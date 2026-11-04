@@ -16,6 +16,7 @@ date: 2026-11-04
      - `List<Particle>` — Array of Structures (`AoS`) for single-item random access.
      - `SoA<Particle>` — Structure of Arrays (`[pos_x...], [pos_y...]`) for full-column SIMD streaming.
      - `Tiled<Particle, lanes: 16>` — Array of Structures of Arrays (`AoSoA`), grouping 16 elements per tile. A tile's slice of one field is `16 × sizeof(field)` bytes: one 64-byte cache line / AVX-512 `ZMM` register for a 4-byte field, two lines for an 8-byte field.
+   - A `mut` element projection of a `SoA` or `Tiled` container (`step(mut particles[i])`) follows copy-in/copy-out (`mutable-value-semantics.md`, item 4): the element is gathered into a temporary and scattered back.
    - `Implemented`: `MorphicLayout::byte_offset` in `mente-mir` computes an element's field offset under each of the three layouts (tested). No container type exists yet.
 2. **Two-tier struct byte layout**:
    - **Plain `struct` (default, `Specified`)**: The compiler MAY reorder fields by descending alignment to eliminate implicit padding bytes.
