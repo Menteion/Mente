@@ -47,3 +47,18 @@ cargo run --bin mn -- test --mutate
 # Project a .mn module's Holographic Spec Blueprint
 cargo run --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
 ```
+
+---
+
+## License
+
+Licensed under either of
+
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0, with LLVM Exceptions ([LICENSE-APACHE](LICENSE-APACHE) or <https://llvm.org/LICENSE.txt>)
+
+at your option. SPDX: `MIT OR Apache-2.0 WITH LLVM-exception`.
+
+The LLVM Exceptions matter for a compiler: when compiling a program embeds part of Mente (its runtime or standard library) in the program's binary, a user who takes the Apache-2.0 option may distribute that binary without Mente's attribution notices.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

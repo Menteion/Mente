@@ -16,7 +16,7 @@ date: 2026-11-04
 | Date | 2026-11-04 |
 | Implementation status | [docs/STATUS.md](../docs/STATUS.md) |
 | Requirement language | The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174). |
-| License | MIT |
+| License | `MIT OR Apache-2.0 WITH LLVM-exception`, at the user's option ([LICENSE-MIT](../LICENSE-MIT), [LICENSE-APACHE](../LICENSE-APACHE)) |
 
 ## How to read this specification
 
@@ -34,6 +34,8 @@ Every claim carries one of four **maturity labels**:
 Where a specification document and the source tree disagree, the source tree is authoritative. Claims about the source tree are checked by `cargo run --bin mn -- spec`, which runs every directive and rejects one that cannot fail. A directive is a substring check, so it shows that a name exists, not that it behaves as claimed; behaviour is backed by the unit tests it names. On a `.mn` target, `mn spec` removes `//` comments before matching, so a directive about the examples is met by code, never by a comment.
 
 <!-- @assert-present file="spec/philosophy.md,spec/holographic-module.md,spec/surface-syntax.md,spec/refinement-and-fixed-point.md,spec/dimensional-units.md,spec/algebraic-types-and-null.md,spec/traits-and-generics.md,spec/mutable-value-semantics.md,spec/regions-and-pools.md,spec/morphic-layouts.md,spec/hardware-contracts.md,spec/error-handling-abi.md,spec/ghost-contracts-and-totality.md,spec/capability-effects.md,spec/structured-concurrency.md,spec/disjoint-parallelism.md,spec/comptime-and-ffi.md,spec/mir-and-codegen.md" reason="All eighteen canonical single-decision specification files exist in flat spec/ directory" -->
+<!-- @assert-present file="LICENSE-MIT,LICENSE-APACHE" reason="Both license texts the License row names are in the repository" -->
+<!-- @assert-count target="LICENSE-APACHE" symbol="LLVM Exceptions to the Apache 2.0 License" min="1" reason="The Apache-2.0 option carries the LLVM exception, so code the compiler embeds in a program needs no attribution" -->
 
 ## Atomic specification files and crate authority map
 
