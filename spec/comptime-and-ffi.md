@@ -39,7 +39,7 @@ date: 2026-11-04
    - `mn check` (`Implemented`): parses each `.mn` file's declarations, computes both hashes, and runs `mente-sema`: the `@layout` and `bitstruct` provers and the token-level `@total` / `@branchless` checks.
    - `mn view --spec <file.mn>` (`Implemented`): prints the Holographic Blueprint (`spec_hash`, types, layouts, signatures, contracts); see `holographic-module.md` for measured time.
    - `mn test --mutate` (`Implemented` as a demo): runs `mn check`, then runs the hand-written MIR region `integrate_cell` built in `main.rs` against two test vectors and, with `--mutate`, `run_in_memory_mutation_gate` on it. `@example` and `@property` bodies are not executed (`Specified`).
-   - `mn spec` (`Implemented`): checks each `spec/*.md` for YAML front matter and at least one `@assert-*` directive, and runs the directives, rejecting any that cannot fail. Proving each rule can fail against a mutated tree is left to `spec-guard prove`.
+   - `mn spec` (`Implemented`): checks each `spec/*.md` for YAML front matter and at least one `@assert-*` directive, and runs the directives, rejecting any that cannot fail. On a `.mn` target it removes `//` comments first, so a comment can neither satisfy a count nor trip an absence. Proving each rule can fail against a mutated tree is left to `spec-guard prove`.
 
 ## 2. Decision rationale and rejected alternatives
 
@@ -55,3 +55,4 @@ date: 2026-11-04
 <!-- @assert-count target="compiler/mente-cli/src/main.rs" symbol="fn test_spec_directives_that_cannot_fail_are_rejected" min="1" reason="mn spec rejects a directive that cannot fail" -->
 <!-- @assert-count target="examples/04_comptime_and_graph_pool.mn" symbol="comptime for field in Type.of<T>().fields" min="1" reason="Example 04 demonstrates zero-macro comptime struct serialization" -->
 <!-- @assert-absence target="examples" symbol="macro_rules!" glob="*.mn" reason="Mente forbids token-stream macros in favor of comptime" -->
+<!-- @assert-count target="compiler/mente-cli/src/main.rs" symbol="fn test_spec_directives_on_mn_files_ignore_comments" min="1" reason="A directive on a .mn file is met by code, never by a comment" -->

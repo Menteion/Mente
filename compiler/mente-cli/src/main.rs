@@ -294,6 +294,11 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
                 }
                 match fs::read_to_string(workspace_root.join(&target_rel)) {
                     Ok(target_src) => {
+                        let target_src = if target_rel.ends_with(".mn") {
+                            strip_mn_comments(&target_src)
+                        } else {
+                            target_src
+                        };
                         let count = target_src.matches(&symbol).count();
                         if count < min_count {
                             errors.push(format!(
@@ -327,7 +332,7 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
                 }
                 let found_in = mn_files.iter().find(|mn| {
                     fs::read_to_string(mn)
-                        .map(|src| src.contains(&symbol))
+                        .map(|src| strip_mn_comments(&src).contains(&symbol))
                         .unwrap_or(false)
                 });
                 match found_in {
@@ -354,6 +359,35 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
     } else {
         Err(errors)
     }
+}
+
+/// Removes `//` comments (`///` doc comments included) from `.mn` source, so a directive
+/// about a `.mn` file is met by code, never by a comment that mentions the code.
+fn strip_mn_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let mut in_string = false;
+        let mut cut = line.len();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' if in_string => i += 1,
+                b'"' => in_string = !in_string,
+                b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => {
+                    cut = i;
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push_str(&line[..cut]);
+        if cut < line.len() && line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn cmd_spec(_args: &[String]) {
@@ -409,6 +443,30 @@ mod tests {
         });
         // Every spec file carries at least one directive, or verify_spec_directory fails.
         assert!(directives >= files_count);
+    }
+
+    #[test]
+    fn test_spec_directives_on_mn_files_ignore_comments() {
+        let root = env::temp_dir().join(format!("mente-spec-comments-{}", process::id()));
+        fs::create_dir_all(root.join("spec")).unwrap();
+        fs::create_dir_all(root.join("examples")).unwrap();
+        fs::write(
+            root.join("examples/demo.mn"),
+            "module demo\n// pub fn only_in_a_comment() uses let mut\npub fn real(url: str) -> str = \"http://x\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("spec/demo.md"),
+            "---\ntitle: t\n---\n\n<!-- @assert-count target=\"examples/demo.mn\" symbol=\"only_in_a_comment\" -->\n<!-- @assert-count target=\"examples/demo.mn\" symbol=\"http://x\" -->\n<!-- @assert-absence target=\"examples\" symbol=\"let mut\" -->\n",
+        )
+        .unwrap();
+        let errs = verify_spec_directory(&root).unwrap_err();
+        fs::remove_dir_all(&root).unwrap();
+
+        // The name in the comment does not count; the string literal's "//" is not a comment;
+        // and the forbidden "let mut" in the comment is not a violation.
+        assert_eq!(errs.len(), 1, "{:?}", errs);
+        assert!(errs[0].contains("only_in_a_comment") && errs[0].contains("matched 0 times"));
     }
 
     #[test]
