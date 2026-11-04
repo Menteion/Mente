@@ -65,7 +65,7 @@
 - [ ] Runtime: arenas with a chunk per task, `Pool<T>` / `Handle<T>`, `Local<T>` / `Shared<T>`, `String` / `List<T>`.
 - [ ] `@layout` structs in native code: alignment, little-endian bytes, `@packed` and `@endian(big)`.
 - [ ] `@simd(lanes: N)` loops through Cranelift's vector types, over `SoA<T>` and `Tiled<T, lanes: N>`.
-- [ ] The Carry-Flag ABI experiment: implement both the Carry-Flag and the two-register tagged return, run the benchmark in `error-handling-abi.md`, and keep the Carry Flag only if it wins.
+- [ ] The Carry-Flag ABI experiment: implement both the Carry-Flag and the two-register tagged return, run the benchmark in `error-handling-abi.md`, and keep the Carry Flag only if it wins. Stock Cranelift cannot express the Carry Flag, so this item waits on `cranelift-cf-abi` in the design review, together with `cranelift-simd-width`, `cranelift-float-select` and `cranelift-optimizer-scope`.
 
 ---
 
