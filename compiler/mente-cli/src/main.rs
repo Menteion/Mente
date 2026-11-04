@@ -446,6 +446,41 @@ mod tests {
         assert!(directives >= files_count);
     }
 
+    /// Every text file in the repository is English: no CJK characters in code, comments, docs or
+    /// examples (CLAUDE.md). Build output and dependencies are skipped.
+    #[test]
+    fn test_repository_text_is_english() {
+        fn is_cjk(c: char) -> bool {
+            matches!(c as u32,
+                0x3000..=0x30FF     // CJK punctuation, Hiragana, Katakana
+                | 0x3400..=0x9FFF   // CJK ideographs
+                | 0xAC00..=0xD7AF   // Hangul
+                | 0xF900..=0xFAFF   // CJK compatibility ideographs
+                | 0xFF00..=0xFFEF)  // full-width forms
+        }
+        fn walk(dir: &Path, found: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    if !matches!(name.as_str(), ".git" | "target" | "node_modules") {
+                        walk(&path, found);
+                    }
+                } else if let Ok(text) = fs::read_to_string(&path) {
+                    for (i, line) in text.lines().enumerate() {
+                        if line.chars().any(is_cjk) {
+                            found.push(format!("{}:{}", path.display(), i + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut found = Vec::new();
+        walk(&root, &mut found);
+        assert!(found.is_empty(), "non-English text at:\n{}", found.join("\n"));
+    }
+
     /// The `mn view --spec` latency protocol in ROADMAP.md. Run it with
     /// `cargo test --release -p mente-cli -- --ignored --nocapture view_projection_protocol`.
     #[test]
