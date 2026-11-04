@@ -21,7 +21,7 @@ date: 2026-11-04
 3. **Three 128-bit structural digests (`Implemented` in `compute_dual_hashes`, `compiler/mente-ast/src/lib.rs`)**:
    - `compiler/mente-ast` computes three non-cryptographic 128-bit digests (two 64-bit FNV-1a-style lanes, hex `String`s) from the parsed declarations:
      - `spec_hash` — the module path, `unit` declarations, every field of each `pub struct` (private fields and defaults included, since they decide the struct's size), `pub bitstruct` fields and `@bits`, `pub enum` variants, `pub trait` method signatures, and each `pub fn`'s attributes, parameters and modes, return and error types, `from` provenance, `with` effects, `requires` / `ensures` / `decreases` clauses.
-     - `instance_hash` — the bodies of `pub` functions that are generic or marked `@inline`.
+     - `instance_hash` — the bodies of `pub` functions that are generic: with a `<...>` list, or taking one of the module's traits by name (`traits-and-generics.md` §3); and of those marked `@inline`.
      - `body_hash` — the token kinds of every function body. Comments and whitespace are not tokens, so they change no digest.
    - `Implemented` and tested in `mente-ast`: editing a plain function body changes only `body_hash`; editing a generic body changes `instance_hash` but not `spec_hash`; changing a private field of a `pub struct` or a function's `from` list changes `spec_hash`.
    - **Zero-cascade incremental compilation (`Specified`)**: a build system that recompiles a dependent only when a dependency's `spec_hash` changes, or its `instance_hash` changes and the dependent instantiates or inlines from it. No build system exists yet.

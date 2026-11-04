@@ -22,7 +22,7 @@ date: 2026-11-04
      $$[i \cdot S, (i + 1) \cdot S) \cap [j \cdot S, (j + 1) \cdot S) = \emptyset$$
    - Each worker thread mutates its assigned slice in place with **zero locks (`0` `Mutex`), zero `RwLock`, and zero atomic bus-locking instructions**.
 2. **Deterministic phased barriers (`Phase.barrier()`, `Specified`)**:
-   - Multi-step parallel simulations alternate cleanly between an immutable previous generation (`prev: Slice<T>`) and a disjoint mutable next generation (`mut next: Slice<T>`), guaranteeing bit-identical output regardless of OS thread scheduling order.
+   - Multi-step parallel simulations alternate cleanly between an immutable previous generation (`prev: []T`) and a disjoint mutable next generation (`mut next: []T`), guaranteeing bit-identical output regardless of OS thread scheduling order.
 3. **Zero-copy ownership `Channel<T, cap>` and data-wrapping `Mutex<T>` (`Specified`)**:
    - Sending a message over a channel requires `ch.send(own msg)`. Because MVS invalidates `msg` at the sender call site (`own`), large buffers and structs transfer across threads by pointer in `O(1)` with zero deep cloning and zero data races.
    - Standalone `lock()` / `unlock()` methods are forbidden; `Mutex<T>` wraps the protected payload `T` directly (`mutex.with_lock { mut state => ... }`), ensuring no reference to `state` can escape the critical section.

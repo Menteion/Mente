@@ -17,7 +17,7 @@ pub fn kinetic_energy(mass: f64[0.0..=1e12]<kg>, vel: f64<meter / sec>) -> f64<j
 = 0.5 * mass * vel * vel
 
 // 2. 精煉值域型別與依賴切片索引（編譯期 100% 證明不越界，0 條執行期邊界檢查指令！）
-pub struct RingWindow<T, const CAP: usize = 64> {
+pub struct RingWindow<T, comptime CAP: usize = 64> {
   pub buf:  [CAP]T
   pub head: usize[0..CAP] = 0
   pub len:  usize[0..=CAP] = 0

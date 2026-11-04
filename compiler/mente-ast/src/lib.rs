@@ -61,6 +61,14 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
     let mut spec_h = SemanticHasher::new(0x4D45_4E54_455F_5350); // "MENTE_SP"
     let mut body_h = SemanticHasher::new(0x4D45_4E54_455F_4244); // "MENTE_BD"
     let mut inst_h = SemanticHasher::new(0x4D45_4E54_455F_494E); // "MENTE_IN"
+    let traits: Vec<&str> = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ItemDecl::Trait(t) => Some(t.name.as_str()),
+            _ => None,
+        })
+        .collect();
 
     spec_h.update("module", &module.module_path);
 
@@ -139,7 +147,7 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
                 for tok in &f.body_tokens {
                     body_h.update("tok", &format!("{:?}", tok));
                 }
-                if f.is_pub && is_instantiable(f) {
+                if f.is_pub && is_instantiable(f, &traits) {
                     inst_h.update("fn_body", &f.name);
                     for tok in &f.body_tokens {
                         inst_h.update("tok", &format!("{:?}", tok));
@@ -159,8 +167,13 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
 
 /// A function whose body dependents compile into themselves: generic (instantiated per use)
 /// or `@inline` (inlined across modules). No other body may reach a dependent.
-fn is_instantiable(f: &FnDecl) -> bool {
-    !f.generics.is_empty() || f.attrs.iter().any(|a| a.name == "inline")
+///
+/// A parameter typed by a bare trait name makes a function generic without `<...>`; only the
+/// module's own traits are known here, until name resolution exists.
+fn is_instantiable(f: &FnDecl, traits: &[&str]) -> bool {
+    !f.generics.is_empty()
+        || f.attrs.iter().any(|a| a.name == "inline")
+        || f.params.iter().any(|p| traits.contains(&p.ty.trim()))
 }
 
 /// Projects a `.mn` `ModuleFile` into its pure Holographic Spec Blueprint (`mn view --spec`).
@@ -400,6 +413,26 @@ pub fn total(n: u32) -> u32 {
         assert_eq!(h1.spec_hash, hp.spec_hash);
         assert_eq!(h1.instance_hash, hp.instance_hash);
         assert_ne!(h1.body_hash, hp.body_hash);
+    }
+
+    #[test]
+    fn test_trait_typed_parameter_makes_a_function_instantiable() {
+        let v1 = r#"
+module io.encode
+pub trait ByteSink {
+  fn write_u64(mut self, v: u64)
+}
+pub fn encode(mut sink: ByteSink, v: u64) {
+  sink.write_u64(v)
+}
+"#;
+        let v2 = v1.replace("sink.write_u64(v)", "sink.write_u64(v + 0)");
+        let h1 = compute_dual_hashes(&parse_module(v1).unwrap());
+        let h2 = compute_dual_hashes(&parse_module(&v2).unwrap());
+
+        // encode is monomorphized per sink type, so dependents compile its body
+        assert_eq!(h1.spec_hash, h2.spec_hash);
+        assert_ne!(h1.instance_hash, h2.instance_hash);
     }
 
     #[test]

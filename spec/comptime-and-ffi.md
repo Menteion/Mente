@@ -15,15 +15,18 @@ date: 2026-11-04
    - Mente has **no macro DSL** (`macro_rules!`, procedural token-stream macros, or `#define` preprocessor directives).
    - Compile-time type reflection and code specialization use standard `.mn` syntax (`comptime for`, `comptime if`, and `Type.of<T>().fields`):
      ```rust
-     pub fn serialize_fields<comptime T: Type>(val item: T, mut sink: ByteSink) {
+     pub fn serialize_fields<T>(item: T, mut sink: ByteSink) {
          comptime for field in Type.of<T>().fields {
-             sink.write_u64(field.read_u64(item))
+             comptime if field.ty == u64 {
+                 sink.write_u64(item.(field.name))
+             }
          }
      }
      ```
+   - `item.(field.name)` reads the field whose name is the compile-time string `field.name`. It is resolved when the loop is expanded, so each expanded line is an ordinary, type-checked field access.
    - `comptime` blocks are strictly pure (`with` effects are forbidden at compile time), ensuring 100% deterministic, hermetic builds.
 2. **Zero-compromise C / C++ / Rust FFI boundary quarantine (`Specified`; the lexer has an `Extern` token, and the parser has no `extern` item yet)**:
-   - External ABI functions are declared inside `extern "C"` blocks with mandatory `with FFI` capability effects and refined boundary types (`Slice<u8>[len: 1..=MAX]`).
+   - External ABI functions are declared inside `extern "C"` blocks with mandatory `with FFI` capability effects, refined boundary types (`fd: i32[0..=65535]`) and length contracts (`buf: []u8` with `requires buf.len >= 1`).
    - Outbound calls prove preconditions statically before emitting a direct `CALL`; inbound return values undergo an automatic boundary check (`CMP` + `JC`) before entering Mente's refined value lattice.
    - **Zero-config ecosystem absorption (`mn bind`, `Specified` — Engineering Guardrail #4)**: To overcome Day-1 library ecosystem gravity without writing manual FFI wrappers, `mn bind <header.h | crate.rlib>` parses C headers and Rust C-ABI exports at build time and automatically synthesizes quarantined `extern "C"` declarations with `with FFI`, non-null pointer refinements, and `@layout` byte-offset assertions.
 3. **Unified `mn` CLI toolchain (`compiler/mente-cli/src/main.rs`)**:
