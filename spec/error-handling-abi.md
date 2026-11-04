@@ -19,6 +19,7 @@ date: 2026-11-04
      - Callers propagate errors with postfix `!` (`val hdr = decode(buf)!`) or handle them inline with `catch { err => ... }`.
 2. **CPU Carry-Flag (`CF`) zero-overhead register ABI (`Specified`; its speed advantage is a `Hypothesis` with no benchmark yet)**:
    - Today `CarryFlagAbiLowering` in `compiler/mente-codegen/src/lib.rs` only names the registers and flag below for each target; nothing emits machine code.
+   - **Not in the first native backend**: Cranelift, which Phase 3 uses, cannot return a status in the carry flag, so Phase 3 lowers `T ! E` to the two-register tagged return this hypothesis is measured against. The Carry-Flag convention waits for a custom emitter or a Cranelift fork (`mir-and-codegen.md`).
    - Rather than packing `T ! E` into a tagged memory union (`sizeof(Result<T, E>) = max(sizeof(T), sizeof(E)) + tag_padding`), Mente lowers `T ! E` directly to hardware status flags:
      - **Success return (`CF = 0`)**: Primary return register (`RAX` / `XMM0` on x86-64; `X0` on AArch64) carries `T`; `CLC` clears the Carry Flag.
      - **Error return (`CF = 1`)**: Secondary return register (`RDX` / `X1`) carries the compact error payload `E`; `STC` sets the Carry Flag.

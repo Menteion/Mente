@@ -64,8 +64,10 @@
 - [ ] **Engineering Guardrail #2**: every Mente-level optimisation (bounds erasure, contract assumptions, `AoSoA` offsets, `@branchless` selects) completes in `MirRegionSoA`; `mente-codegen` then lowers MIR to Cranelift IR for x86-64 and AArch64. Cranelift is pure Rust, so no C++ toolchain enters the build, and `mente-mir` keeps no dependency at all.
 - [ ] Runtime: arenas with a chunk per task, `Pool<T>` / `Handle<T>`, `Local<T>` / `Shared<T>`, `String` / `List<T>`.
 - [ ] `@layout` structs in native code: alignment, little-endian bytes, `@packed` and `@endian(big)`.
-- [ ] `@simd(lanes: N)` loops through Cranelift's vector types, over `SoA<T>` and `Tiled<T, lanes: N>`.
-- [ ] The Carry-Flag ABI experiment: implement both the Carry-Flag and the two-register tagged return, run the benchmark in `error-handling-abi.md`, and keep the Carry Flag only if it wins. Stock Cranelift cannot express the Carry Flag, so this item waits on `cranelift-cf-abi` in the design review, together with `cranelift-simd-width`, `cranelift-float-select` and `cranelift-optimizer-scope`.
+- [ ] `@simd(lanes: N)` loops through Cranelift's 128-bit vector types, splitting wider lane groups, over `SoA<T>` and `Tiled<T, lanes: N>`.
+- [ ] `@branchless` in native code: floating-point and vector selects lowered without Cranelift's branching `select`, and the machine-code check (`E0403`).
+- [ ] `T ! E` as a two-register tagged return through Cranelift's multi-value returns, with the generated `extern "C"` wrappers.
+- [ ] Inlining decided in MIR: `@inline` and generic callees across modules, a size heuristic inside one.
 
 ---
 
@@ -87,7 +89,8 @@
 Each of these starts with an entry in [docs/design-review.md](docs/design-review.md) and is scheduled only once the phases above are done.
 
 - [ ] An execution model for `@kernel` (index space, memory spaces, barriers, relation to `parallel_for`), then SPIR-V 1.6 compute modules. `@kernel` is a `Hypothesis` until the model exists.
-- [ ] A from-scratch native emitter with E-graph peephole rules (`fma`, `bmi2`, AVX-512 masks), pursued only if Cranelift's code is measured short of what a workload needs.
+- [ ] A from-scratch native emitter with E-graph peephole rules (`fma`, `bmi2`, AVX-512 masks) and 256- / 512-bit vectors, pursued only if Cranelift's code is measured short of what a workload needs.
+- [ ] The Carry-Flag ABI experiment of `error-handling-abi.md`, on that emitter or on a Cranelift fork: implement it beside the two-register return, run the benchmark, and keep it only if it wins.
 - [ ] **Engineering Guardrail #4**: `mn bind` for C headers, and Rust libraries through their `cbindgen` headers, once the accepted C dialect is written down.
 - [ ] Index-arithmetic `parallel_for` partitions (`scores[i * S .. (i + 1) * S]`), which need a prover beyond Tier 1.
 - [ ] Self-host `mente-syntax`, `mente-sema`, and `mente-mir` in `.mn`.

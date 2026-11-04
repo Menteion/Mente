@@ -48,7 +48,8 @@ pub struct Particle {
   pub mass: f32
 }
 
-/// 資料平行 + SIMD：每個 worker 分到若干個 16 元素的 tile，每個 tile 的一個 f32 欄位剛好是一條 64-byte 快取行、一個 ZMM 暫存器
+/// 資料平行 + SIMD：每個 worker 分到若干個 16 元素的 tile，每個 tile 的一個 f32 欄位剛好是一條 64-byte 快取行；
+/// 經 Cranelift 用 4 個 128-bit 向量暫存器運算，有 AVX-512 的後端則是 1 個 ZMM 暫存器
 @no_alloc
 pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0]) {
   // 儘管 batch 在物理記憶體中是以 16-lane AoSoA 微磚塊排列以達成零重排 SIMD 載入，
