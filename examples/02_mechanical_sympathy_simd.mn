@@ -65,14 +65,14 @@ pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0])
 @example("64B 快取行無分支積分與 Tiled AoSoA 向量化更新") {
   var cell = DeterministicCell {
     id: 1,
-    potential: 0.5_q16,
-    threshold: 1.0_q16,
-    resting: 0.0_q16,
+    potential: 0.5_q16_16,
+    threshold: 1.0_q16_16,
+    resting: 0.0_q16_16,
     last_header: SpikeHeader { region_id: 2, priority: 5, inhibitory: false, target_idx: 42 },
     dendrite_w: [0.0_q1_15; 20],
   }
 
   // 呼叫端顯式標註 mut，一眼看出 cell 在此行被原地修改
-  val did_fire = integrate_cell(mut cell, 0.75_q16, 2)
-  assert(did_fire and cell.potential == 0.0_q16)
+  val did_fire = integrate_cell(mut cell, 0.75_q16_16, 2)
+  assert(did_fire and cell.potential == 0.0_q16_16)
 }

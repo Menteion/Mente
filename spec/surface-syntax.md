@@ -29,6 +29,10 @@ Today `mente-syntax` parses declarations only: a function body is kept as a flat
    - Data transformation chains use the left-to-right pipe operator `x |> f(a) |> g(b)`.
 5. **Logical word operators (`Specified`; the lexer has `And`, `Or` and `Not` tokens)**:
    - Boolean conjunction, disjunction, and negation use the keywords `and`, `or`, and `not`, reserving `&`, `|`, `^`, and `~` exclusively for bitwise operations and type unions (`A | B`). The lexer has a `Pipe` token for `|`; it skips `&`, `^` and `~` without an error.
+6. **Numeric literals and suffixes (`Specified`)**:
+   - Digits may be grouped with `_` between digits: `1_000_000`, `0xFF_FF`. In a hexadecimal literal `a`–`f` are digits, so there a suffix starts with `_` and a letter beyond `f` (`0xFF_u8`).
+   - A suffix starts with `_` followed by a letter and runs to the end of the identifier. It names a unit in scope (`200.0_meter`, `9.5_sec`, `5_ms`; `dimensional-units.md`), a fixed-point format with the type name's `.` written as `_` so the literal stays one token (`0.5_q16_16` is a `q16.16`, `0.0_q1_15` a `q1.15`), or an integer type (`255_u8`, `5_u4`).
+   - A suffix that names none of these is an error; `_q16` alone is not a format. A literal outside its type's range is an error (`300_u8`).
 
 ## 2. Decision rationale and rejected alternatives
 
@@ -45,3 +49,4 @@ Today `mente-syntax` parses declarations only: a function body is kept as a flat
 <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="Guard," min="1" reason="Lexer defines Guard token for early-exit precondition narrowing" -->
 <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="PipeGt," min="1" reason="Lexer defines PipeGt (|>) for left-to-right data pipelines" -->
 <!-- @assert-absence target="examples" symbol="let mut" glob="*.mn" reason="Mente uses symmetric val/var bindings and forbids let mut" -->
+<!-- @assert-count target="examples/02_mechanical_sympathy_simd.mn" symbol="0.75_q16_16" min="1" reason="Example 02 writes q16.16 literals with the full format, dot as underscore" -->

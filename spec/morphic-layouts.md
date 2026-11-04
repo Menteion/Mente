@@ -22,13 +22,17 @@ date: 2026-11-04
    - **Plain `struct` (default, `Specified`)**: The compiler MAY reorder fields by descending alignment to eliminate implicit padding bytes.
    - **Verified `@layout(size: S, align: A)` + `@bytes(start..end)` (`Implemented` in `verify_explicit_struct_layout`, `compiler/mente-sema/src/lib.rs`)**: Locks field order and statically verifies that:
      1. `A` is a power of two (`E0410`) and `S` is a multiple of `A` (`E0411`).
-     2. Every field carries an explicit `@bytes(start..end)` attribute (`E0412`) whose width equals the field type's byte size (`E0415`). A field type of unknown size is rejected (`E0417`): sizes are known for fixed-width primitives, `q16.16` / `q1.15` / `q0.8`, `sat<T>` / `wrap<T>`, fixed arrays `[N]T`, and the module's own `bitstruct`s and `@layout` structs. `usize` and `isize` have no size here, because a `@layout` must mean the same bytes on every target.
+     2. Every field carries an explicit `@bytes(start..end)` attribute (`E0412`) whose width equals the field type's byte size (`E0415`). A field type of unknown size is rejected (`E0417`): sizes are known for fixed-width primitives, `uN` / `iN` whose `N` is a multiple of 8 (`u24` is exactly 3 bytes), `q16.16` / `q1.15` / `q0.8`, `sat<T>` / `wrap<T>`, fixed arrays `[N]T`, and the module's own `bitstruct`s and `@layout` structs. Any other `uN` width belongs in a `bitstruct`. `usize` and `isize` have no size here, because a `@layout` must mean the same bytes on every target.
      3. Adjacent fields have zero unannotated padding gaps and zero overlaps (`start == cursor`, `E0413`), and no range is empty (`E0414`).
      4. The final field ends at `S` (`cursor == S`, `E0416`).
    - Field alignment within the struct and byte order (endianness) are not checked or specified yet.
 3. **Bit-exact hardware and protocol structures (`bitstruct`, `Implemented` in `verify_bitstruct_layout`, `compiler/mente-sema/src/lib.rs`)**:
    - `bitstruct FrameFlags : u16` packs bitfields into an explicit backing integer (`u8`..`u128`, else `E0420`) and verifies that the half-open `@bits(start..end)` ranges partition `0..N` contiguously without gap or overlap (`E0421`), empty range (`E0422`) or shortfall (`E0423`).
-   - Whether a field's declared type (`u4`, `bool`) matches its range width is not checked yet.
+   - Each field's type must be exactly as wide as its range: `bool` is 1 bit, `uN` / `iN` are `N` bits, and a bitstruct of the same module is its backing width (`E0424` on a mismatch, `E0425` for any other type).
+4. **Arbitrary-width integers (`Specified`; their widths are `Implemented` in the two provers above)**:
+   - `uN` and `iN`, for `1 <= N <= 128`, are unsigned and two's-complement integers of exactly `N` bits' range: `u4` holds `0..=15`, `i4` holds `-8..=7`. `u8`..`u128` and `i8`..`i128` are the cases where `N` is a power of two.
+   - Inside a `bitstruct` a `uN` field occupies exactly `N` bits, and inside a `@layout` struct exactly `N / 8` bytes when `N` is a multiple of 8. Anywhere else the compiler stores it in the smallest of 1, 2, 4, 8 or 16 bytes that holds it.
+   - Arithmetic on `uN` follows `refinement-and-fixed-point.md`: a result outside `N` bits traps unless proven in range.
 
 ## 2. Decision rationale and rejected alternatives
 

@@ -43,13 +43,16 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
     let mut kernel_functions_verified = 0usize;
     let mut examples_count = 0usize;
 
-    // Byte sizes of the module's own fixed-size types, so a `@layout` field may name them.
+    // Byte sizes of the module's own fixed-size types, so a `@layout` field may name them,
+    // and bit widths of its bitstructs, so a bitstruct field may nest one.
     let mut named_sizes: HashMap<String, usize> = HashMap::new();
+    let mut bitstruct_bits: HashMap<String, usize> = HashMap::new();
     for item in &module.items {
         match item {
             ItemDecl::BitStruct(bs) => {
                 if let Some(bits) = backing_bits(&bs.backing_type) {
                     named_sizes.insert(bs.name.clone(), bits / 8);
+                    bitstruct_bits.insert(bs.name.clone(), bits);
                 }
             }
             ItemDecl::Struct(s) => {
@@ -71,7 +74,7 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
                     }
                 }
             }
-            ItemDecl::BitStruct(bs) => match verify_bitstruct_layout(bs) {
+            ItemDecl::BitStruct(bs) => match verify_bitstruct_layout(bs, &bitstruct_bits) {
                 Ok(proof) => bitstruct_proofs.push(proof),
                 Err(e) => errors.push(e),
             },
@@ -244,8 +247,23 @@ fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usiz
         "u32" | "i32" | "f32" | "q16.16" => Some(4),
         "u64" | "i64" | "f64" => Some(8),
         "u128" | "i128" => Some(16),
-        _ => named_sizes.get(t).copied(),
+        // A `uN` / `iN` whose width is whole bytes occupies exactly those bytes (`u24` is 3);
+        // any other width only fits a bitstruct.
+        _ => match int_bits(t) {
+            Some(bits) if bits % 8 == 0 => Some(bits / 8),
+            Some(_) => None,
+            None => named_sizes.get(t).copied(),
+        },
     }
+}
+
+/// Width of an arbitrary-width integer type `uN` / `iN`, `1 <= N <= 128`.
+fn int_bits(ty: &str) -> Option<usize> {
+    let digits = ty.strip_prefix('u').or_else(|| ty.strip_prefix('i'))?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok().filter(|n| (1..=128).contains(n))
 }
 
 fn backing_bits(backing_type: &str) -> Option<usize> {
@@ -259,8 +277,12 @@ fn backing_bits(backing_type: &str) -> Option<usize> {
     }
 }
 
-/// Proves that `bitstruct Name : uN` has contiguous, hole-free `@bits(start..end)` covering `[0..N)`.
-pub fn verify_bitstruct_layout(bs: &BitStructDecl) -> Result<BitStructProof, String> {
+/// Proves that `bitstruct Name : uN` has contiguous, hole-free `@bits(start..end)` covering `[0..N)`,
+/// and that each field's type is exactly as wide as its range.
+pub fn verify_bitstruct_layout(
+    bs: &BitStructDecl,
+    bitstruct_bits: &HashMap<String, usize>,
+) -> Result<BitStructProof, String> {
     let total_bits = backing_bits(&bs.backing_type).ok_or_else(|| {
         format!(
             "E0420 [BitStruct Error]: bitstruct `{}` has unsupported backing type `{}`",
@@ -281,6 +303,24 @@ pub fn verify_bitstruct_layout(bs: &BitStructDecl) -> Result<BitStructProof, Str
             return Err(format!(
                 "E0422 [BitStruct Error]: bitstruct `{}.{}` has invalid bit range {}..{}",
                 bs.name, f.name, start, end
+            ));
+        }
+        let ty = f.ty.trim();
+        let type_bits = if ty == "bool" {
+            Some(1)
+        } else {
+            int_bits(ty).or_else(|| bitstruct_bits.get(ty).copied())
+        }
+        .ok_or_else(|| {
+            format!(
+                "E0425 [BitStruct Error]: field `{}.{}` has type `{}`; a bitstruct field must be `bool`, `uN`, `iN` or a bitstruct of this module",
+                bs.name, f.name, ty
+            )
+        })?;
+        if type_bits != end - start {
+            return Err(format!(
+                "E0424 [BitStruct Error]: field `{}.{}` has type `{}`, {} bits wide, but `@bits({}..{})` spans {} bits",
+                bs.name, f.name, ty, type_bits, start, end, end - start
             ));
         }
         cursor = end;
@@ -395,6 +435,33 @@ pub struct Packet {
         let too_wide = code.replace("@bytes(0..2) pub tag", "@bytes(0..4) pub tag");
         let errs = verify_module(&parse_module(&too_wide).unwrap()).unwrap_err();
         assert!(errs[0].contains("E0415"));
+    }
+
+    #[test]
+    fn test_bitstruct_field_type_must_match_its_range() {
+        let code = r#"
+module test.bits
+pub bitstruct Flags : u8 {
+  @bits(0..3) pub mode: u3
+  @bits(3..4) pub armed: bool
+  @bits(4..8) pub level: i4
+}
+@layout(size: 4, align: 1)
+pub struct Frame {
+  @bytes(0..3) pub seq: u24
+  @bytes(3..4) pub flags: Flags
+}
+"#;
+        let rep = verify_module(&parse_module(code).unwrap()).unwrap();
+        assert_eq!((rep.bitstruct_proofs.len(), rep.layout_proofs.len()), (1, 1));
+
+        let narrow = code.replace("pub mode: u3", "pub mode: u2");
+        let errs = verify_module(&parse_module(&narrow).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0424"), "{:?}", errs);
+
+        let opaque = code.replace("pub level: i4", "pub level: Level");
+        let errs = verify_module(&parse_module(&opaque).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0425"), "{:?}", errs);
     }
 
     #[test]
