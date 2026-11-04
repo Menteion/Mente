@@ -43,21 +43,24 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
     let mut kernel_functions_verified = 0usize;
     let mut examples_count = 0usize;
 
-    // Byte sizes of the module's own fixed-size types, so a `@layout` field may name them,
-    // and bit widths of its bitstructs, so a bitstruct field may nest one.
+    // Byte sizes and alignments of the module's own fixed-size types, so a `@layout` field
+    // may name them, and bit widths of its bitstructs, so a bitstruct field may nest one.
     let mut named_sizes: HashMap<String, usize> = HashMap::new();
+    let mut named_aligns: HashMap<String, usize> = HashMap::new();
     let mut bitstruct_bits: HashMap<String, usize> = HashMap::new();
     for item in &module.items {
         match item {
             ItemDecl::BitStruct(bs) => {
                 if let Some(bits) = backing_bits(&bs.backing_type) {
                     named_sizes.insert(bs.name.clone(), bits / 8);
+                    named_aligns.insert(bs.name.clone(), bits / 8);
                     bitstruct_bits.insert(bs.name.clone(), bits);
                 }
             }
             ItemDecl::Struct(s) => {
-                if let Some((size, _)) = extract_layout_attr(s) {
+                if let Some((size, align)) = extract_layout_attr(s) {
                     named_sizes.insert(s.name.clone(), size);
+                    named_aligns.insert(s.name.clone(), align);
                 }
             }
             _ => {}
@@ -68,7 +71,7 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
         match item {
             ItemDecl::Struct(s) => {
                 if let Some((size, align)) = extract_layout_attr(s) {
-                    match verify_explicit_struct_layout(s, size, align, &named_sizes) {
+                    match verify_explicit_struct_layout(s, size, align, &named_sizes, &named_aligns) {
                         Ok(proof) => layout_proofs.push(proof),
                         Err(e) => errors.push(e),
                     }
@@ -140,12 +143,14 @@ fn extract_layout_attr(s: &StructDecl) -> Option<(usize, usize)> {
     None
 }
 
-/// Proves that `@layout(size: S, align: A)` has contiguous, hole-free `@bytes(start..end)` fields summing to `S`.
+/// Proves that `@layout(size: S, align: A)` has contiguous, hole-free `@bytes(start..end)` fields summing to `S`,
+/// each at an offset its type's alignment allows unless the struct is `@packed`.
 pub fn verify_explicit_struct_layout(
     s: &StructDecl,
     expected_size: usize,
     align: usize,
     named_sizes: &HashMap<String, usize>,
+    named_aligns: &HashMap<String, usize>,
 ) -> Result<LayoutProof, String> {
     if !align.is_power_of_two() {
         return Err(format!(
@@ -160,6 +165,7 @@ pub fn verify_explicit_struct_layout(
         ));
     }
 
+    let packed = s.attrs.iter().any(|a| a.name == "packed");
     let mut cursor = 0usize;
     let mut table = format!(
         "| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n"
@@ -196,6 +202,21 @@ pub fn verify_explicit_struct_layout(
                 "E0415 [Layout Error]: field `{}.{}` of type `{}` requires {} bytes, but `@bytes({}..{})` spans {} bytes",
                 s.name, f.name, f.ty, expected_field_bytes, start, end, width
             ));
+        }
+        if !packed {
+            let field_align = type_alignment(&f.ty, named_sizes, named_aligns).unwrap_or(1);
+            if start % field_align != 0 {
+                return Err(format!(
+                    "E0418 [Layout Error]: field `{}.{}` of type `{}` needs {}-byte alignment, but starts at byte {}; move it, or mark the struct `@packed`",
+                    s.name, f.name, f.ty, field_align, start
+                ));
+            }
+            if field_align > align {
+                return Err(format!(
+                    "E0419 [Layout Error]: field `{}.{}` of type `{}` needs {}-byte alignment, more than the struct's `align: {}`; raise it, or mark the struct `@packed`",
+                    s.name, f.name, f.ty, field_align, align
+                ));
+            }
         }
         table.push_str(&format!(
             "| `[{}..{})` | `{} B` | `{}` | `{}` |\n",
@@ -255,6 +276,33 @@ fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usiz
             None => named_sizes.get(t).copied(),
         },
     }
+}
+
+/// Natural alignment of a fixed-size field type: the declared `align` of the module's
+/// `@layout` structs, a bitstruct's backing size, an array's element alignment, and otherwise
+/// the largest power of two dividing the type's size (`u64` is 8, `u24` is 1), at most 16.
+fn type_alignment(
+    ty: &str,
+    named_sizes: &HashMap<String, usize>,
+    named_aligns: &HashMap<String, usize>,
+) -> Option<usize> {
+    let t = ty.trim();
+    if let Some(inner) = t
+        .strip_prefix("sat<")
+        .or_else(|| t.strip_prefix("wrap<"))
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        return type_alignment(inner, named_sizes, named_aligns);
+    }
+    if t.starts_with('[') {
+        let close = t.find(']')?;
+        return type_alignment(&t[close + 1..], named_sizes, named_aligns);
+    }
+    if let Some(align) = named_aligns.get(t) {
+        return Some(*align);
+    }
+    let size = type_byte_size(t, named_sizes)?;
+    Some((1usize << size.trailing_zeros()).min(16))
 }
 
 /// Width of an arbitrary-width integer type `uN` / `iN`, `1 <= N <= 128`.
@@ -462,6 +510,34 @@ pub struct Frame {
         let opaque = code.replace("pub level: i4", "pub level: Level");
         let errs = verify_module(&parse_module(&opaque).unwrap()).unwrap_err();
         assert!(errs[0].contains("E0425"), "{:?}", errs);
+    }
+
+    #[test]
+    fn test_layout_fields_sit_at_aligned_offsets() {
+        let code = r#"
+module test.aligned
+@layout(size: 16, align: 8)
+pub struct Record {
+  @bytes(0..4)  pub tag: u32
+  @bytes(4..12) pub value: u64
+  @bytes(12..16) pub crc: u32
+}
+"#;
+        let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0418") && errs[0].contains("value"), "{:?}", errs);
+
+        let packed = code.replace("@layout(size: 16, align: 8)", "@packed\n@layout(size: 16, align: 8)");
+        assert!(verify_module(&parse_module(&packed).unwrap()).is_ok());
+
+        let under_aligned = r#"
+module test.under
+@layout(size: 8, align: 4)
+pub struct Wide {
+  @bytes(0..8) pub value: u64
+}
+"#;
+        let errs = verify_module(&parse_module(under_aligned).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0419"), "{:?}", errs);
     }
 
     #[test]
