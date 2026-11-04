@@ -1,0 +1,9 @@
+[package]
+name = "mente-mir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "100% from-scratch Cache-Line-Aligned Mente IR (MIR): Flat SoA RVSDG, Interval Lattice, @branchless verifier, and In-Memory Mutation Prover"
+
+[dependencies]
+# STRICT ARCHITECTURAL RULE: mente-mir has ZERO frontend dependencies!

@@ -1,0 +1,17 @@
+# Build and compiler artifacts
+target/
+build/
+.mente-cache/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.spv
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

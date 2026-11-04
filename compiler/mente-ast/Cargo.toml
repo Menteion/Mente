@@ -1,0 +1,9 @@
+[package]
+name = "mente-ast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mente Canonical AST, dual semantic hashing (spec_hash / body_hash), and Holographic Spec Projection"
+
+[dependencies]
+mente-syntax = { path = "../mente-syntax" }

@@ -1,0 +1,8 @@
+[package]
+name = "mente-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mente (.mn) lexer, token stream, and declaration parser"
+
+[dependencies]

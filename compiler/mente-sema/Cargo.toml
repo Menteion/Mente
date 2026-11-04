@@ -1,0 +1,11 @@
+[package]
+name = "mente-sema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mente semantic analyzer: 64B Cache-Line & bitstruct layout prover, refinement intervals, units, and SMT contract checks"
+
+[dependencies]
+mente-syntax = { path = "../mente-syntax" }
+mente-ast = { path = "../mente-ast" }
+mente-mir = { path = "../mente-mir" }

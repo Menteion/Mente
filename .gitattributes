@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.mn text eol=lf linguist-language=Rust
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+spec/*.md linguist-documentation=true
+docs/*.md linguist-documentation=true

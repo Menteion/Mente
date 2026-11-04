@@ -1,0 +1,17 @@
+[package]
+name = "mente-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mente unified CLI toolchain (mn / mente)"
+
+[[bin]]
+name = "mn"
+path = "src/main.rs"
+
+[dependencies]
+mente-syntax = { path = "../mente-syntax" }
+mente-ast = { path = "../mente-ast" }
+mente-sema = { path = "../mente-sema" }
+mente-mir = { path = "../mente-mir" }
+mente-codegen = { path = "../mente-codegen" }

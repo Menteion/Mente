@@ -1,0 +1,55 @@
+// ============================================================================
+// 標本 04：世代安全物件池（Pool / Handle）與統一語法 comptime 元編程
+// 涵蓋站點：第三站 (Pool / Handle 零 unsafe 環狀圖) + 第七站 (comptime 反射)
+// ============================================================================
+module examples.comptime_and_graph_pool
+
+// 1. 使用世代池 Pool<T> 與 64-bit Handle<T> 輕鬆建構雙向/環狀圖（0 個 unsafe、0 引用計數洩漏！）
+pub struct SceneNode {
+  pub name: str
+  pub parent: ?Handle<SceneNode> = none
+  pub children: List<Handle<SceneNode>> = []
+}
+
+pub fn link_parent_child(
+  mut pool: Pool<SceneNode>,
+  parent_h: Handle<SceneNode>,
+  child_h: Handle<SceneNode>,
+) {
+  pool[mut parent_h].children.push(child_h)
+  pool[mut child_h].parent = parent_h
+}
+
+// 2. 統一語法的 comptime 元編程（決策 P1）：
+//    不學外星巨集語法！在 comptime 中，型別 Type.of<T>() 就是普通結構，直接用 for 迴圈走訪欄位！
+pub trait ByteSink {
+  fn write_u64(mut self, v: u64)
+  fn write_str(mut self, s: str)
+}
+
+pub fn encode_record<T>(mut sink: ByteSink, record: T) {
+  // 編譯期展開為零成本的直線欄位寫入指令（可透過 mn view --expand 白盒檢視）
+  comptime for field in Type.of<T>().fields {
+    comptime if field.ty == u64 {
+      sink.write_u64(record.(field.name))
+    } else if field.ty == str {
+      sink.write_str(record.(field.name))
+    }
+  }
+}
+
+pub struct TelemetryEvent {
+  pub trace_id: u64
+  pub service:  str
+  pub latency:  u64
+}
+
+@example("零 unsafe 雙向場景樹與 comptime 自動編碼") {
+  var scene = Pool<SceneNode>.new()
+  val root  = scene.insert(SceneNode { name: "Root" })
+  val cam   = scene.insert(SceneNode { name: "Camera" })
+
+  link_parent_child(mut scene, root, cam)
+  assert(scene[root].children.len == 1)
+  assert(scene[cam].parent == root)
+}

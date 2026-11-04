@@ -1,0 +1,64 @@
+// ============================================================================
+// 標本 01：精煉值域型別、零成本物理量綱與 SMT 幽靈契約
+// 涵蓋站點：第一站 (.mn 語法) + 第二站 (Refinement / Units) + 第五站 (SMT Contracts / @total)
+// ============================================================================
+module examples.refinement_and_units
+
+// 1. 零成本物理量綱（編譯期自動執行量綱代數推導，生成機器碼時 100% 抹除為純暫存器浮點數）
+unit sec, ms = 0.001 * sec
+unit meter, kg
+unit newton = kg * meter / (sec * sec)
+unit joule  = newton * meter
+
+/// 計算動能：編譯器自動驗證輸入量綱與輸出 <joule> 完全吻合
+@branchless
+pub fn kinetic_energy(mass: f64[0.0..=1e12]<kg>, vel: f64<meter / sec>) -> f64<joule>
+  ensures result >= 0.0_joule
+= 0.5 * mass * vel * vel
+
+// 2. 精煉值域型別與依賴切片索引（編譯期 100% 證明不越界，0 條執行期邊界檢查指令！）
+pub struct RingWindow<T, const CAP: usize = 64> {
+  pub buf:  [CAP]T
+  pub head: usize[0..CAP] = 0
+  pub len:  usize[0..=CAP] = 0
+
+  invariant {
+    CAP > 0
+    head < CAP
+    len <= CAP
+  }
+}
+
+/// 構造性必終止證明（@total + decreases）：編譯期 100% 數學證明絕不可能發生無窮迴圈或越界
+@total
+pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
+  requires items.len > 0
+{
+  var lo: usize[0..=items.len] = 0
+  var hi: usize[0..=items.len] = items.len
+
+  while lo < hi decreases hi - lo {
+    // SMT 證明器自動推導：當 lo < hi 時，mid 嚴格落在 [0..items.len] 區間內！
+    // 因此下方的 items[mid] 在機器碼層級 100% 免除邊界檢查（Zero Bounds-Check Overhead）！
+    val mid: usize[0..items.len] = lo + (hi - lo) / 2
+    val current = items[mid]
+
+    if current == target { return mid }
+    if current < target  { lo = mid + 1 } else { hi = mid }
+  }
+  none
+}
+
+// 3. 內建毫秒級 JIT 驗證沙盒（存檔時由 MIR 記憶體內 JIT 於 < 1 ms 內直接執行驗證）
+@example("物理量綱換算與無越界二分搜尋") {
+  val d: f64<meter> = 200.0_meter
+  val t: f64<sec>   = 9.5_sec + 500.0_ms   // 自動換算為 10.0_sec
+  val v = d / t                            // 自動推導型別為 f64<meter / sec> (20.0)
+  val e = kinetic_energy(2.0_kg, v)
+  assert(e == 400.0_joule)
+
+  val sorted = [10, 20, 35, 50, 80, 130]
+  val idx = binary_search_exact(sorted, 50)
+  guard val found = idx else panic("expected index")
+  assert(found == 3 and sorted[found] == 50)
+}

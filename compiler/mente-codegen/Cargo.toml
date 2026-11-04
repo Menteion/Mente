@@ -1,0 +1,9 @@
+[package]
+name = "mente-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mente backend code generator: Carry-Flag Error ABI, Native x86-64/ARM64 JIT buffer, and Binary SPIR-V (@kernel) emitter"
+
+[dependencies]
+mente-mir = { path = "../mente-mir" }
