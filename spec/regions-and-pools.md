@@ -11,13 +11,13 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Zero `<'a>` lifetime annotations (`Implemented` in `mente-syntax`)**:
-   - Mente forbids tick-mark lifetime parameters (`<'a>`, `&'a T`) on structs, traits, and functions.
+1. **Zero `<'a>` lifetime annotations (`Specified`)**:
+   - Mente forbids tick-mark lifetime parameters (`<'a>`, `&'a T`) on structs, traits, and functions. Nothing rejects them yet: `mn check` accepts `pub struct S<'a>`, because the lexer skips `'` and keeps generics as a raw string.
    - When a function returns a slice or view derived from an input parameter (`fn subslice(data: Slice<u8>, start: usize) -> Slice<u8>`), the compiler automatically infers return provenance tied to the input argument's lexical scope (`Specified` in `mente-sema`).
 2. **Lexical scoped arenas (`Arena.scoped`, `Specified`)**:
    - Temporary phase allocations use `Arena.scoped(capacity) { arena => ... }`.
    - Values allocated within `arena` cannot escape the lexical block via return values or outer `mut` bindings, and the entire region is reclaimed in `O(1)` (`1` bump-pointer reset instruction) upon scope exit.
-3. **Generational `Pool<T>` and 64-bit `Handle<T>` (`Implemented` in `examples/04_comptime_and_graph_pool.mn`, `Specified` in `std::mem`)**:
+3. **Generational `Pool<T>` and 64-bit `Handle<T>` (`Specified`; `examples/04_comptime_and_graph_pool.mn` uses them, and no standard library exists yet)**:
    - Graph topologies, doubly-linked structures, ECS entities, and UI trees use `Pool<T>` indexed by `Handle<T>` (`u32` slot index + `u32` generation tag = `64` bits).
    - `Handle<T>` is `Copy`, serializable across disk/network/GPU buffers, and free of reference cycles.
    - Indexing `pool[handle]` validates the 32-bit generation counter in `O(1)` and returns `?T` (or `mut` projection via `pool.get_mut(handle)`).

@@ -11,19 +11,19 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Unit declaration syntax (`Implemented` in `compiler/mente-syntax/src/lib.rs`)**:
-   - Base units, scaled units, and composite derived units are declared at module scope using the `unit` keyword (`TokenKind::KwUnit`, `Item::UnitDecl`):
+1. **Unit declaration syntax (`Implemented` in `compiler/mente-syntax/src/lib.rs`, as raw text)**:
+   - Base units, scaled units, and composite derived units are declared at module scope using the `unit` keyword (`TokenKind::Unit`, `ItemDecl::Unit`). The parser keeps the declaration's text; nothing interprets it yet:
      ```rust
      unit sec, ms = 0.001 * sec
      unit meter, kg
      unit newton = kg * meter / (sec * sec)
      unit token, byte
      ```
-2. **Dimensional algebra and normalization (`Specified` in `mente-sema`)**:
+2. **Dimensional algebra and normalization (`Specified`)**:
    - Numeric types parameterized by a unit (`f64<meter>`, `f64<meter / sec>`, `u64<byte>`) represent abelian group exponents over base dimensions (e.g., `newton` normalizes to $\text{kg}^1 \cdot \text{meter}^1 \cdot \text{sec}^{-2}$).
    - Addition, subtraction, and relational comparison (`+`, `-`, `<`, `<=`, `==`) require identical normalized dimension vectors; violating this is a hard compile-time error.
    - Multiplication and division (`*`, `/`) add and subtract dimension exponent vectors automatically (`f64<meter> / f64<sec>` yields `f64<meter / sec>`).
-3. **100% compile-time erasure (`Implemented` in `MIR` lowering model)**:
+3. **Compile-time erasure (`Specified`; no `.mn` code is lowered to MIR yet)**:
    - After `mente-sema` verifies dimensional consistency, all `<unit>` parameters are completely erased. At the `MIR` and machine-code levels, `f64<newton>` is an unboxed `f64` in an `XMM` / `ZMM` register with zero wrapper overhead.
 
 ## 2. Decision rationale and rejected alternatives

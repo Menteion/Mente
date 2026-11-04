@@ -11,13 +11,14 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Product types (`struct`) with embedded invariants (`Implemented` in `mente-syntax` and `mente-ast`)**:
-   - `struct` declarations support named fields, default field values, and optional `invariant { ... }` blocks verified at construction and at the end of every `mut` projection.
-2. **Sum types (`enum`) and ad-hoc type unions (`A | B`) (`Implemented` in parser, `Specified` flow narrowing)**:
+1. **Product types (`struct`) with embedded invariants**:
+   - `struct` declarations support named fields, default field values, and optional `invariant { ... }` blocks (`Implemented` in `parse_struct`: fields, defaults and invariant lines are parsed; types and expressions are kept as raw strings).
+   - Invariants are verified at construction and at the end of every `mut` projection (`Specified`).
+2. **Sum types (`enum`) and ad-hoc type unions (`A | B`) (`Specified`; `parse_enum` parses variant lists as raw strings, `Implemented`)**:
    - Nominal tagged unions are declared via `enum`. Ad-hoc unions of existing types are written `A | B`.
    - `match` expressions MUST be exhaustive at compile time.
    - **Flow-sensitive type narrowing (`is`)**: Inside `if x is Packet.Data { ... }` or after `guard x is Packet.Data else { return }`, the static type of `x` narrows automatically to `Packet.Data` without requiring destructuring bindings.
-3. **First-class optional types `?T` and elimination of `.unwrap()` (`Implemented`)**:
+3. **First-class optional types `?T` and elimination of `.unwrap()` (`Specified`; the lexer has `NoneLit`, `Question`, `QuestionDot` and `QuestionQuestion` tokens, and `examples/` is checked for `.unwrap()` by the directive below)**:
    - Nullable values are typed `?T` (equivalent to `T | none`) with automatic niche bit-packing (e.g., `?NonNullPtr` and `?u16[1..=65535]` occupy zero extra tag bytes).
    - **Prohibition of unchecked `.unwrap()`**: Neither the language nor the standard library provides a panicking `.unwrap()` method on `?T`. Accessing `T` from `?T` MUST proceed via compile-time flow narrowing (`guard val v = opt else { ... }`, `if opt != none`), safe navigation (`opt?.field`), or default coalescing (`opt ?? fallback`).
 

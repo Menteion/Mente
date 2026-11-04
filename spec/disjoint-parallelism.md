@@ -11,7 +11,7 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Lock-free disjoint slice parallelism (`parallel_for`, `Implemented` in `mente-syntax` and `examples/03_colorless_concurrency_and_effects.mn`)**:
+1. **Lock-free disjoint slice parallelism (`parallel_for`, `Specified`; the lexer has a `ParallelFor` token and `examples/02_mechanical_sympathy_simd.mn` uses the syntax)**:
    - `parallel_for` distributes independent iterations across the hardware worker pool for shared-memory data parallelism:
      ```rust
      parallel_for tile in (mut scores).chunks_mut(64) {

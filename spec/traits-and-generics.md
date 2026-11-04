@@ -11,17 +11,17 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Angle-bracket generics `<T>` without turbofish `::<>` (`Implemented` in `compiler/mente-syntax/src/lib.rs`)**:
-   - Type parameters on types and functions use angle brackets: `List<T>`, `Pool<SceneNode>`, `fn serialize<comptime T: Type>(...)`.
-   - Because Mente's LL(k) expression grammar separates type arguments from relational comparison via lexical/syntactic context, explicit generic function calls are written `parse<i32>(input)` and **never** `parse::<i32>(input)`.
-2. **`trait` declarations and structural/nominal bounds (`Implemented` in parser)**:
+1. **Angle-bracket generics `<T>` without turbofish `::<>`**:
+   - Type parameters on types and functions use angle brackets: `List<T>`, `Pool<SceneNode>`, `fn serialize<comptime T: Type>(...)` (`Implemented` for declarations: `mente-syntax` keeps a declaration's `<...>` as a raw string).
+   - Explicit generic function calls are written `parse<i32>(input)` and **never** `parse::<i32>(input)` (`Specified`). The rule that tells a type-argument list from a `<` comparison inside expressions is not written yet, and there is no expression parser to apply it.
+2. **`trait` declarations and structural/nominal bounds (`Implemented` in `parse_trait`, method signatures kept as raw strings)**:
    - Shared behavior contracts are declared with `trait`:
      ```rust
      pub trait ByteSink {
          fn write_u64(mut self, v: u64)
      }
      ```
-3. **Static monomorphization by default (`x: Trait`) vs. explicit dynamic dispatch (`dyn Trait`) (`Implemented` in `examples/04_comptime_and_graph_pool.mn`, `Specified` in codegen)**:
+3. **Static monomorphization by default (`x: Trait`) vs. explicit dynamic dispatch (`dyn Trait`) (`Specified`; `examples/04_comptime_and_graph_pool.mn` uses the syntax, and the lexer has a `Dyn` token)**:
    - Writing a trait name directly as a parameter type (`fn encode(mut sink: ByteSink)`) MUST default to **compile-time static monomorphization** (equivalent to Rust `impl ByteSink` or C++20 `concept`), enabling 100% inlining and zero vtable indirection.
    - Runtime virtual dispatch via a 16-byte fat pointer `(data_ptr, vtable_ptr)` MUST be requested explicitly with the `dyn` keyword (`loggers: Slice<dyn Logger>`).
 

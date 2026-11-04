@@ -1,39 +1,43 @@
+---
+title: Mente Implementation Status
+version: 0.1.0
+status: active
+date: 2026-11-04
+---
+
 # Mente — Implementation Status (`docs/STATUS.md`)
 
-**Single source of live implementation status across `compiler/`, `examples/`, and `spec/`.**
+**Single source of live implementation status across `compiler/`, `examples/`, and `spec/`.** It says what the compiler does today; `spec/*.md` says what the language is meant to be.
 
 | Field | Value |
 | :--- | :--- |
-| Current milestone | Phase 1 Foundation Complete (`v0.1.0-alpha`); **Phase 0 (`@spec-family` Governance Setup) queued as immediate Step 0** |
-| Specification files | 19 flat semantic files in [`spec/`](../spec/README.md) (`README.md`, `philosophy.md`, and 17 single-decision specs) |
-| Executable assertions | 61 `<!-- @assert-* -->` directives across `spec/*.md` (100% passing & counterfactual-proven via `mn spec`) |
+| Current milestone | Phase 1 in progress: the declaration parser, hashing, projection and layout provers exist; function bodies are not parsed |
+| Immediate next step | The design pass in [`docs/design-review.md`](design-review.md), one entry at a time; then Phase 0 (`@spec-family`) as written in [`ROADMAP.md`](../ROADMAP.md) |
+| Specification | One single-decision file per mechanism in [`spec/`](../spec/README.md), plus `README.md` and `philosophy.md`; `cargo run --bin mn -- spec` prints the current file and directive counts |
 | Compiler crates | 6 Rust crates (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) |
-| Showcase `.mn` modules | 4 verified programs in [`examples/`](../examples/README.md) |
+| Showcase `.mn` modules | [`examples/`](../examples/README.md). `mn check` verifies their declarations only; their bodies show the intended language and are not checked |
 
 ---
 
-## Immediate Next Step — Phase 0 (Step 0): Full `@spec-family` Governance Configuration
+## What the compiler does not do yet
 
-Before expanding Phase 1 AST-to-`MIR` lowering, execute **Step 0** to wire the external `@spec-family` toolchain alongside `mn spec`:
+These gaps hold across every crate, and every `spec/*.md` claim that depends on them is labelled `Specified`:
 
-1. **`package.json` devDependencies**:
-   - `@spec-family/spec-guard`: `^0.30.0` (`spec-guard`, `spec-guard prove`)
-   - `@spec-family/spec-graph`: `^0.21.0` (`spec-graph`, `spec-graph verify`)
-   - `@spec-family/spec-brief`: `^0.12.0` (`spec-brief generate`, `spec-brief verify --strict`)
-2. **`.spec-graph.json`**:
-   - Point `adrDir` / `specDir` at `spec/` and `docs/` with `requireFrontMatter: true` and `strictLinks: true`.
-3. **`.spec-brief.json` & `briefs/*.md`**:
-   - Map each crate in `compiler/` (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) to its governing atomic `spec/*.md` files so context briefs are auto-generated per crate.
+- **No body parser.** `mente-syntax` keeps each function and `@example` body as a flat token list, and types, contracts and effect clauses as raw strings. `mn check` accepts a body of arbitrary tokens.
+- **No type checker.** Refinement intervals, units, `?T`, `T ! E`, effects, parameter modes and the Law of Exclusivity are not checked.
+- **No lowering.** No `.mn` code reaches MIR. The MIR region `mn test` runs is built by hand in `compiler/mente-cli/src/main.rs`, with hand-written intervals.
+- **No code generation.** `mente-codegen` emits no machine code, and its SPIR-V writer does not produce a valid module.
+- **Silent lexer.** Characters the lexer does not know (`&`, `'`, `^`, `~`) are skipped without an error, so `&mut x` and `<'a>` are not rejected.
 
 ---
 
 ## Crate-by-Crate Maturity Ledger
 
-| Crate | Path | Implemented today | Specified (next milestone) |
+| Crate | Path | Implemented today | Not yet (specified) |
 | :--- | :--- | :--- | :--- |
-| **`mente-syntax`** | [`compiler/mente-syntax/src/lib.rs`](../compiler/mente-syntax/src/lib.rs) | Full `.mn` lexer & structural parser: `module`, `unit`, `struct`, `bitstruct`, `enum`, `trait`, `fn`, `val`/`var`, `mut`/`own`/`in`, `requires`/`ensures`/`invariant`/`decreases`, `with`, `parallel`, `parallel_for`, `comptime`, `@example`. | Full Pratt expression AST nodes for nested binary/pipe expressions inside function bodies. |
-| **`mente-ast`** | [`compiler/mente-ast/src/lib.rs`](../compiler/mente-ast/src/lib.rs) | 128-bit FNV-1a/SplitMix dual semantic hashing (`spec_hash` vs. `body_hash`) and `< 0.1 ms` Holographic Spec Blueprint projection (`project_spec_blueprint`). | Incremental module dependency DAG caching keyed on `spec_hash`. |
-| **`mente-sema`** | [`compiler/mente-sema/src/lib.rs`](../compiler/mente-sema/src/lib.rs) | Exact byte-range `@layout(size, align)` + `@bytes` prover (`E0410`–`E0416`), `bitstruct` `@bits` prover (`E0420`–`E0423`), `@total`/`decreases` loop checker (`E0501`), and `@branchless` control-flow verifier (`E0401`–`E0402`). | Abelian dimensional `unit` solver, MVS interprocedural provenance checker, and Tier-1 difference-bound matrix (`x - y <= c`) solver. |
-| **`mente-mir`** | [`compiler/mente-mir/src/lib.rs`](../compiler/mente-mir/src/lib.rs) | 64-byte aligned `MirRegionSoA` (`NodeId(u32)`), `MorphicLayout` (`AoS`/`SoA`/`Tiled`) byte-offset calculator, `ValueLattice` bounds-check elimination (`proves_in_bounds`), `@branchless` opcode verifier, in-memory evaluator (`eval_in_memory`), and microsecond mutation prover (`run_in_memory_mutation_gate`). | Full AST-to-RVSDG lowering pass and equality saturation (`E-Graph`) rewrite loop. |
-| **`mente-codegen`** | [`compiler/mente-codegen/src/lib.rs`](../compiler/mente-codegen/src/lib.rs) | Carry-Flag (`CF`) zero-overhead error ABI descriptor (`CarryFlagAbiLowering` for x86-64 `RAX`/`RDX`/`CF` and AArch64 `X0`/`X1`/`C`) and direct binary SPIR-V 1.6 emitter (`emit_spirv_binary`). | Direct ELF/PE/Mach-O x86-64/AArch64 machine-code emission and `comptime` bytecode VM. |
-| **`mente-cli`** | [`compiler/mente-cli/src/main.rs`](../compiler/mente-cli/src/main.rs) | `mn view --spec`, `mn check`, `mn test --mutate`, and native `mn spec` (`guard` + counterfactual `prove` + `graph`). | `mn build`, `mn fmt`, and `mn lsp`. |
+| **`mente-syntax`** | [`compiler/mente-syntax/src/lib.rs`](../compiler/mente-syntax/src/lib.rs) | Lexer and declaration parser: `module`, `unit` (raw text), `struct` (fields, defaults, `@bytes`, `invariant` lines), `bitstruct` (`@bits`), `enum`, `trait` (method signatures as text), `fn` (generics, parameters with `mut`/`own`/`in` modes, `-> T ! E`, `with` list, `requires`/`ensures`/`decreases` lines, `= expr` bodies), `@example`. | Statement and expression parsing of bodies; `extern` blocks; diagnostics for unknown characters. |
+| **`mente-ast`** | [`compiler/mente-ast/src/lib.rs`](../compiler/mente-ast/src/lib.rs) | 128-bit two-lane FNV-style `spec_hash` / `body_hash` over the parsed declarations (a private field of a `pub struct` is part of `spec_hash`), and `project_spec_blueprint`. Measured 0.3–0.9 ms per example module including file I/O, 38–60% fewer tokens. | A typed AST; module dependency caching keyed on `spec_hash`. |
+| **`mente-sema`** | [`compiler/mente-sema/src/lib.rs`](../compiler/mente-sema/src/lib.rs) | `@layout(size, align)` + `@bytes` prover (`E0410`–`E0417`; field sizes from primitives, fixed-point, `sat`/`wrap`, arrays and the module's own bitstructs and `@layout` structs), `bitstruct` `@bits` prover (`E0420`–`E0423`). Token checks: `E0501` for a `@total` function with `while` and no `decreases`; `E0401`/`E0402` for a `@branchless` function containing `while`/`raise`. | Type checking, interval and DBM solving, units, MVS exclusivity, provenance, effects. The `@total` check does not verify the measure, and the `@branchless` check does not see `if`, `match` or calls. |
+| **`mente-mir`** | [`compiler/mente-mir/src/lib.rs`](../compiler/mente-mir/src/lib.rs) | Straight-line `MirRegionSoA` (parallel `Vec`s indexed by `NodeId(u32)`; only the header is 64-byte aligned), 12 opcodes, `ValueLattice` record and `proves_in_bounds` predicate, `MorphicLayout::byte_offset`, `verify_branchless` (rejects `BranchCondJump`), `eval_in_memory`, `run_in_memory_mutation_gate`. | Control flow and nested regions (RVSDG), memory operations and calls, interval inference, e-graph rewriting, AST-to-MIR lowering. |
+| **`mente-codegen`** | [`compiler/mente-codegen/src/lib.rs`](../compiler/mente-codegen/src/lib.rs) | `CarryFlagAbiLowering`, a table naming the registers and flag of the error ABI per target; `emit_spirv_binary`, a SPIR-V-shaped word stream that `spirv-val` would reject. | Any machine-code or valid SPIR-V emission. |
+| **`mente-cli`** | [`compiler/mente-cli/src/main.rs`](../compiler/mente-cli/src/main.rs) | `mn check`, `mn view --spec`, `mn test [--mutate]` (runs `mn check`, then the hand-written demo region and its mutation gate), and `mn spec` (front matter, at least one directive per file, every directive run and rejected if it cannot fail). | `mn build`, `mn fmt`, `mn lsp`, `mn prove`; executing `@example` bodies. |

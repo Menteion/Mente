@@ -1,6 +1,6 @@
 # Mente (`.mn`) Showcase Examples
 
-All four showcase modules are verified on every test run by `cargo test` and `cargo run --bin mn -- test --mutate`.
+These modules show the intended language. `cargo test` and `cargo run --bin mn -- check` verify their declarations (layouts, bitstructs and the token-level `@total` / `@branchless` checks); their bodies and `@example` blocks are not parsed or run yet. Where they disagree with a spec, [`docs/design-review.md`](../docs/design-review.md) has the entry that settles it.
 
 | File | Demonstrated mechanisms | Governing specs |
 | :--- | :--- | :--- |

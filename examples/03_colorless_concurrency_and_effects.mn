@@ -1,6 +1,6 @@
 // ============================================================================
 // 標本 03：無染色結構化併發、Arena 零拷貝視圖與代數效應時光機測試
-// 涵蓋站點：第三站 (Arena / 零 <'a>) + 第五站 (T ! E / with Effects) + 第六站 (parallel)
+// 規格：spec/regions-and-pools.md、spec/error-handling-abi.md、spec/algebraic-effects.md、spec/structured-concurrency.md
 // ============================================================================
 module examples.colorless_concurrency_and_effects
 

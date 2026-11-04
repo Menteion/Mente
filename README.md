@@ -1,11 +1,14 @@
 # Mente (`mn`)
 
-**A universal, mathematically verified, hardware-sympathetic programming language (`.mn`) and 64-byte cache-line `SoA` intermediate representation (`MIR`).**
+**The design of a universal, statically verified, hardware-sympathetic programming language (`.mn`), with an early prototype compiler and its own structure-of-arrays intermediate representation (`MIR`).**
+
+The highlights below are the language's design. Most of it is not implemented: [`docs/STATUS.md`](docs/STATUS.md) says what the compiler does today, and [`docs/design-review.md`](docs/design-review.md) lists the design problems still being corrected.
 
 | Resource | Entry point |
 | :--- | :--- |
-| Language Specification | [`spec/README.md`](spec/README.md) (17 orthogonal single-decision specs) |
+| Language Specification | [`spec/README.md`](spec/README.md) (one single-decision file per mechanism) |
 | Implementation Status | [`docs/STATUS.md`](docs/STATUS.md) |
+| Design Review | [`docs/design-review.md`](docs/design-review.md) |
 | Engineering Roadmap | [`ROADMAP.md`](ROADMAP.md) |
 | Showcase `.mn` Programs | [`examples/README.md`](examples/README.md) |
 | Agent Switchboard | [`CLAUDE.md`](CLAUDE.md) |
@@ -15,7 +18,7 @@
 ## Core Architectural Highlights
 
 1. **Holographic `.mn` Module & Dual AST Hashing ([`spec/holographic-module.md`](spec/holographic-module.md))**:
-   - Single `.mn` source file per module. The compiler computes separate `spec_hash` (public interface, layouts, contracts) and `body_hash` (implementation bodies) digests so body edits trigger **zero downstream recompilation**, and `mn view --spec` projects a compact interface blueprint in `< 0.1 ms`.
+   - Single `.mn` source file per module. The compiler computes separate `spec_hash` (public interface, layouts, contracts) and `body_hash` (implementation bodies) digests so body edits trigger **zero downstream recompilation**, and `mn view --spec` projects a compact interface blueprint (target: `< 0.1 ms`).
 2. **Refinement Intervals, Fixed-Point, and Zero-Cost Units ([`spec/refinement-and-fixed-point.md`](spec/refinement-and-fixed-point.md), [`spec/dimensional-units.md`](spec/dimensional-units.md))**:
    - First-class bounded intervals (`u32[0..1024]`, dependent slice indexing `usize[0..items.len]` for zero bounds checks), cross-platform deterministic fixed-point (`q16.16`, `q1.15`, `sat<T>`), and compile-time erased physical units (`unit newton = kg * meter / (sec * sec)`).
 3. **Sigil-Free Mutable Value Semantics & Generational Pools ([`spec/mutable-value-semantics.md`](spec/mutable-value-semantics.md), [`spec/regions-and-pools.md`](spec/regions-and-pools.md))**:
@@ -35,12 +38,12 @@
 # Run all compiler & specification verification tests
 cargo test
 
-# Verify all 19 specification files and 61 executable @assert-* directives
+# Check spec/*.md front matter and run every executable @assert-* directive
 cargo run --bin mn -- spec
 
-# Verify all .mn examples and run the in-memory MIR Mutation Prover
+# Check the examples' declarations, then run the demo MIR region and its mutation gate
 cargo run --bin mn -- test --mutate
 
-# Project a .mn module's Holographic Spec Blueprint (< 0.1 ms)
+# Project a .mn module's Holographic Spec Blueprint
 cargo run --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
 ```

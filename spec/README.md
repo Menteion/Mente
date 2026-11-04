@@ -12,7 +12,7 @@ date: 2026-11-04
 | Document control | |
 | :--- | :--- |
 | Version | 0.1.0 |
-| Status | Active (living specification; verified by `mn spec` and `@spec-family`) |
+| Status | Active (living specification; directives run by `mn spec`) |
 | Date | 2026-11-04 |
 | Implementation status | [docs/STATUS.md](../docs/STATUS.md) |
 | Requirement language | The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174). |
@@ -26,12 +26,12 @@ Every claim carries one of four **maturity labels**:
 
 | Label | Meaning | Evidence required |
 | :--- | :--- | :--- |
-| **Implemented** | Exists in `compiler/` or `examples/` today and is verified by a unit test, a compile-time assertion, or an executable `<!-- @assert-* -->` directive. | Source path plus a test or `@assert-*` directive. |
+| **Implemented** | The compiler in `compiler/` does this today, and a unit test or an executable `<!-- @assert-* -->` directive would fail if it stopped. A `.mn` example that merely uses a syntax does not make that syntax `Implemented`. | Source path plus a test or `@assert-*` directive. |
 | **Specified** | The grammar, type rule, or ABI invariant is fixed in `spec/`, awaiting full lowering in a subsequent milestone. | A normative section in `spec/*.md`. |
 | **Target** | A measurable performance or latency goal with a stated measurement protocol. | A benchmark protocol in [ROADMAP.md](../ROADMAP.md). |
 | **Hypothesis** | An architectural assumption to be validated empirically against a baseline corpus. | A documented evaluation criterion. |
 
-Where a specification document and the source tree disagree, the source tree is authoritative. Claims about the source tree are executable via `cargo run --bin mn -- spec` (`guard`, `prove`, and `graph`).
+Where a specification document and the source tree disagree, the source tree is authoritative. Claims about the source tree are checked by `cargo run --bin mn -- spec`, which runs every directive and rejects one that cannot fail. A directive is a substring check, so it shows that a name exists, not that it behaves as claimed; behaviour is backed by the unit tests it names.
 
 <!-- @assert-present file="spec/philosophy.md,spec/holographic-module.md,spec/surface-syntax.md,spec/refinement-and-fixed-point.md,spec/dimensional-units.md,spec/algebraic-types-and-null.md,spec/traits-and-generics.md,spec/mutable-value-semantics.md,spec/regions-and-pools.md,spec/morphic-layouts.md,spec/hardware-contracts.md,spec/error-handling-abi.md,spec/ghost-contracts-and-totality.md,spec/algebraic-effects.md,spec/structured-concurrency.md,spec/disjoint-parallelism.md,spec/comptime-and-ffi.md,spec/mir-and-codegen.md" reason="All eighteen canonical single-decision specification files exist in flat spec/ directory" -->
 
@@ -46,7 +46,7 @@ Where a specification document and the source tree disagree, the source tree is 
 | [dimensional-units.md](dimensional-units.md) | Zero-cost physical and domain dimensional unit algebra (`unit`) | `compiler/mente-syntax`, `compiler/mente-sema` |
 | [algebraic-types-and-null.md](algebraic-types-and-null.md) | `struct`, `enum`, flow-sensitive union narrowing (`is`), and `.unwrap()`-free `?T` | `compiler/mente-syntax`, `compiler/mente-sema` |
 | [traits-and-generics.md](traits-and-generics.md) | Angle-bracket generics `<T>` (no `::<>`) and static-default `trait` / explicit `dyn Trait` | `compiler/mente-syntax`, `compiler/mente-sema` |
-| [mutable-value-semantics.md](mutable-value-semantics.md) | Sigil-free Mutable Value Semantics (`Let` / `mut` / `own`) and Law of Exclusivity | `compiler/mente-ast`, `compiler/mente-sema` |
+| [mutable-value-semantics.md](mutable-value-semantics.md) | Sigil-free Mutable Value Semantics (read-only / `mut` / `own`) and Law of Exclusivity | `compiler/mente-ast`, `compiler/mente-sema` |
 | [regions-and-pools.md](regions-and-pools.md) | Lifetime-free provenance inference, lexical `Arena`, and generational `Pool<T>`/`Handle<T>` | `compiler/mente-sema` |
 | [morphic-layouts.md](morphic-layouts.md) | Morphic containers (`AoS`/`SoA`/`Tiled`), 64B `@layout`/`@bytes`, and `bitstruct`/`@bits` | `compiler/mente-sema`, `compiler/mente-mir` |
 | [hardware-contracts.md](hardware-contracts.md) | Micro-architectural contracts (`@branchless`, `@simd`, `@no_alloc`, `@max_stack`) and `@kernel` | `compiler/mente-sema`, `compiler/mente-mir`, `compiler/mente-codegen` |

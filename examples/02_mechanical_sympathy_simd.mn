@@ -1,6 +1,6 @@
 // ============================================================================
 // 標本 02：硬體機械同理心、64B 快取行契約、多態記憶體幾何與 @branchless / @kernel
-// 涵蓋站點：第二站 (q16.16 定點數) + 第三站 (顯式 mut) + 第四站 (Mechanical Sympathy)
+// 規格：spec/refinement-and-fixed-point.md、spec/mutable-value-semantics.md、spec/morphic-layouts.md、spec/hardware-contracts.md
 // ============================================================================
 module examples.mechanical_sympathy_simd
 
@@ -72,7 +72,7 @@ pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0])
     dendrite_w: [0.0_q1_15; 20],
   }
 
-  // 呼叫端顯式標註 mut（決策 H1），一眼看出 cell 在此行被原地修改
+  // 呼叫端顯式標註 mut，一眼看出 cell 在此行被原地修改
   val did_fire = integrate_cell(mut cell, 0.75_q16, 2)
   assert(did_fire and cell.potential == 0.0_q16)
 }

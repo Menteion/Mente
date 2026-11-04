@@ -1,6 +1,6 @@
 // ============================================================================
 // 標本 01：精煉值域型別、零成本物理量綱與 SMT 幽靈契約
-// 涵蓋站點：第一站 (.mn 語法) + 第二站 (Refinement / Units) + 第五站 (SMT Contracts / @total)
+// 規格：spec/refinement-and-fixed-point.md、spec/dimensional-units.md、spec/ghost-contracts-and-totality.md
 // ============================================================================
 module examples.refinement_and_units
 
@@ -38,7 +38,8 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   var hi: usize[0..=items.len] = items.len
 
   while lo < hi decreases hi - lo {
-    // SMT 證明器自動推導：當 lo < hi 時，mid 嚴格落在 [0..items.len] 區間內！
+    // 規格上由 Tier-1 求解器推導：當 lo < hi 時，mid 落在 [0..items.len) 區間內。
+    // 規格指定的 octagon 域推不出這一條，見 docs/design-review.md 的 octagon-midpoint。
     // 因此下方的 items[mid] 在機器碼層級 100% 免除邊界檢查（Zero Bounds-Check Overhead）！
     val mid: usize[0..items.len] = lo + (hi - lo) / 2
     val current = items[mid]
@@ -49,7 +50,7 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   none
 }
 
-// 3. 內建毫秒級 JIT 驗證沙盒（存檔時由 MIR 記憶體內 JIT 於 < 1 ms 內直接執行驗證）
+// 3. @example：規格上由 mn test 執行；目前 mn test 還不會執行 @example 主體
 @example("物理量綱換算與無越界二分搜尋") {
   val d: f64<meter> = 200.0_meter
   val t: f64<sec>   = 9.5_sec + 500.0_ms   // 自動換算為 10.0_sec

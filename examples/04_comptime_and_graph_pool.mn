@@ -1,6 +1,6 @@
 // ============================================================================
 // 標本 04：世代安全物件池（Pool / Handle）與統一語法 comptime 元編程
-// 涵蓋站點：第三站 (Pool / Handle 零 unsafe 環狀圖) + 第七站 (comptime 反射)
+// 規格：spec/regions-and-pools.md、spec/traits-and-generics.md、spec/comptime-and-ffi.md
 // ============================================================================
 module examples.comptime_and_graph_pool
 
@@ -20,7 +20,7 @@ pub fn link_parent_child(
   pool[mut child_h].parent = parent_h
 }
 
-// 2. 統一語法的 comptime 元編程（決策 P1）：
+// 2. 統一語法的 comptime 元編程：
 //    不學外星巨集語法！在 comptime 中，型別 Type.of<T>() 就是普通結構，直接用 for 迴圈走訪欄位！
 pub trait ByteSink {
   fn write_u64(mut self, v: u64)
@@ -28,7 +28,7 @@ pub trait ByteSink {
 }
 
 pub fn encode_record<T>(mut sink: ByteSink, record: T) {
-  // 編譯期展開為零成本的直線欄位寫入指令（可透過 mn view --expand 白盒檢視）
+  // 編譯期展開為零成本的直線欄位寫入指令
   comptime for field in Type.of<T>().fields {
     comptime if field.ty == u64 {
       sink.write_u64(record.(field.name))

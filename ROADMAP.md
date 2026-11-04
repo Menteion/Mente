@@ -1,19 +1,21 @@
 # Mente (`mn`) — Engineering Roadmap
 
 **Status ledger:** [docs/STATUS.md](docs/STATUS.md)  
-**Canonical specification:** [spec/README.md](spec/README.md) (17 atomic single-decision specification files)
+**Canonical specification:** [spec/README.md](spec/README.md) (one single-decision file per mechanism)
+**Design review:** [docs/design-review.md](docs/design-review.md) — open design problems. Phases 2 to 5 below are kept as written until `roadmap-scope` there is decided.
 
 ---
 
 ## Phase 0 (`v0.0`): `@spec-family` Governance & Context Brief Pipeline (Step 0 — Immediate)
 
-**Goal:** Wire the external `@spec-family` verification suite alongside `mn spec` so every specification claim, cross-document link, and per-crate context brief is machine-enforced before compiler passes expand.
+**Goal:** Wire the external `@spec-family` verification suite alongside `mn spec`, so that each specification directive is also proven able to fail and every cross-document link is checked.
 
-- [x] Flatten specification into 19 emoji-free, single-decision semantic files in [`spec/`](spec/README.md) with zero `DEC-XXX` or `Station` numbering.
-- [x] Embed 61 executable `<!-- @assert-present -->`, `<!-- @assert-count -->`, and `<!-- @assert-absence -->` directives across `spec/*.md`, verified by `cargo run --bin mn -- spec`.
-- [ ] **Step 0.1 (`package.json`)**: Configure `@spec-family/spec-guard` (`^0.30.0`), `@spec-family/spec-graph` (`^0.21.0`), and `@spec-family/spec-brief` (`^0.12.0`) with `npm run verify:docs` (`spec-guard && spec-guard prove && spec-graph verify && spec-brief verify --strict`).
-- [ ] **Step 0.2 (`.spec-graph.json`)**: Configure front-matter schema validation and cross-link checking across `spec/*.md` and `docs/*.md`.
-- [ ] **Step 0.3 (`.spec-brief.json` & `briefs/`)**: Map each compiler crate (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) to its governing atomic `spec/*.md` files and generate `briefs/*.md`.
+- [x] Flatten specification into emoji-free, single-decision semantic files in [`spec/`](spec/README.md) with zero `DEC-XXX` or `Station` numbering.
+- [x] Embed executable `<!-- @assert-present -->`, `<!-- @assert-count -->`, and `<!-- @assert-absence -->` directives across `spec/*.md`, run by `cargo run --bin mn -- spec`, which also rejects a directive that cannot fail.
+- [x] Make the documents say what the compiler does (2026-11-04): maturity labels, names and measured numbers corrected across `spec/`, `docs/STATUS.md` and the crate comments.
+- [ ] **Step 0.1 (`package.json`)**: private package, `engines` node `>=22`, devDependencies pinned exactly (no `^`): `@spec-family/spec-guard` `0.31.0`, `@spec-family/spec-graph` `0.21.0`, `@spec-family/spec-brief` `0.12.0`. Scripts: `spec-guard "spec/*.md" "docs/*.md"`, `spec-guard prove` over the same patterns, `spec-graph check`, `spec-brief lint --strict`, and `verify:docs` running the four in order. (`spec-graph` has no `verify` command, and `spec-brief` has no `verify` or `generate`.) `spec-guard` 0.31.0 and `spec-graph check` already pass on this tree, run from `C:Reposspecs` on 2026-11-04.
+- [ ] **Step 0.2 (`.spec-graph.json`)**: `patterns` over `spec/*.md`, `docs/*.md`, `README.md`, `ROADMAP.md`, `CLAUDE.md` and `examples/README.md`, with `strict: true` (the keys `C:ReposMenteion.spec-graph.json` uses).
+- [ ] **Step 0.3 (`.spec-brief.json` & `briefs/`)**: `spec-brief init`. `spec-brief` lints task briefs, the work orders handed to a session; each later step gets one. It does not generate per-crate context: the crate-to-spec routing stays in `CLAUDE.md`.
 
 ---
 
@@ -22,10 +24,13 @@
 **Governing specs:** [holographic-module.md](spec/holographic-module.md), [surface-syntax.md](spec/surface-syntax.md), [morphic-layouts.md](spec/morphic-layouts.md), [mir-and-codegen.md](spec/mir-and-codegen.md)
 
 - [x] Zero-dependency `.mn` lexer and top-level structural parser (`compiler/mente-syntax`).
-- [x] Dual 128-bit semantic hashing (`spec_hash` vs. `body_hash`) and `< 0.1 ms` Holographic Spec Blueprint projection (`compiler/mente-ast`).
+- [x] Dual 128-bit structural hashing (`spec_hash` vs. `body_hash`) and Holographic Spec Blueprint projection (`compiler/mente-ast`); measured 0.3–0.9 ms per example module, against a `< 0.1 ms` target.
 - [x] Exact `@layout(size, align)` + `@bytes` and `bitstruct` + `@bits` verifier (`compiler/mente-sema`).
-- [x] 64-byte cache-line-aligned `MirRegionSoA` (`NodeId(u32)`), `ValueLattice`, in-memory evaluator, and microsecond mutation gate (`compiler/mente-mir`).
-- [ ] Complete statement/expression AST-to-`MirRegionSoA` lowering for arithmetic, `val`/`var`, `if`/`match`, `guard`, and `while` loops.
+- [x] Straight-line `MirRegionSoA` (`NodeId(u32)`), `ValueLattice` record, in-memory interpreter, and opcode mutation gate (`compiler/mente-mir`), exercised on one hand-written region.
+- [ ] Statement and expression parser for function bodies (a Pratt parser for nested binary and pipe expressions), replacing today's flat body token lists.
+- [ ] Name resolution and a type checker over the parsed bodies. Lowering and every Phase 2 item depend on it.
+- [ ] Complete statement/expression AST-to-`MirRegionSoA` lowering for arithmetic, `val`/`var`, `if`/`match`, `guard`, and `while` loops, which needs control flow and nested regions in MIR.
+- [ ] Execute `@example` bodies in `mn test` through that lowering, replacing the hand-written demo region in `mente-cli`.
 
 ---
 

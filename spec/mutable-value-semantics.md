@@ -11,21 +11,21 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Elimination of reference sigils (`&T`, `&mut T`, `*T`) (`Implemented` in `mente-syntax` and `mente-ast`)**:
-   - Mente surface syntax has no address-of `&` or dereference `*` sigils on user types.
-   - Instead, every function parameter specifies one of three explicit **parameter ownership modes** (`ParamMode` in `compiler/mente-ast/src/lib.rs`):
+1. **Elimination of reference sigils (`&T`, `&mut T`, `*T`) (`Specified`)**:
+   - Mente surface syntax has no address-of `&` or dereference `*` sigils on user types. Nothing rejects them yet: the lexer skips `&` without an error.
+   - Instead, every function parameter specifies one of three explicit **parameter ownership modes** (`Implemented` for declarations: `parse_param_list` records `ParamMode::ReadOnly`, `Mut`, `Own` or `RegionIn` in `compiler/mente-syntax/src/lib.rs`; the semantics and ABI below are `Specified`):
 
 | Mode | Declaration syntax | Call-site syntax | Semantic contract | Machine ABI lowering |
 | :--- | :--- | :--- | :--- | :--- |
-| **Shared projection (`Let`)** | `x: T` | `f(a)` | Read-only immutable view; caller retains ownership; zero deep copies. | Register value if `sizeof(T) <= 16B`; `const T*` pointer if `> 16B`. |
+| **Shared projection (`ReadOnly`)** | `x: T` | `f(a)` | Read-only immutable view; caller retains ownership; zero deep copies. | Register value if `sizeof(T) <= 16B`; `const T*` pointer if `> 16B`. |
 | **In-place projection (`Mut`)** | `mut x: T` | `f(mut a)` | Exclusive mutable projection; no other argument to `f` may alias `a`. | Non-aliasing `T* restrict` pointer (`noalias`). |
 | **Consuming transfer (`Own`)** | `own x: T` | `f(own a)` | Ownership transferred to `f`; `a` is statically invalidated at caller after call. | Register / bitwise move transfer; drop responsibility moves to callee. |
 
-2. **Mandatory dual-site annotation (`Implemented` in `mente-syntax`)**:
-   - Both `mut` and `own` MUST be written at the function declaration site (`fn step(mut p: Particle)`) **and** at every call site (`step(mut p)`).
-3. **Law of Exclusivity and move invalidation (`Implemented` in `compiler/mente-sema/src/lib.rs`)**:
-   - Within any call expression, two arguments passed as `mut` (or one `mut` and one `Let`/`own`) MUST NOT overlap in root storage path (`check_call_exclusivity`).
-   - Any binding passed with `own` is recorded in `moved_vars` and MUST NOT be read or mutated on any subsequent path unless re-initialized.
+2. **Mandatory dual-site annotation**:
+   - Both `mut` and `own` MUST be written at the function declaration site (`fn step(mut p: Particle)`) **and** at every call site (`step(mut p)`). Declaration sites are parsed (`Implemented`); call sites sit inside unparsed bodies, so the call-site rule is `Specified`.
+3. **Law of Exclusivity and move invalidation (`Specified`; no checker exists)**:
+   - Within any call expression, two arguments passed as `mut` (or one `mut` and one read-only / `own`) MUST NOT overlap in root storage path.
+   - Any binding passed with `own` MUST NOT be read or mutated on any subsequent path unless re-initialized.
 
 ## 2. Decision rationale and rejected alternatives
 

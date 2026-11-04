@@ -11,16 +11,19 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Single `.mn` source file (`Implemented` in `compiler/mente-ast/src/lib.rs`)**:
+1. **Single `.mn` source file (`Specified`; `mente-syntax` parses one file per module, `Implemented`)**:
    - Every Mente module resides in a single `.mn` source file. Separate `.h` / `.cpp` or `.mspec` / `.mbody` split files MUST NOT exist.
    - Public types, memory layouts, function signatures, capability effects (`with ...`), and ghost contracts (`requires` / `ensures` / `invariant`) are written inline alongside function bodies.
-2. **Dual 64-bit FNV-1a AST hashing (`Implemented` in `ModuleAst::compute_dual_hashes`)**:
-   - During parsing, `compiler/mente-ast` partitions the AST into two independent cryptographic/structural digests:
-     - `spec_hash: u64` — hashes solely public declarations, struct/bitstruct `@layout` and `@bytes`/`@bits` metadata, function signatures, `with` effect sets, and `requires`/`ensures` contracts.
-     - `body_hash: u64` — hashes the executable statement and expression bodies of all functions.
-   - **Zero-cascade incremental compilation**: Modifying a function body alters `body_hash` while leaving `spec_hash` unchanged (`spec_hash_before == spec_hash_after`), guaranteeing **zero downstream recompilation** of dependent modules.
-3. **Sub-millisecond blueprint projection (`mn view --spec`, `Implemented` in `compiler/mente-cli/src/main.rs`)**:
-   - Running `mn view <file.mn> --spec` projects only the specification surface (types, layouts, signatures, contracts, and `spec_hash`) while eliding function bodies `{ ... }`, reducing context token consumption by 70–85% for architectural review.
+2. **Dual 128-bit structural hashing (`Implemented` in `compute_dual_hashes`, `compiler/mente-ast/src/lib.rs`)**:
+   - `compiler/mente-ast` computes two non-cryptographic 128-bit digests (two 64-bit FNV-1a-style lanes, hex `String`s) from the parsed declarations:
+     - `spec_hash` — the module path, `unit` declarations, every field of each `pub struct` (private fields and defaults included, since they decide the struct's size), `pub bitstruct` fields and `@bits`, `pub enum` variants, `pub trait` method signatures, and each `pub fn`'s attributes, parameters and modes, return and error types, `with` effects, `requires` / `ensures` / `decreases` clauses.
+     - `body_hash` — the token kinds of every function body. Comments and whitespace are not tokens, so they change neither digest.
+   - `Implemented`: editing a function body changes `body_hash` and leaves `spec_hash` unchanged, and changing a private field of a `pub struct` changes `spec_hash` (both tested in `mente-ast`).
+   - **Zero-cascade incremental compilation (`Specified`)**: a build system that recompiles dependents only when a dependency's `spec_hash` changes. No build system exists yet.
+3. **Blueprint projection (`Implemented` in `project_spec_blueprint` and `mn view --spec`)**:
+   - `mn view --spec <file.mn>` prints the `pub` declarations, layouts, signatures, contracts and both hashes, and replaces each function body with `= ...`.
+   - Measured on the four `examples/` modules (2026-11-04, release build, Windows, including reading the file): 0.3–0.9 ms per module, and 38–60% fewer tokens than the full source.
+   - **Latency target (`Target`)**: under 0.1 ms per module, excluding file I/O. There is no measurement protocol yet.
 
 ## 2. Decision rationale and rejected alternatives
 
@@ -33,4 +36,5 @@ date: 2026-11-04
 
 <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="pub spec_hash: String" min="1" reason="DualSemanticHash tracks interface spec_hash independently of body_hash" -->
 <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="pub body_hash: String" min="1" reason="DualSemanticHash tracks implementation body_hash independently of spec_hash" -->
-<!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="pub fn project_spec_blueprint" min="1" reason="mente-ast supports sub-millisecond blueprint projection for mn view --spec" -->
+<!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="pub fn project_spec_blueprint" min="1" reason="mente-ast projects the spec blueprint printed by mn view --spec" -->
+<!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_private_field_change_changes_spec_hash" min="1" reason="A private field of a pub struct is part of spec_hash, because it decides the struct's size" -->

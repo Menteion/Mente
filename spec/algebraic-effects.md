@@ -11,16 +11,16 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Pure-by-default functions and explicit `with` clauses (`Implemented` in `compiler/mente-sema/src/lib.rs`)**:
+1. **Pure-by-default functions and explicit `with` clauses (`Specified`; `parse_fn` records a function's `with` list in `FnDecl.effects`, `Implemented`)**:
    - A function without a `with ...` clause is statically guaranteed to be pure with respect to external I/O, network sockets, wall-clock time, entropy, and foreign C calls.
    - Side-effecting capabilities MUST be declared in the function signature using `with`:
      ```rust
      pub fn fetch_telemetry(endpoint: Endpoint) -> Telemetry ! NetError
          with Net, Clock
      ```
-2. **Static capability subset verification (`Implemented` in `check_effect_capabilities`)**:
+2. **Static capability subset verification (`Specified`; no checker exists)**:
    - If function `f` calls function `g`, `f`'s declared `with` effect set MUST be a superset of `g`'s `with` effect set (unless `f` installs a local `handle` block that discharges that effect).
-   - `compiler/mente-sema` verifies capability containment across every call site (`check_effect_capabilities`).
+   - `compiler/mente-sema` verifies capability containment across every call site. Call sites sit inside unparsed bodies today.
 3. **Zero-cost static handler monomorphization and 1-line DST (`Specified`)**:
    - In production builds, standard OS handlers (`StdNet`, `StdClock`, `StdIO`) monomorphize statically into direct OS syscalls (`0` heap closure allocation, `0` dynamic dispatch).
    - In test and verification builds (`mn test`), wrapping a call in a virtual handler (`with SimClock(seed: 42), SimNet(drop_rate: 0.05) { ... }`) intercepts every `Clock` and `Net` operation deterministically in memory, enabling FoundationDB-style **Deterministic Simulation Testing (DST)** without mocking frameworks or dependency-injection boilerplate.

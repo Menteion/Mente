@@ -11,13 +11,13 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Prohibition of `async` and `await` keywords (`Implemented` in `compiler/mente-syntax/src/lib.rs`)**:
-   - The keywords `async` and `await` MUST NOT exist in Mente.
+1. **Prohibition of `async` and `await` keywords (`Specified`)**:
+   - The keywords `async` and `await` MUST NOT exist in Mente. The compiler does not reject them yet (they lex as identifiers); `examples/` is checked for `async fn` and `.await` by the directives below.
    - Higher-order combinators (`items.map(f)`, `filter(f)`) accept pure functions and `with IO, Net` functions uniformly without splitting the ecosystem into synchronous and asynchronous APIs.
 2. **Effect-driven static-stack hybrid fibers (`Specified`)**:
    - Functions carrying `with IO` or `with Net` automatically compile to suspendable state/fiber frames backed by OS completion queues (`io_uring` on Linux, `IOCP` on Windows, `kqueue` on macOS).
-   - Using whole-program call-graph stack sizing (`@max_stack`), non-escaping child suspension frames are packed contiguously into the parent task's stack arena, avoiding per-call heap `Box<dyn Future>` allocations and evitar Go-style dynamic stack-copying pauses.
-3. **Lexical structured concurrency (`parallel (...)` and `TaskScope`, `Implemented` in `mente-syntax` and `examples/03_colorless_concurrency_and_effects.mn`)**:
+   - Using whole-program call-graph stack sizing (`@max_stack`), non-escaping child suspension frames are packed contiguously into the parent task's stack arena, avoiding per-call heap `Box<dyn Future>` allocations and Go-style dynamic stack-copying pauses.
+3. **Lexical structured concurrency (`parallel (...)` and `TaskScope`, `Specified`; the lexer has a `Parallel` token and `examples/03_colorless_concurrency_and_effects.mn` uses the syntax)**:
    - Concurrent fan-out is expressed via lexical `parallel (...)` blocks:
      ```rust
      val (left, right) = parallel (
@@ -27,7 +27,7 @@ date: 2026-11-04
      ```
    - **Zero orphan tasks**: No child task spawned inside `parallel (...)` or `TaskScope` can outlive the lexical block.
    - **Automatic sibling cancellation**: If any branch raises an error via `!`, sibling tasks receive immediate cooperative cancellation at their next effect yield point, and all destructors complete before the scope propagates the error.
-   - **Zero-`Arc` parent borrowing**: Because child tasks are strictly bounded by the lexical scope, they MAY read parent `Let` bindings directly without `Arc<T>` heap reference counting or `'static` lifetime bounds.
+   - **Zero-`Arc` parent borrowing**: Because child tasks are strictly bounded by the lexical scope, they MAY read parent read-only bindings directly without `Arc<T>` heap reference counting or `'static` lifetime bounds.
 
 ## 2. Decision rationale and rejected alternatives
 

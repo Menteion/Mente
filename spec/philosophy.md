@@ -21,7 +21,7 @@ Mente (`.mn`) is a universal, statically verified, hardware-sympathetic programm
 
 1. **Zero-compromise universality**: A single language syntax and type system MUST scale continuously from high-level domain pipelines and network services down to 64-byte L1 cache-line structures, `@branchless` SIMD loops, and GPU/NPU `@kernel` compute shaders.
 2. **Proof-erased zero-cost safety**: Every memory, bounds, dimensional unit, and precondition check (`requires` / `ensures`) MUST be discharged statically at compile time whenever provable, emitting zero runtime branch instructions and feeding proven intervals into the optimizer (`Contract-Guided Optimization`).
-3. **Sigil-free local reasoning**: Ownership (`Let`, `mut`, `own`), mutation, error propagation (`!`), and side-effect capabilities (`with IO, Net`) MUST be explicit at function signatures and call sites without reference sigils (`&`, `&mut`, `*`) or viral lifetime parameters (`<'a>`).
+3. **Sigil-free local reasoning**: Ownership (read-only by default, `mut`, `own`), mutation, error propagation (`!`), and side-effect capabilities (`with IO, Net`) MUST be explicit at function signatures and call sites without reference sigils (`&`, `&mut`, `*`) or viral lifetime parameters (`<'a>`).
 4. **Hardware mechanical sympathy as a static contract**: Data layout (`AoS`, `SoA`, `Tiled`, `@layout`, `bitstruct`) and micro-architectural execution constraints (`@branchless`, `@simd`, `@no_alloc`, `@max_stack`) are compile-time verified invariants, never silent compiler hints.
 5. **Canonical single-path representation**: Every semantic concept has exactly one canonical syntactic form, making `.mn` source code unambiguous for both human engineers and automated synthesis/verification agents.
 

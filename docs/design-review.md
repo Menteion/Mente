@@ -1,0 +1,89 @@
+---
+title: Mente Design Review Ledger
+version: 0.1.0
+status: active
+date: 2026-11-04
+---
+
+# Mente Design Review Ledger
+
+The open problems in Mente's design, found in the review of 2026-11-04, and what is proposed for each. The design is corrected one entry at a time: an entry is decided, the governing `spec/*.md` and the examples are changed to match, and the entry's status moves to `done` with the commit that did it.
+
+The first pass, on 2026-11-04, made the documents say what the compiler does: every `Implemented` label that described a plan was relabelled, names of functions and types that do not exist were removed, and the measured numbers replaced the claimed ones. That pass changed no design decision. The entries below are the design decisions still to make.
+
+Statuses: `open` (not decided), `proposed` (a resolution is written below and waits for a decision), `decided` (agreed, not yet applied), `done` (applied; the commit is named).
+
+## 1. Interface and modularity
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `interface-from-signature` | `spec_hash` promises that a body edit never recompiles dependents, but three designs read bodies at the interface: return-slice provenance inferred from the body (`regions-and-pools.md` §1), whole-program stack sizing for fibers (`structured-concurrency.md` §2), and bodies that dependents instantiate or inline (generic functions under static-default traits, `comptime` functions, small `@branchless` helpers). Each makes a body edit change what dependents compile against. | Everything a dependent compiles against is written in, or derived from, the signature alone. Provenance: a conservative default (a returned view may borrow from every read-only or `mut` view parameter) narrowed by an optional `from p` clause in the signature. Fibers: see `fiber-stacks`. Instantiable bodies: hash them into a third digest that only instantiating dependents depend on. | proposed |
+
+## 2. Type system
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `units-scale` | `unit ms = 0.001 * sec` has the same dimension as `sec`, and the rule for `+` compares only dimension vectors, so `5.0_ms + 1.0_sec` type-checks and adds raw numbers. Example 01's comment says it converts instead (`9.5_sec + 500.0_ms` is `10.0_sec`). Also unspecified: integer quantities with a non-integer scale (`u64<ms>`), functions generic over a unit, and whether exponents are integers. | A unit is a dimension vector plus a scale. `+`, `-` and comparisons require the same unit, scale included; conversion is explicit (`t.to<sec>()`), so no hidden float multiply appears. Exponents are integers. Unit parameters: `fn mean<comptime U: Unit>(xs: []f64<U>) -> f64<U>`. Scaling an integer quantity by a non-integer factor is an error. | proposed |
+| `interval-subtyping` | The rules for entering and leaving a refined type are missing: whether `u32[0..10]` is a subtype of `u32`, how a literal or an arithmetic result gets an interval, and what `usize[0..items.len]` means while `items` is a `var` whose length can change. | A refined type is a subtype of its base type. A value enters a refinement by a literal in range, an interval-arithmetic result, or a `guard`. A refinement may name only bindings that are immutable for the refinement's whole scope. | proposed |
+| `octagon-midpoint` | The specified Tier 1 (intervals plus octagons, `±x ± y ≤ c`) cannot prove example 01's `val mid: usize[0..items.len] = lo + (hi - lo) / 2`: the `/ 2` gives a coefficient octagons cannot hold, so the relation `mid < hi` is lost. The flagship example is outside the flagship solver. | Tier 1 uses callee contracts modularly, and the standard library provides `midpoint(lo, hi)` with `requires lo < hi` and `ensures lo <= result and result < hi`; example 01 calls it. Widening Tier 1 to general linear arithmetic would lose its predictability guarantee. | proposed |
+| `requires-fragment` | An unproved `requires` is a compile error, and Tier 1 only understands intervals and octagons, so a function whose precondition is outside that fragment (`requires is_sorted(items)`) can be called only where Tier 2 runs, and Tier 2 is a separate `mn prove` step. | Classify each clause by syntax. A Tier-1-fragment clause is checked by `mn check`. Any other clause needs the function marked for `mn prove`, or is declared `@checked` and compiled to a runtime check. | proposed |
+| `generic-angle-ambiguity` | `parse<i32>(input)` without turbofish is claimed to be settled by "LL(k)", but `f(a < b, c > (d))` stays ambiguous. No rule is written. | Adapt C#'s rule: a `<...>` that parses as type arguments is taken as type arguments only when the token after `>` is one of `(`, `)`, `[`, `]`, `}`, `:`, `,`, `.`, `?`, `==`, `!=`; otherwise it is a comparison. So `f(a < b, c > (d))` calls `a<b, c>` with `d`, as in C#. | proposed |
+| `overflow-release` | Integer and fixed-point overflow is checked "in debug/verification modes"; release behaviour is unspecified, which leaves room for silent wrap or undefined behaviour. | Default arithmetic traps on overflow in every build unless overflow is proven absent; wrapping and saturation are only through `wrap<T>`, `sat<T>` and their operators. `@branchless` code needs the proof, since a trap is a branch. | proposed |
+| `string-types` | `str` is used as a view (example 03 returns a slice of its parameter) and as stored text (example 04's `SceneNode.name`), and no owned string type exists. | `str` is a view; an owned, growable `String` is added; storing a `str` in a struct follows the provenance rules. | proposed |
+| `comptime-params` | Compile-time parameters have three spellings: `<T, const CAP: usize = 64>` (example 01), `<comptime T: Type>` (`comptime-and-ffi.md`), and plain `<T>` (example 04). The spec's example also uses `val item: T` as a parameter mode, which `mutable-value-semantics.md` does not define. | One spelling: a bare `T` in `<...>` is a type parameter, and a compile-time value is `comptime N: usize`. Parameter modes stay the four in `mutable-value-semantics.md`. | proposed |
+| `pool-indexing` | `regions-and-pools.md` says `pool[h]` returns `?T` and `pool.get_mut(h)` gives a `mut` projection; example 04 writes `pool[mut h].children.push(...)` and reads `scene[root].children.len` as a plain `T`. | Pick one. Proposed: `pool[h]` is `?T`, the `mut` projection is `pool[mut h]` (also `?T`), and example 04 narrows with `guard`. | proposed |
+| `slice-syntax` | Slices are `[]T` in the examples and `Slice<T>` in the specs; `comptime-and-ffi.md` alone uses `Slice<u8>[len: 1..=MAX]`, a refinement on a length that no other spec defines. | `[]T` for slices and `[N]T` for arrays, as the examples and the `@layout` prover use; length refinements get one defined form. | proposed |
+| `literal-suffixes` | Literals such as `200.0_meter`, `0.5_q16` and `0.0_q1_15` appear in the examples; no spec defines the suffix grammar, and `_q16` does not say which `q` format it means. | Define the grammar: `<number>_<unit>` for units, and the full type name for fixed-point (`0.5_q16.16`, `0.0_q1.15`). | proposed |
+| `bitfield-widths` | `bitstruct` fields use `u4`, `u3` and `u24`, which no spec defines, and the prover does not check a field's type width against its `@bits` range. | Define `uN` / `iN` for `1 <= N <= 128`, and reject a field whose type width differs from its range width. | proposed |
+
+## 3. Memory model
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `mut-projection-soa` | A `mut` parameter lowers to a `T* restrict` pointer, but an element of `SoA<T>` or `Tiled<T, lanes>` is not a contiguous `T`, so `step(mut particles[i])` and `parallel_for p in mut batch` over a `Tiled` have nothing to point to. | Define `mut` by copy-in/copy-out (Swift `inout`, Hylo): the callee sees exclusive access to a value, and passing a pointer is an optimisation for contiguous storage. A `SoA`/`Tiled` element projection gathers into a temporary and scatters back. | proposed |
+| `shared-upgrade` | `Shared<T>` counts non-atomically while thread-local and "upgrades to atomic when transferred". Other clones left in the first thread keep updating the same counter non-atomically while the second thread updates it atomically: a data race. | Either biased reference counting (an owner-thread counter plus a shared atomic counter), or two types: a thread-local count and an atomic one, with `own` transfer across threads requiring the atomic one. | proposed |
+| `arena-concurrency-and-drop` | Example 03 passes the same `in arena` to both branches of `parallel (...)`, so two tasks bump-allocate in one arena at once; and `in` acts as a mutable use of the arena, which the Law of Exclusivity forbids across concurrent siblings. The `O(1)` reset also skips destructors of arena values that own files or sockets. | `in arena` is a shared allocation capability: the arena allocates atomically, or each branch gets a child arena. Types with a destructor cannot be allocated in an arena, or their destructors run at reset and the reset is no longer `O(1)`. | proposed |
+| `parallel-exclusivity` | Children of `parallel (...)` may read parent bindings, but nothing forbids one branch from mutating what a sibling reads. | The Law of Exclusivity applies across the branches of one `parallel (...)`, as across the arguments of one call. | proposed |
+| `layout-alignment-endianness` | A `@layout` struct is claimed bit-identical across targets, but the prover requires neither natural alignment of each field nor a byte order, so a `u64` at byte 4 or a little/big-endian difference passes. | Each `@bytes` start must be a multiple of the field's natural alignment unless the struct says `@packed`; byte order is little-endian unless `@endian(big)` is given. | proposed |
+
+## 4. Effects and concurrency
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `effect-polymorphism` | "Colorless" concurrency says `items.map(f)` accepts pure and `with Net` functions alike, but an effect set in the signature is a colour unless `map` can be generic over its argument's effects. Nothing specifies that. | Effect variables: `fn map<T, U, E>(xs: []T, f: fn(T) -> U with E) -> List<U> with E`. | proposed |
+| `with-overloaded` | `with` means three things: an effect clause (`with Net, Clock`), installing handlers (`with Clock = VirtualClock(...) { }`), and opening an arena (`with Arena.scoped() as arena { }`). The specs also use `handle` blocks, `Arena.scoped(capacity) { arena => ... }`, and handler names (`SimClock`, `SimNet`) that differ from the examples' (`VirtualClock`, `MockNet`). | One meaning per keyword: `with` in a signature declares effects, and one block form installs handlers. Whether an arena is a handler of an allocation effect, or its own block form, is to decide. | open |
+| `handler-semantics` | The spec is titled algebraic effects, but it never says whether handlers are user-defined or whether they capture resumable continuations. Static monomorphisation to direct syscalls only holds for handlers that resume at once. | Handlers are capability implementations that resume immediately (tail-resumptive); no first-class continuations. The spec is renamed to match. | proposed |
+| `dst-scheduling` | Deterministic simulation needs the order of tasks, fibers and `parallel_for` workers to be deterministic too, but only `Clock` and `Net` are intercepted. | Scheduling is an effect with a deterministic, seeded handler under `mn test`. | proposed |
+| `fiber-stacks` | Fiber frames are sized by whole-program call-graph analysis, which breaks under separate compilation, `dyn` calls, FFI and recursion, and puts callee bodies into the caller's interface. | Stackful fibers on reserved virtual-memory stacks with guard pages, committed on demand; `@max_stack` stays an opt-in contract for embedded code. | proposed |
+
+## 5. Hardware contracts
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `branchless-definition` | "No conditional jump anywhere" also forbids every loop (its back-edge is a conditional branch), every bounds, overflow or division check, and calls that branch inside. Lowering `if` to a select also evaluates both arms, which may trap. | `@branchless` means no conditional branch whose condition depends on data: loops need a compile-time trip count and are unrolled, every check must be proven away, callees must be `@branchless` or inlined, and both arms of a lowered `if` must be total and effect-free. | proposed |
+| `simd-kernel-model` | The example writes `@simd(width: 16)` on a function; the spec writes `@simd(lanes: N)` on a loop. `@kernel` has no execution model (index space, memory spaces, barriers), and example 02 nests `parallel_for` inside `@kernel @simd`, three levels of parallelism with no defined relation. | Define the kernel model before keeping `@kernel` in the language; until then, label it `Hypothesis`. One `@simd` form. | open |
+| `transitive-contracts` | `@no_alloc`, `@max_stack` and `@total` are transitive over the call graph, which `dyn` calls, FFI and recursion leave open. | Traits and `extern` declarations carry the contracts their implementations must meet; recursion is rejected in a `@max_stack` call graph and needs a `decreases` measure under `@total`. | proposed |
+
+## 6. Error ABI
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `cf-abi-scope` | The Carry-Flag ABI carries the error payload in one register, but nothing says what happens when `E` is larger. An epilogue's `add rsp, N` clobbers `CF` before `ret`. SPIR-V has no carry flag. Function pointers and C callers need to know the convention. The rationale compares against a 24-byte `Result` forced onto the stack, while a fair comparison is Rust's two-register `Result` for a payload that fits one register. | Keep it as a `Hypothesis` with a benchmark against the two-register `Result`. Specify: payloads over 8 bytes are returned through memory with `CF` still the tag; epilogues use flag-preserving instructions; `@kernel` and `extern "C"` use a tagged return; function types carry the convention. | proposed |
+
+## 7. Verification and tooling
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `mutation-kill-rate` | `mir-and-codegen.md` requires 100% of mutants killed. Equivalent mutants (a flip that changes nothing observable) make that unreachable in general. | A kill-rate threshold, with surviving mutants reported and individually marked equivalent. | proposed |
+| `mn-bind-scope` | `mn bind` is to add non-null refinements automatically, but C headers do not say which pointers may be null; it is to read `crate.rlib`, which carries no C-ABI description; and parsing real C headers without libclang (C++) is a project of its own. | Pointers are nullable unless annotated (`_Nonnull`, or a Mente sidecar file). Rust libraries are bound through a header generated by cbindgen. The C parser's scope is written down before the feature is promised. | proposed |
+| `ffi-boundary-failure` | Inbound FFI values are boundary-checked, but the spec does not say what happens when a check fails, and raw C pointers have no Mente type. | A failed inbound check is an error value of the `extern` function's return type; raw pointers get a type usable only inside `extern` quarantine. | proposed |
+| `comptime-termination` | `comptime` code is pure, but nothing stops it from looping forever, so a build can hang. | A step budget per `comptime` evaluation, raised explicitly. | proposed |
+| `assert-substring` | An `@assert-count` on a `.mn` file is satisfied by a comment, since neither `mn spec` nor `spec-guard` knows `.mn` comment syntax (`spec-guard` warns about this). A directive proves a name exists, never that it behaves. | Behaviour claims cite a unit test by name; directives on `.mn` files are used only for the examples' spelling. Teach `spec-guard` the `.mn` comment syntax in Phase 0. | proposed |
+
+## 8. Roadmap
+
+| Key | Problem | Proposed resolution | Status |
+| :--- | :--- | :--- | :--- |
+| `roadmap-type-checker` | No phase builds the expression and statement parser, name resolution or a type checker, yet AST-to-MIR lowering and every Phase 2 solver depend on them. | Add them to Phase 1, ahead of lowering. Added to `ROADMAP.md` on 2026-11-04. | decided |
+| `roadmap-targets` | Every latency and code-quality figure (`< 0.1 ms`, `< 5 ms`, `< 1 ms`, LLVM parity) is a `Target` without the measurement protocol `spec/README.md` requires. | Write a protocol per figure (corpus, machine, build, what is timed) or drop the figure. | open |
+| `roadmap-scope` | Phases 3 to 5 (native x86-64 and AArch64 backends, a vectoriser, a `comptime` VM, `mn bind`, fibers, self-hosting) are each years of work for one person with agents. | Re-cut the roadmap around the smallest language that shows the core ideas (refinements, units, layouts, MVS) end to end, and decide whether a native backend is written or borrowed (Cranelift is pure Rust and does not break the no-C++-LLVM invariant). | open |
