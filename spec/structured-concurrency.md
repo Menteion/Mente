@@ -13,7 +13,7 @@ date: 2026-11-04
 
 1. **Prohibition of `async` and `await` keywords (`Specified`)**:
    - The keywords `async` and `await` MUST NOT exist in Mente. The compiler does not reject them yet (they lex as identifiers); `examples/` is checked for `async fn` and `.await` by the directives below.
-   - Higher-order combinators (`items.map(f)`, `filter(f)`) accept pure functions and `with IO, Net` functions uniformly without splitting the ecosystem into synchronous and asynchronous APIs.
+   - Higher-order combinators (`items.map(f)`, `filter(f)`) accept pure functions and `with IO, Net` functions uniformly without splitting the ecosystem into synchronous and asynchronous APIs: they are generic over their argument's effects through effect variables (`capability-effects.md`).
 2. **Effect-driven stackful fibers (`Specified`)**:
    - Functions carrying `with IO` or `with Net` may suspend at an effect operation; suspension is driven by OS completion queues (`io_uring` on Linux, `IOCP` on Windows, `kqueue` on macOS).
    - Each task runs on its own stack: a range of virtual memory reserved when the task starts, committed page by page as it is touched, and ended by an unmapped guard page. Suspending a task keeps its stack where it is, so there is no heap-allocated future per call and no stack copying.

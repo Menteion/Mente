@@ -33,7 +33,7 @@ Every claim carries one of four **maturity labels**:
 
 Where a specification document and the source tree disagree, the source tree is authoritative. Claims about the source tree are checked by `cargo run --bin mn -- spec`, which runs every directive and rejects one that cannot fail. A directive is a substring check, so it shows that a name exists, not that it behaves as claimed; behaviour is backed by the unit tests it names.
 
-<!-- @assert-present file="spec/philosophy.md,spec/holographic-module.md,spec/surface-syntax.md,spec/refinement-and-fixed-point.md,spec/dimensional-units.md,spec/algebraic-types-and-null.md,spec/traits-and-generics.md,spec/mutable-value-semantics.md,spec/regions-and-pools.md,spec/morphic-layouts.md,spec/hardware-contracts.md,spec/error-handling-abi.md,spec/ghost-contracts-and-totality.md,spec/algebraic-effects.md,spec/structured-concurrency.md,spec/disjoint-parallelism.md,spec/comptime-and-ffi.md,spec/mir-and-codegen.md" reason="All eighteen canonical single-decision specification files exist in flat spec/ directory" -->
+<!-- @assert-present file="spec/philosophy.md,spec/holographic-module.md,spec/surface-syntax.md,spec/refinement-and-fixed-point.md,spec/dimensional-units.md,spec/algebraic-types-and-null.md,spec/traits-and-generics.md,spec/mutable-value-semantics.md,spec/regions-and-pools.md,spec/morphic-layouts.md,spec/hardware-contracts.md,spec/error-handling-abi.md,spec/ghost-contracts-and-totality.md,spec/capability-effects.md,spec/structured-concurrency.md,spec/disjoint-parallelism.md,spec/comptime-and-ffi.md,spec/mir-and-codegen.md" reason="All eighteen canonical single-decision specification files exist in flat spec/ directory" -->
 
 ## Atomic specification files and crate authority map
 
@@ -52,7 +52,7 @@ Where a specification document and the source tree disagree, the source tree is 
 | [hardware-contracts.md](hardware-contracts.md) | Micro-architectural contracts (`@branchless`, `@simd`, `@no_alloc`, `@max_stack`) and `@kernel` | `compiler/mente-sema`, `compiler/mente-mir`, `compiler/mente-codegen` |
 | [error-handling-abi.md](error-handling-abi.md) | Orthogonal `T ! E` error model and CPU Carry-Flag (`CF`) zero-overhead register ABI | `compiler/mente-sema`, `compiler/mente-codegen` |
 | [ghost-contracts-and-totality.md](ghost-contracts-and-totality.md) | Two-tier SMT ghost contracts (`requires`/`ensures` erasure) and `@total`/`decreases` | `compiler/mente-sema`, `compiler/mente-mir` |
-| [algebraic-effects.md](algebraic-effects.md) | Algebraic capability effects (`with IO, Net, Clock, Rand`) and single-line DST | `compiler/mente-sema` |
+| [capability-effects.md](capability-effects.md) | Capability effects (`with IO, Net, Clock, Rand`), tail-resumptive `handle` blocks, effect variables, and deterministic simulation | `compiler/mente-syntax`, `compiler/mente-sema` |
 | [structured-concurrency.md](structured-concurrency.md) | Colorless concurrency (no `async`/`await`) and lexical `parallel (...)` task trees | `compiler/mente-syntax`, `compiler/mente-sema` |
 | [disjoint-parallelism.md](disjoint-parallelism.md) | SMT-proven lock-free disjoint slice parallelism (`parallel_for`), `Channel`, and `Mutex<T>` | `compiler/mente-sema`, `compiler/mente-mir` |
 | [comptime-and-ffi.md](comptime-and-ffi.md) | Zero-macro pure `.mn` `comptime` reflection, `extern` FFI quarantine, and `mn` CLI | `compiler/mente-sema`, `compiler/mente-cli` |

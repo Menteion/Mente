@@ -59,10 +59,10 @@
 
 ## Phase 4 (`v0.4`): Colorless Concurrency, Algebraic Effects, and Disjoint Parallelism
 
-**Governing specs:** [algebraic-effects.md](spec/algebraic-effects.md), [structured-concurrency.md](spec/structured-concurrency.md), [disjoint-parallelism.md](spec/disjoint-parallelism.md)
+**Governing specs:** [capability-effects.md](spec/capability-effects.md), [structured-concurrency.md](spec/structured-concurrency.md), [disjoint-parallelism.md](spec/disjoint-parallelism.md)
 
 - [ ] Static capability subset checking (`with IO, Net, Clock, Rand, FFI`) and zero-cost handler monomorphization.
-- [ ] One-line Deterministic Simulation Testing (DST) harness (`VirtualClock`, `MockNet`) in `mn test`.
+- [ ] One-line Deterministic Simulation Testing (DST) harness (`SimClock`, `SimNet`, and a seeded `SimSched` scheduler) in `mn test`.
 - [ ] Static-stack hybrid fiber scheduler and lexical `parallel (...)` task tree with automatic sibling cancellation.
 - [ ] SMT disjoint interval partition checker for lock-free `parallel_for` over `.chunks_mut(N)` and `Tiled<T, lanes: N>`.
 
