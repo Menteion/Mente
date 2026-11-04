@@ -38,10 +38,10 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   var hi: usize[0..=items.len] = items.len
 
   while lo < hi decreases hi - lo {
-    // 規格上由 Tier-1 求解器推導：當 lo < hi 時，mid 落在 [0..items.len) 區間內。
-    // 規格指定的 octagon 域推不出這一條，見 docs/design-review.md 的 octagon-midpoint。
-    // 因此下方的 items[mid] 在機器碼層級 100% 免除邊界檢查（Zero Bounds-Check Overhead）！
-    val mid: usize[0..items.len] = lo + (hi - lo) / 2
+    // midpoint 的契約（requires lo < hi，ensures lo <= result and result < hi）讓 Tier-1 只靠 octagon
+    // 就推得出 mid 落在 [0..items.len)，因此下方的 items[mid] 免除邊界檢查。
+    // 直接寫 lo + (hi - lo) / 2 的話，除以 2 超出 octagon 能表達的範圍，證明會失敗。
+    val mid: usize[0..items.len] = midpoint(lo, hi)
     val current = items[mid]
 
     if current == target { return mid }
