@@ -13,7 +13,11 @@ date: 2026-11-04
 
 1. **Hard compile-time micro-architectural contracts (`Specified`)**:
    - Hardware execution attributes in Mente are **hard static proofs**, never best-effort hints:
-     - **`@branchless`**: Forbids conditional jump instructions (`Jcc`) anywhere in the annotated function or block. All `if`/`match` expressions inside `@branchless` MUST lower to `CMOV` / `CSEL` or SIMD mask select instructions.
+     - **`@branchless`**: Forbids every conditional branch whose condition depends on data in the annotated function or block. Concretely:
+       - All `if`/`match` expressions MUST lower to `CMOV` / `CSEL` or SIMD mask select instructions. Lowering to a select evaluates every arm, so each arm MUST be total and effect-free: no call that may trap, no `raise`, no `with` effect, no `mut` argument.
+       - A loop is allowed only with a compile-time trip count (`for i in 0..N` with `N` a compile-time value), and is fully unrolled; `while` is rejected.
+       - Every runtime check that would branch (bounds, overflow, division by zero, a `?T` narrowing) MUST be proven away by Tier 1, or the operation written in a non-trapping form (`sat<T>`, `wrap<T>`, a select).
+       - Every callee MUST itself be `@branchless`, or be inlined and meet these rules; a call instruction itself is not a branch.
      - **`@simd` / `@simd(lanes: N)`**: Requires the annotated `for` loop (`for i in 0..n @simd`) to vectorize without loop-carried dependencies or scalar fallback.
      - **`@no_alloc`**: Transitively forbids heap allocation across the entire static call graph of the function.
      - **`@max_stack(bytes)`**: Enforces a compile-time upper bound on call-graph stack consumption. The bound composes from signatures: a `@max_stack` function may call only functions that declare their own `@max_stack`, and its bound must cover its own frame plus the largest bound among its callees. Recursion and `dyn` calls are rejected inside a `@max_stack` call graph unless the trait method declares the bound.
@@ -28,6 +32,7 @@ date: 2026-11-04
 | Alternative considered | Reason for rejection |
 | :--- | :--- |
 | **Advisory compiler pragmas (`#pragma clang loop vectorize`, `#[inline]`)** | Advisory pragmas silently degrade to slow scalar branches when a minor code change introduces an alias or branch, causing sudden 10x production regressions without warning. Hard contracts abort compilation immediately with an actionable diagnostic. |
+| **`@branchless` as "no conditional jump instruction anywhere"** | Also forbids every loop (its back-edge is a conditional branch) and every bounds or overflow check the compiler inserts, and says nothing about arms that trap once both are evaluated. "No data-dependent branch" is the property timing-predictable and constant-time code needs, and it can be checked: constant trip counts unroll, proven checks vanish, total arms select safely. |
 | **Separate GPU shading languages (CUDA / WGSL / Metal)** | Forces teams to duplicate data structures, constant tables, and numerical logic across host (Rust/C++) and device (CUDA/WGSL) codebases without shared refinement or unit checking. |
 
 ## 3. Verification assertions
