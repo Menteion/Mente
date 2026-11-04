@@ -31,8 +31,11 @@ date: 2026-11-04
    - `Handle<T>` is `Copy`, serializable across disk/network/GPU buffers, and free of reference cycles.
    - `pool[h]` validates the 32-bit generation counter in `O(1)` and yields `?T`: the element while `h` is live, `none` once its slot has been freed or reused. `pool[mut h]` is the mutable projection, also `?T`, and writes through it follow copy-in/copy-out (`mutable-value-semantics.md`).
    - Reading a field therefore needs narrowing (`guard val node = pool[h] else ...`), and `pool[mut h]?.field = v` does nothing when `h` is stale. There is no `get_mut` and no panicking index.
-5. **Thread-aware `Shared<T>` (`Specified`)**:
-   - Uses non-atomic reference increments while thread-local (`0` `LOCK XADD` bus-lock cost) and upgrades to atomic reference counting only when transferred (`own`) across a thread boundary.
+5. **Reference-counted sharing: `Local<T>` and `Shared<T>` (`Specified`)**:
+   - `Local<T>` counts references without atomic instructions (`0` `LOCK XADD` bus-lock cost). It is **task-bound**: a value whose type contains a `Local<T>` cannot be sent over a channel, moved into another task, or named inside a branch of `parallel (...)` or the body of a `parallel_for` (`E0320`), because each of those may run on another thread.
+   - `Shared<T>` counts atomically and may cross any task boundary; its `T` must not be task-bound.
+   - No conversion leaves clones of the other kind behind: `Local.from(own value)` and `Shared.from(own value)` start from an owned value, and `local.take()` yields `?T`, the value only when no other clone of that `Local<T>` exists.
+   - A clone is always explicit (`x.clone()`), so every count change is visible in the source.
 6. **Provenance escape two-path diagnostic contract (`Specified` — Engineering Guardrail #3)**:
    - Because Mente forbids `<'a>` lifetime parameters in surface syntax, the programmer never solves lifetime constraints manually.
    - Whenever `mente-sema` detects that a borrowed slice or view would outlive its source binding or that two unrelated provenances are stored into the same long-lived struct field (`E0310 [Provenance Escape]`), the compiler MUST NOT expose internal region variable names (such as `'region#4`).
@@ -46,6 +49,7 @@ date: 2026-11-04
 | :--- | :--- |
 | **Inferring return provenance from the body** | Lets a body edit change which arguments a caller must keep alive, so an edit in one module can break a caller in another while every signature stays the same, and `spec_hash` can no longer tell which edits reach dependents. A conservative default plus an optional `from` clause gives the same convenience with the fact on the page. |
 | **Viral `<'a, 'b>` lifetime parameters (Rust)** | Adding a borrowed slice field to a deep struct in Rust forces `<'a>` annotations onto every enclosing struct, trait, and function across the crate, and fails completely on cyclic graphs (forcing `Rc<RefCell<T>>` runtime panics or raw `unsafe` pointers). |
+| **One `Shared<T>` that counts non-atomically until moved across threads, then atomically** | The clones left in the first thread keep updating the same counter non-atomically while the second thread updates it atomically: a data race. Biased reference counting repairs this with a second counter and an owner-thread test on every operation, a runtime cost hidden behind one type. Two types put the cost in the type and let the compiler reject the race. |
 | **Global tracing garbage collection (Go / Java / C# / Python)** | Introduces unpredictable tail-latency pauses, 2–3x memory residency overhead, and loss of deterministic RAII resource destruction. |
 | **Unchecked manual `malloc`/`free` or raw pointers (C / Zig)** | Susceptible to use-after-free and double-free vulnerabilities unless paired with generational validation (`Pool<T>`/`Handle<T>`). |
 
