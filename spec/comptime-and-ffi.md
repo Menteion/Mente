@@ -24,11 +24,17 @@ date: 2026-11-04
      }
      ```
    - `item.(field.name)` reads the field whose name is the compile-time string `field.name`. It is resolved when the loop is expanded, so each expanded line is an ordinary, type-checked field access.
-   - `comptime` blocks are strictly pure (`with` effects are forbidden at compile time), ensuring 100% deterministic, hermetic builds.
+   - `comptime` blocks are strictly pure (`with` effects are forbidden at compile time), ensuring deterministic, hermetic builds.
+   - **Termination**: each `comptime` evaluation runs under a step budget, by default 10^7 evaluation steps. Exceeding it is a compile-time error (`E0701`) that names the loop or call still running; `@comptime_budget(steps: N)` on a function raises the budget for evaluations it starts. A build can therefore never hang in `comptime` code.
 2. **Zero-compromise C / C++ / Rust FFI boundary quarantine (`Specified`; the lexer has an `Extern` token, and the parser has no `extern` item yet)**:
    - External ABI functions are declared inside `extern "C"` blocks with mandatory `with FFI` capability effects, refined boundary types (`fd: i32[0..=65535]`) and length contracts (`buf: []u8` with `requires buf.len >= 1`).
-   - Outbound calls prove preconditions statically before emitting a direct `CALL`; inbound return values undergo an automatic boundary check (`CMP` + `JC`) before entering Mente's refined value lattice.
-   - **Zero-config ecosystem absorption (`mn bind`, `Specified` — Engineering Guardrail #4)**: To overcome Day-1 library ecosystem gravity without writing manual FFI wrappers, `mn bind <header.h | crate.rlib>` parses C headers and Rust C-ABI exports at build time and automatically synthesizes quarantined `extern "C"` declarations with `with FFI`, non-null pointer refinements, and `@layout` byte-offset assertions.
+   - Outbound calls prove preconditions statically before emitting a direct `CALL`; inbound return values undergo an automatic boundary check before entering Mente's refined value lattice.
+   - **A failed inbound check is an error value**: an `extern` function whose result type is refined MUST declare an error type (`-> u16[1..=65535] ! FfiError`), and a value outside the refinement raises it at the boundary. Nothing foreign enters the lattice unchecked, and nothing traps.
+   - **Raw pointers stay in quarantine**: a C pointer has the type `RawPtr<T>`. It may be passed, stored and compared only in code declared `with FFI`, and becomes a Mente value only through a checked conversion (`ptr.read(len)` yields `[]T ! FfiError`, failing on null). A pointer is nullable unless the binding says otherwise.
+   - **Ecosystem absorption (`mn bind`, `Specified` — Engineering Guardrail #4)**: to reduce hand-written FFI, `mn bind <header.h>` parses a C header at build time and synthesizes quarantined `extern "C"` declarations with `with FFI` and `@layout` byte-offset assertions for its structs.
+     - A pointer is bound as nullable unless the header annotates it (`_Nonnull`) or a Mente sidecar file next to the header says otherwise; C headers do not otherwise say which pointers may be null.
+     - A Rust library is bound through the C header that `cbindgen` generates for its `extern "C"` exports; a `.rlib` carries no C-ABI description to read.
+     - The C dialect `mn bind` accepts (preprocessor, compiler extensions, platform headers) is written down before the feature is promised for real libraries; parsing arbitrary system headers without libclang is a project of its own.
 3. **Unified `mn` CLI toolchain (`compiler/mente-cli/src/main.rs`)**:
    - `mn check` (`Implemented`): parses each `.mn` file's declarations, computes both hashes, and runs `mente-sema`: the `@layout` and `bitstruct` provers and the token-level `@total` / `@branchless` checks.
    - `mn view --spec <file.mn>` (`Implemented`): prints the Holographic Blueprint (`spec_hash`, types, layouts, signatures, contracts); see `holographic-module.md` for measured time.

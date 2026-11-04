@@ -21,6 +21,7 @@ date: 2026-11-04
 3. **In-memory `MIR` mutation prover**:
    - `Implemented` in `run_in_memory_mutation_gate`: flips `Add` ↔ `Sub`, `AddSatQ16` ↔ `SubSatQ16` and `CmpGe` ↔ `CmpLt`, swaps the arms of each `SelectBranchless`, and counts the mutants that the supplied `(inputs, expected)` vectors kill. `mn test --mutate` runs it on one hand-written region with two vectors.
    - `Specified`: running it on regions lowered from `.mn` source, with the module's `ensures` contracts and `@example` assertions as the oracle.
+   - **What passing means (`Specified`)**: some mutants cannot be killed by any test because they change nothing observable (an equivalent mutant: flipping `x + 0` to `x - 0`). So the gate does not demand that every mutant die. It passes when every mutant is either killed or marked equivalent with a written reason; `mn test --mutate` lists each survivor with its source line. A project may instead set a kill-rate threshold, and then the report still lists the survivors.
 4. **Multi-backend code generation and Dual-Track Peephole Parity (`Specified` — Engineering Guardrail #2; matching LLVM's code quality is a `Hypothesis`)**:
    - Today `compiler/mente-codegen` has only `CarryFlagAbiLowering`, a table of the registers the error ABI would use, and `emit_spirv_binary`, a SPIR-V-shaped word stream that is not a valid module.
    - **High-level semantic optimization lives 100% in `MIR`**: Bounds-check elimination (`ValueLattice::proves_in_bounds`), Ghost Contract `Assume` propagation, `AoSoA` (`Tiled<T, lanes: N>`) address calculation, and `@branchless` `SelectBranchless` canonicalization are completed inside `MirRegionSoA` before any target backend runs.
@@ -32,6 +33,7 @@ date: 2026-11-04
 | Alternative considered | Reason for rejection |
 | :--- | :--- |
 | **Upstream C++ `MLIR` / `LLVM` heap object graphs (`mlir::Operation*`)** | Upstream C++ MLIR allocates every operation, attribute, and use-def list as heap-allocated 64-bit pointer-linked C++ objects (120–256 bytes per op), causing severe L1/L2 cache thrashing during optimization passes, adding a multi-gigabyte C++ build dependency, and lacking native per-node refinement interval lattices (`ValueLattice`). |
+| **Requiring 100% of mutants killed** | Unreachable in general: an equivalent mutant survives every test, so the rule would push authors to write meaningless tests or to stop running the gate. Accounting for every survivor keeps the gate strict without demanding the impossible. |
 | **Source-level file rewriting mutation testing (`cargo-mutants`)** | Mutating `.rs` or `.mn` source files on disk and invoking the full compiler + linker per mutant takes minutes to hours. Mutating `MirOp` values in memory inside `MirRegionSoA` executes in microseconds (34 µs for the demo region's four mutants, measured 2026-11-04). |
 
 ## 3. Verification assertions
