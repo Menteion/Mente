@@ -54,6 +54,6 @@ Where a specification document and the source tree disagree, the source tree is 
 | [ghost-contracts-and-totality.md](ghost-contracts-and-totality.md) | Two-tier SMT ghost contracts (`requires`/`ensures` erasure) and `@total`/`decreases` | `compiler/mente-sema`, `compiler/mente-mir` |
 | [capability-effects.md](capability-effects.md) | Capability effects (`with IO, Net, Clock, Rand`), tail-resumptive `handle` blocks, effect variables, and deterministic simulation | `compiler/mente-syntax`, `compiler/mente-sema` |
 | [structured-concurrency.md](structured-concurrency.md) | Colorless concurrency (no `async`/`await`) and lexical `parallel (...)` task trees | `compiler/mente-syntax`, `compiler/mente-sema` |
-| [disjoint-parallelism.md](disjoint-parallelism.md) | SMT-proven lock-free disjoint slice parallelism (`parallel_for`), `Channel`, and `Mutex<T>` | `compiler/mente-sema`, `compiler/mente-mir` |
+| [disjoint-parallelism.md](disjoint-parallelism.md) | Lock-free disjoint partition parallelism (`parallel_for`), `Channel`, and `Mutex<T>` | `compiler/mente-sema`, `compiler/mente-mir` |
 | [comptime-and-ffi.md](comptime-and-ffi.md) | Zero-macro pure `.mn` `comptime` reflection, `extern` FFI quarantine, and `mn` CLI | `compiler/mente-sema`, `compiler/mente-cli` |
 | [mir-and-codegen.md](mir-and-codegen.md) | 64B `SoA` `Mente IR (MIR)` (`NodeId(u32)`), RVSDG/E-Graphs, mutation prover, and SPIR-V | `compiler/mente-mir`, `compiler/mente-codegen` |

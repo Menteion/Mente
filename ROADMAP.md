@@ -92,7 +92,7 @@ Each of these starts with an entry in [docs/design-review.md](docs/design-review
 - [ ] A from-scratch native emitter with E-graph peephole rules (`fma`, `bmi2`, AVX-512 masks) and 256- / 512-bit vectors, pursued only if Cranelift's code is measured short of what a workload needs.
 - [ ] The Carry-Flag ABI experiment of `error-handling-abi.md`, on that emitter or on a Cranelift fork: implement it beside the two-register return, run the benchmark, and keep it only if it wins.
 - [ ] **Engineering Guardrail #4**: `mn bind` for C headers, and Rust libraries through their `cbindgen` headers, once the accepted C dialect is written down.
-- [ ] Index-arithmetic `parallel_for` partitions (`scores[i * S .. (i + 1) * S]`), which need a prover beyond Tier 1.
+- [ ] Index-arithmetic `parallel_for` partitions (`scores[i * S .. (i + 1) * S]`), which need Tier 2 (`@prove`, `mn prove`).
 - [ ] Self-host `mente-syntax`, `mente-sema`, and `mente-mir` in `.mn`.
 - [ ] Validate Mente against high-frequency deterministic systems workloads (including porting critical `Menteion` 64-byte cache-line and branchless fixed-point kernels to `.mn` and benchmarking L1 miss rate, branch mispredictions, and lines of code).
 
