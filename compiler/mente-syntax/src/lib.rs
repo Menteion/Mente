@@ -1,6 +1,10 @@
 //! `mente-syntax` — `.mn` Holographic Single-File Lexer & Structural Parser.
 //!
-//! Implements Station 1 (`docs/01_FILE_MODEL_AND_SYNTAX.md`) and Station 8 (`docs/08_COMPILER_IMPLEMENTATION_SPEC.md`).
+//! Governed by `spec/holographic-module.md` and `spec/surface-syntax.md`.
+//!
+//! Parses declarations only. Function and `@example` bodies are kept as flat token lists
+//! (`body_tokens`); types, contracts and effect clauses are kept as raw strings. Characters the
+//! lexer does not know are skipped without an error.
 
 use std::fmt;
 

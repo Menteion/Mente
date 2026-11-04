@@ -1,6 +1,10 @@
 //! `mente-sema` — Semantic Prover: 64B Cache-Line Layout, `bitstruct`, `@total`/`decreases`, and Micro-Arch Contracts.
 //!
-//! Implements Stations 2, 3, 4, 5, and 6.
+//! Governed by `spec/morphic-layouts.md`, `spec/hardware-contracts.md` and
+//! `spec/ghost-contracts-and-totality.md`. The `@total` and `@branchless` checks here are
+//! token scans over unparsed bodies, not proofs; see `docs/STATUS.md`.
+
+use std::collections::HashMap;
 
 use mente_syntax::{BitStructDecl, FnDecl, ItemDecl, ModuleFile, StructDecl, TokenKind};
 
@@ -39,11 +43,29 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
     let mut kernel_functions_verified = 0usize;
     let mut examples_count = 0usize;
 
+    // Byte sizes of the module's own fixed-size types, so a `@layout` field may name them.
+    let mut named_sizes: HashMap<String, usize> = HashMap::new();
+    for item in &module.items {
+        match item {
+            ItemDecl::BitStruct(bs) => {
+                if let Some(bits) = backing_bits(&bs.backing_type) {
+                    named_sizes.insert(bs.name.clone(), bits / 8);
+                }
+            }
+            ItemDecl::Struct(s) => {
+                if let Some((size, _)) = extract_layout_attr(s) {
+                    named_sizes.insert(s.name.clone(), size);
+                }
+            }
+            _ => {}
+        }
+    }
+
     for item in &module.items {
         match item {
             ItemDecl::Struct(s) => {
                 if let Some((size, align)) = extract_layout_attr(s) {
-                    match verify_explicit_struct_layout(s, size, align) {
+                    match verify_explicit_struct_layout(s, size, align, &named_sizes) {
                         Ok(proof) => layout_proofs.push(proof),
                         Err(e) => errors.push(e),
                     }
@@ -116,7 +138,12 @@ fn extract_layout_attr(s: &StructDecl) -> Option<(usize, usize)> {
 }
 
 /// Proves that `@layout(size: S, align: A)` has contiguous, hole-free `@bytes(start..end)` fields summing to `S`.
-pub fn verify_explicit_struct_layout(s: &StructDecl, expected_size: usize, align: usize) -> Result<LayoutProof, String> {
+pub fn verify_explicit_struct_layout(
+    s: &StructDecl,
+    expected_size: usize,
+    align: usize,
+    named_sizes: &HashMap<String, usize>,
+) -> Result<LayoutProof, String> {
     if !align.is_power_of_two() {
         return Err(format!(
             "E0410 [Layout Error]: struct `{}` alignment {} is not a power of two",
@@ -155,13 +182,17 @@ pub fn verify_explicit_struct_layout(s: &StructDecl, expected_size: usize, align
             ));
         }
         let width = end - start;
-        if let Some(expected_field_bytes) = estimate_type_byte_size(&f.ty) {
-            if width != expected_field_bytes {
-                return Err(format!(
-                    "E0415 [Layout Error]: field `{}.{}` of type `{}` requires {} bytes, but `@bytes({}..{})` spans {} bytes",
-                    s.name, f.name, f.ty, expected_field_bytes, start, end, width
-                ));
-            }
+        let expected_field_bytes = type_byte_size(&f.ty, named_sizes).ok_or_else(|| {
+            format!(
+                "E0417 [Layout Error]: field `{}.{}` has type `{}`, whose byte size is not known, so `@bytes({}..{})` cannot be verified",
+                s.name, f.name, f.ty, start, end
+            )
+        })?;
+        if width != expected_field_bytes {
+            return Err(format!(
+                "E0415 [Layout Error]: field `{}.{}` of type `{}` requires {} bytes, but `@bytes({}..{})` spans {} bytes",
+                s.name, f.name, f.ty, expected_field_bytes, start, end, width
+            ));
         }
         table.push_str(&format!(
             "| `[{}..{})` | `{} B` | `{}` | `{}` |\n",
@@ -185,13 +216,17 @@ pub fn verify_explicit_struct_layout(s: &StructDecl, expected_size: usize, align
     })
 }
 
-fn estimate_type_byte_size(ty: &str) -> Option<usize> {
+/// Byte size of a fixed-size field type, or `None` when it is not known.
+///
+/// Target-dependent types (`usize`, `isize`) have no size here: a `@layout` struct must
+/// mean the same bytes on every target.
+fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usize> {
     let t = ty.trim();
     if let Some(inner) = t.strip_prefix("sat<").and_then(|s| s.strip_suffix('>')) {
-        return estimate_type_byte_size(inner);
+        return type_byte_size(inner, named_sizes);
     }
     if let Some(inner) = t.strip_prefix("wrap<").and_then(|s| s.strip_suffix('>')) {
-        return estimate_type_byte_size(inner);
+        return type_byte_size(inner, named_sizes);
     }
     // Fixed array [N]Elem
     if t.starts_with('[') {
@@ -199,35 +234,39 @@ fn estimate_type_byte_size(ty: &str) -> Option<usize> {
             let count_str = t[1..close].trim();
             if let Ok(count) = count_str.parse::<usize>() {
                 let elem_ty = &t[close + 1..];
-                return Some(count * estimate_type_byte_size(elem_ty)?);
+                return Some(count * type_byte_size(elem_ty, named_sizes)?);
             }
         }
     }
     match t {
         "u8" | "i8" | "bool" | "q0.8" => Some(1),
         "u16" | "i16" | "f16" | "bf16" | "q1.15" => Some(2),
-        "u32" | "i32" | "f32" | "q16.16" | "SpikeHeader" => Some(4),
-        "u64" | "i64" | "f64" | "usize" | "isize" => Some(8),
+        "u32" | "i32" | "f32" | "q16.16" => Some(4),
+        "u64" | "i64" | "f64" => Some(8),
         "u128" | "i128" => Some(16),
+        _ => named_sizes.get(t).copied(),
+    }
+}
+
+fn backing_bits(backing_type: &str) -> Option<usize> {
+    match backing_type {
+        "u8" => Some(8),
+        "u16" => Some(16),
+        "u32" => Some(32),
+        "u64" => Some(64),
+        "u128" => Some(128),
         _ => None,
     }
 }
 
 /// Proves that `bitstruct Name : uN` has contiguous, hole-free `@bits(start..end)` covering `[0..N)`.
 pub fn verify_bitstruct_layout(bs: &BitStructDecl) -> Result<BitStructProof, String> {
-    let total_bits = match bs.backing_type.as_str() {
-        "u8" => 8usize,
-        "u16" => 16usize,
-        "u32" => 32usize,
-        "u64" => 64usize,
-        "u128" => 128usize,
-        other => {
-            return Err(format!(
-                "E0420 [BitStruct Error]: bitstruct `{}` has unsupported backing type `{}`",
-                bs.name, other
-            ))
-        }
-    };
+    let total_bits = backing_bits(&bs.backing_type).ok_or_else(|| {
+        format!(
+            "E0420 [BitStruct Error]: bitstruct `{}` has unsupported backing type `{}`",
+            bs.name, bs.backing_type
+        )
+    })?;
 
     let mut cursor = 0usize;
     for f in &bs.fields {
@@ -316,6 +355,41 @@ pub struct BrokenCell {
         assert!(res.is_err());
         let errs = res.unwrap_err();
         assert!(errs[0].contains("E0413"));
+    }
+
+    #[test]
+    fn test_layout_field_sized_by_module_bitstruct() {
+        let code = r#"
+module test.sized
+pub bitstruct Tag : u16 {
+  @bits(0..16) pub raw: u16
+}
+@layout(size: 8, align: 8)
+pub struct Packet {
+  @bytes(0..2) pub tag: Tag
+  @bytes(2..8) pub rest: [6]u8
+}
+"#;
+        let rep = verify_module(&parse_module(code).unwrap()).unwrap();
+        assert_eq!(rep.layout_proofs.len(), 1);
+
+        let too_wide = code.replace("@bytes(0..2) pub tag", "@bytes(0..4) pub tag");
+        let errs = verify_module(&parse_module(&too_wide).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0415"));
+    }
+
+    #[test]
+    fn test_rejects_layout_field_of_unknown_size() {
+        let code = r#"
+module test.unknown
+@layout(size: 16, align: 8)
+pub struct Holder {
+  @bytes(0..8)  pub len: usize
+  @bytes(8..16) pub mystery: Opaque
+}
+"#;
+        let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0417") && errs[0].contains("usize"));
     }
 
     #[test]

@@ -3,8 +3,9 @@
 //! Commands:
 //! - `mn view --spec <file.mn>` : Instant `<0.1ms` Holographic Spec Blueprint projection & dual hash report.
 //! - `mn check <path>`          : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification.
-//! - `mn test [--mutate]`       : Runs built-in `@example` verification and in-memory MIR Mutation Prover.
-//! - `mn spec [guard|prove|graph]`: Zero-dependency specification verification (`@assert-*` directives & link graph).
+//! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate.
+//!                                `@example` bodies are parsed as tokens but not executed.
+//! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
 
 use std::env;
 use std::fs;
@@ -41,8 +42,8 @@ fn print_help() {
     println!("Usage:");
     println!("  mn view --spec <file.mn>     Project Holographic Spec Blueprint (strips bodies, computes spec_hash/body_hash)");
     println!("  mn check [file.mn | dir]     Verify .mn syntax, 64B Cache-Line @layout, bitstruct, @total & @branchless contracts");
-    println!("  mn test [--mutate] [path]    Execute in-memory MIR sandbox & AST/MIR Mutation Gate");
-    println!("  mn spec [guard|prove|graph]  Verify executable spec/*.md @assert-* directives and link integrity");
+    println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
+    println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
 }
 
 fn cmd_view(args: &[String]) {
@@ -187,21 +188,22 @@ fn cmd_test(args: &[String]) {
         assert_eq!(actual, *expected, "MIR in-memory execution mismatch");
     }
 
+    println!(
+        "Demo MIR region `{}` (hand-written, not lowered from examples/): {} test vectors passed.",
+        r.name,
+        vectors.len()
+    );
     if run_mutate {
         let mut_rep = run_in_memory_mutation_gate(&r, vectors);
         println!(
-            "In-Memory MIR Mutation Gate: {}/{} mutants killed ({:.1}% Kill Score) in {} µs",
+            "Mutation gate on the demo region: {}/{} mutants killed ({:.1}%) in {} µs",
             mut_rep.killed_mutants,
             mut_rep.total_mutants,
             mut_rep.kill_score_pct,
             t0.elapsed().as_micros()
         );
-    } else {
-        println!(
-            "In-Memory MIR Sandbox executed in {} µs (All @example assertions passed).",
-            t0.elapsed().as_micros()
-        );
     }
+    println!("Note: @example bodies are not executed yet.");
 }
 
 fn extract_attr(directive: &str, key: &str) -> Option<String> {
@@ -212,7 +214,12 @@ fn extract_attr(directive: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize, usize), Vec<String>> {
+/// Checks every `spec/*.md`: YAML front matter, at least one `@assert-*` directive, and each
+/// directive both holds and could fail.
+///
+/// Returns `(spec_files, directives)`. This is a substring check, not a proof: seeing each rule
+/// fail against a mutated tree is `spec-guard prove`'s job.
+pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Vec<String>> {
     let spec_dir = workspace_root.join("spec");
     let mut errors = Vec::new();
     let mut spec_files = Vec::new();
@@ -233,11 +240,11 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize, usi
     }
 
     let mut directives_passed = 0usize;
-    let mut directives_proved = 0usize;
 
     for file in &spec_files {
         let content = fs::read_to_string(file).unwrap_or_default();
         let fname = file.file_name().unwrap().to_string_lossy();
+        let mut directives_in_file = 0usize;
 
         // 1. Check YAML front-matter
         if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
@@ -250,20 +257,27 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize, usi
             if !trimmed.starts_with("<!-- @assert-") {
                 continue;
             }
+            directives_in_file += 1;
             let line_no = line_idx + 1;
+            let at = format!("spec/{}:{}", fname, line_no);
             if trimmed.starts_with("<!-- @assert-present ") {
-                if let Some(files_csv) = extract_attr(trimmed, "file") {
-                    for rel in files_csv.split(',') {
-                        let target = workspace_root.join(rel.trim());
-                        if !target.exists() {
-                            errors.push(format!(
-                                "[guard] spec/{}:{} @assert-present failed: `{}` does not exist",
-                                fname, line_no, rel
-                            ));
-                        }
-                    }
+                let Some(files_csv) = extract_attr(trimmed, "file") else {
+                    errors.push(format!("[guard] {} @assert-present has no `file` attribute", at));
+                    continue;
+                };
+                let missing: Vec<&str> = files_csv
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|rel| !workspace_root.join(rel).exists())
+                    .collect();
+                if missing.is_empty() {
                     directives_passed += 1;
-                    directives_proved += 1; // Counterfactual absence of file would trigger failure
+                } else {
+                    errors.push(format!(
+                        "[guard] {} @assert-present failed: `{}` does not exist",
+                        at,
+                        missing.join("`, `")
+                    ));
                 }
             } else if trimmed.starts_with("<!-- @assert-count ") {
                 let target_rel = extract_attr(trimmed, "target").unwrap_or_default();
@@ -271,58 +285,72 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize, usi
                 let min_count: usize = extract_attr(trimmed, "min")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1);
-                let target_path = workspace_root.join(&target_rel);
-                if let Ok(target_src) = fs::read_to_string(&target_path) {
-                    let count = target_src.matches(&symbol).count();
-                    if count < min_count {
-                        errors.push(format!(
-                            "[guard] spec/{}:{} @assert-count failed: `{}` in `{}` matched {} times (expected >= {})",
-                            fname, line_no, symbol, target_rel, count, min_count
-                        ));
-                    } else {
-                        directives_passed += 1;
-                        // Counterfactual proof: mutating the target string removes matches -> count = 0 < min_count
-                        let mutated_src = target_src.replace(&symbol, "");
-                        if mutated_src.matches(&symbol).count() < min_count {
-                            directives_proved += 1;
+                if symbol.is_empty() || min_count == 0 {
+                    errors.push(format!(
+                        "[guard] {} @assert-count cannot fail: it needs a non-empty `symbol` and `min` of at least 1",
+                        at
+                    ));
+                    continue;
+                }
+                match fs::read_to_string(workspace_root.join(&target_rel)) {
+                    Ok(target_src) => {
+                        let count = target_src.matches(&symbol).count();
+                        if count < min_count {
+                            errors.push(format!(
+                                "[guard] {} @assert-count failed: `{}` in `{}` matched {} times (expected >= {})",
+                                at, symbol, target_rel, count, min_count
+                            ));
+                        } else {
+                            directives_passed += 1;
                         }
                     }
-                } else {
-                    errors.push(format!(
-                        "[guard] spec/{}:{} @assert-count target `{}` not readable",
-                        fname, line_no, target_rel
-                    ));
+                    Err(_) => errors.push(format!(
+                        "[guard] {} @assert-count target `{}` not readable",
+                        at, target_rel
+                    )),
                 }
             } else if trimmed.starts_with("<!-- @assert-absence ") {
                 let target_rel = extract_attr(trimmed, "target").unwrap_or_default();
                 let symbol = extract_attr(trimmed, "symbol").unwrap_or_default();
-                let target_dir = workspace_root.join(&target_rel);
-                let mn_files = collect_mn_files(&target_dir);
-                let mut found_in = None;
-                for mn in &mn_files {
-                    if let Ok(src) = fs::read_to_string(mn) {
-                        if src.contains(&symbol) {
-                            found_in = Some(mn.display().to_string());
-                            break;
-                        }
-                    }
+                if symbol.is_empty() {
+                    errors.push(format!("[guard] {} @assert-absence has an empty `symbol`", at));
+                    continue;
                 }
-                if let Some(bad_file) = found_in {
+                // Only `.mn` files are scanned, whatever `glob` says; an empty target would pass vacuously.
+                let mn_files = collect_mn_files(&workspace_root.join(&target_rel));
+                if mn_files.is_empty() {
                     errors.push(format!(
-                        "[guard] spec/{}:{} @assert-absence failed: forbidden symbol `{}` found in `{}`",
-                        fname, line_no, symbol, bad_file
+                        "[guard] {} @assert-absence target `{}` holds no `.mn` file to scan",
+                        at, target_rel
                     ));
-                } else {
-                    directives_passed += 1;
-                    // Counterfactual proof: injecting symbol triggers failure
-                    directives_proved += 1;
+                    continue;
                 }
+                let found_in = mn_files.iter().find(|mn| {
+                    fs::read_to_string(mn)
+                        .map(|src| src.contains(&symbol))
+                        .unwrap_or(false)
+                });
+                match found_in {
+                    Some(bad_file) => errors.push(format!(
+                        "[guard] {} @assert-absence failed: forbidden symbol `{}` found in `{}`",
+                        at,
+                        symbol,
+                        bad_file.display()
+                    )),
+                    None => directives_passed += 1,
+                }
+            } else {
+                errors.push(format!("[guard] {} unknown directive `{}`", at, trimmed));
             }
+        }
+
+        if directives_in_file == 0 {
+            errors.push(format!("[guard] spec/{} carries no @assert-* directive", fname));
         }
     }
 
     if errors.is_empty() {
-        Ok((spec_files.len(), directives_passed, directives_proved))
+        Ok((spec_files.len(), directives_passed))
     } else {
         Err(errors)
     }
@@ -332,13 +360,11 @@ fn cmd_spec(_args: &[String]) {
     let t0 = Instant::now();
     let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match verify_spec_directory(&root) {
-        Ok((files_count, guards, proved)) => {
+        Ok((files_count, directives)) => {
             println!(
-                "[PASS] mn spec: Verified {} atomic spec files, {} @assert-* directives passed, {}/{} counterfactual proofs killed in {:.2} ms.",
+                "[PASS] mn spec: {} spec files, {} @assert-* directives hold ({:.2} ms). Counterfactual proof is spec-guard prove's job.",
                 files_count,
-                guards,
-                proved,
-                guards,
+                directives,
                 t0.elapsed().as_secs_f64() * 1000.0
             );
         }
@@ -378,11 +404,27 @@ mod tests {
     #[test]
     fn test_all_spec_assertions_and_graph_pass() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let (files_count, guards, proved) = verify_spec_directory(&root).unwrap_or_else(|errs| {
+        let (files_count, directives) = verify_spec_directory(&root).unwrap_or_else(|errs| {
             panic!("Spec verification failed:\n{}", errs.join("\n"));
         });
-        assert_eq!(files_count, 19, "Expected 19 files in spec/ (README + philosophy + 17 atomic decision specs)");
-        assert!(guards >= 30);
-        assert_eq!(guards, proved);
+        // Every spec file carries at least one directive, or verify_spec_directory fails.
+        assert!(directives >= files_count);
+    }
+
+    #[test]
+    fn test_spec_directives_that_cannot_fail_are_rejected() {
+        let root = env::temp_dir().join(format!("mente-spec-vacuous-{}", process::id()));
+        fs::create_dir_all(root.join("spec")).unwrap();
+        fs::write(
+            root.join("spec/vacuous.md"),
+            "---\ntitle: t\n---\n\n<!-- @assert-count target=\"spec/vacuous.md\" symbol=\"title\" min=\"0\" -->\n<!-- @assert-absence target=\"nowhere\" symbol=\"let mut\" -->\n",
+        )
+        .unwrap();
+        let errs = verify_spec_directory(&root).unwrap_err();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(errs.len(), 2, "{:?}", errs);
+        assert!(errs[0].contains("cannot fail"));
+        assert!(errs[1].contains("holds no `.mn` file"));
     }
 }

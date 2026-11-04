@@ -1,6 +1,6 @@
 //! `mente-ast` — Dual-Track Semantic Hashing (`spec_hash` vs. `body_hash`) & `<0.1ms` Spec Projection.
 //!
-//! Implements Station 1 (`docs/01_FILE_MODEL_AND_SYNTAX.md` §1.1) and Station 8 (`docs/08_COMPILER_IMPLEMENTATION_SPEC.md` §8.2).
+//! Governed by `spec/holographic-module.md`.
 
 use mente_syntax::{tokenize, ItemDecl, ModuleFile, ParamMode};
 
@@ -71,10 +71,13 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
                 for a in &s.attrs {
                     spec_h.update("attr", &a.to_string());
                 }
+                // Private fields still decide the struct's size, alignment and defaults,
+                // which dependents that hold the struct by value compile against.
                 for f in &s.fields {
-                    if f.is_pub {
-                        spec_h.update("field", &format!("{}:{}:{:?}", f.name, f.ty, f.byte_range));
-                    }
+                    spec_h.update(
+                        "field",
+                        &format!("{}:{}:{}:{:?}:{:?}", f.is_pub, f.name, f.ty, f.byte_range, f.default_expr),
+                    );
                 }
                 for inv in &s.invariants {
                     spec_h.update("invariant", inv);
@@ -323,5 +326,28 @@ pub fn score(x: i64, y: i64) -> i64
         assert_eq!(h1.spec_hash, h2.spec_hash);
         // Body hash MUST reflect the algorithm change
         assert_ne!(h1.body_hash, h2.body_hash);
+    }
+
+    #[test]
+    fn test_private_field_change_changes_spec_hash() {
+        let v1 = r#"
+module geo.shapes
+pub struct Point {
+  pub x: f32
+  cache: u32
+}
+"#;
+        let v2 = r#"
+module geo.shapes
+pub struct Point {
+  pub x: f32
+  cache: u64
+}
+"#;
+        let h1 = compute_dual_hashes(&parse_module(v1).unwrap());
+        let h2 = compute_dual_hashes(&parse_module(v2).unwrap());
+
+        // A private field changes the struct's size, so dependents must recompile
+        assert_ne!(h1.spec_hash, h2.spec_hash);
     }
 }

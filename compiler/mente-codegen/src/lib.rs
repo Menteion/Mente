@@ -1,10 +1,11 @@
-//! `mente-codegen` — Hardware-Sympathetic Codegen: Carry-Flag Error ABI & Direct Binary SPIR-V Emitter.
+//! `mente-codegen` — backend placeholders. Governed by `spec/error-handling-abi.md` and `spec/mir-and-codegen.md`.
 //!
-//! Implements Station 4.4 (`@kernel` GPU直出), Station 5.1 (Carry-Flag Zero-Overhead Error ABI), and Station 7.2.
+//! Nothing here emits machine code. `CarryFlagAbiLowering` only names the registers the specified
+//! error ABI would use, and `emit_spirv_binary` writes a SPIR-V-shaped word stream that is not a valid module.
 
 use mente_mir::{MirOp, MirRegionSoA};
 
-/// Carry-Flag Zero-Overhead Error ABI Specification (Station 5.1, Decision L1).
+/// The registers and flag the specified Carry-Flag error ABI assigns per target (`spec/error-handling-abi.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CarryFlagAbiLowering {
     /// Primary return register carrying `T` on the Happy Path (`RAX` on x86-64, `X0` on ARM64).
@@ -37,12 +38,15 @@ impl CarryFlagAbiLowering {
     }
 }
 
-/// SPIR-V Magic Number (`0x07230203`) for direct binary GPU `@kernel` emission without C++ MLIR (Station 7.2, Decision R1).
+/// SPIR-V magic number (`0x07230203`).
 pub const SPIRV_MAGIC: u32 = 0x0723_0203;
 pub const SPIRV_VERSION_1_6: u32 = 0x0001_0600;
 pub const MENTE_GENERATOR_MAGIC: u32 = 0x4D45_0001;
 
-/// Emits a compact binary SPIR-V 1.6 module header and instruction stream directly from a `MirRegionSoA`.
+/// Writes a SPIR-V 1.6 header, `OpCapability Shader`, and one 4-word record per MIR node.
+///
+/// The output is not a valid SPIR-V module: it has no `OpMemoryModel`, `OpEntryPoint`, types or
+/// function, and the per-node records do not follow each opcode's operand layout. `spirv-val` rejects it.
 pub fn emit_spirv_binary(region: &MirRegionSoA) -> Vec<u32> {
     let bound = (region.opcodes.len() as u32) + 16;
     let mut words = vec![

@@ -1,16 +1,17 @@
-//! `mente-mir` — 100% From-Scratch Cache-Line-Aligned Data-Oriented Intermediate Representation.
+//! `mente-mir` — Mente IR, written from scratch in Rust. Governed by `spec/mir-and-codegen.md`.
 //!
-//! Implements Station 4 (`@branchless` / `AoS` / `SoA` / `Tiled`) and Station 7 (`docs/07_METAPROGRAMMING_AND_TOOLCHAIN.md` §7.2):
-//! - Flat Structure-of-Arrays (`SoA`) node storage indexed by 32-bit `NodeId(u32)` (zero heap-pointer graphs).
-//! - Regionalized Value-State Dependence Graph (RVSDG) with attached `ValueLattice` intervals.
-//! - Hard compile-time `@branchless` micro-architectural verifier (Decision K1).
-//! - Microsecond-level in-memory interpreter and native MIR Mutation Prover.
+//! What exists today:
+//! - One flat, straight-line region per function: parallel `Vec`s (structure of arrays) indexed by `NodeId(u32)`.
+//!   There is no control flow, no nested region and no RVSDG yet.
+//! - A `ValueLattice` interval per node, supplied by whoever builds the region; nothing infers it yet.
+//! - A `@branchless` check that rejects `BranchCondJump` nodes.
+//! - An in-memory interpreter and an opcode-flipping mutation gate.
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct NodeId(pub u32);
 
-/// Physical memory geometry of a container (Station 4.1).
+/// Physical memory geometry of a container (`spec/morphic-layouts.md`).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum MorphicLayout {
     /// Standard Array-of-Structs (`List<T>`)
@@ -44,7 +45,8 @@ impl MorphicLayout {
     }
 }
 
-/// Compile-time proven interval and alignment lattice attached to every MIR SSA value (Station 2.1 & 5.2).
+/// Interval and alignment facts attached to a MIR value. Today the builder of the region writes them;
+/// `spec/refinement-and-fixed-point.md` specifies inferring them.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct ValueLattice {
     pub min_val: i128,
@@ -91,7 +93,10 @@ pub enum MirOp {
     BranchCondJump,
 }
 
-/// 64-byte Cache-Line Aligned Structure-of-Arrays (SoA) MIR Region (Station 7.2, Decision R1).
+/// Structure-of-arrays MIR region.
+///
+/// `#[repr(align(64))]` aligns only this header (name, flags and the `Vec` handles). The node
+/// arrays live in heap `Vec`s with their element types' alignment, not on 64-byte lines.
 #[repr(align(64))]
 #[derive(Clone, Debug)]
 pub struct MirRegionSoA {
@@ -136,7 +141,7 @@ impl MirRegionSoA {
         id
     }
 
-    /// Hard compile-time micro-architectural verifier for `@branchless` (Station 4.3, Decision K1).
+    /// Rejects a `@branchless` region that contains a `BranchCondJump` node.
     pub fn verify_branchless(&self) -> Result<(), String> {
         if !self.is_branchless_guaranteed {
             return Ok(());
