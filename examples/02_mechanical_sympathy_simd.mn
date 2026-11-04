@@ -1,5 +1,5 @@
 // ============================================================================
-// 標本 02：硬體機械同理心、64B 快取行契約、多態記憶體幾何與 @branchless / @kernel
+// 標本 02：硬體機械同理心、64B 快取行契約、多態記憶體幾何與 @branchless / @simd
 // 規格：spec/refinement-and-fixed-point.md、spec/mutable-value-semantics.md、spec/morphic-layouts.md、spec/hardware-contracts.md
 // ============================================================================
 module examples.mechanical_sympathy_simd
@@ -48,14 +48,12 @@ pub struct Particle {
   pub mass: f32
 }
 
-/// 統一異質核心（@kernel + @simd）：可同時由 MIR 編譯為 CPU AVX-512/NEON 或 GPU SPIR-V/PTX
-@kernel
-@simd(width: 16)
+/// 資料平行 + SIMD：每個 worker 分到若干個 16 元素的 tile，每個 tile 的一個 f32 欄位剛好是一條 64-byte 快取行、一個 ZMM 暫存器
 @no_alloc
 pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0]) {
-  // 儘管 batch 在物理記憶體中是以 16-lane AoSoA 微磚塊排列以達成 100% 零重排 SIMD 載入，
-  // 開發者依然使用最直觀的欄位語法撰寫！
-  parallel_for p in mut batch {
+  // 儘管 batch 在物理記憶體中是以 16-lane AoSoA 微磚塊排列以達成零重排 SIMD 載入，
+  // 開發者依然使用最直觀的欄位語法撰寫；p 依 copy-in/copy-out 取得，編譯器直接對欄位陣列向量化。
+  parallel_for p in mut batch @simd(lanes: 16) {
     p.x += p.vx * dt
     p.y += p.vy * dt
     p.z += p.vz * dt

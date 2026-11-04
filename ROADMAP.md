@@ -50,10 +50,10 @@
 **Governing specs:** [error-handling-abi.md](spec/error-handling-abi.md), [hardware-contracts.md](spec/hardware-contracts.md), [comptime-and-ffi.md](spec/comptime-and-ffi.md), [mir-and-codegen.md](spec/mir-and-codegen.md)
 
 - [ ] **Engineering Guardrail #2 (Dual-Track Codegen & Peephole Parity)**: Native x86-64 and AArch64 machine-code backend lowering `T ! E` to CPU Carry Flag (`CF` / `NZCV.C`) with zero stack tag overhead, paired with E-Graph target peephole rules (`fma`, `bmi2`, AVX-512 masks) after all `MIR` bounds and ghost contracts are erased.
-- [ ] Vectorizer and `@simd(width: N)` loop dependency prover lowering `SoA<T>` and `Tiled<T, lanes: N>` to AVX-512 / NEON instructions.
+- [ ] Vectorizer and `@simd(lanes: N)` loop dependency prover lowering `SoA<T>` and `Tiled<T, lanes: N>` to AVX-512 / NEON instructions.
 - [ ] Hermetic `comptime` interpreter executing `comptime for field in Type.of<T>().fields` directly on `MirRegionSoA`.
 - [ ] **Engineering Guardrail #4 (Zero-Config Ecosystem Absorption)**: Implement `mn bind` to auto-import C headers and Rust C-ABI exports into quarantined `extern "C"` blocks with `with FFI`, non-null pointer refinements, and `@layout` checks.
-- [ ] Production SPIR-V 1.6 compute module emission for `@kernel` functions.
+- [ ] An execution model for `@kernel` (index space, memory spaces, barriers, relation to `parallel_for`), then production SPIR-V 1.6 compute module emission for `@kernel` functions. `@kernel` is a `Hypothesis` until the model exists.
 
 ---
 
