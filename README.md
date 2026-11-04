@@ -28,7 +28,7 @@ The highlights below are the language's design. Most of it is not implemented: [
 5. **Carry-Flag (`CF`) Error ABI, Ghost Contracts, and Colorless Concurrency ([`spec/error-handling-abi.md`](spec/error-handling-abi.md), [`spec/ghost-contracts-and-totality.md`](spec/ghost-contracts-and-totality.md), [`spec/structured-concurrency.md`](spec/structured-concurrency.md))**:
    - `T ! E` lowers to the hardware CPU Carry Flag (`CF`) with `0` stack union tag bytes on the happy path; proven `requires`/`ensures` ghost contracts erase to `0` runtime instructions; `@total` + `decreases` proves termination; and `parallel (...)` + `with IO, Net` replace `async`/`await`.
 6. **From-Scratch 64-Byte `SoA` `Mente IR (MIR)` ([`spec/mir-and-codegen.md`](spec/mir-and-codegen.md))**:
-   - Built from scratch in Rust without upstream C++ `MLIR`: 32-bit `NodeId(u32)` handles, 64-byte cache-line-aligned `MirRegionSoA`, microsecond in-memory execution, in-memory mutation testing (`mn test --mutate`), and direct SPIR-V 1.6 emission.
+   - Built from scratch in Rust without upstream C++ `MLIR`: 32-bit `NodeId(u32)` handles, 64-byte cache-line-aligned `MirRegionSoA`, microsecond in-memory execution, in-memory mutation testing (`mn test --mutate`), and native code through Cranelift, a pure-Rust backend.
 
 ---
 
