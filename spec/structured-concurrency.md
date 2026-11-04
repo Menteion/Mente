@@ -29,6 +29,7 @@ date: 2026-11-04
    - **Zero orphan tasks**: No child task spawned inside `parallel (...)` or `TaskScope` can outlive the lexical block.
    - **Automatic sibling cancellation**: If any branch raises an error via `!`, sibling tasks receive immediate cooperative cancellation at their next effect yield point, and all destructors complete before the scope propagates the error.
    - **Zero-`Arc` parent borrowing**: Because child tasks are strictly bounded by the lexical scope, they MAY read parent read-only bindings directly without `Arc<T>` heap reference counting or `'static` lifetime bounds.
+   - **Exclusivity across branches**: the branches of one `parallel (...)` are checked by the Law of Exclusivity exactly as the arguments of one call are (`mutable-value-semantics.md`): any number of branches may read a binding, but a binding that one branch mutates no other branch may read or mutate. Passing `in arena` to several branches is a read (`regions-and-pools.md`).
 
 ## 2. Decision rationale and rejected alternatives
 

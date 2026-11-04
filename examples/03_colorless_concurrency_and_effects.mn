@@ -32,12 +32,13 @@ pub fn handle_checkout_request(raw_token: str) -> u64 ! GatewayError with Net, C
   val uid = verify_token(raw_token)!
 
   // 開啟 Request-Scoped Arena：內部所有零拷貝切片與暫存結構在離開區塊時 1 條指令瞬間整批釋放！
-  with Arena.scoped() as arena {
-    // 結構化併發 parallel：同時發出兩個網路請求，自動共享局部變數 uid 與 arena，0 個 'static 報錯！
+  Arena.scoped() { arena =>
+    // 結構化併發 parallel：同時發出兩個網路請求，共享局部變數 uid 與 arena，0 個 'static 報錯！
+    // 兩個分支都只讀 uid、只透過 in 取得 arena 的配置權，排他律允許；各分支從 arena 切自己的一塊來配置。
     // 若任一分支失敗 (!)，另一分支自動收到協作取消信號並清理資源。
     val (name, items) = parallel (
-      fetch_user_name(uid, in: arena)!,
-      fetch_recent_items(uid, in: arena)!,
+      fetch_user_name(uid, in arena)!,
+      fetch_recent_items(uid, in arena)!,
     )
 
     val summary = OrderSummary {

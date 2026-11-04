@@ -24,8 +24,11 @@ date: 2026-11-04
    - A struct with a view field holds a view: it follows the same rules, and storing it where it would outlive its source is `E0310` (item 6). A field of type `String` or `List<T>` avoids the question.
    - A `str` becomes a `String` only explicitly (`String.from(s)`), because that allocates and copies.
 3. **Lexical scoped arenas (`Arena.scoped`, `Specified`)**:
-   - Temporary phase allocations use `Arena.scoped(capacity) { arena => ... }`.
-   - Values allocated within `arena` cannot escape the lexical block via return values or outer `mut` bindings, and the entire region is reclaimed in `O(1)` (`1` bump-pointer reset instruction) upon scope exit.
+   - Temporary phase allocations use `Arena.scoped(capacity) { arena => ... }`, with `capacity` optional. This is the only form that opens an arena.
+   - Values allocated within `arena` cannot escape the lexical block via return values or outer `mut` bindings, and the entire region is reclaimed in `O(1)` upon scope exit.
+   - **Passing an arena**: a function receives one as `in arena: Arena` and is called as `f(in arena)`, the same two-site marking as `mut` and `own` (`mutable-value-semantics.md`). `in` grants allocation only: the callee may allocate into the arena and return values whose provenance is the arena (`from arena`), but cannot reset or free it. For the Law of Exclusivity an `in` argument is a read, so several calls and several tasks may hold the same arena at once.
+   - **Concurrent allocation**: when the branches of `parallel (...)` or the iterations of a `parallel_for` allocate in one arena, each task takes its own chunk from the arena and bumps within it, so the fast path has no atomic instruction and no task waits on another to allocate. Chunks are released with the arena.
+   - **No destructors in an arena**: a type with a destructor (one that owns a resource or heap storage, such as a file, `String` or `List<T>`) cannot be allocated in an arena (`E0312`), so the `O(1)` reset never skips cleanup. Arena data is plain values and views into the arena itself (`str`, `[]T`).
 4. **Generational `Pool<T>` and 64-bit `Handle<T>` (`Specified`; `examples/04_comptime_and_graph_pool.mn` uses them, and no standard library exists yet)**:
    - Graph topologies, doubly-linked structures, ECS entities, and UI trees use `Pool<T>` indexed by `Handle<T>` (`u32` slot index + `u32` generation tag = `64` bits).
    - `Handle<T>` is `Copy`, serializable across disk/network/GPU buffers, and free of reference cycles.
@@ -50,6 +53,8 @@ date: 2026-11-04
 | **Inferring return provenance from the body** | Lets a body edit change which arguments a caller must keep alive, so an edit in one module can break a caller in another while every signature stays the same, and `spec_hash` can no longer tell which edits reach dependents. A conservative default plus an optional `from` clause gives the same convenience with the fact on the page. |
 | **Viral `<'a, 'b>` lifetime parameters (Rust)** | Adding a borrowed slice field to a deep struct in Rust forces `<'a>` annotations onto every enclosing struct, trait, and function across the crate, and fails completely on cyclic graphs (forcing `Rc<RefCell<T>>` runtime panics or raw `unsafe` pointers). |
 | **One `Shared<T>` that counts non-atomically until moved across threads, then atomically** | The clones left in the first thread keep updating the same counter non-atomically while the second thread updates it atomically: a data race. Biased reference counting repairs this with a second counter and an owner-thread test on every operation, a runtime cost hidden behind one type. Two types put the cost in the type and let the compiler reject the race. |
+| **One arena bump pointer shared by all tasks through an atomic add** | Puts a contended atomic on every allocation of every branch, the cost arenas exist to avoid. A chunk per task keeps each allocation a plain add. |
+| **Running destructors when an arena resets** | The reset would walk a list of finalizers, so reclaiming an arena would no longer be `O(1)`, and a type's cleanup would run at a time its owner does not control. |
 | **Global tracing garbage collection (Go / Java / C# / Python)** | Introduces unpredictable tail-latency pauses, 2–3x memory residency overhead, and loss of deterministic RAII resource destruction. |
 | **Unchecked manual `malloc`/`free` or raw pointers (C / Zig)** | Susceptible to use-after-free and double-free vulnerabilities unless paired with generational validation (`Pool<T>`/`Handle<T>`). |
 
@@ -61,3 +66,5 @@ date: 2026-11-04
 <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_from_clause_must_name_a_kept_parameter" min="1" reason="A from clause must name a parameter the caller keeps, never an own one" -->
 <!-- @assert-count target="examples/04_comptime_and_graph_pool.mn" symbol="guard val root_node = scene[root]" min="1" reason="Pool indexing yields ?T, so example 04 narrows before reading a field" -->
 <!-- @assert-absence target="examples" symbol="get_mut" glob="*.mn" reason="The mutable pool projection is pool[mut h], not a get_mut method" -->
+<!-- @assert-count target="examples/03_colorless_concurrency_and_effects.mn" symbol="(uid, in arena)!" min="2" reason="An arena is passed with in at the call site, as mut and own are" -->
+<!-- @assert-absence target="examples" symbol="in: arena" glob="*.mn" reason="The call-site marker is in arena, not a named argument" -->
