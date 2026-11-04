@@ -5,8 +5,9 @@
 module examples.comptime_and_graph_pool
 
 // 1. 使用世代池 Pool<T> 與 64-bit Handle<T> 輕鬆建構雙向/環狀圖（0 個 unsafe、0 引用計數洩漏！）
+// 場景節點會長期存放在 Pool 裡，名稱用擁有記憶體的 String，不存 str 視圖
 pub struct SceneNode {
-  pub name: str
+  pub name: String
   pub parent: ?Handle<SceneNode> = none
   pub children: List<Handle<SceneNode>> = []
 }
@@ -16,8 +17,9 @@ pub fn link_parent_child(
   parent_h: Handle<SceneNode>,
   child_h: Handle<SceneNode>,
 ) {
-  pool[mut parent_h].children.push(child_h)
-  pool[mut child_h].parent = parent_h
+  // pool[mut h] 是 ?SceneNode 的可變投影：handle 過期時為 none，?. 讓這一步什麼都不做
+  pool[mut parent_h]?.children.push(child_h)
+  pool[mut child_h]?.parent = parent_h
 }
 
 // 2. 統一語法的 comptime 元編程：
@@ -46,10 +48,14 @@ pub struct TelemetryEvent {
 
 @example("零 unsafe 雙向場景樹與 comptime 自動編碼") {
   var scene = Pool<SceneNode>.new()
-  val root  = scene.insert(SceneNode { name: "Root" })
-  val cam   = scene.insert(SceneNode { name: "Camera" })
+  val root  = scene.insert(SceneNode { name: String.from("Root") })
+  val cam   = scene.insert(SceneNode { name: String.from("Camera") })
 
   link_parent_child(mut scene, root, cam)
-  assert(scene[root].children.len == 1)
-  assert(scene[cam].parent == root)
+
+  // scene[h] 是 ?SceneNode：先用 guard 收窄，才能讀欄位
+  guard val root_node = scene[root] else panic("root is live")
+  guard val cam_node  = scene[cam] else panic("camera is live")
+  assert(root_node.children.len == 1)
+  assert(cam_node.parent == root)
 }
