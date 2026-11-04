@@ -25,7 +25,7 @@
 **Governing specs:** [holographic-module.md](spec/holographic-module.md), [surface-syntax.md](spec/surface-syntax.md), [morphic-layouts.md](spec/morphic-layouts.md), [mir-and-codegen.md](spec/mir-and-codegen.md)
 
 - [x] Zero-dependency `.mn` lexer and top-level structural parser (`compiler/mente-syntax`).
-- [x] Dual 128-bit structural hashing (`spec_hash` vs. `body_hash`) and Holographic Spec Blueprint projection (`compiler/mente-ast`); measured 0.3–0.9 ms per example module, against a `< 0.1 ms` target.
+- [x] Dual 128-bit structural hashing (`spec_hash` vs. `body_hash`) and Holographic Spec Blueprint projection (`compiler/mente-ast`); median 45–92 µs per example module, meeting the `< 0.1 ms` median target (protocol below).
 - [x] Exact `@layout(size, align)` + `@bytes` and `bitstruct` + `@bits` verifier (`compiler/mente-sema`).
 - [x] Straight-line `MirRegionSoA` (`NodeId(u32)`), `ValueLattice` record, in-memory interpreter, and opcode mutation gate (`compiler/mente-mir`), exercised on one hand-written region.
 - [ ] Statement and expression parser for function bodies (a Pratt parser for nested binary and pipe expressions), replacing today's flat body token lists.
@@ -73,3 +73,28 @@
 
 - [ ] Self-host `mente-syntax`, `mente-sema`, and `mente-mir` in `.mn`.
 - [ ] Validate Mente against high-frequency deterministic systems workloads (including porting critical `Menteion` 64-byte cache-line and branchless fixed-point kernels to `.mn` and benchmarking L1 miss rate, branch mispredictions, and lines of code).
+
+---
+
+## Measurement protocols
+
+A `Target` in `spec/*.md` is a number with a protocol here. A figure without a protocol is not a target, and is removed or relabelled `Hypothesis`.
+
+### `mn view --spec` projection: median under 0.1 ms per module
+
+- **Timed**: parsing a module whose source is already in memory, computing its three digests, and projecting the blueprint. File reading and process start are excluded.
+- **Corpus**: every module in `examples/`, and the largest standard-library module once one exists.
+- **Method**: release build; per module, 100 warm-up runs, then 1,000 timed runs; report the median and the 99th percentile. The harness is the ignored test `view_projection_protocol` in `compiler/mente-cli`:
+  ```powershell
+  cargo test --release -p mente-cli -- --ignored --nocapture view_projection_protocol
+  ```
+- **Machine**: record the CPU, OS and power mode with each result.
+- **Last result** (2026-11-05, AMD Ryzen 7 7735HS, Windows 11): median 45–92 µs, 99th percentile 110–208 µs. The median meets the target; nothing is promised for the 99th percentile.
+
+### Tier-1 re-check after an edit: 99th percentile under 5 ms
+
+- **Timed**: in a running `mn check --watch` or language-server process, from an edit being applied to the source in memory until Tier 1 has re-proven every obligation the edit can affect and produced its diagnostics.
+- **Corpus**: the `examples/` modules, plus a generated module of 200 functions with 20 obligations each (loop bounds, slice indexing, chains of `requires`). Each run applies one random single-token edit inside one function body.
+- **Method**: release build; 100 warm-up edits, then 1,000 timed edits; report the median and the 99th percentile.
+- **Machine**: as above.
+- **Last result**: none yet; Tier 1 does not exist.

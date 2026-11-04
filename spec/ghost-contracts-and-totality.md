@@ -16,7 +16,7 @@ date: 2026-11-04
    - `struct` declarations declare data invariants via `invariant { <bool-expr> }` (`Implemented` in `parse_struct`, as raw strings).
    - Nothing checks or evaluates a clause yet.
 2. **Two-tier verification and Ghost Erasure (`Specified`)**:
-   - **Tier 1 (incremental range/linear solver)**: Runs automatically on every save (`mn check`), propagating `ValueLattice` intervals (`[min_val, max_val]`) and linear inequalities across `guard` checks. Its latency target, under 5 ms per edit, is a `Target` with no measurement protocol yet.
+   - **Tier 1 (incremental range/linear solver)**: Runs automatically on every save (`mn check`), propagating `ValueLattice` intervals (`[min_val, max_val]`) and linear inequalities across `guard` checks. Its latency, a 99th percentile under 5 ms per edit, is a `Target` with its protocol in `ROADMAP.md`; it has no result yet, since Tier 1 does not exist.
    - **Tier 2 (`mn prove` SMT bit-vector / quantifier-free solver)**: Verifies complex non-linear and bit-level contracts in parallel.
    - **Compile-time caller proof obligation**: Calling a function whose `requires` clause is not statically established in the caller's path context (e.g., via refined input types or a preceding `guard` statement) is a compile-time error.
    - **Which tier handles a clause**: every `requires`, `ensures` and `invariant` clause is classified by its syntax alone, so the classification is visible in the signature and in `mn view --spec`:
@@ -42,7 +42,7 @@ date: 2026-11-04
    - Whenever Tier 1 cannot discharge a `requires` or slice-bounds obligation, the compiler MUST NOT emit a generic "precondition might not hold" message. It MUST emit:
      1. A **concrete counterexample valuation** from the violated DBM boundary (e.g., `Counterexample: lo = 0, hi = 0 violates requires items.len > 0`).
      2. A **copy-pasteable 1-line `guard` prescription** (e.g., `Help: insert 'guard items.len > 0 else return none' before line 43 to narrow the interval`).
-   - Adding the prescribed `guard` statement narrows the Tier-1 DBM lattice deterministically without requiring manual proof lemmas; doing so in under 1 ms is a `Target`.
+   - Adding the prescribed `guard` statement narrows the Tier-1 DBM lattice deterministically without requiring manual proof lemmas; the re-check it causes falls under the 5 ms target above.
 
 ## 2. Decision rationale and rejected alternatives
 

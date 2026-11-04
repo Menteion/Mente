@@ -27,8 +27,8 @@ date: 2026-11-04
    - **Zero-cascade incremental compilation (`Specified`)**: a build system that recompiles a dependent only when a dependency's `spec_hash` changes, or its `instance_hash` changes and the dependent instantiates or inlines from it. No build system exists yet.
 4. **Blueprint projection (`Implemented` in `project_spec_blueprint` and `mn view --spec`)**:
    - `mn view --spec <file.mn>` prints the `pub` declarations, layouts, signatures, contracts and the three digests, and replaces each function body with `= ...`.
-   - Measured on the four `examples/` modules (2026-11-04, release build, Windows, including reading the file): 0.3–0.9 ms per module, and 38–60% fewer tokens than the full source.
-   - **Latency target (`Target`)**: under 0.1 ms per module, excluding file I/O. There is no measurement protocol yet.
+   - The projection has 38–60% fewer tokens than the full source on the four `examples/` modules.
+   - **Latency target (`Target`)**: a median under 0.1 ms per module, from source in memory to projected blueprint, under the protocol in `ROADMAP.md`. Last measured 2026-11-05: median 45–92 µs, 99th percentile 110–208 µs across the examples, so the median meets the target. `mn view` prints a single cold run, which is slower and is not the protocol.
 
 ## 2. Decision rationale and rejected alternatives
 

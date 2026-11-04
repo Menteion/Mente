@@ -53,11 +53,12 @@ fn cmd_view(args: &[String]) {
         .map(|s| s.as_str())
         .unwrap_or("examples/01_refinement_and_units.mn");
 
-    let t0 = Instant::now();
     let src = fs::read_to_string(path_str).unwrap_or_else(|e| {
         eprintln!("Failed to read `{}`: {}", path_str, e);
         process::exit(1);
     });
+    // Timed from source text in memory, as the ROADMAP.md protocol measures it: file I/O excluded.
+    let t0 = Instant::now();
     let module = parse_module(&src).unwrap_or_else(|e| {
         eprintln!("Parse error in `{}`: {}", path_str, e);
         process::exit(1);
@@ -68,7 +69,7 @@ fn cmd_view(args: &[String]) {
     println!("{}", report.projected_source);
     println!("// ----------------------------------------------------------------------------");
     println!(
-        "// Projection completed in {} µs | Tokens: {} -> {} ({:.1}% Context Saved)",
+        "// Projection completed in {} µs (parse, hash and project; file read excluded) | Tokens: {} -> {} ({:.1}% Context Saved)",
         elapsed_us, report.total_tokens, report.spec_tokens, report.savings_percent
     );
 }
@@ -443,6 +444,34 @@ mod tests {
         });
         // Every spec file carries at least one directive, or verify_spec_directory fails.
         assert!(directives >= files_count);
+    }
+
+    /// The `mn view --spec` latency protocol in ROADMAP.md. Run it with
+    /// `cargo test --release -p mente-cli -- --ignored --nocapture view_projection_protocol`.
+    #[test]
+    #[ignore = "benchmark; run on demand"]
+    fn view_projection_protocol() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        for file in collect_mn_files(&root) {
+            let src = fs::read_to_string(&file).unwrap();
+            let run = || {
+                let t0 = Instant::now();
+                let module = parse_module(&src).unwrap();
+                std::hint::black_box(project_spec_blueprint(&module));
+                t0.elapsed().as_nanos()
+            };
+            for _ in 0..100 {
+                run();
+            }
+            let mut samples: Vec<u128> = (0..1000).map(|_| run()).collect();
+            samples.sort_unstable();
+            println!(
+                "{}: median {:.1} µs, p99 {:.1} µs",
+                file.file_name().unwrap().to_string_lossy(),
+                samples[500] as f64 / 1000.0,
+                samples[990] as f64 / 1000.0
+            );
+        }
     }
 
     #[test]
