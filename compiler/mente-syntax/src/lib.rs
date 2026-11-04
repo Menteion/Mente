@@ -459,6 +459,8 @@ pub struct FnDecl {
     pub params: Vec<ParamDecl>,
     pub return_ty: Option<String>,
     pub error_ty: Option<String>,
+    /// Parameters a returned view may borrow from, named by `from p, q` after the return type.
+    pub provenance: Vec<String>,
     pub effects: Vec<String>,
     pub requires: Vec<String>,
     pub ensures: Vec<String>,
@@ -978,6 +980,26 @@ impl<'a> Parser<'a> {
             error_ty = err;
         }
 
+        // `from` is contextual: it is a keyword only right after a return type.
+        let mut provenance = Vec::new();
+        if matches!(self.peek(), TokenKind::Ident(w) if w == "from") {
+            self.next();
+            loop {
+                if let TokenKind::Ident(param) = self.peek().clone() {
+                    provenance.push(param);
+                    self.next();
+                    if *self.peek() == TokenKind::Comma {
+                        self.next();
+                        continue;
+                    }
+                }
+                break;
+            }
+            if provenance.is_empty() {
+                return Err(format!("Line {}: `from` in the signature of `{}` names no parameter", line, name));
+            }
+        }
+
         let mut effects = Vec::new();
         if *self.peek() == TokenKind::With {
             self.next();
@@ -1038,6 +1060,7 @@ impl<'a> Parser<'a> {
             params,
             return_ty,
             error_ty,
+            provenance,
             effects,
             requires,
             ensures,
@@ -1070,6 +1093,7 @@ impl<'a> Parser<'a> {
                 {
                     break;
                 }
+                TokenKind::Ident(w) if w == "from" && angle_depth == 0 && bracket_depth == 0 => break,
                 _ => {
                     let tok = self.next();
                     match tok.kind {
@@ -1186,5 +1210,19 @@ pub fn clamp(x: f64, lo: f64, hi: f64) -> f64
         let m = parse_module(code).expect("should parse valid .mn");
         assert_eq!(m.module_path, "demo.core");
         assert_eq!(m.items.len(), 2);
+    }
+
+    #[test]
+    fn test_from_clause_names_return_provenance() {
+        let code = r#"
+module demo.views
+pub fn verify(token: str, key: str) -> str ! AuthError from token with Clock
+"#;
+        let m = parse_module(code).expect("should parse a from clause");
+        let ItemDecl::Fn(f) = &m.items[0] else { panic!("expected a fn") };
+        assert_eq!(f.return_ty.as_deref(), Some("str"));
+        assert_eq!(f.error_ty.as_deref(), Some("AuthError"));
+        assert_eq!(f.provenance, vec!["token".to_string()]);
+        assert_eq!(f.effects, vec!["Clock".to_string()]);
     }
 }

@@ -14,9 +14,10 @@ date: 2026-11-04
 1. **Prohibition of `async` and `await` keywords (`Specified`)**:
    - The keywords `async` and `await` MUST NOT exist in Mente. The compiler does not reject them yet (they lex as identifiers); `examples/` is checked for `async fn` and `.await` by the directives below.
    - Higher-order combinators (`items.map(f)`, `filter(f)`) accept pure functions and `with IO, Net` functions uniformly without splitting the ecosystem into synchronous and asynchronous APIs.
-2. **Effect-driven static-stack hybrid fibers (`Specified`)**:
-   - Functions carrying `with IO` or `with Net` automatically compile to suspendable state/fiber frames backed by OS completion queues (`io_uring` on Linux, `IOCP` on Windows, `kqueue` on macOS).
-   - Using whole-program call-graph stack sizing (`@max_stack`), non-escaping child suspension frames are packed contiguously into the parent task's stack arena, avoiding per-call heap `Box<dyn Future>` allocations and Go-style dynamic stack-copying pauses.
+2. **Effect-driven stackful fibers (`Specified`)**:
+   - Functions carrying `with IO` or `with Net` may suspend at an effect operation; suspension is driven by OS completion queues (`io_uring` on Linux, `IOCP` on Windows, `kqueue` on macOS).
+   - Each task runs on its own stack: a range of virtual memory reserved when the task starts, committed page by page as it is touched, and ended by an unmapped guard page. Suspending a task keeps its stack where it is, so there is no heap-allocated future per call and no stack copying.
+   - A stack's size depends on no callee's body, so no caller's interface does either (`holographic-module.md`). Code that must run within a fixed stack declares `@max_stack(bytes)`, which composes from callees' declared bounds (`hardware-contracts.md`).
 3. **Lexical structured concurrency (`parallel (...)` and `TaskScope`, `Specified`; the lexer has a `Parallel` token and `examples/03_colorless_concurrency_and_effects.mn` uses the syntax)**:
    - Concurrent fan-out is expressed via lexical `parallel (...)` blocks:
      ```rust
@@ -34,6 +35,7 @@ date: 2026-11-04
 | Alternative considered | Reason for rejection |
 | :--- | :--- |
 | **`async fn` / `.await` function coloring (Rust / C# / TypeScript / Python)** | Splits libraries into incompatible sync/async worlds, requires `Pin<Box<dyn Future + Send + 'static>>` gymnastics in traits, and forces viral `Arc<Mutex<T>>` wrappers merely to satisfy `'static` bounds on spawned tasks. |
+| **Stackless fibers sized by whole-program call-graph analysis** | Packing every suspension frame into the parent's stack needs every callee's frame size, which is a property of its body: separate compilation, `dyn` calls, FFI and recursion all leave it unknown, and a body edit in one module would resize tasks in another. Reserved virtual-memory stacks cost address space, not memory, on 64-bit targets. |
 | **Unstructured `go f()` goroutines (Go)** | Detached background tasks easily leak when a parent request times out or errors early, causing silent memory/goroutine leaks and use-after-return hazards. |
 
 ## 3. Verification assertions

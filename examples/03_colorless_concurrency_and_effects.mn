@@ -19,11 +19,12 @@ pub struct OrderSummary {
 
 pub fn verify_token(token: str) -> str ! GatewayError {
   guard token.starts_with("Bearer ") and token.len > 10 else raise GatewayError.InvalidToken
-  token[7..token.len] // 自動來源追蹤：編譯器自動得知回傳切片借用自參數 token，免寫 <'a>！
+  token[7..token.len] // 回傳切片的來源由簽章決定：預設可借自每個 view 參數，這裡只有 token，所以不必寫 from
 }
 
-pub fn fetch_user_name(uid: str, in arena: Arena) -> str ! GatewayError with Net
-pub fn fetch_recent_items(uid: str, in arena: Arena) -> []str ! GatewayError with Net
+// 回傳值配置在呼叫端的 arena 裡，不借自 uid：用 from arena 寫明，呼叫端就不必讓 uid 活得跟結果一樣久
+pub fn fetch_user_name(uid: str, in arena: Arena) -> str ! GatewayError from arena with Net
+pub fn fetch_recent_items(uid: str, in arena: Arena) -> []str ! GatewayError from arena with Net
 
 /// 無 async / await 函數染色！
 /// 透過 T ! GatewayError（底層走 CPU Carry Flag 零空間開銷）與 with Net, Clock 代數效應驅動

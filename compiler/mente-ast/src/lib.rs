@@ -2,7 +2,7 @@
 //!
 //! Governed by `spec/holographic-module.md`.
 
-use mente_syntax::{tokenize, ItemDecl, ModuleFile, ParamMode};
+use mente_syntax::{tokenize, FnDecl, ItemDecl, ModuleFile, ParamMode};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DualSemanticHash {
@@ -10,6 +10,9 @@ pub struct DualSemanticHash {
     pub spec_hash: String,
     /// 128-bit hex fingerprint of canonicalized implementation bodies.
     pub body_hash: String,
+    /// 128-bit hex fingerprint of the bodies dependents instantiate or inline: `pub` functions
+    /// that are generic or marked `@inline`. Only a dependent that uses one of them depends on it.
+    pub instance_hash: String,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +60,7 @@ impl SemanticHasher {
 pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
     let mut spec_h = SemanticHasher::new(0x4D45_4E54_455F_5350); // "MENTE_SP"
     let mut body_h = SemanticHasher::new(0x4D45_4E54_455F_4244); // "MENTE_BD"
+    let mut inst_h = SemanticHasher::new(0x4D45_4E54_455F_494E); // "MENTE_IN"
 
     spec_h.update("module", &module.module_path);
 
@@ -113,6 +117,9 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
                     }
                     spec_h.update("ret", f.return_ty.as_deref().unwrap_or("Void"));
                     spec_h.update("err", f.error_ty.as_deref().unwrap_or(""));
+                    for p in &f.provenance {
+                        spec_h.update("from", p);
+                    }
                     for eff in &f.effects {
                         spec_h.update("effect", eff);
                     }
@@ -126,10 +133,17 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
                         spec_h.update("decreases", d);
                     }
                 }
-                // Implementation tokens go exclusively into body_hash
+                // Implementation tokens go into body_hash, and also into instance_hash
+                // when dependents compile against the body itself
                 body_h.update("fn_body", &f.name);
                 for tok in &f.body_tokens {
                     body_h.update("tok", &format!("{:?}", tok));
+                }
+                if f.is_pub && is_instantiable(f) {
+                    inst_h.update("fn_body", &f.name);
+                    for tok in &f.body_tokens {
+                        inst_h.update("tok", &format!("{:?}", tok));
+                    }
                 }
             }
             _ => {}
@@ -139,7 +153,14 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
     DualSemanticHash {
         spec_hash: spec_h.finish_hex(),
         body_hash: body_h.finish_hex(),
+        instance_hash: inst_h.finish_hex(),
     }
+}
+
+/// A function whose body dependents compile into themselves: generic (instantiated per use)
+/// or `@inline` (inlined across modules). No other body may reach a dependent.
+fn is_instantiable(f: &FnDecl) -> bool {
+    !f.generics.is_empty() || f.attrs.iter().any(|a| a.name == "inline")
 }
 
 /// Projects a `.mn` `ModuleFile` into its pure Holographic Spec Blueprint (`mn view --spec`).
@@ -152,7 +173,8 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
 
     out.push_str(&format!("// [Mente Holographic Spec Projection] module {}\n", module.module_path));
     out.push_str(&format!("// spec_hash: {}\n", hashes.spec_hash));
-    out.push_str(&format!("// body_hash: {}\n\n", hashes.body_hash));
+    out.push_str(&format!("// body_hash: {}\n", hashes.body_hash));
+    out.push_str(&format!("// instance_hash: {}\n\n", hashes.instance_hash));
     out.push_str(&format!("module {}\n\n", module.module_path));
 
     for item in &module.items {
@@ -246,6 +268,9 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                     } else {
                         out.push_str(&format!(" -> {}", ret));
                     }
+                }
+                if !f.provenance.is_empty() {
+                    out.push_str(&format!(" from {}", f.provenance.join(", ")));
                 }
                 if !f.effects.is_empty() {
                     out.push_str(&format!(" with {}", f.effects.join(", ")));
@@ -348,6 +373,48 @@ pub struct Point {
         let h2 = compute_dual_hashes(&parse_module(v2).unwrap());
 
         // A private field changes the struct's size, so dependents must recompile
+        assert_ne!(h1.spec_hash, h2.spec_hash);
+    }
+
+    #[test]
+    fn test_instantiable_bodies_go_into_instance_hash() {
+        let v1 = r#"
+module util.seq
+pub fn largest<T>(a: T, b: T) -> T {
+  if a > b { a } else { b }
+}
+pub fn total(n: u32) -> u32 {
+  n + 1
+}
+"#;
+        let generic_edit = v1.replace("if a > b { a } else { b }", "if b > a { b } else { a }");
+        let plain_edit = v1.replace("n + 1", "1 + n");
+        let h1 = compute_dual_hashes(&parse_module(v1).unwrap());
+        let hg = compute_dual_hashes(&parse_module(&generic_edit).unwrap());
+        let hp = compute_dual_hashes(&parse_module(&plain_edit).unwrap());
+
+        // A generic body is instantiated by dependents: editing it changes instance_hash only
+        assert_eq!(h1.spec_hash, hg.spec_hash);
+        assert_ne!(h1.instance_hash, hg.instance_hash);
+        // A plain body never reaches a dependent
+        assert_eq!(h1.spec_hash, hp.spec_hash);
+        assert_eq!(h1.instance_hash, hp.instance_hash);
+        assert_ne!(h1.body_hash, hp.body_hash);
+    }
+
+    #[test]
+    fn test_from_clause_is_part_of_spec_hash() {
+        let v1 = r#"
+module util.views
+pub fn pick(data: []u8, key: []u8) -> []u8 from data {
+  data
+}
+"#;
+        let v2 = v1.replace("from data", "from data, key");
+        let h1 = compute_dual_hashes(&parse_module(v1).unwrap());
+        let h2 = compute_dual_hashes(&parse_module(&v2).unwrap());
+
+        // Callers keep every named source alive, so widening provenance changes the interface
         assert_ne!(h1.spec_hash, h2.spec_hash);
     }
 }

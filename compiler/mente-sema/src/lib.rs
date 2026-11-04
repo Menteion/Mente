@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use mente_syntax::{BitStructDecl, FnDecl, ItemDecl, ModuleFile, StructDecl, TokenKind};
+use mente_syntax::{BitStructDecl, FnDecl, ItemDecl, ModuleFile, ParamMode, StructDecl, TokenKind};
 
 #[derive(Clone, Debug)]
 pub struct LayoutProof {
@@ -304,6 +304,25 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), String> {
     let is_total = f.attrs.iter().any(|a| a.name == "total");
     let is_branchless = f.attrs.iter().any(|a| a.name == "branchless");
 
+    // 0. A returned view may borrow only from a parameter the caller keeps: never an `own` one.
+    for source in &f.provenance {
+        match f.params.iter().find(|p| &p.name == source) {
+            None => {
+                return Err(format!(
+                    "E0311 [Provenance Error]: `from {}` in the signature of `{}` (line {}) names no parameter of `{}`.",
+                    source, f.name, f.line, f.name
+                ))
+            }
+            Some(p) if p.mode == ParamMode::Own => {
+                return Err(format!(
+                    "E0311 [Provenance Error]: `from {}` in the signature of `{}` (line {}) names an `own` parameter; a returned view cannot borrow from a value the callee consumes.",
+                    source, f.name, f.line
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+
     // 1. If marked @total and contains a `while` loop, it MUST contain a `decreases` termination measure!
     if is_total {
         let has_while = f.body_tokens.iter().any(|t| *t == TokenKind::While);
@@ -390,6 +409,23 @@ pub struct Holder {
 "#;
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
         assert!(errs[0].contains("E0417") && errs[0].contains("usize"));
+    }
+
+    #[test]
+    fn test_from_clause_must_name_a_kept_parameter() {
+        let ok = r#"
+module test.views
+pub fn head(data: []u8, n: usize) -> []u8 from data
+"#;
+        assert!(verify_module(&parse_module(ok).unwrap()).is_ok());
+
+        let unknown = ok.replace("from data", "from buffer");
+        let errs = verify_module(&parse_module(&unknown).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0311") && errs[0].contains("names no parameter"));
+
+        let consumed = ok.replace("head(data:", "head(own data:");
+        let errs = verify_module(&parse_module(&consumed).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0311") && errs[0].contains("`own` parameter"));
     }
 
     #[test]
