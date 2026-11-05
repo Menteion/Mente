@@ -21,7 +21,10 @@ This file is the switchboard, not the rulebook.
    - Never write `async` or `await` (use `with IO, Net` effects and `parallel (...)`).
    - Never write `.unwrap()` or `::<>` turbofish.
    - Never link upstream C++ `LLVM/MLIR` into `compiler/mente-mir` (keep `MirRegionSoA` self-contained pure Rust, indexed by `NodeId(u32)`). `mente-mir` has no dependencies; native code goes through Cranelift, a pure-Rust crate that only `mente-codegen` may depend on.
-3. **Four Mandatory Engineering Guardrails (Phases 2–3)**:
+3. **English-only repository text**:
+   - Code, comments, documentation, examples, commit messages and pull request text are written in English, even when the conversation with Norman is in Chinese.
+   - `test_repository_text_is_english` in `compiler/mente-cli` fails on any CJK character in a file of the working tree (`.git`, `target` and `node_modules` aside). Commit messages and pull request text are outside its reach and follow this rule by hand. A future fixture that must hold non-English text (a lexer test of Unicode string literals, say) goes in a directory the test is changed to skip, named in the test.
+4. **Four Mandatory Engineering Guardrails (Phases 2–3)**:
    - **Guardrail #1 (Solver Predictability — [`ghost-contracts-and-totality.md`](spec/ghost-contracts-and-totality.md))**: Tier-1 stays strictly within polynomial-time Interval + Octagon/DBM ($\pm x \pm y \le c$) domains and MUST emit a concrete counterexample valuation plus a copy-pasteable 1-line `guard` prescription whenever an obligation fails.
    - **Guardrail #2 (Dual-Track Codegen — [`mir-and-codegen.md`](spec/mir-and-codegen.md))**: Complete all high-level semantic optimizations (bounds erasure, Ghost Contract `Assume`, `AoSoA` offsets, `@branchless` select) in `MirRegionSoA` before lowering to Cranelift or any later backend.
    - **Guardrail #3 (Provenance Escape Diagnostics — [`regions-and-pools.md`](spec/regions-and-pools.md))**: Never expose internal region IDs in errors; `E0310` MUST prescribe either `in arena: Arena` or `Pool<T>` / `Handle<T>`.

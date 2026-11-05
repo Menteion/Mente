@@ -1,22 +1,25 @@
 // ============================================================================
-// 標本 01：精煉值域型別、零成本物理量綱與 SMT 幽靈契約
-// 規格：spec/refinement-and-fixed-point.md、spec/dimensional-units.md、spec/ghost-contracts-and-totality.md
+// Example 01: refinement intervals, zero-cost physical units, and two-tier ghost contracts
+// Specs: spec/refinement-and-fixed-point.md, spec/dimensional-units.md, spec/ghost-contracts-and-totality.md
 // ============================================================================
 module examples.refinement_and_units
 
-// 1. 零成本物理量綱（編譯期推導量綱與比例，生成機器碼時抹除為純暫存器浮點數；ms 與 sec 量綱相同、比例不同，換算只能用 .to<U>()）
+// 1. Zero-cost physical units. The compiler derives each quantity's dimension and scale, and erases
+//    both from the machine code, leaving plain floating-point registers. ms and sec share a dimension
+//    but not a scale, so converting between them is always written as .to<U>().
 unit sec, ms = 0.001 * sec
 unit meter, kg
 unit newton = kg * meter / (sec * sec)
 unit joule  = newton * meter
 
-/// 計算動能：編譯器自動驗證輸入量綱與輸出 <joule> 完全吻合
+/// Kinetic energy: the compiler checks that the input units multiply out to exactly <joule>.
 @branchless
 pub fn kinetic_energy(mass: f64[0.0..=1e12]<kg>, vel: f64<meter / sec>) -> f64<joule>
   ensures result >= 0.0_joule
 = 0.5 * mass * vel * vel
 
-// 2. 精煉值域型別與依賴切片索引（編譯期 100% 證明不越界，0 條執行期邊界檢查指令！）
+// 2. Refinement intervals and dependent slice indexing: every index below is proven in bounds at
+//    compile time, so no runtime bounds check is emitted.
 pub struct RingWindow<T, comptime CAP: usize = 64> {
   pub buf:  [CAP]T
   pub head: usize[0..CAP] = 0
@@ -29,7 +32,8 @@ pub struct RingWindow<T, comptime CAP: usize = 64> {
   }
 }
 
-/// 構造性必終止證明（@total + decreases）：編譯期 100% 數學證明絕不可能發生無窮迴圈或越界
+/// Constructive termination (@total + decreases): the compiler proves the loop ends and that
+/// every index stays in bounds.
 @total
 pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   requires items.len > 0
@@ -38,9 +42,9 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   var hi: usize[0..=items.len] = items.len
 
   while lo < hi decreases hi - lo {
-    // midpoint 的契約（requires lo < hi，ensures lo <= result and result < hi）讓 Tier-1 只靠 octagon
-    // 就推得出 mid 落在 [0..items.len)，因此下方的 items[mid] 免除邊界檢查。
-    // 直接寫 lo + (hi - lo) / 2 的話，除以 2 超出 octagon 能表達的範圍，證明會失敗。
+    // midpoint's contract (requires lo < hi, ensures lo <= result and result < hi) lets Tier 1
+    // prove mid in [0..items.len) with octagons alone, so items[mid] below needs no bounds check.
+    // Writing lo + (hi - lo) / 2 directly would fail: dividing by 2 is outside what octagons hold.
     val mid: usize[0..items.len] = midpoint(lo, hi)
     val current = items[mid]
 
@@ -50,11 +54,11 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   none
 }
 
-// 3. @example：規格上由 mn test 執行；目前 mn test 還不會執行 @example 主體
-@example("物理量綱換算與無越界二分搜尋") {
+// 3. @example: specified to run under mn test; mn test does not execute @example bodies yet.
+@example("unit conversion and an in-bounds binary search") {
   val d: f64<meter> = 200.0_meter
-  val t: f64<sec>   = 9.5_sec + 500.0_ms.to<sec>()   // 不同比例的單位不能直接相加，換算要明寫：0.5_sec
-  val v = d / t                            // 自動推導型別為 f64<meter / sec> (20.0)
+  val t: f64<sec>   = 9.5_sec + 500.0_ms.to<sec>()   // units of different scale never add directly: 0.5_sec
+  val v = d / t                            // inferred as f64<meter / sec> (20.0)
   val e = kinetic_energy(2.0_kg, v)
   assert(e == 400.0_joule)
 

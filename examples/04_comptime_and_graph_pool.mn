@@ -1,11 +1,12 @@
 // ============================================================================
-// 標本 04：世代安全物件池（Pool / Handle）與統一語法 comptime 元編程
-// 規格：spec/regions-and-pools.md、spec/traits-and-generics.md、spec/comptime-and-ffi.md
+// Example 04: a generational object pool (Pool / Handle) and comptime metaprogramming in plain .mn
+// Specs: spec/regions-and-pools.md, spec/traits-and-generics.md, spec/comptime-and-ffi.md
 // ============================================================================
 module examples.comptime_and_graph_pool
 
-// 1. 使用世代池 Pool<T> 與 64-bit Handle<T> 輕鬆建構雙向/環狀圖（0 個 unsafe、0 引用計數洩漏！）
-// 場景節點會長期存放在 Pool 裡，名稱用擁有記憶體的 String，不存 str 視圖
+// 1. A generational Pool<T> with 64-bit Handle<T> values builds a two-way, even cyclic, graph with
+//    no unsafe code and no reference-count leaks.
+// Scene nodes live in the pool for a long time, so a node owns its name as a String, not a str view.
 pub struct SceneNode {
   pub name: String
   pub parent: ?Handle<SceneNode> = none
@@ -17,20 +18,21 @@ pub fn link_parent_child(
   parent_h: Handle<SceneNode>,
   child_h: Handle<SceneNode>,
 ) {
-  // pool[mut h] 是 ?SceneNode 的可變投影：handle 過期時為 none，?. 讓這一步什麼都不做
+  // pool[mut h] is a mutable ?SceneNode projection: none when the handle is stale, and ?. then does nothing
   pool[mut parent_h]?.children.push(child_h)
   pool[mut child_h]?.parent = parent_h
 }
 
-// 2. 統一語法的 comptime 元編程：
-//    不學外星巨集語法！在 comptime 中，型別 Type.of<T>() 就是普通結構，直接用 for 迴圈走訪欄位！
+// 2. comptime metaprogramming in the language itself:
+//    no separate macro language. At compile time Type.of<T>() is an ordinary value, and a plain
+//    for loop walks its fields.
 pub trait ByteSink {
   fn write_u64(mut self, v: u64)
   fn write_str(mut self, s: str)
 }
 
 pub fn encode_record<T>(mut sink: ByteSink, record: T) {
-  // 編譯期展開為零成本的直線欄位寫入指令
+  // Expands at compile time into straight-line field writes, with no runtime reflection
   comptime for field in Type.of<T>().fields {
     comptime if field.ty == u64 {
       sink.write_u64(record.(field.name))
@@ -46,14 +48,14 @@ pub struct TelemetryEvent {
   pub latency:  u64
 }
 
-@example("零 unsafe 雙向場景樹與 comptime 自動編碼") {
+@example("a two-way scene tree without unsafe code") {
   var scene = Pool<SceneNode>.new()
   val root  = scene.insert(SceneNode { name: String.from("Root") })
   val cam   = scene.insert(SceneNode { name: String.from("Camera") })
 
   link_parent_child(mut scene, root, cam)
 
-  // scene[h] 是 ?SceneNode：先用 guard 收窄，才能讀欄位
+  // scene[h] is a ?SceneNode: narrow it with guard before reading a field
   guard val root_node = scene[root] else panic("root is live")
   guard val cam_node  = scene[cam] else panic("camera is live")
   assert(root_node.children.len == 1)

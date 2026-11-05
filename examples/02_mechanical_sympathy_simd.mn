@@ -1,10 +1,11 @@
 // ============================================================================
-// 標本 02：硬體機械同理心、64B 快取行契約、多態記憶體幾何與 @branchless / @simd
-// 規格：spec/refinement-and-fixed-point.md、spec/mutable-value-semantics.md、spec/morphic-layouts.md、spec/hardware-contracts.md
+// Example 02: mechanical sympathy, 64-byte cache-line contracts, morphic layouts, @branchless and @simd
+// Specs: spec/refinement-and-fixed-point.md, spec/mutable-value-semantics.md, spec/morphic-layouts.md, spec/hardware-contracts.md
 // ============================================================================
 module examples.mechanical_sympathy_simd
 
-// 1. 位元級打包結構體（bitstruct）：精確到每一個 Bit，編譯器自動合成零分支遮罩指令
+// 1. Bit-exact packed struct (bitstruct): every bit is placed explicitly, and each field's type is
+//    exactly as wide as its range; field access compiles to shifts and masks, with no branches.
 pub bitstruct SpikeHeader : u32 {
   @bits(0..4)   pub region_id:  u4
   @bits(4..7)   pub priority:   u3
@@ -12,7 +13,7 @@ pub bitstruct SpikeHeader : u32 {
   @bits(8..32)  pub target_idx: u24
 }
 
-// 2. 64-Byte CPU Cache-Line 逐位元組契約結構體（跨 x86-64 / ARM64 100% 位元級對齊）
+// 2. A byte-exact 64-byte cache-line struct: the same bytes, in the same order, on every target.
 @layout(size: 64, align: 64)
 pub struct DeterministicCell {
   @bytes(0..8)   pub id:          u64
@@ -23,8 +24,8 @@ pub struct DeterministicCell {
   @bytes(24..64) pub dendrite_w:  [20]q1.15
 }
 
-// 3. 微架構零分支保證（@branchless）+ 零分配保證（@no_alloc）
-//    若編譯器產生任何一條條件跳轉指令 (jmp/br)，編譯期將直接視為硬性錯誤攔截！
+// 3. No data-dependent branch (@branchless) and no heap allocation (@no_alloc).
+//    A conditional jump left in the emitted machine code is a compile-time error (E0403).
 @branchless
 @no_alloc
 pub fn integrate_cell(mut cell: DeterministicCell, drive: q16.16, leak_shift: u32[1..=8]) -> bool {
@@ -32,12 +33,12 @@ pub fn integrate_cell(mut cell: DeterministicCell, drive: q16.16, leak_shift: u3
   val next_v = leaked + drive
   val fired  = next_v >= cell.threshold
 
-  // 編譯器在 MIR RVSDG 層 100% 將此條件賦值編譯為單週期 cmov / csel 指令
+  // Lowered in MIR to a select over integers, which the backend emits as cmov / csel
   cell.potential = if fired { cell.resting } else { next_v }
   fired
 }
 
-// 4. 多態記憶體幾何（Morphic Layouts）：結構體只定義一次，容器一鍵切換為 Tiled (AoSoA)
+// 4. Morphic layouts: the record is declared once, and the container alone chooses Tiled (AoSoA).
 pub struct Particle {
   pub x: f32
   pub y: f32
@@ -48,12 +49,14 @@ pub struct Particle {
   pub mass: f32
 }
 
-/// 資料平行 + SIMD：每個 worker 分到若干個 16 元素的 tile，每個 tile 的一個 f32 欄位剛好是一條 64-byte 快取行；
-/// 經 Cranelift 用 4 個 128-bit 向量暫存器運算，有 AVX-512 的後端則是 1 個 ZMM 暫存器
+/// Data parallelism plus SIMD: each worker takes whole 16-element tiles, and one f32 field of a
+/// tile is exactly one 64-byte cache line. Through Cranelift that is four 128-bit vector
+/// registers; a backend with AVX-512 would use one ZMM register.
 @no_alloc
 pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0]) {
-  // 儘管 batch 在物理記憶體中是以 16-lane AoSoA 微磚塊排列以達成零重排 SIMD 載入，
-  // 開發者依然使用最直觀的欄位語法撰寫；p 依 copy-in/copy-out 取得，編譯器直接對欄位陣列向量化。
+  // batch is laid out in memory as 16-lane AoSoA tiles for shuffle-free SIMD loads, yet the code
+  // still reads as plain field access: p is a copy-in/copy-out projection, and the compiler
+  // vectorizes the loop over the field arrays directly.
   parallel_for p in mut batch @simd(lanes: 16) {
     p.x += p.vx * dt
     p.y += p.vy * dt
@@ -61,7 +64,7 @@ pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0])
   }
 }
 
-@example("64B 快取行無分支積分與 Tiled AoSoA 向量化更新") {
+@example("branch-free cell integration on a 64-byte cache line") {
   var cell = DeterministicCell {
     id: 1,
     potential: 0.5_q16_16,
@@ -71,7 +74,7 @@ pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0])
     dendrite_w: [0.0_q1_15; 20],
   }
 
-  // 呼叫端顯式標註 mut，一眼看出 cell 在此行被原地修改
+  // mut at the call site shows at a glance that this line changes cell in place
   val did_fire = integrate_cell(mut cell, 0.75_q16_16, 2)
   assert(did_fire and cell.potential == 0.0_q16_16)
 }
