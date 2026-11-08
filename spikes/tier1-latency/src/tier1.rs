@@ -217,6 +217,23 @@ fn conjuncts(e: &Expr, out: &mut Vec<Expr>) {
     }
 }
 
+/// The non-strict form of a strict comparison (`i < n` gives `i <= n`), a candidate a loop's
+/// condition also proposes (`loop-condition-candidates` in `docs/design-review.md`).
+fn non_strict(e: &Expr) -> Option<Expr> {
+    let ExprKind::Binary(op, a, b) = &e.kind else {
+        return None;
+    };
+    let weak = match op {
+        BinOp::Lt => BinOp::Le,
+        BinOp::Gt => BinOp::Ge,
+        _ => return None,
+    };
+    Some(Expr {
+        kind: ExprKind::Binary(weak, a.clone(), b.clone()),
+        span: e.span,
+    })
+}
+
 /// The conditions of the `guard`s in a loop body, which are candidate loop-head facts.
 fn guard_conditions(ss: &[Stmt], out: &mut Vec<Expr>) {
     for s in ss {
@@ -1033,13 +1050,18 @@ impl Fx {
             }
         }
         // Candidates come only from the loop's text: written invariants first, then the
-        // condition's conjuncts and the guards' conditions.
+        // condition's conjuncts with the non-strict form of each strict one, and the guards'
+        // conditions.
         let mut cands: Vec<Expr> = Vec::new();
         for i in invariants {
             conjuncts(i, &mut cands);
         }
         let written = cands.len();
-        conjuncts(cond, &mut cands);
+        let mut from_cond = Vec::new();
+        conjuncts(cond, &mut from_cond);
+        let weakened: Vec<Expr> = from_cond.iter().filter_map(non_strict).collect();
+        cands.extend(from_cond);
+        cands.extend(weakened);
         guard_conditions(body, &mut cands);
 
         let was = self.recording;
@@ -1420,8 +1442,8 @@ mod tests {
 
     #[test]
     fn test_houdini_keeps_the_inductive_candidates_only() {
-        // `lo <= i` and `i <= hi` are inductive and written; `i < hi` (the condition) is not,
-        // and is dropped, so without the written `i <= hi` nothing bounds `i` after the loop.
+        // `lo <= i` and `i <= hi` are inductive; `i < hi` (the condition) is not, and is
+        // dropped. Its non-strict form `i <= hi` is a candidate too, so it need not be written.
         let ok = &check(
             "fn f(lo: usize[0..64], hi: usize[0..=64]) -> usize[0..=64]\n    requires lo < hi\n{\n    var i: usize = lo\n    while i < hi invariant lo <= i invariant i <= hi {\n        i += 1\n    }\n    return i\n}\n",
         )[0];
@@ -1429,7 +1451,12 @@ mod tests {
         let unwritten = &check(
             "fn f(lo: usize[0..64], hi: usize[0..=64]) -> usize[0..=64]\n    requires lo < hi\n{\n    var i: usize = lo\n    while i < hi invariant lo <= i {\n        i += 1\n    }\n    return i\n}\n",
         )[0];
-        assert_eq!(must_failures(unwritten), 1, "{unwritten:?}");
+        assert_eq!(must_failures(unwritten), 0, "{unwritten:?}");
+        // A non-strict condition proposes nothing weaker, and `i + 1 <= hi` is not inductive.
+        let unbounded = &check(
+            "fn f(lo: usize[0..64], hi: usize[0..=64]) -> usize[0..=64]\n    requires lo < hi\n{\n    var i: usize = lo\n    while i + 1 <= hi invariant lo <= i {\n        i += 1\n    }\n    return i\n}\n",
+        )[0];
+        assert_eq!(must_failures(unbounded), 1, "{unbounded:?}");
         let bad = &check(
             "fn f(lo: usize[0..64], hi: usize[0..=64]) -> usize\n    requires lo < hi\n{\n    var i: usize = lo\n    while i < hi invariant i == lo {\n        i += 1\n    }\n    return i\n}\n",
         )[0];

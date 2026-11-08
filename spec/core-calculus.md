@@ -31,6 +31,7 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
    - Comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) compare the exact values, across integer types.
 5. `Specified` **The type of an unannotated binding** ([`integer-inference`](../docs/design-review.md#integer-inference)):
    - `val x = e` and `var x = e` take `e`'s type. When the integer operands of `e` all have one type, `e` has that type, so `a + b` with `a` and `b` of type `u8` is a `u8`, and a sum above 255 traps at the binding.
+   - A binding takes a refined type only when it states one ([`refinement-inference`](../docs/design-review.md#refinement-inference)): an expression's type is the plain type of its operands, so with `lo: usize[0..64]`, `val m = lo + 1` is a `usize`. Tier 1 still knows from its facts that `m <= 64`.
    - An integer literal takes the type of the other operands, or of the place it is narrowed into; an expression of literals alone is an `i64`. A literal with a suffix (`255_u8`) has the suffix's type.
    - When `e`'s integer operands have different types, the binding must state its type. The diagnostic suggests the smallest standard type that holds both operands' ranges: `u32` for a `u8` and a `u32`, `i64` for an `i32` and a `u32`.
 6. `Specified` **Bindings, blocks and statements**:
