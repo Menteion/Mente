@@ -6,6 +6,7 @@
 //! [`Diagnostic`] with its code, its span and, where one is certain or plausible, a fix
 //! (`spec/diagnostics.md`).
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
@@ -236,18 +237,18 @@ pub fn verify_explicit_struct_layout(
             });
         };
         let bytes = field_attr(f, "bytes").map_or(f.name_span, |a| a.span);
-        if start != cursor {
-            let what = if start > cursor {
-                format!(
-                    "a gap before field `{}`: it starts at byte {}, but the previous field ends at byte {}",
-                    f.name, start, cursor
-                )
-            } else {
-                format!(
-                    "field `{}` overlaps the previous field: it starts at byte {}, before byte {} where that field ends",
-                    f.name, start, cursor
-                )
-            };
+        let what = match start.cmp(&cursor) {
+            Ordering::Equal => None,
+            Ordering::Greater => Some(format!(
+                "a gap before field `{}`: it starts at byte {}, but the previous field ends at byte {}",
+                f.name, start, cursor
+            )),
+            Ordering::Less => Some(format!(
+                "field `{}` overlaps the previous field: it starts at byte {}, before byte {} where that field ends",
+                f.name, start, cursor
+            )),
+        };
+        if let Some(what) = what {
             return Err(Diagnostic::error(
                 "E0413",
                 bytes,
@@ -506,12 +507,12 @@ pub fn verify_bitstruct_layout(
     for f in &bs.fields {
         let (start, end) = f.bit_range;
         let bits = f.bits_span.unwrap_or(f.name_span);
-        if start != cursor {
-            let what = if start > cursor {
-                "a gap"
-            } else {
-                "an overlap"
-            };
+        let what = match start.cmp(&cursor) {
+            Ordering::Equal => None,
+            Ordering::Greater => Some("a gap"),
+            Ordering::Less => Some("an overlap"),
+        };
+        if let Some(what) = what {
             return Err(Diagnostic::error(
                 "E0421",
                 bits,
@@ -1203,5 +1204,80 @@ pub struct Event {
             (d.code, d.fixes[0].edits[0].replacement.as_str()),
             ("E0420", "u16")
         );
+    }
+
+    #[test]
+    fn test_gap_and_overlap_are_told_apart() {
+        let (d, _) = diagnosed(&layout(
+            "@layout(size: 8, align: 4)",
+            "  @bytes(0..4) pub a: u32\n  @bytes(6..8) pub b: u16\n",
+        ));
+        assert!(d.message.contains("has a gap before field `b`: it starts at byte 6, but the previous field ends at byte 4"), "{}", d);
+        let (d, _) = diagnosed(&layout(
+            "@layout(size: 8, align: 4)",
+            "  @bytes(0..4) pub a: u32\n  @bytes(2..6) pub b: u32\n",
+        ));
+        assert!(
+            d.message.contains(
+                "field `b` overlaps the previous field: it starts at byte 2, before byte 4"
+            ),
+            "{}",
+            d
+        );
+        let bits = |b: &str| {
+            format!("module t\npub bitstruct B : u8 {{\n  @bits(0..4) pub a: u4\n  @bits({}) pub b: u4\n}}\n", b)
+        };
+        let (d, _) = diagnosed(&bits("5..9"));
+        assert!(
+            d.message
+                .contains("has a gap before field `b`: it starts at bit 5"),
+            "{}",
+            d
+        );
+        let (d, _) = diagnosed(&bits("3..7"));
+        assert!(
+            d.message
+                .contains("has an overlap before field `b`: it starts at bit 3"),
+            "{}",
+            d
+        );
+    }
+
+    #[test]
+    fn test_fixes_are_offered_only_when_they_fit() {
+        // E0416: no fields, or fields ending off the alignment, leave no size to suggest.
+        let (d, _) = diagnosed(&layout("@layout(size: 8, align: 4)", ""));
+        assert_eq!((d.code, d.fixes.len()), ("E0416", 0));
+        let (d, _) = diagnosed(&layout(
+            "@layout(size: 8, align: 4)",
+            "  @bytes(0..4) pub a: u32\n  @bytes(4..6) pub b: u16\n",
+        ));
+        assert_eq!((d.code, d.fixes.len()), ("E0416", 0));
+
+        // E0424: an integer field takes the width of its range, keeping its sign; one bit is a
+        // bool; a nested bitstruct cannot change width.
+        let field = |ty: &str, range: &str| {
+            format!("module t\npub bitstruct In : u8 {{\n  @bits(0..8) pub r: u8\n}}\npub bitstruct B : u16 {{\n  @bits({}) pub f: {}\n  @bits(8..16) pub rest: u8\n}}\n", range, ty)
+        };
+        for (ty, range, fix) in [
+            ("u2", "0..8", Some("u8")),
+            ("i2", "0..8", Some("i8")),
+            ("bool", "0..8", Some("u8")),
+            ("u4", "0..1", None),
+            ("In", "0..4", None),
+        ] {
+            let src = if ty == "u4" {
+                String::from("module t\npub bitstruct B : u8 {\n  @bits(0..1) pub on: u4\n  @bits(1..8) pub r: u7\n}\n")
+            } else {
+                field(ty, range)
+            };
+            let (d, _) = diagnosed(&src);
+            assert_eq!(d.code, "E0424", "{}", d);
+            let got = d.fixes.first().map(|f| f.edits[0].replacement.as_str());
+            match (ty, fix) {
+                ("u4", _) => assert_eq!(got, Some("bool"), "{}", d),
+                (_, expected) => assert_eq!(got, expected, "{} in {}: {}", ty, range, d),
+            }
+        }
     }
 }

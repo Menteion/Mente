@@ -135,7 +135,6 @@ impl fmt::Display for Diagnostic {
 /// A span that covers no text, where an edit inserts.
 pub fn insertion_point(at: Span) -> Span {
     Span {
-        start: at.start,
         end: at.start,
         ..at
     }
@@ -308,11 +307,8 @@ pub fn apply_fix(src: &str, fix: &Fix) -> Result<String, String> {
         if start < at {
             return Err(format!("edits overlap at byte {}", start));
         }
-        if start > end
-            || end > src.len()
-            || !src.is_char_boundary(start)
-            || !src.is_char_boundary(end)
-        {
+        // `is_char_boundary` is false past the end, so it bounds `end` too.
+        if start > end || !src.is_char_boundary(start) || !src.is_char_boundary(end) {
             return Err(format!("edit {}..{} lies outside the source", start, end));
         }
         out.push_str(&src[at..start]);
@@ -344,6 +340,10 @@ mod tests {
         // `é` is two bytes and one column.
         assert_eq!(line_col(src, src.find('f').unwrap()), (2, 5));
         assert_eq!(line_col(src, src.len() + 10), (3, 1));
+        // An offset inside a character counts as the character's start.
+        let e = src.find('é').unwrap();
+        assert_eq!(line_col(src, e + 1), line_col(src, e));
+        assert_eq!(insertion_point(span(3, 9)), span(3, 3));
     }
 
     #[test]
@@ -422,7 +422,11 @@ mod tests {
             ">abXYef"
         );
         assert!(apply_fix("abcdef", &fix(vec![(1, 4, "x"), (3, 5, "y")])).is_err());
+        // Each way an edit can fall outside the source, on its own.
+        assert!(apply_fix("abcdef", &fix(vec![(3, 2, "x")])).is_err());
         assert!(apply_fix("abc", &fix(vec![(2, 9, "x")])).is_err());
-        assert!(apply_fix("é", &fix(vec![(1, 1, "x")])).is_err());
+        assert!(apply_fix("é", &fix(vec![(1, 2, "x")])).is_err());
+        assert!(apply_fix("é", &fix(vec![(0, 1, "x")])).is_err());
+        assert_eq!(apply_fix("é", &fix(vec![(0, 2, "e")])).unwrap(), "e");
     }
 }

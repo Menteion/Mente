@@ -263,3 +263,29 @@ fn test_mn_explain_prints_the_catalogue() {
     assert_eq!(unknown.status.code(), Some(1));
     assert!(text(&unknown.stderr).contains("`E9999` is not a Mente error code"));
 }
+
+#[test]
+fn test_mn_help_lists_every_command() {
+    for args in [&["--help"][..], &[][..]] {
+        let run = mn(&repo_root(), args);
+        let out = text(&run.stdout);
+        assert!(run.status.success());
+        for command in [
+            "mn view --spec",
+            "mn check [--json]",
+            "mn test [--mutate]",
+            "mn spec",
+            "mn explain [code]",
+        ] {
+            assert!(
+                out.contains(command),
+                "`{}` missing from:\n{}",
+                command,
+                out
+            );
+        }
+    }
+    let unknown = mn(&repo_root(), &["build"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(text(&unknown.stderr).contains("Unknown command `build`"));
+}

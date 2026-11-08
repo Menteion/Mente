@@ -1789,6 +1789,26 @@ pub fn after(y: i32) -> i32 = y
     }
 
     #[test]
+    fn test_a_type_span_covers_every_token_of_the_type() {
+        let code = "module m
+pub struct S {
+  buf: [4]u8
+  index: Map<str, u32> = Map.empty()
+}
+";
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Struct(s) = &m.items[0] else {
+            panic!("expected a struct")
+        };
+        let types: Vec<_> = s
+            .fields
+            .iter()
+            .map(|f| &code[f.ty_span.start..f.ty_span.end])
+            .collect();
+        assert_eq!(types, vec!["[4]u8", "Map<str, u32>"]);
+    }
+
+    #[test]
     fn test_declarations_keep_their_spans() {
         let code = "module m\n@layout(size: 4, align: 4)\npub struct S {\n  @bytes(0..4) pub v: u32\n}\npub bitstruct B : u8 {\n  @bits(0..8) pub raw: u8\n}\npub fn f(a: []u8) -> []u8 from a\n";
         let m = parse_module(code).unwrap();
