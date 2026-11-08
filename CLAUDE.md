@@ -53,6 +53,9 @@ cargo run --bin mn -- test --mutate
 
 # 4. Inspect Holographic Spec Blueprint projection (strips bodies, shows spec_hash/body_hash)
 cargo run --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+
+# 5. Run the pinned @spec-family checks: directives, prove, claims, the spec graph and briefs (`npm ci` once first)
+npm run verify:docs
 ```
 
 ---
