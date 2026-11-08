@@ -2,6 +2,8 @@
 
 **The design of a universal, statically verified, hardware-sympathetic programming language (`.mn`), with an early prototype compiler and its own structure-of-arrays intermediate representation (`MIR`).**
 
+Its goal is to be the general-purpose language best suited to AI agents writing code, with people reviewing the result and deciding whether to trust it ([spec/philosophy.md](spec/philosophy.md)).
+
 The highlights below are the language's design. Most of it is not implemented: [`docs/STATUS.md`](docs/STATUS.md) says what the compiler does today, and [`docs/design-review.md`](docs/design-review.md) lists the design problems still being corrected.
 
 | Resource | Entry point |

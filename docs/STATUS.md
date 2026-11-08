@@ -11,8 +11,8 @@ date: 2026-11-04
 
 | Field | Value |
 | :--- | :--- |
-| Current milestone | Phase 1 in progress: the declaration parser, hashing, projection and layout provers exist; function bodies are not parsed |
-| Immediate next step | Phase 0 (`@spec-family`), then Phase 1's body parser and type checker, as written in [`ROADMAP.md`](../ROADMAP.md). The design pass of [`docs/design-review.md`](design-review.md) is complete apart from the entries it leaves open |
+| Current milestone | Before M0: the declaration parser, the digests and projection, and the layout provers exist; function bodies are not parsed |
+| Immediate next step | M0a (the documentation tools, CI and Rust hygiene), then M0b (design closure for M1), then M1, as [`ROADMAP.md`](../ROADMAP.md) sets out. The register entries M1 needs are decided during M0, in [`docs/design-review.md`](design-review.md) |
 | Specification | One single-decision file per mechanism in [`spec/`](../spec/README.md), plus `README.md` and `philosophy.md`; `cargo run --bin mn -- spec` prints the current file and directive counts |
 | Compiler crates | 6 Rust crates (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) |
 | Showcase `.mn` modules | [`examples/`](../examples/README.md). `mn check` verifies their declarations only; their bodies show the intended language and are not checked |
