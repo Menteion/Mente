@@ -834,6 +834,8 @@ impl<'a> Parser<'a> {
             match tok.kind {
                 TokenKind::LBracket | TokenKind::Lt | TokenKind::LParen => bracket_depth += 1,
                 TokenKind::RBracket | TokenKind::Gt | TokenKind::RParen => bracket_depth -= 1,
+                // Before the `=`, a `>>` can only close two type-argument lists.
+                TokenKind::Shr if eq_byte.is_none() => bracket_depth -= 2,
                 TokenKind::Eq if bracket_depth <= 0 && eq_byte.is_none() => {
                     eq_byte = Some((tok.span.start, tok.span.end));
                 }
@@ -1099,6 +1101,8 @@ impl<'a> Parser<'a> {
                     match tok.kind {
                         TokenKind::Lt => angle_depth += 1,
                         TokenKind::Gt => angle_depth -= 1,
+                        // `List<List<u8>>` closes two type-argument lists with one `>>` token.
+                        TokenKind::Shr => angle_depth -= 2,
                         TokenKind::LBracket => bracket_depth += 1,
                         TokenKind::RBracket => bracket_depth -= 1,
                         TokenKind::Bang if angle_depth == 0 && bracket_depth == 0 => {
@@ -1175,9 +1179,14 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut res = Vec::new();
     let mut depth = 0i32;
     let mut last = 0usize;
+    let mut prev = ' ';
     for (idx, ch) in s.char_indices() {
+        let after = prev;
+        prev = ch;
         match ch {
             '<' | '[' | '(' => depth += 1,
+            // The `>` of a function type's `->` closes nothing.
+            '>' if after == '-' => {}
             '>' | ']' | ')' => depth -= 1,
             ',' if depth == 0 => {
                 res.push(&s[last..idx]);
@@ -1224,5 +1233,232 @@ pub fn verify(token: str, key: str) -> str ! AuthError from token with Clock
         assert_eq!(f.error_ty.as_deref(), Some("AuthError"));
         assert_eq!(f.provenance, vec!["token".to_string()]);
         assert_eq!(f.effects, vec!["Clock".to_string()]);
+    }
+
+    fn only_fn(code: &str) -> FnDecl {
+        let m = parse_module(code).expect("should parse");
+        match m.items.as_slice() {
+            [ItemDecl::Fn(f)] => f.clone(),
+            other => panic!("expected one fn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_struct_fields_defaults_and_invariants_are_parsed() {
+        let code = r#"
+module demo.shapes
+pub struct Window<T> {
+  pub lo: u32 = 0
+  hi: u32
+  index: Map<str, List<u32>> = Map.empty()
+  invariant {
+    lo <= hi
+    // a comment is not a clause
+    hi < 1024
+  }
+}
+"#;
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
+        assert_eq!((s.name.as_str(), s.generics.as_str(), s.is_pub), ("Window", "<T>", true));
+        let fields: Vec<_> = s.fields.iter().map(|f| (f.is_pub, f.name.as_str(), f.ty.as_str(), f.default_expr.as_deref())).collect();
+        assert_eq!(
+            fields,
+            vec![
+                (true, "lo", "u32", Some("0")),
+                (false, "hi", "u32", None),
+                (false, "index", "Map<str, List<u32>>", Some("Map.empty()")),
+            ]
+        );
+        assert_eq!(s.invariants, vec!["lo <= hi".to_string(), "hi < 1024".to_string()]);
+    }
+
+    #[test]
+    fn test_enum_variants_are_parsed() {
+        let code = "module demo.net\npub enum Packet { Ack, Data(bytes: []u8), Close }\n";
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Enum(e) = &m.items[0] else { panic!("expected an enum") };
+        assert_eq!((e.name.as_str(), e.is_pub), ("Packet", true));
+        assert_eq!(e.variants, vec!["Ack", "Data(bytes: []u8)", "Close"]);
+    }
+
+    #[test]
+    fn test_with_clause_lists_effects() {
+        let f = only_fn("module demo.io\npub fn fetch(url: str) -> str ! NetError with Net, Clock, IO\n");
+        assert_eq!(f.effects, vec!["Net", "Clock", "IO"]);
+        let pure = only_fn("module demo.io\npub fn add(a: i32, b: i32) -> i32 = a + b\n");
+        assert!(pure.effects.is_empty());
+    }
+
+    #[test]
+    fn test_unit_declarations_keep_their_text() {
+        let code = "module demo.units\nunit sec, ms = 0.001 * sec\nunit newton = kg * meter / (sec * sec)\n";
+        let m = parse_module(code).unwrap();
+        let texts: Vec<_> = m
+            .items
+            .iter()
+            .map(|i| match i {
+                ItemDecl::Unit(u) => u.raw_text.as_str(),
+                other => panic!("expected a unit, got {:?}", other),
+            })
+            .collect();
+        assert_eq!(texts, vec!["sec, ms = 0.001 * sec", "newton = kg * meter / (sec * sec)"]);
+    }
+
+    #[test]
+    fn test_error_type_follows_bang_in_return() {
+        let f = only_fn("module demo.err\npub fn decode(buf: []u8) -> Map<str, List<u8>> ! DecodeError\n");
+        assert_eq!(f.return_ty.as_deref(), Some("Map<str, List<u8>>"));
+        assert_eq!(f.error_ty.as_deref(), Some("DecodeError"));
+        let plain = only_fn("module demo.err\npub fn len(buf: []u8) -> usize\n");
+        assert_eq!((plain.return_ty.as_deref(), plain.error_ty), (Some("usize"), None));
+    }
+
+    #[test]
+    fn test_contract_clauses_are_kept_line_by_line() {
+        let f = only_fn(
+            r#"
+module demo.search
+pub fn find(items: []i64, lo: usize, hi: usize) -> usize
+  requires lo < hi
+  requires hi <= items.len
+  ensures lo <= result and result < hi
+  decreases hi - lo
+{
+  lo
+}
+"#,
+        );
+        assert_eq!(f.requires, vec!["lo < hi", "hi <= items.len"]);
+        assert_eq!(f.ensures, vec!["lo <= result and result < hi"]);
+        assert_eq!(f.decreases, vec!["hi - lo"]);
+    }
+
+    #[test]
+    fn test_parameter_modes_are_recorded() {
+        let f = only_fn("module demo.modes\npub fn step(p: Particle, mut q: Particle, own r: Buffer, in arena: Arena)\n");
+        let modes: Vec<_> = f.params.iter().map(|p| (p.mode, p.name.as_str(), p.ty.as_str())).collect();
+        assert_eq!(
+            modes,
+            vec![
+                (ParamMode::ReadOnly, "p", "Particle"),
+                (ParamMode::Mut, "q", "Particle"),
+                (ParamMode::Own, "r", "Buffer"),
+                (ParamMode::RegionIn, "arena", "Arena"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_nested_braces_end_at_their_match() {
+        let code = r#"
+module demo.blocks
+pub fn outer(x: i32) -> i32 {
+  if x > 0 { x } else { 0 }
+}
+pub fn after(y: i32) -> i32 = y
+"#;
+        let m = parse_module(code).unwrap();
+        assert_eq!(m.items.len(), 2);
+        let ItemDecl::Fn(outer) = &m.items[0] else { panic!("expected a fn") };
+        let opens = outer.body_tokens.iter().filter(|t| **t == TokenKind::LBrace).count();
+        let closes = outer.body_tokens.iter().filter(|t| **t == TokenKind::RBrace).count();
+        assert_eq!((opens, closes), (2, 2));
+        let ItemDecl::Fn(after) = &m.items[1] else { panic!("expected a fn") };
+        assert_eq!(after.name, "after");
+    }
+
+    #[test]
+    fn test_function_headers_return_types_and_expression_bodies() {
+        let block = only_fn("module demo.fns\npub fn clamp(x: i32, hi: i32) -> i32 {\n  x\n}\n");
+        assert_eq!((block.return_ty.as_deref(), block.is_expr_body), (Some("i32"), false));
+        let expr = only_fn("module demo.fns\npub fn square(x: i32) -> i32 = x * x\n");
+        assert_eq!((expr.return_ty.as_deref(), expr.is_expr_body), (Some("i32"), true));
+        assert_eq!(expr.body_tokens.len(), 3);
+        let unit = only_fn("module demo.fns\nfn tick(mut n: u64) {\n  n += 1\n}\n");
+        assert_eq!((unit.return_ty, unit.is_pub), (None, false));
+    }
+
+    #[test]
+    fn test_generic_parameter_lists_are_kept() {
+        let code = "module demo.gen\npub struct RingWindow<T, comptime CAP: usize = 64> {\n  len: usize\n}\npub fn largest<T>(a: T, b: T) -> T = a\n";
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
+        assert_eq!(s.generics, "<T, comptime CAP: usize = 64>");
+        let ItemDecl::Fn(f) = &m.items[1] else { panic!("expected a fn") };
+        assert_eq!(f.generics, "<T>");
+    }
+
+    #[test]
+    fn test_parameters_split_only_at_top_level_commas() {
+        let f = only_fn("module demo.params\npub fn run(m: Map<str, u32>, xs: [4]u8, cb: fn(u8, u8) -> u8, n: u32)\n");
+        let params: Vec<_> = f.params.iter().map(|p| (p.name.as_str(), p.ty.as_str())).collect();
+        assert_eq!(
+            params,
+            vec![("m", "Map<str, u32>"), ("xs", "[4]u8"), ("cb", "fn(u8, u8) -> u8"), ("n", "u32")]
+        );
+    }
+
+    #[test]
+    fn test_return_type_scan_respects_type_arguments() {
+        // A function type inside type arguments: its `fn` and `!` belong to the argument.
+        let f = only_fn("module demo.ret\npub fn handlers() -> List<fn(u8) -> u8 ! ParseError> ! SetupError\n");
+        assert_eq!(f.return_ty.as_deref(), Some("List<fn(u8) -> u8 ! ParseError>"));
+        assert_eq!(f.error_ty.as_deref(), Some("SetupError"));
+        let inner_only = only_fn("module demo.ret\npub fn parsers() -> List<fn(u8) -> u8 ! ParseError>\n");
+        assert_eq!(inner_only.return_ty.as_deref(), Some("List<fn(u8) -> u8 ! ParseError>"));
+        assert_eq!(inner_only.error_ty, None);
+    }
+
+    #[test]
+    fn test_field_default_starts_at_a_top_level_equals() {
+        let code = "module demo.fields\npub struct Holder {\n  ring: Ring<CAP = 64>\n  m: Map<str, u32> = Map.empty()\n  grid: [4]u8 = [0, 0, 0, 0]\n}\n";
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
+        let fields: Vec<_> = s.fields.iter().map(|f| (f.name.as_str(), f.ty.as_str(), f.default_expr.as_deref())).collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("ring", "Ring<CAP = 64>", None),
+                ("m", "Map<str, u32>", Some("Map.empty()")),
+                ("grid", "[4]u8", Some("[0, 0, 0, 0]")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_generic_lists_close_at_their_match() {
+        let code = "module demo.gen\npub struct Nest<T = List<List<u8>>> {\n  a: T\n}\npub struct Pair<A, B<C>> {\n  b: A\n}\n";
+        let m = parse_module(code).unwrap();
+        let generics: Vec<_> = m
+            .items
+            .iter()
+            .map(|i| match i {
+                ItemDecl::Struct(s) => s.generics.as_str(),
+                other => panic!("expected a struct, got {:?}", other),
+            })
+            .collect();
+        assert_eq!(generics, vec!["<T = List<List<u8>>>", "<A, B<C>>"]);
+        // An unclosed list ends at the end of the file instead of running past it.
+        assert!(parse_module("module demo.gen\npub struct Open<T").is_err());
+    }
+
+    #[test]
+    fn test_invariant_block_may_hold_braces() {
+        let code = "module demo.inv\npub struct Bag {\n  items: []u32\n  invariant {\n    items.all { x => x > 0 }\n    items.len < 64\n  }\n  extra: u8\n}\n";
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
+        assert_eq!(s.invariants, vec!["items.all { x => x > 0 }", "items.len < 64"]);
+        let names: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["items", "extra"]);
+    }
+
+    #[test]
+    fn test_trait_method_signatures_are_kept() {
+        let code = "module demo.io\npub trait ByteSink {\n  fn write_u64(mut self, v: u64)\n  fn flush(mut self) ! IoError\n}\n";
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Trait(t) = &m.items[0] else { panic!("expected a trait") };
+        assert_eq!((t.name.as_str(), t.is_pub), ("ByteSink", true));
+        assert_eq!(t.methods_sig, vec!["fn write_u64(mut self, v: u64)", "fn flush(mut self) ! IoError"]);
     }
 }

@@ -11,14 +11,14 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Prohibition of `async` and `await` keywords (`Specified`)**:
+1. `Specified` **Prohibition of `async` and `await` keywords**:
    - The keywords `async` and `await` MUST NOT exist in Mente. The compiler does not reject them yet (they lex as identifiers); `examples/` is checked for `async fn` and `.await` by the directives below.
    - Higher-order combinators (`items.map(f)`, `filter(f)`) accept pure functions and `with IO, Net` functions uniformly without splitting the ecosystem into synchronous and asynchronous APIs: they are generic over their argument's effects through effect variables (`capability-effects.md`).
-2. **Effect-driven stackful fibers (`Specified`)**:
+2. `Specified` **Effect-driven stackful fibers**:
    - Functions carrying `with IO` or `with Net` may suspend at an effect operation; suspension is driven by OS completion queues (`io_uring` on Linux, `IOCP` on Windows, `kqueue` on macOS).
    - Each task runs on its own stack: a range of virtual memory reserved when the task starts, committed page by page as it is touched, and ended by an unmapped guard page. Suspending a task keeps its stack where it is, so there is no heap-allocated future per call and no stack copying.
    - A stack's size depends on no callee's body, so no caller's interface does either (`holographic-module.md`). Code that must run within a fixed stack declares `@max_stack(bytes)`, which composes from callees' declared bounds (`hardware-contracts.md`).
-3. **Lexical structured concurrency (`parallel (...)` and `TaskScope`, `Specified`; the lexer has a `Parallel` token and `examples/03_colorless_concurrency_and_effects.mn` uses the syntax)**:
+3. `Specified` **Lexical structured concurrency (`parallel (...)` and `TaskScope`)**:
    - Concurrent fan-out is expressed via lexical `parallel (...)` blocks:
      ```rust
      val (left, right) = parallel (
@@ -30,6 +30,7 @@ date: 2026-11-04
    - **Automatic sibling cancellation**: If any branch raises an error via `!`, sibling tasks receive immediate cooperative cancellation at their next effect yield point, and all destructors complete before the scope propagates the error.
    - **Zero-`Arc` parent borrowing**: Because child tasks are strictly bounded by the lexical scope, they MAY read parent read-only bindings directly without `Arc<T>` heap reference counting or `'static` lifetime bounds.
    - **Exclusivity across branches**: the branches of one `parallel (...)` are checked by the Law of Exclusivity exactly as the arguments of one call are (`mutable-value-semantics.md`): any number of branches may read a binding, but a binding that one branch mutates no other branch may read or mutate. Passing `in arena` to several branches is a read (`regions-and-pools.md`).
+   - The lexer has a `Parallel` token and `examples/03_colorless_concurrency_and_effects.mn` uses the syntax; nothing parses it yet.
 
 ## 2. Decision rationale and rejected alternatives
 

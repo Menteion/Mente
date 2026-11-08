@@ -11,7 +11,7 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Zero-macro `comptime` metaprogramming (`Specified`; the lexer has a `Comptime` token and `examples/04_comptime_and_graph_pool.mn` uses the syntax)**:
+1. `Specified` **Zero-macro `comptime` metaprogramming**:
    - Mente has **no macro DSL** (`macro_rules!`, procedural token-stream macros, or `#define` preprocessor directives).
    - Compile-time type reflection and code specialization use standard `.mn` syntax (`comptime for`, `comptime if`, and `Type.of<T>().fields`):
      ```rust
@@ -26,20 +26,31 @@ date: 2026-11-04
    - `item.(field.name)` reads the field whose name is the compile-time string `field.name`. It is resolved when the loop is expanded, so each expanded line is an ordinary, type-checked field access.
    - `comptime` blocks are strictly pure (`with` effects are forbidden at compile time), ensuring deterministic, hermetic builds.
    - **Termination**: each `comptime` evaluation runs under a step budget, by default 10^7 evaluation steps. Exceeding it is a compile-time error (`E0701`) that names the loop or call still running; `@comptime_budget(steps: N)` on a function raises the budget for evaluations it starts. A build can therefore never hang in `comptime` code.
-2. **Zero-compromise C / C++ / Rust FFI boundary quarantine (`Specified`; the lexer has an `Extern` token, and the parser has no `extern` item yet)**:
+   - The lexer has a `Comptime` token and `examples/04_comptime_and_graph_pool.mn` uses the syntax; nothing parses or evaluates it yet.
+2. `Specified` **Zero-compromise C / C++ / Rust FFI boundary quarantine**:
    - External ABI functions are declared inside `extern "C"` blocks with mandatory `with FFI` capability effects, refined boundary types (`fd: i32[0..=65535]`) and length contracts (`buf: []u8` with `requires buf.len >= 1`).
    - Outbound calls prove preconditions statically before emitting a direct `CALL`; inbound return values undergo an automatic boundary check before entering Mente's refined value lattice.
    - **A failed inbound check is an error value**: an `extern` function whose result type is refined MUST declare an error type (`-> u16[1..=65535] ! FfiError`), and a value outside the refinement raises it at the boundary. Nothing foreign enters the lattice unchecked, and nothing traps.
    - **Raw pointers stay in quarantine**: a C pointer has the type `RawPtr<T>`. It may be passed, stored and compared only in code declared `with FFI`, and becomes a Mente value only through a checked conversion (`ptr.read(len)` yields `[]T ! FfiError`, failing on null). A pointer is nullable unless the binding says otherwise.
-   - **Ecosystem absorption (`mn bind`, `Specified` — Engineering Guardrail #4)**: to reduce hand-written FFI, `mn bind <header.h>` parses a C header at build time and synthesizes quarantined `extern "C"` declarations with `with FFI` and `@layout` byte-offset assertions for its structs.
+   - The lexer has an `Extern` token, and the parser has no `extern` item yet.
+   - **Ecosystem absorption (`mn bind`, Engineering Guardrail #4)**: to reduce hand-written FFI, `mn bind <header.h>` parses a C header at build time and synthesizes quarantined `extern "C"` declarations with `with FFI` and `@layout` byte-offset assertions for its structs.
      - A pointer is bound as nullable unless the header annotates it (`_Nonnull`) or a Mente sidecar file next to the header says otherwise; C headers do not otherwise say which pointers may be null.
      - A Rust library is bound through the C header that `cbindgen` generates for its `extern "C"` exports; a `.rlib` carries no C-ABI description to read.
      - The C dialect `mn bind` accepts (preprocessor, compiler extensions, platform headers) is written down before the feature is promised for real libraries; parsing arbitrary system headers without libclang is a project of its own.
 3. **Unified `mn` CLI toolchain (`compiler/mente-cli/src/main.rs`)**:
-   - `mn check` (`Implemented`): parses each `.mn` file's declarations, computes both hashes, and runs `mente-sema`: the `@layout` and `bitstruct` provers and the token-level `@total` / `@branchless` checks.
-   - `mn view --spec <file.mn>` (`Implemented`): prints the Holographic Blueprint (`spec_hash`, types, layouts, signatures, contracts); see `holographic-module.md` for measured time.
-   - `mn test --mutate` (`Implemented` as a demo): runs `mn check`, then runs the hand-written MIR region `integrate_cell` built in `main.rs` against two test vectors and, with `--mutate`, `run_in_memory_mutation_gate` on it. `@example` and `@property` bodies are not executed (`Specified`).
-   - `mn spec` (`Implemented`): checks each `spec/*.md` for YAML front matter and at least one `@assert-*` directive, and runs the directives, rejecting any that cannot fail. On a `.mn` target it removes `//` comments first, so a comment can neither satisfy a count nor trip an absence. Proving each rule can fail against a mutated tree is left to `spec-guard prove`.
+   - `Implemented`: `mn check` parses each `.mn` file's declarations, computes its digests, and runs `mente-sema`: the `@layout` and `bitstruct` provers, the token-level `@total` / `@branchless` checks and the `from` check; a file that fails any of them fails the command.
+     <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_check_passes_examples_and_rejects_a_broken_layout" min="1" reason="mn check passes the examples and fails a module that breaks a prover" -->
+     <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_report_counts_contract_functions" min="1" reason="The report counts @total, @branchless and @kernel functions and examples" -->
+   - `Implemented`: `mn view --spec <file.mn>` prints the Holographic Blueprint (`spec_hash`, types, layouts, signatures, contracts); see `holographic-module.md` for measured time.
+     <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_view_spec_prints_the_blueprint" min="1" reason="mn view --spec prints the digests and signatures and drops bodies" -->
+   - `Implemented`: `mn test`, as a demo, runs `mn check`, then runs the hand-written MIR region `integrate_cell` built in `main.rs` against two test vectors and, with `--mutate`, `run_in_memory_mutation_gate` on it.
+     <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_test_mutate_runs_the_demo_gate" min="1" reason="mn test runs the demo region, and --mutate adds its mutation gate" -->
+   - `Specified`: `mn test` runs `@example` and `@property` bodies; today they are not executed.
+   - `Implemented`: `mn spec` checks each `spec/*.md` for YAML front matter and at least one `@assert-*` directive, and runs the directives, rejecting any that cannot fail. On a `.mn` target it removes `//` comments first, so a comment can neither satisfy a count nor trip an absence. Proving each rule can fail against a mutated tree is left to `spec-guard prove`.
+     <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_spec_checks_front_matter_and_directives" min="1" reason="mn spec fails a spec without front matter or directives, and a directive that does not hold" -->
+     <!-- @assert-count target="compiler/mente-cli/src/main.rs" symbol="fn test_spec_directives_that_cannot_fail_are_rejected" min="1" reason="mn spec rejects a directive that cannot fail" -->
+     <!-- @assert-count target="compiler/mente-cli/src/main.rs" symbol="fn test_spec_directives_on_mn_files_ignore_comments" min="1" reason="mn spec removes comments from a .mn target first" -->
+     <!-- @assert-count target="compiler/mente-cli/src/main.rs" symbol="fn test_strip_mn_comments_keeps_code_strings_and_lines" min="1" reason="Comments go, strings and line breaks stay" -->
 
 ## 2. Decision rationale and rejected alternatives
 

@@ -450,4 +450,149 @@ pub fn pick(data: []u8, key: []u8) -> []u8 from data {
         // Callers keep every named source alive, so widening provenance changes the interface
         assert_ne!(h1.spec_hash, h2.spec_hash);
     }
+
+    #[test]
+    fn test_spec_hash_covers_units_and_pub_declarations_only() {
+        let base = r#"
+module geo.decls
+unit meter, sec
+pub bitstruct Flags : u8 {
+  @bits(0..8) pub raw: u8
+}
+bitstruct Hidden : u8 {
+  @bits(0..8) pub raw: u8
+}
+pub enum Side { Left, Right }
+enum Inner { A, B }
+pub trait Probe {
+  fn hit(self) -> bool
+}
+trait Secret {
+  fn peek(self) -> bool
+}
+struct Scratch {
+  n: u32
+}
+"#;
+        let spec = |code: &str| compute_dual_hashes(&parse_module(code).unwrap()).spec_hash;
+        let h = spec(base);
+        // Each public declaration, and every unit, is part of the interface.
+        for (from, to) in [
+            ("unit meter, sec", "unit meter, sec, kg"),
+            ("pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8", "pub bitstruct Flags : u8 {\n  @bits(0..8) pub bits: u8"),
+            ("pub enum Side { Left, Right }", "pub enum Side { Left, Right, Up }"),
+            ("  fn hit(self) -> bool", "  fn hit(self) -> u8"),
+        ] {
+            assert_ne!(h, spec(&base.replace(from, to)), "editing `{}` must change spec_hash", from);
+        }
+        // A private declaration is not.
+        for (from, to) in [
+            ("bitstruct Hidden : u8 {\n  @bits(0..8) pub raw: u8", "bitstruct Hidden : u8 {\n  @bits(0..8) pub bits: u8"),
+            ("enum Inner { A, B }", "enum Inner { A, B, C }"),
+            ("  fn peek(self) -> bool", "  fn peek(self) -> u8"),
+            ("struct Scratch {\n  n: u32", "struct Scratch {\n  n: u64"),
+        ] {
+            assert_eq!(h, spec(&base.replace(from, to)), "editing `{}` must not change spec_hash", from);
+        }
+    }
+
+    #[test]
+    fn test_inline_bodies_go_into_instance_hash() {
+        let code = "module util.inl\n@inline\npub fn twice(n: u32) -> u32 {\n  n + n\n}\n@total\npub fn once(n: u32) -> u32 {\n  n\n}\n";
+        let h = |c: &str| compute_dual_hashes(&parse_module(c).unwrap());
+        let base = h(code);
+        let inline_edit = h(&code.replace("n + n", "n * 2"));
+        assert_eq!(base.spec_hash, inline_edit.spec_hash);
+        assert_ne!(base.instance_hash, inline_edit.instance_hash);
+        // Another attribute does not make a body reach dependents.
+        let plain_edit = h(&code.replace("  n\n}", "  n + 0\n}"));
+        assert_eq!(base.instance_hash, plain_edit.instance_hash);
+        assert_ne!(base.body_hash, plain_edit.body_hash);
+    }
+
+    #[test]
+    fn test_projection_lists_units_and_pub_items_only() {
+        let code = r#"
+module geo.items
+unit sec, ms = 0.001 * sec
+pub bitstruct Flags : u8 {
+  @bits(0..8) pub raw: u8
+}
+bitstruct HiddenBits : u8 {
+  @bits(0..8) pub raw: u8
+}
+struct HiddenStruct {
+  n: u32
+}
+enum HiddenEnum { A }
+trait HiddenTrait {
+  fn peek(self) -> bool
+}
+"#;
+        let report = project_spec_blueprint(&parse_module(code).unwrap());
+        let out = &report.projected_source;
+        assert!(out.contains("unit sec, ms = 0.001 * sec") && out.contains("pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8"), "{}", out);
+        for hidden in ["HiddenBits", "HiddenStruct", "HiddenEnum", "HiddenTrait"] {
+            assert!(!out.contains(hidden), "`{}` leaked into:\n{}", hidden, out);
+        }
+        // The saving is the share of the module's tokens the projection leaves out.
+        let expected = (1.0 - report.spec_tokens as f64 / report.total_tokens as f64) * 100.0;
+        assert!((report.savings_percent - expected).abs() < 1e-9 && report.savings_percent > 0.0 && report.savings_percent < 100.0);
+    }
+
+    #[test]
+    fn test_projection_keeps_signatures_and_drops_bodies() {
+        let code = r#"
+module geo.search
+/// The cell a point falls in.
+@layout(size: 8, align: 4)
+pub struct Cell {
+  @bytes(0..4) pub x: u32
+  @bytes(4..8) pub y: u32
+  invariant {
+    x < 4096
+  }
+}
+pub enum Side { Left, Right }
+pub trait Probe {
+  fn hit(self, x: u32) -> bool
+}
+@total
+pub fn find(cells: []Cell, key: []u8, lo: usize, hi: usize) -> []Cell ! SearchError from cells with Clock
+  requires lo < hi
+  ensures result.len <= hi - lo
+  decreases hi - lo
+{
+  val secret_local = lo + hi
+  cells
+}
+fn private_helper(x: u32) -> u32 = x
+"#;
+        let module = parse_module(code).unwrap();
+        let report = project_spec_blueprint(&module);
+        let out = &report.projected_source;
+        for kept in [
+            "/// The cell a point falls in.",
+            "@layout(size: 8, align: 4)",
+            "  @bytes(0..4) pub x: u32",
+            "    x < 4096",
+            "pub enum Side { Left, Right }",
+            "  fn hit(self, x: u32) -> bool",
+            "@total",
+            "pub fn find(cells: []Cell, key: []u8, lo: usize, hi: usize) -> []Cell ! SearchError from cells with Clock",
+            "  requires lo < hi",
+            "  ensures  result.len <= hi - lo",
+            "  decreases hi - lo",
+            "= ...",
+        ] {
+            assert!(out.contains(kept), "missing `{}` in:\n{}", kept, out);
+        }
+        // The body and every private item stay out, and the digests head the projection.
+        assert!(!out.contains("secret_local") && !out.contains("private_helper"), "{}", out);
+        let hashes = compute_dual_hashes(&module);
+        assert!(out.contains(&format!("// spec_hash: {}", hashes.spec_hash)));
+        assert!(out.contains(&format!("// body_hash: {}", hashes.body_hash)));
+        assert!(out.contains(&format!("// instance_hash: {}", hashes.instance_hash)));
+        assert!(report.spec_tokens < report.total_tokens && report.savings_percent > 0.0);
+    }
 }

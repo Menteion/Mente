@@ -12,11 +12,16 @@ date: 2026-11-04
 ## 1. Specification
 
 1. **First-class contract clauses (`requires`, `ensures`, `invariant`)**:
-   - Functions declare preconditions via `requires <bool-expr>` and postconditions via `ensures <bool-expr>`, one clause per line, where `result` names the return value (`Implemented` in `parse_fn`: each clause is kept as a raw string up to the end of its line).
-   - `struct` declarations declare data invariants via `invariant { <bool-expr> }` (`Implemented` in `parse_struct`, as raw strings).
+   - `Specified`: functions declare preconditions via `requires <bool-expr>` and postconditions via `ensures <bool-expr>`, one clause per line, where `result` names the return value.
+   - `Implemented`: `parse_fn` keeps each `requires`, `ensures` and `decreases` clause as a raw string, up to the end of its line.
+     <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_contract_clauses_are_kept_line_by_line" min="1" reason="parse_fn keeps each contract clause as its own line" -->
+   - `Specified`: `struct` declarations declare data invariants via `invariant { <bool-expr> }`.
+   - `Implemented`: `parse_struct` keeps each line of an `invariant` block as a raw string.
+     <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_struct_fields_defaults_and_invariants_are_parsed" min="1" reason="parse_struct keeps each invariant line" -->
    - Nothing checks or evaluates a clause yet.
-2. **Two-tier verification and Ghost Erasure (`Specified`)**:
-   - **Tier 1 (incremental range/linear solver)**: Runs automatically on every save (`mn check`), propagating `ValueLattice` intervals (`[min_val, max_val]`) and linear inequalities across `guard` checks. Its latency, a 99th percentile under 5 ms per edit, is a `Target` with its protocol in `ROADMAP.md`; it has no result yet, since Tier 1 does not exist.
+2. `Specified` **Two-tier verification and Ghost Erasure**:
+   - **Tier 1 (incremental range/linear solver)**: Runs automatically on every save (`mn check`), propagating `ValueLattice` intervals (`[min_val, max_val]`) and linear inequalities across `guard` checks.
+   - `Target`: a Tier-1 re-check after an edit takes under 5 ms at the 99th percentile, under [its protocol](../ROADMAP.md#tier-1-re-check-after-an-edit-99th-percentile-under-5-ms); it has no result yet, since Tier 1 does not exist.
    - **Tier 2 (`mn prove` SMT bit-vector / quantifier-free solver)**: Verifies complex non-linear and bit-level contracts in parallel.
    - **Compile-time caller proof obligation**: Calling a function whose `requires` clause is not statically established in the caller's path context (e.g., via refined input types or a preceding `guard` statement) is a compile-time error.
    - **Which tier handles a clause**: every `requires`, `ensures` and `invariant` clause is classified by its syntax alone, so the classification is visible in the signature and in `mn view --spec`:
@@ -24,11 +29,12 @@ date: 2026-11-04
      - **Any other clause** — a call (`is_sorted(items)`), a product of variables, `or`, `!=`, a quantifier — MUST be routed explicitly. With `@prove` on the function, `mn prove` discharges the clause by Tier 2 at the definition and at every call site. With `@checked`, the clause compiles to a runtime check at entry (`requires`) or exit (`ensures`) that traps when it fails. A clause outside the fragment on a function with neither is an error (`E0503`) whose help offers both. `or` and `!=` are outside because octagons are convex.
    - **Ghost erasure and Contract-Guided Optimization (CGO)**: Once proven, `requires` and `ensures` emit **zero runtime instructions** and become assumptions that let `mente-mir` eliminate downstream redundant bounds checks and dead branches. MIR has no assumption node yet.
 3. **Constructive termination (`@total` and `decreases`)**:
-   - Functions annotated with `@total` MUST terminate on all valid inputs (`Specified`).
-   - Every `while` loop or recursive call inside a `@total` function MUST specify a strictly decreasing well-founded measure (`decreases high - low`) (`Specified`). For recursion the measure is a `decreases` clause in the signature, and each recursive call must make it smaller; mutual recursion shares one measure.
-   - A `@total` function may call only functions that are `@total` themselves, including trait methods and `extern` declarations that declare it (`hardware-contracts.md`), and may iterate only over finite ranges and collections (`Specified`). An effect operation that waits (`Net`, `Clock`) still counts as returning: `@total` promises termination of the computation, not of the outside world.
+   - `Specified`: functions annotated with `@total` MUST terminate on all valid inputs.
+   - `Specified`: every `while` loop or recursive call inside a `@total` function MUST specify a strictly decreasing well-founded measure (`decreases high - low`). For recursion the measure is a `decreases` clause in the signature, and each recursive call must make it smaller; mutual recursion shares one measure.
+   - `Specified`: a `@total` function may call only functions that are `@total` themselves, including trait methods and `extern` declarations that declare it (`hardware-contracts.md`), and may iterate only over finite ranges and collections. An effect operation that waits (`Net`, `Clock`) still counts as returning: `@total` promises termination of the computation, not of the outside world.
    - `Implemented`, as a token check only: `verify_function_contracts` in `compiler/mente-sema/src/lib.rs` raises `E0501 [Totality Error]` when a `@total` function's body contains `while` and neither its signature nor its body contains `decreases`. It does not check that the measure is non-negative or decreases, does not look at recursion, and accepts `while true { i = i + 1 }` once `decreases` appears.
-4. **Tier-1 solver predictability and concrete counterexample diagnostics (`Specified` — Engineering Guardrail #1)**:
+     <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_total_while_without_decreases_is_rejected" min="1" reason="A @total function with a while loop and no decreases is rejected with E0501" -->
+4. `Specified` **Tier-1 solver predictability and concrete counterexample diagnostics (Engineering Guardrail #1)**:
    - To eliminate the "SMT butterfly effect" (where a minor code edit causes unpredictable solver timeouts in Dafny/LiquidHaskell), Tier 1 MUST remain strictly within **polynomial-time decidable abstract domains**: Interval Arithmetic (`[min, max]`) plus the **Octagon / Difference-Bound Matrix (DBM) domain** ($\pm x \pm y \le c$, solved in $O(V^3)$ incremental Floyd-Warshall closure).
    - **Contracts are used modularly**: at each call, Tier 1 checks the callee's `requires` and then assumes its `ensures`; it never analyses the callee's body, which keeps every caller's proof independent of callee bodies (`holographic-module.md`). A fact the two domains cannot derive is supplied by a function whose `ensures` states it inside them and whose body is proven once by Tier 2.
    - The standard library's `midpoint` is the canonical case:

@@ -22,11 +22,11 @@ date: 2026-11-04
 
 Each file in `spec/` defines **one orthogonal architectural mechanism and design decision** of Mente, combining its normative specification, its rationale and rejected alternatives, and its executable `<!-- @assert-* -->` verification directives in a single self-contained document.
 
-Every claim carries one of four **maturity labels**:
+A claim is a list item that starts with one of four **maturity labels**, written as code; a label inside a sentence or in parentheses is not a claim. `npm run spec-guard:claims` holds each claim to the evidence its label asks for:
 
 | Label | Meaning | Evidence required |
 | :--- | :--- | :--- |
-| **Implemented** | The compiler in `compiler/` does this today, and a unit test or an executable `<!-- @assert-* -->` directive would fail if it stopped. A `.mn` example that merely uses a syntax does not make that syntax `Implemented`. | Source path plus a test or `@assert-*` directive. |
+| **Implemented** | The compiler in `compiler/` does this today, and a unit test fails if it stops. A `.mn` example that merely uses a syntax, or a directive that only finds a name, does not make it `Implemented`. | An `<!-- @assert-count -->` indented under the claim whose `symbol` names a `fn test_` test, seen to fail under `cargo-mutants`. |
 | **Specified** | The grammar, type rule, or ABI invariant is fixed in `spec/`, awaiting full lowering in a subsequent milestone. | A normative section in `spec/*.md`. |
 | **Target** | A measurable performance or latency goal with a stated measurement protocol. | A benchmark protocol in [ROADMAP.md](../ROADMAP.md). |
 | **Hypothesis** | An architectural assumption to be validated empirically against a baseline corpus. | A documented evaluation criterion. |
