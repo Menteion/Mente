@@ -1,0 +1,61 @@
+# The fixed agent-benchmark corpus: README.md, "Changing the corpus", says when it may change.
+# `npm run check:benchmark` recomputes every line; `npm run check:benchmark -- --bless` rewrites them.
+# task <id> <milestone> <core|non-core> <solve|adversarial> <sha256 of the file, LF line endings>
+task add-distance-time M5 non-core adversarial sha256:53c87f4f65325852092320d3c45c713dde934e5e16a189b48a854f7e5d9fbf8f
+task apply-ops M2 core solve sha256:516e5c1db01f86d51b61198eb4015260f038759dbeeaf9931e37f799aac5063a
+task binary-search-exact M2 non-core solve sha256:00a7e5e437861eedcf34a80e2a0fa6fe03fbaea6e6284a15005500fb1ea0321d
+task checksum-via-c M4 core adversarial sha256:36110f3261c88da321ccd8eb7056aa34fb7bc0d0b81d6b77d6df7aa3853b709a
+task clamp M1 non-core solve sha256:a4fc5381aba0a129c0432e9577d27b3a04ccd99c278270bdbdef3ff4a9eaf37f
+task count-lines M6 core solve sha256:1c572ff19fa8a3590ca4fdcc341304d2827276f71957f344883b9ce190f7a877
+task count-primes-below M1 core solve sha256:d52361f2d3957dd85a1568c5218a6da111006bc203436a44980da21221460f45
+task csv-column-sum M6 core solve sha256:e436300d342e52817c11888f670a8ada5b85456e29525d5175da9eb34d9ee6e3
+task decode-header M3 non-core solve sha256:42c6936d573ec2252f4b25515abc7be7151ed6061f85699cf5531805b781b2f9
+task dedup-sorted M4 core solve sha256:a2d75e4d75ee02f685608e78ae6cbed8ae8b4736617cc5491111a73f997e3219
+task encode-sample M3 non-core solve sha256:6ee169d00cbe9e2da595b31d97435edaf9b26452794a1b63caa140143f0ad7f7
+task fetch-all-concurrently M7 core solve sha256:ea55cebaab42ad82eaa7925ebf12a730bce0b961674a92e684dbced5ed183fce
+task fetch-lengths M4 core solve sha256:adc9e11ea204ca9723d2601330b3c53b35deb2ea7a7bf944b1acd110e4e1b2b7
+task first-ok M7 core solve sha256:781f3c7234c0c1b60ffb1f06800143e8f5d41b2b8ff2ef7f27351b52daa26b40
+task fuel-needed M5 non-core solve sha256:16dff3be0ccc643325d41b7137e5a16dc95c921eafb99fc363f7ab5292ae51f2
+task gcd M1 core solve sha256:4d4b67d9292438676fe76df35bfde823626aa191fea04cbb74cead640d3c7936
+task index-of-max M1 non-core solve sha256:0ffb54778ab2f212fc7307bb137699366417c6e08b56b1247b9b66ca8c452684
+task isqrt M1 core solve sha256:37a0123fd29abec4b011fbe4fa9a7ab744573c6409f1d4b79a86e82c54551c8b
+task lower-bound M1 non-core solve sha256:81c198517d3664d9b606c9b1c2bc4019875c85c65820b3f18e5da8072259c3be
+task max-subarray-sum M1 core solve sha256:da8fb2a9e9c3e5cc211dcae60a8e81db3999a2c71b4fd0a1d7cae5c17aafd8d9
+task mean8 M1 core solve sha256:79060fc80e906a5e97af6d3482b35746286e3a20787bd5dbb9ff60052af3fe9a
+task median-in-place M2 core adversarial sha256:fae4bcc9b05a5d0fc6cbcc2d7cadf7f7b4dc79782c8ffafac3f56a656e815874
+task merge-sorted M2 core solve sha256:9dbd2d199370108122150812b37a48981965f21042a6369ef2c01d74d7c6c047
+task next-id M4 core adversarial sha256:47ae82ad1243880e4715fb1510006630b0002d20505c8e27141d21cb05a214fb
+task parse-u32 M2 core solve sha256:85900382cca045125cd90b9639777008225f43dbc0ad81af1940201079b0823f
+task percent M1 non-core solve sha256:7380598430bf679a9f56eeb375f7b244bd7deff5f17e1b64270c7438646162d7
+task q-mul M5 non-core solve sha256:9d9235ab8ff1cf811c760db692e24c0998638bb3648716e1ba8017f1c7947493
+task racy-counter M7 core adversarial sha256:2b87da742fc85da22aeefa4412fb7b1901e42c539b84005385fe93a3e45837e5
+task rate-limited-fetch M7 core solve sha256:f1f477321e5da56ca54aafc906af5e271f96503ab2129b1a804859d19801fa00
+task retry-get M4 core solve sha256:4625afe6b6668044336e0f3eca2475a6290472fefb12a32b9f27ccea33bdb606
+task reverse-bits M1 core solve sha256:d681cdf5fa00de772bb2c8c466a4118ae96af038d3319d47bf96a55918f92e7a
+task reverse-in-place M1 core solve sha256:67b7c3e41bc59d11c5be014873257efe70b947bb4e5b924074bb2a553b1204ba
+task rpn-eval M2 core solve sha256:1a2b26afe4e78a568449b3f6dd933cb9e747f960afbd1b15c05a6d1871e58e0c
+task run-length-encode M2 core solve sha256:f9013f8720cf6be8ba2aadd5dd4b07dea542296adf32500c090914209d3cd300
+task score-with-telemetry M4 core adversarial sha256:55e60478417abee47f982a6d259ed47beb165e394f06be67820117a6d175f004
+task sort8 M1 core solve sha256:8678f434948063e9e5ebbcce7e6ab325522ab58d64d0de1994d835cc7c6e504b
+task stats M5 core solve sha256:eaf4f5893ea938ec42ca877173791fa1ace18a19781150e86986995bee11f29d
+task step-particles M3 non-core solve sha256:56800831ce2b09b68df910598debdedea0fd52d2e30d6a5a53e850fe5153503e
+task step-up M1 non-core adversarial sha256:1ab556ca61a60fa25e53fd095ee8663a59b6146420890135f3d95da9b62e5d33
+task to-byte M1 core adversarial sha256:fbefd2d5692b7375ae3f9fd5bf9731678a5d950381dbf659c97b1726953ac338
+task total-area2 M2 core solve sha256:00d6409bf774a3f4bbe8489b4434f548135580987482c343b9aae0d777bd4c21
+task two-sum M2 core solve sha256:3ad3cf24a9e10aea8df7313c8b679d7df912fedd79074b4ce1f06a1084f71c1e
+task word-count M2 core solve sha256:d2ae44294d69987d54cc7e1499be856a71ecad3d9a8e75bfe594fb89d252ca40
+task word-frequencies M6 core solve sha256:f06da971b58aca56eb4c0857a4c3e2fa760fa796e8146b504feee6544b52e450
+# The held-out set: its repository and commit, then one line per task, without its name.
+held-out https://github.com/Menteion/mente-bench-heldout a6bd3136e764c637ca5c9ff0858de813e4a26479
+held-out-task M1 core
+held-out-task M1 core
+held-out-task M1 core
+held-out-task M1 non-core
+held-out-task M2 core
+held-out-task M2 core
+held-out-task M2 core
+held-out-task M3 non-core
+held-out-task M4 core
+held-out-task M5 non-core
+held-out-task M6 core
+held-out-task M7 core

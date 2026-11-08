@@ -1,4 +1,4 @@
-{ "patterns": ["spec/*.md", "docs/*.md", "README.md", "ROADMAP.md", "CLAUDE.md", "examples/README.md"],
+{ "patterns": ["spec/*.md", "docs/*.md", "README.md", "ROADMAP.md", "CLAUDE.md", "examples/README.md", "benchmark/README.md"],
   "strict": true,
   "ignoreReferences": ["LICENSE-*", "../LICENSE-*"],
   "claims": { "files": ["spec/*.md"], "labels": { "Implemented": "done", "Specified": "open", "Target": "open", "Hypothesis": "open" } },
