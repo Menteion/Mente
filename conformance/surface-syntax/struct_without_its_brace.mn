@@ -1,0 +1,4 @@
+// expect: E0102
+module conformance
+pub struct S
+  a: u8

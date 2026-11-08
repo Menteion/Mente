@@ -1,0 +1,94 @@
+== ghost-contracts-and-totality/total_while_without_decreases.mn ==
+{"version":1,"diagnostics":[{"code":"E0501","severity":"error","message":"function `countdown` is marked `@total` and loops with `while`, but gives no `decreases` measure","primary":{"file":"total_while_without_decreases.mn","start":50,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
+== ghost-contracts-and-totality/total_with_decreases_in_the_body.mn ==
+{"version":1,"diagnostics":[]}
+== ghost-contracts-and-totality/total_with_decreases_in_the_signature.mn ==
+{"version":1,"diagnostics":[]}
+== ghost-contracts-and-totality/total_without_a_loop.mn ==
+{"version":1,"diagnostics":[]}
+== hardware-contracts/branchless_raise.mn ==
+{"version":1,"diagnostics":[{"code":"E0402","severity":"error","message":"function `pick` is marked `@branchless`, but contains `raise`","primary":{"file":"branchless_raise.mn","start":55,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
+== hardware-contracts/branchless_straight_line.mn ==
+{"version":1,"diagnostics":[]}
+== hardware-contracts/branchless_unrolled_loop.mn ==
+{"version":1,"diagnostics":[]}
+== hardware-contracts/branchless_while_loop.mn ==
+{"version":1,"diagnostics":[{"code":"E0401","severity":"error","message":"function `spin` is marked `@branchless`, but contains a `while` loop","primary":{"file":"branchless_while_loop.mn","start":55,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
+== morphic-layouts/alignment_not_a_power_of_two.mn ==
+{"version":1,"diagnostics":[{"code":"E0410","severity":"error","message":"struct `S`: alignment 3 is not a power of two","primary":{"file":"alignment_not_a_power_of_two.mn","start":36,"end":62,"line":3,"column":1},"related":[],"fixes":[{"message":"align it to 4 bytes","applicability":"suggestion","edits":[{"span":{"file":"alignment_not_a_power_of_two.mn","start":36,"end":62,"line":3,"column":1},"replacement":"@layout(size: 8, align: 4)"}]}]}]}
+== morphic-layouts/bit_fields_short_of_the_backing.mn ==
+{"version":1,"diagnostics":[{"code":"E0423","severity":"error","message":"bitstruct `B`: backing `u16` has 16 bits, but its fields end at bit 8","primary":{"file":"bit_fields_short_of_the_backing.mn","start":54,"end":57,"line":3,"column":19},"related":[],"fixes":[{"message":"back it with `u8`, as wide as its fields","applicability":"suggestion","edits":[{"span":{"file":"bit_fields_short_of_the_backing.mn","start":54,"end":57,"line":3,"column":19},"replacement":"u8"}]}]}]}
+== morphic-layouts/bitstruct_partition.mn ==
+{"version":1,"diagnostics":[]}
+== morphic-layouts/cache_line_layout.mn ==
+{"version":1,"diagnostics":[]}
+== morphic-layouts/empty_bit_range.mn ==
+{"version":1,"diagnostics":[{"code":"E0422","severity":"error","message":"field `B.a` has an empty bit range 0..0","primary":{"file":"empty_bit_range.mn","start":61,"end":72,"line":4,"column":3},"related":[],"fixes":[]}]}
+== morphic-layouts/empty_byte_range.mn ==
+{"version":1,"diagnostics":[{"code":"E0414","severity":"error","message":"field `S.a` has an empty byte range 0..0","primary":{"file":"empty_byte_range.mn","start":80,"end":92,"line":5,"column":3},"related":[],"fixes":[{"message":"give `a` its 4 bytes","applicability":"suggestion","edits":[{"span":{"file":"empty_byte_range.mn","start":80,"end":92,"line":5,"column":3},"replacement":"@bytes(0..4)"}]}]}]}
+== morphic-layouts/field_more_aligned_than_its_struct.mn ==
+{"version":1,"diagnostics":[{"code":"E0419","severity":"error","message":"field `S.v` of type `u64` needs 8-byte alignment, more than the struct's `align: 4`","primary":{"file":"field_more_aligned_than_its_struct.mn","start":100,"end":103,"line":5,"column":23},"related":[],"fixes":[{"message":"raise `S`'s alignment to 8","applicability":"suggestion","edits":[{"span":{"file":"field_more_aligned_than_its_struct.mn","start":36,"end":62,"line":3,"column":1},"replacement":"@layout(size: 8, align: 8)"}]}]}]}
+== morphic-layouts/field_without_bytes.mn ==
+{"version":1,"diagnostics":[{"code":"E0412","severity":"error","message":"field `S.b` has no `@bytes(start..end)`; every field of a `@layout` struct needs one","primary":{"file":"field_without_bytes.mn","start":110,"end":111,"line":6,"column":7},"related":[],"fixes":[{"message":"give `b` the bytes 4..8","applicability":"machine-applicable","edits":[{"span":{"file":"field_without_bytes.mn","start":106,"end":106,"line":6,"column":3},"replacement":"@bytes(4..8) "}]}]}]}
+== morphic-layouts/fields_short_of_the_size.mn ==
+{"version":1,"diagnostics":[{"code":"E0416","severity":"error","message":"struct `S` declares `size: 8`, but its fields end at byte 4","primary":{"file":"fields_short_of_the_size.mn","start":36,"end":62,"line":3,"column":1},"related":[],"fixes":[{"message":"declare the size its fields take, 4 bytes","applicability":"suggestion","edits":[{"span":{"file":"fields_short_of_the_size.mn","start":36,"end":62,"line":3,"column":1},"replacement":"@layout(size: 4, align: 4)"}]}]}]}
+== morphic-layouts/fixed_point_fields.mn ==
+{"version":1,"diagnostics":[]}
+== morphic-layouts/float_in_a_bitstruct.mn ==
+{"version":1,"diagnostics":[{"code":"E0425","severity":"error","message":"field `B.v` has type `f32`; a bitstruct field must be `bool`, `uN`, `iN` or a bitstruct of this module","primary":{"file":"float_in_a_bitstruct.mn","start":82,"end":85,"line":4,"column":23},"related":[],"fixes":[]}]}
+== morphic-layouts/gap_between_bit_fields.mn ==
+{"version":1,"diagnostics":[{"code":"E0421","severity":"error","message":"bitstruct `B` has a gap before field `b`: it starts at bit 5, but the previous field ends at bit 4","primary":{"file":"gap_between_bit_fields.mn","start":85,"end":96,"line":5,"column":3},"related":[],"fixes":[{"message":"start `b` at bit 4","applicability":"suggestion","edits":[{"span":{"file":"gap_between_bit_fields.mn","start":85,"end":96,"line":5,"column":3},"replacement":"@bits(4..7)"}]}]}]}
+== morphic-layouts/gap_between_fields.mn ==
+{"version":1,"diagnostics":[{"code":"E0413","severity":"error","message":"struct `S` has a gap before field `b`: it starts at byte 6, but the previous field ends at byte 4","primary":{"file":"gap_between_fields.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"start `b` at byte 4","applicability":"suggestion","edits":[{"span":{"file":"gap_between_fields.mn","start":106,"end":118,"line":6,"column":3},"replacement":"@bytes(4..6)"}]}]}]}
+== morphic-layouts/layout_sized_by_a_bitstruct.mn ==
+{"version":1,"diagnostics":[]}
+== morphic-layouts/misaligned_field.mn ==
+{"version":1,"diagnostics":[{"code":"E0418","severity":"error","message":"field `S.b` of type `u32` needs 4-byte alignment, but starts at byte 2","primary":{"file":"misaligned_field.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"mark `S` `@packed`, so its fields may be unaligned","applicability":"suggestion","edits":[{"span":{"file":"misaligned_field.mn","start":36,"end":36,"line":3,"column":1},"replacement":"@packed\n"}]}]}]}
+== morphic-layouts/nested_layout_struct.mn ==
+{"version":1,"diagnostics":[]}
+== morphic-layouts/overlapping_fields.mn ==
+{"version":1,"diagnostics":[{"code":"E0413","severity":"error","message":"struct `S` has field `b` overlaps the previous field: it starts at byte 2, before byte 4 where that field ends","primary":{"file":"overlapping_fields.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"start `b` at byte 4","applicability":"suggestion","edits":[{"span":{"file":"overlapping_fields.mn","start":106,"end":118,"line":6,"column":3},"replacement":"@bytes(4..8)"}]}]}]}
+== morphic-layouts/packed_wire_format.mn ==
+{"version":1,"diagnostics":[]}
+== morphic-layouts/range_narrower_than_its_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0415","severity":"error","message":"field `S.b` of type `u32` requires 4 bytes, but `@bytes(4..6)` spans 2 bytes","primary":{"file":"range_narrower_than_its_type.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"make `b` 4 bytes wide","applicability":"suggestion","edits":[{"span":{"file":"range_narrower_than_its_type.mn","start":106,"end":118,"line":6,"column":3},"replacement":"@bytes(4..8)"}]}]}]}
+== morphic-layouts/size_not_a_multiple_of_alignment.mn ==
+{"version":1,"diagnostics":[{"code":"E0411","severity":"error","message":"struct `S`: size 6 is not a multiple of its alignment 4","primary":{"file":"size_not_a_multiple_of_alignment.mn","start":36,"end":62,"line":3,"column":1},"related":[],"fixes":[{"message":"round the size up to 8 bytes","applicability":"suggestion","edits":[{"span":{"file":"size_not_a_multiple_of_alignment.mn","start":36,"end":62,"line":3,"column":1},"replacement":"@layout(size: 8, align: 4)"}]}]}]}
+== morphic-layouts/target_dependent_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0417","severity":"error","message":"field `S.n` has type `usize`, whose byte size is not known, so `@bytes(0..8)` cannot be checked","primary":{"file":"target_dependent_type.mn","start":100,"end":105,"line":5,"column":23},"related":[],"fixes":[]}]}
+== morphic-layouts/type_narrower_than_its_bits.mn ==
+{"version":1,"diagnostics":[{"code":"E0424","severity":"error","message":"field `B.mode` has type `u2`, 2 bits wide, but `@bits(0..3)` spans 3 bits","primary":{"file":"type_narrower_than_its_bits.mn","start":83,"end":85,"line":4,"column":25},"related":[],"fixes":[{"message":"make `mode` a `u3`","applicability":"suggestion","edits":[{"span":{"file":"type_narrower_than_its_bits.mn","start":83,"end":85,"line":4,"column":25},"replacement":"u3"}]}]}]}
+== morphic-layouts/type_of_unknown_size.mn ==
+{"version":1,"diagnostics":[{"code":"E0417","severity":"error","message":"field `S.v` has type `Opaque`, whose byte size is not known, so `@bytes(0..8)` cannot be checked","primary":{"file":"type_of_unknown_size.mn","start":100,"end":106,"line":5,"column":23},"related":[],"fixes":[]}]}
+== morphic-layouts/unsupported_backing_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0420","severity":"error","message":"bitstruct `B` has backing type `u12`; it must be `u8`, `u16`, `u32`, `u64` or `u128`","primary":{"file":"unsupported_backing_type.mn","start":54,"end":57,"line":3,"column":19},"related":[],"fixes":[{"message":"back it with `u16`","applicability":"suggestion","edits":[{"span":{"file":"unsupported_backing_type.mn","start":54,"end":57,"line":3,"column":19},"replacement":"u16"}]}]}]}
+== morphic-layouts/whole_byte_integer.mn ==
+{"version":1,"diagnostics":[]}
+== regions-and-pools/from_names_a_kept_parameter.mn ==
+{"version":1,"diagnostics":[]}
+== regions-and-pools/from_names_an_own_parameter.mn ==
+{"version":1,"diagnostics":[{"code":"E0311","severity":"error","message":"`from data` in the signature of `head` names an `own` parameter; a returned view cannot borrow from a value the callee consumes","primary":{"file":"from_names_an_own_parameter.mn","start":77,"end":81,"line":3,"column":42},"related":[],"fixes":[]}]}
+== regions-and-pools/from_names_no_parameter.mn ==
+{"version":1,"diagnostics":[{"code":"E0311","severity":"error","message":"`from buffer` in the signature of `head` names no parameter of `head`","primary":{"file":"from_names_no_parameter.mn","start":73,"end":79,"line":3,"column":38},"related":[],"fixes":[{"message":"borrow from `data`","applicability":"suggestion","edits":[{"span":{"file":"from_names_no_parameter.mn","start":73,"end":79,"line":3,"column":38},"replacement":"data"}]}]}]}
+== regions-and-pools/from_names_nothing.mn ==
+{"version":1,"diagnostics":[{"code":"E0104","severity":"error","message":"`from` in the signature of `first` names no parameter; found the end of the file","primary":{"file":"from_names_nothing.mn","start":69,"end":73,"line":3,"column":34},"related":[],"fixes":[]}]}
+== regions-and-pools/from_names_two_parameters.mn ==
+{"version":1,"diagnostics":[]}
+== surface-syntax/example_without_its_brace.mn ==
+{"version":1,"diagnostics":[{"code":"E0102","severity":"error","message":"expected `{`, found `1`","primary":{"file":"example_without_its_brace.mn","start":52,"end":53,"line":3,"column":17},"related":[],"fixes":[]}]}
+== surface-syntax/expression_body.mn ==
+{"version":1,"diagnostics":[]}
+== surface-syntax/keyword_as_a_module_name.mn ==
+{"version":1,"diagnostics":[{"code":"E0101","severity":"error","message":"expected a name, found `raise`","primary":{"file":"keyword_as_a_module_name.mn","start":36,"end":41,"line":2,"column":20},"related":[],"fixes":[]}]}
+== surface-syntax/minimal_module.mn ==
+{"version":1,"diagnostics":[]}
+== surface-syntax/nested_braces_in_a_body.mn ==
+{"version":1,"diagnostics":[]}
+== surface-syntax/number_as_a_name.mn ==
+{"version":1,"diagnostics":[{"code":"E0101","severity":"error","message":"expected a name, found `42`","primary":{"file":"number_as_a_name.mn","start":47,"end":49,"line":3,"column":12},"related":[],"fixes":[]}]}
+== surface-syntax/struct_without_its_brace.mn ==
+{"version":1,"diagnostics":[{"code":"E0102","severity":"error","message":"expected `{` after `struct S`, found `a`","primary":{"file":"struct_without_its_brace.mn","start":51,"end":52,"line":4,"column":3},"related":[],"fixes":[]}]}
+== surface-syntax/unclosed_struct.mn ==
+{"version":1,"diagnostics":[{"code":"E0103","severity":"error","message":"`struct Open` has no closing `}`; found the end of the file","primary":{"file":"unclosed_struct.mn","start":62,"end":62,"line":5,"column":1},"related":[{"message":"`struct Open` opens here","span":{"file":"unclosed_struct.mn","start":47,"end":51,"line":3,"column":12}}],"fixes":[{"message":"close `struct Open` here","applicability":"suggestion","edits":[{"span":{"file":"unclosed_struct.mn","start":62,"end":62,"line":5,"column":1},"replacement":"}\n"}]}]}]}
+== surface-syntax/unclosed_trait.mn ==
+{"version":1,"diagnostics":[{"code":"E0103","severity":"error","message":"`trait Probe` has no closing `}`; found the end of the file","primary":{"file":"unclosed_trait.mn","start":77,"end":77,"line":5,"column":1},"related":[{"message":"`trait Probe` opens here","span":{"file":"unclosed_trait.mn","start":46,"end":51,"line":3,"column":11}}],"fixes":[{"message":"close `trait Probe` here","applicability":"suggestion","edits":[{"span":{"file":"unclosed_trait.mn","start":77,"end":77,"line":5,"column":1},"replacement":"}\n"}]}]}]}

@@ -1,0 +1,3 @@
+// expect: pass
+module conformance
+pub fn pick(a: []u8, b: []u8) -> []u8 from a, b

@@ -1,0 +1,4 @@
+// expect: E0103
+module conformance
+pub trait Probe {
+  fn hit(self) -> bool

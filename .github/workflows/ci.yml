@@ -95,6 +95,23 @@ jobs:
           name: coverage-lcov
           path: lcov.info
 
+  bench:
+    # The projection protocol of ROADMAP.md, in release. A median above its baseline in
+    # compiler/mente-cli/tests/projection-baseline.txt by more than the tolerance fails the job.
+    # Not a required check: shared runners vary.
+    name: Projection benchmark
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Run the projection protocol
+        env:
+          MENTE_BENCH_ENFORCE: "1"
+        run: cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol
+
   docs:
     name: Documentation
     runs-on: ubuntu-24.04

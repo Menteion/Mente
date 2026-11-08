@@ -1,0 +1,5 @@
+// expect: E0420
+module conformance
+pub bitstruct B : u12 {
+  @bits(0..12) pub v: u12
+}

@@ -1,0 +1,8 @@
+// expect: pass
+module conformance
+pub bitstruct B : u16 {
+  @bits(0..3) pub mode: u3
+  @bits(3..4) pub armed: bool
+  @bits(4..8) pub level: i4
+  @bits(8..16) pub spare: u8
+}

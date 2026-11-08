@@ -1,0 +1,6 @@
+// expect: E0417
+module conformance
+@layout(size: 8, align: 8)
+pub struct S {
+  @bytes(0..8) pub v: Opaque
+}

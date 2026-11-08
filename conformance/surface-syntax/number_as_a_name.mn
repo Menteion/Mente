@@ -1,0 +1,4 @@
+// expect: E0101
+module conformance
+pub struct 42 {
+}

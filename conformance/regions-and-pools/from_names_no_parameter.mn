@@ -1,0 +1,3 @@
+// expect: E0311
+module conformance
+pub fn head(data: []u8) -> []u8 from buffer
