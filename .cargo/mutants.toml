@@ -5,3 +5,7 @@
 # against the whole workspace's tests.
 test_workspace = true
 
+
+# Spikes are experiments outside the compiler crates: tested, never cited as evidence, and not
+# mutation-tested (docs/design-brief.md, "Spikes before the milestone that needs them").
+exclude_globs = ["spikes/**"]

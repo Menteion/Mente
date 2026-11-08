@@ -12,7 +12,7 @@ date: 2026-11-04
 | Field | Value |
 | :--- | :--- |
 | Current milestone | M0a, done: the `@spec-family` tools, CI with mutation testing, every claim with its test evidence, the register links, Rust hygiene, structured diagnostics, the conformance suite, reproducible-output checks and the projection benchmark. Function bodies are not parsed yet |
-| Immediate next step | M0b, design closure for M1: the core calculus, the grammar for M1 and the agent-benchmark tasks are written; the Tier-1 and debug-information spikes remain. Then M1, as [`ROADMAP.md`](../ROADMAP.md) sets out. The register entries M1 needs are decided during M0, in [`docs/design-review.md`](design-review.md) |
+| Immediate next step | M0b, design closure for M1: the core calculus, the grammar for M1 and the agent-benchmark tasks are written, and the Tier-1 spike met its latency target; the debug-information spike remains. Then M1, as [`ROADMAP.md`](../ROADMAP.md) sets out. The register entries M1 needs are decided during M0, in [`docs/design-review.md`](design-review.md) |
 | Specification | One single-decision file per mechanism in [`spec/`](../spec/README.md), plus `README.md` and `philosophy.md`; `cargo run --bin mn -- spec` prints the current file and directive counts |
 | Compiler crates | 6 Rust crates (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) |
 | Showcase `.mn` modules | [`examples/`](../examples/README.md). `mn check` verifies their declarations only; their bodies show the intended language and are not checked |

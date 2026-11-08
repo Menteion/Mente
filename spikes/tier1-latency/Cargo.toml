@@ -1,0 +1,14 @@
+[package]
+name = "spike-tier1-latency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "M0b spike: Tier 1 (intervals and octagons) on the generated module of the Tier-1 latency protocol"
+
+[[bin]]
+name = "spike-tier1"
+path = "src/main.rs"
+
+[lints]
+workspace = true

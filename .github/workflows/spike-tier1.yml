@@ -1,0 +1,57 @@
+# The M0b Tier-1 latency spike (spikes/tier1-latency/README.md): the Tier-1 protocol of
+# ROADMAP.md, run on the generated module on each CI platform. Benchmarks run here, never on a
+# developer's machine. The result is data for the register; the job fails only when the spike
+# itself breaks, not when the target is missed.
+name: Tier-1 latency spike
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "spikes/tier1-latency/**"
+      - ".github/workflows/spike-tier1.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike-tier1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: Measure (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64 Linux
+            os: ubuntu-24.04
+          - name: x86-64 Windows
+            os: windows-2025
+          - name: AArch64 Linux
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Record the machine
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name; (Get-CimInstance Win32_OperatingSystem).Caption"
+          else
+            lscpu | grep -E '^(Model name|CPU\(s\)|Architecture)'; uname -sr
+          fi
+          nproc
+      - name: Build
+        run: cargo build --release --locked -p spike-tier1-latency
+      - name: Run the protocol
+        run: |
+          cargo run --release --locked -p spike-tier1-latency -- measure | tee result.txt
+          { echo "### ${{ matrix.name }}"; echo '```'; cat result.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
