@@ -4,7 +4,7 @@ This file is the switchboard, not the rulebook.
 
 1. **Live implementation status**: Read [`docs/STATUS.md`](docs/STATUS.md) first. It is the single source of truth for what is `Implemented` vs. `Specified` across all 6 compiler crates and names the immediate next step. Open design problems, and what is proposed for each, are in [`docs/design-review.md`](docs/design-review.md); a design change starts from its entry there.
 2. **Language and compiler specification**: Read [`spec/README.md`](spec/README.md). Each file in `spec/*.md` defines exactly **one orthogonal mechanism and design decision** (Specification + Decision Rationale & Rejected Alternatives + Executable `<!-- @assert-* -->` assertions). Load only the specific `spec/<topic>.md` file governing the crate you are editing.
-3. **Engineering roadmap**: Read [`ROADMAP.md`](ROADMAP.md) for Phase 0 (`v0.0`) through Phase 4 (`v0.4`) and the unscheduled work after them.
+3. **Engineering roadmap**: Read [`ROADMAP.md`](ROADMAP.md) for the four stages of the work and stage 1's milestones, M0a, M0b and M1 to M9. [`docs/design-brief.md`](docs/design-brief.md) holds the design, the working rules and the long-term plan in full.
 
 ---
 
@@ -12,8 +12,11 @@ This file is the switchboard, not the rulebook.
 
 1. **Single-decision atomic specs (`spec/*.md`)**:
    - Never re-introduce numeric filename prefixes (`00_`..`08_`), nested subdirectories inside `spec/`, `DEC-XXX` numbers, or decorative emoji warning headers.
-   - Every claim in `spec/*.md` must carry a maturity label (`Implemented`, `Specified`, `Target`, or `Hypothesis`) and be backed by an `<!-- @assert-present -->`, `<!-- @assert-count -->`, or `<!-- @assert-absence -->` directive.
-   - `Implemented` means the compiler does it today. A directive only shows that a name exists, so a behaviour claimed `Implemented` also needs a unit test that fails when the behaviour breaks, and the directive names that test. A `.mn` example using a syntax never makes it `Implemented`.
+   - A claim is a list item that starts with its one maturity label written as code: `Implemented`, `Specified`, `Target` or `Hypothesis`. A label inside a sentence or in parentheses is not a claim, and `spec-guard claims` does not read it; write it as a claim. One claim carries one label.
+   - `Implemented` means the compiler does it today. Its evidence is an `<!-- @assert-count -->` indented under the item, whose `symbol` starts with `fn test_` and names a unit test that fails when the behaviour breaks. A directive that names a function or a type shows only that the name exists, and a `.mn` example using a syntax never makes it `Implemented`.
+   - `Specified` and `Hypothesis` need no evidence. A `Target` needs its measurement protocol under "Measurement protocols" in `ROADMAP.md`.
+   - A claim another document cites carries `<!-- @spec-item id="..." -->` on the line above it.
+   - `<!-- @assert-present -->`, `<!-- @assert-count -->` and `<!-- @assert-absence -->` directives still pin the structural facts a spec states, such as files that exist and spellings the examples must or must not use.
    - Do not write counts of files, directives or tests into documents; `mn spec` and `cargo test` print them.
 2. **Forbidden language anti-patterns in `.mn` code**:
    - Never write `let` or `let mut` (use `val` and `var`).
@@ -24,11 +27,15 @@ This file is the switchboard, not the rulebook.
 3. **English-only repository text**:
    - Code, comments, documentation, examples, commit messages and pull request text are written in English, even when the conversation with Norman is in Chinese.
    - `test_repository_text_is_english` in `compiler/mente-cli` fails on any CJK character in a file of the working tree (`.git`, `target` and `node_modules` aside). Commit messages and pull request text are outside its reach and follow this rule by hand. A future fixture that must hold non-English text (a lexer test of Unicode string literals, say) goes in a directory the test is changed to skip, named in the test.
-4. **Four Mandatory Engineering Guardrails (Phases 2–3)**:
+4. **The design register and the documentation tools**:
+   - Cite an entry of [`docs/design-review.md`](docs/design-review.md) as a link whose anchor is its key, such as [`interface-from-signature`](docs/design-review.md#interface-from-signature); `spec-graph` reports a key that is misspelled or renamed. A `done` entry links the documents it changed and ends with `(commit "subject")`.
+   - A task brief's front matter may name `raises: [spec/<file>.md#<claim id>]` and `awaits: [docs/design-review.md#<key>]`. `spec-brief lint` rejects a claim that does not exist or an awaited entry that is not yet `decided` or `done`, and `spec-brief archive` refuses a raised claim that is not yet `Implemented`.
+   - Run the `@spec-family` tools only through the npm scripts, or with `npx --no-install` and the full `@spec-family/` name. Never patch `node_modules` or the tools' own repository (`C:\Repos\specs`); write down a false positive or a missing feature and report it to Norman.
+5. **Four Mandatory Engineering Guardrails**:
    - **Guardrail #1 (Solver Predictability — [`ghost-contracts-and-totality.md`](spec/ghost-contracts-and-totality.md))**: Tier-1 stays strictly within polynomial-time Interval + Octagon/DBM ($\pm x \pm y \le c$) domains and MUST emit a concrete counterexample valuation plus a copy-pasteable 1-line `guard` prescription whenever an obligation fails.
    - **Guardrail #2 (Dual-Track Codegen — [`mir-and-codegen.md`](spec/mir-and-codegen.md))**: Complete all high-level semantic optimizations (bounds erasure, Ghost Contract `Assume`, `AoSoA` offsets, `@branchless` select) in `MirRegionSoA` before lowering to Cranelift or any later backend.
    - **Guardrail #3 (Provenance Escape Diagnostics — [`regions-and-pools.md`](spec/regions-and-pools.md))**: Never expose internal region IDs in errors; `E0310` MUST prescribe either `in arena: Arena` or `Pool<T>` / `Handle<T>`.
-   - **Guardrail #4 (Ecosystem Absorption — [`comptime-and-ffi.md`](spec/comptime-and-ffi.md))**: `mn bind` auto-synthesizes quarantined `extern "C"` + `with FFI` + `@layout` bindings from C headers, and from Rust libraries through their `cbindgen` headers (scheduled after Phase 4).
+   - **Guardrail #4 (Ecosystem Absorption — [`comptime-and-ffi.md`](spec/comptime-and-ffi.md))**: `mn bind` auto-synthesizes quarantined `extern "C"` + `with FFI` + `@layout` bindings from C headers, and from Rust libraries through their `cbindgen` headers (stage 4).
 
 ---
 
