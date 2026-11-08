@@ -1,8 +1,7 @@
 # Dependabot version updates. Security updates are switched on in the repository settings.
 #
-# Cargo and npm (the pinned documentation tools) are listed; github-actions joins when
-# .github/workflows/ exists, since Dependabot reports an error for an ecosystem whose
-# manifest is missing.
+# Cargo, npm (the pinned documentation tools) and the SHA-pinned actions of
+# .github/workflows/.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -25,5 +24,16 @@ updates:
     open-pull-requests-limit: 5
     groups:
       npm:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Taipei
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
         patterns:
           - "*"

@@ -310,11 +310,8 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
 
     let spec_tokens = tokenize(&out).len().saturating_sub(1);
     let total_tokens = module.total_token_count.max(1);
-    let savings_percent = if spec_tokens < total_tokens {
-        (1.0 - (spec_tokens as f64 / total_tokens as f64)) * 100.0
-    } else {
-        0.0
-    };
+    // The share of the module's tokens the projection leaves out, never below zero.
+    let savings_percent = (1.0 - spec_tokens as f64 / total_tokens as f64).max(0.0) * 100.0;
 
     SpecProjectionReport {
         module_path: module.module_path.clone(),

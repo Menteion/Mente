@@ -18,3 +18,5 @@ Thumbs.db
 
 # Node tooling for the documentation checks
 node_modules/
+mutants.out/
+mutants.out.old/

@@ -651,7 +651,7 @@ impl<'a> Parser<'a> {
         let start_byte = open.span.end;
         let mut depth = 1usize;
         let mut end_byte = start_byte;
-        while *self.peek() != TokenKind::Eof && depth > 0 {
+        while *self.peek() != TokenKind::Eof {
             let tok = self.next();
             match tok.kind {
                 TokenKind::LParen => depth += 1,
@@ -673,7 +673,7 @@ impl<'a> Parser<'a> {
         let start_byte = open.span.start;
         let mut depth = 1usize;
         let mut end_byte = open.span.end;
-        while *self.peek() != TokenKind::Eof && depth > 0 {
+        while *self.peek() != TokenKind::Eof {
             let tok = self.next();
             match tok.kind {
                 TokenKind::Lt => depth += 1,
@@ -721,6 +721,15 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(collected)
+    }
+
+    /// Consumes the `}` that closes a declaration, or reports the declaration as unclosed.
+    fn expect_closing_brace(&mut self, what: &str, name: &str) -> Result<Token, String> {
+        if *self.peek() == TokenKind::RBrace {
+            Ok(self.next())
+        } else {
+            Err(format!("Line {}: `{} {}` has no closing `}}`", self.span().line, what, name))
+        }
     }
 
     fn consume_line_text(&mut self) -> String {
@@ -809,9 +818,7 @@ impl<'a> Parser<'a> {
                 default_expr,
             });
         }
-        if *self.peek() == TokenKind::RBrace {
-            self.next();
-        }
+        self.expect_closing_brace("struct", &name)?;
         Ok(StructDecl {
             docs,
             attrs,
@@ -834,8 +841,8 @@ impl<'a> Parser<'a> {
             match tok.kind {
                 TokenKind::LBracket | TokenKind::Lt | TokenKind::LParen => bracket_depth += 1,
                 TokenKind::RBracket | TokenKind::Gt | TokenKind::RParen => bracket_depth -= 1,
-                // Before the `=`, a `>>` can only close two type-argument lists.
-                TokenKind::Shr if eq_byte.is_none() => bracket_depth -= 2,
+                // In a type, `>>` closes two type-argument lists.
+                TokenKind::Shr => bracket_depth -= 2,
                 TokenKind::Eq if bracket_depth <= 0 && eq_byte.is_none() => {
                     eq_byte = Some((tok.span.start, tok.span.end));
                 }
@@ -891,9 +898,7 @@ impl<'a> Parser<'a> {
                 ty,
             });
         }
-        if *self.peek() == TokenKind::RBrace {
-            self.next();
-        }
+        self.expect_closing_brace("bitstruct", &name)?;
         Ok(BitStructDecl {
             docs,
             attrs,
@@ -915,9 +920,7 @@ impl<'a> Parser<'a> {
             while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
                 end_b = self.next().span.end;
             }
-            if *self.peek() == TokenKind::RBrace {
-                end_b = self.next().span.start;
-            }
+            end_b = self.expect_closing_brace("enum", &name)?.span.start;
             for v in self.src[start_b..end_b].split(',') {
                 let t = v.trim();
                 if !t.is_empty() {
@@ -939,9 +942,7 @@ impl<'a> Parser<'a> {
             while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
                 end_b = self.next().span.end;
             }
-            if *self.peek() == TokenKind::RBrace {
-                end_b = self.next().span.start;
-            }
+            end_b = self.expect_closing_brace("trait", &name)?.span.start;
             for line in self.src[start_b..end_b].lines() {
                 let t = line.trim();
                 if !t.is_empty() {
@@ -1441,6 +1442,22 @@ pub fn after(y: i32) -> i32 = y
         assert_eq!(generics, vec!["<T = List<List<u8>>>", "<A, B<C>>"]);
         // An unclosed list ends at the end of the file instead of running past it.
         assert!(parse_module("module demo.gen\npub struct Open<T").is_err());
+    }
+
+    #[test]
+    fn test_unclosed_declarations_are_rejected() {
+        for (code, what) in [
+            ("module m\npub struct Open {\n  a: u8\n", "`struct Open` has no closing `}`"),
+            ("module m\npub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8\n", "`bitstruct Flags` has no closing `}`"),
+            ("module m\npub enum Side { Left, Right\n", "`enum Side` has no closing `}`"),
+            ("module m\npub trait Probe {\n  fn hit(self) -> bool\n", "`trait Probe` has no closing `}`"),
+        ] {
+            let err = parse_module(code).unwrap_err();
+            assert!(err.contains(what), "{}", err);
+        }
+        // Closed, the same declarations parse, and the next item is read.
+        let closed = "module m\npub enum Side { Left, Right }\npub trait Probe {\n  fn hit(self) -> bool\n}\npub fn after() = 0\n";
+        assert_eq!(parse_module(closed).unwrap().items.len(), 3);
     }
 
     #[test]

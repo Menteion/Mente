@@ -1,0 +1,9 @@
+# cargo-mutants settings, read by .github/workflows/mutants.yml. Mutation runs happen on
+# GitHub's runners, not on a developer's machine (ROADMAP.md, M0a).
+
+# A parser function is often tested from a crate downstream of it, so every mutant runs
+# against the whole workspace's tests.
+test_workspace = true
+
+# mente-codegen holds two placeholders that M0a removes (docs/design-review.md, codegen-placeholders).
+exclude_globs = ["compiler/mente-codegen/**"]
