@@ -32,7 +32,7 @@ date: 2026-11-04
    - `Specified`: functions annotated with `@total` MUST terminate on all valid inputs.
    - `Specified`: every `while` loop or recursive call inside a `@total` function MUST specify a strictly decreasing well-founded measure (`decreases high - low`). For recursion the measure is a `decreases` clause in the signature, and each recursive call must make it smaller; mutual recursion shares one measure.
    - `Specified`: a `@total` function may call only functions that are `@total` themselves, including trait methods and `extern` declarations that declare it (`hardware-contracts.md`), and may iterate only over finite ranges and collections. An effect operation that waits (`Net`, `Clock`) still counts as returning: `@total` promises termination of the computation, not of the outside world.
-   - `Implemented`, as a token check only: `verify_function_contracts` in `compiler/mente-sema/src/lib.rs` raises `E0501 [Totality Error]` when a `@total` function's body contains `while` and neither its signature nor its body contains `decreases`. It does not check that the measure is non-negative or decreases, does not look at recursion, and accepts `while true { i = i + 1 }` once `decreases` appears.
+   - `Implemented`, as a token check only: `verify_function_contracts` in `compiler/mente-sema/src/lib.rs` reports `E0501` when a `@total` function's body contains `while` and neither its signature nor its body contains `decreases`. It does not check that the measure is non-negative or decreases, does not look at recursion, and accepts `while true { i = i + 1 }` once `decreases` appears.
      <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_total_while_without_decreases_is_rejected" min="1" reason="A @total function with a while loop and no decreases is rejected with E0501" -->
 4. `Specified` **Tier-1 solver predictability and concrete counterexample diagnostics (Engineering Guardrail #1)**:
    - To eliminate the "SMT butterfly effect" (where a minor code edit causes unpredictable solver timeouts in Dafny/LiquidHaskell), Tier 1 MUST remain strictly within **polynomial-time decidable abstract domains**: Interval Arithmetic (`[min, max]`) plus the **Octagon / Difference-Bound Matrix (DBM) domain** ($\pm x \pm y \le c$, solved in $O(V^3)$ incremental Floyd-Warshall closure).
@@ -61,7 +61,7 @@ date: 2026-11-04
 
 ## 3. Verification assertions
 
-<!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="E0501 [Totality Error]" min="1" reason="Sema rejects a @total function with a while loop and no decreases token" -->
+<!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="E0501" min="1" reason="Sema rejects a @total function with a while loop and no decreases token" -->
 <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="pub struct ValueLattice" min="1" reason="MIR has an interval record per node, the carrier Tier-1 facts are specified to fill" -->
 <!-- @assert-count target="examples/01_refinement_and_units.mn" symbol="requires items.len > 0" min="1" reason="Example 01 uses requires ghost contract" -->
 <!-- @assert-count target="examples/01_refinement_and_units.mn" symbol="@total" min="1" reason="Example 01 proves termination of binary search with @total and decreases" -->

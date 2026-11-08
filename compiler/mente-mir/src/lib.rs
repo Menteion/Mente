@@ -158,17 +158,22 @@ impl MirRegionSoA {
         id
     }
 
-    /// Rejects a `@branchless` region that contains a `BranchCondJump` node.
-    pub fn verify_branchless(&self) -> Result<(), String> {
+    /// Rejects a `@branchless` region that contains a `BranchCondJump` node (`E0401`).
+    pub fn verify_branchless(&self) -> Result<(), MirViolation> {
         if !self.is_branchless_guaranteed {
             return Ok(());
         }
         for (idx, op) in self.opcodes.iter().enumerate() {
             if *op == MirOp::BranchCondJump {
-                return Err(format!(
-                    "E0401 [Hard Micro-Arch Error]: Function `{}` is marked `@branchless`, but MIR node #{} at line {} emitted a conditional jump (`BranchCondJump`). Use branchless expression assignment (`SelectBranchless` / `cmov`) instead.",
-                    self.name, idx, self.lines[idx]
-                ));
+                return Err(MirViolation {
+                    code: "E0401",
+                    node: NodeId(idx as u32),
+                    line: self.lines[idx],
+                    message: format!(
+                        "function `{}` is marked `@branchless`, but MIR node #{} is a conditional jump; use `SelectBranchless`",
+                        self.name, idx
+                    ),
+                });
             }
         }
         Ok(())
@@ -230,6 +235,17 @@ impl MirRegionSoA {
         }
         self.ret_node.map(|r| vals[r.0 as usize]).unwrap_or(0)
     }
+}
+
+/// A rule a MIR region breaks. MIR has no source spans until `.mn` code is lowered into it
+/// (M1), so it names the node and the source line; `mn` reports it with its code
+/// (`spec/diagnostics.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirViolation {
+    pub code: &'static str,
+    pub node: NodeId,
+    pub line: u32,
+    pub message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -616,11 +632,8 @@ mod tests {
             7,
         );
         let err = r.verify_branchless().unwrap_err();
-        assert!(
-            err.contains("E0401") && err.contains("node #6") && err.contains("line 7"),
-            "{}",
-            err
-        );
+        assert_eq!((err.code, err.node, err.line), ("E0401", NodeId(6), 7));
+        assert!(err.message.contains("node #6"), "{}", err.message);
         // A region not marked @branchless may jump.
         r.is_branchless_guaranteed = false;
         assert!(r.verify_branchless().is_ok());

@@ -2,11 +2,17 @@
 //!
 //! Governed by `spec/morphic-layouts.md`, `spec/hardware-contracts.md` and
 //! `spec/ghost-contracts-and-totality.md`. The `@total` and `@branchless` checks here are
-//! token scans over unparsed bodies, not proofs; see `docs/STATUS.md`.
+//! token scans over unparsed bodies, not proofs; see `docs/STATUS.md`. Every problem is a
+//! [`Diagnostic`] with its code, its span and, where one is certain or plausible, a fix
+//! (`spec/diagnostics.md`).
 
 use std::collections::HashMap;
 
-use mente_syntax::{BitStructDecl, FnDecl, ItemDecl, ModuleFile, ParamMode, StructDecl, TokenKind};
+use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
+use mente_syntax::{
+    parse_module, Attr, BitStructDecl, FnDecl, ItemDecl, ModuleFile, ParamMode, Span, StructDecl,
+    StructFieldDecl, TokenKind,
+};
 
 #[derive(Clone, Debug)]
 pub struct LayoutProof {
@@ -33,8 +39,14 @@ pub struct ModuleVerificationReport {
     pub examples_count: usize,
 }
 
+/// Parses and verifies the source of one module: what `mn check` reports for it.
+pub fn check_source(src: &str) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
+    let module = parse_module(src).map_err(|d| vec![d])?;
+    verify_module(&module)
+}
+
 /// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`.
-pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Vec<String>> {
+pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut layout_proofs = Vec::new();
     let mut bitstruct_proofs = Vec::new();
@@ -58,7 +70,7 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
                 }
             }
             ItemDecl::Struct(s) => {
-                if let Some((size, align)) = extract_layout_attr(s) {
+                if let Some((size, align, _)) = extract_layout_attr(s) {
                     named_sizes.insert(s.name.clone(), size);
                     named_aligns.insert(s.name.clone(), align);
                 }
@@ -70,7 +82,7 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
     for item in &module.items {
         match item {
             ItemDecl::Struct(s) => {
-                if let Some((size, align)) = extract_layout_attr(s) {
+                if let Some((size, align, _)) = extract_layout_attr(s) {
                     match verify_explicit_struct_layout(s, size, align, &named_sizes, &named_aligns)
                     {
                         Ok(proof) => layout_proofs.push(proof),
@@ -119,29 +131,33 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
     }
 }
 
-fn extract_layout_attr(s: &StructDecl) -> Option<(usize, usize)> {
-    for a in &s.attrs {
-        if a.name == "layout" {
-            let mut size = None;
-            let mut align = None;
-            for part in a.args.split(',') {
-                let kv: Vec<&str> = part.split(':').collect();
-                if kv.len() == 2 {
-                    let k = kv[0].trim();
-                    let v = kv[1].trim().parse::<usize>().ok();
-                    if k == "size" {
-                        size = v;
-                    } else if k == "align" {
-                        align = v;
-                    }
+/// The first `@layout(size: S, align: A)` of a struct that names both, with its span.
+fn extract_layout_attr(s: &StructDecl) -> Option<(usize, usize, Span)> {
+    for a in s.attrs.iter().filter(|a| a.name == "layout") {
+        let mut size = None;
+        let mut align = None;
+        for part in a.args.split(',') {
+            let kv: Vec<&str> = part.split(':').collect();
+            if kv.len() == 2 {
+                let k = kv[0].trim();
+                let v = kv[1].trim().parse::<usize>().ok();
+                if k == "size" {
+                    size = v;
+                } else if k == "align" {
+                    align = v;
                 }
             }
-            if let (Some(sz), Some(al)) = (size, align) {
-                return Some((sz, al));
-            }
+        }
+        if let (Some(sz), Some(al)) = (size, align) {
+            return Some((sz, al, a.span));
         }
     }
     None
+}
+
+/// A field's attribute by name.
+fn field_attr<'f>(f: &'f StructFieldDecl, name: &str) -> Option<&'f Attr> {
+    f.attrs.iter().find(|a| a.name == name)
 }
 
 /// Proves that `@layout(size: S, align: A)` has contiguous, hole-free `@bytes(start..end)` fields summing to `S`,
@@ -152,17 +168,42 @@ pub fn verify_explicit_struct_layout(
     align: usize,
     named_sizes: &HashMap<String, usize>,
     named_aligns: &HashMap<String, usize>,
-) -> Result<LayoutProof, String> {
+) -> Result<LayoutProof, Diagnostic> {
+    let layout = extract_layout_attr(s).map_or(s.name_span, |(_, _, span)| span);
+    let layout_text =
+        |size: usize, align: usize| format!("@layout(size: {}, align: {})", size, align);
     if !align.is_power_of_two() {
-        return Err(format!(
-            "E0410 [Layout Error]: struct `{}` alignment {} is not a power of two",
-            s.name, align
+        let next = align.next_power_of_two().max(1);
+        return Err(Diagnostic::error(
+            "E0410",
+            layout,
+            format!(
+                "struct `{}`: alignment {} is not a power of two",
+                s.name, align
+            ),
+        )
+        .with_fix(
+            Applicability::Suggestion,
+            format!("align it to {} bytes", next),
+            layout,
+            layout_text(expected_size, next),
         ));
     }
     if !expected_size.is_multiple_of(align) {
-        return Err(format!(
-            "E0411 [Layout Error]: struct `{}` size {} is not a multiple of alignment {}",
-            s.name, expected_size, align
+        let rounded = expected_size.div_ceil(align) * align;
+        return Err(Diagnostic::error(
+            "E0411",
+            layout,
+            format!(
+                "struct `{}`: size {} is not a multiple of its alignment {}",
+                s.name, expected_size, align
+            ),
+        )
+        .with_fix(
+            Applicability::Suggestion,
+            format!("round the size up to {} bytes", rounded),
+            layout,
+            layout_text(rounded, align),
         ));
     }
 
@@ -172,50 +213,139 @@ pub fn verify_explicit_struct_layout(
         String::from("| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n");
 
     for f in &s.fields {
-        let (start, end) = f.byte_range.ok_or_else(|| {
-            format!(
-                "E0412 [Layout Error]: field `{}.{}` inside `@layout` struct is missing explicit `@bytes(start..end)` contract",
-                s.name, f.name
-            )
-        })?;
+        let size = type_byte_size(&f.ty, named_sizes);
+        let Some((start, end)) = f.byte_range else {
+            let d = Diagnostic::error(
+                "E0412",
+                f.name_span,
+                format!(
+                    "field `{}.{}` has no `@bytes(start..end)`; every field of a `@layout` struct needs one",
+                    s.name, f.name
+                ),
+            );
+            // The field must start where the last one ended and be as wide as its type, so
+            // when the type's size is known exactly one range is possible.
+            return Err(match size {
+                Some(n) => d.with_fix(
+                    Applicability::MachineApplicable,
+                    format!("give `{}` the bytes {}..{}", f.name, cursor, cursor + n),
+                    insertion_point(f.span),
+                    format!("@bytes({}..{}) ", cursor, cursor + n),
+                ),
+                None => d,
+            });
+        };
+        let bytes = field_attr(f, "bytes").map_or(f.name_span, |a| a.span);
         if start != cursor {
-            return Err(format!(
-                "E0413 [Layout Error]: struct `{}` has an implicit padding hole or overlap before field `{}`: expected start byte {}, found {}",
-                s.name, f.name, cursor, start
+            let what = if start > cursor {
+                format!(
+                    "a gap before field `{}`: it starts at byte {}, but the previous field ends at byte {}",
+                    f.name, start, cursor
+                )
+            } else {
+                format!(
+                    "field `{}` overlaps the previous field: it starts at byte {}, before byte {} where that field ends",
+                    f.name, start, cursor
+                )
+            };
+            return Err(Diagnostic::error(
+                "E0413",
+                bytes,
+                format!("struct `{}` has {}", s.name, what),
+            )
+            .with_fix(
+                Applicability::Suggestion,
+                format!("start `{}` at byte {}", f.name, cursor),
+                bytes,
+                format!("@bytes({}..{})", cursor, cursor + end.saturating_sub(start)),
             ));
         }
         if end <= start {
-            return Err(format!(
-                "E0414 [Layout Error]: field `{}.{}` has invalid empty byte range {}..{}",
-                s.name, f.name, start, end
-            ));
+            let d = Diagnostic::error(
+                "E0414",
+                bytes,
+                format!(
+                    "field `{}.{}` has an empty byte range {}..{}",
+                    s.name, f.name, start, end
+                ),
+            );
+            return Err(match size {
+                Some(n) => d.with_fix(
+                    Applicability::Suggestion,
+                    format!("give `{}` its {} bytes", f.name, n),
+                    bytes,
+                    format!("@bytes({}..{})", start, start + n),
+                ),
+                None => d,
+            });
         }
         let width = end - start;
-        let expected_field_bytes = type_byte_size(&f.ty, named_sizes).ok_or_else(|| {
-            format!(
-                "E0417 [Layout Error]: field `{}.{}` has type `{}`, whose byte size is not known, so `@bytes({}..{})` cannot be verified",
-                s.name, f.name, f.ty, start, end
-            )
-        })?;
+        let Some(expected_field_bytes) = size else {
+            return Err(Diagnostic::error(
+                "E0417",
+                f.ty_span,
+                format!(
+                    "field `{}.{}` has type `{}`, whose byte size is not known, so `@bytes({}..{})` cannot be checked",
+                    s.name, f.name, f.ty, start, end
+                ),
+            ));
+        };
         if width != expected_field_bytes {
-            return Err(format!(
-                "E0415 [Layout Error]: field `{}.{}` of type `{}` requires {} bytes, but `@bytes({}..{})` spans {} bytes",
-                s.name, f.name, f.ty, expected_field_bytes, start, end, width
+            return Err(Diagnostic::error(
+                "E0415",
+                bytes,
+                format!(
+                    "field `{}.{}` of type `{}` requires {} bytes, but `@bytes({}..{})` spans {} bytes",
+                    s.name, f.name, f.ty, expected_field_bytes, start, end, width
+                ),
+            )
+            .with_fix(
+                Applicability::Suggestion,
+                format!("make `{}` {} bytes wide", f.name, expected_field_bytes),
+                bytes,
+                format!("@bytes({}..{})", start, start + expected_field_bytes),
             ));
         }
         if !packed {
             let field_align = type_alignment(&f.ty, named_sizes, named_aligns).unwrap_or(1);
-            if start % field_align != 0 {
-                return Err(format!(
-                    "E0418 [Layout Error]: field `{}.{}` of type `{}` needs {}-byte alignment, but starts at byte {}; move it, or mark the struct `@packed`",
-                    s.name, f.name, f.ty, field_align, start
+            if !start.is_multiple_of(field_align) {
+                return Err(Diagnostic::error(
+                    "E0418",
+                    bytes,
+                    format!(
+                        "field `{}.{}` of type `{}` needs {}-byte alignment, but starts at byte {}",
+                        s.name, f.name, f.ty, field_align, start
+                    ),
+                )
+                .with_fix(
+                    Applicability::Suggestion,
+                    format!(
+                        "mark `{}` `@packed`, so its fields may be unaligned",
+                        s.name
+                    ),
+                    insertion_point(layout),
+                    "@packed\n",
                 ));
             }
             if field_align > align {
-                return Err(format!(
-                    "E0419 [Layout Error]: field `{}.{}` of type `{}` needs {}-byte alignment, more than the struct's `align: {}`; raise it, or mark the struct `@packed`",
-                    s.name, f.name, f.ty, field_align, align
-                ));
+                let d = Diagnostic::error(
+                    "E0419",
+                    f.ty_span,
+                    format!(
+                        "field `{}.{}` of type `{}` needs {}-byte alignment, more than the struct's `align: {}`",
+                        s.name, f.name, f.ty, field_align, align
+                    ),
+                );
+                return Err(if expected_size.is_multiple_of(field_align) {
+                    d.with_fix(
+                        Applicability::Suggestion,
+                        format!("raise `{}`'s alignment to {}", s.name, field_align),
+                        layout,
+                        layout_text(expected_size, field_align),
+                    )
+                } else {
+                    d
+                });
             }
         }
         table.push_str(&format!(
@@ -226,10 +356,24 @@ pub fn verify_explicit_struct_layout(
     }
 
     if cursor != expected_size {
-        return Err(format!(
-            "E0416 [Layout Error]: struct `{}` declared `@layout(size: {})`, but fields end at byte {}",
-            s.name, expected_size, cursor
-        ));
+        let d = Diagnostic::error(
+            "E0416",
+            layout,
+            format!(
+                "struct `{}` declares `size: {}`, but its fields end at byte {}",
+                s.name, expected_size, cursor
+            ),
+        );
+        return Err(if cursor > 0 && cursor.is_multiple_of(align) {
+            d.with_fix(
+                Applicability::Suggestion,
+                format!("declare the size its fields take, {} bytes", cursor),
+                layout,
+                layout_text(cursor, align),
+            )
+        } else {
+            d
+        });
     }
 
     Ok(LayoutProof {
@@ -327,32 +471,70 @@ fn backing_bits(backing_type: &str) -> Option<usize> {
     }
 }
 
+/// The smallest backing integer that holds `bits` bits.
+fn backing_for(bits: usize) -> Option<usize> {
+    [8, 16, 32, 64, 128].into_iter().find(|&w| bits <= w)
+}
+
 /// Proves that `bitstruct Name : uN` has contiguous, hole-free `@bits(start..end)` covering `[0..N)`,
 /// and that each field's type is exactly as wide as its range.
 pub fn verify_bitstruct_layout(
     bs: &BitStructDecl,
     bitstruct_bits: &HashMap<String, usize>,
-) -> Result<BitStructProof, String> {
-    let total_bits = backing_bits(&bs.backing_type).ok_or_else(|| {
-        format!(
-            "E0420 [BitStruct Error]: bitstruct `{}` has unsupported backing type `{}`",
-            bs.name, bs.backing_type
-        )
-    })?;
+) -> Result<BitStructProof, Diagnostic> {
+    let Some(total_bits) = backing_bits(&bs.backing_type) else {
+        let d = Diagnostic::error(
+            "E0420",
+            bs.backing_span,
+            format!(
+                "bitstruct `{}` has backing type `{}`; it must be `u8`, `u16`, `u32`, `u64` or `u128`",
+                bs.name, bs.backing_type
+            ),
+        );
+        return Err(match int_bits(&bs.backing_type).and_then(backing_for) {
+            Some(w) => d.with_fix(
+                Applicability::Suggestion,
+                format!("back it with `u{}`", w),
+                bs.backing_span,
+                format!("u{}", w),
+            ),
+            None => d,
+        });
+    };
 
     let mut cursor = 0usize;
     for f in &bs.fields {
         let (start, end) = f.bit_range;
+        let bits = f.bits_span.unwrap_or(f.name_span);
         if start != cursor {
-            return Err(format!(
-                "E0421 [BitStruct Error]: bitstruct `{}` has bit gap or overlap before `{}`: expected bit {}, got {}",
-                bs.name, f.name, cursor, start
+            let what = if start > cursor {
+                "a gap"
+            } else {
+                "an overlap"
+            };
+            return Err(Diagnostic::error(
+                "E0421",
+                bits,
+                format!(
+                    "bitstruct `{}` has {} before field `{}`: it starts at bit {}, but the previous field ends at bit {}",
+                    bs.name, what, f.name, start, cursor
+                ),
+            )
+            .with_fix(
+                Applicability::Suggestion,
+                format!("start `{}` at bit {}", f.name, cursor),
+                bits,
+                format!("@bits({}..{})", cursor, cursor + end.saturating_sub(start)),
             ));
         }
         if end <= start {
-            return Err(format!(
-                "E0422 [BitStruct Error]: bitstruct `{}.{}` has invalid bit range {}..{}",
-                bs.name, f.name, start, end
+            return Err(Diagnostic::error(
+                "E0422",
+                bits,
+                format!(
+                    "field `{}.{}` has an empty bit range {}..{}",
+                    bs.name, f.name, start, end
+                ),
             ));
         }
         let ty = f.ty.trim();
@@ -360,27 +542,70 @@ pub fn verify_bitstruct_layout(
             Some(1)
         } else {
             int_bits(ty).or_else(|| bitstruct_bits.get(ty).copied())
-        }
-        .ok_or_else(|| {
-            format!(
-                "E0425 [BitStruct Error]: field `{}.{}` has type `{}`; a bitstruct field must be `bool`, `uN`, `iN` or a bitstruct of this module",
-                bs.name, f.name, ty
-            )
-        })?;
-        if type_bits != end - start {
-            return Err(format!(
-                "E0424 [BitStruct Error]: field `{}.{}` has type `{}`, {} bits wide, but `@bits({}..{})` spans {} bits",
-                bs.name, f.name, ty, type_bits, start, end, end - start
+        };
+        let Some(type_bits) = type_bits else {
+            return Err(Diagnostic::error(
+                "E0425",
+                f.ty_span,
+                format!(
+                    "field `{}.{}` has type `{}`; a bitstruct field must be `bool`, `uN`, `iN` or a bitstruct of this module",
+                    bs.name, f.name, ty
+                ),
             ));
+        };
+        let width = end - start;
+        if type_bits != width {
+            let d = Diagnostic::error(
+                "E0424",
+                f.ty_span,
+                format!(
+                    "field `{}.{}` has type `{}`, {} bits wide, but `@bits({}..{})` spans {} bits",
+                    bs.name, f.name, ty, type_bits, start, end, width
+                ),
+            );
+            // An integer field can take the width of its range; a nested bitstruct cannot.
+            let fitted = if ty.starts_with('i') && int_bits(ty).is_some() {
+                Some(format!("i{}", width))
+            } else if ty == "bool" || int_bits(ty).is_some() {
+                Some(if width == 1 {
+                    String::from("bool")
+                } else {
+                    format!("u{}", width)
+                })
+            } else {
+                None
+            };
+            return Err(match fitted {
+                Some(t) => d.with_fix(
+                    Applicability::Suggestion,
+                    format!("make `{}` a `{}`", f.name, t),
+                    f.ty_span,
+                    t,
+                ),
+                None => d,
+            });
         }
         cursor = end;
     }
 
     if cursor != total_bits {
-        return Err(format!(
-            "E0423 [BitStruct Error]: bitstruct `{}` backing `{}` requires {} bits, but fields end at bit {}",
-            bs.name, bs.backing_type, total_bits, cursor
-        ));
+        let d = Diagnostic::error(
+            "E0423",
+            bs.backing_span,
+            format!(
+                "bitstruct `{}`: backing `{}` has {} bits, but its fields end at bit {}",
+                bs.name, bs.backing_type, total_bits, cursor
+            ),
+        );
+        return Err(match backing_bits(&format!("u{}", cursor)) {
+            Some(w) => d.with_fix(
+                Applicability::Suggestion,
+                format!("back it with `u{}`, as wide as its fields", w),
+                bs.backing_span,
+                format!("u{}", w),
+            ),
+            None => d,
+        });
     }
 
     Ok(BitStructProof {
@@ -390,54 +615,90 @@ pub fn verify_bitstruct_layout(
 }
 
 /// Verifies `@total` termination obligations and `@branchless` / `@no_alloc` syntactic rules on a function.
-pub fn verify_function_contracts(f: &FnDecl) -> Result<(), String> {
+pub fn verify_function_contracts(f: &FnDecl) -> Result<(), Diagnostic> {
     let is_total = f.attrs.iter().any(|a| a.name == "total");
     let is_branchless = f.attrs.iter().any(|a| a.name == "branchless");
 
     // 0. A returned view may borrow only from a parameter the caller keeps: never an `own` one.
-    for source in &f.provenance {
+    for (i, source) in f.provenance.iter().enumerate() {
+        let at = f.provenance_spans.get(i).copied().unwrap_or(f.name_span);
         match f.params.iter().find(|p| &p.name == source) {
             None => {
-                return Err(format!(
-                    "E0311 [Provenance Error]: `from {}` in the signature of `{}` (line {}) names no parameter of `{}`.",
-                    source, f.name, f.line, f.name
-                ))
+                let d = Diagnostic::error(
+                    "E0311",
+                    at,
+                    format!(
+                        "`from {}` in the signature of `{}` names no parameter of `{}`",
+                        source, f.name, f.name
+                    ),
+                );
+                // With one parameter a view can borrow from, that is the one meant.
+                let kept: Vec<_> = f
+                    .params
+                    .iter()
+                    .filter(|p| p.mode != ParamMode::Own)
+                    .collect();
+                return Err(match kept.as_slice() {
+                    [only] => d.with_fix(
+                        Applicability::Suggestion,
+                        format!("borrow from `{}`", only.name),
+                        at,
+                        only.name.clone(),
+                    ),
+                    _ => d,
+                });
             }
             Some(p) if p.mode == ParamMode::Own => {
-                return Err(format!(
-                    "E0311 [Provenance Error]: `from {}` in the signature of `{}` (line {}) names an `own` parameter; a returned view cannot borrow from a value the callee consumes.",
-                    source, f.name, f.line
-                ))
+                return Err(Diagnostic::error(
+                    "E0311",
+                    at,
+                    format!(
+                        "`from {}` in the signature of `{}` names an `own` parameter; a returned view cannot borrow from a value the callee consumes",
+                        source, f.name
+                    ),
+                ));
             }
             Some(_) => {}
         }
     }
 
-    // 1. If marked @total and contains a `while` loop, it MUST contain a `decreases` termination measure!
+    // 1. A `@total` function that loops with `while` gives a `decreases` measure.
     if is_total {
         let has_while = f.body_tokens.contains(&TokenKind::While);
         let has_decreases =
             !f.decreases.is_empty() || f.body_tokens.contains(&TokenKind::Decreases);
         if has_while && !has_decreases {
-            return Err(format!(
-                "E0501 [Totality Error]: Function `{}` (line {}) is marked `@total` and contains a `while` loop, but lacks a constructive `decreases <measure>` proof.",
-                f.name, f.line
+            return Err(Diagnostic::error(
+                "E0501",
+                f.name_span,
+                format!(
+                    "function `{}` is marked `@total` and loops with `while`, but gives no `decreases` measure",
+                    f.name
+                ),
             ));
         }
     }
 
-    // 2. If marked @branchless, it MUST NOT contain unbounded `while` loops or `raise` jumps!
+    // 2. A `@branchless` body has no `while` loop and no `raise`.
     if is_branchless {
         if f.body_tokens.contains(&TokenKind::While) {
-            return Err(format!(
-                "E0401 [Hard Micro-Arch Error]: Function `{}` (line {}) is marked `@branchless`, but contains a `while` loop.",
-                f.name, f.line
+            return Err(Diagnostic::error(
+                "E0401",
+                f.name_span,
+                format!(
+                    "function `{}` is marked `@branchless`, but contains a `while` loop",
+                    f.name
+                ),
             ));
         }
         if f.body_tokens.contains(&TokenKind::Raise) {
-            return Err(format!(
-                "E0402 [Hard Micro-Arch Error]: Function `{}` (line {}) is marked `@branchless`, but contains a `raise` control-flow jump.",
-                f.name, f.line
+            return Err(Diagnostic::error(
+                "E0402",
+                f.name_span,
+                format!(
+                    "function `{}` is marked `@branchless`, but contains `raise`",
+                    f.name
+                ),
             ));
         }
     }
@@ -448,7 +709,6 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mente_syntax::parse_module;
 
     #[test]
     fn test_rejects_struct_with_padding_hole() {
@@ -464,7 +724,7 @@ pub struct BrokenCell {
         let res = verify_module(&m);
         assert!(res.is_err());
         let errs = res.unwrap_err();
-        assert!(errs[0].contains("E0413"));
+        assert!(errs[0].to_string().contains("E0413"));
     }
 
     #[test]
@@ -485,7 +745,7 @@ pub struct Packet {
 
         let too_wide = code.replace("@bytes(0..2) pub tag", "@bytes(0..4) pub tag");
         let errs = verify_module(&parse_module(&too_wide).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0415"));
+        assert!(errs[0].to_string().contains("E0415"));
     }
 
     #[test]
@@ -511,11 +771,11 @@ pub struct Frame {
 
         let narrow = code.replace("pub mode: u3", "pub mode: u2");
         let errs = verify_module(&parse_module(&narrow).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0424"), "{:?}", errs);
+        assert!(errs[0].to_string().contains("E0424"), "{:?}", errs);
 
         let opaque = code.replace("pub level: i4", "pub level: Level");
         let errs = verify_module(&parse_module(&opaque).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0425"), "{:?}", errs);
+        assert!(errs[0].to_string().contains("E0425"), "{:?}", errs);
     }
 
     #[test]
@@ -531,7 +791,7 @@ pub struct Record {
 "#;
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
         assert!(
-            errs[0].contains("E0418") && errs[0].contains("value"),
+            errs[0].to_string().contains("E0418") && errs[0].to_string().contains("value"),
             "{:?}",
             errs
         );
@@ -550,7 +810,7 @@ pub struct Wide {
 }
 "#;
         let errs = verify_module(&parse_module(under_aligned).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0419"), "{:?}", errs);
+        assert!(errs[0].to_string().contains("E0419"), "{:?}", errs);
     }
 
     #[test]
@@ -564,7 +824,7 @@ pub struct Holder {
 }
 "#;
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0417") && errs[0].contains("usize"));
+        assert!(errs[0].to_string().contains("E0417") && errs[0].to_string().contains("usize"));
     }
 
     #[test]
@@ -577,11 +837,17 @@ pub fn head(data: []u8, n: usize) -> []u8 from data
 
         let unknown = ok.replace("from data", "from buffer");
         let errs = verify_module(&parse_module(&unknown).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0311") && errs[0].contains("names no parameter"));
+        assert!(
+            errs[0].to_string().contains("E0311")
+                && errs[0].to_string().contains("names no parameter")
+        );
 
         let consumed = ok.replace("head(data:", "head(own data:");
         let errs = verify_module(&parse_module(&consumed).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0311") && errs[0].contains("`own` parameter"));
+        assert!(
+            errs[0].to_string().contains("E0311")
+                && errs[0].to_string().contains("`own` parameter")
+        );
     }
 
     #[test]
@@ -600,7 +866,7 @@ pub fn bad_loop(x: i32) -> i32 {
         let m = parse_module(bad_branchless).unwrap();
         let res = verify_module(&m);
         assert!(res.is_err());
-        assert!(res.unwrap_err()[0].contains("E0401"));
+        assert!(res.unwrap_err()[0].to_string().contains("E0401"));
     }
 
     #[test]
@@ -613,7 +879,7 @@ pub fn pick(x: i32) -> i32 ! RangeError {
 }
 "#;
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0402"), "{:?}", errs);
+        assert!(errs[0].to_string().contains("E0402"), "{:?}", errs);
         // The same body is accepted without the contract: raise is ordinary control flow.
         let plain = code.replace("@branchless\n", "");
         assert!(verify_module(&parse_module(&plain).unwrap()).is_ok());
@@ -634,7 +900,7 @@ pub fn countdown(n: u32) -> u32 {
 "#;
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
         assert!(
-            errs[0].contains("E0501") && errs[0].contains("countdown"),
+            errs[0].to_string().contains("E0501") && errs[0].to_string().contains("countdown"),
             "{:?}",
             errs
         );
@@ -676,13 +942,14 @@ pub struct Sample {
             .replace("@bytes(4..6) pub gain", "@bytes(2..6) pub gain");
         let errs = verify_module(&parse_module(&wrong).unwrap()).unwrap_err();
         assert!(
-            errs[0].contains("E0415") && errs[0].contains("requires 4 bytes"),
+            errs[0].to_string().contains("E0415")
+                && errs[0].to_string().contains("requires 4 bytes"),
             "{:?}",
             errs
         );
     }
 
-    fn first_error(code: &str) -> String {
+    fn first_error(code: &str) -> Diagnostic {
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
         errs[0].clone()
     }
@@ -718,7 +985,12 @@ pub struct Sample {
         ];
         for (code, expected) in cases {
             let err = first_error(&code);
-            assert!(err.contains(expected), "expected {}: {}", expected, err);
+            assert!(
+                err.to_string().contains(expected),
+                "expected {}: {}",
+                expected,
+                err
+            );
         }
     }
 
@@ -777,21 +1049,25 @@ pub struct Event {
             .replace("@bytes(0..8) pub at: Stamp\n  @bytes(8..16) pub value: f64", "@bytes(0..4) pub tag: u32\n  @bytes(4..12) pub at: Stamp\n  @bytes(12..20) pub value: f64");
         assert!(verify_module(&parse_module(&misplaced).unwrap()).is_ok());
         let unpacked = misplaced.replace("@packed\n", "");
-        assert!(first_error(&unpacked).contains("E0418"));
+        assert!(first_error(&unpacked).to_string().contains("E0418"));
     }
 
     #[test]
     fn test_field_sizes_and_alignments_follow_their_types() {
         // u12 is not a whole number of bytes, so it belongs in a bitstruct.
         let odd = "module test.sizes\n@layout(size: 2, align: 2)\npub struct Odd {\n  @bytes(0..2) pub v: u12\n}\n";
-        assert!(first_error(odd).contains("E0417"));
+        assert!(first_error(odd).to_string().contains("E0417"));
         // An array is aligned like its element: [2]u32 cannot start at byte 2.
         let arr = "module test.sizes\n@layout(size: 12, align: 4)\npub struct Arr {\n  @bytes(0..2) pub tag: u16\n  @bytes(2..10) pub vals: [2]u32\n  @bytes(10..12) pub crc: u16\n}\n";
         let err = first_error(arr);
-        assert!(err.contains("E0418") && err.contains("vals"), "{}", err);
+        assert!(
+            err.to_string().contains("E0418") && err.to_string().contains("vals"),
+            "{}",
+            err
+        );
         // Leading zeros do not spell a width.
         let zero = "module test.sizes\npub bitstruct Z : u8 {\n  @bits(0..7) pub v: u07\n  @bits(7..8) pub f: bool\n}\n";
-        assert!(first_error(zero).contains("E0425"));
+        assert!(first_error(zero).to_string().contains("E0425"));
         // Every backing width from u8 to u128 is accepted.
         for (backing, bits) in [
             ("u8", 8),
@@ -839,7 +1115,93 @@ pub struct Event {
         ];
         for (code, expected) in cases {
             let err = first_error(&code);
-            assert!(err.contains(expected), "expected {}: {}", expected, err);
+            assert!(
+                err.to_string().contains(expected),
+                "expected {}: {}",
+                expected,
+                err
+            );
         }
+    }
+
+    /// The first diagnostic of a module that must fail, and the text its primary span covers.
+    fn diagnosed(src: &str) -> (Diagnostic, String) {
+        let d = check_source(src).unwrap_err().remove(0);
+        let text = src[d.primary.start..d.primary.end].to_string();
+        (d, text)
+    }
+
+    fn layout(attr: &str, fields: &str) -> String {
+        format!("module t\n{}\npub struct S {{\n{}}}\n", attr, fields)
+    }
+
+    #[test]
+    fn test_diagnostics_point_at_their_source() {
+        for (src, code, text) in [
+            (layout("@layout(size: 8, align: 3)", "  @bytes(0..8) pub a: u64\n"), "E0410", "@layout(size: 8, align: 3)"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..4) pub a: u32\n  pub b: u32\n"), "E0412", "b"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..4) pub a: u32\n  @bytes(6..8) pub b: u16\n"), "E0413", "@bytes(6..8)"),
+            (layout("@layout(size: 8, align: 8)", "  @bytes(0..8) pub n: usize\n"), "E0417", "usize"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..8) pub v: u64\n"), "E0419", "u64"),
+            (String::from("module t\npub bitstruct B : u12 {\n  @bits(0..12) pub v: u12\n}\n"), "E0420", "u12"),
+            (String::from("module t\npub bitstruct B : u8 {\n  @bits(0..3) pub m: u2\n  @bits(3..8) pub r: u5\n}\n"), "E0424", "u2"),
+            (String::from("module t\npub fn head(data: []u8) -> []u8 from buffer\n"), "E0311", "buffer"),
+            (String::from("module t\n@total\npub fn countdown(n: u32) -> u32 {\n  while n > 0 {\n  }\n  n\n}\n"), "E0501", "countdown"),
+        ] {
+            let (d, at) = diagnosed(&src);
+            assert_eq!((d.code, at.as_str()), (code, text), "{}", d);
+        }
+    }
+
+    #[test]
+    fn test_machine_applicable_fix_gives_the_only_valid_range() {
+        // A field without @bytes: contiguity and its type fix the range, so the fix is certain.
+        let src = "module t\n@layout(size: 8, align: 4)\npub struct S {\n  @bytes(0..4) pub a: u32\n  pub b: u32\n}\n";
+        let (d, _) = diagnosed(src);
+        assert_eq!(d.code, "E0412");
+        assert_eq!(d.fixes[0].applicability, Applicability::MachineApplicable);
+        let fixed = mente_syntax::diagnostics::apply_fix(src, &d.fixes[0]).unwrap();
+        assert!(fixed.contains("  @bytes(4..8) pub b: u32\n"), "{}", fixed);
+        assert!(check_source(&fixed).is_ok(), "{}", fixed);
+        // When the size of the type is unknown, no range is certain and no fix is offered.
+        let (d, _) = diagnosed(&src.replace("pub b: u32", "pub b: Opaque"));
+        assert_eq!((d.code, d.fixes.len()), ("E0412", 0));
+    }
+
+    #[test]
+    fn test_suggested_fixes_repair_the_module() {
+        for (src, code) in [
+            (layout("@layout(size: 8, align: 3)", "  @bytes(0..4) pub a: u32\n  @bytes(4..8) pub b: u32\n"), "E0410"),
+            (layout("@layout(size: 6, align: 4)", "  @bytes(0..4) pub a: u32\n  @bytes(4..8) pub b: u32\n"), "E0411"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..4) pub a: u32\n  @bytes(6..10) pub b: u32\n"), "E0413"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..4) pub a: u32\n  @bytes(4..4) pub b: u32\n"), "E0414"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..4) pub a: u32\n  @bytes(4..6) pub b: u32\n"), "E0415"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..4) pub a: u32\n"), "E0416"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..2) pub a: u16\n  @bytes(2..6) pub b: u32\n  @bytes(6..8) pub c: u16\n"), "E0418"),
+            (layout("@layout(size: 8, align: 4)", "  @bytes(0..8) pub v: u64\n"), "E0419"),
+            (String::from("module t\npub bitstruct B : u8 {\n  @bits(0..4) pub a: u4\n  @bits(5..9) pub b: u4\n}\n"), "E0421"),
+            (String::from("module t\npub bitstruct B : u16 {\n  @bits(0..8) pub a: u8\n}\n"), "E0423"),
+            (String::from("module t\npub bitstruct B : u8 {\n  @bits(0..3) pub m: u2\n  @bits(3..8) pub r: u5\n}\n"), "E0424"),
+            (String::from("module t\npub bitstruct B : u8 {\n  @bits(0..1) pub on: u2\n  @bits(1..8) pub r: u7\n}\n"), "E0424"),
+            (String::from("module t\npub fn head(data: []u8, own key: []u8) -> []u8 from buffer\n"), "E0311"),
+        ] {
+            let (d, _) = diagnosed(&src);
+            assert_eq!(d.code, code, "{}", d);
+            assert_eq!(d.fixes[0].applicability, Applicability::Suggestion, "{}", d);
+            let fixed = mente_syntax::diagnostics::apply_fix(&src, &d.fixes[0]).unwrap();
+            assert!(
+                check_source(&fixed).is_ok(),
+                "{} did not repair:\n{}\n{:?}",
+                code,
+                fixed,
+                check_source(&fixed).err()
+            );
+        }
+        // E0420 suggests the next backing width; the fields still decide whether it is enough.
+        let (d, _) = diagnosed("module t\npub bitstruct B : u12 {\n  @bits(0..12) pub v: u12\n}\n");
+        assert_eq!(
+            (d.code, d.fixes[0].edits[0].replacement.as_str()),
+            ("E0420", "u16")
+        );
     }
 }

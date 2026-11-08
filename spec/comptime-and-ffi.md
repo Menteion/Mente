@@ -38,6 +38,7 @@ date: 2026-11-04
      - A Rust library is bound through the C header that `cbindgen` generates for its `extern "C"` exports; a `.rlib` carries no C-ABI description to read.
      - The C dialect `mn bind` accepts (preprocessor, compiler extensions, platform headers) is written down before the feature is promised for real libraries; parsing arbitrary system headers without libclang is a project of its own.
 3. **Unified `mn` CLI toolchain (`compiler/mente-cli/src/main.rs`)**:
+   - How `mn` reports a problem, `mn check --json` and `mn explain` are specified in `diagnostics.md`.
    - `Implemented`: `mn check` parses each `.mn` file's declarations, computes its digests, and runs `mente-sema`: the `@layout` and `bitstruct` provers, the token-level `@total` / `@branchless` checks and the `from` check; a file that fails any of them fails the command.
      <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_check_passes_examples_and_rejects_a_broken_layout" min="1" reason="mn check passes the examples and fails a module that breaks a prover" -->
      <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_report_counts_contract_functions" min="1" reason="The report counts @total, @branchless and @kernel functions and examples" -->

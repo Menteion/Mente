@@ -68,9 +68,9 @@ cargo clippy --all-targets --workspace -- -D warnings
 
 | Crate | Governing `spec/*.md` files |
 | :--- | :--- |
-| `compiler/mente-syntax` | [`holographic-module.md`](spec/holographic-module.md), [`surface-syntax.md`](spec/surface-syntax.md) |
+| `compiler/mente-syntax` | [`holographic-module.md`](spec/holographic-module.md), [`surface-syntax.md`](spec/surface-syntax.md), [`diagnostics.md`](spec/diagnostics.md) |
 | `compiler/mente-ast` | [`holographic-module.md`](spec/holographic-module.md) |
-| `compiler/mente-sema` | [`refinement-and-fixed-point.md`](spec/refinement-and-fixed-point.md), [`dimensional-units.md`](spec/dimensional-units.md), [`algebraic-types-and-null.md`](spec/algebraic-types-and-null.md), [`traits-and-generics.md`](spec/traits-and-generics.md), [`mutable-value-semantics.md`](spec/mutable-value-semantics.md), [`regions-and-pools.md`](spec/regions-and-pools.md), [`morphic-layouts.md`](spec/morphic-layouts.md), [`ghost-contracts-and-totality.md`](spec/ghost-contracts-and-totality.md), [`capability-effects.md`](spec/capability-effects.md) |
+| `compiler/mente-sema` | [`refinement-and-fixed-point.md`](spec/refinement-and-fixed-point.md), [`dimensional-units.md`](spec/dimensional-units.md), [`algebraic-types-and-null.md`](spec/algebraic-types-and-null.md), [`traits-and-generics.md`](spec/traits-and-generics.md), [`mutable-value-semantics.md`](spec/mutable-value-semantics.md), [`regions-and-pools.md`](spec/regions-and-pools.md), [`morphic-layouts.md`](spec/morphic-layouts.md), [`ghost-contracts-and-totality.md`](spec/ghost-contracts-and-totality.md), [`capability-effects.md`](spec/capability-effects.md), [`diagnostics.md`](spec/diagnostics.md) |
 | `compiler/mente-mir` | [`mir-and-codegen.md`](spec/mir-and-codegen.md), [`hardware-contracts.md`](spec/hardware-contracts.md), [`disjoint-parallelism.md`](spec/disjoint-parallelism.md) |
 | `compiler/mente-codegen` | [`error-handling-abi.md`](spec/error-handling-abi.md), [`hardware-contracts.md`](spec/hardware-contracts.md), [`mir-and-codegen.md`](spec/mir-and-codegen.md) |
-| `compiler/mente-cli` | [`comptime-and-ffi.md`](spec/comptime-and-ffi.md), [`holographic-module.md`](spec/holographic-module.md) |
+| `compiler/mente-cli` | [`comptime-and-ffi.md`](spec/comptime-and-ffi.md), [`holographic-module.md`](spec/holographic-module.md), [`diagnostics.md`](spec/diagnostics.md) |
