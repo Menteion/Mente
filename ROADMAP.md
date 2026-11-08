@@ -65,7 +65,7 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 - [x] The core calculus of M1's language, in a new normative spec file, [`spec/core-calculus.md`](spec/core-calculus.md) ([`core-calculus-home`](docs/design-review.md#core-calculus-home); commit "Write the core calculus of M1").
 - [x] The normative EBNF grammar of M1's surface syntax, in a new spec file, [`spec/grammar.md`](spec/grammar.md) ([`grammar-home`](docs/design-review.md#grammar-home); commit "Write the grammar of M1's surface syntax").
 - [x] The agent-benchmark tasks, fixed before anything is measured, each marked with the earliest milestone that can run it and as core-only or not, with a held-out set and adversarial tasks, in [`benchmark/`](benchmark/README.md); and the control language ([`success-workload`](docs/design-review.md#success-workload), [`benchmark-corpus`](docs/design-review.md#benchmark-corpus); protocol below; commit "Fix the agent-benchmark tasks before anything is measured").
-- [ ] Spike: Tier 1 on the generated module of the Tier-1 protocol below, against its latency target.
+- [x] Spike: Tier 1 on the generated module of the Tier-1 protocol below, against its latency target, in [`spikes/tier1-latency`](spikes/tier1-latency/README.md): the target held for a per-function re-check, and two questions for M1 arose ([`tier1-latency-spike`](docs/design-review.md#tier1-latency-spike); commit "Record the Tier-1 latency spike's result").
 - [ ] Spike: debug and unwind information through Cranelift, DWARF on Linux and PDB with CodeView on Windows ([`debug-info`](docs/design-review.md#debug-info)). Its Cranelift, DWARF and object crates go to Norman for approval first, under the dependency policy.
 - [x] Decided: the reference interpreter is a crate of its own, `mente-interp` ([`reference-interpreter-crate`](docs/design-review.md#reference-interpreter-crate)), and stage 1 builds no mechanised model of the core calculus ([`mechanised-model`](docs/design-review.md#mechanised-model)) (commit "Apply the M0b decisions to the spec, the roadmap and CLAUDE.md").
 
@@ -195,7 +195,7 @@ A `Target` in `spec/*.md` is a number with a protocol here. A figure without a p
 - **Corpus**: the `examples/` modules, plus a generated module of 200 functions with 20 obligations each (loop bounds, slice indexing, chains of `requires`). Each run applies one random single-token edit inside one function body.
 - **Method**: release build; 100 warm-up edits, then 1,000 timed edits; report the median and the 99th percentile.
 - **Machine**: as above.
-- **Last result**: none yet; Tier 1 does not exist.
+- **Last result**: none yet for Tier 1 itself, which M1 builds. On 2026-11-09 the M0b spike's prototype, on the generated module alone and on the CI runners, re-checked an edit in a median of 249 to 305 µs and a 99th percentile of 288 to 479 µs, re-parsing only the edited function ([`spikes/tier1-latency/README.md`](spikes/tier1-latency/README.md); commit "Record the Tier-1 latency spike's result"). A spike is never evidence for a claim.
 
 ### Agent benchmark: Mente for agents, against Rust and a control language
 

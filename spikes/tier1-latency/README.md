@@ -26,3 +26,20 @@ The measurement is a benchmark, so it runs on GitHub Actions, in [`.github/workf
 cargo test -p spike-tier1-latency
 cargo run --release -p spike-tier1-latency -- measure
 ```
+
+## Result
+
+On 2026-11-09, in the workflow run for pull request 19, on GitHub's runners (4 vCPUs each): an AMD EPYC 7763 under Ubuntu 24.04 and under Windows Server 2025, and an Arm Neoverse-N2 under Ubuntu 24.04. The generated module has 200 functions, 105,649 bytes and 4,000 obligations, 2,200 of which must be proven; Tier 1 proves every one of those, and leaves 200 as run-time checks (the additions to an `i64` sum). Of the 1,000 timed edits, 471 made an obligation fail that Tier 1 must prove, 25 broke the parse, and 69 caused another diagnostic.
+
+| Runner | Re-check after an edit, one function re-parsed: median / 99th percentile | Whole module re-parsed instead: median / 99th percentile | Cold check of the whole module |
+| :--- | :--- | :--- | :--- |
+| x86-64 Linux | 272 µs / 332 µs | 4.9 ms / 5.3 ms | 53 ms |
+| x86-64 Windows | 305 µs / 479 µs | 7.4 ms / 13.4 ms | 63 ms |
+| AArch64 Linux | 249 µs / 288 µs | 4.1 ms / 4.2 ms | 48 ms |
+
+## Findings
+
+1. **The target holds with room to spare when the re-check is per function.** Re-parsing and re-checking the edited function alone keeps the 99th percentile between 0.29 and 0.48 ms, a tenth of the 5 ms target, on every platform. Tier 1 itself costs about 0.25 ms for a function of 20 obligations, two loops and a call.
+2. **Re-parsing the whole module on every edit misses the target.** Its 99th percentile is 4.2 to 13.4 ms, from just under the target to almost three times it, and it grows with the module. M1's incremental architecture therefore parses and checks per item, with each item's spans relative to its start, so that an edit shifts no other item's spans or diagnostics (the prototype shifts only the item boundaries).
+3. **A counting loop needs a written invariant to bound its counter after the loop.** At a loop head Tier 1 keeps only the candidates that are inductive ([`tier1-loops`](../../docs/design-review.md#tier1-loops)). The condition `i < n` of the most common loop is not: it fails on the last iteration. So after `while i < n { i += 1 }` nothing bounds `i` by `n` unless the loop says `invariant i <= n`. [`loop-condition-candidates`](../../docs/design-review.md#loop-condition-candidates) proposes taking the non-strict form of a strict comparison in the condition as a candidate too.
+4. **Whether an unannotated binding takes a refinement is not said.** With `lo: usize[0..64]`, `val m = lo + 1` could have the type `usize[0..64]`, which `lo = 63` breaks, or `usize`. The generated module states every type; [`refinement-inference`](../../docs/design-review.md#refinement-inference) proposes that a binding takes a refined type only when it states one.
