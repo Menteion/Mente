@@ -45,6 +45,7 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
     // midpoint's contract (requires lo < hi, ensures lo <= result and result < hi) lets Tier 1
     // prove mid in [0..items.len) with octagons alone, so items[mid] below needs no bounds check.
     // Writing lo + (hi - lo) / 2 directly would fail: dividing by 2 is outside what octagons hold.
+    // Until `mn prove` runs, midpoint's own body is a trusted axiom: its contract is assumed, not proven.
     val mid: usize[0..items.len] = midpoint(lo, hi)
     val current = items[mid]
 

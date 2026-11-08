@@ -21,8 +21,11 @@ date: 2026-11-04
    - Nothing checks or evaluates a clause yet.
 2. `Specified` **Two-tier verification and Ghost Erasure**:
    - **Tier 1 (incremental range/linear solver)**: Runs automatically on every save (`mn check`), propagating `ValueLattice` intervals (`[min_val, max_val]`) and linear inequalities across `guard` checks.
+   - `Specified` **Facts at a loop head** ([`tier1-loops`](../docs/design-review.md#tier1-loops)): Tier 1 keeps exactly the candidate facts that are inductive, true on entry and preserved by the body. Candidates come only from the loop's own text: its condition, its `guard`s, the refinements of the variables it touches, and an optional `invariant` clause. Tier 1 drops failing candidates until the set is stable, in polynomial time and with no widening, so a reader can tell from the loop which facts can survive. A written `invariant` is itself checked, on entry and across the body.
+   - `Specified`: when an obligation inside a loop fails, the diagnostic lists the facts held at the loop head and the candidate that was dropped, with the assignment that breaks it, and offers an `invariant` line or a `guard` as fixes.
    - `Target`: a Tier-1 re-check after an edit takes under 5 ms at the 99th percentile, under [its protocol](../ROADMAP.md#tier-1-re-check-after-an-edit-99th-percentile-under-5-ms); it has no result yet, since Tier 1 does not exist.
-   - **Tier 2 (`mn prove` SMT bit-vector / quantifier-free solver)**: Verifies complex non-linear and bit-level contracts in parallel.
+   - **Tier 2 (`mn prove` SMT bit-vector / quantifier-free solver)**: Verifies complex non-linear and bit-level contracts in parallel. Until `mn prove` runs, a clause routed to it, and a body such as `midpoint`'s that only it could prove, is a trusted axiom: assumed, not proven, and called so in the spec, the examples and the diagnostics. `mn prove` never reports a clause proven before it can prove it ([`tier2-trusted`](../docs/design-review.md#tier2-trusted)).
+   - `Specified`: `mn check` lists every trusted clause with its place, as it lists every `todo`.
    - **Compile-time caller proof obligation**: Calling a function whose `requires` clause is not statically established in the caller's path context (e.g., via refined input types or a preceding `guard` statement) is a compile-time error.
    - **Which tier handles a clause**: every `requires`, `ensures` and `invariant` clause is classified by its syntax alone, so the classification is visible in the signature and in `mn view --spec`:
      - **Tier-1 fragment**: a conjunction (`and`) of comparisons of the form `±x ±y <op> c` or `±x <op> c`, in any equivalent arrangement (`lo < hi`, `items.len > 0`, `i + 1 <= n`), where `x` and `y` are integer or fixed-point bindings, field paths or `.len`, `c` is a compile-time constant, and `<op>` is `<`, `<=`, `>`, `>=` or `==`; plus single-variable bounds on floating-point values (`result >= 0.0_joule`). `mn check` proves these at every definition and every call.
@@ -36,7 +39,7 @@ date: 2026-11-04
      <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_total_while_without_decreases_is_rejected" min="1" reason="A @total function with a while loop and no decreases is rejected with E0501" -->
 4. `Specified` **Tier-1 solver predictability and concrete counterexample diagnostics (Engineering Guardrail #1)**:
    - To eliminate the "SMT butterfly effect" (where a minor code edit causes unpredictable solver timeouts in Dafny/LiquidHaskell), Tier 1 MUST remain strictly within **polynomial-time decidable abstract domains**: Interval Arithmetic (`[min, max]`) plus the **Octagon / Difference-Bound Matrix (DBM) domain** ($\pm x \pm y \le c$, solved in $O(V^3)$ incremental Floyd-Warshall closure).
-   - **Contracts are used modularly**: at each call, Tier 1 checks the callee's `requires` and then assumes its `ensures`; it never analyses the callee's body, which keeps every caller's proof independent of callee bodies (`holographic-module.md`). A fact the two domains cannot derive is supplied by a function whose `ensures` states it inside them and whose body is proven once by Tier 2.
+   - **Contracts are used modularly**: at each call, Tier 1 checks the callee's `requires` and then assumes its `ensures`; it never analyses the callee's body, which keeps every caller's proof independent of callee bodies (`holographic-module.md`). A fact the two domains cannot derive is supplied by a function whose `ensures` states it inside them and whose body is proven once by Tier 2, a trusted axiom until `mn prove` runs.
    - The standard library's `midpoint` is the canonical case:
      ```rust
      pub fn midpoint(lo: usize, hi: usize) -> usize
@@ -46,8 +49,8 @@ date: 2026-11-04
      ```
      Its body divides by 2, a coefficient no octagon constraint can hold, so Tier 1 alone would lose the relation between `mid` and `hi`. Through the contract, a binary search's `items[mid]` is proven in bounds from octagon facts only (`examples/01_refinement_and_units.mn`).
    - Whenever Tier 1 cannot discharge a `requires` or slice-bounds obligation, the compiler MUST NOT emit a generic "precondition might not hold" message. It MUST emit:
-     1. A **concrete counterexample valuation** from the violated DBM boundary (e.g., `Counterexample: lo = 0, hi = 0 violates requires items.len > 0`).
-     2. A **copy-pasteable 1-line `guard` prescription** (e.g., `Help: insert 'guard items.len > 0 else return none' before line 43 to narrow the interval`).
+     1. A **concrete valuation Tier 1 cannot rule out**, read from the violated DBM boundary (e.g., `Tier 1 cannot rule out lo = 0, hi = 0, which violates requires items.len > 0`). Octagons over-approximate, notably after the join at the end of an `if`, so no execution may reach the valuation, and the diagnostic never calls it an input that fails ([`tier1-counterexample`](../docs/design-review.md#tier1-counterexample)).
+     2. A **copy-pasteable 1-line `guard` prescription** (e.g., `Help: insert 'guard items.len > 0 else return none' before line 43 to narrow the interval`). It is the diagnostic's fix, with applicability `suggestion`: a `guard` changes what the function does on the inputs it excludes (`diagnostics.md`).
    - Adding the prescribed `guard` statement narrows the Tier-1 DBM lattice deterministically without requiring manual proof lemmas; the re-check it causes falls under the 5 ms target above.
 
 ## 2. Decision rationale and rejected alternatives
