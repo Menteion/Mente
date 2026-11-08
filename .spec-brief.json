@@ -1,0 +1,117 @@
+{
+  "$schema": "./node_modules/@spec-family/spec-brief/schema.json",
+  "briefs": "briefs",
+  "archive": "briefs/archive",
+  "files": "[0-9]*.md",
+  "id": {
+    "source": "filename",
+    "separator": "_",
+    "digits": 3
+  },
+  "status": {
+    "field": "status",
+    "draft": "draft",
+    "active": "active",
+    "deferred": "deferred",
+    "archived": "archived"
+  },
+  "sections": [
+    {
+      "name": "Intent",
+      "aliases": [
+        "Commander's Intent",
+        "Mission",
+        "Objective"
+      ],
+      "hint": "The state of the tree when this round is done, and why it matters. One paragraph."
+    },
+    {
+      "name": "Negative Scope",
+      "aliases": [
+        "Out of Scope",
+        "Non-Goals",
+        "Not in Scope",
+        "What this round is NOT",
+        "What this brief does NOT do"
+      ],
+      "hint": "What this round must not do, even where it would look helpful."
+    },
+    {
+      "name": "Not Empowered",
+      "aliases": [
+        "Non-Empowerment",
+        "Non-Empowerment List"
+      ],
+      "optional": true,
+      "hint": "Files, interfaces and decisions this round may not change."
+    },
+    {
+      "name": "Invariants",
+      "aliases": [
+        "Invariant Checklist",
+        "Definition of Done"
+      ],
+      "checklist": true,
+      "hint": "Checks that must hold before the round is called done, each one a task item."
+    }
+  ],
+  "types": {
+    "feature": {
+      "sections": [
+        {
+          "name": "Acceptance Criteria",
+          "checklist": true,
+          "hint": "What a reviewer checks to accept the result, each one a task item."
+        }
+      ]
+    },
+    "defect": {
+      "sections": [
+        {
+          "name": "The Defect, Measured",
+          "aliases": [
+            "Reproduction"
+          ],
+          "hint": "How to reproduce the defect, and the measurement that shows it."
+        }
+      ]
+    },
+    "refactor": {
+      "sections": []
+    },
+    "chore": {
+      "sections": []
+    }
+  },
+  "archiving": {
+    "tasks": "all",
+    "dispositions": [
+      "**Delegated",
+      "**Accepted debt",
+      "**Rejected"
+    ],
+    "banner": [
+      "**Archived {date}.**",
+      "{summary}",
+      "Merged in pull request {pr}.",
+      "Recorded at commit `{commit}`: {diffstat}.",
+      "{links}",
+      "The body below describes the tree before execution and is not maintained."
+    ],
+    "base": null
+  },
+  "claims": {
+    "labels": {
+      "Implemented": "done",
+      "Specified": "open",
+      "Target": "open",
+      "Hypothesis": "open"
+    }
+  },
+  "registers": {
+    "settled": [
+      "decided",
+      "done"
+    ]
+  }
+}
