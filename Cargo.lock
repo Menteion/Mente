@@ -39,3 +39,7 @@ dependencies = [
 [[package]]
 name = "mente-syntax"
 version = "0.1.0"
+
+[[package]]
+name = "spike-tier1-latency"
+version = "0.1.0"
