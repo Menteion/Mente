@@ -69,7 +69,9 @@ pub fn build_object(
     let isa = host_isa()?;
     let mut builder = ObjectBuilder::new(isa, "demo", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
-    builder.unwind_info(true);
+    // cranelift-object can write .eh_frame itself, but with absolute FDE pointers, which a
+    // position-independent executable cannot link; the spike writes it with PC-relative ones.
+    builder.unwind_info(false);
     let mut module = ObjectModule::new(builder);
     let call_conv = module.isa().default_call_conv();
 
@@ -207,13 +209,17 @@ pub fn build_object(
     }
 
     let _ = call_conv;
+    let cie = module.isa().create_systemv_cie();
     let mut product = module.finish();
     let symbols: Vec<SymbolId> = compiled
         .iter()
         .map(|f| product.function_symbol(f.id))
         .collect();
     match product.object.format() {
-        BinaryFormat::Elf => add_dwarf(&mut product.object, &compiled, &symbols, path, comp_dir)?,
+        BinaryFormat::Elf => {
+            add_eh_frame(&mut product.object, &compiled, &symbols, cie)?;
+            add_dwarf(&mut product.object, &compiled, &symbols, path, comp_dir)?;
+        }
         BinaryFormat::Coff => {
             add_windows_unwind(&mut product.object, &compiled, &symbols)?;
             add_codeview(&mut product.object, &compiled, &symbols, path)?;
@@ -477,6 +483,67 @@ fn add_dwarf(
     })
 }
 
+/// `.eh_frame` from Cranelift's System V unwind information, with FDE addresses encoded as
+/// PC-relative 32-bit values, so the section needs no dynamic relocation in a PIE.
+fn add_eh_frame(
+    obj: &mut Object<'static>,
+    fns: &[CompiledFn],
+    symbols: &[SymbolId],
+    cie: Option<gimli::write::CommonInformationEntry>,
+) -> Result<(), String> {
+    let mut cie = cie.ok_or("the ISA gives no System V CIE")?;
+    cie.fde_address_encoding = gimli::DwEhPe(gimli::DW_EH_PE_pcrel.0 | gimli::DW_EH_PE_sdata4.0);
+    let mut table = gimli::write::FrameTable::default();
+    let cie_id = table.add_cie(cie);
+    for (k, f) in fns.iter().enumerate() {
+        let Some(UnwindInfo::SystemV(info)) = &f.unwind else {
+            return Err(format!(
+                "{}: Cranelift gave no System V unwind information",
+                f.name
+            ));
+        };
+        table.add_fde(
+            cie_id,
+            info.to_fde(Address::Symbol {
+                symbol: k,
+                addend: 0,
+            }),
+        );
+    }
+    let mut eh = gimli::write::EhFrame(RelocSection {
+        writer: EndianVec::new(gimli::RunTimeEndian::Little),
+        relocations: Vec::new(),
+    });
+    table.write_eh_frame(&mut eh).map_err(|e| e.to_string())?;
+    let section = obj.section_id(object::write::StandardSection::EhFrame);
+    obj.append_section_data(section, eh.0.writer.slice(), 8);
+    for r in &eh.0.relocations {
+        let RelocationTarget::Symbol(k) = r.target else {
+            return Err(".eh_frame refers to a section".into());
+        };
+        let kind = match r.eh_pe {
+            Some(pe) if pe.application() == gimli::DW_EH_PE_pcrel => RelocationKind::Relative,
+            _ => RelocationKind::Absolute,
+        };
+        let flags = RelocationFlags::Generic {
+            kind,
+            encoding: RelocationEncoding::Generic,
+            size: r.size * 8,
+        };
+        obj.add_relocation(
+            section,
+            ObjRelocation {
+                offset: r.offset as u64,
+                symbol: symbols[k],
+                addend: r.addend,
+                flags,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- Windows: unwind and CodeView
 
 const IMAGE_REL_AMD64_ADDR32NB: u16 = 0x0003;
@@ -686,13 +753,25 @@ mod tests {
         }
     }
 
+    /// Whether a function's rows hold every line of its body, and nothing else but perhaps its
+    /// declaration line, which only a prologue without a source location produces (a leaf
+    /// function on AArch64 has none).
+    fn fits(name: &str, lines: &BTreeSet<u32>) -> bool {
+        let all = expected_lines(name);
+        let decl = *all.iter().next().unwrap();
+        all.iter()
+            .filter(|l| **l != decl)
+            .all(|l| lines.contains(l))
+            && lines.is_subset(&all)
+    }
+
     #[test]
     fn test_cranelift_gives_every_function_its_lines_and_unwind_information() {
         let (_, fns) = build_object(SOURCE, "demo.mn", "/src").unwrap();
         assert_eq!(fns.len(), 3);
         for f in &fns {
             let lines: BTreeSet<u32> = line_rows(f).into_iter().map(|(_, l)| l).collect();
-            assert_eq!(lines, expected_lines(&f.name), "{}", f.name);
+            assert!(fits(&f.name, &lines), "{}: {lines:?}", f.name);
             assert!(f.unwind.is_some(), "{}", f.name);
             assert!(
                 f.lines.iter().all(|(s, e, _)| s < e && *e <= f.size),
@@ -750,9 +829,10 @@ mod tests {
                     }
                 }
                 sequences.pop();
-                let wanted: Vec<BTreeSet<u32>> =
-                    fns.iter().map(|f| expected_lines(&f.name)).collect();
-                assert_eq!(sequences, wanted);
+                assert_eq!(sequences.len(), fns.len());
+                for (f, seq) in fns.iter().zip(&sequences) {
+                    assert!(fits(&f.name, seq), "{}: {seq:?}", f.name);
+                }
             }
             BinaryFormat::Coff => {
                 for s in [".debug$S", ".pdata", ".xdata"] {
@@ -792,9 +872,10 @@ mod tests {
                     }
                     at += 8 + len.div_ceil(4) * 4;
                 }
-                let wanted: Vec<BTreeSet<u32>> =
-                    fns.iter().map(|f| expected_lines(&f.name)).collect();
-                assert_eq!(tables, wanted);
+                assert_eq!(tables.len(), fns.len());
+                for (f, table) in fns.iter().zip(&tables) {
+                    assert!(fits(&f.name, table), "{}: {table:?}", f.name);
+                }
             }
             other => panic!("unexpected format {other:?}"),
         }
