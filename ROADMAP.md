@@ -62,7 +62,7 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 
 ### M0b: design closure for M1
 
-- [ ] The core calculus of M1's language, in a new normative spec file, `spec/core-calculus.md` ([`core-calculus-home`](docs/design-review.md#core-calculus-home)).
+- [x] The core calculus of M1's language, in a new normative spec file, [`spec/core-calculus.md`](spec/core-calculus.md) ([`core-calculus-home`](docs/design-review.md#core-calculus-home); commit "Write the core calculus of M1").
 - [ ] The normative EBNF grammar of M1's surface syntax, in a new spec file, `spec/grammar.md` ([`grammar-home`](docs/design-review.md#grammar-home)).
 - [ ] The agent-benchmark tasks, fixed before anything is measured, each marked with the earliest milestone that can run it and as core-only or not, with a held-out set and adversarial tasks; and the control language ([`success-workload`](docs/design-review.md#success-workload); protocol below).
 - [ ] Spike: Tier 1 on the generated module of the Tier-1 protocol below, against its latency target.
@@ -73,7 +73,7 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 
 **Decided first:** [`foreign-idiom-diagnostics`](docs/design-review.md#foreign-idiom-diagnostics), [`tier1-loops`](docs/design-review.md#tier1-loops), [`tier1-counterexample`](docs/design-review.md#tier1-counterexample), [`tier2-trusted`](docs/design-review.md#tier2-trusted), [`gradual-verification`](docs/design-review.md#gradual-verification), [`language-card`](docs/design-review.md#language-card), [`todo-marker`](docs/design-review.md#todo-marker), [`debug-info`](docs/design-review.md#debug-info), [`docs-site`](docs/design-review.md#docs-site).
 
-Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter modes, `if`, `while` and `guard`, run end to end. Runs in full at the end: the slice's conformance programs.
+Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter modes, `if`, `while` with `break` and `continue` ([`loop-exits`](docs/design-review.md#loop-exits)), and `guard`, run end to end, as [`spec/core-calculus.md`](spec/core-calculus.md) defines them. Runs in full at the end: the slice's conformance programs.
 
 - [ ] **Checkpoint (a), parse and check**: the body parser (Pratt, the C#-style type-argument rule, error recovery, dedicated errors for other languages' idioms, errors for unknown characters); name resolution and the type checker for the slice; `todo`; the reference interpreter over the typed AST, in its own crate `mente-interp`, which joins `CLAUDE.md`'s crate list; the incremental architecture with `mn check --watch`; canonical serialised forms of every phase's output; `mn explain`.
 - [ ] **Checkpoint (b), refinements and Tier 1**: intervals plus octagons with counterexamples and `guard` prescriptions, intermediate results computed exactly and checked where they are narrowed, and bounds and overflow checks erased where Tier 1 proves them, in refined and unrefined code alike. **Engineering Guardrail #1 (Solver Predictability)** holds from here on.
