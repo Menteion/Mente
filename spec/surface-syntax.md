@@ -37,6 +37,13 @@ Today `mente-syntax` parses declarations only: a function body is kept as a flat
    - Digits may be grouped with `_` between digits: `1_000_000`, `0xFF_FF`. In a hexadecimal literal `a`–`f` are digits, so there a suffix starts with `_` and a letter beyond `f` (`0xFF_u8`).
    - A suffix starts with `_` followed by a letter and runs to the end of the identifier. It names a unit in scope (`200.0_meter`, `9.5_sec`, `5_ms`; `dimensional-units.md`), a fixed-point format with the type name's `.` written as `_` so the literal stays one token (`0.5_q16_16` is a `q16.16`, `0.0_q1_15` a `q1.15`), or an integer type (`255_u8`, `5_u4`).
    - A suffix that names none of these is an error; `_q16` alone is not a format. A literal outside its type's range is an error (`300_u8`).
+7. `Specified` **An honest unfinished body: `todo("reason")`** ([`todo-marker`](../docs/design-review.md#todo-marker)):
+   - `todo("reason")` is an expression of any type that traps when reached, for a body its author could not finish.
+   - `mn check` lists every `todo` with its reason, a release build rejects a module that contains one, and a function containing one is never the evidence for an `Implemented` claim.
+8. `Specified` **Other languages' idioms get errors of their own** ([`foreign-idiom-diagnostics`](../docs/design-review.md#foreign-idiom-diagnostics)):
+   - The body parser recognises `let` and `let mut`, a call site's `&x` and `&mut x`, lifetimes such as `<'a>`, `async` and `await`, `.unwrap()` and `::<>`, and reports each under its own code in the `E01xx` range, naming the Mente spelling.
+   - A fix is `machine-applicable` only where the rewrite is unique: `let mut` to `var`, `let` to `val`, a call site's `&mut x` to `mut x`, `::<` to `<`. `.unwrap()` (a `guard` or `??`), `async` and `await` (`with` effects and `parallel (...)`) and `<'a>` (a `from` clause or a parameter mode) need judgement and get suggestions.
+   - A character the lexer does not know is an error instead of being skipped.
 
 ## 2. Decision rationale and rejected alternatives
 
