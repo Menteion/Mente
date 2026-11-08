@@ -24,13 +24,22 @@ pub enum MorphicLayout {
 
 impl MorphicLayout {
     /// Computes the byte offset of element `elem_idx` and field `field_idx` (given field sizes and total element count).
-    pub fn byte_offset(&self, elem_idx: usize, field_idx: usize, field_sizes: &[usize], total_elems: usize) -> usize {
+    pub fn byte_offset(
+        &self,
+        elem_idx: usize,
+        field_idx: usize,
+        field_sizes: &[usize],
+        total_elems: usize,
+    ) -> usize {
         let field_offset_in_struct: usize = field_sizes[..field_idx].iter().sum();
         let struct_size: usize = field_sizes.iter().sum();
         match *self {
             MorphicLayout::AoS => elem_idx * struct_size + field_offset_in_struct,
             MorphicLayout::SoA => {
-                let prior_arrays_bytes: usize = field_sizes[..field_idx].iter().map(|s| s * total_elems).sum();
+                let prior_arrays_bytes: usize = field_sizes[..field_idx]
+                    .iter()
+                    .map(|s| s * total_elems)
+                    .sum();
                 prior_arrays_bytes + elem_idx * field_sizes[field_idx]
             }
             MorphicLayout::Tiled { lanes } => {
@@ -56,11 +65,19 @@ pub struct ValueLattice {
 
 impl ValueLattice {
     pub const fn exact(v: i128) -> Self {
-        Self { min_val: v, max_val: v, align_bytes: 8 }
+        Self {
+            min_val: v,
+            max_val: v,
+            align_bytes: 8,
+        }
     }
 
     pub const fn bounded(min_val: i128, max_val: i128) -> Self {
-        Self { min_val, max_val, align_bytes: 8 }
+        Self {
+            min_val,
+            max_val,
+            align_bytes: 8,
+        }
     }
 
     pub const fn proves_in_bounds(&self, slice_len: usize) -> bool {
@@ -174,11 +191,41 @@ impl MirRegionSoA {
                 MirOp::AddSatQ16 => (a as i32).saturating_add(b as i32) as i64,
                 MirOp::SubSatQ16 => (a as i32).saturating_sub(b as i32) as i64,
                 MirOp::Shr => a >> (b.clamp(0, 63)),
-                MirOp::CmpGe => if a >= b { 1 } else { 0 },
-                MirOp::CmpLt => if a < b { 1 } else { 0 },
-                MirOp::CmpEq => if a == b { 1 } else { 0 },
-                MirOp::SelectBranchless => if a != 0 { b } else { c },
-                MirOp::BranchCondJump => if a != 0 { b } else { c },
+                MirOp::CmpGe => {
+                    if a >= b {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                MirOp::CmpLt => {
+                    if a < b {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                MirOp::CmpEq => {
+                    if a == b {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                MirOp::SelectBranchless => {
+                    if a != 0 {
+                        b
+                    } else {
+                        c
+                    }
+                }
+                MirOp::BranchCondJump => {
+                    if a != 0 {
+                        b
+                    } else {
+                        c
+                    }
+                }
             };
         }
         self.ret_node.map(|r| vals[r.0 as usize]).unwrap_or(0)
@@ -196,7 +243,10 @@ pub struct MutationReport {
 ///
 /// Flips operators (`Add` <-> `Sub`, `CmpGe` <-> `CmpLt`, `SelectBranchless` swap) directly in the SoA
 /// array in memory—completing in microseconds without touching the disk!
-pub fn run_in_memory_mutation_gate(region: &MirRegionSoA, test_vectors: &[(&[i64], i64)]) -> MutationReport {
+pub fn run_in_memory_mutation_gate(
+    region: &MirRegionSoA,
+    test_vectors: &[(&[i64], i64)],
+) -> MutationReport {
     let mut total_mutants = 0usize;
     let mut killed_mutants = 0usize;
 
@@ -264,17 +314,77 @@ mod tests {
         // next_potential = select(fired, resting, next_v)
         let mut r = MirRegionSoA::new("integrate_cell", true);
         let z = NodeId(0);
-        let potential = r.push_node(MirOp::Param(0), MirType::Q16_16, [z, z, z], ValueLattice::bounded(0, 655360), 1);
-        let drive = r.push_node(MirOp::Param(1), MirType::Q16_16, [z, z, z], ValueLattice::bounded(0, 655360), 1);
-        let leak_shift = r.push_node(MirOp::Param(2), MirType::I64, [z, z, z], ValueLattice::bounded(1, 8), 1);
-        let threshold = r.push_node(MirOp::Param(3), MirType::Q16_16, [z, z, z], ValueLattice::exact(65536), 1);
-        let resting = r.push_node(MirOp::Param(4), MirType::Q16_16, [z, z, z], ValueLattice::exact(0), 1);
+        let potential = r.push_node(
+            MirOp::Param(0),
+            MirType::Q16_16,
+            [z, z, z],
+            ValueLattice::bounded(0, 655360),
+            1,
+        );
+        let drive = r.push_node(
+            MirOp::Param(1),
+            MirType::Q16_16,
+            [z, z, z],
+            ValueLattice::bounded(0, 655360),
+            1,
+        );
+        let leak_shift = r.push_node(
+            MirOp::Param(2),
+            MirType::I64,
+            [z, z, z],
+            ValueLattice::bounded(1, 8),
+            1,
+        );
+        let threshold = r.push_node(
+            MirOp::Param(3),
+            MirType::Q16_16,
+            [z, z, z],
+            ValueLattice::exact(65536),
+            1,
+        );
+        let resting = r.push_node(
+            MirOp::Param(4),
+            MirType::Q16_16,
+            [z, z, z],
+            ValueLattice::exact(0),
+            1,
+        );
 
-        let shifted = r.push_node(MirOp::Shr, MirType::Q16_16, [potential, leak_shift, z], ValueLattice::bounded(0, 327680), 2);
-        let leaked = r.push_node(MirOp::SubSatQ16, MirType::Q16_16, [potential, shifted, z], ValueLattice::bounded(0, 655360), 2);
-        let next_v = r.push_node(MirOp::AddSatQ16, MirType::Q16_16, [leaked, drive, z], ValueLattice::bounded(0, 655360), 3);
-        let fired = r.push_node(MirOp::CmpGe, MirType::Bool, [next_v, threshold, z], ValueLattice::bounded(0, 1), 4);
-        let out_v = r.push_node(MirOp::SelectBranchless, MirType::Q16_16, [fired, resting, next_v], ValueLattice::bounded(0, 65536), 5);
+        let shifted = r.push_node(
+            MirOp::Shr,
+            MirType::Q16_16,
+            [potential, leak_shift, z],
+            ValueLattice::bounded(0, 327680),
+            2,
+        );
+        let leaked = r.push_node(
+            MirOp::SubSatQ16,
+            MirType::Q16_16,
+            [potential, shifted, z],
+            ValueLattice::bounded(0, 655360),
+            2,
+        );
+        let next_v = r.push_node(
+            MirOp::AddSatQ16,
+            MirType::Q16_16,
+            [leaked, drive, z],
+            ValueLattice::bounded(0, 655360),
+            3,
+        );
+        let fired = r.push_node(
+            MirOp::CmpGe,
+            MirType::Bool,
+            [next_v, threshold, z],
+            ValueLattice::bounded(0, 1),
+            4,
+        );
+        let out_v = r.push_node(
+            MirOp::SelectBranchless,
+            MirType::Q16_16,
+            [fired, resting, next_v],
+            ValueLattice::bounded(0, 65536),
+            5,
+        );
         r.ret_node = Some(out_v);
 
         // 1. Verify @branchless passes
@@ -297,7 +407,10 @@ mod tests {
                 (&[32768, 16384, 2, 65536, 0], 40960),
             ],
         );
-        assert_eq!((mut_report.total_mutants, mut_report.killed_mutants), (4, 4));
+        assert_eq!(
+            (mut_report.total_mutants, mut_report.killed_mutants),
+            (4, 4)
+        );
         assert_eq!(mut_report.kill_score_pct, 100.0);
     }
 
@@ -309,10 +422,22 @@ mod tests {
         let any = ValueLattice::bounded(-100, 100);
         let a = r.push_node(MirOp::Param(0), MirType::I64, [z, z, z], any, 1);
         let b = r.push_node(MirOp::Param(1), MirType::I64, [z, z, z], any, 1);
-        let ge = r.push_node(MirOp::CmpGe, MirType::Bool, [a, b, z], ValueLattice::bounded(0, 1), 2);
+        let ge = r.push_node(
+            MirOp::CmpGe,
+            MirType::Bool,
+            [a, b, z],
+            ValueLattice::bounded(0, 1),
+            2,
+        );
         let diff = r.push_node(MirOp::Sub, MirType::I64, [a, b, z], any, 2);
         let sum = r.push_node(MirOp::Add, MirType::I64, [a, b, z], any, 2);
-        r.ret_node = Some(r.push_node(MirOp::SelectBranchless, MirType::I64, [ge, diff, sum], any, 3));
+        r.ret_node = Some(r.push_node(
+            MirOp::SelectBranchless,
+            MirType::I64,
+            [ge, diff, sum],
+            any,
+            3,
+        ));
         r
     }
 
@@ -334,9 +459,18 @@ mod tests {
         // A region with nothing to flip reports no mutants rather than a failure.
         let mut constant = MirRegionSoA::new("constant", false);
         let z = NodeId(0);
-        constant.ret_node = Some(constant.push_node(MirOp::Const(5), MirType::I64, [z, z, z], ValueLattice::exact(5), 1));
+        constant.ret_node = Some(constant.push_node(
+            MirOp::Const(5),
+            MirType::I64,
+            [z, z, z],
+            ValueLattice::exact(5),
+            1,
+        ));
         let none = run_in_memory_mutation_gate(&constant, &[(&[], 5)]);
-        assert_eq!((none.total_mutants, none.killed_mutants, none.kill_score_pct), (0, 0, 100.0));
+        assert_eq!(
+            (none.total_mutants, none.killed_mutants, none.kill_score_pct),
+            (0, 0, 100.0)
+        );
     }
 
     /// `out = op(a, b)` for one binary opcode.
@@ -346,21 +480,41 @@ mod tests {
         let any = ValueLattice::bounded(-100, 100);
         let a = r.push_node(MirOp::Param(0), MirType::I64, [z, z, z], any, 1);
         let b = r.push_node(MirOp::Param(1), MirType::I64, [z, z, z], any, 1);
-        r.ret_node = Some(r.push_node(op, MirType::Bool, [a, b, z], ValueLattice::bounded(0, 1), 2));
+        r.ret_node =
+            Some(r.push_node(op, MirType::Bool, [a, b, z], ValueLattice::bounded(0, 1), 2));
         r
     }
 
     #[test]
     fn test_interpreter_compares_and_selects() {
-        for (op, below, equal, above) in [(MirOp::CmpLt, 1, 0, 0), (MirOp::CmpGe, 0, 1, 1), (MirOp::CmpEq, 0, 1, 0)] {
+        for (op, below, equal, above) in [
+            (MirOp::CmpLt, 1, 0, 0),
+            (MirOp::CmpGe, 0, 1, 1),
+            (MirOp::CmpEq, 0, 1, 0),
+        ] {
             let r = binary_region(op);
-            assert_eq!([r.eval_in_memory(&[2, 3]), r.eval_in_memory(&[3, 3]), r.eval_in_memory(&[4, 3])], [below, equal, above], "{:?}", op);
+            assert_eq!(
+                [
+                    r.eval_in_memory(&[2, 3]),
+                    r.eval_in_memory(&[3, 3]),
+                    r.eval_in_memory(&[4, 3])
+                ],
+                [below, equal, above],
+                "{:?}",
+                op
+            );
         }
         // A conditional jump evaluates like a select: the true arm when the condition is non-zero.
         let mut r = MirRegionSoA::new("jump", false);
         let z = NodeId(0);
         let any = ValueLattice::bounded(-100, 100);
-        let c = r.push_node(MirOp::Param(0), MirType::Bool, [z, z, z], ValueLattice::bounded(0, 1), 1);
+        let c = r.push_node(
+            MirOp::Param(0),
+            MirType::Bool,
+            [z, z, z],
+            ValueLattice::bounded(0, 1),
+            1,
+        );
         let t = r.push_node(MirOp::Const(10), MirType::I64, [z, z, z], any, 1);
         let f = r.push_node(MirOp::Const(20), MirType::I64, [z, z, z], any, 1);
         r.ret_node = Some(r.push_node(MirOp::BranchCondJump, MirType::I64, [c, t, f], any, 2));
@@ -386,12 +540,33 @@ mod tests {
     fn test_nodes_are_rows_addressed_by_index() {
         let mut r = MirRegionSoA::new("rows", false);
         let z = NodeId(0);
-        let a = r.push_node(MirOp::Param(0), MirType::I64, [z, z, z], ValueLattice::bounded(0, 9), 10);
-        let c = r.push_node(MirOp::Const(5), MirType::I64, [z, z, z], ValueLattice::exact(5), 11);
-        let sum = r.push_node(MirOp::Add, MirType::I64, [a, c, z], ValueLattice::bounded(5, 14), 12);
+        let a = r.push_node(
+            MirOp::Param(0),
+            MirType::I64,
+            [z, z, z],
+            ValueLattice::bounded(0, 9),
+            10,
+        );
+        let c = r.push_node(
+            MirOp::Const(5),
+            MirType::I64,
+            [z, z, z],
+            ValueLattice::exact(5),
+            11,
+        );
+        let sum = r.push_node(
+            MirOp::Add,
+            MirType::I64,
+            [a, c, z],
+            ValueLattice::bounded(5, 14),
+            12,
+        );
         assert_eq!((a, c, sum), (NodeId(0), NodeId(1), NodeId(2)));
         // Each node is one row across the parallel arrays.
-        assert_eq!(r.opcodes, vec![MirOp::Param(0), MirOp::Const(5), MirOp::Add]);
+        assert_eq!(
+            r.opcodes,
+            vec![MirOp::Param(0), MirOp::Const(5), MirOp::Add]
+        );
         assert_eq!(r.types.len(), 3);
         assert_eq!(r.inputs[2], [a, c, z]);
         assert_eq!(r.lattices[2], ValueLattice::bounded(5, 14));
@@ -433,9 +608,19 @@ mod tests {
     fn test_branchless_region_rejects_conditional_jump() {
         let mut r = select_region();
         assert!(r.verify_branchless().is_ok());
-        r.push_node(MirOp::BranchCondJump, MirType::I64, [NodeId(2), NodeId(3), NodeId(4)], ValueLattice::bounded(-100, 100), 7);
+        r.push_node(
+            MirOp::BranchCondJump,
+            MirType::I64,
+            [NodeId(2), NodeId(3), NodeId(4)],
+            ValueLattice::bounded(-100, 100),
+            7,
+        );
         let err = r.verify_branchless().unwrap_err();
-        assert!(err.contains("E0401") && err.contains("node #6") && err.contains("line 7"), "{}", err);
+        assert!(
+            err.contains("E0401") && err.contains("node #6") && err.contains("line 7"),
+            "{}",
+            err
+        );
         // A region not marked @branchless may jump.
         r.is_branchless_guaranteed = false;
         assert!(r.verify_branchless().is_ok());
@@ -452,9 +637,18 @@ mod tests {
         assert_eq!(tiled.byte_offset(17, 2, &fields, 1024), 448 + 384 + 4);
 
         // AoS: whole elements one after another.
-        assert_eq!(MorphicLayout::AoS.byte_offset(3, 1, &fields, 1024), 3 * 28 + 12);
+        assert_eq!(
+            MorphicLayout::AoS.byte_offset(3, 1, &fields, 1024),
+            3 * 28 + 12
+        );
         // SoA: one array per field, each total_elems long.
-        assert_eq!(MorphicLayout::SoA.byte_offset(3, 1, &fields, 1024), 12 * 1024 + 3 * 12);
-        assert_eq!(MorphicLayout::SoA.byte_offset(5, 2, &fields, 1024), 24 * 1024 + 5 * 4);
+        assert_eq!(
+            MorphicLayout::SoA.byte_offset(3, 1, &fields, 1024),
+            12 * 1024 + 3 * 12
+        );
+        assert_eq!(
+            MorphicLayout::SoA.byte_offset(5, 2, &fields, 1024),
+            24 * 1024 + 5 * 4
+        );
     }
 }

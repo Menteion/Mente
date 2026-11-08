@@ -71,7 +71,8 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
         match item {
             ItemDecl::Struct(s) => {
                 if let Some((size, align)) = extract_layout_attr(s) {
-                    match verify_explicit_struct_layout(s, size, align, &named_sizes, &named_aligns) {
+                    match verify_explicit_struct_layout(s, size, align, &named_sizes, &named_aligns)
+                    {
                         Ok(proof) => layout_proofs.push(proof),
                         Err(e) => errors.push(e),
                     }
@@ -167,7 +168,8 @@ pub fn verify_explicit_struct_layout(
 
     let packed = s.attrs.iter().any(|a| a.name == "packed");
     let mut cursor = 0usize;
-    let mut table = String::from("| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n");
+    let mut table =
+        String::from("| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n");
 
     for f in &s.fields {
         let (start, end) = f.byte_range.ok_or_else(|| {
@@ -308,7 +310,10 @@ fn int_bits(ty: &str) -> Option<usize> {
     if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    digits.parse::<usize>().ok().filter(|n| (1..=128).contains(n))
+    digits
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=128).contains(n))
 }
 
 fn backing_bits(backing_type: &str) -> Option<usize> {
@@ -411,7 +416,8 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), String> {
     // 1. If marked @total and contains a `while` loop, it MUST contain a `decreases` termination measure!
     if is_total {
         let has_while = f.body_tokens.contains(&TokenKind::While);
-        let has_decreases = !f.decreases.is_empty() || f.body_tokens.contains(&TokenKind::Decreases);
+        let has_decreases =
+            !f.decreases.is_empty() || f.body_tokens.contains(&TokenKind::Decreases);
         if has_while && !has_decreases {
             return Err(format!(
                 "E0501 [Totality Error]: Function `{}` (line {}) is marked `@total` and contains a `while` loop, but lacks a constructive `decreases <measure>` proof.",
@@ -498,7 +504,10 @@ pub struct Frame {
 }
 "#;
         let rep = verify_module(&parse_module(code).unwrap()).unwrap();
-        assert_eq!((rep.bitstruct_proofs.len(), rep.layout_proofs.len()), (1, 1));
+        assert_eq!(
+            (rep.bitstruct_proofs.len(), rep.layout_proofs.len()),
+            (1, 1)
+        );
 
         let narrow = code.replace("pub mode: u3", "pub mode: u2");
         let errs = verify_module(&parse_module(&narrow).unwrap()).unwrap_err();
@@ -521,9 +530,16 @@ pub struct Record {
 }
 "#;
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0418") && errs[0].contains("value"), "{:?}", errs);
+        assert!(
+            errs[0].contains("E0418") && errs[0].contains("value"),
+            "{:?}",
+            errs
+        );
 
-        let packed = code.replace("@layout(size: 16, align: 8)", "@packed\n@layout(size: 16, align: 8)");
+        let packed = code.replace(
+            "@layout(size: 16, align: 8)",
+            "@packed\n@layout(size: 16, align: 8)",
+        );
         assert!(verify_module(&parse_module(&packed).unwrap()).is_ok());
 
         let under_aligned = r#"
@@ -617,7 +633,11 @@ pub fn countdown(n: u32) -> u32 {
 }
 "#;
         let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0501") && errs[0].contains("countdown"), "{:?}", errs);
+        assert!(
+            errs[0].contains("E0501") && errs[0].contains("countdown"),
+            "{:?}",
+            errs
+        );
 
         // A measure in the signature or in the body satisfies the token check.
         let in_signature = code.replace("-> u32 {", "-> u32\n  decreases n\n{");
@@ -649,10 +669,17 @@ pub struct Sample {
         assert_eq!(rep.layout_proofs[0].total_bytes, 8);
 
         let wrong = code
-            .replace("@bytes(0..4) pub level: q16.16", "@bytes(0..2) pub level: q16.16")
+            .replace(
+                "@bytes(0..4) pub level: q16.16",
+                "@bytes(0..2) pub level: q16.16",
+            )
             .replace("@bytes(4..6) pub gain", "@bytes(2..6) pub gain");
         let errs = verify_module(&parse_module(&wrong).unwrap()).unwrap_err();
-        assert!(errs[0].contains("E0415") && errs[0].contains("requires 4 bytes"), "{:?}", errs);
+        assert!(
+            errs[0].contains("E0415") && errs[0].contains("requires 4 bytes"),
+            "{:?}",
+            errs
+        );
     }
 
     fn first_error(code: &str) -> String {
@@ -664,14 +691,29 @@ pub struct Sample {
     fn test_layout_rejects_bad_geometry() {
         let good = "module test.geo\n@layout(size: 8, align: 4)\npub struct Pair {\n  @bytes(0..4) pub a: u32\n  @bytes(4..8) pub b: u32\n}\n";
         let rep = verify_module(&parse_module(good).unwrap()).unwrap();
-        assert_eq!((rep.layout_proofs[0].total_bytes, rep.layout_proofs[0].align_bytes), (8, 4));
-        assert!(rep.layout_proofs[0].markdown_table.contains("| `[4..8)` | `4 B` | `b` | `u32` |"));
+        assert_eq!(
+            (
+                rep.layout_proofs[0].total_bytes,
+                rep.layout_proofs[0].align_bytes
+            ),
+            (8, 4)
+        );
+        assert!(rep.layout_proofs[0]
+            .markdown_table
+            .contains("| `[4..8)` | `4 B` | `b` | `u32` |"));
 
         let cases = [
             (good.replace("align: 4", "align: 3"), "E0410"),
-            (good.replace("size: 8, align: 4", "size: 6, align: 4"), "E0411"),
+            (
+                good.replace("size: 8, align: 4", "size: 6, align: 4"),
+                "E0411",
+            ),
             (good.replace("@bytes(4..8) pub b", "pub b"), "E0412"),
-            (good.replace("@bytes(0..4) pub a: u32", "@bytes(0..0) pub a: u32").replace("@bytes(4..8)", "@bytes(0..4)"), "E0414"),
+            (
+                good.replace("@bytes(0..4) pub a: u32", "@bytes(0..0) pub a: u32")
+                    .replace("@bytes(4..8)", "@bytes(0..4)"),
+                "E0414",
+            ),
             (good.replace("size: 8", "size: 12"), "E0416"),
         ];
         for (code, expected) in cases {
@@ -702,7 +744,12 @@ pub fn e(n: u32) -> u32 = n
 "#;
         let rep = verify_module(&parse_module(code).unwrap()).unwrap();
         assert_eq!(
-            (rep.total_functions_verified, rep.branchless_functions_verified, rep.kernel_functions_verified, rep.examples_count),
+            (
+                rep.total_functions_verified,
+                rep.branchless_functions_verified,
+                rep.kernel_functions_verified,
+                rep.examples_count
+            ),
             (2, 1, 1, 1)
         );
         assert_eq!(rep.module_path, "test.counts");
@@ -746,8 +793,17 @@ pub struct Event {
         let zero = "module test.sizes\npub bitstruct Z : u8 {\n  @bits(0..7) pub v: u07\n  @bits(7..8) pub f: bool\n}\n";
         assert!(first_error(zero).contains("E0425"));
         // Every backing width from u8 to u128 is accepted.
-        for (backing, bits) in [("u8", 8), ("u16", 16), ("u32", 32), ("u64", 64), ("u128", 128)] {
-            let code = format!("module test.sizes\npub bitstruct W : {} {{\n  @bits(0..{}) pub raw: u{}\n}}\n", backing, bits, bits);
+        for (backing, bits) in [
+            ("u8", 8),
+            ("u16", 16),
+            ("u32", 32),
+            ("u64", 64),
+            ("u128", 128),
+        ] {
+            let code = format!(
+                "module test.sizes\npub bitstruct W : {} {{\n  @bits(0..{}) pub raw: u{}\n}}\n",
+                backing, bits, bits
+            );
             let rep = verify_module(&parse_module(&code).unwrap()).unwrap();
             assert_eq!(rep.bitstruct_proofs[0].total_bits, bits);
         }
@@ -757,13 +813,29 @@ pub struct Event {
     fn test_bitstruct_rejects_gaps_and_shortfalls() {
         let good = "module test.bits\npub bitstruct Flags : u8 {\n  @bits(0..4) pub lo: u4\n  @bits(4..8) pub hi: u4\n}\n";
         let rep = verify_module(&parse_module(good).unwrap()).unwrap();
-        assert_eq!((rep.bitstruct_proofs[0].name.as_str(), rep.bitstruct_proofs[0].total_bits), ("Flags", 8));
+        assert_eq!(
+            (
+                rep.bitstruct_proofs[0].name.as_str(),
+                rep.bitstruct_proofs[0].total_bits
+            ),
+            ("Flags", 8)
+        );
 
         let cases = [
             (good.replace(": u8 {", ": u12 {"), "E0420"),
-            (good.replace("@bits(4..8) pub hi: u4", "@bits(5..8) pub hi: u3"), "E0421"),
-            (good.replace("@bits(0..4) pub lo: u4", "@bits(0..0) pub lo: u4").replace("@bits(4..8)", "@bits(0..4)"), "E0422"),
-            (good.replace("@bits(4..8) pub hi: u4", "@bits(4..7) pub hi: u3"), "E0423"),
+            (
+                good.replace("@bits(4..8) pub hi: u4", "@bits(5..8) pub hi: u3"),
+                "E0421",
+            ),
+            (
+                good.replace("@bits(0..4) pub lo: u4", "@bits(0..0) pub lo: u4")
+                    .replace("@bits(4..8)", "@bits(0..4)"),
+                "E0422",
+            ),
+            (
+                good.replace("@bits(4..8) pub hi: u4", "@bits(4..7) pub hi: u3"),
+                "E0423",
+            ),
         ];
         for (code, expected) in cases {
             let err = first_error(&code);

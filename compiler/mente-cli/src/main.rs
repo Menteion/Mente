@@ -171,17 +171,77 @@ fn cmd_test(args: &[String]) {
     let t0 = Instant::now();
     let mut r = MirRegionSoA::new("integrate_cell", true);
     let z = NodeId(0);
-    let potential = r.push_node(MirOp::Param(0), MirType::Q16_16, [z, z, z], ValueLattice::bounded(0, 655360), 1);
-    let drive = r.push_node(MirOp::Param(1), MirType::Q16_16, [z, z, z], ValueLattice::bounded(0, 655360), 1);
-    let leak_shift = r.push_node(MirOp::Param(2), MirType::I64, [z, z, z], ValueLattice::bounded(1, 8), 1);
-    let threshold = r.push_node(MirOp::Param(3), MirType::Q16_16, [z, z, z], ValueLattice::exact(65536), 1);
-    let resting = r.push_node(MirOp::Param(4), MirType::Q16_16, [z, z, z], ValueLattice::exact(0), 1);
+    let potential = r.push_node(
+        MirOp::Param(0),
+        MirType::Q16_16,
+        [z, z, z],
+        ValueLattice::bounded(0, 655360),
+        1,
+    );
+    let drive = r.push_node(
+        MirOp::Param(1),
+        MirType::Q16_16,
+        [z, z, z],
+        ValueLattice::bounded(0, 655360),
+        1,
+    );
+    let leak_shift = r.push_node(
+        MirOp::Param(2),
+        MirType::I64,
+        [z, z, z],
+        ValueLattice::bounded(1, 8),
+        1,
+    );
+    let threshold = r.push_node(
+        MirOp::Param(3),
+        MirType::Q16_16,
+        [z, z, z],
+        ValueLattice::exact(65536),
+        1,
+    );
+    let resting = r.push_node(
+        MirOp::Param(4),
+        MirType::Q16_16,
+        [z, z, z],
+        ValueLattice::exact(0),
+        1,
+    );
 
-    let shifted = r.push_node(MirOp::Shr, MirType::Q16_16, [potential, leak_shift, z], ValueLattice::bounded(0, 327680), 2);
-    let leaked = r.push_node(MirOp::SubSatQ16, MirType::Q16_16, [potential, shifted, z], ValueLattice::bounded(0, 655360), 2);
-    let next_v = r.push_node(MirOp::AddSatQ16, MirType::Q16_16, [leaked, drive, z], ValueLattice::bounded(0, 655360), 3);
-    let fired = r.push_node(MirOp::CmpGe, MirType::Bool, [next_v, threshold, z], ValueLattice::bounded(0, 1), 4);
-    let out_v = r.push_node(MirOp::SelectBranchless, MirType::Q16_16, [fired, resting, next_v], ValueLattice::bounded(0, 65536), 5);
+    let shifted = r.push_node(
+        MirOp::Shr,
+        MirType::Q16_16,
+        [potential, leak_shift, z],
+        ValueLattice::bounded(0, 327680),
+        2,
+    );
+    let leaked = r.push_node(
+        MirOp::SubSatQ16,
+        MirType::Q16_16,
+        [potential, shifted, z],
+        ValueLattice::bounded(0, 655360),
+        2,
+    );
+    let next_v = r.push_node(
+        MirOp::AddSatQ16,
+        MirType::Q16_16,
+        [leaked, drive, z],
+        ValueLattice::bounded(0, 655360),
+        3,
+    );
+    let fired = r.push_node(
+        MirOp::CmpGe,
+        MirType::Bool,
+        [next_v, threshold, z],
+        ValueLattice::bounded(0, 1),
+        4,
+    );
+    let out_v = r.push_node(
+        MirOp::SelectBranchless,
+        MirType::Q16_16,
+        [fired, resting, next_v],
+        ValueLattice::bounded(0, 65536),
+        5,
+    );
     r.ret_node = Some(out_v);
 
     if let Err(e) = r.verify_branchless() {
@@ -246,7 +306,10 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
     spec_files.sort();
 
     if spec_files.is_empty() {
-        errors.push(format!("No spec/*.md files found in {}", spec_dir.display()));
+        errors.push(format!(
+            "No spec/*.md files found in {}",
+            spec_dir.display()
+        ));
         return Err(errors);
     }
 
@@ -259,7 +322,10 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
 
         // 1. Check YAML front-matter
         if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
-            errors.push(format!("[graph] spec/{} is missing YAML front-matter", fname));
+            errors.push(format!(
+                "[graph] spec/{} is missing YAML front-matter",
+                fname
+            ));
         }
 
         // 2. Evaluate <!-- @assert-* --> directives
@@ -273,7 +339,10 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
             let at = format!("spec/{}:{}", fname, line_no);
             if trimmed.starts_with("<!-- @assert-present ") {
                 let Some(files_csv) = extract_attr(trimmed, "file") else {
-                    errors.push(format!("[guard] {} @assert-present has no `file` attribute", at));
+                    errors.push(format!(
+                        "[guard] {} @assert-present has no `file` attribute",
+                        at
+                    ));
                     continue;
                 };
                 let missing: Vec<&str> = files_csv
@@ -329,7 +398,10 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
                 let target_rel = extract_attr(trimmed, "target").unwrap_or_default();
                 let symbol = extract_attr(trimmed, "symbol").unwrap_or_default();
                 if symbol.is_empty() {
-                    errors.push(format!("[guard] {} @assert-absence has an empty `symbol`", at));
+                    errors.push(format!(
+                        "[guard] {} @assert-absence has an empty `symbol`",
+                        at
+                    ));
                     continue;
                 }
                 // Only `.mn` files are scanned, whatever `glob` says; an empty target would pass vacuously.
@@ -361,7 +433,10 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
         }
 
         if directives_in_file == 0 {
-            errors.push(format!("[guard] spec/{} carries no @assert-* directive", fname));
+            errors.push(format!(
+                "[guard] spec/{} carries no @assert-* directive",
+                fname
+            ));
         }
     }
 
@@ -434,7 +509,8 @@ mod tests {
 
         for file in files {
             let src = fs::read_to_string(&file).expect("read .mn file");
-            let module = parse_module(&src).unwrap_or_else(|e| panic!("Failed to parse {:?}: {}", file, e));
+            let module =
+                parse_module(&src).unwrap_or_else(|e| panic!("Failed to parse {:?}: {}", file, e));
             let spec = project_spec_blueprint(&module);
             assert!(!spec.hashes.spec_hash.is_empty());
             assert!(spec.spec_tokens < spec.total_tokens);
@@ -466,7 +542,7 @@ mod tests {
                 | 0x3400..=0x9FFF   // CJK ideographs
                 | 0xAC00..=0xD7AF   // Hangul
                 | 0xF900..=0xFAFF   // CJK compatibility ideographs
-                | 0xFF00..=0xFFEF)  // full-width forms
+                | 0xFF00..=0xFFEF) // full-width forms
         }
         fn walk(dir: &Path, found: &mut Vec<String>) {
             for entry in fs::read_dir(dir).unwrap().flatten() {
@@ -488,7 +564,11 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut found = Vec::new();
         walk(&root, &mut found);
-        assert!(found.is_empty(), "non-English text at:\n{}", found.join("\n"));
+        assert!(
+            found.is_empty(),
+            "non-English text at:\n{}",
+            found.join("\n")
+        );
     }
 
     /// The `mn view --spec` latency protocol in ROADMAP.md. Run it with
@@ -555,7 +635,14 @@ mod tests {
         );
         assert_eq!(
             strip_mn_comments(src),
-            concat!("val a = 1 \n", "val s = \"a\\\"//b\" \n", "\n", "val c = 3\n", "x \\\n", "last ")
+            concat!(
+                "val a = 1 \n",
+                "val s = \"a\\\"//b\" \n",
+                "\n",
+                "val c = 3\n",
+                "x \\\n",
+                "last "
+            )
         );
     }
 
