@@ -9,6 +9,8 @@ members = [
     "compiler/mente-cli",
     "spikes/tier1-latency",
 ]
+# A workspace of its own, with the external crates Norman approved for it (its README.md).
+exclude = ["spikes/cranelift-debug-info"]
 
 [workspace.package]
 version = "0.1.0"
