@@ -1,0 +1,50 @@
+# The M0b spike on debug and unwind information through Cranelift
+# (spikes/cranelift-debug-info/README.md): the spike's tests, then gdb and lldb on Linux and cdb
+# on Windows stepping through the code it generates.
+name: Cranelift debug-info spike
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "spikes/cranelift-debug-info/**"
+      - ".github/workflows/spike-cranelift.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike-cranelift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Debuggers (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64 Linux
+            os: ubuntu-24.04
+          - name: x86-64 Windows
+            os: windows-2025
+          - name: AArch64 Linux
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: spikes/cranelift-debug-info
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Install gdb and lldb
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q gdb lldb && gdb --version | head -1 && lldb --version
+      - name: Tests
+        run: cargo test --locked
+      - name: Debuggers
+        run: bash check.sh

@@ -1,0 +1,20 @@
+// The program the spike compiles, written by hand as Cranelift IR in src/lib.rs. Its line
+// table, symbols and unwind information point here, so a debugger stops on these lines.
+
+fn square(x: i64) -> i64 {
+    return x * x
+}
+
+fn sum_squares(n: i64) -> i64 {
+    var s: i64 = 0
+    var i: i64 = 1
+    while i <= n {
+        s += square(i)
+        i += 1
+    }
+    return s
+}
+
+fn mente_main() -> i64 {
+    return sum_squares(10)
+}
