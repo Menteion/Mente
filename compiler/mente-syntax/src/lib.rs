@@ -4,9 +4,15 @@
 //!
 //! Parses declarations only. Function and `@example` bodies are kept as flat token lists
 //! (`body_tokens`); types, contracts and effect clauses are kept as raw strings. Characters the
-//! lexer does not know are skipped without an error.
+//! lexer does not know are skipped without an error. A parse error is a [`Diagnostic`]
+//! (`spec/diagnostics.md`), and declarations, fields and attributes keep their spans so later
+//! checks can point at them.
 
 use std::fmt;
+
+pub mod diagnostics;
+
+use diagnostics::{insertion_point, Applicability, Diagnostic};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Span {
@@ -419,6 +425,8 @@ pub fn tokenize(src: &str) -> Vec<Token> {
 pub struct Attr {
     pub name: String,
     pub args: String,
+    /// From `@` to the end of the arguments.
+    pub span: Span,
 }
 
 impl fmt::Display for Attr {
@@ -454,6 +462,10 @@ pub struct StructFieldDecl {
     pub name: String,
     pub ty: String,
     pub default_expr: Option<String>,
+    /// From the field's first attribute, or its name, to the end of its type or default.
+    pub span: Span,
+    pub name_span: Span,
+    pub ty_span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -462,6 +474,7 @@ pub struct StructDecl {
     pub attrs: Vec<Attr>,
     pub is_pub: bool,
     pub name: String,
+    pub name_span: Span,
     pub generics: String,
     pub fields: Vec<StructFieldDecl>,
     pub invariants: Vec<String>,
@@ -473,6 +486,11 @@ pub struct BitFieldDecl {
     pub is_pub: bool,
     pub name: String,
     pub ty: String,
+    pub span: Span,
+    pub name_span: Span,
+    pub ty_span: Span,
+    /// The `@bits(...)` attribute, when there is one.
+    pub bits_span: Option<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -481,7 +499,9 @@ pub struct BitStructDecl {
     pub attrs: Vec<Attr>,
     pub is_pub: bool,
     pub name: String,
+    pub name_span: Span,
     pub backing_type: String,
+    pub backing_span: Span,
     pub fields: Vec<BitFieldDecl>,
 }
 
@@ -491,12 +511,15 @@ pub struct FnDecl {
     pub attrs: Vec<Attr>,
     pub is_pub: bool,
     pub name: String,
+    pub name_span: Span,
     pub generics: String,
     pub params: Vec<ParamDecl>,
     pub return_ty: Option<String>,
     pub error_ty: Option<String>,
     /// Parameters a returned view may borrow from, named by `from p, q` after the return type.
     pub provenance: Vec<String>,
+    /// The span of each name in `provenance`, in the same order.
+    pub provenance_spans: Vec<Span>,
     pub effects: Vec<String>,
     pub requires: Vec<String>,
     pub ensures: Vec<String>,
@@ -550,13 +573,14 @@ pub struct ModuleFile {
 }
 
 /// Parses a `.mn` source string into a structured `ModuleFile`.
-pub fn parse_module(src: &str) -> Result<ModuleFile, String> {
+pub fn parse_module(src: &str) -> Result<ModuleFile, Diagnostic> {
     let tokens = tokenize(src);
     let total_token_count = tokens.len().saturating_sub(1);
     let mut p = Parser {
         src,
         tokens,
         pos: 0,
+        last_end: 0,
     };
     p.parse_file(total_token_count)
 }
@@ -565,6 +589,8 @@ struct Parser<'a> {
     src: &'a str,
     tokens: Vec<Token>,
     pos: usize,
+    /// Where the last token taken ends, so a construct's span can close there.
+    last_end: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -581,10 +607,30 @@ impl<'a> Parser<'a> {
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
         }
+        self.last_end = tok.span.end;
         tok
     }
 
-    fn parse_file(&mut self, total_token_count: usize) -> Result<ModuleFile, String> {
+    /// From the start of `start` to the end of the last token taken.
+    fn span_from(&self, start: Span) -> Span {
+        Span {
+            end: self.last_end.max(start.end),
+            ..start
+        }
+    }
+
+    /// The token about to be read, as an error message names it.
+    fn found(&self) -> String {
+        match self.peek() {
+            TokenKind::Eof => String::from("the end of the file"),
+            _ => {
+                let sp = self.span();
+                format!("`{}`", &self.src[sp.start..sp.end])
+            }
+        }
+    }
+
+    fn parse_file(&mut self, total_token_count: usize) -> Result<ModuleFile, Diagnostic> {
         let mut module_path = String::from("main");
         let mut pending_docs = Vec::new();
         while let TokenKind::DocComment(d) = self.peek().clone() {
@@ -657,7 +703,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_dotted_ident(&mut self) -> Result<String, String> {
+    fn parse_dotted_ident(&mut self) -> Result<String, Diagnostic> {
         let mut out = self.expect_ident()?;
         while *self.peek() == TokenKind::Dot {
             self.next();
@@ -667,32 +713,41 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    fn expect_ident(&mut self) -> Result<String, String> {
-        match self.next().kind {
-            TokenKind::Ident(s) => Ok(s),
-            other => Err(format!(
-                "Expected identifier at line {}, got {:?}",
-                self.span().line,
-                other
-            )),
-        }
+    fn expect_ident(&mut self) -> Result<String, Diagnostic> {
+        self.expect_name().map(|(name, _)| name)
     }
 
-    fn parse_attrs(&mut self) -> Result<Vec<Attr>, String> {
+    /// A name and its span; anything else is `E0101`.
+    fn expect_name(&mut self) -> Result<(String, Span), Diagnostic> {
+        if let TokenKind::Ident(name) = self.peek().clone() {
+            return Ok((name, self.next().span));
+        }
+        Err(Diagnostic::error(
+            "E0101",
+            self.span(),
+            format!("expected a name, found {}", self.found()),
+        ))
+    }
+
+    fn parse_attrs(&mut self) -> Result<Vec<Attr>, Diagnostic> {
         let mut attrs = Vec::new();
         while *self.peek() == TokenKind::At {
-            self.next();
+            let at = self.next().span;
             let name = self.expect_ident()?;
             let mut args = String::new();
             if *self.peek() == TokenKind::LParen {
                 args = self.consume_balanced_parens_str()?;
             }
-            attrs.push(Attr { name, args });
+            attrs.push(Attr {
+                name,
+                args,
+                span: self.span_from(at),
+            });
         }
         Ok(attrs)
     }
 
-    fn consume_balanced_parens_str(&mut self) -> Result<String, String> {
+    fn consume_balanced_parens_str(&mut self) -> Result<String, Diagnostic> {
         let open = self.next();
         let start_byte = open.span.end;
         let mut depth = 1usize;
@@ -714,7 +769,7 @@ impl<'a> Parser<'a> {
         Ok(self.src[start_byte..end_byte].trim().to_string())
     }
 
-    fn consume_balanced_angles_str(&mut self) -> Result<String, String> {
+    fn consume_balanced_angles_str(&mut self) -> Result<String, Diagnostic> {
         let open = self.next();
         let start_byte = open.span.start;
         let mut depth = 1usize;
@@ -743,10 +798,14 @@ impl<'a> Parser<'a> {
         Ok(self.src[start_byte..end_byte].trim().to_string())
     }
 
-    fn consume_balanced_braces(&mut self) -> Result<Vec<TokenKind>, String> {
+    fn consume_balanced_braces(&mut self) -> Result<Vec<TokenKind>, Diagnostic> {
         let mut collected = Vec::new();
         if *self.peek() != TokenKind::LBrace {
-            return Err(format!("Expected '{{' at line {}", self.span().line));
+            return Err(Diagnostic::error(
+                "E0102",
+                self.span(),
+                format!("expected `{{`, found {}", self.found()),
+            ));
         }
         self.next();
         let mut depth = 1usize;
@@ -770,17 +829,32 @@ impl<'a> Parser<'a> {
     }
 
     /// Consumes the `}` that closes a declaration, or reports the declaration as unclosed.
-    fn expect_closing_brace(&mut self, what: &str, name: &str) -> Result<Token, String> {
+    fn expect_closing_brace(
+        &mut self,
+        what: &str,
+        name: &str,
+        name_span: Span,
+    ) -> Result<Token, Diagnostic> {
         if *self.peek() == TokenKind::RBrace {
-            Ok(self.next())
-        } else {
-            Err(format!(
-                "Line {}: `{} {}` has no closing `}}`",
-                self.span().line,
-                what,
-                name
-            ))
+            return Ok(self.next());
         }
+        Err(Diagnostic::error(
+            "E0103",
+            self.span(),
+            format!(
+                "`{} {}` has no closing `}}`; found {}",
+                what,
+                name,
+                self.found()
+            ),
+        )
+        .with_related(name_span, format!("`{} {}` opens here", what, name))
+        .with_fix(
+            Applicability::Suggestion,
+            format!("close `{} {}` here", what, name),
+            insertion_point(self.span()),
+            "}\n",
+        ))
     }
 
     fn consume_line_text(&mut self) -> String {
@@ -798,16 +872,24 @@ impl<'a> Parser<'a> {
         docs: Vec<String>,
         attrs: Vec<Attr>,
         is_pub: bool,
-    ) -> Result<StructDecl, String> {
+    ) -> Result<StructDecl, Diagnostic> {
         self.next(); // consume 'struct'
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_name()?;
         let generics = if *self.peek() == TokenKind::Lt {
             self.consume_balanced_angles_str()?
         } else {
             String::new()
         };
         if *self.peek() != TokenKind::LBrace {
-            return Err(format!("Expected '{{' after struct {}", name));
+            return Err(Diagnostic::error(
+                "E0102",
+                self.span(),
+                format!(
+                    "expected `{{` after `struct {}`, found {}",
+                    name,
+                    self.found()
+                ),
+            ));
         }
         self.next();
 
@@ -847,6 +929,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            let f_start = self.span();
             let f_attrs = self.parse_attrs()?;
             let mut byte_range = None;
             for a in &f_attrs {
@@ -860,11 +943,11 @@ impl<'a> Parser<'a> {
             } else {
                 false
             };
-            let f_name = self.expect_ident()?;
+            let (f_name, name_span) = self.expect_name()?;
             if *self.peek() == TokenKind::Colon {
                 self.next();
             }
-            let (ty, default_expr) = self.consume_field_type_and_default();
+            let (ty, default_expr, ty_span) = self.consume_field_type_and_default();
             fields.push(StructFieldDecl {
                 attrs: f_attrs,
                 byte_range,
@@ -872,23 +955,28 @@ impl<'a> Parser<'a> {
                 name: f_name,
                 ty,
                 default_expr,
+                span: self.span_from(f_start),
+                name_span,
+                ty_span,
             });
         }
-        self.expect_closing_brace("struct", &name)?;
+        self.expect_closing_brace("struct", &name, name_span)?;
         Ok(StructDecl {
             docs,
             attrs,
             is_pub,
             name,
+            name_span,
             generics,
             fields,
             invariants,
         })
     }
 
-    fn consume_field_type_and_default(&mut self) -> (String, Option<String>) {
-        let line = self.span().line;
-        let start = self.span().start;
+    fn consume_field_type_and_default(&mut self) -> (String, Option<String>, Span) {
+        let first = self.span();
+        let line = first.line;
+        let start = first.start;
         let mut eq_byte = None;
         let mut end = start;
         let mut bracket_depth = 0i32;
@@ -915,15 +1003,21 @@ impl<'a> Parser<'a> {
                 .trim_end_matches(',')
                 .to_string();
             let def = self.src[eq_e..end].trim().trim_end_matches(',').to_string();
-            (ty, Some(def))
+            let ty_span = Span {
+                end: start + ty.len(),
+                ..first
+            };
+            (ty, Some(def), ty_span)
         } else {
-            (
-                self.src[start..end]
-                    .trim()
-                    .trim_end_matches(',')
-                    .to_string(),
-                None,
-            )
+            let ty = self.src[start..end]
+                .trim()
+                .trim_end_matches(',')
+                .to_string();
+            let ty_span = Span {
+                end: start + ty.len(),
+                ..first
+            };
+            (ty, None, ty_span)
         }
     }
 
@@ -932,22 +1026,25 @@ impl<'a> Parser<'a> {
         docs: Vec<String>,
         attrs: Vec<Attr>,
         is_pub: bool,
-    ) -> Result<BitStructDecl, String> {
+    ) -> Result<BitStructDecl, Diagnostic> {
         self.next(); // consume 'bitstruct'
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_name()?;
         if *self.peek() == TokenKind::Colon {
             self.next();
         }
-        let backing_type = self.expect_ident()?;
+        let (backing_type, backing_span) = self.expect_name()?;
         if *self.peek() == TokenKind::LBrace {
             self.next();
         }
         let mut fields = Vec::new();
         while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
+            let f_start = self.span();
             let f_attrs = self.parse_attrs()?;
             let mut bit_range = (0, 0);
+            let mut bits_span = None;
             for a in &f_attrs {
                 if a.name == "bits" {
+                    bits_span = Some(a.span);
                     if let Some(r) = parse_range_arg(&a.args) {
                         bit_range = r;
                     }
@@ -959,32 +1056,38 @@ impl<'a> Parser<'a> {
             } else {
                 false
             };
-            let f_name = self.expect_ident()?;
+            let (f_name, f_name_span) = self.expect_name()?;
             if *self.peek() == TokenKind::Colon {
                 self.next();
             }
-            let (ty, _) = self.consume_field_type_and_default();
+            let (ty, _, ty_span) = self.consume_field_type_and_default();
             fields.push(BitFieldDecl {
                 bit_range,
                 is_pub: f_pub,
                 name: f_name,
                 ty,
+                span: self.span_from(f_start),
+                name_span: f_name_span,
+                ty_span,
+                bits_span,
             });
         }
-        self.expect_closing_brace("bitstruct", &name)?;
+        self.expect_closing_brace("bitstruct", &name, name_span)?;
         Ok(BitStructDecl {
             docs,
             attrs,
             is_pub,
             name,
+            name_span,
             backing_type,
+            backing_span,
             fields,
         })
     }
 
-    fn parse_enum(&mut self, is_pub: bool) -> Result<EnumDecl, String> {
+    fn parse_enum(&mut self, is_pub: bool) -> Result<EnumDecl, Diagnostic> {
         self.next(); // consume 'enum'
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_name()?;
         let mut variants = Vec::new();
         if *self.peek() == TokenKind::LBrace {
             let open = self.next();
@@ -992,7 +1095,10 @@ impl<'a> Parser<'a> {
             while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
                 self.next();
             }
-            let end_b = self.expect_closing_brace("enum", &name)?.span.start;
+            let end_b = self
+                .expect_closing_brace("enum", &name, name_span)?
+                .span
+                .start;
             for v in self.src[start_b..end_b].split(',') {
                 let t = v.trim();
                 if !t.is_empty() {
@@ -1007,9 +1113,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_trait(&mut self, is_pub: bool) -> Result<TraitDecl, String> {
+    fn parse_trait(&mut self, is_pub: bool) -> Result<TraitDecl, Diagnostic> {
         self.next(); // consume 'trait'
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_name()?;
         let mut methods_sig = Vec::new();
         if *self.peek() == TokenKind::LBrace {
             let open = self.next();
@@ -1017,7 +1123,10 @@ impl<'a> Parser<'a> {
             while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
                 self.next();
             }
-            let end_b = self.expect_closing_brace("trait", &name)?.span.start;
+            let end_b = self
+                .expect_closing_brace("trait", &name, name_span)?
+                .span
+                .start;
             for line in self.src[start_b..end_b].lines() {
                 let t = line.trim();
                 if !t.is_empty() {
@@ -1037,10 +1146,10 @@ impl<'a> Parser<'a> {
         docs: Vec<String>,
         attrs: Vec<Attr>,
         is_pub: bool,
-    ) -> Result<FnDecl, String> {
+    ) -> Result<FnDecl, Diagnostic> {
         let fn_tok = self.next(); // consume 'fn'
         let line = fn_tok.span.line;
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_name()?;
         let generics = if *self.peek() == TokenKind::Lt {
             self.consume_balanced_angles_str()?
         } else {
@@ -1065,12 +1174,13 @@ impl<'a> Parser<'a> {
 
         // `from` is contextual: it is a keyword only right after a return type.
         let mut provenance = Vec::new();
+        let mut provenance_spans = Vec::new();
         if matches!(self.peek(), TokenKind::Ident(w) if w == "from") {
-            self.next();
+            let from_span = self.next().span;
             loop {
                 if let TokenKind::Ident(param) = self.peek().clone() {
                     provenance.push(param);
-                    self.next();
+                    provenance_spans.push(self.next().span);
                     if *self.peek() == TokenKind::Comma {
                         self.next();
                         continue;
@@ -1079,9 +1189,14 @@ impl<'a> Parser<'a> {
                 break;
             }
             if provenance.is_empty() {
-                return Err(format!(
-                    "Line {}: `from` in the signature of `{}` names no parameter",
-                    line, name
+                return Err(Diagnostic::error(
+                    "E0104",
+                    from_span,
+                    format!(
+                        "`from` in the signature of `{}` names no parameter; found {}",
+                        name,
+                        self.found()
+                    ),
                 ));
             }
         }
@@ -1142,11 +1257,13 @@ impl<'a> Parser<'a> {
             attrs,
             is_pub,
             name,
+            name_span,
             generics,
             params,
             return_ty,
             error_ty,
             provenance,
+            provenance_spans,
             effects,
             requires,
             ensures,
@@ -1643,6 +1760,97 @@ pub fn after(y: i32) -> i32 = y
     }
 
     #[test]
+    fn test_parse_errors_are_diagnostics_with_spans() {
+        let at =
+            |code: &str, err: &Diagnostic| code[err.primary.start..err.primary.end].to_string();
+
+        let code = "module m\npub struct 42 {\n}\n";
+        let err = parse_module(code).unwrap_err();
+        assert_eq!((err.code, at(code, &err).as_str()), ("E0101", "42"));
+        assert_eq!(err.message, "expected a name, found `42`");
+        let err = parse_module("module").unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            ("E0101", "expected a name, found the end of the file")
+        );
+
+        let code = "module m\npub struct S\n  a: u8\n";
+        let err = parse_module(code).unwrap_err();
+        assert_eq!((err.code, at(code, &err).as_str()), ("E0102", "a"));
+        assert_eq!(err.message, "expected `{` after `struct S`, found `a`");
+        let code = "module m\n@example(\"x\") 1\n";
+        let err = parse_module(code).unwrap_err();
+        assert_eq!((err.code, at(code, &err).as_str()), ("E0102", "1"));
+
+        let code = "module m\npub fn f(a: []u8) -> []u8 from with IO\n";
+        let err = parse_module(code).unwrap_err();
+        assert_eq!((err.code, at(code, &err).as_str()), ("E0104", "from"));
+        assert!(err.message.ends_with("found `with`"), "{}", err.message);
+    }
+
+    #[test]
+    fn test_a_type_span_covers_every_token_of_the_type() {
+        let code = "module m
+pub struct S {
+  buf: [4]u8
+  index: Map<str, u32> = Map.empty()
+}
+";
+        let m = parse_module(code).unwrap();
+        let ItemDecl::Struct(s) = &m.items[0] else {
+            panic!("expected a struct")
+        };
+        let types: Vec<_> = s
+            .fields
+            .iter()
+            .map(|f| &code[f.ty_span.start..f.ty_span.end])
+            .collect();
+        assert_eq!(types, vec!["[4]u8", "Map<str, u32>"]);
+    }
+
+    #[test]
+    fn test_declarations_keep_their_spans() {
+        let code = "module m\n@layout(size: 4, align: 4)\npub struct S {\n  @bytes(0..4) pub v: u32\n}\npub bitstruct B : u8 {\n  @bits(0..8) pub raw: u8\n}\npub fn f(a: []u8) -> []u8 from a\n";
+        let m = parse_module(code).unwrap();
+        let text = |sp: Span| &code[sp.start..sp.end];
+        let ItemDecl::Struct(s) = &m.items[0] else {
+            panic!("expected a struct")
+        };
+        assert_eq!(text(s.attrs[0].span), "@layout(size: 4, align: 4)");
+        assert_eq!(text(s.name_span), "S");
+        let f = &s.fields[0];
+        assert_eq!(
+            (
+                text(f.span),
+                text(f.name_span),
+                text(f.ty_span),
+                text(f.attrs[0].span)
+            ),
+            ("@bytes(0..4) pub v: u32", "v", "u32", "@bytes(0..4)")
+        );
+        let ItemDecl::BitStruct(b) = &m.items[1] else {
+            panic!("expected a bitstruct")
+        };
+        assert_eq!((text(b.name_span), text(b.backing_span)), ("B", "u8"));
+        let bf = &b.fields[0];
+        assert_eq!(
+            (text(bf.span), text(bf.ty_span), bf.bits_span.map(text)),
+            ("@bits(0..8) pub raw: u8", "u8", Some("@bits(0..8)"))
+        );
+        let ItemDecl::Fn(func) = &m.items[2] else {
+            panic!("expected a fn")
+        };
+        assert_eq!(text(func.name_span), "f");
+        assert_eq!(
+            func.provenance_spans
+                .iter()
+                .map(|sp| text(*sp))
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+    }
+
+    #[test]
     fn test_unclosed_declarations_are_rejected() {
         for (code, what) in [
             (
@@ -1663,7 +1871,16 @@ pub fn after(y: i32) -> i32 = y
             ),
         ] {
             let err = parse_module(code).unwrap_err();
-            assert!(err.contains(what), "{}", err);
+            assert_eq!(err.code, "E0103");
+            assert!(err.message.contains(what), "{:?}", err);
+            // The related span is the declaration's name, and the suggested fix closes it.
+            let name = what.split(' ').nth(1).unwrap().trim_end_matches('`');
+            assert_eq!(
+                &code[err.related[0].span.start..err.related[0].span.end],
+                name
+            );
+            let fixed = diagnostics::apply_fix(code, &err.fixes[0]).unwrap();
+            assert!(parse_module(&fixed).is_ok(), "{}", fixed);
         }
         // Closed, the same declarations parse, and the next item is read.
         let closed = "module m\npub enum Side { Left, Right }\npub trait Probe {\n  fn hit(self) -> bool\n}\npub fn after() = 0\n";

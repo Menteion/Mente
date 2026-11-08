@@ -2,7 +2,9 @@
 //!
 //! Commands:
 //! - `mn view --spec <file.mn>` : Instant `<0.1ms` Holographic Spec Blueprint projection & dual hash report.
-//! - `mn check <path>`          : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification.
+//! - `mn check [--json] <path>` : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification;
+//!   `--json` prints the diagnostics in the versioned JSON form of `spec/diagnostics.md`.
+//! - `mn explain [code]`        : What an error code means, from the catalogue in `catalogue.rs`.
 //! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate;
 //!   `@example` bodies are parsed as tokens but not executed.
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
@@ -16,7 +18,10 @@ use std::time::Instant;
 use mente_ast::project_spec_blueprint;
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
 use mente_sema::verify_module;
+use mente_syntax::diagnostics::{render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
+
+mod catalogue;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -30,6 +35,7 @@ fn main() {
         "check" => cmd_check(&args[1..]),
         "test" => cmd_test(&args[1..]),
         "spec" => cmd_spec(&args[1..]),
+        "explain" => cmd_explain(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -41,7 +47,9 @@ fn print_help() {
     println!("Mente Programming Language Toolchain (mn v0.1.0)");
     println!("Usage:");
     println!("  mn view --spec <file.mn>     Project Holographic Spec Blueprint (strips bodies, computes spec_hash/body_hash)");
-    println!("  mn check [file.mn | dir]     Verify .mn syntax, 64B Cache-Line @layout, bitstruct, @total & @branchless contracts");
+    println!("  mn check [--json] [file.mn | dir]");
+    println!("                               Verify .mn syntax, 64B Cache-Line @layout, bitstruct, @total & @branchless contracts");
+    println!("  mn explain [code]            Explain an error code, or list them all");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
 }
@@ -60,7 +68,7 @@ fn cmd_view(args: &[String]) {
     // Timed from source text in memory, as the ROADMAP.md protocol measures it: file I/O excluded.
     let t0 = Instant::now();
     let module = parse_module(&src).unwrap_or_else(|e| {
-        eprintln!("Parse error in `{}`: {}", path_str, e);
+        eprint!("{}", render_text(&e, path_str, &src));
         process::exit(1);
     });
     let report = project_spec_blueprint(&module);
@@ -93,7 +101,12 @@ fn collect_mn_files(target: &Path) -> Vec<PathBuf> {
 }
 
 fn cmd_check(args: &[String]) {
-    let target_str = args.first().map(|s| s.as_str()).unwrap_or("examples");
+    let json = args.iter().any(|a| a == "--json");
+    let target_str = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("examples");
     let files = collect_mn_files(Path::new(target_str));
     if files.is_empty() {
         eprintln!("No `.mn` files found at `{}`", target_str);
@@ -102,59 +115,102 @@ fn cmd_check(args: &[String]) {
 
     let t0 = Instant::now();
     let mut all_ok = true;
+    // Each file with its source and its diagnostics, for the JSON form.
+    let mut checked: Vec<(String, String, Vec<Diagnostic>)> = Vec::new();
     for file in &files {
+        let shown = file.display().to_string();
         let src = match fs::read_to_string(file) {
             Ok(src) => src,
             Err(e) => {
-                eprintln!("[FAIL] [{}] cannot be read: {}", file.display(), e);
+                eprintln!("error: cannot read `{}`: {}", shown, e);
                 all_ok = false;
                 continue;
             }
         };
-        let module = match parse_module(&src) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("[FAIL] [{}] Parse Error: {}", file.display(), e);
-                all_ok = false;
-                continue;
-            }
-        };
-        let proj = project_spec_blueprint(&module);
-        match verify_module(&module) {
-            Ok(rep) => {
-                println!(
-                    "[PASS] [{}] module `{}` | spec_hash: {}.. | layouts: {} | bitstructs: {} | @branchless: {} | @total: {} | @kernel: {}",
-                    file.display(),
-                    rep.module_path,
-                    &proj.hashes.spec_hash[..12],
-                    rep.layout_proofs.len(),
-                    rep.bitstruct_proofs.len(),
-                    rep.branchless_functions_verified,
-                    rep.total_functions_verified,
-                    rep.kernel_functions_verified,
-                );
-                for lp in &rep.layout_proofs {
-                    println!(
-                        "       Proven @layout `{}` ({} bytes, align {} bytes — 0 padding holes)",
-                        lp.struct_name, lp.total_bytes, lp.align_bytes
-                    );
+        let diagnostics = match parse_module(&src) {
+            Err(d) => vec![d],
+            Ok(module) => match verify_module(&module) {
+                Ok(rep) => {
+                    if !json {
+                        let proj = project_spec_blueprint(&module);
+                        println!(
+                            "[PASS] [{}] module `{}` | spec_hash: {}.. | layouts: {} | bitstructs: {} | @branchless: {} | @total: {} | @kernel: {}",
+                            shown,
+                            rep.module_path,
+                            &proj.hashes.spec_hash[..12],
+                            rep.layout_proofs.len(),
+                            rep.bitstruct_proofs.len(),
+                            rep.branchless_functions_verified,
+                            rep.total_functions_verified,
+                            rep.kernel_functions_verified,
+                        );
+                        for lp in &rep.layout_proofs {
+                            println!(
+                                "       Proven @layout `{}` ({} bytes, align {} bytes — 0 padding holes)",
+                                lp.struct_name, lp.total_bytes, lp.align_bytes
+                            );
+                        }
+                    }
+                    Vec::new()
                 }
-            }
-            Err(errs) => {
-                all_ok = false;
-                for e in errs {
-                    eprintln!("[FAIL] [{}] {}", file.display(), e);
+                Err(diagnostics) => diagnostics,
+            },
+        };
+        if !diagnostics.is_empty() {
+            all_ok = false;
+            if !json {
+                for d in &diagnostics {
+                    eprint!("{}", render_text(d, &shown, &src));
                 }
             }
         }
+        checked.push((shown, src, diagnostics));
     }
-    println!(
-        "\nChecked {} `.mn` file(s) in {:.2} ms.",
-        files.len(),
-        t0.elapsed().as_secs_f64() * 1000.0
-    );
+    if json {
+        let files: Vec<FileDiagnostics> = checked
+            .iter()
+            .map(|(file, src, diagnostics)| FileDiagnostics {
+                file,
+                src,
+                diagnostics,
+            })
+            .collect();
+        println!("{}", render_json(&files));
+    } else {
+        println!(
+            "
+Checked {} `.mn` file(s) in {:.2} ms.",
+            files.len(),
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     if !all_ok {
         process::exit(1);
+    }
+}
+
+/// `mn explain E0413` prints what a code means; `mn explain` lists every code.
+fn cmd_explain(args: &[String]) {
+    let Some(code) = args.first() else {
+        for e in catalogue::CATALOGUE {
+            let status = match e.status {
+                catalogue::CodeStatus::Emitted => "",
+                catalogue::CodeStatus::Reserved => " (reserved)",
+                catalogue::CodeStatus::Retired => " (retired)",
+            };
+            println!("{}  {}{}", e.code, e.title, status);
+        }
+        return;
+    };
+    match catalogue::lookup(&code.to_uppercase()) {
+        Some(e) => print!("{}", catalogue::explain(e)),
+        None => {
+            eprintln!(
+                "`{}` is not a Mente error code; `mn explain` lists them all",
+                code
+            );
+            process::exit(1);
+        }
     }
 }
 
@@ -244,8 +300,11 @@ fn cmd_test(args: &[String]) {
     );
     r.ret_node = Some(out_v);
 
-    if let Err(e) = r.verify_branchless() {
-        eprintln!("[FAIL] {}", e);
+    if let Err(v) = r.verify_branchless() {
+        eprintln!(
+            "error[{}]: {} (MIR node #{}, line {})",
+            v.code, v.message, v.node.0, v.line
+        );
         process::exit(1);
     }
 

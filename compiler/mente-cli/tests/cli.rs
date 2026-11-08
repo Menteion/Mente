@@ -167,3 +167,125 @@ fn test_mn_spec_checks_front_matter_and_directives() {
         err
     );
 }
+
+#[test]
+fn test_mn_check_json_reports_the_versioned_form() {
+    let clean = mn(&repo_root(), &["check", "--json", "examples"]);
+    assert!(clean.status.success(), "{}", text(&clean.stderr));
+    assert_eq!(text(&clean.stdout), "{\"version\":1,\"diagnostics\":[]}\n");
+
+    let dir = scratch("json");
+    fs::write(
+        dir.join("broken.mn"),
+        "module test.bad\n@layout(size: 16, align: 8)\npub struct Hole {\n  @bytes(0..8) pub id: u64\n  @bytes(12..16) pub rest: u32\n}\n",
+    )
+    .unwrap();
+    let bad = mn(&dir, &["check", "--json", "broken.mn"]);
+    fs::remove_dir_all(&dir).unwrap();
+    let out = text(&bad.stdout);
+    assert_eq!(bad.status.code(), Some(1));
+    // Only the JSON document goes to standard output.
+    assert!(
+        out.starts_with(
+            "{\"version\":1,\"diagnostics\":[{\"code\":\"E0413\",\"severity\":\"error\","
+        ),
+        "{}",
+        out
+    );
+    assert!(
+        out.contains("\"primary\":{\"file\":\"broken.mn\",\"start\":")
+            && out.contains("\"line\":5,\"column\":3}"),
+        "{}",
+        out
+    );
+    assert!(
+        out.contains("\"applicability\":\"suggestion\"")
+            && out.contains("\"replacement\":\"@bytes(8..12)\""),
+        "{}",
+        out
+    );
+    assert_eq!(out.lines().count(), 1, "{}", out);
+}
+
+#[test]
+fn test_mn_check_text_shows_code_place_and_fix() {
+    let dir = scratch("text");
+    fs::write(
+        dir.join("open.mn"),
+        "module m\n@layout(size: 8, align: 4)\npub struct S {\n  @bytes(0..4) pub a: u32\n  pub b: u32\n}\n",
+    )
+    .unwrap();
+    let run = mn(&dir, &["check", "open.mn"]);
+    fs::remove_dir_all(&dir).unwrap();
+    let err = text(&run.stderr);
+    assert_eq!(run.status.code(), Some(1));
+    for part in [
+        "error[E0412]: field `S.b` has no `@bytes(start..end)`",
+        "  --> open.mn:5:7\n",
+        "5 |   pub b: u32\n",
+        "  |       ^\n",
+        "  fix (machine-applicable): give `b` the bytes 4..8\n",
+    ] {
+        assert!(err.contains(part), "missing `{}` in:\n{}", part, err);
+    }
+}
+
+#[test]
+fn test_mn_explain_prints_the_catalogue() {
+    let one = mn(&repo_root(), &["explain", "E0413"]);
+    let out = text(&one.stdout);
+    assert!(one.status.success());
+    assert!(
+        out.starts_with("E0413: A @layout field leaves a gap or overlaps\n"),
+        "{}",
+        out
+    );
+    assert!(
+        out.contains("Governed by spec/morphic-layouts.md.")
+            && out.contains("This fails with E0413:"),
+        "{}",
+        out
+    );
+
+    let reserved = mn(&repo_root(), &["explain", "e0601"]);
+    assert!(text(&reserved.stdout).contains("(reserved: specified, not reported yet)"));
+
+    let all = mn(&repo_root(), &["explain"]);
+    let list = text(&all.stdout);
+    assert!(
+        list.contains("E0101  A name was expected\n")
+            && list.contains("E0701  A comptime evaluation exceeds its step budget (reserved)\n"),
+        "{}",
+        list
+    );
+
+    let unknown = mn(&repo_root(), &["explain", "E9999"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(text(&unknown.stderr).contains("`E9999` is not a Mente error code"));
+}
+
+#[test]
+fn test_mn_help_lists_every_command() {
+    for args in [&["--help"][..], &[][..]] {
+        let run = mn(&repo_root(), args);
+        let out = text(&run.stdout);
+        assert!(run.status.success());
+        for command in [
+            "mn view --spec",
+            "mn check [--json]",
+            "mn test [--mutate]",
+            "mn spec",
+            "mn explain [code]",
+        ] {
+            assert!(
+                out.contains(command),
+                "`{}` missing from:\n{}",
+                command,
+                out
+            );
+        }
+    }
+    let unknown = mn(&repo_root(), &["build"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(text(&unknown.stderr).contains("Unknown command `build`"));
+}
