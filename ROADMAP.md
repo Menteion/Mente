@@ -63,7 +63,7 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 ### M0b: design closure for M1
 
 - [x] The core calculus of M1's language, in a new normative spec file, [`spec/core-calculus.md`](spec/core-calculus.md) ([`core-calculus-home`](docs/design-review.md#core-calculus-home); commit "Write the core calculus of M1").
-- [ ] The normative EBNF grammar of M1's surface syntax, in a new spec file, `spec/grammar.md` ([`grammar-home`](docs/design-review.md#grammar-home)).
+- [x] The normative EBNF grammar of M1's surface syntax, in a new spec file, [`spec/grammar.md`](spec/grammar.md) ([`grammar-home`](docs/design-review.md#grammar-home); commit "Write the grammar of M1's surface syntax").
 - [ ] The agent-benchmark tasks, fixed before anything is measured, each marked with the earliest milestone that can run it and as core-only or not, with a held-out set and adversarial tasks; and the control language ([`success-workload`](docs/design-review.md#success-workload); protocol below).
 - [ ] Spike: Tier 1 on the generated module of the Tier-1 protocol below, against its latency target.
 - [ ] Spike: debug and unwind information through Cranelift, DWARF on Linux and PDB with CodeView on Windows ([`debug-info`](docs/design-review.md#debug-info)). Its Cranelift, DWARF and object crates go to Norman for approval first, under the dependency policy.

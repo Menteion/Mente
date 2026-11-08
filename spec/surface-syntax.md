@@ -17,7 +17,7 @@ Today `mente-syntax` parses declarations only: a function body is kept as a flat
    - `Specified`: blocks are delimited by explicit braces `{` and `}`.
    - `Implemented`: the declaration parser matches a body's braces, so a body ends at the brace that closes its first one.
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_nested_braces_end_at_their_match" min="1" reason="A body with nested braces ends at its matching brace" -->
-   - `Specified`: statements terminate at newlines without trailing semicolons `;`. Line continuation occurs automatically after binary operators (`+`, `-`, `*`, `/`, `|>`, `and`, `or`) or inside unclosed delimiters `(...)`, `[...]`, `{...}`.
+   - `Specified`: statements terminate at newlines without trailing semicolons `;`. Line continuation occurs automatically after binary operators (`+`, `-`, `*`, `/`, `|>`, `and`, `or`) or inside unclosed parentheses and brackets; inside a block's braces a newline separates statements. `grammar.md`, item 2, gives the exact rules.
 2. `Specified` **Symmetric 3-letter variable bindings**:
    - `val name: Type = expr` declares an immutable binding.
    - `var name: Type = expr` declares a local mutable binding.
