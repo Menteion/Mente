@@ -5,6 +5,7 @@ This file is the switchboard, not the rulebook.
 1. **Live implementation status**: Read [`docs/STATUS.md`](docs/STATUS.md) first. It is the single source of truth for what is `Implemented` vs. `Specified` across all 6 compiler crates and names the immediate next step. Open design problems, and what is proposed for each, are in [`docs/design-review.md`](docs/design-review.md); a design change starts from its entry there.
 2. **Language and compiler specification**: Read [`spec/README.md`](spec/README.md). Each file in `spec/*.md` defines exactly **one orthogonal mechanism and design decision** (Specification + Decision Rationale & Rejected Alternatives + Executable `<!-- @assert-* -->` assertions). Load only the specific `spec/<topic>.md` file governing the crate you are editing.
 3. **Engineering roadmap**: Read [`ROADMAP.md`](ROADMAP.md) for the four stages of the work and stage 1's milestones, M0a, M0b and M1 to M9. [`docs/design-brief.md`](docs/design-brief.md) holds the design, the working rules and the long-term plan in full.
+4. **Agent benchmark**: [`benchmark/README.md`](benchmark/README.md) defines the corpus. Its held-out set lives in the private repository `Menteion/mente-bench-heldout`, cloned beside this one as `..\mente-bench-heldout`. Never read it, or held-out results task by task, while working on the language card or on anything a benchmark agent is shown; only `npm run check:benchmark -- --held-out` opens it.
 
 ---
 
@@ -56,6 +57,10 @@ cargo run --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
 
 # 5. Run the pinned @spec-family checks: directives, prove, claims, the spec graph and briefs (`npm ci` once first)
 npm run verify:docs
+
+# 7. Check the agent-benchmark corpus against its references and its lock, and test the checker
+npm run check:benchmark
+npm run test:benchmark
 
 # 6. Check the format and the lints (rustfmt, then clippy with warnings as errors)
 cargo fmt --all --check
