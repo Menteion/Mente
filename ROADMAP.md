@@ -11,15 +11,15 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 
 ## Done before M0
 
-- [x] The specification is split into emoji-free, single-decision files in [`spec/`](spec/README.md), with no `DEC-XXX` or `Station` numbering; a directive in [spec/README.md](spec/README.md) keeps every file present.
-- [x] Executable `<!-- @assert-* -->` directives across `spec/*.md`, run by `cargo run --bin mn -- spec`, which rejects a directive that cannot fail and ignores comments in `.mn` files ([`test_spec_directives_that_cannot_fail_are_rejected`](compiler/mente-cli/src/main.rs), [`test_spec_directives_on_mn_files_ignore_comments`](compiler/mente-cli/src/main.rs)).
+- [x] The specification is split into emoji-free, single-decision files in [`spec/`](spec/README.md), with no `DEC-XXX` or `Station` numbering; a directive in [spec/README.md](spec/README.md) keeps every file present (commit "Baseline: Mente as found on 2026-11-04").
+- [x] Executable `<!-- @assert-* -->` directives across `spec/*.md`, run by `cargo run --bin mn -- spec`, which rejects a directive that cannot fail and ignores comments in `.mn` files ([`test_spec_directives_that_cannot_fail_are_rejected`](compiler/mente-cli/src/main.rs), [`test_spec_directives_on_mn_files_ignore_comments`](compiler/mente-cli/src/main.rs); commit "Keep comments from satisfying directives on .mn files").
 - [x] The documents say what the compiler does: maturity labels, names and measured numbers corrected across `spec/`, [docs/STATUS.md](docs/STATUS.md) and the crate comments (commit "Say what the compiler does, and list the open design problems").
-- [x] A zero-dependency `.mn` lexer and declaration parser in `compiler/mente-syntax` ([`test_lexer_and_parser_on_basic_mn`](compiler/mente-syntax/src/lib.rs), [`test_from_clause_names_return_provenance`](compiler/mente-syntax/src/lib.rs)).
-- [x] Three 128-bit structural digests (`spec_hash`, `instance_hash`, `body_hash`) and the Holographic Spec Blueprint projection in `compiler/mente-ast` ([`test_private_field_change_changes_spec_hash`](compiler/mente-ast/src/lib.rs), [`test_instantiable_bodies_go_into_instance_hash`](compiler/mente-ast/src/lib.rs)); the projection meets its median target under the protocol below.
-- [x] The exact `@layout(size, align)` + `@bytes` prover, with field alignment and `@packed`, and the `bitstruct` + `@bits` prover, with field widths, in `compiler/mente-sema` ([`test_layout_fields_sit_at_aligned_offsets`](compiler/mente-sema/src/lib.rs), [`test_bitstruct_field_type_must_match_its_range`](compiler/mente-sema/src/lib.rs)).
-- [x] Return-view provenance read from the signature: the `from` clause is parsed, hashed and checked against the parameter list, `E0311` ([`test_from_clause_must_name_a_kept_parameter`](compiler/mente-sema/src/lib.rs)).
-- [x] A straight-line `MirRegionSoA` (`NodeId(u32)`), its `ValueLattice` record, an in-memory interpreter and an opcode mutation gate in `compiler/mente-mir`, exercised on one hand-written region ([`test_branchless_integrate_cell_mir_and_mutation_prover`](compiler/mente-mir/src/lib.rs)).
-- [x] Repository text in English ([`test_repository_text_is_english`](compiler/mente-cli/src/main.rs)).
+- [x] A zero-dependency `.mn` lexer and declaration parser in `compiler/mente-syntax` ([`test_lexer_and_parser_on_basic_mn`](compiler/mente-syntax/src/lib.rs), [`test_from_clause_names_return_provenance`](compiler/mente-syntax/src/lib.rs); commit "Read every interface fact from the signature").
+- [x] Three 128-bit structural digests (`spec_hash`, `instance_hash`, `body_hash`) and the Holographic Spec Blueprint projection in `compiler/mente-ast` ([`test_private_field_change_changes_spec_hash`](compiler/mente-ast/src/lib.rs), [`test_instantiable_bodies_go_into_instance_hash`](compiler/mente-ast/src/lib.rs); commit "Read every interface fact from the signature"); the projection meets its median target under the protocol below.
+- [x] The exact `@layout(size, align)` + `@bytes` prover, with field alignment and `@packed`, and the `bitstruct` + `@bits` prover, with field widths, in `compiler/mente-sema` ([`test_layout_fields_sit_at_aligned_offsets`](compiler/mente-sema/src/lib.rs), [`test_bitstruct_field_type_must_match_its_range`](compiler/mente-sema/src/lib.rs); commit "Check field alignment in @layout, and fix its byte order").
+- [x] Return-view provenance read from the signature: the `from` clause is parsed, hashed and checked against the parameter list, `E0311` ([`test_from_clause_must_name_a_kept_parameter`](compiler/mente-sema/src/lib.rs); commit "Read every interface fact from the signature").
+- [x] A straight-line `MirRegionSoA` (`NodeId(u32)`), its `ValueLattice` record, an in-memory interpreter and an opcode mutation gate in `compiler/mente-mir`, exercised on one hand-written region ([`test_branchless_integrate_cell_mir_and_mutation_prover`](compiler/mente-mir/src/lib.rs); commit "Make the checkers report what they check").
+- [x] Repository text in English ([`test_repository_text_is_english`](compiler/mente-cli/src/main.rs); commit "Write every example in English, and keep the repository English").
 
 ---
 
@@ -29,8 +29,8 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 
 **Decided first:** [`ai-first-purpose`](docs/design-review.md#ai-first-purpose), [`foundation-milestones`](docs/design-review.md#foundation-milestones), [`foundation-gate`](docs/design-review.md#foundation-gate), [`codegen-placeholders`](docs/design-review.md#codegen-placeholders), [`implemented-evidence`](docs/design-review.md#implemented-evidence), [`diagnostics-as-api`](docs/design-review.md#diagnostics-as-api), [`success-workload`](docs/design-review.md#success-workload), [`overflow-check-cost`](docs/design-review.md#overflow-check-cost), all decided on 2026-11-08.
 
-- [ ] **Step 0.1 (`package.json`)**: a private package, `engines` node `>=22`, with devDependencies pinned exactly (no `^`): `@spec-family/spec-guard` `0.32.0`, `@spec-family/spec-graph` `0.23.1`, `@spec-family/spec-brief` `0.13.0`, and `package-lock.json` committed. Scripts: `spec-guard` over `"spec/*.md" "docs/*.md" README.md ROADMAP.md CLAUDE.md`, `spec-guard prove` over the same patterns, `spec-guard claims`, `spec-graph check`, `spec-brief lint --strict`, and `verify:docs` running all five in order. The tools run only through these scripts or `npx --no-install` with the full `@spec-family/` name. Add the `npm` ecosystem to `.github/dependabot.yml` in the same change.
-- [ ] **Step 0.2 (`.spec-graph.json`)**:
+- [x] **Step 0.1 (`package.json`)** (commit "Wire the @spec-family documentation tools"): a private package, `engines` node `>=22`, with devDependencies pinned exactly (no `^`): `@spec-family/spec-guard` `0.32.0`, `@spec-family/spec-graph` `0.23.1`, `@spec-family/spec-brief` `0.13.0`, and `package-lock.json` committed. Scripts: `spec-guard` over `"spec/*.md" "docs/*.md" README.md ROADMAP.md CLAUDE.md`, `spec-guard prove` over the same patterns, `spec-guard claims`, `spec-graph check`, `spec-brief lint --strict`, and `verify:docs` running all five in order. The tools run only through these scripts or `npx --no-install` with the full `@spec-family/` name. Add the `npm` ecosystem to `.github/dependabot.yml` in the same change.
+- [x] **Step 0.2 (`.spec-graph.json`)** (commit "Wire the @spec-family documentation tools"):
   ```json
   { "patterns": ["spec/*.md", "docs/*.md", "README.md", "ROADMAP.md", "CLAUDE.md", "examples/README.md"],
     "strict": true,
@@ -44,14 +44,14 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
       "fields": { "*": ["Timed", "Corpus", "Method", "Machine"] }, "claims": ["Target"] },
     "orientation": { "files": ["CLAUDE.md", "docs/design-brief.md"], "extensions": [".md", ".rs", ".mn", ".toml"], "roots": ["spec"] } }
   ```
-- [ ] **Step 0.25 (`.spec-guard.json`)**: `.mn` comments are declared in the configuration, with no change to the tool, and the claim check is configured beside them:
+- [x] **Step 0.25 (`.spec-guard.json`)** (commit "Wire the @spec-family documentation tools"): `.mn` comments are declared in the configuration, with no change to the tool, and the claim check is configured beside them:
   ```json
-  { "comments": { ".mn": "c-like" },
+  { "comments": { ".mn": "c-like", "LICENSE-APACHE": "none" },
     "claims": { "files": ["spec/*.md"],
       "labels": { "Implemented": { "evidence": "test" }, "Specified": {}, "Target": {}, "Hypothesis": {} },
       "testPrefixes": ["fn test_"] } }
   ```
-- [ ] **Step 0.3 (`.spec-brief.json` and `briefs/`)**: `spec-brief init`, then add `"claims": { "labels": { "Implemented": "done", "Specified": "open", "Target": "open", "Hypothesis": "open" } }` and `"registers": { "settled": ["decided", "done"] }`. A brief's front matter may name `raises: [spec/<file>.md#<claim id>]` and `awaits: [docs/design-review.md#<key>]`.
+- [x] **Step 0.3 (`.spec-brief.json` and `briefs/`)** (commit "Wire the @spec-family documentation tools"): `spec-brief init`, then add `"claims": { "labels": { "Implemented": "done", "Specified": "open", "Target": "open", "Hypothesis": "open" } }` and `"registers": { "settled": ["decided", "done"] }`. A brief's front matter may name `raises: [spec/<file>.md#<claim id>]` and `awaits: [docs/design-review.md#<key>]`.
 - [ ] **CI**: GitHub Actions on every pull request, with every action pinned to a full commit SHA: a Rust job running the four commands of `CLAUDE.md` on x86-64 Linux, x86-64 Windows and AArch64 Linux, and a documentation job running `npm ci` and `npm run verify:docs`. The repository's ruleset then requires both.
 - [ ] Every claim in `spec/*.md` rewritten in the tools' convention ([`implemented-evidence`](docs/design-review.md#implemented-evidence)), and every finding of `spec-guard claims` resolved: a test that fails when the behaviour breaks, seen to fail under `cargo-mutants`, or a lower label.
 - [ ] The `mente-codegen` placeholders removed, with the sentences and directives that name them ([`codegen-placeholders`](docs/design-review.md#codegen-placeholders)).
@@ -67,7 +67,7 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 - [ ] The agent-benchmark tasks, fixed before anything is measured, each marked with the earliest milestone that can run it and as core-only or not, with a held-out set and adversarial tasks; and the control language ([`success-workload`](docs/design-review.md#success-workload); protocol below).
 - [ ] Spike: Tier 1 on the generated module of the Tier-1 protocol below, against its latency target.
 - [ ] Spike: debug and unwind information through Cranelift, DWARF on Linux and PDB with CodeView on Windows ([`debug-info`](docs/design-review.md#debug-info)).
-- [ ] Decided: whether the reference interpreter is a crate of its own, and whether to build a mechanised model of the core calculus.
+- [ ] Decide whether the reference interpreter is a crate of its own, and whether to build a mechanised model of the core calculus.
 
 ### M1: the thin slice
 

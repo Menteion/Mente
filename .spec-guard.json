@@ -1,0 +1,4 @@
+{ "comments": { ".mn": "c-like", "LICENSE-APACHE": "none" },
+  "claims": { "files": ["spec/*.md"],
+    "labels": { "Implemented": { "evidence": "test" }, "Specified": {}, "Target": {}, "Hypothesis": {} },
+    "testPrefixes": ["fn test_"] } }

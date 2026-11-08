@@ -1,8 +1,8 @@
 # Dependabot version updates. Security updates are switched on in the repository settings.
 #
-# Only Cargo is listed: npm joins when package.json exists (ROADMAP.md, Phase 0 step 0.1) and
-# github-actions when .github/workflows/ does, since Dependabot reports an error for an
-# ecosystem whose manifest is missing.
+# Cargo and npm (the pinned documentation tools) are listed; github-actions joins when
+# .github/workflows/ exists, since Dependabot reports an error for an ecosystem whose
+# manifest is missing.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -14,5 +14,16 @@ updates:
     open-pull-requests-limit: 5
     groups:
       cargo:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Taipei
+    open-pull-requests-limit: 5
+    groups:
+      npm:
         patterns:
           - "*"

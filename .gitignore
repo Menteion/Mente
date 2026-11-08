@@ -15,3 +15,6 @@ build/
 Thumbs.db
 .vscode/
 .idea/
+
+# Node tooling for the documentation checks
+node_modules/

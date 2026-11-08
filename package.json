@@ -1,0 +1,22 @@
+{
+  "name": "mente-docs-tools",
+  "private": true,
+  "description": "Documentation checks for the Mente repository: the @spec-family tools, pinned exactly.",
+  "license": "MIT OR Apache-2.0 WITH LLVM-exception",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "spec-guard": "spec-guard \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md",
+    "spec-guard:prove": "spec-guard prove \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md",
+    "spec-guard:claims": "spec-guard claims",
+    "spec-graph": "spec-graph check",
+    "spec-brief": "spec-brief lint --strict",
+    "verify:docs": "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief"
+  },
+  "devDependencies": {
+    "@spec-family/spec-brief": "0.13.0",
+    "@spec-family/spec-graph": "0.23.1",
+    "@spec-family/spec-guard": "0.32.0"
+  }
+}

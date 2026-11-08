@@ -1,0 +1,11 @@
+{ "patterns": ["spec/*.md", "docs/*.md", "README.md", "ROADMAP.md", "CLAUDE.md", "examples/README.md"],
+  "strict": true,
+  "ignoreReferences": ["LICENSE-*", "../LICENSE-*"],
+  "claims": { "files": ["spec/*.md"], "labels": { "Implemented": "done", "Specified": "open", "Target": "open", "Hypothesis": "open" } },
+  "checklists": ["ROADMAP.md"],
+  "ledgers": ["docs/STATUS.md"],
+  "registers": { "files": ["docs/design-review.md"], "resolution": "Proposed resolution",
+    "statuses": { "open": {}, "proposed": { "needs": ["resolution"] }, "decided": { "needs": ["resolution"] }, "done": { "closes": true, "needs": ["citation", "commit"] } } },
+  "protocols": { "files": ["ROADMAP.md"], "heading": "Measurement protocols", "result": "Last result",
+    "fields": { "*": ["Timed", "Corpus", "Method", "Machine"] }, "claims": ["Target"] },
+  "orientation": { "files": ["CLAUDE.md", "docs/design-brief.md"], "extensions": [".md", ".rs", ".mn", ".toml"], "roots": ["spec"] } }
