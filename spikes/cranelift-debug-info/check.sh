@@ -10,6 +10,7 @@ cd "$(dirname "$0")"
 line() { grep -n -F "$1" demo.mn | head -1 | cut -d: -f1; }
 L_SQUARE=$(line "return x * x")
 L_CALL=$(line "s += square(i)")
+L_NEXT=$(line "i += 1")
 L_MAIN=$(line "return sum_squares(10)")
 
 mkdir -p target/demo
@@ -36,7 +37,8 @@ case "$(uname -s)" in
     expect target/demo/gdb.txt "gdb unwinds into sum_squares at the call" "^#1 .*sum_squares .*demo\.mn:$L_CALL"
     expect target/demo/gdb.txt "gdb unwinds into mente_main at the call" "^#2 .*mente_main .*demo\.mn:$L_MAIN"
     expect target/demo/gdb.txt "gdb unwinds through every Cranelift frame into the host" "^#3 .*host::main"
-    expect target/demo/gdb.txt "gdb steps from square back to the caller's line" "sum_squares .*demo\.mn:$L_CALL"
+    # Returning into the middle of line $L_CALL, gdb steps on to the start of the next line.
+    expect target/demo/gdb.txt "gdb steps out of square to the caller's next line" "^sum_squares \(\) at .*demo\.mn:$L_NEXT"
 
     lldb --batch -o "breakpoint set --file demo.mn --line $L_SQUARE" -o run -o "thread backtrace" -o "thread step-over" "$exe" > target/demo/lldb.txt 2>&1 || true
     cat target/demo/lldb.txt
@@ -44,6 +46,7 @@ case "$(uname -s)" in
     expect target/demo/lldb.txt "lldb unwinds into sum_squares at the call" "frame #1: .*sum_squares at demo\.mn:$L_CALL"
     expect target/demo/lldb.txt "lldb unwinds into mente_main at the call" "frame #2: .*mente_main at demo\.mn:$L_MAIN"
     expect target/demo/lldb.txt "lldb unwinds through every Cranelift frame into the host" "frame #3: .*host::main"
+    expect target/demo/lldb.txt "lldb steps out of square to the caller at the call" "frame #0: .*sum_squares at demo\.mn:$L_CALL"
     ;;
   MINGW* | MSYS* | CYGWIN*)
     cdb=""
@@ -51,7 +54,7 @@ case "$(uname -s)" in
       [ -x "$c" ] && cdb="$c" && break
     done
     [ -n "$cdb" ] || { echo "cdb.exe not found; the runner's Windows Kits hold:"; ls "/c/Program Files (x86)/Windows Kits/10" || true; exit 1; }
-    "$cdb" -lines -c "bp \`demo.mn:$L_SQUARE\`; g; k; p; .lines; q" "$exe" > target/demo/cdb.txt 2>&1 || true
+    "$cdb" -lines -c "bp \`demo.mn:$L_SQUARE\`; g; k; q" "$exe" > target/demo/cdb.txt 2>&1 || true
     cat target/demo/cdb.txt
     expect target/demo/cdb.txt "cdb stops in square at demo.mn:$L_SQUARE" "demo!square.*demo\.mn @ $L_SQUARE"
     expect target/demo/cdb.txt "cdb unwinds into sum_squares at the call" "demo!sum_squares.*demo\.mn @ $L_CALL"
