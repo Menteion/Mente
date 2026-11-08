@@ -95,6 +95,33 @@ jobs:
           name: coverage-lcov
           path: lcov.info
 
+  bench:
+    # The projection protocol of ROADMAP.md, in release, on the base branch and then on this
+    # change, on one runner: shared runners differ by up to a factor of two from run to run, so
+    # only a comparison on one machine means anything. A median more than PROJECTION_TOLERANCE
+    # above the base's fails the job. Not a required check.
+    name: Projection benchmark
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Measure the base branch
+        run: |
+          # A pull request compares with its base; a push to main, with the commit before it.
+          if [ -n "$GITHUB_BASE_REF" ]; then base="origin/$GITHUB_BASE_REF"; else base="HEAD~1"; fi
+          git worktree add ../base "$base"
+          (cd ../base && cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol) \
+            | sed -n -E 's/^([^ :]+): median ([0-9.]+) .*/\1 \2/p' > "$RUNNER_TEMP/base-medians.txt"
+          cat "$RUNNER_TEMP/base-medians.txt"
+      - name: Measure this change against it
+        run: |
+          export MENTE_BENCH_BASELINE="$RUNNER_TEMP/base-medians.txt" MENTE_BENCH_ENFORCE=1
+          cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol
+
   docs:
     name: Documentation
     runs-on: ubuntu-24.04

@@ -1,0 +1,3 @@
+// expect: pass
+module conformance
+pub fn head(data: []u8, n: usize) -> []u8 from data

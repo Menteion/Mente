@@ -57,7 +57,7 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 - [x] The `mente-codegen` placeholders removed, with the sentences and directives that name them ([`codegen-placeholders`](docs/design-review.md#codegen-placeholders); commit "Remove the mente-codegen placeholders").
 - [x] Every `done` entry of [docs/design-review.md](docs/design-review.md) links the documents it changed and names its commit (commit "Link every done register row to what it changed").
 - [x] Diagnostics in the structured form of [`diagnostics-as-api`](docs/design-review.md#diagnostics-as-api), and the error-code catalogue of today's codes ([spec/diagnostics.md](spec/diagnostics.md); commit "Report every error as a structured diagnostic, with a catalogue").
-- [ ] The quality-system instruments active from M0: the conformance runner over today's declaration checks, `cargo-mutants` on the compiler, the projection benchmark with a regression tolerance, and a check that compiling twice gives identical output.
+- [x] The quality-system instruments active from M0: the conformance runner over today's declaration checks, `cargo-mutants` on the compiler, the projection benchmark with a regression tolerance, and a check that compiling twice gives identical output ([conformance/README.md](conformance/README.md); commit "Add the conformance suite, reproducible-output checks and the projection benchmark").
 - [x] Rust hygiene: `rustfmt`, `clippy` with warnings as errors, no `unsafe` outside the runtime and FFI code, a dependency policy, coverage reported, and lints that keep the compiler inside a subset of Rust that translates to Mente (commit "Check format, lints, dependencies and coverage in CI").
 
 ### M0b: design closure for M1
@@ -185,8 +185,9 @@ A `Target` in `spec/*.md` is a number with a protocol here. A figure without a p
   ```powershell
   cargo test --release -p mente-cli -- --ignored --nocapture view_projection_protocol
   ```
+- **Regression tolerance**: the CI job "Projection benchmark" builds the base branch and the change on one GitHub x86-64 `ubuntu-24.04` runner, measures both, and fails when a median of the change exceeds the base's by more than 30%. A fixed baseline does not work on shared runners: two runs of the same code on 2026-11-08 differed by a factor of 1.8.
 - **Machine**: record the CPU, OS and power mode with each result.
-- **Last result** (2026-11-05, AMD Ryzen 7 7735HS, Windows 11): median 45–92 µs, 99th percentile 110–208 µs. The median meets the target; nothing is promised for the 99th percentile.
+- **Last result** (2026-11-08, GitHub x86-64 `ubuntu-24.04` runners, the CI job): median 22.5–36.5 µs and 99th percentile 35.7–48.1 µs in one run; median 40.2–67.8 µs in the next, on another runner, for the same code. The median meets the target either way; nothing is promised for the 99th percentile. On 2026-11-05 an AMD Ryzen 7 7735HS under Windows 11 measured a median of 45–92 µs.
 
 ### Tier-1 re-check after an edit: 99th percentile under 5 ms
 

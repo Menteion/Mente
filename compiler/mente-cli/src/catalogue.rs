@@ -546,4 +546,20 @@ mod tests {
             reserved
         );
     }
+    #[test]
+    fn test_every_reported_code_has_a_conformance_program_under_its_spec() {
+        for e in CATALOGUE.iter().filter(|e| e.status == CodeStatus::Emitted) {
+            let stem = e.spec.trim_start_matches("spec/").trim_end_matches(".md");
+            let dir = root().join("conformance").join(stem);
+            let expects_it = fs::read_dir(&dir).into_iter().flatten().flatten().any(|f| {
+                fs::read_to_string(f.path())
+                    .is_ok_and(|src| src.lines().next() == Some(&format!("// expect: {}", e.code)))
+            });
+            assert!(
+                expects_it,
+                "no program under conformance/{} expects {}",
+                stem, e.code
+            );
+        }
+    }
 }

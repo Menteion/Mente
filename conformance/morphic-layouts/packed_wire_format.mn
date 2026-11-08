@@ -1,0 +1,9 @@
+// expect: pass
+module conformance
+@packed
+@layout(size: 7, align: 1)
+pub struct Frame {
+  @bytes(0..1) pub kind: u8
+  @bytes(1..5) pub length: u32
+  @bytes(5..7) pub crc: u16
+}

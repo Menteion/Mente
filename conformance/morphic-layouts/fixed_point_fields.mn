@@ -1,0 +1,9 @@
+// expect: pass
+module conformance
+@layout(size: 8, align: 4)
+pub struct S {
+  @bytes(0..4) pub level: q16.16
+  @bytes(4..6) pub gain: q1.15
+  @bytes(6..7) pub weight: q0.8
+  @bytes(7..8) pub pad: u8
+}

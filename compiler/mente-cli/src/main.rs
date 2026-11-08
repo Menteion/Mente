@@ -707,13 +707,44 @@ mod tests {
         );
     }
 
-    /// The `mn view --spec` latency protocol in ROADMAP.md. Run it with
+    /// How far a median may rise above the base branch's, measured on the same runner in the same
+    /// job, before the benchmark fails. Shared runners differ by up to a factor of two from one
+    /// run to the next, so only a comparison on one machine means anything.
+    const PROJECTION_TOLERANCE: f64 = 1.3;
+
+    /// Per-module medians, as `<module> <µs>` lines: the base branch's, which CI measures first.
+    fn projection_baselines(text: &str) -> Vec<(String, f64)> {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter_map(|l| {
+                let mut parts = l.split_whitespace();
+                let name = parts.next()?.to_string();
+                let micros = parts.next()?.parse().ok()?;
+                Some((name, micros))
+            })
+            .collect()
+    }
+
+    /// The `mn view --spec` latency protocol in ROADMAP.md. CI measures the base branch and then
+    /// this change on one runner; with `MENTE_BENCH_BASELINE` naming the base's medians and
+    /// `MENTE_BENCH_ENFORCE=1`, a median above the base's by more than `PROJECTION_TOLERANCE`
+    /// fails it:
     /// `cargo test --release -p mente-cli -- --ignored --nocapture view_projection_protocol`.
     #[test]
     #[ignore = "benchmark; run on demand"]
     fn view_projection_protocol() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-        for file in collect_mn_files(&root) {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let baselines = projection_baselines(
+            &env::var_os("MENTE_BENCH_BASELINE")
+                .and_then(|path| fs::read_to_string(path).ok())
+                .unwrap_or_default(),
+        );
+        let enforce = env::var_os("MENTE_BENCH_ENFORCE").is_some();
+        let mut table = String::from("| Module | Median (µs) | 99th percentile (µs) | Base branch (µs) |\n| :--- | ---: | ---: | ---: |\n");
+        let mut regressions = Vec::new();
+        for file in collect_mn_files(&manifest.join("../../examples")) {
+            let name = file.file_name().unwrap().to_string_lossy().into_owned();
             let src = fs::read_to_string(&file).unwrap();
             let run = || {
                 let t0 = Instant::now();
@@ -726,13 +757,52 @@ mod tests {
             }
             let mut samples: Vec<u128> = (0..1000).map(|_| run()).collect();
             samples.sort_unstable();
-            println!(
-                "{}: median {:.1} µs, p99 {:.1} µs",
-                file.file_name().unwrap().to_string_lossy(),
-                samples[500] as f64 / 1000.0,
-                samples[990] as f64 / 1000.0
-            );
+            let median = samples[500] as f64 / 1000.0;
+            let p99 = samples[990] as f64 / 1000.0;
+            let baseline = baselines.iter().find(|(n, _)| *n == name).map(|(_, b)| *b);
+            println!("{}: median {:.1} µs, p99 {:.1} µs", name, median, p99);
+            table.push_str(&format!(
+                "| {} | {:.1} | {:.1} | {} |\n",
+                name,
+                median,
+                p99,
+                baseline.map_or_else(|| String::from("not measured"), |b| format!("{:.1}", b))
+            ));
+            if let Some(b) = baseline {
+                if median > b * PROJECTION_TOLERANCE {
+                    regressions.push(format!(
+                        "{}: median {:.1} µs, above {:.1} µs (the base branch's {:.1} µs × {})",
+                        name,
+                        median,
+                        b * PROJECTION_TOLERANCE,
+                        b,
+                        PROJECTION_TOLERANCE
+                    ));
+                }
+            }
         }
+        if let Some(summary) = env::var_os("GITHUB_STEP_SUMMARY") {
+            let mut text = fs::read_to_string(&summary).unwrap_or_default();
+            text.push_str(&format!("## Projection benchmark\n\n{}\n", table));
+            fs::write(&summary, text).unwrap();
+        }
+        assert!(
+            !enforce || regressions.is_empty(),
+            "projection regressed:\n{}",
+            regressions.join("\n")
+        );
+    }
+
+    #[test]
+    fn test_projection_baselines_are_read_line_by_line() {
+        let text = "# measured on the base branch\n\n01_a.mn 41.5\n02_b.mn  62\nbroken line\n03_c.mn notanumber\n";
+        assert_eq!(
+            projection_baselines(text),
+            vec![
+                (String::from("01_a.mn"), 41.5),
+                (String::from("02_b.mn"), 62.0)
+            ]
+        );
     }
 
     #[test]

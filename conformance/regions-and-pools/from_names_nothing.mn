@@ -1,0 +1,3 @@
+// expect: E0104
+module conformance
+pub fn first(data: []u8) -> []u8 from

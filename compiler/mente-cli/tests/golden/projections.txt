@@ -1,0 +1,147 @@
+== examples/01_refinement_and_units.mn ==
+// [Mente Holographic Spec Projection] module examples.refinement_and_units
+// spec_hash: b711b3bd6e364f6421fcd7ed6c4fa40a
+// body_hash: 1399ce34caea84f8481eb286dde0b531
+// instance_hash: 86b7d2b0c17d6a6b188aa99b596e066e
+
+module examples.refinement_and_units
+
+unit sec, ms = 0.001 * sec
+unit meter, kg
+unit newton = kg * meter / (sec * sec)
+unit joule  = newton * meter
+/// Kinetic energy: the compiler checks that the input units multiply out to exactly <joule>.
+@branchless
+pub fn kinetic_energy(mass: f64[0.0..=1e12]<kg>, vel: f64<meter / sec>) -> f64<joule>
+  ensures  result >= 0.0_joule
+= ...
+
+pub struct RingWindow<T, comptime CAP: usize = 64> {
+  pub buf: [CAP]T
+  pub head: usize[0..CAP] = 0
+  pub len: usize[0..=CAP] = 0
+
+  invariant {
+    CAP > 0
+    head < CAP
+    len <= CAP
+  }
+}
+
+/// Constructive termination (@total + decreases): the compiler proves the loop ends and that
+/// every index stays in bounds.
+@total
+pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
+  requires items.len > 0
+= ...
+
+
+== examples/02_mechanical_sympathy_simd.mn ==
+// [Mente Holographic Spec Projection] module examples.mechanical_sympathy_simd
+// spec_hash: 637612826c6eb0627bebef27bf0f33c7
+// body_hash: 9197b9854cd0c46b1b9141b34ce519fd
+// instance_hash: 86b7d2b0c17d6a6b188aa99b596e066e
+
+module examples.mechanical_sympathy_simd
+
+pub bitstruct SpikeHeader : u32 {
+  @bits(0..4) pub region_id: u4
+  @bits(4..7) pub priority: u3
+  @bits(7..8) pub inhibitory: bool
+  @bits(8..32) pub target_idx: u24
+}
+
+@layout(size: 64, align: 64)
+pub struct DeterministicCell {
+  @bytes(0..8) pub id: u64
+  @bytes(8..12) pub potential: sat<q16.16>
+  @bytes(12..16) pub threshold: q16.16
+  @bytes(16..20) pub resting: q16.16
+  @bytes(20..24) pub last_header: SpikeHeader
+  @bytes(24..64) pub dendrite_w: [20]q1.15
+}
+
+@branchless
+@no_alloc
+pub fn integrate_cell(mut cell: DeterministicCell, drive: q16.16, leak_shift: u32[1..=8]) -> bool
+= ...
+
+pub struct Particle {
+  pub x: f32
+  pub y: f32
+  pub z: f32
+  pub vx: f32
+  pub vy: f32
+  pub vz: f32
+  pub mass: f32
+}
+
+/// Data parallelism plus SIMD: each worker takes whole 16-element tiles, and one f32 field of a
+/// tile is exactly one 64-byte cache line. Through Cranelift that is four 128-bit vector
+/// registers; a backend with AVX-512 would use one ZMM register.
+@no_alloc
+pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0])
+= ...
+
+
+== examples/03_colorless_concurrency_and_effects.mn ==
+// [Mente Holographic Spec Projection] module examples.colorless_concurrency_and_effects
+// spec_hash: 6dea73e55a7b3317ac30716f9429dc13
+// body_hash: aa7bdf7c75513580d4313be724e58891
+// instance_hash: 86b7d2b0c17d6a6b188aa99b596e066e
+
+module examples.colorless_concurrency_and_effects
+
+pub enum GatewayError { InvalidToken, Timeout, UpstreamFailure(code: u16) }
+
+pub struct OrderSummary {
+  pub user_name: str
+  pub items_slice: []str
+  pub timestamp_ms: u64
+}
+
+pub fn verify_token(token: str) -> str ! GatewayError
+= ...
+
+pub fn fetch_user_name(uid: str, in arena: Arena) -> str ! GatewayError from arena with Net
+
+pub fn fetch_recent_items(uid: str, in arena: Arena) -> []str ! GatewayError from arena with Net
+
+/// No async / await function coloring.
+/// Driven by T ! GatewayError and by the Net and Clock capability effects.
+pub fn handle_checkout_request(raw_token: str) -> u64 ! GatewayError with Net, Clock
+= ...
+
+
+== examples/04_comptime_and_graph_pool.mn ==
+// [Mente Holographic Spec Projection] module examples.comptime_and_graph_pool
+// spec_hash: 50ef53fc24b451679380fe1b52a59dd5
+// body_hash: a8e000949d2efdd01a22f7a5cacd2939
+// instance_hash: e37ccb9a3d38f0b6ab2ebb27b028f296
+
+module examples.comptime_and_graph_pool
+
+pub struct SceneNode {
+  pub name: String
+  pub parent: ?Handle<SceneNode> = none
+  pub children: List<Handle<SceneNode>> = []
+}
+
+pub fn link_parent_child(mut pool: Pool<SceneNode>, parent_h: Handle<SceneNode>, child_h: Handle<SceneNode>)
+= ...
+
+pub trait ByteSink {
+  fn write_u64(mut self, v: u64)
+  fn write_str(mut self, s: str)
+}
+
+pub fn encode_record<T>(mut sink: ByteSink, record: T)
+= ...
+
+pub struct TelemetryEvent {
+  pub trace_id: u64
+  pub service: str
+  pub latency: u64
+}
+
+

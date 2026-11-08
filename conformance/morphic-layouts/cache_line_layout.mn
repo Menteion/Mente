@@ -1,0 +1,8 @@
+// expect: pass
+module conformance
+@layout(size: 64, align: 64)
+pub struct Cell {
+  @bytes(0..8) pub id: u64
+  @bytes(8..16) pub stamp: u64
+  @bytes(16..64) pub payload: [48]u8
+}

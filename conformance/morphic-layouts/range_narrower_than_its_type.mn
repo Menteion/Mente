@@ -1,0 +1,7 @@
+// expect: E0415
+module conformance
+@layout(size: 8, align: 4)
+pub struct S {
+  @bytes(0..4) pub a: u32
+  @bytes(4..6) pub b: u32
+}

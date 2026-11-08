@@ -1,0 +1,6 @@
+// expect: E0402
+module conformance
+@branchless
+pub fn pick(x: i32) -> i32 ! RangeError {
+  raise RangeError.TooBig
+}

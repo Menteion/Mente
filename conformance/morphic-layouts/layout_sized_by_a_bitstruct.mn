@@ -1,0 +1,10 @@
+// expect: pass
+module conformance
+pub bitstruct Tag : u16 {
+  @bits(0..16) pub raw: u16
+}
+@layout(size: 8, align: 8)
+pub struct Packet {
+  @bytes(0..2) pub tag: Tag
+  @bytes(2..8) pub rest: [6]u8
+}

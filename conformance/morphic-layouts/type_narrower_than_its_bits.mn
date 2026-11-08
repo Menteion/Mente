@@ -1,0 +1,6 @@
+// expect: E0424
+module conformance
+pub bitstruct B : u8 {
+  @bits(0..3) pub mode: u2
+  @bits(3..8) pub rest: u5
+}

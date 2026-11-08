@@ -1,0 +1,3 @@
+// expect: E0102
+module conformance
+@example("one") 1
