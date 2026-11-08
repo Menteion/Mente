@@ -263,13 +263,12 @@ fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usiz
         }
     }
     match t {
-        "u8" | "i8" | "bool" | "q0.8" => Some(1),
-        "u16" | "i16" | "f16" | "bf16" | "q1.15" => Some(2),
-        "u32" | "i32" | "f32" | "q16.16" => Some(4),
-        "u64" | "i64" | "f64" => Some(8),
-        "u128" | "i128" => Some(16),
-        // A `uN` / `iN` whose width is whole bytes occupies exactly those bytes (`u24` is 3);
-        // any other width only fits a bitstruct.
+        "bool" | "q0.8" => Some(1),
+        "f16" | "bf16" | "q1.15" => Some(2),
+        "f32" | "q16.16" => Some(4),
+        "f64" => Some(8),
+        // A `uN` / `iN` whose width is whole bytes occupies exactly those bytes (`u8` is 1,
+        // `u24` is 3); any other width only fits a bitstruct.
         _ => match int_bits(t) {
             Some(bits) if bits % 8 == 0 => Some(bits / 8),
             Some(_) => None,
