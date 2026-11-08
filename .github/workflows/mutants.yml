@@ -49,13 +49,17 @@ jobs:
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           status=0
           cargo mutants --in-diff pr.diff --in-place --no-shuffle || status=$?
-          # Exit 3 means some mutants timed out: each made a loop never end, which any test run
-          # would notice, so a timeout counts as caught. Exit 2, a mutant no test caught, still fails.
-          if [ "$status" -eq 3 ]; then
-            echo "Some mutants timed out; they count as caught." >> "$GITHUB_STEP_SUMMARY"
-            status=0
+          # The outcome files decide, not the exit code: cargo-mutants exits 3 whenever a mutant
+          # timed out, even when others were missed. A timeout made a loop never end, which any
+          # test run would notice, so it counts as caught; a missed mutant fails the job.
+          case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
+          if [ -s mutants.out/timeout.txt ]; then
+            echo "Timed out, counted as caught: $(wc -l < mutants.out/timeout.txt)" >> "$GITHUB_STEP_SUMMARY"
           fi
-          exit "$status"
+          if [ -s mutants.out/missed.txt ]; then
+            { echo "## Missed mutants"; echo "```text"; cat mutants.out/missed.txt; echo "```"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -87,13 +91,17 @@ jobs:
         run: |
           status=0
           cargo mutants --shard ${{ matrix.shard }}/4 --in-place --no-shuffle || status=$?
-          # Exit 3 means some mutants timed out: each made a loop never end, which any test run
-          # would notice, so a timeout counts as caught. Exit 2, a mutant no test caught, still fails.
-          if [ "$status" -eq 3 ]; then
-            echo "Some mutants timed out; they count as caught." >> "$GITHUB_STEP_SUMMARY"
-            status=0
+          # The outcome files decide, not the exit code: cargo-mutants exits 3 whenever a mutant
+          # timed out, even when others were missed. A timeout made a loop never end, which any
+          # test run would notice, so it counts as caught; a missed mutant fails the job.
+          case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
+          if [ -s mutants.out/timeout.txt ]; then
+            echo "Timed out, counted as caught: $(wc -l < mutants.out/timeout.txt)" >> "$GITHUB_STEP_SUMMARY"
           fi
-          exit "$status"
+          if [ -s mutants.out/missed.txt ]; then
+            { echo "## Missed mutants"; echo "```text"; cat mutants.out/missed.txt; echo "```"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

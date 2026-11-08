@@ -1291,6 +1291,36 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 mod tests {
     use super::*;
 
+    fn doc_comments(src: &str) -> Vec<String> {
+        tokenize(src)
+            .into_iter()
+            .filter_map(|t| match t.kind {
+                TokenKind::DocComment(d) => Some(d),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_doc_comments_are_exactly_three_slashes() {
+        // `///` opens a doc comment; `//` and `////` open plain comments, which leave no token.
+        let src = "module m\n/// the doc\n// plain\n//// banner\nfn f() = 0\n///";
+        assert_eq!(doc_comments(src), vec!["the doc", ""]);
+        // A comment that ends the file, with or without a third slash, does not read past it.
+        assert_eq!(doc_comments("x //"), Vec::<String>::new());
+        assert_eq!(doc_comments("x ///"), vec![""]);
+        assert_eq!(doc_comments("x ////"), Vec::<String>::new());
+        // The code before a comment stays code.
+        let kinds: Vec<_> = tokenize("val a = 1 // note\n")
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert!(
+            kinds.contains(&TokenKind::Val)
+                && !kinds.iter().any(|k| matches!(k, TokenKind::DocComment(_)))
+        );
+    }
+
     #[test]
     fn test_lexer_and_parser_on_basic_mn() {
         let code = r#"
