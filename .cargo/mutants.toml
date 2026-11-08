@@ -5,5 +5,3 @@
 # against the whole workspace's tests.
 test_workspace = true
 
-# mente-codegen holds two placeholders that M0a removes (docs/design-review.md, codegen-placeholders).
-exclude_globs = ["compiler/mente-codegen/**"]

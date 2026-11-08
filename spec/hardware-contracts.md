@@ -30,7 +30,7 @@ date: 2026-11-04
 2. `Hypothesis` **Heterogeneous compute (`@kernel`)**:
    - The hypothesis: functions annotated with `@kernel` can be written in standard `.mn` syntax, with refinement intervals (`u32[0..N]`), fixed-point types (`q16.16`) and dimensional units (`unit`), and lowered from `MIR` to both CPU SIMD loops (AVX-512 / NEON) and GPU/NPU SPIR-V 1.6 compute modules without external CUDA C++, HLSL, or WGSL string shaders.
    - It stays a hypothesis until an execution model is written: the index space a kernel runs over and how it is launched, the memory spaces it may touch (global, workgroup, private), barriers, and how a kernel relates to `parallel_for` and `@simd`. No example uses `@kernel` until then.
-   - Today `mn check` only counts `@kernel` functions. `emit_spirv_binary` in `mente-codegen` writes a SPIR-V-shaped word stream that is not a valid module.
+   - Today `mn check` only counts `@kernel` functions, and nothing emits SPIR-V.
 
 ## 2. Decision rationale and rejected alternatives
 
@@ -44,7 +44,6 @@ date: 2026-11-04
 ## 3. Verification assertions
 
 <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="pub fn verify_branchless" min="1" reason="MIR rejects a @branchless region that contains a BranchCondJump node" -->
-<!-- @assert-count target="compiler/mente-codegen/src/lib.rs" symbol="pub fn emit_spirv_binary" min="1" reason="Codegen has a placeholder SPIR-V word writer; it is not a valid module" -->
 <!-- @assert-count target="examples/02_mechanical_sympathy_simd.mn" symbol="@branchless" min="1" reason="Example 02 enforces @branchless contract on integrate_cell" -->
 <!-- @assert-count target="examples/02_mechanical_sympathy_simd.mn" symbol="parallel_for p in mut batch @simd(lanes: 16)" min="1" reason="Example 02 vectorizes a parallel_for over a Tiled container with @simd(lanes: N) on the loop" -->
 <!-- @assert-absence target="examples" symbol="@simd(width" glob="*.mn" reason="The vector width is written @simd(lanes: N), on a loop" -->
