@@ -11,35 +11,41 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Zero `<'a>` lifetime annotations (`Specified`)**:
+1. `Specified` **Zero `<'a>` lifetime annotations**:
    - Mente forbids tick-mark lifetime parameters (`<'a>`, `&'a T`) on structs, traits, and functions. Nothing rejects them yet: `mn check` accepts `pub struct S<'a>`, because the lexer skips `'` and keeps generics as a raw string.
-   - **Return provenance is read from the signature, never inferred from the body (`Specified`)**. When a function returns a view (`[]T`, `str`, or a value holding one), the parameters it may borrow from are:
+   - `Specified` **Return provenance is read from the signature, never inferred from the body**. When a function returns a view (`[]T`, `str`, or a value holding one), the parameters it may borrow from are:
      - by default, every read-only, `mut` or `in` parameter that is or holds a view or an arena. This is safe without annotation: the caller keeps all of them alive for as long as it keeps the result;
      - with a `from p, q` clause after the return type, only the named parameters: `fn subslice(data: []u8, key: []u8, start: usize) -> []u8 from data`. The clause comes after any `! E` and before `with`.
    - A body that returns a view borrowed from somewhere the signature does not allow is an error (`E0310`, with the two-path fix below). Because provenance is part of the signature, it is part of `spec_hash` (`holographic-module.md`), and a body edit cannot change it.
-   - `Implemented`: `parse_fn` records the `from` list (`FnDecl.provenance`), `spec_hash` covers it, `mn view --spec` prints it, and `verify_function_contracts` rejects a `from` that names no parameter or an `own` parameter (`E0311`; a view cannot borrow from a value the callee consumes). Checking the body against the clause needs a body parser and is `Specified`.
-2. **Views and owned values (`Specified`)**:
+   - `Implemented`: `parse_fn` records the `from` list (`FnDecl.provenance`), `spec_hash` covers it, `mn view --spec` prints it, and `verify_function_contracts` rejects a `from` that names no parameter or an `own` parameter (`E0311`; a view cannot borrow from a value the callee consumes).
+     <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_from_clause_names_return_provenance" min="1" reason="parse_fn records the from list" -->
+     <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_from_clause_is_part_of_spec_hash" min="1" reason="spec_hash covers the from list" -->
+     <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_projection_keeps_signatures_and_drops_bodies" min="1" reason="The projection prints the from list" -->
+     <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_from_clause_must_name_a_kept_parameter" min="1" reason="A from clause must name a parameter the caller keeps, never an own one" -->
+   - `Specified`: checking a body against its `from` clause, which needs a body parser.
+2. `Specified` **Views and owned values**:
    - `str` is a view of UTF-8 text and `[]T` a view of a contiguous run of `T`; both borrow, and follow the provenance rules of item 1. `String` and `List<T>` own their storage, and can be stored, returned and moved with no provenance.
    - A string literal is a `str` view of static storage, valid for the whole program, so a value holding only literals carries no provenance constraint.
    - A struct with a view field holds a view: it follows the same rules, and storing it where it would outlive its source is `E0310` (item 6). A field of type `String` or `List<T>` avoids the question.
    - A `str` becomes a `String` only explicitly (`String.from(s)`), because that allocates and copies.
-3. **Lexical scoped arenas (`Arena.scoped`, `Specified`)**:
+3. `Specified` **Lexical scoped arenas (`Arena.scoped`)**:
    - Temporary phase allocations use `Arena.scoped(capacity) { arena => ... }`, with `capacity` optional. This is the only form that opens an arena.
    - Values allocated within `arena` cannot escape the lexical block via return values or outer `mut` bindings, and the entire region is reclaimed in `O(1)` upon scope exit.
    - **Passing an arena**: a function receives one as `in arena: Arena` and is called as `f(in arena)`, the same two-site marking as `mut` and `own` (`mutable-value-semantics.md`). `in` grants allocation only: the callee may allocate into the arena and return values whose provenance is the arena (`from arena`), but cannot reset or free it. For the Law of Exclusivity an `in` argument is a read, so several calls and several tasks may hold the same arena at once.
    - **Concurrent allocation**: when the branches of `parallel (...)` or the iterations of a `parallel_for` allocate in one arena, each task takes its own chunk from the arena and bumps within it, so the fast path has no atomic instruction and no task waits on another to allocate. Chunks are released with the arena.
    - **No destructors in an arena**: a type with a destructor (one that owns a resource or heap storage, such as a file, `String` or `List<T>`) cannot be allocated in an arena (`E0312`), so the `O(1)` reset never skips cleanup. Arena data is plain values and views into the arena itself (`str`, `[]T`).
-4. **Generational `Pool<T>` and 64-bit `Handle<T>` (`Specified`; `examples/04_comptime_and_graph_pool.mn` uses them, and no standard library exists yet)**:
+4. `Specified` **Generational `Pool<T>` and 64-bit `Handle<T>`**:
    - Graph topologies, doubly-linked structures, ECS entities, and UI trees use `Pool<T>` indexed by `Handle<T>` (`u32` slot index + `u32` generation tag = `64` bits).
    - `Handle<T>` is `Copy`, serializable across disk/network/GPU buffers, and free of reference cycles.
    - `pool[h]` validates the 32-bit generation counter in `O(1)` and yields `?T`: the element while `h` is live, `none` once its slot has been freed or reused. `pool[mut h]` is the mutable projection, also `?T`, and writes through it follow copy-in/copy-out (`mutable-value-semantics.md`).
    - Reading a field therefore needs narrowing (`guard val node = pool[h] else ...`), and `pool[mut h]?.field = v` does nothing when `h` is stale. There is no `get_mut` and no panicking index.
-5. **Reference-counted sharing: `Local<T>` and `Shared<T>` (`Specified`)**:
+   - `examples/04_comptime_and_graph_pool.mn` uses them; no standard library exists yet.
+5. `Specified` **Reference-counted sharing: `Local<T>` and `Shared<T>`**:
    - `Local<T>` counts references without atomic instructions (`0` `LOCK XADD` bus-lock cost). It is **task-bound**: a value whose type contains a `Local<T>` cannot be sent over a channel, moved into another task, or named inside a branch of `parallel (...)` or the body of a `parallel_for` (`E0320`), because each of those may run on another thread.
    - `Shared<T>` counts atomically and may cross any task boundary; its `T` must not be task-bound.
    - No conversion leaves clones of the other kind behind: `Local.from(own value)` and `Shared.from(own value)` start from an owned value, and `local.take()` yields `?T`, the value only when no other clone of that `Local<T>` exists.
    - A clone is always explicit (`x.clone()`), so every count change is visible in the source.
-6. **Provenance escape two-path diagnostic contract (`Specified` — Engineering Guardrail #3)**:
+6. `Specified` **Provenance escape two-path diagnostic contract (Engineering Guardrail #3)**:
    - Because Mente forbids `<'a>` lifetime parameters in surface syntax, the programmer never solves lifetime constraints manually.
    - Whenever `mente-sema` detects that a borrowed slice or view would outlive its source binding or that two unrelated provenances are stored into the same long-lived struct field (`E0310 [Provenance Escape]`), the compiler MUST NOT expose internal region variable names (such as `'region#4`).
    - Instead, `E0310` MUST output a deterministic **two-path architectural fix**:
@@ -63,7 +69,6 @@ date: 2026-11-04
 <!-- @assert-count target="examples/04_comptime_and_graph_pool.mn" symbol="Pool<SceneNode>" min="1" reason="Example 04 models cyclic/hierarchical scene graphs via Pool<T>" -->
 <!-- @assert-count target="examples/04_comptime_and_graph_pool.mn" symbol="Handle<SceneNode>" min="2" reason="Example 04 uses 64-bit generational Handle<T> values" -->
 <!-- @assert-absence target="examples" symbol="Rc<RefCell" glob="*.mn" reason="Mente uses Pool<T>/Handle<T> rather than runtime-panicking Rc<RefCell<T>>" -->
-<!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_from_clause_must_name_a_kept_parameter" min="1" reason="A from clause must name a parameter the caller keeps, never an own one" -->
 <!-- @assert-count target="examples/04_comptime_and_graph_pool.mn" symbol="guard val root_node = scene[root]" min="1" reason="Pool indexing yields ?T, so example 04 narrows before reading a field" -->
 <!-- @assert-absence target="examples" symbol="get_mut" glob="*.mn" reason="The mutable pool projection is pool[mut h], not a get_mut method" -->
 <!-- @assert-count target="examples/03_colorless_concurrency_and_effects.mn" symbol="(uid, in arena)!" min="2" reason="An arena is passed with in at the call site, as mut and own are" -->

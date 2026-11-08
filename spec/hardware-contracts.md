@@ -11,7 +11,7 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Hard compile-time micro-architectural contracts (`Specified`)**:
+1. `Specified` **Hard compile-time micro-architectural contracts**:
    - Hardware execution attributes in Mente are **hard static proofs**, never best-effort hints:
      - **`@branchless`**: Forbids every conditional branch whose condition depends on data in the annotated function or block. Concretely:
        - All `if`/`match` expressions MUST lower to `CMOV` / `CSEL` or SIMD mask select instructions. Lowering to a select evaluates every arm, so each arm MUST be total and effect-free: no call that may trap, no `raise`, no `with` effect, no `mut` argument.
@@ -24,7 +24,10 @@ date: 2026-11-04
      - **`@max_stack(bytes)`**: Enforces a compile-time upper bound on call-graph stack consumption. The bound composes from signatures: a `@max_stack` function may call only functions that declare their own `@max_stack`, and its bound must cover its own frame plus the largest bound among its callees. Recursion and `dyn` calls are rejected inside a `@max_stack` call graph unless the trait method declares the bound.
    - **Contracts through `dyn`, traits and FFI**: a caller only ever sees a callee's signature (`holographic-module.md`), so `@branchless`, `@no_alloc`, `@max_stack` and `@total` reach across a call only when the callee declares them. A trait method that declares a contract requires every implementation to meet it, which is what lets a `dyn` call or a call through a trait-typed parameter satisfy the contract. An `extern` declaration may declare a contract on the foreign function's behalf; the compiler cannot check foreign code, so that declaration is trusted and sits in the FFI quarantine (`comptime-and-ffi.md`).
    - `Implemented` for `@branchless` only, and only as two partial checks: `verify_function_contracts` in `mente-sema` rejects a `@branchless` function whose body tokens contain `while` (`E0401`) or `raise` (`E0402`), and `MirRegionSoA::verify_branchless` in `mente-mir` rejects a region containing a `BranchCondJump` node (`E0401`). Neither sees an `if`, a `match` or a call, and no `.mn` body is lowered to MIR yet. `@simd`, `@no_alloc` and `@max_stack` are parsed as attributes and checked by nothing.
-2. **Heterogeneous compute (`@kernel`, `Hypothesis`)**:
+     <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_rejects_branchless_with_while_loop" min="1" reason="A @branchless body with while is rejected with E0401" -->
+     <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_rejects_branchless_with_raise" min="1" reason="A @branchless body with raise is rejected with E0402" -->
+     <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_branchless_region_rejects_conditional_jump" min="1" reason="A @branchless MIR region with a BranchCondJump node is rejected" -->
+2. `Hypothesis` **Heterogeneous compute (`@kernel`)**:
    - The hypothesis: functions annotated with `@kernel` can be written in standard `.mn` syntax, with refinement intervals (`u32[0..N]`), fixed-point types (`q16.16`) and dimensional units (`unit`), and lowered from `MIR` to both CPU SIMD loops (AVX-512 / NEON) and GPU/NPU SPIR-V 1.6 compute modules without external CUDA C++, HLSL, or WGSL string shaders.
    - It stays a hypothesis until an execution model is written: the index space a kernel runs over and how it is launched, the memory spaces it may touch (global, workgroup, private), barriers, and how a kernel relates to `parallel_for` and `@simd`. No example uses `@kernel` until then.
    - Today `mn check` only counts `@kernel` functions. `emit_spirv_binary` in `mente-codegen` writes a SPIR-V-shaped word stream that is not a valid module.

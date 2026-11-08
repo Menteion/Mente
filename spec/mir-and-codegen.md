@@ -11,18 +11,26 @@ date: 2026-11-04
 
 ## 1. Specification
 
-1. **Index-addressed structure-of-arrays region (`Implemented` in `MirRegionSoA`, `compiler/mente-mir/src/lib.rs`)**:
+1. `Implemented` **Index-addressed structure-of-arrays region** (`MirRegionSoA`, `compiler/mente-mir/src/lib.rs`):
+   <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_nodes_are_rows_addressed_by_index" min="1" reason="Each node is one row of the parallel arrays, addressed by its NodeId" -->
+   <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_interpreter_compares_and_selects" min="1" reason="The interpreter's comparisons, select and jump" -->
+   <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_branchless_integrate_cell_mir_and_mutation_prover" min="1" reason="The interpreter evaluates a region over its arrays" -->
    - Every `MIR` instruction node is addressed by a 32-bit index handle (`NodeId(pub u32)`, `4` bytes) rather than a 64-bit heap pointer (`8` bytes).
    - `MirRegionSoA` stores one straight-line region in parallel vectors: `opcodes: Vec<MirOp>`, `types: Vec<MirType>` (`I64`, `Q16_16`, `Bool`), `inputs: Vec<[NodeId; 3]>`, `lattices: Vec<ValueLattice>` (an `i128` interval and an alignment per node), `lines: Vec<u32>`, plus `is_branchless_guaranteed: bool` and `ret_node`.
    - `MirOp` today: `Param`, `Const`, `Add`, `Sub`, `AddSatQ16`, `SubSatQ16`, `Shr`, `CmpGe`, `CmpLt`, `CmpEq`, `SelectBranchless`, `BranchCondJump`. There are no loads, stores, calls, loops or nested regions.
-   - `#[repr(align(64))]` on `MirRegionSoA` aligns the struct header only; the node arrays are ordinary heap `Vec`s. Packing nodes into 64-byte cache-line buckets is `Specified`.
-2. **RVSDG canonicalization and Equality Saturation (`E-Graphs`, `Specified`)**:
+   - `#[repr(align(64))]` on `MirRegionSoA` aligns the struct header only; the node arrays are ordinary heap `Vec`s.
+   - `Specified`: packing nodes into 64-byte cache-line buckets.
+2. `Specified` **RVSDG canonicalization and Equality Saturation (`E-Graphs`)**:
    - A rewrite pass performs non-destructive algebraic rewrites directly over the `SoA` arrays (e.g., folding identity additions while preserving `ValueLattice` bounds), avoiding phase-ordering cliffs. Neither RVSDG structure nor an e-graph exists yet.
 3. **In-memory `MIR` mutation prover**:
-   - `Implemented` in `run_in_memory_mutation_gate`: flips `Add` ↔ `Sub`, `AddSatQ16` ↔ `SubSatQ16` and `CmpGe` ↔ `CmpLt`, swaps the arms of each `SelectBranchless`, and counts the mutants that the supplied `(inputs, expected)` vectors kill. `mn test --mutate` runs it on one hand-written region with two vectors.
+   - `Implemented`: `run_in_memory_mutation_gate` flips `Add` ↔ `Sub`, `AddSatQ16` ↔ `SubSatQ16` and `CmpGe` ↔ `CmpLt`, swaps the arms of each `SelectBranchless`, and counts the mutants that the supplied `(inputs, expected)` vectors kill. `mn test --mutate` runs it on one hand-written region with two vectors.
+     <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_mutation_gate_counts_survivors" min="1" reason="The gate counts each mutant and the ones the vectors kill" -->
+     <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_branchless_integrate_cell_mir_and_mutation_prover" min="1" reason="The demo region's four mutants are all killed" -->
+     <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_test_mutate_runs_the_demo_gate" min="1" reason="mn test --mutate runs the gate on the demo region" -->
+     <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_mutation_gate_flips_each_comparison" min="1" reason="CmpLt and CmpGe flip into each other" -->
    - `Specified`: running it on regions lowered from `.mn` source, with the module's `ensures` contracts and `@example` assertions as the oracle.
-   - **What passing means (`Specified`)**: some mutants cannot be killed by any test because they change nothing observable (an equivalent mutant: flipping `x + 0` to `x - 0`). So the gate does not demand that every mutant die. It passes when every mutant is either killed or marked equivalent with a written reason; `mn test --mutate` lists each survivor with its source line. A project may instead set a kill-rate threshold, and then the report still lists the survivors.
-4. **Code generation through Cranelift (`Specified` — Engineering Guardrail #2)**:
+   - `Specified` **What passing means**: some mutants cannot be killed by any test because they change nothing observable (an equivalent mutant: flipping `x + 0` to `x - 0`). So the gate does not demand that every mutant die. It passes when every mutant is either killed or marked equivalent with a written reason; `mn test --mutate` lists each survivor with its source line. A project may instead set a kill-rate threshold, and then the report still lists the survivors.
+4. `Specified` **Code generation through Cranelift (Engineering Guardrail #2)**:
    - Today `compiler/mente-codegen` has only `CarryFlagAbiLowering`, a table of the registers the error ABI would use, and `emit_spirv_binary`, a SPIR-V-shaped word stream that is not a valid module.
    - **High-level semantic optimization lives 100% in `MIR`**: Bounds-check elimination (`ValueLattice::proves_in_bounds`), Ghost Contract `Assume` propagation, `AoSoA` (`Tiled<T, lanes: N>`) address calculation, and `@branchless` `SelectBranchless` canonicalization are completed inside `MirRegionSoA` before any target backend runs.
    - **Native code**: `mente-codegen` lowers optimised MIR to Cranelift IR and lets Cranelift emit x86-64 and AArch64 machine code. Cranelift is written in Rust, so no C++ toolchain enters the build; `mente-mir` itself depends on nothing, and only `mente-codegen` depends on Cranelift.
@@ -30,7 +38,8 @@ date: 2026-11-04
    - **Vectors are 128 bits wide**: Cranelift's x64 and AArch64 backends handle vector values of at most 128 bits, so `mente-codegen` splits a wider lane group into 128-bit operations (`hardware-contracts.md`).
    - **No floating-point or vector `select` reaches Cranelift from `@branchless` code**, because on x64 Cranelift emits those as a jump around a move. `mente-codegen` lowers a vector select to `bitselect` over a comparison mask and a scalar float select to an integer `select` on the bit pattern; integer selects become `cmov` / `csel`. After emission, `mn` checks each `@branchless` function's machine code (`E0403`, `hardware-contracts.md`).
    - **Errors return as a two-register tagged value**: Cranelift has no flags type and no calling convention that returns a status in the carry flag, so `T ! E` is lowered to a tag and a payload in two return registers through Cranelift's multi-value returns. The Carry-Flag convention of `error-handling-abi.md` is tested later, on a custom emitter or a Cranelift fork.
-   - **A backend written in Mente (stage 3)**: the performance stage replaces Cranelift with a native backend written in Mente, for x86-64 and AArch64, as [`long-term-order`](../docs/design-review.md#long-term-order) decided. It becomes the default only when it gives the same results as Cranelift on the whole corpus and neither its generated code, its compile latency nor its debug and profiler information is worse; until then Cranelift is the only backend. Whether its code matches LLVM-compiled equivalents is a `Hypothesis`, measured program against program.
+   - **A backend written in Mente (stage 3)**: the performance stage replaces Cranelift with a native backend written in Mente, for x86-64 and AArch64, as [`long-term-order`](../docs/design-review.md#long-term-order) decided. It becomes the default only when it gives the same results as Cranelift on the whole corpus and neither its generated code, its compile latency nor its debug and profiler information is worse; until then Cranelift is the only backend.
+     - `Hypothesis`: its code matches LLVM-compiled equivalents, measured program against program.
    - **SPIR-V** waits for `@kernel`'s execution model (`hardware-contracts.md`).
 
 ## 2. Decision rationale and rejected alternatives

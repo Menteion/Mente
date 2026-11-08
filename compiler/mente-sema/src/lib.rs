@@ -589,4 +589,188 @@ pub fn bad_loop(x: i32) -> i32 {
         assert!(res.is_err());
         assert!(res.unwrap_err()[0].contains("E0401"));
     }
+
+    #[test]
+    fn test_rejects_branchless_with_raise() {
+        let code = r#"
+module test.jumps
+@branchless
+pub fn pick(x: i32) -> i32 ! RangeError {
+  raise RangeError.TooBig
+}
+"#;
+        let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0402"), "{:?}", errs);
+        // The same body is accepted without the contract: raise is ordinary control flow.
+        let plain = code.replace("@branchless\n", "");
+        assert!(verify_module(&parse_module(&plain).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn test_total_while_without_decreases_is_rejected() {
+        let code = r#"
+module test.total
+@total
+pub fn countdown(n: u32) -> u32 {
+  var i = n
+  while i > 0 {
+    i -= 1
+  }
+  i
+}
+"#;
+        let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0501") && errs[0].contains("countdown"), "{:?}", errs);
+
+        // A measure in the signature or in the body satisfies the token check.
+        let in_signature = code.replace("-> u32 {", "-> u32\n  decreases n\n{");
+        let rep = verify_module(&parse_module(&in_signature).unwrap()).unwrap();
+        assert_eq!(rep.total_functions_verified, 1);
+        let in_body = code.replace("while i > 0 {", "while i > 0 {\n    decreases i");
+        assert!(verify_module(&parse_module(&in_body).unwrap()).is_ok());
+
+        // Without @total, a loop needs no measure; without a loop, @total needs none either.
+        let plain = code.replace("@total\n", "");
+        assert!(verify_module(&parse_module(&plain).unwrap()).is_ok());
+        let no_loop = "module test.total\n@total\npub fn id(n: u32) -> u32 {\n  n\n}\n";
+        assert!(verify_module(&parse_module(no_loop).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn test_fixed_point_fields_have_their_byte_sizes() {
+        let code = r#"
+module test.fixed
+@layout(size: 8, align: 4)
+pub struct Sample {
+  @bytes(0..4) pub level: q16.16
+  @bytes(4..6) pub gain: q1.15
+  @bytes(6..7) pub weight: q0.8
+  @bytes(7..8) pub pad: u8
+}
+"#;
+        let rep = verify_module(&parse_module(code).unwrap()).unwrap();
+        assert_eq!(rep.layout_proofs[0].total_bytes, 8);
+
+        let wrong = code
+            .replace("@bytes(0..4) pub level: q16.16", "@bytes(0..2) pub level: q16.16")
+            .replace("@bytes(4..6) pub gain", "@bytes(2..6) pub gain");
+        let errs = verify_module(&parse_module(&wrong).unwrap()).unwrap_err();
+        assert!(errs[0].contains("E0415") && errs[0].contains("requires 4 bytes"), "{:?}", errs);
+    }
+
+    fn first_error(code: &str) -> String {
+        let errs = verify_module(&parse_module(code).unwrap()).unwrap_err();
+        errs[0].clone()
+    }
+
+    #[test]
+    fn test_layout_rejects_bad_geometry() {
+        let good = "module test.geo\n@layout(size: 8, align: 4)\npub struct Pair {\n  @bytes(0..4) pub a: u32\n  @bytes(4..8) pub b: u32\n}\n";
+        let rep = verify_module(&parse_module(good).unwrap()).unwrap();
+        assert_eq!((rep.layout_proofs[0].total_bytes, rep.layout_proofs[0].align_bytes), (8, 4));
+        assert!(rep.layout_proofs[0].markdown_table.contains("| `[4..8)` | `4 B` | `b` | `u32` |"));
+
+        let cases = [
+            (good.replace("align: 4", "align: 3"), "E0410"),
+            (good.replace("size: 8, align: 4", "size: 6, align: 4"), "E0411"),
+            (good.replace("@bytes(4..8) pub b", "pub b"), "E0412"),
+            (good.replace("@bytes(0..4) pub a: u32", "@bytes(0..0) pub a: u32").replace("@bytes(4..8)", "@bytes(0..4)"), "E0414"),
+            (good.replace("size: 8", "size: 12"), "E0416"),
+        ];
+        for (code, expected) in cases {
+            let err = first_error(&code);
+            assert!(err.contains(expected), "expected {}: {}", expected, err);
+        }
+    }
+
+    #[test]
+    fn test_report_counts_contract_functions() {
+        let code = r#"
+module test.counts
+@total
+pub fn a(n: u32) -> u32 = n
+pub fn b(n: u32) -> u32
+  decreases n
+= n
+@branchless
+pub fn c(n: u32) -> u32 = n
+@kernel
+pub fn d(n: u32) -> u32 = n
+@inline
+pub fn e(n: u32) -> u32 = n
+@example("one")
+{
+  a(1)
+}
+"#;
+        let rep = verify_module(&parse_module(code).unwrap()).unwrap();
+        assert_eq!(
+            (rep.total_functions_verified, rep.branchless_functions_verified, rep.kernel_functions_verified, rep.examples_count),
+            (2, 1, 1, 1)
+        );
+        assert_eq!(rep.module_path, "test.counts");
+    }
+
+    #[test]
+    fn test_layout_field_may_be_a_layout_struct() {
+        let code = r#"
+module test.nested
+@layout(size: 8, align: 8)
+pub struct Stamp {
+  @bytes(0..8) pub nanos: u64
+}
+@layout(size: 16, align: 8)
+pub struct Event {
+  @bytes(0..8) pub at: Stamp
+  @bytes(8..16) pub value: f64
+}
+"#;
+        let rep = verify_module(&parse_module(code).unwrap()).unwrap();
+        assert_eq!(rep.layout_proofs.len(), 2);
+        // Stamp's declared alignment applies where it is used.
+        let misplaced = code
+            .replace("@layout(size: 16, align: 8)\npub struct Event", "@packed\n@layout(size: 20, align: 4)\npub struct Event")
+            .replace("@bytes(0..8) pub at: Stamp\n  @bytes(8..16) pub value: f64", "@bytes(0..4) pub tag: u32\n  @bytes(4..12) pub at: Stamp\n  @bytes(12..20) pub value: f64");
+        assert!(verify_module(&parse_module(&misplaced).unwrap()).is_ok());
+        let unpacked = misplaced.replace("@packed\n", "");
+        assert!(first_error(&unpacked).contains("E0418"));
+    }
+
+    #[test]
+    fn test_field_sizes_and_alignments_follow_their_types() {
+        // u12 is not a whole number of bytes, so it belongs in a bitstruct.
+        let odd = "module test.sizes\n@layout(size: 2, align: 2)\npub struct Odd {\n  @bytes(0..2) pub v: u12\n}\n";
+        assert!(first_error(odd).contains("E0417"));
+        // An array is aligned like its element: [2]u32 cannot start at byte 2.
+        let arr = "module test.sizes\n@layout(size: 12, align: 4)\npub struct Arr {\n  @bytes(0..2) pub tag: u16\n  @bytes(2..10) pub vals: [2]u32\n  @bytes(10..12) pub crc: u16\n}\n";
+        let err = first_error(arr);
+        assert!(err.contains("E0418") && err.contains("vals"), "{}", err);
+        // Leading zeros do not spell a width.
+        let zero = "module test.sizes\npub bitstruct Z : u8 {\n  @bits(0..7) pub v: u07\n  @bits(7..8) pub f: bool\n}\n";
+        assert!(first_error(zero).contains("E0425"));
+        // Every backing width from u8 to u128 is accepted.
+        for (backing, bits) in [("u8", 8), ("u16", 16), ("u32", 32), ("u64", 64), ("u128", 128)] {
+            let code = format!("module test.sizes\npub bitstruct W : {} {{\n  @bits(0..{}) pub raw: u{}\n}}\n", backing, bits, bits);
+            let rep = verify_module(&parse_module(&code).unwrap()).unwrap();
+            assert_eq!(rep.bitstruct_proofs[0].total_bits, bits);
+        }
+    }
+
+    #[test]
+    fn test_bitstruct_rejects_gaps_and_shortfalls() {
+        let good = "module test.bits\npub bitstruct Flags : u8 {\n  @bits(0..4) pub lo: u4\n  @bits(4..8) pub hi: u4\n}\n";
+        let rep = verify_module(&parse_module(good).unwrap()).unwrap();
+        assert_eq!((rep.bitstruct_proofs[0].name.as_str(), rep.bitstruct_proofs[0].total_bits), ("Flags", 8));
+
+        let cases = [
+            (good.replace(": u8 {", ": u12 {"), "E0420"),
+            (good.replace("@bits(4..8) pub hi: u4", "@bits(5..8) pub hi: u3"), "E0421"),
+            (good.replace("@bits(0..4) pub lo: u4", "@bits(0..0) pub lo: u4").replace("@bits(4..8)", "@bits(0..4)"), "E0422"),
+            (good.replace("@bits(4..8) pub hi: u4", "@bits(4..7) pub hi: u3"), "E0423"),
+        ];
+        for (code, expected) in cases {
+            let err = first_error(&code);
+            assert!(err.contains(expected), "expected {}: {}", expected, err);
+        }
+    }
 }

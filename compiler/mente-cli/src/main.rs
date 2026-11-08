@@ -534,6 +534,22 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_mn_comments_keeps_code_strings_and_lines() {
+        let src = concat!(
+            "val a = 1 // note\n",
+            "val s = \"a\\\"//b\" // tail\n",
+            "/// doc\n",
+            "val c = 3\n",
+            "x \\// outside a string, a backslash escapes nothing\n",
+            "last // no newline",
+        );
+        assert_eq!(
+            strip_mn_comments(src),
+            concat!("val a = 1 \n", "val s = \"a\\\"//b\" \n", "\n", "val c = 3\n", "x \\\n", "last ")
+        );
+    }
+
+    #[test]
     fn test_spec_directives_that_cannot_fail_are_rejected() {
         let root = env::temp_dir().join(format!("mente-spec-vacuous-{}", process::id()));
         fs::create_dir_all(root.join("spec")).unwrap();
