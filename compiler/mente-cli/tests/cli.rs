@@ -1,6 +1,9 @@
 //! End-to-end tests of the `mn` commands that `spec/comptime-and-ffi.md` lists as implemented.
 //! Each runs the built binary, as a user would.
 
+// These helpers are test code: a failed setup step is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

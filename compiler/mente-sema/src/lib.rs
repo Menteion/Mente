@@ -158,7 +158,7 @@ pub fn verify_explicit_struct_layout(
             s.name, align
         ));
     }
-    if expected_size % align != 0 {
+    if !expected_size.is_multiple_of(align) {
         return Err(format!(
             "E0411 [Layout Error]: struct `{}` size {} is not a multiple of alignment {}",
             s.name, expected_size, align
@@ -167,9 +167,7 @@ pub fn verify_explicit_struct_layout(
 
     let packed = s.attrs.iter().any(|a| a.name == "packed");
     let mut cursor = 0usize;
-    let mut table = format!(
-        "| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n"
-    );
+    let mut table = String::from("| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n");
 
     for f in &s.fields {
         let (start, end) = f.byte_range.ok_or_else(|| {
@@ -412,8 +410,8 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), String> {
 
     // 1. If marked @total and contains a `while` loop, it MUST contain a `decreases` termination measure!
     if is_total {
-        let has_while = f.body_tokens.iter().any(|t| *t == TokenKind::While);
-        let has_decreases = !f.decreases.is_empty() || f.body_tokens.iter().any(|t| *t == TokenKind::Decreases);
+        let has_while = f.body_tokens.contains(&TokenKind::While);
+        let has_decreases = !f.decreases.is_empty() || f.body_tokens.contains(&TokenKind::Decreases);
         if has_while && !has_decreases {
             return Err(format!(
                 "E0501 [Totality Error]: Function `{}` (line {}) is marked `@total` and contains a `while` loop, but lacks a constructive `decreases <measure>` proof.",
@@ -424,13 +422,13 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), String> {
 
     // 2. If marked @branchless, it MUST NOT contain unbounded `while` loops or `raise` jumps!
     if is_branchless {
-        if f.body_tokens.iter().any(|t| *t == TokenKind::While) {
+        if f.body_tokens.contains(&TokenKind::While) {
             return Err(format!(
                 "E0401 [Hard Micro-Arch Error]: Function `{}` (line {}) is marked `@branchless`, but contains a `while` loop.",
                 f.name, f.line
             ));
         }
-        if f.body_tokens.iter().any(|t| *t == TokenKind::Raise) {
+        if f.body_tokens.contains(&TokenKind::Raise) {
             return Err(format!(
                 "E0402 [Hard Micro-Arch Error]: Function `{}` (line {}) is marked `@branchless`, but contains a `raise` control-flow jump.",
                 f.name, f.line

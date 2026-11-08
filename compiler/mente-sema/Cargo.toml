@@ -9,3 +9,6 @@ description = "Mente semantic analyzer: 64B Cache-Line & bitstruct layout prover
 mente-syntax = { path = "../mente-syntax" }
 mente-ast = { path = "../mente-ast" }
 mente-mir = { path = "../mente-mir" }
+
+[lints]
+workspace = true

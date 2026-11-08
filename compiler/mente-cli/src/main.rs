@@ -3,8 +3,8 @@
 //! Commands:
 //! - `mn view --spec <file.mn>` : Instant `<0.1ms` Holographic Spec Blueprint projection & dual hash report.
 //! - `mn check <path>`          : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification.
-//! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate.
-//!                                `@example` bodies are parsed as tokens but not executed.
+//! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate;
+//!   `@example` bodies are parsed as tokens but not executed.
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
 
 use std::env;
@@ -103,7 +103,14 @@ fn cmd_check(args: &[String]) {
     let t0 = Instant::now();
     let mut all_ok = true;
     for file in &files {
-        let src = fs::read_to_string(file).unwrap();
+        let src = match fs::read_to_string(file) {
+            Ok(src) => src,
+            Err(e) => {
+                eprintln!("[FAIL] [{}] cannot be read: {}", file.display(), e);
+                all_ok = false;
+                continue;
+            }
+        };
         let module = match parse_module(&src) {
             Ok(m) => m,
             Err(e) => {
@@ -177,7 +184,10 @@ fn cmd_test(args: &[String]) {
     let out_v = r.push_node(MirOp::SelectBranchless, MirType::Q16_16, [fired, resting, next_v], ValueLattice::bounded(0, 65536), 5);
     r.ret_node = Some(out_v);
 
-    r.verify_branchless().expect("@branchless verification failed");
+    if let Err(e) = r.verify_branchless() {
+        eprintln!("[FAIL] {}", e);
+        process::exit(1);
+    }
 
     let vectors: &[(&[i64], i64)] = &[
         (&[32768, 49152, 2, 65536, 0], 0),
@@ -244,7 +254,7 @@ pub fn verify_spec_directory(workspace_root: &Path) -> Result<(usize, usize), Ve
 
     for file in &spec_files {
         let content = fs::read_to_string(file).unwrap_or_default();
-        let fname = file.file_name().unwrap().to_string_lossy();
+        let fname = file.file_name().unwrap_or_default().to_string_lossy();
         let mut directives_in_file = 0usize;
 
         // 1. Check YAML front-matter

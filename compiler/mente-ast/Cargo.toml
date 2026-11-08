@@ -7,3 +7,6 @@ description = "Mente Canonical AST, dual semantic hashing (spec_hash / body_hash
 
 [dependencies]
 mente-syntax = { path = "../mente-syntax" }
+
+[lints]
+workspace = true
