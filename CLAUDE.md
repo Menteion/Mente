@@ -23,7 +23,7 @@ This file is the switchboard, not the rulebook.
    - Never write `&T`, `&mut T`, or `<'a>` lifetimes (use MVS parameter modes: default read-only, `mut`, `own`, `in`).
    - Never write `async` or `await` (use `with IO, Net` effects and `parallel (...)`).
    - Never write `.unwrap()` or `::<>` turbofish.
-   - Never link upstream C++ `LLVM/MLIR` into `compiler/mente-mir` (keep `MirRegionSoA` self-contained pure Rust, indexed by `NodeId(u32)`). `mente-mir` has no dependencies; native code goes through Cranelift, a pure-Rust crate that only `mente-codegen` may depend on.
+   - Never link upstream C++ `LLVM/MLIR` into `compiler/mente-mir` (keep `MirRegionSoA` self-contained pure Rust, indexed by `NodeId(u32)`). `mente-mir` has no dependencies; native code goes through Cranelift, a pure-Rust crate that only `mente-codegen` may depend on. Every other crate depends only on the workspace's own crates: a new external dependency needs Norman's approval, and `test_crates_depend_only_on_allowed_crates` holds the line.
 3. **English-only repository text**:
    - Code, comments, documentation, examples, commit messages and pull request text are written in English, even when the conversation with Norman is in Chinese.
    - `test_repository_text_is_english` in `compiler/mente-cli` fails on any CJK character in a file of the working tree (`.git`, `target` and `node_modules` aside). Commit messages and pull request text are outside its reach and follow this rule by hand. A future fixture that must hold non-English text (a lexer test of Unicode string literals, say) goes in a directory the test is changed to skip, named in the test.
@@ -56,6 +56,10 @@ cargo run --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
 
 # 5. Run the pinned @spec-family checks: directives, prove, claims, the spec graph and briefs (`npm ci` once first)
 npm run verify:docs
+
+# 6. Check the format and the lints (rustfmt, then clippy with warnings as errors)
+cargo fmt --all --check
+cargo clippy --all-targets --workspace -- -D warnings
 ```
 
 ---

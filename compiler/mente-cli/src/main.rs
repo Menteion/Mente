@@ -532,6 +532,83 @@ mod tests {
         assert!(directives >= files_count);
     }
 
+    /// The dependency policy of CLAUDE.md, applied to one manifest: a compiler crate depends
+    /// only on the workspace's own crates, by path; `mente-mir` depends on nothing; only
+    /// `mente-codegen` may add Cranelift. Returns each dependency line outside the policy.
+    fn dependency_policy_violations(krate: &str, manifest: &str) -> Vec<String> {
+        let mut section = String::new();
+        let mut found = Vec::new();
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                section = line.trim_matches(|c| c == '[' || c == ']').to_string();
+                continue;
+            }
+            if !section.ends_with("dependencies") || line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let name = line.split(['=', '.']).next().unwrap_or("").trim();
+            let allowed = if name.starts_with("mente-") {
+                krate != "mente-mir" && line.contains("path =")
+            } else {
+                name.starts_with("cranelift") && krate == "mente-codegen"
+            };
+            if !allowed {
+                found.push(format!("{}: [{}] {}", krate, section, line));
+            }
+        }
+        found
+    }
+
+    /// A new external dependency needs Norman's approval and a change to this policy.
+    #[test]
+    fn test_crates_depend_only_on_allowed_crates() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut found = dependency_policy_violations(
+            "workspace",
+            &fs::read_to_string(root.join("Cargo.toml")).unwrap(),
+        );
+        let mut crates = 0;
+        for entry in fs::read_dir(root.join("compiler")).unwrap().flatten() {
+            if let Ok(manifest) = fs::read_to_string(entry.path().join("Cargo.toml")) {
+                crates += 1;
+                found.extend(dependency_policy_violations(
+                    &entry.file_name().to_string_lossy(),
+                    &manifest,
+                ));
+            }
+        }
+        assert!(
+            crates >= 6,
+            "expected the six compiler crates, read {}",
+            crates
+        );
+        assert!(
+            found.is_empty(),
+            "dependencies outside the policy:\n{}",
+            found.join("\n")
+        );
+
+        // The policy itself: what it lets through and what it stops.
+        let manifest = "[package]\nname = \"x\"\n\n[dependencies]\nmente-ast = { path = \"../mente-ast\" }\ncranelift-codegen = \"0.135\"\n\n[dev-dependencies]\nproptest = \"1\"\n";
+        assert_eq!(
+            dependency_policy_violations("mente-sema", manifest),
+            vec![
+                "mente-sema: [dependencies] cranelift-codegen = \"0.135\"".to_string(),
+                "mente-sema: [dev-dependencies] proptest = \"1\"".to_string(),
+            ]
+        );
+        assert_eq!(
+            dependency_policy_violations("mente-codegen", manifest).len(),
+            1
+        );
+        assert_eq!(dependency_policy_violations("mente-mir", manifest).len(), 3);
+        assert_eq!(
+            dependency_policy_violations("mente-cli", "[dependencies]\nmente-ast = \"0.1\"\n")
+                .len(),
+            1
+        );
+    }
+
     /// Every text file in the repository is English: no CJK characters in code, comments, docs or
     /// examples (CLAUDE.md). Build output and dependencies are skipped.
     #[test]

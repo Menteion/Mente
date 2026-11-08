@@ -58,7 +58,7 @@ The work runs in four stages, in the order [`long-term-order`](docs/design-revie
 - [x] Every `done` entry of [docs/design-review.md](docs/design-review.md) links the documents it changed and names its commit (commit "Link every done register row to what it changed").
 - [ ] Diagnostics in the structured form of [`diagnostics-as-api`](docs/design-review.md#diagnostics-as-api), and the error-code catalogue of today's codes.
 - [ ] The quality-system instruments active from M0: the conformance runner over today's declaration checks, `cargo-mutants` on the compiler, the projection benchmark with a regression tolerance, and a check that compiling twice gives identical output.
-- [ ] Rust hygiene: `rustfmt`, `clippy` with warnings as errors, no `unsafe` outside the runtime and FFI code, a dependency policy, coverage reported, and lints that keep the compiler inside a subset of Rust that translates to Mente.
+- [x] Rust hygiene: `rustfmt`, `clippy` with warnings as errors, no `unsafe` outside the runtime and FFI code, a dependency policy, coverage reported, and lints that keep the compiler inside a subset of Rust that translates to Mente (commit "Check format, lints, dependencies and coverage in CI").
 
 ### M0b: design closure for M1
 
