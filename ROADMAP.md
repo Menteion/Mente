@@ -185,9 +185,9 @@ A `Target` in `spec/*.md` is a number with a protocol here. A figure without a p
   ```powershell
   cargo test --release -p mente-cli -- --ignored --nocapture view_projection_protocol
   ```
-- **Regression tolerance**: the CI job "Projection benchmark" runs the protocol on every pull request, on GitHub's x86-64 `ubuntu-24.04` runner, and fails when a median exceeds its baseline in `compiler/mente-cli/tests/projection-baseline.txt` by more than 50%. Shared runners vary from run to run, so the tolerance is wide.
+- **Regression tolerance**: the CI job "Projection benchmark" builds the base branch and the change on one GitHub x86-64 `ubuntu-24.04` runner, measures both, and fails when a median of the change exceeds the base's by more than 30%. A fixed baseline does not work on shared runners: two runs of the same code on 2026-11-08 differed by a factor of 1.8.
 - **Machine**: record the CPU, OS and power mode with each result.
-- **Last result** (2026-11-08, GitHub x86-64 `ubuntu-24.04` runner, the CI job): median 22.5–36.5 µs, 99th percentile 35.7–48.1 µs, which are now the baselines. The median meets the target; nothing is promised for the 99th percentile. On 2026-11-05 an AMD Ryzen 7 7735HS under Windows 11 measured a median of 45–92 µs.
+- **Last result** (2026-11-08, GitHub x86-64 `ubuntu-24.04` runners, the CI job): median 22.5–36.5 µs and 99th percentile 35.7–48.1 µs in one run; median 40.2–67.8 µs in the next, on another runner, for the same code. The median meets the target either way; nothing is promised for the 99th percentile. On 2026-11-05 an AMD Ryzen 7 7735HS under Windows 11 measured a median of 45–92 µs.
 
 ### Tier-1 re-check after an edit: 99th percentile under 5 ms
 

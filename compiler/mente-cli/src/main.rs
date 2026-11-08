@@ -707,11 +707,12 @@ mod tests {
         );
     }
 
-    /// How far a median may rise above its baseline before the benchmark fails. Shared CI
-    /// runners vary from run to run, so the tolerance is wide; a real regression is larger.
-    const PROJECTION_TOLERANCE: f64 = 1.5;
+    /// How far a median may rise above the base branch's, measured on the same runner in the same
+    /// job, before the benchmark fails. Shared runners differ by up to a factor of two from one
+    /// run to the next, so only a comparison on one machine means anything.
+    const PROJECTION_TOLERANCE: f64 = 1.3;
 
-    /// The per-module median baselines in `tests/projection-baseline.txt`: `<module> <µs>` lines.
+    /// Per-module medians, as `<module> <µs>` lines: the base branch's, which CI measures first.
     fn projection_baselines(text: &str) -> Vec<(String, f64)> {
         text.lines()
             .map(str::trim)
@@ -725,19 +726,22 @@ mod tests {
             .collect()
     }
 
-    /// The `mn view --spec` latency protocol in ROADMAP.md. CI runs it in release on its
-    /// x86-64 Linux runner with `MENTE_BENCH_ENFORCE=1`, which fails it when a median rises above
-    /// its baseline by more than `PROJECTION_TOLERANCE`:
+    /// The `mn view --spec` latency protocol in ROADMAP.md. CI measures the base branch and then
+    /// this change on one runner; with `MENTE_BENCH_BASELINE` naming the base's medians and
+    /// `MENTE_BENCH_ENFORCE=1`, a median above the base's by more than `PROJECTION_TOLERANCE`
+    /// fails it:
     /// `cargo test --release -p mente-cli -- --ignored --nocapture view_projection_protocol`.
     #[test]
     #[ignore = "benchmark; run on demand"]
     fn view_projection_protocol() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let baselines = projection_baselines(
-            &fs::read_to_string(manifest.join("tests/projection-baseline.txt")).unwrap_or_default(),
+            &env::var_os("MENTE_BENCH_BASELINE")
+                .and_then(|path| fs::read_to_string(path).ok())
+                .unwrap_or_default(),
         );
         let enforce = env::var_os("MENTE_BENCH_ENFORCE").is_some();
-        let mut table = String::from("| Module | Median (µs) | 99th percentile (µs) | Baseline (µs) |\n| :--- | ---: | ---: | ---: |\n");
+        let mut table = String::from("| Module | Median (µs) | 99th percentile (µs) | Base branch (µs) |\n| :--- | ---: | ---: | ---: |\n");
         let mut regressions = Vec::new();
         for file in collect_mn_files(&manifest.join("../../examples")) {
             let name = file.file_name().unwrap().to_string_lossy().into_owned();
@@ -762,12 +766,12 @@ mod tests {
                 name,
                 median,
                 p99,
-                baseline.map_or_else(|| String::from("none yet"), |b| format!("{:.1}", b))
+                baseline.map_or_else(|| String::from("not measured"), |b| format!("{:.1}", b))
             ));
             if let Some(b) = baseline {
                 if median > b * PROJECTION_TOLERANCE {
                     regressions.push(format!(
-                        "{}: median {:.1} µs, above {:.1} µs (baseline {:.1} µs × {})",
+                        "{}: median {:.1} µs, above {:.1} µs (the base branch's {:.1} µs × {})",
                         name,
                         median,
                         b * PROJECTION_TOLERANCE,
@@ -791,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_projection_baselines_are_read_line_by_line() {
-        let text = "# machine: GitHub ubuntu-24.04\n\n01_a.mn 41.5\n02_b.mn  62\nbroken line\n03_c.mn notanumber\n";
+        let text = "# measured on the base branch\n\n01_a.mn 41.5\n02_b.mn  62\nbroken line\n03_c.mn notanumber\n";
         assert_eq!(
             projection_baselines(text),
             vec![
