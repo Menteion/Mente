@@ -1,6 +1,9 @@
 //! End-to-end tests of the `mn` commands that `spec/comptime-and-ffi.md` lists as implemented.
 //! Each runs the built binary, as a user would.
 
+// These helpers are test code: a failed setup step is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -35,7 +38,11 @@ fn test_mn_check_passes_examples_and_rejects_a_broken_layout() {
     let out = text(&ok.stdout);
     assert!(ok.status.success(), "{}{}", out, text(&ok.stderr));
     assert_eq!(out.matches("[PASS]").count(), 4, "{}", out);
-    assert!(out.contains("Proven @layout") && out.contains("spec_hash:"), "{}", out);
+    assert!(
+        out.contains("Proven @layout") && out.contains("spec_hash:"),
+        "{}",
+        out
+    );
 
     let dir = scratch("check");
     fs::write(
@@ -43,12 +50,20 @@ fn test_mn_check_passes_examples_and_rejects_a_broken_layout() {
         "module test.bad\n@layout(size: 16, align: 8)\npub struct Hole {\n  @bytes(0..8) pub id: u64\n  @bytes(12..16) pub rest: u32\n}\n",
     )
     .unwrap();
-    fs::write(dir.join("total.mn"), "module test.total\n@total\npub fn spin(n: u32) -> u32 {\n  while n > 0 {\n  }\n  n\n}\n").unwrap();
+    fs::write(
+        dir.join("total.mn"),
+        "module test.total\n@total\npub fn spin(n: u32) -> u32 {\n  while n > 0 {\n  }\n  n\n}\n",
+    )
+    .unwrap();
     let bad = mn(&dir, &["check", "."]);
     fs::remove_dir_all(&dir).unwrap();
     let err = text(&bad.stderr);
     assert_eq!(bad.status.code(), Some(1));
-    assert!(err.contains("E0413") && err.contains("broken.mn"), "{}", err);
+    assert!(
+        err.contains("E0413") && err.contains("broken.mn"),
+        "{}",
+        err
+    );
     assert!(err.contains("E0501") && err.contains("total.mn"), "{}", err);
 }
 
@@ -64,7 +79,14 @@ fn test_mn_view_spec_prints_the_blueprint() {
     fs::remove_dir_all(&dir).unwrap();
     let out = text(&run.stdout);
     assert!(run.status.success(), "{}", text(&run.stderr));
-    for kept in ["// spec_hash: ", "// body_hash: ", "pub fn score(x: i64) -> i64", "  requires x >= 0", "= ...", "Projection completed in"] {
+    for kept in [
+        "// spec_hash: ",
+        "// body_hash: ",
+        "pub fn score(x: i64) -> i64",
+        "  requires x >= 0",
+        "= ...",
+        "Projection completed in",
+    ] {
         assert!(out.contains(kept), "missing `{}` in:\n{}", kept, out);
     }
     assert!(!out.contains("hidden_local"), "{}", out);
@@ -75,7 +97,11 @@ fn test_mn_test_mutate_runs_the_demo_gate() {
     let plain = mn(&repo_root(), &["test", "examples"]);
     let out = text(&plain.stdout);
     assert!(plain.status.success(), "{}", text(&plain.stderr));
-    assert!(out.contains("[PASS]") && out.contains("2 test vectors passed"), "{}", out);
+    assert!(
+        out.contains("[PASS]") && out.contains("2 test vectors passed"),
+        "{}",
+        out
+    );
     assert!(!out.contains("Mutation gate"), "{}", out);
 
     let mutate = mn(&repo_root(), &["test", "--mutate", "examples"]);
@@ -104,9 +130,17 @@ fn test_mn_spec_checks_front_matter_and_directives() {
     let ok = mn(&dir, &["spec"]);
     let out = text(&ok.stdout);
     assert!(ok.status.success(), "{}{}", out, text(&ok.stderr));
-    assert!(out.contains("[PASS] mn spec: 1 spec files, 3 @assert-* directives hold"), "{}", out);
+    assert!(
+        out.contains("[PASS] mn spec: 1 spec files, 3 @assert-* directives hold"),
+        "{}",
+        out
+    );
 
-    fs::write(dir.join("spec/bare.md"), "# no front matter and no directive\n").unwrap();
+    fs::write(
+        dir.join("spec/bare.md"),
+        "# no front matter and no directive\n",
+    )
+    .unwrap();
     fs::write(
         dir.join("spec/missing.md"),
         "---\ntitle: missing\n---\n\n<!-- @assert-count target=\"lib.rs\" symbol=\"fn test_absent\" min=\"1\" -->\n",
@@ -116,8 +150,20 @@ fn test_mn_spec_checks_front_matter_and_directives() {
     fs::remove_dir_all(&dir).unwrap();
     let err = text(&bad.stderr);
     assert_eq!(bad.status.code(), Some(1));
-    assert!(err.contains("spec/bare.md is missing YAML front-matter"), "{}", err);
-    assert!(err.contains("spec/bare.md carries no @assert-* directive"), "{}", err);
+    assert!(
+        err.contains("spec/bare.md is missing YAML front-matter"),
+        "{}",
+        err
+    );
+    assert!(
+        err.contains("spec/bare.md carries no @assert-* directive"),
+        "{}",
+        err
+    );
     // Each failure names its spec file and line.
-    assert!(err.contains("spec/missing.md:5 @assert-count failed") && err.contains("matched 0 times"), "{}", err);
+    assert!(
+        err.contains("spec/missing.md:5 @assert-count failed") && err.contains("matched 0 times"),
+        "{}",
+        err
+    );
 }

@@ -72,44 +72,44 @@ pub enum TokenKind {
     DocComment(String),
 
     // Punctuation & Operators
-    At,         // @
-    LParen,     // (
-    RParen,     // )
-    LBrace,     // {
-    RBrace,     // }
-    LBracket,   // [
-    RBracket,   // ]
-    Colon,      // :
-    Comma,      // ,
-    Dot,        // .
-    DotDot,     // ..
-    DotDotEq,   // ..=
-    Ellipsis,   // ...
-    Arrow,      // ->
-    FatArrow,   // =>
-    PipeGt,     // |>
-    Pipe,       // |
-    Question,   // ?
-    QuestionDot,// ?.
+    At,               // @
+    LParen,           // (
+    RParen,           // )
+    LBrace,           // {
+    RBrace,           // }
+    LBracket,         // [
+    RBracket,         // ]
+    Colon,            // :
+    Comma,            // ,
+    Dot,              // .
+    DotDot,           // ..
+    DotDotEq,         // ..=
+    Ellipsis,         // ...
+    Arrow,            // ->
+    FatArrow,         // =>
+    PipeGt,           // |>
+    Pipe,             // |
+    Question,         // ?
+    QuestionDot,      // ?.
     QuestionQuestion, // ??
-    Bang,       // !
-    Eq,         // =
-    EqEq,       // ==
-    NotEq,      // !=
-    Lt,         // <
-    Le,         // <=
-    Gt,         // >
-    Ge,         // >=
-    Shl,        // <<
-    Shr,        // >>
-    Plus,       // +
-    PlusEq,     // +=
-    Minus,      // -
-    MinusEq,    // -=
-    Star,       // *
-    Slash,      // /
-    Percent,    // %
-    Semi,       // ; (used in array repeat [val; N])
+    Bang,             // !
+    Eq,               // =
+    EqEq,             // ==
+    NotEq,            // !=
+    Lt,               // <
+    Le,               // <=
+    Gt,               // >
+    Ge,               // >=
+    Shl,              // <<
+    Shr,              // >>
+    Plus,             // +
+    PlusEq,           // +=
+    Minus,            // -
+    MinusEq,          // -=
+    Star,             // *
+    Slash,            // /
+    Percent,          // %
+    Semi,             // ; (used in array repeat [val; N])
     Eof,
 }
 
@@ -144,7 +144,8 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
             let start = i;
             let start_col = col;
-            let is_doc = i + 2 < len && bytes[i + 2] == b'/' && (i + 3 >= len || bytes[i + 3] != b'/');
+            let is_doc =
+                i + 2 < len && bytes[i + 2] == b'/' && (i + 3 >= len || bytes[i + 3] != b'/');
             i += 2;
             if is_doc {
                 i += 1;
@@ -157,7 +158,12 @@ pub fn tokenize(src: &str) -> Vec<Token> {
                 let doc = src[text_start..i].trim().to_string();
                 tokens.push(Token {
                     kind: TokenKind::DocComment(doc),
-                    span: Span { start, end: i, line, col: start_col },
+                    span: Span {
+                        start,
+                        end: i,
+                        line,
+                        col: start_col,
+                    },
                 });
             }
             continue;
@@ -187,7 +193,12 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             }
             tokens.push(Token {
                 kind: TokenKind::StrLit(content),
-                span: Span { start, end: i, line, col: start_col },
+                span: Span {
+                    start,
+                    end: i,
+                    line,
+                    col: start_col,
+                },
             });
             continue;
         }
@@ -231,7 +242,12 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             if is_float {
                 tokens.push(Token {
                     kind: TokenKind::FloatLit(raw.to_string()),
-                    span: Span { start, end: i, line, col: start_col },
+                    span: Span {
+                        start,
+                        end: i,
+                        line,
+                        col: start_col,
+                    },
                 });
             } else {
                 let digits_only: String = raw
@@ -242,7 +258,12 @@ pub fn tokenize(src: &str) -> Vec<Token> {
                 let val = digits_only.parse::<i128>().unwrap_or(0);
                 tokens.push(Token {
                     kind: TokenKind::IntLit(val, raw.to_string()),
-                    span: Span { start, end: i, line, col: start_col },
+                    span: Span {
+                        start,
+                        end: i,
+                        line,
+                        col: start_col,
+                    },
                 });
             }
             continue;
@@ -304,7 +325,12 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             };
             tokens.push(Token {
                 kind,
-                span: Span { start, end: i, line, col: start_col },
+                span: Span {
+                    start,
+                    end: i,
+                    line,
+                    col: start_col,
+                },
             });
             continue;
         }
@@ -364,13 +390,23 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         col += advance as u32;
         tokens.push(Token {
             kind,
-            span: Span { start, end: i, line, col: start_col },
+            span: Span {
+                start,
+                end: i,
+                line,
+                col: start_col,
+            },
         });
     }
 
     tokens.push(Token {
         kind: TokenKind::Eof,
-        span: Span { start: len, end: len, line, col },
+        span: Span {
+            start: len,
+            end: len,
+            line,
+            col,
+        },
     });
     tokens
 }
@@ -517,7 +553,11 @@ pub struct ModuleFile {
 pub fn parse_module(src: &str) -> Result<ModuleFile, String> {
     let tokens = tokenize(src);
     let total_token_count = tokens.len().saturating_sub(1);
-    let mut p = Parser { src, tokens, pos: 0 };
+    let mut p = Parser {
+        src,
+        tokens,
+        pos: 0,
+    };
     p.parse_file(total_token_count)
 }
 
@@ -590,7 +630,9 @@ impl<'a> Parser<'a> {
                     items.push(ItemDecl::Struct(self.parse_struct(docs, attrs, is_pub)?));
                 }
                 TokenKind::BitStruct => {
-                    items.push(ItemDecl::BitStruct(self.parse_bitstruct(docs, attrs, is_pub)?));
+                    items.push(ItemDecl::BitStruct(
+                        self.parse_bitstruct(docs, attrs, is_pub)?,
+                    ));
                 }
                 TokenKind::Enum => {
                     items.push(ItemDecl::Enum(self.parse_enum(is_pub)?));
@@ -628,7 +670,11 @@ impl<'a> Parser<'a> {
     fn expect_ident(&mut self) -> Result<String, String> {
         match self.next().kind {
             TokenKind::Ident(s) => Ok(s),
-            other => Err(format!("Expected identifier at line {}, got {:?}", self.span().line, other)),
+            other => Err(format!(
+                "Expected identifier at line {}, got {:?}",
+                self.span().line,
+                other
+            )),
         }
     }
 
@@ -728,7 +774,12 @@ impl<'a> Parser<'a> {
         if *self.peek() == TokenKind::RBrace {
             Ok(self.next())
         } else {
-            Err(format!("Line {}: `{} {}` has no closing `}}`", self.span().line, what, name))
+            Err(format!(
+                "Line {}: `{} {}` has no closing `}}`",
+                self.span().line,
+                what,
+                name
+            ))
         }
     }
 
@@ -742,7 +793,12 @@ impl<'a> Parser<'a> {
         self.src[start_byte..end_byte].trim().to_string()
     }
 
-    fn parse_struct(&mut self, docs: Vec<String>, attrs: Vec<Attr>, is_pub: bool) -> Result<StructDecl, String> {
+    fn parse_struct(
+        &mut self,
+        docs: Vec<String>,
+        attrs: Vec<Attr>,
+        is_pub: bool,
+    ) -> Result<StructDecl, String> {
         self.next(); // consume 'struct'
         let name = self.expect_ident()?;
         let generics = if *self.peek() == TokenKind::Lt {
@@ -836,7 +892,10 @@ impl<'a> Parser<'a> {
         let mut eq_byte = None;
         let mut end = start;
         let mut bracket_depth = 0i32;
-        while *self.peek() != TokenKind::Eof && self.span().line == line && *self.peek() != TokenKind::RBrace {
+        while *self.peek() != TokenKind::Eof
+            && self.span().line == line
+            && *self.peek() != TokenKind::RBrace
+        {
             let tok = self.next();
             match tok.kind {
                 TokenKind::LBracket | TokenKind::Lt | TokenKind::LParen => bracket_depth += 1,
@@ -851,15 +910,29 @@ impl<'a> Parser<'a> {
             end = tok.span.end;
         }
         if let Some((eq_s, eq_e)) = eq_byte {
-            let ty = self.src[start..eq_s].trim().trim_end_matches(',').to_string();
+            let ty = self.src[start..eq_s]
+                .trim()
+                .trim_end_matches(',')
+                .to_string();
             let def = self.src[eq_e..end].trim().trim_end_matches(',').to_string();
             (ty, Some(def))
         } else {
-            (self.src[start..end].trim().trim_end_matches(',').to_string(), None)
+            (
+                self.src[start..end]
+                    .trim()
+                    .trim_end_matches(',')
+                    .to_string(),
+                None,
+            )
         }
     }
 
-    fn parse_bitstruct(&mut self, docs: Vec<String>, attrs: Vec<Attr>, is_pub: bool) -> Result<BitStructDecl, String> {
+    fn parse_bitstruct(
+        &mut self,
+        docs: Vec<String>,
+        attrs: Vec<Attr>,
+        is_pub: bool,
+    ) -> Result<BitStructDecl, String> {
         self.next(); // consume 'bitstruct'
         let name = self.expect_ident()?;
         if *self.peek() == TokenKind::Colon {
@@ -927,7 +1000,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok(EnumDecl { is_pub, name, variants })
+        Ok(EnumDecl {
+            is_pub,
+            name,
+            variants,
+        })
     }
 
     fn parse_trait(&mut self, is_pub: bool) -> Result<TraitDecl, String> {
@@ -955,7 +1032,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_fn(&mut self, docs: Vec<String>, attrs: Vec<Attr>, is_pub: bool) -> Result<FnDecl, String> {
+    fn parse_fn(
+        &mut self,
+        docs: Vec<String>,
+        attrs: Vec<Attr>,
+        is_pub: bool,
+    ) -> Result<FnDecl, String> {
         let fn_tok = self.next(); // consume 'fn'
         let line = fn_tok.span.line;
         let name = self.expect_ident()?;
@@ -997,7 +1079,10 @@ impl<'a> Parser<'a> {
                 break;
             }
             if provenance.is_empty() {
-                return Err(format!("Line {}: `from` in the signature of `{}` names no parameter", line, name));
+                return Err(format!(
+                    "Line {}: `from` in the signature of `{}` names no parameter",
+                    line, name
+                ));
             }
         }
 
@@ -1094,7 +1179,9 @@ impl<'a> Parser<'a> {
                 {
                     break;
                 }
-                TokenKind::Ident(w) if w == "from" && angle_depth == 0 && bracket_depth == 0 => break,
+                TokenKind::Ident(w) if w == "from" && angle_depth == 0 && bracket_depth == 0 => {
+                    break
+                }
                 _ => {
                     let tok = self.next();
                     match tok.kind {
@@ -1204,6 +1291,36 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 mod tests {
     use super::*;
 
+    fn doc_comments(src: &str) -> Vec<String> {
+        tokenize(src)
+            .into_iter()
+            .filter_map(|t| match t.kind {
+                TokenKind::DocComment(d) => Some(d),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_doc_comments_are_exactly_three_slashes() {
+        // `///` opens a doc comment; `//` and `////` open plain comments, which leave no token.
+        let src = "module m\n/// the doc\n// plain\n//// banner\nfn f() = 0\n///";
+        assert_eq!(doc_comments(src), vec!["the doc", ""]);
+        // A comment that ends the file, with or without a third slash, does not read past it.
+        assert_eq!(doc_comments("x //"), Vec::<String>::new());
+        assert_eq!(doc_comments("x ///"), vec![""]);
+        assert_eq!(doc_comments("x ////"), Vec::<String>::new());
+        // The code before a comment stays code.
+        let kinds: Vec<_> = tokenize("val a = 1 // note\n")
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert!(
+            kinds.contains(&TokenKind::Val)
+                && !kinds.iter().any(|k| matches!(k, TokenKind::DocComment(_)))
+        );
+    }
+
     #[test]
     fn test_lexer_and_parser_on_basic_mn() {
         let code = r#"
@@ -1227,7 +1344,9 @@ module demo.views
 pub fn verify(token: str, key: str) -> str ! AuthError from token with Clock
 "#;
         let m = parse_module(code).expect("should parse a from clause");
-        let ItemDecl::Fn(f) = &m.items[0] else { panic!("expected a fn") };
+        let ItemDecl::Fn(f) = &m.items[0] else {
+            panic!("expected a fn")
+        };
         assert_eq!(f.return_ty.as_deref(), Some("str"));
         assert_eq!(f.error_ty.as_deref(), Some("AuthError"));
         assert_eq!(f.provenance, vec!["token".to_string()]);
@@ -1258,9 +1377,25 @@ pub struct Window<T> {
 }
 "#;
         let m = parse_module(code).unwrap();
-        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
-        assert_eq!((s.name.as_str(), s.generics.as_str(), s.is_pub), ("Window", "<T>", true));
-        let fields: Vec<_> = s.fields.iter().map(|f| (f.is_pub, f.name.as_str(), f.ty.as_str(), f.default_expr.as_deref())).collect();
+        let ItemDecl::Struct(s) = &m.items[0] else {
+            panic!("expected a struct")
+        };
+        assert_eq!(
+            (s.name.as_str(), s.generics.as_str(), s.is_pub),
+            ("Window", "<T>", true)
+        );
+        let fields: Vec<_> = s
+            .fields
+            .iter()
+            .map(|f| {
+                (
+                    f.is_pub,
+                    f.name.as_str(),
+                    f.ty.as_str(),
+                    f.default_expr.as_deref(),
+                )
+            })
+            .collect();
         assert_eq!(
             fields,
             vec![
@@ -1269,21 +1404,28 @@ pub struct Window<T> {
                 (false, "index", "Map<str, List<u32>>", Some("Map.empty()")),
             ]
         );
-        assert_eq!(s.invariants, vec!["lo <= hi".to_string(), "hi < 1024".to_string()]);
+        assert_eq!(
+            s.invariants,
+            vec!["lo <= hi".to_string(), "hi < 1024".to_string()]
+        );
     }
 
     #[test]
     fn test_enum_variants_are_parsed() {
         let code = "module demo.net\npub enum Packet { Ack, Data(bytes: []u8), Close }\n";
         let m = parse_module(code).unwrap();
-        let ItemDecl::Enum(e) = &m.items[0] else { panic!("expected an enum") };
+        let ItemDecl::Enum(e) = &m.items[0] else {
+            panic!("expected an enum")
+        };
         assert_eq!((e.name.as_str(), e.is_pub), ("Packet", true));
         assert_eq!(e.variants, vec!["Ack", "Data(bytes: []u8)", "Close"]);
     }
 
     #[test]
     fn test_with_clause_lists_effects() {
-        let f = only_fn("module demo.io\npub fn fetch(url: str) -> str ! NetError with Net, Clock, IO\n");
+        let f = only_fn(
+            "module demo.io\npub fn fetch(url: str) -> str ! NetError with Net, Clock, IO\n",
+        );
         assert_eq!(f.effects, vec!["Net", "Clock", "IO"]);
         let pure = only_fn("module demo.io\npub fn add(a: i32, b: i32) -> i32 = a + b\n");
         assert!(pure.effects.is_empty());
@@ -1301,16 +1443,24 @@ pub struct Window<T> {
                 other => panic!("expected a unit, got {:?}", other),
             })
             .collect();
-        assert_eq!(texts, vec!["sec, ms = 0.001 * sec", "newton = kg * meter / (sec * sec)"]);
+        assert_eq!(
+            texts,
+            vec!["sec, ms = 0.001 * sec", "newton = kg * meter / (sec * sec)"]
+        );
     }
 
     #[test]
     fn test_error_type_follows_bang_in_return() {
-        let f = only_fn("module demo.err\npub fn decode(buf: []u8) -> Map<str, List<u8>> ! DecodeError\n");
+        let f = only_fn(
+            "module demo.err\npub fn decode(buf: []u8) -> Map<str, List<u8>> ! DecodeError\n",
+        );
         assert_eq!(f.return_ty.as_deref(), Some("Map<str, List<u8>>"));
         assert_eq!(f.error_ty.as_deref(), Some("DecodeError"));
         let plain = only_fn("module demo.err\npub fn len(buf: []u8) -> usize\n");
-        assert_eq!((plain.return_ty.as_deref(), plain.error_ty), (Some("usize"), None));
+        assert_eq!(
+            (plain.return_ty.as_deref(), plain.error_ty),
+            (Some("usize"), None)
+        );
     }
 
     #[test]
@@ -1336,7 +1486,11 @@ pub fn find(items: []i64, lo: usize, hi: usize) -> usize
     #[test]
     fn test_parameter_modes_are_recorded() {
         let f = only_fn("module demo.modes\npub fn step(p: Particle, mut q: Particle, own r: Buffer, in arena: Arena)\n");
-        let modes: Vec<_> = f.params.iter().map(|p| (p.mode, p.name.as_str(), p.ty.as_str())).collect();
+        let modes: Vec<_> = f
+            .params
+            .iter()
+            .map(|p| (p.mode, p.name.as_str(), p.ty.as_str()))
+            .collect();
         assert_eq!(
             modes,
             vec![
@@ -1359,20 +1513,38 @@ pub fn after(y: i32) -> i32 = y
 "#;
         let m = parse_module(code).unwrap();
         assert_eq!(m.items.len(), 2);
-        let ItemDecl::Fn(outer) = &m.items[0] else { panic!("expected a fn") };
-        let opens = outer.body_tokens.iter().filter(|t| **t == TokenKind::LBrace).count();
-        let closes = outer.body_tokens.iter().filter(|t| **t == TokenKind::RBrace).count();
+        let ItemDecl::Fn(outer) = &m.items[0] else {
+            panic!("expected a fn")
+        };
+        let opens = outer
+            .body_tokens
+            .iter()
+            .filter(|t| **t == TokenKind::LBrace)
+            .count();
+        let closes = outer
+            .body_tokens
+            .iter()
+            .filter(|t| **t == TokenKind::RBrace)
+            .count();
         assert_eq!((opens, closes), (2, 2));
-        let ItemDecl::Fn(after) = &m.items[1] else { panic!("expected a fn") };
+        let ItemDecl::Fn(after) = &m.items[1] else {
+            panic!("expected a fn")
+        };
         assert_eq!(after.name, "after");
     }
 
     #[test]
     fn test_function_headers_return_types_and_expression_bodies() {
         let block = only_fn("module demo.fns\npub fn clamp(x: i32, hi: i32) -> i32 {\n  x\n}\n");
-        assert_eq!((block.return_ty.as_deref(), block.is_expr_body), (Some("i32"), false));
+        assert_eq!(
+            (block.return_ty.as_deref(), block.is_expr_body),
+            (Some("i32"), false)
+        );
         let expr = only_fn("module demo.fns\npub fn square(x: i32) -> i32 = x * x\n");
-        assert_eq!((expr.return_ty.as_deref(), expr.is_expr_body), (Some("i32"), true));
+        assert_eq!(
+            (expr.return_ty.as_deref(), expr.is_expr_body),
+            (Some("i32"), true)
+        );
         assert_eq!(expr.body_tokens.len(), 3);
         let unit = only_fn("module demo.fns\nfn tick(mut n: u64) {\n  n += 1\n}\n");
         assert_eq!((unit.return_ty, unit.is_pub), (None, false));
@@ -1382,30 +1554,52 @@ pub fn after(y: i32) -> i32 = y
     fn test_generic_parameter_lists_are_kept() {
         let code = "module demo.gen\npub struct RingWindow<T, comptime CAP: usize = 64> {\n  len: usize\n}\npub fn largest<T>(a: T, b: T) -> T = a\n";
         let m = parse_module(code).unwrap();
-        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
+        let ItemDecl::Struct(s) = &m.items[0] else {
+            panic!("expected a struct")
+        };
         assert_eq!(s.generics, "<T, comptime CAP: usize = 64>");
-        let ItemDecl::Fn(f) = &m.items[1] else { panic!("expected a fn") };
+        let ItemDecl::Fn(f) = &m.items[1] else {
+            panic!("expected a fn")
+        };
         assert_eq!(f.generics, "<T>");
     }
 
     #[test]
     fn test_parameters_split_only_at_top_level_commas() {
         let f = only_fn("module demo.params\npub fn run(m: Map<str, u32>, xs: [4]u8, cb: fn(u8, u8) -> u8, n: u32)\n");
-        let params: Vec<_> = f.params.iter().map(|p| (p.name.as_str(), p.ty.as_str())).collect();
+        let params: Vec<_> = f
+            .params
+            .iter()
+            .map(|p| (p.name.as_str(), p.ty.as_str()))
+            .collect();
         assert_eq!(
             params,
-            vec![("m", "Map<str, u32>"), ("xs", "[4]u8"), ("cb", "fn(u8, u8) -> u8"), ("n", "u32")]
+            vec![
+                ("m", "Map<str, u32>"),
+                ("xs", "[4]u8"),
+                ("cb", "fn(u8, u8) -> u8"),
+                ("n", "u32")
+            ]
         );
     }
 
     #[test]
     fn test_return_type_scan_respects_type_arguments() {
         // A function type inside type arguments: its `fn` and `!` belong to the argument.
-        let f = only_fn("module demo.ret\npub fn handlers() -> List<fn(u8) -> u8 ! ParseError> ! SetupError\n");
-        assert_eq!(f.return_ty.as_deref(), Some("List<fn(u8) -> u8 ! ParseError>"));
+        let f = only_fn(
+            "module demo.ret\npub fn handlers() -> List<fn(u8) -> u8 ! ParseError> ! SetupError\n",
+        );
+        assert_eq!(
+            f.return_ty.as_deref(),
+            Some("List<fn(u8) -> u8 ! ParseError>")
+        );
         assert_eq!(f.error_ty.as_deref(), Some("SetupError"));
-        let inner_only = only_fn("module demo.ret\npub fn parsers() -> List<fn(u8) -> u8 ! ParseError>\n");
-        assert_eq!(inner_only.return_ty.as_deref(), Some("List<fn(u8) -> u8 ! ParseError>"));
+        let inner_only =
+            only_fn("module demo.ret\npub fn parsers() -> List<fn(u8) -> u8 ! ParseError>\n");
+        assert_eq!(
+            inner_only.return_ty.as_deref(),
+            Some("List<fn(u8) -> u8 ! ParseError>")
+        );
         assert_eq!(inner_only.error_ty, None);
     }
 
@@ -1413,8 +1607,14 @@ pub fn after(y: i32) -> i32 = y
     fn test_field_default_starts_at_a_top_level_equals() {
         let code = "module demo.fields\npub struct Holder {\n  ring: Ring<CAP = 64>\n  m: Map<str, u32> = Map.empty()\n  grid: [4]u8 = [0, 0, 0, 0]\n}\n";
         let m = parse_module(code).unwrap();
-        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
-        let fields: Vec<_> = s.fields.iter().map(|f| (f.name.as_str(), f.ty.as_str(), f.default_expr.as_deref())).collect();
+        let ItemDecl::Struct(s) = &m.items[0] else {
+            panic!("expected a struct")
+        };
+        let fields: Vec<_> = s
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.ty.as_str(), f.default_expr.as_deref()))
+            .collect();
         assert_eq!(
             fields,
             vec![
@@ -1445,10 +1645,22 @@ pub fn after(y: i32) -> i32 = y
     #[test]
     fn test_unclosed_declarations_are_rejected() {
         for (code, what) in [
-            ("module m\npub struct Open {\n  a: u8\n", "`struct Open` has no closing `}`"),
-            ("module m\npub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8\n", "`bitstruct Flags` has no closing `}`"),
-            ("module m\npub enum Side { Left, Right\n", "`enum Side` has no closing `}`"),
-            ("module m\npub trait Probe {\n  fn hit(self) -> bool\n", "`trait Probe` has no closing `}`"),
+            (
+                "module m\npub struct Open {\n  a: u8\n",
+                "`struct Open` has no closing `}`",
+            ),
+            (
+                "module m\npub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8\n",
+                "`bitstruct Flags` has no closing `}`",
+            ),
+            (
+                "module m\npub enum Side { Left, Right\n",
+                "`enum Side` has no closing `}`",
+            ),
+            (
+                "module m\npub trait Probe {\n  fn hit(self) -> bool\n",
+                "`trait Probe` has no closing `}`",
+            ),
         ] {
             let err = parse_module(code).unwrap_err();
             assert!(err.contains(what), "{}", err);
@@ -1462,8 +1674,13 @@ pub fn after(y: i32) -> i32 = y
     fn test_invariant_block_may_hold_braces() {
         let code = "module demo.inv\npub struct Bag {\n  items: []u32\n  invariant {\n    items.all { x => x > 0 }\n    items.len < 64\n  }\n  extra: u8\n}\n";
         let m = parse_module(code).unwrap();
-        let ItemDecl::Struct(s) = &m.items[0] else { panic!("expected a struct") };
-        assert_eq!(s.invariants, vec!["items.all { x => x > 0 }", "items.len < 64"]);
+        let ItemDecl::Struct(s) = &m.items[0] else {
+            panic!("expected a struct")
+        };
+        assert_eq!(
+            s.invariants,
+            vec!["items.all { x => x > 0 }", "items.len < 64"]
+        );
         let names: Vec<_> = s.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["items", "extra"]);
     }
@@ -1472,8 +1689,16 @@ pub fn after(y: i32) -> i32 = y
     fn test_trait_method_signatures_are_kept() {
         let code = "module demo.io\npub trait ByteSink {\n  fn write_u64(mut self, v: u64)\n  fn flush(mut self) ! IoError\n}\n";
         let m = parse_module(code).unwrap();
-        let ItemDecl::Trait(t) = &m.items[0] else { panic!("expected a trait") };
+        let ItemDecl::Trait(t) = &m.items[0] else {
+            panic!("expected a trait")
+        };
         assert_eq!((t.name.as_str(), t.is_pub), ("ByteSink", true));
-        assert_eq!(t.methods_sig, vec!["fn write_u64(mut self, v: u64)", "fn flush(mut self) ! IoError"]);
+        assert_eq!(
+            t.methods_sig,
+            vec![
+                "fn write_u64(mut self, v: u64)",
+                "fn flush(mut self) ! IoError"
+            ]
+        );
     }
 }

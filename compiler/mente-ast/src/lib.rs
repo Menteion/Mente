@@ -88,7 +88,10 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
                 for f in &s.fields {
                     spec_h.update(
                         "field",
-                        &format!("{}:{}:{}:{:?}:{:?}", f.is_pub, f.name, f.ty, f.byte_range, f.default_expr),
+                        &format!(
+                            "{}:{}:{}:{:?}:{:?}",
+                            f.is_pub, f.name, f.ty, f.byte_range, f.default_expr
+                        ),
                     );
                 }
                 for inv in &s.invariants {
@@ -98,7 +101,10 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
             ItemDecl::BitStruct(bs) if bs.is_pub => {
                 spec_h.update("bitstruct", &format!("{}:{}", bs.name, bs.backing_type));
                 for f in &bs.fields {
-                    spec_h.update("bitfield", &format!("{}:{}:{:?}", f.name, f.ty, f.bit_range));
+                    spec_h.update(
+                        "bitfield",
+                        &format!("{}:{}:{:?}", f.name, f.ty, f.bit_range),
+                    );
                 }
             }
             ItemDecl::Enum(e) if e.is_pub => {
@@ -184,7 +190,10 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
     let hashes = compute_dual_hashes(module);
     let mut out = String::new();
 
-    out.push_str(&format!("// [Mente Holographic Spec Projection] module {}\n", module.module_path));
+    out.push_str(&format!(
+        "// [Mente Holographic Spec Projection] module {}\n",
+        module.module_path
+    ));
     out.push_str(&format!("// spec_hash: {}\n", hashes.spec_hash));
     out.push_str(&format!("// body_hash: {}\n", hashes.body_hash));
     out.push_str(&format!("// instance_hash: {}\n\n", hashes.instance_hash));
@@ -202,7 +211,10 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                 for a in &bs.attrs {
                     out.push_str(&format!("{}\n", a));
                 }
-                out.push_str(&format!("pub bitstruct {} : {} {{\n", bs.name, bs.backing_type));
+                out.push_str(&format!(
+                    "pub bitstruct {} : {} {{\n",
+                    bs.name, bs.backing_type
+                ));
                 for f in &bs.fields {
                     let vis = if f.is_pub { "pub " } else { "" };
                     out.push_str(&format!(
@@ -244,7 +256,11 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                 out.push_str("}\n\n");
             }
             ItemDecl::Enum(e) if e.is_pub => {
-                out.push_str(&format!("pub enum {} {{ {} }}\n\n", e.name, e.variants.join(", ")));
+                out.push_str(&format!(
+                    "pub enum {} {{ {} }}\n\n",
+                    e.name,
+                    e.variants.join(", ")
+                ));
             }
             ItemDecl::Trait(t) if t.is_pub => {
                 out.push_str(&format!("pub trait {} {{\n", t.name));
@@ -274,7 +290,12 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                     })
                     .collect();
 
-                out.push_str(&format!("pub fn {}{}({})", f.name, f.generics, params_str.join(", ")));
+                out.push_str(&format!(
+                    "pub fn {}{}({})",
+                    f.name,
+                    f.generics,
+                    params_str.join(", ")
+                ));
                 if let Some(ret) = &f.return_ty {
                     if let Some(err) = &f.error_ty {
                         out.push_str(&format!(" -> {} ! {}", ret, err));
@@ -476,20 +497,39 @@ struct Scratch {
         // Each public declaration, and every unit, is part of the interface.
         for (from, to) in [
             ("unit meter, sec", "unit meter, sec, kg"),
-            ("pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8", "pub bitstruct Flags : u8 {\n  @bits(0..8) pub bits: u8"),
-            ("pub enum Side { Left, Right }", "pub enum Side { Left, Right, Up }"),
+            (
+                "pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8",
+                "pub bitstruct Flags : u8 {\n  @bits(0..8) pub bits: u8",
+            ),
+            (
+                "pub enum Side { Left, Right }",
+                "pub enum Side { Left, Right, Up }",
+            ),
             ("  fn hit(self) -> bool", "  fn hit(self) -> u8"),
         ] {
-            assert_ne!(h, spec(&base.replace(from, to)), "editing `{}` must change spec_hash", from);
+            assert_ne!(
+                h,
+                spec(&base.replace(from, to)),
+                "editing `{}` must change spec_hash",
+                from
+            );
         }
         // A private declaration is not.
         for (from, to) in [
-            ("bitstruct Hidden : u8 {\n  @bits(0..8) pub raw: u8", "bitstruct Hidden : u8 {\n  @bits(0..8) pub bits: u8"),
+            (
+                "bitstruct Hidden : u8 {\n  @bits(0..8) pub raw: u8",
+                "bitstruct Hidden : u8 {\n  @bits(0..8) pub bits: u8",
+            ),
             ("enum Inner { A, B }", "enum Inner { A, B, C }"),
             ("  fn peek(self) -> bool", "  fn peek(self) -> u8"),
             ("struct Scratch {\n  n: u32", "struct Scratch {\n  n: u64"),
         ] {
-            assert_eq!(h, spec(&base.replace(from, to)), "editing `{}` must not change spec_hash", from);
+            assert_eq!(
+                h,
+                spec(&base.replace(from, to)),
+                "editing `{}` must not change spec_hash",
+                from
+            );
         }
     }
 
@@ -528,13 +568,22 @@ trait HiddenTrait {
 "#;
         let report = project_spec_blueprint(&parse_module(code).unwrap());
         let out = &report.projected_source;
-        assert!(out.contains("unit sec, ms = 0.001 * sec") && out.contains("pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8"), "{}", out);
+        assert!(
+            out.contains("unit sec, ms = 0.001 * sec")
+                && out.contains("pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8"),
+            "{}",
+            out
+        );
         for hidden in ["HiddenBits", "HiddenStruct", "HiddenEnum", "HiddenTrait"] {
             assert!(!out.contains(hidden), "`{}` leaked into:\n{}", hidden, out);
         }
         // The saving is the share of the module's tokens the projection leaves out.
         let expected = (1.0 - report.spec_tokens as f64 / report.total_tokens as f64) * 100.0;
-        assert!((report.savings_percent - expected).abs() < 1e-9 && report.savings_percent > 0.0 && report.savings_percent < 100.0);
+        assert!(
+            (report.savings_percent - expected).abs() < 1e-9
+                && report.savings_percent > 0.0
+                && report.savings_percent < 100.0
+        );
     }
 
     #[test]
@@ -585,7 +634,11 @@ fn private_helper(x: u32) -> u32 = x
             assert!(out.contains(kept), "missing `{}` in:\n{}", kept, out);
         }
         // The body and every private item stay out, and the digests head the projection.
-        assert!(!out.contains("secret_local") && !out.contains("private_helper"), "{}", out);
+        assert!(
+            !out.contains("secret_local") && !out.contains("private_helper"),
+            "{}",
+            out
+        );
         let hashes = compute_dual_hashes(&module);
         assert!(out.contains(&format!("// spec_hash: {}", hashes.spec_hash)));
         assert!(out.contains(&format!("// body_hash: {}", hashes.body_hash)));

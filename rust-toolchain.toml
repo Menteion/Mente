@@ -1,0 +1,6 @@
+# The toolchain CI and every machine build with, so a lint or a format rule never differs
+# between them. Raise it in a pull request of its own.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

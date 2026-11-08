@@ -6,3 +6,6 @@ license.workspace = true
 description = "Mente native code generation through Cranelift; empty until milestone M1"
 
 [dependencies]
+
+[lints]
+workspace = true

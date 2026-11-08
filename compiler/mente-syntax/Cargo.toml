@@ -6,3 +6,6 @@ license.workspace = true
 description = "Mente (.mn) lexer, token stream, and declaration parser"
 
 [dependencies]
+
+[lints]
+workspace = true

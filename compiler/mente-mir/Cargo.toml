@@ -7,3 +7,6 @@ description = "100% from-scratch Cache-Line-Aligned Mente IR (MIR): Flat SoA RVS
 
 [dependencies]
 # STRICT ARCHITECTURAL RULE: mente-mir has ZERO frontend dependencies!
+
+[lints]
+workspace = true

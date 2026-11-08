@@ -14,3 +14,6 @@ mente-syntax = { path = "../mente-syntax" }
 mente-ast = { path = "../mente-ast" }
 mente-sema = { path = "../mente-sema" }
 mente-mir = { path = "../mente-mir" }
+
+[lints]
+workspace = true

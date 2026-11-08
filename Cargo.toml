@@ -14,3 +14,18 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0 WITH LLVM-exception"
 repository = "https://github.com/Menteion/Mente"
+
+# Lints every crate inherits with `[lints] workspace = true` (ROADMAP.md, M0a: Rust hygiene).
+# They keep the compiler inside a subset of Rust that translates to Mente.
+[workspace.lints.rust]
+# No runtime or FFI code exists yet, so no crate may use `unsafe`.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Mente has no `.unwrap()`: outside tests, absence and failure are handled where they occur.
+unwrap_used = "deny"
+expect_used = "deny"
+# No stand-ins (docs/design-brief.md, section 5).
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

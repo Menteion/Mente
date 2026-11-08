@@ -32,6 +32,9 @@ jobs:
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    env:
+      # A warning fails the build (ROADMAP.md, M0a: Rust hygiene).
+      RUSTFLAGS: -D warnings
     defaults:
       run:
         shell: bash
@@ -39,11 +42,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the stable Rust toolchain
+      - name: Install the toolchain rust-toolchain.toml pins
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install
           rustc --version
+      - name: rustfmt
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo fmt --all --check
+      - name: clippy
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo clippy --all-targets --workspace --locked -- -D warnings
       - name: cargo test
         run: cargo test --locked
       - name: mn spec
@@ -52,6 +60,40 @@ jobs:
         run: cargo run --locked --bin mn -- test --mutate
       - name: mn view --spec
         run: cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+
+  coverage:
+    # Reported, not required: line coverage of the workspace's tests, in the run summary and as lcov.
+    name: Coverage
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_LLVM_COV_VERSION: "0.9.1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins, with llvm-tools
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-llvm-cov
+          key: cargo-llvm-cov-${{ runner.os }}-${{ env.CARGO_LLVM_COV_VERSION }}
+      - name: Install cargo-llvm-cov
+        run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version "$CARGO_LLVM_COV_VERSION"
+      - name: Measure
+        run: |
+          cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+          {
+            echo '## Line coverage'
+            echo '```text'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-lcov
+          path: lcov.info
 
   docs:
     name: Documentation
