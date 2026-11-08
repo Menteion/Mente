@@ -187,7 +187,7 @@ A `Target` in `spec/*.md` is a number with a protocol here. A figure without a p
   ```
 - **Regression tolerance**: the CI job "Projection benchmark" runs the protocol on every pull request, on GitHub's x86-64 `ubuntu-24.04` runner, and fails when a median exceeds its baseline in `compiler/mente-cli/tests/projection-baseline.txt` by more than 50%. Shared runners vary from run to run, so the tolerance is wide.
 - **Machine**: record the CPU, OS and power mode with each result.
-- **Last result** (2026-11-05, AMD Ryzen 7 7735HS, Windows 11): median 45–92 µs, 99th percentile 110–208 µs. The median meets the target; nothing is promised for the 99th percentile.
+- **Last result** (2026-11-08, GitHub x86-64 `ubuntu-24.04` runner, the CI job): median 22.5–36.5 µs, 99th percentile 35.7–48.1 µs, which are now the baselines. The median meets the target; nothing is promised for the 99th percentile. On 2026-11-05 an AMD Ryzen 7 7735HS under Windows 11 measured a median of 45–92 µs.
 
 ### Tier-1 re-check after an edit: 99th percentile under 5 ms
 

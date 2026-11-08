@@ -42,7 +42,7 @@ date: 2026-11-04
    - The projection has 38–60% fewer tokens than the full source on the four `examples/` modules.
    - `Implemented`: the projection, its digests included, is byte-identical from run to run and on x86-64 Linux, x86-64 Windows and AArch64 Linux, where CI compares it with the same golden file.
      <!-- @assert-count target="compiler/mente-cli/tests/reproducible.rs" symbol="fn test_projections_are_reproducible" min="1" reason="Each example projects identically twice and matches its golden file" -->
-   - `Target` **Latency target**: a median under 0.1 ms per module, from source in memory to projected blueprint, under [its protocol](../ROADMAP.md#mn-view---spec-projection-median-under-01-ms-per-module). Last measured 2026-11-05: median 45–92 µs, 99th percentile 110–208 µs across the examples, so the median meets the target. `mn view` prints a single cold run, which is slower and is not the protocol.
+   - `Target` **Latency target**: a median under 0.1 ms per module, from source in memory to projected blueprint, under [its protocol](../ROADMAP.md#mn-view---spec-projection-median-under-01-ms-per-module). Last measured 2026-11-08 on the CI runner: median 22.5–36.5 µs, 99th percentile 35.7–48.1 µs across the examples, so the median meets the target. `mn view` prints a single cold run, which is slower and is not the protocol.
 
 ## 2. Decision rationale and rejected alternatives
 

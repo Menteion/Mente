@@ -5,3 +5,7 @@
 # gets faster; raise one only in a pull request that says why.
 #
 # <module> <median µs>
+01_refinement_and_units.mn 25.7
+02_mechanical_sympathy_simd.mn 36.5
+03_colorless_concurrency_and_effects.mn 22.9
+04_comptime_and_graph_pool.mn 22.5
