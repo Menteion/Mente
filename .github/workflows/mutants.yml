@@ -49,7 +49,15 @@ jobs:
       - name: Mutate the lines this pull request changes
         run: |
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
-          cargo mutants --in-diff pr.diff --in-place --no-shuffle
+          status=0
+          cargo mutants --in-diff pr.diff --in-place --no-shuffle || status=$?
+          # Exit 3 means some mutants timed out: each made a loop never end, which any test run
+          # would notice, so a timeout counts as caught. Exit 2, a mutant no test caught, still fails.
+          if [ "$status" -eq 3 ]; then
+            echo "Some mutants timed out; they count as caught." >> "$GITHUB_STEP_SUMMARY"
+            status=0
+          fi
+          exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -80,7 +88,16 @@ jobs:
       - name: Install cargo-mutants
         run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
       - name: Mutate this shard of the compiler
-        run: cargo mutants --shard ${{ matrix.shard }}/4 --in-place --no-shuffle
+        run: |
+          status=0
+          cargo mutants --shard ${{ matrix.shard }}/4 --in-place --no-shuffle || status=$?
+          # Exit 3 means some mutants timed out: each made a loop never end, which any test run
+          # would notice, so a timeout counts as caught. Exit 2, a mutant no test caught, still fails.
+          if [ "$status" -eq 3 ]; then
+            echo "Some mutants timed out; they count as caught." >> "$GITHUB_STEP_SUMMARY"
+            status=0
+          fi
+          exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

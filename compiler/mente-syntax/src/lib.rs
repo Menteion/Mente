@@ -916,11 +916,10 @@ impl<'a> Parser<'a> {
         if *self.peek() == TokenKind::LBrace {
             let open = self.next();
             let start_b = open.span.end;
-            let mut end_b = start_b;
             while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
-                end_b = self.next().span.end;
+                self.next();
             }
-            end_b = self.expect_closing_brace("enum", &name)?.span.start;
+            let end_b = self.expect_closing_brace("enum", &name)?.span.start;
             for v in self.src[start_b..end_b].split(',') {
                 let t = v.trim();
                 if !t.is_empty() {
@@ -938,11 +937,10 @@ impl<'a> Parser<'a> {
         if *self.peek() == TokenKind::LBrace {
             let open = self.next();
             let start_b = open.span.end;
-            let mut end_b = start_b;
             while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
-                end_b = self.next().span.end;
+                self.next();
             }
-            end_b = self.expect_closing_brace("trait", &name)?.span.start;
+            let end_b = self.expect_closing_brace("trait", &name)?.span.start;
             for line in self.src[start_b..end_b].lines() {
                 let t = line.trim();
                 if !t.is_empty() {

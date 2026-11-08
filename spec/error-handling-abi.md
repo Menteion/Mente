@@ -21,8 +21,7 @@ date: 2026-11-04
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_error_type_follows_bang_in_return" min="1" reason="The error type after ! is recorded apart from the return type" -->
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_return_type_scan_respects_type_arguments" min="1" reason="A ! inside type arguments belongs to the argument" -->
 2. `Specified` **CPU Carry-Flag (`CF`) zero-overhead register ABI**:
-   - Today `CarryFlagAbiLowering` in `compiler/mente-codegen/src/lib.rs` only names the registers and flag below for each target; nothing emits machine code.
-   - **Not in the first native backend**: Cranelift, which Phase 3 uses, cannot return a status in the carry flag, so Phase 3 lowers `T ! E` to the two-register tagged return this hypothesis is measured against. The Carry-Flag convention waits for a custom emitter or a Cranelift fork (`mir-and-codegen.md`).
+   - **Not in the first native backend**: Cranelift, which checkpoint (c) of M1 brings in, cannot return a status in the carry flag, so the first native code lowers `T ! E` to the two-register tagged return this hypothesis is measured against. The Carry-Flag convention waits for the backend written in Mente in stage 3 (`mir-and-codegen.md`). Nothing emits machine code yet.
    - Rather than packing `T ! E` into a tagged memory union (`sizeof(Result<T, E>) = max(sizeof(T), sizeof(E)) + tag_padding`), Mente lowers `T ! E` directly to hardware status flags:
      - **Success return (`CF = 0`)**: Primary return register (`RAX` / `XMM0` on x86-64; `X0` on AArch64) carries `T`; `CLC` clears the Carry Flag.
      - **Error return (`CF = 1`)**: Secondary return register (`RDX` / `X1`) carries the compact error payload `E`; `STC` sets the Carry Flag.
@@ -42,6 +41,4 @@ date: 2026-11-04
 
 ## 3. Verification assertions
 
-<!-- @assert-count target="compiler/mente-codegen/src/lib.rs" symbol="CarryFlagAbiLowering" min="1" reason="Codegen names the registers and flag of the specified Carry-Flag (CF) error ABI" -->
-<!-- @assert-count target="compiler/mente-codegen/src/lib.rs" symbol="happy_path_tag_overhead_bytes" min="1" reason="The ABI descriptor records 0 tag bytes on the happy path" -->
 <!-- @assert-count target="examples/03_colorless_concurrency_and_effects.mn" symbol="! GatewayError" min="2" reason="Example 03 demonstrates unwrapped T ! E return signature with raise and postfix !" -->

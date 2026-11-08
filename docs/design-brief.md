@@ -20,7 +20,7 @@ Written 2026-11-06 for a Claude Code session that continues Mente development fr
   - a hand-written straight-line MIR region with an interpreter and a mutation gate;
   - `mn spec`.
 - **What does not exist:** function bodies are not parsed, nothing is type-checked, no `.mn` code is lowered, and no machine code is emitted. `docs/STATUS.md` lists every gap.
-- **Stand-ins already in the tree:** `mente-codegen` holds `CarryFlagAbiLowering` and `emit_spirv_binary`, placeholders for two `Hypothesis` features, and `test_carry_flag_abi_zero_overhead` asserts a value the code itself sets. Their comments say what they are, but they break the "No stand-ins" rule in section 5. Their removal in M0a was decided in [`codegen-placeholders`](design-review.md#codegen-placeholders).
+- **Stand-ins, since removed:** `mente-codegen` held `CarryFlagAbiLowering` and `emit_spirv_binary`, placeholders for two `Hypothesis` features, with a test asserting a value the code itself set. They broke the "No stand-ins" rule in section 5 and were removed in M0a ([`codegen-placeholders`](design-review.md#codegen-placeholders)); the crate stays, empty, until M1.
 - **Labels older than the evidence rule:** most `Implemented` claims in `spec/` are backed by a directive that names a function or a type, not a test. Under the rule in section 5, each needs a test or a lower label; [`implemented-evidence`](design-review.md#implemented-evidence) decided how M0a finds and resolves them, with `spec-guard claims`.
 
 ## 2. What Mente is
