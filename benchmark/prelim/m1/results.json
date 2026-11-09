@@ -1,0 +1,4723 @@
+{
+  "models": [
+    {
+      "id": "claude-sonnet-5-5",
+      "input": 2,
+      "output": 10
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "input": 0.1,
+      "output": 0.5
+    }
+  ],
+  "api_version": "2026-10-21",
+  "max_tokens": 16000,
+  "max_repairs": 10,
+  "thinking": "adaptive, each model's default; display omitted",
+  "sampling": "the defaults; API version 2026-10-21 accepts no temperature",
+  "commit": "5192dfa18548b282cb682ab6a7b8e611563cb5e9",
+  "budget": 5,
+  "system_prompt": "You write code in Mente, a new programming language that no model has been trained on.\nEverything you know about Mente is in its language card, below. Use only what it describes.\n\n# Mente Language Card (draft)\n\nHow to write Mente as of milestone M1, for an agent that has never seen it. This is the draft the syntax probe uses ([`syntax-probe`](design-review.md#syntax-probe)); the first version closes M1 ([`language-card`](design-review.md#language-card)). Every `mente` block below passes `mn check`, which a test holds it to. The full rules are in `spec/core-calculus.md` and `spec/grammar.md`.\n\n## What M1 has\n\nIntegers, `bool`, fixed-size arrays `[N]T`, functions with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and `continue`, `guard`, `return`, `requires` and `ensures`, refined integer types such as `u8[0..10]`, `todo` and `unreachable`. Nothing else: no strings, floats, structs, enums, slices, `for` loops, methods, generics, closures or error types yet. Using one is an error that names the milestone that brings it.\n\n## A module\n\n```mente\nmodule demo\n\n/// The larger of two values.\npub fn larger(a: i32, b: i32) -> i32 {\n  if a > b {\n    a\n  } else {\n    b\n  }\n}\n\npub fn square(x: i64) -> i64 = x * x\n```\n\n- A file is a module: `module name`, then declarations. `pub` makes a function visible outside the module.\n- A function's body is a block, or `= expression` for one expression.\n- A block's value is its last expression. `return value` leaves early.\n- A statement ends at the end of its line. There are no semicolons.\n- A line goes on to the next only when it ends with an operator, `,`, `(`, `[`, `{` or `=`, or inside parentheses and brackets. `else`, `{` and `invariant` may start their own line.\n\n## Bindings\n\n```mente\nmodule demo\n\npub fn total(a: [4]u32) -> u32 {\n  val first = a[0]\n  var sum: u32 = first\n  sum += a[1] + a[2] + a[3]\n  sum\n}\n```\n\n- `val` never changes; `var` can be assigned. Write `val` and `var`, never `let` or `let mut`.\n- A name is declared once in a function, its parameters and inner blocks included: no shadowing, and no binding named like a function of the module. Use a new name.\n- Every `val` and `var` is read, and every `var` is assigned somewhere; otherwise write `val`.\n- Every value is used. Discard one on purpose with `_ = f(x)`.\n- Assignment `x = e`, element assignment `a[i] = e`, and `+= -= *= /= %= &= |= ^= <<= >>=` apply to a `var` or a `mut` parameter.\n\n## Types\n\n- Integer types `i8` `i16` `i32` `i64` `i128`, `u8` `u16` `u32` `u64` `u128`, and `usize` (64 bits, unsigned). `bool`.\n- `[N]T` is an array of `N` values of type `T`; `N` is an integer literal. `a.len` is `N`. `[0; 8]` is eight zeros; `[1, 2, 3]` lists the elements.\n- An array is a value: binding, passing and returning it copies it. Two names never share one.\n- A refined type narrows an integer type: `u8[0..10]` holds 0 to 9, `i32[-5..=5]` holds -5 to 5. A bound is an integer literal, a `val` or read-only parameter, or `name.len`.\n- Literals take the type around them, and literals alone make an `i64`. `255_u8` states it.\n- `val x = a + b` takes the type of `a` and `b`. When they have different integer types, state it: `val total: u32 = small + big`.\n\n## Integer arithmetic\n\n- `+ - * / %` compute the exact result, whatever the types; `/` truncates toward zero, `%` takes the sign of the left operand.\n- A value is checked against its type where it lands: a binding, an assignment, an argument, a returned value, an array element. A value outside the range traps at run time, or is an error at compile time if the type is refined and the compiler cannot prove it fits.\n- There are no casts and no `as`: any integer expression may flow into any integer type, and is checked where it lands.\n- `val x = a + b` takes the operands' type when they share one. When they differ, state the type: `val x: u64 = a + b`.\n- A zero divisor traps, and so does an index outside its array.\n\n## Operators\n\nFrom loosest to tightest:\n\n| Operators | Meaning |\n| :--- | :--- |\n| `or` | logical or |\n| `and` | logical and |\n| `not` | logical not |\n| `==` `!=` `<` `<=` `>` `>=` | comparison; they do not chain |\n| `\\|` | bitwise or |\n| `^` | bitwise xor |\n| `&` | bitwise and |\n| `<<` `>>` | shifts |\n| `+` `-` | sum |\n| `*` `/` `%` | product |\n| `-` `~` | negation, bitwise not |\n| `a[i]` `a.len` | index, length |\n\n- Write `and`, `or`, `not`, never `&&`, `||` or `!`.\n- `not a == b` means `not (a == b)`. `x & mask == 0` means `(x & mask) == 0`.\n- `a < b < c` is an error: write `a < b and b < c`.\n\n## Control flow\n\n```mente\nmodule demo\n\npub fn count_down(n: u32) -> u32 {\n  var i = n\n  var steps: u32 = 0\n  while i > 0 {\n    i -= 1\n    if i == 3 {\n      continue\n    }\n    steps += 1\n  }\n  steps\n}\n\npub fn safe_div(a: i32, b: i32) -> i32 {\n  guard b != 0 else {\n    return 0\n  }\n  a / b\n}\n\npub fn sign(x: i32) -> i32 = if x < 0 { -1 } else if x > 0 { 1 } else { 0 }\n```\n\n- `if c { ... } else { ... }` is an expression when it has `else`. An `if` inside an operator's operand needs parentheses: `1 + (if c { 2 } else { 3 })`.\n- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A loop that needs a fact the compiler cannot infer states it after the condition: `while i < n invariant total <= i * 255 {`.\n- `guard c else { ... }` continues when `c` holds. Its block must leave: `return`, `break`, `continue`, `todo` or `unreachable`.\n- There is no `for`, `match`, ternary `? :`, `loop` or `do`.\n\n## Functions and `mut`\n\n```mente\nmodule demo\n\npub fn swap(mut a: [4]i32, i: usize[0..4], j: usize[0..4]) {\n  val t = a[i]\n  a[i] = a[j]\n  a[j] = t\n}\n\npub fn demo() -> i32 {\n  var v: [4]i32 = [1, 2, 3, 4]\n  swap(mut v, 0, 3)\n  v[0]\n}\n```\n\n- Parameters are read-only by default. A `mut` parameter receives a place, marked at the call: `swap(mut v, 0, 3)`. It is copied in when the call starts and copied back when it returns. The place has the parameter's type exactly: `var count: i32 = 0` for a `mut` parameter of type `i32`.\n- Never write `&x` or `&mut x`. There are no references, pointers or lifetimes.\n- In one call, a `mut` argument's variable may not appear in any other argument: `f(mut a[i], a[j])` is an error.\n- A function that returns nothing has no `->`.\n\n## Contracts\n\n```mente\nmodule demo\n\npub fn wrap_index(i: usize, len: usize) -> usize\n  requires len > 0\n  ensures result < len\n{\n  i % len\n}\n\npub fn scaled(x: u32, factor: u32) -> u32[0..=1000] {\n  val y = x * factor\n  guard y <= 1000 else {\n    return 1000\n  }\n  y\n}\n```\n\n- `requires` holds at every call, and `ensures` at every return, where `result` is the returned value.\n- The compiler proves contracts, refinements and loop invariants with simple interval and difference reasoning. When it cannot, it reports a value it could not rule out and suggests a `guard`, after which the condition is a known fact. A plain integer type needs no proof: it is checked at run time.\n- Write a contract, a refinement or an `invariant` only where the code needs the guarantee; the compiler infers the facts a loop's condition gives.\n\n## Unfinished and impossible cases\n\n- `todo(\"reason\")` stands for any value and traps when it runs. Use it for work you have not finished, never a placeholder that looks finished.\n- `unreachable(\"reason\")` stands for any value too, for a case you know cannot happen. It traps if it ever runs, and the compiler removes it where it proves the case impossible.\n\n## Habits from other languages that Mente rejects\n\n```text\nlet x = 1                // val x = 1\nlet mut y = 2            // var y = 2\nx = 1;                   // x = 1 (no semicolons)\nf(&mut v)                // f(mut v)\na && b, a || b, !a       // a and b, a or b, not a\nc ? a : b                // if c { a } else { b }\nx as u8                  // val y: u8 = x (checked where it lands)\nfor i in 0..n { }        // a while loop with a counter\n```",
+  "runs": [
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "count-primes-below",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.014902,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 806,
+            "output_tokens_details": {
+              "thinking_tokens": 634
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.014902,
+          "file": "claude-sonnet-5-5-count-primes-below-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "count-primes-below",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.013032,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 619,
+            "output_tokens_details": {
+              "thinking_tokens": 473
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.013032,
+          "file": "claude-sonnet-5-5-count-primes-below-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "count-primes-below",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.012742,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 590,
+            "output_tokens_details": {
+              "thinking_tokens": 439
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.012742,
+          "file": "claude-sonnet-5-5-count-primes-below-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "count-primes-below",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.013132,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 629,
+            "output_tokens_details": {
+              "thinking_tokens": 470
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.013132,
+          "file": "claude-sonnet-5-5-count-primes-below-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "count-primes-below",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.013072,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 623,
+            "output_tokens_details": {
+              "thinking_tokens": 475
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.013072,
+          "file": "claude-sonnet-5-5-count-primes-below-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "gcd",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.007678,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 79,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.007678,
+          "file": "claude-sonnet-5-5-gcd-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "gcd",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.007678,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 79,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.007678,
+          "file": "claude-sonnet-5-5-gcd-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "gcd",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.009028,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 214,
+            "output_tokens_details": {
+              "thinking_tokens": 135
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.009028,
+          "file": "claude-sonnet-5-5-gcd-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "gcd",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.007678,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 79,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.007678,
+          "file": "claude-sonnet-5-5-gcd-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "gcd",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.007678,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 79,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.007678,
+          "file": "claude-sonnet-5-5-gcd-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "isqrt",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.012144,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 529,
+            "output_tokens_details": {
+              "thinking_tokens": 400
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.012144,
+          "file": "claude-sonnet-5-5-isqrt-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "isqrt",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.012894,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 604,
+            "output_tokens_details": {
+              "thinking_tokens": 471
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.012894,
+          "file": "claude-sonnet-5-5-isqrt-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "isqrt",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.012724,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 587,
+            "output_tokens_details": {
+              "thinking_tokens": 454
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.012724,
+          "file": "claude-sonnet-5-5-isqrt-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "isqrt",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.012514,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 566,
+            "output_tokens_details": {
+              "thinking_tokens": 433
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.012514,
+          "file": "claude-sonnet-5-5-isqrt-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "isqrt",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.013184,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 633,
+            "output_tokens_details": {
+              "thinking_tokens": 503
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.013184,
+          "file": "claude-sonnet-5-5-isqrt-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "max-subarray-sum",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011326,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 419,
+            "output_tokens_details": {
+              "thinking_tokens": 261
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011326,
+          "file": "claude-sonnet-5-5-max-subarray-sum-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "max-subarray-sum",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011726,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 459,
+            "output_tokens_details": {
+              "thinking_tokens": 301
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011726,
+          "file": "claude-sonnet-5-5-max-subarray-sum-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "max-subarray-sum",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.012146,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 501,
+            "output_tokens_details": {
+              "thinking_tokens": 346
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.012146,
+          "file": "claude-sonnet-5-5-max-subarray-sum-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "max-subarray-sum",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011086,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 395,
+            "output_tokens_details": {
+              "thinking_tokens": 237
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011086,
+          "file": "claude-sonnet-5-5-max-subarray-sum-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "max-subarray-sum",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011556,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 442,
+            "output_tokens_details": {
+              "thinking_tokens": 284
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011556,
+          "file": "claude-sonnet-5-5-max-subarray-sum-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "mean8",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010468,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 346,
+            "output_tokens_details": {
+              "thinking_tokens": 258
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010468,
+          "file": "claude-sonnet-5-5-mean8-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "mean8",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011278,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 427,
+            "output_tokens_details": {
+              "thinking_tokens": 341
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011278,
+          "file": "claude-sonnet-5-5-mean8-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "mean8",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011348,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 434,
+            "output_tokens_details": {
+              "thinking_tokens": 346
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011348,
+          "file": "claude-sonnet-5-5-mean8-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "mean8",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010298,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 329,
+            "output_tokens_details": {
+              "thinking_tokens": 241
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010298,
+          "file": "claude-sonnet-5-5-mean8-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "mean8",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011158,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 415,
+            "output_tokens_details": {
+              "thinking_tokens": 327
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011158,
+          "file": "claude-sonnet-5-5-mean8-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-bits",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011222,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 434,
+            "output_tokens_details": {
+              "thinking_tokens": 337
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011222,
+          "file": "claude-sonnet-5-5-reverse-bits-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-bits",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010882,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 400,
+            "output_tokens_details": {
+              "thinking_tokens": 285
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010882,
+          "file": "claude-sonnet-5-5-reverse-bits-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-bits",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010822,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 394,
+            "output_tokens_details": {
+              "thinking_tokens": 283
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010822,
+          "file": "claude-sonnet-5-5-reverse-bits-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-bits",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010762,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 388,
+            "output_tokens_details": {
+              "thinking_tokens": 277
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010762,
+          "file": "claude-sonnet-5-5-reverse-bits-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-bits",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010852,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 397,
+            "output_tokens_details": {
+              "thinking_tokens": 286
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010852,
+          "file": "claude-sonnet-5-5-reverse-bits-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-in-place",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010582,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 349,
+            "output_tokens_details": {
+              "thinking_tokens": 247
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010582,
+          "file": "claude-sonnet-5-5-reverse-in-place-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-in-place",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.011562,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 447,
+            "output_tokens_details": {
+              "thinking_tokens": 348
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.011562,
+          "file": "claude-sonnet-5-5-reverse-in-place-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-in-place",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010782,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 369,
+            "output_tokens_details": {
+              "thinking_tokens": 267
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010782,
+          "file": "claude-sonnet-5-5-reverse-in-place-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-in-place",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010862,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 377,
+            "output_tokens_details": {
+              "thinking_tokens": 275
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010862,
+          "file": "claude-sonnet-5-5-reverse-in-place-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "reverse-in-place",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.010992,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 390,
+            "output_tokens_details": {
+              "thinking_tokens": 288
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.010992,
+          "file": "claude-sonnet-5-5-reverse-in-place-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "sort8",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.01304,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 596,
+            "output_tokens_details": {
+              "thinking_tokens": 434
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.01304,
+          "file": "claude-sonnet-5-5-sort8-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "sort8",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.01269,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 561,
+            "output_tokens_details": {
+              "thinking_tokens": 399
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.01269,
+          "file": "claude-sonnet-5-5-sort8-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "sort8",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.01385,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 677,
+            "output_tokens_details": {
+              "thinking_tokens": 517
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.01385,
+          "file": "claude-sonnet-5-5-sort8-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "sort8",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.01321,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 613,
+            "output_tokens_details": {
+              "thinking_tokens": 451
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.01321,
+          "file": "claude-sonnet-5-5-sort8-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "sort8",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.01399,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 691,
+            "output_tokens_details": {
+              "thinking_tokens": 531
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.01399,
+          "file": "claude-sonnet-5-5-sort8-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "count-primes-below",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0005171,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 350,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0005171,
+          "file": "claude-haiku-5-5-count-primes-below-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "count-primes-below",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0004216,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 159,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0004216,
+          "file": "claude-haiku-5-5-count-primes-below-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "count-primes-below",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0007086,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 733,
+            "output_tokens_details": {
+              "thinking_tokens": 585
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0007086,
+          "file": "claude-haiku-5-5-count-primes-below-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "count-primes-below",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0004216,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 159,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0004216,
+          "file": "claude-haiku-5-5-count-primes-below-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "count-primes-below",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0007606000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3421,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 837,
+            "output_tokens_details": {
+              "thinking_tokens": 688
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0007606000000000001,
+          "file": "claude-haiku-5-5-count-primes-below-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "count_primes_below(10)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(2)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "count_primes_below(100)",
+              "expected": "25",
+              "leaves": false,
+              "got": "25",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "gcd",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0005264000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 364,
+            "output_tokens_details": {
+              "thinking_tokens": 285
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0005264000000000001,
+          "file": "claude-haiku-5-5-gcd-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "gcd",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0005069,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 325,
+            "output_tokens_details": {
+              "thinking_tokens": 246
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0005069,
+          "file": "claude-haiku-5-5-gcd-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "gcd",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0004959000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 303,
+            "output_tokens_details": {
+              "thinking_tokens": 224
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0004959000000000001,
+          "file": "claude-haiku-5-5-gcd-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "gcd",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0005694000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 450,
+            "output_tokens_details": {
+              "thinking_tokens": 371
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0005694000000000001,
+          "file": "claude-haiku-5-5-gcd-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "gcd",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0005549000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3444,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 421,
+            "output_tokens_details": {
+              "thinking_tokens": 342
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0005549000000000001,
+          "file": "claude-haiku-5-5-gcd-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "gcd(12, 18)",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "gcd(0, 5)",
+              "expected": "5",
+              "leaves": false,
+              "got": "5",
+              "pass": true
+            },
+            {
+              "call": "gcd(17, 5)",
+              "expected": "1",
+              "leaves": false,
+              "got": "1",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "isqrt",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008987,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1112,
+            "output_tokens_details": {
+              "thinking_tokens": 975
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008987,
+          "file": "claude-haiku-5-5-isqrt-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "isqrt",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008787,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1072,
+            "output_tokens_details": {
+              "thinking_tokens": 910
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008787,
+          "file": "claude-haiku-5-5-isqrt-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "isqrt",
+      "run": 3,
+      "solved": true,
+      "repairs": 1,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0021459,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1253,
+            "output_tokens_details": {
+              "thinking_tokens": 1091
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0009692,
+          "file": "claude-haiku-5-5-isqrt-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "2",
+              "pass": false
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "1",
+              "pass": false
+            }
+          ]
+        },
+        {
+          "attempt": 1,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4792,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1395,
+            "output_tokens_details": {
+              "thinking_tokens": 1158
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0011767000000000001,
+          "file": "claude-haiku-5-5-isqrt-3-1.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "isqrt",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0009172000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1149,
+            "output_tokens_details": {
+              "thinking_tokens": 1041
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0009172000000000001,
+          "file": "claude-haiku-5-5-isqrt-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "isqrt",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008417,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3427,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 998,
+            "output_tokens_details": {
+              "thinking_tokens": 890
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008417,
+          "file": "claude-haiku-5-5-isqrt-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "isqrt(0)",
+              "expected": "0",
+              "leaves": false,
+              "got": "0",
+              "pass": true
+            },
+            {
+              "call": "isqrt(15)",
+              "expected": "3",
+              "leaves": false,
+              "got": "3",
+              "pass": true
+            },
+            {
+              "call": "isqrt(16)",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "max-subarray-sum",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008698,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1026,
+            "output_tokens_details": {
+              "thinking_tokens": 873
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008698,
+          "file": "claude-haiku-5-5-max-subarray-sum-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "max-subarray-sum",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0007383,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 763,
+            "output_tokens_details": {
+              "thinking_tokens": 610
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0007383,
+          "file": "claude-haiku-5-5-max-subarray-sum-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "max-subarray-sum",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008158,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 918,
+            "output_tokens_details": {
+              "thinking_tokens": 750
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008158,
+          "file": "claude-haiku-5-5-max-subarray-sum-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "max-subarray-sum",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008788,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1044,
+            "output_tokens_details": {
+              "thinking_tokens": 886
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008788,
+          "file": "claude-haiku-5-5-max-subarray-sum-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "max-subarray-sum",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008298,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3568,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 946,
+            "output_tokens_details": {
+              "thinking_tokens": 791
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008298,
+          "file": "claude-haiku-5-5-max-subarray-sum-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "max_subarray_sum([-2, 1, -3, 4, -1, 2, 1, -5, 4, 0, 0, 0])",
+              "expected": "6",
+              "leaves": false,
+              "got": "6",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])",
+              "expected": "12",
+              "leaves": false,
+              "got": "12",
+              "pass": true
+            },
+            {
+              "call": "max_subarray_sum([-5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5])",
+              "expected": "-5",
+              "leaves": false,
+              "got": "-5",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "mean8",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0007134000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 726,
+            "output_tokens_details": {
+              "thinking_tokens": 652
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0007134000000000001,
+          "file": "claude-haiku-5-5-mean8-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "mean8",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0006844,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 668,
+            "output_tokens_details": {
+              "thinking_tokens": 594
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0006844,
+          "file": "claude-haiku-5-5-mean8-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "mean8",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0006964000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 692,
+            "output_tokens_details": {
+              "thinking_tokens": 604
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0006964000000000001,
+          "file": "claude-haiku-5-5-mean8-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "mean8",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0007364000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 772,
+            "output_tokens_details": {
+              "thinking_tokens": 684
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0007364000000000001,
+          "file": "claude-haiku-5-5-mean8-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "mean8",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0007849,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3504,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 869,
+            "output_tokens_details": {
+              "thinking_tokens": 784
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0007849,
+          "file": "claude-haiku-5-5-mean8-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "mean8([1, 2, 3, 4, 5, 6, 7, 8])",
+              "expected": "4",
+              "leaves": false,
+              "got": "4",
+              "pass": true
+            },
+            {
+              "call": "mean8([-1, -2, -3, -4, -5, -6, -7, -8])",
+              "expected": "-4",
+              "leaves": false,
+              "got": "-4",
+              "pass": true
+            },
+            {
+              "call": "mean8([10, 10, 10, 10, 10, 10, 10, 10])",
+              "expected": "10",
+              "leaves": false,
+              "got": "10",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-bits",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008171000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 946,
+            "output_tokens_details": {
+              "thinking_tokens": 840
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008171000000000001,
+          "file": "claude-haiku-5-5-reverse-bits-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-bits",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008296,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 971,
+            "output_tokens_details": {
+              "thinking_tokens": 865
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008296,
+          "file": "claude-haiku-5-5-reverse-bits-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-bits",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008731,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1058,
+            "output_tokens_details": {
+              "thinking_tokens": 951
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008731,
+          "file": "claude-haiku-5-5-reverse-bits-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-bits",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008791000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1070,
+            "output_tokens_details": {
+              "thinking_tokens": 967
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008791000000000001,
+          "file": "claude-haiku-5-5-reverse-bits-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-bits",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0007666,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3441,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 845,
+            "output_tokens_details": {
+              "thinking_tokens": 733
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0007666,
+          "file": "claude-haiku-5-5-reverse-bits-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_bits(1)",
+              "expected": "128",
+              "leaves": false,
+              "got": "128",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(6)",
+              "expected": "96",
+              "leaves": false,
+              "got": "96",
+              "pass": true
+            },
+            {
+              "call": "reverse_bits(255)",
+              "expected": "255",
+              "leaves": false,
+              "got": "255",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-in-place",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0005851000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 461,
+            "output_tokens_details": {
+              "thinking_tokens": 362
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0005851000000000001,
+          "file": "claude-haiku-5-5-reverse-in-place-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-in-place",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0006676000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 626,
+            "output_tokens_details": {
+              "thinking_tokens": 527
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0006676000000000001,
+          "file": "claude-haiku-5-5-reverse-in-place-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-in-place",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0006406000000000001,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 572,
+            "output_tokens_details": {
+              "thinking_tokens": 470
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0006406000000000001,
+          "file": "claude-haiku-5-5-reverse-in-place-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-in-place",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0006086,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 508,
+            "output_tokens_details": {
+              "thinking_tokens": 406
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0006086,
+          "file": "claude-haiku-5-5-reverse-in-place-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "reverse-in-place",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0006491,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3546,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 589,
+            "output_tokens_details": {
+              "thinking_tokens": 490
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0006491,
+          "file": "claude-haiku-5-5-reverse-in-place-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "reverse_in_place(mut [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])",
+              "expected": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "leaves": true,
+              "got": "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
+              "pass": true
+            },
+            {
+              "call": "reverse_in_place(mut [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "leaves": true,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "sort8",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0009345,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1161,
+            "output_tokens_details": {
+              "thinking_tokens": 999
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0009345,
+          "file": "claude-haiku-5-5-sort8-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "sort8",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0008295,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 951,
+            "output_tokens_details": {
+              "thinking_tokens": 793
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0008295,
+          "file": "claude-haiku-5-5-sort8-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "sort8",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.000797,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 886,
+            "output_tokens_details": {
+              "thinking_tokens": 724
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.000797,
+          "file": "claude-haiku-5-5-sort8-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "sort8",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0009415,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1175,
+            "output_tokens_details": {
+              "thinking_tokens": 1010
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0009415,
+          "file": "claude-haiku-5-5-sort8-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "sort8",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.000857,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3540,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1006,
+            "output_tokens_details": {
+              "thinking_tokens": 844
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.000857,
+          "file": "claude-haiku-5-5-sort8-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "sort8([5, 3, 8, 1, 9, 2, 7, 4])",
+              "expected": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 7, 8, 9]",
+              "pass": true
+            },
+            {
+              "call": "sort8([1, 1, 2, 2, 1, 1, 2, 2])",
+              "expected": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 2, 2, 2, 2]",
+              "pass": true
+            },
+            {
+              "call": "sort8([-1, 0, 1, -1, 0, 1, -1, 0])",
+              "expected": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "leaves": false,
+              "got": "[-1, -1, -1, 0, 0, 0, 1, 1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "spent": 0.4891591999999999,
+  "stopped_early": false
+}

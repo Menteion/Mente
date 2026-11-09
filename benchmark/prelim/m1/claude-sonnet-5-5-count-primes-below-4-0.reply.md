@@ -1,0 +1,21 @@
+```mente
+pub fn count_primes_below(n: u32) -> u32 {
+  var count: u32 = 0
+  var i: u32 = 2
+  while i < n {
+    var d: u32 = 2
+    var is_prime: bool = true
+    while d * d <= i and is_prime {
+      if i % d == 0 {
+        is_prime = false
+      }
+      d += 1
+    }
+    if is_prime {
+      count += 1
+    }
+    i += 1
+  }
+  count
+}
+```

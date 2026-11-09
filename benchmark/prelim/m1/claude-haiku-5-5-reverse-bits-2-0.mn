@@ -1,0 +1,12 @@
+module prelim
+
+pub fn reverse_bits(x: u8) -> u8 {
+  var result: u8 = 0
+  var i: u8 = 0
+  while i < 8 {
+    val bit = (x >> i) & 1
+    result = result | (bit << (7 - i))
+    i += 1
+  }
+  result
+}

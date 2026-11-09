@@ -1,0 +1,13 @@
+```mente
+pub fn reverse_bits(x: u8) -> u8 {
+  var y = x
+  var r: u8 = 0
+  var i: u8 = 0
+  while i < 8 {
+    r = r * 2 + y % 2
+    y = y / 2
+    i += 1
+  }
+  r
+}
+```
