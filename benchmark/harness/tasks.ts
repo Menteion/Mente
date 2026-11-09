@@ -21,6 +21,13 @@ export interface Task {
   hidden: string[];
 }
 
+/** The public M1 solve tasks a preliminary run gives the agent: the core ones or the others. */
+export function preliminaryTasks(tasks: Task[], core: boolean): Task[] {
+  return tasks.filter(
+    (t) => t.milestone === "M1" && t.set === "public" && t.kind === "solve" && t.core === core,
+  );
+}
+
 /** Reads one task file. */
 export function parseTask(text: string): Task {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text.replace(/\r\n/g, "\n"));

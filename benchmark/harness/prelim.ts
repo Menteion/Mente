@@ -1,12 +1,15 @@
-// The preliminary run of the core M1 tasks (docs/design-review.md, early-core-benchmark).
+// The preliminary runs of the M1 tasks (docs/design-review.md, early-core-benchmark and
+// benchmark-difficulty).
 //
-// Agents write the public core M1 solve tasks from the language card, with repairs: after each
+// Agents write the public M1 solve tasks, the core ones or the others, from the language card,
+// with repairs: after each
 // program the harness runs `mn check` and, when it passes, the task's examples on the reference
 // interpreter, and shows the agent what failed. A run ends when the program checks and passes
 // every example, or after 10 repairs. The hidden tests then score the last program. It is a
 // preliminary run, not a benchmark result, and it never opens the held-out set.
 //
-//   node benchmark/harness/prelim.ts --mn target/release/mn [--runs 5] [--budget 5] [--out prelim-out]
+//   node benchmark/harness/prelim.ts --mn target/release/mn [--tasks core|non-core] [--runs 5]
+//     [--budget 5] [--out prelim-out]
 //
 // It calls the Claude Messages API over HTTP with the key in ANTHROPIC_API_KEY. Each turn sends
 // the conversation so far as it was, the model's earlier replies unchanged, and the run stops
@@ -22,6 +25,7 @@ import {
   outcome,
   parseCase,
   parseTask,
+  preliminaryTasks,
   systemPrompt,
   userPrompt,
   type Case,
@@ -45,13 +49,12 @@ function option(name: string, fallback: string): string {
   return at > 0 && at + 1 < process.argv.length ? process.argv[at + 1] : fallback;
 }
 
-/** The public core M1 solve tasks, in the order of their ids. */
-function coreTasks(dir: string): Task[] {
+/** The public tasks of `dir`, in the order of their ids. */
+function readTasks(dir: string): Task[] {
   return readdirSync(dir)
     .filter((f) => f.endsWith(".md"))
     .sort()
-    .map((f) => parseTask(readFileSync(join(dir, f), "utf8")))
-    .filter((t) => t.milestone === "M1" && t.set === "public" && t.kind === "solve" && t.core);
+    .map((f) => parseTask(readFileSync(join(dir, f), "utf8")));
 }
 
 type Message = { role: "user" | "assistant"; content: unknown };
@@ -137,6 +140,8 @@ function failureClass(mn: string, code: string): string {
 
 async function main(): Promise<void> {
   const mn = option("mn", "target/release/mn");
+  const which = option("tasks", "core");
+  if (which !== "core" && which !== "non-core") throw new Error("--tasks is core or non-core");
   const runs = Number(option("runs", "5"));
   const budget = Number(option("budget", "5"));
   const out = option("out", "prelim-out");
@@ -144,7 +149,7 @@ async function main(): Promise<void> {
   if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
   const card = readFileSync("docs/language-card.md", "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");
   const system = systemPrompt(card);
-  const tasks = coreTasks("benchmark/tasks");
+  const tasks = preliminaryTasks(readTasks("benchmark/tasks"), which === "core");
   mkdirSync(out, { recursive: true });
   const record = {
     models: MODELS,
@@ -155,6 +160,7 @@ async function main(): Promise<void> {
     sampling: "the defaults; API version 2026-10-21 accepts no temperature",
     commit: process.env.GITHUB_SHA ?? "local",
     budget,
+    tasks: which,
     system_prompt: system,
     runs: [] as object[],
     spent: 0,

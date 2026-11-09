@@ -14,6 +14,7 @@ import {
   menteSignature,
   menteType,
   parseTask,
+  preliminaryTasks,
   systemPrompt,
   userPrompt,
 } from "./tasks.ts";
@@ -91,6 +92,30 @@ test("every public M1 solve task has a signature M1 can write", () => {
   for (const task of tasks) {
     assert.match(menteSignature(task.signature), /^pub fn \w+\(/, task.id);
   }
+});
+
+test("a preliminary run takes the public M1 solve tasks, the core ones or the others", () => {
+  const dir = "benchmark/tasks";
+  const all = readdirSync(dir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => parseTask(readFileSync(join(dir, f), "utf8")));
+  const core = preliminaryTasks(all, true);
+  const others = preliminaryTasks(all, false);
+  assert.ok(core.some((t) => t.id === "gcd"));
+  assert.ok(others.some((t) => t.id === "lower-bound"));
+  for (const [tasks, mark] of [
+    [core, true],
+    [others, false],
+  ] as const) {
+    for (const t of tasks) {
+      assert.deepEqual([t.milestone, t.set, t.kind, t.core], ["M1", "public", "solve", mark], t.id);
+    }
+  }
+  const solve = all.filter((t) => t.milestone === "M1" && t.set === "public" && t.kind === "solve");
+  assert.equal(core.length + others.length, solve.length);
+  const adversarial = all.filter((t) => t.kind === "adversarial").map((t) => t.id);
+  assert.ok(adversarial.length > 0);
+  assert.ok([...core, ...others].every((t) => !adversarial.includes(t.id)));
 });
 
 test("the program is the reply's first fenced block, or the whole reply", () => {
