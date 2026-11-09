@@ -15,6 +15,7 @@ mente-ast = { path = "../mente-ast" }
 mente-sema = { path = "../mente-sema" }
 mente-mir = { path = "../mente-mir" }
 mente-interp = { path = "../mente-interp" }
+mente-codegen = { path = "../mente-codegen" }
 
 [lints]
 workspace = true

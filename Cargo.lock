@@ -313,6 +313,7 @@ name = "mente-cli"
 version = "0.1.0"
 dependencies = [
  "mente-ast",
+ "mente-codegen",
  "mente-interp",
  "mente-mir",
  "mente-sema",
@@ -329,6 +330,9 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "gimli",
+ "mente-mir",
+ "mente-sema",
+ "mente-syntax",
  "object",
 ]
 

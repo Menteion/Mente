@@ -419,6 +419,48 @@ fn test_mn_run_prints_a_result_or_a_trap() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn test_mn_run_mir_prints_what_the_interpreter_prints() {
+    let dir = scratch("run-mir");
+    fs::write(
+        dir.join("prog.mn"),
+        "module t\npub fn bump(mut x: u8) -> bool {\n  x += 1\n  true\n}\npub fn half(x: u8) -> u8 = x / 2\npub fn main() -> u8 = half(9)\n",
+    )
+    .unwrap();
+    for args in [
+        &["run", "prog.mn"][..],
+        &["run", "prog.mn", "--call", "bump(mut 41)"],
+        &["run", "prog.mn", "--call", "bump(mut 255)"],
+    ] {
+        let reference = mn(&dir, args);
+        let through_mir = mn(&dir, &[args, &["--mir"]].concat());
+        assert_eq!(
+            through_mir.status.code(),
+            reference.status.code(),
+            "{:?}",
+            args
+        );
+        assert_eq!(
+            text(&through_mir.stdout),
+            text(&reference.stdout),
+            "{:?}",
+            args
+        );
+        assert_eq!(
+            text(&through_mir.stderr),
+            text(&reference.stderr),
+            "{:?}",
+            args
+        );
+    }
+    let main = mn(&dir, &["run", "prog.mn", "--mir"]);
+    assert_eq!(text(&main.stdout), "4\n");
+    let missing = mn(&dir, &["run", "prog.mn", "--mir", "--call", "nothing()"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(text(&missing.stderr).contains("no function `nothing`"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `mn check --watch` checks a module item by item and reports what it re-parsed and re-checked;
 /// `--rounds` stops it.
 #[test]
