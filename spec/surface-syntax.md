@@ -46,6 +46,11 @@ The body parser in `mente-syntax` reads the statements and expressions of M1 (`g
    - The parser recognises each and reports it under its own code, naming the Mente spelling: `let` and `let mut` (`E0118`); `&x` and `&mut x` (`E0119`); lifetimes such as `'a`, anywhere in a module (`E0120`); `async` and `await` (`E0121`); `.unwrap()` and `.expect(...)` (`E0122`); `::` in a path and the turbofish `::<>` (`E0123`); `&&`, `||` and `!` (`E0124`); the conditional `c ? a : b` (`E0125`); and the cast `as` (`E0126`). Where the idiom's meaning is plain, as for `let` and `&&`, the parser reads it as the Mente spelling and checks the rest of the statement.
    - A fix is `machine-applicable` only where the rewrite is unique: `let mut` to `var`, `let` to `val`, a call site's `&mut x` to `mut x`, `::<` to `<`, `&&`, `||` and `!` to `and`, `or` and `not` (with parentheses where `not` would group differently, as in `(not a) == b`), and `c ? a : b` to `if c { a } else { b }`. `.unwrap()` (a `guard` or `??`), `async` and `await` (`with` effects and `parallel (...)`), `<'a>` (a `from` clause or a parameter mode), `&x` elsewhere than a call, a path's `::`, and `as` need judgement and get suggestions.
    - A character the lexer does not know is an error, `E0105` (`grammar.md`, item 1).
+9. `Specified` **A case that cannot happen: `unreachable("reason")`** ([`unreachable-marker`](../docs/design-review.md#unreachable-marker)):
+   - `unreachable("reason")` is an expression of any type that traps when reached, for a case its author knows cannot happen, such as the `else` of a `guard` whose condition a contract implies but Tier 1 cannot prove.
+   - Tier 1 erases it where it proves the case impossible. Unlike `todo`, it marks finished code: a release build accepts it, and the agent benchmark scores it like any other code.
+   - `Implemented`: the body parser reads `todo("reason")` and `unreachable("reason")` with their string reasons, and reports a reason that is not a string literal (`E0111`).
+     <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_operators_bind_and_group_as_the_grammar_says" min="1" reason="todo and unreachable parse with their reasons" -->
 
 ## 2. Decision rationale and rejected alternatives
 

@@ -1,0 +1,12 @@
+```mente
+pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {
+  var i: usize = 0
+  while i < 16 {
+    if a[i] >= x {
+      return i
+    }
+    i += 1
+  }
+  16
+}
+```

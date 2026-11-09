@@ -1,0 +1,12 @@
+module probe
+
+pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {
+  var i: usize[0..=16] = 0
+  while i < 16 decreases 16 - i {
+    if a[i] >= x {
+      return i
+    }
+    i += 1
+  }
+  16
+}

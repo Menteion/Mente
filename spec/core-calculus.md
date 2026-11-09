@@ -13,7 +13,7 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
 
 ## 1. Specification
 
-1. `Specified` **What M1 contains**: integers, `bool`, fixed-size arrays `[N]T` held as values, functions with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and `continue` ([`loop-exits`](../docs/design-review.md#loop-exits)), `guard`, `return`, `requires` and `ensures`, refined integer types, and `todo`.
+1. `Specified` **What M1 contains**: integers, `bool`, fixed-size arrays `[N]T` held as values, functions with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and `continue` ([`loop-exits`](../docs/design-review.md#loop-exits)), `guard`, `return`, `requires` and `ensures`, refined integer types, `todo` and `unreachable`.
    - A program that uses anything else (structs, enums, `?T`, `T ! E`, effects, floating-point and fixed-point values, units, `own` and `in` parameters, views, generics, traits, `comptime`, `wrap<T>` and `sat<T>`, parallelism) is rejected with a diagnostic that names the construct and the milestone that brings it. Those mechanisms stay specified in their own files.
 2. `Specified` **Integer types are ranges** ([`integer-conversions`](../docs/design-review.md#integer-conversions)):
    - An integer value is a mathematical integer. An integer type names a range of them: `uN` holds `0 ..= 2^N - 1` and `iN` holds `-2^(N-1) ..= 2^(N-1) - 1`, for `N` in 8, 16, 32, 64 and 128. On every M1 target `usize` is 64 bits wide and unsigned.
@@ -22,7 +22,7 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
    - A plain type is a range checked at run time where Tier 1 cannot prove it; a refined type is a range proven at compile time (item 8).
 3. `Specified` **`bool` and arrays**:
    - `bool` holds `true` and `false`. No integer converts to `bool` or back.
-   - `[N]T` holds `N` values of type `T`, where `N` is a non-negative integer literal and `T` is any M1 type, arrays included. `a.len` is `N`. An array is a value: binding, passing and returning it copies it, and no two bindings ever share one.
+   - `[N]T` holds `N` values of type `T`, where `N` is a non-negative integer literal and `T` is any M1 type, arrays included. `a.len` is `N`. An index may have any integer type, and is checked against `0 ..= N - 1`. An array is a value: binding, passing and returning it copies it, and no two bindings ever share one.
 4. `Specified` **Integer arithmetic is exact, and checked where it is narrowed** ([`overflow-check-cost`](../docs/design-review.md#overflow-check-cost)):
    - `+`, `-`, `*`, `/`, `%` and unary `-` compute the exact mathematical result, whatever the integer types of their operands. `/` truncates toward zero, `%` takes the sign of its left operand, and a zero divisor traps.
    - A value is narrowed, and checked against the type it enters, at a binding's initializer, an assignment, an argument, a returned value, an element of an array literal, and an element store. A value outside the type's range traps.
@@ -40,9 +40,10 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
    - A block runs its statements in order. Its value is its last statement when that is an expression; a function with a result type must produce a value of that type on every path that does not leave it by `return` or a trap.
    - `if c { a } else { b }` evaluates `c`, then one branch, and is an expression whose type both branches share. Without `else`, `if` is a statement.
    - `while c { body }` repeats `body` while `c` holds. `break` leaves the innermost loop, and `continue` starts its next iteration.
-   - `guard c else { body }` continues when `c` holds. Its `body` must not reach its end: it leaves by `return`, `break`, `continue` or `todo`. After a `guard`, `c` is a fact Tier 1 holds.
+   - `guard c else { body }` continues when `c` holds. Its `body` must not reach its end: it leaves by `return`, `break`, `continue`, `todo` or `unreachable`. After a `guard`, `c` is a fact Tier 1 holds.
    - `and` and `or` evaluate their right operand only when it decides the result; `not` negates.
    - `todo("reason")` has any type and traps when it runs (`surface-syntax.md`, item 7).
+   - `unreachable("reason")` has any type and traps when it runs; it states a case its author knows cannot happen, and Tier 1 erases it where it proves the case impossible (`surface-syntax.md`, item 9).
 7. `Specified` **Functions and parameter modes** (`mutable-value-semantics.md`):
    - A function's parameters are read-only by default. A read-only parameter is a value the function cannot change.
    - A `mut` parameter receives a place, marked at the call site: `f(mut x)` or `f(mut a[i])`. Its value is copied in when the call starts and copied back on every return, so the caller's place holds the parameter's final value.
@@ -50,11 +51,11 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
    - Arguments are evaluated left to right, each narrowed to its parameter's type, then the call runs. A function may call itself; running out of stack traps.
    - `requires` clauses are obligations at every call, and `ensures` clauses at every return of the function, where `result` names the returned value (`ghost-contracts-and-totality.md`, item 2). A clause outside the Tier-1 fragment needs `@checked`, which makes it a run-time check that traps when it fails, or `@prove`, which makes it a trusted axiom until `mn prove` runs.
 8. `Specified` **What Tier 1 must prove, and what may stay a run-time check** ([`gradual-verification`](../docs/design-review.md#gradual-verification)):
-   - Must be proven at compile time, or the program is rejected with the valuation Tier 1 cannot rule out and a `guard` suggestion: a value entering a refined type, a `requires` clause at a call, an `ensures` clause at a return, and a written loop `invariant`.
+   - Must be proven at compile time, or the program is rejected with the valuation Tier 1 cannot rule out and a `guard` suggestion: a value entering a refined type, a `requires` clause at a call, an `ensures` clause at a return, a written loop `invariant`, and a written `decreases` clause, whether or not the function is `@total`: its measure is non-negative and smaller at each round of its loop, or at each recursive call ([`loop-decreases`](../docs/design-review.md#loop-decreases)).
    - May stay a run-time check where Tier 1 cannot prove it, and is erased where it can: a value entering a plain integer type, an index inside its array, a non-zero divisor, and a shift amount in range. Tier 1 runs on refined and unrefined code alike.
-   - Tier 1's facts come from the refinements of parameters and bindings, `requires` clauses of the function, `ensures` clauses of its callees, `if`, `while` and `guard` conditions, assignments, and the inductive facts at each loop head, where a `break` is one more exit of the loop (`ghost-contracts-and-totality.md`, items 2 and 4).
+   - Tier 1's facts come from the refinements of parameters and bindings, `requires` clauses of the function, `ensures` clauses of its callees, `if`, `while` and `guard` conditions, assignments, and the inductive facts at each loop head, where a `break` is one more exit of the loop (`ghost-contracts-and-totality.md`, items 2 and 4). They include the facts of `%` and of division by a positive constant: `0 <= x % y` and `x % y < y` when `y > 0`, and `x / c` within its operand's bounds divided by `c`, so that `lo + (hi - lo) / 2` lies between `lo` and `hi`.
 9. `Specified` **Traps**:
-   - A trap ends the program. M1's traps are: a value outside the type it is narrowed into, a zero divisor, an index outside its array, a shift amount out of range, a `todo` reached, a failed `@checked` clause, and running out of stack.
+   - A trap ends the program. M1's traps are: a value outside the type it is narrowed into, a zero divisor, an index outside its array, a shift amount out of range, a `todo` or an `unreachable` reached, a failed `@checked` clause, and running out of stack.
    - The reference interpreter reports the trap's kind and the span of the operation that trapped. MIR and native code may defer checks within a region that has no visible effect and report the region instead (`refinement-and-fixed-point.md`, item 5); the three execution paths agree when they produce the same value, or trap of the same kind in the same region.
 10. `Specified` **Evaluation order and the program's result**:
     - Operands, arguments and the elements of an array literal are evaluated left to right. An element assignment `a[i] = e` evaluates `i`, then `e`, then checks the index.

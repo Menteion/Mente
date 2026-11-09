@@ -11,7 +11,7 @@ How to write Mente as of milestone M1, for an agent that has never seen it. This
 
 ## What M1 has
 
-Integers, `bool`, fixed-size arrays `[N]T`, functions with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and `continue`, `guard`, `return`, `requires` and `ensures`, refined integer types such as `u8[0..10]`, and `todo`. Nothing else: no strings, floats, structs, enums, slices, `for` loops, methods, generics, closures or error types yet. Using one is an error that names the milestone that brings it.
+Integers, `bool`, fixed-size arrays `[N]T`, functions with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and `continue`, `guard`, `return`, `requires` and `ensures`, refined integer types such as `u8[0..10]`, `todo` and `unreachable`. Nothing else: no strings, floats, structs, enums, slices, `for` loops, methods, generics, closures or error types yet. Using one is an error that names the milestone that brings it.
 
 ## A module
 
@@ -34,7 +34,7 @@ pub fn square(x: i64) -> i64 = x * x
 - A function's body is a block, or `= expression` for one expression.
 - A block's value is its last expression. `return value` leaves early.
 - A statement ends at the end of its line. There are no semicolons.
-- A line goes on to the next only when it ends with an operator, `,`, `(`, `[`, `{` or `=`, or inside parentheses and brackets. `else`, `{`, `invariant` and `decreases` may start their own line.
+- A line goes on to the next only when it ends with an operator, `,`, `(`, `[`, `{` or `=`, or inside parentheses and brackets. `else`, `{` and `invariant` may start their own line.
 
 ## Bindings
 
@@ -100,7 +100,7 @@ module demo
 pub fn count_down(n: u32) -> u32 {
   var i = n
   var steps: u32 = 0
-  while i > 0 decreases i {
+  while i > 0 {
     i -= 1
     if i == 3 {
       continue
@@ -121,8 +121,8 @@ pub fn sign(x: i32) -> i32 = if x < 0 { -1 } else if x > 0 { 1 } else { 0 }
 ```
 
 - `if c { ... } else { ... }` is an expression when it has `else`. An `if` inside an operator's operand needs parentheses: `1 + (if c { 2 } else { 3 })`.
-- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. Clauses come after the condition: `while lo < hi invariant lo <= hi decreases hi - lo {`.
-- `guard c else { ... }` continues when `c` holds. Its block must leave: `return`, `break`, `continue` or `todo`.
+- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A loop that needs a fact the compiler cannot infer states it after the condition: `while i < n invariant total <= i * 255 {`.
+- `guard c else { ... }` continues when `c` holds. Its block must leave: `return`, `break`, `continue`, `todo` or `unreachable`.
 - There is no `for`, `match`, ternary `? :`, `loop` or `do`.
 
 ## Functions and `mut`
@@ -153,26 +153,30 @@ pub fn demo() -> i32 {
 ```mente
 module demo
 
-pub fn clamp(x: i32, lo: i32, hi: i32) -> i32
-  requires lo <= hi
-  ensures lo <= result and result <= hi
+pub fn wrap_index(i: usize, len: usize) -> usize
+  requires len > 0
+  ensures result < len
 {
-  if x < lo {
-    lo
-  } else if x > hi {
-    hi
-  } else {
-    x
+  i % len
+}
+
+pub fn scaled(x: u32, factor: u32) -> u32[0..=1000] {
+  val y = x * factor
+  guard y <= 1000 else {
+    return 1000
   }
+  y
 }
 ```
 
 - `requires` holds at every call, and `ensures` at every return, where `result` is the returned value.
-- The compiler proves contracts, refinements and loop invariants with simple interval and difference reasoning. When it cannot, it reports a value it could not rule out and suggests a `guard`. A plain integer type needs no proof: it is checked at run time.
+- The compiler proves contracts, refinements and loop invariants with simple interval and difference reasoning. When it cannot, it reports a value it could not rule out and suggests a `guard`, after which the condition is a known fact. A plain integer type needs no proof: it is checked at run time.
+- Write a contract, a refinement or an `invariant` only where the code needs the guarantee; the compiler infers the facts a loop's condition gives.
 
-## Unfinished work
+## Unfinished and impossible cases
 
-`todo("reason")` stands for any value and traps when it runs. Use it instead of a placeholder that looks finished.
+- `todo("reason")` stands for any value and traps when it runs. Use it for work you have not finished, never a placeholder that looks finished.
+- `unreachable("reason")` stands for any value too, for a case you know cannot happen. It traps if it ever runs, and the compiler removes it where it proves the case impossible.
 
 ## Habits from other languages that Mente rejects
 
