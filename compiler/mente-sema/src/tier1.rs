@@ -13,6 +13,8 @@
 //!
 //! [`tier1-counterexample`]: ../../docs/design-review.md#tier1-counterexample
 
+use std::collections::BTreeSet;
+
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
     Arg, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind, FnSyntax,
@@ -990,11 +992,14 @@ fn run(f: &Function, callees: &[Option<Callee>], src: &str) -> (Report, Vec<Retr
     (fx.report, fx.retries)
 }
 
-/// The fix that declares a `var` refined, offered before the `guard` for the `E0502` of `r`:
-/// Tier 1 checks the function again with each candidate declared so, the `var` the value reads
-/// first and then every other `var` of the same integer type declared without a refinement, in
-/// order, and offers the first after which that obligation holds and no other fails. It runs only
-/// once an obligation has failed, so code that proves pays nothing for it.
+/// The fix that declares a `var` refined, offered before the `guard` for the `E0502` of `r`, when
+/// the value is a binding's name: Tier 1 checks the function again with each candidate declared
+/// so, in the order of declaration, and offers the first after which that obligation holds and no
+/// other fails. The candidates are that binding and the bindings named with it in a comparison,
+/// each a `var` of the refinement's integer type declared without a refinement. A refinement of
+/// any other `var` gives Tier 1 no fact about the value, and trying it would only slow the
+/// re-check of an edit. It runs only once an obligation has failed, so code that proves pays
+/// nothing for it.
 fn refined_var_fix(
     f: &Function,
     callees: &[Option<Callee>],
@@ -1006,15 +1011,14 @@ fn refined_var_fix(
     let key = |d: &Diagnostic| (d.code, d.primary.start, d.primary.end);
     let failed = key(&before[r.diagnostic]);
     let bindings = &f.resolution.bindings;
-    let others = (0..bindings.len()).filter(|b| Some(*b) != r.read);
-    for b in r.read.into_iter().chain(others) {
+    let tree = &f.syntax.tree;
+    for b in compared_with(tree, f.resolution, r.read?) {
         let Some(t) = bindings[b]
             .ty
             .filter(|_| bindings[b].kind == BindingKind::Var)
         else {
             continue;
         };
-        let tree = &f.syntax.tree;
         let TypeKind::Int {
             name: declared,
             refinement: None,
@@ -1052,6 +1056,47 @@ fn refined_var_fix(
         }
     }
     None
+}
+
+/// Binding `b` and the bindings named with it in a comparison of the function, by index in the
+/// order of declaration. A name counts where arithmetic reaches it, as in `lo + 1 < hi`, and not
+/// inside an index: `a[i] > a[best]` compares elements, and says nothing of `i` and `best`.
+fn compared_with(tree: &Tree, resolution: &Resolution, b: usize) -> BTreeSet<usize> {
+    let mut out = BTreeSet::from([b]);
+    for (i, e) in tree.exprs.iter().enumerate() {
+        let comparison = matches!(
+            e.kind,
+            ExprKind::Binary {
+                op: BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge,
+                ..
+            }
+        );
+        if comparison {
+            let names = named(tree, resolution, ExprId(i as u32));
+            if names.contains(&b) {
+                out.extend(names);
+            }
+        }
+    }
+    out
+}
+
+/// The bindings `e` names where arithmetic reaches them, by index.
+fn named(tree: &Tree, resolution: &Resolution, e: ExprId) -> Vec<usize> {
+    let mut out: Vec<usize> = resolution.names[e.0 as usize]
+        .iter()
+        .map(|id| id.0 as usize)
+        .collect();
+    if let ExprKind::Binary { lhs, rhs, .. } = &tree.expr(e).kind {
+        out.extend(named(tree, resolution, *lhs));
+        out.extend(named(tree, resolution, *rhs));
+    }
+    out
 }
 
 fn is_int_type(tree: &Tree, t: TypeId) -> bool {
@@ -5349,11 +5394,23 @@ mod tests {
 
     #[test]
     fn test_the_refined_var_may_be_one_the_value_does_not_read() {
-        // `lo`, which the result reads, is tried first and fails at `lo = mid + 1`; `hi` bounds it.
-        let src = "pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {\n  var lo: usize = 0\n  var hi: usize = 16\n  while lo < hi {\n    val mid = lo + (hi - lo) / 2\n    if a[mid] < x {\n      lo = mid + 1\n    } else {\n      hi = mid\n    }\n  }\n  lo\n}";
-        assert_eq!(fix_messages(src)[0], "declare `hi` as `usize[0..=16]`");
-        let applied = apply_fix(&module(src), &diagnostics(src)[0].fixes[0]).unwrap();
-        assert!(check_source(&applied).is_ok(), "{}", applied);
+        // `lo`, which the result reads, is tried first and fails at `lo = mid + 1`; `hi`, named
+        // with it in the loop's condition, directly or through arithmetic, bounds it.
+        let search = |cond: &str| {
+            format!("pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {{\n  var lo: usize = 0\n  var hi: usize = 16\n  while {} {{\n    val mid = lo + (hi - lo) / 2\n    if a[mid] < x {{\n      lo = mid + 1\n    }} else {{\n      hi = mid\n    }}\n  }}\n  lo\n}}", cond)
+        };
+        // A parameter is bounded by a `var` a `guard` compares it with.
+        let param = "pub fn f(a: [16]i32, n: usize) -> usize[0..=16] {\n  var hi: usize = 16\n  while hi > 0 and a[hi - 1] > 0 {\n    hi -= 1\n  }\n  guard n <= hi else {\n    return 0\n  }\n  n\n}";
+        for src in [search("lo < hi"), search("hi - lo > 0"), param.to_string()] {
+            assert_eq!(
+                fix_messages(&src)[0],
+                "declare `hi` as `usize[0..=16]`",
+                "{}",
+                src
+            );
+            let applied = apply_fix(&module(&src), &diagnostics(&src)[0].fixes[0]).unwrap();
+            assert!(check_source(&applied).is_ok(), "{}", applied);
+        }
     }
 
     #[test]
@@ -5361,8 +5418,9 @@ mod tests {
         // Declared `usize[0..8]`, `x` would fail at its own declaration instead.
         let moved = "pub fn f(n: usize) -> usize[0..8] {\n  var x: usize = n\n  x = x / 2\n  x\n}";
         // `n`, a parameter, is never offered: refined, it would only move the obligation to every
-        // caller. Declared `usize[0..8]`, `k` fits, but the result still fails.
-        let unrelated = "pub fn f(n: usize) -> usize[0..8] {\n  var k: usize = 0\n  while k < 3 {\n    k += 1\n  }\n  n\n}";
+        // caller. Declared `usize[0..8]`, `k`, which the loop compares with `n`, fits, but the
+        // result still fails.
+        let unrelated = "pub fn f(n: usize) -> usize[0..8] {\n  var k: usize = 0\n  while k < n and k < 3 {\n    k += 1\n  }\n  n\n}";
         // With only a `val`, nothing is offered, and a `var` of another integer type is not.
         let val = "pub fn f(n: usize) -> usize[0..8] {\n  val x: usize = n % 9\n  x\n}";
         let other_type = "pub fn f(a: [8]i32) -> usize[0..8] {\n  var best: u32 = 0\n  var i: u32 = 1\n  while i < 8 {\n    if a[i] > a[best] {\n      best = i\n    }\n    i += 1\n  }\n  best\n}";
