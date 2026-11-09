@@ -11,7 +11,7 @@ date: 2026-11-04
 
 | Field | Value |
 | :--- | :--- |
-| Current milestone | M0b, done: the core calculus and the grammar of M1, the agent-benchmark corpus, the Tier-1 latency spike and the Cranelift debug-information spike, after M0a's documentation tools, CI, claim evidence, Rust hygiene, structured diagnostics, conformance suite and benchmarks. Function bodies are not parsed yet |
+| Current milestone | M0b, done (tag `m0b`): the core calculus and the grammar of M1, the agent-benchmark corpus, the Tier-1 latency spike and the Cranelift debug-information spike, after M0a's documentation tools, CI, claim evidence, Rust hygiene, structured diagnostics, conformance suite and benchmarks (tag `m0a`). The plan was reviewed against M0's evidence on 2026-11-09 and stands ([`milestone-reviews.md`](milestone-reviews.md)). Function bodies are not parsed yet |
 | Immediate next step | M1, the thin slice, from checkpoint (a): the body parser, name resolution and the type checker, `todo`, the reference interpreter `mente-interp`, the incremental architecture with `mn check --watch`, and `mn explain`, as [`ROADMAP.md`](../ROADMAP.md) sets out. The register entries M1 needs are decided during M0, in [`docs/design-review.md`](design-review.md) |
 | Specification | One single-decision file per mechanism in [`spec/`](../spec/README.md), plus `README.md` and `philosophy.md`; `cargo run --bin mn -- spec` prints the current file and directive counts |
 | Compiler crates | 6 Rust crates (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) |

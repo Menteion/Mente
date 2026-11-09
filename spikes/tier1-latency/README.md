@@ -29,7 +29,7 @@ cargo run --release -p spike-tier1-latency -- measure
 
 ## Result
 
-On 2026-11-09, in the workflow run for pull request 19, on GitHub's runners (4 vCPUs each): an AMD EPYC 7763 under Ubuntu 24.04 and under Windows Server 2025, and an Arm Neoverse-N2 under Ubuntu 24.04. The generated module has 200 functions, 105,649 bytes and 4,000 obligations, 2,200 of which must be proven; Tier 1 proves every one of those, and leaves 200 as run-time checks (the additions to an `i64` sum). Of the 1,000 timed edits, 471 made an obligation fail that Tier 1 must prove, 25 broke the parse, and 69 caused another diagnostic.
+On 2026-11-09 (tag `m0b`), in the workflow run for pull request 19, on GitHub's runners (4 vCPUs each): an AMD EPYC 7763 under Ubuntu 24.04 and under Windows Server 2025, and an Arm Neoverse-N2 under Ubuntu 24.04. The generated module has 200 functions, 105,649 bytes and 4,000 obligations, 2,200 of which must be proven; Tier 1 proves every one of those, and leaves 200 as run-time checks (the additions to an `i64` sum). Of the 1,000 timed edits, 471 made an obligation fail that Tier 1 must prove, 25 broke the parse, and 69 caused another diagnostic.
 
 | Runner | Re-check after an edit, one function re-parsed: median / 99th percentile | Whole module re-parsed instead: median / 99th percentile | Cold check of the whole module |
 | :--- | :--- | :--- | :--- |

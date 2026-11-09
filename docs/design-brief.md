@@ -574,7 +574,7 @@ Each risky mechanism gets a small experiment before the milestone that depends o
 
 #### Versions inside the foundation
 
-- **Every milestone ends with a version tag**, so that every benchmark result and baseline names the version it measured. A tag is not a release, and nothing is promised about it.
+- **Every milestone ends with a version tag**, so that every benchmark result and baseline names the version it measured. The tag is the milestone's name in lower case, such as `m1`, on the merge commit that ends it ([`milestone-tags`](design-review.md#milestone-tags)). A tag is not a release, and nothing is promised about it.
 - **The end of M6 is the first usable Mente:** an internal preview, marked unstable, with no promise of compatibility. It is used for Norman's own tools and for agent tasks beyond the benchmark, because real use finds what fixed benchmark tasks do not. M6 is the earliest point at which real programs can be written, since files, time and processes arrive with the standard library.
 - **There is no public release, and no separate minimum-viable track, before the gate.** Users before the design settles would either freeze its mistakes or have to follow its changes; the stability policy begins at the gate (section 7.3), and until then the language may still change.
 
@@ -589,7 +589,7 @@ The plan is a hypothesis, and the spikes and the first agent-benchmark runs can 
 - **A milestone takes far longer than the ones before it.** It is split, and the order of the remaining milestones is reconsidered.
 - **Real use of the M6 preview finds a gap the benchmark missed.** It enters the register, and is weighed before M7 starts.
 
-A change that follows from a review enters `docs/design-review.md` as an entry, and the plan changes only with Norman.
+Each review is recorded in [`docs/milestone-reviews.md`](milestone-reviews.md). A change that follows from a review enters `docs/design-review.md` as an entry, and the plan changes only with Norman.
 
 #### Every milestone ends when
 
