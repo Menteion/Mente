@@ -1,0 +1,3 @@
+// expect: E0108
+module conformance
+pub fn f() -> u8 = 0b102

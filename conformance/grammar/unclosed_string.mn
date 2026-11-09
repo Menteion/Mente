@@ -1,0 +1,5 @@
+// expect: E0106
+module conformance
+pub fn f() -> i32 {
+  todo("unfinished)
+}

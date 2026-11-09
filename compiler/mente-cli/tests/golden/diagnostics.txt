@@ -6,6 +6,22 @@
 {"version":1,"diagnostics":[]}
 == ghost-contracts-and-totality/total_without_a_loop.mn ==
 {"version":1,"diagnostics":[]}
+== grammar/binary_digit_out_of_base.mn ==
+{"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"`2` is not a binary digit","primary":{"file":"binary_digit_out_of_base.mn","start":55,"end":60,"line":3,"column":20},"related":[],"fixes":[]}]}
+== grammar/integer_beyond_u128.mn ==
+{"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1","primary":{"file":"integer_beyond_u128.mn","start":57,"end":96,"line":3,"column":22},"related":[],"fixes":[]}]}
+== grammar/lifetime_quote.mn ==
+{"version":1,"diagnostics":[{"code":"E0105","severity":"error","message":"`'` is not a character Mente uses; Mente writes no lifetimes and has no character literals","primary":{"file":"lifetime_quote.mn","start":49,"end":50,"line":3,"column":14},"related":[],"fixes":[]}]}
+== grammar/m1_literals_and_operators.mn ==
+{"version":1,"diagnostics":[]}
+== grammar/suffix_without_underscore.mn ==
+{"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"a literal's suffix starts with `_`: write `5_ms`","primary":{"file":"suffix_without_underscore.mn","start":56,"end":59,"line":3,"column":21},"related":[],"fixes":[{"message":"insert `_` before `ms`","applicability":"machine-applicable","edits":[{"span":{"file":"suffix_without_underscore.mn","start":57,"end":57,"line":3,"column":22},"replacement":"_"}]}]}]}
+== grammar/unclosed_string.mn ==
+{"version":1,"diagnostics":[{"code":"E0106","severity":"error","message":"this string literal is not closed on its line; close it with `\"`, and write a line break inside it as `\\n`","primary":{"file":"unclosed_string.mn","start":63,"end":75,"line":4,"column":8},"related":[],"fixes":[]}]}
+== grammar/unknown_character.mn ==
+{"version":1,"diagnostics":[{"code":"E0105","severity":"error","message":"`#` is not a character Mente uses; an attribute is written `@name`","primary":{"file":"unknown_character.mn","start":58,"end":59,"line":3,"column":23},"related":[],"fixes":[]}]}
+== grammar/unknown_escape.mn ==
+{"version":1,"diagnostics":[{"code":"E0107","severity":"error","message":"`\\q` is not an escape Mente knows; a string literal may use `\\\"`, `\\\\`, `\\n` and `\\t`","primary":{"file":"unknown_escape.mn","start":65,"end":67,"line":4,"column":10},"related":[],"fixes":[]}]}
 == hardware-contracts/branchless_raise.mn ==
 {"version":1,"diagnostics":[{"code":"E0402","severity":"error","message":"function `pick` is marked `@branchless`, but contains `raise`","primary":{"file":"branchless_raise.mn","start":55,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
 == hardware-contracts/branchless_straight_line.mn ==

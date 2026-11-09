@@ -1,0 +1,5 @@
+// expect: E0107
+module conformance
+pub fn f() -> i32 {
+  todo("a\qb")
+}
