@@ -790,11 +790,7 @@ impl Parser {
         .with_fix(
             Applicability::Suggestion,
             format!("compare `{}` twice, joined by `and`", middle_text),
-            Span {
-                start: b.end,
-                end: b.end,
-                ..b
-            },
+            Span { start: b.end, ..b },
             format!(" and {}", middle_text),
         );
         self.error(d);
