@@ -50,7 +50,9 @@ pub fn total(a: [4]u32) -> u32 {
 ```
 
 - `val` never changes; `var` can be assigned. Write `val` and `var`, never `let` or `let mut`.
-- A name is declared once in a function, its parameters and inner blocks included: no shadowing. Use a new name.
+- A name is declared once in a function, its parameters and inner blocks included: no shadowing, and no binding named like a function of the module. Use a new name.
+- Every `val` and `var` is read, and every `var` is assigned somewhere; otherwise write `val`.
+- Every value is used. Discard one on purpose with `_ = f(x)`.
 - Assignment `x = e`, element assignment `a[i] = e`, and `+= -= *= /= %= &= |= ^= <<= >>=` apply to a `var` or a `mut` parameter.
 
 ## Types

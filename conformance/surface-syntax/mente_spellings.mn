@@ -8,6 +8,6 @@ pub fn spellings(a: bool, b: bool, x: u32) -> u8 {
   var count: i32 = first
   bump(mut count)
   val both = a and b or not a
-  val small: u8 = if x < 256 { 1 } else { 0 }
+  val small: u8 = if x < 256 and both { 1 } else { 0 }
   small
 }

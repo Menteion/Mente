@@ -6,11 +6,13 @@
 //! whose `else` can end (`E0211`), an unannotated binding computed from operands of different
 //! integer types (`E0212`), a call with the wrong number of arguments (`E0213`) or the wrong
 //! `mut` marks (`E0214`), `.len` of a value that is not an array (`E0215`), and a bit
-//! operation on operands of different integer types (`E0216`). It checks the parameter modes
+//! operation on operands of different integer types (`E0216`), a value nobody uses, which
+//! `_ = e` discards on purpose (`E0217`), and a literal outside its suffix's type (`E0221`). It checks the parameter modes
 //! too: only a `var` or a `mut` parameter is assigned (`E0205`) or passed as `mut` (`E0206`),
 //! and a `mut` argument's binding appears in no other argument of its call (`E0207`).
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
 use mente_syntax::tree::BinaryOp::{BitAnd, BitOr, BitXor, Shl, Shr};
@@ -93,6 +95,7 @@ pub fn check(
             exprs: vec![Ty::Any; tree.exprs.len()],
             bindings,
         },
+        negated: negated_literals(tree),
         errors: Vec::new(),
     };
     for contract in &f.contracts {
@@ -111,7 +114,7 @@ pub fn check(
                 let place = c.as_result();
                 c.expect(e, &want, &place);
             }
-            None => c.effect(e),
+            None => c.discarded(e),
         },
         Some(Body::Block(b)) => c.body(b),
         None => {}
@@ -126,6 +129,8 @@ struct Checker<'a> {
     signatures: &'a [Option<Signature>],
     result: Option<Ty>,
     typing: Typing,
+    /// The literals that are the operand of a unary `-`, whose range reaches one further.
+    negated: HashSet<ExprId>,
     errors: Vec<Diagnostic>,
 }
 
@@ -198,10 +203,13 @@ impl Checker<'_> {
     fn compute(&mut self, e: ExprId, used: bool) -> Ty {
         let tree = self.tree;
         match &tree.expr(e).kind {
-            ExprKind::Int { suffix, .. } => suffix
-                .as_deref()
-                .and_then(IntTy::named)
-                .map_or(ANY_INT, Ty::int),
+            ExprKind::Int { value, suffix } => match suffix.as_deref().and_then(IntTy::named) {
+                Some(t) => {
+                    self.literal(e, *value, t);
+                    Ty::int(t)
+                }
+                None => ANY_INT,
+            },
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Name(_) => self.resolution.names[e.0 as usize]
                 .map_or(Ty::Any, |id| self.typing.bindings[id.0 as usize].clone()),
@@ -226,6 +234,56 @@ impl Checker<'_> {
                 otherwise,
             } => self.if_expr(e, *cond, *then, *otherwise, used),
         }
+    }
+
+    /// A literal with a suffix lies in the suffix's type (`E0221`).
+    fn literal(&mut self, e: ExprId, value: u128, t: IntTy) {
+        let limit = if self.negated.contains(&e) {
+            t.min_magnitude().max(t.max())
+        } else {
+            t.max()
+        };
+        if value > limit {
+            let span = self.span(e);
+            self.errors.push(Diagnostic::error(
+                "E0221",
+                span,
+                format!(
+                    "the literal {}_{} lies outside `{}`, which holds {}",
+                    value,
+                    t.name,
+                    t.name,
+                    t.range_text()
+                ),
+            ));
+        }
+    }
+
+    /// An expression statement whose value nobody uses: an error unless it has no value
+    /// (`E0217`), so that a result is never dropped by mistake.
+    fn discarded(&mut self, e: ExprId) {
+        self.effect(e);
+        let ty = self.typing.exprs[e.0 as usize].clone();
+        if matches!(ty, Ty::Unit | Ty::Any) {
+            return;
+        }
+        let span = self.span(e);
+        self.errors.push(
+            Diagnostic::error(
+                "E0217",
+                span,
+                format!(
+                    "this value, {}, is never used; use it, or discard it on purpose with `_ = ...`",
+                    ty.describe()
+                ),
+            )
+            .with_fix(
+                Applicability::Suggestion,
+                "discard it on purpose",
+                insertion_point(span),
+                "_ = ",
+            ),
+        );
     }
 
     fn unary(&mut self, op: UnaryOp, operand: ExprId) -> Ty {
@@ -685,7 +743,16 @@ impl Checker<'_> {
     fn stmt(&mut self, s: StmtId, used: bool) -> Ty {
         match &self.tree.stmt(s).kind {
             StmtKind::Expr(e) if used => return self.value(*e),
-            StmtKind::Expr(e) => self.effect(*e),
+            StmtKind::Expr(e) => self.discarded(*e),
+            StmtKind::Discard(e) => {
+                if self.value(*e) == Ty::Unit {
+                    let hint = self.no_value_hint(*e);
+                    self.mismatch(
+                        *e,
+                        format!("`_ =` discards a value, but this produces none{}", hint),
+                    );
+                }
+            }
             StmtKind::Binding {
                 name,
                 name_span,
@@ -887,6 +954,20 @@ impl Checker<'_> {
     }
 }
 
+/// The literals with a suffix that are the operand of a unary `-`.
+fn negated_literals(tree: &Tree) -> HashSet<ExprId> {
+    tree.exprs
+        .iter()
+        .filter_map(|e| match e.kind {
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => Some(operand),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether `e` names a place: a binding, or an element of one.
 pub fn is_place(tree: &Tree, e: ExprId) -> bool {
     match &tree.expr(e).kind {
@@ -905,6 +986,7 @@ pub fn block_ends(tree: &Tree, b: BlockId) -> bool {
         .all(|&s| match &tree.stmt(s).kind {
             StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => false,
             StmtKind::Expr(e)
+            | StmtKind::Discard(e)
             | StmtKind::Binding { init: e, .. }
             | StmtKind::Assign { value: e, .. } => expr_ends(tree, *e),
             StmtKind::While { .. } | StmtKind::Guard { .. } => true,
@@ -945,8 +1027,19 @@ mod tests {
         )
     }
 
-    fn diagnostics(src: &str) -> Vec<Diagnostic> {
+    /// Every diagnostic of the module.
+    fn all_diagnostics(src: &str) -> Vec<Diagnostic> {
         check_source(&module(src)).err().unwrap_or_default()
+    }
+
+    /// The diagnostics of the module but unused values and bindings (`E0217`, `E0218`): these
+    /// programs bind and compute values only to check them, and those codes have tests of
+    /// their own.
+    fn diagnostics(src: &str) -> Vec<Diagnostic> {
+        all_diagnostics(src)
+            .into_iter()
+            .filter(|d| !matches!(d.code, "E0217" | "E0218"))
+            .collect()
     }
 
     fn codes(src: &str) -> Vec<&'static str> {
@@ -1182,7 +1275,7 @@ mod tests {
 
     #[test]
     fn test_mut_parameters_are_marked_at_the_call_and_receive_places() {
-        let missing = diagnostics("pub fn f() {\n  var v: u8 = 0\n  touch(v)\n}");
+        let missing = diagnostics("pub fn f() {\n  var v: u8 = 0\n  v = 1\n  touch(v)\n}");
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].code, "E0214");
         assert_eq!(
@@ -1595,6 +1688,8 @@ mod tests {
                 two, body
             ))
             .iter()
+            // Not every body assigns the bindings these programs declare.
+            .filter(|d| d.code != "E0219")
             .map(|d| d.code)
             .collect::<Vec<_>>()
         };
@@ -1627,6 +1722,84 @@ pub fn f() {
 }"
             ),
             ["E0207"]
+        );
+    }
+
+    fn all_codes(src: &str) -> Vec<&'static str> {
+        all_diagnostics(src).iter().map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn test_a_value_nobody_uses_is_discarded_on_purpose() {
+        let d = all_diagnostics("pub fn f(a: u8) {\n  id(a)\n}");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0217");
+        assert_eq!(
+            d[0].message,
+            "this value, `u8`, is never used; use it, or discard it on purpose with `_ = ...`"
+        );
+        assert_eq!((d[0].primary.line, d[0].primary.col), (10, 3));
+        let fix = &d[0].fixes[0];
+        assert_eq!(fix.message, "discard it on purpose");
+        assert_eq!(fix.applicability, Applicability::Suggestion);
+        assert_eq!(fix.edits[0].replacement, "_ = ");
+        assert_eq!(fix.edits[0].span.start, fix.edits[0].span.end);
+        assert_eq!(fix.edits[0].span.start, d[0].primary.start);
+        assert_eq!(all_codes("pub fn f(a: u8) {\n  a + 1\n}"), ["E0217"]);
+        assert_eq!(all_codes("pub fn f(a: u8) = a + 1"), ["E0217"]);
+        assert_eq!(all_codes("pub fn f(a: u8) {\n  a\n}"), ["E0217"]);
+        assert_eq!(
+            all_codes("pub fn f(c: bool) {\n  if c {\n    id(1)\n  } else {\n    2\n  }\n}"),
+            ["E0217", "E0217"]
+        );
+        assert_eq!(
+            all_codes("pub fn f(c: bool) {\n  while c {\n    c\n  }\n}"),
+            ["E0217"]
+        );
+        for ok in [
+            "pub fn f(a: u8) {\n  _ = id(a)\n}",
+            "pub fn f(a: u8) {\n  _ = a + 1\n  nothing()\n}",
+            "pub fn f() {\n  todo(\"later\")\n}",
+            "pub fn f(c: bool) {\n  if c {\n    nothing()\n  }\n}",
+            "pub fn f() = nothing()",
+        ] {
+            assert_eq!(all_codes(ok), NONE, "{}", ok);
+        }
+        assert_eq!(all_codes("pub fn f() {\n  _ = nothing()\n}"), ["E0203"]);
+        assert_eq!(
+            messages("pub fn f() {\n  _ = nothing()\n}"),
+            ["`_ =` discards a value, but this produces none; `nothing` has no result type"]
+        );
+        assert_eq!(all_codes("pub fn f() {\n  _ = zz\n}"), ["E0201"]);
+        assert_eq!(
+            all_codes("pub fn f(c: bool) {\n  guard c else {\n    _ = unreachable(\"c\")\n  }\n}"),
+            NONE
+        );
+    }
+
+    #[test]
+    fn test_a_literal_lies_in_its_suffix_type() {
+        let d = all_diagnostics("pub fn f() -> u8 = 300_u8");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0221");
+        assert_eq!(
+            d[0].message,
+            "the literal 300_u8 lies outside `u8`, which holds 0 to 255"
+        );
+        assert_eq!((d[0].primary.line, d[0].primary.col), (9, 20));
+        assert_eq!(all_codes("pub fn f() -> u8 = 255_u8"), NONE);
+        assert_eq!(all_codes("pub fn f() -> i8 = 128_i8"), ["E0221"]);
+        assert_eq!(all_codes("pub fn f() -> i8 = 127_i8"), NONE);
+        assert_eq!(all_codes("pub fn f() -> i8 = -128_i8"), NONE);
+        assert_eq!(all_codes("pub fn f() -> i8 = -129_i8"), ["E0221"]);
+        assert_eq!(all_codes("pub fn f() -> u8 = -255_u8"), NONE);
+        assert_eq!(all_codes("pub fn f() -> u8 = -256_u8"), ["E0221"]);
+        assert_eq!(all_codes("pub fn f() -> u8 = 1 - 255_u8"), NONE);
+        assert_eq!(all_codes("pub fn f() -> u8 = 1 - 256_u8"), ["E0221"]);
+        assert_eq!(all_codes("pub fn f() -> i64 = -(1 + 128_i8)"), ["E0221"]);
+        assert_eq!(
+            all_codes("pub fn f() -> u128 = 340282366920938463463374607431768211455_u128"),
+            NONE
         );
     }
 }

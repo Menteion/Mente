@@ -1,0 +1,6 @@
+// expect: E0218
+module conformance
+pub fn f(a: u8) -> u8 {
+  val clamped = a
+  a
+}

@@ -1,0 +1,7 @@
+// expect: E0220
+module conformance
+pub fn id(x: u8) -> u8 = x
+pub fn f(a: u8) -> u8 {
+  val id = a
+  id
+}

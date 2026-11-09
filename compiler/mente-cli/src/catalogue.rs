@@ -502,8 +502,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A refinement's bounds are integer literals, names of bindings that cannot change in \
          the refined value's scope (a `val` or a read-only parameter), or `.len` of an array, \
          so that a refinement stays true for its whole scope.",
-        "module m\npub fn f(n: u8) {\n  var m: u8 = n\n  val i: u8[0..=m] = 0\n}\n",
-        "module m\npub fn f(n: u8) {\n  val m: u8 = n\n  val i: u8[0..=m] = 0\n}\n",
+        "module m\npub fn f(n: u8) -> u8 {\n  var m: u8 = n\n  m += 1\n  val i: u8[0..=m] = 0\n  i\n}\n",
+        "module m\npub fn f(n: u8) -> u8 {\n  val m: u8 = n\n  val i: u8[0..=m] = 0\n  i\n}\n",
     ),
     emitted(
         "E0210",
@@ -523,7 +523,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A `guard` whose `else` can end",
         "`guard c else { body }` continues only when `c` holds, so its `body` never reaches its \
          end: it leaves by `return`, `break`, `continue`, `todo` or `unreachable`.",
-        "module m\npub fn f(x: u8) -> u8 {\n  guard x > 0 else {\n    x\n  }\n  x\n}\n",
+        "module m\npub fn f(x: u8) -> u8 {\n  guard x > 0 else {\n    _ = x\n  }\n  x\n}\n",
         "module m\npub fn f(x: u8) -> u8 {\n  guard x > 0 else {\n    return 0\n  }\n  x\n}\n",
     ),
     emitted(
@@ -554,7 +554,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A `mut` parameter receives a place that the call marks, as in `f(mut x)`, so that a \
          reader sees at the call what it may change; the argument of a read-only parameter is \
          not marked. Adding a missing `mut` before a place is machine-applicable.",
-        "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  var v: u8 = 0\n  bump(v)\n}\n",
+        "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() -> u8 {\n  var v: u8 = 0\n  v = 1\n  bump(v)\n  v\n}\n",
         "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  var v: u8 = 0\n  bump(mut v)\n}\n",
     ),
     emitted(
@@ -576,6 +576,62 @@ pub const CATALOGUE: &[CodeEntry] = &[
          operand to a `val` of the other's type first.",
         "module m\npub fn f(a: u8, b: u16) -> u16 = a & b\n",
         "module m\npub fn f(a: u8, b: u16) -> u16 {\n  val wide: u16 = a\n  wide & b\n}\n",
+    ),
+    emitted(
+        "E0217",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A value nobody uses",
+        "An expression statement whose value nobody uses is an error, so that a result is never \
+         dropped by mistake: under value semantics, `sort(xs)` returns the sorted array and \
+         leaves `xs` as it was. Use the value, or discard it on purpose with `_ = e`, which is \
+         suggested.",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) {\n  id(a)\n}\n",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) {\n  _ = id(a)\n}\n",
+    ),
+    emitted(
+        "E0218",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A binding nobody reads",
+        "Every `val` and `var` is read somewhere: a binding nobody reads is often a value \
+         computed and then forgotten, such as a clamped value with the unclamped one returned. \
+         Assigning a binding does not read it. Parameters are exempt, since a signature is an \
+         interface its callers fix. Removing the binding is suggested.",
+        "module m\npub fn f(a: u8) -> u8 {\n  val clamped = a\n  a\n}\n",
+        "module m\npub fn f(a: u8) -> u8 {\n  val clamped = a\n  clamped\n}\n",
+    ),
+    emitted(
+        "E0219",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A `var` that is never assigned",
+        "A `var` says its value changes. One that is never assigned, nor passed as `mut`, is a \
+         `val`, and declaring it so is machine-applicable.",
+        "module m\npub fn f(a: u8) -> u8 {\n  var b = a\n  b\n}\n",
+        "module m\npub fn f(a: u8) -> u8 {\n  val b = a\n  b\n}\n",
+    ),
+    emitted(
+        "E0220",
+        FailureClass::ForeignIdiom,
+        "spec/core-calculus.md",
+        "A binding named like a function of its module",
+        "A name means one thing in a function and its module: a parameter, a `val` or a `var` \
+         never takes the name of a function of the module, as Rust lets a local hide one. \
+         Renaming the binding and its uses is suggested.",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) -> u8 {\n  val id = a\n  id\n}\n",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) -> u8 {\n  val b = a\n  b\n}\n",
+    ),
+    emitted(
+        "E0221",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A literal outside its suffix type",
+        "A literal with a suffix has the suffix type, so its value lies in that type: `255_u8` \
+         is a `u8`, and `300_u8` is an error. A literal right after a unary `-` may reach the \
+         type's smallest value, as in `-128_i8`.",
+        "module m\npub fn f() -> u8 = 300_u8\n",
+        "module m\npub fn f() -> u8 = 255_u8\n",
     ),
     reserved(
         "E0310",
@@ -1065,7 +1121,7 @@ mod tests {
                 _ if e.code == "E0116" => FailureClass::Type,
                 _ if ("E0118"..="E0126").contains(&e.code) => FailureClass::ForeignIdiom,
                 _ if e.code == "E0201" => FailureClass::UnknownName,
-                _ if e.code == "E0202" => FailureClass::ForeignIdiom,
+                _ if e.code == "E0202" || e.code == "E0220" => FailureClass::ForeignIdiom,
                 _ if e.code == "E0208" => FailureClass::Syntax,
                 "E01" => FailureClass::Syntax,
                 "E02" => FailureClass::Type,

@@ -1,5 +1,9 @@
 == core-calculus/assign_to_val.mn ==
 {"version":1,"diagnostics":[{"code":"E0205","severity":"error","message":"cannot assign to `x`: it is a `val`, which never changes; declare it with `var`","primary":{"file":"assign_to_val.mn","start":69,"end":70,"line":5,"column":3},"related":[{"message":"declared here","span":{"file":"assign_to_val.mn","start":61,"end":62,"line":4,"column":7}}],"fixes":[]}]}
+== core-calculus/binding_named_like_a_function.mn ==
+{"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`id` is the name of a function of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_function.mn","start":93,"end":95,"line":5,"column":7},"related":[],"fixes":[{"message":"rename this `id` and its uses to `id2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_function.mn","start":93,"end":95,"line":5,"column":7},"replacement":"id2"},{"span":{"file":"binding_named_like_a_function.mn","start":102,"end":104,"line":6,"column":3},"replacement":"id2"}]}]}]}
+== core-calculus/binding_never_read.mn ==
+{"version":1,"diagnostics":[{"code":"E0218","severity":"error","message":"`clamped` is never read; use it where it was meant to be used, or remove it","primary":{"file":"binding_never_read.mn","start":66,"end":73,"line":4,"column":7},"related":[],"fixes":[{"message":"remove `clamped`","applicability":"suggestion","edits":[{"span":{"file":"binding_never_read.mn","start":62,"end":77,"line":4,"column":3},"replacement":""}]}]}]}
 == core-calculus/binding_of_mixed_integers.mn ==
 {"version":1,"diagnostics":[{"code":"E0212","severity":"error","message":"`total` is computed from integers of different types, so it states its type; `u32` holds them all","primary":{"file":"binding_of_mixed_integers.mn","start":75,"end":80,"line":4,"column":7},"related":[],"fixes":[{"message":"declare `total` as `u32`","applicability":"suggestion","edits":[{"span":{"file":"binding_of_mixed_integers.mn","start":80,"end":80,"line":4,"column":12},"replacement":": u32"}]}]}]}
 == core-calculus/bit_operation_on_two_types.mn ==
@@ -9,7 +13,7 @@
 == core-calculus/function_as_value.mn ==
 {"version":1,"diagnostics":[{"code":"E0204","severity":"error","message":"`id` is a function, which M1 only calls: write `id(...)`","primary":{"file":"function_as_value.mn","start":82,"end":84,"line":4,"column":20},"related":[],"fixes":[]}]}
 == core-calculus/guard_that_falls_through.mn ==
-{"version":1,"diagnostics":[{"code":"E0211","severity":"error","message":"the `else` of a `guard` must not reach its end: leave by `return`, `break`, `continue`, `todo` or `unreachable`","primary":{"file":"guard_that_falls_through.mn","start":79,"end":90,"line":4,"column":20},"related":[],"fixes":[]}]}
+{"version":1,"diagnostics":[{"code":"E0211","severity":"error","message":"the `else` of a `guard` must not reach its end: leave by `return`, `break`, `continue`, `todo` or `unreachable`","primary":{"file":"guard_that_falls_through.mn","start":79,"end":94,"line":4,"column":20},"related":[],"fixes":[]}]}
 == core-calculus/later_error_type.mn ==
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an error type `T ! E` comes in M2; M1 does not have it","primary":{"file":"later_error_type.mn","start":60,"end":61,"line":3,"column":25},"related":[],"fixes":[]}]}
 == core-calculus/later_for_loop.mn ==
@@ -20,10 +24,12 @@
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string value comes in M2; M1 does not have it","primary":{"file":"later_string_value.mn","start":66,"end":72,"line":4,"column":11},"related":[],"fixes":[]}]}
 == core-calculus/len_of_a_non_array.mn ==
 {"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`.len` is an array's length, but this is `u8`","primary":{"file":"len_of_a_non_array.mn","start":63,"end":68,"line":3,"column":28},"related":[],"fixes":[]}]}
+== core-calculus/literal_outside_its_suffix.mn ==
+{"version":1,"diagnostics":[{"code":"E0221","severity":"error","message":"the literal 300_u8 lies outside `u8`, which holds 0 to 255","primary":{"file":"literal_outside_its_suffix.mn","start":55,"end":61,"line":3,"column":20},"related":[],"fixes":[]}]}
 == core-calculus/m1_slice.mn ==
 {"version":1,"diagnostics":[]}
 == core-calculus/missing_mut_mark.mn ==
-{"version":1,"diagnostics":[{"code":"E0214","severity":"error","message":"parameter `x` of `bump` is `mut`, so the call marks its argument `mut`, as in `bump(mut x)`","primary":{"file":"missing_mut_mark.mn","start":108,"end":109,"line":8,"column":8},"related":[],"fixes":[{"message":"mark the argument `mut`","applicability":"machine-applicable","edits":[{"span":{"file":"missing_mut_mark.mn","start":108,"end":108,"line":8,"column":8},"replacement":"mut "}]}]}]}
+{"version":1,"diagnostics":[{"code":"E0214","severity":"error","message":"parameter `x` of `bump` is `mut`, so the call marks its argument `mut`, as in `bump(mut x)`","primary":{"file":"missing_mut_mark.mn","start":122,"end":123,"line":9,"column":8},"related":[],"fixes":[{"message":"mark the argument `mut`","applicability":"machine-applicable","edits":[{"span":{"file":"missing_mut_mark.mn","start":122,"end":122,"line":9,"column":8},"replacement":"mut "}]}]}]}
 == core-calculus/missing_result.mn ==
 {"version":1,"diagnostics":[{"code":"E0210","severity":"error","message":"`f` returns `u8`, but its body can reach its end without one; an `if` without `else` has no value; end it with a value of that type, `return`, or `unreachable(\"reason\")`","primary":{"file":"missing_result.mn","start":64,"end":87,"line":4,"column":3},"related":[],"fixes":[]}]}
 == core-calculus/mut_argument_named_twice.mn ==
@@ -31,11 +37,15 @@
 == core-calculus/mut_argument_of_val.mn ==
 {"version":1,"diagnostics":[{"code":"E0206","severity":"error","message":"cannot pass as `mut` `v`: it is a `val`, which never changes; declare it with `var`","primary":{"file":"mut_argument_of_val.mn","start":112,"end":113,"line":8,"column":12},"related":[{"message":"declared here","span":{"file":"mut_argument_of_val.mn","start":91,"end":92,"line":7,"column":7}}],"fixes":[]}]}
 == core-calculus/refinement_over_a_var.mn ==
-{"version":1,"diagnostics":[{"code":"E0209","severity":"error","message":"a refinement's bound names `m`, which can change; a bound is a literal, a `val`, a read-only parameter, or `name.len`","primary":{"file":"refinement_over_a_var.mn","start":79,"end":88,"line":5,"column":10},"related":[],"fixes":[]}]}
+{"version":1,"diagnostics":[{"code":"E0209","severity":"error","message":"a refinement's bound names `m`, which can change; a bound is a literal, a `val`, a read-only parameter, or `name.len`","primary":{"file":"refinement_over_a_var.mn","start":94,"end":103,"line":6,"column":10},"related":[],"fixes":[]}]}
 == core-calculus/shadowing.mn ==
 {"version":1,"diagnostics":[{"code":"E0202","severity":"error","message":"`x` is already declared in this function, at line 3; Mente has no shadowing, so give this one a new name","primary":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"related":[{"message":"first declared here","span":{"file":"shadowing.mn","start":45,"end":46,"line":3,"column":10}}],"fixes":[{"message":"rename this `x` and its uses to `x2`","applicability":"suggestion","edits":[{"span":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"replacement":"x2"},{"span":{"file":"shadowing.mn","start":74,"end":75,"line":5,"column":3},"replacement":"x2"}]}]}]}
 == core-calculus/unknown_name.mn ==
 {"version":1,"diagnostics":[{"code":"E0201","severity":"error","message":"there is no binding named `cuont` here; did you mean `count`?","primary":{"file":"unknown_name.mn","start":64,"end":69,"line":3,"column":29},"related":[],"fixes":[{"message":"write `count`","applicability":"suggestion","edits":[{"span":{"file":"unknown_name.mn","start":64,"end":69,"line":3,"column":29},"replacement":"count"}]}]}]}
+== core-calculus/unused_value.mn ==
+{"version":1,"diagnostics":[{"code":"E0217","severity":"error","message":"this value, `u8`, is never used; use it, or discard it on purpose with `_ = ...`","primary":{"file":"unused_value.mn","start":83,"end":88,"line":5,"column":3},"related":[],"fixes":[{"message":"discard it on purpose","applicability":"suggestion","edits":[{"span":{"file":"unused_value.mn","start":83,"end":83,"line":5,"column":3},"replacement":"_ = "}]}]}]}
+== core-calculus/var_never_assigned.mn ==
+{"version":1,"diagnostics":[{"code":"E0219","severity":"error","message":"`b` is never assigned, so it is a `val`; a `var` says the value changes","primary":{"file":"var_never_assigned.mn","start":66,"end":67,"line":4,"column":7},"related":[],"fixes":[{"message":"declare it with `val`","applicability":"machine-applicable","edits":[{"span":{"file":"var_never_assigned.mn","start":62,"end":65,"line":4,"column":3},"replacement":"val"}]}]}]}
 == core-calculus/wrong_number_of_arguments.mn ==
 {"version":1,"diagnostics":[{"code":"E0213","severity":"error","message":"`id` takes 1 argument, but this call passes 2","primary":{"file":"wrong_number_of_arguments.mn","start":82,"end":90,"line":4,"column":20},"related":[],"fixes":[]}]}
 == core-calculus/wrong_type.mn ==

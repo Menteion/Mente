@@ -191,6 +191,8 @@ pub enum StmtKind {
     Return(Option<ExprId>),
     Break,
     Continue,
+    /// `_ = e`: a value discarded on purpose.
+    Discard(ExprId),
     Expr(ExprId),
 }
 
@@ -472,6 +474,7 @@ impl Tree {
             StmtKind::Return(None) => String::from("(return)"),
             StmtKind::Break => String::from("break"),
             StmtKind::Continue => String::from("continue"),
+            StmtKind::Discard(e) => format!("(discard {})", self.render_expr(*e)),
             StmtKind::Expr(e) => self.render_expr(*e),
         }
     }
