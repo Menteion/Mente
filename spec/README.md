@@ -41,7 +41,7 @@ Where a specification document and the source tree disagree, the source tree is 
 
 | Specification file | Orthogonal mechanism / decision | Governed crates |
 | :--- | :--- | :--- |
-| [philosophy.md](philosophy.md) | First-principles design philosophy and the five founding axioms | Workspace-wide |
+| [philosophy.md](philosophy.md) | First-principles design philosophy, the six founding axioms, their order and the non-goals | Workspace-wide |
 | [holographic-module.md](holographic-module.md) | Single `.mn` file model and AST dual hashing (`spec_hash` vs `body_hash`) | `compiler/mente-syntax`, `compiler/mente-ast` |
 | [surface-syntax.md](surface-syntax.md) | `{}` semicolon-free blocks, `val`/`var`, `->`, `guard`, `\|>`, `and`/`or`/`not` | `compiler/mente-syntax`, `compiler/mente-ast` |
 | [refinement-and-fixed-point.md](refinement-and-fixed-point.md) | Bounded interval types (`u32[0..N]`), dependent slice indexing, and fixed-point (`q16.16`) | `compiler/mente-sema`, `compiler/mente-mir` |

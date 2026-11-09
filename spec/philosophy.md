@@ -1,8 +1,8 @@
 ---
 title: First-Principles Design Philosophy and Founding Axioms
-version: 0.1.0
+version: 0.2.0
 status: active
-date: 2026-11-04
+date: 2026-11-09
 ---
 
 # First-Principles Design Philosophy and Founding Axioms
@@ -17,22 +17,45 @@ Mente (`.mn`) is a universal, statically verified, hardware-sympathetic programm
 2. **Runtime boundary and contract redundancy**: Traditional languages re-evaluate array bounds, null checks, and defensive preconditions at runtime on every call instead of proving them once at compile time and erasing them from the instruction stream.
 3. **Opaque compiler intermediate representations**: Upstream C++ compiler infrastructures (`LLVM` / `MLIR`) represent programs as pointer-heavy heap object graphs that cannot natively reason about value refinement intervals, hardware cache-line alignment, or branchless execution contracts.
 
-## 2. The five founding axioms
+## 2. The six founding axioms
 
-1. **Zero-compromise universality**: A single language syntax and type system MUST scale continuously from high-level domain pipelines and network services down to 64-byte L1 cache-line structures and `@branchless` SIMD loops. Reaching GPU/NPU compute through `@kernel` stays a hypothesis until it has an execution model (`hardware-contracts.md`).
-2. **Proof-erased zero-cost safety**: Every memory, bounds, dimensional unit, and precondition check (`requires` / `ensures`) MUST be discharged statically at compile time whenever provable, emitting zero runtime branch instructions and feeding proven intervals into the optimizer (`Contract-Guided Optimization`).
-3. **Sigil-free local reasoning**: Ownership (read-only by default, `mut`, `own`), mutation, error propagation (`!`), and side-effect capabilities (`with IO, Net`) MUST be explicit at function signatures and call sites without reference sigils (`&`, `&mut`, `*`) or viral lifetime parameters (`<'a>`).
+1. **Universality by layers**: A single language syntax and type system MUST scale from high-level domain pipelines and network services down to 64-byte L1 cache-line structures and `@branchless` SIMD loops. It does so through a small core that is safe, strict and simple, and opt-in layers (layouts, `@branchless`, `@simd`, regions and pools, units, fixed-point numbers) that add guarantees or control without changing the meaning of core code. Reaching GPU/NPU compute through `@kernel` stays a hypothesis until it has an execution model (`hardware-contracts.md`).
+2. **Proof-erased safety with visible cost**: Every memory, bounds, dimensional unit, and precondition check (`requires` / `ensures`) MUST be discharged statically at compile time whenever Tier 1 proves it, and then emits no run-time branch and feeds its proven intervals into the optimizer (`Contract-Guided Optimization`). A check that stays is visible to the reader: `mn view` marks every run-time check Tier 1 leaves, from M1's checkpoint (b). No cost is hidden: no hidden control flow, allocation, conversion or copy.
+3. **Local reasoning from signatures and call sites**: Ownership (read-only by default, `mut`, `own`), mutation, error propagation (`!`), and side-effect capabilities (`with IO, Net`) MUST be explicit at function signatures and call sites without reference sigils (`&`, `&mut`, `*`) or viral lifetime parameters (`<'a>`).
 4. **Hardware mechanical sympathy as a static contract**: Data layout (`AoS`, `SoA`, `Tiled`, `@layout`, `bitstruct`) and micro-architectural execution constraints (`@branchless`, `@simd`, `@no_alloc`, `@max_stack`) are compile-time verified invariants, never silent compiler hints.
 5. **Canonical single-path representation**: Every semantic concept has exactly one canonical syntactic form, making `.mn` source code unambiguous for both human engineers and automated synthesis/verification agents.
+6. **Every rejection teaches**: Every error names the rule it enforces and carries a fix: machine-applicable where it is certain, a suggestion otherwise; a failed proof carries a counterexample and a `guard` (Engineering Guardrail #1, `diagnostics.md`). A rule whose violations cannot be explained this way is not added.
 
 ### The order of the axioms' aims
 
-Safety and strictness come first, and performance is reached on top of them, never traded against them (Norman, 2026-11-09; [`strict-defaults`](../docs/design-review.md#strict-defaults)). Where a rule weighs strictness against convenience, Mente takes the strict side and lets the diagnostic and its fix carry the convenience. Performance comes from what strictness makes possible: a check Tier 1 proves is erased, a `mut` argument of its parameter's exact type is passed by address, and a value that never changes is a `val`.
+Safety and strictness come first, and performance is reached on top of them, never traded against them. Where the aims conflict, the earlier one wins (Norman, 2026-11-09; [`strict-defaults`](../docs/design-review.md#strict-defaults), [`philosophy-polish`](../docs/design-review.md#philosophy-polish)):
+
+1. **Safety**: no undefined behaviour, and no silently wrong value.
+2. **Strictness**: one meaning for each construct, and a mistake rejected as early as it can be found.
+3. **Predictable cost**: a reader sees what each construct costs (axiom 2).
+4. **Learnability of the core**: a small core with familiar spellings.
+5. **Peak performance**: reached through the opt-in layers of axiom 1, so it never makes the core harder.
+6. **Brevity**.
+
+Convenience for agents comes from diagnostics, fixes and the language card (axiom 6), never from relaxing an earlier aim. Performance comes from what strictness makes possible: a check Tier 1 proves is erased, a `mut` argument of its parameter's exact type is passed by address, and a value that never changes is a `val`.
+
+### Non-goals
+
+Each is decided in the spec file it names; a new one starts from an entry of the register ([`philosophy-polish`](../docs/design-review.md#philosophy-polish)).
+
+- No garbage collection: memory is values, regions and pools (`regions-and-pools.md`).
+- No exceptions: an error is a value of `T ! E`, propagated with `!` (`error-handling-abi.md`).
+- No null: an optional value is `?T` (`algebraic-types-and-null.md`).
+- No macros: `comptime` instead (`comptime-and-ffi.md`).
+- No global mutable state (`capability-effects.md`).
+- No implicit conversions and no casts (`core-calculus.md`, item 2).
+- No references or lifetimes: parameter modes instead (`mutable-value-semantics.md`).
 
 ## 3. Goal: the general-purpose language best suited to AI agents
 
 - Mente aims to be the general-purpose programming language best suited to AI agents writing code, while people review the result and decide whether to trust it ([`ai-first-purpose`](../docs/design-review.md#ai-first-purpose), decided 2026-11-08).
 - "Best suited" is a claim, so it is measured: by the agent benchmark of [`success-workload`](../docs/design-review.md#success-workload), against Rust and a control language, under its protocol in `ROADMAP.md`.
+- `Hypothesis`: strict rules pay off for agents. They raise the failures of a first attempt, and in return lower the repairs a solve needs and raise the final pass rate. The agent benchmark reports both by failure class from the end of M1, so the cost of each strict rule is visible ([`philosophy-polish`](../docs/design-review.md#philosophy-polish)).
 - The goal does not narrow axiom 1. Mechanical sympathy stays a principle of the whole language: defaults fit the hardware, hardware costs are visible to agents and reviewers, and the hardware contracts are its strongest form. Agents are weakest at exactly this knowledge, which other languages leave implicit, so making it explicit and checked is part of what suits Mente to them.
 - **The core subset.** No model has been trained on Mente, so an agent learns every mechanism from its context, and the language's surface area is the main cost of the goal. An agent can write correct, reasonably fast code using only the core of the language: types, `val` and `var`, parameter modes, `?T`, `T ! E` and effects. Refinements, units, explicit layouts and hardware contracts appear only where the code asks for them, and a refinement or a contract asks for a compile-time proof only where it is written. Code without refinements or contracts is a supported way to write Mente, not a draft: it is checked for types, effects, parameter modes and exclusivity; overflow, a zero divisor and an out-of-bounds index trap at run time; and a check Tier 1 cannot prove in such code stays a run-time check, never a compile-time error ([`gradual-verification`](../docs/design-review.md#gradual-verification)). The agent benchmark scores tasks that need only the core apart from those that use the other mechanisms.
 
