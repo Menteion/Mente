@@ -542,7 +542,7 @@ fn test_mn_view_checks_lists_the_run_time_checks_tier1_leaves() {
     let dir = scratch("checks");
     fs::write(
         dir.join("c.mn"),
-        "module m\npub fn sum(a: [16]i32, n: usize[0..=16]) -> i64 {\n  var i: usize = 0\n  var s: i64 = 0\n  while i < n {\n    s += a[i]\n    i += 1\n  }\n  s\n}\npub fn pick(xs: [4]u8, i: usize, d: u8) -> u8 = xs[i] / d << 1\npub fn one(x: u8) -> u8 = x\npub fn bad() -> u8 = zz\n",
+        "module m\npub fn sum(a: [16]i32, n: usize[0..=16]) -> i64 {\n  var i: usize = 0\n  var s: i64 = 0\n  while i < n {\n    s += a[i]\n    i += 1\n  }\n  s\n}\npub fn pick(xs: [4]u8, i: usize, d: u8, k: u8) -> u8 = xs[i] / d << k\npub fn one(x: u8) -> u8 = x\npub fn bad() -> u8 = zz\n",
     )
     .unwrap();
     fs::write(dir.join("broken.mn"), "module m\nlet x = 1\n").unwrap();
@@ -555,10 +555,11 @@ fn test_mn_view_checks_lists_the_run_time_checks_tier1_leaves() {
             "  6:10 narrowing into `i64`\n",
             "  Tier 1 erased 5 run-time checks\n",
             "fn pick\n",
-            "  11:49 narrowing into `u8`\n",
-            "  11:52 index into an array of 4\n",
-            "  11:57 divisor\n",
-            "  Tier 1 erased 2 run-time checks\n",
+            "  11:56 narrowing into `u8`\n",
+            "  11:59 index into an array of 4\n",
+            "  11:64 divisor\n",
+            "  11:69 shift amount below 8\n",
+            "  Tier 1 erased 1 run-time check\n",
             "fn one\n",
             "  Tier 1 erased 1 run-time check\n",
         )
