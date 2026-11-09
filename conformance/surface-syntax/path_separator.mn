@@ -1,0 +1,3 @@
+// expect: E0123
+module conformance
+pub fn f(a: i32, b: i32) -> i32 = cmp::max(a, b)

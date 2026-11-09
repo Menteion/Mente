@@ -11,7 +11,7 @@ date: 2026-11-04
 
 | Field | Value |
 | :--- | :--- |
-| Current milestone | M1, checkpoint (a), under way: the lexer of M1 and the body parser are done. Before it, M0b, done (tag `m0b`): the core calculus and the grammar of M1, the agent-benchmark corpus, the Tier-1 latency spike and the Cranelift debug-information spike, after M0a's documentation tools, CI, claim evidence, Rust hygiene, structured diagnostics, conformance suite and benchmarks (tag `m0a`). The plan was reviewed against M0's evidence on 2026-11-09 and stands ([`milestone-reviews.md`](milestone-reviews.md)). |
+| Current milestone | M1, checkpoint (a), under way: the lexer of M1, the body parser and the diagnostics for other languages' idioms are done. Before it, M0b, done (tag `m0b`): the core calculus and the grammar of M1, the agent-benchmark corpus, the Tier-1 latency spike and the Cranelift debug-information spike, after M0a's documentation tools, CI, claim evidence, Rust hygiene, structured diagnostics, conformance suite and benchmarks (tag `m0a`). The plan was reviewed against M0's evidence on 2026-11-09 and stands ([`milestone-reviews.md`](milestone-reviews.md)). |
 | Immediate next step | M1, the thin slice, from checkpoint (a): the syntax probe on the public M1 tasks before anything builds on the syntax, name resolution and the type checker, `todo`, the reference interpreter `mente-interp`, the incremental architecture with `mn check --watch`, and `mn explain`, as [`ROADMAP.md`](../ROADMAP.md) sets out. The register entries M1 needs are decided during M0, in [`docs/design-review.md`](design-review.md) |
 | Specification | One single-decision file per mechanism in [`spec/`](../spec/README.md), plus `README.md` and `philosophy.md`; `cargo run --bin mn -- spec` prints the current file and directive counts |
 | Compiler crates | 6 Rust crates (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) |
@@ -27,7 +27,6 @@ These gaps hold across every crate, and every `spec/*.md` claim that depends on 
 - **No type checker.** Refinement intervals, units, `?T`, `T ! E`, effects, parameter modes and the Law of Exclusivity are not checked.
 - **No lowering.** No `.mn` code reaches MIR. The MIR region `mn test` runs is built by hand in `compiler/mente-cli/src/main.rs`, with hand-written intervals.
 - **No code generation.** `mente-codegen` is empty until M1 lowers MIR to Cranelift.
-- **No idiom diagnostics yet.** The lexer reports a character Mente does not use (`E0105`), so `<'a>` is rejected; `&mut x` and `let` reach the body parser as an expression it does not expect, not yet as the idioms of `surface-syntax.md`, item 8.
 
 ---
 

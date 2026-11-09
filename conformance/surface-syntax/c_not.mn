@@ -1,0 +1,3 @@
+// expect: E0124
+module conformance
+pub fn f(a: bool) -> bool = !a

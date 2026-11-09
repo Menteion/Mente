@@ -122,7 +122,8 @@ This file is the normative grammar of the language `core-calculus.md` defines fo
      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_constructs_of_later_milestones_name_their_milestone" min="1" reason="Each construct of a later milestone names its milestone" -->
    - `Implemented` **Recovery**: after an error the parser skips to the next statement, past any brackets the statement opened, or in a header to its next clause, so one mistake yields one diagnostic.
      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_parse_errors_have_their_codes_and_recovery_reports_one" min="1" reason="One mistake yields one diagnostic, and the next statement parses" -->
-   - `Specified` **Other languages' idioms**: each idiom of `surface-syntax.md`, item 8, is reported with a diagnostic of its own.
+   - `Implemented` **Other languages' idioms**: each idiom of `surface-syntax.md`, item 8, is reported with a diagnostic of its own.
+     <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_other_languages_idioms_name_the_mente_spelling" min="1" reason="Each idiom has its own code" -->
 
 ## 2. Decision rationale and rejected alternatives
 
