@@ -36,6 +36,7 @@ fn main() {
         "test" => cmd_test(&args[1..]),
         "spec" => cmd_spec(&args[1..]),
         "explain" => cmd_explain(&args[1..]),
+        "run" => cmd_run(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -50,8 +51,90 @@ fn print_help() {
     println!("  mn check [--json] [file.mn | dir]");
     println!("                               Verify .mn syntax, 64B Cache-Line @layout, bitstruct, @total & @branchless contracts");
     println!("  mn explain [code]            Explain an error code, or list them all");
+    println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"]");
+    println!("                               Run main, or one call, on the reference interpreter");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
+}
+
+/// Runs a module on the reference interpreter: its `main`, or the call `--call` names. Prints
+/// the result's canonical form, or the trap and where it happened (exit 1); a module that
+/// does not check prints its diagnostics (exit 2).
+fn cmd_run(args: &[String]) {
+    let mut call = None;
+    let mut path = None;
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        if a == "--call" {
+            call = rest.next().cloned();
+        } else if !a.starts_with('-') {
+            path = Some(a.clone());
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("Usage: mn run <file.mn> [--call \"f(args)\"]");
+        process::exit(2);
+    };
+    let src = match fs::read_to_string(&path) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("error: cannot read `{}`: {}", path, e);
+            process::exit(2);
+        }
+    };
+    let module = match mente_sema::check_program(&src) {
+        Ok(m) => m,
+        Err(diagnostics) => {
+            for d in &diagnostics {
+                eprint!("{}", render_text(d, &path, &src));
+            }
+            process::exit(2);
+        }
+    };
+    let (name, args) = match call.as_deref().map(mente_interp::parse_call_modes) {
+        None => ("main".to_string(), Vec::new()),
+        Some(Some(parsed)) => parsed,
+        Some(None) => {
+            eprintln!(
+                "error: `--call` takes a call such as \"f(1, true, mut [2, 3])\"; got `{}`",
+                call.unwrap_or_default()
+            );
+            process::exit(2);
+        }
+    };
+    // An argument is marked `mut` exactly where its parameter is.
+    let params = module
+        .index(&name)
+        .and_then(|i| module.functions[i].as_ref())
+        .map(|f| f.syntax.params.clone())
+        .unwrap_or_default();
+    for ((is_mut, _), p) in args.iter().zip(&params) {
+        if *is_mut != p.is_mut {
+            eprintln!(
+                "error: parameter `{}` of `{}` is {}, so its argument is {}marked `mut`",
+                p.name,
+                name,
+                if p.is_mut { "`mut`" } else { "read-only" },
+                if p.is_mut { "" } else { "not " }
+            );
+            process::exit(2);
+        }
+    }
+    let marked: Vec<bool> = args.iter().map(|(m, _)| *m).collect();
+    let values = args.into_iter().map(|(_, v)| v).collect();
+    match mente_interp::call_leaving(&module, &name, values, mente_interp::Limits::default()) {
+        Ok((v, finals)) => {
+            println!("{}", v);
+            // What each `mut` argument is left holding.
+            for (_, last) in marked.iter().zip(finals).filter(|(m, _)| **m) {
+                println!("leaves {}", last);
+            }
+        }
+        Err(stop) => {
+            eprintln!("{}: {}", path, stop);
+            process::exit(1);
+        }
+    }
 }
 
 fn cmd_view(args: &[String]) {
@@ -735,7 +818,9 @@ mod tests {
             }
             let name = line.split(['=', '.']).next().unwrap_or("").trim();
             let allowed = if name.starts_with("mente-") {
-                krate != "mente-mir" && line.contains("path =")
+                krate != "mente-mir"
+                    && !(krate == "mente-interp" && matches!(name, "mente-mir" | "mente-codegen"))
+                    && line.contains("path =")
             } else {
                 name.starts_with("cranelift") && krate == "mente-codegen"
             };
@@ -765,8 +850,8 @@ mod tests {
             }
         }
         assert!(
-            crates >= 6,
-            "expected the six compiler crates, read {}",
+            crates >= 7,
+            "expected the seven compiler crates, read {}",
             crates
         );
         assert!(
@@ -789,6 +874,17 @@ mod tests {
             1
         );
         assert_eq!(dependency_policy_violations("mente-mir", manifest).len(), 3);
+        // The reference interpreter shares no code with the paths it checks.
+        let interp = "[dependencies]\nmente-sema = { path = \"../mente-sema\" }\nmente-mir = { path = \"../mente-mir\" }\nmente-codegen = { path = \"../mente-codegen\" }\n";
+        assert_eq!(
+            dependency_policy_violations("mente-interp", interp),
+            vec![
+                "mente-interp: [dependencies] mente-mir = { path = \"../mente-mir\" }".to_string(),
+                "mente-interp: [dependencies] mente-codegen = { path = \"../mente-codegen\" }"
+                    .to_string(),
+            ]
+        );
+        assert!(dependency_policy_violations("mente-cli", interp).is_empty());
         assert_eq!(
             dependency_policy_violations("mente-cli", "[dependencies]\nmente-ast = \"0.1\"\n")
                 .len(),

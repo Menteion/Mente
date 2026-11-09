@@ -40,6 +40,12 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
    - `Implemented`: the type checker gives each operator its operands: integers for arithmetic, shifts and ordering, `bool` for `and`, `or` and `not`, and two integers or two bools for `==` and `!=` (`E0203`); the operands of `&`, `|` and `^` have one integer type (`E0216`).
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_operators_take_the_kinds_of_operands_the_spec_gives_them" min="1" reason="Operators take the operands the spec gives them" -->
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_bit_operations_need_one_integer_type" min="1" reason="Bit operations on two integer types are E0216" -->
+   - `Implemented`: the reference interpreter computes integer arithmetic exactly, narrows a value at a binding's initializer, an assignment, an argument, a returned value, an array element and an element store, works the bit operations and shifts in their operand's type, and checks every operator on 128-bit operands. An intermediate of narrower operands whose magnitude needs more than 128 bits, such as `a * b * c` for `u64` values, traps until [`wide-intermediates`](../docs/design-review.md#wide-intermediates) settles its rule.
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_integer_arithmetic_is_exact_and_narrowed_where_it_lands" min="1" reason="Arithmetic is exact and narrowed where it lands" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_division_truncates_and_a_zero_divisor_traps" min="1" reason="Division truncates, the remainder takes the left sign, zero traps" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_bits_and_shifts_work_in_their_type" min="1" reason="Bit operations and shifts work in their type" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_wide_arithmetic_is_checked_at_each_operator" min="1" reason="128-bit operands are checked at each operator" -->
+     <!-- @assert-count target="compiler/mente-interp/src/int.rs" symbol="fn test_integers_add_subtract_and_multiply_exactly" min="1" reason="Exact integers add, subtract and multiply" -->
 5. `Specified` **The type of an unannotated binding** ([`integer-inference`](../docs/design-review.md#integer-inference)):
    - `val x = e` and `var x = e` take `e`'s type. When the integer operands of `e` all have one type, `e` has that type, so `a + b` with `a` and `b` of type `u8` is a `u8`, and a sum above 255 traps at the binding.
    - A binding takes a refined type only when it states one ([`refinement-inference`](../docs/design-review.md#refinement-inference)): an expression's type is the plain type of its operands, so with `lo: usize[0..64]`, `val m = lo + 1` is a `usize`. Tier 1 still knows from its facts that `m <= 64`.
@@ -91,6 +97,9 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_calls_match_their_signatures" min="1" reason="Calls match the number and types of their parameters" -->
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_mut_parameters_are_marked_at_the_call_and_receive_places" min="1" reason="mut marks match the parameters" -->
      <!-- @assert-count target="compiler/mente-sema/src/types.rs" symbol="fn test_a_mut_argument_has_its_parameters_type_exactly" min="1" reason="A mut argument has its parameter's type exactly" -->
+   - `Implemented`: the reference interpreter copies a `mut` parameter's final value back into its caller's place on every return, and arrays are values that binding, passing and returning copy.
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_mut_parameters_copy_back_into_the_place_passed" min="1" reason="A mut parameter is copied back on every return" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_arrays_are_values_indexed_within_their_length" min="1" reason="Arrays are values, indexed within their length" -->
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_only_a_var_or_a_mut_parameter_is_passed_as_mut" min="1" reason="A mut argument of a val or a read-only parameter is E0206" -->
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_a_mut_argument_is_named_by_no_other_argument" min="1" reason="A mut argument named by another argument is E0207" -->
      <!-- @assert-count target="compiler/mente-sema/src/names.rs" symbol="fn test_functions_are_called_and_values_are_not" min="1" reason="A function used as a value, or a value called, is E0204" -->
@@ -102,9 +111,19 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
 9. `Specified` **Traps**:
    - A trap ends the program. M1's traps are: a value outside the type it is narrowed into, a zero divisor, an index outside its array, a shift amount out of range, a `todo` or an `unreachable` reached, a failed `@checked` clause, and running out of stack.
    - The reference interpreter reports the trap's kind and the span of the operation that trapped. MIR and native code may defer checks within a region that has no visible effect and report the region instead (`refinement-and-fixed-point.md`, item 5); the three execution paths agree when they produce the same value, or trap of the same kind in the same region.
+   - `Implemented`: the reference interpreter traps with the kind and the span of the operation that trapped: a narrowing, a zero divisor, an index outside its array, a shift amount out of range, a `todo` or an `unreachable` reached, and the stack running out.
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_todo_and_unreachable_trap_with_their_reasons" min="1" reason="todo and unreachable trap with their reasons and spans" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_calls_recurse_until_the_stack_runs_out" min="1" reason="Running out of stack traps" -->
+   - `Implemented`: the reference interpreter also checks at run time every refinement and contract Tier 1 must prove: a value entering a refined type, `requires` at a call, `ensures` at a return, and each loop `invariant` and `decreases` at the loop head, with a recursive call's measure smaller than its caller's. Each failure traps with its own kind, so that the interpreter judges Tier 1 independently ([`interpreter-checks-contracts`](../docs/design-review.md#interpreter-checks-contracts)).
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_refinements_are_checked_where_values_enter_them" min="1" reason="Refinements are checked where values enter them" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_contracts_are_checked_at_calls_returns_and_loop_heads" min="1" reason="Contracts are checked at calls, returns and loop heads" -->
 10. `Specified` **Evaluation order and the program's result**:
     - Operands, arguments and the elements of an array literal are evaluated left to right. An element assignment `a[i] = e` evaluates `i`, then `e`, then checks the index.
     - A program runs its `main` function, which takes no parameters. When `main` has a result type, which in M1 is an integer type, `bool` or an array of them, its value is the program's result; otherwise a program that does not trap has no result.
+    - `Implemented`: the reference interpreter evaluates from left to right, `and` and `or` short-circuit, and `mn run` runs `main`, or a call named on its command line, under limits on depth, steps and array size.
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_logic_short_circuits_and_branches_choose" min="1" reason="and and or short-circuit, and branches choose" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_calls_from_outside_name_a_function_and_its_arguments" min="1" reason="main runs, and a call names a function with a body" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_runs_stop_at_their_limits" min="1" reason="A run stops at its step and array limits" -->
 
 ## 2. Decision rationale and rejected alternatives
 

@@ -72,6 +72,54 @@ pub fn check_module(
 /// Parses each function with a body, then resolves the names and checks the types of each one
 /// the body parser reports nothing in, function by function in source order.
 pub fn check_bodies(src: &str, module: &ModuleFile) -> Vec<Diagnostic> {
+    bodies(src, module).1
+}
+
+/// A function whose body parsed, with its names resolved and its types checked.
+#[derive(Clone, Debug)]
+pub struct CheckedFn {
+    pub syntax: mente_syntax::tree::FnSyntax,
+    pub resolution: names::Resolution,
+    pub typing: check::Typing,
+}
+
+/// A module that passed every check, with its functions in order: those with a body checked,
+/// a declaration without one as `None`.
+#[derive(Clone, Debug)]
+pub struct CheckedModule {
+    pub names: Vec<String>,
+    pub functions: Vec<Option<CheckedFn>>,
+}
+
+impl CheckedModule {
+    /// The index of the function named `name`.
+    pub fn index(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|n| n == name)
+    }
+}
+
+/// Parses and checks a module, and returns its checked functions when no check reports
+/// anything, for the reference interpreter to run.
+pub fn check_program(src: &str) -> Result<CheckedModule, Vec<Diagnostic>> {
+    let module = parse_module(src).map_err(|d| vec![d])?;
+    check_module(src, &module)?;
+    let (functions, _) = bodies(src, &module);
+    Ok(CheckedModule {
+        names: module
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ItemDecl::Fn(f) => Some(f.name.clone()),
+                _ => None,
+            })
+            .collect(),
+        functions,
+    })
+}
+
+/// Parses each function with a body, then resolves the names and checks the types of each one
+/// the body parser reports nothing in, function by function in source order.
+fn bodies(src: &str, module: &ModuleFile) -> (Vec<Option<CheckedFn>>, Vec<Diagnostic>) {
     let parsed = mente_syntax::parse_bodies(src, module);
     let names: Vec<String> = parsed.iter().map(|p| p.name.clone()).collect();
     let signatures: Vec<Option<check::Signature>> = parsed
@@ -79,17 +127,27 @@ pub fn check_bodies(src: &str, module: &ModuleFile) -> Vec<Diagnostic> {
         .map(|p| p.syntax.as_ref().map(check::Signature::of))
         .collect();
     let mut errors = Vec::new();
+    let mut functions = Vec::new();
     for p in parsed {
         let clean = p.errors.is_empty();
         errors.extend(p.errors);
-        if let (Some(syntax), true) = (&p.syntax, clean) {
-            let (resolution, found) = names::resolve(syntax, &names);
-            errors.extend(found);
-            let (_, found) = check::check(syntax, &resolution, &signatures);
-            errors.extend(found);
-        }
+        let checked = match (p.syntax, clean) {
+            (Some(syntax), true) => {
+                let (resolution, found) = names::resolve(&syntax, &names);
+                errors.extend(found);
+                let (typing, found) = check::check(&syntax, &resolution, &signatures);
+                errors.extend(found);
+                Some(CheckedFn {
+                    syntax,
+                    resolution,
+                    typing,
+                })
+            }
+            _ => None,
+        };
+        functions.push(checked);
     }
-    errors
+    (functions, errors)
 }
 
 /// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`.

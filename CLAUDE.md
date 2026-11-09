@@ -24,7 +24,7 @@ This file is the switchboard, not the rulebook.
    - Never write `&T`, `&mut T`, or `<'a>` lifetimes (use MVS parameter modes: default read-only, `mut`, `own`, `in`).
    - Never write `async` or `await` (use `with IO, Net` effects and `parallel (...)`).
    - Never write `.unwrap()` or `::<>` turbofish.
-   - Never link upstream C++ `LLVM/MLIR` into `compiler/mente-mir` (keep `MirRegionSoA` self-contained pure Rust, indexed by `NodeId(u32)`). `mente-mir` has no dependencies; native code goes through Cranelift, a pure-Rust crate that only `mente-codegen` may depend on. Every other crate depends only on the workspace's own crates: a new external dependency needs Norman's approval, and `test_crates_depend_only_on_allowed_crates` holds the line. An approval names the direct dependencies and covers the crates they bring in; the pull request that adds or upgrades one lists every crate `Cargo.lock` gains ([`dependency-approval`](docs/design-review.md#dependency-approval)).
+   - Never link upstream C++ `LLVM/MLIR` into `compiler/mente-mir` (keep `MirRegionSoA` self-contained pure Rust, indexed by `NodeId(u32)`). `mente-mir` has no dependencies; native code goes through Cranelift, a pure-Rust crate that only `mente-codegen` may depend on. The reference interpreter `mente-interp` never depends on `mente-mir` or `mente-codegen`, so that it shares no code with the paths it checks. Every other crate depends only on the workspace's own crates: a new external dependency needs Norman's approval, and `test_crates_depend_only_on_allowed_crates` holds the line. An approval names the direct dependencies and covers the crates they bring in; the pull request that adds or upgrades one lists every crate `Cargo.lock` gains ([`dependency-approval`](docs/design-review.md#dependency-approval)).
 3. **English-only repository text**:
    - Code, comments, documentation, examples, commit messages and pull request text are written in English, even when the conversation with Norman is in Chinese.
    - `test_repository_text_is_english` in `compiler/mente-cli` fails on any CJK character in a file of the working tree (`.git`, `target` and `node_modules` aside). Commit messages and pull request text are outside its reach and follow this rule by hand. A future fixture that must hold non-English text (a lexer test of Unicode string literals, say) goes in a directory the test is changed to skip, named in the test.
@@ -43,7 +43,7 @@ This file is the switchboard, not the rulebook.
 ## Verification Commands (Must Pass Before Every Commit)
 
 ```powershell
-# 1. Run all unit & integration tests across the 6 compiler crates (including spec assertions)
+# 1. Run all unit & integration tests across the 7 compiler crates (including spec assertions)
 cargo test
 
 # 2. Check spec/*.md front matter and run every @assert-* directive (rejects directives that cannot fail)
@@ -78,4 +78,5 @@ cargo clippy --all-targets --workspace -- -D warnings
 | `compiler/mente-sema` | [`core-calculus.md`](spec/core-calculus.md), [`refinement-and-fixed-point.md`](spec/refinement-and-fixed-point.md), [`dimensional-units.md`](spec/dimensional-units.md), [`algebraic-types-and-null.md`](spec/algebraic-types-and-null.md), [`traits-and-generics.md`](spec/traits-and-generics.md), [`mutable-value-semantics.md`](spec/mutable-value-semantics.md), [`regions-and-pools.md`](spec/regions-and-pools.md), [`morphic-layouts.md`](spec/morphic-layouts.md), [`ghost-contracts-and-totality.md`](spec/ghost-contracts-and-totality.md), [`capability-effects.md`](spec/capability-effects.md), [`diagnostics.md`](spec/diagnostics.md) |
 | `compiler/mente-mir` | [`core-calculus.md`](spec/core-calculus.md), [`mir-and-codegen.md`](spec/mir-and-codegen.md), [`hardware-contracts.md`](spec/hardware-contracts.md), [`disjoint-parallelism.md`](spec/disjoint-parallelism.md) |
 | `compiler/mente-codegen` | [`error-handling-abi.md`](spec/error-handling-abi.md), [`hardware-contracts.md`](spec/hardware-contracts.md), [`mir-and-codegen.md`](spec/mir-and-codegen.md) |
+| `compiler/mente-interp` | [`core-calculus.md`](spec/core-calculus.md) |
 | `compiler/mente-cli` | [`comptime-and-ffi.md`](spec/comptime-and-ffi.md), [`holographic-module.md`](spec/holographic-module.md), [`diagnostics.md`](spec/diagnostics.md) |

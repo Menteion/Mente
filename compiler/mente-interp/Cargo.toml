@@ -1,0 +1,13 @@
+[package]
+name = "mente-interp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mente reference interpreter: runs checked M1 programs over the typed tree, as the executable semantics of spec/core-calculus.md"
+
+[dependencies]
+mente-syntax = { path = "../mente-syntax" }
+mente-sema = { path = "../mente-sema" }
+
+[lints]
+workspace = true
