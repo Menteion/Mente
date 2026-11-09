@@ -18,7 +18,7 @@
 //! Every check is kept: erasing those Tier 1 proves is a separate step.
 
 use mente_mir::cfg::{
-    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Num, Op, Term, Ty,
+    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Term, Ty,
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
@@ -303,7 +303,16 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        let b = Builder::new(&s.f.syntax.name, &params, result);
+        let decl = s.f.syntax.name_span;
+        let b = Builder::declared_at(
+            &s.f.syntax.name,
+            &params,
+            result,
+            Loc {
+                line: decl.line,
+                col: decl.col,
+            },
+        );
         Ok(Lower {
             m,
             sigs,

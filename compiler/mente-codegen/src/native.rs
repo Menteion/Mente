@@ -168,7 +168,7 @@ pub fn program(
         let decl =
             f.locs
                 .iter()
-                .find(|l| l.line > 0)
+                .find(|l| l.line != 0)
                 .map_or(SourcePos { line: 1, column: 1 }, |l| SourcePos {
                     line: l.line,
                     column: l.col,
@@ -593,7 +593,7 @@ impl Translate {
             }
             for &v in &block.insts {
                 let loc = f.locs[v.0 as usize];
-                if loc.line > 0 {
+                if loc.line != 0 {
                     let sl = writer.source_loc(SourcePos {
                         line: loc.line,
                         column: loc.col,
@@ -799,14 +799,11 @@ impl Translate {
                 let from = int(arg_tys[0])?;
                 let to = int(rty)?;
                 let (ft, tt) = (int_type(from), int_type(to));
-                if ft == tt {
-                    args[0]
-                } else if tt.bits() < ft.bits() {
-                    e.b.ins().ireduce(tt, args[0])
-                } else if from.signed {
-                    e.b.ins().sextend(tt, args[0])
-                } else {
-                    e.b.ins().uextend(tt, args[0])
+                match tt.bits().cmp(&ft.bits()) {
+                    std::cmp::Ordering::Equal => args[0],
+                    std::cmp::Ordering::Less => e.b.ins().ireduce(tt, args[0]),
+                    std::cmp::Ordering::Greater if from.signed => e.b.ins().sextend(tt, args[0]),
+                    std::cmp::Ordering::Greater => e.b.ins().uextend(tt, args[0]),
                 }
             }
             Op::Check { trap: site } => {
@@ -1364,10 +1361,7 @@ pub fn executable(
         cranelift_codegen::settings::OptLevel::Speed,
         crate::Cpu::Baseline,
     )?;
-    let object = exe.with_extension(match target {
-        Target::X86_64Windows => "obj",
-        _ => "o",
-    });
+    let object = object_path(exe, target);
     let name = object
         .file_name()
         .map_or_else(|| "program.o".into(), |n| n.to_string_lossy().into_owned());
@@ -1376,4 +1370,112 @@ pub fn executable(
     let bytes = writer.finish()?;
     std::fs::write(&object, bytes).map_err(|e| err(format!("{}: {e}", object.display())))?;
     crate::link::link(&object, exe, target)
+}
+
+/// The object file `executable` writes beside `exe`, with the extension of `target`'s format.
+fn object_path(exe: &std::path::Path, target: Target) -> std::path::PathBuf {
+    exe.with_extension(match target {
+        Target::X86_64Windows => "obj",
+        Target::X86_64Linux | Target::Aarch64Linux => "o",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use cranelift_codegen::settings::OptLevel;
+    use cranelift_module::FuncOrDataId;
+
+    use super::*;
+    use crate::{Cpu, SourceFile};
+
+    const SOURCE: &str = "module m
+pub fn f(a: u8, b: u8) -> u8 {
+  val s: u16 = a + b
+  s
+}
+pub fn g(xs: [3]u8) -> u8 = xs[0]
+";
+
+    fn lowered() -> Lowered {
+        let module = mente_sema::check_program_without_proofs(SOURCE).unwrap();
+        crate::lower::lower(&module).unwrap()
+    }
+
+    fn writer(target: Target) -> ObjectWriter {
+        let isa = target.isa(OptLevel::Speed, Cpu::Baseline).unwrap();
+        let source = SourceFile {
+            path: "m.mn".into(),
+            directory: ".".into(),
+        };
+        ObjectWriter::new(isa, source, "m.o").unwrap()
+    }
+
+    /// Each MIR function becomes a function named after it, declared at its first line, whose
+    /// instructions carry the lines they come from.
+    #[test]
+    fn test_native_functions_carry_their_names_and_source_lines() {
+        let lowered = lowered();
+        let index = lowered
+            .module
+            .functions
+            .iter()
+            .position(|f| f.name == "f")
+            .unwrap();
+        for target in Target::ALL {
+            let mut w = writer(target);
+            program(&lowered, &[], "", &mut w).unwrap();
+            let Some(FuncOrDataId::Func(id)) = w.module().get_name(&format!("mente_f{index}_f"))
+            else {
+                panic!("{target:?}: no function named after `f`");
+            };
+            let compiled = w.functions.iter().find(|c| c.id == id).unwrap();
+            assert_eq!(compiled.decl.line, 2, "{target:?}");
+            let lines: BTreeSet<u32> = compiled.ranges.iter().map(|r| r.position.line).collect();
+            assert!(
+                lines.contains(&3) && lines.contains(&4),
+                "{target:?}: {lines:?}"
+            );
+            assert!(
+                lines.iter().all(|l| (2..=4).contains(l)),
+                "{target:?}: {lines:?}"
+            );
+        }
+    }
+
+    /// A call's argument must have its parameter's shape: an array of its length, of its
+    /// element type.
+    #[test]
+    fn test_an_argument_must_have_its_parameters_shape() {
+        let lowered = lowered();
+        let g = lowered.entries.iter().position(|e| e.name == "g").unwrap();
+        let int = |v: i128| Arg::Int(Num::from_i128(v));
+        let build = |args: Vec<Arg>| {
+            let mut w = writer(Target::X86_64Linux);
+            program(&lowered, &[Call { entry: g, args }], "", &mut w)
+        };
+        assert!(build(vec![Arg::Array(vec![int(1), int(2), int(3)])]).is_ok());
+        for wrong in [
+            vec![Arg::Array(vec![int(1), int(2)])],
+            vec![Arg::Array(vec![int(1), int(2), int(3), int(4)])],
+            vec![Arg::Array(vec![int(1), Arg::Bool(true), int(3)])],
+            vec![int(1)],
+        ] {
+            assert!(build(wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn test_the_object_lies_beside_the_executable_in_its_targets_format() {
+        let dir = Path::new("out");
+        assert_eq!(
+            object_path(&dir.join("prog.exe"), Target::X86_64Windows),
+            dir.join("prog.obj")
+        );
+        for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+            assert_eq!(object_path(&dir.join("prog"), target), dir.join("prog.o"));
+        }
+    }
 }

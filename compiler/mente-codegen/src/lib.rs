@@ -128,7 +128,9 @@ impl Target {
     }
 
     /// A Cranelift ISA for this target that generates position-independent code, optimised at
-    /// `opt_level`, for the processor features `cpu` allows.
+    /// `opt_level`, for the processor features `cpu` allows. A frame larger than a page
+    /// touches each page of it in order on the way down, as Windows needs to commit its stack
+    /// and as stops a frame on any system from jumping over the guard page.
     pub fn isa(self, opt_level: OptLevel, cpu: Cpu) -> Result<OwnedTargetIsa, CodegenError> {
         let mut flags = settings::builder();
         let setting_error = |e: settings::SetError| CodegenError::new(e.to_string());
@@ -136,6 +138,12 @@ impl Target {
             .set("opt_level", &opt_level.to_string())
             .map_err(setting_error)?;
         flags.set("is_pic", "true").map_err(setting_error)?;
+        flags
+            .set("enable_probestack", "true")
+            .map_err(setting_error)?;
+        flags
+            .set("probestack_strategy", "inline")
+            .map_err(setting_error)?;
         let mut builder = isa::lookup_by_name(self.triple())
             .map_err(|e| CodegenError::new(format!("{}: {e}", self.triple())))?;
         if cpu == Cpu::Host {
@@ -520,6 +528,16 @@ mod tests {
             .unwrap();
         assert_eq!(isa.flags().opt_level(), OptLevel::None);
         assert!(isa.flags().is_pic());
+        // Every target probes a large frame's pages inline, with no routine to link.
+        for target in Target::ALL {
+            let isa = target.isa(OptLevel::Speed, Cpu::Baseline).unwrap();
+            assert!(isa.flags().enable_probestack(), "{target:?}");
+            assert_eq!(
+                isa.flags().probestack_strategy(),
+                settings::ProbestackStrategy::Inline,
+                "{target:?}"
+            );
+        }
     }
 
     #[test]

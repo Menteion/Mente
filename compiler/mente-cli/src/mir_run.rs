@@ -268,9 +268,13 @@ mod tests {
     }
 
     /// Like `compare`, and through native code as well when `native`: one executable a
-    /// program, every call in a process of its own.
+    /// program, every call in a process of its own. Each comparison builds in a folder of its
+    /// own, since tests run side by side in one process.
     fn compare_paths(sections: &[&str], native_too: bool) -> (usize, Vec<String>) {
-        let scratch = std::env::temp_dir().join(format!("mente-paths-{}", std::process::id()));
+        static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let scratch =
+            std::env::temp_dir().join(format!("mente-paths-{}-{}", std::process::id(), run));
         fs::create_dir_all(&scratch).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmark");
         let tasks: Vec<String> = fs::read_dir(root.join("tasks"))
@@ -421,6 +425,18 @@ mod tests {
         (
             "pub fn div(a: i32, b: i32) -> i32 = a / b\npub fn rem(a: i32, b: i32) -> i32 = a % b",
             &["div(-7, 2)", "rem(-7, 2)", "rem(7, -2)", "div(1, 0)", "rem(1, 0)"],
+        ),
+        // Division of 128-bit operands, checked; of narrower ones in a 128-bit machine type; and
+        // of unsigned 64-bit values above the signed range.
+        (
+            "pub fn q(a: i128, b: i128) -> i128 = a / b\npub fn r(a: i128, b: i128) -> i128 = a % b\npub fn uq(a: u128, b: u128) -> u128 = a / b\npub fn ur(a: u128, b: u128) -> u128 = a % b\npub fn mq(a: u64, b: i64) -> i64 = a / b\npub fn mr(a: u64, b: i64) -> i64 = a % b\npub fn ud(a: u64, b: u64) -> u64 = a / b\npub fn um(a: u64, b: u64) -> u64 = a % b",
+            &["q(-170141183460469231731687303715884105728, -1)", "q(-100000000000000000000007, 10)", "r(-100000000000000000000007, 10)", "q(7, 0)", "uq(340282366920938463463374607431768211455, 18446744073709551617)", "ur(340282366920938463463374607431768211455, 1000000007)", "uq(5, 0)", "mq(18446744073709551615, -3)", "mr(18446744073709551615, -7)", "mq(18446744073709551615, 1)", "ud(18446744073709551615, 2)", "um(18446744073709551615, 10)"],
+        ),
+        // A frame larger than a page, which Windows commits a page at a time, and 32-bit
+        // integers in memory.
+        (
+            "pub fn big(i: usize) -> u8 {\n  var xs: [10000]u8 = [0; 10000]\n  xs[i] = 7\n  xs[i] + xs[9999]\n}\npub fn pick32(xs: [3]u32, i: usize) -> u32 = xs[i]\npub fn neg32(mut xs: [2]i32) {\n  xs[0] = -xs[1]\n}",
+            &["big(5)", "big(9999)", "big(10000)", "pick32([1, 4000000000, 3], 1)", "pick32([1, 2, 3], 0)", "neg32(mut [0, 2147483647])", "neg32(mut [0, -2147483648])"],
         ),
         // Indexes, read and written, nested, and outside their arrays.
         (

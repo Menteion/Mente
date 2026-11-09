@@ -438,6 +438,12 @@ pub struct Builder {
 impl Builder {
     /// A function whose entry block takes `params`.
     pub fn new(name: &str, params: &[Ty], result: Option<Ty>) -> Builder {
+        Builder::declared_at(name, params, result, Loc::default())
+    }
+
+    /// A function whose entry block takes `params`, declared at `decl`: its parameters carry
+    /// that location, which a debugger names as the function's.
+    pub fn declared_at(name: &str, params: &[Ty], result: Option<Ty>, decl: Loc) -> Builder {
         let mut b = Builder {
             f: Function {
                 name: name.to_string(),
@@ -446,10 +452,11 @@ impl Builder {
                 ..Function::default()
             },
             current: BlockId(0),
-            loc: Loc::default(),
+            loc: decl,
         };
         let entry = b.block(params);
         b.switch(entry);
+        b.loc = Loc::default();
         b
     }
 

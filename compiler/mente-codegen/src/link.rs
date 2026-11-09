@@ -11,9 +11,30 @@ use crate::{CodegenError, Target};
 
 /// Links `object`, written for `target`, into the executable `exe`.
 pub fn link(object: &Path, exe: &Path, target: Target) -> Result<(), CodegenError> {
-    let mut cmd = match target {
+    let out = command(object, exe, target, Msvc::find)?
+        .output()
+        .map_err(|e| CodegenError::new(format!("the linker did not start: {e}")))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(CodegenError::new(format!(
+            "the linker failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )))
+    }
+}
+
+/// The command that links `object` into `exe` for `target`; `msvc` finds MSVC on Windows.
+fn command(
+    object: &Path,
+    exe: &Path,
+    target: Target,
+    msvc: impl FnOnce() -> Result<Msvc, CodegenError>,
+) -> Result<Command, CodegenError> {
+    Ok(match target {
         Target::X86_64Windows => {
-            let msvc = Msvc::find()?;
+            let msvc = msvc()?;
             let mut c = Command::new(&msvc.link);
             c.arg("/NOLOGO")
                 .arg(format!("/OUT:{}", exe.display()))
@@ -26,24 +47,12 @@ pub fn link(object: &Path, exe: &Path, target: Target) -> Result<(), CodegenErro
             c.args(["msvcrt.lib", "ucrt.lib", "vcruntime.lib", "kernel32.lib"]);
             c
         }
-        _ => {
+        Target::X86_64Linux | Target::Aarch64Linux => {
             let mut c = Command::new("cc");
             c.arg(object).arg("-o").arg(exe);
             c
         }
-    };
-    let out = cmd
-        .output()
-        .map_err(|e| CodegenError::new(format!("the linker did not start: {e}")))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(CodegenError::new(format!(
-            "the linker failed: {}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        )))
-    }
+    })
 }
 
 /// MSVC's linker and the folders of the libraries a console program needs.
@@ -93,5 +102,52 @@ impl Msvc {
                 sdk.join("um/x64"),
             ],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(c: &Command) -> Vec<String> {
+        c.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn test_each_system_links_with_its_own_linker() {
+        let none = || Err(CodegenError::new("no MSVC here"));
+        for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+            let c = command(Path::new("p.o"), Path::new("p"), target, none).unwrap();
+            assert_eq!(c.get_program(), "cc");
+            assert_eq!(args(&c), ["p.o", "-o", "p"]);
+        }
+        let found = || {
+            Ok(Msvc {
+                link: PathBuf::from("link.exe"),
+                libs: vec![PathBuf::from("lib")],
+            })
+        };
+        let (object, exe) = (Path::new("p.obj"), Path::new("p.exe"));
+        let c = command(object, exe, Target::X86_64Windows, found).unwrap();
+        assert_eq!(c.get_program(), "link.exe");
+        assert_eq!(
+            args(&c),
+            [
+                "/NOLOGO",
+                "/OUT:p.exe",
+                "p.obj",
+                "/SUBSYSTEM:CONSOLE",
+                "/DEBUG",
+                "/LIBPATH:lib",
+                "msvcrt.lib",
+                "ucrt.lib",
+                "vcruntime.lib",
+                "kernel32.lib"
+            ]
+        );
+        // Without MSVC, Windows has no linker.
+        assert!(command(object, exe, Target::X86_64Windows, none).is_err());
     }
 }
