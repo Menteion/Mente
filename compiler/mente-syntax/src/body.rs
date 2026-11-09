@@ -649,6 +649,11 @@ impl Parser {
             {
                 self.let_binding()
             }
+            TokenKind::Ident(w) if w == "_" && self.peek_second() == &TokenKind::Eq => {
+                self.bump();
+                self.bump();
+                StmtKind::Discard(self.expr())
+            }
             _ => {
                 let target = self.expr();
                 match assign_op(self.peek()) {
@@ -1734,6 +1739,14 @@ mod tests {
             "{(guard (> x 0) {(return 0)}); (return)}"
         );
         assert_eq!(block("if c { return }"), "{(if c {(return)})}");
+        assert_eq!(
+            block(
+                "_ = f(x)
+_ = a + 1
+_ == b"
+            ),
+            "{(discard (call f x)); (discard (+ a 1)); (== _ b)}"
+        );
         assert_eq!(
             block("val a: [4]bool = [true; 4]\nval b: i32[-5..=n] = 0\nval c: usize[0..a.len] = 1"),
             "{(val a [4]bool [true; 4]); (val b i32[-5..=n] 0); (val c usize[0..a.len] 1)}"

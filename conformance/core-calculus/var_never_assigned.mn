@@ -1,0 +1,6 @@
+// expect: E0219
+module conformance
+pub fn f(a: u8) -> u8 {
+  var b = a
+  b
+}

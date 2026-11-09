@@ -74,13 +74,14 @@ This file is the normative grammar of the language `core-calculus.md` defines fo
    ```
    - A refinement binds to the integer type it follows: `[4]u8[0..10]` is an array of four `u8[0..10]` values.
 6. `Implemented` **Statements**:
-   <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_statements_of_m1_parse" min="1" reason="Every statement of M1 parses into its canonical form" -->
+   <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_statements_of_m1_parse" min="1" reason="Every statement of M1 parses into its canonical form, the discard included" -->
    ```ebnf
    block       = "{" { statement } "}" ;                  (* statements end at newlines *)
-   statement   = binding | assignment | while | guard | return | "break" | "continue" | expression ;
+   statement   = binding | assignment | discard | while | guard | return | "break" | "continue" | expression ;
    binding     = ( "val" | "var" ) identifier [ ":" type ] "=" expression ;
    assignment  = place ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ) expression ;
    place       = identifier { "[" expression "]" } ;
+   discard     = "_" "=" expression ;                     (* a value discarded on purpose *)
    while       = "while" expression { loop clause } block ;
    loop clause = ( "invariant" | "decreases" ) expression ;
    guard       = "guard" expression "else" block ;

@@ -44,6 +44,33 @@ impl IntTy {
         INT_TYPES.iter().copied().find(|t| t.name == name)
     }
 
+    /// The largest value of the type.
+    pub fn max(self) -> u128 {
+        match (self.signed, self.bits) {
+            (false, 128) => u128::MAX,
+            (false, bits) => (1 << bits) - 1,
+            (true, bits) => (1 << (bits - 1)) - 1,
+        }
+    }
+
+    /// The magnitude of the smallest value of the type: 0, or 2^(N-1) for `iN`.
+    pub fn min_magnitude(self) -> u128 {
+        if self.signed {
+            1 << (self.bits - 1)
+        } else {
+            0
+        }
+    }
+
+    /// The range of the type, as a diagnostic writes it: "0 to 255", "-128 to 127".
+    pub fn range_text(self) -> String {
+        if self.signed {
+            format!("-{} to {}", self.min_magnitude(), self.max())
+        } else {
+            format!("0 to {}", self.max())
+        }
+    }
+
     /// Whether every value of `other` is a value of `self`.
     pub fn holds(self, other: IntTy) -> bool {
         match (self.signed, other.signed) {
@@ -233,6 +260,20 @@ mod tests {
         assert!(!t("u64").holds(t("i8")));
         assert!(t("usize").holds(t("u64")) && t("u64").holds(t("usize")));
         assert_eq!(IntTy::named("u7"), None);
+    }
+
+    #[test]
+    fn test_integer_types_know_their_bounds() {
+        assert_eq!(t("u8").max(), 255);
+        assert_eq!(t("u16").max(), 65_535);
+        assert_eq!(t("i8").max(), 127);
+        assert_eq!(t("u128").max(), u128::MAX);
+        assert_eq!(t("i128").max(), (1 << 127) - 1);
+        assert_eq!(t("u64").min_magnitude(), 0);
+        assert_eq!(t("i8").min_magnitude(), 128);
+        assert_eq!(t("i128").min_magnitude(), 1 << 127);
+        assert_eq!(t("u8").range_text(), "0 to 255");
+        assert_eq!(t("i16").range_text(), "-32768 to 32767");
     }
 
     #[test]

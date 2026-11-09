@@ -25,6 +25,10 @@ Mente (`.mn`) is a universal, statically verified, hardware-sympathetic programm
 4. **Hardware mechanical sympathy as a static contract**: Data layout (`AoS`, `SoA`, `Tiled`, `@layout`, `bitstruct`) and micro-architectural execution constraints (`@branchless`, `@simd`, `@no_alloc`, `@max_stack`) are compile-time verified invariants, never silent compiler hints.
 5. **Canonical single-path representation**: Every semantic concept has exactly one canonical syntactic form, making `.mn` source code unambiguous for both human engineers and automated synthesis/verification agents.
 
+### The order of the axioms' aims
+
+Safety and strictness come first, and performance is reached on top of them, never traded against them (Norman, 2026-11-09; [`strict-defaults`](../docs/design-review.md#strict-defaults)). Where a rule weighs strictness against convenience, Mente takes the strict side and lets the diagnostic and its fix carry the convenience. Performance comes from what strictness makes possible: a check Tier 1 proves is erased, a `mut` argument of its parameter's exact type is passed by address, and a value that never changes is a `val`.
+
 ## 3. Goal: the general-purpose language best suited to AI agents
 
 - Mente aims to be the general-purpose programming language best suited to AI agents writing code, while people review the result and decide whether to trust it ([`ai-first-purpose`](../docs/design-review.md#ai-first-purpose), decided 2026-11-08).

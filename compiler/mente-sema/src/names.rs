@@ -3,11 +3,12 @@
 //! [`resolve`] walks one parsed function and binds each name to its declaration: a parameter,
 //! a `val` or `var`, or `result` in an `ensures` clause. A name is declared once in a function,
 //! its inner blocks included (no shadowing); it is visible from its declaration to the end of
-//! its block. It also checks what follows from the names alone: `break` and `continue` stand
-//! in a loop, and a refinement's bound names a binding that cannot change. The resolution is
-//! kept in tables indexed like the tree.
+//! its block, and no binding takes the name of a function of its module. It also checks what
+//! follows from the names alone: `break` and `continue` stand in a loop, a refinement's bound
+//! names a binding that cannot change, every `val` and `var` is read, and every `var` is
+//! assigned. The resolution is kept in tables indexed like the tree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mente_syntax::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
@@ -71,10 +72,14 @@ pub fn resolve(f: &FnSyntax, functions: &[String]) -> (Resolution, Vec<Diagnosti
         scopes: vec![Vec::new()],
         declared: HashMap::new(),
         duplicates: Vec::new(),
+        clashing: HashSet::new(),
+        reads: Vec::new(),
+        writes: Vec::new(),
         loops: 0,
         errors: Vec::new(),
     };
     r.function(f);
+    r.unused(&f.tree);
     r.rename_duplicates(&f.tree);
     (r.resolution, r.errors)
 }
@@ -86,8 +91,13 @@ struct Resolver {
     scopes: Vec<Vec<BindingId>>,
     /// Every name declared in the function, with its first declaration.
     declared: HashMap<String, BindingId>,
-    /// A second declaration of a name, and the index of its diagnostic.
+    /// A declaration that needs a new name, and the index of its diagnostic.
     duplicates: Vec<(BindingId, usize)>,
+    /// The names declared twice, or named like a function: their uses tell nothing.
+    clashing: HashSet<String>,
+    /// For each binding, how often it is read and how often it is written.
+    reads: Vec<u32>,
+    writes: Vec<u32>,
     /// How many loops enclose the statement being read.
     loops: u32,
     errors: Vec<Diagnostic>,
@@ -150,10 +160,13 @@ impl Resolver {
             kind,
             ty,
         });
+        self.reads.push(0);
+        self.writes.push(0);
         BindingId(self.resolution.bindings.len() as u32 - 1)
     }
 
-    /// Declares a name in the innermost block; a second declaration in the function is `E0202`.
+    /// Declares a name in the innermost block. A name of a function of the module is `E0220`,
+    /// and a second declaration in the function is `E0202`.
     fn declare(
         &mut self,
         name: &str,
@@ -162,7 +175,20 @@ impl Resolver {
         ty: Option<TypeId>,
     ) -> BindingId {
         let id = self.push_binding(name, span, kind, ty);
-        if let Some(&first) = self.declared.get(name) {
+        if self.functions.contains_key(name) {
+            let d = Diagnostic::error(
+                "E0220",
+                span,
+                format!(
+                    "`{}` is the name of a function of this module; a name means one thing, so give this binding another",
+                    name
+                ),
+            );
+            self.clashing.insert(name.to_string());
+            self.duplicates.push((id, self.errors.len()));
+            self.errors.push(d);
+            self.declared.entry(name.to_string()).or_insert(id);
+        } else if let Some(&first) = self.declared.get(name) {
             let at = self.binding(first).span;
             let d = Diagnostic::error(
                 "E0202",
@@ -173,6 +199,7 @@ impl Resolver {
                 ),
             )
             .with_related(at, "first declared here");
+            self.clashing.insert(name.to_string());
             self.duplicates.push((id, self.errors.len()));
             self.errors.push(d);
         } else {
@@ -249,9 +276,10 @@ impl Resolver {
                     self.resolution.stmts[s.0 as usize] = Some(id);
                 }
                 StmtKind::Assign { place, value, .. } => {
-                    self.expr(tree, *place);
                     self.expr(tree, *value);
+                    self.place(tree, *place, false);
                 }
+                StmtKind::Discard(e) => self.expr(tree, *e),
                 StmtKind::While {
                     cond,
                     invariants,
@@ -299,20 +327,8 @@ impl Resolver {
         let span = tree.expr(e).span;
         match &tree.expr(e).kind {
             ExprKind::Name(n) => {
-                if let Some(id) = self.lookup(n) {
-                    self.resolution.names[e.0 as usize] = Some(id);
-                } else if self.functions.contains_key(n) {
-                    self.errors.push(Diagnostic::error(
-                        "E0204",
-                        span,
-                        format!(
-                            "`{}` is a function, which M1 only calls: write `{}(...)`",
-                            n, n
-                        ),
-                    ));
-                } else {
-                    let candidates = self.visible();
-                    self.unknown(n, span, "binding", candidates);
+                if let Some(id) = self.name(e, n, span) {
+                    self.reads[id.0 as usize] += 1;
                 }
             }
             ExprKind::Call { callee, args } => {
@@ -336,7 +352,11 @@ impl Resolver {
                     self.unknown(callee, name_span, "function", candidates);
                 }
                 for a in args {
-                    self.expr(tree, a.value);
+                    if a.is_mut {
+                        self.place(tree, a.value, true);
+                    } else {
+                        self.expr(tree, a.value);
+                    }
                 }
             }
             ExprKind::Unary { operand, .. } => self.expr(tree, *operand),
@@ -376,6 +396,99 @@ impl Resolver {
         }
     }
 
+    /// The binding `n`, at expression `e`, refers to: `E0204` when it names a function, and
+    /// `E0201` when it names nothing.
+    fn name(&mut self, e: ExprId, n: &str, span: Span) -> Option<BindingId> {
+        if let Some(id) = self.lookup(n) {
+            self.resolution.names[e.0 as usize] = Some(id);
+            return Some(id);
+        }
+        if self.functions.contains_key(n) {
+            self.errors.push(Diagnostic::error(
+                "E0204",
+                span,
+                format!(
+                    "`{}` is a function, which M1 only calls: write `{}(...)`",
+                    n, n
+                ),
+            ));
+        } else {
+            let candidates = self.visible();
+            self.unknown(n, span, "binding", candidates);
+        }
+        None
+    }
+
+    /// A place a statement assigns or a call changes: its root binding is written, and read
+    /// too when the call copies it in.
+    fn place(&mut self, tree: &Tree, e: ExprId, read: bool) {
+        match &tree.expr(e).kind {
+            ExprKind::Name(n) => {
+                if let Some(id) = self.name(e, n, tree.expr(e).span) {
+                    self.writes[id.0 as usize] += 1;
+                    self.reads[id.0 as usize] += u32::from(read);
+                }
+            }
+            ExprKind::Index { base, index } => {
+                self.place(tree, *base, read);
+                self.expr(tree, *index);
+            }
+            _ => self.expr(tree, e),
+        }
+    }
+
+    /// A `val` or `var` that is never read is `E0218`, and a `var` that is read but never
+    /// assigned is `E0219`. Parameters and `result` are exempt: a signature is an interface.
+    fn unused(&mut self, tree: &Tree) {
+        for (s, declared) in self.resolution.stmts.iter().enumerate() {
+            let Some(id) = *declared else {
+                continue;
+            };
+            let b = self.binding(id);
+            if self.clashing.contains(&b.name) {
+                continue;
+            }
+            let stmt = tree.stmts[s].span;
+            let d = if self.reads[id.0 as usize] == 0 {
+                Diagnostic::error(
+                    "E0218",
+                    b.span,
+                    format!(
+                        "`{}` is never read; use it where it was meant to be used, or remove it",
+                        b.name
+                    ),
+                )
+                .with_fix(
+                    Applicability::Suggestion,
+                    format!("remove `{}`", b.name),
+                    stmt,
+                    "",
+                )
+            } else if b.kind == BindingKind::Var && self.writes[id.0 as usize] == 0 {
+                Diagnostic::error(
+                    "E0219",
+                    b.span,
+                    format!(
+                        "`{}` is never assigned, so it is a `val`; a `var` says the value changes",
+                        b.name
+                    ),
+                )
+                .with_fix(
+                    Applicability::MachineApplicable,
+                    "declare it with `val`",
+                    Span {
+                        end: stmt.start + 3,
+                        ..stmt
+                    },
+                    "val",
+                )
+            } else {
+                continue;
+            };
+            self.errors.push(d);
+        }
+    }
+
     /// A refinement's bound names a binding that cannot change, or `name.len` (`E0209`).
     fn ty(&mut self, tree: &Tree, t: TypeId) {
         let span = tree.ty(t).span;
@@ -396,6 +509,7 @@ impl Resolver {
                             self.unknown(name, span, "binding", candidates);
                         }
                         Some(id) => {
+                            self.reads[id.0 as usize] += 1;
                             let kind = self.binding(id).kind;
                             let changes = matches!(
                                 kind,
@@ -426,7 +540,7 @@ impl Resolver {
             let b = self.binding(id).clone();
             let fresh = (2..)
                 .map(|n| format!("{}{}", b.name, n))
-                .find(|n| !self.declared.contains_key(n))
+                .find(|n| !self.declared.contains_key(n) && !self.functions.contains_key(n))
                 .unwrap_or_default();
             let mut edits = vec![Edit {
                 span: b.span,
@@ -501,8 +615,19 @@ mod tests {
         format!("module m\npub fn id(x: u8) -> u8 = x\n{}\n", src)
     }
 
-    fn diagnostics(src: &str) -> Vec<Diagnostic> {
+    /// Every diagnostic of the module.
+    fn all_diagnostics(src: &str) -> Vec<Diagnostic> {
         check_source(&module(src)).err().unwrap_or_default()
+    }
+
+    /// The diagnostics of the module but unused values and bindings (`E0217`, `E0218`): these
+    /// programs bind and compute values only to check them, and those codes have tests of
+    /// their own.
+    fn diagnostics(src: &str) -> Vec<Diagnostic> {
+        all_diagnostics(src)
+            .into_iter()
+            .filter(|d| !matches!(d.code, "E0217" | "E0218"))
+            .collect()
     }
 
     fn codes(src: &str) -> Vec<&'static str> {
@@ -620,7 +745,7 @@ mod tests {
             ["`x` is a value, not a function, so it cannot be called"]
         );
         assert_eq!(codes("pub fn f(x: u8) = x(zz)"), ["E0204", "E0201"]);
-        assert_eq!(codes("pub fn f(id: u8) = id"), NONE);
+        assert_eq!(codes("pub fn f(id: u8) -> u8 = id"), ["E0220"]);
     }
 
     #[test]
@@ -647,23 +772,23 @@ mod tests {
     #[test]
     fn test_a_refinement_bound_names_a_binding_that_cannot_change() {
         assert_eq!(
-            codes("pub fn f(n: u8) {\n  var m: u8 = n\n  val i: u8[0..m] = 0\n}"),
+            codes("pub fn f(n: u8) {\n  var m: u8 = n\n  m += 1\n  val i: u8[0..m] = 0\n}"),
             ["E0209"]
         );
         assert_eq!(
-            messages("pub fn f(n: u8) {\n  var m: u8 = n\n  val i: u8[0..m] = 0\n}"),
+            messages("pub fn f(n: u8) {\n  var m: u8 = n\n  m += 1\n  val i: u8[0..m] = 0\n}"),
             ["a refinement's bound names `m`, which can change; a bound is a literal, a `val`, a read-only parameter, or `name.len`"]
         );
         assert_eq!(codes("pub fn f(mut n: u8, i: u8[n..=9]) {\n}"), ["E0209"]);
         assert_eq!(codes("pub fn f(mut n: u8) -> u8[0..=n] = 0"), ["E0209"]);
         assert_eq!(
-            codes("pub fn f(n: u8) {\n  var m: u8 = n\n  val a: [2]u8[0..m] = [0, 0]\n}"),
+            codes("pub fn f(n: u8) {\n  var m: u8 = n\n  m += 1\n  val a: [2]u8[0..m] = [0, 0]\n}"),
             ["E0209"]
         );
         assert_eq!(codes("pub fn f(i: u8[0..k]) {\n}"), ["E0201"]);
         assert_eq!(codes("pub fn f(i: u8[k..=2]) {\n}"), ["E0201"]);
         assert_eq!(
-            codes("pub fn f(n: u8, i: u8[0..n]) -> u8[0..=n] {\n  val k = n\n  var xs = [1, 2]\n  val j: usize[0..xs.len] = 0\n  var l: u8[k..=n] = n\n  val m: i8[-4..4] = 0\n  0\n}"),
+            codes("pub fn f(n: u8, i: u8[0..n]) -> u8[0..=n] {\n  val k = n\n  var xs = [1, 2]\n  xs[0] = 3\n  val j: usize[0..xs.len] = 0\n  var l: u8[k..=n] = n\n  val m: i8[-4..4] = 0\n  0\n}"),
             NONE
         );
     }
@@ -716,6 +841,113 @@ mod tests {
         assert_eq!(
             closest("abcde", &list(&["abcxy", "abcdx"])),
             Some("abcdx".to_string())
+        );
+    }
+
+    fn all_codes(src: &str) -> Vec<&'static str> {
+        all_diagnostics(src).iter().map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn test_every_val_and_var_is_read() {
+        let d = all_diagnostics("pub fn f(a: u8) -> u8 {\n  val clamped = a\n  a\n}");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0218");
+        assert_eq!(
+            d[0].message,
+            "`clamped` is never read; use it where it was meant to be used, or remove it"
+        );
+        assert_eq!((d[0].primary.line, d[0].primary.col), (4, 7));
+        let fix = &d[0].fixes[0];
+        assert_eq!(fix.message, "remove `clamped`");
+        assert_eq!(fix.applicability, Applicability::Suggestion);
+        assert_eq!(fix.edits[0].replacement, "");
+        assert_eq!((fix.edits[0].span.line, fix.edits[0].span.col), (4, 3));
+        assert_eq!(fix.edits[0].span.end - fix.edits[0].span.start, 15);
+        // Assigning a binding, or adding to it, does not read it.
+        assert_eq!(
+            all_codes("pub fn f() {\n  var x = 0\n  x = 1\n}"),
+            ["E0218"]
+        );
+        assert_eq!(
+            all_codes("pub fn f() {\n  var x = 0\n  x += 1\n}"),
+            ["E0218"]
+        );
+        assert_eq!(
+            all_codes("pub fn f() {\n  var xs = [0, 0]\n  xs[1] = 2\n}"),
+            ["E0218"]
+        );
+        for ok in [
+            "pub fn f(unused: u8) {\n}",
+            "pub fn f(a: u8) -> u8 {\n  val b = a\n  b\n}",
+            "pub fn f(i: usize) -> u8 {\n  var xs = [0, 0]\n  val j: usize = 1\n  xs[j] = 2\n  xs[i]\n}",
+            "pub fn f() -> u8\n  ensures result > 0\n= 1",
+        ] {
+            assert_eq!(all_codes(ok), NONE, "{}", ok);
+        }
+        // A name declared twice reports that alone.
+        assert_eq!(
+            all_codes("pub fn f() -> u8 {\n  val a = 1\n  val a = 2\n  a\n}"),
+            ["E0202"]
+        );
+    }
+
+    #[test]
+    fn test_every_var_is_assigned() {
+        let d = all_diagnostics("pub fn f() -> u8 {\n  var total = 1\n  total\n}");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0219");
+        assert_eq!(
+            d[0].message,
+            "`total` is never assigned, so it is a `val`; a `var` says the value changes"
+        );
+        let fix = &d[0].fixes[0];
+        assert_eq!(fix.applicability, Applicability::MachineApplicable);
+        assert_eq!(fix.message, "declare it with `val`");
+        assert_eq!(fix.edits[0].replacement, "val");
+        assert_eq!((fix.edits[0].span.line, fix.edits[0].span.col), (4, 3));
+        assert_eq!(fix.edits[0].span.end - fix.edits[0].span.start, 3);
+        let both = "pub fn bump(mut x: u8) {\n  x += 1\n}\n";
+        for ok in [
+            "pub fn f() -> u8 {\n  var total = 1\n  total += 1\n  total\n}",
+            "pub fn f() -> u8 {\n  var xs = [1, 2]\n  xs[0] = 3\n  xs[1]\n}",
+        ] {
+            assert_eq!(all_codes(ok), NONE, "{}", ok);
+        }
+        assert_eq!(
+            all_codes(&format!(
+                "{}pub fn f() -> u8 {{\n  var v: u8 = 1\n  bump(mut v)\n  v\n}}",
+                both
+            )),
+            NONE
+        );
+        assert_eq!(
+            all_codes(&format!("{}pub fn f(i: usize) -> u8 {{\n  var xs: [2]u8 = [1, 2]\n  bump(mut xs[i])\n  xs[0]\n}}", both)),
+            NONE
+        );
+    }
+
+    #[test]
+    fn test_no_binding_takes_the_name_of_a_function() {
+        let d = all_diagnostics("pub fn f(a: u8) -> u8 {\n  val id = a\n  id + 1\n}");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0220");
+        assert_eq!(
+            d[0].message,
+            "`id` is the name of a function of this module; a name means one thing, so give this binding another"
+        );
+        let fix = &d[0].fixes[0];
+        assert_eq!(fix.message, "rename this `id` and its uses to `id2`");
+        assert_eq!(fix.edits.len(), 2);
+        assert_eq!(all_codes("pub fn f(f: u8) -> u8 = f"), ["E0220"]);
+        assert_eq!(
+            all_diagnostics("pub fn id2() {\n}\npub fn f(id: u8) -> u8 = id")[0].fixes[0].edits[0]
+                .replacement,
+            "id3"
+        );
+        assert_eq!(
+            all_codes("pub fn f(a: u8) -> u8 {\n  val id = a\n  val id = 1\n  id(id)\n}"),
+            ["E0220", "E0220"]
         );
     }
 }
