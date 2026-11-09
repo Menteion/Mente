@@ -3,6 +3,7 @@
 //! line.
 
 use mente_codegen::lower::{self, Lowered, Shape};
+use mente_codegen::native;
 use mente_interp::Value;
 use mente_mir::cfg::{self, Memory, Num, Ty, Val};
 use mente_sema::CheckedModule;
@@ -10,6 +11,9 @@ use mente_sema::CheckedModule;
 /// What a run printed: its value and what each `mut` argument was left holding, or why it
 /// stopped.
 pub type Printed = Result<Vec<String>, String>;
+
+/// A call by name, with its arguments, each marked `mut` or not.
+pub type CallArgs = (String, Vec<(bool, Value)>);
 
 /// Calls `name` on `args`, each marked `mut` or not, through MIR, and prints as `mn run` does.
 pub fn run(module: &CheckedModule, name: &str, args: Vec<(bool, Value)>) -> Printed {
@@ -82,6 +86,67 @@ pub fn reference(module: &CheckedModule, name: &str, args: Vec<(bool, Value)>) -
         printed.push(format!("leaves {}", last));
     }
     Ok(printed)
+}
+
+/// Native code for every call of `calls` on a lowered module: one executable, built in
+/// `dir`, whose `main` makes the call its first argument numbers. Each call runs in a process
+/// of its own and prints what `mn run` prints, its trap without the file's name.
+pub fn native(
+    lowered: &Lowered,
+    calls: &[CallArgs],
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<Vec<Printed>, String> {
+    let mut native_calls = Vec::new();
+    for (f, args) in calls {
+        let entry = lowered
+            .entries
+            .iter()
+            .position(|e| &e.name == f)
+            .ok_or_else(|| format!("no function `{}` with a body to run", f))?;
+        let args = args
+            .iter()
+            .map(|(_, v)| native_arg(v))
+            .collect::<Result<Vec<_>, String>>()?;
+        native_calls.push(native::Call { entry, args });
+    }
+    let exe = dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
+    let source = mente_codegen::SourceFile {
+        path: format!("{}.mn", name),
+        directory: dir.display().to_string(),
+    };
+    native::executable(lowered, &native_calls, "", source, &exe).map_err(|e| e.to_string())?;
+    let mut printed = Vec::new();
+    for k in 0..calls.len() {
+        let out = std::process::Command::new(&exe)
+            .arg(k.to_string())
+            .output()
+            .map_err(|e| format!("{}: {}", exe.display(), e))?;
+        let text = |b: &[u8]| String::from_utf8_lossy(b).replace("\r\n", "\n");
+        printed.push(match out.status.code() {
+            Some(0) => Ok(text(&out.stdout).lines().map(String::from).collect()),
+            Some(1) => Err(text(&out.stderr).trim_end().to_string()),
+            other => Err(format!(
+                "the program ended with {:?}: {}",
+                other,
+                text(&out.stderr)
+            )),
+        });
+    }
+    Ok(printed)
+}
+
+fn native_arg(value: &Value) -> Result<native::Arg, String> {
+    Ok(match value {
+        Value::Bool(b) => native::Arg::Bool(*b),
+        Value::Array(items) => native::Arg::Array(
+            items
+                .iter()
+                .map(native_arg)
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        v => native::Arg::Int(num(v)?),
+    })
 }
 
 fn num(value: &Value) -> Result<Num, String> {
@@ -199,6 +264,18 @@ mod tests {
     /// task, through the reference interpreter and through MIR, and returns how many calls it
     /// compared and those whose outputs differ.
     fn compare(sections: &[&str]) -> (usize, Vec<String>) {
+        compare_paths(sections, false)
+    }
+
+    /// Like `compare`, and through native code as well when `native`: one executable a
+    /// program, every call in a process of its own. Each comparison builds in a folder of its
+    /// own, since tests run side by side in one process.
+    fn compare_paths(sections: &[&str], native_too: bool) -> (usize, Vec<String>) {
+        static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let scratch =
+            std::env::temp_dir().join(format!("mente-paths-{}-{}", std::process::id(), run));
+        fs::create_dir_all(&scratch).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmark");
         let tasks: Vec<String> = fs::read_dir(root.join("tasks"))
             .unwrap()
@@ -226,10 +303,24 @@ mod tests {
                     continue;
                 };
                 let lowered = lower::lower(&module);
-                for call in calls(&task, sections) {
-                    let Some((f, args)) = mente_interp::parse_call_modes(&call) else {
-                        continue;
-                    };
+                let parsed: Vec<(String, CallArgs)> = calls(&task, sections)
+                    .into_iter()
+                    .filter_map(|c| mente_interp::parse_call_modes(&c).map(|p| (c, p)))
+                    .collect();
+                let natively = match (&lowered, native_too) {
+                    (Ok(l), true) => {
+                        let list: Vec<_> = parsed.iter().map(|(_, p)| p.clone()).collect();
+                        let stem = name
+                            .trim_end_matches(".mn")
+                            .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+                        Some(
+                            native(l, &list, &scratch, &stem)
+                                .map_err(|e| format!("not built: {}", e)),
+                        )
+                    }
+                    _ => None,
+                };
+                for (k, (call, (f, args))) in parsed.into_iter().enumerate() {
                     let expected = reference(&module, &f, args.clone());
                     let got = match &lowered {
                         Ok(l) => run_lowered(l, &f, args),
@@ -239,9 +330,23 @@ mod tests {
                     if got != expected {
                         differences.push(format!("{} {}: {:?} != {:?}", name, call, got, expected));
                     }
+                    let Some(natively) = &natively else {
+                        continue;
+                    };
+                    let got = match natively {
+                        Ok(all) => all[k].clone(),
+                        Err(e) => Err(e.clone()),
+                    };
+                    if got != expected {
+                        differences.push(format!(
+                            "native {} {}: {:?} != {:?}",
+                            name, call, got, expected
+                        ));
+                    }
                 }
             }
         }
+        fs::remove_dir_all(&scratch).ok();
         (compared, differences)
     }
 
@@ -278,6 +383,16 @@ mod tests {
         assert_same(compared, &differences, 2000);
     }
 
+    /// The three paths on every example and hidden test of every agent program: the reference
+    /// interpreter, MIR and native code, which links an executable a program:
+    /// `cargo test --release -p mente-cli -- --ignored native_matches_the_reference_interpreter`.
+    #[test]
+    #[ignore = "builds and runs an executable a program; CI runs it in release"]
+    fn native_matches_the_reference_interpreter_on_every_hidden_test() {
+        let (compared, differences) = compare_paths(&["## Examples", "## Hidden tests"], true);
+        assert_same(compared, &differences, 2000);
+    }
+
     /// Programs that reach each construct the lowering handles, each with calls whose output
     /// both paths must print alike: a value or a trap of every kind.
     const CONSTRUCTS: &[(&str, &[&str])] = &[
@@ -310,6 +425,18 @@ mod tests {
         (
             "pub fn div(a: i32, b: i32) -> i32 = a / b\npub fn rem(a: i32, b: i32) -> i32 = a % b",
             &["div(-7, 2)", "rem(-7, 2)", "rem(7, -2)", "div(1, 0)", "rem(1, 0)"],
+        ),
+        // Division of 128-bit operands, checked; of narrower ones in a 128-bit machine type; and
+        // of unsigned 64-bit values above the signed range.
+        (
+            "pub fn q(a: i128, b: i128) -> i128 = a / b\npub fn r(a: i128, b: i128) -> i128 = a % b\npub fn uq(a: u128, b: u128) -> u128 = a / b\npub fn ur(a: u128, b: u128) -> u128 = a % b\npub fn mq(a: u64, b: i64) -> i64 = a / b\npub fn mr(a: u64, b: i64) -> i64 = a % b\npub fn ud(a: u64, b: u64) -> u64 = a / b\npub fn um(a: u64, b: u64) -> u64 = a % b",
+            &["q(-170141183460469231731687303715884105728, -1)", "q(-100000000000000000000007, 10)", "r(-100000000000000000000007, 10)", "q(7, 0)", "uq(340282366920938463463374607431768211455, 18446744073709551617)", "ur(340282366920938463463374607431768211455, 1000000007)", "uq(5, 0)", "mq(18446744073709551615, -3)", "mr(18446744073709551615, -7)", "mq(18446744073709551615, 1)", "ud(18446744073709551615, 2)", "um(18446744073709551615, 10)"],
+        ),
+        // A frame larger than a page, which Windows commits a page at a time, and 32-bit
+        // integers in memory.
+        (
+            "pub fn big(i: usize) -> u8 {\n  var xs: [10000]u8 = [0; 10000]\n  xs[i] = 7\n  xs[i] + xs[9999]\n}\npub fn pick32(xs: [3]u32, i: usize) -> u32 = xs[i]\npub fn neg32(mut xs: [2]i32) {\n  xs[0] = -xs[1]\n}",
+            &["big(5)", "big(9999)", "big(10000)", "pick32([1, 4000000000, 3], 1)", "pick32([1, 2, 3], 0)", "neg32(mut [0, 2147483647])", "neg32(mut [0, -2147483648])"],
         ),
         // Indexes, read and written, nested, and outside their arrays.
         (
@@ -404,6 +531,36 @@ pub fn below(n: i8) -> i8 {
             &["later(0)", "later(2)", "never(12)", "never(3)", "drop(255)", "drop(4)"],
         ),
     ];
+
+    /// Each construct, as native code: one executable a program, every call in a process of its
+    /// own, printing what the reference interpreter prints.
+    #[test]
+    fn test_native_code_runs_each_construct_as_the_reference_interpreter_does() {
+        let dir = std::env::temp_dir().join(format!("mente-native-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut differences = Vec::new();
+        let mut compared = 0;
+        for (k, (src, calls)) in CONSTRUCTS.iter().enumerate() {
+            let text = format!("module m\n{}\n", src);
+            let module = mente_sema::check_program_without_proofs(&text).unwrap();
+            let lowered = lower::lower(&module).unwrap();
+            let parsed: Vec<CallArgs> = calls
+                .iter()
+                .map(|c| mente_interp::parse_call_modes(c).expect("a call"))
+                .collect();
+            let got = native(&lowered, &parsed, &dir, &format!("c{}", k))
+                .unwrap_or_else(|e| panic!("{}: {}", src, e));
+            for ((call, (f, args)), got) in calls.iter().zip(parsed).zip(got) {
+                let expected = reference(&module, &f, args);
+                compared += 1;
+                if got != expected {
+                    differences.push(format!("{}: {:?} != {:?}", call, got, expected));
+                }
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
+        assert_same(compared, &differences, 90);
+    }
 
     /// An argument from outside the program must have its parameter's shape and fit its types.
     #[test]

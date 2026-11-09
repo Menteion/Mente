@@ -455,6 +455,23 @@ fn test_mn_run_mir_prints_what_the_interpreter_prints() {
     }
     let main = mn(&dir, &["run", "prog.mn", "--mir"]);
     assert_eq!(text(&main.stdout), "4\n");
+    // Native code prints the same, its trap's file name included.
+    for args in [
+        &["run", "prog.mn"][..],
+        &["run", "prog.mn", "--call", "bump(mut 41)"],
+        &["run", "prog.mn", "--call", "bump(mut 255)"],
+    ] {
+        let reference = mn(&dir, args);
+        let native = mn(&dir, &[args, &["--native"]].concat());
+        assert_eq!(native.status.code(), reference.status.code(), "{:?}", args);
+        assert_eq!(
+            text(&native.stdout).replace("\r\n", "\n"),
+            text(&reference.stdout),
+            "{:?}",
+            args
+        );
+        assert_eq!(text(&native.stderr), text(&reference.stderr), "{:?}", args);
+    }
     let missing = mn(&dir, &["run", "prog.mn", "--mir", "--call", "nothing()"]);
     assert_eq!(missing.status.code(), Some(1));
     assert!(text(&missing.stderr).contains("no function `nothing`"));
