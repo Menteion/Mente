@@ -37,6 +37,7 @@ fn main() {
         "spec" => cmd_spec(&args[1..]),
         "explain" => cmd_explain(&args[1..]),
         "run" => cmd_run(&args[1..]),
+        "dump" => cmd_dump(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -55,10 +56,46 @@ fn print_help() {
     );
     println!("                               Verify .mn syntax, 64B Cache-Line @layout, bitstruct, @total & @branchless contracts");
     println!("  mn explain [code]            Explain an error code, or list them all");
+    println!("  mn dump --tokens|--tree|--typed <file.mn>");
+    println!("                               Print a phase's output in its canonical form");
     println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"]");
     println!("                               Run main, or one call, on the reference interpreter");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
+}
+
+/// Prints one phase's output for a module in its canonical form, which two implementations of
+/// the phase must print byte for byte alike.
+fn cmd_dump(args: &[String]) {
+    let phase = args
+        .iter()
+        .find(|a| a.starts_with("--"))
+        .map(String::as_str);
+    let path = args.iter().find(|a| !a.starts_with('-'));
+    let (Some(phase), Some(path)) = (phase, path) else {
+        eprintln!("Usage: mn dump --tokens|--tree|--typed <file.mn>");
+        process::exit(2);
+    };
+    let src = match fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("error: cannot read `{}`: {}", path, e);
+            process::exit(2);
+        }
+    };
+    let out = match phase {
+        "--tokens" => mente_syntax::dump_tokens(&src),
+        "--tree" => mente_syntax::dump_tree(&src),
+        "--typed" => mente_sema::dump_typed(&src),
+        other => {
+            eprintln!(
+                "error: `mn dump` knows --tokens, --tree and --typed, not `{}`",
+                other
+            );
+            process::exit(2);
+        }
+    };
+    print!("{}", out);
 }
 
 /// Runs a module on the reference interpreter: its `main`, or the call `--call` names. Prints

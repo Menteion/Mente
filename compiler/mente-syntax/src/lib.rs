@@ -943,6 +943,55 @@ pub struct ModuleFile {
     pub total_token_count: usize,
 }
 
+/// The version of the canonical dumps, which rises when any dump's form changes.
+pub const DUMP_VERSION: u32 = 1;
+
+/// The canonical form of a module's tokens: a header line, then one token per line as
+/// `line:col Kind text`, the kind the name of its [`TokenKind`] variant and the text its source
+/// spells, with `\` and newlines escaped. Two lexers agree when their dumps are byte-identical.
+pub fn dump_tokens(src: &str) -> String {
+    let mut out = format!("mente-dump {} tokens\n", DUMP_VERSION);
+    for t in tokenize(src)
+        .into_iter()
+        .filter(|t| t.kind != TokenKind::Eof)
+    {
+        let debug = format!("{:?}", t.kind);
+        let kind = debug.split(['(', ' ', '{']).next().unwrap_or("");
+        let text = src
+            .get(t.span.start..t.span.end)
+            .unwrap_or("")
+            .replace('\\', "\\\\")
+            .replace('\n', "\\n");
+        out.push_str(&format!(
+            "{}:{} {} {}\n",
+            t.span.line, t.span.col, kind, text
+        ));
+    }
+    out
+}
+
+/// The canonical form of a module's syntax trees: a header line, then each function with a
+/// body as [`tree::Tree::render_fn`] writes it, one per line. A module the declaration parser
+/// rejects dumps its error as `error line:col code`.
+pub fn dump_tree(src: &str) -> String {
+    let mut out = format!("mente-dump {} tree\n", DUMP_VERSION);
+    match parse_module(src) {
+        Err(d) => out.push_str(&format!(
+            "error {}:{} {}\n",
+            d.primary.line, d.primary.col, d.code
+        )),
+        Ok(module) => {
+            for parsed in parse_bodies(src, &module) {
+                if let Some(f) = parsed.syntax {
+                    out.push_str(&tree::Tree::render_fn(&f));
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Where one top-level item's text starts: its byte offset and its line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItemStart {
@@ -2252,6 +2301,26 @@ mod tests {
             let err = parse_module(src).unwrap_err();
             assert_eq!((err.code, err.message.as_str()), (code, message), "{}", src);
         }
+    }
+
+    #[test]
+    fn test_tokens_and_trees_dump_in_their_canonical_forms() {
+        assert_eq!(
+            dump_tokens("pub fn f() = a\\b"),
+            "mente-dump 1 tokens\n1:1 Pub pub\n1:5 Fn fn\n1:8 Ident f\n1:9 LParen (\n1:10 RParen )\n1:12 Eq =\n1:14 Ident a\n1:16 Ident b\n"
+        );
+        assert_eq!(
+            dump_tokens("/// a\\b\nmodule m"),
+            "mente-dump 1 tokens\n1:1 DocComment /// a\\\\b\n2:1 Module module\n2:8 Ident m\n"
+        );
+        assert_eq!(
+            dump_tree("module m\npub fn f(mut x: u8, y: bool) -> u8\n  requires y\n  ensures result > 0\n  decreases x\n{\n  x\n}\npub fn g() = 1\npub fn h()\n"),
+            "mente-dump 1 tree\n(fn f ((mut x u8) (y bool)) u8 ((requires y) (ensures (> result 0)) (decreases x)) {x})\n(fn g () () () (= 1))\n"
+        );
+        assert_eq!(
+            dump_tree("module m\nlet x = 1\n"),
+            "mente-dump 1 tree\nerror 2:1 E0111\n"
+        );
     }
 
     #[test]
