@@ -34,7 +34,7 @@ Mente (`.mn`) is a universal, statically verified, hardware-sympathetic programm
 
 ### Problems agents meet, and Mente's answer to each
 
-The catalogue of [`ai-coding-problems`](../docs/design-review.md#ai-coding-problems), decided on 2026-11-09. Every design decision made for agents names the row it serves. A problem with no answer is an `open` entry in the register, and a problem outside what any language can solve is marked so rather than promised. The last column says how the answer is shown to work: by the agent benchmark, whose report classifies a program that fails to build by the failure classes of its codes ([`diagnostics.md`](diagnostics.md) item 8), or by a check. "Not measured" marks an answer that nothing checks yet.
+The catalogue of [`ai-coding-problems`](../docs/design-review.md#ai-coding-problems), decided on 2026-11-09. Every design decision made for agents names the row it serves. A problem with no answer is an `open` entry in the register, and a problem outside what any language can solve is marked so rather than promised. The last column says how the answer is shown to work: by the agent benchmark, whose report classifies a program that fails to build by the failure classes of its codes ([`diagnostics.md`](diagnostics.md) item 8), or by a check. "Not measured" marks an answer that nothing checks yet. What no answer reaches is listed under "What Mente cannot solve" below.
 
 | Problem agents meet | Mente's answer | Status | Measured by |
 | :--- | :--- | :--- | :--- |
@@ -58,5 +58,33 @@ The catalogue of [`ai-coding-problems`](../docs/design-review.md#ai-coding-probl
 | Code that works but fights the hardware: pointer chasing, padding, branches in hot loops, false sharing | Defaults that fit the hardware; a cost report per function and per type; hardware contracts where it matters most | Proposed: [`sympathetic-defaults`](../docs/design-review.md#sympathetic-defaults), [`cost-report`](../docs/design-review.md#cost-report); the hardware contracts in the spec | Baselines with hardware counters; the tight-loop benchmark's gaps |
 | Code that is correct but slow, unknown to the agent | The cost report; baselines that record hardware counters; the performance stage | Proposed: [`cost-report`](../docs/design-review.md#cost-report), [`performance-stage`](../docs/design-review.md#performance-stage) | Baselines with hardware counters, from M1 |
 | Misreading what a requirement means, or choosing the wrong design | Outside what a language can solve. Contracts and `@example`s make the behaviour the agent intended explicit and checkable, so a reviewer sees what it understood | Outside a language | Not separable from other failures |
+
+### What Mente cannot solve
+
+Some problems agents meet are outside what any language can solve, and some limits are Mente's own. They are written down here so that no decision or claim promises otherwise. Each says what reduces it, where anything does. The review after each milestone, in `docs/milestone-reviews.md`, watches the ones that evidence can show.
+
+**Outside Mente's control**
+
+- **No model has been trained on Mente.** The language card, the documentation site, the examples and later the self-hosted compiler reduce the cost ([`language-card`](../docs/design-review.md#language-card), [`docs-site`](../docs/design-review.md#docs-site), [`self-hosting-plan`](../docs/design-review.md#self-hosting-plan)). But Mente's share of any future training data will stay small for years: without users there is little Mente code, and without that code agents write Mente less well.
+- **The ecosystem is small.** `extern "C"`, and later `mn bind`, reach C libraries. They do not reach the long tail that agents rely on in other languages: cloud SDKs, database drivers, authentication, payments ([`stdlib-scope`](../docs/design-review.md#stdlib-scope)). And what comes through FFI carries none of Mente's guarantees, as below.
+- **Models change.** The agent benchmark measures the models of its day, and stronger models may close the gap that Mente's design opens for today's. So a result holds only for the model it names ([`success-workload`](../docs/design-review.md#success-workload)).
+- **Reviewers must learn Mente too.** Under the goal, people decide whether to trust what agents write, from its signatures, contracts and effects. A reviewer who does not know Mente cannot do that. This is the same network effect as training data, on the people's side.
+
+**Limits no language escapes**
+
+- **Most of an agent's failures are not the language's.** Misreading a requirement, choosing the wrong design, or misunderstanding an existing codebase or the environment it runs in: a language reduces only the failures it causes, however well it is designed. The benchmark, whose tasks state their requirements exactly, does not measure the rest.
+- **A proof is only as good as its contract.** Tier 1 and Tier 2 prove what a contract says. A wrong or weak contract is proven just the same, and gives false confidence. Only a reviewer can judge a contract; `@example`s and mutation testing of the user's own code ([`user-mutation-testing`](../docs/design-review.md#user-mutation-testing)) make a weak one easier to see.
+- **The guarantees stop at the FFI boundary.** Code behind `with FFI` can do anything, so its effects, its memory safety and its contracts are trusted, not checked ([`capability-trust`](../docs/design-review.md#capability-trust)). The more a program leans on C libraries, the less of it Mente vouches for.
+- **Some properties cannot be proven.** Tier 1 stays inside a fragment it decides predictably, and Tier 2's solver is incomplete and unpredictable outside that fragment. Some obligations will always remain run-time checks or trusted axioms ([`tier2-trusted`](../docs/design-review.md#tier2-trusted)).
+
+**Trade-offs that can be tuned, not removed**
+
+- **Every check is something to learn.** Refinements, contracts and units catch bugs, but each mechanism costs an agent context and tokens. No design is both the most checked and the smallest. The core subset is one point between the two, and the benchmark judges it by scoring core tasks apart from the others.
+- **Some tight loops will trail C and Rust.** Overflow checks are a cost paid on purpose, and Cranelift optimises less than mature backends until stage 3 brings a backend of Mente's own ([`tight-loops`](../docs/design-review.md#tight-loops), [`performance-stage`](../docs/design-review.md#performance-stage)).
+
+**Risks of the project**
+
+- **Scale and time.** One person with agents builds a foundation of ten milestones, then self-hosting, then a backend ([`long-term-order`](../docs/design-review.md#long-term-order)). The field may change before Mente matures.
+- **The benchmark cannot show everything.** Its tasks are single functions. Changes across a large codebase, effects across modules and long maintenance are not measured. The benchmark shows how Mente compares on such tasks against Rust and a control language ([`benchmark-corpus`](../docs/design-review.md#benchmark-corpus)); beyond them, the goal's wider claim stays a hypothesis.
 
 <!-- @assert-present file="Cargo.toml,compiler/mente-syntax/src/lib.rs,compiler/mente-ast/src/lib.rs,compiler/mente-sema/src/lib.rs,compiler/mente-mir/src/lib.rs,compiler/mente-codegen/src/lib.rs,compiler/mente-cli/src/main.rs" reason="All six core Mente compiler crates exist in the workspace" -->
