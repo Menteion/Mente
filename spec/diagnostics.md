@@ -47,9 +47,9 @@ Agents act on what a compiler says, so every problem `mn` reports is data first 
 7. `Implemented` **MIR reports a rule it breaks as a value**: `MirRegionSoA::verify_branchless` returns a `MirViolation` with the code, the node and its source line, which `mn` prints as `error[E0401]`.
    <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_branchless_region_rejects_conditional_jump" min="1" reason="A conditional jump in a @branchless region is reported with its code, node and line" -->
    - `Specified`: once `.mn` code is lowered to MIR (M1), MIR's diagnostics carry source spans like every other.
-8. `Implemented` **Every code has a failure class** ([`ai-coding-problems`](../docs/design-review.md#ai-coding-problems)): each catalogue entry carries one class, which `mn explain` prints, so that the agent benchmark classifies a program that fails to build by the codes it reports and counts the failures the re-planning triggers name. Today's classes are syntax, provenance, hardware contract, proof, type (units included) and comptime, following the ranges above.
+8. `Implemented` **Every code has a failure class** ([`ai-coding-problems`](../docs/design-review.md#ai-coding-problems)): each catalogue entry carries one class, which `mn explain` prints, so that the agent benchmark classifies a program that fails to build by the codes it reports and counts the failures the re-planning triggers name. Today's classes are syntax, later milestone, foreign idiom, provenance, hardware contract, proof, type (units included) and comptime, mostly following the ranges above.
    <!-- @assert-count target="compiler/mente-cli/src/catalogue.rs" symbol="fn test_every_code_has_a_failure_class" min="1" reason="Every code has its class, and mn explain prints it" -->
-   - `Specified`: foreign idiom and unknown name join as classes with their first codes in M1, and effect in M4. A code whose class differs from its range's is listed in the test with its class.
+   - `Specified`: unknown name joins as a class with its first code in M1, and effect in M4. A code whose class differs from its range's, such as the foreign idioms `E0118` to `E0126`, is listed in the test with its class.
 
 ## 2. Decision rationale and rejected alternatives
 

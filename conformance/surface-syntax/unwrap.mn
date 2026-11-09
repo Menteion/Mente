@@ -1,0 +1,3 @@
+// expect: E0122
+module conformance
+pub fn f(r: i32) -> i32 = r.unwrap()

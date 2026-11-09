@@ -1,0 +1,6 @@
+// expect: E0118
+module conformance
+pub fn f() -> i32 {
+  let x = 1
+  x
+}

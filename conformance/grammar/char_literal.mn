@@ -1,0 +1,6 @@
+// expect: E0105
+module conformance
+pub fn f() -> i32 {
+  val c = 'x'
+  0
+}

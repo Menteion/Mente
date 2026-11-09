@@ -1,0 +1,13 @@
+// expect: pass
+module conformance
+pub fn bump(mut a: i32) {
+  a += 1
+}
+pub fn spellings(a: bool, b: bool, x: u32) -> u8 {
+  val first = 1
+  var count = first
+  bump(mut count)
+  val both = a and b or not a
+  val small: u8 = if x < 256 { 1 } else { 0 }
+  small
+}

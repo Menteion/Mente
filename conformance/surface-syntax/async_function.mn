@@ -1,0 +1,3 @@
+// expect: E0121
+module conformance
+pub async fn f() -> i32 = 1

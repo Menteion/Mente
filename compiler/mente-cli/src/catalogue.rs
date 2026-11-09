@@ -6,14 +6,16 @@
 //! one that is withdrawn stays here as `Retired`. Each code also has a failure class, which the
 //! agent benchmark counts when a program fails to build (`ai-coding-problems`).
 
-/// What kind of mistake a code reports. A class joins with the first code that needs it: foreign
-/// idioms and unknown names in M1, effects in M4.
+/// What kind of mistake a code reports. A class joins with the first code that needs it: unknown
+/// names in M1, effects in M4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureClass {
     /// The text does not parse.
     Syntax,
     /// A construct of a later milestone, which the current one does not have.
     LaterMilestone,
+    /// A habit from another language, such as `let` or `&&`.
+    ForeignIdiom,
     /// A view, an arena value or a task-bound value is used where its provenance does not reach.
     Provenance,
     /// A layout, bit-field or branch-freedom contract does not hold.
@@ -32,6 +34,7 @@ impl FailureClass {
         match self {
             FailureClass::Syntax => "syntax",
             FailureClass::LaterMilestone => "later milestone",
+            FailureClass::ForeignIdiom => "foreign idiom",
             FailureClass::Provenance => "provenance",
             FailureClass::HardwareContract => "hardware contract",
             FailureClass::Proof => "proof",
@@ -297,6 +300,105 @@ pub const CATALOGUE: &[CodeEntry] = &[
          part of its type, so `count` is an integer literal.",
         "module m\npub fn f(n: usize) -> [4]u8 {\n  val a = [0; n]\n  a\n}\n",
         "module m\npub fn f(n: usize) -> [4]u8 {\n  val a = [0; 4]\n  a\n}\n",
+    ),
+    emitted(
+        "E0118",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "`let` or `let mut` from Rust",
+        "Mente binds a value that never changes with `val`, and one that assignment may change \
+         with `var`. The fix rewrites `let` as `val` and `let mut` as `var`, and the rest of the \
+         binding is checked as written.",
+        "module m\npub fn f() -> i32 {\n  let x = 1\n  x\n}\n",
+        "module m\npub fn f() -> i32 {\n  val x = 1\n  x\n}\n",
+    ),
+    emitted(
+        "E0119",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "A reference `&x` or `&mut x` from Rust",
+        "Mente has no references. A parameter is read-only unless it is `mut`, and a call passes \
+         a place it may change as `mut x`. At a call, `&mut x` becomes `mut x`, a unique \
+         rewrite; elsewhere removing the `&` is suggested.",
+        "module m\npub fn g(mut a: i32) {\n  a = 1\n}\npub fn f() -> i32 {\n  var v = 0\n  g(&mut v)\n  v\n}\n",
+        "module m\npub fn g(mut a: i32) {\n  a = 1\n}\npub fn f() -> i32 {\n  var v = 0\n  g(mut v)\n  v\n}\n",
+    ),
+    emitted(
+        "E0120",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "A lifetime such as `'a` from Rust",
+        "Mente writes no lifetimes. A returned view names the parameter it borrows from with a \
+         `from` clause, and a parameter that must outlive the call takes the mode `own` or \
+         `in`. Removing `<'a>`, or the `'a` of `&'a T`, is suggested.",
+        "module m\npub fn first<'a>(x: i32) -> i32 = x\n",
+        "module m\npub fn first(x: i32) -> i32 = x\n",
+    ),
+    emitted(
+        "E0121",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "`async` or `await`",
+        "Mente has no function colouring. A function that waits on the network or the clock \
+         declares it with `with Net, Clock`, and tasks run at once with `parallel (...)`. \
+         Removing `async`, `await` or `.await` is suggested.",
+        "module m\npub async fn f() -> i32 = 1\n",
+        "module m\npub fn f() -> i32 = 1\n",
+    ),
+    emitted(
+        "E0122",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "`.unwrap()` or `.expect(...)` from Rust",
+        "Mente has no `.unwrap()`. An absent value is tested with `guard`, or replaced by a \
+         default with `??`; both apply to `?T`, which comes in M2. Removing the call is \
+         suggested.",
+        "module m\npub fn f(r: i32) -> i32 = r.unwrap()\n",
+        "module m\npub fn f(r: i32) -> i32 = r\n",
+    ),
+    emitted(
+        "E0123",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "`::` from Rust or C++",
+        "Mente separates the parts of a path with `.`, and writes type arguments as `f<T>(...)`. \
+         The fix rewrites a turbofish's `::<` as `<`; for a path it suggests `.`.",
+        "module m\npub fn f(a: i32, b: i32) -> i32 = cmp::max(a, b)\n",
+        "module m\npub fn f(a: i32, b: i32) -> i32 = a\n",
+    ),
+    emitted(
+        "E0124",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "`&&`, `||` or `!` from C",
+        "Mente writes the logical operators as the words `and`, `or` and `not`, so `&` and `|` \
+         stay bitwise and `!` can mark error propagation. The fix rewrites each; for `!a == b`, \
+         which C reads as `(!a) == b`, it writes `(not a) == b`, since `not a == b` means \
+         `not (a == b)`.",
+        "module m\npub fn f(a: bool, b: bool) -> bool = a && b\n",
+        "module m\npub fn f(a: bool, b: bool) -> bool = a and b\n",
+    ),
+    emitted(
+        "E0125",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "The conditional `c ? a : b` from C",
+        "Mente has no `? :`. An `if` with `else` is an expression, so the fix rewrites \
+         `c ? a : b` as `if c { a } else { b }`.",
+        "module m\npub fn f(c: bool) -> i32 = c ? 1 : 2\n",
+        "module m\npub fn f(c: bool) -> i32 = if c { 1 } else { 2 }\n",
+    ),
+    emitted(
+        "E0126",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "A cast `as` from Rust or C",
+        "Mente has no casts. Any integer expression may flow into any integer type, and is \
+         checked where it lands, so a narrowing that would truncate traps or is rejected instead \
+         of losing bits. Bind the value with the type it needs, as in `val y: u8 = x`; removing \
+         the cast is suggested.",
+        "module m\npub fn f(x: u32) -> u8 = x as u8\n",
+        "module m\npub fn f(x: u32) -> u8 = x\n",
     ),
     reserved(
         "E0310",
@@ -757,6 +859,7 @@ mod tests {
         let all = [
             FailureClass::Syntax,
             FailureClass::LaterMilestone,
+            FailureClass::ForeignIdiom,
             FailureClass::Provenance,
             FailureClass::HardwareContract,
             FailureClass::Proof,
@@ -769,6 +872,7 @@ mod tests {
             [
                 "syntax",
                 "later milestone",
+                "foreign idiom",
                 "provenance",
                 "hardware contract",
                 "proof",
@@ -780,6 +884,7 @@ mod tests {
             let expected = match &e.code[..3] {
                 _ if e.code == "E0109" => FailureClass::LaterMilestone,
                 _ if e.code == "E0116" => FailureClass::Type,
+                _ if ("E0118"..="E0126").contains(&e.code) => FailureClass::ForeignIdiom,
                 "E01" => FailureClass::Syntax,
                 "E03" => FailureClass::Provenance,
                 "E04" => FailureClass::HardwareContract,

@@ -76,8 +76,12 @@ impl Parser {
     }
 
     /// The token after the next one, or the end.
+    fn second(&self) -> &Token {
+        &self.tokens[(self.pos + 1).min(self.tokens.len() - 1)]
+    }
+
     fn peek_second(&self) -> &TokenKind {
-        &self.tokens[(self.pos + 1).min(self.tokens.len() - 1)].kind
+        &self.second().kind
     }
 
     fn at(&self, kind: &TokenKind) -> bool {
@@ -147,6 +151,33 @@ impl Parser {
             self.errors.push(d);
         }
         self.recovering = true;
+    }
+
+    /// Reports `d` and goes on: for another language's idiom whose meaning is plain, so the
+    /// rest of the statement is still checked.
+    fn note(&mut self, d: Diagnostic) {
+        if !self.recovering {
+            self.errors.push(d);
+        }
+    }
+
+    /// Whether the next two tokens touch, as the two characters of `&&` do.
+    fn next_two_touch(&self) -> bool {
+        self.span().end == self.second().span.start
+    }
+
+    /// The index of the `)` that closes the `(` at the next token, or of the end.
+    fn closing_paren(&self) -> usize {
+        let mut depth = 0i32;
+        for (i, tok) in self.tokens.iter().enumerate().skip(self.pos) {
+            match tok.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen if depth == 1 => return i,
+                TokenKind::RParen => depth -= 1,
+                _ => {}
+            }
+        }
+        self.tokens.len() - 1
     }
 
     fn expected(&mut self, what: &str) {
@@ -612,6 +643,12 @@ impl Parser {
                 self.later(start, "a `for` loop", None);
                 StmtKind::Break
             }
+            TokenKind::Ident(w)
+                if w == "let"
+                    && matches!(self.peek_second(), TokenKind::Ident(_) | TokenKind::Mut) =>
+            {
+                self.let_binding()
+            }
             _ => {
                 let target = self.expr();
                 match assign_op(self.peek()) {
@@ -648,6 +685,42 @@ impl Parser {
 
     fn binding(&mut self) -> StmtKind {
         let is_var = self.bump().kind == TokenKind::Var;
+        self.binding_rest(is_var)
+    }
+
+    /// `let` and `let mut` from Rust, read as `val` and `var` after their diagnostic (`E0118`).
+    fn let_binding(&mut self) -> StmtKind {
+        let first = self.bump().span;
+        let is_var = self.at(&TokenKind::Mut);
+        let span = if is_var {
+            Span {
+                end: self.bump().span.end,
+                ..first
+            }
+        } else {
+            first
+        };
+        let (mente, written) = if is_var {
+            ("var", "let mut")
+        } else {
+            ("val", "let")
+        };
+        let d = Diagnostic::error(
+            "E0118",
+            span,
+            format!("Mente writes `{}`, not `{}`", mente, written),
+        )
+        .with_fix(
+            Applicability::MachineApplicable,
+            format!("write `{}`", mente),
+            span,
+            mente,
+        );
+        self.note(d);
+        self.binding_rest(is_var)
+    }
+
+    fn binding_rest(&mut self, is_var: bool) -> StmtKind {
         let (name, name_span) = self.name("a name for the binding");
         let ty = if !self.recovering && self.eat(&TokenKind::Colon) {
             Some(self.ty())
@@ -754,6 +827,45 @@ impl Parser {
             if self.recovering {
                 break;
             }
+            if let Some((op, word)) = self.c_logical() {
+                let lbp = if op == BinaryOp::And { 2 } else { 1 };
+                if lbp < min_bp {
+                    break;
+                }
+                let first = self.bump().span;
+                let second = self.bump().span;
+                let span = Span {
+                    end: second.end,
+                    ..first
+                };
+                let d = Diagnostic::error(
+                    "E0124",
+                    span,
+                    format!("Mente writes `{}`, not `{}`", word, self.text_of(span)),
+                )
+                .with_fix(
+                    Applicability::MachineApplicable,
+                    format!("write `{}`", word),
+                    span,
+                    word,
+                );
+                self.note(d);
+                let rhs = self.binary(lbp + 1);
+                let span = self.span_from(start);
+                lhs = self.tree.push_expr(ExprKind::Binary { op, lhs, rhs }, span);
+                continue;
+            }
+            if self.at(&TokenKind::As) {
+                self.cast(lhs);
+                continue;
+            }
+            if self.at(&TokenKind::Question) && self.ternary_follows() {
+                if min_bp > 0 {
+                    break;
+                }
+                self.ternary(&mut lhs, start);
+                continue;
+            }
             let Some((op, lbp)) = infix(self.peek()) else {
                 break;
             };
@@ -773,6 +885,103 @@ impl Parser {
             lhs = self.tree.push_expr(ExprKind::Binary { op, lhs, rhs }, span);
         }
         lhs
+    }
+
+    /// `&&` or `||` from C, Rust and JavaScript, as two touching tokens.
+    fn c_logical(&self) -> Option<(BinaryOp, &'static str)> {
+        if !self.next_two_touch() {
+            return None;
+        }
+        match (self.peek(), self.peek_second()) {
+            (TokenKind::Amp, TokenKind::Amp) => Some((BinaryOp::And, "and")),
+            (TokenKind::Pipe, TokenKind::Pipe) => Some((BinaryOp::Or, "or")),
+            _ => None,
+        }
+    }
+
+    /// `x as T` from Rust and C (`E0126`): Mente has no casts.
+    fn cast(&mut self, value: ExprId) {
+        let from = self.tree.expr(value).span.end;
+        let as_span = self.bump().span;
+        // The type is read only to find where it ends; its own errors would be a second report.
+        let was = self.recovering;
+        self.recovering = true;
+        self.ty();
+        self.recovering = was;
+        let removed = Span {
+            start: from,
+            end: self.prev_end(),
+            ..as_span
+        };
+        let d = Diagnostic::error(
+            "E0126",
+            as_span,
+            "Mente has no casts: an integer converts where it lands, checked there, so bind it with the type it needs, as in `val y: u8 = x`",
+        )
+        .with_fix(Applicability::Suggestion, "remove the cast", removed, "");
+        self.note(d);
+    }
+
+    /// Whether the `?` at the next token opens C's conditional `c ? a : b`: a value follows it
+    /// on its line.
+    fn ternary_follows(&self) -> bool {
+        let next = self.second();
+        next.span.line == self.span().line && starts_expression(&next.kind)
+    }
+
+    /// `c ? a : b` from C and JavaScript (`E0125`), read as `if c { a } else { b }` after its
+    /// diagnostic, whose fix writes it so.
+    fn ternary(&mut self, cond: &mut ExprId, start: Span) {
+        let question = self.bump().span;
+        let then_value = self.binary(0);
+        if self.recovering || !self.at(&TokenKind::Colon) {
+            self.later(question, "error propagation (`?` and `!`)", Some("M2"));
+            return;
+        }
+        self.bump();
+        let else_value = self.binary(0);
+        if self.recovering {
+            return;
+        }
+        let whole = self.span_from(start);
+        let rewritten = format!(
+            "if {} {{ {} }} else {{ {} }}",
+            self.text_of(self.tree.expr(*cond).span),
+            self.text_of(self.tree.expr(then_value).span),
+            self.text_of(self.tree.expr(else_value).span)
+        );
+        let d = Diagnostic::error(
+            "E0125",
+            question,
+            "Mente has no `? :`; write `if c { a } else { b }`",
+        )
+        .with_fix(
+            Applicability::MachineApplicable,
+            "write it as an `if` expression",
+            whole,
+            rewritten,
+        );
+        self.note(d);
+        let then = self.single(then_value);
+        let otherwise = Some(Else::Block(self.single(else_value)));
+        *cond = self.tree.push_expr(
+            ExprKind::If {
+                cond: *cond,
+                then,
+                otherwise,
+            },
+            whole,
+        );
+    }
+
+    /// A block holding one expression, as an `if` read from `? :` has.
+    fn single(&mut self, value: ExprId) -> BlockId {
+        let span = self.tree.expr(value).span;
+        let stmt = self.tree.push_stmt(StmtKind::Expr(value), span);
+        self.tree.push_block(Block {
+            stmts: vec![stmt],
+            span,
+        })
     }
 
     /// `a < b < c`: comparisons do not chain (`E0113`).
@@ -825,6 +1034,47 @@ impl Parser {
                 if self.recovering {
                     return true;
                 }
+                let through_name = Span {
+                    end: name_span.end,
+                    ..at
+                };
+                if name == "await" && !self.at(&TokenKind::LParen) {
+                    let d = Diagnostic::error(
+                        "E0121",
+                        through_name,
+                        "Mente has no `await`: a function that waits declares its effects with `with`, and tasks run at once with `parallel (...)`",
+                    )
+                    .with_fix(Applicability::Suggestion, "remove `.await`", through_name, "");
+                    self.note(d);
+                    return true;
+                }
+                if (name == "unwrap" || name == "expect") && self.at(&TokenKind::LParen) {
+                    let close = self.closing_paren();
+                    while self.pos < close {
+                        self.bump();
+                    }
+                    self.bump();
+                    let call = Span {
+                        end: self.prev_end(),
+                        ..at
+                    };
+                    let d = Diagnostic::error(
+                        "E0122",
+                        through_name,
+                        format!(
+                            "Mente has no `.{}()`: test the value with `guard`, or give a default with `??` (M2)",
+                            name
+                        ),
+                    )
+                    .with_fix(
+                        Applicability::Suggestion,
+                        format!("remove `.{}(...)`", name),
+                        call,
+                        "",
+                    );
+                    self.note(d);
+                    return true;
+                }
                 if self.at(&TokenKind::LParen) {
                     self.later(name_span, "a method call", Some("M2"));
                 } else if name != "len" {
@@ -837,6 +1087,8 @@ impl Parser {
                 }
                 true
             }
+            // `c ? a : b` is read in `binary`, at the level of a whole expression.
+            TokenKind::Question if self.ternary_follows() => false,
             TokenKind::Question | TokenKind::Bang => {
                 self.later(at, "error propagation (`?` and `!`)", Some("M2"));
                 true
@@ -881,7 +1133,34 @@ impl Parser {
             }
             TokenKind::Ident(n) => {
                 self.bump();
-                if self.at(&TokenKind::LParen) && !self.newline_before() {
+                if self.at(&TokenKind::Colon)
+                    && self.peek_second() == &TokenKind::Colon
+                    && self.next_two_touch()
+                {
+                    self.path_idiom();
+                    ExprKind::Error
+                } else if n == "await" && !self.newline_before() && starts_expression(self.peek()) {
+                    let removed = Span {
+                        end: self.span().start,
+                        ..start
+                    };
+                    let d = Diagnostic::error(
+                        "E0121",
+                        start,
+                        "Mente has no `await`: a function that waits declares its effects with `with`, and tasks run at once with `parallel (...)`",
+                    )
+                    .with_fix(Applicability::Suggestion, "remove `await`", removed, "");
+                    self.note(d);
+                    return self.binary(UNARY_OPERAND_BP);
+                } else if n == "async" && self.at(&TokenKind::LBrace) {
+                    let d = Diagnostic::error(
+                        "E0121",
+                        start,
+                        "Mente has no `async` blocks: tasks run at once with `parallel (...)` (M7)",
+                    );
+                    self.error(d);
+                    ExprKind::Error
+                } else if self.at(&TokenKind::LParen) && !self.newline_before() {
                     if n == "todo" {
                         self.todo()
                     } else {
@@ -936,6 +1215,33 @@ impl Parser {
                 self.later(start, &what, Some("M7"));
                 ExprKind::Error
             }
+            TokenKind::Amp => return self.reference(),
+            TokenKind::Bang => {
+                let bang = self.bump().span;
+                let operand = self.binary(UNARY_OPERAND_BP);
+                if !self.recovering {
+                    let operand_span = self.tree.expr(operand).span;
+                    let text = format!("not {}", self.text_of(operand_span));
+                    // `!a == b` is `(!a) == b`, but `not a == b` is `not (a == b)`.
+                    let tight = !self.ends_here() && infix(self.peek()).is_some();
+                    let replacement = if tight { format!("({})", text) } else { text };
+                    let d = Diagnostic::error("E0124", bang, "Mente writes `not`, not `!`")
+                        .with_fix(
+                            Applicability::MachineApplicable,
+                            "write `not`",
+                            Span {
+                                end: operand_span.end,
+                                ..bang
+                            },
+                            replacement,
+                        );
+                    self.note(d);
+                }
+                ExprKind::Unary {
+                    op: UnaryOp::Not,
+                    operand,
+                }
+            }
             TokenKind::Invariant
             | TokenKind::Decreases
             | TokenKind::Requires
@@ -963,6 +1269,75 @@ impl Parser {
         };
         let span = self.span_from(start);
         self.tree.push_expr(kind, span)
+    }
+
+    /// `a::b` and `f::<T>` from Rust and C++ (`E0123`).
+    fn path_idiom(&mut self) {
+        let first = self.bump().span;
+        let second = self.bump().span;
+        let colons = Span {
+            end: second.end,
+            ..first
+        };
+        let d = if self.at(&TokenKind::Lt) {
+            let lt = self.span();
+            Diagnostic::error(
+                "E0123",
+                colons,
+                "Mente writes type arguments as `f<T>(...)`, without `::`",
+            )
+            .with_fix(
+                Applicability::MachineApplicable,
+                "write `<`",
+                Span {
+                    end: lt.end,
+                    ..colons
+                },
+                "<",
+            )
+        } else {
+            Diagnostic::error(
+                "E0123",
+                colons,
+                "Mente separates the parts of a path with `.`, not `::`",
+            )
+            .with_fix(Applicability::Suggestion, "write `.`", colons, ".")
+        };
+        self.error(d);
+    }
+
+    /// `&x` and `&mut x` from Rust (`E0119`): Mente has no references. Read as `x` after the
+    /// diagnostic.
+    fn reference(&mut self) -> ExprId {
+        let amp = self.bump().span;
+        let is_mut = self.eat(&TokenKind::Mut);
+        let written = Span {
+            end: self.prev_end(),
+            ..amp
+        };
+        let removed = Span {
+            end: self.span().start,
+            ..amp
+        };
+        let (message, fix) = if is_mut {
+            (
+                "Mente has no references: a call passes a place to change as `mut x`, and nothing else takes `&mut x`",
+                "remove `&mut`",
+            )
+        } else {
+            (
+                "Mente has no references: a parameter is read-only unless it is `mut`, so pass `x`, not `&x`",
+                "remove `&`",
+            )
+        };
+        let d = Diagnostic::error("E0119", written, message).with_fix(
+            Applicability::Suggestion,
+            fix,
+            removed,
+            "",
+        );
+        self.note(d);
+        self.binary(UNARY_OPERAND_BP)
     }
 
     fn unary(&mut self, op: UnaryOp, operand_bp: u8) -> ExprKind {
@@ -1008,6 +1383,26 @@ impl Parser {
         let mut args = Vec::new();
         while !self.at(&TokenKind::RParen) && !self.recovering {
             let before = self.pos;
+            if self.at(&TokenKind::Amp) && self.peek_second() == &TokenKind::Mut {
+                // A call's `&mut x` is Rust's spelling of `mut x`: the rewrite is unique.
+                let amp = self.bump().span;
+                let span = Span {
+                    end: self.span().end,
+                    ..amp
+                };
+                let d = Diagnostic::error(
+                    "E0119",
+                    span,
+                    "a call passes a place to change as `mut x`, not `&mut x`",
+                )
+                .with_fix(
+                    Applicability::MachineApplicable,
+                    "write `mut`",
+                    span,
+                    "mut",
+                );
+                self.note(d);
+            }
             let is_mut = self.eat(&TokenKind::Mut);
             let value = self.expr();
             if is_mut && !self.recovering && !self.is_place(value) {
@@ -1139,6 +1534,26 @@ fn infix(kind: &TokenKind) -> Option<(BinaryOp, u8)> {
         TokenKind::Percent => (BinaryOp::Rem, 10),
         _ => return None,
     })
+}
+
+/// Whether a token can start an expression, which tells C's `c ? a : b` and `await x` apart.
+fn starts_expression(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::IntLit(..)
+            | TokenKind::FloatLit(_)
+            | TokenKind::StrLit(_)
+            | TokenKind::Ident(_)
+            | TokenKind::TrueLit
+            | TokenKind::FalseLit
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::Minus
+            | TokenKind::Tilde
+            | TokenKind::Not
+            | TokenKind::Bang
+            | TokenKind::If
+    )
 }
 
 fn is_comparison(op: BinaryOp) -> bool {
@@ -1832,6 +2247,200 @@ mod tests {
                 src
             );
         }
+    }
+
+    /// Parses the block body `body`, which holds one idiom, and returns the source and its one
+    /// diagnostic.
+    fn idiom(body: &str) -> (String, Diagnostic) {
+        let src = format!("fn f() {{\n{}\n}}", body);
+        let (_, mut errs) = parse(&src);
+        assert_eq!(errs.len(), 1, "{}: {:?}", body, errs);
+        (src, errs.remove(0))
+    }
+
+    #[test]
+    fn test_other_languages_idioms_name_the_mente_spelling() {
+        // Rewrites that are unique: (body, code, message, the body once the fix is applied).
+        let unique = [
+            (
+                "let x = 1",
+                "E0118",
+                "Mente writes `val`, not `let`",
+                "val x = 1",
+            ),
+            (
+                "let mut y = 2",
+                "E0118",
+                "Mente writes `var`, not `let mut`",
+                "var y = 2",
+            ),
+            (
+                "f(&mut v)",
+                "E0119",
+                "a call passes a place to change as `mut x`, not `&mut x`",
+                "f(mut v)",
+            ),
+            (
+                "val ok = a && b",
+                "E0124",
+                "Mente writes `and`, not `&&`",
+                "val ok = a and b",
+            ),
+            (
+                "val ok = a || b",
+                "E0124",
+                "Mente writes `or`, not `||`",
+                "val ok = a or b",
+            ),
+            (
+                "val ok = !a",
+                "E0124",
+                "Mente writes `not`, not `!`",
+                "val ok = not a",
+            ),
+            (
+                "val ok = !a == b",
+                "E0124",
+                "Mente writes `not`, not `!`",
+                "val ok = (not a) == b",
+            ),
+            (
+                "val y = c ? 1 : 2",
+                "E0125",
+                "Mente has no `? :`; write `if c { a } else { b }`",
+                "val y = if c { 1 } else { 2 }",
+            ),
+            (
+                "val y = x > 0 ? x : 0 - x",
+                "E0125",
+                "Mente has no `? :`; write `if c { a } else { b }`",
+                "val y = if x > 0 { x } else { 0 - x }",
+            ),
+            (
+                "val n = parse::<u8>(s)",
+                "E0123",
+                "Mente writes type arguments as `f<T>(...)`, without `::`",
+                "val n = parse<u8>(s)",
+            ),
+        ];
+        for (body, code, message, after) in unique {
+            let (src, d) = idiom(body);
+            assert_eq!((d.code, d.message.as_str()), (code, message), "{}", body);
+            assert_eq!(
+                d.fixes[0].applicability,
+                Applicability::MachineApplicable,
+                "{}",
+                body
+            );
+            let repaired = apply_fix(&src, &d.fixes[0]).unwrap();
+            assert_eq!(repaired, format!("fn f() {{\n{}\n}}", after), "{}", body);
+        }
+        for after in [
+            "val x = 1",
+            "var y = 2",
+            "f(mut v)",
+            "val ok = (not a) == b",
+            "val y = if x > 0 { x } else { 0 - x }",
+        ] {
+            assert!(codes(after).is_empty(), "{}", after);
+        }
+        // Rewrites that need judgement are suggestions.
+        let judged = [
+            (
+                "f(&v)",
+                "E0119",
+                "Mente has no references: a parameter is read-only unless it is `mut`, so pass `x`, not `&x`",
+                "f(v)",
+            ),
+            (
+                "val r = &mut v",
+                "E0119",
+                "Mente has no references: a call passes a place to change as `mut x`, and nothing else takes `&mut x`",
+                "val r = v",
+            ),
+            (
+                "val n = x.await",
+                "E0121",
+                "Mente has no `await`: a function that waits declares its effects with `with`, and tasks run at once with `parallel (...)`",
+                "val n = x",
+            ),
+            (
+                "val n = await g(1)",
+                "E0121",
+                "Mente has no `await`: a function that waits declares its effects with `with`, and tasks run at once with `parallel (...)`",
+                "val n = g(1)",
+            ),
+            (
+                "val v = r.unwrap()",
+                "E0122",
+                "Mente has no `.unwrap()`: test the value with `guard`, or give a default with `??` (M2)",
+                "val v = r",
+            ),
+            (
+                "val v = r.expect(g(1))",
+                "E0122",
+                "Mente has no `.expect()`: test the value with `guard`, or give a default with `??` (M2)",
+                "val v = r",
+            ),
+            (
+                "val y = x as u8",
+                "E0126",
+                "Mente has no casts: an integer converts where it lands, checked there, so bind it with the type it needs, as in `val y: u8 = x`",
+                "val y = x",
+            ),
+            (
+                "val m = cmp::max(a, b)",
+                "E0123",
+                "Mente separates the parts of a path with `.`, not `::`",
+                "val m = cmp.max(a, b)",
+            ),
+        ];
+        for (body, code, message, after) in judged {
+            let (src, d) = idiom(body);
+            assert_eq!((d.code, d.message.as_str()), (code, message), "{}", body);
+            assert_eq!(
+                d.fixes[0].applicability,
+                Applicability::Suggestion,
+                "{}",
+                body
+            );
+            let repaired = apply_fix(&src, &d.fixes[0]).unwrap();
+            assert_eq!(repaired, format!("fn f() {{\n{}\n}}", after), "{}", body);
+        }
+        // An `async` block gets the code, with no fix.
+        let (_, d) = idiom("async {\n  f()\n}");
+        assert_eq!((d.code, d.fixes.len()), ("E0121", 0));
+        // A `?` with no value after it, or no `:`, is error propagation, a construct of M2.
+        assert_eq!(codes("val r = f()?"), vec!["E0109"]);
+        assert_eq!(codes("val r = f() ? 1"), vec!["E0109"]);
+        // `& &`, apart, is not `&&`.
+        assert_eq!(codes("val b = a & &c"), vec!["E0119"]);
+        // `&&` and `||` group as `and` and `or` do.
+        for (src, want) in [
+            ("fn f() = a || b && c", "(or a (and b c))"),
+            ("fn f() = a && b && c", "(and (and a b) c)"),
+        ] {
+            let (f, errs) = parse(src);
+            assert_eq!(errs.len(), 2, "{}", src);
+            let Some(Body::Expr(e)) = f.body else {
+                panic!("no expression body")
+            };
+            assert_eq!(f.tree.render_expr(e), want, "{}", src);
+        }
+        // A call the tokens never close is removed to their end.
+        let (_, errs) = parse("fn f() = r.unwrap(");
+        assert_eq!(
+            errs.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec!["E0122"]
+        );
+        // After an idiom whose meaning is plain, the rest of the statement is still checked.
+        assert_eq!(codes("let x = 1 +\n"), vec!["E0118", "E0110"]);
+        let (f, errs) = parse("fn f() {\n  let mut i = 0\n  i += 1\n}");
+        assert_eq!(errs.len(), 1);
+        let Some(Body::Block(b)) = f.body else {
+            panic!("no block body")
+        };
+        assert_eq!(f.tree.render_block(b), "{(var i 0); (+= i 1)}");
     }
 
     #[test]

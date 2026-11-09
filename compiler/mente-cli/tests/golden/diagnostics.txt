@@ -24,14 +24,14 @@
 {"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"expected `=` and the binding's value, found `1`","primary":{"file":"binding_without_value.mn","start":64,"end":65,"line":4,"column":9},"related":[],"fixes":[]}]}
 == grammar/chained_comparison.mn ==
 {"version":1,"diagnostics":[{"code":"E0113","severity":"error","message":"comparisons do not chain; write `... b and b ...`","primary":{"file":"chained_comparison.mn","start":85,"end":86,"line":3,"column":50},"related":[],"fixes":[{"message":"compare `b` twice, joined by `and`","applicability":"suggestion","edits":[{"span":{"file":"chained_comparison.mn","start":84,"end":84,"line":3,"column":49},"replacement":" and b"}]}]}]}
+== grammar/char_literal.mn ==
+{"version":1,"diagnostics":[{"code":"E0105","severity":"error","message":"`'` is not a character Mente uses; Mente has no character literals: write the character's code, such as `0x41` for `A`","primary":{"file":"char_literal.mn","start":66,"end":67,"line":4,"column":11},"related":[],"fixes":[]}]}
 == grammar/expression_expected.mn ==
 {"version":1,"diagnostics":[{"code":"E0110","severity":"error","message":"expected an expression, found `)`","primary":{"file":"expression_expected.mn","start":56,"end":57,"line":3,"column":21},"related":[],"fixes":[]}]}
 == grammar/if_as_an_operand.mn ==
 {"version":1,"diagnostics":[{"code":"E0115","severity":"error","message":"an `if` expression used as an operand needs parentheses","primary":{"file":"if_as_an_operand.mn","start":67,"end":88,"line":3,"column":32},"related":[],"fixes":[{"message":"put the `if` expression in parentheses","applicability":"machine-applicable","edits":[{"span":{"file":"if_as_an_operand.mn","start":67,"end":88,"line":3,"column":32},"replacement":"(if c { 2 } else { 3 })"}]}]}]}
 == grammar/integer_beyond_u128.mn ==
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1","primary":{"file":"integer_beyond_u128.mn","start":57,"end":96,"line":3,"column":22},"related":[],"fixes":[]}]}
-== grammar/lifetime_quote.mn ==
-{"version":1,"diagnostics":[{"code":"E0105","severity":"error","message":"`'` is not a character Mente uses; Mente writes no lifetimes and has no character literals","primary":{"file":"lifetime_quote.mn","start":49,"end":50,"line":3,"column":14},"related":[],"fixes":[]}]}
 == grammar/m1_literals_and_operators.mn ==
 {"version":1,"diagnostics":[]}
 == grammar/newlines_and_clauses.mn ==
@@ -120,21 +120,49 @@
 {"version":1,"diagnostics":[{"code":"E0104","severity":"error","message":"`from` in the signature of `first` names no parameter; found the end of the file","primary":{"file":"from_names_nothing.mn","start":69,"end":73,"line":3,"column":34},"related":[],"fixes":[]}]}
 == regions-and-pools/from_names_two_parameters.mn ==
 {"version":1,"diagnostics":[]}
+== surface-syntax/async_function.mn ==
+{"version":1,"diagnostics":[{"code":"E0121","severity":"error","message":"Mente has no `async`: a function declares its effects with `with`, and runs tasks at once with `parallel (...)`","primary":{"file":"async_function.mn","start":40,"end":45,"line":3,"column":5},"related":[],"fixes":[{"message":"remove `async`","applicability":"suggestion","edits":[{"span":{"file":"async_function.mn","start":40,"end":46,"line":3,"column":5},"replacement":""}]}]}]}
+== surface-syntax/await_postfix.mn ==
+{"version":1,"diagnostics":[{"code":"E0121","severity":"error","message":"Mente has no `await`: a function that waits declares its effects with `with`, and tasks run at once with `parallel (...)`","primary":{"file":"await_postfix.mn","start":63,"end":69,"line":3,"column":28},"related":[],"fixes":[{"message":"remove `.await`","applicability":"suggestion","edits":[{"span":{"file":"await_postfix.mn","start":63,"end":69,"line":3,"column":28},"replacement":""}]}]}]}
+== surface-syntax/c_logical_operators.mn ==
+{"version":1,"diagnostics":[{"code":"E0124","severity":"error","message":"Mente writes `and`, not `&&`","primary":{"file":"c_logical_operators.mn","start":75,"end":77,"line":3,"column":40},"related":[],"fixes":[{"message":"write `and`","applicability":"machine-applicable","edits":[{"span":{"file":"c_logical_operators.mn","start":75,"end":77,"line":3,"column":40},"replacement":"and"}]}]}]}
+== surface-syntax/c_not.mn ==
+{"version":1,"diagnostics":[{"code":"E0124","severity":"error","message":"Mente writes `not`, not `!`","primary":{"file":"c_not.mn","start":64,"end":65,"line":3,"column":29},"related":[],"fixes":[{"message":"write `not`","applicability":"machine-applicable","edits":[{"span":{"file":"c_not.mn","start":64,"end":66,"line":3,"column":29},"replacement":"not a"}]}]}]}
+== surface-syntax/cast.mn ==
+{"version":1,"diagnostics":[{"code":"E0126","severity":"error","message":"Mente has no casts: an integer converts where it lands, checked there, so bind it with the type it needs, as in `val y: u8 = x`","primary":{"file":"cast.mn","start":63,"end":65,"line":3,"column":28},"related":[],"fixes":[{"message":"remove the cast","applicability":"suggestion","edits":[{"span":{"file":"cast.mn","start":62,"end":68,"line":3,"column":27},"replacement":""}]}]}]}
+== surface-syntax/conditional_operator.mn ==
+{"version":1,"diagnostics":[{"code":"E0125","severity":"error","message":"Mente has no `? :`; write `if c { a } else { b }`","primary":{"file":"conditional_operator.mn","start":65,"end":66,"line":3,"column":30},"related":[],"fixes":[{"message":"write it as an `if` expression","applicability":"machine-applicable","edits":[{"span":{"file":"conditional_operator.mn","start":63,"end":72,"line":3,"column":28},"replacement":"if c { 1 } else { 2 }"}]}]}]}
 == surface-syntax/example_without_its_brace.mn ==
 {"version":1,"diagnostics":[{"code":"E0102","severity":"error","message":"expected `{`, found `1`","primary":{"file":"example_without_its_brace.mn","start":52,"end":53,"line":3,"column":17},"related":[],"fixes":[]}]}
 == surface-syntax/expression_body.mn ==
 {"version":1,"diagnostics":[]}
 == surface-syntax/keyword_as_a_module_name.mn ==
 {"version":1,"diagnostics":[{"code":"E0101","severity":"error","message":"expected a name, found `raise`","primary":{"file":"keyword_as_a_module_name.mn","start":36,"end":41,"line":2,"column":20},"related":[],"fixes":[]}]}
+== surface-syntax/let_binding.mn ==
+{"version":1,"diagnostics":[{"code":"E0118","severity":"error","message":"Mente writes `val`, not `let`","primary":{"file":"let_binding.mn","start":58,"end":61,"line":4,"column":3},"related":[],"fixes":[{"message":"write `val`","applicability":"machine-applicable","edits":[{"span":{"file":"let_binding.mn","start":58,"end":61,"line":4,"column":3},"replacement":"val"}]}]}]}
+== surface-syntax/let_mut_binding.mn ==
+{"version":1,"diagnostics":[{"code":"E0118","severity":"error","message":"Mente writes `var`, not `let mut`","primary":{"file":"let_mut_binding.mn","start":58,"end":65,"line":4,"column":3},"related":[],"fixes":[{"message":"write `var`","applicability":"machine-applicable","edits":[{"span":{"file":"let_mut_binding.mn","start":58,"end":65,"line":4,"column":3},"replacement":"var"}]}]}]}
+== surface-syntax/lifetime.mn ==
+{"version":1,"diagnostics":[{"code":"E0120","severity":"error","message":"Mente writes no lifetimes: a returned view names its source with `from p`, and a parameter that must outlive the call takes the mode `own` or `in`","primary":{"file":"lifetime.mn","start":49,"end":51,"line":3,"column":14},"related":[],"fixes":[{"message":"remove the lifetime list","applicability":"suggestion","edits":[{"span":{"file":"lifetime.mn","start":48,"end":52,"line":3,"column":13},"replacement":""}]}]}]}
+== surface-syntax/mente_spellings.mn ==
+{"version":1,"diagnostics":[]}
 == surface-syntax/minimal_module.mn ==
 {"version":1,"diagnostics":[]}
 == surface-syntax/nested_braces_in_a_body.mn ==
 {"version":1,"diagnostics":[]}
 == surface-syntax/number_as_a_name.mn ==
 {"version":1,"diagnostics":[{"code":"E0101","severity":"error","message":"expected a name, found `42`","primary":{"file":"number_as_a_name.mn","start":47,"end":49,"line":3,"column":12},"related":[],"fixes":[]}]}
+== surface-syntax/path_separator.mn ==
+{"version":1,"diagnostics":[{"code":"E0123","severity":"error","message":"Mente separates the parts of a path with `.`, not `::`","primary":{"file":"path_separator.mn","start":73,"end":75,"line":3,"column":38},"related":[],"fixes":[{"message":"write `.`","applicability":"suggestion","edits":[{"span":{"file":"path_separator.mn","start":73,"end":75,"line":3,"column":38},"replacement":"."}]}]}]}
+== surface-syntax/reference_at_a_call.mn ==
+{"version":1,"diagnostics":[{"code":"E0119","severity":"error","message":"a call passes a place to change as `mut x`, not `&mut x`","primary":{"file":"reference_at_a_call.mn","start":112,"end":116,"line":8,"column":8},"related":[],"fixes":[{"message":"write `mut`","applicability":"machine-applicable","edits":[{"span":{"file":"reference_at_a_call.mn","start":112,"end":116,"line":8,"column":8},"replacement":"mut"}]}]}]}
 == surface-syntax/struct_without_its_brace.mn ==
 {"version":1,"diagnostics":[{"code":"E0102","severity":"error","message":"expected `{` after `struct S`, found `a`","primary":{"file":"struct_without_its_brace.mn","start":51,"end":52,"line":4,"column":3},"related":[],"fixes":[]}]}
+== surface-syntax/turbofish.mn ==
+{"version":1,"diagnostics":[{"code":"E0123","severity":"error","message":"Mente writes type arguments as `f<T>(...)`, without `::`","primary":{"file":"turbofish.mn","start":67,"end":69,"line":3,"column":32},"related":[],"fixes":[{"message":"write `<`","applicability":"machine-applicable","edits":[{"span":{"file":"turbofish.mn","start":67,"end":70,"line":3,"column":32},"replacement":"<"}]}]}]}
 == surface-syntax/unclosed_struct.mn ==
 {"version":1,"diagnostics":[{"code":"E0103","severity":"error","message":"`struct Open` has no closing `}`; found the end of the file","primary":{"file":"unclosed_struct.mn","start":62,"end":62,"line":5,"column":1},"related":[{"message":"`struct Open` opens here","span":{"file":"unclosed_struct.mn","start":47,"end":51,"line":3,"column":12}}],"fixes":[{"message":"close `struct Open` here","applicability":"suggestion","edits":[{"span":{"file":"unclosed_struct.mn","start":62,"end":62,"line":5,"column":1},"replacement":"}\n"}]}]}]}
 == surface-syntax/unclosed_trait.mn ==
 {"version":1,"diagnostics":[{"code":"E0103","severity":"error","message":"`trait Probe` has no closing `}`; found the end of the file","primary":{"file":"unclosed_trait.mn","start":77,"end":77,"line":5,"column":1},"related":[{"message":"`trait Probe` opens here","span":{"file":"unclosed_trait.mn","start":46,"end":51,"line":3,"column":11}}],"fixes":[{"message":"close `trait Probe` here","applicability":"suggestion","edits":[{"span":{"file":"unclosed_trait.mn","start":77,"end":77,"line":5,"column":1},"replacement":"}\n"}]}]}]}
+== surface-syntax/unwrap.mn ==
+{"version":1,"diagnostics":[{"code":"E0122","severity":"error","message":"Mente has no `.unwrap()`: test the value with `guard`, or give a default with `??` (M2)","primary":{"file":"unwrap.mn","start":63,"end":70,"line":3,"column":28},"related":[],"fixes":[{"message":"remove `.unwrap(...)`","applicability":"suggestion","edits":[{"span":{"file":"unwrap.mn","start":63,"end":72,"line":3,"column":28},"replacement":""}]}]}]}

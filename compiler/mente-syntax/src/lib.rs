@@ -84,6 +84,8 @@ pub enum TokenKind {
     FloatLit(String),
     StrLit(String),
     DocComment(String),
+    /// A lifetime from Rust, such as `'a`: not Mente, and reported as such.
+    Lifetime(String),
 
     // Punctuation & Operators
     At,               // @
@@ -451,6 +453,36 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             continue;
         }
 
+        // A lifetime from Rust (`'a`), which Mente does not write, is a token of its own, so
+        // the parser names the idiom (`E0120`); a character literal (`'a'`) stays an error.
+        if b == b'\''
+            && bytes
+                .get(i + 1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+        {
+            let mut j = i + 1;
+            while bytes
+                .get(j)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            {
+                j += 1;
+            }
+            if bytes.get(j) != Some(&b'\'') {
+                tokens.push(Token {
+                    kind: TokenKind::Lifetime(src[i + 1..j].to_string()),
+                    span: Span {
+                        start,
+                        end: j,
+                        line,
+                        col: start_col,
+                    },
+                });
+                col += (j - i) as u32;
+                i = j;
+                continue;
+            }
+        }
+
         // Identifiers & Keywords
         if b.is_ascii_alphabetic() || b == b'_' {
             while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -576,7 +608,7 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             _ => {
                 let c = src[i..].chars().next().unwrap_or('?');
                 let why = match c {
-                    '\'' => "; Mente writes no lifetimes and has no character literals",
+                    '\'' => "; Mente has no character literals: write the character's code, such as `0x41` for `A`",
                     '#' => "; an attribute is written `@name`",
                     _ => "",
                 };
@@ -619,6 +651,47 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
         },
     });
     (tokens, errors)
+}
+
+/// A lifetime from Rust (`E0120`). Removing `<'a>`, or the `'a` of `&'a T`, is suggested; what
+/// replaces it, a `from` clause or a parameter mode, needs judgement.
+fn lifetime_idiom(tokens: &[Token], at: usize) -> Diagnostic {
+    let here = tokens[at].span;
+    let d = Diagnostic::error(
+        "E0120",
+        here,
+        "Mente writes no lifetimes: a returned view names its source with `from p`, and a parameter that must outlive the call takes the mode `own` or `in`",
+    );
+    let prev = at.checked_sub(1).and_then(|p| tokens.get(p));
+    let next = tokens.get(at + 1);
+    match (prev, next) {
+        (Some(p), Some(n)) if p.kind == TokenKind::Lt && n.kind == TokenKind::Gt => {
+            let list = Span {
+                start: p.span.start,
+                end: n.span.end,
+                ..here
+            };
+            d.with_fix(
+                Applicability::Suggestion,
+                "remove the lifetime list",
+                list,
+                "",
+            )
+        }
+        (Some(p), Some(n)) if p.kind == TokenKind::Amp => {
+            let lifetime = Span {
+                end: n.span.start,
+                ..here
+            };
+            d.with_fix(
+                Applicability::Suggestion,
+                "remove the lifetime",
+                lifetime,
+                "",
+            )
+        }
+        _ => d,
+    }
 }
 
 /// Whether a statement goes on past a newline after `last`: a token that cannot end one
@@ -850,6 +923,12 @@ pub fn parse_module(src: &str) -> Result<ModuleFile, Diagnostic> {
     if let Some(first) = lex_errors.into_iter().next() {
         return Err(first);
     }
+    if let Some(at) = tokens
+        .iter()
+        .position(|t| matches!(t.kind, TokenKind::Lifetime(_)))
+    {
+        return Err(lifetime_idiom(&tokens, at));
+    }
     let total_token_count = tokens.len().saturating_sub(1);
     let mut p = Parser {
         src,
@@ -978,6 +1057,22 @@ impl<'a> Parser<'a> {
     /// What stands where a declaration belongs: a declaration of a later milestone (`E0109`), or
     /// anything else (`E0111`).
     fn not_a_declaration(&self) -> Diagnostic {
+        if matches!(self.peek(), TokenKind::Ident(w) if w == "async") {
+            let here = self.span();
+            let to_next = Span {
+                end: self
+                    .tokens
+                    .get(self.pos + 1)
+                    .map_or(here.end, |t| t.span.start),
+                ..here
+            };
+            return Diagnostic::error(
+                "E0121",
+                here,
+                "Mente has no `async`: a function declares its effects with `with`, and runs tasks at once with `parallel (...)`",
+            )
+            .with_fix(Applicability::Suggestion, "remove `async`", to_next, "");
+        }
         let later = match self.peek() {
             TokenKind::Import => Some(("an `import`", "M6")),
             TokenKind::Extern => Some(("an `extern` block", "M4")),
@@ -1870,7 +1965,20 @@ mod tests {
                 "`#` is not a character Mente uses; an attribute is written `@name`".to_string()
             )]
         );
-        assert!(lex_errors("fn f<'a>()")[0].1.contains("no lifetimes"));
+        assert!(lex_errors("val c = 'x'")[0]
+            .1
+            .contains("no character literals"));
+        assert_eq!(
+            kinds("<'a>"),
+            vec![
+                TokenKind::Lt,
+                TokenKind::Lifetime("a".into()),
+                TokenKind::Gt,
+                TokenKind::Eof
+            ]
+        );
+        let (tokens, _) = lex("x <'ab> y");
+        assert_eq!((tokens[2].span.end, tokens[4].span.col), (6, 9));
         assert_eq!(lex_errors("é")[0].1, "`é` is not a character Mente uses");
         let (tokens, _) = lex("é x");
         assert_eq!(tokens[0].span.col, 3);
@@ -2004,6 +2112,47 @@ mod tests {
         assert_eq!(module.items.len(), 2);
         let (_, errors) = parse_functions(src, &module);
         assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn test_lifetimes_and_async_are_idioms_wherever_they_stand() {
+        let message = "Mente writes no lifetimes: a returned view names its source with `from p`, and a parameter that must outlive the call takes the mode `own` or `in`";
+        for (src, repaired) in [
+            (
+                "module m\npub fn first<'a>(x: i32) -> i32 = x\n",
+                "module m\npub fn first(x: i32) -> i32 = x\n",
+            ),
+            (
+                "module m\npub struct View<'a> {\n  a: u8\n}\n",
+                "module m\npub struct View {\n  a: u8\n}\n",
+            ),
+            (
+                "module m\npub fn f(x: &'a u8) = 1\n",
+                "module m\npub fn f(x: &u8) = 1\n",
+            ),
+        ] {
+            let err = parse_module(src).unwrap_err();
+            assert_eq!(
+                (err.code, err.message.as_str()),
+                ("E0120", message),
+                "{}",
+                src
+            );
+            assert_eq!(err.fixes[0].applicability, Applicability::Suggestion);
+            assert_eq!(
+                diagnostics::apply_fix(src, &err.fixes[0]).unwrap(),
+                repaired
+            );
+        }
+        let err = parse_module("module m\npub fn f() = 'static\n").unwrap_err();
+        assert_eq!((err.code, err.fixes.len()), ("E0120", 0));
+
+        let src = "module m\npub async fn f() -> i32 = 1\n";
+        let err = parse_module(src).unwrap_err();
+        assert_eq!(err.code, "E0121");
+        let repaired = diagnostics::apply_fix(src, &err.fixes[0]).unwrap();
+        assert_eq!(repaired, "module m\npub fn f() -> i32 = 1\n");
+        assert!(parse_module(&repaired).is_ok());
     }
 
     #[test]
