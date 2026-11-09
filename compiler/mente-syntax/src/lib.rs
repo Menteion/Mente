@@ -1829,6 +1829,10 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+        assert_eq!(
+            kinds("break continue"),
+            vec![TokenKind::Break, TokenKind::Continue, TokenKind::Eof]
+        );
         // A string keeps its four escapes as written.
         assert_eq!(
             kinds(r#""a\"b\\c\n\t""#)[0],
@@ -1992,6 +1996,12 @@ mod tests {
         assert_eq!(fns[0].requires, vec![String::from("a > 0")]);
         assert_eq!(fns[0].body_tokens.len(), 6, "{:?}", fns[0].body_tokens);
         assert_eq!(fns[1].ensures, vec![String::from("result > a")]);
+        let (_, errors) = parse_functions(src, &module);
+        assert!(errors.is_empty(), "{:?}", errors);
+        // Only the open parenthesis keeps this body going past its first line.
+        let src = "module m\npub fn r(a: i32) -> i32 = add(a\n  , 1)\npub fn s() -> i32 = 0\n";
+        let module = parse_module(src).unwrap();
+        assert_eq!(module.items.len(), 2);
         let (_, errors) = parse_functions(src, &module);
         assert!(errors.is_empty(), "{:?}", errors);
     }

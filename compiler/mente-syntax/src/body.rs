@@ -1505,6 +1505,12 @@ mod tests {
             errs[0].message,
             "expected the end of the expression body, found `b`"
         );
+        // Recovery that reaches the end of the tokens stops there.
+        let (_, errs) = parse("fn f() {\n  val x = (1 +");
+        assert_eq!(
+            errs.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec!["E0110", "E0111"]
+        );
         // A block the tokens never close.
         let (_, errs) = parse("fn f() {\n  val x = 1");
         assert_eq!(errs[0].message, "this block has no closing `}`");
@@ -1639,6 +1645,11 @@ mod tests {
                 "expected `]` after the array's length, found `u8`",
             ),
             ("fn f(x: )", "E0116", "expected a type, found `)`"),
+            (
+                "fn f(x: u8[0..n.x]) = x",
+                "E0111",
+                "expected `]` to close the refinement, found `.`",
+            ),
         ];
         for (src, code, message) in cases {
             let (_, errs) = parse(src);

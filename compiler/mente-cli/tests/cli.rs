@@ -123,6 +123,14 @@ fn test_mn_test_mutate_runs_the_demo_gate() {
 
 #[test]
 fn test_mn_test_compares_each_module_with_its_expected_file() {
+    // A `.mn` path that cannot be read as a file fails the run.
+    let dir = scratch("unreadable");
+    fs::create_dir_all(dir.join("folder.mn")).unwrap();
+    let unreadable = mn(&dir, &["test", "."]);
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(unreadable.status.code(), Some(1));
+    assert!(text(&unreadable.stderr).contains("cannot read"));
+
     let dir = scratch("expected");
     fs::write(
         dir.join("later.mn"),
