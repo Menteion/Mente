@@ -884,8 +884,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A value entering a refined type (a binding's initializer, an assignment, an element \
          store, an argument, a returned value) must be proven inside the refinement at compile \
          time. The message names a valuation Tier 1 cannot rule out; octagons over-approximate, \
-         so no run may reach it. The fix inserts a `guard` before the statement, whose `else` \
-         leaves by `todo` or `return`: decide what the function does there.",
+         so no run may reach it. When declaring a `var` refined lets Tier 1 prove the value, \
+         the first fix does that, and leaves no run-time check. Otherwise the fix inserts a \
+         `guard` before the statement, whose `else` leaves by `todo` or `return`: decide what the \
+         function does there.",
         "module m\npub fn next(x: u8) -> u8[1..=255] {\n  return x + 1\n}\n",
         "module m\npub fn next(x: u8) -> u8[1..=255] {\n  guard x < 255 else {\n    return 1\n  }\n  return x + 1\n}\n",
     ),

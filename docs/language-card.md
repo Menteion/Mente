@@ -173,7 +173,7 @@ pub fn scaled(x: u32, factor: u32) -> u32[0..=1000] {
 ```
 
 - `requires` holds at every call, and `ensures` at every return, where `result` is the returned value.
-- The compiler proves contracts, refinements and loop invariants with simple interval and difference reasoning. When it cannot, it reports a value it could not rule out and suggests a `guard`, after which the condition is a known fact. A plain integer type needs no proof: it is checked at run time.
+- The compiler proves contracts, refinements and loop invariants with simple interval and difference reasoning. When it cannot, it reports a value it could not rule out and suggests fixes. If declaring a `var` with a refined type lets it prove the value, it suggests that first: prefer it, since nothing is left to check at run time. Otherwise it suggests a `guard`, after which the condition is a known fact. A `guard` that only states a fact you know but the compiler cannot prove ends in `unreachable("why")`, never in an invented value. A plain integer type needs no proof: it is checked at run time.
 - Write a contract, a refinement or an `invariant` only where the code needs the guarantee; the compiler infers the facts a loop's condition gives.
 
 ## Unfinished and impossible cases
