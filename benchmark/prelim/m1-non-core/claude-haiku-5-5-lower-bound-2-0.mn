@@ -1,0 +1,12 @@
+module prelim
+
+pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {
+  var i: usize = 0
+  while i < 16 invariant i <= 16 {
+    if a[i] >= x {
+      break
+    }
+    i += 1
+  }
+  i
+}
