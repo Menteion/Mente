@@ -39,7 +39,7 @@ bash check.sh
 
 ## Result
 
-On 2026-11-09, in the workflow runs for pull request 21, every check passed on all three platforms:
+On 2026-11-09 (tag `m0b`), in the workflow runs for pull request 21, every check passed on all three platforms:
 
 - **gdb 15.1 and lldb 18.1.3, on x86-64 and AArch64 Linux**: both stopped at `square () at demo.mn:5`, and showed `sum_squares` at line 12, `mente_main` at line 19, and then `host::main` and the Rust runtime below them. gdb's `next` left `square` for line 13 of `sum_squares`, since it steps on from the middle of line 12 to the start of the next line; lldb's step-over stopped at line 12.
 - **cdb 10.0.26100, on x86-64 Windows Server 2025**: a breakpoint on `demo.mn:5` stopped in `demo!square [demo.mn @ 5]`. `k` walked `demo!sum_squares [demo.mn @ 12]` and `demo!mente_main [demo.mn @ 19]` into `demo!host::main`, the Rust runtime and the C runtime's start-up, through the spike's `.pdata` and the PDB the linker built from its CodeView.
