@@ -2,7 +2,7 @@
 //!
 //! An integer type is a range, and any integer value flows into any integer type, checked where
 //! it is narrowed; so the type checker compares integer types only where the spec makes one
-//! type matter: an unannotated binding and the operands of `&`, `|` and `^`.
+//! type matter: an unannotated binding, the operands of `&`, `|` and `^`, and a `mut` argument.
 //! Refinements are Tier 1's to prove and are not part of a [`Ty`].
 
 use mente_syntax::tree::{Tree, TypeId, TypeKind};
@@ -153,6 +153,17 @@ impl Ty {
         }
     }
 
+    /// Whether a place of type `place` may be passed as `mut` to a parameter of this type:
+    /// the call writes the parameter back into the place, so their types are the same, and
+    /// the write-back never fails (`core-calculus.md`, item 7).
+    pub fn same_as(&self, place: &Ty) -> bool {
+        match (self, place) {
+            (Ty::Any, _) | (_, Ty::Any) => true,
+            (Ty::Array(n, a), Ty::Array(m, b)) => n == m && a.same_as(b),
+            (a, b) => a == b,
+        }
+    }
+
     /// The type an unannotated binding takes: literals alone become `i64`.
     pub fn settled(&self) -> Ty {
         match self {
@@ -268,6 +279,21 @@ mod tests {
         assert!(arr(4, u8_.clone()).accepts(&arr(4, Ty::Int(Int::Literal))));
         assert!(!arr(4, u8_.clone()).accepts(&arr(3, u8_.clone())));
         assert!(!arr(4, u8_.clone()).accepts(&arr(4, Ty::Bool)));
+    }
+
+    #[test]
+    fn test_a_mut_argument_has_its_parameters_type_exactly() {
+        let u8_ = Ty::int(t("u8"));
+        let arr = |n: u128, e: Ty| Ty::Array(n, Box::new(e));
+        assert!(u8_.same_as(&u8_));
+        assert!(!u8_.same_as(&Ty::int(t("u16"))));
+        assert!(!Ty::int(t("u64")).same_as(&Ty::int(t("usize"))));
+        assert!(Ty::Bool.same_as(&Ty::Any) && Ty::Any.same_as(&Ty::Bool));
+        assert!(!Ty::Bool.same_as(&u8_));
+        assert!(arr(2, u8_.clone()).same_as(&arr(2, u8_.clone())));
+        assert!(arr(2, u8_.clone()).same_as(&arr(2, Ty::Any)));
+        assert!(!arr(2, u8_.clone()).same_as(&arr(3, u8_.clone())));
+        assert!(!arr(2, u8_.clone()).same_as(&arr(2, Ty::int(t("u16")))));
     }
 
     #[test]

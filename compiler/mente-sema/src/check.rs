@@ -431,14 +431,54 @@ impl Checker<'_> {
             } else {
                 if a.is_mut {
                     self.mut_argument(args, i);
+                    self.mut_type(a.value, &found, p, callee);
+                } else {
+                    let place = format!("for parameter `{}` of `{}`", p.name, callee);
+                    self.check_ty(a.value, &found, &p.ty, &place);
                 }
-                // A `mut` argument is narrowed into the parameter, and the parameter back into
-                // it, as an assignment narrows (`core-calculus.md`, items 4 and 7).
-                let place = format!("for parameter `{}` of `{}`", p.name, callee);
-                self.check_ty(a.value, &found, &p.ty, &place);
             }
         }
         result
+    }
+
+    /// A `mut` argument has its parameter's type exactly (`E0203`). When it is a `var` declared
+    /// without a type, the fix states the parameter's.
+    fn mut_type(&mut self, place: ExprId, found: &Ty, p: &SigParam, callee: &str) {
+        if p.ty.same_as(found) {
+            return;
+        }
+        let mut d = Diagnostic::error(
+            "E0203",
+            self.span(place),
+            format!(
+                "a `mut` argument has its parameter's type exactly, since the call writes it back: `{}` of `{}` is {}, but this is {}",
+                p.name,
+                callee,
+                p.ty.describe(),
+                found.describe()
+            ),
+        );
+        let binding = match &self.tree.expr(place).kind {
+            ExprKind::Name(_) => self.resolution.names[place.0 as usize]
+                .map(|id| &self.resolution.bindings[id.0 as usize]),
+            _ => None,
+        };
+        if let Some(b) = binding.filter(|b| b.kind == BindingKind::Var && b.ty.is_none()) {
+            let width = (b.span.end - b.span.start) as u32;
+            let at = Span {
+                start: b.span.end,
+                end: b.span.end,
+                line: b.span.line,
+                col: b.span.col + width,
+            };
+            d = d.with_fix(
+                Applicability::Suggestion,
+                format!("declare `{}` as `{}`", b.name, p.ty.spelling()),
+                at,
+                format!(": {}", p.ty.spelling()),
+            );
+        }
+        self.errors.push(d);
     }
 
     /// A `mut` argument names a `var` or a `mut` parameter (`E0206`), which no other argument
@@ -1135,7 +1175,7 @@ mod tests {
             ["expected `u8` as the result of `f`, found no value; `nothing` has no result type"]
         );
         assert_eq!(
-            codes("pub fn f() {\n  var v: u64 = 0\n  touch(mut v)\n}"),
+            codes("pub fn f() {\n  var v: u8 = 0\n  touch(mut v)\n}"),
             NONE
         );
     }
@@ -1168,6 +1208,34 @@ mod tests {
         );
         assert_eq!(
             codes("pub fn f() {\n  var xs: [2]u8 = [0, 0]\n  touch(mut xs[1])\n}"),
+            NONE
+        );
+        let wide = diagnostics("pub fn f() {\n  var v = 0\n  touch(mut v)\n}");
+        assert_eq!(wide.len(), 1);
+        assert_eq!(wide[0].code, "E0203");
+        assert_eq!(
+            wide[0].message,
+            "a `mut` argument has its parameter's type exactly, since the call writes it back: `x` of `touch` is `u8`, but this is `i64`"
+        );
+        assert_eq!((wide[0].primary.line, wide[0].primary.col), (11, 13));
+        let fix = &wide[0].fixes[0];
+        assert_eq!(fix.message, "declare `v` as `u8`");
+        assert_eq!(fix.applicability, Applicability::Suggestion);
+        assert_eq!(fix.edits[0].replacement, ": u8");
+        assert_eq!((fix.edits[0].span.line, fix.edits[0].span.col), (10, 8));
+        assert_eq!(fix.edits[0].span.start, fix.edits[0].span.end);
+        for no_fix in [
+            "pub fn f() {\n  var v: u64 = 0\n  touch(mut v)\n}",
+            "pub fn f() {\n  var xs: [2]u16 = [0, 0]\n  touch(mut xs[1])\n}",
+            "pub fn f(mut v: u16) {\n  touch(mut v)\n}",
+        ] {
+            let d = diagnostics(no_fix);
+            assert_eq!(d.len(), 1, "{}", no_fix);
+            assert_eq!(d[0].code, "E0203", "{}", no_fix);
+            assert!(d[0].fixes.is_empty(), "{}", no_fix);
+        }
+        assert_eq!(
+            codes("pub fn f() {\n  var v = todo(\"x\")\n  touch(mut v)\n}"),
             NONE
         );
     }
