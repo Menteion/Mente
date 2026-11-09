@@ -133,8 +133,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version: 24
       - run: npm ci
       - run: npm run verify:docs
       - run: npm run check:benchmark
       - run: npm run test:benchmark
+      - run: npm run test:harness

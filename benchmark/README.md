@@ -100,3 +100,9 @@ npm run check:benchmark -- --bless --held-out ..\mente-bench-heldout
 ```
 
 [`check.mjs`](check.mjs) checks every task's front matter, sections and core mark, the composition against the table above, every example and hidden test against the signature and against the task's solution in [`reference.mjs`](reference.mjs), and every digest in `corpus.lock`. CI runs the first form, without the held-out set; the second also checks a local clone of the held-out repository against the lock; the third rewrites the lock after a change that "Changing the corpus" allows.
+
+## The harness
+
+[`harness/`](harness/) holds the harness, in TypeScript that Node runs as it is, with no dependency. It reads a task, writes its signature in Mente (`tasks.ts`), and asks the model through the Messages API over HTTP, recording the model, its parameters, every prompt and reply and the tokens used, and stopping before a call that could pass its budget. `npm run test:harness` tests it without the network.
+
+Its first use is the syntax probe of M1's checkpoint (a) ([`syntax-probe`](../docs/design-review.md#syntax-probe)): [`probe.ts`](harness/probe.ts) gives the model the draft [language card](../docs/language-card.md) and each public M1 solve task, takes one program per run with no repairs, and records what `mn check` reports for it. It runs only by hand, in the workflow "Syntax probe", with the key in the repository's `ANTHROPIC_API_KEY` secret and the budget Norman set. The probe uses `claude-sonnet-5-5`: a weaker model meets more of the syntax's frictions, at less cost. Which model the agent benchmark uses is settled before its first run, at the end of M1. The harness sends no fallback model, so every program comes from the model it names, and a refusal is recorded as one.

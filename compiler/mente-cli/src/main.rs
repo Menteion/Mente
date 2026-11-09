@@ -641,6 +641,30 @@ mod tests {
     use super::*;
     use mente_sema::verify_module;
 
+    /// Every `mente` block of the language card passes `mn check`, so the card cannot drift
+    /// from the compiler (`docs/design-review.md`, `language-card`).
+    #[test]
+    fn test_language_card_snippets_pass_mn_check() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let card = fs::read_to_string(root.join("docs/language-card.md")).unwrap();
+        let mut snippets = 0;
+        let mut rest = card.as_str();
+        while let Some(start) = rest.find("```mente\n") {
+            let body = &rest[start + "```mente\n".len()..];
+            let end = body.find("```").unwrap_or(body.len());
+            let snippet = &body[..end];
+            assert!(
+                mente_sema::check_source(snippet).is_ok(),
+                "a snippet of the language card fails mn check:\n{}\n{:?}",
+                snippet,
+                mente_sema::check_source(snippet).err()
+            );
+            snippets += 1;
+            rest = &body[end..];
+        }
+        assert!(snippets > 0, "the language card has no mente block");
+    }
+
     #[test]
     fn test_examples_pass_their_declaration_checks_and_report_what_they_expect() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
