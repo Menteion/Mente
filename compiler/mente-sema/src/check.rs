@@ -1219,10 +1219,10 @@ mod tests {
         );
         assert_eq!((wide[0].primary.line, wide[0].primary.col), (11, 13));
         let fix = &wide[0].fixes[0];
-        assert_eq!(fix.message, "declare `v` as `u8`");
+        assert_eq!(fix.message, "declare `count` as `u8`");
         assert_eq!(fix.applicability, Applicability::Suggestion);
         assert_eq!(fix.edits[0].replacement, ": u8");
-        assert_eq!((fix.edits[0].span.line, fix.edits[0].span.col), (10, 8));
+        assert_eq!((fix.edits[0].span.line, fix.edits[0].span.col), (10, 12));
         assert_eq!(fix.edits[0].span.start, fix.edits[0].span.end);
         for no_fix in [
             "pub fn f() {\n  var v: u64 = 0\n  touch(mut v)\n}",
