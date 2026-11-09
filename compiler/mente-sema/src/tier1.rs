@@ -13,10 +13,12 @@
 //!
 //! [`tier1-counterexample`]: ../../docs/design-review.md#tier1-counterexample
 
+use std::collections::BTreeSet;
+
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
     Arg, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind, FnSyntax,
-    StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::{Attr, Span};
 
@@ -587,6 +589,27 @@ struct Refine {
     lo_text: String,
     hi_text: String,
     text: String,
+    /// The integer type and refinement a `var` can be declared with to meet this one, when
+    /// both bounds are literals.
+    declared: Option<(String, Refinement)>,
+}
+
+/// The integer type `name` refined by `r`, when both bounds are literals: a `var` declared
+/// with it holds exactly the values the refinement admits, wherever the refinement was written.
+fn literal_refinement(name: &str, r: &Refinement) -> Option<(String, Refinement)> {
+    let literal = |b: &Bound| matches!(b, Bound::Int { .. });
+    (literal(&r.lo) && literal(&r.hi)).then(|| (name.to_string(), r.clone()))
+}
+
+/// An integer type with a refinement, as a declaration writes it: `usize[0..=16]`.
+fn refined_type_text(name: &str, r: &Refinement) -> String {
+    format!(
+        "{}[{}..{}{}]",
+        name,
+        bound_text(&r.lo),
+        if r.inclusive { "=" } else { "" },
+        bound_text(&r.hi)
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -925,6 +948,17 @@ struct Fx<'a> {
     entry_measures: Vec<(usize, usize)>,
     /// The measures of the enclosing loops' rounds, each followed by how much it has changed.
     tracks: Vec<Track>,
+    /// The `E0502`s a refined `var` might fix.
+    retries: Vec<Retry>,
+}
+
+/// An `E0502` that declaring a `var` refined might fix: the diagnostic's index in the report,
+/// the type and refinement the `var` would be declared with, and the binding the value reads,
+/// when it is one.
+struct Retry {
+    diagnostic: usize,
+    declared: (String, Refinement),
+    read: Option<usize>,
 }
 
 /// A loop measure linear in bindings: `delta` follows its change since the round's start,
@@ -938,14 +972,131 @@ struct Track {
 /// Checks one function, whose callees are `callees` in module order (`None` for a function
 /// without a body). `src` is the text its spans point into, for the fixes.
 pub fn check(f: &Function, callees: &[Option<Callee>], src: &str) -> Report {
+    let (mut report, retries) = run(f, callees, src);
+    for r in &retries {
+        if let Some(fix) = refined_var_fix(f, callees, src, &report.diagnostics, r) {
+            report.diagnostics[r.diagnostic].fixes.insert(0, fix);
+        }
+    }
+    report.diagnostics.sort_by_key(|d| d.primary.start);
+    report
+}
+
+/// One pass of Tier 1 over a function, its diagnostics in the order it found them.
+fn run(f: &Function, callees: &[Option<Callee>], src: &str) -> (Report, Vec<Retry>) {
     let mut fx = Fx::new(f, callees, src);
     fx.route();
     let mut st = Octagon::new(fx.count);
     fx.entry(&mut st);
     fx.body(&mut st);
-    let mut report = fx.report;
-    report.diagnostics.sort_by_key(|d| d.primary.start);
-    report
+    (fx.report, fx.retries)
+}
+
+/// The fix that declares a `var` refined, offered before the `guard` for the `E0502` of `r`, when
+/// the value is a binding's name: Tier 1 checks the function again with each candidate declared
+/// so, in the order of declaration, and offers the first after which that obligation holds and no
+/// other fails. The candidates are that binding and the bindings named with it in a comparison,
+/// each a `var` of the refinement's integer type declared without a refinement. A refinement of
+/// any other `var` gives Tier 1 no fact about the value, and trying it would only slow the
+/// re-check of an edit. It runs only once an obligation has failed, so code that proves pays
+/// nothing for it.
+fn refined_var_fix(
+    f: &Function,
+    callees: &[Option<Callee>],
+    src: &str,
+    before: &[Diagnostic],
+    r: &Retry,
+) -> Option<Fix> {
+    let (name, refinement) = &r.declared;
+    let key = |d: &Diagnostic| (d.code, d.primary.start, d.primary.end);
+    let failed = key(&before[r.diagnostic]);
+    let bindings = &f.resolution.bindings;
+    let tree = &f.syntax.tree;
+    for b in compared_with(tree, f.resolution, r.read?) {
+        let Some(t) = bindings[b]
+            .ty
+            .filter(|_| bindings[b].kind == BindingKind::Var)
+        else {
+            continue;
+        };
+        let TypeKind::Int {
+            name: declared,
+            refinement: None,
+        } = &tree.ty(t).kind
+        else {
+            continue;
+        };
+        if declared != name {
+            continue;
+        }
+        let mut syntax = f.syntax.clone();
+        syntax.tree.types[t.0 as usize].kind = TypeKind::Int {
+            name: name.clone(),
+            refinement: Some(refinement.clone()),
+        };
+        let g = Function {
+            syntax: &syntax,
+            ..*f
+        };
+        let after = run(&g, callees, src).0.diagnostics;
+        let fixed = after.iter().all(|d| key(d) != failed);
+        let nothing_new = after
+            .iter()
+            .all(|d| before.iter().any(|o| key(o) == key(d)));
+        if fixed && nothing_new {
+            let text = refined_type_text(name, refinement);
+            return Some(Fix {
+                message: format!("declare `{}` as `{}`", bindings[b].name, text),
+                applicability: Applicability::MachineApplicable,
+                edits: vec![Edit {
+                    span: tree.ty(t).span,
+                    replacement: text,
+                }],
+            });
+        }
+    }
+    None
+}
+
+/// Binding `b` and the bindings named with it in a comparison of the function, by index in the
+/// order of declaration. A name counts where arithmetic reaches it, as in `lo + 1 < hi`, and not
+/// inside an index: `a[i] > a[best]` compares elements, and says nothing of `i` and `best`.
+fn compared_with(tree: &Tree, resolution: &Resolution, b: usize) -> BTreeSet<usize> {
+    let mut out = BTreeSet::from([b]);
+    for (i, e) in tree.exprs.iter().enumerate() {
+        let comparison = matches!(
+            e.kind,
+            ExprKind::Binary {
+                op: BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge,
+                ..
+            }
+        );
+        if comparison {
+            let names = named(tree, resolution, ExprId(i as u32));
+            if names.contains(&b) {
+                out.extend(names);
+            }
+        }
+    }
+    out
+}
+
+/// The bindings `e` names where arithmetic reaches them, by index.
+fn named(tree: &Tree, resolution: &Resolution, e: ExprId) -> Vec<usize> {
+    let mut out: Vec<usize> = resolution.names[e.0 as usize]
+        .iter()
+        .map(|id| id.0 as usize)
+        .collect();
+    if let ExprKind::Binary { lhs, rhs, .. } = &tree.expr(e).kind {
+        out.extend(named(tree, resolution, *lhs));
+        out.extend(named(tree, resolution, *rhs));
+    }
+    out
 }
 
 fn is_int_type(tree: &Tree, t: TypeId) -> bool {
@@ -1057,6 +1208,7 @@ impl<'a> Fx<'a> {
             measures,
             entry_measures,
             tracks: Vec::new(),
+            retries: Vec::new(),
         };
         let shape = f.syntax.result.map(|t| fx.own_shape(t));
         fx.result_shape = shape;
@@ -1100,6 +1252,7 @@ impl<'a> Fx<'a> {
                         lo_text: bound_text(&r.lo),
                         hi_text: bound_text(&r.hi),
                         text: tree.render_type(t),
+                        declared: literal_refinement(name, r),
                     })
                 }),
             },
@@ -1149,6 +1302,7 @@ impl<'a> Fx<'a> {
                         lo_text: text(&r.lo),
                         hi_text: text(&r.hi),
                         text: tree.render_type(t),
+                        declared: literal_refinement(name, r),
                     })
                 }),
             },
@@ -1810,6 +1964,12 @@ impl<'a> Fx<'a> {
             }
             _ => format!("Tier 1 cannot rule out that {}", core),
         };
+        let read = what.as_ref().and_then(|w| {
+            self.scope
+                .iter()
+                .copied()
+                .find(|b| self.resolution.bindings[*b].name == w.0)
+        });
         let guard = what.map(|w| {
             let x = paren(w, OPERAND);
             let mut parts = Vec::new();
@@ -1823,6 +1983,13 @@ impl<'a> Fx<'a> {
         });
         let anchor = self.anchor();
         self.emit("E0502", span, message, guard, anchor);
+        if let Some(declared) = r.declared.clone() {
+            self.retries.push(Retry {
+                diagnostic: self.report.diagnostics.len() - 1,
+                declared,
+                read,
+            });
+        }
     }
 
     fn index_check(&mut self, st: &Octagon, i: &Val, len: u128, span: Span) {
@@ -5200,6 +5367,74 @@ mod tests {
             .unwrap();
         assert_eq!(header(&g), "()  ()");
         assert_eq!(Routing::of(&[]), Routing::default());
+    }
+
+    /// The messages of the fixes of the only diagnostic of `src`, which must be an `E0502`.
+    fn fix_messages(src: &str) -> Vec<String> {
+        let d = diagnostics(src);
+        assert_eq!(codes(src), ["E0502"], "{}", src);
+        d[0].fixes.iter().map(|f| f.message.clone()).collect()
+    }
+
+    #[test]
+    fn test_a_refined_var_is_offered_before_the_guard() {
+        let src = "pub fn index_of_max(a: [8]i32) -> usize[0..8] {\n  var best: usize = 0\n  var i: usize = 1\n  while i < 8 {\n    if a[i] > a[best] {\n      best = i\n    }\n    i += 1\n  }\n  best\n}";
+        let d = diagnostics(src);
+        assert_eq!(codes(src), ["E0502"]);
+        assert_eq!(d[0].fixes.len(), 2);
+        let fix = &d[0].fixes[0];
+        assert_eq!(fix.message, "declare `best` as `usize[0..8]`");
+        assert_eq!(fix.applicability, Applicability::MachineApplicable);
+        assert!(d[0].fixes[1].message.starts_with("insert `guard best < 8"));
+        let text = module(src);
+        let applied = apply_fix(&text, fix).unwrap();
+        assert!(applied.contains("var best: usize[0..8] = 0"), "{}", applied);
+        assert!(check_source(&applied).is_ok(), "{}", applied);
+    }
+
+    #[test]
+    fn test_the_refined_var_may_be_one_the_value_does_not_read() {
+        // `lo`, which the result reads, is tried first and fails at `lo = mid + 1`; `hi`, named
+        // with it in the loop's condition, directly or through arithmetic, bounds it.
+        let search = |cond: &str| {
+            format!("pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {{\n  var lo: usize = 0\n  var hi: usize = 16\n  while {} {{\n    val mid = lo + (hi - lo) / 2\n    if a[mid] < x {{\n      lo = mid + 1\n    }} else {{\n      hi = mid\n    }}\n  }}\n  lo\n}}", cond)
+        };
+        // A parameter is bounded by a `var` a `guard` compares it with.
+        let param = "pub fn f(a: [16]i32, n: usize) -> usize[0..=16] {\n  var hi: usize = 16\n  while hi > 0 and a[hi - 1] > 0 {\n    hi -= 1\n  }\n  guard n <= hi else {\n    return 0\n  }\n  n\n}";
+        for src in [search("lo < hi"), search("hi - lo > 0"), param.to_string()] {
+            assert_eq!(
+                fix_messages(&src)[0],
+                "declare `hi` as `usize[0..=16]`",
+                "{}",
+                src
+            );
+            let applied = apply_fix(&module(&src), &diagnostics(&src)[0].fixes[0]).unwrap();
+            assert!(check_source(&applied).is_ok(), "{}", applied);
+        }
+    }
+
+    #[test]
+    fn test_no_refined_var_is_offered_unless_tier1_then_proves_the_function() {
+        // Declared `usize[0..8]`, `x` would fail at its own declaration instead.
+        let moved = "pub fn f(n: usize) -> usize[0..8] {\n  var x: usize = n\n  x = x / 2\n  x\n}";
+        // `n`, a parameter, is never offered: refined, it would only move the obligation to every
+        // caller. Declared `usize[0..8]`, `k`, which the loop compares with `n`, fits, but the
+        // result still fails.
+        let unrelated = "pub fn f(n: usize) -> usize[0..8] {\n  var k: usize = 0\n  while k < n and k < 3 {\n    k += 1\n  }\n  n\n}";
+        // With only a `val`, nothing is offered, and a `var` of another integer type is not.
+        let val = "pub fn f(n: usize) -> usize[0..8] {\n  val x: usize = n % 9\n  x\n}";
+        let other_type = "pub fn f(a: [8]i32) -> usize[0..8] {\n  var best: u32 = 0\n  var i: u32 = 1\n  while i < 8 {\n    if a[i] > a[best] {\n      best = i\n    }\n    i += 1\n  }\n  best\n}";
+        // A bound that names a parameter is not offered.
+        let named = "pub fn f(a: [8]i32, n: usize[1..=8]) -> usize[0..n] {\n  var best: usize = 0\n  var i: usize = 1\n  while i < n {\n    if a[i] > a[best] {\n      best = i\n    }\n    i += 1\n  }\n  best\n}";
+        for src in [moved, unrelated, val, other_type, named] {
+            let messages = fix_messages(src);
+            assert!(
+                messages.iter().all(|m| !m.starts_with("declare")),
+                "{}: {:?}",
+                src,
+                messages
+            );
+        }
     }
 }
 
