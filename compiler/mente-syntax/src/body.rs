@@ -1161,8 +1161,8 @@ impl Parser {
                     self.error(d);
                     ExprKind::Error
                 } else if self.at(&TokenKind::LParen) && !self.newline_before() {
-                    if n == "todo" {
-                        self.todo()
+                    if n == "todo" || n == "unreachable" {
+                        self.marker(&n)
                     } else {
                         self.call(n)
                     }
@@ -1432,8 +1432,8 @@ impl Parser {
         ExprKind::Call { callee, args }
     }
 
-    /// `todo("reason")`, whose argument is a string literal.
-    fn todo(&mut self) -> ExprKind {
+    /// `todo("reason")` or `unreachable("reason")`, whose argument is a string literal.
+    fn marker(&mut self, name: &str) -> ExprKind {
         self.bump(); // `(`
         let reason = match (self.peek().clone(), self.peek_second()) {
             (TokenKind::StrLit(s), TokenKind::RParen) => s,
@@ -1442,7 +1442,9 @@ impl Parser {
                     "E0111",
                     self.span(),
                     format!(
-                        "`todo` takes its reason as a string, as in `todo(\"why\")`; found {}",
+                        "`{}` takes its reason as a string, as in `{}(\"why\")`; found {}",
+                        name,
+                        name,
                         self.found()
                     ),
                 );
@@ -1452,7 +1454,11 @@ impl Parser {
         };
         self.bump();
         self.bump();
-        ExprKind::Todo(reason)
+        if name == "todo" {
+            ExprKind::Todo(reason)
+        } else {
+            ExprKind::Unreachable(reason)
+        }
     }
 
     /// `[a, b, c]` or `[value; count]`.
@@ -1684,6 +1690,10 @@ mod tests {
             ("[0; 4]", "[0; 4]"),
             ("[[0; 2]; 3]", "[[0; 2]; 3]"),
             ("todo(\"later\")", "(todo \"later\")"),
+            (
+                "unreachable(\"checked above\")",
+                "(unreachable \"checked above\")",
+            ),
             ("if c { 1 } else { 2 }", "(if c {1} {2})"),
             (
                 "if a { 1 } else if b { 2 } else { 3 }",
@@ -1871,6 +1881,15 @@ mod tests {
                 "E0111",
                 String::from(
                     "`todo` takes its reason as a string, as in `todo(\"why\")`; found `5`"
+                )
+            )]
+        );
+        assert_eq!(
+            errors("val x = unreachable(1)"),
+            vec![(
+                "E0111",
+                String::from(
+                    "`unreachable` takes its reason as a string, as in `unreachable(\"why\")`; found `1`"
                 )
             )]
         );

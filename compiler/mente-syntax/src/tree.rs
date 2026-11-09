@@ -111,6 +111,8 @@ pub enum ExprKind {
     Name(String),
     /// `todo("reason")`.
     Todo(String),
+    /// `unreachable("reason")`.
+    Unreachable(String),
     Unary {
         op: UnaryOp,
         operand: ExprId,
@@ -330,6 +332,7 @@ impl Tree {
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Name(n) => n.clone(),
             ExprKind::Todo(reason) => format!("(todo {:?})", reason),
+            ExprKind::Unreachable(reason) => format!("(unreachable {:?})", reason),
             ExprKind::Unary { op, operand } => {
                 let sym = match op {
                     UnaryOp::Neg => "-",
