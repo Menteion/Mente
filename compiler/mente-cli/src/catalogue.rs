@@ -12,6 +12,8 @@
 pub enum FailureClass {
     /// The text does not parse.
     Syntax,
+    /// A construct of a later milestone, which the current one does not have.
+    LaterMilestone,
     /// A view, an arena value or a task-bound value is used where its provenance does not reach.
     Provenance,
     /// A layout, bit-field or branch-freedom contract does not hold.
@@ -29,6 +31,7 @@ impl FailureClass {
     pub fn name(self) -> &'static str {
         match self {
             FailureClass::Syntax => "syntax",
+            FailureClass::LaterMilestone => "later milestone",
             FailureClass::Provenance => "provenance",
             FailureClass::HardwareContract => "hardware contract",
             FailureClass::Proof => "proof",
@@ -192,6 +195,109 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f() -> u8 = 0b102\n",
         "module m\npub fn f() -> u8 = 0b101\n",
     ),
+    emitted(
+        "E0109",
+        FailureClass::LaterMilestone,
+        "spec/core-calculus.md",
+        "A construct of a later milestone",
+        "M1 is a thin slice of the language: integers, `bool`, fixed-size arrays, functions \
+         with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and \
+         `continue`, `guard`, `return`, contracts, refined integer types and `todo`. A \
+         construct of a later milestone, such as a string, a float, `match`, a struct's field, \
+         a method call, an error type or an effect clause, is reported with the milestone that \
+         brings it. A few, such as `for` loops and the pipe `|>`, are in no milestone yet.",
+        "module m\npub fn f() -> i32 {\n  val s = \"text\"\n  0\n}\n",
+        "module m\npub fn f() -> i32 {\n  val n = 1\n  n\n}\n",
+    ),
+    emitted(
+        "E0110",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "An expression was expected",
+        "An operand, an initializer, an argument, a condition or a returned value must be an \
+         expression: a literal, a name, a call, an array, an `if`, or operators applied to \
+         them. The diagnostic names what was found instead.",
+        "module m\npub fn f() -> i32 = )\n",
+        "module m\npub fn f() -> i32 = 0\n",
+    ),
+    emitted(
+        "E0111",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "A token the grammar requires is missing",
+        "A form of the grammar needs a token that is not there: `=` and a value after a \
+         binding's name, `else` after a guard's condition, `,` or `)` between arguments, `]` to \
+         close an index, `{` after a condition, or a string in `todo(\"why\")`. The diagnostic \
+         names what was expected and what was found.",
+        "module m\npub fn f() -> i32 {\n  val x 1\n  x\n}\n",
+        "module m\npub fn f() -> i32 {\n  val x = 1\n  x\n}\n",
+    ),
+    emitted(
+        "E0112",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "Two statements share a line",
+        "A statement ends at the end of its line, and Mente has no `;` to end one early. The \
+         fix starts the second statement on a new line; for a `;` at the end of a line it \
+         removes the `;`.",
+        "module m\npub fn f() -> i32 {\n  val x = 1 x\n}\n",
+        "module m\npub fn f() -> i32 {\n  val x = 1\n  x\n}\n",
+    ),
+    emitted(
+        "E0113",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "Comparisons do not chain",
+        "`a < b < c` would mean `(a < b) < c` to a reader from C or Rust and `a < b and b < c` \
+         to one from Python, so Mente rejects it. Write the two comparisons joined by `and`, as \
+         the suggested fix does; parentheses make a comparison an operand like any other.",
+        "module m\npub fn f(a: i32, b: i32, c: i32) -> bool = a < b < c\n",
+        "module m\npub fn f(a: i32, b: i32, c: i32) -> bool = a < b and b < c\n",
+    ),
+    emitted(
+        "E0114",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "Not a place",
+        "Assignment, compound assignment and a `mut` argument need a place: a name, or an \
+         element of one such as `a[i]` or `a[i][j]`. Any other expression has no storage to \
+         change.",
+        "module m\npub fn f(a: i32) -> i32 {\n  var b = a\n  b + 1 = 2\n  b\n}\n",
+        "module m\npub fn f(a: i32) -> i32 {\n  var b = a\n  b = 2\n  b\n}\n",
+    ),
+    emitted(
+        "E0115",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "An if expression used as an operand needs parentheses",
+        "An `if` expression stands alone as an initializer, an argument or a returned value. \
+         Inside an operator's operand, or followed by an operator, it needs parentheses, which \
+         the fix adds.",
+        "module m\npub fn f(c: bool) -> i32 = 1 + if c { 2 } else { 3 }\n",
+        "module m\npub fn f(c: bool) -> i32 = 1 + (if c { 2 } else { 3 })\n",
+    ),
+    emitted(
+        "E0116",
+        FailureClass::Type,
+        "spec/grammar.md",
+        "A type M1 does not have, or a malformed one",
+        "M1's types are the integer types `i8` to `i128`, `u8` to `u128` and `usize`, each with \
+         an optional refinement such as `u8[0..10]`, `bool`, and arrays `[N]T` whose length is \
+         an integer literal. A refinement's bound is an integer literal, a name, or `name.len`. \
+         Structs and enums come in M2.",
+        "module m\npub fn f(x: int) -> i32 = 0\n",
+        "module m\npub fn f(x: i32) -> i32 = 0\n",
+    ),
+    emitted(
+        "E0117",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "An array repeat's count is not an integer literal",
+        "`[value; count]` makes an array of `count` copies of `value`, and an array's length is \
+         part of its type, so `count` is an integer literal.",
+        "module m\npub fn f(n: usize) -> [4]u8 {\n  val a = [0; n]\n  a\n}\n",
+        "module m\npub fn f(n: usize) -> [4]u8 {\n  val a = [0; 4]\n  a\n}\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,
@@ -240,7 +346,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
          unrolled and allowed. MIR reports the same code for a conditional-jump node in a \
          `@branchless` region.",
         "module m\n@branchless\npub fn spin(x: i32) -> i32 {\n  while x > 0 {\n  }\n  x\n}\n",
-        "module m\n@branchless\npub fn spin(x: i32) -> i32 {\n  for i in 0..4 {\n  }\n  x\n}\n",
+        "module m\n@branchless\npub fn spin(x: i32) -> i32 {\n  x * 2\n}\n",
     ),
     emitted(
         "E0402",
@@ -248,9 +354,11 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "spec/hardware-contracts.md",
         "A @branchless function raises",
         "`raise` leaves the function along an error path, which is a branch. A `@branchless` \
-         function computes its result with selects, and reports failure in its value.",
+         function computes its result with selects, and reports failure in its value. `raise` \
+         comes in M2, so until then the program that fails with this code also reports `raise` \
+         and the error type as constructs of a later milestone (`E0109`).",
         "module m\n@branchless\npub fn pick(x: i32) -> i32 ! RangeError {\n  raise RangeError.TooBig\n}\n",
-        "module m\npub fn pick(x: i32) -> i32 ! RangeError {\n  raise RangeError.TooBig\n}\n",
+        "module m\n@branchless\npub fn pick(x: i32) -> i32 {\n  x\n}\n",
     ),
     reserved(
         "E0403",
@@ -648,6 +756,7 @@ mod tests {
     fn test_every_code_has_a_failure_class() {
         let all = [
             FailureClass::Syntax,
+            FailureClass::LaterMilestone,
             FailureClass::Provenance,
             FailureClass::HardwareContract,
             FailureClass::Proof,
@@ -659,6 +768,7 @@ mod tests {
             names,
             [
                 "syntax",
+                "later milestone",
                 "provenance",
                 "hardware contract",
                 "proof",
@@ -668,6 +778,8 @@ mod tests {
         );
         for e in CATALOGUE {
             let expected = match &e.code[..3] {
+                _ if e.code == "E0109" => FailureClass::LaterMilestone,
+                _ if e.code == "E0116" => FailureClass::Type,
                 "E01" => FailureClass::Syntax,
                 "E03" => FailureClass::Provenance,
                 "E04" => FailureClass::HardwareContract,
@@ -724,9 +836,16 @@ mod tests {
         for e in CATALOGUE.iter().filter(|e| e.status == CodeStatus::Emitted) {
             let stem = e.spec.trim_start_matches("spec/").trim_end_matches(".md");
             let dir = root().join("conformance").join(stem);
+            // A program expects the code first; a construct of a later milestone may follow
+            // it, as `raise` follows `E0402` until M2 brings `raise`.
             let expects_it = fs::read_dir(&dir).into_iter().flatten().flatten().any(|f| {
-                fs::read_to_string(f.path())
-                    .is_ok_and(|src| src.lines().next() == Some(&format!("// expect: {}", e.code)))
+                fs::read_to_string(f.path()).is_ok_and(|src| {
+                    src.lines()
+                        .next()
+                        .and_then(|l| l.strip_prefix("// expect: "))
+                        .and_then(|codes| codes.split_whitespace().next())
+                        == Some(e.code)
+                })
             });
             assert!(
                 expects_it,

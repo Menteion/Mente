@@ -49,7 +49,7 @@ cargo test
 # 2. Check spec/*.md front matter and run every @assert-* directive (rejects directives that cannot fail)
 cargo run --bin mn -- spec
 
-# 3. Check the examples' declarations, then run the demo MIR region and its mutation gate
+# 3. Check that each example reports exactly what its .expected file lists, then run the demo MIR region and its mutation gate
 cargo run --bin mn -- test --mutate
 
 # 4. Inspect Holographic Spec Blueprint projection (strips bodies, shows spec_hash/body_hash)

@@ -32,17 +32,28 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// A module of M1 code and a proven layout, which `mn check` passes.
+const CLEAN: &str = "module test.clean\n@layout(size: 8, align: 4)\npub struct Pair {\n  @bytes(0..4) pub a: u32\n  @bytes(4..8) pub b: u32\n}\npub fn double(x: i32) -> i32 {\n  val y = x * 2\n  y\n}\n";
+
 #[test]
-fn test_mn_check_passes_examples_and_rejects_a_broken_layout() {
-    let ok = mn(&repo_root(), &["check", "examples"]);
+fn test_mn_check_proves_a_layout_and_rejects_broken_modules() {
+    let dir = scratch("clean");
+    fs::write(dir.join("clean.mn"), CLEAN).unwrap();
+    let ok = mn(&dir, &["check", "."]);
+    fs::remove_dir_all(&dir).unwrap();
     let out = text(&ok.stdout);
     assert!(ok.status.success(), "{}{}", out, text(&ok.stderr));
-    assert_eq!(out.matches("[PASS]").count(), 4, "{}", out);
+    assert_eq!(out.matches("[PASS]").count(), 1, "{}", out);
     assert!(
-        out.contains("Proven @layout") && out.contains("spec_hash:"),
+        out.contains("Proven @layout `Pair`") && out.contains("spec_hash:"),
         "{}",
         out
     );
+
+    // The examples use constructs of later milestones, which M1 reports.
+    let examples = mn(&repo_root(), &["check", "examples"]);
+    assert_eq!(examples.status.code(), Some(1));
+    assert!(text(&examples.stderr).contains("error[E0109]"));
 
     let dir = scratch("check");
     fs::write(
@@ -111,6 +122,71 @@ fn test_mn_test_mutate_runs_the_demo_gate() {
 }
 
 #[test]
+fn test_mn_test_compares_each_module_with_its_expected_file() {
+    // A `.mn` path that cannot be read as a file fails the run.
+    let dir = scratch("unreadable");
+    fs::create_dir_all(dir.join("folder.mn")).unwrap();
+    let unreadable = mn(&dir, &["test", "."]);
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(unreadable.status.code(), Some(1));
+    assert!(text(&unreadable.stderr).contains("cannot read"));
+
+    let dir = scratch("expected");
+    fs::write(
+        dir.join("later.mn"),
+        "module t\npub fn f() -> i32 {\n  val s = \"x\"\n  0\n}\n",
+    )
+    .unwrap();
+    // Without an `.expected` file, a module must report nothing.
+    let bare = mn(&dir, &["test", "."]);
+    let err = text(&bare.stderr);
+    assert_eq!(bare.status.code(), Some(1));
+    assert!(
+        err.contains("[FAIL]") && err.contains("reported, not expected: 3:11 E0109"),
+        "{}",
+        err
+    );
+    assert!(!err.contains("in another order"), "{}", err);
+    // With one, it must report exactly what the file lists.
+    fs::write(dir.join("later.expected"), "3:11 E0109\n").unwrap();
+    let listed = mn(&dir, &["test", "."]);
+    let out = text(&listed.stdout);
+    assert!(listed.status.success(), "{}", text(&listed.stderr));
+    assert!(
+        out.contains("reports its 1 expected diagnostics"),
+        "{}",
+        out
+    );
+    fs::write(dir.join("later.expected"), "3:12 E0109\n").unwrap();
+    let moved = mn(&dir, &["test", "."]);
+    let err = text(&moved.stderr);
+    assert_eq!(moved.status.code(), Some(1));
+    assert!(
+        err.contains("reported, not expected: 3:11 E0109")
+            && err.contains("expected, not reported: 3:12 E0109")
+            && !err.contains("in another order"),
+        "{}",
+        err
+    );
+    // The same diagnostics in another order are not what the file lists.
+    fs::write(
+        dir.join("later.mn"),
+        "module t\npub fn f() -> i32 {\n  val s = \"x\"\n  val t = 1.5\n  0\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("later.expected"), "4:11 E0109\n3:11 E0109\n").unwrap();
+    let swapped = mn(&dir, &["test", "."]);
+    fs::remove_dir_all(&dir).unwrap();
+    let err = text(&swapped.stderr);
+    assert_eq!(swapped.status.code(), Some(1));
+    assert!(
+        err.contains("the same diagnostics, in another order"),
+        "{}",
+        err
+    );
+}
+
+#[test]
 fn test_mn_spec_checks_front_matter_and_directives() {
     let dir = scratch("spec");
     fs::create_dir_all(dir.join("spec")).unwrap();
@@ -170,7 +246,10 @@ fn test_mn_spec_checks_front_matter_and_directives() {
 
 #[test]
 fn test_mn_check_json_reports_the_versioned_form() {
-    let clean = mn(&repo_root(), &["check", "--json", "examples"]);
+    let dir = scratch("json-clean");
+    fs::write(dir.join("clean.mn"), CLEAN).unwrap();
+    let clean = mn(&dir, &["check", "--json", "clean.mn"]);
+    fs::remove_dir_all(&dir).unwrap();
     assert!(clean.status.success(), "{}", text(&clean.stderr));
     assert_eq!(text(&clean.stdout), "{\"version\":1,\"diagnostics\":[]}\n");
 

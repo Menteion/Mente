@@ -1,21 +1,51 @@
+== core-calculus/later_error_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an error type `T ! E` comes in M2; M1 does not have it","primary":{"file":"later_error_type.mn","start":60,"end":61,"line":3,"column":25},"related":[],"fixes":[]}]}
+== core-calculus/later_for_loop.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `for` loop is in no milestone yet; M1 does not have it","primary":{"file":"later_for_loop.mn","start":70,"end":73,"line":5,"column":3},"related":[],"fixes":[]}]}
+== core-calculus/later_match.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"`match` comes in M2; M1 does not have it","primary":{"file":"later_match.mn","start":72,"end":77,"line":4,"column":11},"related":[],"fixes":[]}]}
+== core-calculus/later_string_value.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string value comes in M2; M1 does not have it","primary":{"file":"later_string_value.mn","start":66,"end":72,"line":4,"column":11},"related":[],"fixes":[]}]}
+== core-calculus/m1_slice.mn ==
+{"version":1,"diagnostics":[]}
 == ghost-contracts-and-totality/total_while_without_decreases.mn ==
 {"version":1,"diagnostics":[{"code":"E0501","severity":"error","message":"function `countdown` is marked `@total` and loops with `while`, but gives no `decreases` measure","primary":{"file":"total_while_without_decreases.mn","start":50,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
-== ghost-contracts-and-totality/total_with_decreases_in_the_body.mn ==
-{"version":1,"diagnostics":[]}
 == ghost-contracts-and-totality/total_with_decreases_in_the_signature.mn ==
+{"version":1,"diagnostics":[]}
+== ghost-contracts-and-totality/total_with_decreases_on_the_loop.mn ==
 {"version":1,"diagnostics":[]}
 == ghost-contracts-and-totality/total_without_a_loop.mn ==
 {"version":1,"diagnostics":[]}
+== grammar/assignment_to_a_sum.mn ==
+{"version":1,"diagnostics":[{"code":"E0114","severity":"error","message":"`b + 1` is not a place to assign to; a place is a name, or an element of one such as `a[i]`","primary":{"file":"assignment_to_a_sum.mn","start":76,"end":81,"line":5,"column":3},"related":[{"message":"assigned here","span":{"file":"assignment_to_a_sum.mn","start":82,"end":83,"line":5,"column":9}}],"fixes":[]}]}
 == grammar/binary_digit_out_of_base.mn ==
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"`2` is not a binary digit","primary":{"file":"binary_digit_out_of_base.mn","start":55,"end":60,"line":3,"column":20},"related":[],"fixes":[]}]}
+== grammar/binding_without_value.mn ==
+{"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"expected `=` and the binding's value, found `1`","primary":{"file":"binding_without_value.mn","start":64,"end":65,"line":4,"column":9},"related":[],"fixes":[]}]}
+== grammar/chained_comparison.mn ==
+{"version":1,"diagnostics":[{"code":"E0113","severity":"error","message":"comparisons do not chain; write `... b and b ...`","primary":{"file":"chained_comparison.mn","start":85,"end":86,"line":3,"column":50},"related":[],"fixes":[{"message":"compare `b` twice, joined by `and`","applicability":"suggestion","edits":[{"span":{"file":"chained_comparison.mn","start":84,"end":84,"line":3,"column":49},"replacement":" and b"}]}]}]}
+== grammar/expression_expected.mn ==
+{"version":1,"diagnostics":[{"code":"E0110","severity":"error","message":"expected an expression, found `)`","primary":{"file":"expression_expected.mn","start":56,"end":57,"line":3,"column":21},"related":[],"fixes":[]}]}
+== grammar/if_as_an_operand.mn ==
+{"version":1,"diagnostics":[{"code":"E0115","severity":"error","message":"an `if` expression used as an operand needs parentheses","primary":{"file":"if_as_an_operand.mn","start":67,"end":88,"line":3,"column":32},"related":[],"fixes":[{"message":"put the `if` expression in parentheses","applicability":"machine-applicable","edits":[{"span":{"file":"if_as_an_operand.mn","start":67,"end":88,"line":3,"column":32},"replacement":"(if c { 2 } else { 3 })"}]}]}]}
 == grammar/integer_beyond_u128.mn ==
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1","primary":{"file":"integer_beyond_u128.mn","start":57,"end":96,"line":3,"column":22},"related":[],"fixes":[]}]}
 == grammar/lifetime_quote.mn ==
 {"version":1,"diagnostics":[{"code":"E0105","severity":"error","message":"`'` is not a character Mente uses; Mente writes no lifetimes and has no character literals","primary":{"file":"lifetime_quote.mn","start":49,"end":50,"line":3,"column":14},"related":[],"fixes":[]}]}
 == grammar/m1_literals_and_operators.mn ==
 {"version":1,"diagnostics":[]}
+== grammar/newlines_and_clauses.mn ==
+{"version":1,"diagnostics":[]}
+== grammar/repeat_count_not_a_literal.mn ==
+{"version":1,"diagnostics":[{"code":"E0117","severity":"error","message":"the count of `[value; count]` is an integer literal, not `n`","primary":{"file":"repeat_count_not_a_literal.mn","start":80,"end":81,"line":4,"column":15},"related":[],"fixes":[]}]}
+== grammar/semicolon_at_line_end.mn ==
+{"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"`;` does not end a statement in Mente; a newline does","primary":{"file":"semicolon_at_line_end.mn","start":67,"end":68,"line":4,"column":12},"related":[],"fixes":[{"message":"remove the `;`","applicability":"machine-applicable","edits":[{"span":{"file":"semicolon_at_line_end.mn","start":67,"end":68,"line":4,"column":12},"replacement":""}]}]}]}
 == grammar/suffix_without_underscore.mn ==
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"a literal's suffix starts with `_`: write `5_ms`","primary":{"file":"suffix_without_underscore.mn","start":56,"end":59,"line":3,"column":21},"related":[],"fixes":[{"message":"insert `_` before `ms`","applicability":"machine-applicable","edits":[{"span":{"file":"suffix_without_underscore.mn","start":57,"end":57,"line":3,"column":22},"replacement":"_"}]}]}]}
+== grammar/two_statements_on_a_line.mn ==
+{"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"a statement ends at the end of its line, and `x` starts another on the same line","primary":{"file":"two_statements_on_a_line.mn","start":68,"end":69,"line":4,"column":13},"related":[],"fixes":[{"message":"start it on a new line","applicability":"machine-applicable","edits":[{"span":{"file":"two_statements_on_a_line.mn","start":67,"end":68,"line":4,"column":12},"replacement":"\n"}]}]}]}
+== grammar/type_m1_lacks.mn ==
+{"version":1,"diagnostics":[{"code":"E0116","severity":"error","message":"`int` is not a type of M1, whose types are the integer types, `bool` and arrays `[N]T`; structs and enums come in M2","primary":{"file":"type_m1_lacks.mn","start":48,"end":51,"line":3,"column":13},"related":[],"fixes":[]}]}
 == grammar/unclosed_string.mn ==
 {"version":1,"diagnostics":[{"code":"E0106","severity":"error","message":"this string literal is not closed on its line; close it with `\"`, and write a line break inside it as `\\n`","primary":{"file":"unclosed_string.mn","start":63,"end":75,"line":4,"column":8},"related":[],"fixes":[]}]}
 == grammar/unknown_character.mn ==
@@ -23,11 +53,11 @@
 == grammar/unknown_escape.mn ==
 {"version":1,"diagnostics":[{"code":"E0107","severity":"error","message":"`\\q` is not an escape Mente knows; a string literal may use `\\\"`, `\\\\`, `\\n` and `\\t`","primary":{"file":"unknown_escape.mn","start":65,"end":67,"line":4,"column":10},"related":[],"fixes":[]}]}
 == hardware-contracts/branchless_raise.mn ==
-{"version":1,"diagnostics":[{"code":"E0402","severity":"error","message":"function `pick` is marked `@branchless`, but contains `raise`","primary":{"file":"branchless_raise.mn","start":55,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
+{"version":1,"diagnostics":[{"code":"E0402","severity":"error","message":"function `pick` is marked `@branchless`, but contains `raise`","primary":{"file":"branchless_raise.mn","start":67,"end":71,"line":4,"column":8},"related":[],"fixes":[]},{"code":"E0109","severity":"error","message":"an error type `T ! E` comes in M2; M1 does not have it","primary":{"file":"branchless_raise.mn","start":87,"end":88,"line":4,"column":28},"related":[],"fixes":[]},{"code":"E0109","severity":"error","message":"`raise` comes in M2; M1 does not have it","primary":{"file":"branchless_raise.mn","start":104,"end":109,"line":5,"column":3},"related":[],"fixes":[]}]}
 == hardware-contracts/branchless_straight_line.mn ==
 {"version":1,"diagnostics":[]}
 == hardware-contracts/branchless_unrolled_loop.mn ==
-{"version":1,"diagnostics":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `for` loop is in no milestone yet; M1 does not have it","primary":{"file":"branchless_unrolled_loop.mn","start":79,"end":82,"line":5,"column":3},"related":[],"fixes":[]}]}
 == hardware-contracts/branchless_while_loop.mn ==
 {"version":1,"diagnostics":[{"code":"E0401","severity":"error","message":"function `spin` is marked `@branchless`, but contains a `while` loop","primary":{"file":"branchless_while_loop.mn","start":55,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
 == morphic-layouts/alignment_not_a_power_of_two.mn ==

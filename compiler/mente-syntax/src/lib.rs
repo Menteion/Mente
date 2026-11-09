@@ -2,8 +2,10 @@
 //!
 //! Governed by `spec/holographic-module.md` and `spec/surface-syntax.md`.
 //!
-//! Parses declarations only. Function and `@example` bodies are kept as flat token lists
-//! (`body_tokens`); types, contracts and effect clauses are kept as raw strings. The lexer
+//! The declaration parser keeps function and `@example` bodies as flat token lists
+//! (`body_tokens`), and types, contracts and effect clauses as raw strings, for the digests;
+//! the body parser ([`body`], over [`tree`]) reads each function with a body under M1's
+//! grammar, through [`parse_functions`]. The lexer
 //! follows `spec/grammar.md`, item 1, and reports a character Mente does not use, an unclosed
 //! string, an unknown escape and a malformed integer literal. A parse error is a [`Diagnostic`]
 //! (`spec/diagnostics.md`), and declarations, fields and attributes keep their spans so later
@@ -11,7 +13,9 @@
 
 use std::fmt;
 
+pub mod body;
 pub mod diagnostics;
+pub mod tree;
 
 use diagnostics::{insertion_point, Applicability, Diagnostic};
 
@@ -49,6 +53,8 @@ pub enum TokenKind {
     Match,
     Guard,
     While,
+    Break,
+    Continue,
     For,
     In,
     Parallel,
@@ -132,7 +138,7 @@ pub enum TokenKind {
     Eof,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -476,6 +482,8 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                 "match" => TokenKind::Match,
                 "guard" => TokenKind::Guard,
                 "while" => TokenKind::While,
+                "break" => TokenKind::Break,
+                "continue" => TokenKind::Continue,
                 "for" => TokenKind::For,
                 "in" => TokenKind::In,
                 "parallel" => TokenKind::Parallel,
@@ -613,6 +621,71 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
     (tokens, errors)
 }
 
+/// Whether a statement goes on past a newline after `last`: a token that cannot end one
+/// (`spec/grammar.md`, item 2).
+fn continues_statement(last: &TokenKind) -> bool {
+    matches!(
+        last,
+        TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::Amp
+            | TokenKind::Pipe
+            | TokenKind::Caret
+            | TokenKind::Shl
+            | TokenKind::Shr
+            | TokenKind::EqEq
+            | TokenKind::NotEq
+            | TokenKind::Lt
+            | TokenKind::Le
+            | TokenKind::Gt
+            | TokenKind::Ge
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Not
+            | TokenKind::Eq
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            | TokenKind::AmpEq
+            | TokenKind::PipeEq
+            | TokenKind::CaretEq
+            | TokenKind::ShlEq
+            | TokenKind::ShrEq
+            | TokenKind::Comma
+            | TokenKind::Dot
+            | TokenKind::Arrow
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+    )
+}
+
+/// Parses, under M1's grammar, every function of `module` that has a body (`spec/grammar.md`,
+/// items 2 to 8), and reports every error the body parser finds. A function without a body is
+/// a declaration, which the declaration checks of its spec file read; M1 does not parse it
+/// further.
+pub fn parse_functions(src: &str, module: &ModuleFile) -> (Vec<tree::FnSyntax>, Vec<Diagnostic>) {
+    let mut functions = Vec::new();
+    let mut errors = Vec::new();
+    for item in &module.items {
+        if let ItemDecl::Fn(f) = item {
+            let has_body =
+                f.is_expr_body || f.tokens.last().is_some_and(|t| t.kind == TokenKind::RBrace);
+            if has_body {
+                let (syntax, found) = body::parse_function(src, &f.tokens);
+                functions.push(syntax);
+                errors.extend(found);
+            }
+        }
+    }
+    (functions, errors)
+}
+
 // ============================================================================
 // Parsed Structural Representation of a `.mn` Holographic File
 // ============================================================================
@@ -722,6 +795,9 @@ pub struct FnDecl {
     pub decreases: Vec<String>,
     pub body_tokens: Vec<TokenKind>,
     pub is_expr_body: bool,
+    /// Every token of the function, from `fn` to the end of its body, which the body parser
+    /// reads under M1's grammar ([`parse_functions`]).
+    pub tokens: Vec<Token>,
     pub line: u32,
 }
 
@@ -757,7 +833,7 @@ pub enum ItemDecl {
     BitStruct(BitStructDecl),
     Enum(EnumDecl),
     Trait(TraitDecl),
-    Fn(FnDecl),
+    Fn(Box<FnDecl>),
     Example(ExampleDecl),
 }
 
@@ -886,12 +962,9 @@ impl<'a> Parser<'a> {
                     items.push(ItemDecl::Trait(self.parse_trait(is_pub)?));
                 }
                 TokenKind::Fn => {
-                    items.push(ItemDecl::Fn(self.parse_fn(docs, attrs, is_pub)?));
+                    items.push(ItemDecl::Fn(Box::new(self.parse_fn(docs, attrs, is_pub)?)));
                 }
-                _ => {
-                    // Advance gracefully on other top-level constructs
-                    self.next();
-                }
+                _ => return Err(self.not_a_declaration()),
             }
         }
 
@@ -900,6 +973,32 @@ impl<'a> Parser<'a> {
             items,
             total_token_count,
         })
+    }
+
+    /// What stands where a declaration belongs: a declaration of a later milestone (`E0109`), or
+    /// anything else (`E0111`).
+    fn not_a_declaration(&self) -> Diagnostic {
+        let later = match self.peek() {
+            TokenKind::Import => Some(("an `import`", "M6")),
+            TokenKind::Extern => Some(("an `extern` block", "M4")),
+            TokenKind::Actor => Some(("an `actor`", "M7")),
+            _ => None,
+        };
+        match later {
+            Some((what, milestone)) => Diagnostic::error(
+                "E0109",
+                self.span(),
+                format!("{} comes in {}; M1 does not have it", what, milestone),
+            ),
+            None => Diagnostic::error(
+                "E0111",
+                self.span(),
+                format!(
+                    "expected a declaration, such as `fn`, `struct` or `@example`, found {}",
+                    self.found()
+                ),
+            ),
+        }
     }
 
     fn parse_dotted_ident(&mut self) -> Result<String, Diagnostic> {
@@ -1346,6 +1445,7 @@ impl<'a> Parser<'a> {
         attrs: Vec<Attr>,
         is_pub: bool,
     ) -> Result<FnDecl, Diagnostic> {
+        let fn_index = self.pos;
         let fn_tok = self.next(); // consume 'fn'
         let line = fn_tok.span.line;
         let (name, name_span) = self.expect_name()?;
@@ -1443,9 +1543,26 @@ impl<'a> Parser<'a> {
         if *self.peek() == TokenKind::Eq {
             self.next();
             is_expr_body = true;
-            let expr_line = self.span().line;
-            while *self.peek() != TokenKind::Eof && self.span().line == expr_line {
-                body_tokens.push(self.next().kind);
+            // The body runs to the end of its line, and on past a newline where
+            // `spec/grammar.md`, item 2, says the statement goes on.
+            let mut depth = 0i32;
+            let mut last_line = self.span().line;
+            let mut last = TokenKind::Eq;
+            while *self.peek() != TokenKind::Eof
+                && (depth > 0
+                    || self.span().line == last_line
+                    || continues_statement(&last)
+                    || matches!(self.peek(), TokenKind::Else | TokenKind::LBrace))
+            {
+                let tok = self.next();
+                match tok.kind {
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+                    _ => {}
+                }
+                last_line = tok.span.line;
+                body_tokens.push(tok.kind.clone());
+                last = tok.kind;
             }
         } else if *self.peek() == TokenKind::LBrace {
             body_tokens = self.consume_balanced_braces()?;
@@ -1469,6 +1586,7 @@ impl<'a> Parser<'a> {
             decreases,
             body_tokens,
             is_expr_body,
+            tokens: self.tokens[fn_index..self.pos].to_vec(),
             line,
         })
     }
@@ -1526,16 +1644,27 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A contract clause: to the end of its line, and on past a newline where `spec/grammar.md`,
+    /// item 2, says it goes on; it stops before the body's `{` or `=`.
     fn consume_contract_expr(&mut self) -> String {
-        let line = self.span().line;
         let start = self.span().start;
         let mut end = start;
+        let mut depth = 0i32;
+        let mut last_line = self.span().line;
+        let mut last = TokenKind::Requires;
         while *self.peek() != TokenKind::Eof
-            && self.span().line == line
-            && *self.peek() != TokenKind::LBrace
-            && *self.peek() != TokenKind::Eq
+            && (depth > 0 || self.span().line == last_line || continues_statement(&last))
+            && !(depth == 0 && matches!(self.peek(), TokenKind::LBrace | TokenKind::Eq))
         {
-            end = self.next().span.end;
+            let tok = self.next();
+            match tok.kind {
+                TokenKind::LParen | TokenKind::LBracket => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket => depth -= 1,
+                _ => {}
+            }
+            last_line = tok.span.line;
+            end = tok.span.end;
+            last = tok.kind;
         }
         self.src[start..end].trim().to_string()
     }
@@ -1700,6 +1829,10 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+        assert_eq!(
+            kinds("break continue"),
+            vec![TokenKind::Break, TokenKind::Continue, TokenKind::Eof]
+        );
         // A string keeps its four escapes as written.
         assert_eq!(
             kinds(r#""a\"b\\c\n\t""#)[0],
@@ -1826,6 +1959,97 @@ mod tests {
     }
 
     #[test]
+    fn test_clauses_and_expression_bodies_continue_past_a_newline() {
+        let src = "module m\npub fn f(a: [2]i32) -> i32\n  requires a[0] >\n    0\n  ensures (result\n    > 0)\n= a[0] +\n  a[1]\npub fn g() -> i32 = 2\n";
+        let module = parse_module(src).unwrap();
+        let fns: Vec<&FnDecl> = module
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ItemDecl::Fn(f) => Some(&**f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fns.len(), 2);
+        assert_eq!(fns[0].requires, vec![String::from("a[0] >\n    0")]);
+        assert_eq!(fns[0].ensures, vec![String::from("(result\n    > 0)")]);
+        assert_eq!(fns[0].body_tokens.len(), 9, "{:?}", fns[0].body_tokens);
+        assert_eq!(fns[1].name, "g");
+        // An `else` on the next line continues an `if` in an expression body.
+        let src = "module m\npub fn h(c: bool) -> i32 = if c { 1 }\n  else { 2 }\npub fn k() -> i32 = 3\n";
+        let module = parse_module(src).unwrap();
+        assert_eq!(module.items.len(), 2);
+        let (_, errors) = parse_functions(src, &module);
+        assert!(errors.is_empty(), "{:?}", errors);
+        // Brackets hold a body together across lines, and a clause stops where the body starts.
+        let src = "module m\npub fn p(a: i32) -> i32 requires a > 0 = add(a,\n  1)\npub fn q(a: i32) -> i32 ensures result > a {\n  a + 1\n}\n";
+        let module = parse_module(src).unwrap();
+        let fns: Vec<&FnDecl> = module
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ItemDecl::Fn(f) => Some(&**f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fns.len(), 2);
+        assert_eq!(fns[0].requires, vec![String::from("a > 0")]);
+        assert_eq!(fns[0].body_tokens.len(), 6, "{:?}", fns[0].body_tokens);
+        assert_eq!(fns[1].ensures, vec![String::from("result > a")]);
+        let (_, errors) = parse_functions(src, &module);
+        assert!(errors.is_empty(), "{:?}", errors);
+        // Only the open parenthesis keeps this body going past its first line.
+        let src = "module m\npub fn r(a: i32) -> i32 = add(a\n  , 1)\npub fn s() -> i32 = 0\n";
+        let module = parse_module(src).unwrap();
+        assert_eq!(module.items.len(), 2);
+        let (_, errors) = parse_functions(src, &module);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn test_only_declarations_stand_at_the_top_level() {
+        let cases = [
+            (
+                "module m\nlet x = 1\n",
+                "E0111",
+                "expected a declaration, such as `fn`, `struct` or `@example`, found `let`",
+            ),
+            (
+                "module m\nimport net\n",
+                "E0109",
+                "an `import` comes in M6; M1 does not have it",
+            ),
+            (
+                "module m\nextern \"C\" {\n}\n",
+                "E0109",
+                "an `extern` block comes in M4; M1 does not have it",
+            ),
+            (
+                "module m\nactor A {\n}\n",
+                "E0109",
+                "an `actor` comes in M7; M1 does not have it",
+            ),
+        ];
+        for (src, code, message) in cases {
+            let err = parse_module(src).unwrap_err();
+            assert_eq!((err.code, err.message.as_str()), (code, message), "{}", src);
+        }
+    }
+
+    #[test]
+    fn test_parse_functions_reads_each_function_with_a_body() {
+        let src = "module m\npub fn decl(x: i32) -> i32\npub fn expr(x: i32) -> i32 = x + 1\npub fn block(x: i32) -> i32 {\n  val y = x 1\n  y\n}\npub fn empty() {}\n";
+        let module = parse_module(src).unwrap();
+        let (functions, errors) = parse_functions(src, &module);
+        let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["expr", "block", "empty"]);
+        assert_eq!(
+            errors.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec!["E0112"]
+        );
+    }
+
+    #[test]
     fn test_doc_comments_are_exactly_three_slashes() {
         // `///` opens a doc comment; `//` and `////` open plain comments, which leave no token.
         let src = "module m\n/// the doc\n// plain\n//// banner\nfn f() = 0\n///";
@@ -1880,7 +2104,7 @@ pub fn verify(token: str, key: str) -> str ! AuthError from token with Clock
     fn only_fn(code: &str) -> FnDecl {
         let m = parse_module(code).expect("should parse");
         match m.items.as_slice() {
-            [ItemDecl::Fn(f)] => f.clone(),
+            [ItemDecl::Fn(f)] => (**f).clone(),
             other => panic!("expected one fn, got {:?}", other),
         }
     }

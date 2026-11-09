@@ -1,0 +1,29 @@
+// expect: pass
+module conformance
+
+pub fn spread(lo: i32, hi: i32) -> i32
+  requires lo <=
+    hi
+{
+  val width = hi -
+    lo
+  val total = add(lo,
+    hi)
+  var i = lo
+  while i < hi
+    invariant i <= hi
+    decreases hi - i
+  {
+    i += 1
+  }
+  if width > 10
+  {
+    return total
+  }
+  else {
+    return width
+  }
+}
+
+pub fn add(a: i32, b: i32) -> i32 = a +
+  b

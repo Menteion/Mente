@@ -11,7 +11,7 @@ The first line states what checking it must report:
 // expect: E0413
 ```
 
-`pass` means no diagnostic at all. A code means exactly one diagnostic, with that code. The rest of the file is an ordinary `.mn` module; keep each program to the one thing it tests.
+`pass` means no diagnostic at all. Codes, separated by spaces, mean exactly those diagnostics, in that order: one code for one diagnostic, the usual case, and more for a program that also uses a construct of a later milestone (`E0109`), as `// expect: E0402 E0109 E0109` does. The rest of the file is an ordinary `.mn` module; keep each program to the one thing it tests.
 
 ## The runner
 

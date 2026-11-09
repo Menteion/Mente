@@ -40,10 +40,29 @@ pub struct ModuleVerificationReport {
     pub examples_count: usize,
 }
 
-/// Parses and verifies the source of one module: what `mn check` reports for it.
+/// Parses and checks the source of one module: what `mn check` reports for it.
 pub fn check_source(src: &str) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
     let module = parse_module(src).map_err(|d| vec![d])?;
-    verify_module(&module)
+    check_module(src, &module)
+}
+
+/// Checks a parsed module: the declaration checks of [`verify_module`], then every function
+/// with a body parsed under M1's grammar (`spec/grammar.md`). The declaration checks'
+/// diagnostics come first.
+pub fn check_module(
+    src: &str,
+    module: &ModuleFile,
+) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
+    let verified = verify_module(module);
+    let (_, body_errors) = mente_syntax::parse_functions(src, module);
+    match verified {
+        Ok(report) if body_errors.is_empty() => Ok(report),
+        Ok(_) => Err(body_errors),
+        Err(mut errors) => {
+            errors.extend(body_errors);
+            Err(errors)
+        }
+    }
 }
 
 /// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`.
@@ -710,6 +729,24 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_check_module_reports_declarations_first_then_bodies() {
+        let clean = "module m\npub fn f(x: i32) -> i32 = x + 1\n";
+        assert!(check_source(clean).is_ok());
+        let body_only = "module m\npub fn f(x: i32) -> i32 = x +\n";
+        let codes = |src: &str| -> Vec<&str> {
+            check_source(src)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        assert_eq!(codes(body_only), vec!["E0110"]);
+        let both = "module m\n@layout(size: 16, align: 8)\npub struct Hole {\n  @bytes(0..8) pub id: u64\n  @bytes(12..16) pub rest: u32\n}\npub fn f(x: i32) -> i32 = x +\n";
+        assert_eq!(codes(both), vec!["E0413", "E0110"]);
+    }
 
     #[test]
     fn test_rejects_struct_with_padding_hole() {

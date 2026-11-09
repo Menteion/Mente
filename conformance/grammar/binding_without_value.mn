@@ -1,0 +1,6 @@
+// expect: E0111
+module conformance
+pub fn f() -> i32 {
+  val x 1
+  x
+}

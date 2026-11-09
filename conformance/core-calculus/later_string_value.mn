@@ -1,0 +1,6 @@
+// expect: E0109
+module conformance
+pub fn f() -> i32 {
+  val s = "text"
+  0
+}

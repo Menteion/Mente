@@ -1,6 +1,6 @@
 # Mente (`.mn`) Showcase Examples
 
-These modules show the intended language. `cargo test` and `cargo run --bin mn -- check` verify their declarations (layouts, bitstructs and the token-level `@total` / `@branchless` checks); their bodies and `@example` blocks are not parsed or run yet. Where they disagree with a spec, [`docs/design-review.md`](../docs/design-review.md) has the entry that settles it.
+These modules show the intended language. `cargo test` and `cargo run --bin mn -- check` verify their declarations (layouts, bitstructs and the token-level `@total` / `@branchless` checks). Their bodies use constructs of later milestones, which `mn check` reports as such; each example's `.expected` file lists what it reports, and `mn test` holds it to that list until the milestone that runs the example in full. Their `@example` blocks are not run yet. Where they disagree with a spec, [`docs/design-review.md`](../docs/design-review.md) has the entry that settles it.
 
 | File | Demonstrated mechanisms | Governing specs |
 | :--- | :--- | :--- |

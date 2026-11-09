@@ -11,11 +11,11 @@ date: 2026-11-04
 
 | Field | Value |
 | :--- | :--- |
-| Current milestone | M0b, done (tag `m0b`): the core calculus and the grammar of M1, the agent-benchmark corpus, the Tier-1 latency spike and the Cranelift debug-information spike, after M0a's documentation tools, CI, claim evidence, Rust hygiene, structured diagnostics, conformance suite and benchmarks (tag `m0a`). The plan was reviewed against M0's evidence on 2026-11-09 and stands ([`milestone-reviews.md`](milestone-reviews.md)). Function bodies are not parsed yet |
-| Immediate next step | M1, the thin slice, from checkpoint (a): the body parser, then the syntax probe on the public M1 tasks before anything builds on the syntax, name resolution and the type checker, `todo`, the reference interpreter `mente-interp`, the incremental architecture with `mn check --watch`, and `mn explain`, as [`ROADMAP.md`](../ROADMAP.md) sets out. The register entries M1 needs are decided during M0, in [`docs/design-review.md`](design-review.md) |
+| Current milestone | M1, checkpoint (a), under way: the lexer of M1 and the body parser are done. Before it, M0b, done (tag `m0b`): the core calculus and the grammar of M1, the agent-benchmark corpus, the Tier-1 latency spike and the Cranelift debug-information spike, after M0a's documentation tools, CI, claim evidence, Rust hygiene, structured diagnostics, conformance suite and benchmarks (tag `m0a`). The plan was reviewed against M0's evidence on 2026-11-09 and stands ([`milestone-reviews.md`](milestone-reviews.md)). |
+| Immediate next step | M1, the thin slice, from checkpoint (a): the syntax probe on the public M1 tasks before anything builds on the syntax, name resolution and the type checker, `todo`, the reference interpreter `mente-interp`, the incremental architecture with `mn check --watch`, and `mn explain`, as [`ROADMAP.md`](../ROADMAP.md) sets out. The register entries M1 needs are decided during M0, in [`docs/design-review.md`](design-review.md) |
 | Specification | One single-decision file per mechanism in [`spec/`](../spec/README.md), plus `README.md` and `philosophy.md`; `cargo run --bin mn -- spec` prints the current file and directive counts |
 | Compiler crates | 6 Rust crates (`mente-syntax`, `mente-ast`, `mente-sema`, `mente-mir`, `mente-codegen`, `mente-cli`) |
-| Showcase `.mn` modules | [`examples/`](../examples/README.md). `mn check` verifies their declarations only; their bodies show the intended language and are not checked |
+| Showcase `.mn` modules | [`examples/`](../examples/README.md). Their declarations pass `mn check`; their bodies use constructs of later milestones, and `mn test` checks that each reports exactly what its `.expected` file lists ([`example-bodies`](design-review.md#example-bodies)) |
 
 ---
 
@@ -23,11 +23,11 @@ date: 2026-11-04
 
 These gaps hold across every crate, and every `spec/*.md` claim that depends on them is labelled `Specified`:
 
-- **No body parser.** `mente-syntax` keeps each function and `@example` body as a flat token list, and types, contracts and effect clauses as raw strings. `mn check` accepts a body of arbitrary tokens.
+- **Bodies are parsed, not checked.** The body parser reads every function with a body under M1's grammar and reports what M1 does not accept; `@example` bodies stay token lists, and the declaration parser keeps types, contracts and effect clauses as raw strings for the digests.
 - **No type checker.** Refinement intervals, units, `?T`, `T ! E`, effects, parameter modes and the Law of Exclusivity are not checked.
 - **No lowering.** No `.mn` code reaches MIR. The MIR region `mn test` runs is built by hand in `compiler/mente-cli/src/main.rs`, with hand-written intervals.
 - **No code generation.** `mente-codegen` is empty until M1 lowers MIR to Cranelift.
-- **No idiom diagnostics yet.** The lexer reports a character Mente does not use (`E0105`), so `<'a>` is rejected, but `&mut x` and `let` lex as tokens and get their own diagnostics only once the body parser reads bodies.
+- **No idiom diagnostics yet.** The lexer reports a character Mente does not use (`E0105`), so `<'a>` is rejected; `&mut x` and `let` reach the body parser as an expression it does not expect, not yet as the idioms of `surface-syntax.md`, item 8.
 
 ---
 
