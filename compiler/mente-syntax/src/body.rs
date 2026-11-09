@@ -2413,6 +2413,13 @@ mod tests {
         // A `?` with no value after it, or no `:`, is error propagation, a construct of M2.
         assert_eq!(codes("val r = f()?"), vec!["E0109"]);
         assert_eq!(codes("val r = f() ? 1"), vec!["E0109"]);
+        // A name, then a name on the next line, is two statements, not a `let`.
+        assert_eq!(block("x\ny"), "{x; y}");
+        // A `?` before a closing parenthesis is error propagation, not `? :`.
+        assert_eq!(codes("val r = g(f()?)"), vec!["E0109"]);
+        // The report on a reference covers what was written.
+        let (src, d) = idiom("val r = &mut v");
+        assert_eq!(&src[d.primary.start..d.primary.end], "&mut");
         // `& &`, apart, is not `&&`.
         assert_eq!(codes("val b = a & &c"), vec!["E0119"]);
         // `&&` and `||` group as `and` and `or` do.

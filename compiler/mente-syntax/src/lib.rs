@@ -1977,6 +1977,8 @@ mod tests {
                 TokenKind::Eof
             ]
         );
+        assert_eq!(lex_errors("'9 x")[0].0, "E0105");
+        assert_eq!(kinds("'_a")[0], TokenKind::Lifetime("_a".into()));
         let (tokens, _) = lex("x <'ab> y");
         assert_eq!((tokens[2].span.end, tokens[4].span.col), (6, 9));
         assert_eq!(lex_errors("é")[0].1, "`é` is not a character Mente uses");
@@ -2144,8 +2146,13 @@ mod tests {
                 repaired
             );
         }
-        let err = parse_module("module m\npub fn f() = 'static\n").unwrap_err();
-        assert_eq!((err.code, err.fixes.len()), ("E0120", 0));
+        for src in [
+            "module m\npub fn f() = 'static\n",
+            "module m\npub fn f<'a, T>(x: T) = x\n",
+        ] {
+            let err = parse_module(src).unwrap_err();
+            assert_eq!((err.code, err.fixes.len()), ("E0120", 0), "{}", src);
+        }
 
         let src = "module m\npub async fn f() -> i32 = 1\n";
         let err = parse_module(src).unwrap_err();
