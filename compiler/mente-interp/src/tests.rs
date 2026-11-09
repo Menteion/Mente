@@ -673,3 +673,13 @@ fn test_a_program_tier1_proves_never_trips_its_checks() {
         }
     }
 }
+
+#[test]
+fn test_a_mut_parameter_hands_back_into_its_place_refinement() {
+    let src = "pub fn bump(mut x: u8, by: u8) {\n  x += by\n}\npub fn main(by: u8) -> u8 {\n  var v: u8[0..10] = 8\n  bump(mut v, by)\n  v\n}";
+    assert_eq!(run(src, "main(1)"), "9");
+    assert_eq!(trapped(src, "main(2)"), ("refinement".to_string(), 7, 3));
+    let elems = "pub fn bump(mut x: u8) {\n  x += 5\n}\npub fn main(i: usize) -> [2]u8 {\n  var xs: [2]u8[0..10] = [1, 6]\n  bump(mut xs[i])\n  xs\n}";
+    assert_eq!(run(elems, "main(0)"), "[6, 6]");
+    assert_eq!(kind(elems, "main(1)"), "refinement");
+}

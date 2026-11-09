@@ -140,7 +140,14 @@ impl Form {
     }
 }
 
-fn form(tree: &Tree, e: ExprId, is_int: &dyn Fn(&str) -> bool) -> Result<Form, String> {
+/// What the classifier knows of a name: whether it is an integer binding, and the length of a
+/// fixed-size array, whose `.len` is the constant `N` of its type `[N]T`.
+pub struct Names<'a> {
+    pub is_int: &'a dyn Fn(&str) -> bool,
+    pub len_of: &'a dyn Fn(&str) -> Option<u128>,
+}
+
+fn form(tree: &Tree, e: ExprId, names: &Names) -> Result<Form, String> {
     let var = |name: String| Form {
         vars: vec![(name, 1)],
         constant: 0,
@@ -150,29 +157,35 @@ fn form(tree: &Tree, e: ExprId, is_int: &dyn Fn(&str) -> bool) -> Result<Form, S
             vars: Vec::new(),
             constant: i128::try_from(*value).unwrap_or(i128::MAX),
         }),
-        ExprKind::Name(n) if is_int(n) => Ok(var(n.clone())),
+        ExprKind::Name(n) if (names.is_int)(n) => Ok(var(n.clone())),
         ExprKind::Field { base, name } => match &tree.expr(*base).kind {
-            ExprKind::Name(n) => Ok(var(format!("{}.{}", n, name))),
+            ExprKind::Name(n) => Ok(match (names.len_of)(n) {
+                Some(len) => Form {
+                    vars: Vec::new(),
+                    constant: i128::try_from(len).unwrap_or(i128::MAX),
+                },
+                None => var(format!("{}.{}", n, name)),
+            }),
             _ => Err("a field of a value that is not a binding".to_string()),
         },
         ExprKind::Unary {
             op: UnaryOp::Neg,
             operand,
-        } => Ok(form(tree, *operand, is_int)?.scaled(-1)),
+        } => Ok(form(tree, *operand, names)?.scaled(-1)),
         ExprKind::Binary {
             op: op @ (BinaryOp::Add | BinaryOp::Sub),
             lhs,
             rhs,
         } => {
             let sign = if *op == BinaryOp::Add { 1 } else { -1 };
-            Ok(form(tree, *lhs, is_int)?.add(form(tree, *rhs, is_int)?, sign))
+            Ok(form(tree, *lhs, names)?.add(form(tree, *rhs, names)?, sign))
         }
         ExprKind::Binary {
             op: BinaryOp::Mul,
             lhs,
             rhs,
         } => {
-            let (a, b) = (form(tree, *lhs, is_int)?, form(tree, *rhs, is_int)?);
+            let (a, b) = (form(tree, *lhs, names)?, form(tree, *rhs, names)?);
             match (a.vars.is_empty(), b.vars.is_empty()) {
                 (false, false) => Err("a product of variables".to_string()),
                 (true, _) => Ok(b.scaled(a.constant)),
@@ -188,21 +201,21 @@ fn form(tree: &Tree, e: ExprId, is_int: &dyn Fn(&str) -> bool) -> Result<Form, S
 }
 
 /// Why a contract clause lies outside the Tier-1 fragment, or `None` when it is a conjunction
-/// of comparisons `±x ±y <op> c` (`ghost-contracts-and-totality.md`, item 2). `is_int` tells
-/// which names are integer bindings.
-pub fn outside_fragment(tree: &Tree, e: ExprId, is_int: &dyn Fn(&str) -> bool) -> Option<String> {
+/// of comparisons `±x ±y <op> c` (`ghost-contracts-and-totality.md`, item 2). `names` tells
+/// which names are integer bindings and how long each fixed-size array is.
+pub fn outside_fragment(tree: &Tree, e: ExprId, names: &Names) -> Option<String> {
     match &tree.expr(e).kind {
         ExprKind::Binary {
             op: BinaryOp::And,
             lhs,
             rhs,
-        } => outside_fragment(tree, *lhs, is_int).or_else(|| outside_fragment(tree, *rhs, is_int)),
+        } => outside_fragment(tree, *lhs, names).or_else(|| outside_fragment(tree, *rhs, names)),
         ExprKind::Binary {
             op: BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge,
             lhs,
             rhs,
         } => {
-            let diff = match (form(tree, *lhs, is_int), form(tree, *rhs, is_int)) {
+            let diff = match (form(tree, *lhs, names), form(tree, *rhs, names)) {
                 (Ok(a), Ok(b)) => a.add(b, -1),
                 (Err(why), _) | (_, Err(why)) => return Some(why),
             };
@@ -1102,6 +1115,17 @@ impl<'a> Fx<'a> {
         }
     }
 
+    fn own_len(&self, name: &str) -> Option<u128> {
+        self.resolution
+            .bindings
+            .iter()
+            .zip(&self.typing.bindings)
+            .find_map(|(b, t)| match t {
+                Ty::Array(len, _) if b.name == name => Some(*len),
+                _ => None,
+            })
+    }
+
     fn own_int(&self, name: &str) -> bool {
         self.resolution
             .bindings
@@ -1111,7 +1135,11 @@ impl<'a> Fx<'a> {
     }
 
     fn outside(&self, e: ExprId) -> Option<String> {
-        outside_fragment(self.tree, e, &|n| self.own_int(n))
+        let names = Names {
+            is_int: &|n| self.own_int(n),
+            len_of: &|n| self.own_len(n),
+        };
+        outside_fragment(self.tree, e, &names)
     }
 
     fn callee_outside(&self, c: &Callee, e: ExprId) -> Option<String> {
@@ -1120,7 +1148,18 @@ impl<'a> Fx<'a> {
             Some(p) => is_int_type(&s.tree, p.ty),
             None => n == "result" && s.result.is_some_and(|t| is_int_type(&s.tree, t)),
         };
-        outside_fragment(&s.tree, e, &is_int)
+        let len_of = |n: &str| {
+            let p = s.params.iter().find(|p| p.name == n)?;
+            match s.tree.ty(p.ty).kind {
+                TypeKind::Array { len, .. } => Some(len),
+                _ => None,
+            }
+        };
+        let names = Names {
+            is_int: &is_int,
+            len_of: &len_of,
+        };
+        outside_fragment(&s.tree, e, &names)
     }
 
     fn span(&self, e: ExprId) -> Span {
@@ -3625,6 +3664,23 @@ mod tests {
         ] {
             assert_ne!(codes(src), NONE, "{}", src);
         }
+    }
+
+    #[test]
+    fn test_the_len_of_a_fixed_array_is_a_constant_in_clauses() {
+        // `x + y <= xs.len` has two variables and the constant 4, so it is inside the fragment.
+        let callee =
+            "pub fn take(x: u8, y: u8, xs: [4]u8) -> u8\n  requires x + y <= xs.len\n= xs[0]\n";
+        assert_eq!(codes(callee), Vec::<&str>::new());
+        let proven = format!("{}pub fn f(xs: [4]u8) -> u8 = take(1, 3, xs)", callee);
+        assert_eq!(codes(&proven), Vec::<&str>::new());
+        let refuted = format!("{}pub fn f(xs: [4]u8) -> u8 = take(2, 3, xs)", callee);
+        assert_eq!(codes(&refuted), ["E0504"]);
+        // With a third variable in place of the length, the same clause is outside.
+        assert_eq!(
+            codes("pub fn g(x: u8, y: u8, z: u8)\n  requires x + y <= z\n{\n}"),
+            ["E0503"]
+        );
     }
 
     #[test]
