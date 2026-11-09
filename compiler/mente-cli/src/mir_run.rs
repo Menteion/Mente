@@ -386,12 +386,39 @@ pub fn below(n: i8) -> i8 {
 }",
             &["at([1, 2, 3], 2)", "at([1, 2, 3], 3)", "grid(2)", "below(-5)"],
         ),
+        // Arrays of other element types, two `ensures`, an element's refinement, a negative
+        // value into an unsigned type, and booleans in memory.
+        (
+            "pub fn widen(xs: [2]u8) -> [2]u16 {\n  xs\n}\npub fn shrink(xs: [2]u16) -> [2]u8 {\n  xs\n}\nfn two(x: u8) -> u8\n  ensures result > 0\n  ensures result < 100\n= x\npub fn ends(x: u8) -> u8 = two(x)\npub fn put(i: usize, v: u8) -> u8 {\n  var xs: [2]u8[0..10] = [1, 2]\n  xs[i] = v\n  xs[i]\n}\npub fn tou(x: i16) -> u8 = x\npub fn flags(mut fs: [2]bool) {\n  fs[0] = not fs[0]\n}\npub fn flip(mut b: bool) {\n  b = not b\n}",
+            &["widen([1, 2])", "shrink([1, 2])", "shrink([1, 300])", "ends(5)", "ends(0)", "ends(150)", "put(1, 9)", "put(1, 12)", "tou(-1)", "tou(7)", "flags(mut [true, false])", "flip(mut true)"],
+        ),
         // `todo`, `unreachable` and a discarded result.
         (
             "pub fn later(x: u8) -> u8 {\n  guard x > 0 else {\n    todo(\"zero is not handled\")\n  }\n  x\n}\npub fn never(x: u8) -> u8 {\n  guard x < 10 else {\n    unreachable(\"x is a digit\")\n  }\n  x\n}\nfn noisy(x: u8) -> u8 = x + 1\npub fn drop(x: u8) -> u8 {\n  _ = noisy(x)\n  x\n}",
             &["later(0)", "later(2)", "never(12)", "never(3)", "drop(255)", "drop(4)"],
         ),
     ];
+
+    /// An argument from outside the program must have its parameter's shape and fit its types.
+    #[test]
+    fn test_mir_runs_refuse_arguments_of_another_shape() {
+        let text = "module m\npub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]\n";
+        let module = mente_sema::check_program(text).unwrap();
+        let lowered = lower::lower(&module).unwrap();
+        let call = |c: &str| {
+            let (f, args) = mente_interp::parse_call_modes(c).expect("a call");
+            run_lowered(&lowered, &f, args)
+        };
+        assert_eq!(call("get([1, 2, 3], 1)"), Ok(vec!["2".to_string()]));
+        assert!(call("get([1, 2], 0)").unwrap_err().contains("shape"));
+        assert!(call("get([1, true, 3], 0)").unwrap_err().contains("not an integer"));
+        assert!(call("get([1, 2, 300], 0)")
+            .unwrap_err()
+            .contains("lies outside"));
+        assert!(call("get([1, 2, 3])")
+            .unwrap_err()
+            .contains("takes 2 arguments"));
+    }
 
     /// Each construct the lowering handles, run on calls that reach every path of it, prints
     /// alike through the reference interpreter and through MIR.

@@ -997,7 +997,8 @@ impl<'a> Lower<'a> {
             (V::Int(n, t), _, Shape::Int(into)) => {
                 V::Int(self.narrow_int(n, t, *into, span), mir(*into))
             }
-            (V::Arr(a), Shape::Array(_, fe), Shape::Array(len, te)) if fe != te => {
+            (V::Arr(a), Shape::Array(_, fe), Shape::Array(_, te)) if fe == te => V::Arr(a),
+            (V::Arr(a), Shape::Array(_, fe), Shape::Array(len, te)) => {
                 // Elements of another type: a new array, each element narrowed into it.
                 let slot = self.inst(Op::Slot { bytes: to.size() }, Ty::Addr, &[]);
                 let (fe, te, len) = ((**fe).clone(), (**te).clone(), *len);
@@ -1024,11 +1025,12 @@ impl<'a> Lower<'a> {
         }
         let (lo, hi) = (into.min(), into.max());
         let mut parts = Vec::new();
-        if from.min() < lo {
+        // A bound needs a check where the source type reaches past it.
+        if !into.holds(from.min()) {
             let c = self.int(from, lo);
             parts.push(self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[n, c]));
         }
-        if from.max() > hi {
+        if !into.holds(from.max()) {
             let c = self.int(from, hi);
             parts.push(self.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[n, c]));
         }
@@ -1819,5 +1821,68 @@ fn common(a: IntTy, b: IntTy) -> Option<IntTy> {
             }
             Some(IntTy::new(s.bits.max(u.bits * 2), true))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const U16: SemaIntTy = SemaIntTy {
+        name: "u16",
+        signed: false,
+        bits: 16,
+    };
+
+    #[test]
+    fn test_shapes_have_the_size_and_type_of_their_values() {
+        assert_eq!(Shape::Int(U16).size(), 2);
+        assert_eq!(Shape::Bool.size(), 1);
+        let grid = Shape::Array(3, Box::new(Shape::Array(2, Box::new(Shape::Int(U16)))));
+        assert_eq!(grid.size(), 12);
+        assert_eq!(Shape::Unit.size(), 0);
+        assert_eq!(grid.ty(), Ty::Addr);
+        assert_eq!(Shape::Int(U16).ty(), Ty::Int(IntTy::new(16, false)));
+        assert_eq!(Shape::Bool.ty(), Ty::Bool);
+        assert_eq!(
+            Shape::of(&SemaTy::Array(2, Box::new(SemaTy::Bool))),
+            Ok(Shape::Array(2, Box::new(Shape::Bool)))
+        );
+        assert!(Shape::of(&SemaTy::Any).is_err());
+    }
+
+    #[test]
+    fn test_machine_types_are_the_narrowest_that_hold_a_range() {
+        let n = Num::from_i128;
+        assert_eq!(machine(n(-1), n(5)), Some(IntTy::new(64, true)));
+        assert_eq!(
+            machine(n(0), Num::new(false, u128::from(u64::MAX))),
+            Some(IntTy::new(64, false))
+        );
+        assert_eq!(
+            machine(n(-1), Num::new(false, u128::from(u64::MAX))),
+            Some(IntTy::new(128, true))
+        );
+        assert_eq!(
+            machine(n(0), Num::new(false, u128::MAX)),
+            Some(IntTy::new(128, false))
+        );
+        assert_eq!(machine(n(-1), Num::new(false, u128::MAX)), None);
+        assert_eq!(
+            common(IntTy::new(8, false), IntTy::new(64, true)),
+            Some(IntTy::new(64, true))
+        );
+        assert_eq!(
+            common(IntTy::new(64, false), IntTy::new(8, true)),
+            Some(IntTy::new(128, true))
+        );
+        assert_eq!(common(IntTy::new(128, false), IntTy::new(8, true)), None);
+        assert_eq!(
+            common(IntTy::new(16, true), IntTy::new(32, true)),
+            Some(IntTy::new(32, true))
+        );
+        assert_eq!(minus_one(n(0)), Some(n(-1)));
+        assert_eq!(minus_one(n(5)), Some(n(4)));
+        assert_eq!(minus_one(n(-5)), Some(n(-6)));
     }
 }
