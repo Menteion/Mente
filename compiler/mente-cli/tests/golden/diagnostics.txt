@@ -18,6 +18,8 @@
 {"version":1,"diagnostics":[{"code":"E0204","severity":"error","message":"`id` is a function, which M1 only calls: write `id(...)`","primary":{"file":"function_as_value.mn","start":82,"end":84,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/guard_that_falls_through.mn ==
 {"version":1,"diagnostics":[{"code":"E0211","severity":"error","message":"the `else` of a `guard` must not reach its end: leave by `return`, `break`, `continue`, `todo` or `unreachable`","primary":{"file":"guard_that_falls_through.mn","start":79,"end":94,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/intermediate_beyond_128_bits.mn ==
+{"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the exact value of `a * a * a` might need more than 128 bits, and an intermediate is computed exactly only within `i128` or `u128`","primary":{"file":"intermediate_beyond_128_bits.mn","start":82,"end":91,"line":4,"column":17},"related":[],"fixes":[{"message":"bind `a * a` to `product: u128` first","applicability":"suggestion","edits":[{"span":{"file":"intermediate_beyond_128_bits.mn","start":66,"end":66,"line":4,"column":1},"replacement":"  val product: u128 = a * a\n"},{"span":{"file":"intermediate_beyond_128_bits.mn","start":82,"end":87,"line":4,"column":17},"replacement":"product"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/later_error_type.mn ==
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an error type `T ! E` comes in M2; M1 does not have it","primary":{"file":"later_error_type.mn","start":60,"end":61,"line":3,"column":25},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/later_for_loop.mn ==

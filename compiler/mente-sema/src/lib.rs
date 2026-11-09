@@ -12,6 +12,7 @@ pub mod names;
 pub mod octagon;
 pub mod tier1;
 pub mod types;
+pub mod wide;
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -256,6 +257,7 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
                 let (resolution, mut found) = names::resolve(syntax, &names);
                 let (typing, typed) = check::check(syntax, &resolution, &signatures);
                 found.extend(typed);
+                found.extend(wide::check(syntax, &resolution, &typing, src));
                 if prove && found.is_empty() {
                     let f = tier1::Function {
                         syntax,

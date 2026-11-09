@@ -69,6 +69,7 @@ pub fn total(a: [4]u32) -> u32 {
 - `+ - * / %` compute the exact result, whatever the types; `/` truncates toward zero, `%` takes the sign of the left operand.
 - A value is checked against its type where it lands: a binding, an assignment, an argument, a returned value, an array element. A value outside the range traps at run time, or is an error at compile time if the type is refined and the compiler cannot prove it fits.
 - There are no casts and no `as`: any integer expression may flow into any integer type, and is checked where it lands.
+- An intermediate result must fit in `u128` or `i128`, judged from the operands' types: `a * a * a` for a `u64` is an error. Bind part of it first, `val product: u128 = a * a`; arithmetic on a `u128` or `i128` is checked at each operator.
 - `val x = a + b` takes the operands' type when they share one. When they differ, state the type: `val x: u64 = a + b`.
 - A zero divisor traps, and so does an index outside its array.
 

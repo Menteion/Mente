@@ -7,7 +7,7 @@
 //! integer types (`E0212`), a call with the wrong number of arguments (`E0213`) or the wrong
 //! `mut` marks (`E0214`), `.len` of a value that is not an array (`E0215`), and a bit
 //! operation on operands of different integer types (`E0216`), a value nobody uses, which
-//! `_ = e` discards on purpose (`E0217`), and a literal outside its suffix's type (`E0221`). It checks the parameter modes
+//! `_ = e` discards on purpose (`E0217`), and a literal outside its suffix's type (`E0221`); `wide.rs` adds an intermediate that might need more than 128 bits (`E0222`). It checks the parameter modes
 //! too: only a `var` or a `mut` parameter is assigned (`E0205`) or passed as `mut` (`E0206`),
 //! and a `mut` argument's binding appears in no other argument of its call (`E0207`).
 

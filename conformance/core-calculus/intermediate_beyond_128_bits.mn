@@ -1,0 +1,6 @@
+// expect: E0222
+module conformance
+pub fn cube(a: u64) -> u128 {
+  val c: u128 = a * a * a
+  c
+}
