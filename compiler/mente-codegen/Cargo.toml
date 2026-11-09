@@ -3,9 +3,19 @@ name = "mente-codegen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Mente native code generation through Cranelift; empty until milestone M1"
+description = "Mente native code generation through Cranelift: object files with debug and unwind information"
 
+# Norman approved these crates for mente-codegen on 2026-11-10: the set and the versions the M0b
+# spike used (spikes/cranelift-debug-info). Every target this crate's tests write for is compiled
+# in (`x86`, `arm64`), so that each host checks all of them.
 [dependencies]
+cranelift-codegen = { version = "=0.137.1", features = ["unwind", "x86", "arm64"] }
+cranelift-frontend = "=0.137.1"
+cranelift-module = "=0.137.1"
+cranelift-object = "=0.137.1"
+cranelift-native = "=0.137.1"
+gimli = { version = "0.33", default-features = false, features = ["write", "std", "read"] }
+object = { version = "0.40", default-features = false, features = ["write", "std", "read_core", "elf", "coff"] }
 
 [lints]
 workspace = true

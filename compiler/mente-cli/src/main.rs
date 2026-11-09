@@ -1004,7 +1004,8 @@ mod tests {
 
     /// The dependency policy of CLAUDE.md, applied to one manifest: a compiler crate depends
     /// only on the workspace's own crates, by path; `mente-mir` depends on nothing; only
-    /// `mente-codegen` may add Cranelift. Returns each dependency line outside the policy.
+    /// `mente-codegen` may add Cranelift, and `gimli` and `object` for its object files and
+    /// debug information (Norman, 2026-11-10). Returns each dependency line outside the policy.
     fn dependency_policy_violations(krate: &str, manifest: &str) -> Vec<String> {
         let mut section = String::new();
         let mut found = Vec::new();
@@ -1022,7 +1023,8 @@ mod tests {
                     && !(krate == "mente-interp" && matches!(name, "mente-mir" | "mente-codegen"))
                     && line.contains("path =")
             } else {
-                name.starts_with("cranelift") && krate == "mente-codegen"
+                (name.starts_with("cranelift") || matches!(name, "gimli" | "object"))
+                    && krate == "mente-codegen"
             };
             if !allowed {
                 found.push(format!("{}: [{}] {}", krate, section, line));
@@ -1112,6 +1114,20 @@ mod tests {
             dependency_policy_violations("mente-cli", "[dependencies]\nmente-ast = \"0.1\"\n")
                 .len(),
             1
+        );
+        // The object and DWARF writers are mente-codegen's alone, and only those two.
+        let objects = "[dependencies]\ngimli = { version = \"0.33\" }\nobject = \"0.40\"\nobject-pool = \"1\"\n";
+        assert_eq!(
+            dependency_policy_violations("mente-codegen", objects),
+            vec!["mente-codegen: [dependencies] object-pool = \"1\"".to_string()]
+        );
+        assert_eq!(
+            dependency_policy_violations("mente-sema", objects),
+            vec![
+                "mente-sema: [dependencies] gimli = { version = \"0.33\" }".to_string(),
+                "mente-sema: [dependencies] object = \"0.40\"".to_string(),
+                "mente-sema: [dependencies] object-pool = \"1\"".to_string(),
+            ]
         );
     }
 
