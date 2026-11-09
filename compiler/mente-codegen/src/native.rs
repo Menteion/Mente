@@ -176,7 +176,7 @@ pub fn program(
         let mut ctx = writer.module().make_context();
         ctx.func.signature = signature(f, conv, ptr);
         Translate::function(writer, &mut rt, &ids, f, &mut ctx, &mut fctx, ptr, prefix)?;
-        writer.define_function(ids[i], &mut ctx, decl)?;
+        writer.define_function_as(ids[i], &mut ctx, decl, &f.name)?;
     }
     define_main(writer, &mut rt, &ids, lowered, calls, &mut fctx, ptr, conv)?;
     Ok(())
@@ -1432,6 +1432,7 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
                 panic!("{target:?}: no function named after `f`");
             };
             let compiled = w.functions.iter().find(|c| c.id == id).unwrap();
+            assert_eq!(compiled.debug_name.as_deref(), Some("f"), "{target:?}");
             assert_eq!(compiled.decl.line, 2, "{target:?}");
             let lines: BTreeSet<u32> = compiled.ranges.iter().map(|r| r.position.line).collect();
             assert!(

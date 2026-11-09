@@ -148,6 +148,38 @@ jobs:
       - name: Compare
         run: cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 
+  debuggers:
+    # Native code that `mn build` builds from a .mn program, stepped through by a scripted gdb
+    # session on Linux and a cdb session on Windows (compiler/mente-cli/tests/debuggers).
+    name: Debuggers (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64 Linux
+            os: ubuntu-24.04
+          - name: x86-64 Windows
+            os: windows-2025
+          - name: AArch64 Linux
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Install gdb
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q gdb && gdb --version | head -1
+      - name: Build mn
+        run: cargo build --locked --bin mn
+      - name: Step through
+        run: bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn
+
   tier1-latency:
     # The Tier-1 re-check protocol of ROADMAP.md, in release: 1,000 timed single-token edits to
     # the generated module and to each module in examples/, applied to the session

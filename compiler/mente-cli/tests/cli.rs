@@ -358,6 +358,7 @@ fn test_mn_help_lists_every_command() {
             "mn test [--mutate]",
             "mn spec",
             "mn explain [code]",
+            "mn build <file.mn>",
         ] {
             assert!(
                 out.contains(command),
@@ -367,9 +368,9 @@ fn test_mn_help_lists_every_command() {
             );
         }
     }
-    let unknown = mn(&repo_root(), &["build"]);
+    let unknown = mn(&repo_root(), &["deploy"]);
     assert_eq!(unknown.status.code(), Some(1));
-    assert!(text(&unknown.stderr).contains("Unknown command `build`"));
+    assert!(text(&unknown.stderr).contains("Unknown command `deploy`"));
 }
 
 /// `mn run` runs `main`, or the call `--call` names, on the reference interpreter: it prints
@@ -473,6 +474,64 @@ fn test_mn_run_mir_prints_what_the_interpreter_prints() {
         assert_eq!(text(&native.stderr), text(&reference.stderr), "{:?}", args);
     }
     let missing = mn(&dir, &["run", "prog.mn", "--mir", "--call", "nothing()"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(text(&missing.stderr).contains("no function `nothing`"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `mn build` writes an executable that makes the call and prints what `mn run` prints, its
+/// trap's file name included; by default beside the source, without `.mn`.
+#[test]
+fn test_mn_build_writes_an_executable_that_prints_what_mn_run_prints() {
+    let dir = scratch("build");
+    fs::write(
+        dir.join("prog.mn"),
+        "module t
+pub fn bump(mut x: u8) -> bool {
+  x += 1
+  true
+}
+pub fn half(x: u8) -> u8 = x / 2
+pub fn main() -> u8 = half(9)
+",
+    )
+    .unwrap();
+    let suffix = std::env::consts::EXE_SUFFIX;
+    for (call, exe) in [
+        (None, format!("prog{suffix}")),
+        (Some("bump(mut 41)"), format!("bumped{suffix}")),
+        (Some("bump(mut 255)"), format!("trapped{suffix}")),
+    ] {
+        let mut build = vec!["build", "prog.mn"];
+        let mut run = vec!["run", "prog.mn"];
+        if let Some(call) = call {
+            build.extend(["--call", call, "-o", &exe]);
+            run.extend(["--call", call]);
+        }
+        let built = mn(&dir, &build);
+        assert_eq!(built.status.code(), Some(0), "{}", text(&built.stderr));
+        assert!(text(&built.stdout).trim_end().ends_with(&exe));
+        let reference = mn(&dir, &run);
+        let native = Command::new(dir.join(&exe))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(native.status.code(), reference.status.code(), "{:?}", call);
+        assert_eq!(
+            text(&native.stdout).replace("\r\n", "\n"),
+            text(&reference.stdout),
+            "{:?}",
+            call
+        );
+        assert_eq!(
+            text(&native.stderr).replace("\r\n", "\n"),
+            text(&reference.stderr),
+            "{:?}",
+            call
+        );
+    }
+    // A call that names no function is not built.
+    let missing = mn(&dir, &["build", "prog.mn", "--call", "nothing()"]);
     assert_eq!(missing.status.code(), Some(1));
     assert!(text(&missing.stderr).contains("no function `nothing`"));
     fs::remove_dir_all(&dir).unwrap();

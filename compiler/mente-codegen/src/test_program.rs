@@ -246,11 +246,29 @@ pub(crate) fn object(target: Target) -> (Vec<u8>, Vec<CompiledFunction>) {
 /// A writer for `target` with one function, `fn one() -> i64 { return 1 }`, declared and
 /// compiled at `position`.
 pub(crate) fn writer_with_one(target: Target, position: SourcePos) -> ObjectWriter {
+    one_function(target, position, "one", None)
+}
+
+/// The symbol of the function `writer_with_one_named` defines.
+pub(crate) const NAMED_SYMBOL: &str = "mente_f0_one";
+
+/// A writer for `target` with one function like `writer_with_one`'s, whose symbol is
+/// `NAMED_SYMBOL` and which the debug information names `name`.
+pub(crate) fn writer_with_one_named(target: Target, name: &str) -> ObjectWriter {
+    one_function(target, decl_of("square"), NAMED_SYMBOL, Some(name))
+}
+
+fn one_function(
+    target: Target,
+    position: SourcePos,
+    symbol: &str,
+    name: Option<&str>,
+) -> ObjectWriter {
     let mut w = empty_writer(target);
     let sig = signature(&w, 0);
     let id = w
         .module_mut()
-        .declare_function("one", Linkage::Export, &sig)
+        .declare_function(symbol, Linkage::Export, &sig)
         .unwrap();
     let frontend = w.module().isa().frontend_config();
     let loc = w.source_loc(position).unwrap();
@@ -264,6 +282,10 @@ pub(crate) fn writer_with_one(target: Target, position: SourcePos) -> ObjectWrit
     let one = b.ins().iconst(types::I64, 1);
     b.ins().return_(&[one]);
     b.finalize(frontend);
-    w.define_function(id, &mut ctx, position).unwrap();
+    match name {
+        Some(name) => w.define_function_as(id, &mut ctx, position, name),
+        None => w.define_function(id, &mut ctx, position),
+    }
+    .unwrap();
     w
 }

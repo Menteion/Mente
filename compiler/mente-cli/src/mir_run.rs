@@ -97,25 +97,8 @@ pub fn native(
     dir: &std::path::Path,
     name: &str,
 ) -> Result<Vec<Printed>, String> {
-    let mut native_calls = Vec::new();
-    for (f, args) in calls {
-        let entry = lowered
-            .entries
-            .iter()
-            .position(|e| &e.name == f)
-            .ok_or_else(|| format!("no function `{}` with a body to run", f))?;
-        let args = args
-            .iter()
-            .map(|(_, v)| native_arg(v))
-            .collect::<Result<Vec<_>, String>>()?;
-        native_calls.push(native::Call { entry, args });
-    }
     let exe = dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
-    let source = mente_codegen::SourceFile {
-        path: format!("{}.mn", name),
-        directory: dir.display().to_string(),
-    };
-    native::executable(lowered, &native_calls, "", source, &exe).map_err(|e| e.to_string())?;
+    build(lowered, calls, &dir.join(format!("{}.mn", name)), "", &exe)?;
     let mut printed = Vec::new();
     for k in 0..calls.len() {
         let out = std::process::Command::new(&exe)
@@ -134,6 +117,44 @@ pub fn native(
         });
     }
     Ok(printed)
+}
+
+/// Native code for every call of `calls` on a lowered module, linked into the executable
+/// `exe`, whose `main` makes the call its first argument numbers, the first without one. Its
+/// debug information names `source`, and `prefix` starts each trap's message.
+pub fn build(
+    lowered: &Lowered,
+    calls: &[CallArgs],
+    source: &std::path::Path,
+    prefix: &str,
+    exe: &std::path::Path,
+) -> Result<(), String> {
+    let mut native_calls = Vec::new();
+    for (f, args) in calls {
+        let entry = lowered
+            .entries
+            .iter()
+            .position(|e| &e.name == f)
+            .ok_or_else(|| format!("no function `{}` with a body to run", f))?;
+        let args = args
+            .iter()
+            .map(|(_, v)| native_arg(v))
+            .collect::<Result<Vec<_>, String>>()?;
+        native_calls.push(native::Call { entry, args });
+    }
+    let absolute =
+        std::path::absolute(source).map_err(|e| format!("{}: {}", source.display(), e))?;
+    let source = mente_codegen::SourceFile {
+        path: absolute
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        directory: absolute
+            .parent()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default(),
+    };
+    native::executable(lowered, &native_calls, prefix, source, exe).map_err(|e| e.to_string())
 }
 
 fn native_arg(value: &Value) -> Result<native::Arg, String> {

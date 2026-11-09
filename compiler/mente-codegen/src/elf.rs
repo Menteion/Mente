@@ -196,8 +196,14 @@ pub(crate) fn add_dwarf(
         let e = dwarf.unit.get_mut(sp);
         e.set(
             gimli::DW_AT_name,
-            AttributeValue::String(f.name.as_bytes().to_vec()),
+            AttributeValue::String(f.debug_name.as_bytes().to_vec()),
         );
+        if f.debug_name != f.name {
+            e.set(
+                gimli::DW_AT_linkage_name,
+                AttributeValue::String(f.name.as_bytes().to_vec()),
+            );
+        }
         e.set(gimli::DW_AT_external, AttributeValue::Flag(true));
         e.set(
             gimli::DW_AT_decl_file,
@@ -335,6 +341,37 @@ mod tests {
         is_stmt: bool,
     }
 
+    /// A function defined under a name of its own: DWARF names it so, and keeps its symbol as
+    /// the linkage name.
+    #[test]
+    fn test_dwarf_names_a_function_as_it_was_defined() {
+        for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+            let bytes = test_program::writer_with_one_named(target, "one")
+                .finish()
+                .unwrap();
+            let file = object::File::parse(&*bytes).unwrap();
+            let dwarf = load(&file);
+            let header = dwarf.units().next().unwrap().unwrap();
+            let unit = dwarf.unit(header).unwrap();
+            let mut entries = unit.entries();
+            entries.next_dfs().unwrap();
+            let sp = entries.next_dfs().unwrap().unwrap();
+            let string = |at| {
+                dwarf
+                    .attr_string(&unit, sp.attr_value(at).unwrap())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            assert_eq!(string(gimli::DW_AT_name), "one", "{target:?}");
+            assert_eq!(
+                string(gimli::DW_AT_linkage_name),
+                test_program::NAMED_SYMBOL,
+                "{target:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_elf_object_carries_dwarf_lines_and_subprograms() {
         for target in [Target::X86_64Linux, Target::Aarch64Linux] {
@@ -432,6 +469,8 @@ mod tests {
             let mut subprograms = Vec::new();
             while let Some(e) = entries.next_dfs().unwrap() {
                 assert_eq!(e.tag(), gimli::DW_TAG_subprogram);
+                // Named by its symbol, a function needs no linkage name of its own.
+                assert!(e.attr_value(gimli::DW_AT_linkage_name).is_none());
                 let udata = |at| match e.attr_value(at) {
                     Some(gimli::AttributeValue::Udata(v)) => v,
                     other => panic!("{at}: {other:?}"),

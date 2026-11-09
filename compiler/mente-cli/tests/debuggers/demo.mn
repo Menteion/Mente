@@ -1,0 +1,11 @@
+module demo
+
+fn square(x: u32[0..1000]) -> u32[0..1000000] {
+  x * x
+}
+
+pub fn sum_squares(a: u32[0..1000], b: u32[0..1000]) -> u32 {
+  val s: u32[0..1000000] = square(a)
+  val t: u32[0..1000000] = square(b)
+  s + t
+}

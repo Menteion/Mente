@@ -233,6 +233,8 @@ struct CodeRange {
 #[derive(Clone, Debug)]
 struct CompiledFunction {
     id: FuncId,
+    /// The name the debug information gives it, when not its symbol's.
+    debug_name: Option<String>,
     decl: SourcePos,
     size: u32,
     ranges: Vec<CodeRange>,
@@ -243,6 +245,8 @@ struct CompiledFunction {
 #[derive(Clone, Debug)]
 struct Function {
     name: String,
+    /// The name a debugger shows: its symbol's, or the one it was defined as.
+    debug_name: String,
     symbol: SymbolId,
     decl: SourcePos,
     size: u32,
@@ -395,6 +399,29 @@ impl ObjectWriter {
         ctx: &mut Context,
         decl: SourcePos,
     ) -> Result<(), CodegenError> {
+        self.define(id, ctx, decl, None)
+    }
+
+    /// [`ObjectWriter::define_function`] for a function the debug information names `name`
+    /// rather than by its symbol, which must be unique in the object: a debugger shows `name`,
+    /// and DWARF keeps the symbol as the function's linkage name.
+    pub fn define_function_as(
+        &mut self,
+        id: FuncId,
+        ctx: &mut Context,
+        decl: SourcePos,
+        name: &str,
+    ) -> Result<(), CodegenError> {
+        self.define(id, ctx, decl, Some(name.to_string()))
+    }
+
+    fn define(
+        &mut self,
+        id: FuncId,
+        ctx: &mut Context,
+        decl: SourcePos,
+        debug_name: Option<String>,
+    ) -> Result<(), CodegenError> {
         self.module
             .define_function(id, ctx)
             .map_err(|e| CodegenError::new(format!("{e:?}")))?;
@@ -417,6 +444,7 @@ impl ObjectWriter {
             .map_err(|e| in_function(e.to_string()))?;
         self.functions.push(CompiledFunction {
             id,
+            debug_name,
             decl,
             size,
             ranges,
@@ -452,8 +480,10 @@ impl ObjectWriter {
                     f.id
                 )));
             };
+            let name = String::from_utf8_lossy(&product.object.symbol(symbol).name).into_owned();
             functions.push(Function {
-                name: String::from_utf8_lossy(&product.object.symbol(symbol).name).into_owned(),
+                debug_name: f.debug_name.unwrap_or_else(|| name.clone()),
+                name,
                 symbol,
                 decl: f.decl,
                 size: f.size,
