@@ -1,0 +1,6 @@
+// expect: E0209
+module conformance
+pub fn f(n: u8) {
+  var m: u8 = n
+  val i: u8[0..=m] = 0
+}

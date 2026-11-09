@@ -1,0 +1,8 @@
+// expect: E0203
+module conformance
+pub fn f(x: u8) -> u8 {
+  if x {
+    return 1
+  }
+  0
+}

@@ -1,0 +1,9 @@
+// expect: E0206
+module conformance
+pub fn bump(mut x: u8) {
+  x += 1
+}
+pub fn f() {
+  val v: u8 = 0
+  bump(mut v)
+}

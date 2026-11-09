@@ -6,6 +6,10 @@
 //! [`Diagnostic`] with its code, its span and, where one is certain or plausible, a fix
 //! (`spec/diagnostics.md`).
 
+pub mod check;
+pub mod names;
+pub mod types;
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -47,14 +51,14 @@ pub fn check_source(src: &str) -> Result<ModuleVerificationReport, Vec<Diagnosti
 }
 
 /// Checks a parsed module: the declaration checks of [`verify_module`], then every function
-/// with a body parsed under M1's grammar (`spec/grammar.md`). The declaration checks'
-/// diagnostics come first.
+/// with a body, under M1's grammar (`spec/grammar.md`) and its names and types
+/// (`spec/core-calculus.md`). The declaration checks' diagnostics come first.
 pub fn check_module(
     src: &str,
     module: &ModuleFile,
 ) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
     let verified = verify_module(module);
-    let (_, body_errors) = mente_syntax::parse_functions(src, module);
+    let body_errors = check_bodies(src, module);
     match verified {
         Ok(report) if body_errors.is_empty() => Ok(report),
         Ok(_) => Err(body_errors),
@@ -63,6 +67,29 @@ pub fn check_module(
             Err(errors)
         }
     }
+}
+
+/// Parses each function with a body, then resolves the names and checks the types of each one
+/// the body parser reports nothing in, function by function in source order.
+pub fn check_bodies(src: &str, module: &ModuleFile) -> Vec<Diagnostic> {
+    let parsed = mente_syntax::parse_bodies(src, module);
+    let names: Vec<String> = parsed.iter().map(|p| p.name.clone()).collect();
+    let signatures: Vec<Option<check::Signature>> = parsed
+        .iter()
+        .map(|p| p.syntax.as_ref().map(check::Signature::of))
+        .collect();
+    let mut errors = Vec::new();
+    for p in parsed {
+        let clean = p.errors.is_empty();
+        errors.extend(p.errors);
+        if let (Some(syntax), true) = (&p.syntax, clean) {
+            let (resolution, found) = names::resolve(syntax, &names);
+            errors.extend(found);
+            let (_, found) = check::check(syntax, &resolution, &signatures);
+            errors.extend(found);
+        }
+    }
+    errors
 }
 
 /// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`.

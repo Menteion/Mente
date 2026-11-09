@@ -1,0 +1,8 @@
+// expect: E0211
+module conformance
+pub fn f(x: u8) -> u8 {
+  guard x > 0 else {
+    x
+  }
+  x
+}

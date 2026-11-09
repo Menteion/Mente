@@ -16,6 +16,8 @@ pub enum FailureClass {
     LaterMilestone,
     /// A habit from another language, such as `let` or `&&`.
     ForeignIdiom,
+    /// A name that refers to nothing visible: a binding or a function that does not exist.
+    UnknownName,
     /// A view, an arena value or a task-bound value is used where its provenance does not reach.
     Provenance,
     /// A layout, bit-field or branch-freedom contract does not hold.
@@ -35,6 +37,7 @@ impl FailureClass {
             FailureClass::Syntax => "syntax",
             FailureClass::LaterMilestone => "later milestone",
             FailureClass::ForeignIdiom => "foreign idiom",
+            FailureClass::UnknownName => "unknown name",
             FailureClass::Provenance => "provenance",
             FailureClass::HardwareContract => "hardware contract",
             FailureClass::Proof => "proof",
@@ -399,6 +402,179 @@ pub const CATALOGUE: &[CodeEntry] = &[
          the cast is suggested.",
         "module m\npub fn f(x: u32) -> u8 = x as u8\n",
         "module m\npub fn f(x: u32) -> u8 = x\n",
+    ),
+    emitted(
+        "E0201",
+        FailureClass::UnknownName,
+        "spec/core-calculus.md",
+        "An unknown name",
+        "A name refers to a parameter, to a `val` or `var` declared before it in an enclosing \
+         block, to `result` in an `ensures` clause, or to a function of the module. A name that \
+         is none of these is an error, and the closest visible name, within a third of its \
+         length, is suggested.",
+        "module m\npub fn f(count: u8) -> u8 = cuont\n",
+        "module m\npub fn f(count: u8) -> u8 = count\n",
+    ),
+    emitted(
+        "E0202",
+        FailureClass::ForeignIdiom,
+        "spec/core-calculus.md",
+        "A name declared twice in a function",
+        "Mente has no shadowing: a name is declared once in a function, its parameters and \
+         inner blocks included, so a name always means one binding. Rebinding a name with a new \
+         `let`, as Rust does, is an error here; renaming the second declaration and its uses is \
+         suggested.",
+        "module m\npub fn f(x: u8) -> u8 {\n  val x = 1\n  x\n}\n",
+        "module m\npub fn f(x: u8) -> u8 {\n  val y = 1\n  y\n}\n",
+    ),
+    emitted(
+        "E0203",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A value of the wrong type",
+        "A condition, a contract clause and the operands of `and`, `or` and `not` are `bool`; \
+         an arithmetic operand, an index and a measure are integers; an argument, an \
+         initializer, an assigned value and a result flow into the type of their place. Any \
+         integer flows into any integer type and is checked where it lands, but no integer \
+         becomes a `bool`, and an array flows only into an array of its length.",
+        "module m\npub fn f(x: u8) -> u8 {\n  if x {\n    return 1\n  }\n  0\n}\n",
+        "module m\npub fn f(x: u8) -> u8 {\n  if x > 0 {\n    return 1\n  }\n  0\n}\n",
+    ),
+    emitted(
+        "E0204",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A function used as a value, or a value called",
+        "M1 has no function values: the name of a function is only called, as in `f(x)`, and \
+         the name of a binding is never called.",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id\n",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id(1)\n",
+    ),
+    emitted(
+        "E0205",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "An assignment to a binding that cannot change",
+        "Assignment and element assignment apply to a `var` or a `mut` parameter. A `val` never \
+         changes, and a read-only parameter is a value the function cannot change: declare the \
+         binding with `var`, or make the parameter `mut`, which is suggested.",
+        "module m\npub fn f() -> u8 {\n  val x = 1\n  x = 2\n  x\n}\n",
+        "module m\npub fn f() -> u8 {\n  var x = 1\n  x = 2\n  x\n}\n",
+    ),
+    emitted(
+        "E0206",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A `mut` argument that cannot change",
+        "A `mut` argument is a place the call changes, so it is a `var` or a `mut` parameter, \
+         or an element of one.",
+        "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  val v: u8 = 0\n  bump(mut v)\n}\n",
+        "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  var v: u8 = 0\n  bump(mut v)\n}\n",
+    ),
+    emitted(
+        "E0207",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A `mut` argument named by another argument",
+        "Within one call, the binding of a `mut` argument appears in no other argument, so that \
+         a parameter the callee changes never overlaps another: `f(mut a[i], a[j])` and `f(mut \
+         a[i], mut a[j])` are errors whatever `i` and `j` are. Copy what the other argument \
+         needs into a `val` first.",
+        "module m\npub fn put(mut x: u8, y: u8) {\n  x = y\n}\npub fn f() {\n  var xs: [2]u8 = [0, 1]\n  put(mut xs[0], xs[1])\n}\n",
+        "module m\npub fn put(mut x: u8, y: u8) {\n  x = y\n}\npub fn f() {\n  var xs: [2]u8 = [0, 1]\n  val y = xs[1]\n  put(mut xs[0], y)\n}\n",
+    ),
+    emitted(
+        "E0208",
+        FailureClass::Syntax,
+        "spec/core-calculus.md",
+        "`break` or `continue` outside a loop",
+        "`break` leaves the innermost `while` loop and `continue` starts its next round, so \
+         both stand only inside one.",
+        "module m\npub fn f() {\n  break\n}\n",
+        "module m\npub fn f(c: bool) {\n  while c {\n    break\n  }\n}\n",
+    ),
+    emitted(
+        "E0209",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A refinement bound that can change",
+        "A refinement's bounds are integer literals, names of bindings that cannot change in \
+         the refined value's scope (a `val` or a read-only parameter), or `.len` of an array, \
+         so that a refinement stays true for its whole scope.",
+        "module m\npub fn f(n: u8) {\n  var m: u8 = n\n  val i: u8[0..=m] = 0\n}\n",
+        "module m\npub fn f(n: u8) {\n  val m: u8 = n\n  val i: u8[0..=m] = 0\n}\n",
+    ),
+    emitted(
+        "E0210",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A body that can end without its result",
+        "A function with a result type produces a value of that type on every path that reaches \
+         the end of its body: the body ends in an expression of that type, or every path leaves \
+         by `return` or a trap. An `if` without `else` has no value.",
+        "module m\npub fn f(c: bool) -> u8 {\n  if c {\n    return 1\n  }\n}\n",
+        "module m\npub fn f(c: bool) -> u8 {\n  if c {\n    return 1\n  }\n  0\n}\n",
+    ),
+    emitted(
+        "E0211",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A `guard` whose `else` can end",
+        "`guard c else { body }` continues only when `c` holds, so its `body` never reaches its \
+         end: it leaves by `return`, `break`, `continue`, `todo` or `unreachable`.",
+        "module m\npub fn f(x: u8) -> u8 {\n  guard x > 0 else {\n    x\n  }\n  x\n}\n",
+        "module m\npub fn f(x: u8) -> u8 {\n  guard x > 0 else {\n    return 0\n  }\n  x\n}\n",
+    ),
+    emitted(
+        "E0212",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "An unannotated binding of mixed integer types",
+        "`val x = e` takes the type of `e` when the integer operands of `e` all have one type. \
+         When they have different types, the binding states its type, and the smallest standard \
+         type that holds every operand's range is suggested.",
+        "module m\npub fn f(a: u8, b: u32) -> u64 {\n  val total = a + b\n  total\n}\n",
+        "module m\npub fn f(a: u8, b: u32) -> u64 {\n  val total: u32 = a + b\n  total\n}\n",
+    ),
+    emitted(
+        "E0213",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A call with the wrong number of arguments",
+        "A call passes one argument for each of the function's parameters.",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id(1, 2)\n",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id(1)\n",
+    ),
+    emitted(
+        "E0214",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A `mut` mark that does not match the parameter",
+        "A `mut` parameter receives a place that the call marks, as in `f(mut x)`, so that a \
+         reader sees at the call what it may change; the argument of a read-only parameter is \
+         not marked. Adding a missing `mut` before a place is machine-applicable.",
+        "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  var v: u8 = 0\n  bump(v)\n}\n",
+        "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  var v: u8 = 0\n  bump(mut v)\n}\n",
+    ),
+    emitted(
+        "E0215",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "`.len` of a value that is not an array",
+        "`.len`, the only field M1 has, is the length of an array.",
+        "module m\npub fn f(x: u8) -> usize = x.len\n",
+        "module m\npub fn f(x: [4]u8) -> usize = x.len\n",
+    ),
+    emitted(
+        "E0216",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A bit operation on two integer types",
+        "`&`, `|` and `^` work on the two's-complement bits of one integer type, so their \
+         operands have one type, and a literal takes the type of the other operand. Bind one \
+         operand to a `val` of the other's type first.",
+        "module m\npub fn f(a: u8, b: u16) -> u16 = a & b\n",
+        "module m\npub fn f(a: u8, b: u16) -> u16 {\n  val wide: u16 = a\n  wide & b\n}\n",
     ),
     reserved(
         "E0310",
@@ -860,6 +1036,7 @@ mod tests {
             FailureClass::Syntax,
             FailureClass::LaterMilestone,
             FailureClass::ForeignIdiom,
+            FailureClass::UnknownName,
             FailureClass::Provenance,
             FailureClass::HardwareContract,
             FailureClass::Proof,
@@ -873,6 +1050,7 @@ mod tests {
                 "syntax",
                 "later milestone",
                 "foreign idiom",
+                "unknown name",
                 "provenance",
                 "hardware contract",
                 "proof",
@@ -885,7 +1063,11 @@ mod tests {
                 _ if e.code == "E0109" => FailureClass::LaterMilestone,
                 _ if e.code == "E0116" => FailureClass::Type,
                 _ if ("E0118"..="E0126").contains(&e.code) => FailureClass::ForeignIdiom,
+                _ if e.code == "E0201" => FailureClass::UnknownName,
+                _ if e.code == "E0202" => FailureClass::ForeignIdiom,
+                _ if e.code == "E0208" => FailureClass::Syntax,
                 "E01" => FailureClass::Syntax,
+                "E02" => FailureClass::Type,
                 "E03" => FailureClass::Provenance,
                 "E04" => FailureClass::HardwareContract,
                 "E05" => FailureClass::Proof,
@@ -896,6 +1078,7 @@ mod tests {
             assert_eq!(e.class, expected, "{}", e.code);
         }
         for (code, class) in [
+            ("E0201", "unknown name"),
             ("E0311", "provenance"),
             ("E0501", "proof"),
             ("E0601", "type"),
