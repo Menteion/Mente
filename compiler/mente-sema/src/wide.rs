@@ -213,6 +213,58 @@ pub fn check(f: &FnSyntax, resolution: &Resolution, typing: &Typing, src: &str) 
     w.errors
 }
 
+/// A static range: the smallest and the largest value an integer expression can take, each as
+/// whether it is negative and its magnitude.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interval {
+    pub lo: (bool, u128),
+    pub hi: (bool, u128),
+}
+
+impl From<Range> for Interval {
+    fn from(r: Range) -> Interval {
+        Interval {
+            lo: (r.lo.neg, r.lo.mag),
+            hi: (r.hi.neg, r.hi.mag),
+        }
+    }
+}
+
+impl From<Interval> for Range {
+    fn from(i: Interval) -> Range {
+        Range {
+            lo: Num::new(i.lo.0, i.lo.1),
+            hi: Num::new(i.hi.0, i.hi.1),
+        }
+    }
+}
+
+/// The static range of each expression of `f`, by its index: `None` for one that is not an
+/// integer, or whose range the operations of a module that checks never need.
+pub fn intervals(f: &FnSyntax, resolution: &Resolution, typing: &Typing) -> Vec<Option<Interval>> {
+    let tree = &f.tree;
+    let mut w = Wide {
+        tree,
+        resolution,
+        typing,
+        src: "",
+        body: None,
+        ranges: vec![None; tree.exprs.len()],
+        errors: Vec::new(),
+    };
+    (0..tree.exprs.len())
+        .map(|i| w.range(ExprId(i as u32)).map(Interval::from))
+        .collect()
+}
+
+/// The static range of `a op b`, for an arithmetic `op`, as a compound assignment computes it;
+/// `None` when it might leave 128 bits, which `E0222` rejects.
+pub fn combine(op: BinaryOp, a: Interval, b: Interval) -> Option<Interval> {
+    arithmetic(op, a.into(), b.into())
+        .filter(|r| r.fits())
+        .map(Interval::from)
+}
+
 struct Wide<'a> {
     tree: &'a Tree,
     resolution: &'a Resolution,

@@ -122,6 +122,21 @@ jobs:
           export MENTE_BENCH_BASELINE="$RUNNER_TEMP/base-medians.txt" MENTE_BENCH_ENFORCE=1
           cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol
 
+  execution-paths:
+    # The MIR interpreter against the reference interpreter on every probe and preliminary
+    # program, over every example and hidden test of their tasks: too slow for a debug build, so
+    # in release here; the unit tests compare the examples alone.
+    name: Execution paths
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Compare
+        run: cargo test --release --locked -p mente-cli -- --ignored mir_matches_the_reference_interpreter
+
   tier1-latency:
     # The Tier-1 re-check protocol of ROADMAP.md, in release: 1,000 timed single-token edits to
     # the generated module and to each module in examples/, applied to the session

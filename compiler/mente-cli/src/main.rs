@@ -3,6 +3,8 @@
 //! Commands:
 //! - `mn view --spec <file.mn>` : Instant `<0.1ms` Holographic Spec Blueprint projection & dual hash report.
 //! - `mn view --checks <file.mn>`: Each run-time check Tier 1 leaves, function by function.
+//! - `mn run <file.mn> [--call "f(args)"] [--mir]`: Runs a call on the reference interpreter, or
+//!   with `--mir` through MIR, and prints the result or the trap.
 //! - `mn check [--json] <path>` : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification;
 //!   `--json` prints the diagnostics in the versioned JSON form of `spec/diagnostics.md`.
 //! - `mn explain [code]`        : What an error code means, from the catalogue in `catalogue.rs`.
@@ -25,6 +27,7 @@ use mente_syntax::parse_module;
 mod catalogue;
 #[cfg(test)]
 mod latency;
+mod mir_run;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -62,7 +65,7 @@ fn print_help() {
     println!("  mn explain [code]            Explain an error code, or list them all");
     println!("  mn dump --tokens|--tree|--typed <file.mn>");
     println!("                               Print a phase's output in its canonical form");
-    println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"]");
+    println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"] [--mir]");
     println!("                               Run main, or one call, on the reference interpreter");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
@@ -108,16 +111,19 @@ fn cmd_dump(args: &[String]) {
 fn cmd_run(args: &[String]) {
     let mut call = None;
     let mut path = None;
+    let mut through_mir = false;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         if a == "--call" {
             call = rest.next().cloned();
+        } else if a == "--mir" {
+            through_mir = true;
         } else if !a.starts_with('-') {
             path = Some(a.clone());
         }
     }
     let Some(path) = path else {
-        eprintln!("Usage: mn run <file.mn> [--call \"f(args)\"]");
+        eprintln!("Usage: mn run <file.mn> [--call \"f(args)\"] [--mir]");
         process::exit(2);
     };
     let src = match fs::read_to_string(&path) {
@@ -164,6 +170,16 @@ fn cmd_run(args: &[String]) {
             );
             process::exit(2);
         }
+    }
+    if through_mir {
+        match mir_run::run(&module, &name, args) {
+            Ok(lines) => lines.iter().for_each(|l| println!("{}", l)),
+            Err(stop) => {
+                eprintln!("{}: {}", path, stop);
+                process::exit(1);
+            }
+        }
+        return;
     }
     let marked: Vec<bool> = args.iter().map(|(m, _)| *m).collect();
     let values = args.into_iter().map(|(_, v)| v).collect();

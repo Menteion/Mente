@@ -9,6 +9,9 @@ description = "Mente native code generation through Cranelift: object files with
 # spike used (spikes/cranelift-debug-info). Every target this crate's tests write for is compiled
 # in (`x86`, `arm64`), so that each host checks all of them.
 [dependencies]
+mente-mir = { path = "../mente-mir" }
+mente-sema = { path = "../mente-sema" }
+mente-syntax = { path = "../mente-syntax" }
 cranelift-codegen = { version = "=0.137.1", features = ["unwind", "x86", "arm64"] }
 cranelift-frontend = "=0.137.1"
 cranelift-module = "=0.137.1"
