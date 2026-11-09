@@ -368,3 +368,50 @@ fn test_mn_help_lists_every_command() {
     assert_eq!(unknown.status.code(), Some(1));
     assert!(text(&unknown.stderr).contains("Unknown command `build`"));
 }
+
+/// `mn run` runs `main`, or the call `--call` names, on the reference interpreter: it prints
+/// the result and what each `mut` argument is left holding, or the trap and where (exit 1), or
+/// the diagnostics of a module that does not check (exit 2).
+#[test]
+fn test_mn_run_prints_a_result_or_a_trap() {
+    let dir = scratch("run");
+    fs::write(
+        dir.join("prog.mn"),
+        "module t\npub fn bump(mut x: u8) -> bool {\n  x += 1\n  true\n}\npub fn half(x: u8) -> u8 = x / 2\npub fn main() -> u8 = half(9)\n",
+    )
+    .unwrap();
+    fs::write(dir.join("bad.mn"), "module t\npub fn main() -> u8 = zz\n").unwrap();
+    let main = mn(&dir, &["run", "prog.mn"]);
+    assert_eq!(main.status.code(), Some(0));
+    assert_eq!(text(&main.stdout), "4\n");
+    let call = mn(&dir, &["run", "prog.mn", "--call", "half(200)"]);
+    assert_eq!(text(&call.stdout), "100\n");
+    let leaves = mn(&dir, &["run", "prog.mn", "--call", "bump(mut 41)"]);
+    assert_eq!(text(&leaves.stdout), "true\nleaves 42\n");
+    let trap = mn(&dir, &["run", "prog.mn", "--call", "bump(mut 255)"]);
+    assert_eq!(trap.status.code(), Some(1));
+    assert_eq!(
+        text(&trap.stderr),
+        "prog.mn: trap[narrowing] at 3:8: 256 does not fit in `u8`\n"
+    );
+    let unmarked = mn(&dir, &["run", "prog.mn", "--call", "bump(41)"]);
+    assert_eq!(unmarked.status.code(), Some(2));
+    assert!(text(&unmarked.stderr)
+        .contains("parameter `x` of `bump` is `mut`, so its argument is marked `mut`"));
+    let marked = mn(&dir, &["run", "prog.mn", "--call", "half(mut 4)"]);
+    assert_eq!(marked.status.code(), Some(2));
+    assert!(text(&marked.stderr).contains("is read-only, so its argument is not marked `mut`"));
+    let garbled = mn(&dir, &["run", "prog.mn", "--call", "half(4"]);
+    assert_eq!(garbled.status.code(), Some(2));
+    assert!(text(&garbled.stderr).contains("`--call` takes a call"));
+    let bad = mn(&dir, &["run", "bad.mn"]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(text(&bad.stderr).contains("E0201"));
+    let missing = mn(&dir, &["run", "missing.mn"]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(text(&missing.stderr).contains("cannot read"));
+    let usage = mn(&dir, &["run"]);
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(text(&usage.stderr).contains("Usage: mn run"));
+    fs::remove_dir_all(&dir).unwrap();
+}

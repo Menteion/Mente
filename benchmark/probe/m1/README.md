@@ -33,7 +33,11 @@ So the probe found no friction in M1's syntax. It asks for no change to the gram
    - **Non-linear refinements need a `guard`.** `percent`'s refined result depends on `part * 100 / whole`, which intervals and octagons cannot bound by `part <= whole`. Tier 1 will report a counterexample and suggest a `guard`, as [`gradual-verification`](../../../docs/design-review.md#gradual-verification) intends.
    - **Refinements on locals.** Several programs refined their loop counters (`var i: usize[1..=8]`) and wrote invariants that the loop-condition candidates of [`loop-condition-candidates`](../../../docs/design-review.md#loop-condition-candidates) would infer. These are proofs the code did not need, which the card's revised guidance discourages.
 
+## Run on the reference interpreter
+
+On 2026-11-09, once the reference interpreter existed, each of the 36 programs ran every example and hidden test of its task with `mn run --call`, with every refinement and contract checked at run time ([`interpreter-checks-contracts`](../../../docs/design-review.md#interpreter-checks-contracts)). **All 36 programs pass every case**, `reverse-in-place` included, whose cases check what its `mut` argument is left holding. The three `clamp` programs copied the card's old example, so they show nothing; the other 33 are the first evidence that programs an agent writes from the card alone compute the right results. They were written once, by one model, for small tasks.
+
 ## Limits
 
 - One model, twelve small tasks, three runs each, and a card in the prompt. Several tasks gave the same program in all three runs.
-- The probe sees syntax only. Whether these programs compute the right results waits for the reference interpreter, and whether they pass Tier 1 waits for checkpoint (b). The first agent benchmark, at the end of M1, measures both, with repairs.
+- The probe checked syntax, and the later run on the reference interpreter checked results. Whether the programs pass Tier 1 waits for checkpoint (b). The first agent benchmark, at the end of M1, measures both, with repairs.

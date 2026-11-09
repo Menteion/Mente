@@ -7,6 +7,7 @@ members = [
     "compiler/mente-mir",
     "compiler/mente-codegen",
     "compiler/mente-cli",
+    "compiler/mente-interp",
     "spikes/tier1-latency",
 ]
 # A workspace of its own, with the external crates Norman approved for it (its README.md).
