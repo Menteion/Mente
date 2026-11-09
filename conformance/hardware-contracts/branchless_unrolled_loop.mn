@@ -1,4 +1,4 @@
-// expect: pass
+// expect: E0109
 module conformance
 @branchless
 pub fn sum4(x: i32) -> i32 {

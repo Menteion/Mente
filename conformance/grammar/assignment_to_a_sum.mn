@@ -1,0 +1,7 @@
+// expect: E0114
+module conformance
+pub fn f(a: i32) -> i32 {
+  var b = a
+  b + 1 = 2
+  b
+}

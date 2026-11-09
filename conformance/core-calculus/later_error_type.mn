@@ -1,0 +1,3 @@
+// expect: E0109
+module conformance
+pub fn f(x: i32) -> i32 ! Overflow = x

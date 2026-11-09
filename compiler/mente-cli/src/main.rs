@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use mente_ast::project_spec_blueprint;
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
-use mente_sema::verify_module;
+use mente_sema::check_module;
 use mente_syntax::diagnostics::{render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
 
@@ -129,7 +129,7 @@ fn cmd_check(args: &[String]) {
         };
         let diagnostics = match parse_module(&src) {
             Err(d) => vec![d],
-            Ok(module) => match verify_module(&module) {
+            Ok(module) => match check_module(&src, &module) {
                 Ok(rep) => {
                     if !json {
                         let proj = project_spec_blueprint(&module);
@@ -214,6 +214,86 @@ fn cmd_explain(args: &[String]) {
     }
 }
 
+/// What `mn check` reports for one module's source, one diagnostic per line as `line:col code`:
+/// the form of a module's `.expected` file.
+fn diagnostic_lines(src: &str) -> Vec<String> {
+    let diagnostics = match parse_module(src) {
+        Err(d) => vec![d],
+        Ok(module) => check_module(src, &module).err().unwrap_or_default(),
+    };
+    diagnostics
+        .iter()
+        .map(|d| format!("{}:{} {}", d.primary.line, d.primary.col, d.code))
+        .collect()
+}
+
+/// The diagnostics a module is expected to report: the lines of the `.expected` file beside
+/// it, or none when it has no such file. An example uses constructs of later milestones, and
+/// its file lists what M1 reports for them until the milestone that runs it in full
+/// (`docs/design-review.md`, `example-bodies`).
+fn expected_lines(file: &Path) -> Vec<String> {
+    fs::read_to_string(file.with_extension("expected"))
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `mn test`'s first step: every module reports exactly the diagnostics it is expected to.
+fn test_modules(target: &Path) {
+    let files = collect_mn_files(target);
+    if files.is_empty() {
+        eprintln!("No `.mn` files found at `{}`", target.display());
+        process::exit(1);
+    }
+    let mut failed = 0;
+    for file in &files {
+        let shown = file.display().to_string();
+        let Ok(src) = fs::read_to_string(file) else {
+            eprintln!("error: cannot read `{}`", shown);
+            failed += 1;
+            continue;
+        };
+        let actual = diagnostic_lines(&src);
+        let expected = expected_lines(file);
+        if actual == expected {
+            match expected.len() {
+                0 => println!("[PASS] [{}] reports no diagnostic", shown),
+                n => println!("[PASS] [{}] reports its {} expected diagnostics", shown, n),
+            }
+            continue;
+        }
+        failed += 1;
+        eprintln!(
+            "[FAIL] [{}] does not report what {} lists:",
+            shown,
+            if expected.is_empty() {
+                String::from("an empty `.expected` file")
+            } else {
+                format!("`{}`", file.with_extension("expected").display())
+            }
+        );
+        for line in actual.iter().filter(|l| !expected.contains(l)) {
+            eprintln!("  reported, not expected: {}", line);
+        }
+        for line in expected.iter().filter(|l| !actual.contains(l)) {
+            eprintln!("  expected, not reported: {}", line);
+        }
+        if actual.iter().all(|l| expected.contains(l))
+            && expected.iter().all(|l| actual.contains(l))
+        {
+            eprintln!("  the same diagnostics, in another order or number");
+        }
+    }
+    if failed > 0 {
+        process::exit(1);
+    }
+}
+
 fn cmd_test(args: &[String]) {
     let run_mutate = args.iter().any(|a| a == "--mutate");
     let target_str = args
@@ -222,7 +302,7 @@ fn cmd_test(args: &[String]) {
         .map(|s| s.as_str())
         .unwrap_or("examples");
 
-    cmd_check(&[target_str.to_string()]);
+    test_modules(Path::new(target_str));
 
     let t0 = Instant::now();
     let mut r = MirRegionSoA::new("integrate_cell", true);
@@ -559,9 +639,10 @@ fn cmd_spec(_args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mente_sema::verify_module;
 
     #[test]
-    fn test_all_four_example_mn_files_pass_verification() {
+    fn test_examples_pass_their_declaration_checks_and_report_what_they_expect() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
         let files = collect_mn_files(&root);
         assert_eq!(files.len(), 4, "Expected 4 .mn showcase files in examples/");
@@ -578,6 +659,29 @@ mod tests {
                 panic!("Verification failed for {:?}: {:?}", file, errs);
             });
             assert!(rep.examples_count >= 1);
+
+            // Their bodies use constructs of later milestones: each reports exactly what its
+            // `.expected` file lists, and only constructs M1 lacks.
+            let actual = diagnostic_lines(&src);
+            if std::env::var_os("MENTE_BLESS").is_some() {
+                let mut text = actual.join("\n");
+                text.push('\n');
+                fs::write(file.with_extension("expected"), text).unwrap();
+            }
+            assert_eq!(
+                actual,
+                expected_lines(&file),
+                "{:?} reports other diagnostics; run with MENTE_BLESS=1 if the change is intended",
+                file
+            );
+            assert!(
+                actual
+                    .iter()
+                    .all(|l| l.ends_with(" E0109") || l.ends_with(" E0116")),
+                "{:?}: {:?}",
+                file,
+                actual
+            );
         }
     }
 

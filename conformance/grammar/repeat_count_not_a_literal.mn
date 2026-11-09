@@ -1,0 +1,6 @@
+// expect: E0117
+module conformance
+pub fn f(n: usize) -> [4]u8 {
+  val a = [0; n]
+  a
+}

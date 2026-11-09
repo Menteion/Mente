@@ -1,0 +1,3 @@
+// expect: E0116
+module conformance
+pub fn f(x: int) -> i32 = 0

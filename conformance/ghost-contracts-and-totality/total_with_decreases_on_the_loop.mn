@@ -2,8 +2,7 @@
 module conformance
 @total
 pub fn countdown(n: u32) -> u32 {
-  while n > 0 {
-    decreases n
+  while n > 0 decreases n {
   }
   n
 }

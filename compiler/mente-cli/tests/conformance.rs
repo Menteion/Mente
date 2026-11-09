@@ -1,8 +1,8 @@
 //! The conformance runner (`conformance/README.md`).
 //!
 //! Every program under `conformance/<spec>/` states in its first line what `mn check --json` must
-//! report for it: `// expect: pass`, or `// expect: E0413` for exactly one diagnostic with that
-//! code. The runner reads nothing from the compiler but that command's output, so it runs
+//! report for it: `// expect: pass`, or the codes of every diagnostic in order, such as
+//! `// expect: E0413` or `// expect: E0402 E0109`. The runner reads nothing from the compiler but that command's output, so it runs
 //! unchanged against another implementation: set `MENTE_COMPILER` to its path.
 
 // A failed setup step here is a failed test.
@@ -82,7 +82,7 @@ fn test_conformance_suite() {
         };
         let expected: Vec<String> = match expect.trim() {
             "pass" => Vec::new(),
-            code => vec![code.to_string()],
+            codes => codes.split_whitespace().map(String::from).collect(),
         };
         let out = Command::new(compiler())
             .args(["check", "--json"])

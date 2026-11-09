@@ -11,7 +11,7 @@ date: 2026-11-04
 
 ## 1. Specification
 
-Today `mente-syntax` parses declarations only: a function body is kept as a flat token list, so nothing below about statements and expressions is checked until a body parser exists.
+The body parser in `mente-syntax` reads the statements and expressions of M1 (`grammar.md`); the forms below that M1 lacks come with later milestones, and the body parser reports them as such.
 
 1. **Block delimiters and line termination**:
    - `Specified`: blocks are delimited by explicit braces `{` and `}`.
@@ -21,7 +21,7 @@ Today `mente-syntax` parses declarations only: a function body is kept as a flat
 2. `Specified` **Symmetric 3-letter variable bindings**:
    - `val name: Type = expr` declares an immutable binding.
    - `var name: Type = expr` declares a local mutable binding.
-   - The keywords `let`, `let mut`, and `const` MUST NOT be used for local bindings. Nothing rejects them yet: `let` lexes as an identifier. The lexer has `Val` and `Var` tokens; nothing parses a binding yet.
+   - The keywords `let`, `let mut`, and `const` MUST NOT be used for local bindings. The body parser reads `val` and `var` bindings (`grammar.md`, item 6); `let` still lexes as an identifier, and gets its own diagnostic with the idioms of item 8.
 3. `Implemented` **Function headers and return syntax** (`parse_fn`):
    <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_function_headers_return_types_and_expression_bodies" min="1" reason="parse_fn reads the return type and tells a block body from an expression body" -->
    - Return types follow `->`: `pub fn clamp(x: i32, hi: i32) -> i32`.
@@ -30,7 +30,7 @@ Today `mente-syntax` parses declarations only: a function body is kept as a flat
    - `if` and `match` are expressions that return the value of their evaluated branch; Mente has no ternary `? :` operator.
    - `guard <cond> else { <diverging-expr> }` enforces preconditions and narrows types for the rest of the enclosing block.
    - Data transformation chains use the left-to-right pipe operator `x |> f(a) |> g(b)`.
-   - The lexer has `If`, `Match`, `Guard` and `PipeGt` tokens; nothing parses an expression yet.
+   - The body parser reads `if` and `guard` (`grammar.md`, items 6 and 7); `match` and `|>` come later, and are reported as such.
 5. `Specified` **Logical word operators**:
    - Boolean conjunction, disjunction, and negation use the keywords `and`, `or`, and `not`, reserving `&`, `|`, `^`, and `~` exclusively for bitwise operations and type unions (`A | B`). The lexer has `Pipe`, `Amp`, `Caret` and `Tilde` tokens for `|`, `&`, `^` and `~`. It has `And`, `Or` and `Not` tokens.
 6. `Specified` **Numeric literals and suffixes**:

@@ -1,0 +1,8 @@
+// expect: E0109
+module conformance
+pub fn f() -> i32 {
+  var t = 0
+  for i in 0..4 {
+  }
+  t
+}

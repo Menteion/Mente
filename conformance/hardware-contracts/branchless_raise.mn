@@ -1,4 +1,4 @@
-// expect: E0402
+// expect: E0402 E0109 E0109
 module conformance
 @branchless
 pub fn pick(x: i32) -> i32 ! RangeError {
