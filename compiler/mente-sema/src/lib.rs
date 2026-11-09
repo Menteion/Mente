@@ -100,7 +100,7 @@ pub fn tier1_reports(src: &str) -> Vec<(String, tier1::Report)> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listings {
     pub todos: Vec<(Span, String)>,
-    pub trusted: Vec<(Span, String)>,
+    pub axioms: Vec<(Span, String)>,
 }
 
 pub fn listings(src: &str) -> Listings {
@@ -108,12 +108,12 @@ pub fn listings(src: &str) -> Listings {
         return Listings::default();
     };
     let b = bodies(src, &module, true);
-    let mut trusted: Vec<(Span, String)> =
-        b.reports.into_iter().flat_map(|(_, r)| r.trusted).collect();
-    trusted.sort_by_key(|t| t.0.start);
+    let mut axioms: Vec<(Span, String)> =
+        b.reports.into_iter().flat_map(|(_, r)| r.axioms).collect();
+    axioms.sort_by_key(|t| t.0.start);
     Listings {
         todos: b.todos,
-        trusted,
+        axioms,
     }
 }
 
@@ -985,14 +985,10 @@ mod tests {
             todos,
             [(5, 3, "b"), (6, 36, "a"), (6, 55, "c"), (7, 25, "d")]
         );
-        let trusted: Vec<(u32, &str)> = l
-            .trusted
-            .iter()
-            .map(|(s, t)| (s.line, t.as_str()))
-            .collect();
-        assert_eq!(trusted, [(4, "requires x != 3 of h")]);
+        let axioms: Vec<(u32, &str)> = l.axioms.iter().map(|(s, t)| (s.line, t.as_str())).collect();
+        assert_eq!(axioms, [(4, "requires x != 3 of h")]);
         let two = "module m\n@prove\npub fn b(x: u8)\n  requires x != 1\n{\n}\n@prove\npub fn a(x: u8)\n  requires x != 2\n{\n}\n";
-        let lines: Vec<u32> = listings(two).trusted.iter().map(|t| t.0.line).collect();
+        let lines: Vec<u32> = listings(two).axioms.iter().map(|t| t.0.line).collect();
         assert_eq!(lines, [4, 9]);
         assert_eq!(listings("module m\nlet x = 1\n"), Listings::default());
         // Tier 1 reports on each function whose names and types check.

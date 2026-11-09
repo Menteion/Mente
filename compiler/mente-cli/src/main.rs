@@ -340,14 +340,14 @@ fn listing_lines(file: &str, src: &str, listings: &mente_sema::Listings) -> Vec<
         .todos
         .iter()
         .map(|(span, reason)| format!("todo: {}: {:?}", place(span.start), reason));
-    let trusted = listings.trusted.iter().map(|(span, clause)| {
+    let axioms = listings.axioms.iter().map(|(span, clause)| {
         format!(
             "trusted: {}: {}, assumed until mn prove runs",
             place(span.start),
             clause
         )
     });
-    todos.chain(trusted).collect()
+    todos.chain(axioms).collect()
 }
 
 fn collect_mn_files(target: &Path) -> Vec<PathBuf> {
@@ -453,7 +453,7 @@ fn cmd_check(args: &[String]) {
                 src,
                 diagnostics,
                 todos: &listings.todos,
-                trusted: &listings.trusted,
+                axioms: &listings.axioms,
             })
             .collect();
         println!("{}", render_json(&files));

@@ -98,7 +98,7 @@ pub struct Obligation {
 pub struct Report {
     pub obligations: Vec<Obligation>,
     pub diagnostics: Vec<Diagnostic>,
-    pub trusted: Vec<(Span, String)>,
+    pub axioms: Vec<(Span, String)>,
 }
 
 /// What a caller's check reads of a function: its parameters' and result's types with their
@@ -1466,7 +1466,7 @@ impl<'a> Fx<'a> {
             if self.routing.prove {
                 let of = if kw == "invariant" { "in" } else { "of" };
                 let text = format!("{} {} {} {}", kw, clause, of, name);
-                self.report.trusted.push((self.span(e), text));
+                self.report.axioms.push((self.span(e), text));
                 continue;
             }
             if self.routing.checked {
@@ -5169,7 +5169,7 @@ mod tests {
         let src = "@prove\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  requires x < 200\n  ensures result * 2 == x\n= x / 2\n@prove\npub fn g(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i != 300 invariant i <= n {\n    i += 1\n  }\n  i\n}\n@checked\npub fn h(x: u8)\n  requires x != 3\n{\n}";
         let all: Vec<(u32, u32, String)> = reports(src)
             .into_iter()
-            .flat_map(|r| r.trusted)
+            .flat_map(|r| r.axioms)
             .map(|(s, t)| (s.line, s.col, t))
             .collect();
         assert_eq!(

@@ -204,7 +204,7 @@ pub struct FileDiagnostics<'a> {
     pub src: &'a str,
     pub diagnostics: &'a [Diagnostic],
     pub todos: &'a [(Span, String)],
-    pub trusted: &'a [(Span, String)],
+    pub axioms: &'a [(Span, String)],
 }
 
 /// The JSON form: `{"version": 1, "diagnostics": [...], "todos": [...], "trusted": [...]}`,
@@ -213,7 +213,7 @@ pub struct FileDiagnostics<'a> {
 pub fn render_json(files: &[FileDiagnostics]) -> String {
     let mut items = Vec::new();
     let mut todos = Vec::new();
-    let mut trusted = Vec::new();
+    let mut axioms = Vec::new();
     for f in files {
         for d in f.diagnostics {
             items.push(diagnostic_json(d, f.file, f.src));
@@ -227,14 +227,14 @@ pub fn render_json(files: &[FileDiagnostics]) -> String {
             )
         };
         todos.extend(f.todos.iter().map(|t| listed("reason", t)));
-        trusted.extend(f.trusted.iter().map(|t| listed("clause", t)));
+        axioms.extend(f.axioms.iter().map(|t| listed("clause", t)));
     }
     format!(
         "{{\"version\":{},\"diagnostics\":[{}],\"todos\":[{}],\"trusted\":[{}]}}",
         JSON_VERSION,
         items.join(","),
         todos.join(","),
-        trusted.join(",")
+        axioms.join(",")
     )
 }
 
@@ -381,7 +381,7 @@ mod tests {
             src,
             diagnostics: &[d],
             todos: &[(span(9, 14), "later \"x\"".to_string())],
-            trusted: &[(span(0, 6), "ensures x of f".to_string())],
+            axioms: &[(span(0, 6), "ensures x of f".to_string())],
         }]);
         assert_eq!(
             json,
