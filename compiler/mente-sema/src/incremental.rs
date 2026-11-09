@@ -248,9 +248,7 @@ impl Session {
             };
             declarations.extend(f.declaration.iter().map(|d| relocate(d, *at)));
             bodies.extend(f.body.iter().map(|d| relocate(d, *at)));
-            if f.syntax.is_none() || !f.body.is_empty() {
-                continue;
-            }
+            // Only a function whose body parsed cleanly was checked.
             if let Some((_, found)) = &entry.checked {
                 bodies.extend(found.iter().map(|d| relocate(d, *at)));
             }

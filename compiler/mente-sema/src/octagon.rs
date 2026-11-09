@@ -110,10 +110,8 @@ impl Octagon {
         for (k, ki) in into_i.iter().enumerate() {
             let a = add(*ki, c);
             for (l, jl) in from_j.iter().enumerate() {
-                let v = add(a, *jl);
-                if v < self.at(k, l) {
-                    self.put(k, l, v);
-                }
+                let v = add(a, *jl).min(self.at(k, l));
+                self.put(k, l, v);
             }
         }
     }
@@ -136,33 +134,13 @@ impl Octagon {
                 if cj >= INF {
                     continue;
                 }
-                let s = floor_half(ci + cj);
-                if s < self.at(i, j) {
-                    self.put(i, j, s);
-                }
+                let s = floor_half(ci + cj).min(self.at(i, j));
+                self.put(i, j, s);
             }
         }
         if (0..d).any(|k| self.at(k, k) < 0) {
             self.empty = true;
         }
-    }
-
-    /// Recomputes the tight closure from scratch (Floyd-Warshall, then tightening and
-    /// strengthening). The incremental path never needs it; the tests compare the two.
-    pub fn close(&mut self) {
-        let d = self.d();
-        for k in 0..d {
-            for i in 0..d {
-                let ik = self.at(i, k);
-                for j in 0..d {
-                    let v = add(ik, self.at(k, j));
-                    if v < self.at(i, j) {
-                        self.put(i, j, v);
-                    }
-                }
-            }
-        }
-        self.tighten_and_strengthen();
     }
 
     /// Adds `terms <= c`, for at most two terms; a longer sum is ignored, which is sound. A
@@ -182,14 +160,8 @@ impl Octagon {
                 let a = t.node();
                 self.add_edge(a ^ 1, a, 2 * c);
             }
-            [s, t] if s.var == t.var => {
-                if s.neg == t.neg {
-                    let a = s.node();
-                    self.add_edge(a ^ 1, a, c);
-                } else if c < 0 {
-                    self.empty = true;
-                }
-            }
+            // Two terms of one variable work too: `x + x <= c` bounds `2x`, and `x - x <= c`
+            // puts `c` on the diagonal, where a negative one empties the octagon.
             [s, t] => {
                 let (a, b) = (s.node(), t.node());
                 self.add_edge(b ^ 1, a, c);
@@ -209,13 +181,6 @@ impl Octagon {
                     INF
                 } else {
                     floor_half(v)
-                }
-            }
-            [s, t] if s.var == t.var => {
-                if s.neg == t.neg {
-                    self.at(s.node() ^ 1, s.node())
-                } else {
-                    0
                 }
             }
             [s, t] => self.at(t.node() ^ 1, s.node()),
@@ -393,6 +358,42 @@ mod tests {
             <= c
     }
 
+    /// Whether a matrix is tightly closed: every path no shorter than its edge, every unary
+    /// bound even, and every edge no longer than the sum of its two unary bounds' halves.
+    fn closed(o: &Octagon) -> bool {
+        let d = o.d();
+        let at = |i: usize, j: usize| o.at(i, j);
+        (0..d).all(|i| {
+            (0..d).all(|j| {
+                (0..d).all(|k| at(i, j) <= add(at(i, k), at(k, j)))
+                    && (at(i, i ^ 1) >= INF || at(i, i ^ 1) % 2 == 0)
+                    && (at(i, i ^ 1) >= INF
+                        || at(j ^ 1, j) >= INF
+                        || at(i, j) <= floor_half(at(i, i ^ 1) + at(j ^ 1, j)))
+            })
+        })
+    }
+
+    #[test]
+    fn test_closedness_is_recognised() {
+        let mut o = Octagon::new(2);
+        o.add_lin(&[x(0)], 3);
+        o.add_lin(&[x(1), nx(0)], 1);
+        assert!(closed(&o));
+        let mut path = o.clone();
+        path.put(3, 2, INF);
+        assert!(!closed(&path));
+        let mut odd = o.clone();
+        odd.put(1, 0, 5);
+        assert!(!closed(&odd));
+        let mut weak = Octagon::new(2);
+        weak.add_lin(&[x(0)], 3);
+        weak.add_lin(&[x(1)], 4);
+        weak.put(1, 2, INF);
+        weak.put(3, 0, INF);
+        assert!(!closed(&weak));
+    }
+
     /// Against brute force over every integer point of a box: the incremental closure keeps
     /// every point (soundness), finds emptiness exactly, and its bounds are reached by a point;
     /// a picked point satisfies every constraint and lies as close to zero as it can.
@@ -433,9 +434,7 @@ mod tests {
                 assert_eq!(lo, points.iter().map(|p| p[v]).min().unwrap(), "{cs:?}");
                 assert_eq!(hi, points.iter().map(|p| p[v]).max().unwrap(), "{cs:?}");
             }
-            let mut full = o.clone();
-            full.close();
-            assert_eq!(full, o, "the incremental closure is not closed: {cs:?}");
+            assert!(closed(&o), "the incremental closure is not closed: {cs:?}");
             let picked = o.pick(&[0, 1, 2]).unwrap();
             assert!(
                 cs.iter().all(|(t, k)| satisfies(&picked, t, *k)),
@@ -474,5 +473,12 @@ mod tests {
         c.forget(0);
         assert_eq!(c.bounds(0), (-INF, INF));
         assert_eq!(c.bounds(1), (-INF, 1));
+        // A bound on one variable says nothing of its sum with an unbounded one.
+        let mut one = Octagon::new(2);
+        one.add_lin(&[x(0)], -3);
+        assert_eq!(one.upper(&[x(1), x(0)]), INF);
+        assert_eq!(one.upper(&[x(0), x(1)]), INF);
+        assert_eq!(one.upper(&[nx(1), x(0)]), INF);
+        assert_eq!(one.bounds(0), (-INF, -3));
     }
 }

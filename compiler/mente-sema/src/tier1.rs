@@ -413,27 +413,20 @@ fn add_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
     Val::Itv(sat_add(a, c), sat_add(b, d))
 }
 
+/// A product of two bounds, the unbounded ends kept: a sentinel times a number of either sign
+/// saturates past it, and is clamped back.
 fn mul_bound(a: i128, b: i128) -> i128 {
-    if a == 0 || b == 0 {
-        return 0;
-    }
-    let sign = if (a > 0) == (b > 0) { INF } else { -INF };
-    if a.abs() >= INF || b.abs() >= INF {
-        return sign;
-    }
-    a.checked_mul(b).map_or(sign, |v| v.clamp(-INF, INF))
+    a.saturating_mul(b).clamp(-INF, INF)
 }
 
-fn hull(points: [i128; 4]) -> Val {
-    let lo = points.iter().copied().min().unwrap_or(-INF);
-    let hi = points.iter().copied().max().unwrap_or(INF);
-    Val::Itv(lo, hi)
+fn hull([p, q, r, s]: [i128; 4]) -> Val {
+    Val::Itv(p.min(q).min(r).min(s), p.max(q).max(r).max(s))
 }
 
 fn mul_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
+    // A factor of 1 or -1 keeps the other one's relations; any other goes by its bounds.
     for (k, v) in [(as_const(r), l), (as_const(l), r)] {
         match k {
-            Some(0) => return lin(Vec::new(), 0),
             Some(1) => return v.clone(),
             Some(-1) => return negate(v),
             _ => {}
@@ -448,25 +441,9 @@ fn mul_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
     ])
 }
 
-fn div_bound(a: i128, b: i128) -> i128 {
-    if a.abs() >= INF {
-        if (a > 0) == (b > 0) {
-            INF
-        } else {
-            -INF
-        }
-    } else if b.abs() >= INF {
-        0
-    } else {
-        a / b
-    }
-}
-
 fn div_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
     match as_const(r) {
-        Some(0) => return TOP,
-        Some(c) if c < 0 => return negate(&div_vals(st, l, &lin(Vec::new(), -c))),
-        Some(c) => {
+        Some(c) if c > 0 => {
             if let Val::Lin(t, k) = l {
                 return Val::Quot {
                     base: (Vec::new(), 0),
@@ -477,31 +454,40 @@ fn div_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
             let (lo, hi) = interval(st, l);
             return Val::Itv(trunc_div(lo, c), trunc_div(hi, c));
         }
-        None => {}
+        Some(c) if c < 0 => return negate(&div_vals(st, l, &lin(Vec::new(), -c))),
+        _ => {}
     }
     let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
-    if c > 0 || d < 0 {
-        hull([
-            div_bound(a, c),
-            div_bound(a, d),
-            div_bound(b, c),
-            div_bound(b, d),
-        ])
+    if c > 0 {
+        // A positive divisor keeps the dividend's sign; the quotient's ends come from the
+        // dividend's ends over the divisor's.
+        let lo = if a.abs() >= INF {
+            a
+        } else {
+            (a / c).min(a / d)
+        };
+        let hi = if b.abs() >= INF {
+            b
+        } else {
+            (b / c).max(b / d)
+        };
+        Val::Itv(lo, hi)
+    } else if d < 0 {
+        negate(&div_vals(st, l, &negate(r)))
     } else {
+        // A divisor that may be zero is not zero where the division runs, so the quotient's
+        // magnitude is at most the dividend's.
         let m = a.abs().max(b.abs());
         Val::Itv(-m, m)
     }
 }
 
 /// The bounds of `x % y`: the sign of `x`, and a magnitude below `|y|` and at most `|x|`.
+/// A zero divisor traps, so `|y|` bounds the magnitude even when `y` may be zero.
 fn rem_interval(st: &Octagon, l: &Val, r: &Val) -> (i128, i128) {
     let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
     let m = a.abs().max(b.abs());
-    let bound = if c > 0 || d < 0 {
-        (c.abs().max(d.abs()) - 1).min(m)
-    } else {
-        m
-    };
+    let bound = (c.abs().max(d.abs()) - 1).min(m);
     (
         if a >= 0 { 0 } else { -bound },
         if b <= 0 { 0 } else { bound },
@@ -690,14 +676,11 @@ fn constrain_offset(st: &mut Octagon, x: usize, terms: &[Term], c: i128, lo: i12
     let xt = Term::pos(x);
     let (low, high) = (sat_add(c, lo), sat_add(c, hi));
     match terms {
-        [] => {
-            st.add_lin(&[xt], high);
-            st.add_lin(&[xt.negated()], -low);
-        }
         [t] => {
             st.add_lin(&[xt, t.negated()], high);
             st.add_lin(&[xt.negated(), *t], -low);
         }
+        // No term, or two: each term against `x` by the other's bounds, then `x`'s own.
         _ => {
             for (k, t) in terms.iter().enumerate() {
                 let (olo, ohi) = lin_interval(st, &[terms[1 - k]], 0);
@@ -1144,9 +1127,11 @@ impl<'a> Fx<'a> {
 
     fn callee_outside(&self, c: &Callee, e: ExprId) -> Option<String> {
         let s = c.syntax;
-        let is_int = |n: &str| match s.params.iter().find(|p| p.name == n) {
-            Some(p) => is_int_type(&s.tree, p.ty),
-            None => n == "result" && s.result.is_some_and(|t| is_int_type(&s.tree, t)),
+        // Only `requires` clauses are classified at a call, where `result` is not visible.
+        let is_int = |n: &str| {
+            s.params
+                .iter()
+                .any(|p| p.name == n && is_int_type(&s.tree, p.ty))
         };
         let len_of = |n: &str| {
             let p = s.params.iter().find(|p| p.name == n)?;
@@ -1585,7 +1570,8 @@ impl<'a> Fx<'a> {
     fn summary(&self, st: &Octagon, shape: &Shape) -> Val {
         match shape {
             Shape::Int { int, refine } => {
-                let (mut lo, mut hi) = int.map_or((-INF, INF), int_range);
+                // Without an integer type, the whole domain.
+                let (mut lo, mut hi) = int.map_or(interval(st, &TOP), int_range);
                 if let Some(r) = refine {
                     lo = lo.max(interval(st, &r.lo).0);
                     let top = interval(st, &r.hi).1;
@@ -2187,11 +2173,13 @@ impl<'a> Fx<'a> {
         let ((llo, lhi), (rlo, rhi)) = (interval(st, l), interval(st, r));
         self.assign(st, var, &Val::Itv(lo, hi));
         let v = var_val(var);
-        if rlo > 0 {
+        // A zero divisor traps, so one that is not negative is positive where this runs, and
+        // one that is not positive is negative.
+        if rlo >= 0 {
             self.le(st, &v, r, -1);
             self.le(st, &negate(r), &v, -1);
         }
-        if rhi < 0 {
+        if rhi <= 0 {
             self.le(st, &v, &negate(r), -1);
             self.le(st, r, &v, -1);
         }
@@ -3025,6 +3013,7 @@ mod tests {
             ("pub fn f(x: u8) -> u8[0..10] = x", "x < 10"),
             ("pub fn g(i: u8[2..=9]) -> u8 = i\npub fn f(x: u8) -> u8 = g(x)", "x >= 2 and x <= 9"),
             ("pub fn f(x: u8) -> [2]u8[0..5] = [x, 0]", "x < 5"),
+            ("pub fn f(x: u8) -> [2]u8[0..5] = [x; 2]", "x < 5"),
             ("pub fn f(x: u8) -> u8 {\n  var y: u8[0..10] = 0\n  y += x\n  y\n}", "y + x < 10"),
             ("pub fn f(x: u8, z: u8[1..3]) -> u8 {\n  var y: u8[0..10] = z\n  y *= x + 1\n  y\n}", "y * (x + 1) < 10"),
         ];
@@ -3408,6 +3397,12 @@ mod tests {
     fn test_remainder_and_division_by_a_constant_have_their_facts() {
         for src in [
             "pub fn f(x: u32, y: u32[1..100]) -> u32[0..100] = x % y",
+            // A zero divisor traps, so where x % y runs it lies strictly between -y and y.
+            "pub fn f(x: u32, y: u32[0..100]) -> u32[0..100] = x % y",
+            "pub fn f(x: u8, y: u8) -> u8 {\n  val r: u8[0..y] = x % y\n  r\n}",
+            "pub fn f(x: i8, y: i8) -> i16 {\n  guard y > 0 else {\n    return 0\n  }\n  val r = x % y\n  val s: i16[0..=300] = r + y - 1\n  s\n}",
+            "pub fn f(x: i8, y: i8[-100..=0]) -> i8 {\n  val r: i8[y..=100] = x % y\n  r\n}",
+            "pub fn f(x: i8, y: i8) -> i16 {\n  guard y < 0 else {\n    return 0\n  }\n  val r = x % y\n  val s: i16[-300..0] = r + y\n  s\n}",
             "pub fn f(x: u32, y: u32) -> u32 {\n  guard y > 0 else {\n    return 0\n  }\n  val r: u32[0..y] = x % y\n  r\n}",
             "pub fn f(x: u8[0..20], y: u8[1..=200]) -> u8[0..=20] = x % y",
             "pub fn f(x: u8, y: u8) -> u8 {\n  guard x < 20 else {\n    return 0\n  }\n  val r: u8[0..=x] = x % 7\n  r\n}",
@@ -3426,16 +3421,17 @@ mod tests {
             "pub fn f(x: u8, y: i8[-4..=4]) -> i16[-255..=255] = x / y",
             "pub fn f(x: u8) -> u8[0..=255] = x / 1",
             "pub fn f(x: u8, y: u8[1..4]) -> u8[0..=255] = (x * 2) / 4 + 0 * y",
+            "pub fn f(lo: u8, hi: u8) -> u8\n  requires lo < hi\n  ensures result <= hi + 1\n= lo + 1 + (hi + 2 - lo) / 2",
         ] {
             assert_eq!(codes(src), NONE, "{}", src);
         }
         for src in [
-            "pub fn f(x: u32, y: u32[0..100]) -> u32[0..100] = x % y",
             "pub fn f(x: i8, y: i8[1..=100]) -> i8[0..100] = x % y",
             "pub fn f(x: i8, y: i8[1..=100]) -> i8[-98..100] = x % y",
             "pub fn f(lo: usize, hi: usize) -> usize\n  requires lo < hi\n  ensures result < hi\n= (lo + hi) / 2",
             "pub fn f(lo: usize, hi: usize) -> usize\n  requires lo < hi\n  ensures lo < result\n= lo + (hi - lo) / 2",
             "pub fn f(x: u8) -> u8[0..=84] = x / 3",
+            "pub fn f(lo: u8, hi: u8) -> u8\n  requires lo < hi\n  ensures result <= hi\n= lo + 1 + (hi + 2 - lo) / 2",
             "pub fn f(x: i8) -> i8[-41..=42] = x / -3",
             "pub fn f(x: u8, y: u8[2..=4]) -> u8[0..=126] = x / y",
             "pub fn f(x: u8, y: u8) -> u8[0..=254] = x / y",
@@ -3455,6 +3451,15 @@ mod tests {
         assert_eq!(
             obligations("pub fn f(a: i8, b: i8) -> i32 = a + b"),
             [(Range, false, true)]
+        );
+        // An array argument narrows each element into the parameter's element type.
+        assert_eq!(
+            obligations("pub fn g(xs: [2]u8) -> u8 = xs[0]\npub fn f(ys: [2]u8) -> u8 = g(ys)"),
+            [(Range, false, true), (Range, false, true)]
+        );
+        assert_eq!(
+            obligations("pub fn g(xs: [2]u8) -> u8 = xs[0]\npub fn f(ys: [2]u16) -> u8 = g(ys)"),
+            [(Range, false, false), (Range, false, true)]
         );
         let index = "pub fn f(xs: [4]u8, i: usize) -> u8 = xs[i]";
         assert_eq!(
@@ -3635,6 +3640,12 @@ mod tests {
             "pub fn f(x: u8) -> i16[-255..=0] = x * -1",
             "pub fn f(x: u8) -> u8[0..1] = 0 * x",
             "pub fn f(x: u8) -> u8[0..1] = x * 0",
+            "pub fn f(x: u8, y: u8) -> u8 {\n  guard x < y else {\n    return 0\n  }\n  val d: u8[1..=255] = y - x * 1\n  d\n}",
+            "pub fn f(x: u8, y: u8) -> u8 {\n  guard x < y else {\n    return 0\n  }\n  val d: u8[1..=255] = y - 1 * x\n  d\n}",
+            "pub fn f(x: u8, y: u8) -> i16 {\n  guard x < y else {\n    return 0\n  }\n  val d: i16[1..=255] = y + x * -1\n  d\n}",
+            "pub fn f(x: u8, y: u8) -> i16 {\n  guard x < y else {\n    return 0\n  }\n  val d: i16[1..=255] = y + -1 * x\n  d\n}",
+            "pub fn f(x: u8[1..16]) -> u8[16..=240] = x << 4",
+            "pub fn f(x: i8[0..=9], y: i8[-8..=-1]) -> i8[0..=9] = x & y",
             "pub fn f(x: i8[-3..=2]) -> i8[-2..=3] = -x",
             "pub fn f(x: u8[0..10], y: u8[0..10]) -> u8[0..=18] = x + y",
             "pub fn f(x: u8[0..10], y: u8[0..10]) -> i8[-9..=9] = x - y",
@@ -3654,6 +3665,9 @@ mod tests {
             "pub fn f(x: i8[-8..=-1], k: u8[0..8]) -> i8[-8..=-2] = x >> k",
             "pub fn f(x: i8[-8..=-1]) -> i8[-3..=-1] = x >> 1",
             "pub fn f(x: u8[0..16]) -> u8[0..=239] = x << 4",
+            "pub fn f(x: u8[1..16]) -> u8[17..=240] = x << 4",
+            "pub fn f(x: i8[-8..=-1], y: i8[-8..=-1]) -> i8[0..=127] = x & y",
+            "pub fn f(x: i8[0..=9], y: i8[-8..=-1]) -> i8[0..1] = x & y",
             "pub fn f(x: u8[0..16]) -> u8[241..=255] = ~x",
             "pub fn f(x: i8[0..16]) -> i8[-15..=-1] = ~x",
             "pub fn f(x: u8[2..=3], y: u8[4..=5]) -> u8[8..15] = x * y",
@@ -3691,6 +3705,10 @@ mod tests {
             ("x != 3", "`!=`"),
             ("x * y > 3", "a product of variables"),
             ("2 * x > 3", "a coefficient other than 1 or -1"),
+            ("x + x <= 3", "a coefficient other than 1 or -1"),
+            ("x <= 2 * y", "a coefficient other than 1 or -1"),
+            ("x + 2 * x <= 3", "a coefficient other than 1 or -1"),
+            ("x * xs.len <= 9", "a coefficient other than 1 or -1"),
             ("x + y + z > 3", "more than two variables"),
             ("id(x) > 3", "a call"),
             ("not x > 3", "`not`"),
@@ -3711,7 +3729,7 @@ mod tests {
         ];
         for (clause, why) in cases {
             let src = format!(
-                "pub fn id(v: u8) -> u8 = v\npub fn f(x: u8, y: u8, z: u8, c: bool, xs: [2]u8)\n  requires {}\n{{\n}}",
+                "pub fn id(v: u8) -> u8 = v\npub fn f(x: u8, y: u8, z: u8, c: bool, one: [1]u8, xs: [2]u8)\n  requires {}\n{{\n}}",
                 clause
             );
             let d = diagnostics(&src);
@@ -3751,10 +3769,15 @@ mod tests {
             "x + x - x <= 3 * 4",
             "x <= 3 * 4 - 1",
             "x * 1 < y",
+            "-x + x + y < z",
+            "x - x + y + z > 0",
+            "x + y <= x + 3",
+            "x * one.len < y",
+            "(2 - 1) * x < y",
             "x < y and y < z + 0",
         ] {
             let src = format!(
-                "pub fn f(x: u8, y: u8, z: u8, xs: [2]u8)\n  requires {}\n{{\n}}",
+                "pub fn f(x: u8, y: u8, z: u8, one: [1]u8, xs: [2]u8)\n  requires {}\n{{\n}}",
                 clause
             );
             assert_eq!(codes(&src), NONE, "{}", clause);
@@ -3992,7 +4015,13 @@ mod tests {
         assert_eq!(codes(negated), NONE);
         let math = "@checked\npub fn g(a: u8[0..10]) -> u8\n  ensures result == a * 1 + a / 1 - a % 1\n= a\npub fn f(x: u8[0..3]) -> u8[0..5] = g(x)";
         assert_eq!(codes(math), NONE);
-        let logic = "@checked\npub fn g(a: u8) -> u8\n  ensures (result < 5 and true) or not (result >= 5)\n= 1\npub fn f(x: u8) -> u8[0..5] = g(x)";
+        let never = "@checked\npub fn g(a: u8) -> u8\n  ensures false\n= todo(\"never\")\npub fn f(x: u8) -> u8[0..5] = g(x)";
+        assert_eq!(codes(never), NONE);
+        // A callee's clause over `bool` parameters lies outside the fragment and is skipped at
+        // its calls, though the callee has an integer parameter too.
+        let bools = "@checked\npub fn g(c: bool, d: bool, n: u8)\n  requires c == d\n{\n}\npub fn f(x: bool) {\n  g(x, x, 1)\n}";
+        assert_eq!(codes(bools), NONE);
+        let logic ="@checked\npub fn g(a: u8) -> u8\n  ensures (result < 5 and true) or not (result >= 5)\n= 1\npub fn f(x: u8) -> u8[0..5] = g(x)";
         assert_eq!(codes(logic), NONE);
         let unknown = "@checked\npub fn g(a: u8, xs: [2]u8) -> u8\n  ensures result == xs[0] and result < 5 and result == q\n= 1\npub fn f(x: u8, ys: [2]u8) -> u8[0..5] = g(x, ys)";
         assert_eq!(codes(unknown), ["E0201"]);
@@ -4057,13 +4086,14 @@ mod tests {
         assert_eq!(mul_bound(-3, -INF), INF);
         assert_eq!(mul_bound(i128::MAX / 8, 3), INF);
         assert_eq!(mul_bound(-3, 4), -12);
-        assert_eq!(div_bound(INF, -2), -INF);
-        assert_eq!(div_bound(-INF, -2), INF);
-        assert_eq!(div_bound(INF, 2), INF);
-        assert_eq!(div_bound(7, INF), 0);
-        assert_eq!(div_bound(7, -INF), 0);
-        assert_eq!(div_bound(-7, 2), -3);
+        assert_eq!(mul_bound(INF, INF), INF);
+        assert_eq!(mul_bound(-INF, INF), -INF);
+        assert_eq!(hull([3, -1, 7, 2]), Val::Itv(-1, 7));
+        assert_eq!(hull([-1, 3, 2, 7]), Val::Itv(-1, 7));
+        assert_eq!(hull([7, 2, -1, 3]), Val::Itv(-1, 7));
+        assert_eq!(hull([2, 7, 3, -1]), Val::Itv(-1, 7));
         assert_eq!(ones(0), 0);
+        assert_eq!(ones(15), 15);
         assert_eq!(ones(1), 1);
         assert_eq!(ones(9), 15);
         assert_eq!(ones(16), 31);
@@ -4110,17 +4140,74 @@ mod tests {
             Val::Arr(Box::new(Val::Itv(0, 6)))
         );
         assert_eq!(interval(&st, &Val::Other), (-INF, INF));
+        // `x0 + 1 + (x1 - x0 + 2) / 2` with `0 <= x0 < x1 <= 10`: the sum `x1 + 3` bounds it
+        // above by 11, tighter than `x0 + 1` and the quotient's bounds apart.
+        let mut rel = Octagon::new(2);
+        rel.add_lin(&[x.negated()], 0);
+        rel.add_lin(&[y], 10);
+        rel.add_lin(&[x, y.negated()], -1);
+        let q = Val::Quot {
+            base: (vec![x], 1),
+            num: (vec![y, x.negated()], 2),
+            div: 2,
+        };
+        assert_eq!(interval(&rel, &q), (2, 11));
         assert_eq!(interval(&st, &Val::Lin(vec![x], 3)), (-INF, INF));
         assert_eq!(flip(BinaryOp::Ne), BinaryOp::Eq);
         assert_eq!(flip(BinaryOp::Eq), BinaryOp::Ne);
-        assert_eq!(div_vals(&st, &Val::Itv(1, 9), &lin(vec![], 0)), TOP);
+        // Division: by a constant, by a positive or a negative divisor, by one that may be
+        // zero, and with an unbounded dividend.
+        assert_eq!(
+            div_vals(&st, &Val::Itv(1, 9), &lin(vec![], 0)),
+            Val::Itv(-9, 9)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(1, 9), &Val::Itv(0, 0)),
+            Val::Itv(-9, 9)
+        );
         assert_eq!(
             div_vals(&st, &Val::Itv(1, 9), &lin(vec![], 2)),
             Val::Itv(0, 4)
         );
         assert_eq!(
+            div_vals(&st, &Val::Itv(1, 9), &lin(vec![], -2)),
+            Val::Itv(-4, 0)
+        );
+        assert_eq!(
             div_vals(&st, &Val::Itv(-9, 9), &Val::Itv(-1, 1)),
             Val::Itv(-9, 9)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(-9, 9), &Val::Itv(-3, 0)),
+            Val::Itv(-9, 9)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(-9, 7), &Val::Itv(2, 3)),
+            Val::Itv(-4, 3)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(-9, 7), &Val::Itv(-3, -2)),
+            Val::Itv(-3, 4)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(5, 7), &Val::Itv(2, 3)),
+            Val::Itv(1, 3)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(-7, -5), &Val::Itv(2, 3)),
+            Val::Itv(-3, -1)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(-INF, 10), &Val::Itv(2, 4)),
+            Val::Itv(-INF, 5)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(-10, INF), &Val::Itv(2, 4)),
+            Val::Itv(-5, INF)
+        );
+        assert_eq!(
+            div_vals(&st, &Val::Itv(-10, 10), &Val::Itv(2, INF)),
+            Val::Itv(-5, 5)
         );
         assert_eq!(
             add_vals(
@@ -4136,6 +4223,20 @@ mod tests {
             div: 2,
         };
         assert_eq!(add_vals(&st, &q, &Val::Lin(vec![], BIG)), TOP);
+        let q5 = Val::Quot {
+            base: (vec![x], 5),
+            num: (vec![y], 7),
+            div: 2,
+        };
+        assert_eq!(add_vals(&st, &q5, &Val::Lin(vec![], BIG - 3)), TOP);
+        assert_eq!(
+            negate(&q5),
+            Val::Quot {
+                base: (vec![x.negated()], -5),
+                num: (vec![y.negated()], -7),
+                div: 2
+            }
+        );
         assert_eq!(add_vals(&st, &q, &Val::Lin(vec![x], 0)), TOP);
         assert_eq!(
             add_vals(&st, &Val::Lin(vec![], 3), &q),
@@ -4155,6 +4256,10 @@ mod tests {
         );
         assert_eq!(
             rem_interval(&st, &Val::Itv(-9, 9), &Val::Itv(-1, 3)),
+            (-2, 2)
+        );
+        assert_eq!(
+            rem_interval(&st, &Val::Itv(-9, 9), &Val::Itv(-INF, 3)),
             (-9, 9)
         );
         assert_eq!(
@@ -4271,6 +4376,7 @@ mod tests {
             "a | b ^ c & d << 1 >> 2 == (a | b) & c",
             "a < b or c and not d",
             "(a or b) and c",
+            "(not a) == c",
             "todo(\"x\") == unreachable(\"y\")",
             "1_u8 == true",
             "a % b / c * d == 0",
