@@ -99,7 +99,11 @@ impl Range {
     /// `-m ..= m`, or `0 ..= m` when the values cannot be negative.
     fn within(m: u128, non_negative: bool) -> Range {
         Range {
-            lo: Num::new(!non_negative, m),
+            lo: if non_negative {
+                Num::new(false, 0)
+            } else {
+                Num::new(true, m)
+            },
             hi: Num::new(false, m),
         }
     }
@@ -241,12 +245,11 @@ impl Wide<'_> {
         match &self.tree.expr(e).kind {
             ExprKind::Int { value, .. } => Some(Range::point(Num::new(false, *value))),
             ExprKind::Name(_) => self.declared(e).or(typed),
-            ExprKind::Field { base, name } if name == "len" => {
-                match &self.typing.exprs[base.0 as usize] {
-                    Ty::Array(n, _) => Some(Range::point(Num::new(false, *n))),
-                    _ => typed,
-                }
-            }
+            // M1's only field is `.len`.
+            ExprKind::Field { base, .. } => match &self.typing.exprs[base.0 as usize] {
+                Ty::Array(n, _) => Some(Range::point(Num::new(false, *n))),
+                _ => typed,
+            },
             ExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
@@ -338,13 +341,15 @@ impl Wide<'_> {
                 };
                 (arithmetic(op, ra, rb), larger, may_be_negative(op, ra, rb))
             }
+            // A negation leaves both types only when its operand can be positive, so its result
+            // can be negative.
             _ => (
                 Some(Range {
                     lo: ra.hi.negated(),
                     hi: ra.lo.negated(),
                 }),
                 a,
-                !ra.hi.neg && ra.hi.mag > 0,
+                true,
             ),
         };
         if let Some(r) = exact.filter(|r| r.fits()) {
@@ -394,8 +399,9 @@ impl Wide<'_> {
     /// For an operation in a function's expression body, the edit that turns `= body` into a
     /// block that declares `line` and then gives the body with the operand replaced by `name`.
     fn block_body(&self, at: Span, operand: Span, line: &str, name: &str) -> Option<Edit> {
+        // An operation outside the body lies before it, in a contract clause.
         let body = self.tree.expr(self.body?).span;
-        if at.start < body.start || body.end < at.end {
+        if at.start < body.start {
             return None;
         }
         let equals = self.src.get(..body.start)?.rfind('=')?;
@@ -455,7 +461,7 @@ impl Wide<'_> {
             .stmts
             .iter()
             .filter(|s| s.span.start <= at.start && at.end <= s.span.end)
-            .min_by_key(|s| s.span.end - s.span.start)
+            .max_by_key(|s| s.span.start)
             .filter(|s| !matches!(s.kind, StmtKind::While { .. }))?;
         let start = stmt.span.start;
         let line_start = self.src.get(..start)?.rfind('\n').map_or(0, |i| i + 1);
@@ -490,8 +496,74 @@ impl Wide<'_> {
 #[cfg(test)]
 mod tests {
     use mente_syntax::diagnostics::apply_fix;
+    use mente_syntax::tree::BinaryOp;
 
+    use super::{arithmetic, may_be_negative, Num, Range};
     use crate::check_source;
+
+    fn n(v: i128) -> Num {
+        Num::new(v < 0, v.unsigned_abs())
+    }
+
+    fn r(lo: i128, hi: i128) -> Range {
+        Range {
+            lo: n(lo),
+            hi: n(hi),
+        }
+    }
+
+    #[test]
+    fn test_ranges_follow_interval_arithmetic() {
+        assert_eq!(n(5).add(n(-7)), Some(n(-2)));
+        assert_eq!(n(-5).add(n(7)), Some(n(2)));
+        assert_eq!(n(-5).add(n(-7)), Some(n(-12)));
+        assert_eq!(Num::new(false, u128::MAX).add(n(1)), None);
+        assert_eq!(n(-3).mul(n(4)), Some(n(-12)));
+        assert_eq!(Num::new(false, 1 << 64).mul(Num::new(false, 1 << 64)), None);
+        assert_eq!(arithmetic(BinaryOp::Add, r(-1, 2), r(3, 4)), Some(r(2, 6)));
+        assert_eq!(arithmetic(BinaryOp::Sub, r(0, 10), r(1, 3)), Some(r(-3, 9)));
+        assert_eq!(
+            arithmetic(BinaryOp::Mul, r(-2, 3), r(4, 5)),
+            Some(r(-10, 15))
+        );
+        // A quotient is no larger than its dividend, and negative only with a negative operand.
+        assert_eq!(arithmetic(BinaryOp::Div, r(0, 9), r(1, 3)), Some(r(0, 9)));
+        assert_eq!(arithmetic(BinaryOp::Div, r(0, 9), r(-3, 3)), Some(r(-9, 9)));
+        assert_eq!(arithmetic(BinaryOp::Div, r(-9, 2), r(1, 3)), Some(r(-9, 9)));
+        // A remainder is no larger than either operand, and takes its dividend's sign.
+        assert_eq!(arithmetic(BinaryOp::Rem, r(0, 9), r(-4, 4)), Some(r(0, 4)));
+        assert_eq!(
+            arithmetic(BinaryOp::Rem, r(-20, 9), r(1, 30)),
+            Some(r(-20, 20))
+        );
+    }
+
+    #[test]
+    fn test_a_range_fits_when_one_128_bit_type_holds_it() {
+        let top = Num::new(false, u128::MAX);
+        assert!(Range { lo: n(0), hi: top }.fits());
+        assert!(r(i128::MIN, i128::MAX).fits());
+        assert!(!Range {
+            lo: n(-1),
+            hi: Num::new(false, 1 << 127)
+        }
+        .fits());
+        assert!(!Range {
+            lo: Num::new(true, (1 << 127) + 1),
+            hi: n(0)
+        }
+        .fits());
+        assert!(!Range { lo: n(-1), hi: top }.fits());
+    }
+
+    #[test]
+    fn test_a_result_may_be_negative_by_its_operands_signs() {
+        assert!(!may_be_negative(BinaryOp::Sub, r(3, 10), r(0, 3)));
+        assert!(may_be_negative(BinaryOp::Sub, r(2, 10), r(0, 3)));
+        assert!(!may_be_negative(BinaryOp::Mul, r(0, 1), r(0, 1)));
+        assert!(may_be_negative(BinaryOp::Mul, r(-1, 1), r(0, 1)));
+        assert!(may_be_negative(BinaryOp::Mul, r(0, 1), r(-1, 1)));
+    }
 
     fn module(src: &str) -> String {
         format!("module t\n{}\n", src)
@@ -566,6 +638,8 @@ mod tests {
             "pub fn f(c: bool, a: u64, b: u64) -> u128 = (if c { a * b } else { 0 }) * a",
             "pub fn f(c: bool, a: u64, b: u64) -> u128 = (if c { 0 } else { a * b }) * a",
             "pub fn f(a: u64, b: u64, c: u64) -> u128 = a * b * c / c",
+            // A shift narrows into its operand's type, whatever the amount.
+            "pub fn f(a: u64, b: u64) -> u128 = (a << 60) * b * b",
         ] {
             assert_eq!(codes(wide), ["E0222"], "{}", wide);
         }
@@ -617,6 +691,24 @@ mod tests {
             "bind `b * c + b` to `sum: u128` first",
         );
         assert!(check_source(&sum).is_ok(), "{}", sum);
+        // Of operands of one range, the left is bound; a difference is named so.
+        let tie = fixed(
+            "pub fn f(a: u64, b: u64, c: u64, d: u64) -> u128 {\n  val x: u128 = a * b * (c * d)\n  x\n}",
+            "bind `a * b` to `product: u128` first",
+        );
+        assert!(check_source(&tie).is_ok(), "{}", tie);
+        let difference = fixed(
+            "pub fn f(a: i64, b: i64, c: i64, d: i64) -> i128 {\n  val x: i128 = (a * b - c) * d\n  x\n}",
+            "bind `a * b - c` to `difference: i128` first",
+        );
+        assert!(check_source(&difference).is_ok(), "{}", difference);
+        // In a contract clause, which no statement holds, no binding is offered.
+        let contract = check_source(&module(
+            "pub fn f(a: u64) -> u128\n  ensures result <= a * a * a\n= a",
+        ))
+        .unwrap_err();
+        assert_eq!(contract[0].code, "E0222");
+        assert!(contract[0].fixes.is_empty());
         // In a loop's condition, which runs every round, no binding is offered.
         let d = check_source(&module(
             "pub fn f(a: u64, n: u128) -> u64 {\n  var k: u64 = 0\n  while a * a * a > n {\n    k += 1\n  }\n  k\n}",
