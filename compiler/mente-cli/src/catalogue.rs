@@ -633,6 +633,20 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f() -> u8 = 300_u8\n",
         "module m\npub fn f() -> u8 = 255_u8\n",
     ),
+    emitted(
+        "E0222",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "An intermediate that might need more than 128 bits",
+        "Arithmetic is exact, but an intermediate is computed exactly only within `i128` or \
+         `u128`, so that native code computes it in one machine type without a check. Each \
+         operation of narrower operands has a static range, from its operands' types, literal \
+         values, `.len` and refinements with literal bounds; one that might leave both types \
+         is an error. The fix binds an operand to a `u128` or an `i128` first: an operation \
+         with a 128-bit operand is checked at the operator, against that type.",
+        "module m\npub fn cube(a: u64) -> u128 {\n  val c: u128 = a * a * a\n  c\n}\n",
+        "module m\npub fn cube(a: u64) -> u128 {\n  val product: u128 = a * a\n  val c: u128 = product * a\n  c\n}\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

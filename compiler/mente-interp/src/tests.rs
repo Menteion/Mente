@@ -118,10 +118,12 @@ fn test_wide_arithmetic_is_checked_at_each_operator() {
         kind(signed, "g(-170141183460469231731687303715884105728)"),
         "narrowing"
     );
-    let cube = "pub fn h(a: u64) -> u128 = a * a * a";
+    // `a * a * a` might leave 128 bits, which the checker rejects (`E0222`); bound to a
+    // `u128`, the square makes the next product an operation on a `u128`, checked there.
+    let cube = "pub fn h(a: u64) -> u128 {\n  val product: u128 = a * a\n  product * a\n}";
     assert_eq!(
         trapped(cube, "h(18446744073709551615)"),
-        ("intermediate-overflow".to_string(), 2, 28)
+        ("narrowing".to_string(), 4, 3)
     );
     assert_eq!(run(cube, "h(1000)"), "1000000000");
 }

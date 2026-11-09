@@ -17,7 +17,7 @@ use mente_syntax::tree::FnSyntax;
 use mente_syntax::{lex, parse_bodies, parse_module, split_items, ItemDecl, ItemStart, Span};
 
 use crate::check::{self, Signature};
-use crate::{check_source, names, tier1, verify_function_contracts};
+use crate::{check_source, names, tier1, verify_function_contracts, wide};
 
 /// What parsing one item gives, every span relative to the item.
 #[derive(Clone, Debug, Default)]
@@ -216,6 +216,7 @@ impl Session {
             let (resolution, mut found) = names::resolve(syntax, &names);
             let (typing, typed) = check::check(syntax, &resolution, &signatures);
             found.extend(typed);
+            found.extend(wide::check(syntax, &resolution, &typing, text));
             if found.is_empty() {
                 let function = tier1::Function {
                     syntax,
