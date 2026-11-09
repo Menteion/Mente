@@ -246,7 +246,8 @@ pub enum Op {
     Bool(bool),
     /// `a op b`, operands and result of the value's type. Exact (`trap` none) when the static
     /// ranges guarantee the result fits, which a checker then never sees fail; checked
-    /// otherwise, trapping at `trap` when it does not fit.
+    /// otherwise, trapping at `trap` when it does not fit, with the exact result when its
+    /// magnitude lies below 2^128 and `the result` beyond.
     Arith {
         op: ArithOp,
         trap: Option<TrapId>,
@@ -259,8 +260,9 @@ pub enum Op {
     Bits(BitOp),
     /// `~a` on the bits of the value's type, or `not` on a boolean.
     Not,
-    /// `a · 2^k` in the value's type; when it does not fit, a trap at `trap` that reports the
-    /// exact value when its magnitude lies below 2^128. `k` lies within the type's width.
+    /// `a · 2^k` in the value's type, `a` of any integer type; when it does not fit, a trap at
+    /// `trap` that reports the exact value when its magnitude lies below 2^128. `k` lies within
+    /// the width of the value's type.
     Shl {
         trap: TrapId,
     },
@@ -619,7 +621,9 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
         Op::Neg { trap } => int && args == [ty] && trap.as_ref().is_none_or(|t| site(t, 1)),
         Op::Bits(_) => (int || ty == Ty::Bool) && args == [ty, ty],
         Op::Not => (int || ty == Ty::Bool) && args == [ty],
-        Op::Shl { trap } => int && args.len() == 2 && args[0] == ty && site(trap, 1),
+        Op::Shl { trap } => {
+            int && args.len() == 2 && matches!(args[0], Ty::Int(_)) && site(trap, 1)
+        }
         Op::Shr => int && args.len() == 2 && args[0] == ty,
         Op::Cmp(_) => ty == Ty::Bool && args.len() == 2 && args[0] == args[1],
         Op::Cast => int && args.len() == 1 && matches!(args[0], Ty::Int(_)),
@@ -929,7 +933,7 @@ impl<'m> Machine<'m> {
             };
             match (n.filter(|n| t.holds(*n)), trap_at) {
                 (Some(n), _) => Ok(Val::Int(n)),
-                (None, Some(at)) => Err(trap(f, at, &[None])),
+                (None, Some(at)) => Err(trap(f, at, &[n])),
                 (None, None) => Err(broken(format!("the exact v{} left its type", v.0))),
             }
         };
@@ -1327,6 +1331,26 @@ mod tests {
             "trap[narrowing] at 2:30: the result does not fit in `u128`"
         );
         assert_eq!(run0(&sum2(true, U128), 0, &[int(1), int(2)]), Ok(int(3)));
+        // A checked difference below zero reports its exact value, as the interpreter does.
+        let mut b = Builder::new("sub", &[Ty::Int(U128), Ty::Int(U128)], Some(Ty::Int(U128)));
+        let [x, y] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let t = b.trap_site("narrowing", &["", " does not fit in `u128`"]);
+        let d = b.inst(
+            Op::Arith {
+                op: ArithOp::Sub,
+                trap: Some(t),
+            },
+            Ty::Int(U128),
+            &[x, y],
+        );
+        b.end(Term::Return(Some(d)));
+        let m = module(vec![b.finish()]);
+        assert_eq!(
+            run0(&m, 0, &[int(1), int(2)]).unwrap_err().to_string(),
+            "trap[narrowing] at 0:0: -1 does not fit in `u128`"
+        );
         assert!(matches!(
             run0(&sum2(false, U64), 0, &[Val::Int(U64.max()), int(1)]),
             Err(Stop::Broken(_))
@@ -1375,7 +1399,7 @@ mod tests {
         assert_eq!(binary(Op::Shr, I64, -8, 1), Ok(int(-4)));
         assert_eq!(binary(Op::Shr, I64, 7, 1), Ok(int(3)));
         assert_eq!(binary(Op::Shr, I64, -1, 63), Ok(int(-1)));
-        let mut shl = Builder::new("shl", &[Ty::Int(I64), Ty::Int(I64)], Some(Ty::Int(I64)));
+        let mut shl = Builder::new("shl", &[Ty::Int(I128), Ty::Int(I64)], Some(Ty::Int(I64)));
         let [x, k] = shl.params(BlockId(0))[..] else {
             panic!("two parameters")
         };
@@ -1384,6 +1408,13 @@ mod tests {
         shl.end(Term::Return(Some(r)));
         let m = module(vec![shl.finish()]);
         assert_eq!(run0(&m, 0, &[int(-3), int(2)]), Ok(int(-12)));
+        // A wider operand whose shifted value fits the result type.
+        assert_eq!(
+            run0(&m, 0, &[int(1 << 70), int(0)])
+                .unwrap_err()
+                .to_string(),
+            "trap[narrowing] at 0:0: 1180591620717411303424 does not fit in `i64`"
+        );
         // The exact value is reported while it lies below 2^128, and "the result" after.
         assert_eq!(
             run0(&m, 0, &[int(1), int(63)]).unwrap_err().to_string(),
