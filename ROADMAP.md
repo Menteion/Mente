@@ -194,8 +194,12 @@ A `Target` in `spec/*.md` is a number with a protocol here. A figure without a p
 ### Tier-1 re-check after an edit: 99th percentile under 5 ms
 
 - **Timed**: in a running `mn check --watch` or language-server process, from an edit being applied to the source in memory until Tier 1 has re-proven every obligation the edit can affect and produced its diagnostics.
-- **Corpus**: the `examples/` modules, plus a generated module of 200 functions with 20 obligations each (loop bounds, slice indexing, chains of `requires`). Each run applies one random single-token edit inside one function body.
-- **Method**: release build; 100 warm-up edits, then 1,000 timed edits; report the median and the 99th percentile.
+- **Corpus**: the `examples/` modules, plus a generated module of 200 functions with 20 obligations each, as Tier 1 counts them: loop bounds and invariants, array indexing, and a chain of `requires`. Each run applies one random single-token edit inside one function body: an integer literal, a comparison, `+` or `-`, or a binding's name replaced by another of its kind.
+- **Method**: release build; 100 warm-up edits, then 1,000 timed edits, each undone, untimed, before the next; report the median and the 99th percentile. The harness is the ignored test `tier1_recheck_protocol` in `compiler/mente-cli`, which applies each edit to the session `mn check --watch` runs (`mente_sema::incremental::Session`) and reads its diagnostics:
+  ```powershell
+  cargo test --release -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
+  ```
+- **Enforcement**: the CI job "Tier-1 latency" runs the harness on a GitHub x86-64 `ubuntu-24.04` runner and fails when the 99th percentile of any module reaches 5 ms.
 - **Machine**: as above.
 - **Last result**: none yet for Tier 1 itself, which M1 builds. On 2026-11-09 the M0b spike's prototype, on the generated module alone and on the CI runners, re-checked an edit in a median of 249 to 305 µs and a 99th percentile of 288 to 479 µs, re-parsing only the edited function ([`spikes/tier1-latency/README.md`](spikes/tier1-latency/README.md); tag `m0b`, commit "Record the Tier-1 latency spike's result"). A spike is never evidence for a claim.
 

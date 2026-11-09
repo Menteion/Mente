@@ -23,6 +23,8 @@ use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, 
 use mente_syntax::parse_module;
 
 mod catalogue;
+#[cfg(test)]
+mod latency;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
