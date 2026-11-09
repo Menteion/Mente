@@ -1,5 +1,5 @@
 # The preliminary runs of the M1 tasks (docs/design-review.md, early-core-benchmark and
-# benchmark-difficulty): agents write the public M1 solve tasks, the core ones or the others,
+# benchmark-difficulty): agents write the public M1 solve tasks, the core ones, the others or those named,
 # from the language card, with repairs, and the reference interpreter runs their examples and
 # hidden tests. Run by hand, within the budget Norman set;
 # the programs and the record are kept as an artifact, and the findings go to benchmark/prelim/.
@@ -9,9 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       tasks:
-        description: Which public M1 solve tasks
-        type: choice
-        options: [core, non-core]
+        description: Which public M1 solve tasks, core, non-core, or task ids separated by commas
+        type: string
         default: core
       runs:
         description: Runs per task and model

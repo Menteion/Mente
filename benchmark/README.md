@@ -6,7 +6,7 @@ The agent benchmark measures Mente's goal, the language best suited to AI agents
 
 | Milestone | Tuning | Held-out | Adversarial |
 | :--- | ---: | ---: | ---: |
-| M1 | 12 | 4 | 2 |
+| M1 | 18 | 4 | 2 |
 | M2 | 9 | 3 | 1 |
 | M3 | 3 | 1 | 0 |
 | M4 | 3 | 1 | 3 |
@@ -24,7 +24,7 @@ The agent benchmark measures Mente's goal, the language best suited to AI agents
 
 - **Languages**: Mente; Rust, the reference; Odin, the control ([`control-language`](../docs/design-review.md#control-language)), whose agent is given a document of the same size as the language card, written with the card's first version at the end of M1; and Go, if the budget allows.
 - **Runs**: every task runs 5 times per language. In a run the agent submits a program, and the harness builds it and runs the visible examples; the agent may then revise it, seeing the diagnostics and the examples' results, at most 10 times. The run ends when the agent declares it finished or has used its 10 repairs.
-- **Scoring**: a run is solved when its last program builds and passes every example and every hidden test. A program that contains a `todo` scores as unsolved ([`todo-marker`](../docs/design-review.md#todo-marker)); one that contains `unreachable` is scored like any other ([`unreachable-marker`](../docs/design-review.md#unreachable-marker)). The report gives each language's pass rate, the median repairs and tokens of solved runs, the failures of first attempts and the repairs by failure class ([`philosophy-polish`](../docs/design-review.md#philosophy-polish)), and their variance across the 5 runs, with core tasks apart from the others and the held-out set apart from the tuning set.
+- **Scoring**: a run is solved when its last program builds and passes every example and every hidden test. A program that contains a `todo` scores as unsolved ([`todo-marker`](../docs/design-review.md#todo-marker)); one that contains `unreachable` is scored like any other ([`unreachable-marker`](../docs/design-review.md#unreachable-marker)). The report gives each language's pass rate, the share of runs whose first program passes before any repair, the median repairs and tokens of solved runs, the failures of first attempts and the repairs by failure class ([`philosophy-polish`](../docs/design-review.md#philosophy-polish)), and their variance across the 5 runs, with core tasks apart from the others and the held-out set apart from the tuning set.
 - **Failure classes**: the report classifies every program that fails, so that the re-planning triggers of `docs/design-brief.md` section 7.7 are counted, not judged ([`ai-coding-problems`](../docs/design-review.md#ai-coding-problems)). A Mente program that does not build is classed by the failure classes of the codes it reports (`spec/diagnostics.md` item 8); a program in another language that does not build is classed as a build failure. A program that builds but fails an example or a hidden test, or traps, is classed as such. The report counts the classes over the last program of every unsolved run, and over every program the runs submitted.
 - **Adversarial tasks** are scored as caught or missed, under the task's own "Caught when" and "Missed when", and a catch at build time is reported apart from a catch when the program runs.
 
@@ -88,6 +88,7 @@ A test sets the stand-ins up with `given` lines before its call, and checks thei
 ## Changing the corpus
 
 - Until the first measured run, at the end of M1, a task may be corrected, for a wrong expected value or an ambiguous sentence. The correction updates `corpus.lock` in the same commit, and the commit message gives the reason.
+- Until then, tasks may also be added, harder ones where a preliminary run finds the tasks of a milestone too easy to tell models or languages apart ([`benchmark-difficulty`](../docs/design-review.md#benchmark-difficulty)). The composition table, `corpus.lock` and, for a held-out task, the commit it names change in the same commit, and the tasks already there stay, so that they still give the trend across milestones. A held-out task is written in its own repository by a session that works on nothing a benchmark agent is shown.
 - From the first measured run on, a task never changes. A task found to be broken is retired: `retired: <date> <reason>` joins its front matter, it stays in the corpus, and it is excluded from every later score, while the scores before keep it. A replacement takes a new `id`, counts in the composition table, and is reported apart until it has as many runs as the tasks it is compared with.
 - The held-out set follows the same rules in its own repository; a change to it updates the commit in `corpus.lock`.
 

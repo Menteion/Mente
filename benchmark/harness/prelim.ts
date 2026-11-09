@@ -8,7 +8,7 @@
 // every example, or after 10 repairs. The hidden tests then score the last program. It is a
 // preliminary run, not a benchmark result, and it never opens the held-out set.
 //
-//   node benchmark/harness/prelim.ts --mn target/release/mn [--tasks core|non-core] [--runs 5]
+//   node benchmark/harness/prelim.ts --mn target/release/mn [--tasks core|non-core|<id>,<id>] [--runs 5]
 //     [--budget 5] [--out prelim-out]
 //
 // It calls the Claude Messages API over HTTP with the key in ANTHROPIC_API_KEY. Each turn sends
@@ -141,7 +141,6 @@ function failureClass(mn: string, code: string): string {
 async function main(): Promise<void> {
   const mn = option("mn", "target/release/mn");
   const which = option("tasks", "core");
-  if (which !== "core" && which !== "non-core") throw new Error("--tasks is core or non-core");
   const runs = Number(option("runs", "5"));
   const budget = Number(option("budget", "5"));
   const out = option("out", "prelim-out");
@@ -149,7 +148,7 @@ async function main(): Promise<void> {
   if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
   const card = readFileSync("docs/language-card.md", "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");
   const system = systemPrompt(card);
-  const tasks = preliminaryTasks(readTasks("benchmark/tasks"), which === "core");
+  const tasks = preliminaryTasks(readTasks("benchmark/tasks"), which);
   mkdirSync(out, { recursive: true });
   const record = {
     models: MODELS,

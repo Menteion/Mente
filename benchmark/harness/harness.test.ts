@@ -94,13 +94,19 @@ test("every public M1 solve task has a signature M1 can write", () => {
   }
 });
 
-test("a preliminary run takes the public M1 solve tasks, the core ones or the others", () => {
+test("a preliminary run takes the public M1 solve tasks, the core ones, the others or those named", () => {
   const dir = "benchmark/tasks";
   const all = readdirSync(dir)
     .filter((f) => f.endsWith(".md"))
     .map((f) => parseTask(readFileSync(join(dir, f), "utf8")));
-  const core = preliminaryTasks(all, true);
-  const others = preliminaryTasks(all, false);
+  const core = preliminaryTasks(all, "core");
+  const others = preliminaryTasks(all, "non-core");
+  assert.deepEqual(
+    preliminaryTasks(all, "spiral, bucket").map((t) => t.id).sort(),
+    ["bucket", "spiral"],
+  );
+  assert.throws(() => preliminaryTasks(all, "spiral,parse-u32"), /parse-u32/);
+  assert.throws(() => preliminaryTasks(all, "step-up"), /step-up/);
   assert.ok(core.some((t) => t.id === "gcd"));
   assert.ok(others.some((t) => t.id === "lower-bound"));
   for (const [tasks, mark] of [
