@@ -226,7 +226,11 @@ impl Parser {
         if !self.recovering {
             self.nest += 1;
             while !self.at(&TokenKind::RParen) && !self.recovering {
+                let before = self.pos;
                 params.push(self.param());
+                if self.pos == before {
+                    break;
+                }
                 if !self.eat(&TokenKind::Comma) && !self.at(&TokenKind::RParen) {
                     self.expected("`,` or `)`");
                 }
@@ -499,11 +503,15 @@ impl Parser {
                 }
                 _ => {}
             }
+            let before = self.pos;
             stmts.push(self.stmt());
             if self.recovering {
                 self.skip_statement();
             } else {
                 self.statement_end();
+            }
+            if self.pos == before {
+                self.bump();
             }
         }
         self.nest = saved_nest;
@@ -1003,6 +1011,7 @@ impl Parser {
         self.nest += 1;
         let mut args = Vec::new();
         while !self.at(&TokenKind::RParen) && !self.recovering {
+            let before = self.pos;
             let is_mut = self.eat(&TokenKind::Mut);
             let value = self.expr();
             if is_mut && !self.recovering && !self.is_place(value) {
@@ -1018,6 +1027,9 @@ impl Parser {
                 self.error(d);
             }
             args.push(Arg { is_mut, value });
+            if self.pos == before {
+                break;
+            }
             if !self.recovering && !self.eat(&TokenKind::Comma) && !self.at(&TokenKind::RParen) {
                 self.expected("`,` or `)` in the arguments");
             }
