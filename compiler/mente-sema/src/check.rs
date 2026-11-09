@@ -10,6 +10,8 @@
 //! too: only a `var` or a `mut` parameter is assigned (`E0205`) or passed as `mut` (`E0206`),
 //! and a `mut` argument's binding appears in no other argument of its call (`E0207`).
 
+use std::cmp::Ordering;
+
 use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
 use mente_syntax::tree::BinaryOp::{BitAnd, BitOr, BitXor, Shl, Shr};
 use mente_syntax::tree::{
@@ -448,9 +450,11 @@ impl Checker<'_> {
             return;
         };
         for (j, other) in args.iter().enumerate() {
-            // Two `mut` arguments that name one binding are reported once, at the second.
-            if j == i || (other.is_mut && j < i) {
-                continue;
+            match j.cmp(&i) {
+                Ordering::Equal => continue,
+                // Two `mut` arguments that name one binding are reported once, at the second.
+                Ordering::Less if other.is_mut => continue,
+                _ => {}
             }
             let mut used = Vec::new();
             self.names_in(other.value, &mut used);
@@ -1060,6 +1064,15 @@ mod tests {
         );
         assert_eq!(codes("pub fn f(a: u8, b: u16) -> u16 = a << b"), NONE);
         assert_eq!(codes("pub fn f(a: u8, b: u16) -> u16 = b >> a"), NONE);
+        assert_eq!(
+            codes(
+                "pub fn f(a: u8, b: u32) {
+  val s = a << b
+  val t = b >> a
+}"
+            ),
+            NONE
+        );
         assert_eq!(codes("pub fn f(a: u8) -> u8 = a & 0xF0"), NONE);
         assert_eq!(
             codes("pub fn f(a: u8, b: u16) {\n  val c = (a + b) << 1\n}"),
@@ -1536,5 +1549,16 @@ mod tests {
         assert_eq!(codes_of("  two(mut v, w)"), NONE);
         assert_eq!(codes_of("  both(mut v, mut xs[0])"), NONE);
         assert_eq!(codes_of("  declared(mut v)"), NONE);
+        assert_eq!(
+            codes(
+                "pub fn rev(b: u8, mut a: u8) {
+}
+pub fn f() {
+  var v: u8 = 0
+  rev(v + 1, mut v)
+}"
+            ),
+            ["E0207"]
+        );
     }
 }
