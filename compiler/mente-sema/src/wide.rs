@@ -639,7 +639,7 @@ mod tests {
             "pub fn f(c: bool, a: u64, b: u64) -> u128 = (if c { 0 } else { a * b }) * a",
             "pub fn f(a: u64, b: u64, c: u64) -> u128 = a * b * c / c",
             // A shift narrows into its operand's type, whatever the amount.
-            "pub fn f(a: u64, b: u64) -> u128 = (a << 60) * b * b",
+            "pub fn f(a: u64, b: u64) -> u128 = (a << 1) * b * b",
         ] {
             assert_eq!(codes(wide), ["E0222"], "{}", wide);
         }
@@ -702,6 +702,22 @@ mod tests {
             "bind `a * b - c` to `difference: i128` first",
         );
         assert!(check_source(&difference).is_ok(), "{}", difference);
+        // Inside an expression body, the body becomes a block.
+        let inner = fixed(
+            "pub fn f(a: u64, b: u64) -> u128 = 1 + a * b * 2",
+            "bind `a * b` to `product: u128` first",
+        );
+        assert!(
+            inner.contains(
+                "-> u128 {
+  val product: u128 = a * b
+  1 + product * 2
+}"
+            ),
+            "{}",
+            inner
+        );
+        assert!(check_source(&inner).is_ok(), "{}", inner);
         // In a contract clause, which no statement holds, no binding is offered.
         let contract = check_source(&module(
             "pub fn f(a: u64) -> u128\n  ensures result <= a * a * a\n= a",
