@@ -325,6 +325,47 @@ impl Tree {
 
     /// An expression in canonical form: every operator application in parentheses, as
     /// `(+ a (* b c))`, so precedence and grouping can be read off.
+    /// A function in its canonical form: `(fn name (params) result (clauses) body)`, where a
+    /// parameter is `(name type)` or `(mut name type)`, a missing result `()`, a clause
+    /// `(requires e)`, `(ensures e)` or `(decreases e)`, and a missing body `()`.
+    pub fn render_fn(f: &FnSyntax) -> String {
+        let tree = &f.tree;
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| {
+                let m = if p.is_mut { "mut " } else { "" };
+                format!("({}{} {})", m, p.name, tree.render_type(p.ty))
+            })
+            .collect();
+        let result = f.result.map_or("()".to_string(), |t| tree.render_type(t));
+        let clauses: Vec<String> = f
+            .contracts
+            .iter()
+            .map(|c| {
+                let kind = match c.kind {
+                    ContractKind::Requires => "requires",
+                    ContractKind::Ensures => "ensures",
+                    ContractKind::Decreases => "decreases",
+                };
+                format!("({} {})", kind, tree.render_expr(c.expr))
+            })
+            .collect();
+        let body = match f.body {
+            Some(Body::Block(b)) => tree.render_block(b),
+            Some(Body::Expr(e)) => format!("(= {})", tree.render_expr(e)),
+            None => "()".to_string(),
+        };
+        format!(
+            "(fn {} ({}) {} ({}) {})",
+            f.name,
+            params.join(" "),
+            result,
+            clauses.join(" "),
+            body
+        )
+    }
+
     pub fn render_expr(&self, id: ExprId) -> String {
         match &self.expr(id).kind {
             ExprKind::Int { value, suffix } => match suffix {

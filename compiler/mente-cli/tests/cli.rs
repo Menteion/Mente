@@ -450,3 +450,32 @@ fn test_mn_check_watch_checks_item_by_item() {
     assert_eq!(missing.status.code(), Some(2));
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `mn dump` prints a phase's output in its canonical form, the same bytes on every run.
+#[test]
+fn test_mn_dump_prints_canonical_forms() {
+    let dir = scratch("dump");
+    fs::write(dir.join("d.mn"), "module t\npub fn f(x: u8) -> u8 = x\n").unwrap();
+    let tokens = mn(&dir, &["dump", "--tokens", "d.mn"]);
+    assert_eq!(tokens.status.code(), Some(0));
+    assert!(text(&tokens.stdout).starts_with("mente-dump 1 tokens\n1:1 Module module\n"));
+    let tree = mn(&dir, &["dump", "--tree", "d.mn"]);
+    assert_eq!(
+        text(&tree.stdout),
+        "mente-dump 1 tree\n(fn f ((x u8)) u8 () (= x))\n"
+    );
+    let typed = mn(&dir, &["dump", "--typed", "d.mn"]);
+    assert_eq!(
+        text(&typed.stdout),
+        "mente-dump 1 typed\n(fn f ((x u8)) u8 () (= x))\n  (binding x u8)\n  (expr 0 2:25 1 u8)\n"
+    );
+    assert_eq!(mn(&dir, &["dump", "--typed", "d.mn"]).stdout, typed.stdout);
+    let unknown = mn(&dir, &["dump", "--mir", "d.mn"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(text(&unknown.stderr).contains("knows --tokens, --tree and --typed"));
+    assert_eq!(mn(&dir, &["dump", "d.mn"]).status.code(), Some(2));
+    let missing = mn(&dir, &["dump", "--tree", "gone.mn"]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(text(&missing.stderr).contains("cannot read"));
+    fs::remove_dir_all(&dir).unwrap();
+}

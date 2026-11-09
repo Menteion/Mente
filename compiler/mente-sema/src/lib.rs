@@ -118,6 +118,40 @@ pub fn check_program(src: &str) -> Result<CheckedModule, Vec<Diagnostic>> {
     })
 }
 
+/// The canonical form of a module's typed functions and its diagnostics: a header line; for
+/// each function whose body checks, its tree as `Tree::render_fn` writes it, then each binding
+/// as `  (binding name type)` and each expression as `  (expr id line:col length type)`,
+/// types as Mente spells them; then each diagnostic `check_source` reports as `line:col code`.
+pub fn dump_typed(src: &str) -> String {
+    let mut out = format!("mente-dump {} typed\n", mente_syntax::DUMP_VERSION);
+    if let Ok(module) = parse_module(src) {
+        for f in bodies(src, &module).0.into_iter().flatten() {
+            out.push_str(&mente_syntax::tree::Tree::render_fn(&f.syntax));
+            out.push('\n');
+            for (b, ty) in f.resolution.bindings.iter().zip(&f.typing.bindings) {
+                out.push_str(&format!("  (binding {} {})\n", b.name, ty.spelling()));
+            }
+            for (i, (e, ty)) in f.syntax.tree.exprs.iter().zip(&f.typing.exprs).enumerate() {
+                out.push_str(&format!(
+                    "  (expr {} {}:{} {} {})\n",
+                    i,
+                    e.span.line,
+                    e.span.col,
+                    e.span.end - e.span.start,
+                    ty.spelling()
+                ));
+            }
+        }
+    }
+    for d in check_source(src).err().unwrap_or_default() {
+        out.push_str(&format!(
+            "{}:{} {}\n",
+            d.primary.line, d.primary.col, d.code
+        ));
+    }
+    out
+}
+
 /// Parses each function with a body, then resolves the names and checks the types of each one
 /// the body parser reports nothing in, function by function in source order.
 fn bodies(src: &str, module: &ModuleFile) -> (Vec<Option<CheckedFn>>, Vec<Diagnostic>) {
@@ -815,6 +849,18 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_typed_functions_dump_with_their_diagnostics() {
+        assert_eq!(
+            dump_typed("module m\npub fn f(x: u8) -> u8 {\n  val y = x + 1\n  y\n}\npub fn g() -> u8 = zz\n"),
+            "mente-dump 1 typed\n(fn f ((x u8)) u8 () {(val y (+ x 1)); y})\n  (binding x u8)\n  (binding y u8)\n  (expr 0 3:11 1 u8)\n  (expr 1 3:15 1 integer)\n  (expr 2 3:11 5 u8)\n  (expr 3 4:3 1 u8)\n(fn g () u8 () (= zz))\n  (expr 0 6:20 2 _)\n6:20 E0201\n"
+        );
+        assert_eq!(
+            dump_typed("module m\nlet x = 1\n"),
+            "mente-dump 1 typed\n2:1 E0111\n"
+        );
+    }
 
     #[test]
     fn test_check_module_reports_declarations_first_then_bodies() {
