@@ -282,15 +282,15 @@ fn rows(decl: SourcePos, ranges: &[CodeRange]) -> Vec<Row> {
     rows
 }
 
-/// The code ranges of a compiled function, with their source positions. Instructions without a
-/// position, such as the prologue and epilogue Cranelift adds, belong to the declaration.
+/// The code ranges of a compiled function, with their source positions.
 fn code_ranges(
     code: &CompiledCode,
     base: SourceLoc,
     decl: SourcePos,
     positions: &Positions,
 ) -> Result<Vec<CodeRange>, CodegenError> {
-    code.buffer
+    let found = code
+        .buffer
         .get_srclocs_sorted()
         .iter()
         .map(|s| {
@@ -300,19 +300,36 @@ fn code_ranges(
                 s.loc.relocate(base)
             };
             let position = if loc.is_default() {
-                decl
+                None
             } else {
-                positions.get(loc).ok_or_else(|| {
+                Some(positions.get(loc).ok_or_else(|| {
                     CodegenError::new(format!(
                         "source location {loc} was not handed out by ObjectWriter::source_loc"
                     ))
-                })?
+                })?)
             };
-            Ok(CodeRange {
-                start: s.start,
-                end: s.end,
-                position,
-            })
+            Ok((s.start, s.end, position))
+        })
+        .collect::<Result<Vec<_>, CodegenError>>()?;
+    Ok(placed(decl, &found))
+}
+
+/// Code ranges with their positions, from ranges that may have none. Code without a position
+/// before the first that has one, such as the prologue Cranelift adds, belongs to the
+/// declaration; later code without one, such as an epilogue or a register move, continues the
+/// position before it, so that a debugger stepping over a line does not stop on the
+/// declaration in the middle of the function.
+fn placed(decl: SourcePos, found: &[(u32, u32, Option<SourcePos>)]) -> Vec<CodeRange> {
+    let mut last = decl;
+    found
+        .iter()
+        .map(|&(start, end, position)| {
+            last = position.unwrap_or(last);
+            CodeRange {
+                start,
+                end,
+                position: last,
+            }
         })
         .collect()
 }
@@ -403,8 +420,7 @@ impl ObjectWriter {
     }
 
     /// [`ObjectWriter::define_function`] for a function the debug information names `name`
-    /// rather than by its symbol, which must be unique in the object: a debugger shows `name`,
-    /// and DWARF keeps the symbol as the function's linkage name.
+    /// rather than by its symbol, which must be unique in the object: a debugger shows `name`.
     pub fn define_function_as(
         &mut self,
         id: FuncId,
@@ -652,6 +668,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(writer.positions.limit, SourceLoc::default().bits());
+    }
+
+    #[test]
+    fn test_code_without_a_position_belongs_to_the_declaration_only_before_the_body() {
+        let decl = pos(1, 1);
+        let found = [
+            (0, 4, None),
+            (4, 8, Some(pos(2, 5))),
+            (8, 10, None),
+            (10, 12, Some(pos(3, 5))),
+            (12, 16, None),
+        ];
+        assert_eq!(
+            placed(decl, &found),
+            vec![
+                range(0, 4, decl),
+                range(4, 8, pos(2, 5)),
+                range(8, 10, pos(2, 5)),
+                range(10, 12, pos(3, 5)),
+                range(12, 16, pos(3, 5)),
+            ]
+        );
+        assert_eq!(placed(decl, &[(0, 2, None)]), vec![range(0, 2, decl)]);
     }
 
     #[test]

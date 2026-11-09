@@ -9,6 +9,7 @@ mn="$1"
 out="$(mktemp -d)"
 
 line() { grep -n -F "$1" "$here/demo.mn" | head -1 | cut -d: -f1; }
+L_DECL=$(line "fn square")
 L_SQUARE=$(line "x * x")
 L_CALL=$(line "square(a)")
 L_NEXT=$(line "square(b)")
@@ -31,9 +32,9 @@ case "$(uname -s)" in
     gdb -batch -nx -iex "set debuginfod enabled off" \
       -ex "break demo.mn:$L_SQUARE" -ex run -ex bt -ex next "$exe" > "$out/gdb.txt" 2>&1 || true
     cat "$out/gdb.txt"
-    expect "$out/gdb.txt" "gdb stops on demo.mn:$L_SQUARE in square" "Breakpoint 1, .*square .*demo\.mn:$L_SQUARE"
-    expect "$out/gdb.txt" "gdb unwinds into sum_squares at the call" "^#1 .*sum_squares .*demo\.mn:$L_CALL"
-    expect "$out/gdb.txt" "gdb unwinds through every Mente frame into main" "^#[0-9]+ .* main .*demo\.mn"
+    expect "$out/gdb.txt" "gdb stops on demo.mn:$L_SQUARE in square" "^Breakpoint 1, square \(\) at .*demo\.mn:$L_SQUARE"
+    expect "$out/gdb.txt" "gdb unwinds into sum_squares at the call" "^#1 .* in sum_squares \(\) at .*demo\.mn:$L_CALL"
+    expect "$out/gdb.txt" "gdb unwinds through every Mente frame into main" "^#[0-9]+ .* in main \(\) at .*demo\.mn"
     # Returning into the middle of line $L_CALL, gdb steps on to the start of the next line.
     expect "$out/gdb.txt" "gdb steps out of square to the caller's next line" "^sum_squares \(\) at .*demo\.mn:$L_NEXT"
     ;;
@@ -43,11 +44,14 @@ case "$(uname -s)" in
       [ -x "$c" ] && cdb="$c" && break
     done
     [ -n "$cdb" ] || { echo "cdb.exe not found; the runner's Windows Kits hold:"; ls "/c/Program Files (x86)/Windows Kits/10" || true; exit 1; }
-    "$cdb" -lines -c "bp \`demo.mn:$L_SQUARE\`; g; k; q" "$exe" > "$out/cdb.txt" 2>&1 || true
+    # A line with checks has code in more than one place, the checks' traps out of line, and cdb
+    # refuses such a line as ambiguous; so the breakpoint is on the function.
+    "$cdb" -lines -c "bp demo!square; g; kn; gu; kn; q" "$exe" > "$out/cdb.txt" 2>&1 || true
     cat "$out/cdb.txt"
-    expect "$out/cdb.txt" "cdb stops in square at demo.mn:$L_SQUARE" "demo!square.*demo\.mn @ $L_SQUARE"
-    expect "$out/cdb.txt" "cdb unwinds into sum_squares at the call" "demo!sum_squares.*demo\.mn @ $L_CALL"
-    expect "$out/cdb.txt" "cdb unwinds through every Mente frame into main" "demo!main.*demo\.mn"
+    expect "$out/cdb.txt" "cdb stops on square's entry at demo.mn:$L_DECL" "^00 .*demo!square .*demo\.mn @ $L_DECL"
+    expect "$out/cdb.txt" "cdb unwinds into sum_squares at the call" "^01 .*demo!sum_squares\+.*demo\.mn @ $L_CALL"
+    expect "$out/cdb.txt" "cdb unwinds through every Mente frame into main" "demo!main\+.*demo\.mn"
+    expect "$out/cdb.txt" "cdb steps out of square into sum_squares at the call" "^00 .*demo!sum_squares\+.*demo\.mn @ $L_CALL"
     ;;
   *) echo "the debugger sessions cover Linux and Windows"; exit 1 ;;
 esac

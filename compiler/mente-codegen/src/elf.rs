@@ -198,12 +198,6 @@ pub(crate) fn add_dwarf(
             gimli::DW_AT_name,
             AttributeValue::String(f.debug_name.as_bytes().to_vec()),
         );
-        if f.debug_name != f.name {
-            e.set(
-                gimli::DW_AT_linkage_name,
-                AttributeValue::String(f.name.as_bytes().to_vec()),
-            );
-        }
         e.set(gimli::DW_AT_external, AttributeValue::Flag(true));
         e.set(
             gimli::DW_AT_decl_file,
@@ -341,8 +335,8 @@ mod tests {
         is_stmt: bool,
     }
 
-    /// A function defined under a name of its own: DWARF names it so, and keeps its symbol as
-    /// the linkage name.
+    /// A function defined under a name of its own: DWARF names it so, and gives no linkage
+    /// name, which gdb would show instead.
     #[test]
     fn test_dwarf_names_a_function_as_it_was_defined() {
         for target in [Target::X86_64Linux, Target::Aarch64Linux] {
@@ -364,11 +358,10 @@ mod tests {
                     .into_owned()
             };
             assert_eq!(string(gimli::DW_AT_name), "one", "{target:?}");
-            assert_eq!(
-                string(gimli::DW_AT_linkage_name),
-                test_program::NAMED_SYMBOL,
-                "{target:?}"
-            );
+            assert!(sp.attr_value(gimli::DW_AT_linkage_name).is_none());
+            // The symbol keeps its own name.
+            let symbol = file.symbol_by_name(test_program::NAMED_SYMBOL).unwrap();
+            assert!(symbol.is_definition(), "{target:?}");
         }
     }
 
@@ -469,8 +462,6 @@ mod tests {
             let mut subprograms = Vec::new();
             while let Some(e) = entries.next_dfs().unwrap() {
                 assert_eq!(e.tag(), gimli::DW_TAG_subprogram);
-                // Named by its symbol, a function needs no linkage name of its own.
-                assert!(e.attr_value(gimli::DW_AT_linkage_name).is_none());
                 let udata = |at| match e.attr_value(at) {
                     Some(gimli::AttributeValue::Udata(v)) => v,
                     other => panic!("{at}: {other:?}"),
