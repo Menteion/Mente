@@ -91,10 +91,26 @@ pub struct Obligation {
     /// What a run-time check checks against, as `mn view --checks` prints it: `into `u8``,
     /// `into an array of 4`, `below 8`; empty when there is nothing to say.
     pub detail: String,
-    /// For a `Range` obligation, the type the value enters, which tells apart two narrowings at
-    /// one place; the lowering leaves out a check only where every obligation of its kind, place
-    /// and type is proven.
-    pub into: Option<&'static str>,
+    /// What tells it apart from other obligations of its kind at its place; the lowering leaves
+    /// out a check only where every obligation of its kind, place and tag is proven.
+    pub tag: Tag,
+}
+
+/// What tells apart obligations of one kind at one place, so that the lowering leaves out of
+/// MIR exactly the checks Tier 1 proves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tag {
+    /// Nothing more than the kind and the place.
+    None,
+    /// A narrowing: the type the value enters.
+    Into(&'static str),
+    /// A `requires`, `ensures` or `invariant` clause, or a `decreases` measure that is never
+    /// negative: the clause's own span. Each conjunct of an invariant carries its clause's.
+    Clause(Span),
+    /// The `decreases` measures together, smaller than at the previous round or on entry.
+    Smaller,
+    /// A `mut` place's refinement, with what the callee left in it.
+    Back,
 }
 
 /// Every obligation of a function, proven or not, the errors for those it must prove, and the
@@ -1381,8 +1397,8 @@ impl<'a> Fx<'a> {
 
     // -- diagnostics -------------------------------------------------------------------------
 
-    fn record(&mut self, kind: ObligationKind, span: Span, must: bool, proven: bool) {
-        self.record_check(kind, span, must, proven, String::new(), None);
+    fn record(&mut self, kind: ObligationKind, span: Span, must: bool, proven: bool, tag: Tag) {
+        self.record_check(kind, span, must, proven, String::new(), tag);
     }
 
     fn record_check(
@@ -1392,7 +1408,7 @@ impl<'a> Fx<'a> {
         must: bool,
         proven: bool,
         detail: String,
-        into: Option<&'static str>,
+        tag: Tag,
     ) {
         if self.recording {
             self.report.obligations.push(Obligation {
@@ -1401,7 +1417,7 @@ impl<'a> Fx<'a> {
                 must,
                 proven,
                 detail,
-                into,
+                tag,
             });
         }
     }
@@ -1850,7 +1866,7 @@ impl<'a> Fx<'a> {
             false,
             st.is_empty() || proven,
             detail,
-            t.map(|t| t.name),
+            t.map_or(Tag::None, |t| Tag::Into(t.name)),
         );
         // An empty interval is a value no path computes, after an operation that always traps.
         let (tlo, thi) = range.filter(|_| !st.is_empty() && lo <= hi)?;
@@ -1885,7 +1901,7 @@ impl<'a> Fx<'a> {
         st: &Octagon,
         v: &Val,
         shape: &Shape,
-        span: Span,
+        (span, tag): (Span, Tag),
         place: &str,
         what: Option<(String, u8)>,
     ) {
@@ -1900,7 +1916,7 @@ impl<'a> Fx<'a> {
                     }
                 }
                 if let Some(r) = refine {
-                    self.refinement(st, v, r, span, place, what);
+                    self.refinement(st, v, r, (span, tag), place, what);
                 }
             }
             Shape::Array(_, elem) => {
@@ -1909,7 +1925,7 @@ impl<'a> Fx<'a> {
                     _ => TOP,
                 };
                 let place = format!("each element of {}", place);
-                self.narrow(st, &each, elem, span, &place, None);
+                self.narrow(st, &each, elem, (span, tag), &place, None);
             }
             Shape::Other => {}
         }
@@ -1920,7 +1936,7 @@ impl<'a> Fx<'a> {
         st: &Octagon,
         v: &Val,
         r: &Refine,
-        span: Span,
+        (span, tag): (Span, Tag),
         place: &str,
         what: Option<(String, u8)>,
     ) {
@@ -1934,7 +1950,13 @@ impl<'a> Fx<'a> {
         let fail_low = self.refute(st, &low);
         let fail_high = self.refute(st, &high);
         let failing = fail_low.clone().or(fail_high.clone());
-        self.record(ObligationKind::Refinement, span, true, failing.is_none());
+        self.record(
+            ObligationKind::Refinement,
+            span,
+            true,
+            failing.is_none(),
+            tag,
+        );
         let (Some(mut s), true) = (failing, self.recording) else {
             return;
         };
@@ -2008,7 +2030,7 @@ impl<'a> Fx<'a> {
             false,
             st.is_empty() || (lo >= 0 && hi < n),
             format!("into an array of {}", len),
-            None,
+            Tag::None,
         );
     }
 
@@ -2041,7 +2063,8 @@ impl<'a> Fx<'a> {
             let mut s = out.clone();
             let k = self.cond(&mut s, c.expr);
             let failing = self.refute(&s, &k);
-            self.record(ObligationKind::Ensures, span, true, failing.is_none());
+            let tag = Tag::Clause(self.span(c.expr));
+            self.record(ObligationKind::Ensures, span, true, failing.is_none(), tag);
             let Some(failing) = failing else {
                 continue;
             };
@@ -2263,7 +2286,7 @@ impl<'a> Fx<'a> {
                     st,
                     &v,
                     &shape,
-                    self.span(value),
+                    (self.span(value), Tag::None),
                     &place_name,
                     Some((what, p)),
                 );
@@ -2315,7 +2338,7 @@ impl<'a> Fx<'a> {
             _ => {
                 let v = self.eval(st, e);
                 let what = self.own_text(e);
-                self.narrow(st, &v, shape, self.span(e), place, Some(what));
+                self.narrow(st, &v, shape, (self.span(e), Tag::None), place, Some(what));
                 v
             }
         }
@@ -2454,7 +2477,7 @@ impl<'a> Fx<'a> {
                     false,
                     st.is_empty() || (lo >= 0 && hi < width),
                     lt.map_or(String::new(), |t| format!("below {}", t.bits)),
-                    None,
+                    Tag::None,
                 );
                 let v = shift_vals(st, op, l, r, None);
                 self.fits(st, &v, lt, span);
@@ -2473,6 +2496,7 @@ impl<'a> Fx<'a> {
                     rspan,
                     false,
                     st.is_empty() || lo > 0 || hi < 0,
+                    Tag::None,
                 );
                 if op == BinaryOp::Div {
                     div_vals(st, l, r)
@@ -2761,7 +2785,7 @@ impl<'a> Fx<'a> {
         for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
             let v = self.eval(st, a.value);
             let plain = Shape::plain(&Ty::of(&callee.tree, p.ty));
-            self.narrow(st, &v, &plain, self.span(a.value), "", None);
+            self.narrow(st, &v, &plain, (self.span(a.value), Tag::None), "", None);
             if let Some(var) = site.ins[k] {
                 self.assign(st, var, &v);
                 self.facts(st, var, &plain);
@@ -2774,7 +2798,14 @@ impl<'a> Fx<'a> {
             let place = format!("parameter `{}` of `{}`", p.name, callee.name);
             let what = self.own_text(a.value);
             let v = site.ins[k].map_or_else(|| vals[k].clone(), var_val);
-            self.narrow(st, &v, &shape, self.span(a.value), &place, Some(what));
+            self.narrow(
+                st,
+                &v,
+                &shape,
+                (self.span(a.value), Tag::None),
+                &place,
+                Some(what),
+            );
             if let Some(var) = site.ins[k] {
                 self.facts(st, var, &shape);
             }
@@ -2787,7 +2818,8 @@ impl<'a> Fx<'a> {
             }
             let k = self.callee_cond(st, &c, &site, clause.expr, false);
             let failing = self.refute(st, &k);
-            self.record(ObligationKind::Requires, span, true, failing.is_none());
+            let tag = Tag::Clause(callee.tree.expr(clause.expr).span);
+            self.record(ObligationKind::Requires, span, true, failing.is_none(), tag);
             let Some(failing) = failing else {
                 continue;
             };
@@ -2849,7 +2881,7 @@ impl<'a> Fx<'a> {
                 st,
                 &back,
                 &shape.refinements(),
-                self.span(a.value),
+                (self.span(a.value), Tag::Back),
                 &place,
                 None,
             );
@@ -3161,6 +3193,7 @@ impl<'a> Fx<'a> {
             self.span(e),
             true,
             failing.is_none(),
+            Tag::Clause(self.span(e)),
         );
         let Some(failing) = failing else {
             return;
@@ -3299,7 +3332,13 @@ impl<'a> Fx<'a> {
             .find_map(|end| self.round_fails(end, cond, measures, tracked));
         self.recording = true;
         let span = self.span(measures[0].0);
-        self.record(ObligationKind::Decreases, span, true, found.is_none());
+        self.record(
+            ObligationKind::Decreases,
+            span,
+            true,
+            found.is_none(),
+            Tag::Smaller,
+        );
         let Some((mut failing, after, before)) = found else {
             return;
         };
@@ -3362,7 +3401,14 @@ impl<'a> Fx<'a> {
             let text = print(&callee.tree, clause.expr, &no_subst).0;
             let what = format!("the measure `{}` of `{}`", text, callee.name);
             let failing = self.refute(st, &cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0)));
-            self.record(ObligationKind::Decreases, span, true, failing.is_none());
+            let tag = Tag::Clause(callee.tree.expr(clause.expr).span);
+            self.record(
+                ObligationKind::Decreases,
+                span,
+                true,
+                failing.is_none(),
+                tag,
+            );
             if let Some(failing) = failing {
                 let (valuation, _) = self.valuation(&failing, &named, &[]);
                 let message = Fx::cannot_rule_out(
@@ -3397,7 +3443,13 @@ impl<'a> Fx<'a> {
         }
         let entry: Vec<Val> = self.entry_measures.iter().map(|m| var_val(m.0)).collect();
         let failing = self.refute(st, &lex_less(&values, &entry));
-        self.record(ObligationKind::Decreases, span, true, failing.is_none());
+        self.record(
+            ObligationKind::Decreases,
+            span,
+            true,
+            failing.is_none(),
+            Tag::Smaller,
+        );
         let Some(mut failing) = failing else {
             return;
         };
@@ -3447,11 +3499,14 @@ impl<'a> Fx<'a> {
         // condition's conjuncts with the non-strict form of each strict one, then the guards.
         let mut cands = Vec::new();
         let mut axioms = Vec::new();
+        // The written clause each conjunct of a written invariant comes from.
+        let mut clause_of = Vec::new();
         for &i in invariants {
             if self.outside(i).is_some() {
                 axioms.push(i);
             } else {
                 self.conjuncts(i, &mut cands);
+                clause_of.resize(cands.len(), self.span(i));
             }
         }
         let written = cands.len();
@@ -3515,7 +3570,14 @@ impl<'a> Fx<'a> {
             let span = self.span(match c {
                 Cand::Expr(e) | Cand::Weak(e) => e,
             });
-            self.record(ObligationKind::Invariant, span, true, failing.is_none());
+            let tag = Tag::Clause(clause_of[k]);
+            self.record(
+                ObligationKind::Invariant,
+                span,
+                true,
+                failing.is_none(),
+                tag,
+            );
             let Some((state, on_entry)) = failing else {
                 continue;
             };

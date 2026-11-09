@@ -22,7 +22,7 @@ use mente_mir::cfg::{
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
-use mente_sema::tier1::{Obligation, ObligationKind};
+use mente_sema::tier1::{Obligation, ObligationKind, Tag};
 use mente_sema::types::{Int as SemaInt, IntTy as SemaIntTy, Ty as SemaTy};
 use mente_sema::wide::{self, Interval};
 use mente_sema::{CheckedFn, CheckedModule};
@@ -264,6 +264,44 @@ impl<'a> Scope<'a> {
     }
 }
 
+/// Where Tier 1 records the obligation of a check: its place, or any place for a written
+/// invariant, whose conjuncts it records each at its own; its tag; and whether it is one of a
+/// call's own checks, made in the callee's scope but recorded in the caller's.
+#[derive(Clone, Copy)]
+struct Key {
+    at: Option<Span>,
+    tag: Tag,
+    call: bool,
+}
+
+impl Key {
+    fn at(at: Span, tag: Tag) -> Key {
+        Key {
+            at: Some(at),
+            tag,
+            call: false,
+        }
+    }
+
+    /// A call's own check, at the call or an argument.
+    fn call(at: Span, tag: Tag) -> Key {
+        Key {
+            at: Some(at),
+            tag,
+            call: true,
+        }
+    }
+
+    /// A written invariant, `clause`.
+    fn invariant(clause: Span) -> Key {
+        Key {
+            at: None,
+            tag: Tag::Clause(clause),
+            call: false,
+        }
+    }
+}
+
 /// An index of a place: its value, the span of its indexing, where it traps, and the span of the
 /// index itself, where Tier 1 records it.
 type Indexing = (V, Span, Span);
@@ -339,17 +377,17 @@ impl<'a> Lower<'a> {
         })
     }
 
-    /// Whether Tier 1 proves the check of `kind` it records at `at`, for a narrowing into the
-    /// type `into`: some obligation has that key, and every one that does is proven. Never in a
-    /// callee's scope, nor in an entry, which has no obligations.
-    fn proven(&self, kind: ObligationKind, at: Span, into: Option<&str>) -> bool {
-        if self.in_callee {
+    /// Whether Tier 1 proves the check of `kind` it records under `key`: some obligation has
+    /// that kind, place and tag, and every one that does is proven. In a callee's scope, only a
+    /// call's own checks; in an entry, which has no obligations, none.
+    fn proven(&self, kind: ObligationKind, key: Key) -> bool {
+        if self.in_callee && !key.call {
             return false;
         }
         let mut found = self
             .obligations
             .iter()
-            .filter(|o| o.kind == kind && o.span == at && o.into == into)
+            .filter(|o| o.kind == kind && key.at.is_none_or(|at| o.span == at) && o.tag == key.tag)
             .peekable();
         found.peek().is_some() && found.all(|o| o.proven)
     }
@@ -563,7 +601,8 @@ impl<'a> Lower<'a> {
                 });
             }
             let text = format!("`ensures {}` is false at this return", tree.render_expr(c));
-            self.clause(c, "ensures", &text, span)?;
+            let key = Key::at(span, Tag::Clause(tree.expr(c).span));
+            self.clause(c, ("ensures", ObligationKind::Ensures), &text, span, key)?;
         }
         match v {
             V::Int(n, _) | V::Bool(n) => self.end(Term::Return(Some(n))),
@@ -585,10 +624,21 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
-    /// Traps at `span` with `text` unless the clause `c`, of the current scope, holds.
-    fn clause(&mut self, c: ExprId, kind: &str, text: &str, span: Span) -> Result<(), String> {
+    /// Traps at `span` with `text` unless the clause `c`, of the current scope, holds, or
+    /// Tier 1 proves it under `key`. The clause is evaluated either way, so that a trap inside
+    /// it stays where the reference interpreter has it.
+    fn clause(
+        &mut self,
+        c: ExprId,
+        (kind, obligation): (&str, ObligationKind),
+        text: &str,
+        span: Span,
+        key: Key,
+    ) -> Result<(), String> {
         if let V::Bool(cond) = self.expr(c)? {
-            self.check(cond, kind, &[text], &[], span);
+            if !self.proven(obligation, key) {
+                self.check(cond, kind, &[text], &[], span);
+            }
         }
         Ok(())
     }
@@ -736,7 +786,8 @@ impl<'a> Lower<'a> {
                 "`invariant {}` is false at the loop head",
                 tree.render_expr(i)
             );
-            self.clause(i, "invariant", &text, tree.expr(i).span)?;
+            let (at, key) = (tree.expr(i).span, Key::invariant(tree.expr(i).span));
+            self.clause(i, ("invariant", ObligationKind::Invariant), &text, at, key)?;
         }
         let V::Bool(c) = self.expr(cond)? else {
             return Ok(V::Never);
@@ -748,7 +799,7 @@ impl<'a> Lower<'a> {
         });
         self.b.switch(round);
         if let (Some((seen, slots)), Some(&first)) = (before, decreases.first()) {
-            let now = self.measure(decreases)?;
+            let now = self.measure(decreases, None)?;
             // A measure of any integer type fits u128 once it is not negative.
             let prev: Vec<V> = slots
                 .iter()
@@ -762,7 +813,10 @@ impl<'a> Lower<'a> {
                 "`decreases {}` is negative or did not decrease",
                 tree.render_expr(first)
             );
-            self.check(ok, "decreases", &[&text], &[], tree.expr(first).span);
+            let fspan = tree.expr(first).span;
+            if !self.proven(ObligationKind::Decreases, Key::at(fspan, Tag::Smaller)) {
+                self.check(ok, "decreases", &[&text], &[], fspan);
+            }
             let yes = self.bool(true);
             self.inst(Op::Store, Ty::Unit, &[seen, yes]);
             for (v, s) in now.iter().zip(&slots) {
@@ -782,13 +836,18 @@ impl<'a> Lower<'a> {
         Ok(V::Unit)
     }
 
-    /// The values of a measure, each checked not to be negative at its clause.
-    fn measure(&mut self, exprs: &[ExprId]) -> Result<Vec<V>, String> {
+    /// The values of a measure, each checked not to be negative at its clause, unless Tier 1
+    /// proves it: at the clause in a loop, at the call `call` for a callee's.
+    fn measure(&mut self, exprs: &[ExprId], call: Option<Span>) -> Result<Vec<V>, String> {
         let tree = self.tree();
         let mut values = Vec::new();
         for &e in exprs {
             let v = self.expr(e)?;
-            if let V::Int(n, t) = v {
+            let clause = Tag::Clause(tree.expr(e).span);
+            let key = call.map_or(Key::at(tree.expr(e).span, clause), |at| {
+                Key::call(at, clause)
+            });
+            if let (V::Int(n, t), false) = (v, self.proven(ObligationKind::Decreases, key)) {
                 let zero = self.int(t, Num::ZERO);
                 let ok = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[n, zero]);
                 let text = format!(
@@ -913,7 +972,7 @@ impl<'a> Lower<'a> {
             return Err("an index that is not an integer".into());
         };
         self.at(span);
-        if !self.proven(ObligationKind::Index, key, None) {
+        if !self.proven(ObligationKind::Index, Key::at(key, Tag::None)) {
             let zero = self.int(t, Num::ZERO);
             let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[i, zero]);
             let n = Num::new(false, u128::from(len));
@@ -1028,7 +1087,7 @@ impl<'a> Lower<'a> {
     ) -> Result<V, String> {
         let v = self.narrow(v, from, to, span, Some(span))?;
         if let Some(d) = declared {
-            self.refined(v, to, d, span)?;
+            self.refined(v, to, d, span, Key::at(span, Tag::None))?;
         }
         Ok(v)
     }
@@ -1080,7 +1139,8 @@ impl<'a> Lower<'a> {
         key: Option<Span>,
     ) -> NodeId {
         let into = mir(to);
-        let proven = key.is_some_and(|k| self.proven(ObligationKind::Range, k, Some(to.name)));
+        let proven =
+            key.is_some_and(|k| self.proven(ObligationKind::Range, Key::at(k, Tag::Into(to.name))));
         if from == into || proven {
             return self.cast(n, from, into);
         }
@@ -1114,8 +1174,18 @@ impl<'a> Lower<'a> {
     }
 
     /// Checks a value of `shape` against the refinements of the declared type `d`, elementwise
-    /// for an array.
-    fn refined(&mut self, v: V, shape: &Shape, d: TypeId, span: Span) -> Result<(), String> {
+    /// for an array, trapping at `span`, unless Tier 1 proves under `key` that it fits them.
+    fn refined(
+        &mut self,
+        v: V,
+        shape: &Shape,
+        d: TypeId,
+        span: Span,
+        key: Key,
+    ) -> Result<(), String> {
+        if self.proven(ObligationKind::Refinement, key) {
+            return Ok(());
+        }
         let tree = self.tree();
         match (v, &tree.ty(d).kind, shape) {
             (
@@ -1134,7 +1204,7 @@ impl<'a> Lower<'a> {
                 self.each(len, &mut |l, i| {
                     let at = l.inst(Op::Elem { stride: es.size() }, Ty::Addr, &[a, i]);
                     let x = l.load(at, &es);
-                    l.refined(x, &es, elem, span)
+                    l.refined(x, &es, elem, span, key)
                 })
             }
             _ => Ok(()),
@@ -1640,7 +1710,10 @@ impl<'a> Lower<'a> {
                 let t = lt.unwrap_or(I64);
                 let w = mir(t);
                 // The amount lies within the type's width, unless Tier 1 proves it does.
-                if !self.proven(ObligationKind::Shift, tree.expr(re).span, None) {
+                if !self.proven(
+                    ObligationKind::Shift,
+                    Key::at(tree.expr(re).span, Tag::None),
+                ) {
                     let zero = self.int(tb, Num::ZERO);
                     let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[b, zero]);
                     let width = Num::new(false, u128::from(t.bits));
@@ -1700,7 +1773,8 @@ impl<'a> Lower<'a> {
                 let x = self.cast(a, ta, m);
                 let y = self.cast(b, tb, m);
                 let divides = matches!(arith, ArithOp::Div | ArithOp::Rem);
-                if divides && !self.proven(ObligationKind::Divisor, tree.expr(re).span, None) {
+                let divisor = Key::at(tree.expr(re).span, Tag::None);
+                if divides && !self.proven(ObligationKind::Divisor, divisor) {
                     let zero = self.int(m, Num::ZERO);
                     let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
                     self.check(ok, "division-by-zero", &["division by zero"], &[], span);
@@ -1708,7 +1782,9 @@ impl<'a> Lower<'a> {
                 // An operation on a 128-bit operand is checked unless Tier 1 proves its result
                 // fits.
                 let trap = wide
-                    .filter(|w| !self.proven(ObligationKind::Range, span, Some(w.name)))
+                    .filter(|w| {
+                        !self.proven(ObligationKind::Range, Key::at(span, Tag::Into(w.name)))
+                    })
                     .map(|w| {
                         let after = format!(" does not fit in `{}`", w.name);
                         self.b.trap_site("narrowing", &["", &after])
@@ -1780,9 +1856,9 @@ impl<'a> Lower<'a> {
         let r = self.inst(Op::Call(sig.func), result_ty.unwrap_or(Ty::Unit), &mir_args);
         // A `mut` place takes back what the callee left, which enters its refinement.
         for arg in &args {
-            if let Arg::Place(a, shape, Some(d), _) = arg {
+            if let Arg::Place(a, shape, Some(d), arg_span) = arg {
                 let v = self.load(*a, shape);
-                self.refined(v, shape, *d, at)?;
+                self.refined(v, shape, *d, at, Key::at(*arg_span, Tag::Back))?;
             }
         }
         Ok(match (&sig.result, sret) {
@@ -1812,17 +1888,19 @@ impl<'a> Lower<'a> {
                     Local::Value(v) => v,
                     Local::Place(a, s) => self.load(a, &s),
                 };
-                self.refined(v, &shape, p.ty, span)?;
+                self.refined(v, &shape, p.ty, span, Key::call(span, Tag::None))?;
             }
         }
         for c in self.clauses(ContractKind::Requires) {
             let text = format!("`requires {}` is false at this call", tree.render_expr(c));
-            self.clause(c, "requires", &text, at)?;
+            let key = Key::call(at, Tag::Clause(tree.expr(c).span));
+            self.clause(c, ("requires", ObligationKind::Requires), &text, at, key)?;
         }
         let clauses = self.clauses(ContractKind::Decreases);
         if let Some(&first) = clauses.first() {
-            let now = self.measure(&clauses)?;
-            if let (true, Some(before)) = (recursive, caller) {
+            let now = self.measure(&clauses, Some(at))?;
+            let proven = self.proven(ObligationKind::Decreases, Key::call(at, Tag::Smaller));
+            if let (true, Some(before), false) = (recursive, caller, proven) {
                 let smaller = self.lex_less(&now, &before)?;
                 let text = format!(
                     "`decreases {}` is negative or did not decrease",
@@ -2006,5 +2084,83 @@ pub fn pass2(x: u8) -> u8 = take(x + 1)
         }
         // An entry checks its arguments whatever Tier 1 proves.
         assert_eq!(checks(&proven, "enter half"), kinds(&["narrowing"]));
+    }
+
+    /// Where Tier 1 proves a refinement, a `requires` or `ensures` clause, a loop invariant or
+    /// a `decreases` measure, its check is left out of MIR, clause by clause: a clause outside
+    /// the Tier-1 fragment, which it does not prove, keeps its check, and so does an entry.
+    #[test]
+    fn test_tier1_proofs_leave_contract_checks_out_of_mir() {
+        let src = "module m
+fn need(x: u8) -> u8
+  requires x > 2
+= x - 1
+pub fn use_need(x: u8[5..10]) -> u8 = need(x)
+fn small(k: u8[0..10]) -> u8 = k
+pub fn give(x: u8[0..5]) -> u8 = small(x)
+pub fn land(x: u8[0..5]) -> u8[0..10] = x
+fn bump(mut k: u8[0..10]) {
+  guard k < 9 else {
+    return
+  }
+  k += 1
+}
+pub fn twice(x: u8[0..5]) -> u8 {
+  var k: u8[0..10] = x
+  bump(mut k)
+  k
+}
+pub fn count(n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n invariant i <= n and n >= 0 decreases n - i {
+    i += 1
+  }
+  i
+}
+fn down(n: u8) -> u8
+  decreases n
+= if n == 0 { 0 } else { down(n - 1) }
+pub fn start(n: u8) -> u8 = down(n)
+pub fn pos(x: u8) -> u8
+  ensures result >= x
+= x
+@checked
+fn both(x: u8, y: u8) -> u8
+  requires x * y < 100
+  requires x < 50
+= x
+pub fn call_both(x: u8[0..5], y: u8[0..5]) -> u8 = both(x, y)
+";
+        let proven = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        let unproven = lower(&mente_sema::check_program_without_proofs(src).unwrap()).unwrap();
+        let both = |name: &str| (checks(&proven, name), checks(&unproven, name));
+        let kinds = |k: &[&str]| k.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (refinement, decreases) = ("refinement", "decreases");
+        for (name, kept, all) in [
+            ("use_need", &[][..], &["requires"][..]),
+            ("give", &[], &[refinement]),
+            ("land", &[], &[refinement]),
+            ("twice", &[], &[refinement, refinement, refinement]),
+            (
+                "count",
+                &[],
+                &[decreases, decreases, "invariant", "narrowing", "narrowing"],
+            ),
+            (
+                "down",
+                &[],
+                &[decreases, decreases, "narrowing", "narrowing"],
+            ),
+            ("start", &[], &[decreases]),
+            ("pos", &[], &["ensures"]),
+            ("call_both", &["requires"], &["requires", "requires"]),
+        ] {
+            assert_eq!(both(name), (kinds(kept), kinds(all)), "{name}");
+        }
+        // An entry checks its arguments' refinements whatever Tier 1 proves.
+        assert_eq!(
+            checks(&proven, "enter give"),
+            kinds(&["narrowing", refinement])
+        );
     }
 }
