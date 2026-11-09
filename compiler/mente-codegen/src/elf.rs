@@ -17,9 +17,9 @@ use object::{RelocationEncoding, RelocationFlags, RelocationKind, SectionKind};
 use crate::{producer, rows, CodegenError, Function, SourceFile};
 
 /// How `.eh_frame` encodes each FDE's address: a signed 32-bit offset from the pointer itself,
-/// so that the section needs no dynamic relocation in a position-independent executable.
-const FDE_POINTER: gimli::DwEhPe =
-    gimli::DwEhPe(gimli::DW_EH_PE_pcrel.0 | gimli::DW_EH_PE_sdata4.0);
+/// so that the section needs no dynamic relocation in a position-independent executable. The
+/// byte is `DW_EH_PE_pcrel` (0x10) applied to `DW_EH_PE_sdata4` (0x0b).
+const FDE_POINTER: gimli::DwEhPe = gimli::DwEhPe(0x1b);
 
 /// A DWARF section as `gimli` writes it, with the relocations it asks for.
 #[derive(Clone)]
@@ -543,7 +543,9 @@ mod tests {
             assert_eq!(cies, 1, "{target:?}");
             let sizes: Vec<u64> = fns.iter().map(|f| u64::from(f.size)).collect();
             assert_eq!(lengths, sizes, "{target:?}");
-            assert_eq!(super::FDE_POINTER.0, 0x1b);
+            // The encoding is a 32-bit signed value, relative to the pointer's own address.
+            assert_eq!(super::FDE_POINTER.application(), gimli::DW_EH_PE_pcrel);
+            assert_eq!(super::FDE_POINTER.format(), gimli::DW_EH_PE_sdata4);
         }
     }
 }
