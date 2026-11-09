@@ -1,0 +1,7 @@
+// expect: E0210
+module conformance
+pub fn f(c: bool) -> u8 {
+  if c {
+    return 1
+  }
+}

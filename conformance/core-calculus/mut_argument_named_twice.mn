@@ -1,0 +1,9 @@
+// expect: E0207
+module conformance
+pub fn put(mut x: u8, y: u8) {
+  x = y
+}
+pub fn f() {
+  var xs: [2]u8 = [0, 1]
+  put(mut xs[0], xs[1])
+}

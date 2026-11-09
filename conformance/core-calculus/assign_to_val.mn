@@ -1,0 +1,7 @@
+// expect: E0205
+module conformance
+pub fn f() -> u8 {
+  val x = 1
+  x = 2
+  x
+}

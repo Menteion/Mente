@@ -1,0 +1,5 @@
+// expect: E0208
+module conformance
+pub fn f() {
+  break
+}

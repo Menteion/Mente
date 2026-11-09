@@ -745,18 +745,44 @@ fn continues_statement(last: &TokenKind) -> bool {
 pub fn parse_functions(src: &str, module: &ModuleFile) -> (Vec<tree::FnSyntax>, Vec<Diagnostic>) {
     let mut functions = Vec::new();
     let mut errors = Vec::new();
+    for parsed in parse_bodies(src, module) {
+        functions.extend(parsed.syntax);
+        errors.extend(parsed.errors);
+    }
+    (functions, errors)
+}
+
+/// One function of a module, as [`parse_bodies`] reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedFn {
+    pub name: String,
+    /// Its syntax tree, when it has a body.
+    pub syntax: Option<tree::FnSyntax>,
+    /// What the body parser reported in it.
+    pub errors: Vec<Diagnostic>,
+}
+
+/// Every function of `module`, in order, with the syntax tree of each one that has a body.
+pub fn parse_bodies(src: &str, module: &ModuleFile) -> Vec<ParsedFn> {
+    let mut functions = Vec::new();
     for item in &module.items {
         if let ItemDecl::Fn(f) = item {
             let has_body =
                 f.is_expr_body || f.tokens.last().is_some_and(|t| t.kind == TokenKind::RBrace);
-            if has_body {
-                let (syntax, found) = body::parse_function(src, &f.tokens);
-                functions.push(syntax);
-                errors.extend(found);
-            }
+            let (syntax, errors) = if has_body {
+                let (syntax, errors) = body::parse_function(src, &f.tokens);
+                (Some(syntax), errors)
+            } else {
+                (None, Vec::new())
+            };
+            functions.push(ParsedFn {
+                name: f.name.clone(),
+                syntax,
+                errors,
+            });
         }
     }
-    (functions, errors)
+    functions
 }
 
 // ============================================================================

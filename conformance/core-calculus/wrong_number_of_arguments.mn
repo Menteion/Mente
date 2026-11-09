@@ -1,0 +1,4 @@
+// expect: E0213
+module conformance
+pub fn id(x: u8) -> u8 = x
+pub fn f() -> u8 = id(1, 2)
