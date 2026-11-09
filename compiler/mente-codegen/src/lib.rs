@@ -31,7 +31,9 @@ use object::write::SymbolId;
 
 mod coff;
 mod elf;
+pub mod link;
 pub mod lower;
+pub mod native;
 #[cfg(test)]
 mod test_program;
 

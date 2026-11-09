@@ -123,11 +123,22 @@ jobs:
           cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol
 
   execution-paths:
-    # The MIR interpreter against the reference interpreter on every probe and preliminary
-    # program, over every example and hidden test of their tasks: too slow for a debug build, so
-    # in release here; the unit tests compare the examples alone.
-    name: Execution paths
-    runs-on: ubuntu-24.04
+    # The three execution paths, the reference interpreter, MIR and native code, on every probe
+    # and preliminary program, over every example and hidden test of their tasks, on each
+    # platform native code runs on: too slow for a debug build, so in release here; the unit
+    # tests compare the examples and the construct programs alone.
+    name: Execution paths (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64 Linux
+            os: ubuntu-24.04
+          - name: x86-64 Windows
+            os: windows-2025
+          - name: AArch64 Linux
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -135,7 +146,7 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
       - name: Compare
-        run: cargo test --release --locked -p mente-cli -- --ignored mir_matches_the_reference_interpreter
+        run: cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 
   tier1-latency:
     # The Tier-1 re-check protocol of ROADMAP.md, in release: 1,000 timed single-token edits to

@@ -3,8 +3,9 @@
 //! Commands:
 //! - `mn view --spec <file.mn>` : Instant `<0.1ms` Holographic Spec Blueprint projection & dual hash report.
 //! - `mn view --checks <file.mn>`: Each run-time check Tier 1 leaves, function by function.
-//! - `mn run <file.mn> [--call "f(args)"] [--mir]`: Runs a call on the reference interpreter, or
-//!   with `--mir` through MIR, and prints the result or the trap.
+//! - `mn run <file.mn> [--call "f(args)"] [--mir | --native]`: Runs a call on the reference
+//!   interpreter, with `--mir` through MIR, or with `--native` as native code, and prints the
+//!   result or the trap.
 //! - `mn check [--json] <path>` : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification;
 //!   `--json` prints the diagnostics in the versioned JSON form of `spec/diagnostics.md`.
 //! - `mn explain [code]`        : What an error code means, from the catalogue in `catalogue.rs`.
@@ -65,7 +66,7 @@ fn print_help() {
     println!("  mn explain [code]            Explain an error code, or list them all");
     println!("  mn dump --tokens|--tree|--typed <file.mn>");
     println!("                               Print a phase's output in its canonical form");
-    println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"] [--mir]");
+    println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"] [--mir | --native]");
     println!("                               Run main, or one call, on the reference interpreter");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
@@ -112,18 +113,21 @@ fn cmd_run(args: &[String]) {
     let mut call = None;
     let mut path = None;
     let mut through_mir = false;
+    let mut native = false;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         if a == "--call" {
             call = rest.next().cloned();
         } else if a == "--mir" {
             through_mir = true;
+        } else if a == "--native" {
+            native = true;
         } else if !a.starts_with('-') {
             path = Some(a.clone());
         }
     }
     let Some(path) = path else {
-        eprintln!("Usage: mn run <file.mn> [--call \"f(args)\"] [--mir]");
+        eprintln!("Usage: mn run <file.mn> [--call \"f(args)\"] [--mir | --native]");
         process::exit(2);
     };
     let src = match fs::read_to_string(&path) {
@@ -170,6 +174,24 @@ fn cmd_run(args: &[String]) {
             );
             process::exit(2);
         }
+    }
+    if native {
+        let dir = env::temp_dir().join(format!("mn-run-{}", process::id()));
+        let printed = fs::create_dir_all(&dir)
+            .map_err(|e| e.to_string())
+            .and_then(|()| mente_codegen::lower::lower(&module))
+            .and_then(|lowered| mir_run::native(&lowered, &[(name.clone(), args)], &dir, "run"))
+            .map(|mut p| p.remove(0))
+            .unwrap_or_else(Err);
+        fs::remove_dir_all(&dir).ok();
+        match printed {
+            Ok(lines) => lines.iter().for_each(|l| println!("{}", l)),
+            Err(stop) => {
+                eprintln!("{}: {}", path, stop);
+                process::exit(1);
+            }
+        }
+        return;
     }
     if through_mir {
         match mir_run::run(&module, &name, args) {
