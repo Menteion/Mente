@@ -9,6 +9,8 @@
 pub mod check;
 pub mod incremental;
 pub mod names;
+pub mod octagon;
+pub mod tier1;
 pub mod types;
 
 use std::cmp::Ordering;
@@ -52,14 +54,20 @@ pub fn check_source(src: &str) -> Result<ModuleVerificationReport, Vec<Diagnosti
 }
 
 /// Checks a parsed module: the declaration checks of [`verify_module`], then every function
-/// with a body, under M1's grammar (`spec/grammar.md`) and its names and types
+/// with a body, under M1's grammar (`spec/grammar.md`), its names and types and Tier 1
 /// (`spec/core-calculus.md`). The declaration checks' diagnostics come first.
 pub fn check_module(
     src: &str,
     module: &ModuleFile,
 ) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
-    let verified = verify_module(module);
-    let body_errors = check_bodies(src, module);
+    combine(verify_module(module), check_bodies(src, module))
+}
+
+/// The declaration checks' verdict, then the bodies' diagnostics.
+fn combine<T>(
+    verified: Result<T, Vec<Diagnostic>>,
+    body_errors: Vec<Diagnostic>,
+) -> Result<T, Vec<Diagnostic>> {
     match verified {
         Ok(report) if body_errors.is_empty() => Ok(report),
         Ok(_) => Err(body_errors),
@@ -71,9 +79,10 @@ pub fn check_module(
 }
 
 /// Parses each function with a body, then resolves the names and checks the types of each one
-/// the body parser reports nothing in, function by function in source order.
+/// the body parser reports nothing in, then runs Tier 1 on each one those report nothing in,
+/// function by function in source order.
 pub fn check_bodies(src: &str, module: &ModuleFile) -> Vec<Diagnostic> {
-    bodies(src, module).1
+    bodies(src, module, true).1
 }
 
 /// A function whose body parsed, with its names resolved and its types checked.
@@ -102,9 +111,19 @@ impl CheckedModule {
 /// Parses and checks a module, and returns its checked functions when no check reports
 /// anything, for the reference interpreter to run.
 pub fn check_program(src: &str) -> Result<CheckedModule, Vec<Diagnostic>> {
+    program(src, true)
+}
+
+/// [`check_program`] without Tier 1: for running programs whose refinements and contracts may
+/// fail, as the reference interpreter's own tests do to check its run-time checks.
+pub fn check_program_without_proofs(src: &str) -> Result<CheckedModule, Vec<Diagnostic>> {
+    program(src, false)
+}
+
+fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
     let module = parse_module(src).map_err(|d| vec![d])?;
-    check_module(src, &module)?;
-    let (functions, _) = bodies(src, &module);
+    let (functions, body_errors) = bodies(src, &module, prove);
+    combine(verify_module(&module), body_errors)?;
     Ok(CheckedModule {
         names: module
             .items
@@ -125,7 +144,7 @@ pub fn check_program(src: &str) -> Result<CheckedModule, Vec<Diagnostic>> {
 pub fn dump_typed(src: &str) -> String {
     let mut out = format!("mente-dump {} typed\n", mente_syntax::DUMP_VERSION);
     if let Ok(module) = parse_module(src) {
-        for f in bodies(src, &module).0.into_iter().flatten() {
+        for f in bodies(src, &module, true).0.into_iter().flatten() {
             out.push_str(&mente_syntax::tree::Tree::render_fn(&f.syntax));
             out.push('\n');
             for (b, ty) in f.resolution.bindings.iter().zip(&f.typing.bindings) {
@@ -153,35 +172,70 @@ pub fn dump_typed(src: &str) -> String {
 }
 
 /// Parses each function with a body, then resolves the names and checks the types of each one
-/// the body parser reports nothing in, function by function in source order.
-fn bodies(src: &str, module: &ModuleFile) -> (Vec<Option<CheckedFn>>, Vec<Diagnostic>) {
+/// the body parser reports nothing in, then, when `prove`, runs Tier 1 on each one those report
+/// nothing in, function by function in source order. Tier 1 reads each callee's header as it
+/// parsed, from the module's functions in order.
+fn bodies(
+    src: &str,
+    module: &ModuleFile,
+    prove: bool,
+) -> (Vec<Option<CheckedFn>>, Vec<Diagnostic>) {
     let parsed = mente_syntax::parse_bodies(src, module);
+    let routings: Vec<tier1::Routing> = module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ItemDecl::Fn(f) => Some(tier1::Routing::of(&f.attrs)),
+            _ => None,
+        })
+        .collect();
     let names: Vec<String> = parsed.iter().map(|p| p.name.clone()).collect();
     let signatures: Vec<Option<check::Signature>> = parsed
         .iter()
         .map(|p| p.syntax.as_ref().map(check::Signature::of))
         .collect();
+    let callees: Vec<Option<tier1::Callee>> = parsed
+        .iter()
+        .map(|p| p.syntax.as_ref().map(|syntax| tier1::Callee { syntax }))
+        .collect();
     let mut errors = Vec::new();
-    let mut functions = Vec::new();
-    for p in parsed {
-        let clean = p.errors.is_empty();
-        errors.extend(p.errors);
-        let checked = match (p.syntax, clean) {
+    let mut checked = Vec::new();
+    for (p, routing) in parsed.iter().zip(&routings) {
+        errors.extend(p.errors.iter().cloned());
+        let done = match (&p.syntax, p.errors.is_empty()) {
             (Some(syntax), true) => {
-                let (resolution, found) = names::resolve(&syntax, &names);
+                let (resolution, mut found) = names::resolve(syntax, &names);
+                let (typing, typed) = check::check(syntax, &resolution, &signatures);
+                found.extend(typed);
+                if prove && found.is_empty() {
+                    let f = tier1::Function {
+                        syntax,
+                        resolution: &resolution,
+                        typing: &typing,
+                        routing: *routing,
+                    };
+                    found.extend(tier1::check(&f, &callees, src).diagnostics);
+                }
                 errors.extend(found);
-                let (typing, found) = check::check(&syntax, &resolution, &signatures);
-                errors.extend(found);
-                Some(CheckedFn {
-                    syntax,
-                    resolution,
-                    typing,
-                })
+                Some((resolution, typing))
             }
             _ => None,
         };
-        functions.push(checked);
+        checked.push(done);
     }
+    drop(callees);
+    let functions = parsed
+        .into_iter()
+        .zip(checked)
+        .map(|(p, done)| match (p.syntax, done) {
+            (Some(syntax), Some((resolution, typing))) => Some(CheckedFn {
+                syntax,
+                resolution,
+                typing,
+            }),
+            _ => None,
+        })
+        .collect();
     (functions, errors)
 }
 

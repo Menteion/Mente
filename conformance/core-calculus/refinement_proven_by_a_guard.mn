@@ -1,0 +1,16 @@
+// expect: pass
+module conformance
+pub fn next(x: u8) -> u8[1..=255] {
+  guard x < 255 else {
+    return 1
+  }
+  return x + 1
+}
+
+pub fn first(xs: [8]u8, n: usize[0..=8]) -> u8 {
+  guard n > 0 else {
+    return 0
+  }
+  val last: usize[0..8] = n - 1
+  xs[last]
+}

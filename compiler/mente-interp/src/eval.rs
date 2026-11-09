@@ -529,6 +529,9 @@ impl<'m> Machine<'m> {
                 let (result, finals) = self.call(index, values, &spans, span, caller)?;
                 for (place, v) in places.into_iter().zip(finals) {
                     if let Some(path) = place {
+                        // The value a `mut` parameter hands back enters the place's refinement.
+                        let declared = self.place_type(frame, &path);
+                        self.refined(frame, &v, declared, span)?;
                         self.write(frame, &path, v)?;
                     }
                 }

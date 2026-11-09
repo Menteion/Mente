@@ -876,13 +876,62 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\n@total\npub fn countdown(n: u32) -> u32 {\n  while n > 0 {\n  }\n  n\n}\n",
         "module m\n@total\npub fn countdown(n: u32) -> u32\n  decreases n\n{\n  while n > 0 {\n  }\n  n\n}\n",
     ),
-    reserved(
+    emitted(
+        "E0502",
+        FailureClass::Proof,
+        "spec/core-calculus.md",
+        "Tier 1 cannot prove a value lies in its refined type",
+        "A value entering a refined type (a binding's initializer, an assignment, an element \
+         store, an argument, a returned value) must be proven inside the refinement at compile \
+         time. The message names a valuation Tier 1 cannot rule out; octagons over-approximate, \
+         so no run may reach it. The fix inserts a `guard` before the statement, whose `else` \
+         leaves by `todo` or `return`: decide what the function does there.",
+        "module m\npub fn next(x: u8) -> u8[1..=255] {\n  return x + 1\n}\n",
+        "module m\npub fn next(x: u8) -> u8[1..=255] {\n  guard x < 255 else {\n    return 1\n  }\n  return x + 1\n}\n",
+    ),
+    emitted(
         "E0503",
         FailureClass::Proof,
         "spec/ghost-contracts-and-totality.md",
         "A contract clause outside Tier 1 is not routed",
-        "A `requires`, `ensures` or `invariant` clause outside the Tier-1 fragment needs `@prove` \
-         (Tier 2 proves it) or `@checked` (it becomes a runtime check). The help offers both.",
+        "A `requires`, `ensures` or `invariant` clause outside the Tier-1 fragment (a conjunction \
+         of comparisons `x + y <= c`) needs `@prove` (a trusted axiom until `mn prove` runs) or \
+         `@checked` (a run-time check). The help offers both.",
+        "module m\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n= x / 2\n",
+        "module m\n@checked\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n= x / 2\n",
+    ),
+    emitted(
+        "E0504",
+        FailureClass::Proof,
+        "spec/core-calculus.md",
+        "Tier 1 cannot prove a requires clause at a call",
+        "Each call proves the callee's `requires` from what the caller knows: its own refinements \
+         and `requires`, conditions and `guard`s, and its callees' `ensures`. The message names a \
+         valuation Tier 1 cannot rule out, and the fix guards the call.",
+        "module m\npub fn pick(lo: u8, hi: u8) -> u8\n  requires lo < hi\n= lo\npub fn f(n: u8) -> u8 = pick(0, n)\n",
+        "module m\npub fn pick(lo: u8, hi: u8) -> u8\n  requires lo < hi\n= lo\npub fn f(n: u8) -> u8 {\n  guard n > 0 else {\n    return 0\n  }\n  pick(0, n)\n}\n",
+    ),
+    emitted(
+        "E0505",
+        FailureClass::Proof,
+        "spec/core-calculus.md",
+        "Tier 1 cannot prove an ensures clause at a return",
+        "Every return, the end of the body included, proves the function's `ensures` with \
+         `result` the returned value. The message names a valuation Tier 1 cannot rule out, and \
+         the fix guards the return.",
+        "module m\npub fn inc(x: u8) -> u8\n  ensures result > x\n= x\n",
+        "module m\npub fn inc(x: u8[0..255]) -> u8\n  ensures result > x\n= x + 1\n",
+    ),
+    emitted(
+        "E0506",
+        FailureClass::Proof,
+        "spec/ghost-contracts-and-totality.md",
+        "Tier 1 cannot prove a loop invariant",
+        "A written `invariant` holds when the loop is entered and after every round of its body. \
+         The message says which fails and names a valuation Tier 1 cannot rule out; the fix \
+         guards the loop's entry, or the end of its body.",
+        "module m\npub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i <= 5 {\n    i += 1\n  }\n  i\n}\n",
+        "module m\npub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i <= n {\n    i += 1\n  }\n  i\n}\n",
     ),
     reserved(
         "E0601",

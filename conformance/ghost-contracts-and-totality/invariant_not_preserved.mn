@@ -1,0 +1,9 @@
+// expect: E0506
+module conformance
+pub fn count(n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n invariant i <= 5 {
+    i += 1
+  }
+  i
+}

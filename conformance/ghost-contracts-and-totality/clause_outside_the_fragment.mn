@@ -1,0 +1,5 @@
+// expect: E0503
+module conformance
+pub fn half(x: u8) -> u8
+  requires x % 2 == 0
+= x / 2

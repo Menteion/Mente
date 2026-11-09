@@ -1142,7 +1142,7 @@ mod tests {
             ["E0203"]
         );
         assert_eq!(
-            codes("pub fn f(x: u8, c: bool)\n  requires x > 0 and c\n  decreases x\n{\n  var i = x\n  while i > 0\n    invariant i <= x\n    decreases i\n  {\n    i -= 1\n  }\n  guard c else {\n    return\n  }\n}"),
+            codes("@checked\npub fn f(x: u8, c: bool)\n  requires x > 0 and c\n  decreases x\n{\n  var i = x\n  while i > 0\n    invariant i <= x\n    decreases i\n  {\n    i -= 1\n  }\n  guard c else {\n    return\n  }\n}"),
             NONE
         );
         assert_eq!(
