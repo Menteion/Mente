@@ -21,11 +21,20 @@ export interface Task {
   hidden: string[];
 }
 
-/** The public M1 solve tasks a preliminary run gives the agent: the core ones or the others. */
-export function preliminaryTasks(tasks: Task[], core: boolean): Task[] {
-  return tasks.filter(
-    (t) => t.milestone === "M1" && t.set === "public" && t.kind === "solve" && t.core === core,
-  );
+/**
+ * The public M1 solve tasks a preliminary run gives the agent: `core`, the others with
+ * `non-core`, or those a comma-separated list of ids names; an id that names no such task is an
+ * error.
+ */
+export function preliminaryTasks(tasks: Task[], which: string): Task[] {
+  const m1 = tasks.filter((t) => t.milestone === "M1" && t.set === "public" && t.kind === "solve");
+  if (which === "core" || which === "non-core") {
+    return m1.filter((t) => t.core === (which === "core"));
+  }
+  const ids = which.split(",").map((id) => id.trim());
+  const unknown = ids.filter((id) => !m1.some((t) => t.id === id));
+  if (unknown.length > 0) throw new Error(`no public M1 solve task ${unknown.join(", ")}`);
+  return m1.filter((t) => ids.includes(t.id));
 }
 
 /** Reads one task file. */

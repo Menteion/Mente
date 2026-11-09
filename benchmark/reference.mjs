@@ -98,6 +98,67 @@ export const tasks = {
     return BigInt(i < 0 ? a.length : i);
   },
 
+  // The harder M1 tasks (docs/design-review.md, benchmark-difficulty).
+
+  spiral(_, m) {
+    const out = [];
+    let [top, bottom, left, right] = [0, m.length - 1, 0, m[0].length - 1];
+    while (top <= bottom && left <= right) {
+      for (let c = left; c <= right; c++) out.push(m[top][c]);
+      for (let r = top + 1; r <= bottom; r++) out.push(m[r][right]);
+      if (top < bottom) for (let c = right - 1; c >= left; c--) out.push(m[bottom][c]);
+      if (left < right) for (let r = bottom - 1; r > top; r--) out.push(m[r][left]);
+      [top, bottom, left, right] = [top + 1, bottom - 1, left + 1, right - 1];
+    }
+    return out;
+  },
+
+  "multiply-digits"(_, a, b) {
+    const value = (ds) => ds.reduceRight((n, d) => n * 10n + d, 0n);
+    let p = value(a) * value(b);
+    const out = [];
+    for (let k = 0; k < 12; k++) {
+      out.push(p % 10n);
+      p /= 10n;
+    }
+    return out;
+  },
+
+  "next-permutation"(_, a) {
+    let i = a.length - 2;
+    while (i >= 0 && a[i] >= a[i + 1]) i--;
+    if (i < 0) {
+      a.reverse();
+      return false;
+    }
+    let j = a.length - 1;
+    while (a[j] <= a[i]) j--;
+    [a[i], a[j]] = [a[j], a[i]];
+    const rest = a.splice(i + 1).reverse();
+    a.push(...rest);
+    return true;
+  },
+
+  bucket(_, x, lo, hi, n) {
+    if (x < lo) return 0n;
+    if (x > hi) return n - 1n;
+    return ((x - lo) * n) / (hi - lo + 1n);
+  },
+
+  "merge-unique"(_, a, b, out) {
+    const all = [...new Set([...a, ...b])].sort(cmp);
+    all.forEach((v, k) => {
+      out[k] = v;
+    });
+    return BigInt(all.length);
+  },
+
+  "day-of-year"(_, year, month, day) {
+    const leap = (year % 4n === 0n && year % 100n !== 0n) || year % 400n === 0n;
+    const lengths = [31n, leap ? 29n : 28n, 31n, 30n, 31n, 30n, 31n, 31n, 30n, 31n, 30n, 31n];
+    return lengths.slice(0, Number(month) - 1).reduce((d, n) => d + n, day);
+  },
+
   // ---------------------------------------------------------------- M2
 
   "parse-u32"(_, s) {
