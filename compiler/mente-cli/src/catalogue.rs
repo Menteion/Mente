@@ -3,7 +3,40 @@
 //! Every code the compiler reports has an entry: what it means, the spec that governs it, a
 //! program that must fail with it and a near miss that must pass; tests run both. A code the
 //! spec defines but the compiler does not report yet is `Reserved`, and a code is never reused:
-//! one that is withdrawn stays here as `Retired`.
+//! one that is withdrawn stays here as `Retired`. Each code also has a failure class, which the
+//! agent benchmark counts when a program fails to build (`ai-coding-problems`).
+
+/// What kind of mistake a code reports. A class joins with the first code that needs it: foreign
+/// idioms and unknown names in M1, effects in M4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureClass {
+    /// The text does not parse.
+    Syntax,
+    /// A view, an arena value or a task-bound value is used where its provenance does not reach.
+    Provenance,
+    /// A layout, bit-field or branch-freedom contract does not hold.
+    HardwareContract,
+    /// A contract, a refinement or a termination measure is not proven.
+    Proof,
+    /// Types do not match, units included.
+    Type,
+    /// A compile-time evaluation goes wrong.
+    Comptime,
+}
+
+impl FailureClass {
+    /// The name `mn explain` prints and the benchmark report counts.
+    pub fn name(self) -> &'static str {
+        match self {
+            FailureClass::Syntax => "syntax",
+            FailureClass::Provenance => "provenance",
+            FailureClass::HardwareContract => "hardware contract",
+            FailureClass::Proof => "proof",
+            FailureClass::Type => "type",
+            FailureClass::Comptime => "comptime",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeStatus {
@@ -19,6 +52,7 @@ pub enum CodeStatus {
 #[derive(Clone, Copy, Debug)]
 pub struct CodeEntry {
     pub code: &'static str,
+    pub class: FailureClass,
     pub status: CodeStatus,
     pub spec: &'static str,
     pub title: &'static str,
@@ -31,6 +65,7 @@ pub struct CodeEntry {
 
 const fn emitted(
     code: &'static str,
+    class: FailureClass,
     spec: &'static str,
     title: &'static str,
     explain: &'static str,
@@ -39,6 +74,7 @@ const fn emitted(
 ) -> CodeEntry {
     CodeEntry {
         code,
+        class,
         status: CodeStatus::Emitted,
         spec,
         title,
@@ -50,12 +86,14 @@ const fn emitted(
 
 const fn reserved(
     code: &'static str,
+    class: FailureClass,
     spec: &'static str,
     title: &'static str,
     explain: &'static str,
 ) -> CodeEntry {
     CodeEntry {
         code,
+        class,
         status: CodeStatus::Reserved,
         spec,
         title,
@@ -69,6 +107,7 @@ const fn reserved(
 pub const CATALOGUE: &[CodeEntry] = &[
     emitted(
         "E0101",
+        FailureClass::Syntax,
         "spec/surface-syntax.md",
         "A name was expected",
         "A declaration, a field, a module path or an attribute needs a name at this point, and \
@@ -79,6 +118,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0102",
+        FailureClass::Syntax,
         "spec/surface-syntax.md",
         "An opening brace was expected",
         "A `struct` and an `@example` open their body with `{`. The parser found something else \
@@ -88,6 +128,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0103",
+        FailureClass::Syntax,
         "spec/surface-syntax.md",
         "A declaration has no closing brace",
         "A `struct`, `bitstruct`, `enum` or `trait` opened with `{` is not closed before the file \
@@ -98,6 +139,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0104",
+        FailureClass::Syntax,
         "spec/regions-and-pools.md",
         "A from clause names no parameter",
         "`from` after a return type lists the parameters a returned view may borrow from, \
@@ -107,6 +149,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0310",
+        FailureClass::Provenance,
         "spec/regions-and-pools.md",
         "A view outlives the value it borrows from",
         "A returned or stored view borrows from somewhere its signature does not allow, or would \
@@ -116,6 +159,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0311",
+        FailureClass::Provenance,
         "spec/regions-and-pools.md",
         "A from clause names a parameter a view cannot borrow from",
         "Every name in a `from` clause must be a parameter of the function, and not an `own` one: \
@@ -126,6 +170,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0312",
+        FailureClass::Provenance,
         "spec/regions-and-pools.md",
         "A type with a destructor is allocated in an arena",
         "An arena is reset in O(1) without running destructors, so a value that owns a resource \
@@ -133,6 +178,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0320",
+        FailureClass::Provenance,
         "spec/regions-and-pools.md",
         "A task-bound value crosses a task boundary",
         "A `Local<T>` counts references without atomic instructions, so a value holding one may \
@@ -141,6 +187,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0401",
+        FailureClass::HardwareContract,
         "spec/hardware-contracts.md",
         "A @branchless function loops with while",
         "`@branchless` forbids every data-dependent branch. A `while` loop branches on its \
@@ -152,6 +199,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0402",
+        FailureClass::HardwareContract,
         "spec/hardware-contracts.md",
         "A @branchless function raises",
         "`raise` leaves the function along an error path, which is a branch. A `@branchless` \
@@ -161,6 +209,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0403",
+        FailureClass::HardwareContract,
         "spec/hardware-contracts.md",
         "A @branchless function's machine code has a conditional jump",
         "After code generation, `mn` disassembles every `@branchless` function and rejects a \
@@ -168,6 +217,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0410",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout alignment is not a power of two",
         "`@layout(size: S, align: A)` needs `A` to be a power of two. The fix suggests the next \
@@ -177,6 +227,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0411",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout size is not a multiple of its alignment",
         "In `@layout(size: S, align: A)`, `S` must be a multiple of `A`, so an array of the struct \
@@ -186,6 +237,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0412",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout field has no @bytes range",
         "Every field of a `@layout` struct states its bytes with `@bytes(start..end)`. When the \
@@ -196,6 +248,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0413",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout field leaves a gap or overlaps",
         "Each field starts exactly where the previous one ends: a gap would be padding nobody \
@@ -205,6 +258,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0414",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @bytes range is empty",
         "`@bytes(start..end)` is half-open and must hold at least one byte: `end` is greater than \
@@ -214,6 +268,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0415",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @bytes range is not as wide as its type",
         "The range of a field holds exactly its type: a `u32` takes 4 bytes, a `[6]u8` 6, a \
@@ -223,6 +278,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0416",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout struct's fields do not fill its size",
         "The last field ends at the declared size, so no byte of the struct is unaccounted for. \
@@ -232,6 +288,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0417",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout field's type has no known size",
         "A `@layout` struct means the same bytes on every target, so its fields are fixed-size \
@@ -242,6 +299,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0418",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout field is not aligned",
         "Unless the struct is `@packed`, each field starts at a multiple of its type's natural \
@@ -252,6 +310,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0419",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout field needs more alignment than its struct",
         "A field's natural alignment may not exceed the struct's `align`, or an array of the \
@@ -261,6 +320,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0420",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A bitstruct's backing type is not supported",
         "A bitstruct packs its fields into `u8`, `u16`, `u32`, `u64` or `u128`. The fix suggests \
@@ -270,6 +330,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0421",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A bitstruct field leaves a gap or overlaps",
         "The `@bits(start..end)` ranges of a bitstruct partition its backing integer: each field \
@@ -279,6 +340,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0422",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @bits range is empty",
         "`@bits(start..end)` is half-open and must hold at least one bit.",
@@ -287,6 +349,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0423",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A bitstruct's fields do not fill its backing type",
         "The last field ends at the width of the backing integer, so every bit has a name. Write \
@@ -296,6 +359,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0424",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A bitstruct field's type is not as wide as its range",
         "A field's type is exactly as wide as its range: `bool` is 1 bit, `uN` and `iN` are `N` \
@@ -305,6 +369,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0425",
+        FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A bitstruct field's type cannot be packed into bits",
         "A bitstruct field is `bool`, `uN`, `iN` or a bitstruct of the same module. Floats, \
@@ -314,6 +379,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     emitted(
         "E0501",
+        FailureClass::Proof,
         "spec/ghost-contracts-and-totality.md",
         "A @total function loops without a decreases measure",
         "`@total` promises the function terminates, so a `while` loop gives a measure that \
@@ -324,6 +390,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0503",
+        FailureClass::Proof,
         "spec/ghost-contracts-and-totality.md",
         "A contract clause outside Tier 1 is not routed",
         "A `requires`, `ensures` or `invariant` clause outside the Tier-1 fragment needs `@prove` \
@@ -331,6 +398,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0601",
+        FailureClass::Type,
         "spec/dimensional-units.md",
         "Quantities of different units are added or compared",
         "Addition, subtraction and comparison need the same unit, scale included: \
@@ -338,6 +406,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0602",
+        FailureClass::Type,
         "spec/dimensional-units.md",
         "A unit conversion changes dimension",
         "`x.to<U>()` converts between units of the same dimension only: seconds to milliseconds, \
@@ -345,6 +414,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0603",
+        FailureClass::Type,
         "spec/dimensional-units.md",
         "An integer conversion to a coarser unit would lose a remainder",
         "On an integer quantity, `.to<U>()` must multiply by an integer ratio. Converting `u64<ms>` \
@@ -353,6 +423,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
     ),
     reserved(
         "E0701",
+        FailureClass::Comptime,
         "spec/comptime-and-ffi.md",
         "A comptime evaluation exceeds its step budget",
         "Each `comptime` evaluation runs under a step budget, 10^7 steps by default, so a build \
@@ -373,8 +444,13 @@ pub fn explain(e: &CodeEntry) -> String {
         CodeStatus::Retired => " (retired)",
     };
     let mut out = format!(
-        "{}: {}{}\n\n{}\n\nGoverned by {}.\n",
-        e.code, e.title, status, e.explain, e.spec
+        "{}: {}{}\n\n{}\n\nGoverned by {}. Failure class: {}.\n",
+        e.code,
+        e.title,
+        status,
+        e.explain,
+        e.spec,
+        e.class.name()
     );
     if e.status == CodeStatus::Emitted {
         out.push_str(&format!(
@@ -516,6 +592,58 @@ mod tests {
                     code
                 );
             }
+        }
+    }
+
+    /// The agent benchmark classifies a program that fails to build by the classes of the codes
+    /// it reports (`ai-coding-problems`), so each code's class is fixed here and printed by
+    /// `mn explain`. Today's codes take their class from their hundred; a code of another kind
+    /// in the same hundred (a foreign idiom among the E01xx, say) is listed here when it arrives.
+    #[test]
+    fn test_every_code_has_a_failure_class() {
+        let all = [
+            FailureClass::Syntax,
+            FailureClass::Provenance,
+            FailureClass::HardwareContract,
+            FailureClass::Proof,
+            FailureClass::Type,
+            FailureClass::Comptime,
+        ];
+        let names: Vec<&str> = all.iter().map(|c| c.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "syntax",
+                "provenance",
+                "hardware contract",
+                "proof",
+                "type",
+                "comptime"
+            ]
+        );
+        for e in CATALOGUE {
+            let expected = match &e.code[..3] {
+                "E01" => FailureClass::Syntax,
+                "E03" => FailureClass::Provenance,
+                "E04" => FailureClass::HardwareContract,
+                "E05" => FailureClass::Proof,
+                "E06" => FailureClass::Type,
+                "E07" => FailureClass::Comptime,
+                other => panic!("{}: no class is expected for {}xx", e.code, other),
+            };
+            assert_eq!(e.class, expected, "{}", e.code);
+        }
+        for (code, class) in [
+            ("E0311", "provenance"),
+            ("E0501", "proof"),
+            ("E0601", "type"),
+        ] {
+            let text = explain(lookup(code).unwrap());
+            assert!(
+                text.contains(&format!(". Failure class: {}.\n", class)),
+                "{}",
+                text
+            );
         }
     }
 
