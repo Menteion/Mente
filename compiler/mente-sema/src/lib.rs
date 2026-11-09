@@ -7,6 +7,7 @@
 //! (`spec/diagnostics.md`).
 
 pub mod check;
+pub mod incremental;
 pub mod names;
 pub mod types;
 

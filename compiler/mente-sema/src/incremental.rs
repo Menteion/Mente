@@ -1,0 +1,486 @@
+//! Checking a module item by item, for `mn check --watch` (`ROADMAP.md`, M1 checkpoint (a)).
+//!
+//! The Tier-1 latency spike found that an edit must re-parse and re-check only the item it
+//! falls in to meet the 5 ms target, and that re-parsing the whole module misses it
+//! ([`tier1-latency-spike`](../../docs/design-review.md#tier1-latency-spike)). A [`Session`]
+//! therefore splits the module into its top-level items, parses and checks each on its own
+//! with spans relative to the item, and keeps the results by the item's text: an item whose
+//! text an edit leaves alone keeps them wherever it moves. A function's names and types are
+//! checked again only when its text changes, or when a function's name or signature does.
+//! Its diagnostics are those `check_source` reports for the whole module, in the same order.
+
+use std::collections::HashMap;
+
+use mente_syntax::diagnostics::Diagnostic;
+use mente_syntax::tree::FnSyntax;
+use mente_syntax::{lex, parse_bodies, parse_module, split_items, ItemDecl, ItemStart, Span};
+
+use crate::check::{self, Signature};
+use crate::{check_source, names, verify_function_contracts};
+
+/// What parsing one item gives, every span relative to the item.
+#[derive(Clone, Debug, Default)]
+struct Parsed {
+    /// The declaration parser's error, with its rank: a lexical error 0, a lifetime 1, the rest
+    /// 2, the order in which `parse_module` looks for them across the whole module.
+    error: Option<(u8, Diagnostic)>,
+    /// The function the item declares.
+    function: Option<Function>,
+    /// The item declares something other than one function, which the session checks with the
+    /// whole module.
+    other: bool,
+}
+
+#[derive(Clone, Debug)]
+struct Function {
+    name: String,
+    /// The declaration checks' error.
+    declaration: Option<Diagnostic>,
+    /// The syntax tree of its body, when it has one.
+    syntax: Option<FnSyntax>,
+    /// What the body parser reported.
+    body: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug)]
+struct Entry {
+    parsed: Parsed,
+    /// The names and types checks' diagnostics, with the context generation they hold for.
+    checked: Option<(u64, Vec<Diagnostic>)>,
+}
+
+/// What the last update did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Work {
+    /// Items parsed again.
+    pub parsed: usize,
+    /// Functions whose names and types were checked again.
+    pub checked: usize,
+    /// Whether the whole module was checked, since it declares more than functions.
+    pub whole: bool,
+}
+
+/// One module, checked item by item across edits.
+#[derive(Debug, Default)]
+pub struct Session {
+    src: String,
+    items: Vec<(ItemStart, String)>,
+    cache: HashMap<String, Entry>,
+    /// Each function's name and signature, which every function's check depends on.
+    context: Vec<(String, Option<Signature>)>,
+    generation: u64,
+    diagnostics: Vec<Diagnostic>,
+    work: Work,
+}
+
+impl Session {
+    pub fn new(src: &str) -> Session {
+        let mut s = Session::default();
+        s.update(src);
+        s
+    }
+
+    /// The module's text now.
+    pub fn source(&self) -> &str {
+        &self.src
+    }
+
+    /// What `check_source` reports for the module, in its order.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// What the last update parsed and checked again.
+    pub fn work(&self) -> Work {
+        self.work
+    }
+
+    /// Replaces the bytes `start..end` of the module's text with `text`.
+    pub fn edit(&mut self, start: usize, end: usize, text: &str) {
+        let mut src = self.src.clone();
+        src.replace_range(start..end, text);
+        self.update(&src);
+    }
+
+    /// Takes the module's new text and checks again what it changed.
+    pub fn update(&mut self, src: &str) {
+        self.src = src.to_string();
+        self.work = Work::default();
+        let starts = split_items(src);
+        let mut items = Vec::new();
+        for (i, at) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).map_or(src.len(), |next| next.offset);
+            items.push((*at, src[at.offset..end].to_string()));
+        }
+        let mut cache = HashMap::new();
+        for (_, text) in &items {
+            if cache.contains_key(text) {
+                continue;
+            }
+            let entry = match self.cache.remove(text) {
+                Some(e) => e,
+                None => {
+                    self.work.parsed += 1;
+                    Entry {
+                        parsed: parse_item(text),
+                        checked: None,
+                    }
+                }
+            };
+            cache.insert(text.clone(), entry);
+        }
+        self.items = items;
+        self.cache = cache;
+        self.diagnostics = self.check();
+    }
+
+    fn check(&mut self) -> Vec<Diagnostic> {
+        let entries: Vec<&Parsed> = self
+            .items
+            .iter()
+            .filter_map(|(_, text)| self.cache.get(text).map(|e| &e.parsed))
+            .collect();
+        if entries.iter().any(|p| p.other) {
+            self.work.whole = true;
+            return check_source(&self.src).err().unwrap_or_default();
+        }
+        // `parse_module` stops at its first error, lexical errors before lifetimes before the rest.
+        let first_error = self
+            .items
+            .iter()
+            .filter_map(|(at, text)| {
+                let e = self.cache.get(text)?.parsed.error.as_ref()?;
+                Some((e.0, at.offset, relocate(&e.1, *at)))
+            })
+            .min_by_key(|(rank, offset, _)| (*rank, *offset));
+        if let Some((_, _, d)) = first_error {
+            return vec![d];
+        }
+        let context: Vec<(String, Option<Signature>)> = self
+            .items
+            .iter()
+            .filter_map(|(_, text)| self.cache.get(text)?.parsed.function.as_ref())
+            .map(|f| (f.name.clone(), f.syntax.as_ref().map(Signature::of)))
+            .collect();
+        if context != self.context {
+            self.context = context;
+            self.generation += 1;
+        }
+        let names: Vec<String> = self.context.iter().map(|(n, _)| n.clone()).collect();
+        let signatures: Vec<Option<Signature>> =
+            self.context.iter().map(|(_, s)| s.clone()).collect();
+        let mut declarations = Vec::new();
+        let mut bodies = Vec::new();
+        for (at, text) in &self.items {
+            let Some(entry) = self.cache.get_mut(text) else {
+                continue;
+            };
+            let Some(f) = &entry.parsed.function else {
+                continue;
+            };
+            declarations.extend(f.declaration.iter().map(|d| relocate(d, *at)));
+            bodies.extend(f.body.iter().map(|d| relocate(d, *at)));
+            let Some(syntax) = f.syntax.as_ref().filter(|_| f.body.is_empty()) else {
+                continue;
+            };
+            let fresh = entry
+                .checked
+                .as_ref()
+                .is_some_and(|(g, _)| *g == self.generation);
+            if !fresh {
+                self.work.checked += 1;
+                let (resolution, mut found) = names::resolve(syntax, &names);
+                found.extend(check::check(syntax, &resolution, &signatures).1);
+                entry.checked = Some((self.generation, found));
+            }
+            if let Some((_, found)) = &entry.checked {
+                bodies.extend(found.iter().map(|d| relocate(d, *at)));
+            }
+        }
+        declarations.extend(bodies);
+        declarations
+    }
+}
+
+/// Parses one item's text on its own.
+fn parse_item(text: &str) -> Parsed {
+    let module = match parse_module(text) {
+        Ok(m) => m,
+        Err(d) => {
+            let rank = if !lex(text).1.is_empty() {
+                0
+            } else if d.code == "E0120" {
+                1
+            } else {
+                2
+            };
+            return Parsed {
+                error: Some((rank, d)),
+                ..Parsed::default()
+            };
+        }
+    };
+    match module.items.as_slice() {
+        [] => Parsed::default(),
+        [ItemDecl::Fn(f)] => {
+            let parsed = parse_bodies(text, &module).into_iter().next();
+            let (syntax, body) = parsed.map_or((None, Vec::new()), |p| (p.syntax, p.errors));
+            Parsed {
+                function: Some(Function {
+                    name: f.name.clone(),
+                    declaration: verify_function_contracts(f).err(),
+                    syntax,
+                    body,
+                }),
+                ..Parsed::default()
+            }
+        }
+        _ => Parsed {
+            other: true,
+            ..Parsed::default()
+        },
+    }
+}
+
+/// A diagnostic of an item, with its spans moved from the item's start to the module's.
+fn relocate(d: &Diagnostic, at: ItemStart) -> Diagnostic {
+    let shift = |s: Span| Span {
+        start: s.start + at.offset,
+        end: s.end + at.offset,
+        line: s.line + at.line - 1,
+        col: s.col,
+    };
+    let mut d = d.clone();
+    d.primary = shift(d.primary);
+    for label in &mut d.related {
+        label.span = shift(label.span);
+    }
+    for fix in &mut d.fixes {
+        for edit in &mut fix.edits {
+            edit.span = shift(edit.span);
+        }
+    }
+    d
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    fn whole(src: &str) -> Vec<Diagnostic> {
+        check_source(src).err().unwrap_or_default()
+    }
+
+    fn mn_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                mn_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "mn") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every module in the repository: item by item, a session reports exactly what the whole
+    /// module's check does.
+    #[test]
+    fn test_a_session_reports_what_the_whole_module_check_does() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        for dir in [
+            "examples",
+            "conformance",
+            "benchmark/probe",
+            "benchmark/prelim",
+        ] {
+            mn_files(&root.join(dir), &mut files);
+        }
+        assert!(files.len() > 100, "{}", files.len());
+        let mut item_by_item = 0;
+        for file in &files {
+            let src = fs::read_to_string(file).unwrap_or_default();
+            let session = Session::new(&src);
+            assert_eq!(
+                session.diagnostics(),
+                whole(&src).as_slice(),
+                "{}",
+                file.display()
+            );
+            if !session.work().whole {
+                item_by_item += 1;
+            }
+        }
+        assert!(item_by_item > 100, "{}", item_by_item);
+    }
+
+    const MODULE: &str = "module m\n\npub fn id(x: u8) -> u8 = x\n\n/// Doubles.\npub fn twice(x: u8) -> u16 {\n  val y: u16 = x\n  y + y\n}\n\npub fn main() -> u16 = twice(id(3))\n";
+
+    /// Applies an edit to a session and to the text, and checks that they agree.
+    fn edited(session: &mut Session, from: &str, to: &str) -> Work {
+        let start = session.source().find(from).unwrap_or(0);
+        session.edit(start, start + from.len(), to);
+        let src = session.source().to_string();
+        assert_eq!(session.diagnostics(), whole(&src).as_slice(), "{}", src);
+        session.work()
+    }
+
+    #[test]
+    fn test_an_edit_parses_and_checks_again_only_what_it_changes() {
+        let mut s = Session::new(MODULE);
+        assert!(s.diagnostics().is_empty());
+        assert_eq!(
+            s.work(),
+            Work {
+                parsed: 4,
+                checked: 3,
+                whole: false
+            }
+        );
+        // A body edit: one item parsed and checked again.
+        let w = edited(&mut s, "y + y", "y + z");
+        assert_eq!(
+            w,
+            Work {
+                parsed: 1,
+                checked: 1,
+                whole: false
+            }
+        );
+        assert_eq!(s.diagnostics()[0].code, "E0201");
+        assert_eq!(s.diagnostics()[0].primary.line, 8);
+        let w = edited(&mut s, "y + z", "y + y");
+        assert_eq!((w.parsed, w.checked), (1, 1));
+        assert!(s.diagnostics().is_empty());
+        // The same text again: nothing to do.
+        let src = s.source().to_string();
+        s.update(&src);
+        assert_eq!(s.work(), Work::default());
+        // A line added above moves every item after it, which keep their results.
+        let w = edited(&mut s, "module m\n", "module m\n\n");
+        assert_eq!((w.parsed, w.checked), (1, 0));
+        // A comment above a function belongs to it.
+        let w = edited(&mut s, "\npub fn id", "\n// the identity\npub fn id");
+        assert_eq!((w.parsed, w.checked), (1, 1));
+        // A signature changes what callers see: every function is checked again.
+        let w = edited(
+            &mut s,
+            "pub fn id(x: u8) -> u8 = x",
+            "pub fn id(x: u8) -> bool = true",
+        );
+        assert_eq!((w.parsed, w.checked), (1, 3));
+        assert_eq!(s.diagnostics()[0].code, "E0203");
+        // A new function, and one removed.
+        let w = edited(
+            &mut s,
+            "\npub fn main()",
+            "\npub fn extra() -> u8 = 1\n\npub fn main()",
+        );
+        assert_eq!(w.parsed, 1);
+        edited(&mut s, "pub fn extra() -> u8 = 1\n\n", "");
+    }
+
+    #[test]
+    fn test_errors_come_in_the_order_the_whole_module_check_gives() {
+        let mut s = Session::new(MODULE);
+        // A parse error in one item and a lexical error in a later one: the lexical error wins.
+        edited(&mut s, "val y: u16 = x", "val y: u16 = (x");
+        edited(
+            &mut s,
+            "pub fn main() -> u16 = twice(id(3))",
+            "pub fn main() -> u16 = twice(id(3)) $",
+        );
+        assert_eq!(s.diagnostics().len(), 1);
+        assert_eq!(s.diagnostics()[0].code, "E0105");
+        edited(&mut s, " $", "");
+        // A lifetime outranks a later parse error and an earlier one alike.
+        edited(
+            &mut s,
+            "pub fn id(x: u8) -> u8 = x",
+            "pub fn id<'a>(x: u8) -> u8 = x",
+        );
+        assert_eq!(s.diagnostics()[0].code, "E0120");
+        edited(&mut s, "<'a>", "");
+        assert_eq!(s.diagnostics()[0].code, "E0111");
+        edited(&mut s, "(x\n", "x\n");
+        assert!(s.diagnostics().is_empty());
+        // Declaration errors come before body errors, and fixes move with their item.
+        edited(&mut s, "pub fn main() -> u16 = twice(id(3))", "@total\npub fn main() -> u16 {\n  var i: u8 = 0\n  while i < 3 {\n    i += 1\n  }\n  twice(id(i))\n}");
+        edited(&mut s, "y + y", "zz");
+        assert_eq!(s.diagnostics()[0].code, "E0501");
+        let fix = s
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == "E0201")
+            .map(|d| d.fixes.clone());
+        assert!(fix.is_some());
+    }
+
+    #[test]
+    fn test_a_module_with_more_than_functions_is_checked_whole() {
+        let mut s = Session::new(MODULE);
+        let w = edited(
+            &mut s,
+            "\npub fn main()",
+            "\npub struct P {\n  x: u8\n}\n\npub fn main()",
+        );
+        assert!(w.whole);
+        edited(&mut s, "pub struct P {\n  x: u8\n}\n\n", "");
+        assert!(!s.work().whole);
+    }
+}
+
+#[cfg(test)]
+mod timing {
+    use std::time::Instant;
+
+    use super::*;
+
+    /// Prints how long a session takes to re-check a body edit in a module of 200 functions,
+    /// against checking the whole module again. Names and types only: Tier 1 comes later.
+    #[test]
+    #[ignore]
+    fn watch_recheck_sketch() {
+        let mut src = String::from("module m\n");
+        for i in 0..200 {
+            src.push_str(&format!(
+                "\npub fn f{i}(xs: [8]i32, n: usize) -> i64 {{\n  var total: i64 = 0\n  var k: usize = 0\n  while k < n and k < 8 {{\n    if xs[k] > 0 {{\n      total += xs[k]\n    }}\n    k += 1\n  }}\n  total\n}}\n"
+            ));
+        }
+        let mut session = Session::new(&src);
+        let mut edits = Vec::new();
+        let mut wholes = Vec::new();
+        for round in 0..200 {
+            let i = (round * 37) % 200;
+            let from = format!("pub fn f{i}(xs: [8]i32, n: usize) -> i64 {{\n  var total: i64 = 0");
+            let to =
+                format!("pub fn f{i}(xs: [8]i32, n: usize) -> i64 {{\n  var total: i64 = {round}");
+            let current = session.source().to_string();
+            let Some(at) = current.find(&from) else {
+                continue;
+            };
+            let start = at + from.len() - 1;
+            let t0 = Instant::now();
+            session.edit(start, start + 1, &round.to_string());
+            edits.push(t0.elapsed().as_micros());
+            let edited = session.source().to_string();
+            let t1 = Instant::now();
+            let _ = check_source(&edited);
+            wholes.push(t1.elapsed().as_micros());
+            let _ = to;
+        }
+        edits.sort_unstable();
+        wholes.sort_unstable();
+        let p = |v: &[u128], q: f64| v[((v.len() - 1) as f64 * q) as usize];
+        println!(
+            "edit re-check: median {} us, p99 {} us; whole module: median {} us, p99 {} us",
+            p(&edits, 0.5),
+            p(&edits, 0.99),
+            p(&wholes, 0.5),
+            p(&wholes, 0.99)
+        );
+    }
+}

@@ -194,8 +194,8 @@ impl Resolver {
                 "E0202",
                 span,
                 format!(
-                    "`{}` is already declared in this function, at line {}; Mente has no shadowing, so give this one a new name",
-                    name, at.line
+                    "`{}` is already declared in this function; Mente has no shadowing, so give this one a new name",
+                    name
                 ),
             )
             .with_related(at, "first declared here");
@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(d[0].code, "E0202");
         assert_eq!(
             d[0].message,
-            "`x` is already declared in this function, at line 3; Mente has no shadowing, so give this one a new name"
+            "`x` is already declared in this function; Mente has no shadowing, so give this one a new name"
         );
         assert_eq!(d[0].primary.line, 4);
         assert_eq!(d[0].related[0].span.line, 3);
