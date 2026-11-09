@@ -304,34 +304,41 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     break;
                 }
             }
-            let is_float = radix == 10
-                && ((j + 1 < len && bytes[j] == b'.' && bytes[j + 1].is_ascii_digit())
-                    || (j < len && (bytes[j] == b'e' || bytes[j] == b'E')));
-            if is_float {
-                if bytes[j] == b'.' {
+            let digit_at = |k: usize| bytes.get(k).is_some_and(u8::is_ascii_digit);
+            let word_at = |k: usize| {
+                bytes
+                    .get(k)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            };
+            // A fraction is `.` and a digit; an exponent is `e` or `E`, then a digit, or a
+            // sign and a digit (`1e12`, `1.5e-3`).
+            let fraction_at = |k: usize| bytes.get(k) == Some(&b'.') && digit_at(k + 1);
+            let exponent_at = |k: usize| {
+                matches!(bytes.get(k), Some(b'e' | b'E'))
+                    && (digit_at(k + 1)
+                        || (matches!(bytes.get(k + 1), Some(b'+' | b'-')) && digit_at(k + 2)))
+            };
+            if radix == 10 && (fraction_at(j) || exponent_at(j)) {
+                if fraction_at(j) {
                     j += 1;
-                    while j < len
-                        && (bytes[j].is_ascii_digit()
-                            || (bytes[j] == b'_'
-                                && bytes.get(j + 1).is_some_and(u8::is_ascii_digit)))
-                    {
+                    while digit_at(j) || (bytes.get(j) == Some(&b'_') && digit_at(j + 1)) {
                         j += 1;
                     }
                 }
-                // Scientific notation e.g. 1e12 or 1e-9
-                if j < len && (bytes[j] == b'e' || bytes[j] == b'E') {
+                if exponent_at(j) {
                     j += 1;
-                    if j < len && (bytes[j] == b'+' || bytes[j] == b'-') {
+                    if matches!(bytes.get(j), Some(b'+' | b'-')) {
                         j += 1;
                     }
-                    while j < len && bytes[j].is_ascii_digit() {
+                    while digit_at(j) {
                         j += 1;
                     }
                 }
                 // A float's suffix, after `_`, names a unit or a fixed-point format.
-                if j + 1 < len && bytes[j] == b'_' && bytes[j + 1].is_ascii_alphabetic() {
-                    j += 2;
-                    while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                if bytes.get(j) == Some(&b'_')
+                    && bytes.get(j + 1).is_some_and(u8::is_ascii_alphabetic)
+                {
+                    while word_at(j) {
                         j += 1;
                     }
                 }
@@ -350,18 +357,16 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             }
 
             let digits_end = j;
-            // A suffix starts with `_` and a letter that is not a digit of the literal.
-            let suffix_starts = j + 1 < len
-                && bytes[j] == b'_'
-                && bytes[j + 1].is_ascii_alphabetic()
-                && !is_digit(bytes[j + 1]);
-            let mut problem = None;
-            if suffix_starts {
-                j += 1;
-            } else if j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                problem = Some(j);
-            }
-            while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            // The digits stop at a `_` only when no digit of the literal follows it, so a `_`
+            // and a letter start the suffix.
+            let suffix_starts = bytes.get(j) == Some(&b'_')
+                && bytes.get(j + 1).is_some_and(u8::is_ascii_alphabetic);
+            let problem = if !suffix_starts && word_at(j) {
+                Some(j)
+            } else {
+                None
+            };
+            while word_at(j) {
                 j += 1;
             }
             let span = Span {
@@ -1709,6 +1714,17 @@ mod tests {
         assert_eq!(cols, vec![1, 9, 11, 15, 17, 22, 24, 28, 29]);
         let (tokens, _) = lex("255_u8 x");
         assert_eq!((tokens[0].span.start, tokens[0].span.end), (0, 6));
+        let (tokens, _) = lex("x 255 y");
+        assert_eq!(tokens[2].span.col, 7);
+        // Letters right after a float, with no `_`, are a word of their own.
+        assert_eq!(
+            kinds("1.5ab"),
+            vec![
+                TokenKind::FloatLit("1.5".into()),
+                TokenKind::Ident("ab".into()),
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -1747,6 +1763,12 @@ mod tests {
         );
         let (tokens, _) = lex(r#""\q" z"#);
         assert_eq!(tokens[1].span.col, 6);
+        let (tokens, errors) = lex(r#"x "\q" z"#);
+        assert_eq!(tokens[2].span.col, 8);
+        let at = errors[0].primary;
+        assert_eq!((at.start, at.end, at.col), (3, 5, 4));
+        let at = lex("\"open\nx").1[0].primary;
+        assert_eq!((at.start, at.end, at.col), (0, 5, 1));
 
         // Malformed integers.
         let malformed = [
@@ -1757,6 +1779,7 @@ mod tests {
             ("1__0", "a `_` in a number stands between two digits, or starts its suffix (`255_u8`)"),
             ("7_", "a `_` in a number stands between two digits, or starts its suffix (`255_u8`)"),
             ("0b1e", "a literal's suffix starts with `_`: write `0b1_e`"),
+            ("1eq5", "a literal's suffix starts with `_`: write `1_eq5`"),
             (
                 "340282366920938463463374607431768211456",
                 "this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1",
@@ -1780,6 +1803,8 @@ mod tests {
             errors[0].fixes[0].applicability,
             Applicability::MachineApplicable
         );
+        let edit = errors[0].fixes[0].edits[0].span;
+        assert_eq!((edit.start, edit.end, edit.col), (9, 9, 10));
         let fixed = diagnostics::apply_fix("val t = 5ms", &errors[0].fixes[0]).unwrap();
         assert_eq!(fixed, "val t = 5_ms");
         assert!(lex(&fixed).1.is_empty());
