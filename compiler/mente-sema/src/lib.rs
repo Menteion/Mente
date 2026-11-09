@@ -124,6 +124,9 @@ pub struct CheckedFn {
     pub syntax: mente_syntax::tree::FnSyntax,
     pub resolution: names::Resolution,
     pub typing: check::Typing,
+    /// Every obligation Tier 1 recorded in the function, proven or not; none when the module
+    /// was checked without it.
+    pub obligations: Vec<tier1::Obligation>,
 }
 
 /// A module that passed every check, with its functions in order: those with a body checked,
@@ -258,6 +261,7 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
                 let (typing, typed) = check::check(syntax, &resolution, &signatures);
                 found.extend(typed);
                 found.extend(wide::check(syntax, &resolution, &typing, src));
+                let mut obligations = Vec::new();
                 if prove && found.is_empty() {
                     let f = tier1::Function {
                         syntax,
@@ -267,10 +271,11 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
                     };
                     let report = tier1::check(&f, &callees, src);
                     found.extend(report.diagnostics.iter().cloned());
+                    obligations = report.obligations.clone();
                     reports.push((p.name.clone(), report));
                 }
                 errors.extend(found);
-                Some((resolution, typing))
+                Some((resolution, typing, obligations))
             }
             _ => None,
         };
@@ -281,10 +286,11 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
         .into_iter()
         .zip(checked)
         .map(|(p, done)| match (p.syntax, done) {
-            (Some(syntax), Some((resolution, typing))) => Some(CheckedFn {
+            (Some(syntax), Some((resolution, typing, obligations))) => Some(CheckedFn {
                 syntax,
                 resolution,
                 typing,
+                obligations,
             }),
             _ => None,
         })
