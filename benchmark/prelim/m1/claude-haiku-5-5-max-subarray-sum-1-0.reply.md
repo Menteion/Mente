@@ -1,0 +1,17 @@
+```mente
+pub fn max_subarray_sum(a: [12]i32) -> i64 {
+  var best: i64 = a[0]
+  var cur: i64 = a[0]
+  var i: usize = 1
+  while i < 12 {
+    val x: i64 = a[i]
+    val extend = cur + x
+    cur = if extend > x { extend } else { x }
+    if cur > best {
+      best = cur
+    }
+    i += 1
+  }
+  best
+}
+```
