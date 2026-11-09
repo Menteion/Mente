@@ -176,18 +176,27 @@ impl<'m> Machine<'m> {
                         return trap(TrapKind::Requires(tree.render_expr(c.expr)), at);
                     }
                 }
-                ContractKind::Decreases => {
-                    let measure = self.measure(frame, &[c.expr])?;
-                    let recursive = caller.as_ref().filter(|(i, _)| *i == frame.index);
-                    if let Some((_, Some(before))) = recursive {
-                        if measure >= *before {
-                            return trap(TrapKind::Decreases(tree.render_expr(c.expr)), at);
-                        }
-                    }
-                    frame.measure = Some(measure);
-                }
-                ContractKind::Ensures => {}
+                ContractKind::Decreases | ContractKind::Ensures => {}
             }
+        }
+        // The `decreases` clauses together form one measure, each part never negative, and at a
+        // direct recursive call smaller than the caller's in lexicographic order.
+        let clauses: Vec<ExprId> = f
+            .syntax
+            .contracts
+            .iter()
+            .filter(|c| c.kind == ContractKind::Decreases)
+            .map(|c| c.expr)
+            .collect();
+        if let Some(&first) = clauses.first() {
+            let measure = self.measure(frame, &clauses)?;
+            let recursive = caller.as_ref().filter(|(i, _)| *i == frame.index);
+            if let Some((_, Some(before))) = recursive {
+                if measure >= *before {
+                    return trap(TrapKind::Decreases(tree.render_expr(first)), at);
+                }
+            }
+            frame.measure = Some(measure);
         }
         let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
         let (result, ret_span) = match f.syntax.body {

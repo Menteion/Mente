@@ -690,3 +690,21 @@ fn test_a_mut_parameter_hands_back_into_its_place_refinement() {
     assert_eq!(run(elems, "main(0)"), "[6, 6]");
     assert_eq!(kind(elems, "main(1)"), "refinement");
 }
+
+/// Several `decreases` clauses of a function form one measure, which a direct recursive call
+/// makes smaller in lexicographic order.
+#[test]
+fn test_function_measures_are_lexicographic() {
+    // The first part stays and the second gets smaller.
+    let second = "pub fn r(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n{\n  if b == 0 {\n    return a\n  }\n  r(a, b - 1)\n}";
+    assert_eq!(run(second, "r(2, 3)"), "2");
+    // Neither gets smaller.
+    let neither = "pub fn r(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n{\n  if b == 0 {\n    return a\n  }\n  r(a, b)\n}";
+    assert_eq!(trapped(neither, "r(2, 3)"), ("decreases".to_string(), 9, 3));
+    // The first gets smaller while the second grows.
+    let first = "pub fn r(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n{\n  if a == 0 {\n    return b\n  }\n  r(a - 1, b + 10)\n}";
+    assert_eq!(run(first, "r(3, 1)"), "31");
+    // Each part is never negative.
+    let negative = "pub fn r(a: i8, b: i8) -> i8\n  decreases a\n  decreases b\n= 0";
+    assert_eq!(kind(negative, "r(1, -1)"), "decreases");
+}

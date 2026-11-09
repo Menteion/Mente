@@ -919,9 +919,10 @@ struct Fx<'a> {
     /// For each `while` statement, a variable for each of its `decreases` measures at the
     /// start of a round, and one for its value at the end.
     measures: Vec<Vec<(usize, usize)>>,
-    /// The function's own measure on entry, its last `decreases` clause, against which a
-    /// recursive call's is compared.
-    entry_measure: Option<usize>,
+    /// For each of the function's `decreases` clauses, which together form one measure, a
+    /// variable for its value on entry, against which a recursive call's is compared, and one
+    /// for its value at the call, for a diagnostic.
+    entry_measures: Vec<(usize, usize)>,
     /// The measures of the enclosing loops' rounds, each followed by how much it has changed.
     tracks: Vec<Track>,
 }
@@ -1024,12 +1025,13 @@ impl<'a> Fx<'a> {
                 _ => Vec::new(),
             })
             .collect();
-        let entry_measure = alloc(
-            f.syntax
-                .contracts
-                .iter()
-                .any(|c| c.kind == ContractKind::Decreases),
-        );
+        let entry_measures = f
+            .syntax
+            .contracts
+            .iter()
+            .filter(|c| c.kind == ContractKind::Decreases)
+            .map(|_| (alloc(true).unwrap_or(0), alloc(true).unwrap_or(0)))
+            .collect();
         let mut fx = Fx {
             syntax: f.syntax,
             tree,
@@ -1053,7 +1055,7 @@ impl<'a> Fx<'a> {
             stmt: None,
             heads: Vec::new(),
             measures,
-            entry_measure,
+            entry_measures,
             tracks: Vec::new(),
         };
         let shape = f.syntax.result.map(|t| fx.own_shape(t));
@@ -1906,11 +1908,11 @@ impl<'a> Fx<'a> {
                 self.assume(st, &k, true);
             }
         }
-        let last = syntax
+        let measures = syntax
             .contracts
             .iter()
-            .rfind(|c| c.kind == ContractKind::Decreases);
-        if let (Some(m), Some(c)) = (self.entry_measure, last) {
+            .filter(|c| c.kind == ContractKind::Decreases);
+        for (c, (m, _)) in measures.zip(self.entry_measures.clone()) {
             let v = self.eval(st, c.expr);
             self.assign(st, m, &v);
         }
@@ -3173,14 +3175,15 @@ impl<'a> Fx<'a> {
         span: Span,
     ) {
         let callee = c.syntax;
-        let recursive = std::ptr::eq(callee, self.syntax);
+        let named = self.call_named(callee, site);
+        let mut values = Vec::new();
+        let mut texts = Vec::new();
         for clause in &callee.contracts {
             if clause.kind != ContractKind::Decreases {
                 continue;
             }
             let v = self.callee_val(st, c, site, clause.expr, false);
             let text = print(&callee.tree, clause.expr, &no_subst).0;
-            let named = self.call_named(callee, site);
             let what = format!("the measure `{}` of `{}`", text, callee.name);
             let failing = self.refute(st, &cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0)));
             self.record(ObligationKind::Decreases, span, true, failing.is_none());
@@ -3208,33 +3211,50 @@ impl<'a> Fx<'a> {
                 let anchor = self.anchor();
                 self.emit("E0507", span, message, Some(guard), anchor);
             }
-            let Some(m) = self.entry_measure.filter(|_| recursive) else {
-                continue;
-            };
-            let failing = self.refute(st, &cmp(BinaryOp::Lt, v.clone(), var_val(m)));
-            self.record(ObligationKind::Decreases, span, true, failing.is_none());
-            let Some(mut failing) = failing else {
-                continue;
-            };
-            self.assign(&mut failing, self.probe, &v);
-            let (valuation, values) = self.valuation(&failing, &named, &[self.probe, m]);
-            let (to, from) = (
-                tuple(values.get(..1).unwrap_or(&[])),
-                tuple(values.get(1..).unwrap_or(&[])),
-            );
-            let message = Fx::cannot_rule_out(
-                &valuation,
-                &format!(
-                    "where {} is {} at this recursive call and {} on entry: a `decreases` measure gets smaller at every recursive call",
-                    what, to, from
-                ),
-                &format!(
-                    "{} is {} at this recursive call and {} on entry: a `decreases` measure gets smaller at every recursive call",
-                    what, to, from
-                ),
-            );
-            self.emit("E0507", span, message, None, Anchor::Nowhere);
+            values.push(v);
+            texts.push(text);
         }
+        // At a direct recursive call, the clauses together, in lexicographic order, are smaller
+        // than on the caller's entry.
+        if !std::ptr::eq(callee, self.syntax) || values.is_empty() {
+            return;
+        }
+        let entry: Vec<Val> = self.entry_measures.iter().map(|m| var_val(m.0)).collect();
+        let failing = self.refute(st, &lex_less(&values, &entry));
+        self.record(ObligationKind::Decreases, span, true, failing.is_none());
+        let Some(mut failing) = failing else {
+            return;
+        };
+        for (v, m) in values.iter().zip(&self.entry_measures) {
+            self.assign(&mut failing, m.1, v);
+        }
+        let extra: Vec<usize> = self
+            .entry_measures
+            .iter()
+            .map(|m| m.1)
+            .chain(self.entry_measures.iter().map(|m| m.0))
+            .collect();
+        let (valuation, picked) = self.valuation(&failing, &named, &extra);
+        let (to, from) = picked.split_at(values.len().min(picked.len()));
+        let what = format!(
+            "the measure `{}` of `{}` is {} at this recursive call and {} on entry",
+            texts.join(", "),
+            callee.name,
+            tuple(to),
+            tuple(from)
+        );
+        let message = Fx::cannot_rule_out(
+            &valuation,
+            &format!(
+                "where {}: a `decreases` measure gets smaller at every recursive call",
+                what
+            ),
+            &format!(
+                "{}: a `decreases` measure gets smaller at every recursive call",
+                what
+            ),
+        );
+        self.emit("E0507", span, message, None, Anchor::Nowhere);
     }
 
     fn while_loop(
@@ -5035,6 +5055,31 @@ mod tests {
         assert_eq!(
             messages(empty_rec),
             ["Tier 1 cannot rule out that the measure `3` of `r` is 3 at this recursive call and 3 on entry: a `decreases` measure gets smaller at every recursive call"]
+        );
+    }
+
+    #[test]
+    fn test_function_measures_are_lexicographic() {
+        // The first part stays and the second gets smaller.
+        let second = "pub fn r(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n{\n  if b == 0 {\n    return a\n  }\n  r(a, b - 1)\n}";
+        assert_eq!(codes(second), NONE);
+        // Neither gets smaller.
+        let neither = "pub fn r(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n{\n  if b == 0 {\n    return a\n  }\n  r(a, b)\n}";
+        assert_eq!(
+            messages(neither),
+            ["Tier 1 cannot rule out `a = 0, b = 1`, where the measure `a, b` of `r` is (0, 1) at this recursive call and (0, 1) on entry: a `decreases` measure gets smaller at every recursive call"]
+        );
+        // The first gets smaller while the second grows.
+        let first = "pub fn r(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n{\n  if a == 0 or b > 200 {\n    return b\n  }\n  r(a - 1, b + 10)\n}";
+        assert_eq!(codes(&format!("@checked\n{}", first)), NONE);
+        // The second gets smaller while the first grows.
+        let grows = "pub fn r(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n{\n  if b == 0 or a > 200 {\n    return a\n  }\n  r(a + 1, b - 1)\n}";
+        assert_eq!(codes(&format!("@checked\n{}", grows)), ["E0507"]);
+        let constant =
+            "pub fn r(c: bool)\n  decreases 3\n  decreases 1\n{\n  if c {\n    r(c)\n  }\n}";
+        assert_eq!(
+            messages(constant),
+            ["Tier 1 cannot rule out that the measure `3, 1` of `r` is (3, 1) at this recursive call and (3, 1) on entry: a `decreases` measure gets smaller at every recursive call"]
         );
     }
 
