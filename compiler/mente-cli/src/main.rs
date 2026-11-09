@@ -6,6 +6,8 @@
 //! - `mn run <file.mn> [--call "f(args)"] [--mir | --native]`: Runs a call on the reference
 //!   interpreter, with `--mir` through MIR, or with `--native` as native code, and prints the
 //!   result or the trap.
+//! - `mn build <file.mn> [--call "f(args)"] [-o <exe>]`: Builds the call as an executable, with
+//!   debug information, that prints what `mn run` prints.
 //! - `mn check [--json] <path>` : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification;
 //!   `--json` prints the diagnostics in the versioned JSON form of `spec/diagnostics.md`.
 //! - `mn explain [code]`        : What an error code means, from the catalogue in `catalogue.rs`.
@@ -44,6 +46,7 @@ fn main() {
         "spec" => cmd_spec(&args[1..]),
         "explain" => cmd_explain(&args[1..]),
         "run" => cmd_run(&args[1..]),
+        "build" => cmd_build(&args[1..]),
         "dump" => cmd_dump(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
@@ -67,6 +70,7 @@ fn print_help() {
     println!("  mn dump --tokens|--tree|--typed <file.mn>");
     println!("                               Print a phase's output in its canonical form");
     println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"] [--mir | --native]");
+    println!("  mn build <file.mn> [--call \"f(1, [2, 3])\"] [-o <exe>]");
     println!("                               Run main, or one call, on the reference interpreter");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
@@ -130,51 +134,7 @@ fn cmd_run(args: &[String]) {
         eprintln!("Usage: mn run <file.mn> [--call \"f(args)\"] [--mir | --native]");
         process::exit(2);
     };
-    let src = match fs::read_to_string(&path) {
-        Ok(src) => src,
-        Err(e) => {
-            eprintln!("error: cannot read `{}`: {}", path, e);
-            process::exit(2);
-        }
-    };
-    let module = match mente_sema::check_program(&src) {
-        Ok(m) => m,
-        Err(diagnostics) => {
-            for d in &diagnostics {
-                eprint!("{}", render_text(d, &path, &src));
-            }
-            process::exit(2);
-        }
-    };
-    let (name, args) = match call.as_deref().map(mente_interp::parse_call_modes) {
-        None => ("main".to_string(), Vec::new()),
-        Some(Some(parsed)) => parsed,
-        Some(None) => {
-            eprintln!(
-                "error: `--call` takes a call such as \"f(1, true, mut [2, 3])\"; got `{}`",
-                call.unwrap_or_default()
-            );
-            process::exit(2);
-        }
-    };
-    // An argument is marked `mut` exactly where its parameter is.
-    let params = module
-        .index(&name)
-        .and_then(|i| module.functions[i].as_ref())
-        .map(|f| f.syntax.params.clone())
-        .unwrap_or_default();
-    for ((is_mut, _), p) in args.iter().zip(&params) {
-        if *is_mut != p.is_mut {
-            eprintln!(
-                "error: parameter `{}` of `{}` is {}, so its argument is {}marked `mut`",
-                p.name,
-                name,
-                if p.is_mut { "`mut`" } else { "read-only" },
-                if p.is_mut { "" } else { "not " }
-            );
-            process::exit(2);
-        }
-    }
+    let (module, name, args) = checked_call(&path, call);
     if native {
         let dir = env::temp_dir().join(format!("mn-run-{}", process::id()));
         let printed = fs::create_dir_all(&dir)
@@ -218,6 +178,111 @@ fn cmd_run(args: &[String]) {
             process::exit(1);
         }
     }
+}
+
+/// Builds a module's call as an executable: its `main`, or the call `--call` names, made when
+/// the executable starts and printed as `mn run` prints it, a trap with the file's name. `-o`
+/// names the executable, by default the source's path without `.mn`; its object file, and on
+/// Windows its PDB, lie beside it. A module that does not check prints its diagnostics
+/// (exit 2); a call that cannot be built, why (exit 1).
+fn cmd_build(args: &[String]) {
+    let mut call = None;
+    let mut path = None;
+    let mut out = None;
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        if a == "--call" {
+            call = rest.next().cloned();
+        } else if a == "-o" {
+            out = rest.next().cloned();
+        } else if !a.starts_with('-') {
+            path = Some(a.clone());
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("Usage: mn build <file.mn> [--call \"f(args)\"] [-o <exe>]");
+        process::exit(2);
+    };
+    let (module, name, args) = checked_call(&path, call);
+    let source = Path::new(&path);
+    let exe = out
+        .map(PathBuf::from)
+        .unwrap_or_else(|| source.with_extension(env::consts::EXE_EXTENSION));
+    let built = mente_codegen::lower::lower(&module).and_then(|lowered| {
+        mir_run::build(
+            &lowered,
+            &[(name, args)],
+            source,
+            &format!("{}: ", path),
+            &exe,
+        )
+    });
+    match built {
+        Ok(()) => println!("{}", exe.display()),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+/// The module at `path`, checked, and the call `call` names in it, `main` by default, with
+/// each argument marked `mut` exactly where its parameter is. Exits with status 2 on anything
+/// that does not check.
+fn checked_call(
+    path: &str,
+    call: Option<String>,
+) -> (
+    mente_sema::CheckedModule,
+    String,
+    Vec<(bool, mente_interp::Value)>,
+) {
+    let src = match fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("error: cannot read `{}`: {}", path, e);
+            process::exit(2);
+        }
+    };
+    let module = match mente_sema::check_program(&src) {
+        Ok(m) => m,
+        Err(diagnostics) => {
+            for d in &diagnostics {
+                eprint!("{}", render_text(d, path, &src));
+            }
+            process::exit(2);
+        }
+    };
+    let (name, args) = match call.as_deref().map(mente_interp::parse_call_modes) {
+        None => ("main".to_string(), Vec::new()),
+        Some(Some(parsed)) => parsed,
+        Some(None) => {
+            eprintln!(
+                "error: `--call` takes a call such as \"f(1, true, mut [2, 3])\"; got `{}`",
+                call.unwrap_or_default()
+            );
+            process::exit(2);
+        }
+    };
+    // An argument is marked `mut` exactly where its parameter is.
+    let params = module
+        .index(&name)
+        .and_then(|i| module.functions[i].as_ref())
+        .map(|f| f.syntax.params.clone())
+        .unwrap_or_default();
+    for ((is_mut, _), p) in args.iter().zip(&params) {
+        if *is_mut != p.is_mut {
+            eprintln!(
+                "error: parameter `{}` of `{}` is {}, so its argument is {}marked `mut`",
+                p.name,
+                name,
+                if p.is_mut { "`mut`" } else { "read-only" },
+                if p.is_mut { "" } else { "not " }
+            );
+            process::exit(2);
+        }
+    }
+    (module, name, args)
 }
 
 /// Checks one module item by item, then again each time its file changes, re-parsing and

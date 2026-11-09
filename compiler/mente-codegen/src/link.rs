@@ -40,7 +40,8 @@ fn command(
                 .arg(format!("/OUT:{}", exe.display()))
                 .arg(object)
                 .arg("/SUBSYSTEM:CONSOLE")
-                .arg("/DEBUG");
+                .arg("/DEBUG")
+                .arg("/INCREMENTAL:NO");
             for dir in &msvc.libs {
                 c.arg(format!("/LIBPATH:{}", dir.display()));
             }
@@ -140,6 +141,7 @@ mod tests {
                 "p.obj",
                 "/SUBSYSTEM:CONSOLE",
                 "/DEBUG",
+                "/INCREMENTAL:NO",
                 "/LIBPATH:lib",
                 "msvcrt.lib",
                 "ucrt.lib",

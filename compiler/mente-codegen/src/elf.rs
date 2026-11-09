@@ -196,7 +196,7 @@ pub(crate) fn add_dwarf(
         let e = dwarf.unit.get_mut(sp);
         e.set(
             gimli::DW_AT_name,
-            AttributeValue::String(f.name.as_bytes().to_vec()),
+            AttributeValue::String(f.debug_name.as_bytes().to_vec()),
         );
         e.set(gimli::DW_AT_external, AttributeValue::Flag(true));
         e.set(
@@ -333,6 +333,36 @@ mod tests {
         offset: u64,
         position: SourcePos,
         is_stmt: bool,
+    }
+
+    /// A function defined under a name of its own: DWARF names it so, and gives no linkage
+    /// name, which gdb would show instead.
+    #[test]
+    fn test_dwarf_names_a_function_as_it_was_defined() {
+        for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+            let bytes = test_program::writer_with_one_named(target, "one")
+                .finish()
+                .unwrap();
+            let file = object::File::parse(&*bytes).unwrap();
+            let dwarf = load(&file);
+            let header = dwarf.units().next().unwrap().unwrap();
+            let unit = dwarf.unit(header).unwrap();
+            let mut entries = unit.entries();
+            entries.next_dfs().unwrap();
+            let sp = entries.next_dfs().unwrap().unwrap();
+            let string = |at| {
+                dwarf
+                    .attr_string(&unit, sp.attr_value(at).unwrap())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            assert_eq!(string(gimli::DW_AT_name), "one", "{target:?}");
+            assert!(sp.attr_value(gimli::DW_AT_linkage_name).is_none());
+            // The symbol keeps its own name.
+            let symbol = file.symbol_by_name(test_program::NAMED_SYMBOL).unwrap();
+            assert!(symbol.is_definition(), "{target:?}");
+        }
     }
 
     #[test]

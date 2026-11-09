@@ -169,7 +169,7 @@ pub(crate) fn add_codeview(
         p.extend_from_slice(&0u32.to_le_bytes()); // the offset, relocated
         p.extend_from_slice(&0u16.to_le_bytes()); // the section, relocated
         p.push(0); // flags
-        p.extend_from_slice(f.name.as_bytes());
+        p.extend_from_slice(f.debug_name.as_bytes());
         p.push(0);
         let record_at = syms.len() + 4; // past the record's length and kind
         cv_record(&mut syms, S_GPROC32, &p);
@@ -340,6 +340,28 @@ mod tests {
         }
         assert_eq!(at, data.len());
         found
+    }
+
+    /// A function defined under a name of its own: its procedure has that name, which cdb
+    /// shows.
+    #[test]
+    fn test_codeview_names_a_procedure_as_it_was_defined() {
+        let bytes = test_program::writer_with_one_named(Target::X86_64Windows, "one")
+            .finish()
+            .unwrap();
+        let file = object::File::parse(&*bytes).unwrap();
+        let data = file.section_by_name(".debug$S").unwrap().data().unwrap();
+        let syms = subsections(data)[0].2;
+        let mut names = Vec::new();
+        let mut at = 0;
+        while at < syms.len() {
+            let length = usize::from(u16_at(syms, at));
+            if u16_at(syms, at + 2) == S_GPROC32 {
+                names.push(c_string(syms, at + 4 + 35));
+            }
+            at += 2 + length;
+        }
+        assert_eq!(names, ["one"]);
     }
 
     #[test]
