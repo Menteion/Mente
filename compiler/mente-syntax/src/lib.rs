@@ -964,7 +964,7 @@ pub fn split_items(src: &str) -> Vec<ItemStart> {
         let first = line.chars().next().unwrap_or(' ');
         let starts_item = first.is_ascii_alphabetic() || matches!(first, '_' | '@' | '/');
         let prefix = matches!(first, '@' | '/');
-        if starts_item && has_body && offset > 0 {
+        if starts_item && has_body {
             starts.push(ItemStart {
                 offset,
                 line: i as u32 + 1,

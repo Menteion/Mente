@@ -385,6 +385,17 @@ mod tests {
 
     #[test]
     fn test_errors_come_in_the_order_the_whole_module_check_gives() {
+        // Declaration errors in two items: a later lexical error, or a later lifetime, wins
+        // over an earlier parse error.
+        let mut d = Session::new(MODULE);
+        edited(&mut d, "pub fn id(x: u8)", "pub fn id(x u8)");
+        let parse = d.diagnostics()[0].code;
+        edited(&mut d, "twice(id(3))", "twice(id(3)) $");
+        assert_eq!(d.diagnostics()[0].code, "E0105");
+        edited(&mut d, " $", "");
+        assert_eq!(d.diagnostics()[0].code, parse);
+        edited(&mut d, "pub fn main()", "pub fn main<'a>()");
+        assert_eq!(d.diagnostics()[0].code, "E0120");
         let mut s = Session::new(MODULE);
         // A parse error in one item and a lexical error in a later one: the lexical error wins.
         edited(&mut s, "val y: u16 = x", "val y: u16 = (x");

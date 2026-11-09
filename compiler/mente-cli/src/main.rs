@@ -168,7 +168,7 @@ fn cmd_watch(args: &[String]) {
                 process::exit(2);
             }
         };
-        if session.as_ref().is_none_or(|s| s.source() != src) {
+        if needs_check(session.as_ref(), &src) {
             let t0 = Instant::now();
             let s = session.get_or_insert_with(mente_sema::incremental::Session::default);
             s.update(&src);
@@ -198,6 +198,11 @@ fn cmd_watch(args: &[String]) {
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+}
+
+/// Whether `mn check --watch` checks again: first, and each time the text changed.
+fn needs_check(session: Option<&mente_sema::incremental::Session>, src: &str) -> bool {
+    session.is_none_or(|s| s.source() != src)
 }
 
 fn cmd_view(args: &[String]) {
@@ -899,6 +904,29 @@ mod tests {
     }
 
     /// A new external dependency needs Norman's approval and a change to this policy.
+    #[test]
+    fn test_watch_checks_first_and_then_only_on_a_change() {
+        let session = mente_sema::incremental::Session::new(
+            "module m
+",
+        );
+        assert!(needs_check(
+            None,
+            "module m
+"
+        ));
+        assert!(!needs_check(
+            Some(&session),
+            "module m
+"
+        ));
+        assert!(needs_check(
+            Some(&session),
+            "module n
+"
+        ));
+    }
+
     #[test]
     fn test_crates_depend_only_on_allowed_crates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
