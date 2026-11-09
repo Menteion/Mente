@@ -636,8 +636,8 @@ fn test_each_ensures_clause_reads_its_own_result_and_elements_take_their_type() 
 }
 
 /// Tier 1 never contradicts the interpreter: a program it proves, which `check_program`
-/// accepts, never trips the run-time check of a refinement, a `requires`, an `ensures` or an
-/// invariant, on any input tried ([`interpreter-checks-contracts`]).
+/// accepts, never trips the run-time check of a refinement, a `requires`, an `ensures`, an
+/// invariant or a `decreases` measure, on any input tried ([`interpreter-checks-contracts`]).
 ///
 /// [`interpreter-checks-contracts`]: ../../docs/design-review.md#interpreter-checks-contracts
 #[test]
@@ -647,9 +647,16 @@ fn test_a_program_tier1_proves_never_trips_its_checks() {
         "pub fn f(a: u8, b: u8) -> u8[0..=100] {\n  guard b > 0 and a <= b else {\n    return 0\n  }\n  val r: u64 = a * 100 / b\n  guard r <= 100 else {\n    return 0\n  }\n  r\n}",
         "pub fn f(a: u8, b: u8) -> u8 {\n  var i: u8 = 0\n  var total: u8[0..=200] = 0\n  while i < a invariant i <= a {\n    guard total < 200 else {\n      break\n    }\n    total += 1\n    i += 1\n  }\n  val m: u8[0..=b] = if total < b { total } else { b }\n  m\n}",
         "pub fn f(a: u8, b: u8) -> u8[0..16] {\n  guard b > 0 else {\n    return 0\n  }\n  val r: u8[0..b] = a % b\n  r & 15\n}",
+        "pub fn g(x: u8, y: u8) -> u8\n  decreases y\n{\n  if y == 0 {\n    return x\n  }\n  g(y, x % y)\n}\npub fn f(a: u8, b: u8) -> u8 {\n  var x: u8 = a\n  var y: u8 = b\n  while y != 0 decreases y {\n    val t = x % y\n    x = y\n    y = t\n  }\n  x + g(a, b) - g(a, b)\n}",
         "pub fn f(a: u8, b: u8) -> u8[0..=255] {\n  guard a <= b else {\n    return 0\n  }\n  var lo: u8 = a\n  var hi: u8 = b\n  while lo < hi invariant lo <= hi {\n    val mid: u8 = lo + (hi - lo) / 2\n    if mid % 3 == 0 {\n      hi = mid\n    } else {\n      lo = mid + 1\n    }\n  }\n  lo\n}",
     ];
-    let contracts = ["refinement", "requires", "ensures", "invariant"];
+    let contracts = [
+        "refinement",
+        "requires",
+        "ensures",
+        "invariant",
+        "decreases",
+    ];
     for src in programs {
         let text = format!("module m\n{}\n", src);
         let m = match mente_sema::check_program(&text) {

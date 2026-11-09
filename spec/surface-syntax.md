@@ -40,6 +40,9 @@ The body parser in `mente-syntax` reads the statements and expressions of M1 (`g
 7. `Specified` **An honest unfinished body: `todo("reason")`** ([`todo-marker`](../docs/design-review.md#todo-marker)):
    - `todo("reason")` is an expression of any type that traps when reached, for a body its author could not finish.
    - `mn check` lists every `todo` with its reason, a release build rejects a module that contains one, and a function containing one is never the evidence for an `Implemented` claim.
+   - `Implemented`: `mn check` lists every `todo` of a module's function bodies with its reason and its place, after the file's diagnostics and in `--json`; the list changes nothing in the verdict. A release build does not exist yet.
+     <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_listings_name_every_todo_and_trusted_clause" min="1" reason="Every todo is listed with its reason and place" -->
+     <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_check_lists_todos_and_trusted_clauses" min="1" reason="mn check prints every todo" -->
 8. `Implemented` **Other languages' idioms get errors of their own** ([`foreign-idiom-diagnostics`](../docs/design-review.md#foreign-idiom-diagnostics)):
    <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_other_languages_idioms_name_the_mente_spelling" min="1" reason="Each idiom in a body has its code, its message and its fix" -->
    <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_lifetimes_and_async_are_idioms_wherever_they_stand" min="1" reason="Lifetimes and async are reported wherever they stand, with suggestions" -->

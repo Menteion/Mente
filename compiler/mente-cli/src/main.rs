@@ -2,6 +2,7 @@
 //!
 //! Commands:
 //! - `mn view --spec <file.mn>` : Instant `<0.1ms` Holographic Spec Blueprint projection & dual hash report.
+//! - `mn view --checks <file.mn>`: Each run-time check Tier 1 leaves, function by function.
 //! - `mn check [--json] <path>` : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification;
 //!   `--json` prints the diagnostics in the versioned JSON form of `spec/diagnostics.md`.
 //! - `mn explain [code]`        : What an error code means, from the catalogue in `catalogue.rs`.
@@ -18,7 +19,7 @@ use std::time::Instant;
 use mente_ast::project_spec_blueprint;
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
 use mente_sema::check_module;
-use mente_syntax::diagnostics::{render_json, render_text, Diagnostic, FileDiagnostics};
+use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
 
 mod catalogue;
@@ -49,6 +50,7 @@ fn print_help() {
     println!("Mente Programming Language Toolchain (mn v0.1.0)");
     println!("Usage:");
     println!("  mn view --spec <file.mn>     Project Holographic Spec Blueprint (strips bodies, computes spec_hash/body_hash)");
+    println!("  mn view --checks <file.mn>   List each run-time check Tier 1 leaves, and count those it erased");
     println!("  mn check [--json] [file.mn | dir]");
     println!("  mn check --watch <file.mn> [--rounds N]");
     println!(
@@ -243,6 +245,10 @@ fn needs_check(session: Option<&mente_sema::incremental::Session>, src: &str) ->
 }
 
 fn cmd_view(args: &[String]) {
+    if args.iter().any(|a| a == "--checks") {
+        cmd_view_checks(args);
+        return;
+    }
     let path_str = args
         .iter()
         .find(|a| !a.starts_with('-'))
@@ -268,6 +274,80 @@ fn cmd_view(args: &[String]) {
         "// Projection completed in {} µs (parse, hash and project; file read excluded) | Tokens: {} -> {} ({:.1}% Context Saved)",
         elapsed_us, report.total_tokens, report.spec_tokens, report.savings_percent
     );
+}
+
+/// `mn view --checks <file.mn>`: for each function whose body checks, each run-time check Tier 1
+/// leaves, as `line:col kind detail`, then how many it erased (`philosophy.md`, axiom 2).
+fn cmd_view_checks(args: &[String]) {
+    let Some(path) = args.iter().find(|a| !a.starts_with('-')) else {
+        eprintln!("Usage: mn view --checks <file.mn>");
+        process::exit(2);
+    };
+    let src = match fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("error: cannot read `{}`: {}", path, e);
+            process::exit(2);
+        }
+    };
+    if let Err(d) = parse_module(&src) {
+        eprint!("{}", render_text(&d, path, &src));
+        process::exit(1);
+    }
+    print!("{}", run_time_checks(&src));
+}
+
+/// The run-time checks Tier 1 leaves in a module, in the form `mn view --checks` prints.
+fn run_time_checks(src: &str) -> String {
+    use mente_sema::tier1::ObligationKind;
+    let mut out = String::new();
+    for (name, report) in mente_sema::tier1_reports(src) {
+        out.push_str(&format!("fn {}\n", name));
+        let (erased, mut left): (Vec<_>, Vec<_>) = report
+            .obligations
+            .iter()
+            .filter(|o| !o.must)
+            .partition(|o| o.proven);
+        left.sort_by_key(|o| o.span.start);
+        for o in left {
+            let kind = match o.kind {
+                ObligationKind::Index => "index",
+                ObligationKind::Divisor => "divisor",
+                ObligationKind::Shift => "shift amount",
+                _ => "narrowing",
+            };
+            let line = format!("{}:{} {} {}", o.span.line, o.span.col, kind, o.detail);
+            out.push_str(&format!("  {}\n", line.trim_end()));
+        }
+        let plural = if erased.len() == 1 { "" } else { "s" };
+        out.push_str(&format!(
+            "  Tier 1 erased {} run-time check{}\n",
+            erased.len(),
+            plural
+        ));
+    }
+    out
+}
+
+/// What `mn check` prints after a file's diagnostics: one line for each `todo` and for each
+/// trusted clause.
+fn listing_lines(file: &str, src: &str, listings: &mente_sema::Listings) -> Vec<String> {
+    let place = |at: usize| {
+        let (line, col) = line_col(src, at);
+        format!("{}:{}:{}", file, line, col)
+    };
+    let todos = listings
+        .todos
+        .iter()
+        .map(|(span, reason)| format!("todo: {}: {:?}", place(span.start), reason));
+    let trusted = listings.trusted.iter().map(|(span, clause)| {
+        format!(
+            "trusted: {}: {}, assumed until mn prove runs",
+            place(span.start),
+            clause
+        )
+    });
+    todos.chain(trusted).collect()
 }
 
 fn collect_mn_files(target: &Path) -> Vec<PathBuf> {
@@ -308,7 +388,7 @@ fn cmd_check(args: &[String]) {
     let t0 = Instant::now();
     let mut all_ok = true;
     // Each file with its source and its diagnostics, for the JSON form.
-    let mut checked: Vec<(String, String, Vec<Diagnostic>)> = Vec::new();
+    let mut checked: Vec<(String, String, Vec<Diagnostic>, mente_sema::Listings)> = Vec::new();
     for file in &files {
         let shown = file.display().to_string();
         let src = match fs::read_to_string(file) {
@@ -356,15 +436,24 @@ fn cmd_check(args: &[String]) {
                 }
             }
         }
-        checked.push((shown, src, diagnostics));
+        // Every todo and every trusted clause, which change nothing in the verdict.
+        let listings = mente_sema::listings(&src);
+        if !json {
+            for line in listing_lines(&shown, &src, &listings) {
+                println!("{}", line);
+            }
+        }
+        checked.push((shown, src, diagnostics, listings));
     }
     if json {
         let files: Vec<FileDiagnostics> = checked
             .iter()
-            .map(|(file, src, diagnostics)| FileDiagnostics {
+            .map(|(file, src, diagnostics, listings)| FileDiagnostics {
                 file,
                 src,
                 diagnostics,
+                todos: &listings.todos,
+                trusted: &listings.trusted,
             })
             .collect();
         println!("{}", render_json(&files));

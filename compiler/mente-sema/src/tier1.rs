@@ -75,6 +75,9 @@ pub enum ObligationKind {
     Ensures,
     /// A written loop `invariant`: must be proven.
     Invariant,
+    /// A `decreases` measure, never negative and smaller at each round or recursive call:
+    /// must be proven.
+    Decreases,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,13 +86,19 @@ pub struct Obligation {
     pub span: Span,
     pub must: bool,
     pub proven: bool,
+    /// What a run-time check checks against, as `mn view --checks` prints it: `into `u8``,
+    /// `into an array of 4`, `below 8`; empty when there is nothing to say.
+    pub detail: String,
 }
 
-/// Every obligation of a function, proven or not, and the errors for those it must prove.
+/// Every obligation of a function, proven or not, the errors for those it must prove, and the
+/// clauses it trusts: those of an `@prove` function outside the Tier-1 fragment, each with its
+/// place and its text, assumed until `mn prove` runs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
     pub obligations: Vec<Obligation>,
     pub diagnostics: Vec<Diagnostic>,
+    pub trusted: Vec<(Span, String)>,
 }
 
 /// What a caller's check reads of a function: its parameters' and result's types with their
@@ -658,6 +667,30 @@ fn cmp(op: BinaryOp, l: Val, r: Val) -> Cond {
     Cond::Cmp(op, Box::new(l), Box::new(r))
 }
 
+/// `a < b` in lexicographic order, for two measures of one length: the last pair compares
+/// with `false` after it.
+fn lex_less(a: &[Val], b: &[Val]) -> Cond {
+    match (a, b) {
+        ([x, xs @ ..], [y, ys @ ..]) => Cond::Or(
+            Box::new(cmp(BinaryOp::Lt, x.clone(), y.clone())),
+            Box::new(Cond::And(
+                Box::new(cmp(BinaryOp::Eq, x.clone(), y.clone())),
+                Box::new(lex_less(xs, ys)),
+            )),
+        ),
+        _ => Cond::Const(false),
+    }
+}
+
+/// The values of a measure as a message writes them: `3`, or `(3, 0)` for several.
+fn tuple(values: &[i128]) -> String {
+    let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+    match parts.as_slice() {
+        [one] => one.clone(),
+        _ => format!("({})", parts.join(", ")),
+    }
+}
+
 fn flip(op: BinaryOp) -> BinaryOp {
     match op {
         BinaryOp::Lt => BinaryOp::Ge,
@@ -883,6 +916,22 @@ struct Fx<'a> {
     /// The innermost statement being checked, before which a `guard` goes.
     stmt: Option<StmtId>,
     heads: Vec<Head>,
+    /// For each `while` statement, a variable for each of its `decreases` measures at the
+    /// start of a round, and one for its value at the end.
+    measures: Vec<Vec<(usize, usize)>>,
+    /// The function's own measure on entry, its last `decreases` clause, against which a
+    /// recursive call's is compared.
+    entry_measure: Option<usize>,
+    /// The measures of the enclosing loops' rounds, each followed by how much it has changed.
+    tracks: Vec<Track>,
+}
+
+/// A loop measure linear in bindings: `delta` follows its change since the round's start,
+/// moved at each assignment to a binding in `terms` by the interval of that binding's change,
+/// so that a decrease along every path survives the joins of the body.
+struct Track {
+    delta: usize,
+    terms: Vec<Term>,
 }
 
 /// Checks one function, whose callees are `callees` in module order (`None` for a function
@@ -964,6 +1013,23 @@ impl<'a> Fx<'a> {
         let temps = [alloc(true).unwrap_or(0), alloc(true).unwrap_or(0)];
         let scratch = alloc(true).unwrap_or(0);
         let probe = alloc(true).unwrap_or(0);
+        let measures = tree
+            .stmts
+            .iter()
+            .map(|s| match &s.kind {
+                StmtKind::While { decreases, .. } => decreases
+                    .iter()
+                    .map(|_| (alloc(true).unwrap_or(0), alloc(true).unwrap_or(0)))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let entry_measure = alloc(
+            f.syntax
+                .contracts
+                .iter()
+                .any(|c| c.kind == ContractKind::Decreases),
+        );
         let mut fx = Fx {
             syntax: f.syntax,
             tree,
@@ -986,6 +1052,9 @@ impl<'a> Fx<'a> {
             scope: Vec::new(),
             stmt: None,
             heads: Vec::new(),
+            measures,
+            entry_measure,
+            tracks: Vec::new(),
         };
         let shape = f.syntax.result.map(|t| fx.own_shape(t));
         fx.result_shape = shape;
@@ -1153,12 +1222,24 @@ impl<'a> Fx<'a> {
     // -- diagnostics -------------------------------------------------------------------------
 
     fn record(&mut self, kind: ObligationKind, span: Span, must: bool, proven: bool) {
+        self.record_check(kind, span, must, proven, String::new());
+    }
+
+    fn record_check(
+        &mut self,
+        kind: ObligationKind,
+        span: Span,
+        must: bool,
+        proven: bool,
+        detail: String,
+    ) {
         if self.recording {
             self.report.obligations.push(Obligation {
                 kind,
                 span,
                 must,
                 proven,
+                detail,
             });
         }
     }
@@ -1171,14 +1252,14 @@ impl<'a> Fx<'a> {
         }
     }
 
-    /// A point of a failing state over the bindings in scope and `extra`, then the value of
-    /// `probe` when `with_probe`.
+    /// A point of a failing state over the bindings in scope and `named`, as text, then the
+    /// values the same point gives `extra`.
     fn valuation(
         &self,
         st: &Octagon,
-        extra: &[(String, usize)],
-        with_probe: bool,
-    ) -> (String, Option<i128>) {
+        named: &[(String, usize)],
+        extra: &[usize],
+    ) -> (String, Vec<i128>) {
         let mut names = Vec::new();
         let mut vars = Vec::new();
         for &b in &self.scope {
@@ -1187,21 +1268,19 @@ impl<'a> Fx<'a> {
                 vars.push(v);
             }
         }
-        for (n, v) in extra {
+        for (n, v) in named {
             names.push(n.clone());
             vars.push(*v);
         }
-        if with_probe {
-            vars.push(self.probe);
-        }
+        vars.extend(extra);
         let picked = st.pick(&vars).unwrap_or_default();
         let text: Vec<String> = names
             .iter()
             .zip(&picked)
             .map(|(n, v)| format!("{} = {}", n, v))
             .collect();
-        let value = picked.get(names.len()).copied().filter(|_| with_probe);
-        (text.join(", "), value)
+        let values = picked.iter().skip(names.len()).copied().collect();
+        (text.join(", "), values)
     }
 
     /// `Tier 1 cannot rule out ...`: `with` follows a valuation, `without` stands for one.
@@ -1357,11 +1436,9 @@ impl<'a> Fx<'a> {
         self.report.diagnostics.push(d);
     }
 
-    /// `E0503` for each clause outside the Tier-1 fragment, unless the function routes them.
+    /// `E0503` for each clause outside the Tier-1 fragment, unless the function routes them;
+    /// with `@prove`, each is a trusted clause.
     fn route(&mut self) {
-        if self.routing.checked || self.routing.prove {
-            return;
-        }
         let mut clauses = Vec::new();
         for c in &self.syntax.contracts {
             match c.kind {
@@ -1384,6 +1461,15 @@ impl<'a> Fx<'a> {
                 continue;
             };
             let clause = print(self.tree, e, &no_subst).0;
+            if self.routing.prove {
+                let of = if kw == "invariant" { "in" } else { "of" };
+                let text = format!("{} {} {} {}", kw, clause, of, name);
+                self.report.trusted.push((self.span(e), text));
+                continue;
+            }
+            if self.routing.checked {
+                continue;
+            }
             let fix = |attr: &str, effect: &str| Fix {
                 message: format!("mark `{}` `@{}`: {}", name, attr, effect),
                 applicability: Applicability::Suggestion,
@@ -1586,13 +1672,47 @@ impl<'a> Fx<'a> {
     // -- obligations -------------------------------------------------------------------------
 
     /// A value entering a plain integer type: a run-time check unless its bounds fit.
-    fn fits(&mut self, st: &Octagon, v: &Val, t: Option<IntTy>, span: Span) {
+    /// Where the value always lies outside the type, when this point is reached: `at most -1`,
+    /// `at least 256`.
+    fn fits(&mut self, st: &Octagon, v: &Val, t: Option<IntTy>, span: Span) -> Option<String> {
         let (lo, hi) = interval(st, v);
-        let proven = t.is_some_and(|t| {
-            let (tlo, thi) = int_range(t);
-            tlo <= lo && hi <= thi && -INF < lo && hi < INF
+        let range = t.map(int_range);
+        let proven =
+            range.is_some_and(|(tlo, thi)| tlo <= lo && hi <= thi && -INF < lo && hi < INF);
+        let detail = t.map_or("into its type".to_string(), |t| {
+            format!("into `{}`", t.name)
         });
-        self.record(ObligationKind::Range, span, false, st.is_empty() || proven);
+        self.record_check(
+            ObligationKind::Range,
+            span,
+            false,
+            st.is_empty() || proven,
+            detail,
+        );
+        // An empty interval is a value no path computes, after an operation that always traps.
+        let (tlo, thi) = range.filter(|_| !st.is_empty() && lo <= hi)?;
+        if hi < tlo {
+            Some(format!("at most {}", hi))
+        } else if lo > thi {
+            Some(format!("at least {}", lo))
+        } else {
+            None
+        }
+    }
+
+    /// `E0508`: a narrowing Tier 1 proves always traps where it is reached
+    /// ([`strict-defaults`]).
+    ///
+    /// [`strict-defaults`]: ../../docs/design-review.md#strict-defaults
+    fn always_traps(&mut self, side: &str, t: IntTy, span: Span, what: &str) {
+        let message = format!(
+            "Tier 1 proves {} is {} here, outside `{}` ({}), so this narrowing always traps",
+            what,
+            side,
+            t.name,
+            t.range_text()
+        );
+        self.emit("E0508", span, message, None, Anchor::Nowhere);
     }
 
     /// A value narrowed into a place of shape `shape`: its plain range may stay a run-time
@@ -1608,8 +1728,13 @@ impl<'a> Fx<'a> {
     ) {
         match shape {
             Shape::Int { int, refine } => {
-                if int.is_some() {
-                    self.fits(st, v, *int, span);
+                if let Some(t) = int {
+                    if let Some(side) = self.fits(st, v, Some(*t), span) {
+                        // What follows a narrowing that always traps is never reached.
+                        let shown = what.map_or("the value".to_string(), |w| format!("`{}`", w.0));
+                        self.always_traps(&side, *t, span, &shown);
+                        return;
+                    }
                 }
                 if let Some(r) = refine {
                     self.refinement(st, v, r, span, place, what);
@@ -1658,7 +1783,8 @@ impl<'a> Fx<'a> {
             None => (high_op, &r.hi),
         };
         self.assume(&mut s, &cmp(op, probe, bound.clone()), false);
-        let (valuation, value) = self.valuation(&s, &[], true);
+        let (valuation, values) = self.valuation(&s, &[], &[self.probe]);
+        let value = values.first().copied();
         let outside = format!("outside `{}`, the type of {}", r.text, place);
         let shown = what
             .as_ref()
@@ -1700,11 +1826,12 @@ impl<'a> Fx<'a> {
     fn index_check(&mut self, st: &Octagon, i: &Val, len: u128, span: Span) {
         let (lo, hi) = interval(st, i);
         let n = i128::try_from(len).unwrap_or(INF);
-        self.record(
+        self.record_check(
             ObligationKind::Index,
             span,
             false,
             st.is_empty() || (lo >= 0 && hi < n),
+            format!("into an array of {}", len),
         );
     }
 
@@ -1751,7 +1878,7 @@ impl<'a> Fx<'a> {
                     .flatten()
             };
             let guard = print(self.tree, c.expr, &subst).0;
-            let (valuation, _) = self.valuation(&failing, &extra, false);
+            let (valuation, _) = self.valuation(&failing, &extra, &[]);
             let what = format!("`ensures {}` of `{}` {}", clause, name, at);
             let message = Fx::cannot_rule_out(
                 &valuation,
@@ -1778,6 +1905,14 @@ impl<'a> Fx<'a> {
                 let k = self.cond(st, c.expr);
                 self.assume(st, &k, true);
             }
+        }
+        let last = syntax
+            .contracts
+            .iter()
+            .rfind(|c| c.kind == ContractKind::Decreases);
+        if let (Some(m), Some(c)) = (self.entry_measure, last) {
+            let v = self.eval(st, c.expr);
+            self.assign(st, m, &v);
         }
     }
 
@@ -1959,8 +2094,26 @@ impl<'a> Fx<'a> {
             }
         };
         if let Some(var) = scalar {
+            self.track(st, var, &v);
             self.assign(st, var, &v);
             self.facts(st, var, &shape);
+        }
+    }
+
+    /// Before `var` takes `v`: each tracked measure with `var` in it changes by what `var` does.
+    fn track(&self, st: &mut Octagon, var: usize, v: &Val) {
+        for t in &self.tracks {
+            for term in t.terms.iter().filter(|term| term.var == var) {
+                let diff = add_vals(st, v, &negate(&var_val(var)));
+                let change = if term.neg { negate(&diff) } else { diff };
+                let (lo, hi) = interval(st, &change);
+                let s = self.scratch;
+                st.forget(s);
+                constrain_offset(st, s, &[Term::pos(t.delta)], 0, lo, hi);
+                st.forget(t.delta);
+                constrain_offset(st, t.delta, &[Term::pos(s)], 0, 0, 0);
+                st.forget(s);
+            }
         }
     }
 
@@ -2118,11 +2271,12 @@ impl<'a> Fx<'a> {
             BinaryOp::Shl | BinaryOp::Shr => {
                 let (lo, hi) = interval(st, r);
                 let width = lt.map_or(0, |t| i128::from(t.bits));
-                self.record(
+                self.record_check(
                     ObligationKind::Shift,
                     rspan,
                     false,
                     st.is_empty() || (lo >= 0 && hi < width),
+                    lt.map_or(String::new(), |t| format!("below {}", t.bits)),
                 );
                 let v = shift_vals(st, op, l, r, None);
                 self.fits(st, &v, lt, span);
@@ -2389,6 +2543,7 @@ impl<'a> Fx<'a> {
             if let Some(b) = self.resolution.names[place.0 as usize] {
                 let b = b.0 as usize;
                 if let Some(v) = self.vars[b] {
+                    self.track(st, v, &TOP);
                     st.forget(v);
                     let shape = self.binding_shape(b);
                     self.facts(st, v, &shape);
@@ -2458,18 +2613,8 @@ impl<'a> Fx<'a> {
             let Some(failing) = failing else {
                 continue;
             };
-            let extra: Vec<(String, usize)> = if self.scope.iter().any(|b| self.vars[*b].is_some())
-            {
-                Vec::new()
-            } else {
-                callee
-                    .params
-                    .iter()
-                    .zip(&site.ins)
-                    .filter_map(|(p, v)| v.map(|v| (p.name.clone(), v)))
-                    .collect()
-            };
-            let (valuation, _) = self.valuation(&failing, &extra, false);
+            let extra = self.call_named(callee, &site);
+            let (valuation, _) = self.valuation(&failing, &extra, &[]);
             let text = print(&callee.tree, clause.expr, &no_subst).0;
             let subst = |_: ExprId, n: &str| {
                 let k = callee.params.iter().position(|p| p.name == n)?;
@@ -2485,6 +2630,7 @@ impl<'a> Fx<'a> {
             let anchor = self.anchor();
             self.emit("E0504", span, message, Some(guard), anchor);
         }
+        self.call_measures(st, &c, &site, args, span);
         // After the call: the result and the `mut` parameters' final values, then `ensures`.
         if let (Some(r), Some(t)) = (site.result, callee.result) {
             let shape = self.callee_shape(&c, &site, args, t);
@@ -2533,6 +2679,7 @@ impl<'a> Fx<'a> {
                 .filter(|_| indexes.is_empty())
                 .and_then(|b| self.vars[b])
             {
+                self.track(st, var, &back);
                 self.assign(st, var, &back);
                 self.facts(st, var, &shape);
             }
@@ -2733,6 +2880,7 @@ impl<'a> Fx<'a> {
         let mut h = entry.clone();
         for &b in changed {
             if let Some(v) = self.vars[b] {
+                self.track(&mut h, v, &TOP);
                 h.forget(v);
                 let shape = self.binding_shape(b);
                 self.facts(&mut h, v, &shape);
@@ -2753,18 +2901,340 @@ impl<'a> Fx<'a> {
 
     /// Runs the body once from the head: the state at the back edge and at the exit, where a
     /// `break` is one more exit.
-    fn pass(&mut self, head: &Octagon, cond: ExprId, body: BlockId) -> (Octagon, Octagon) {
-        let mut s = head.clone();
-        let c = self.cond(&mut s, cond);
-        let mut b = s.clone();
+    fn pass(
+        &mut self,
+        head: &Octagon,
+        (s, cond, body): (StmtId, ExprId, BlockId),
+        entry: &Octagon,
+    ) -> (Octagon, Octagon) {
+        let mut at = head.clone();
+        let c = self.cond(&mut at, cond);
+        let mut b = at.clone();
         self.assume(&mut b, &c, true);
+        // The measures at the start of a round that runs: never negative, and followed. One
+        // linear in bindings is tracked by its change; any other is kept, to compare with.
+        let measures = self.loop_measures(s);
+        let outer = self.tracks.len();
+        let mut tracked = Vec::new();
+        for &(e, start, _) in &measures {
+            let v = self.eval(&mut b, e);
+            self.measure_never_negative(&b, &v, e, (s, cond, body), entry);
+            let terms = match &v {
+                Val::Lin(t, _) if t.iter().all(|t| self.vars.contains(&Some(t.var))) => {
+                    Some(t.clone())
+                }
+                _ => None,
+            };
+            tracked.push(terms.is_some());
+            match terms {
+                Some(terms) => {
+                    self.assign(&mut b, start, &lin(Vec::new(), 0));
+                    self.tracks.push(Track {
+                        delta: start,
+                        terms,
+                    });
+                }
+                None => self.assign(&mut b, start, &v),
+            }
+        }
         self.loops.push(Frame::default());
-        self.block(&mut b, body, None);
+        let mut ends = self.body_ends(b, body);
+        self.tracks.truncate(outer);
         let frame = self.loops.pop().unwrap_or_default();
-        let back = frame.continues.iter().fold(b, |acc, x| acc.join(x));
-        self.assume(&mut s, &c, false);
-        let exit = frame.breaks.iter().fold(s, |acc, x| acc.join(x));
+        ends.extend(frame.continues);
+        self.measure_decreases(&ends, cond, &measures, &tracked);
+        let back = ends
+            .iter()
+            .skip(1)
+            .fold(ends[0].clone(), |acc, x| acc.join(x));
+        self.assume(&mut at, &c, false);
+        let exit = frame.breaks.iter().fold(at, |acc, x| acc.join(x));
         (back, exit)
+    }
+
+    /// A loop's `decreases` measures with the variables of each.
+    fn loop_measures(&self, s: StmtId) -> Vec<(ExprId, usize, usize)> {
+        match &self.tree.stmt(s).kind {
+            StmtKind::While { decreases, .. } => decreases
+                .iter()
+                .zip(&self.measures[s.0 as usize])
+                .map(|(e, (start, end))| (*e, *start, *end))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A loop's measure at the head of a round that runs is never negative. The guard goes
+    /// before the loop when the first round can break it, else at the end of the body.
+    fn measure_never_negative(
+        &mut self,
+        b: &Octagon,
+        v: &Val,
+        e: ExprId,
+        (s, cond, body): (StmtId, ExprId, BlockId),
+        entry: &Octagon,
+    ) {
+        if !self.recording {
+            return;
+        }
+        let failing = self.refute(b, &cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0)));
+        self.record(
+            ObligationKind::Decreases,
+            self.span(e),
+            true,
+            failing.is_none(),
+        );
+        let Some(failing) = failing else {
+            return;
+        };
+        self.recording = false;
+        let mut first = entry.clone();
+        let c = self.cond(&mut first, cond);
+        self.assume(&mut first, &c, true);
+        let v0 = self.eval(&mut first, e);
+        let on_entry = self.refute(&first, &cmp(BinaryOp::Ge, v0, lin(Vec::new(), 0)));
+        self.recording = true;
+        let anchor = match on_entry {
+            Some(_) => Anchor::Before(s),
+            None => Anchor::After(body),
+        };
+        let text = self.own_text(e);
+        let (valuation, _) = self.valuation(&failing, &[], &[]);
+        let message = Fx::cannot_rule_out(
+            &valuation,
+            &format!(
+                "at the head of a round of this loop, where its measure `{}` is negative: a `decreases` measure is never negative",
+                text.0
+            ),
+            &format!(
+                "this loop's measure `{}` is negative at the head of a round: a `decreases` measure is never negative",
+                text.0
+            ),
+        );
+        let guard = format!("{} >= 0", paren(text, OPERAND));
+        self.emit("E0507", self.span(e), message, Some(guard), anchor);
+    }
+
+    /// A round of a loop that the next round follows leaves its measures smaller, in
+    /// lexicographic order, than at the round's start.
+    /// Runs a loop's body, keeping apart the states in which a trailing `if` statement's
+    /// branches end, so that a measure is checked on each path rather than on their join.
+    fn body_ends(&mut self, mut st: Octagon, body: BlockId) -> Vec<Octagon> {
+        let tree = self.tree;
+        let stmts = &tree.block(body).stmts;
+        let mark = self.scope.len();
+        let saved = self.stmt;
+        let mut ends = Vec::new();
+        for (i, &s) in stmts.iter().enumerate() {
+            if st.is_empty() {
+                break;
+            }
+            self.stmt = Some(s);
+            match &tree.stmt(s).kind {
+                StmtKind::Expr(e) if i + 1 == stmts.len() => {
+                    ends = self.if_ends(std::mem::replace(&mut st, Octagon::new(0)), *e);
+                }
+                _ => {
+                    self.stmt_eval(&mut st, s, None);
+                }
+            }
+        }
+        self.stmt = saved;
+        self.scope.truncate(mark);
+        if ends.is_empty() {
+            ends.push(st);
+        }
+        ends
+    }
+
+    /// The states an `if` statement's branches end in, one for each branch.
+    fn if_ends(&mut self, mut st: Octagon, e: ExprId) -> Vec<Octagon> {
+        let ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } = &self.tree.expr(e).kind
+        else {
+            self.eval(&mut st, e);
+            return vec![st];
+        };
+        let c = self.cond(&mut st, *cond);
+        let mut t = st.clone();
+        self.assume(&mut t, &c, true);
+        self.block(&mut t, *then, None);
+        let mut o = st;
+        self.assume(&mut o, &c, false);
+        let mut ends = vec![t];
+        match otherwise {
+            Some(Else::Block(b)) => {
+                self.block(&mut o, *b, None);
+                ends.push(o);
+            }
+            Some(Else::If(i)) => ends.extend(self.if_ends(o, *i)),
+            None => ends.push(o),
+        }
+        ends
+    }
+
+    /// The first path of a round, among `ends`, on which the next round can start without the
+    /// measures having got smaller, with the measures' values after and before it.
+    fn round_fails(
+        &mut self,
+        end: &Octagon,
+        cond: ExprId,
+        measures: &[(ExprId, usize, usize)],
+        tracked: &[bool],
+    ) -> Option<(Octagon, Vec<Val>, Vec<Val>)> {
+        let mut next = end.clone();
+        let c = self.cond(&mut next, cond);
+        self.assume(&mut next, &c, true);
+        // A tracked measure has changed by its delta, which is below 0 when it decreased; any
+        // other is evaluated again, to compare with its value at the round's start.
+        let mut after = Vec::new();
+        let mut before = Vec::new();
+        for (m, t) in measures.iter().zip(tracked) {
+            if *t {
+                after.push(var_val(m.1));
+                before.push(lin(Vec::new(), 0));
+            } else {
+                after.push(self.eval(&mut next, m.0));
+                before.push(var_val(m.1));
+            }
+        }
+        let failing = self.refute(&next, &lex_less(&after, &before))?;
+        Some((failing, after, before))
+    }
+
+    fn measure_decreases(
+        &mut self,
+        ends: &[Octagon],
+        cond: ExprId,
+        measures: &[(ExprId, usize, usize)],
+        tracked: &[bool],
+    ) {
+        if !self.recording || measures.is_empty() {
+            return;
+        }
+        self.recording = false;
+        let found = ends
+            .iter()
+            .find_map(|end| self.round_fails(end, cond, measures, tracked));
+        self.recording = true;
+        let span = self.span(measures[0].0);
+        self.record(ObligationKind::Decreases, span, true, found.is_none());
+        let Some((mut failing, after, before)) = found else {
+            return;
+        };
+        // What the round changed each measure by, read from the failing state.
+        for ((a, z), m) in after.iter().zip(&before).zip(measures) {
+            let change = add_vals(&failing, a, &negate(z));
+            self.assign(&mut failing, m.2, &change);
+        }
+        let extra: Vec<usize> = measures.iter().map(|m| m.2).collect();
+        let (valuation, values) = self.valuation(&failing, &[], &extra);
+        let texts: Vec<String> = measures.iter().map(|m| self.own_text(m.0).0).collect();
+        let (measure, by) = (texts.join(", "), tuple(&values));
+        let message = Fx::cannot_rule_out(
+            &valuation,
+            &format!(
+                "after a round of this loop, where its measure `{}` changes by {}: a `decreases` measure gets smaller at every round",
+                measure, by
+            ),
+            &format!(
+                "a round of this loop changes its measure `{}` by {}: a `decreases` measure gets smaller at every round",
+                measure, by
+            ),
+        );
+        self.emit("E0507", span, message, None, Anchor::Nowhere);
+    }
+
+    /// The bindings a call's valuation names: those in scope, or the callee's parameters when
+    /// none is.
+    fn call_named(&self, callee: &FnSyntax, site: &CallSite) -> Vec<(String, usize)> {
+        if self.scope.iter().any(|b| self.vars[*b].is_some()) {
+            return Vec::new();
+        }
+        callee
+            .params
+            .iter()
+            .zip(&site.ins)
+            .filter_map(|(p, v)| v.map(|v| (p.name.clone(), v)))
+            .collect()
+    }
+
+    /// At a call, the callee's measure is never negative; at a recursive call, it is smaller
+    /// than the caller's on entry.
+    fn call_measures(
+        &mut self,
+        st: &Octagon,
+        c: &Callee,
+        site: &CallSite,
+        args: &[Arg],
+        span: Span,
+    ) {
+        let callee = c.syntax;
+        let recursive = std::ptr::eq(callee, self.syntax);
+        for clause in &callee.contracts {
+            if clause.kind != ContractKind::Decreases {
+                continue;
+            }
+            let v = self.callee_val(st, c, site, clause.expr, false);
+            let text = print(&callee.tree, clause.expr, &no_subst).0;
+            let named = self.call_named(callee, site);
+            let what = format!("the measure `{}` of `{}`", text, callee.name);
+            let failing = self.refute(st, &cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0)));
+            self.record(ObligationKind::Decreases, span, true, failing.is_none());
+            if let Some(failing) = failing {
+                let (valuation, _) = self.valuation(&failing, &named, &[]);
+                let message = Fx::cannot_rule_out(
+                    &valuation,
+                    &format!(
+                        "where {} is negative at this call: a `decreases` measure is never negative",
+                        what
+                    ),
+                    &format!(
+                        "{} is negative at this call: a `decreases` measure is never negative",
+                        what
+                    ),
+                );
+                let subst = |_: ExprId, n: &str| {
+                    let k = callee.params.iter().position(|p| p.name == n)?;
+                    args.get(k).map(|a| self.own_text(a.value))
+                };
+                let guard = format!(
+                    "{} >= 0",
+                    paren(print(&callee.tree, clause.expr, &subst), OPERAND)
+                );
+                let anchor = self.anchor();
+                self.emit("E0507", span, message, Some(guard), anchor);
+            }
+            let Some(m) = self.entry_measure.filter(|_| recursive) else {
+                continue;
+            };
+            let failing = self.refute(st, &cmp(BinaryOp::Lt, v.clone(), var_val(m)));
+            self.record(ObligationKind::Decreases, span, true, failing.is_none());
+            let Some(mut failing) = failing else {
+                continue;
+            };
+            self.assign(&mut failing, self.probe, &v);
+            let (valuation, values) = self.valuation(&failing, &named, &[self.probe, m]);
+            let (to, from) = (
+                tuple(values.get(..1).unwrap_or(&[])),
+                tuple(values.get(1..).unwrap_or(&[])),
+            );
+            let message = Fx::cannot_rule_out(
+                &valuation,
+                &format!(
+                    "where {} is {} at this recursive call and {} on entry: a `decreases` measure gets smaller at every recursive call",
+                    what, to, from
+                ),
+                &format!(
+                    "{} is {} at this recursive call and {} on entry: a `decreases` measure gets smaller at every recursive call",
+                    what, to, from
+                ),
+            );
+            self.emit("E0507", span, message, None, Anchor::Nowhere);
+        }
     }
 
     fn while_loop(
@@ -2819,7 +3289,7 @@ impl<'a> Fx<'a> {
         let mut back;
         loop {
             let head = self.head(st, &changed, &cands, &alive, &axioms);
-            back = self.pass(&head, cond, body).0;
+            back = self.pass(&head, (s, cond, body), st).0;
             let mut dropped = false;
             for (k, c) in cands.iter().enumerate() {
                 if alive[k] && self.refute_cand(&back, *c).is_some() {
@@ -2854,7 +3324,7 @@ impl<'a> Fx<'a> {
                 continue;
             };
             let text = self.cand_text(c);
-            let (valuation, _) = self.valuation(&state, &[], false);
+            let (valuation, _) = self.valuation(&state, &[], &[]);
             let (with, without, anchor) = if on_entry {
                 (
                     format!("on entry to this loop, which violates `invariant {}`", text),
@@ -2889,7 +3359,7 @@ impl<'a> Fx<'a> {
             }
         }
         self.heads.push(facts);
-        let (_, exit) = self.pass(&head, cond, body);
+        let (_, exit) = self.pass(&head, (s, cond, body), st);
         self.heads.pop();
         *st = exit;
     }
@@ -4400,6 +4870,272 @@ mod tests {
             print(&f.tree, f.contracts[0].expr, &no_subst).0,
             "(if a { ... }) == 1"
         );
+    }
+
+    #[test]
+    fn test_loop_measures_are_never_negative_and_get_smaller() {
+        for src in [
+            "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 1\n  }\n  i\n}",
+            "pub fn gcd(a: u32, b: u32) -> u32 {\n  var x: u32 = a\n  var y: u32 = b\n  while y != 0 decreases y {\n    val t = x % y\n    x = y\n    y = t\n  }\n  x\n}",
+            // Each branch makes the measure smaller, which the join of the two does not show.
+            "pub fn f(n: u64) -> u64 {\n  var lo: u64 = 0\n  var hi: u64 = 4294967296\n  while hi - lo > 1 decreases hi - lo {\n    val mid = lo + (hi - lo) / 2\n    if mid * mid <= n {\n      lo = mid\n    } else {\n      hi = mid\n    }\n  }\n  lo\n}",
+            "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  var j: u8 = 0\n  while i < n invariant j <= 9 decreases n - i decreases 9 - j {\n    if j < 9 {\n      j += 1\n    } else if n > 200 {\n      i += 2\n      j = 0\n    } else {\n      i += 1\n      j = 0\n    }\n  }\n  i\n}",
+            "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 1\n    if i == 3 {\n      continue\n    }\n  }\n  i\n}",
+            "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  var j: u8 = 0\n  while i < 8 decreases 8 - i {\n    j = 0\n    while j < 7 - i decreases 7 - i - j {\n      j += 1\n    }\n    i += 1\n  }\n  j + n\n}",
+            "pub fn dist(i: u8) -> u8\n  requires i <= 100\n  ensures result == 100 - i\n= 100 - i\npub fn f() -> u8 {\n  var i: u8 = 0\n  while i < 100 decreases dist(i) {\n    i += 1\n  }\n  i\n}",
+            "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 1\n    if i > 3 {\n      break\n    }\n  }\n  i\n}",
+            "pub fn f(c: bool) -> u8 {\n  var i: u8 = 0\n  while c and i < 3 decreases 3 - i {\n    i += 1\n  }\n  i\n}",
+        ] {
+            assert_eq!(codes(src), NONE, "{}", src);
+            assert!(obligations(src).contains(&(Decreases, true, true)), "{}", src);
+        }
+        let stuck = "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 0\n  }\n  i\n}";
+        let d = diagnostics(stuck);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0507");
+        assert_eq!(
+            d[0].message,
+            "Tier 1 cannot rule out `n = 1, i = 0`, after a round of this loop, where its measure `n - i` changes by 0: a `decreases` measure gets smaller at every round"
+        );
+        assert_eq!((d[0].primary.line, d[0].primary.col), (4, 25));
+        assert!(d[0].fixes.is_empty());
+        assert!(obligations(stuck).contains(&(Decreases, true, false)));
+        // Several measures go in lexicographic order, each path of the round on its own.
+        let lex = "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  var j: u8 = 0\n  while i < n invariant j <= 9 decreases n - i decreases 9 - j {\n    if j < 9 {\n      j += 0\n    } else {\n      i += 1\n      j = 0\n    }\n  }\n  i\n}";
+        assert_eq!(
+            messages(lex),
+            ["Tier 1 cannot rule out `n = 1, i = 0, j = 0`, after a round of this loop, where its measure `n - i, 9 - j` changes by (0, 0): a `decreases` measure gets smaller at every round"]
+        );
+        let up = lex
+            .replace("j += 0", "j += 1")
+            .replace("i += 1\n", "i += 0\n");
+        assert_eq!(codes(&up), ["E0507"]);
+        // A measure Tier 1 does not follow binding by binding is compared with its start.
+        let product = "pub fn f() -> u8 {\n  var i: u8 = 0\n  while i < 9 decreases 20 - 2 * i {\n    i += 1\n  }\n  i\n}";
+        assert_eq!(codes(product), ["E0507"]);
+        let call = "pub fn dist(i: u8) -> u8\n  requires i <= 100\n  ensures result == 100 - i\n= 100 - i\npub fn f() -> u8 {\n  var i: u8 = 0\n  while i < 100 decreases dist(i) {\n    i += 0\n  }\n  i\n}";
+        assert_eq!(
+            messages(call),
+            ["Tier 1 cannot rule out `i = 0`, after a round of this loop, where its measure `dist(i)` changes by 0: a `decreases` measure gets smaller at every round"]
+        );
+        let nothing = "pub fn three() -> u8\n  ensures result == 3\n= 3\npub fn f(c: bool) {\n  while c decreases three() {\n  }\n}";
+        assert_eq!(
+            messages(nothing),
+            ["Tier 1 cannot rule out that a round of this loop changes its measure `three()` by 0: a `decreases` measure gets smaller at every round"]
+        );
+    }
+
+    #[test]
+    fn test_a_loop_measure_follows_every_change_of_its_bindings() {
+        let base = "pub fn bump(mut x: u8)\n  ensures x > 0\n{\n  x = 1\n}\npub fn ext(mut x: u8)\npub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 1\nCHANGE\n  }\n  i\n}";
+        assert_eq!(codes(&base.replace("CHANGE\n", "")), NONE);
+        for change in [
+            "    bump(mut i)\n",
+            "    ext(mut i)\n",
+            "    i = i - 1\n",
+            "    while i > 0 {\n      i -= 1\n    }\n",
+        ] {
+            let src = base.replace("CHANGE\n", change);
+            assert_eq!(codes(&src), ["E0507"], "{}", change);
+        }
+        // A binding of the measure that only an inner loop leaves alone keeps its change.
+        let kept = base.replace(
+            "CHANGE\n",
+            "    var k: u8 = 0\n    while k < 3 {\n      k += 1\n    }\n",
+        );
+        assert_eq!(codes(&kept), NONE);
+    }
+
+    #[test]
+    fn test_a_negative_measure_gets_a_guard_where_it_can() {
+        let neg = "pub fn f(n: i8) -> i8 {\n  var i: i8 = n\n  while i != 0 decreases i {\n    i -= 1\n  }\n  i\n}";
+        let d = &diagnostics(neg)[0];
+        assert_eq!(d.code, "E0507");
+        assert_eq!(
+            d.message,
+            "Tier 1 cannot rule out `n = 0, i = -1`, at the head of a round of this loop, where its measure `i` is negative: a `decreases` measure is never negative"
+        );
+        assert_eq!(
+            d.fixes[0].message,
+            "insert `guard i >= 0 else { todo(\"i >= 0 is false here\") }`"
+        );
+        // The first round can break it: the guard goes before the loop.
+        assert!(fixed(neg).contains(
+            "  var i: i8 = n\n  guard i >= 0 else { todo(\"i >= 0 is false here\") }\n  while"
+        ));
+        // Only a later round can: the guard ends the body.
+        let later = "pub fn f() -> i8 {\n  var i: i8 = 5\n  while i != 0 decreases i {\n    i -= 2\n  }\n  i\n}";
+        assert!(fixed(later)
+            .contains("    i -= 2\n    guard i >= 0 else { todo(\"i >= 0 is false here\") }\n  }"));
+        let none = "pub fn f(c: bool) {\n  while c decreases -1 {\n  }\n}";
+        assert_eq!(
+            messages(none),
+            [
+                "Tier 1 cannot rule out that this loop's measure `-1` is negative at the head of a round: a `decreases` measure is never negative",
+                "Tier 1 cannot rule out that a round of this loop changes its measure `-1` by 0: a `decreases` measure gets smaller at every round"
+            ]
+        );
+        let shifted = "pub fn f(n: i8) -> i8 {\n  var i: i8 = n\n  while i != 0 decreases i + 1 - 1 {\n    i -= 1\n  }\n  i\n}";
+        assert!(diagnostics(shifted)[0].fixes[0]
+            .message
+            .contains("guard i + 1 - 1 >= 0 else"));
+    }
+
+    #[test]
+    fn test_a_function_measure_is_proven_at_its_calls() {
+        let ok = "pub fn r(n: u8) -> u8\n  decreases n\n{\n  if n == 0 {\n    return 0\n  }\n  r(n - 1)\n}";
+        assert_eq!(codes(ok), NONE);
+        assert_eq!(
+            obligations(ok)
+                .into_iter()
+                .filter(|o| o.0 == Decreases)
+                .collect::<Vec<_>>(),
+            [(Decreases, true, true), (Decreases, true, true)]
+        );
+        let same =
+            "pub fn r(n: u8) -> u8\n  decreases n\n{\n  if n == 0 {\n    return 0\n  }\n  r(n)\n}";
+        let d = &diagnostics(same)[0];
+        assert_eq!(d.code, "E0507");
+        assert_eq!(
+            d.message,
+            "Tier 1 cannot rule out `n = 1`, where the measure `n` of `r` is 1 at this recursive call and 1 on entry: a `decreases` measure gets smaller at every recursive call"
+        );
+        assert!(d.fixes.is_empty());
+        let negative = "pub fn down(n: i8) -> i8\n  decreases n\n{\n  if n <= 0 {\n    return 0\n  }\n  down(n - 1)\n}\npub fn start(k: i8) -> i8 = down(k)";
+        let d = diagnostics(negative);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            d[0].message,
+            "Tier 1 cannot rule out `k = -1`, where the measure `n` of `down` is negative at this call: a `decreases` measure is never negative"
+        );
+        assert_eq!(
+            repairs(negative),
+            module("pub fn down(n: i8) -> i8\n  decreases n\n{\n  if n <= 0 {\n    return 0\n  }\n  down(n - 1)\n}\npub fn start(k: i8) -> i8 {\n  guard k >= 0 else { todo(\"k >= 0 is false here\") }\n  down(k)\n}")
+        );
+        let constant =
+            "pub fn down(n: i8) -> i8\n  decreases n\n= 0\npub fn start() -> i8 = down(-3)";
+        assert_eq!(
+            messages(constant),
+            ["Tier 1 cannot rule out `n = -3`, where the measure `n` of `down` is negative at this call: a `decreases` measure is never negative"]
+        );
+        let empty = "pub fn never()\n  decreases -1\n{\n}\npub fn f() {\n  never()\n}";
+        assert_eq!(
+            messages(empty),
+            ["Tier 1 cannot rule out that the measure `-1` of `never` is negative at this call: a `decreases` measure is never negative"]
+        );
+        // Another function's measure only stays non-negative; it need not be smaller.
+        let other = "pub fn b(m: u8) -> u8\n  decreases m\n= 0\npub fn a(n: u8) -> u8\n  decreases n\n= b(n + 5)";
+        assert_eq!(codes(other), NONE);
+        // The caller's measure is its value on entry, before the body changes a `mut` parameter.
+        let entry = "pub fn r(mut n: u8) -> u8\n  decreases n\n{\n  if n == 0 {\n    return 0\n  }\n  n = n - 1\n  r(mut n)\n}";
+        assert_eq!(codes(entry), NONE);
+        let raised = "pub fn r(mut n: u8) -> u8\n  decreases n\n{\n  if n == 0 or n == 255 {\n    return 0\n  }\n  n = n + 1\n  r(mut n)\n}";
+        assert_eq!(codes(raised), ["E0507"]);
+        let empty_rec = "pub fn r(c: bool)\n  decreases 3\n{\n  if c {\n    r(c)\n  }\n}";
+        assert_eq!(
+            messages(empty_rec),
+            ["Tier 1 cannot rule out that the measure `3` of `r` is 3 at this recursive call and 3 on entry: a `decreases` measure gets smaller at every recursive call"]
+        );
+    }
+
+    #[test]
+    fn test_a_narrowing_that_always_traps_is_an_error() {
+        let d = diagnostics("pub fn f(x: u8) -> u8 {\n  val y: u8 = x + 300\n  y\n}");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0508");
+        assert_eq!(
+            d[0].message,
+            "Tier 1 proves `x + 300` is at least 300 here, outside `u8` (0 to 255), so this narrowing always traps"
+        );
+        assert!(d[0].fixes.is_empty());
+        assert_eq!(
+            messages("pub fn f(x: u8) -> i8 = x - 400"),
+            ["Tier 1 proves `x - 400` is at most -145 here, outside `i8` (-128 to 127), so this narrowing always traps"]
+        );
+        for src in [
+            "pub fn f(x: u8) {\n  var y: u8 = 0\n  y = x + 256\n  _ = y\n}",
+            "pub fn f(x: u8) -> [2]u8 {\n  var xs: [2]u8 = [0, 0]\n  xs[0] = x + 256\n  xs\n}",
+            "pub fn g(a: u8) -> u8 = a\npub fn f(x: u8) -> u8 = g(x + 256)",
+            "pub fn f(x: u8) -> u8 {\n  return x + 256\n}",
+            "pub fn f(x: u8) -> [2]u8 = [x + 256, 0]",
+            "pub fn f() -> u8[0..10] = 300",
+            "pub fn f(xs: [2]u16[300..400]) -> [2]u8 = [xs[0], 0]",
+        ] {
+            assert_eq!(codes(src), ["E0508"], "{}", src);
+        }
+        // A value that may fit, at either end, and a place no path reaches, are not errors.
+        for src in [
+            "pub fn f(x: u8) -> u8 = x + 255 - 255",
+            "pub fn f(x: u8) -> u8 {\n  val y: u8 = x - 255\n  y\n}",
+            "pub fn f(x: u8) -> i16 {\n  val y: u8 = x + 255 - 255\n  y\n}",
+            "pub fn f(x: u8) -> u8 {\n  if x > 255 {\n    val y: u8 = x + 300\n    return y\n  }\n  0\n}",
+            "pub fn f(x: u128) -> u128 = x + 1",
+            "pub fn f(x: u8[1..3]) -> u8 = x << 8 >> 8",
+            "pub fn f(x: u8[1..3]) -> u8 = x << 8",
+            "pub fn g(a: u8) -> bool = true\npub fn f(x: u8) -> bool = x > 255 and g(x + 300)",
+        ] {
+            assert!(!codes(src).contains(&"E0508"), "{}", src);
+        }
+        assert_eq!(codes("pub fn f(x: u8) -> u8 = x + 255"), NONE);
+        assert_eq!(
+            messages("pub fn f(xs: [2]u16[300..400]) -> [2]u8 = xs"),
+            ["Tier 1 proves the value is at least 300 here, outside `u8` (0 to 255), so this narrowing always traps"]
+        );
+    }
+
+    #[test]
+    fn test_run_time_checks_say_what_they_check() {
+        let details = |src: &str| -> Vec<(ObligationKind, String)> {
+            report(src)
+                .obligations
+                .into_iter()
+                .map(|o| (o.kind, o.detail))
+                .collect()
+        };
+        assert_eq!(
+            details("pub fn f(xs: [4]u8, i: usize, d: u8, k: u8) -> u8 = xs[i] / d << k"),
+            [
+                (Index, "into an array of 4".to_string()),
+                (Divisor, String::new()),
+                (Shift, "below 8".to_string()),
+                (Range, "into `u8`".to_string()),
+                (Range, "into `u8`".to_string()),
+            ]
+        );
+        assert_eq!(
+            details("pub fn f(k: u8[0..8]) -> i64 = 1 << k"),
+            [
+                (Shift, String::new()),
+                (Range, "into its type".to_string()),
+                (Range, "into `i64`".to_string()),
+            ]
+        );
+        assert_eq!(
+            details("pub fn f(x: u8) -> u8[0..10]\n  ensures result < 9\n= x")
+                .into_iter()
+                .filter(|d| d.0 != Range)
+                .collect::<Vec<_>>(),
+            [(Refinement, String::new()), (Ensures, String::new())]
+        );
+    }
+
+    #[test]
+    fn test_a_prove_function_trusts_the_clauses_outside_the_fragment() {
+        let src = "@prove\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  requires x < 200\n  ensures result * 2 == x\n= x / 2\n@prove\npub fn g(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i != 300 invariant i <= n {\n    i += 1\n  }\n  i\n}\n@checked\npub fn h(x: u8)\n  requires x != 3\n{\n}";
+        let all: Vec<(u32, u32, String)> = reports(src)
+            .into_iter()
+            .flat_map(|r| r.trusted)
+            .map(|(s, t)| (s.line, s.col, t))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (4, 12, "requires x % 2 == 0 of half".to_string()),
+                (6, 11, "ensures result * 2 == x of half".to_string()),
+                (11, 25, "invariant i != 300 in g".to_string()),
+            ]
+        );
+        assert_eq!(codes(src), NONE);
     }
 
     #[test]

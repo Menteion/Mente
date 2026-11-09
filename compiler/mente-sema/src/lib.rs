@@ -82,7 +82,39 @@ fn combine<T>(
 /// the body parser reports nothing in, then runs Tier 1 on each one those report nothing in,
 /// function by function in source order.
 pub fn check_bodies(src: &str, module: &ModuleFile) -> Vec<Diagnostic> {
-    bodies(src, module, true).1
+    bodies(src, module, true).errors
+}
+
+/// For each function whose names and types check, in source order, its name and what Tier 1
+/// found: every obligation, proven or left to run time, which `mn view --checks` lists.
+pub fn tier1_reports(src: &str) -> Vec<(String, tier1::Report)> {
+    match parse_module(src) {
+        Ok(module) => bodies(src, &module, true).reports,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// What `mn check` lists beside a module's diagnostics: every `todo` with its reason, and
+/// every trusted clause, one of an `@prove` function outside the Tier-1 fragment, assumed until
+/// `mn prove` runs. Each comes with its place, in source order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listings {
+    pub todos: Vec<(Span, String)>,
+    pub trusted: Vec<(Span, String)>,
+}
+
+pub fn listings(src: &str) -> Listings {
+    let Ok(module) = parse_module(src) else {
+        return Listings::default();
+    };
+    let b = bodies(src, &module, true);
+    let mut trusted: Vec<(Span, String)> =
+        b.reports.into_iter().flat_map(|(_, r)| r.trusted).collect();
+    trusted.sort_by_key(|t| t.0.start);
+    Listings {
+        todos: b.todos,
+        trusted,
+    }
 }
 
 /// A function whose body parsed, with its names resolved and its types checked.
@@ -122,7 +154,8 @@ pub fn check_program_without_proofs(src: &str) -> Result<CheckedModule, Vec<Diag
 
 fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
     let module = parse_module(src).map_err(|d| vec![d])?;
-    let (functions, body_errors) = bodies(src, &module, prove);
+    let b = bodies(src, &module, prove);
+    let (functions, body_errors) = (b.functions, b.errors);
     combine(verify_module(&module), body_errors)?;
     Ok(CheckedModule {
         names: module
@@ -144,7 +177,7 @@ fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
 pub fn dump_typed(src: &str) -> String {
     let mut out = format!("mente-dump {} typed\n", mente_syntax::DUMP_VERSION);
     if let Ok(module) = parse_module(src) {
-        for f in bodies(src, &module, true).0.into_iter().flatten() {
+        for f in bodies(src, &module, true).functions.into_iter().flatten() {
             out.push_str(&mente_syntax::tree::Tree::render_fn(&f.syntax));
             out.push('\n');
             for (b, ty) in f.resolution.bindings.iter().zip(&f.typing.bindings) {
@@ -175,12 +208,27 @@ pub fn dump_typed(src: &str) -> String {
 /// the body parser reports nothing in, then, when `prove`, runs Tier 1 on each one those report
 /// nothing in, function by function in source order. Tier 1 reads each callee's header as it
 /// parsed, from the module's functions in order.
-fn bodies(
-    src: &str,
-    module: &ModuleFile,
-    prove: bool,
-) -> (Vec<Option<CheckedFn>>, Vec<Diagnostic>) {
+/// What checking a module's bodies gives: each function checked when its body parsed cleanly,
+/// every diagnostic, Tier 1's report of each function it ran on, and every `todo`.
+struct Bodies {
+    functions: Vec<Option<CheckedFn>>,
+    errors: Vec<Diagnostic>,
+    reports: Vec<(String, tier1::Report)>,
+    todos: Vec<(Span, String)>,
+}
+
+fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
     let parsed = mente_syntax::parse_bodies(src, module);
+    let mut todos: Vec<(Span, String)> = parsed
+        .iter()
+        .filter_map(|p| p.syntax.as_ref())
+        .flat_map(|f| &f.tree.exprs)
+        .filter_map(|e| match &e.kind {
+            mente_syntax::tree::ExprKind::Todo(reason) => Some((e.span, reason.clone())),
+            _ => None,
+        })
+        .collect();
+    todos.sort_by_key(|t| t.0.start);
     let routings: Vec<tier1::Routing> = module
         .items
         .iter()
@@ -200,6 +248,7 @@ fn bodies(
         .collect();
     let mut errors = Vec::new();
     let mut checked = Vec::new();
+    let mut reports = Vec::new();
     for (p, routing) in parsed.iter().zip(&routings) {
         errors.extend(p.errors.iter().cloned());
         let done = match (&p.syntax, p.errors.is_empty()) {
@@ -214,7 +263,9 @@ fn bodies(
                         typing: &typing,
                         routing: *routing,
                     };
-                    found.extend(tier1::check(&f, &callees, src).diagnostics);
+                    let report = tier1::check(&f, &callees, src);
+                    found.extend(report.diagnostics.iter().cloned());
+                    reports.push((p.name.clone(), report));
                 }
                 errors.extend(found);
                 Some((resolution, typing))
@@ -236,7 +287,12 @@ fn bodies(
             _ => None,
         })
         .collect();
-    (functions, errors)
+    Bodies {
+        functions,
+        errors,
+        reports,
+        todos,
+    }
 }
 
 /// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`.
@@ -914,6 +970,35 @@ mod tests {
             dump_typed("module m\nlet x = 1\n"),
             "mente-dump 1 typed\n2:1 E0111\n"
         );
+    }
+
+    #[test]
+    fn test_listings_name_every_todo_and_trusted_clause() {
+        let src = "module m\n@prove\npub fn h(x: u8) -> u8\n  requires x != 3\n= todo(\"b\")\npub fn f(x: u8) -> u8 = if x > 2 { todo(\"a\") } else { todo(\"c\") }\npub fn g() -> u8 = zz + todo(\"d\")\n";
+        let l = listings(src);
+        let todos: Vec<(u32, u32, &str)> = l
+            .todos
+            .iter()
+            .map(|(s, r)| (s.line, s.col, r.as_str()))
+            .collect();
+        assert_eq!(
+            todos,
+            [(5, 3, "b"), (6, 36, "a"), (6, 55, "c"), (7, 25, "d")]
+        );
+        let trusted: Vec<(u32, &str)> = l
+            .trusted
+            .iter()
+            .map(|(s, t)| (s.line, t.as_str()))
+            .collect();
+        assert_eq!(trusted, [(4, "requires x != 3 of h")]);
+        let two = "module m\n@prove\npub fn b(x: u8)\n  requires x != 1\n{\n}\n@prove\npub fn a(x: u8)\n  requires x != 2\n{\n}\n";
+        let lines: Vec<u32> = listings(two).trusted.iter().map(|t| t.0.line).collect();
+        assert_eq!(lines, [4, 9]);
+        assert_eq!(listings("module m\nlet x = 1\n"), Listings::default());
+        // Tier 1 reports on each function whose names and types check.
+        let names: Vec<String> = tier1_reports(src).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["h", "f"]);
+        assert!(tier1_reports("module m\nlet x = 1\n").is_empty());
     }
 
     #[test]

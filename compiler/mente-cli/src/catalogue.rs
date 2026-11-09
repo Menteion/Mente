@@ -933,6 +933,31 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i <= 5 {\n    i += 1\n  }\n  i\n}\n",
         "module m\npub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i <= n {\n    i += 1\n  }\n  i\n}\n",
     ),
+    emitted(
+        "E0507",
+        FailureClass::Proof,
+        "spec/ghost-contracts-and-totality.md",
+        "Tier 1 cannot prove a decreases measure",
+        "A written `decreases` measure is never negative, and gets smaller at every round of its \
+         loop, in lexicographic order when there are several, or at every recursive call; the \
+         call's measure is never negative at any call. The message names a valuation Tier 1 \
+         cannot rule out. Where a `guard` can make the measure non-negative, the fix inserts \
+         one; a measure that does not get smaller has no fix, since only the loop or the call \
+         can change.",
+        "module m\npub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 0\n  }\n  i\n}\n",
+        "module m\npub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 1\n  }\n  i\n}\n",
+    ),
+    emitted(
+        "E0508",
+        FailureClass::Proof,
+        "spec/core-calculus.md",
+        "A narrowing always traps",
+        "Tier 1 proves that the value entering a type here lies outside the type's range on \
+         every path that reaches it, so the narrowing traps whenever it runs: a mistake, not a \
+         run-time check. Widen the type, or compute a value that fits.",
+        "module m\npub fn f(x: u8) -> u8 {\n  val y: u8 = x + 300\n  y\n}\n",
+        "module m\npub fn f(x: u8) -> u16 {\n  val y: u16 = x + 300\n  y\n}\n",
+    ),
     reserved(
         "E0601",
         FailureClass::Type,

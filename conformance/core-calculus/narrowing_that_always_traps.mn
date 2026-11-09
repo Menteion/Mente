@@ -1,0 +1,6 @@
+// expect: E0508
+module conformance
+pub fn f(x: u8) -> u8 {
+  val y: u8 = x + 300
+  y
+}

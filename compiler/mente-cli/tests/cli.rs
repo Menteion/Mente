@@ -251,7 +251,10 @@ fn test_mn_check_json_reports_the_versioned_form() {
     let clean = mn(&dir, &["check", "--json", "clean.mn"]);
     fs::remove_dir_all(&dir).unwrap();
     assert!(clean.status.success(), "{}", text(&clean.stderr));
-    assert_eq!(text(&clean.stdout), "{\"version\":1,\"diagnostics\":[]}\n");
+    assert_eq!(
+        text(&clean.stdout),
+        "{\"version\":1,\"diagnostics\":[],\"todos\":[],\"trusted\":[]}\n"
+    );
 
     let dir = scratch("json");
     fs::write(
@@ -477,5 +480,96 @@ fn test_mn_dump_prints_canonical_forms() {
     let missing = mn(&dir, &["dump", "--tree", "gone.mn"]);
     assert_eq!(missing.status.code(), Some(2));
     assert!(text(&missing.stderr).contains("cannot read"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `mn check` lists every `todo` with its reason and every trusted clause with its place, after
+/// a file's diagnostics and in `--json`, without changing its verdict.
+#[test]
+fn test_mn_check_lists_todos_and_trusted_clauses() {
+    let dir = scratch("listings");
+    fs::write(
+        dir.join("open.mn"),
+        "module m\npub fn later(x: u8) -> u8 = todo(\"think about x\")\n@prove\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  ensures x > 1 or x == 0\n= x / 2\n@prove\npub fn g(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i != 300 {\n    i += 1\n  }\n  i\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("broken.mn"),
+        "module m\npub fn f() -> u8 {\n  val y: u8 = zz\n  todo(\"after\")\n}\n",
+    )
+    .unwrap();
+    let run = mn(&dir, &["check", "open.mn"]);
+    let out = text(&run.stdout);
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    let listed: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("todo:") || l.starts_with("trusted:"))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            "todo: open.mn:2:29: \"think about x\"",
+            "trusted: open.mn:5:12: requires x % 2 == 0 of half, assumed until mn prove runs",
+            "trusted: open.mn:6:11: ensures x > 1 or x == 0 of half, assumed until mn prove runs",
+            "trusted: open.mn:11:25: invariant i != 300 in g, assumed until mn prove runs",
+        ]
+    );
+    let json = text(&mn(&dir, &["check", "--json", "open.mn"]).stdout);
+    assert!(
+        json.contains(
+            "\"todos\":[{\"reason\":\"think about x\",\"span\":{\"file\":\"open.mn\",\"start\":37,"
+        ),
+        "{}",
+        json
+    );
+    assert!(
+        json.contains("\"trusted\":[{\"clause\":\"requires x % 2 == 0 of half\",\"span\":{\"file\":\"open.mn\","),
+        "{}",
+        json
+    );
+    // A module with an error still lists its todo, and fails for its error alone.
+    let broken = mn(&dir, &["check", "broken.mn"]);
+    assert_eq!(broken.status.code(), Some(1));
+    assert!(text(&broken.stdout).contains("todo: broken.mn:4:3: \"after\"\n"));
+    assert!(text(&broken.stderr).contains("E0201"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `mn view --checks` lists, for each function whose body checks, each run-time check Tier 1
+/// leaves, then how many it erased.
+#[test]
+fn test_mn_view_checks_lists_the_run_time_checks_tier1_leaves() {
+    let dir = scratch("checks");
+    fs::write(
+        dir.join("c.mn"),
+        "module m\npub fn sum(a: [16]i32, n: usize[0..=16]) -> i64 {\n  var i: usize = 0\n  var s: i64 = 0\n  while i < n {\n    s += a[i]\n    i += 1\n  }\n  s\n}\npub fn pick(xs: [4]u8, i: usize, d: u8) -> u8 = xs[i] / d << 1\npub fn one(x: u8) -> u8 = x\npub fn bad() -> u8 = zz\n",
+    )
+    .unwrap();
+    fs::write(dir.join("broken.mn"), "module m\nlet x = 1\n").unwrap();
+    let run = mn(&dir, &["view", "--checks", "c.mn"]);
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    assert_eq!(
+        text(&run.stdout),
+        concat!(
+            "fn sum\n",
+            "  6:10 narrowing into `i64`\n",
+            "  Tier 1 erased 5 run-time checks\n",
+            "fn pick\n",
+            "  11:49 narrowing into `u8`\n",
+            "  11:52 index into an array of 4\n",
+            "  11:57 divisor\n",
+            "  Tier 1 erased 2 run-time checks\n",
+            "fn one\n",
+            "  Tier 1 erased 1 run-time check\n",
+        )
+    );
+    let broken = mn(&dir, &["view", "--checks", "broken.mn"]);
+    assert_eq!(broken.status.code(), Some(1));
+    assert!(text(&broken.stderr).contains("E0111"));
+    let missing = mn(&dir, &["view", "--checks", "missing.mn"]);
+    assert_eq!(missing.status.code(), Some(2));
+    let usage = mn(&dir, &["view", "--checks"]);
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(text(&usage.stderr).contains("Usage: mn view --checks"));
     fs::remove_dir_all(&dir).unwrap();
 }
