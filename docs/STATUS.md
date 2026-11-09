@@ -23,8 +23,9 @@ date: 2026-11-04
 
 These gaps hold across every crate, and every `spec/*.md` claim that depends on them is labelled `Specified`:
 
-- **Bodies are parsed, not checked.** The body parser reads every function with a body under M1's grammar and reports what M1 does not accept; `@example` bodies stay token lists, and the declaration parser keeps types, contracts and effect clauses as raw strings for the digests.
-- **No type checker.** Refinement intervals, units, `?T`, `T ! E`, effects, parameter modes and the Law of Exclusivity are not checked.
+- **Bodies are checked for M1's slice only.** The body parser reads every function with a body under M1's grammar, and name resolution and the type checker check M1's names, types and parameter modes in each function that parses cleanly. `@example` bodies stay token lists, and the declaration parser keeps the types, contracts and effect clauses of declarations as raw strings for the digests.
+- **No checks beyond M1's types, and no proofs.** Tier 1 does not exist, so refinements and contracts are not proven; units, `?T`, `T ! E`, effects and the Law of Exclusivity beyond a single call are not checked.
+- **Nothing runs `.mn` code.** The reference interpreter `mente-interp` does not exist yet.
 - **No lowering.** No `.mn` code reaches MIR. The MIR region `mn test` runs is built by hand in `compiler/mente-cli/src/main.rs`, with hand-written intervals.
 - **No code generation.** `mente-codegen` is empty until M1 lowers MIR to Cranelift.
 
