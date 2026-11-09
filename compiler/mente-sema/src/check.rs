@@ -1210,7 +1210,7 @@ mod tests {
             codes("pub fn f() {\n  var xs: [2]u8 = [0, 0]\n  touch(mut xs[1])\n}"),
             NONE
         );
-        let wide = diagnostics("pub fn f() {\n  var v = 0\n  touch(mut v)\n}");
+        let wide = diagnostics("pub fn f() {\n  var count = 0\n  touch(mut count)\n}");
         assert_eq!(wide.len(), 1);
         assert_eq!(wide[0].code, "E0203");
         assert_eq!(
