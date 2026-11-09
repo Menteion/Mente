@@ -14,7 +14,7 @@ The agent benchmark measures Mente's goal, the language best suited to AI agents
 | M6 | 3 | 1 | 0 |
 | M7 | 3 | 1 | 1 |
 
-- **Tuning** tasks are the public solve tasks in [`tasks/`](tasks/). Work on the language card may study their results.
+- **Tuning** tasks are the public solve tasks in [`tasks/`](tasks/). Work on the language card may study their results. Before the first run, the syntax probe of M1's checkpoint (a) uses the M1 tuning tasks too: one program per run, no repairs and nothing scored, with its programs and findings kept in `probe/` ([`syntax-probe`](../docs/design-review.md#syntax-probe)).
 - **Held-out** tasks are solve tasks kept in a private repository, `Menteion/mente-bench-heldout`, so that no session working in this repository can read them. The language card is never tuned on them, and their results are published only as totals. [`corpus.lock`](corpus.lock) names the commit that fixes them, and their milestones and marks.
 - **Adversarial** tasks ask for something the language must refuse, such as smuggling a network call into a pure function. They are public.
 - A task runs first at the end of the milestone its front matter names, the earliest whose compiler can build a solution, and again at the end of every later milestone, so the M1 tasks give Mente's trend across milestones.
@@ -25,6 +25,7 @@ The agent benchmark measures Mente's goal, the language best suited to AI agents
 - **Languages**: Mente; Rust, the reference; Odin, the control ([`control-language`](../docs/design-review.md#control-language)), whose agent is given a document of the same size as the language card, written with the card's first version at the end of M1; and Go, if the budget allows.
 - **Runs**: every task runs 5 times per language. In a run the agent submits a program, and the harness builds it and runs the visible examples; the agent may then revise it, seeing the diagnostics and the examples' results, at most 10 times. The run ends when the agent declares it finished or has used its 10 repairs.
 - **Scoring**: a run is solved when its last program builds and passes every example and every hidden test. A program that contains a `todo` scores as unsolved ([`todo-marker`](../docs/design-review.md#todo-marker)). The report gives each language's pass rate, the median repairs and tokens of solved runs, and their variance across the 5 runs, with core tasks apart from the others and the held-out set apart from the tuning set.
+- **Failure classes**: the report classifies every program that fails, so that the re-planning triggers of `docs/design-brief.md` section 7.7 are counted, not judged ([`ai-coding-problems`](../docs/design-review.md#ai-coding-problems)). A Mente program that does not build is classed by the failure classes of the codes it reports (`spec/diagnostics.md` item 8); a program in another language that does not build is classed as a build failure. A program that builds but fails an example or a hidden test, or traps, is classed as such. The report counts the classes over the last program of every unsolved run, and over every program the runs submitted.
 - **Adversarial tasks** are scored as caught or missed, under the task's own "Caught when" and "Missed when", and a catch at build time is reported apart from a catch when the program runs.
 
 ## Task files
