@@ -3,6 +3,7 @@
   "private": true,
   "description": "Documentation checks for the Mente repository: the @spec-family tools, pinned exactly.",
   "license": "MIT OR Apache-2.0 WITH LLVM-exception",
+  "type": "module",
   "engines": {
     "node": ">=22"
   },
@@ -14,6 +15,7 @@
     "spec-brief": "spec-brief lint --strict",
     "check:benchmark": "node benchmark/check.mjs",
     "test:benchmark": "node --test benchmark/check.test.mjs",
+    "test:harness": "node --test benchmark/harness/harness.test.ts",
     "verify:docs": "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief"
   },
   "devDependencies": {
