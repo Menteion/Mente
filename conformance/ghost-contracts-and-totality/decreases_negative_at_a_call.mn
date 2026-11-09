@@ -1,0 +1,12 @@
+// expect: E0507
+module conformance
+pub fn down(n: i8) -> i8
+  decreases n
+{
+  if n <= 0 {
+    return 0
+  }
+  down(n - 1)
+}
+
+pub fn start(k: i8) -> i8 = down(k)

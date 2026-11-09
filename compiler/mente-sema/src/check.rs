@@ -1341,7 +1341,7 @@ mod tests {
             ["the elements of an array literal have one type, but this is `bool` after an integer"]
         );
         assert_eq!(codes("pub fn f(a: [2]u8) -> [3]u8 = a"), ["E0203"]);
-        assert_eq!(codes("pub fn f() -> [2]u8 = [1, 300]"), NONE);
+        assert_eq!(codes("pub fn f() -> [2]u16 = [1, 300]"), NONE);
         assert_eq!(codes("pub fn f() -> [2]bool = [true; 2]"), NONE);
         assert_eq!(codes("pub fn f() -> [2]bool = [1; 2]"), ["E0203"]);
         assert_eq!(codes("pub fn f() -> [2]bool = [todo(\"x\"), true]"), NONE);
@@ -1792,9 +1792,9 @@ pub fn f() {
         assert_eq!(all_codes("pub fn f() -> i8 = 127_i8"), NONE);
         assert_eq!(all_codes("pub fn f() -> i8 = -128_i8"), NONE);
         assert_eq!(all_codes("pub fn f() -> i8 = -129_i8"), ["E0221"]);
-        assert_eq!(all_codes("pub fn f() -> u8 = -255_u8"), NONE);
+        assert_eq!(all_codes("pub fn f() -> i64 = -255_u8"), NONE);
         assert_eq!(all_codes("pub fn f() -> u8 = -256_u8"), ["E0221"]);
-        assert_eq!(all_codes("pub fn f() -> u8 = 1 - 255_u8"), NONE);
+        assert_eq!(all_codes("pub fn f() -> i64 = 1 - 255_u8"), NONE);
         assert_eq!(all_codes("pub fn f() -> u8 = 1 - 256_u8"), ["E0221"]);
         assert_eq!(all_codes("pub fn f() -> i64 = -(1 + 128_i8)"), ["E0221"]);
         assert_eq!(

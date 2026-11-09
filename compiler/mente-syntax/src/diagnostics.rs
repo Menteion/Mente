@@ -197,25 +197,44 @@ pub fn render_text(d: &Diagnostic, file: &str, src: &str) -> String {
     out
 }
 
-/// The diagnostics of one source file, for [`render_json`].
+/// The diagnostics of one source file, for [`render_json`], with what `mn check` lists beside
+/// them: each `todo` with its reason, and each trusted clause with its text.
 pub struct FileDiagnostics<'a> {
     pub file: &'a str,
     pub src: &'a str,
     pub diagnostics: &'a [Diagnostic],
+    pub todos: &'a [(Span, String)],
+    pub axioms: &'a [(Span, String)],
 }
 
-/// The JSON form: `{"version": 1, "diagnostics": [...]}`, every diagnostic of every file.
+/// The JSON form: `{"version": 1, "diagnostics": [...], "todos": [...], "trusted": [...]}`,
+/// every diagnostic of every file, then every `todo` as its `reason` and `span`, and every
+/// trusted clause as its `clause` and `span`.
 pub fn render_json(files: &[FileDiagnostics]) -> String {
     let mut items = Vec::new();
+    let mut todos = Vec::new();
+    let mut axioms = Vec::new();
     for f in files {
         for d in f.diagnostics {
             items.push(diagnostic_json(d, f.file, f.src));
         }
+        let listed = |key: &str, (span, text): &(Span, String)| {
+            format!(
+                "{{\"{}\":{},\"span\":{}}}",
+                key,
+                json_string(text),
+                span_json(*span, f.file, f.src)
+            )
+        };
+        todos.extend(f.todos.iter().map(|t| listed("reason", t)));
+        axioms.extend(f.axioms.iter().map(|t| listed("clause", t)));
     }
     format!(
-        "{{\"version\":{},\"diagnostics\":[{}]}}",
+        "{{\"version\":{},\"diagnostics\":[{}],\"todos\":[{}],\"trusted\":[{}]}}",
         JSON_VERSION,
-        items.join(",")
+        items.join(","),
+        todos.join(","),
+        axioms.join(",")
     )
 }
 
@@ -361,6 +380,8 @@ mod tests {
             file: "a\\b.mn",
             src,
             diagnostics: &[d],
+            todos: &[(span(9, 14), "later \"x\"".to_string())],
+            axioms: &[(span(0, 6), "ensures x of f".to_string())],
         }]);
         assert_eq!(
             json,
@@ -370,10 +391,15 @@ mod tests {
                 "\"primary\":{\"file\":\"a\\\\b.mn\",\"start\":16,\"end\":19,\"line\":2,\"column\":8},",
                 "\"related\":[{\"message\":\"in this module\",\"span\":{\"file\":\"a\\\\b.mn\",\"start\":0,\"end\":6,\"line\":1,\"column\":1}}],",
                 "\"fixes\":[{\"message\":\"use a bitstruct\",\"applicability\":\"suggestion\",",
-                "\"edits\":[{\"span\":{\"file\":\"a\\\\b.mn\",\"start\":16,\"end\":19,\"line\":2,\"column\":8},\"replacement\":\"u16\"}]}]}]}"
+                "\"edits\":[{\"span\":{\"file\":\"a\\\\b.mn\",\"start\":16,\"end\":19,\"line\":2,\"column\":8},\"replacement\":\"u16\"}]}]}],",
+                "\"todos\":[{\"reason\":\"later \\\"x\\\"\",\"span\":{\"file\":\"a\\\\b.mn\",\"start\":9,\"end\":14,\"line\":2,\"column\":1}}],",
+                "\"trusted\":[{\"clause\":\"ensures x of f\",\"span\":{\"file\":\"a\\\\b.mn\",\"start\":0,\"end\":6,\"line\":1,\"column\":1}}]}"
             )
         );
-        assert_eq!(render_json(&[]), "{\"version\":1,\"diagnostics\":[]}");
+        assert_eq!(
+            render_json(&[]),
+            "{\"version\":1,\"diagnostics\":[],\"todos\":[],\"trusted\":[]}"
+        );
         assert_eq!(json_string("a\tb\u{1}"), "\"a\\tb\\u0001\"");
     }
 
