@@ -386,10 +386,12 @@ mod tests {
     #[test]
     fn test_errors_come_in_the_order_the_whole_module_check_gives() {
         // Declaration errors in two items: a later lexical error, or a later lifetime, wins
-        // over an earlier parse error.
+        // over an earlier parse error. (A parameter written wrong is the body parser's error,
+        // so a construct of a later milestone stands for the declaration parser's.)
         let mut d = Session::new(MODULE);
-        edited(&mut d, "pub fn id(x: u8)", "pub fn id(x u8)");
+        edited(&mut d, "pub fn id(x: u8) -> u8 = x", "import foo");
         let parse = d.diagnostics()[0].code;
+        assert_eq!(parse, "E0109");
         edited(&mut d, "twice(id(3))", "twice(id(3)) $");
         assert_eq!(d.diagnostics()[0].code, "E0105");
         edited(&mut d, " $", "");
