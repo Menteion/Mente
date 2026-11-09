@@ -51,6 +51,14 @@ Each is decided in the spec file it names; a new one starts from an entry of the
 - No implicit conversions and no casts (`core-calculus.md`, item 2).
 - No references or lifetimes: parameter modes instead (`mutable-value-semantics.md`).
 
+### How the language changes
+
+Agents learn Mente from its language card, not from training data, so a change costs less than in a language models were trained on, as long as the card changes with it (Norman, 2026-11-09; [`language-evolution`](../docs/design-review.md#language-evolution)).
+
+- `Specified`: before 1.0, which is the foundation gate, any change may break existing code. The pull request that makes it updates the language card, the tests of the card's snippets, the conformance suite and the examples, and `mn` offers a machine-applicable migration where the change is mechanical.
+- `Specified`: after 1.0, a breaking change is admitted only with a machine-applicable migration, which `mn migrate` applies to existing code, as axiom 6 asks of every rejection. A change that cannot be migrated mechanically is considered for an edition, through the register.
+- `Specified`: the language card names the language version it describes and ships with the compiler. `mn card` prints the card of the installed version, so an agent always reads the card of the compiler it uses; the stable address serves the latest.
+
 ## 3. Goal: the general-purpose language best suited to AI agents
 
 - Mente aims to be the general-purpose programming language best suited to AI agents writing code, while people review the result and decide whether to trust it ([`ai-first-purpose`](../docs/design-review.md#ai-first-purpose), decided 2026-11-08).
