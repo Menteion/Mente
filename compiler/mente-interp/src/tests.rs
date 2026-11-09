@@ -620,3 +620,15 @@ fn test_depth_counts_nested_calls_only() {
         (10_000, 100_000_000, 1 << 24)
     );
 }
+
+#[test]
+fn test_each_ensures_clause_reads_its_own_result_and_elements_take_their_type() {
+    let two = "pub fn inc(x: u8) -> u8\n  ensures result > x\n  ensures result >= x + 1\n= x + 1";
+    assert_eq!(run(two, "inc(3)"), "4");
+    let shifted = "pub fn f(a: u8) -> [2]u8 = [a, 1 << 8]";
+    assert_eq!(kind(shifted, "f(1)"), "shift-amount");
+    assert_eq!(super::stack_bytes(0), 1 << 20);
+    assert_eq!(super::stack_bytes(2), (1 << 20) + 2 * (64 << 10));
+    assert_eq!(Int::from_i128(0), Int::ZERO);
+    assert_eq!(Int::from_i128(-3).to_string(), "-3");
+}

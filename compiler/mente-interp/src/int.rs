@@ -32,7 +32,7 @@ impl Int {
     }
 
     pub fn from_i128(v: i128) -> Int {
-        Int::new(v < 0, v.unsigned_abs())
+        Int::new(v.is_negative(), v.unsigned_abs())
     }
 
     pub fn is_negative(self) -> bool {

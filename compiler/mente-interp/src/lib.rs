@@ -233,7 +233,7 @@ pub fn call_leaving(
 ) -> Result<(Value, Vec<Value>), Stop> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
-            .stack_size((1 << 20) + STACK_PER_CALL * limits.max_depth)
+            .stack_size(stack_bytes(limits.max_depth))
             .spawn_scoped(s, || eval::Machine::new(module, limits).enter(name, args))
             .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
             .join()
@@ -247,6 +247,11 @@ pub fn call_leaving(
 
 /// Stack bytes reserved for each nested call of the interpreted program.
 const STACK_PER_CALL: usize = 64 << 10;
+
+/// The stack a run's thread gets: a base for the interpreter itself, and room for each call.
+fn stack_bytes(max_depth: usize) -> usize {
+    (1 << 20) + STACK_PER_CALL * max_depth
+}
 
 /// Runs a program: its `main`, which takes no parameters (`core-calculus.md`, item 10).
 pub fn run_main(module: &CheckedModule, limits: Limits) -> Result<Value, Stop> {
