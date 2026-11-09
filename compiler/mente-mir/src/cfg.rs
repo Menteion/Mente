@@ -122,7 +122,7 @@ impl Num {
     }
 
     pub fn from_i128(v: i128) -> Num {
-        Num::new(v < 0, v.unsigned_abs())
+        Num::new(v.is_negative(), v.unsigned_abs())
     }
 
     fn negated(self) -> Num {
@@ -601,55 +601,97 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
     Ok(())
 }
 
+/// A type an operation's result or operand must have.
+#[derive(Clone, Copy)]
+enum Want {
+    Is(Ty),
+    Int,
+    IntOrBool,
+}
+
+impl Want {
+    fn admits(self, t: Ty) -> bool {
+        match self {
+            Want::Is(x) => x == t,
+            Want::Int => matches!(t, Ty::Int(_)),
+            Want::IntOrBool => matches!(t, Ty::Int(_) | Ty::Bool),
+        }
+    }
+}
+
+/// Checks an instruction against what its operation takes and gives: its result's type, its
+/// operands' types, and the trap site it may raise, with room for the values it reports.
 fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
     let ty = f.ty(v);
     let args: Vec<Ty> = f.args(v).iter().map(|a| f.ty(*a)).collect();
-    let int = matches!(ty, Ty::Int(_));
-    // A trap site whose text has room for `values` values.
-    let site = |t: &TrapId, values: usize| {
-        f.traps
-            .get(t.0 as usize)
-            .is_some_and(|s| s.text.len() == values + 1)
-    };
-    let ok = match f.op(v) {
-        Op::Param => false,
-        Op::Int(_) => int && args.is_empty(),
-        Op::Bool(_) => ty == Ty::Bool && args.is_empty(),
-        Op::Arith { trap, .. } => {
-            int && args == [ty, ty] && trap.as_ref().is_none_or(|t| site(t, 1))
+    let same = Want::Is(ty);
+    let reported = |t: &Option<TrapId>| t.map(|t| (t, 1));
+    let (result, operands, trap): (Want, Vec<Want>, Option<(TrapId, usize)>) = match f.op(v) {
+        Op::Param => return Err("a parameter among a block's instructions".into()),
+        Op::Int(_) => (Want::Int, vec![], None),
+        Op::Bool(_) => (Want::Is(Ty::Bool), vec![], None),
+        Op::Arith { trap, .. } => (Want::Int, vec![same, same], reported(trap)),
+        Op::Neg { trap } => (Want::Int, vec![same], reported(trap)),
+        Op::Bits(_) => (Want::IntOrBool, vec![same, same], None),
+        Op::Not => (Want::IntOrBool, vec![same], None),
+        Op::Shl { trap } => (Want::Int, vec![Want::Int, Want::Int], Some((*trap, 1))),
+        Op::Shr => (Want::Int, vec![same, Want::Int], None),
+        Op::Cmp(_) => {
+            let first = args.first().copied().unwrap_or(Ty::Unit);
+            (
+                Want::Is(Ty::Bool),
+                vec![Want::IntOrBool, Want::Is(first)],
+                None,
+            )
         }
-        Op::Neg { trap } => int && args == [ty] && trap.as_ref().is_none_or(|t| site(t, 1)),
-        Op::Bits(_) => (int || ty == Ty::Bool) && args == [ty, ty],
-        Op::Not => (int || ty == Ty::Bool) && args == [ty],
-        Op::Shl { trap } => {
-            int && args.len() == 2 && matches!(args[0], Ty::Int(_)) && site(trap, 1)
-        }
-        Op::Shr => int && args.len() == 2 && args[0] == ty,
-        Op::Cmp(_) => ty == Ty::Bool && args.len() == 2 && args[0] == args[1],
-        Op::Cast => int && args.len() == 1 && matches!(args[0], Ty::Int(_)),
+        Op::Cast => (Want::Int, vec![Want::Int], None),
         Op::Check { trap } => {
-            ty == Ty::Unit
-                && matches!(args.first(), Some(Ty::Bool))
-                && args[1..].iter().all(|a| matches!(a, Ty::Int(_)))
-                && site(trap, args.len() - 1)
+            let values = args.len().saturating_sub(1);
+            let mut wants = vec![Want::Is(Ty::Bool)];
+            wants.extend(std::iter::repeat_n(Want::Int, values));
+            (Want::Is(Ty::Unit), wants, Some((*trap, values)))
         }
-        Op::Slot { .. } => ty == Ty::Addr && args.is_empty(),
-        Op::Elem { .. } => ty == Ty::Addr && args.len() == 2 && args[0] == Ty::Addr,
-        Op::Load => (int || ty == Ty::Bool) && args == [Ty::Addr],
-        Op::Store => ty == Ty::Unit && args.len() == 2 && args[0] == Ty::Addr,
-        Op::Copy { .. } => ty == Ty::Unit && args == [Ty::Addr, Ty::Addr],
+        Op::Slot { .. } => (Want::Is(Ty::Addr), vec![], None),
+        Op::Elem { .. } => (
+            Want::Is(Ty::Addr),
+            vec![Want::Is(Ty::Addr), Want::Int],
+            None,
+        ),
+        Op::Load => (Want::IntOrBool, vec![Want::Is(Ty::Addr)], None),
+        Op::Store => (
+            Want::Is(Ty::Unit),
+            vec![Want::Is(Ty::Addr), Want::IntOrBool],
+            None,
+        ),
+        Op::Copy { .. } => (
+            Want::Is(Ty::Unit),
+            vec![Want::Is(Ty::Addr), Want::Is(Ty::Addr)],
+            None,
+        ),
         Op::Call(c) => {
             let callee = m
                 .functions
                 .get(c.0 as usize)
                 .ok_or("a call of a function that does not exist")?;
-            args == callee.params && callee.result.unwrap_or(Ty::Unit) == ty
+            let params = callee.params.iter().map(|p| Want::Is(*p)).collect();
+            (Want::Is(callee.result.unwrap_or(Ty::Unit)), params, None)
         }
     };
-    if ok {
-        Ok(())
-    } else {
-        Err(format!("{:?} of type {} on {:?}", f.op(v), ty, args))
+    let site = trap.is_none_or(|(t, values)| {
+        f.traps
+            .get(t.0 as usize)
+            .is_some_and(|s| s.text.len() == values + 1)
+    });
+    let typed = result.admits(ty)
+        && args.len() == operands.len()
+        && operands.iter().zip(&args).all(|(w, t)| w.admits(*t));
+    match (typed, site) {
+        (true, true) => Ok(()),
+        (false, _) => Err(format!("{:?} of type {} on {:?}", f.op(v), ty, args)),
+        (true, false) => Err(format!(
+            "{:?} traps at a site without room for its values",
+            f.op(v)
+        )),
     }
 }
 
@@ -753,7 +795,8 @@ impl Memory {
         self.bytes.truncate(to);
     }
 
-    fn top(&self) -> usize {
+    /// Bytes in use: what a caller set up, and the slots of the calls still running.
+    pub fn used(&self) -> usize {
         self.bytes.len()
     }
 }
@@ -846,7 +889,7 @@ impl<'m> Machine<'m> {
             vals: vec![Val::Unit; f.ops.len()],
             block: BlockId(0),
             next: 0,
-            mark: self.memory.top(),
+            mark: self.memory.used(),
             dest,
         };
         enter(&mut frame, BlockId(0), args)?;
@@ -983,10 +1026,7 @@ impl<'m> Machine<'m> {
             },
             Op::Shl { trap: at } => {
                 let (a, k) = (int(0)?, shift(int(1)?)?);
-                let n = (k < 128)
-                    .then(|| a.mag.checked_mul(1u128 << k))
-                    .flatten()
-                    .map(|m| Num::new(a.neg, m));
+                let n = a.mag.checked_mul(1u128 << k).map(|m| Num::new(a.neg, m));
                 match (n, ty) {
                     (Some(n), Ty::Int(t)) if t.holds(n) => Val::Int(n),
                     (n, Ty::Int(_)) => return Err(trap(f, *at, &[n])),
@@ -996,8 +1036,8 @@ impl<'m> Machine<'m> {
             Op::Shr => {
                 let (a, k) = (int(0)?, shift(int(1)?)?);
                 // Floor: a negative value whose low bits are not all zero rounds down.
-                let mag = if k >= 128 { 0 } else { a.mag >> k };
-                let exact = k < 128 && mag << k == a.mag;
+                let mag = a.mag >> k;
+                let exact = mag << k == a.mag;
                 Val::Int(if a.neg && !exact {
                     Num::new(true, mag + 1)
                 } else {
@@ -1615,5 +1655,199 @@ mod tests {
         let mut f = sum();
         f.params = vec![Ty::Bool];
         assert!(wrong(f).contains("entry block"));
+    }
+
+    /// A function of one block whose instruction is `op` of type `ty` on `args`, built from
+    /// parameters of `params`; `traps` are the sites' texts.
+    fn one(op: Op, ty: Ty, params: &[Ty], args: &[usize], traps: &[&[&str]]) -> Function {
+        let mut b = Builder::new("one", params, None);
+        let ps = b.params(BlockId(0));
+        for t in traps {
+            b.trap_site("narrowing", t);
+        }
+        let operands: Vec<NodeId> = args.iter().map(|i| ps[*i]).collect();
+        b.inst(op, ty, &operands);
+        b.finish()
+    }
+
+    #[test]
+    fn test_the_verifier_checks_each_instruction_against_its_operation() {
+        let check = |f: Function| verify(&Module { functions: vec![f] });
+        let add = |trap| Op::Arith {
+            op: ArithOp::Add,
+            trap,
+        };
+        let i = Ty::Int(I64);
+        let u = Ty::Int(U8);
+        // Well formed.
+        for f in [
+            one(add(None), i, &[i, i], &[0, 1], &[]),
+            one(add(Some(TrapId(0))), i, &[i, i], &[0, 1], &[&["", "x"]]),
+            one(
+                Op::Check { trap: TrapId(0) },
+                Ty::Unit,
+                &[Ty::Bool, i, u],
+                &[0, 1, 2],
+                &[&["", "", ""]],
+            ),
+            one(
+                Op::Elem { stride: 1 },
+                Ty::Addr,
+                &[Ty::Addr, u],
+                &[0, 1],
+                &[],
+            ),
+            one(Op::Store, Ty::Unit, &[Ty::Addr, Ty::Bool], &[0, 1], &[]),
+            one(
+                Op::Cmp(CmpOp::Eq),
+                Ty::Bool,
+                &[Ty::Bool, Ty::Bool],
+                &[0, 1],
+                &[],
+            ),
+            one(
+                Op::Shl { trap: TrapId(0) },
+                u,
+                &[i, u],
+                &[0, 1],
+                &[&["", "x"]],
+            ),
+        ] {
+            assert_eq!(check(f), Ok(()));
+        }
+        // Each wrong in one way: the result, the count of operands, an operand, the site.
+        for f in [
+            one(add(None), Ty::Bool, &[i, i], &[0, 1], &[]),
+            one(add(None), i, &[i], &[0], &[]),
+            one(add(None), i, &[i, u], &[0, 1], &[]),
+            one(add(Some(TrapId(0))), i, &[i, i], &[0, 1], &[&["no room"]]),
+            one(
+                Op::Check { trap: TrapId(0) },
+                Ty::Unit,
+                &[Ty::Bool, i],
+                &[0, 1],
+                &[&["one piece"]],
+            ),
+            one(
+                Op::Check { trap: TrapId(0) },
+                Ty::Unit,
+                &[i],
+                &[0],
+                &[&["x"]],
+            ),
+            one(
+                Op::Elem { stride: 1 },
+                Ty::Addr,
+                &[Ty::Addr, Ty::Bool],
+                &[0, 1],
+                &[],
+            ),
+            one(Op::Load, Ty::Addr, &[Ty::Addr], &[0], &[]),
+            one(Op::Store, Ty::Unit, &[i, i], &[0, 1], &[]),
+            one(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, u], &[0, 1], &[]),
+            one(
+                Op::Cmp(CmpOp::Lt),
+                Ty::Bool,
+                &[Ty::Addr, Ty::Addr],
+                &[0, 1],
+                &[],
+            ),
+            one(
+                Op::Shl { trap: TrapId(0) },
+                u,
+                &[Ty::Bool, u],
+                &[0, 1],
+                &[&["", "x"]],
+            ),
+            one(Op::Shr, u, &[i, u], &[0, 1], &[]),
+            one(Op::Cast, u, &[Ty::Bool], &[0], &[]),
+            one(Op::Not, Ty::Addr, &[Ty::Addr], &[0], &[]),
+            one(Op::Bits(BitOp::And), u, &[u, i], &[0, 1], &[]),
+            one(
+                Op::Copy { bytes: 1 },
+                Ty::Unit,
+                &[Ty::Addr, u],
+                &[0, 1],
+                &[],
+            ),
+            one(Op::Int(1), Ty::Bool, &[], &[], &[]),
+            one(Op::Bool(true), u, &[], &[], &[]),
+            one(Op::Slot { bytes: 1 }, u, &[], &[], &[]),
+            one(Op::Neg { trap: None }, u, &[i], &[0], &[]),
+            one(Op::Param, u, &[], &[], &[]),
+        ] {
+            assert!(check(f).is_err());
+        }
+        // A call takes its callee's parameters and gives its result.
+        let mut callee = Builder::new("callee", &[u], Some(i));
+        let p = callee.params(BlockId(0))[0];
+        let w = callee.inst(Op::Cast, i, &[p]);
+        callee.end(Term::Return(Some(w)));
+        let callee = callee.finish();
+        let caller = |ty: Ty, param: Ty| {
+            let mut b = Builder::new("caller", &[param], None);
+            let p = b.params(BlockId(0))[0];
+            b.inst(Op::Call(FuncId(0)), ty, &[p]);
+            Module {
+                functions: vec![callee.clone(), b.finish()],
+            }
+        };
+        assert_eq!(verify(&caller(i, u)), Ok(()));
+        assert!(verify(&caller(u, u)).is_err());
+        assert!(verify(&caller(i, i)).is_err());
+        // An operand one past the last value.
+        let mut f = sum();
+        let last = NodeId(f.ops.len() as u32);
+        f.pool[0] = last;
+        assert!(verify(&Module { functions: vec![f] })
+            .unwrap_err()
+            .contains("does not exist"));
+    }
+
+    #[test]
+    fn test_runs_count_steps_and_give_back_memory() {
+        // Three instructions: a slot, a constant and its store.
+        let mut b = Builder::new("three", &[], None);
+        let s = b.inst(Op::Slot { bytes: 8 }, Ty::Addr, &[]);
+        let k = b.int(I64, Num::from_i128(7));
+        b.inst(Op::Store, Ty::Unit, &[s, k]);
+        b.end(Term::Return(None));
+        let m = module(vec![b.finish()]);
+        let limited = |steps| Limits {
+            max_depth: 10,
+            max_steps: steps,
+        };
+        let mut memory = Memory::default();
+        let before = memory.used();
+        assert_eq!(
+            run(&m, FuncId(0), &[], &mut memory, limited(3)),
+            Ok(Val::Unit)
+        );
+        assert_eq!(memory.used(), before);
+        assert_eq!(
+            run(&m, FuncId(0), &[], &mut Memory::default(), limited(2)),
+            Err(Stop::OutOfSteps)
+        );
+    }
+
+    #[test]
+    fn test_unchecked_shift_amounts_are_broken_mir() {
+        let shr = |amount: i128| {
+            let mut b = Builder::new("shr", &[Ty::Int(I128), Ty::Int(I128)], Some(Ty::Int(I128)));
+            let [x, k] = b.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let r = b.inst(Op::Shr, Ty::Int(I128), &[x, k]);
+            b.end(Term::Return(Some(r)));
+            run0(&module(vec![b.finish()]), 0, &[int(8), int(amount)])
+        };
+        assert_eq!(shr(127), Ok(int(0)));
+        assert!(matches!(shr(-1), Err(Stop::Broken(_))));
+        assert!(matches!(shr(128), Err(Stop::Broken(_))));
+        // A negative constant prints as its value.
+        let mut b = Builder::new("k", &[], Some(Ty::Int(I64)));
+        let k = b.int(I64, Num::from_i128(-5));
+        b.end(Term::Return(Some(k)));
+        assert!(b.finish().to_string().contains("= int -5 @"));
     }
 }

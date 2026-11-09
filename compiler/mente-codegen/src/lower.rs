@@ -792,7 +792,7 @@ impl<'a> Lower<'a> {
                 let at = self.address(root, &indexes)?;
                 let current = self.load(at, &shape);
                 let rhs = self.expr(value)?;
-                let iv = self.place_interval(&shape, declared);
+                let iv = Self::place_interval(&shape);
                 let viv = self.interval(value);
                 let combined = match (iv, viv) {
                     (Some(a), Some(b)) => wide::combine(op, a, b),
@@ -1066,7 +1066,7 @@ impl<'a> Lower<'a> {
                 _,
             ) => self.in_range(x, t, r, span),
             (V::Arr(a), TypeKind::Array { elem, .. }, Shape::Array(len, es)) => {
-                if !has_refinement(tree, *elem) {
+                if leaf_refinement(tree, *elem).is_none() {
                     return Ok(());
                 }
                 let (elem, es, len) = (*elem, (**es).clone(), *len);
@@ -1114,10 +1114,8 @@ impl<'a> Lower<'a> {
             }
             Bound::Name(n) => match slot(self, n).and_then(|i| self.s.locals[i].clone()) {
                 Some(Local::Value(V::Int(v, t))) => (v, t),
-                Some(Local::Place(at, Shape::Int(t))) => {
-                    (self.inst(Op::Load, Ty::Int(mir(t)), &[at]), mir(t))
-                }
-                _ => return Err(format!("a bound `{}` that is not an integer", n)),
+                // A bound names a `val` or a read-only parameter, never a place in memory.
+                _ => return Err(format!("a bound `{}` that is not an integer value", n)),
             },
             Bound::Len(n) => match slot(self, n).and_then(|i| self.s.locals[i].clone()) {
                 Some(Local::Place(_, Shape::Array(len, _))) => {
@@ -1162,11 +1160,11 @@ impl<'a> Lower<'a> {
         });
         self.b.switch(known);
         // With s < u: u > s, u >= s and u != s hold; with the operands swapped, s < u.
-        let holds = match (op, swapped) {
-            (CmpOp::Ne, _) => true,
-            (CmpOp::Eq, _) => false,
-            (CmpOp::Gt | CmpOp::Ge, false) | (CmpOp::Lt | CmpOp::Le, true) => true,
-            _ => false,
+        let holds = match op {
+            CmpOp::Ne => true,
+            CmpOp::Eq => false,
+            CmpOp::Gt | CmpOp::Ge => !swapped,
+            CmpOp::Lt | CmpOp::Le => swapped,
         };
         let r = self.bool(holds);
         self.jump(join, vec![r]);
@@ -1189,37 +1187,13 @@ impl<'a> Lower<'a> {
         self.s.iv.get(e.0 as usize).copied().flatten()
     }
 
-    /// The range of a place of `shape` whose declared type is `declared`.
-    fn place_interval(&self, shape: &Shape, declared: Option<TypeId>) -> Option<Interval> {
+    /// The range of a place of `shape`: its type's, which holds every value it can take.
+    fn place_interval(shape: &Shape) -> Option<Interval> {
         let Shape::Int(t) = shape else {
             return None;
         };
         let t = mir(*t);
         let (lo, hi) = (t.min(), t.max());
-        let literal = declared.and_then(|d| match &self.tree().ty(d).kind {
-            TypeKind::Int {
-                refinement: Some(r),
-                ..
-            } => match (&r.lo, &r.hi) {
-                (
-                    Bound::Int {
-                        negative: ln,
-                        value: lv,
-                    },
-                    Bound::Int {
-                        negative: hn,
-                        value: hv,
-                    },
-                ) => {
-                    let lo = Num::new(*ln, *lv);
-                    let hi = Num::new(*hn, *hv);
-                    Some((lo, if r.inclusive { hi } else { minus_one(hi)? }))
-                }
-                _ => None,
-            },
-            _ => None,
-        });
-        let (lo, hi) = literal.unwrap_or((lo, hi));
         Some(Interval {
             lo: (lo.neg, lo.mag),
             hi: (hi.neg, hi.mag),
@@ -1788,22 +1762,13 @@ impl<'a> Lower<'a> {
     }
 }
 
-fn has_refinement(tree: &Tree, t: TypeId) -> bool {
+/// The refinement of the integer type at the bottom of `t`'s arrays, when it has one.
+fn leaf_refinement(tree: &Tree, t: TypeId) -> Option<&Refinement> {
     match &tree.ty(t).kind {
-        TypeKind::Int { refinement, .. } => refinement.is_some(),
-        TypeKind::Array { elem, .. } => has_refinement(tree, *elem),
-        _ => false,
+        TypeKind::Int { refinement, .. } => refinement.as_ref(),
+        TypeKind::Array { elem, .. } => leaf_refinement(tree, *elem),
+        _ => None,
     }
-}
-
-fn minus_one(n: Num) -> Option<Num> {
-    Some(if n.neg {
-        Num::new(true, n.mag.checked_add(1)?)
-    } else if n.mag == 0 {
-        Num::new(true, 1)
-    } else {
-        Num::new(false, n.mag - 1)
-    })
 }
 
 /// The integer type in which two of `a` and `b` compare, when there is one: a u128 and a
@@ -1881,8 +1846,5 @@ mod tests {
             common(IntTy::new(16, true), IntTy::new(32, true)),
             Some(IntTy::new(32, true))
         );
-        assert_eq!(minus_one(n(0)), Some(n(-1)));
-        assert_eq!(minus_one(n(5)), Some(n(4)));
-        assert_eq!(minus_one(n(-5)), Some(n(-6)));
     }
 }

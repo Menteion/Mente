@@ -333,8 +333,8 @@ mod tests {
         ),
         // Comparisons across types, a u128 against a signed integer among them.
         (
-            "pub fn gt(a: u128, b: i64) -> bool = a > b\npub fn lt(a: i64, b: u128) -> bool = a < b\npub fn eq(a: u128, b: i8) -> bool = a == b\npub fn mix(a: u8, b: i64) -> bool = a <= b\npub fn same(a: bool, b: bool) -> bool = a == b",
-            &["gt(5, -1)", "gt(0, 3)", "gt(7, 3)", "lt(-1, 0)", "lt(4, 4)", "eq(3, 3)", "eq(3, -3)", "mix(5, -2)", "mix(5, 9)", "same(true, false)"],
+            "pub fn gt(a: u128, b: i64) -> bool = a > b\npub fn lt(a: i64, b: u128) -> bool = a < b\npub fn eq(a: u128, b: i8) -> bool = a == b\npub fn mix(a: u8, b: i64) -> bool = a <= b\npub fn same(a: bool, b: bool) -> bool = a == b\npub fn ne(a: u128, b: i8) -> bool = a != b\npub fn le(a: u128, b: i64) -> bool = a <= b\npub fn ge(a: i64, b: u128) -> bool = a >= b",
+            &["gt(5, -1)", "gt(0, 3)", "gt(7, 3)", "lt(-1, 0)", "lt(4, 4)", "eq(3, 3)", "eq(3, -3)", "mix(5, -2)", "mix(5, 9)", "same(true, false)", "ne(3, -3)", "ne(3, 3)", "le(3, -1)", "le(3, 3)", "ge(-1, 3)", "ge(4, 3)"],
         ),
         // Shifts: amounts outside the width, a left shift that leaves its type, a floor.
         (
@@ -344,7 +344,7 @@ mod tests {
         // Bit operations, whose operands narrow into one type first.
         (
             "pub fn both(a: u8, b: u8) -> u8 = a & b\npub fn mixed(a: u16, b: u16) -> u8 = a | b\npub fn flip(a: i8) -> i8 = ~a\npub fn sum_or(a: u8, b: u8) -> u8 = (a + b) ^ 1",
-            &["both(12, 10)", "mixed(256, 1)", "flip(5)", "sum_or(200, 100)", "sum_or(2, 3)"],
+            &["both(12, 10)", "mixed(256, 1)", "mixed(3, 1)", "flip(5)", "sum_or(200, 100)", "sum_or(2, 3)"],
         ),
         // Exact arithmetic in a wider type, narrowed where it lands, and checked 128-bit operations.
         (
@@ -392,6 +392,12 @@ pub fn below(n: i8) -> i8 {
             "pub fn widen(xs: [2]u8) -> [2]u16 {\n  xs\n}\npub fn shrink(xs: [2]u16) -> [2]u8 {\n  xs\n}\nfn two(x: u8) -> u8\n  ensures result > 0\n  ensures result < 100\n= x\npub fn ends(x: u8) -> u8 = two(x)\npub fn put(i: usize, v: u8) -> u8 {\n  var xs: [2]u8[0..10] = [1, 2]\n  xs[i] = v\n  xs[i]\n}\npub fn tou(x: i16) -> u8 = x\npub fn flags(mut fs: [2]bool) {\n  fs[0] = not fs[0]\n}\npub fn flip(mut b: bool) {\n  b = not b\n}",
             &["widen([1, 2])", "shrink([1, 2])", "shrink([1, 300])", "ends(5)", "ends(0)", "ends(150)", "put(1, 9)", "put(1, 12)", "tou(-1)", "tou(7)", "flags(mut [true, false])", "flip(mut true)"],
         ),
+        // Values of an `if` of each kind, operations on a branch that leaves, a callee's array
+        // result, and a nested refined array.
+        (
+            "pub fn pick_b(c: bool, a: bool, b: bool) -> bool = if c { a } else { b }\npub fn pick_a(c: bool, a: [2]u8, b: [2]u8) -> [2]u8 = if c { a } else { b }\npub fn half(c: bool) -> u8 = if c { todo(\"not yet\") } else { 5 }\npub fn add_todo(x: u8) -> u8 = x + todo(\"later\")\npub fn cmp_todo(x: u8) -> bool = x < todo(\"later\")\nfn mk(v: u8) -> [2]u8 = [v, v]\npub fn use_mk(v: u8) -> u8 {\n  val a: [2]u8 = mk(v)\n  a[1]\n}\npub fn deep(g: [2][2]u8[0..5]) -> u8 = g[1][1]",
+            &["pick_b(true, false, true)", "pick_b(false, false, true)", "pick_a(true, [1, 2], [3, 4])", "pick_a(false, [1, 2], [3, 4])", "half(true)", "half(false)", "add_todo(1)", "cmp_todo(1)", "use_mk(7)", "deep([[1, 2], [3, 4]])", "deep([[1, 2], [3, 9]])"],
+        ),
         // `todo`, `unreachable` and a discarded result.
         (
             "pub fn later(x: u8) -> u8 {\n  guard x > 0 else {\n    todo(\"zero is not handled\")\n  }\n  x\n}\npub fn never(x: u8) -> u8 {\n  guard x < 10 else {\n    unreachable(\"x is a digit\")\n  }\n  x\n}\nfn noisy(x: u8) -> u8 = x + 1\npub fn drop(x: u8) -> u8 {\n  _ = noisy(x)\n  x\n}",
@@ -411,7 +417,9 @@ pub fn below(n: i8) -> i8 {
         };
         assert_eq!(call("get([1, 2, 3], 1)"), Ok(vec!["2".to_string()]));
         assert!(call("get([1, 2], 0)").unwrap_err().contains("shape"));
-        assert!(call("get([1, true, 3], 0)").unwrap_err().contains("not an integer"));
+        assert!(call("get([1, true, 3], 0)")
+            .unwrap_err()
+            .contains("not an integer"));
         assert!(call("get([1, 2, 300], 0)")
             .unwrap_err()
             .contains("lies outside"));
