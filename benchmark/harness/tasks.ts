@@ -13,8 +13,12 @@ export interface Task {
   kind: string;
   title: string;
   description: string;
+  /** Whether the signature uses only the core of the language (benchmark/README.md). */
+  core: boolean;
   signature: string[];
   examples: string[];
+  /** The hidden tests, which only scoring reads and no prompt ever shows. */
+  hidden: string[];
 }
 
 /** Reads one task file. */
@@ -33,10 +37,12 @@ export function parseTask(text: string): Task {
     milestone: front.milestone ?? "",
     set: front.set ?? "",
     kind: front.kind ?? "",
+    core: front.core === "true",
     title,
     description: section(body, "Task").join("\n").trim(),
     signature: indented(section(body, "Signature")),
     examples: indented(section(body, "Examples")),
+    hidden: indented(section(body, "Hidden tests")),
   };
 }
 
@@ -135,4 +141,70 @@ export function userPrompt(task: Task): string {
     "",
     "Write the function, with exactly this signature, in one ```mente block. Write only the function: no module line, no other functions and no explanation.",
   ].join("\n");
+}
+
+/** One example or hidden test: a call, and the value it returns or its `mut` argument holds. */
+export interface Case {
+  call: string;
+  expected: string;
+  /** `leaves v`: the value the call's `mut` argument holds afterwards. */
+  leaves: boolean;
+}
+
+/** Reads `f(args) == v` or `f(mut a) leaves v`. */
+export function parseCase(line: string): Case | null {
+  const eq = line.lastIndexOf(" == ");
+  if (eq > 0) return { call: line.slice(0, eq).trim(), expected: line.slice(eq + 4).trim(), leaves: false };
+  const lv = line.lastIndexOf(" leaves ");
+  if (lv > 0) return { call: line.slice(0, lv).trim(), expected: line.slice(lv + 8).trim(), leaves: true };
+  return null;
+}
+
+/** What `mn run --call` printed, as the value a case compares: its result, or the trap. */
+export function outcome(c: Case, status: number | null, stdout: string, stderr: string): string {
+  if (status !== 0) {
+    const last = stderr.trim().split(/\r?\n/).pop() ?? "";
+    // Drop the file name `mn run` puts first.
+    return last.replace(/^.*?: (?=trap\[|no function|the run|an array)/, "");
+  }
+  const lines = stdout.trim().split(/\r?\n/);
+  if (c.leaves) {
+    const left = lines.find((l) => l.startsWith("leaves "));
+    return left ? left.slice("leaves ".length) : "";
+  }
+  return lines[0] ?? "";
+}
+
+/** One case's result, as the agent's feedback shows it. */
+export interface CaseResult {
+  call: string;
+  expected: string;
+  leaves: boolean;
+  got: string;
+  pass: boolean;
+}
+
+/** The feedback after a program: what `mn check` reported, else each example's result. */
+export function feedbackPrompt(diagnostics: string[], results: CaseResult[]): string {
+  const lines: string[] = [];
+  if (diagnostics.length > 0) {
+    lines.push("`mn check` rejects the program:", "", "```text", ...diagnostics, "```");
+  } else {
+    lines.push("The program checks. Its examples ran on the reference interpreter:", "", "```text");
+    for (const r of results) {
+      const verb = r.leaves ? "leaves" : "==";
+      lines.push(`${r.pass ? "PASS" : "FAIL"} ${r.call} ${verb} ${r.expected}${r.pass ? "" : `, got ${r.got}`}`);
+    }
+    lines.push("```");
+  }
+  lines.push(
+    "",
+    "Revise the function and reply with all of it, with exactly the same signature, in one ```mente block.",
+  );
+  return lines.join("\n");
+}
+
+/** Whether a program still holds a `todo`, which scores as unsolved (benchmark/README.md). */
+export function hasTodo(program: string): boolean {
+  return /\btodo\s*\(/.test(program);
 }

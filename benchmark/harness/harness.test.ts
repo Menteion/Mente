@@ -7,6 +7,10 @@ import { test } from "node:test";
 import {
   costOf,
   extractProgram,
+  feedbackPrompt,
+  hasTodo,
+  outcome,
+  parseCase,
   menteSignature,
   menteType,
   parseTask,
@@ -107,4 +111,57 @@ test("the prompts carry the card, the signature and the examples, and no hidden 
   assert.match(user, /```mente\npub fn clamp\(x: i32, lo: i32, hi: i32\) -> i32\n {2}requires lo <= hi/);
   assert.match(user, /clamp\(5, 0, 10\) == 5/);
   assert.doesNotMatch(user, /clamp\(0, 0, 0\)/);
+});
+
+test("a task's core mark and hidden tests are read", () => {
+  const task = parseTask(TASK);
+  assert.equal(task.core, false);
+  assert.deepEqual(task.hidden, ["clamp(0, 0, 0) == 0"]);
+  assert.equal(parseTask(TASK.replace("core: false", "core: true")).core, true);
+});
+
+test("cases are read as a returned value or what a mut argument is left holding", () => {
+  assert.deepEqual(parseCase("clamp(5, 0, 10) == 5"), { call: "clamp(5, 0, 10)", expected: "5", leaves: false });
+  assert.deepEqual(parseCase("rev(mut [1, 2]) leaves [2, 1]"), {
+    call: "rev(mut [1, 2])",
+    expected: "[2, 1]",
+    leaves: true,
+  });
+  assert.equal(parseCase("no case here"), null);
+});
+
+test("an outcome is the printed result, what a mut argument leaves, or the trap", () => {
+  const value = { call: "f(1)", expected: "2", leaves: false };
+  const left = { call: "g(mut [1])", expected: "[1]", leaves: true };
+  assert.equal(outcome(value, 0, "2\n", ""), "2");
+  assert.equal(outcome(left, 0, "()\nleaves [1]\n", ""), "[1]");
+  assert.equal(outcome(left, 0, "()\n", ""), "");
+  assert.equal(
+    outcome(value, 1, "", "prelim-out/x.mn: trap[narrowing] at 3:5: 256 does not fit in `u8`\n"),
+    "trap[narrowing] at 3:5: 256 does not fit in `u8`",
+  );
+  assert.equal(outcome(value, 1, "", "x.mn: the run took more steps than its limit\n"), "the run took more steps than its limit");
+});
+
+test("feedback shows the diagnostics, or each example's result", () => {
+  const rejected = feedbackPrompt(["3:5 E0201 there is no binding named `y` here"], []);
+  assert.match(rejected, /`mn check` rejects the program:/);
+  assert.match(rejected, /3:5 E0201 there is no binding named `y` here/);
+  assert.match(rejected, /in one ```mente block/);
+  const ran = feedbackPrompt(
+    [],
+    [
+      { call: "f(1)", expected: "2", leaves: false, got: "2", pass: true },
+      { call: "g(mut [1])", expected: "[2]", leaves: true, got: "[1]", pass: false },
+    ],
+  );
+  assert.match(ran, /PASS f\(1\) == 2\n/);
+  assert.match(ran, /FAIL g\(mut \[1\]\) leaves \[2\], got \[1\]/);
+  assert.doesNotMatch(ran, /rejects/);
+});
+
+test("a todo left in a program is found", () => {
+  assert.equal(hasTodo('pub fn f() -> u8 = todo("later")'), true);
+  assert.equal(hasTodo("pub fn f() -> u8 = 1"), false);
+  assert.equal(hasTodo("pub fn todos() -> u8 = 1"), false);
 });
