@@ -22,6 +22,7 @@ use mente_mir::cfg::{
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
+use mente_sema::tier1::{Obligation, ObligationKind};
 use mente_sema::types::{Int as SemaInt, IntTy as SemaIntTy, Ty as SemaTy};
 use mente_sema::wide::{self, Interval};
 use mente_sema::{CheckedFn, CheckedModule};
@@ -263,6 +264,10 @@ impl<'a> Scope<'a> {
     }
 }
 
+/// An index of a place: its value, the span of its indexing, where it traps, and the span of the
+/// index itself, where Tier 1 records it.
+type Indexing = (V, Span, Span);
+
 /// One function's lowering.
 struct Lower<'a> {
     m: &'a CheckedModule,
@@ -277,6 +282,12 @@ struct Lower<'a> {
     sret: Option<NodeId>,
     /// This function's `decreases` measure on entry, for its recursive calls.
     measure: Option<Vec<V>>,
+    /// What Tier 1 recorded in the function, which tells the checks it proves; nothing for an
+    /// entry, whose arguments come from outside the program.
+    obligations: &'a [Obligation],
+    /// Whether the lowering is making a call's checks in its callee's scope, whose checks are
+    /// never left out.
+    in_callee: bool,
 }
 
 impl<'a> Lower<'a> {
@@ -303,6 +314,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        let obligations: &'a [Obligation] = if entry { &[] } else { &s.f.obligations };
         let decl = s.f.syntax.name_span;
         let b = Builder::declared_at(
             &s.f.syntax.name,
@@ -322,7 +334,24 @@ impl<'a> Lower<'a> {
             loops: Vec::new(),
             sret: None,
             measure: None,
+            obligations,
+            in_callee: false,
         })
+    }
+
+    /// Whether Tier 1 proves the check of `kind` it records at `at`, for a narrowing into the
+    /// type `into`: some obligation has that key, and every one that does is proven. Never in a
+    /// callee's scope, nor in an entry, which has no obligations.
+    fn proven(&self, kind: ObligationKind, at: Span, into: Option<&str>) -> bool {
+        if self.in_callee {
+            return false;
+        }
+        let mut found = self
+            .obligations
+            .iter()
+            .filter(|o| o.kind == kind && o.span == at && o.into == into)
+            .peekable();
+        found.peek().is_some() && found.all(|o| o.proven)
     }
 
     fn sig_of(&self, index: usize) -> Result<&'a Sig, String> {
@@ -821,14 +850,14 @@ impl<'a> Lower<'a> {
     }
 
     /// The root binding of a place and its indexes, evaluated left to right, each with the
-    /// span of its indexing.
-    fn place_path(&mut self, e: ExprId) -> Result<(usize, Vec<(V, Span)>), String> {
+    /// span of its indexing and of the index itself.
+    fn place_path(&mut self, e: ExprId) -> Result<(usize, Vec<Indexing>), String> {
         let tree = self.tree();
         match &tree.expr(e).kind {
             ExprKind::Index { base, index } => {
                 let (root, mut indexes) = self.place_path(*base)?;
                 let i = self.expr(*index)?;
-                indexes.push((i, tree.expr(e).span));
+                indexes.push((i, tree.expr(e).span, tree.expr(*index).span));
                 Ok((root, indexes))
             }
             _ => Ok((
@@ -854,47 +883,50 @@ impl<'a> Lower<'a> {
     }
 
     /// The address of a place, each index checked against its array's length.
-    fn address(&mut self, root: usize, indexes: &[(V, Span)]) -> Result<NodeId, String> {
+    fn address(&mut self, root: usize, indexes: &[Indexing]) -> Result<NodeId, String> {
         let local = self.s.locals[root].clone().ok_or("a place never bound")?;
         let Local::Place(mut at, mut shape) = local else {
             return Err("a place that is not in memory".into());
         };
-        for (i, span) in indexes {
+        for (i, span, key) in indexes {
             let Shape::Array(len, elem) = shape else {
                 return Err("an index into a value that is not an array".into());
             };
-            at = self.element(at, len, &elem, *i, *span)?;
+            at = self.element(at, len, &elem, *i, (*span, *key))?;
             shape = *elem;
         }
         Ok(at)
     }
 
     /// The address of element `i` of an array of `len` elements of `elem` at `base`; an index
-    /// outside it traps at `span`.
+    /// outside it traps at `span`, unless Tier 1 proves at `key`, the index's own span, that it
+    /// lies inside.
     fn element(
         &mut self,
         base: NodeId,
         len: u32,
         elem: &Shape,
         i: V,
-        span: Span,
+        (span, key): (Span, Span),
     ) -> Result<NodeId, String> {
         let V::Int(i, t) = i else {
             return Err("an index that is not an integer".into());
         };
         self.at(span);
-        let zero = self.int(t, Num::ZERO);
-        let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[i, zero]);
-        let n = Num::new(false, u128::from(len));
-        let below = if t.holds(n) {
-            let n = self.int(t, n);
-            self.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, n])
-        } else {
-            self.bool(true)
-        };
-        let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
-        let after = format!(" is outside an array of length {}", len);
-        self.check(ok, "index-out-of-bounds", &["index ", &after], &[i], span);
+        if !self.proven(ObligationKind::Index, key, None) {
+            let zero = self.int(t, Num::ZERO);
+            let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[i, zero]);
+            let n = Num::new(false, u128::from(len));
+            let below = if t.holds(n) {
+                let n = self.int(t, n);
+                self.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, n])
+            } else {
+                self.bool(true)
+            };
+            let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
+            let after = format!(" is outside an array of length {}", len);
+            self.check(ok, "index-out-of-bounds", &["index ", &after], &[i], span);
+        }
         let index = self.cast(i, t, USIZE);
         Ok(self.inst(
             Op::Elem {
@@ -994,17 +1026,26 @@ impl<'a> Lower<'a> {
         declared: Option<TypeId>,
         span: Span,
     ) -> Result<V, String> {
-        let v = self.narrow(v, from, to, span)?;
+        let v = self.narrow(v, from, to, span, Some(span))?;
         if let Some(d) = declared {
             self.refined(v, to, d, span)?;
         }
         Ok(v)
     }
 
-    fn narrow(&mut self, v: V, from: &Shape, to: &Shape, span: Span) -> Result<V, String> {
+    /// A value of shape `from` narrowed into `to`, elementwise for an array, trapping at
+    /// `span`; `key` is where Tier 1 records the narrowing, when it does.
+    fn narrow(
+        &mut self,
+        v: V,
+        from: &Shape,
+        to: &Shape,
+        span: Span,
+        key: Option<Span>,
+    ) -> Result<V, String> {
         Ok(match (v, from, to) {
             (V::Int(n, t), _, Shape::Int(into)) => {
-                V::Int(self.narrow_int(n, t, *into, span), mir(*into))
+                V::Int(self.narrow_int(n, t, *into, span, key), mir(*into))
             }
             (V::Arr(a), Shape::Array(_, fe), Shape::Array(len, te)) => {
                 // Elements of the same type stay where they are; of another type, they are
@@ -1018,7 +1059,7 @@ impl<'a> Lower<'a> {
                     let src = l.inst(Op::Elem { stride: fe.size() }, Ty::Addr, &[a, i]);
                     let dst = l.inst(Op::Elem { stride: te.size() }, Ty::Addr, &[slot, i]);
                     let x = l.load(src, &fe);
-                    let x = l.narrow(x, &fe, &te, span)?;
+                    let x = l.narrow(x, &fe, &te, span, key)?;
                     l.store_shaped(dst, x, &te);
                     Ok(())
                 })?;
@@ -1028,12 +1069,20 @@ impl<'a> Lower<'a> {
         })
     }
 
-    /// `n` of type `from` narrowed into `to`: a check that it fits, where it may not, then a
-    /// cast.
-    fn narrow_int(&mut self, n: NodeId, from: IntTy, to: SemaIntTy, span: Span) -> NodeId {
+    /// `n` of type `from` narrowed into `to`: a check that it fits, where it may not and Tier 1
+    /// does not prove it at `key`, then a cast.
+    fn narrow_int(
+        &mut self,
+        n: NodeId,
+        from: IntTy,
+        to: SemaIntTy,
+        span: Span,
+        key: Option<Span>,
+    ) -> NodeId {
         let into = mir(to);
-        if from == into {
-            return n;
+        let proven = key.is_some_and(|k| self.proven(ObligationKind::Range, k, Some(to.name)));
+        if from == into || proven {
+            return self.cast(n, from, into);
         }
         let (lo, hi) = (into.min(), into.max());
         let mut parts = Vec::new();
@@ -1252,7 +1301,7 @@ impl<'a> Lower<'a> {
                     let V::Int(x, from) = v else {
                         return Ok(v);
                     };
-                    let x = self.narrow_int(x, from, t, tree.expr(*operand).span);
+                    let x = self.narrow_int(x, from, t, tree.expr(*operand).span, None);
                     V::Int(self.inst(Op::Not, Ty::Int(mir(t)), &[x]), mir(t))
                 }
             },
@@ -1302,7 +1351,7 @@ impl<'a> Lower<'a> {
                 let Shape::Array(len, elem) = self.shape(*base)? else {
                     return Err("an index into a value that is not an array".into());
                 };
-                let at = self.element(a, len, &elem, i, span)?;
+                let at = self.element(a, len, &elem, i, (span, tree.expr(*index).span))?;
                 self.load(at, &elem)
             }
             ExprKind::Field { base, .. } => match self.shape(*base)? {
@@ -1366,7 +1415,8 @@ impl<'a> Lower<'a> {
                 for (k, &item) in items.iter().enumerate() {
                     let v = self.expr(item)?;
                     let from = self.shape(item)?;
-                    let v = self.narrow(v, &from, elem, span)?;
+                    let key = Some(tree.expr(item).span);
+                    let v = self.narrow(v, &from, elem, span, key)?;
                     if matches!(v, V::Never) {
                         return Ok(V::Never);
                     }
@@ -1389,7 +1439,8 @@ impl<'a> Lower<'a> {
                 };
                 let v = self.expr(*value)?;
                 let from = self.shape(*value)?;
-                let v = self.narrow(v, &from, elem, span)?;
+                let key = Some(tree.expr(*value).span);
+                let v = self.narrow(v, &from, elem, span, key)?;
                 if matches!(v, V::Never) {
                     return Ok(V::Never);
                 }
@@ -1588,19 +1639,21 @@ impl<'a> Lower<'a> {
             BinaryOp::Shl | BinaryOp::Shr => {
                 let t = lt.unwrap_or(I64);
                 let w = mir(t);
-                // The amount lies within the type's width.
-                let zero = self.int(tb, Num::ZERO);
-                let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[b, zero]);
-                let width = Num::new(false, u128::from(t.bits));
-                let below = if tb.holds(width) {
-                    let n = self.int(tb, width);
-                    self.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[b, n])
-                } else {
-                    self.bool(true)
-                };
-                let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
-                let after = format!(" is outside 0 ..= {}", t.bits - 1);
-                self.check(ok, "shift-amount", &["shift amount ", &after], &[b], span);
+                // The amount lies within the type's width, unless Tier 1 proves it does.
+                if !self.proven(ObligationKind::Shift, tree.expr(re).span, None) {
+                    let zero = self.int(tb, Num::ZERO);
+                    let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[b, zero]);
+                    let width = Num::new(false, u128::from(t.bits));
+                    let below = if tb.holds(width) {
+                        let n = self.int(tb, width);
+                        self.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[b, n])
+                    } else {
+                        self.bool(true)
+                    };
+                    let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
+                    let after = format!(" is outside 0 ..= {}", t.bits - 1);
+                    self.check(ok, "shift-amount", &["shift amount ", &after], &[b], span);
+                }
                 let k = self.cast(b, tb, USIZE);
                 if op == BinaryOp::Shl {
                     let after = format!(" does not fit in `{}`", t.name);
@@ -1611,13 +1664,14 @@ impl<'a> Lower<'a> {
                     ))
                 } else {
                     let s = self.inst(Op::Shr, Ty::Int(ta), &[a, k]);
-                    Ok(V::Int(self.narrow_int(s, ta, t, span), w))
+                    Ok(V::Int(self.narrow_int(s, ta, t, span, Some(span)), w))
                 }
             }
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                 let t = lt.or(rt).unwrap_or(I64);
-                let x = self.narrow_int(a, ta, t, tree.expr(le).span);
-                let y = self.narrow_int(b, tb, t, tree.expr(re).span);
+                let (ls, rs) = (tree.expr(le).span, tree.expr(re).span);
+                let x = self.narrow_int(a, ta, t, ls, Some(ls));
+                let y = self.narrow_int(b, tb, t, rs, Some(rs));
                 let bit = match op {
                     BinaryOp::BitAnd => BitOp::And,
                     BinaryOp::BitOr => BitOp::Or,
@@ -1645,15 +1699,20 @@ impl<'a> Lower<'a> {
                 };
                 let x = self.cast(a, ta, m);
                 let y = self.cast(b, tb, m);
-                if matches!(arith, ArithOp::Div | ArithOp::Rem) {
+                let divides = matches!(arith, ArithOp::Div | ArithOp::Rem);
+                if divides && !self.proven(ObligationKind::Divisor, tree.expr(re).span, None) {
                     let zero = self.int(m, Num::ZERO);
                     let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
                     self.check(ok, "division-by-zero", &["division by zero"], &[], span);
                 }
-                let trap = wide.map(|w| {
-                    let after = format!(" does not fit in `{}`", w.name);
-                    self.b.trap_site("narrowing", &["", &after])
-                });
+                // An operation on a 128-bit operand is checked unless Tier 1 proves its result
+                // fits.
+                let trap = wide
+                    .filter(|w| !self.proven(ObligationKind::Range, span, Some(w.name)))
+                    .map(|w| {
+                        let after = format!(" does not fit in `{}`", w.name);
+                        self.b.trap_site("narrowing", &["", &after])
+                    });
                 Ok(V::Int(
                     self.inst(Op::Arith { op: arith, trap }, Ty::Int(m), &[x, y]),
                     m,
@@ -1685,7 +1744,7 @@ impl<'a> Lower<'a> {
             let shape = &sig.params[i].1;
             values.push(match arg {
                 Arg::Value(v, span, from) => {
-                    let v = self.narrow(*v, from, shape, *span)?;
+                    let v = self.narrow(*v, from, shape, *span, Some(*span))?;
                     if matches!(v, V::Never) {
                         return Ok(V::Never);
                     }
@@ -1708,7 +1767,9 @@ impl<'a> Lower<'a> {
         // another parameter.
         let caller = self.measure.clone();
         let saved = std::mem::replace(&mut self.s, callee);
+        let was = std::mem::replace(&mut self.in_callee, true);
         let outcome = self.callee_checks(&args, at, recursive, caller);
+        self.in_callee = was;
         self.s = saved;
         outcome?;
         let mut mir_args = Vec::new();
@@ -1858,5 +1919,92 @@ mod tests {
             common(IntTy::new(16, true), IntTy::new(32, true)),
             Some(IntTy::new(32, true))
         );
+    }
+
+    /// The kinds of the checks in the lowered function `name`, sorted: each `Check`'s trap kind,
+    /// and `checked` for an operation that traps by itself.
+    fn checks(lowered: &Lowered, name: &str) -> Vec<String> {
+        let f = lowered
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no function {name}"));
+        let mut kinds: Vec<String> = f
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Check { trap } => Some(f.traps[trap.0 as usize].kind.clone()),
+                Op::Arith { trap: Some(_), .. } | Op::Neg { trap: Some(_) } | Op::Shl { .. } => {
+                    Some("checked".to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        kinds.sort();
+        kinds
+    }
+
+    /// Where Tier 1 proves a narrowing, an index, a divisor, a shift amount or a 128-bit
+    /// operation, its check is left out of MIR; where it does not, the check stays, and so does
+    /// every check of an entry, whose arguments come from outside the program.
+    #[test]
+    fn test_tier1_proofs_leave_bounds_and_overflow_checks_out_of_mir() {
+        let src = "module m
+pub fn get(xs: [4]u8, i: usize[0..4]) -> u8 = xs[i]
+pub fn any(xs: [4]u8, i: usize) -> u8 = xs[i]
+pub fn half(x: u8) -> u8 = x / 2
+pub fn div(x: u8, y: u8) -> u8 = x / y
+pub fn sh(x: u8, k: u8[0..8]) -> u8 = x >> k
+pub fn shk(x: u8, k: u8) -> u8 = x >> k
+pub fn sum(a: u8[0..100], b: u8[0..100]) -> u8 = a + b
+pub fn add(a: u8, b: u8) -> u8 = a + b
+pub fn big(a: i128[0..10], b: i128[0..10]) -> i128 = a * b
+pub fn huge(a: i128, b: i128) -> i128 = a * b
+pub fn mix(xs: [4]u8, i: usize, k: usize[0..4]) -> u8 {
+  val a: u8 = xs[k]
+  val b: u8 = xs[i]
+  a & b
+}
+pub fn mask(a: u8[0..100], b: u8) -> u8 = (a + 1) & b
+pub fn mask2(a: u8, b: u8) -> u8 = (a + 1) & b
+pub fn arr(x: u8[0..10]) -> [2]u8 = [x + 1, 2]
+pub fn rep(x: u8[0..10]) -> [3]u8 = [x + 1; 3]
+fn take(v: u8) -> u8 = v
+pub fn pass(x: u8[0..10]) -> u8 = take(x + 1)
+pub fn pass2(x: u8) -> u8 = take(x + 1)
+";
+        let proven = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        let unproven = lower(&mente_sema::check_program_without_proofs(src).unwrap()).unwrap();
+        let both = |name: &str| (checks(&proven, name), checks(&unproven, name));
+        let kinds = |k: &[&str]| k.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let index = "index-out-of-bounds";
+        for (name, kept, all) in [
+            ("get", &[][..], &[index][..]),
+            ("any", &[index], &[index]),
+            ("half", &[], &["division-by-zero", "narrowing"]),
+            (
+                "div",
+                &["division-by-zero", "narrowing"],
+                &["division-by-zero", "narrowing"],
+            ),
+            ("sh", &[], &["shift-amount"]),
+            ("shk", &["shift-amount"], &["shift-amount"]),
+            ("sum", &[], &["narrowing"]),
+            ("add", &["narrowing"], &["narrowing"]),
+            ("big", &[], &["checked"]),
+            ("huge", &["checked"], &["checked"]),
+            ("mix", &[index], &[index, index]),
+            ("mask", &[], &["narrowing"]),
+            ("mask2", &["narrowing"], &["narrowing"]),
+            ("arr", &[], &["narrowing", "narrowing"]),
+            ("rep", &[], &["narrowing"]),
+            ("pass", &[], &["narrowing"]),
+            ("pass2", &["narrowing"], &["narrowing"]),
+        ] {
+            assert_eq!(both(name), (kinds(kept), kinds(all)), "{name}");
+        }
+        // An entry checks its arguments whatever Tier 1 proves.
+        assert_eq!(checks(&proven, "enter half"), kinds(&["narrowing"]));
     }
 }

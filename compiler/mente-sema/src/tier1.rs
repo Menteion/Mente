@@ -91,6 +91,10 @@ pub struct Obligation {
     /// What a run-time check checks against, as `mn view --checks` prints it: `into `u8``,
     /// `into an array of 4`, `below 8`; empty when there is nothing to say.
     pub detail: String,
+    /// For a `Range` obligation, the type the value enters, which tells apart two narrowings at
+    /// one place; the lowering leaves out a check only where every obligation of its kind, place
+    /// and type is proven.
+    pub into: Option<&'static str>,
 }
 
 /// Every obligation of a function, proven or not, the errors for those it must prove, and the
@@ -1378,7 +1382,7 @@ impl<'a> Fx<'a> {
     // -- diagnostics -------------------------------------------------------------------------
 
     fn record(&mut self, kind: ObligationKind, span: Span, must: bool, proven: bool) {
-        self.record_check(kind, span, must, proven, String::new());
+        self.record_check(kind, span, must, proven, String::new(), None);
     }
 
     fn record_check(
@@ -1388,6 +1392,7 @@ impl<'a> Fx<'a> {
         must: bool,
         proven: bool,
         detail: String,
+        into: Option<&'static str>,
     ) {
         if self.recording {
             self.report.obligations.push(Obligation {
@@ -1396,6 +1401,7 @@ impl<'a> Fx<'a> {
                 must,
                 proven,
                 detail,
+                into,
             });
         }
     }
@@ -1844,6 +1850,7 @@ impl<'a> Fx<'a> {
             false,
             st.is_empty() || proven,
             detail,
+            t.map(|t| t.name),
         );
         // An empty interval is a value no path computes, after an operation that always traps.
         let (tlo, thi) = range.filter(|_| !st.is_empty() && lo <= hi)?;
@@ -2001,6 +2008,7 @@ impl<'a> Fx<'a> {
             false,
             st.is_empty() || (lo >= 0 && hi < n),
             format!("into an array of {}", len),
+            None,
         );
     }
 
@@ -2446,6 +2454,7 @@ impl<'a> Fx<'a> {
                     false,
                     st.is_empty() || (lo >= 0 && hi < width),
                     lt.map_or(String::new(), |t| format!("below {}", t.bits)),
+                    None,
                 );
                 let v = shift_vals(st, op, l, r, None);
                 self.fits(st, &v, lt, span);
