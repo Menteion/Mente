@@ -144,7 +144,7 @@ pub fn demo() -> i32 {
 }
 ```
 
-- Parameters are read-only by default. A `mut` parameter receives a place, marked at the call: `swap(mut v, 0, 3)`. It is copied in when the call starts and copied back when it returns.
+- Parameters are read-only by default. A `mut` parameter receives a place, marked at the call: `swap(mut v, 0, 3)`. It is copied in when the call starts and copied back when it returns. The place has the parameter's type exactly: `var count: i32 = 0` for a `mut` parameter of type `i32`.
 - Never write `&x` or `&mut x`. There are no references, pointers or lifetimes.
 - In one call, a `mut` argument's variable may not appear in any other argument: `f(mut a[i], a[j])` is an error.
 - A function that returns nothing has no `->`.

@@ -324,7 +324,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
          a place it may change as `mut x`. At a call, `&mut x` becomes `mut x`, a unique \
          rewrite; elsewhere removing the `&` is suggested.",
         "module m\npub fn g(mut a: i32) {\n  a = 1\n}\npub fn f() -> i32 {\n  var v = 0\n  g(&mut v)\n  v\n}\n",
-        "module m\npub fn g(mut a: i32) {\n  a = 1\n}\npub fn f() -> i32 {\n  var v = 0\n  g(mut v)\n  v\n}\n",
+        "module m\npub fn g(mut a: i32) {\n  a = 1\n}\npub fn f() -> i32 {\n  var v: i32 = 0\n  g(mut v)\n  v\n}\n",
     ),
     emitted(
         "E0120",
@@ -436,7 +436,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
          an arithmetic operand, an index and a measure are integers; an argument, an \
          initializer, an assigned value and a result flow into the type of their place. Any \
          integer flows into any integer type and is checked where it lands, but no integer \
-         becomes a `bool`, and an array flows only into an array of its length.",
+         becomes a `bool`, and an array flows only into an array of its length. A `mut` \
+         argument has its parameter's type exactly, since the call writes it back.",
         "module m\npub fn f(x: u8) -> u8 {\n  if x {\n    return 1\n  }\n  0\n}\n",
         "module m\npub fn f(x: u8) -> u8 {\n  if x > 0 {\n    return 1\n  }\n  0\n}\n",
     ),
