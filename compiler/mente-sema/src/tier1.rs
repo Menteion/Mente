@@ -454,7 +454,6 @@ fn div_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
             let (lo, hi) = interval(st, l);
             return Val::Itv(trunc_div(lo, c), trunc_div(hi, c));
         }
-        Some(c) if c < 0 => return negate(&div_vals(st, l, &lin(Vec::new(), -c))),
         _ => {}
     }
     let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
@@ -4098,6 +4097,8 @@ mod tests {
         assert_eq!(ones(9), 15);
         assert_eq!(ones(16), 31);
         assert!(ones(INF) >= INF);
+        // Beyond the domain's bound, the mask stops at it.
+        assert_eq!(ones(INF + 5), INF);
         assert_eq!(int_literal(u128::MAX), TOP);
         assert_eq!(lin(vec![], BIG), TOP);
         assert_eq!(lin(vec![], -BIG), TOP);
