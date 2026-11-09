@@ -1,0 +1,10 @@
+// expect: pass
+module conformance
+pub fn hex() -> u8 = 0xFF_u8
+pub fn bin() -> u8 = 0b1010_0101
+pub fn grouped() -> u64 = 1_000_000
+pub fn widest() -> u128 = 340282366920938463463374607431768211455
+pub fn escapes() -> i32 {
+  todo("a \"quoted\" tab\t and line\n and \\")
+}
+pub fn bits(x: u8) -> u8 = x & 0x0F ^ ~x

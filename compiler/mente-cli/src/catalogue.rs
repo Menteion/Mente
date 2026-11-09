@@ -147,6 +147,51 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn first(data: []u8) -> []u8 from\n",
         "module m\npub fn first(data: []u8) -> []u8 from data\n",
     ),
+    emitted(
+        "E0105",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "A character Mente does not use",
+        "Outside comments and string literals, Mente uses ASCII letters, digits, `_` and the \
+         operators and punctuation of the grammar. Anything else, such as `#`, `$`, `'` or a \
+         letter outside ASCII, is an error rather than being skipped. An attribute is written \
+         `@name`, not `#[name]`, and Mente writes no lifetimes and has no character literals.",
+        "module m\npub fn f() -> i32 = 1 # 2\n",
+        "module m\npub fn f() -> i32 = 1\n",
+    ),
+    emitted(
+        "E0106",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "A string literal is not closed on its line",
+        "A string literal ends with `\"` on the line it starts on. A line break inside a string \
+         is written `\\n`. The diagnostic points at the string from its opening quote.",
+        "module m\npub fn f() -> i32 {\n  todo(\"unfinished)\n}\n",
+        "module m\npub fn f() -> i32 {\n  todo(\"unfinished\")\n}\n",
+    ),
+    emitted(
+        "E0107",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "A string literal uses an escape Mente does not know",
+        "A string literal knows four escapes: `\\\"` for a quote, `\\\\` for a backslash, `\\n` \
+         for a line break and `\\t` for a tab. Any other character after a backslash is an \
+         error.",
+        "module m\npub fn f() -> i32 {\n  todo(\"a\\qb\")\n}\n",
+        "module m\npub fn f() -> i32 {\n  todo(\"a\\tb\")\n}\n",
+    ),
+    emitted(
+        "E0108",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "An integer literal is malformed",
+        "An integer literal is decimal, hexadecimal after `0x` or binary after `0b`, with at \
+         least one digit, and `_` only between two digits or before its suffix: `1_000`, \
+         `0xFF_u8`, `0b1010`. A digit its base does not have, a suffix written without its \
+         `_` (`5ms` for `5_ms`, which the fix inserts) and a value beyond `u128` are errors.",
+        "module m\npub fn f() -> u8 = 0b102\n",
+        "module m\npub fn f() -> u8 = 0b101\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

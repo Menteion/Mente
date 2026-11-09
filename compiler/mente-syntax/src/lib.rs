@@ -3,8 +3,9 @@
 //! Governed by `spec/holographic-module.md` and `spec/surface-syntax.md`.
 //!
 //! Parses declarations only. Function and `@example` bodies are kept as flat token lists
-//! (`body_tokens`); types, contracts and effect clauses are kept as raw strings. Characters the
-//! lexer does not know are skipped without an error. A parse error is a [`Diagnostic`]
+//! (`body_tokens`); types, contracts and effect clauses are kept as raw strings. The lexer
+//! follows `spec/grammar.md`, item 1, and reports a character Mente does not use, an unclosed
+//! string, an unknown escape and a malformed integer literal. A parse error is a [`Diagnostic`]
 //! (`spec/diagnostics.md`), and declarations, fields and attributes keep their spans so later
 //! checks can point at them.
 
@@ -72,7 +73,8 @@ pub enum TokenKind {
 
     // Identifiers & Literals
     Ident(String),
-    IntLit(i128, String),
+    /// The value, and the literal as written, suffix included.
+    IntLit(u128, String),
     FloatLit(String),
     StrLit(String),
     DocComment(String),
@@ -95,6 +97,9 @@ pub enum TokenKind {
     FatArrow,         // =>
     PipeGt,           // |>
     Pipe,             // |
+    Amp,              // &
+    Caret,            // ^
+    Tilde,            // ~
     Question,         // ?
     QuestionDot,      // ?.
     QuestionQuestion, // ??
@@ -112,6 +117,14 @@ pub enum TokenKind {
     PlusEq,           // +=
     Minus,            // -
     MinusEq,          // -=
+    StarEq,           // *=
+    SlashEq,          // /=
+    PercentEq,        // %=
+    AmpEq,            // &=
+    PipeEq,           // |=
+    CaretEq,          // ^=
+    ShlEq,            // <<=
+    ShrEq,            // >>=
     Star,             // *
     Slash,            // /
     Percent,          // %
@@ -125,13 +138,23 @@ pub struct Token {
     pub span: Span,
 }
 
+/// The tokens of `src`, without the lexical errors [`lex`] reports.
 pub fn tokenize(src: &str) -> Vec<Token> {
+    lex(src).0
+}
+
+/// Lexes `src` into tokens, and reports every lexical error on the way (`spec/grammar.md`,
+/// item 1): a character Mente does not use (`E0105`), a string literal a newline or the end of
+/// the file interrupts (`E0106`), an unknown escape (`E0107`) and a malformed integer literal
+/// (`E0108`). Lexing goes on after an error, so each one is reported.
+pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
     let bytes = src.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     let mut line = 1u32;
     let mut col = 1u32;
     let mut tokens = Vec::new();
+    let mut errors = Vec::new();
 
     while i < len {
         let b = bytes[i];
@@ -178,24 +201,70 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         let start = i;
         let start_col = col;
 
-        // String literal
+        // String literal: it ends on its own line, and knows four escapes.
         if b == b'"' {
             i += 1;
             col += 1;
             let s_start = i;
-            while i < len && bytes[i] != b'"' {
-                if bytes[i] == b'\\' && i + 1 < len {
-                    i += 2;
-                    col += 2;
-                } else {
-                    i += 1;
-                    col += 1;
+            let mut closed = false;
+            while i < len {
+                match bytes[i] {
+                    b'"' => {
+                        closed = true;
+                        break;
+                    }
+                    b'\n' => break,
+                    b'\\' => {
+                        let escaped = src[i + 1..].chars().next();
+                        match escaped {
+                            Some('"' | '\\' | 'n' | 't') => {
+                                i += 2;
+                                col += 2;
+                            }
+                            Some(c) if c != '\n' => {
+                                errors.push(Diagnostic::error(
+                                    "E0107",
+                                    Span {
+                                        start: i,
+                                        end: i + 1 + c.len_utf8(),
+                                        line,
+                                        col,
+                                    },
+                                    format!(
+                                        "`\\{}` is not an escape Mente knows; a string literal may use `\\\"`, `\\\\`, `\\n` and `\\t`",
+                                        c
+                                    ),
+                                ));
+                                i += 1 + c.len_utf8();
+                                col += 2;
+                            }
+                            _ => {
+                                i += 1;
+                                col += 1;
+                            }
+                        }
+                    }
+                    _ => {
+                        i += src[i..].chars().next().map_or(1, char::len_utf8);
+                        col += 1;
+                    }
                 }
             }
             let content = src[s_start..i].to_string();
-            if i < len {
+            if closed {
                 i += 1;
                 col += 1;
+            } else {
+                errors.push(Diagnostic::error(
+                    "E0106",
+                    Span {
+                        start,
+                        end: i,
+                        line,
+                        col: start_col,
+                    },
+                    "this string literal is not closed on its line; close it with `\"`, and write a line break inside it as `\\n`",
+                ));
             }
             tokens.push(Token {
                 kind: TokenKind::StrLit(content),
@@ -209,45 +278,67 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             continue;
         }
 
-        // Number literal (including unit/fixed-point suffixes like 100.0_meter or 0.5_q16)
+        // Number literal: an integer in decimal, `0x` hexadecimal or `0b` binary, with digits
+        // grouped by `_` and an optional suffix (`255_u8`); or a decimal float, whose suffix
+        // may name a unit or a fixed-point format (`100.0_meter`, `0.5_q16_16`).
         if b.is_ascii_digit() {
-            let mut is_float = false;
-            while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
-                i += 1;
-                col += 1;
-            }
-            if i + 1 < len && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
-                is_float = true;
-                i += 1;
-                col += 1;
-                while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
-                    i += 1;
-                    col += 1;
+            let (radix, prefix) = match (b, bytes.get(i + 1)) {
+                (b'0', Some(b'x')) => (16, "0x"),
+                (b'0', Some(b'b')) => (2, "0b"),
+                _ => (10, ""),
+            };
+            let is_digit = |c: u8| match radix {
+                16 => c.is_ascii_hexdigit(),
+                2 => c == b'0' || c == b'1',
+                _ => c.is_ascii_digit(),
+            };
+            let digits_start = i + prefix.len();
+            let mut j = digits_start;
+            while j < len {
+                let separator = bytes[j] == b'_'
+                    && j > digits_start
+                    && bytes.get(j + 1).is_some_and(|&c| is_digit(c));
+                if is_digit(bytes[j]) || separator {
+                    j += 1;
+                } else {
+                    break;
                 }
             }
-            // Scientific notation e.g. 1e12 or 1e-9
-            if i < len && (bytes[i] == b'e' || bytes[i] == b'E') {
-                is_float = true;
-                i += 1;
-                col += 1;
-                if i < len && (bytes[i] == b'+' || bytes[i] == b'-') {
-                    i += 1;
-                    col += 1;
-                }
-                while i < len && bytes[i].is_ascii_digit() {
-                    i += 1;
-                    col += 1;
-                }
-            }
-            // Optional unit/type suffix starting with alphabetic or _
-            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-                col += 1;
-            }
-            let raw = &src[start..i];
+            let is_float = radix == 10
+                && ((j + 1 < len && bytes[j] == b'.' && bytes[j + 1].is_ascii_digit())
+                    || (j < len && (bytes[j] == b'e' || bytes[j] == b'E')));
             if is_float {
+                if bytes[j] == b'.' {
+                    j += 1;
+                    while j < len
+                        && (bytes[j].is_ascii_digit()
+                            || (bytes[j] == b'_'
+                                && bytes.get(j + 1).is_some_and(u8::is_ascii_digit)))
+                    {
+                        j += 1;
+                    }
+                }
+                // Scientific notation e.g. 1e12 or 1e-9
+                if j < len && (bytes[j] == b'e' || bytes[j] == b'E') {
+                    j += 1;
+                    if j < len && (bytes[j] == b'+' || bytes[j] == b'-') {
+                        j += 1;
+                    }
+                    while j < len && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                }
+                // A float's suffix, after `_`, names a unit or a fixed-point format.
+                if j + 1 < len && bytes[j] == b'_' && bytes[j + 1].is_ascii_alphabetic() {
+                    j += 2;
+                    while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                        j += 1;
+                    }
+                }
+                col += (j - i) as u32;
+                i = j;
                 tokens.push(Token {
-                    kind: TokenKind::FloatLit(raw.to_string()),
+                    kind: TokenKind::FloatLit(src[start..i].to_string()),
                     span: Span {
                         start,
                         end: i,
@@ -255,23 +346,97 @@ pub fn tokenize(src: &str) -> Vec<Token> {
                         col: start_col,
                     },
                 });
-            } else {
-                let digits_only: String = raw
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '_')
-                    .filter(|c| *c != '_')
-                    .collect();
-                let val = digits_only.parse::<i128>().unwrap_or(0);
-                tokens.push(Token {
-                    kind: TokenKind::IntLit(val, raw.to_string()),
-                    span: Span {
-                        start,
-                        end: i,
-                        line,
-                        col: start_col,
-                    },
-                });
+                continue;
             }
+
+            let digits_end = j;
+            // A suffix starts with `_` and a letter that is not a digit of the literal.
+            let suffix_starts = j + 1 < len
+                && bytes[j] == b'_'
+                && bytes[j + 1].is_ascii_alphabetic()
+                && !is_digit(bytes[j + 1]);
+            let mut problem = None;
+            if suffix_starts {
+                j += 1;
+            } else if j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                problem = Some(j);
+            }
+            while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            let span = Span {
+                start,
+                end: j,
+                line,
+                col: start_col,
+            };
+            let digits: String = src[digits_start..digits_end]
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
+            let value = u128::from_str_radix(&digits, radix).ok();
+            // Only a hexadecimal or binary literal can lack a digit, or hold one its base lacks.
+            let radix_name = if radix == 16 { "hexadecimal" } else { "binary" };
+            if digits.is_empty() {
+                errors.push(Diagnostic::error(
+                    "E0108",
+                    span,
+                    format!(
+                        "`{}` needs at least one {} digit after it",
+                        prefix, radix_name
+                    ),
+                ));
+            } else if let Some(at) = problem {
+                let c = bytes[at] as char;
+                let d = if c == '_' {
+                    Diagnostic::error(
+                        "E0108",
+                        span,
+                        "a `_` in a number stands between two digits, or starts its suffix (`255_u8`)",
+                    )
+                } else if c.is_ascii_digit() || (radix == 16 && c.is_ascii_hexdigit()) {
+                    Diagnostic::error(
+                        "E0108",
+                        span,
+                        format!("`{}` is not a {} digit", c, radix_name),
+                    )
+                } else {
+                    let suffix = &src[at..j];
+                    Diagnostic::error(
+                        "E0108",
+                        span,
+                        format!(
+                            "a literal's suffix starts with `_`: write `{}_{}`",
+                            &src[start..at],
+                            suffix
+                        ),
+                    )
+                    .with_fix(
+                        Applicability::MachineApplicable,
+                        format!("insert `_` before `{}`", suffix),
+                        insertion_point(Span {
+                            start: at,
+                            end: at,
+                            line,
+                            col: start_col + (at - start) as u32,
+                        }),
+                        "_",
+                    )
+                };
+                errors.push(d);
+            } else if value.is_none() {
+                errors.push(Diagnostic::error(
+                    "E0108",
+                    span,
+                    "this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1",
+                ));
+            }
+            col += (j - i) as u32;
+            i = j;
+            tokens.push(Token {
+                kind: TokenKind::IntLit(value.unwrap_or(0), src[start..i].to_string()),
+                span,
+            });
             continue;
         }
 
@@ -348,6 +513,8 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         let (kind, advance) = match (three, two, b) {
             (b"..=", _, _) => (TokenKind::DotDotEq, 3),
             (b"...", _, _) => (TokenKind::Ellipsis, 3),
+            (b"<<=", _, _) => (TokenKind::ShlEq, 3),
+            (b">>=", _, _) => (TokenKind::ShrEq, 3),
             (_, b"..", _) => (TokenKind::DotDot, 2),
             (_, b"->", _) => (TokenKind::Arrow, 2),
             (_, b"=>", _) => (TokenKind::FatArrow, 2),
@@ -362,6 +529,12 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             (_, b">>", _) => (TokenKind::Shr, 2),
             (_, b"+=", _) => (TokenKind::PlusEq, 2),
             (_, b"-=", _) => (TokenKind::MinusEq, 2),
+            (_, b"*=", _) => (TokenKind::StarEq, 2),
+            (_, b"/=", _) => (TokenKind::SlashEq, 2),
+            (_, b"%=", _) => (TokenKind::PercentEq, 2),
+            (_, b"&=", _) => (TokenKind::AmpEq, 2),
+            (_, b"|=", _) => (TokenKind::PipeEq, 2),
+            (_, b"^=", _) => (TokenKind::CaretEq, 2),
             (_, _, b'@') => (TokenKind::At, 1),
             (_, _, b'(') => (TokenKind::LParen, 1),
             (_, _, b')') => (TokenKind::RParen, 1),
@@ -373,6 +546,9 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             (_, _, b',') => (TokenKind::Comma, 1),
             (_, _, b'.') => (TokenKind::Dot, 1),
             (_, _, b'|') => (TokenKind::Pipe, 1),
+            (_, _, b'&') => (TokenKind::Amp, 1),
+            (_, _, b'^') => (TokenKind::Caret, 1),
+            (_, _, b'~') => (TokenKind::Tilde, 1),
             (_, _, b'?') => (TokenKind::Question, 1),
             (_, _, b'!') => (TokenKind::Bang, 1),
             (_, _, b'=') => (TokenKind::Eq, 1),
@@ -385,8 +561,23 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             (_, _, b'%') => (TokenKind::Percent, 1),
             (_, _, b';') => (TokenKind::Semi, 1),
             _ => {
-                let ch_len = src[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-                i += ch_len;
+                let c = src[i..].chars().next().unwrap_or('?');
+                let why = match c {
+                    '\'' => "; Mente writes no lifetimes and has no character literals",
+                    '#' => "; an attribute is written `@name`",
+                    _ => "",
+                };
+                errors.push(Diagnostic::error(
+                    "E0105",
+                    Span {
+                        start: i,
+                        end: i + c.len_utf8(),
+                        line,
+                        col,
+                    },
+                    format!("`{}` is not a character Mente uses{}", c, why),
+                ));
+                i += c.len_utf8();
                 col += 1;
                 continue;
             }
@@ -414,7 +605,7 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             col,
         },
     });
-    tokens
+    (tokens, errors)
 }
 
 // ============================================================================
@@ -574,7 +765,10 @@ pub struct ModuleFile {
 
 /// Parses a `.mn` source string into a structured `ModuleFile`.
 pub fn parse_module(src: &str) -> Result<ModuleFile, Diagnostic> {
-    let tokens = tokenize(src);
+    let (tokens, lex_errors) = lex(src);
+    if let Some(first) = lex_errors.into_iter().next() {
+        return Err(first);
+    }
     let total_token_count = tokens.len().saturating_sub(1);
     let mut p = Parser {
         src,
@@ -1416,6 +1610,194 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn kinds(src: &str) -> Vec<TokenKind> {
+        let (tokens, errors) = lex(src);
+        assert!(errors.is_empty(), "{:?}", errors);
+        tokens.into_iter().map(|t| t.kind).collect()
+    }
+
+    /// The codes and messages of every lexical error in `src`.
+    fn lex_errors(src: &str) -> Vec<(&'static str, String)> {
+        lex(src)
+            .1
+            .into_iter()
+            .map(|d| (d.code, d.message))
+            .collect()
+    }
+
+    #[test]
+    fn test_lexer_reads_every_m1_literal_and_operator() {
+        // Integers in decimal, hexadecimal and binary, grouped by `_`, with a suffix after `_`.
+        assert_eq!(
+            kinds("1_000_000 0xFF_u8 0xab_cd 0b1010_0101 255_u8 0"),
+            vec![
+                TokenKind::IntLit(1_000_000, "1_000_000".into()),
+                TokenKind::IntLit(255, "0xFF_u8".into()),
+                TokenKind::IntLit(0xabcd, "0xab_cd".into()),
+                TokenKind::IntLit(0b1010_0101, "0b1010_0101".into()),
+                TokenKind::IntLit(255, "255_u8".into()),
+                TokenKind::IntLit(0, "0".into()),
+                TokenKind::Eof,
+            ]
+        );
+        // The widest value, `u128::MAX`, is a literal; floats keep their unit suffixes.
+        let max = u128::MAX.to_string();
+        assert_eq!(kinds(&max)[0], TokenKind::IntLit(u128::MAX, max.clone()));
+        assert_eq!(
+            kinds("1.5 100.0_meter 1e12 1.5e-3 2E+4 0.75_q16_16 1_000.000_5"),
+            vec![
+                TokenKind::FloatLit("1.5".into()),
+                TokenKind::FloatLit("100.0_meter".into()),
+                TokenKind::FloatLit("1e12".into()),
+                TokenKind::FloatLit("1.5e-3".into()),
+                TokenKind::FloatLit("2E+4".into()),
+                TokenKind::FloatLit("0.75_q16_16".into()),
+                TokenKind::FloatLit("1_000.000_5".into()),
+                TokenKind::Eof,
+            ]
+        );
+        // A dot after an integer, with no digit after it, is a dot.
+        assert_eq!(
+            kinds("a.len 3.len 1."),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Dot,
+                TokenKind::Ident("len".into()),
+                TokenKind::IntLit(3, "3".into()),
+                TokenKind::Dot,
+                TokenKind::Ident("len".into()),
+                TokenKind::IntLit(1, "1".into()),
+                TokenKind::Dot,
+                TokenKind::Eof,
+            ]
+        );
+        // Every operator of grammar.md, item 1, that the declaration parser did not need.
+        assert_eq!(
+            kinds("& ^ ~ *= /= %= &= |= ^= <<= >>= << >> | ;"),
+            vec![
+                TokenKind::Amp,
+                TokenKind::Caret,
+                TokenKind::Tilde,
+                TokenKind::StarEq,
+                TokenKind::SlashEq,
+                TokenKind::PercentEq,
+                TokenKind::AmpEq,
+                TokenKind::PipeEq,
+                TokenKind::CaretEq,
+                TokenKind::ShlEq,
+                TokenKind::ShrEq,
+                TokenKind::Shl,
+                TokenKind::Shr,
+                TokenKind::Pipe,
+                TokenKind::Semi,
+                TokenKind::Eof,
+            ]
+        );
+        // A string keeps its four escapes as written.
+        assert_eq!(
+            kinds(r#""a\"b\\c\n\t""#)[0],
+            TokenKind::StrLit(r#"a\"b\\c\n\t"#.into())
+        );
+        // Columns count characters, so a token after a literal starts where it appears.
+        let cols: Vec<u32> = lex(r#"0xFF_u8 x 1.5 y "\n" z "é" w"#)
+            .0
+            .iter()
+            .map(|t| t.span.col)
+            .collect();
+        assert_eq!(cols, vec![1, 9, 11, 15, 17, 22, 24, 28, 29]);
+        let (tokens, _) = lex("255_u8 x");
+        assert_eq!((tokens[0].span.start, tokens[0].span.end), (0, 6));
+    }
+
+    #[test]
+    fn test_lexical_errors_are_diagnostics_and_lexing_goes_on() {
+        // A character Mente does not use, with a word on why for the ones agents bring along.
+        assert_eq!(
+            lex_errors("x # y"),
+            vec![(
+                "E0105",
+                "`#` is not a character Mente uses; an attribute is written `@name`".to_string()
+            )]
+        );
+        assert!(lex_errors("fn f<'a>()")[0].1.contains("no lifetimes"));
+        assert_eq!(lex_errors("é")[0].1, "`é` is not a character Mente uses");
+        let (tokens, _) = lex("é x");
+        assert_eq!(tokens[0].span.col, 3);
+
+        // A string ends on its line; lexing goes on with the next one.
+        let (tokens, errors) = lex("\"open\nx");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "E0106");
+        assert_eq!(tokens[1].kind, TokenKind::Ident("x".into()));
+        assert_eq!(lex_errors("\"a\\\nb\"")[0].0, "E0106");
+        let (tokens, errors) = lex("\"\\");
+        assert_eq!(errors[0].code, "E0106");
+        assert_eq!(tokens[1].span.col, 3);
+
+        // Four escapes and no others.
+        assert_eq!(
+            lex_errors(r#""\q""#),
+            vec![(
+                "E0107",
+                r#"`\q` is not an escape Mente knows; a string literal may use `\"`, `\\`, `\n` and `\t`"#
+                    .to_string()
+            )]
+        );
+        let (tokens, _) = lex(r#""\q" z"#);
+        assert_eq!(tokens[1].span.col, 6);
+
+        // Malformed integers.
+        let malformed = [
+            ("0x", "`0x` needs at least one hexadecimal digit after it"),
+            ("0x_FF", "`0x` needs at least one hexadecimal digit after it"),
+            ("0b", "`0b` needs at least one binary digit after it"),
+            ("0b102", "`2` is not a binary digit"),
+            ("1__0", "a `_` in a number stands between two digits, or starts its suffix (`255_u8`)"),
+            ("7_", "a `_` in a number stands between two digits, or starts its suffix (`255_u8`)"),
+            ("0b1e", "a literal's suffix starts with `_`: write `0b1_e`"),
+            (
+                "340282366920938463463374607431768211456",
+                "this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1",
+            ),
+        ];
+        for (src, message) in malformed {
+            assert_eq!(
+                lex_errors(src),
+                vec![("E0108", message.to_string())],
+                "{}",
+                src
+            );
+        }
+        // A suffix written without `_` gets a fix that inserts it.
+        let (_, errors) = lex("val t = 5ms");
+        assert_eq!(
+            errors[0].message,
+            "a literal's suffix starts with `_`: write `5_ms`"
+        );
+        assert_eq!(
+            errors[0].fixes[0].applicability,
+            Applicability::MachineApplicable
+        );
+        let fixed = diagnostics::apply_fix("val t = 5ms", &errors[0].fixes[0]).unwrap();
+        assert_eq!(fixed, "val t = 5_ms");
+        assert!(lex(&fixed).1.is_empty());
+
+        // Every error is reported, and parse_module stops at the first.
+        assert_eq!(
+            lex_errors("# \"\\q\" 0b2 $")
+                .iter()
+                .map(|e| e.0)
+                .collect::<Vec<_>>(),
+            vec!["E0105", "E0107", "E0108", "E0105"]
+        );
+        assert_eq!(
+            parse_module("module m\npub fn f() -> u8 = 0b2\n# ")
+                .unwrap_err()
+                .code,
+            "E0108"
+        );
     }
 
     #[test]

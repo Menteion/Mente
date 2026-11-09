@@ -15,7 +15,7 @@ This file is the normative grammar of the language `core-calculus.md` defines fo
 
 ## 1. Specification
 
-1. `Specified` **Lexical structure**:
+1. **Lexical structure**:
    ```ebnf
    comment          = "//" { <any character but a newline> } ;
    doc comment      = "///" { <any character but a newline> } ;          (* exactly three slashes *)
@@ -27,9 +27,16 @@ This file is the normative grammar of the language `core-calculus.md` defines fo
    suffix           = "_" integer type ;                                  (* 255_u8; 0xFF_u8 *)
    string literal   = '"' { <any character but '"', "\" or a newline> | "\" ( '"' | "\" | "n" | "t" ) } '"' ;
    ```
-   - The keywords M1 uses are `module`, `pub`, `fn`, `mut`, `val`, `var`, `if`, `else`, `while`, `break`, `continue`, `guard`, `return`, `requires`, `ensures`, `decreases`, `invariant`, `and`, `or`, `not`, `true` and `false`.
-   - These words are reserved for later milestones and cannot be names: `struct`, `bitstruct`, `enum`, `trait`, `type`, `unit`, `dyn`, `own`, `in`, `import`, `extern`, `const`, `match`, `for`, `parallel`, `parallel_for`, `actor`, `with`, `as`, `comptime`, `raise`, `catch`, `is` and `none`. `from` is a keyword only right after a return type, and `todo` is a built-in function name.
-   - The operators and punctuation are `+ - * / % & | ^ ~ << >>`, `== != < <= > >=`, `= += -= *= /= %= &= |= ^= <<= >>=`, `( ) [ ] { } , : . .. ..= ->`, `@`, and `;`, which appears only in an array repeat.
+   - `Implemented` **Tokens**: the lexer (`lex` in `compiler/mente-syntax`) reads every form above, the keywords and reserved words below, and the operators and punctuation `+ - * / % & | ^ ~ << >>`, `== != < <= > >=`, `= += -= *= /= %= &= |= ^= <<= >>=`, `( ) [ ] { } , : . .. ..= ->`, `@`, and `;`, which appears only in an array repeat. An integer literal keeps its value, up to `u128`, and the text it was written with.
+     <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_lexer_reads_every_m1_literal_and_operator" min="1" reason="Every literal form and operator of M1 lexes, and columns count characters" -->
+   - `Implemented` **Lexical errors**: these are errors, and lexing goes on after each, so every one is reported:
+     - a character outside comments and string literals that Mente does not use, such as `#`, `$`, `'` or a letter outside ASCII (`E0105`);
+     - a string literal that a newline or the end of the file interrupts (`E0106`);
+     - an escape other than the four above (`E0107`);
+     - an integer literal with no digit after its prefix, a `_` that is not between two digits or before its suffix, a digit its base does not have, a suffix written without its `_`, or a value beyond `u128` (`E0108`). A suffix without its `_` has a machine-applicable fix that inserts it.
+     <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_lexical_errors_are_diagnostics_and_lexing_goes_on" min="1" reason="Each lexical error has its code, lexing goes on, and the suffix fix applies" -->
+   - `Specified` The keywords M1 uses are `module`, `pub`, `fn`, `mut`, `val`, `var`, `if`, `else`, `while`, `break`, `continue`, `guard`, `return`, `requires`, `ensures`, `decreases`, `invariant`, `and`, `or`, `not`, `true` and `false`.
+   - `Specified` These words are reserved for later milestones and cannot be names: `struct`, `bitstruct`, `enum`, `trait`, `type`, `unit`, `dyn`, `own`, `in`, `import`, `extern`, `const`, `match`, `for`, `parallel`, `parallel_for`, `actor`, `with`, `as`, `comptime`, `raise`, `catch`, `is` and `none`. `from` is a keyword only right after a return type, and `todo` is a built-in function name.
 2. `Specified` **Where a newline ends a statement**:
    - Inside parentheses and brackets, a newline is whitespace. Inside a block's braces, a newline ends the statement before it.
    - A newline does not end a statement after a token that cannot end one: a binary operator, `not`, `=`, a compound assignment, `,`, `.`, `->`, `(`, `[` or `{`.
