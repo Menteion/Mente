@@ -997,9 +997,12 @@ impl<'a> Lower<'a> {
             (V::Int(n, t), _, Shape::Int(into)) => {
                 V::Int(self.narrow_int(n, t, *into, span), mir(*into))
             }
-            (V::Arr(a), Shape::Array(_, fe), Shape::Array(_, te)) if fe == te => V::Arr(a),
             (V::Arr(a), Shape::Array(_, fe), Shape::Array(len, te)) => {
-                // Elements of another type: a new array, each element narrowed into it.
+                // Elements of the same type stay where they are; of another type, they are
+                // narrowed into a new array.
+                if fe == te {
+                    return Ok(V::Arr(a));
+                }
                 let slot = self.inst(Op::Slot { bytes: to.size() }, Ty::Addr, &[]);
                 let (fe, te, len) = ((**fe).clone(), (**te).clone(), *len);
                 self.each(len, &mut |l, i| {
