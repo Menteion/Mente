@@ -1,0 +1,10 @@
+// expect: E0505
+module conformance
+pub fn inc(x: u8) -> u8
+  ensures result > x
+{
+  if x == 255 {
+    return x
+  }
+  x + 1
+}

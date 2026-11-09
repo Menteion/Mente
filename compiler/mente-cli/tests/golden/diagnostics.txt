@@ -10,6 +10,10 @@
 {"version":1,"diagnostics":[{"code":"E0216","severity":"error","message":"`&` works on the bits of one integer type, but its operands are `u8` and `u16`; bind one of them to a `val` of the other's type first","primary":{"file":"bit_operation_on_two_types.mn","start":69,"end":74,"line":3,"column":34},"related":[],"fixes":[]}]}
 == core-calculus/break_outside_a_loop.mn ==
 {"version":1,"diagnostics":[{"code":"E0208","severity":"error","message":"`break` stands only inside a `while` loop","primary":{"file":"break_outside_a_loop.mn","start":51,"end":56,"line":4,"column":3},"related":[],"fixes":[]}]}
+== core-calculus/contracts_used_modularly.mn ==
+{"version":1,"diagnostics":[]}
+== core-calculus/ensures_not_proven_at_a_return.mn ==
+{"version":1,"diagnostics":[{"code":"E0505","severity":"error","message":"Tier 1 cannot rule out `x = 255, result = 255`, which violates `ensures result > x` of `inc` at this return","primary":{"file":"ensures_not_proven_at_a_return.mn","start":110,"end":111,"line":7,"column":12},"related":[],"fixes":[{"message":"insert `guard x > x else { todo(\"x > x is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"ensures_not_proven_at_a_return.mn","start":99,"end":99,"line":7,"column":1},"replacement":"    guard x > x else { todo(\"x > x is false here\") }\n"}]}]}]}
 == core-calculus/function_as_value.mn ==
 {"version":1,"diagnostics":[{"code":"E0204","severity":"error","message":"`id` is a function, which M1 only calls: write `id(...)`","primary":{"file":"function_as_value.mn","start":82,"end":84,"line":4,"column":20},"related":[],"fixes":[]}]}
 == core-calculus/guard_that_falls_through.mn ==
@@ -36,8 +40,16 @@
 {"version":1,"diagnostics":[{"code":"E0207","severity":"error","message":"`xs` is passed as `mut` in this call, so no other argument may name it; copy what this argument needs into a `val` first","primary":{"file":"mut_argument_named_twice.mn","start":132,"end":134,"line":8,"column":18},"related":[{"message":"passed as `mut` here","span":{"file":"mut_argument_named_twice.mn","start":125,"end":130,"line":8,"column":11}}],"fixes":[]}]}
 == core-calculus/mut_argument_of_val.mn ==
 {"version":1,"diagnostics":[{"code":"E0206","severity":"error","message":"cannot pass as `mut` `v`: it is a `val`, which never changes; declare it with `var`","primary":{"file":"mut_argument_of_val.mn","start":112,"end":113,"line":8,"column":12},"related":[{"message":"declared here","span":{"file":"mut_argument_of_val.mn","start":91,"end":92,"line":7,"column":7}}],"fixes":[]}]}
+== core-calculus/refinement_not_proven.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 255`, where `x + 1` is 256, outside `u8[1..=255]`, the type of the result of `next`","primary":{"file":"refinement_not_proven.mn","start":81,"end":86,"line":4,"column":10},"related":[],"fixes":[{"message":"insert `guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refinement_not_proven.mn","start":72,"end":72,"line":4,"column":1},"replacement":"  guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }\n"}]}]}]}
 == core-calculus/refinement_over_a_var.mn ==
 {"version":1,"diagnostics":[{"code":"E0209","severity":"error","message":"a refinement's bound names `m`, which can change; a bound is a literal, a `val`, a read-only parameter, or `name.len`","primary":{"file":"refinement_over_a_var.mn","start":94,"end":103,"line":6,"column":10},"related":[],"fixes":[]}]}
+== core-calculus/refinement_proven_by_a_guard.mn ==
+{"version":1,"diagnostics":[]}
+== core-calculus/remainder_and_division_facts.mn ==
+{"version":1,"diagnostics":[]}
+== core-calculus/requires_not_proven_at_a_call.mn ==
+{"version":1,"diagnostics":[{"code":"E0504","severity":"error","message":"Tier 1 cannot rule out `n = 0`, which violates `requires lo < hi` of `pick` at this call","primary":{"file":"requires_not_proven_at_a_call.mn","start":119,"end":129,"line":7,"column":25},"related":[],"fixes":[{"message":"insert `guard 0 < n else { todo(\"0 < n is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"requires_not_proven_at_a_call.mn","start":117,"end":129,"line":7,"column":23},"replacement":"{\n  guard 0 < n else { todo(\"0 < n is false here\") }\n  pick(0, n)\n}"}]}]}]}
 == core-calculus/shadowing.mn ==
 {"version":1,"diagnostics":[{"code":"E0202","severity":"error","message":"`x` is already declared in this function; Mente has no shadowing, so give this one a new name","primary":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"related":[{"message":"first declared here","span":{"file":"shadowing.mn","start":45,"end":46,"line":3,"column":10}}],"fixes":[{"message":"rename this `x` and its uses to `x2`","applicability":"suggestion","edits":[{"span":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"replacement":"x2"},{"span":{"file":"shadowing.mn","start":74,"end":75,"line":5,"column":3},"replacement":"x2"}]}]}]}
 == core-calculus/unknown_name.mn ==
@@ -50,6 +62,14 @@
 {"version":1,"diagnostics":[{"code":"E0213","severity":"error","message":"`id` takes 1 argument, but this call passes 2","primary":{"file":"wrong_number_of_arguments.mn","start":82,"end":90,"line":4,"column":20},"related":[],"fixes":[]}]}
 == core-calculus/wrong_type.mn ==
 {"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"expected `bool` as the condition of `if`, found `u8`","primary":{"file":"wrong_type.mn","start":65,"end":66,"line":4,"column":6},"related":[],"fixes":[]}]}
+== ghost-contracts-and-totality/clause_outside_the_fragment.mn ==
+{"version":1,"diagnostics":[{"code":"E0503","severity":"error","message":"`requires x % 2 == 0` lies outside the Tier-1 fragment, since it uses `%`; mark `half` `@checked` to check it at run time, or `@prove` to make it a trusted axiom until `mn prove` runs","primary":{"file":"clause_outside_the_fragment.mn","start":72,"end":82,"line":4,"column":12},"related":[],"fixes":[{"message":"mark `half` `@checked`: the clause becomes a run-time check","applicability":"suggestion","edits":[{"span":{"file":"clause_outside_the_fragment.mn","start":36,"end":36,"line":3,"column":1},"replacement":"@checked\n"}]},{"message":"mark `half` `@prove`: the clause becomes a trusted axiom until `mn prove` runs","applicability":"suggestion","edits":[{"span":{"file":"clause_outside_the_fragment.mn","start":36,"end":36,"line":3,"column":1},"replacement":"@prove\n"}]}]}]}
+== ghost-contracts-and-totality/clause_routed_by_checked.mn ==
+{"version":1,"diagnostics":[]}
+== ghost-contracts-and-totality/invariant_not_preserved.mn ==
+{"version":1,"diagnostics":[{"code":"E0506","severity":"error","message":"Tier 1 cannot rule out `n = 6, i = 6`, after a round of this loop's body, which violates `invariant i <= 5`: the body does not preserve it","primary":{"file":"invariant_not_preserved.mn","start":104,"end":110,"line":5,"column":25},"related":[],"fixes":[{"message":"insert `guard i <= 5 else { todo(\"i <= 5 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"invariant_not_preserved.mn","start":123,"end":123,"line":6,"column":11},"replacement":"\n    guard i <= 5 else { todo(\"i <= 5 is false here\") }"}]}]}]}
+== ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
+{"version":1,"diagnostics":[]}
 == ghost-contracts-and-totality/total_while_without_decreases.mn ==
 {"version":1,"diagnostics":[{"code":"E0501","severity":"error","message":"function `countdown` is marked `@total` and loops with `while`, but gives no `decreases` measure","primary":{"file":"total_while_without_decreases.mn","start":50,"end":59,"line":4,"column":8},"related":[],"fixes":[]}]}
 == ghost-contracts-and-totality/total_with_decreases_in_the_signature.mn ==

@@ -1,0 +1,7 @@
+// expect: E0504
+module conformance
+pub fn pick(lo: u8, hi: u8) -> u8
+  requires lo < hi
+= lo
+
+pub fn f(n: u8) -> u8 = pick(0, n)

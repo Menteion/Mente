@@ -1,0 +1,20 @@
+// expect: pass
+module conformance
+pub fn count(n: u8[0..100]) -> u8[0..100] {
+  var i: u8 = 0
+  while i < n {
+    i += 1
+  }
+  i
+}
+
+pub fn first_zero(xs: [10]u8) -> usize[0..=10] {
+  var i: usize = 0
+  while i < xs.len invariant i <= xs.len {
+    guard xs[i] != 0 else {
+      break
+    }
+    i += 1
+  }
+  i
+}

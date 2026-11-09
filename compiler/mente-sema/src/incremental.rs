@@ -5,8 +5,9 @@
 //! ([`tier1-latency-spike`](../../docs/design-review.md#tier1-latency-spike)). A [`Session`]
 //! therefore splits the module into its top-level items, parses and checks each on its own
 //! with spans relative to the item, and keeps the results by the item's text: an item whose
-//! text an edit leaves alone keeps them wherever it moves. A function's names and types are
-//! checked again only when its text changes, or when a function's name or signature does.
+//! text an edit leaves alone keeps them wherever it moves. A function's names, types and Tier 1
+//! are checked again only when its text changes, or when a function's name, signature or
+//! header does: Tier 1 reads its callees' refinements and contracts.
 //! Its diagnostics are those `check_source` reports for the whole module, in the same order.
 
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use mente_syntax::tree::FnSyntax;
 use mente_syntax::{lex, parse_bodies, parse_module, split_items, ItemDecl, ItemStart, Span};
 
 use crate::check::{self, Signature};
-use crate::{check_source, names, verify_function_contracts};
+use crate::{check_source, names, tier1, verify_function_contracts};
 
 /// What parsing one item gives, every span relative to the item.
 #[derive(Clone, Debug, Default)]
@@ -40,12 +41,24 @@ struct Function {
     syntax: Option<FnSyntax>,
     /// What the body parser reported.
     body: Vec<Diagnostic>,
+    /// How it routes its clauses outside the Tier-1 fragment.
+    routing: tier1::Routing,
+}
+
+/// What every function's check reads of one function: its name, its signature, and the header
+/// Tier 1 reads, its refinements and contracts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Context {
+    name: String,
+    signature: Option<Signature>,
+    header: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 struct Entry {
     parsed: Parsed,
-    /// The names and types checks' diagnostics, with the context generation they hold for.
+    /// The names and types checks' and Tier 1's diagnostics, with the context generation they
+    /// hold for.
     checked: Option<(u64, Vec<Diagnostic>)>,
 }
 
@@ -54,7 +67,7 @@ struct Entry {
 pub struct Work {
     /// Items parsed again.
     pub parsed: usize,
-    /// Functions whose names and types were checked again.
+    /// Functions whose names, types and Tier 1 were checked again.
     pub checked: usize,
     /// Whether the whole module was checked, since it declares more than functions.
     pub whole: bool,
@@ -66,8 +79,8 @@ pub struct Session {
     src: String,
     items: Vec<(ItemStart, String)>,
     cache: HashMap<String, Entry>,
-    /// Each function's name and signature, which every function's check depends on.
-    context: Vec<(String, Option<Signature>)>,
+    /// What every function's check reads of each function.
+    context: Vec<Context>,
     generation: u64,
     diagnostics: Vec<Diagnostic>,
     work: Work,
@@ -156,23 +169,78 @@ impl Session {
         if let Some((_, _, d)) = first_error {
             return vec![d];
         }
-        let context: Vec<(String, Option<Signature>)> = self
+        let functions: Vec<&Function> = self
             .items
             .iter()
             .filter_map(|(_, text)| self.cache.get(text)?.parsed.function.as_ref())
-            .map(|f| (f.name.clone(), f.syntax.as_ref().map(Signature::of)))
+            .collect();
+        let context: Vec<Context> = functions
+            .iter()
+            .map(|f| Context {
+                name: f.name.clone(),
+                signature: f.syntax.as_ref().map(Signature::of),
+                header: f.syntax.as_ref().map(tier1::header),
+            })
+            .collect();
+        let callees: Vec<Option<tier1::Callee>> = functions
+            .iter()
+            .map(|f| f.syntax.as_ref().map(|syntax| tier1::Callee { syntax }))
             .collect();
         if context != self.context {
             self.context = context;
             self.generation += 1;
         }
-        let names: Vec<String> = self.context.iter().map(|(n, _)| n.clone()).collect();
+        let names: Vec<String> = self.context.iter().map(|c| c.name.clone()).collect();
         let signatures: Vec<Option<Signature>> =
-            self.context.iter().map(|(_, s)| s.clone()).collect();
+            self.context.iter().map(|c| c.signature.clone()).collect();
+        // Check again each function whose results are stale, once per text.
+        let mut fresh: HashMap<&str, Vec<Diagnostic>> = HashMap::new();
+        for (_, text) in &self.items {
+            let Some(entry) = self.cache.get(text) else {
+                continue;
+            };
+            let Some(f) = &entry.parsed.function else {
+                continue;
+            };
+            let Some(syntax) = f.syntax.as_ref().filter(|_| f.body.is_empty()) else {
+                continue;
+            };
+            let current = entry
+                .checked
+                .as_ref()
+                .is_some_and(|(g, _)| *g == self.generation);
+            if current || fresh.contains_key(text.as_str()) {
+                continue;
+            }
+            self.work.checked += 1;
+            let (resolution, mut found) = names::resolve(syntax, &names);
+            let (typing, typed) = check::check(syntax, &resolution, &signatures);
+            found.extend(typed);
+            if found.is_empty() {
+                let function = tier1::Function {
+                    syntax,
+                    resolution: &resolution,
+                    typing: &typing,
+                    routing: f.routing,
+                };
+                found.extend(tier1::check(&function, &callees, text).diagnostics);
+            }
+            fresh.insert(text, found);
+        }
+        drop(callees);
+        let fresh: Vec<(String, Vec<Diagnostic>)> = fresh
+            .into_iter()
+            .map(|(text, found)| (text.to_string(), found))
+            .collect();
+        for (text, found) in fresh {
+            if let Some(entry) = self.cache.get_mut(&text) {
+                entry.checked = Some((self.generation, found));
+            }
+        }
         let mut declarations = Vec::new();
         let mut bodies = Vec::new();
         for (at, text) in &self.items {
-            let Some(entry) = self.cache.get_mut(text) else {
+            let Some(entry) = self.cache.get(text) else {
                 continue;
             };
             let Some(f) = &entry.parsed.function else {
@@ -180,18 +248,8 @@ impl Session {
             };
             declarations.extend(f.declaration.iter().map(|d| relocate(d, *at)));
             bodies.extend(f.body.iter().map(|d| relocate(d, *at)));
-            let Some(syntax) = f.syntax.as_ref().filter(|_| f.body.is_empty()) else {
+            if f.syntax.is_none() || !f.body.is_empty() {
                 continue;
-            };
-            let fresh = entry
-                .checked
-                .as_ref()
-                .is_some_and(|(g, _)| *g == self.generation);
-            if !fresh {
-                self.work.checked += 1;
-                let (resolution, mut found) = names::resolve(syntax, &names);
-                found.extend(check::check(syntax, &resolution, &signatures).1);
-                entry.checked = Some((self.generation, found));
             }
             if let Some((_, found)) = &entry.checked {
                 bodies.extend(found.iter().map(|d| relocate(d, *at)));
@@ -231,6 +289,7 @@ fn parse_item(text: &str) -> Parsed {
                     declaration: verify_function_contracts(f).err(),
                     syntax,
                     body,
+                    routing: tier1::Routing::of(&f.attrs),
                 }),
                 ..Parsed::default()
             }
@@ -432,6 +491,42 @@ mod tests {
         assert!(fix.is_some());
     }
 
+    /// Tier 1 reads a callee's refinements and contracts, which its signature does not hold: an
+    /// edit to them proves every caller again.
+    #[test]
+    fn test_a_callee_contract_edit_proves_its_callers_again() {
+        let src = "module m\n\npub fn pick(lo: u8, hi: u8) -> u8\n  requires lo < hi\n= lo\n\npub fn caller(n: u8) -> u8 {\n  guard n > 0 else {\n    return 0\n  }\n  pick(0, n)\n}\n";
+        let mut s = Session::new(src);
+        assert!(s.diagnostics().is_empty());
+        // A stronger `requires`: the caller's call no longer proves it.
+        let w = edited(&mut s, "requires lo < hi", "requires lo + 1 < hi");
+        assert_eq!((w.parsed, w.checked), (1, 2));
+        assert_eq!(s.diagnostics()[0].code, "E0504");
+        assert_eq!(s.diagnostics()[0].primary.line, 11);
+        // A refinement of a parameter, then of the result.
+        edited(&mut s, "requires lo + 1 < hi", "requires lo < hi");
+        assert!(s.diagnostics().is_empty());
+        let w = edited(&mut s, "hi: u8)", "hi: u8[2..9])");
+        assert_eq!(w.checked, 2);
+        assert_eq!(s.diagnostics()[0].code, "E0502");
+        edited(&mut s, "hi: u8[2..9])", "hi: u8)");
+        edited(
+            &mut s,
+            "pick(0, n)\n}",
+            "val r: u8[0..1] = pick(0, n)\n  r\n}",
+        );
+        assert_eq!(s.diagnostics()[0].code, "E0502");
+        let w = edited(&mut s, "-> u8\n  requires", "-> u8[0..1]\n  requires");
+        assert_eq!(w.checked, 2);
+        // The caller is proven now; the callee's own body is not.
+        assert_eq!(s.diagnostics().len(), 1);
+        assert_eq!(s.diagnostics()[0].primary.line, 5);
+        // A body edit of the callee leaves its callers alone.
+        let w = edited(&mut s, "= lo\n", "= 0\n");
+        assert_eq!((w.parsed, w.checked), (1, 1));
+        assert!(s.diagnostics().is_empty());
+    }
+
     #[test]
     fn test_a_module_with_more_than_functions_is_checked_whole() {
         let mut s = Session::new(MODULE);
@@ -453,7 +548,7 @@ mod timing {
     use super::*;
 
     /// Prints how long a session takes to re-check a body edit in a module of 200 functions,
-    /// against checking the whole module again. Names and types only: Tier 1 comes later.
+    /// against checking the whole module again, names, types and Tier 1 included.
     #[test]
     #[ignore]
     fn watch_recheck_sketch() {

@@ -1,0 +1,5 @@
+// expect: pass
+module conformance
+pub fn bucket(x: u32, n: u32[1..64]) -> u32[0..64] = x % n
+
+pub fn half(x: u8) -> u8[0..=127] = x / 2

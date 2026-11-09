@@ -3,9 +3,11 @@
 
 use super::*;
 
+/// A module whose names and types check. Tier 1 is left out: these programs break their
+/// refinements and contracts on purpose, to see the interpreter's own checks trap.
 fn module(src: &str) -> CheckedModule {
     let text = format!("module m\n{}\n", src);
-    match mente_sema::check_program(&text) {
+    match mente_sema::check_program_without_proofs(&text) {
         Ok(m) => m,
         Err(d) => panic!("the program should check: {:?}", d),
     }
@@ -631,4 +633,43 @@ fn test_each_ensures_clause_reads_its_own_result_and_elements_take_their_type() 
     assert_eq!(super::stack_bytes(2), (1 << 20) + 2 * (64 << 10));
     assert_eq!(Int::from_i128(0), Int::ZERO);
     assert_eq!(Int::from_i128(-3).to_string(), "-3");
+}
+
+/// Tier 1 never contradicts the interpreter: a program it proves, which `check_program`
+/// accepts, never trips the run-time check of a refinement, a `requires`, an `ensures` or an
+/// invariant, on any input tried ([`interpreter-checks-contracts`]).
+///
+/// [`interpreter-checks-contracts`]: ../../docs/design-review.md#interpreter-checks-contracts
+#[test]
+fn test_a_program_tier1_proves_never_trips_its_checks() {
+    let programs = [
+        "pub fn midpoint(lo: usize, hi: usize) -> usize\n  requires lo < hi\n  ensures lo <= result and result < hi\n= lo + (hi - lo) / 2\npub fn f(a: u8, b: u8) -> usize {\n  guard a < b else {\n    return 0\n  }\n  midpoint(a, b)\n}",
+        "pub fn f(a: u8, b: u8) -> u8[0..=100] {\n  guard b > 0 and a <= b else {\n    return 0\n  }\n  val r: u64 = a * 100 / b\n  guard r <= 100 else {\n    return 0\n  }\n  r\n}",
+        "pub fn f(a: u8, b: u8) -> u8 {\n  var i: u8 = 0\n  var total: u8[0..=200] = 0\n  while i < a invariant i <= a {\n    guard total < 200 else {\n      break\n    }\n    total += 1\n    i += 1\n  }\n  val m: u8[0..=b] = if total < b { total } else { b }\n  m\n}",
+        "pub fn f(a: u8, b: u8) -> u8[0..16] {\n  guard b > 0 else {\n    return 0\n  }\n  val r: u8[0..b] = a % b\n  r & 15\n}",
+        "pub fn f(a: u8, b: u8) -> u8[0..=255] {\n  guard a <= b else {\n    return 0\n  }\n  var lo: u8 = a\n  var hi: u8 = b\n  while lo < hi invariant lo <= hi {\n    val mid: u8 = lo + (hi - lo) / 2\n    if mid % 3 == 0 {\n      hi = mid\n    } else {\n      lo = mid + 1\n    }\n  }\n  lo\n}",
+    ];
+    let contracts = ["refinement", "requires", "ensures", "invariant"];
+    for src in programs {
+        let text = format!("module m\n{}\n", src);
+        let m = match mente_sema::check_program(&text) {
+            Ok(m) => m,
+            Err(d) => panic!("Tier 1 should prove {}: {:?}", src, d),
+        };
+        for a in (0..=255u128).step_by(5) {
+            for b in (0..=255u128).step_by(7) {
+                let args = vec![Value::Int(Int::from_u128(a)), Value::Int(Int::from_u128(b))];
+                if let Err(Stop::Trap(t)) = call(&m, "f", args, Limits::default()) {
+                    assert!(
+                        !contracts.contains(&t.kind.name()),
+                        "{} trapped on f({}, {}): {}",
+                        src,
+                        a,
+                        b,
+                        t.kind.name()
+                    );
+                }
+            }
+        }
+    }
 }
