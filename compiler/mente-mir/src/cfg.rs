@@ -271,8 +271,8 @@ pub enum Op {
     /// The operand's value in the value's type, which holds it: an extension, or a reduction
     /// after a check.
     Cast,
-    /// Traps at `trap` unless the boolean operand holds; a second operand is the value the
-    /// message reports.
+    /// Traps at `trap` unless the boolean operand holds; the operands after it are the values
+    /// the message reports.
     Check {
         trap: TrapId,
     },
@@ -324,14 +324,15 @@ pub struct Loc {
     pub col: u32,
 }
 
-/// Where a trap is raised and what it reports: `trap[kind] at line:col: before` then, for a
-/// check that reports a value, the value and `after`, as the reference interpreter prints it.
+/// Where a trap is raised and what it reports, as the reference interpreter prints it:
+/// `trap[kind] at line:col: ` and then the pieces of `text` with the values the trap reports
+/// between them, so `text` has one piece more than there are values. A value the trap cannot
+/// know, the exact result of an operation beyond 128 bits, reads `the result`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TrapSite {
     pub kind: String,
     pub loc: Loc,
-    pub before: String,
-    pub after: String,
+    pub text: Vec<String>,
 }
 
 /// One function: a row per value, structure of arrays, and its blocks.
@@ -506,13 +507,12 @@ impl Builder {
         self.inst(Op::Int(n.to_bits(t)), Ty::Int(t), &[])
     }
 
-    pub fn trap_site(&mut self, kind: &str, before: &str, after: &str) -> TrapId {
+    pub fn trap_site(&mut self, kind: &str, text: &[&str]) -> TrapId {
         let id = TrapId(self.f.traps.len() as u32);
         self.f.traps.push(TrapSite {
             kind: kind.to_string(),
             loc: self.loc,
-            before: before.to_string(),
-            after: after.to_string(),
+            text: text.iter().map(|s| s.to_string()).collect(),
         });
         id
     }
@@ -590,7 +590,7 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
                 }
             }
             Term::Trap(t) => {
-                if t.0 as usize >= f.traps.len() {
+                if f.traps.get(t.0 as usize).is_none_or(|s| s.text.len() != 1) {
                     return Err(format!("block {} traps at a site that does not exist", bi));
                 }
             }
@@ -603,24 +603,31 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
     let ty = f.ty(v);
     let args: Vec<Ty> = f.args(v).iter().map(|a| f.ty(*a)).collect();
     let int = matches!(ty, Ty::Int(_));
-    let trap_ok = |t: &TrapId| (t.0 as usize) < f.traps.len();
+    // A trap site whose text has room for `values` values.
+    let site = |t: &TrapId, values: usize| {
+        f.traps
+            .get(t.0 as usize)
+            .is_some_and(|s| s.text.len() == values + 1)
+    };
     let ok = match f.op(v) {
         Op::Param => false,
         Op::Int(_) => int && args.is_empty(),
         Op::Bool(_) => ty == Ty::Bool && args.is_empty(),
-        Op::Arith { trap, .. } => int && args == [ty, ty] && trap.as_ref().is_none_or(trap_ok),
-        Op::Neg { trap } => int && args == [ty] && trap.as_ref().is_none_or(trap_ok),
+        Op::Arith { trap, .. } => {
+            int && args == [ty, ty] && trap.as_ref().is_none_or(|t| site(t, 1))
+        }
+        Op::Neg { trap } => int && args == [ty] && trap.as_ref().is_none_or(|t| site(t, 1)),
         Op::Bits(_) => (int || ty == Ty::Bool) && args == [ty, ty],
         Op::Not => (int || ty == Ty::Bool) && args == [ty],
-        Op::Shl { trap } => int && args.len() == 2 && args[0] == ty && trap_ok(trap),
+        Op::Shl { trap } => int && args.len() == 2 && args[0] == ty && site(trap, 1),
         Op::Shr => int && args.len() == 2 && args[0] == ty,
         Op::Cmp(_) => ty == Ty::Bool && args.len() == 2 && args[0] == args[1],
         Op::Cast => int && args.len() == 1 && matches!(args[0], Ty::Int(_)),
         Op::Check { trap } => {
             ty == Ty::Unit
                 && matches!(args.first(), Some(Ty::Bool))
-                && args.len() <= 2
-                && trap_ok(trap)
+                && args[1..].iter().all(|a| matches!(a, Ty::Int(_)))
+                && site(trap, args.len() - 1)
         }
         Op::Slot { .. } => ty == Ty::Addr && args.is_empty(),
         Op::Elem { .. } => ty == Ty::Addr && args.len() == 2 && args[0] == Ty::Addr,
@@ -899,7 +906,7 @@ impl<'m> Machine<'m> {
                         _ => return Ok(result),
                     }
                 }
-                Term::Trap(t) => return Err(trap(f, *t, None)),
+                Term::Trap(t) => return Err(trap(f, *t, &[])),
             }
         }
     }
@@ -922,7 +929,7 @@ impl<'m> Machine<'m> {
             };
             match (n.filter(|n| t.holds(*n)), trap_at) {
                 (Some(n), _) => Ok(Val::Int(n)),
-                (None, Some(at)) => Err(trap(f, at, None)),
+                (None, Some(at)) => Err(trap(f, at, &[None])),
                 (None, None) => Err(broken(format!("the exact v{} left its type", v.0))),
             }
         };
@@ -978,7 +985,7 @@ impl<'m> Machine<'m> {
                     .map(|m| Num::new(a.neg, m));
                 match (n, ty) {
                     (Some(n), Ty::Int(t)) if t.holds(n) => Val::Int(n),
-                    (n, Ty::Int(_)) => return Err(trap(f, *at, n)),
+                    (n, Ty::Int(_)) => return Err(trap(f, *at, &[n])),
                     _ => return Err(broken("a shift of a value that is no integer")),
                 }
             }
@@ -1012,11 +1019,14 @@ impl<'m> Machine<'m> {
             Op::Check { trap: at } => match args.first() {
                 Some(Val::Bool(true)) => Val::Unit,
                 Some(Val::Bool(false)) => {
-                    let shown = match args.get(1) {
-                        Some(Val::Int(n)) => Some(*n),
-                        _ => None,
-                    };
-                    return Err(trap(f, *at, shown));
+                    let shown: Vec<Option<Num>> = args[1..]
+                        .iter()
+                        .map(|a| match a {
+                            Val::Int(n) => Some(*n),
+                            _ => None,
+                        })
+                        .collect();
+                    return Err(trap(f, *at, &shown));
                 }
                 _ => return Err(broken("a check of a value that is not a bool")),
             },
@@ -1056,14 +1066,21 @@ fn shift(k: Num) -> Result<u32, Stop> {
     Ok(k.mag as u32)
 }
 
-fn trap(f: &Function, at: TrapId, value: Option<Num>) -> Stop {
+fn trap(f: &Function, at: TrapId, values: &[Option<Num>]) -> Stop {
     let Some(site) = f.traps.get(at.0 as usize) else {
         return broken("a trap at a site that does not exist");
     };
-    let shown = value.map_or(String::new(), |n| format!("{}{}", n, site.after));
+    let mut message = site.text.first().cloned().unwrap_or_default();
+    for (v, piece) in values.iter().zip(&site.text[1..]) {
+        match v {
+            Some(n) => message.push_str(&n.to_string()),
+            None => message.push_str("the result"),
+        }
+        message.push_str(piece);
+    }
     Stop::Trap(format!(
-        "trap[{}] at {}:{}: {}{}",
-        site.kind, site.loc.line, site.loc.col, site.before, shown
+        "trap[{}] at {}:{}: {}",
+        site.kind, site.loc.line, site.loc.col, message
     ))
 }
 
@@ -1130,8 +1147,8 @@ impl fmt::Display for Function {
         for (i, t) in self.traps.iter().enumerate() {
             writeln!(
                 out,
-                "t{}: {} @{}:{} {:?} {:?}",
-                i, t.kind, t.loc.line, t.loc.col, t.before, t.after
+                "t{}: {} @{}:{} {:?}",
+                i, t.kind, t.loc.line, t.loc.col, t.text
             )?;
         }
         writeln!(out, "}}")
@@ -1238,7 +1255,7 @@ mod tests {
         let ge = b.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[x, lo]);
         let le = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[x, hi]);
         let fits = b.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, le]);
-        let t = b.trap_site("narrowing", "", " does not fit in `u8`");
+        let t = b.trap_site("narrowing", &["", " does not fit in `u8`"]);
         b.inst(Op::Check { trap: t }, Ty::Unit, &[fits, x]);
         let y = b.inst(Op::Cast, Ty::Int(U8), &[x]);
         b.end(Term::Return(Some(y)));
@@ -1248,13 +1265,33 @@ mod tests {
             run0(&m, 0, &[int(-1)]).unwrap_err().to_string(),
             "trap[narrowing] at 3:17: -1 does not fit in `u8`"
         );
+        // A refinement whose bound is a parameter reports the value and both bounds.
+        let mut r = Builder::new("refined", &[Ty::Int(I64), Ty::Int(I64)], None);
+        let [x, n] = r.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        r.at(4, 9);
+        let zero = r.int(I64, Num::ZERO);
+        let below = r.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[x, n]);
+        let site = r.trap_site(
+            "refinement",
+            &["", " lies outside the refinement `[", "..", "]`"],
+        );
+        r.inst(Op::Check { trap: site }, Ty::Unit, &[below, x, zero, n]);
+        r.end(Term::Return(None));
+        let m = module(vec![r.finish()]);
+        assert_eq!(run0(&m, 0, &[int(2), int(3)]), Ok(Val::Unit));
+        assert_eq!(
+            run0(&m, 0, &[int(5), int(3)]).unwrap_err().to_string(),
+            "trap[refinement] at 4:9: 5 lies outside the refinement `[0..3]`"
+        );
         // A check that reports no value, and a trap terminator, as `todo` lowers.
         let mut t = Builder::new("todo", &[Ty::Bool], Some(Ty::Int(U8)));
         let c = t.params(BlockId(0))[0];
         t.at(2, 5);
-        let zero = t.trap_site("division-by-zero", "division by zero", "");
+        let zero = t.trap_site("division-by-zero", &["division by zero"]);
         t.inst(Op::Check { trap: zero }, Ty::Unit, &[c]);
-        let site = t.trap_site("todo", "todo reached: later", "");
+        let site = t.trap_site("todo", &["todo reached: later"]);
         t.end(Term::Trap(site));
         let m = module(vec![t.finish()]);
         assert_eq!(
@@ -1277,8 +1314,7 @@ mod tests {
                 panic!("two parameters")
             };
             b.at(2, 30);
-            let trap =
-                checked.then(|| b.trap_site("narrowing", "the result does not fit in `u128`", ""));
+            let trap = checked.then(|| b.trap_site("narrowing", &["", " does not fit in `u128`"]));
             let s = b.inst(add(trap), Ty::Int(t), &[x, y]);
             b.end(Term::Return(Some(s)));
             module(vec![b.finish()])
@@ -1299,7 +1335,7 @@ mod tests {
         // A checked negation of the smallest i128.
         let mut b = Builder::new("neg", &[Ty::Int(I128)], Some(Ty::Int(I128)));
         let x = b.params(BlockId(0))[0];
-        let t = b.trap_site("narrowing", "the result does not fit in `i128`", "");
+        let t = b.trap_site("narrowing", &["", " does not fit in `i128`"]);
         let r = b.inst(Op::Neg { trap: Some(t) }, Ty::Int(I128), &[x]);
         b.end(Term::Return(Some(r)));
         let m = module(vec![b.finish()]);
@@ -1343,18 +1379,33 @@ mod tests {
         let [x, k] = shl.params(BlockId(0))[..] else {
             panic!("two parameters")
         };
-        let t = shl.trap_site(
-            "narrowing",
-            "the result does not fit in `i64`",
-            " does not fit in `i64`",
-        );
+        let t = shl.trap_site("narrowing", &["", " does not fit in `i64`"]);
         let r = shl.inst(Op::Shl { trap: t }, Ty::Int(I64), &[x, k]);
         shl.end(Term::Return(Some(r)));
         let m = module(vec![shl.finish()]);
         assert_eq!(run0(&m, 0, &[int(-3), int(2)]), Ok(int(-12)));
+        // The exact value is reported while it lies below 2^128, and "the result" after.
         assert_eq!(
             run0(&m, 0, &[int(1), int(63)]).unwrap_err().to_string(),
-            "trap[narrowing] at 0:0: the result does not fit in `i64`9223372036854775808 does not fit in `i64`"
+            "trap[narrowing] at 0:0: 9223372036854775808 does not fit in `i64`"
+        );
+        let mut wide = Builder::new("wide", &[Ty::Int(I128), Ty::Int(I128)], Some(Ty::Int(I128)));
+        let [x, k] = wide.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let t = wide.trap_site("narrowing", &["", " does not fit in `i128`"]);
+        let r = wide.inst(Op::Shl { trap: t }, Ty::Int(I128), &[x, k]);
+        wide.end(Term::Return(Some(r)));
+        let m = module(vec![wide.finish()]);
+        assert_eq!(
+            run0(&m, 0, &[int(1 << 126), int(1)]).unwrap_err().to_string(),
+            "trap[narrowing] at 0:0: 170141183460469231731687303715884105728 does not fit in `i128`"
+        );
+        assert_eq!(
+            run0(&m, 0, &[int(1 << 126), int(2)])
+                .unwrap_err()
+                .to_string(),
+            "trap[narrowing] at 0:0: the result does not fit in `i128`"
         );
         let mut not = Builder::new("not", &[Ty::Int(U8)], Some(Ty::Int(U8)));
         let x = not.params(BlockId(0))[0];
@@ -1521,6 +1572,14 @@ mod tests {
             *cond = NodeId(0);
         }
         assert!(wrong(f).contains("not a bool"));
+        // A check whose site has no room for the values it reports.
+        let mut b = Builder::new("check", &[Ty::Bool, Ty::Int(I64)], None);
+        let [c, x] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let site = b.trap_site("narrowing", &["no value"]);
+        b.inst(Op::Check { trap: site }, Ty::Unit, &[c, x]);
+        assert!(wrong(b.finish()).contains("Check"));
         // An entry block that does not take the function's parameters.
         let mut f = sum();
         f.params = vec![Ty::Bool];
