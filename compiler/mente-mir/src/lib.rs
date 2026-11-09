@@ -6,6 +6,10 @@
 //! - A `ValueLattice` interval per node, supplied by whoever builds the region; nothing infers it yet.
 //! - A `@branchless` check that rejects `BranchCondJump` nodes.
 //! - An in-memory interpreter and an opcode-flipping mutation gate.
+//! - [`cfg`]: the MIR of M1's checkpoint (c), an SSA control-flow graph with block parameters,
+//!   stored as structure of arrays, with its verifier and interpreter.
+
+pub mod cfg;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
