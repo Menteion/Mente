@@ -415,3 +415,38 @@ fn test_mn_run_prints_a_result_or_a_trap() {
     assert!(text(&usage.stderr).contains("Usage: mn run"));
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `mn check --watch` checks a module item by item and reports what it re-parsed and re-checked;
+/// `--rounds` stops it.
+#[test]
+fn test_mn_check_watch_checks_item_by_item() {
+    let dir = scratch("watch");
+    fs::write(
+        dir.join("w.mn"),
+        "module t\npub fn f(x: u8) -> u8 = y\npub fn g() -> u8 = f(1)\n",
+    )
+    .unwrap();
+    let out = mn(&dir, &["check", "--watch", "w.mn", "--rounds", "1"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.starts_with(
+            "[watch] w.mn: 1 problem(s); re-parsed 3 item(s), re-checked 2 function(s) in "
+        ),
+        "{}",
+        stdout
+    );
+    assert!(text(&out.stderr).contains("E0201"));
+    fs::write(dir.join("s.mn"), "module t\npub struct P {\n  x: u8\n}\n").unwrap();
+    let whole = mn(&dir, &["check", "--watch", "s.mn", "--rounds", "1"]);
+    assert!(
+        text(&whole.stdout).contains("checked the whole module"),
+        "{}",
+        text(&whole.stdout)
+    );
+    let usage = mn(&dir, &["check", "--watch"]);
+    assert_eq!(usage.status.code(), Some(2));
+    let missing = mn(&dir, &["check", "--watch", "gone.mn", "--rounds", "1"]);
+    assert_eq!(missing.status.code(), Some(2));
+    fs::remove_dir_all(&dir).unwrap();
+}

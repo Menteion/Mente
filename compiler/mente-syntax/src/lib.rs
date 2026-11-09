@@ -943,6 +943,42 @@ pub struct ModuleFile {
     pub total_token_count: usize,
 }
 
+/// Where one top-level item's text starts: its byte offset and its line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemStart {
+    pub offset: usize,
+    pub line: u32,
+}
+
+/// Splits a module's text into its top-level items, each running from its start to the next
+/// one's, for parsing and checking item by item. An item starts at a line whose first column
+/// holds a letter, `_`, `@` or `/`; the attributes, doc comments and comments right above an
+/// item belong to it, and the module's first item starts at its first byte. A line that starts
+/// with anything else, such as the `{`, `=` or `}` of a function, continues the item above it.
+pub fn split_items(src: &str) -> Vec<ItemStart> {
+    let mut starts = vec![ItemStart { offset: 0, line: 1 }];
+    // Whether the current item holds anything but attributes and comments yet.
+    let mut has_body = false;
+    let mut offset = 0;
+    for (i, line) in src.split_inclusive('\n').enumerate() {
+        let first = line.chars().next().unwrap_or(' ');
+        let starts_item = first.is_ascii_alphabetic() || matches!(first, '_' | '@' | '/');
+        let prefix = matches!(first, '@' | '/');
+        if starts_item && has_body {
+            starts.push(ItemStart {
+                offset,
+                line: i as u32 + 1,
+            });
+            has_body = false;
+        }
+        if starts_item && !prefix {
+            has_body = true;
+        }
+        offset += line.len();
+    }
+    starts
+}
+
 /// Parses a `.mn` source string into a structured `ModuleFile`.
 pub fn parse_module(src: &str) -> Result<ModuleFile, Diagnostic> {
     let (tokens, lex_errors) = lex(src);
@@ -2216,6 +2252,39 @@ mod tests {
             let err = parse_module(src).unwrap_err();
             assert_eq!((err.code, err.message.as_str()), (code, message), "{}", src);
         }
+    }
+
+    #[test]
+    fn test_a_module_splits_into_its_top_level_items() {
+        let src = "module m\n\n/// Doc.\n@total\npub fn f(x: u8) -> u8\n  requires x > 0\n{\n  x\n}\n// note\n\npub fn g() = 1\n_x\n";
+        let starts = split_items(src);
+        let texts: Vec<&str> = starts
+            .iter()
+            .enumerate()
+            .map(|(i, s)| &src[s.offset..starts.get(i + 1).map_or(src.len(), |n| n.offset)])
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "module m\n\n",
+                "/// Doc.\n@total\npub fn f(x: u8) -> u8\n  requires x > 0\n{\n  x\n}\n",
+                "// note\n\npub fn g() = 1\n",
+                "_x\n",
+            ]
+        );
+        assert_eq!(
+            starts[1],
+            ItemStart {
+                offset: 10,
+                line: 3
+            }
+        );
+        assert_eq!(starts[2].line, 10);
+        assert_eq!(starts[3].line, 13);
+        // An expression body on its own line continues its function.
+        assert_eq!(split_items("pub fn f() -> u8\n= 1\n").len(), 1);
+        assert_eq!(split_items("").len(), 1);
+        assert_eq!(split_items("  indented\n}\n").len(), 1);
     }
 
     #[test]

@@ -49,6 +49,10 @@ fn print_help() {
     println!("Usage:");
     println!("  mn view --spec <file.mn>     Project Holographic Spec Blueprint (strips bodies, computes spec_hash/body_hash)");
     println!("  mn check [--json] [file.mn | dir]");
+    println!("  mn check --watch <file.mn> [--rounds N]");
+    println!(
+        "                               Check again, item by item, each time the file changes"
+    );
     println!("                               Verify .mn syntax, 64B Cache-Line @layout, bitstruct, @total & @branchless contracts");
     println!("  mn explain [code]            Explain an error code, or list them all");
     println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"]");
@@ -137,6 +141,70 @@ fn cmd_run(args: &[String]) {
     }
 }
 
+/// Checks one module item by item, then again each time its file changes, re-parsing and
+/// re-checking only what an edit changed. `--rounds N` stops after N checks.
+fn cmd_watch(args: &[String]) {
+    let mut path = None;
+    let mut rounds = None;
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        if a == "--rounds" {
+            rounds = rest.next().and_then(|n| n.parse::<u64>().ok());
+        } else if !a.starts_with('-') {
+            path = Some(a.clone());
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("Usage: mn check --watch <file.mn> [--rounds N]");
+        process::exit(2);
+    };
+    let mut session: Option<mente_sema::incremental::Session> = None;
+    let mut done = 0;
+    loop {
+        let src = match fs::read_to_string(&path) {
+            Ok(src) => src,
+            Err(e) => {
+                eprintln!("error: cannot read `{}`: {}", path, e);
+                process::exit(2);
+            }
+        };
+        if needs_check(session.as_ref(), &src) {
+            let t0 = Instant::now();
+            let s = session.get_or_insert_with(mente_sema::incremental::Session::default);
+            s.update(&src);
+            let took = t0.elapsed();
+            for d in s.diagnostics() {
+                eprint!("{}", render_text(d, &path, &src));
+            }
+            let work = s.work();
+            println!(
+                "[watch] {}: {} problem(s); {} in {} µs",
+                path,
+                s.diagnostics().len(),
+                if work.whole {
+                    "checked the whole module".to_string()
+                } else {
+                    format!(
+                        "re-parsed {} item(s), re-checked {} function(s)",
+                        work.parsed, work.checked
+                    )
+                },
+                took.as_micros()
+            );
+            done += 1;
+            if rounds.is_some_and(|n| done >= n) {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Whether `mn check --watch` checks again: first, and each time the text changed.
+fn needs_check(session: Option<&mente_sema::incremental::Session>, src: &str) -> bool {
+    session.is_none_or(|s| s.source() != src)
+}
+
 fn cmd_view(args: &[String]) {
     let path_str = args
         .iter()
@@ -184,6 +252,10 @@ fn collect_mn_files(target: &Path) -> Vec<PathBuf> {
 }
 
 fn cmd_check(args: &[String]) {
+    if args.iter().any(|a| a == "--watch") {
+        cmd_watch(args);
+        return;
+    }
     let json = args.iter().any(|a| a == "--json");
     let target_str = args
         .iter()
@@ -832,6 +904,29 @@ mod tests {
     }
 
     /// A new external dependency needs Norman's approval and a change to this policy.
+    #[test]
+    fn test_watch_checks_first_and_then_only_on_a_change() {
+        let session = mente_sema::incremental::Session::new(
+            "module m
+",
+        );
+        assert!(needs_check(
+            None,
+            "module m
+"
+        ));
+        assert!(!needs_check(
+            Some(&session),
+            "module m
+"
+        ));
+        assert!(needs_check(
+            Some(&session),
+            "module n
+"
+        ));
+    }
+
     #[test]
     fn test_crates_depend_only_on_allowed_crates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
