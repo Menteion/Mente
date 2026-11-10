@@ -1575,17 +1575,17 @@ fn plant_panic(src: &str) {
 
 fn plant_overflow(src: &str) {
     if src.contains(PLANT_MARK) {
-        std::hint::black_box(descend(0));
+        std::hint::black_box(descend([0; 64]));
     }
 }
 
-/// A recursion without a limit.
-fn descend(depth: u64) -> u64 {
-    let frame = std::hint::black_box([depth; 64]);
-    if depth == u64::MAX {
-        return frame[0];
+/// A recursion without a limit: its frame never holds the value that would end it.
+fn descend(frame: [u64; 64]) -> u64 {
+    let frame = std::hint::black_box(frame);
+    if frame[0] == u64::MAX {
+        return frame[1];
     }
-    descend(depth + 1).wrapping_add(frame[1])
+    descend(frame).wrapping_add(frame[1])
 }
 
 fn plant_hang(src: &str) {
@@ -1724,6 +1724,8 @@ impl Worker {
     }
 }
 
+/// A worker the fuzzer lets go of is stopped. An idle worker would end anyway once its standard
+/// input closes; this stops one that is still busy, as when a job panics in the middle of a case.
 impl Drop for Worker {
     fn drop(&mut self) {
         self.stop();
@@ -2145,8 +2147,9 @@ pub fn campaign(
     let mut generator = Generator::new(opts.seed, job, opts.jobs, corpus, opts.shallow);
     let mut tally = Tally::default();
     let runs = opts.runs.map(|r| r.div_ceil(opts.jobs.max(1) as u64));
-    while runs.is_none_or(|r| tally.runs < r) && (opts.runs.is_some() || Instant::now() < deadline)
-    {
+    // Before the deadline: `now` is not yet at or past it.
+    let before = |deadline: Instant| Instant::now().checked_duration_since(deadline).is_none();
+    while runs.is_none_or(|r| tally.runs < r) && (opts.runs.is_some() || before(deadline)) {
         let case = generator.next_case();
         let outcome = exec.exec(&case)?;
         let run = tally.runs;
