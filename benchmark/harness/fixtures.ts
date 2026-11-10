@@ -3,21 +3,28 @@
 // as an agent's program would be. A solve task's fixture must build and pass every example and
 // hidden test. An adversarial task's fixture starts with a line `// expect: <verdict>`, and its
 // probe must end with that verdict. Every public M1 solve task needs a fixture in each language.
+// With Odin, it also checks each `odin` block of the control document, benchmark/control/odin.md,
+// with `odin check`, as the document says its blocks are.
 //
 //   node benchmark/harness/fixtures.ts [--languages rust,odin] [--rustc rustc] [--rust-toolchain <toolchain>]
 //     [--odin odin] [--out fixtures-out]
 //
 // It runs in the workflow "Harness", which installs the toolchains toolchains.json pins; the Rust
 // toolchain defaults to that pin, and `--rust-toolchain ""` takes `rustc` as it is.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildProgram, childEnv, dropExecutable, runCases, runProcess, verdictOf, type Tools } from "./build.ts";
+import { buildProgram, childEnv, cleanOutput, dropExecutable, runCases, runProcess, verdictOf, type Tools } from "./build.ts";
 import { parseSignature, type Lang } from "./languages.ts";
 import { parseCase, parseTask, type Case } from "./tasks.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const EXTENSIONS: Record<string, string> = { rust: "rs", odin: "odin" };
+
+/** The `odin` code blocks of a Markdown document. */
+function odinBlocks(markdown: string): string[] {
+  return [...markdown.replace(/\r\n/g, "\n").matchAll(/^```odin\n([\s\S]*?)^```$/gm)].map((m) => m[1]);
+}
 
 function option(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
@@ -92,11 +99,25 @@ async function main(): Promise<void> {
       console.log(`${lang} ${task.id}: ${results.length - failed.length} of ${results.length} cases pass`);
     }
   }
+  if (languages.includes("odin")) {
+    const doc = join(here, "..", "control", "odin.md");
+    const blocks = existsSync(doc) ? odinBlocks(readFileSync(doc, "utf8")) : [];
+    for (const [i, block] of blocks.entries()) {
+      const dir = join(out, "odin-document", String(i + 1));
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "block.odin"), block);
+      const p = await runProcess(tools.odin, ["check", ".", "-no-entry-point"], { cwd: dir, timeoutMs: 120_000 });
+      if (p.status !== 0) failures.push(`odin document block ${i + 1}: odin check rejects it\n${cleanOutput(p.stderr + p.stdout, dir).join("\n")}`);
+      console.log(`odin document block ${i + 1}: ${p.status === 0 ? "checks" : "rejected"}`);
+      checked++;
+    }
+  }
   if (failures.length > 0) {
     console.error(`\n${failures.length} failures:\n${failures.join("\n")}`);
     process.exit(1);
   }
-  console.log(`\n${checked} fixtures build through the harness and give what their tasks expect`);
+  console.log(`\n${checked} fixtures and document blocks build through the harness and give what they should`);
 }
 
 await main();

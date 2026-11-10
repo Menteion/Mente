@@ -2,7 +2,8 @@
 # each fixture under benchmark/harness/fixtures/ is built through the harness, with the Rust and
 # Odin that benchmark/harness/toolchains.json pins, as an agent's program would be, and must pass
 # every example and hidden test of its task, or end its adversarial task's probe with the verdict
-# it names. The harness's unit tests also run in CI's Documentation job.
+# it names. It also checks every `odin` block of benchmark/control/odin.md with `odin check`.
+# The harness's unit tests also run in CI's Documentation job.
 name: Harness
 
 on:
