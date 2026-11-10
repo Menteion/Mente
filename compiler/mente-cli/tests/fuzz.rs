@@ -226,12 +226,12 @@ fn fuzz_tier1_nested_loops() {
     replay(&[regressions().join("tier1-nested-loops.mn")]);
 }
 
-/// Found by `mn fuzz`: deep nesting overflows the stack: in the body parser, the tree dump, the
-/// checker or the incremental session, whichever recurses deepest first. Each way of nesting
-/// the fuzzer makes is written out here rather than as a file, at a depth past any stack `mn`
-/// runs on.
+/// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,
+/// the checker or the incremental session, whichever recursed deepest first. Past the nesting
+/// limit of 256 levels each way of nesting the fuzzer makes is `E0127`, and no phase crashes.
+/// Each is written out here rather than as a file, at a depth far past the limit.
 #[test]
-#[ignore = "pending a nesting limit in the parser and the phases after it"]
+#[ignore = "pending the nesting limit (E0127)"]
 fn fuzz_deep_nesting() {
     const DEPTH: usize = 50_000;
     let expression = |nest: String| format!("module m\npub fn deep(x: i32) -> i32 = {}\n", nest);
@@ -266,5 +266,22 @@ fn fuzz_deep_nesting() {
         files.push(file);
     }
     replay(&files);
+    for file in &files {
+        let run = mn(&["check", file.to_str().unwrap()], None);
+        let printed = text(&run.stdout) + &text(&run.stderr);
+        assert_eq!(
+            run.status.code(),
+            Some(2),
+            "{}: {}",
+            file.display(),
+            printed
+        );
+        assert!(
+            printed.contains("E0127"),
+            "{}: no E0127 in {}",
+            file.display(),
+            printed
+        );
+    }
     let _ = fs::remove_dir_all(&dir);
 }

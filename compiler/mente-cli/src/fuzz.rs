@@ -19,8 +19,8 @@
 //!   error or a codegen error from a module that checks; two runs of a phase that give
 //!   different output; or an incremental re-check that reports otherwise than a whole check.
 //!   Diagnostics, refusals and traps are correct behaviour on bad input.
-//! - **Isolation**: the phases run in a worker process (`mn fuzz --worker`), on a thread whose
-//!   stack is the 1 MiB `mn` gets on Windows, so a stack overflow found is one a user can hit.
+//! - **Isolation**: the phases run in a worker process (`mn fuzz --worker`), on a thread with
+//!   the 256 MiB stack `mn` runs its work on, so a stack overflow found is one a user can hit.
 //!   A worker that dies or stops answering is a crash or a hang of the last phase it named,
 //!   and is started again.
 //! - **Each failure is minimized** (delta debugging over lines, then tokens, then characters)
@@ -49,9 +49,9 @@ use mente_sema::CheckedModule;
 use mente_syntax::diagnostics::{render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::TokenKind;
 
-/// The stack the phases run on: the 1 MiB the main thread of `mn` gets on Windows, the
-/// smallest of the three platforms.
-const STACK_BYTES: usize = 1 << 20;
+/// The stack the phases run on: the one `mn` runs its work on, deep enough for the nesting
+/// limit (`E0127`) in a debug build.
+const STACK_BYTES: usize = 256 << 20;
 
 /// How long one phase may take on one input before it counts as a hang.
 const PHASE_SECONDS: u64 = 10;
@@ -59,9 +59,11 @@ const PHASE_SECONDS: u64 = 10;
 /// How long past the phase budget a worker may stay silent before it is stopped.
 const GRACE: Duration = Duration::from_secs(3);
 
-/// The largest input a mutation leaves, in bytes; deep nesting may go up to [`MAX_NESTED`].
+/// The largest input a mutation leaves, in bytes; deep nesting may go up to [`MAX_NESTED`],
+/// enough for a million levels, since only that overflows a recursion the nesting limit misses
+/// on [`STACK_BYTES`].
 const MAX_INPUT: usize = 64 << 10;
-const MAX_NESTED: usize = 512 << 10;
+const MAX_NESTED: usize = 4 << 20;
 
 /// The most mutants that join a job's corpus.
 const MAX_CORPUS: usize = 4096;
@@ -743,7 +745,10 @@ fn deep_function(kind: usize, depth: usize) -> String {
 }
 
 fn nesting(rng: &mut Rng, text: &str) -> String {
-    let depth = [2, 3, 8, 16, 64, 200, 1000, 2000, 5000, 20000, 50000][rng.below(11)];
+    // Around the nesting limit of 256 levels, and far past it.
+    let depth = [
+        2, 3, 8, 16, 64, 200, 255, 256, 257, 1000, 5000, 50_000, 1_000_000,
+    ][rng.below(13)];
     let kind = rng.below(10);
     let spans = token_spans(text);
     // An atom of a body: a literal, or a name after `=`, `(` or an operator.
@@ -2500,8 +2505,6 @@ mod tests {
         Phases {
             objects: false,
             plant,
-            // Tests run in debug builds, with larger frames.
-            stack: 8 << 20,
             ..Phases::default()
         }
     }
@@ -2706,10 +2709,7 @@ mod tests {
     /// and fails none; one that does not check stops before the lowering, and fails none.
     #[test]
     fn test_a_clean_module_reaches_every_phase_without_a_failure() {
-        let mut exec = InProcess(Phases {
-            stack: 8 << 20,
-            ..Phases::default()
-        });
+        let mut exec = InProcess(Phases::default());
         let case = Case {
             text: SEED.to_string(),
             edit: 1,
