@@ -14,11 +14,14 @@ pub const INF: i128 = i128::MAX / 4;
 /// which is sound, so that doubling a constant never overflows.
 pub const BIG: i128 = INF / 2;
 
+/// A sum of two bounds, kept within `[-INF, INF]`: at or beyond `INF` it is no bound, and below
+/// `-INF` it is raised to `-INF`, a weaker bound, which is sound and keeps every later sum of
+/// two bounds inside `i128`.
 fn add(a: i128, b: i128) -> i128 {
     if a >= INF || b >= INF {
         INF
     } else {
-        (a + b).min(INF)
+        (a + b).clamp(-INF, INF)
     }
 }
 
@@ -121,7 +124,7 @@ impl Octagon {
         for k in 0..d {
             let v = self.at(k, k ^ 1);
             if v < INF {
-                self.put(k, k ^ 1, 2 * floor_half(v));
+                self.put(k, k ^ 1, (2 * floor_half(v)).max(-INF));
             }
         }
         for i in 0..d {
@@ -134,6 +137,8 @@ impl Octagon {
                 if cj >= INF {
                     continue;
                 }
+                // Both are below `INF` and at or above `-INF`, so their sum fits; it is not
+                // saturated, since half of it is the bound.
                 let s = floor_half(ci + cj).min(self.at(i, j));
                 self.put(i, j, s);
             }
