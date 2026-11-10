@@ -1,3 +1,7 @@
+== core-calculus/array_literal_beyond_128_bits.mn ==
+{"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the elements of this array literal give values that no one of `i128` and `u128` holds together, and they are kept in one of them","primary":{"file":"array_literal_beyond_128_bits.mn","start":98,"end":104,"line":4,"column":21},"related":[],"fixes":[{"message":"bind `b` to `wide: i128` first","applicability":"suggestion","edits":[{"span":{"file":"array_literal_beyond_128_bits.mn","start":78,"end":78,"line":4,"column":1},"replacement":"  val wide: i128 = b\n"},{"span":{"file":"array_literal_beyond_128_bits.mn","start":102,"end":103,"line":4,"column":25},"replacement":"wide"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/array_literal_of_mixed_integers.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/assign_to_val.mn ==
 {"version":1,"diagnostics":[{"code":"E0205","severity":"error","message":"cannot assign to `x`: it is a `val`, which never changes; declare it with `var`","primary":{"file":"assign_to_val.mn","start":69,"end":70,"line":5,"column":3},"related":[{"message":"declared here","span":{"file":"assign_to_val.mn","start":61,"end":62,"line":4,"column":7}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/binding_named_like_a_function.mn ==
@@ -50,6 +54,8 @@
 {"version":1,"diagnostics":[{"code":"E0508","severity":"error","message":"Tier 1 proves `x + 300` is at least 300 here, outside `u8` (0 to 255), so this narrowing always traps","primary":{"file":"narrowing_that_always_traps.mn","start":74,"end":81,"line":4,"column":15},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/narrowing_that_may_trap.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/operands_beyond_128_bits.mn ==
+{"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the operands of `b + (a + 170141183460469231731687303715884105727)` fit no one of `i128` and `u128` together with its value, and an operation computes in one of them","primary":{"file":"operands_beyond_128_bits.mn","start":89,"end":138,"line":4,"column":17},"related":[],"fixes":[{"message":"bind `a + 170141183460469231731687303715884105727` to `sum: u128` first","applicability":"suggestion","edits":[{"span":{"file":"operands_beyond_128_bits.mn","start":73,"end":73,"line":4,"column":1},"replacement":"  val sum: u128 = a + 170141183460469231731687303715884105727\n"},{"span":{"file":"operands_beyond_128_bits.mn","start":94,"end":137,"line":4,"column":22},"replacement":"sum"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/refinement_not_proven.mn ==
 {"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 255`, where `x + 1` is 256, outside `u8[1..=255]`, the type of the result of `next`","primary":{"file":"refinement_not_proven.mn","start":81,"end":86,"line":4,"column":10},"related":[],"fixes":[{"message":"insert `guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refinement_not_proven.mn","start":72,"end":72,"line":4,"column":1},"replacement":"  guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }\n"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/refinement_over_a_var.mn ==

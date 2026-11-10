@@ -1,0 +1,6 @@
+// expect: E0222
+module conformance
+pub fn shift(a: u8, b: i8) -> u128 {
+  val v: u128 = b + (a + 170141183460469231731687303715884105727)
+  v
+}

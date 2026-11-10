@@ -646,7 +646,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
          with a 128-bit operand is checked at the operator, against that type. The branches of \
          an `if` meet in one machine type too, so an `if` whose branches' values fit no one of \
          the two together, such as an `i64` and a `u128`, is an error as well; its fix binds \
-         the higher branch's value to an `i128` inside that branch.",
+         the higher branch's value to an `i128` inside that branch. So are an operation whose \
+         operands do not fit one type with its value, a negative one beside one above `i128`, \
+         and an array literal whose elements, of no one integer type, do not fit one type \
+         together.",
         "module m\npub fn cube(a: u64) -> u128 {\n  val c: u128 = a * a * a\n  c\n}\n",
         "module m\npub fn cube(a: u64) -> u128 {\n  val product: u128 = a * a\n  val c: u128 = product * a\n  c\n}\n",
     ),

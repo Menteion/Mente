@@ -1304,8 +1304,43 @@ impl<'a> Lower<'a> {
     fn shape(&self, e: ExprId) -> Result<Shape, String> {
         match &self.s.f.typing.exprs[e.0 as usize] {
             SemaTy::Any => Ok(Shape::Unit),
+            SemaTy::Array(n, elem) if self.mixed(elem) => {
+                // An array literal of integers of no one type keeps its elements exact until it
+                // lands, in the machine type that holds them all (`wide.rs`).
+                let tree = self.tree();
+                let items: Vec<ExprId> = match &tree.expr(e).kind {
+                    ExprKind::Array(items) => items.clone(),
+                    ExprKind::Repeat { value, .. } => vec![*value],
+                    _ => return Shape::of(&self.s.f.typing.exprs[e.0 as usize]),
+                };
+                let mut lo: Option<Num> = None;
+                let mut hi: Option<Num> = None;
+                for &i in &items {
+                    let r = self
+                        .interval(i)
+                        .ok_or("an element without a static range")?;
+                    let (l, h) = (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1));
+                    lo = Some(lo.map_or(l, |x| x.min(l)));
+                    hi = Some(hi.map_or(h, |x| x.max(h)));
+                }
+                let m = match (lo, hi) {
+                    (Some(lo), Some(hi)) => machine(lo, hi),
+                    _ => Some(IntTy::new(64, true)),
+                }
+                .ok_or("an array literal beyond 128 bits")?;
+                let name = format!("{}{}", if m.signed { "i" } else { "u" }, m.bits);
+                let t = SemaIntTy::named(&name).ok_or("a machine type without a name")?;
+                let n = u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?;
+                Ok(Shape::Array(n, Box::new(Shape::Int(t))))
+            }
             t => Shape::of(t),
         }
+    }
+
+    /// Whether `t` is an integer of no one type, the element of an array literal whose elements
+    /// have different integer types.
+    fn mixed(&self, t: &SemaTy) -> bool {
+        matches!(t, SemaTy::Int(i) if int_ty(i).is_none())
     }
 
     fn interval(&self, e: ExprId) -> Option<Interval> {
@@ -1473,11 +1508,23 @@ impl<'a> Lower<'a> {
                     Ty::Addr,
                     &[],
                 );
+                // Elements of no one type are kept exact, each within the machine type of the
+                // array, which holds them all; elements of one type are narrowed into it.
+                let mixed = matches!(
+                    &self.s.f.typing.exprs[e.0 as usize],
+                    SemaTy::Array(_, t) if self.mixed(t)
+                );
                 for (k, &item) in items.iter().enumerate() {
                     let v = self.expr(item)?;
                     let from = self.shape(item)?;
                     let key = Some(tree.expr(item).span);
-                    let v = self.narrow(v, &from, elem, span, key)?;
+                    let v = match (mixed, v, elem.as_ref()) {
+                        (true, V::Int(n, t), Shape::Int(to)) => {
+                            let into = mir(*to);
+                            V::Int(self.cast(n, t, into), into)
+                        }
+                        (_, v, _) => self.narrow(v, &from, elem, span, key)?,
+                    };
                     if matches!(v, V::Never) {
                         return Ok(V::Never);
                     }

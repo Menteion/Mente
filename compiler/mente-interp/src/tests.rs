@@ -158,6 +158,13 @@ fn test_array_literal_elements_are_narrowed_into_its_element_type() {
         "trap[narrowing] at 2:29: -1 does not fit in `u8`"
     );
     assert_eq!(run(repeat, "g(3)"), "[2, 2]");
+    // Elements of no one integer type stay exact until the array lands.
+    let mixed = "pub fn q(a: i32, b: u64) -> [2]i64 = [a, b]";
+    assert_eq!(run(mixed, "q(-1, 5)"), "[-1, 5]");
+    assert_eq!(
+        run(mixed, "q(-1, 18446744073709551615)"),
+        "trap[narrowing] at 2:38: 18446744073709551615 does not fit in `i64`"
+    );
 }
 
 #[test]
