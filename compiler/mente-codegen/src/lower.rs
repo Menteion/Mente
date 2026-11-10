@@ -1789,20 +1789,31 @@ impl<'a> Lower<'a> {
                     Some(w) => mir(w),
                     None => self.op_type(&[li, ri, ctx], ta)?,
                 };
-                let x = self.cast(a, ta, m);
-                let y = self.cast(b, tb, m);
+                // An operand whose type the operation's does not hold, an `i32` beside a `u128`,
+                // keeps its own: only a checked operation, which computes its exact result
+                // first, takes operands of other types.
+                let keeps =
+                    |t: IntTy| wide.is_some() && !(m.min() <= t.min() && t.max() <= m.max());
+                let mixed = keeps(ta) || keeps(tb);
+                let x = if keeps(ta) { a } else { self.cast(a, ta, m) };
+                let (y, ty) = if keeps(tb) {
+                    (b, tb)
+                } else {
+                    (self.cast(b, tb, m), m)
+                };
                 let divides = matches!(arith, ArithOp::Div | ArithOp::Rem);
                 let divisor = Key::at(tree.expr(re).span, Tag::None);
                 if divides && !self.proven(ObligationKind::Divisor, divisor) {
-                    let zero = self.int(m, Num::ZERO);
+                    let zero = self.int(ty, Num::ZERO);
                     let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
                     self.check(ok, "division-by-zero", &["division by zero"], &[], span);
                 }
                 // An operation on a 128-bit operand is checked unless Tier 1 proves its result
-                // fits.
+                // fits, and always when its operands have other types.
                 let trap = wide
                     .filter(|w| {
-                        !self.proven(ObligationKind::Range, Key::at(span, Tag::Into(w.name)))
+                        mixed
+                            || !self.proven(ObligationKind::Range, Key::at(span, Tag::Into(w.name)))
                     })
                     .map(|w| {
                         let after = format!(" does not fit in `{}`", w.name);

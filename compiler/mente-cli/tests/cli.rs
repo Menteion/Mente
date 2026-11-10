@@ -850,3 +850,48 @@ pub fn rep(a: i16) -> [2]u8 = [a - 1; 2]
     }
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// An operation on a 128-bit operand and a narrower one of another sign, an `i32` beside a
+/// `u128`, is computed exactly and checked against the 128-bit type, alike on every path.
+#[test]
+fn test_mixed_128_bit_operations_run_alike_on_every_path() {
+    let dir = scratch("mixed");
+    fs::write(
+        dir.join("x.mn"),
+        "module m
+pub fn f(x: i32, y: u128) -> i32 = x * y
+pub fn g(x: i64, y: u128) -> u128 = y - x
+pub fn h(x: i8, y: u128) -> u128 = y / x
+pub fn k(a: i128, b: u128) -> i128 = a + b
+",
+    )
+    .unwrap();
+    for (call, status, printed) in [
+        ("f(-2147483647, 1)", 1, "x.mn: trap[narrowing] at 2:36: -2147483647 does not fit in `u128`"),
+        ("f(-3, 0)", 0, "0"),
+        ("f(5, 2)", 0, "10"),
+        ("g(-5, 10)", 0, "15"),
+        ("h(-2, 10)", 1, "x.mn: trap[narrowing] at 4:36: -5 does not fit in `u128`"),
+        ("h(0, 10)", 1, "x.mn: trap[division-by-zero] at 4:36: division by zero"),
+        ("k(-5, 3)", 0, "-2"),
+        (
+            "k(-1, 340282366920938463463374607431768211455)",
+            1,
+            "x.mn: trap[narrowing] at 5:38: 340282366920938463463374607431768211454 does not fit in `i128`",
+        ),
+    ] {
+        for path in [None, Some("--mir"), Some("--native")] {
+            let mut args = vec!["run", "x.mn", "--call", call];
+            args.extend(path);
+            let out = mn(&dir, &args);
+            assert_eq!(out.status.code(), Some(status), "{call} {path:?}");
+            let shown = if status == 0 { &out.stdout } else { &out.stderr };
+            assert_eq!(
+                text(shown).replace("\r\n", "\n").trim_end(),
+                printed,
+                "{call} {path:?}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
