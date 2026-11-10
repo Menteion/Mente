@@ -9,7 +9,6 @@
 
 compiler/mente-cli/tests/mutants/arith.mn::add/b0.i3/int-1 -- a + b of two u8 is never negative, so its narrowing's lower bound holds as `>= -1` wherever it holds as `>= 0`
 compiler/mente-cli/tests/mutants/arith.mn::mul/b0.i3/int-1 -- a * b of two u8 is never negative, so its narrowing's lower bound holds as `>= -1` wherever it holds as `>= 0`
-compiler/mente-cli/tests/mutants/arith.mn::sq/b0.i5/unchecked -- p = a * a is at most (2^64 - 1)^2 = 2^128 - 2^65 + 1, so p + 1 never leaves u128 and its overflow trap never fires
 compiler/mente-cli/tests/mutants/arith.mn::neg/b0.i2/int+1 -- -a of an i8 lies in -127..=128, so the narrowing's lower bound holds as `>= -127` wherever it holds as `>= -128`
 compiler/mente-cli/tests/mutants/arith.mn::neg/b0.i2/int-1 -- -a of an i8 lies in -127..=128, so the narrowing's lower bound holds as `>= -129` wherever it holds as `>= -128`
 compiler/mente-cli/tests/mutants/arith.mn::neg/b0.i3/ge>gt -- -a of an i8 lies in -127..=128, never at -128, so `> -128` and `>= -128` agree
@@ -77,7 +76,7 @@ compiler/mente-cli/tests/mutants/compare.mn::bigger/b0.i0/ge>gt -- `>=` and `>` 
 
 # A `decreases` measure that is a u8 is never negative.
 compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i12/check-removed -- the measure m of the recursive call is a u8, never negative, so the check that it is not negative never fails
-compiler/mente-cli/tests/mutants/contracts.mn::enter down/b0.i16/check-removed -- the entry's measure n is a u8, never negative, so the check that it is not negative never fails
+compiler/mente-cli/tests/mutants/contracts.mn::enter down/b0.i2/check-removed -- the entry's measure n is a u8, never negative, so the check that it is not negative never fails
 
 # A measure of one clause compares lexicographically with nothing after it: `smaller or (equal
 # and false)`. The equality is and-ed with false, so nothing that computes it changes the result.

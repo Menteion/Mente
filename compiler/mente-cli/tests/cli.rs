@@ -128,7 +128,7 @@ fn test_mn_test_mutate_runs_the_demo_gate() {
         "{}",
         out
     );
-    assert!(!out.contains("Agent programs"), "{}", out);
+    assert!(!out.contains("Reported programs"), "{}", out);
     assert!(!text(&plain.stdout).contains("lowered code"));
 }
 

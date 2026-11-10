@@ -42,7 +42,7 @@ jobs:
       - name: Run the gate
         run: |
           status=0
-          ./target/release/mn test --mutate --agent-programs examples > gate.txt || status=$?
+          ./target/release/mn test --mutate --reported examples > gate.txt || status=$?
           {
             echo '## MIR mutation gate on lowered code'
             echo '```text'

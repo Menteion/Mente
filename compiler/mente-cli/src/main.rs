@@ -886,11 +886,11 @@ fn cmd_test(args: &[String]) {
             mut_rep.kill_score_pct,
             t0.elapsed().as_micros()
         );
-        // The gate on lowered code, run from the repository's root; `--agent-programs` adds the
-        // benchmark's agent programs, whose survivors are reported.
+        // The gate on lowered code, run from the repository's root; `--reported` adds the
+        // programs whose calls are fixed, whose survivors are reported.
         let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let agents = args.iter().any(|a| a == "--agent-programs");
-        if !mir_mutants::command(&root, agents) {
+        let reported = args.iter().any(|a| a == "--reported");
+        if !mir_mutants::command(&root, reported) {
             process::exit(1);
         }
     }

@@ -396,7 +396,7 @@ fn inst_changes(f: &cfg::Function, v: NodeId) -> Vec<Candidate> {
 }
 
 /// `n + 1` when `up`, else `n - 1`, when its magnitude stays below 2^128.
-pub fn step(n: Num, up: bool) -> Option<Num> {
+fn step(n: Num, up: bool) -> Option<Num> {
     Some(match (n.neg, up) {
         (false, true) | (true, false) => Num::new(n.neg, n.mag.checked_add(1)?),
         (_, _) if n.mag == 0 => Num::new(true, 1),

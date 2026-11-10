@@ -19,10 +19,11 @@
 //!
 //! - the gate's own corpus, `tests/mutants/*.mn`, is gated: a survivor without a reason is a
 //!   gap, closed by adding a call that kills it. Each function's first call also runs with
-//!   each integer argument at the edges of its type, so every entry's argument checks are
-//!   reached from both sides;
-//! - the benchmark's agent programs, run on their tasks' examples and hidden tests, a fixed set
-//!   of calls, are reported: their survivors are counted, not failed on.
+//!   each integer argument at its type's smallest and largest value;
+//! - the construct corpus of `mir_run.rs`, with the calls its tests make, and the benchmark's
+//!   agent programs, run on their tasks' examples and hidden tests, have fixed calls and are
+//!   reported: their survivors are counted, not failed on. `mn test --mutate --reported` adds
+//!   them.
 //!
 //! Any other source, such as a program generator, plugs in as a list of [`Program`]s given to
 //! [`gate`]: a generated program whose calls can grow is gated, one whose calls are fixed is
@@ -34,6 +35,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mente_codegen::lower::{self, Lowered, Shape};
+use mente_codegen::native;
 use mente_interp::Value;
 use mente_mir::cfg::{self, FuncId, Loc, Memory, Num, Ty, Val};
 use mente_mir::cfg_mutate::{self, Family};
@@ -242,11 +244,10 @@ pub fn run_program(p: &Program) -> ProgramRun {
     run
 }
 
-/// The calls the gate adds to a gated program's own, so that each entry's checks on arguments
-/// from outside the program are reached from both sides: each function's first written call
-/// again, with each integer argument moved in turn to one below its type's smallest value, the
-/// smallest, the largest and one above. A `mut` argument lives in memory of its type, and an
-/// entry's parameter has a MIR type of its own, so only edges those hold are written.
+/// The calls the gate adds to a gated program's own: each function's first written call again,
+/// with each integer argument moved in turn to its type's smallest and largest value, where an
+/// operation, a refinement or a bound on it is most often wrong. An argument outside its type
+/// traps before the entry runs, on every path, so no edge beyond these reaches MIR.
 fn edge_calls(lowered: &Lowered, written: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for entry in &lowered.entries {
@@ -257,27 +258,12 @@ fn edge_calls(lowered: &Lowered, written: &[String]) -> Vec<String> {
         }) else {
             continue;
         };
-        let Some(func) = lowered.module.functions.get(entry.func.0 as usize) else {
-            continue;
-        };
-        // An array result's address comes before the parameters.
-        let first = usize::from(matches!(entry.result, Shape::Array(..)));
-        for (j, (is_mut, shape)) in entry.params.iter().enumerate() {
+        for (j, (_, shape)) in entry.params.iter().enumerate() {
             let Shape::Int(t) = shape else {
                 continue;
             };
             let t = lower::mir(*t);
-            let holds = match (is_mut, func.params.get(first + j)) {
-                (false, Some(Ty::Int(e))) => *e,
-                _ => t,
-            };
-            let edges = [
-                cfg_mutate::step(t.min(), false),
-                Some(t.min()),
-                Some(t.max()),
-                cfg_mutate::step(t.max(), true),
-            ];
-            for edge in edges.into_iter().flatten().filter(|n| holds.holds(*n)) {
+            for edge in [t.min(), t.max()] {
                 let shown: Vec<String> = args
                     .iter()
                     .enumerate()
@@ -353,6 +339,15 @@ fn prepare(
     if args.len() != entry.params.len() {
         return Ok(None);
     }
+    // An argument outside its parameter's type traps before the entry runs, on every path.
+    let outside = args
+        .iter()
+        .map(|(_, v)| native_arg(v))
+        .collect::<Option<Vec<_>>>()
+        .is_none_or(|native_args| native::refusal(entry, &native_args).is_some());
+    if outside {
+        return Ok(None);
+    }
     let mut memory = Memory::filled(POISON);
     let mut values = Vec::new();
     let sret = match &entry.result {
@@ -424,6 +419,18 @@ fn execute(m: &cfg::Module, c: &Prepared, max_steps: u64) -> (Printed, u64) {
         Ok(out)
     });
     (printed, steps)
+}
+
+/// An argument as native code and `native::refusal` take it.
+fn native_arg(value: &Value) -> Option<native::Arg> {
+    Some(match value {
+        Value::Bool(b) => native::Arg::Bool(*b),
+        Value::Int(i) => native::Arg::Int(Num::new(i.is_negative(), i.magnitude())),
+        Value::Array(items) => {
+            native::Arg::Array(items.iter().map(native_arg).collect::<Option<Vec<_>>>()?)
+        }
+        Value::Unit => return None,
+    })
 }
 
 fn scalar(value: &Value) -> Option<Val> {
@@ -527,6 +534,47 @@ pub fn corpus(root: &Path) -> Result<Vec<Program>, String> {
         });
     }
     Ok(programs)
+}
+
+/// The construct corpus of `mir_run.rs`, with the calls its tests make, which are fixed there:
+/// reported, not gated, and checked without Tier 1 as those tests check it, so that its calls
+/// reach the traps Tier 1 would reject. Each is named after the functions it defines.
+pub fn constructs() -> Vec<Program> {
+    mir_run::CONSTRUCTS
+        .iter()
+        .map(|(src, calls)| Program {
+            name: format!(
+                "compiler/mente-cli/src/mir_run.rs#{}",
+                functions(src).join("+")
+            ),
+            source: format!(
+                "module m
+{}
+",
+                src
+            ),
+            calls: calls.iter().map(|c| c.to_string()).collect(),
+            proofs: false,
+            gated: false,
+        })
+        .collect()
+}
+
+/// The names of the functions a source defines, in order: each word after a `fn` keyword.
+fn functions(src: &str) -> Vec<&str> {
+    src.match_indices("fn ")
+        .filter(|(at, _)| {
+            src[..*at]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+        })
+        .filter_map(|(at, _)| {
+            let rest = &src[at + 3..];
+            let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+            (end > 0).then(|| &rest[..end])
+        })
+        .collect()
 }
 
 /// The benchmark's agent programs that check, each with the calls of its task's examples and
@@ -744,7 +792,7 @@ impl Report {
         );
         if self.programs.1 > 0 {
             out.push_str(&format!(
-                "Agent programs on their tasks' fixed tests, reported and not gated: {}\n{}",
+                "Reported programs, whose calls are fixed tests: {}\n{}",
                 self.programs.1,
                 Report::table(&self.reported)
             ));
@@ -790,22 +838,29 @@ pub fn gate(programs: &[Program], eq: &Equivalences) -> Report {
     verdict(&run_programs(programs), eq)
 }
 
-/// `mn test --mutate`'s gate on lowered code: the gate's own corpus, and with `agents` the
-/// benchmark's agent programs too. Prints the counts by family and every survivor of a gated
-/// program without a written reason, and returns whether the gate passes.
-pub fn command(root: &Path, agents: bool) -> bool {
+/// The programs `mn test --mutate` runs: the gate's own corpus, and with `reported` the sources
+/// whose calls are fixed, the construct corpus and the benchmark's agent programs, after it.
+pub fn programs(root: &Path, reported: bool) -> Result<Vec<Program>, String> {
+    let mut programs = corpus(root)?;
+    if reported {
+        programs.extend(constructs());
+        programs.extend(agent_programs(root));
+    }
+    Ok(programs)
+}
+
+/// `mn test --mutate`'s gate on lowered code, on [`programs`]. Prints the counts by family and
+/// every survivor of a gated program without a written reason, and returns whether the gate
+/// passes.
+pub fn command(root: &Path, reported: bool) -> bool {
     let started = std::time::Instant::now();
-    let (programs, eq) = match (corpus(root), Equivalences::read(root)) {
+    let (programs, eq) = match (programs(root, reported), Equivalences::read(root)) {
         (Ok(p), Ok(e)) => (p, e),
         (Err(e), _) | (_, Err(e)) => {
             eprintln!("error: {}", e);
             return false;
         }
     };
-    let mut programs = programs;
-    if agents {
-        programs.extend(agent_programs(root));
-    }
     let report = gate(&programs, &eq);
     print!("{}", report.render(started.elapsed()));
     report.passes()
@@ -907,8 +962,8 @@ mod tests {
         );
         let run = run_program(&p);
         assert!(run.problems.is_empty(), "{:?}", run.problems);
-        // The three written calls, and abs(x) at -129, -128, 127 and 128.
-        assert_eq!(run.calls, 7);
+        // The three written calls, and abs(x) at -128 and 127.
+        assert_eq!(run.calls, 5);
         let negated = outcome(&run, "t.mn::abs/b0.i2/lt>ge");
         assert_eq!(negated.family, Family::Cmp);
         assert_eq!(negated.loc.line, 2);
@@ -916,11 +971,8 @@ mod tests {
         assert_eq!(kind, Kill::Output);
         assert!(by == "abs(5)" || by == "abs(-3)", "{}", by);
         assert_eq!(outcome(&run, "t.mn::abs/b0.i2/lt>le").killed, None);
-        // The entry is a function of its own, named apart.
-        assert!(run
-            .outcomes
-            .iter()
-            .any(|o| o.id.starts_with("t.mn::enter abs/b0.")));
+        // The entry of an unrefined function only calls it, and has nothing to mutate.
+        assert!(run.outcomes.iter().all(|o| !o.id.contains("enter abs")));
     }
 
     /// A survivor fails the gate until `equivalent.txt` records it with a reason; a record of a
@@ -987,21 +1039,19 @@ mod tests {
             &["f(1)", "g(1)", "f(300)", "nonsense"],
         );
         let run = run_program(&p);
-        // `f(300)` reaches the entry, which traps; `g(1)` names no function; f(1) also comes
-        // back at -1, 0, 255 and 256.
-        assert_eq!(run.calls, 6);
+        // `f(300)` traps before the entry runs and `g(1)` names no function, so neither reaches
+        // MIR; f(1) also comes back at 0 and 255.
+        assert_eq!(run.calls, 3);
         assert_eq!(run.problems, ["nonsense: not a call"]);
-        // An array argument the reference interpreter narrows and MIR refuses.
-        let refused = program("pub fn h(xs: [2]u8) -> u8 = xs[0]", &["h([1, 300])"]);
-        let run = run_program(&refused);
-        assert!(run.problems[0].contains("MIR prints"), "{:?}", run.problems);
-        let report = verdict(
-            &[ProgramRun {
-                gated: false,
-                ..run
-            }],
-            &Equivalences::default(),
-        );
+        // A problem fails the gate for a gated program, and is only reported for another.
+        let failing = verdict(&[run_program(&broken)], &Equivalences::default());
+        assert!(!failing.passes() && failing.problems_reported.is_empty());
+        assert!(failing.problems[0].starts_with("t.mn: does not check"));
+        let fixed = Program {
+            gated: false,
+            ..broken
+        };
+        let report = verdict(&[run_program(&fixed)], &Equivalences::default());
         assert!(report.passes() && report.problems.is_empty());
         assert_eq!(report.problems_reported.len(), 1);
     }
@@ -1034,7 +1084,7 @@ mod tests {
         assert!(report.passes(), "{}", report.render(Duration::ZERO));
         assert_eq!(report.programs, (programs.len(), 0));
         assert!(
-            programs.len() >= 9 && report.calls >= 500,
+            programs.len() >= 9 && report.calls >= 400,
             "{:?}",
             report.programs
         );
@@ -1085,6 +1135,31 @@ mod tests {
             ]
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The construct corpus enters as reported programs, without Tier 1, each named apart after
+    /// the functions it defines and carrying the calls `mir_run.rs` makes.
+    #[test]
+    fn test_the_construct_corpus_is_reported_under_its_function_names() {
+        let found = constructs();
+        assert_eq!(found.len(), mir_run::CONSTRUCTS.len());
+        let mut names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names[0],
+            "compiler/mente-cli/src/mir_run.rs#bind+take+arg+back"
+        );
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), found.len(), "two constructs share a name");
+        for (p, (src, calls)) in found.iter().zip(mir_run::CONSTRUCTS) {
+            assert!(!p.gated && !p.proofs, "{}", p.name);
+            assert_eq!(p.source, format!("module m\n{}\n", src));
+            assert_eq!(p.calls, calls.to_vec());
+        }
+        assert_eq!(
+            functions("pub fn a(x: u8) -> u8 = todo(\"fn x\")\nfn b_2() {}\n  fn c() {}\nfn (x)"),
+            ["a", "b_2", "c"]
+        );
     }
 
     /// An agent program that checks gets the calls of its task's examples and hidden tests, its
@@ -1140,10 +1215,10 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Each function's first written call comes back with each integer argument at the edges of
-    /// its type, as far as the entry's parameter or a `mut` argument's memory holds them.
+    /// Each function's first written call comes back with each integer argument, `mut` or not,
+    /// at its type's smallest and largest value; arrays and booleans stay as written.
     #[test]
-    fn test_edge_calls_reach_each_entry_check_from_both_sides() {
+    fn test_edge_calls_move_each_integer_to_its_types_edges() {
         let src = "module m\npub fn f(a: u8, mut b: u8, c: i128, xs: [2]u8) -> [2]u8 {\n  b = a\n  [xs[0], c]\n}\npub fn g(n: i8) -> i8 = n\n";
         let module = mente_sema::check_program_without_proofs(src).unwrap();
         let lowered = lower::lower(&module).unwrap();
@@ -1158,10 +1233,8 @@ mod tests {
         assert_eq!(
             edge_calls(&lowered, &written),
             [
-                "f(-1, mut 2, 3, [4, 5])".to_string(),
-                "f(0, mut 2, 3, [4, 5])".into(),
+                "f(0, mut 2, 3, [4, 5])".to_string(),
                 "f(255, mut 2, 3, [4, 5])".into(),
-                "f(256, mut 2, 3, [4, 5])".into(),
                 "f(1, mut 0, 3, [4, 5])".into(),
                 "f(1, mut 255, 3, [4, 5])".into(),
                 format!(
@@ -1173,7 +1246,7 @@ mod tests {
         );
         assert_eq!(
             edge_calls(&lowered, &["g(0)".to_string()]),
-            ["g(-129)", "g(-128)", "g(127)", "g(128)"]
+            ["g(-128)", "g(127)"]
         );
     }
 
@@ -1231,7 +1304,7 @@ mod tests {
         assert!(shown.ends_with(
             "[PASS] every mutant of the gated programs is killed or has a written reason\n"
         ));
-        assert!(!shown.contains("Agent programs"));
+        assert!(!shown.contains("Reported programs"));
 
         let loc = Loc { line: 3, col: 4 };
         let found = Report {
@@ -1247,7 +1320,7 @@ mod tests {
         };
         let shown = found.render(Duration::ZERO);
         for line in [
-            "Agent programs on their tasks' fixed tests, reported and not gated: 2\n",
+            "Reported programs, whose calls are fixed tests: 2\n",
             "  total          18      10       4       2          6        2       8\n",
             "  reported problem: q: does not lower\n",
             "  survives: q::g/b1.term/swap at 3:4\n",
@@ -1323,12 +1396,14 @@ mod tests {
         assert_eq!(kill_kind(&Ok(vec!["5".into()])), Kill::Output);
     }
 
-    /// `mn test --mutate`'s gate passes on a corpus whose mutants are all killed, with agent
-    /// programs reported beside it, and fails on an unexplained survivor or a missing file.
+    /// `mn test --mutate`'s gate passes on a corpus whose mutants are all killed and fails on an
+    /// unexplained survivor or a missing file; `--reported` puts the construct corpus and the
+    /// agent programs after the gated corpus.
     #[test]
     fn test_the_command_passes_or_fails_on_the_corpus_it_finds() {
         let dir = scratch("command");
         assert!(!command(&dir, false));
+        assert!(programs(&dir, true).is_err());
         put(&dir.join(DIR).join("equivalent.txt"), "# none\n");
         put(
             &dir.join(DIR).join("id.mn"),
@@ -1343,7 +1418,19 @@ mod tests {
             "module m\npub fn id(x: bool) -> bool = if x { false } else { x }\n",
         );
         assert!(command(&dir, false));
-        assert!(command(&dir, true));
+        let names = |reported| -> Vec<String> {
+            programs(&dir, reported)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.name)
+                .collect()
+        };
+        let gated = format!("{}/id.mn", DIR);
+        assert_eq!(names(false), std::slice::from_ref(&gated));
+        let mut all = vec![gated];
+        all.extend(constructs().into_iter().map(|p| p.name));
+        all.push("benchmark/probe/m1/id-1.mn".into());
+        assert_eq!(names(true), all);
         put(
             &dir.join(DIR).join("pick.mn"),
             "// call: pick(true)\nmodule m\npub fn pick(c: bool) -> u8 = if c { 1 } else { 2 }\n",
