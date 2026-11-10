@@ -149,9 +149,10 @@ fn test_fuzz_replay_passes_a_clean_module() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 3] = [
+const PENDING: [&str; 4] = [
     "incremental-function-without-parameters.mn",
     "incremental-module-declared-twice.mn",
+    "incremental-unindented-body.mn",
     "tier1-nested-loops.mn",
 ];
 
@@ -226,6 +227,15 @@ fn fuzz_tier1_nested_loops() {
     replay(&[regressions().join("tier1-nested-loops.mn")]);
 }
 
+/// Found by `mn fuzz`: a body line that starts in the first column, such as an unindented
+/// tail expression, passes a whole check, while `mn check --watch`'s session starts a new item
+/// there and reports `E0111`.
+#[test]
+#[ignore = "pending a fix in how mente-sema's incremental session splits items"]
+fn fuzz_incremental_unindented_body() {
+    replay(&[regressions().join("incremental-unindented-body.mn")]);
+}
+
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,
 /// the checker or the incremental session, whichever recursed deepest first. Past the nesting
 /// limit of 256 levels each way of nesting the fuzzer makes is `E0127`, and no phase crashes.
@@ -269,9 +279,10 @@ fn fuzz_deep_nesting() {
     for file in &files {
         let run = mn(&["check", file.to_str().unwrap()], None);
         let printed = text(&run.stdout) + &text(&run.stderr);
+        // `mn check` exits with 1 when a module has a diagnostic.
         assert_eq!(
             run.status.code(),
-            Some(2),
+            Some(1),
             "{}: {}",
             file.display(),
             printed
