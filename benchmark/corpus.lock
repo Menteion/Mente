@@ -52,10 +52,12 @@ task two-sum M2 core solve sha256:3ad3cf24a9e10aea8df7313c8b679d7df912fedd79074b
 task word-count M2 core solve sha256:d2ae44294d69987d54cc7e1499be856a71ecad3d9a8e75bfe594fb89d252ca40
 task word-frequencies M6 core solve sha256:f06da971b58aca56eb4c0857a4c3e2fa760fa796e8146b504feee6544b52e450
 # The held-out set: its repository and commit, then one line per task, without its name.
-held-out https://github.com/Menteion/mente-bench-heldout a6bd3136e764c637ca5c9ff0858de813e4a26479
+held-out https://github.com/Menteion/mente-bench-heldout 1464a097e240f418806c09419cb1a9f6cc9dd2d5
 held-out-task M1 core
 held-out-task M1 core
 held-out-task M1 core
+held-out-task M1 core
+held-out-task M1 non-core
 held-out-task M1 non-core
 held-out-task M2 core
 held-out-task M2 core

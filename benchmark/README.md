@@ -6,7 +6,7 @@ The agent benchmark measures Mente's goal, the language best suited to AI agents
 
 | Milestone | Tuning | Held-out | Adversarial |
 | :--- | ---: | ---: | ---: |
-| M1 | 18 | 4 | 2 |
+| M1 | 18 | 6 | 2 |
 | M2 | 9 | 3 | 1 |
 | M3 | 3 | 1 | 0 |
 | M4 | 3 | 1 | 3 |
