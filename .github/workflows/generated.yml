@@ -43,6 +43,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Every program with a difference, with its text, not only the first few.
+  MENTE_GEN_SHOW: "50"
 
 jobs:
   paths:
@@ -121,6 +123,8 @@ jobs:
             mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/generated.txt"
       - name: The conformance suite on the three paths
+        # Its result stands on its own, whatever the generated programs found.
+        if: ${{ !cancelled() }}
         env:
           MENTE_GEN_CALLS: "64"
         run: |
