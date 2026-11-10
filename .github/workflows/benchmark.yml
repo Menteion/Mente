@@ -1,0 +1,113 @@
+# The measured runs of the agent benchmark (benchmark/README.md, "Method"; ROADMAP.md, "Agent
+# benchmark"): every task of the milestone in Mente, Rust and Odin, with each model named, 5 runs
+# each, within the budget Norman sets. Run by hand only.
+#
+# The held-out set is read only when the repository has the secret MENTE_BENCH_HELDOUT_TOKEN, a
+# fine-grained token that can read the contents of Menteion/mente-bench-heldout and nothing else.
+# Without it the run takes the public tasks alone. The held-out set is checked out at the commit
+# benchmark/corpus.lock names and checked against the lock, its runs' prompts and programs never
+# leave the runner, the log names a held-out task only by its place in the set, and the results
+# give the held-out set only as totals. The artifact holds the public runs and results.json.
+name: Agent benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: Budget in US dollars
+        required: true
+        type: string
+      models:
+        description: Models, separated by commas; one without listed prices as id@input/output/cache-read, in dollars per million tokens
+        type: string
+        default: claude-sonnet-5-5,claude-haiku-5-5
+      languages:
+        description: Languages, separated by commas
+        type: string
+        default: mente,rust,odin
+      milestone:
+        description: The milestone whose tasks run
+        type: string
+        default: M1
+      runs:
+        description: Runs per task, language and model
+        type: string
+        default: "5"
+      tasks:
+        description: Public tasks, all or ids separated by commas
+        type: string
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-benchmark
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: Agent benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      # Whether the secret exists, never the secret itself.
+      HAS_HELD_OUT: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Build mn
+        run: cargo build --locked --release --bin mn
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the benchmark's Rust and Odin
+        id: toolchains
+        run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
+      - name: Find the held-out commit corpus.lock names
+        id: lock
+        if: env.HAS_HELD_OUT == 'true'
+        run: echo "commit=$(awk '$1 == "held-out" { print $3 }' benchmark/corpus.lock)" >> "$GITHUB_OUTPUT"
+      - name: Check out the held-out set
+        if: env.HAS_HELD_OUT == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Menteion/mente-bench-heldout
+          ref: ${{ steps.lock.outputs.commit }}
+          token: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}
+          path: held-out-set
+          persist-credentials: false
+      - name: Check the held-out set against corpus.lock
+        if: env.HAS_HELD_OUT == 'true'
+        # The checker's messages could name held-out tasks, so only its verdict reaches the log.
+        run: node benchmark/check.mjs --held-out held-out-set > /dev/null 2>&1 || { echo "the held-out set does not match corpus.lock"; exit 1; }
+      - name: Run
+        timeout-minutes: 340
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ODIN: ${{ steps.toolchains.outputs.odin }}
+          BUDGET: ${{ inputs.budget }}
+          MODELS: ${{ inputs.models }}
+          LANGUAGES: ${{ inputs.languages }}
+          MILESTONE: ${{ inputs.milestone }}
+          RUNS: ${{ inputs.runs }}
+          TASKS: ${{ inputs.tasks }}
+        run: |
+          held_out=()
+          if [ "$HAS_HELD_OUT" = true ]; then held_out=(--held-out held-out-set); fi
+          node benchmark/harness/bench.ts --budget "$BUDGET" --models "$MODELS" --languages "$LANGUAGES" \
+            --milestone "$MILESTONE" --runs "$RUNS" --tasks "$TASKS" --mn target/release/mn --odin "$ODIN" \
+            "${held_out[@]}" --out bench-out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: agent-benchmark-${{ inputs.milestone }}
+          path: |
+            bench-out
+            !bench-out/held-out
+      - name: Remove the held-out set from the runner
+        if: always()
+        run: rm -rf held-out-set bench-out/held-out
