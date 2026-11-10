@@ -560,6 +560,24 @@ mod tests {
         }
     }
 
+    /// Code written without indentation splits where the whole module's check reads its
+    /// declarations, so a session reports what that check does.
+    #[test]
+    fn test_unindented_code_is_checked_as_the_whole_module_is() {
+        for src in [
+            "module m\n\npub fn h(x: i32) -> i32 {\n  val y = x\ny\n}\n",
+            "module m\n\npub fn h(x: i32) -> i32 {\nvar y: i32 = x\nwhile y > 0 {\ny -= 1\n}\ny\n}\n",
+            "module m\n\npub fn h(x: i32) -> i32 =\nx + 1\n",
+            // A function without its parameter list, split over two lines.
+            "module x\nfn\nm\n",
+        ] {
+            let s = Session::new(src);
+            let whole = check_source(src).err().unwrap_or_default();
+            let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
+            assert_eq!(codes(s.diagnostics()), codes(&whole), "{}", src);
+        }
+    }
+
     #[test]
     fn test_a_module_with_more_than_functions_is_checked_whole() {
         let mut s = Session::new(MODULE);
