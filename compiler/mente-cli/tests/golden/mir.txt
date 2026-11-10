@@ -100,45 +100,21 @@ t1: index-out-of-bounds @15:15 ["index ", " is outside an array of length 16"]
 t2: unreachable @21:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f2: fn enter midpoint(i128, i128) -> u64 {
-block0(v0: i128, v1: i128):
-  v2: i128 = int 0 @0:0
-  v3: bool = ge v0, v2 @0:0
-  v4: i128 = int 18446744073709551615 @0:0
-  v5: bool = le v0, v4 @0:0
-  v6: bool = and v3, v5 @0:0
-  v7: unit = check t0 v6, v0 @3:8
-  v8: u64 = cast v0 @3:8
-  v9: i128 = int 0 @3:8
-  v10: bool = ge v1, v9 @3:8
-  v11: i128 = int 18446744073709551615 @3:8
-  v12: bool = le v1, v11 @3:8
-  v13: bool = and v10, v12 @3:8
-  v14: unit = check t1 v13, v1 @3:8
-  v15: u64 = cast v1 @3:8
-  v16: bool = lt v8, v15 @4:17
-  v17: unit = check t2 v16 @3:8
-  v18: u64 = call f0 v8, v15 @3:8
-  return v18
-t0: narrowing @3:8 ["", " does not fit in `usize`"]
-t1: narrowing @3:8 ["", " does not fit in `usize`"]
-t2: requires @3:8 ["`requires (< lo hi)` is false at this call"]
-t3: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f2: fn enter midpoint(u64, u64) -> u64 {
+block0(v0: u64, v1: u64):
+  v2: bool = lt v0, v1 @4:17
+  v3: unit = check t0 v2 @3:8
+  v4: u64 = call f0 v0, v1 @3:8
+  return v4
+t0: requires @3:8 ["`requires (< lo hi)` is false at this call"]
+t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter search(addr, i128) -> bool {
-block0(v0: addr, v1: i128):
-  v2: i128 = int -2147483648 @0:0
-  v3: bool = ge v1, v2 @0:0
-  v4: i128 = int 2147483647 @0:0
-  v5: bool = le v1, v4 @0:0
-  v6: bool = and v3, v5 @0:0
-  v7: unit = check t0 v6, v1 @8:8
-  v8: i32 = cast v1 @8:8
-  v9: bool = call f1 v0, v8 @8:8
-  return v9
-t0: narrowing @8:8 ["", " does not fit in `i32`"]
-t1: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+f3: fn enter search(addr, i32) -> bool {
+block0(v0: addr, v1: i32):
+  v2: bool = call f1 v0, v1 @8:8
+  return v2
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/ensures_not_proven_at_a_return.mn == (exit 2)
 == conformance/core-calculus/function_as_value.mn == (exit 2)
@@ -461,48 +437,32 @@ t0: narrowing @38:29 ["", " does not fit in `i8`"]
 t1: unreachable @38:29 ["unreachable reached: control left the code the checker allows"]
 }
 
-f6: fn enter sum_to(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @4:8
-  v7: u32 = cast v0 @4:8
-  v8: i64 = int 0 @4:8
-  v9: i64 = int 1000 @4:8
-  v10: i64 = cast v7 @4:8
-  v11: bool = ge v10, v8 @4:8
-  v12: i64 = cast v7 @4:8
-  v13: bool = lt v12, v9 @4:8
-  v14: bool = and v11, v13 @4:8
-  v15: unit = check t1 v14, v7, v8, v9 @4:8
-  v16: i64 = int 0 @5:16
-  v17: i64 = cast v7 @5:16
-  v18: bool = gt v17, v16 @5:16
-  v19: unit = check t2 v18 @4:8
-  v20: u64 = call f0 v7 @4:8
-  return v20
-t0: narrowing @4:8 ["", " does not fit in `u32`"]
-t1: refinement @4:8 ["", " lies outside the refinement `[", "..", "]`"]
-t2: requires @4:8 ["`requires (> n 0)` is false at this call"]
-t3: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+f6: fn enter sum_to(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @0:0
+  v2: i64 = int 1000 @0:0
+  v3: i64 = cast v0 @0:0
+  v4: bool = ge v3, v1 @0:0
+  v5: i64 = cast v0 @0:0
+  v6: bool = lt v5, v2 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v0, v1, v2 @4:8
+  v9: i64 = int 0 @5:16
+  v10: i64 = cast v0 @5:16
+  v11: bool = gt v10, v9 @5:16
+  v12: unit = check t1 v11 @4:8
+  v13: u64 = call f0 v0 @4:8
+  return v13
+t0: refinement @4:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: requires @4:8 ["`requires (> n 0)` is false at this call"]
+t2: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f7: fn enter swap_first(addr, i128) -> bool {
-block0(v0: addr, v1: i128):
-  v2: i128 = int 0 @0:0
-  v3: bool = ge v1, v2 @0:0
-  v4: i128 = int 255 @0:0
-  v5: bool = le v1, v4 @0:0
-  v6: bool = and v3, v5 @0:0
-  v7: unit = check t0 v6, v1 @23:8
-  v8: u8 = cast v1 @23:8
-  v9: bool = call f1 v0, v8 @23:8
-  return v9
-t0: narrowing @23:8 ["", " does not fit in `u8`"]
-t1: unreachable @23:8 ["unreachable reached: control left the code the checker allows"]
+f7: fn enter swap_first(addr, u8) -> bool {
+block0(v0: addr, v1: u8):
+  v2: bool = call f1 v0, v1 @23:8
+  return v2
+t0: unreachable @23:8 ["unreachable reached: control left the code the checker allows"]
 }
 
 f8: fn enter caller() -> bool {
@@ -512,19 +472,11 @@ block0():
 t0: unreachable @29:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f9: fn enter masks(i128) -> u16 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 65535 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @34:8
-  v7: u16 = cast v0 @34:8
-  v8: u16 = call f3 v7 @34:8
-  return v8
-t0: narrowing @34:8 ["", " does not fit in `u16`"]
-t1: unreachable @34:8 ["unreachable reached: control left the code the checker allows"]
+f9: fn enter masks(u16) -> u16 {
+block0(v0: u16):
+  v1: u16 = call f3 v0 @34:8
+  return v1
+t0: unreachable @34:8 ["unreachable reached: control left the code the checker allows"]
 }
 
 f10: fn enter pick(bool) -> i32 {
@@ -566,19 +518,11 @@ t0: narrowing @4:15 ["", " does not fit in `u8`"]
 t1: unreachable @5:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter f(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @3:8
-  v7: u8 = cast v0 @3:8
-  v8: u8 = call f0 v7 @3:8
-  return v8
-t0: narrowing @3:8 ["", " does not fit in `u8`"]
-t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter f(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f0 v0 @3:8
+  return v1
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/refinement_not_proven.mn == (exit 2)
 == conformance/core-calculus/refinement_over_a_var.mn == (exit 2)
@@ -633,45 +577,29 @@ block4():
 t0: unreachable @15:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f2: fn enter next(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @3:8
-  v7: u8 = cast v0 @3:8
-  v8: u8 = call f0 v7 @3:8
-  return v8
-t0: narrowing @3:8 ["", " does not fit in `u8`"]
-t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f2: fn enter next(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f0 v0 @3:8
+  return v1
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter first(addr, i128) -> u8 {
-block0(v0: addr, v1: i128):
-  v2: i128 = int 0 @0:0
-  v3: bool = ge v1, v2 @0:0
-  v4: i128 = int 18446744073709551615 @0:0
-  v5: bool = le v1, v4 @0:0
-  v6: bool = and v3, v5 @0:0
-  v7: unit = check t0 v6, v1 @10:8
-  v8: u64 = cast v1 @10:8
-  v9: i64 = int 0 @10:8
-  v10: i64 = int 8 @10:8
-  v11: i128 = cast v8 @10:8
-  v12: i128 = cast v9 @10:8
-  v13: bool = ge v11, v12 @10:8
-  v14: i128 = cast v8 @10:8
-  v15: i128 = cast v10 @10:8
-  v16: bool = le v14, v15 @10:8
-  v17: bool = and v13, v16 @10:8
-  v18: unit = check t1 v17, v8, v9, v10 @10:8
-  v19: u8 = call f1 v0, v8 @10:8
-  return v19
-t0: narrowing @10:8 ["", " does not fit in `usize`"]
-t1: refinement @10:8 ["", " lies outside the refinement `[", "..=", "]`"]
-t2: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+f3: fn enter first(addr, u64) -> u8 {
+block0(v0: addr, v1: u64):
+  v2: i64 = int 0 @0:0
+  v3: i64 = int 8 @0:0
+  v4: i128 = cast v1 @0:0
+  v5: i128 = cast v2 @0:0
+  v6: bool = ge v4, v5 @0:0
+  v7: i128 = cast v1 @0:0
+  v8: i128 = cast v3 @0:0
+  v9: bool = le v7, v8 @0:0
+  v10: bool = and v6, v9 @0:0
+  v11: unit = check t0 v10, v1, v2, v3 @10:8
+  v12: u8 = call f1 v0, v1 @10:8
+  return v12
+t0: refinement @10:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/remainder_and_division_facts.mn ==
 mente-dump 1 mir
@@ -699,51 +627,27 @@ block1():
 t0: unreachable @5:37 ["unreachable reached: control left the code the checker allows"]
 }
 
-f2: fn enter bucket(i128, i128) -> u32 {
-block0(v0: i128, v1: i128):
-  v2: i128 = int 0 @0:0
-  v3: bool = ge v0, v2 @0:0
-  v4: i128 = int 4294967295 @0:0
-  v5: bool = le v0, v4 @0:0
-  v6: bool = and v3, v5 @0:0
-  v7: unit = check t0 v6, v0 @3:8
-  v8: u32 = cast v0 @3:8
-  v9: i128 = int 0 @3:8
-  v10: bool = ge v1, v9 @3:8
-  v11: i128 = int 4294967295 @3:8
-  v12: bool = le v1, v11 @3:8
-  v13: bool = and v10, v12 @3:8
-  v14: unit = check t1 v13, v1 @3:8
-  v15: u32 = cast v1 @3:8
-  v16: i64 = int 1 @3:8
-  v17: i64 = int 64 @3:8
-  v18: i64 = cast v15 @3:8
-  v19: bool = ge v18, v16 @3:8
-  v20: i64 = cast v15 @3:8
-  v21: bool = lt v20, v17 @3:8
-  v22: bool = and v19, v21 @3:8
-  v23: unit = check t2 v22, v15, v16, v17 @3:8
-  v24: u32 = call f0 v8, v15 @3:8
-  return v24
-t0: narrowing @3:8 ["", " does not fit in `u32`"]
-t1: narrowing @3:8 ["", " does not fit in `u32`"]
-t2: refinement @3:8 ["", " lies outside the refinement `[", "..", "]`"]
-t3: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f2: fn enter bucket(u32, u32) -> u32 {
+block0(v0: u32, v1: u32):
+  v2: i64 = int 1 @0:0
+  v3: i64 = int 64 @0:0
+  v4: i64 = cast v1 @0:0
+  v5: bool = ge v4, v2 @0:0
+  v6: i64 = cast v1 @0:0
+  v7: bool = lt v6, v3 @0:0
+  v8: bool = and v5, v7 @0:0
+  v9: unit = check t0 v8, v1, v2, v3 @3:8
+  v10: u32 = call f0 v0, v1 @3:8
+  return v10
+t0: refinement @3:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter half(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u8 = cast v0 @5:8
-  v8: u8 = call f1 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u8`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f3: fn enter half(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f1 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/requires_not_proven_at_a_call.mn == (exit 2)
 == conformance/core-calculus/shadowing.mn == (exit 2)
@@ -823,65 +727,41 @@ t4: narrowing @13:29 ["", " does not fit in `u8`"]
 t5: unreachable @13:29 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter half(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @4:8
-  v7: u8 = cast v0 @4:8
-  v8: i64 = int 2 @5:16
-  v9: i64 = cast v7 @5:12
-  v10: i64 = int 0 @5:12
-  v11: bool = ne v8, v10 @5:12
-  v12: unit = check t1 v11 @5:12
-  v13: i64 = rem v9, v8 @5:12
-  v14: i64 = int 0 @5:21
-  v15: bool = eq v13, v14 @5:21
-  v16: unit = check t2 v15 @4:8
-  v17: u8 = call f0 v7 @4:8
-  return v17
-t0: narrowing @4:8 ["", " does not fit in `u8`"]
-t1: division-by-zero @5:12 ["division by zero"]
-t2: requires @4:8 ["`requires (== (% x 2) 0)` is false at this call"]
-t3: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+f3: fn enter half(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 2 @5:16
+  v2: i64 = cast v0 @5:12
+  v3: i64 = int 0 @5:12
+  v4: bool = ne v1, v3 @5:12
+  v5: unit = check t0 v4 @5:12
+  v6: i64 = rem v2, v1 @5:12
+  v7: i64 = int 0 @5:21
+  v8: bool = eq v6, v7 @5:21
+  v9: unit = check t1 v8 @4:8
+  v10: u8 = call f0 v0 @4:8
+  return v10
+t0: division-by-zero @5:12 ["division by zero"]
+t1: requires @4:8 ["`requires (== (% x 2) 0)` is false at this call"]
+t2: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f4: fn enter odd(i128) -> bool {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @9:8
-  v7: u8 = cast v0 @9:8
-  v8: i64 = int 0 @10:17
-  v9: i64 = cast v7 @10:17
-  v10: bool = ne v9, v8 @10:17
-  v11: unit = check t1 v10 @9:8
-  v12: bool = call f1 v7 @9:8
-  return v12
-t0: narrowing @9:8 ["", " does not fit in `u8`"]
-t1: requires @9:8 ["`requires (!= x 0)` is false at this call"]
-t2: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+f4: fn enter odd(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 0 @10:17
+  v2: i64 = cast v0 @10:17
+  v3: bool = ne v2, v1 @10:17
+  v4: unit = check t0 v3 @9:8
+  v5: bool = call f1 v0 @9:8
+  return v5
+t0: requires @9:8 ["`requires (!= x 0)` is false at this call"]
+t1: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f5: fn enter twice(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @13:8
-  v7: u8 = cast v0 @13:8
-  v8: u8 = call f2 v7 @13:8
-  return v8
-t0: narrowing @13:8 ["", " does not fit in `u8`"]
-t1: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
+f5: fn enter twice(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f2 v0 @13:8
+  return v1
+t0: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/ghost-contracts-and-totality/decreases_negative_at_a_call.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/decreases_not_smaller.mn == (exit 2)
@@ -1190,76 +1070,36 @@ block5():
 t0: unreachable @48:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f4: fn enter gcd(i128, i128) -> u32 {
-block0(v0: i128, v1: i128):
-  v2: i128 = int 0 @0:0
-  v3: bool = ge v0, v2 @0:0
-  v4: i128 = int 4294967295 @0:0
-  v5: bool = le v0, v4 @0:0
-  v6: bool = and v3, v5 @0:0
-  v7: unit = check t0 v6, v0 @3:8
-  v8: u32 = cast v0 @3:8
-  v9: i128 = int 0 @3:8
-  v10: bool = ge v1, v9 @3:8
-  v11: i128 = int 4294967295 @3:8
-  v12: bool = le v1, v11 @3:8
-  v13: bool = and v10, v12 @3:8
-  v14: unit = check t1 v13, v1 @3:8
-  v15: u32 = cast v1 @3:8
-  v16: u32 = call f0 v8, v15 @3:8
-  return v16
-t0: narrowing @3:8 ["", " does not fit in `u32`"]
-t1: narrowing @3:8 ["", " does not fit in `u32`"]
-t2: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f4: fn enter gcd(u32, u32) -> u32 {
+block0(v0: u32, v1: u32):
+  v2: u32 = call f0 v0, v1 @3:8
+  return v2
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f5: fn enter isqrt(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 18446744073709551615 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @14:8
-  v7: u64 = cast v0 @14:8
-  v8: u64 = call f1 v7 @14:8
-  return v8
-t0: narrowing @14:8 ["", " does not fit in `u64`"]
-t1: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+f5: fn enter isqrt(u64) -> u64 {
+block0(v0: u64):
+  v1: u64 = call f1 v0 @14:8
+  return v1
+t0: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f6: fn enter pairs(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @28:8
-  v7: u8 = cast v0 @28:8
-  v8: u8 = call f2 v7 @28:8
-  return v8
-t0: narrowing @28:8 ["", " does not fit in `u8`"]
-t1: unreachable @28:8 ["unreachable reached: control left the code the checker allows"]
+f6: fn enter pairs(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f2 v0 @28:8
+  return v1
+t0: unreachable @28:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f7: fn enter down(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @42:8
-  v7: u8 = cast v0 @42:8
-  v8: u8 = int 0 @43:13
-  v9: bool = ge v7, v8 @43:13
-  v10: unit = check t1 v9 @43:13
-  v11: u8 = call f3 v7 @42:8
-  return v11
-t0: narrowing @42:8 ["", " does not fit in `u8`"]
-t1: decreases @43:13 ["`decreases n` is negative or did not decrease"]
-t2: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
+f7: fn enter down(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = int 0 @43:13
+  v2: bool = ge v0, v1 @43:13
+  v3: unit = check t0 v2 @43:13
+  v4: u8 = call f3 v0 @42:8
+  return v4
+t0: decreases @43:13 ["`decreases n` is negative or did not decrease"]
+t1: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/ghost-contracts-and-totality/invariant_not_preserved.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
@@ -1335,28 +1175,20 @@ block7():
 t0: unreachable @19:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f2: fn enter count(i128) -> u8 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 255 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @3:8
-  v7: u8 = cast v0 @3:8
-  v8: i64 = int 0 @3:8
-  v9: i64 = int 100 @3:8
-  v10: i64 = cast v7 @3:8
-  v11: bool = ge v10, v8 @3:8
-  v12: i64 = cast v7 @3:8
-  v13: bool = lt v12, v9 @3:8
-  v14: bool = and v11, v13 @3:8
-  v15: unit = check t1 v14, v7, v8, v9 @3:8
-  v16: u8 = call f0 v7 @3:8
-  return v16
-t0: narrowing @3:8 ["", " does not fit in `u8`"]
-t1: refinement @3:8 ["", " lies outside the refinement `[", "..", "]`"]
-t2: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f2: fn enter count(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @0:0
+  v2: i64 = int 100 @0:0
+  v3: i64 = cast v0 @0:0
+  v4: bool = ge v3, v1 @0:0
+  v5: i64 = cast v0 @0:0
+  v6: bool = lt v5, v2 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v0, v1, v2 @3:8
+  v9: u8 = call f0 v0 @3:8
+  return v9
+t0: refinement @3:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
 f3: fn enter first_zero(addr) -> u64 {
@@ -1385,23 +1217,15 @@ block4():
 t0: unreachable @9:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter countdown(i128) -> u32 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @4:8
-  v7: u32 = cast v0 @4:8
-  v8: u32 = int 0 @5:13
-  v9: bool = ge v7, v8 @5:13
-  v10: unit = check t1 v9 @5:13
-  v11: u32 = call f0 v7 @4:8
-  return v11
-t0: narrowing @4:8 ["", " does not fit in `u32`"]
-t1: decreases @5:13 ["`decreases n` is negative or did not decrease"]
-t2: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter countdown(u32) -> u32 {
+block0(v0: u32):
+  v1: u32 = int 0 @5:13
+  v2: bool = ge v0, v1 @5:13
+  v3: unit = check t0 v2 @5:13
+  v4: u32 = call f0 v0 @4:8
+  return v4
+t0: decreases @5:13 ["`decreases n` is negative or did not decrease"]
+t1: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/ghost-contracts-and-totality/total_with_decreases_on_the_loop.mn ==
 mente-dump 1 mir
@@ -1452,19 +1276,11 @@ block4():
 t0: unreachable @9:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter countdown(i128) -> u32 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @4:8
-  v7: u32 = cast v0 @4:8
-  v8: u32 = call f0 v7 @4:8
-  return v8
-t0: narrowing @4:8 ["", " does not fit in `u32`"]
-t1: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter countdown(u32) -> u32 {
+block0(v0: u32):
+  v1: u32 = call f0 v0 @4:8
+  return v1
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/ghost-contracts-and-totality/total_without_a_loop.mn ==
 mente-dump 1 mir
@@ -1476,19 +1292,11 @@ block1():
 t0: unreachable @4:28 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter id(i128) -> u32 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @4:8
-  v7: u32 = cast v0 @4:8
-  v8: u32 = call f0 v7 @4:8
-  return v8
-t0: narrowing @4:8 ["", " does not fit in `u32`"]
-t1: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter id(u32) -> u32 {
+block0(v0: u32):
+  v1: u32 = call f0 v0 @4:8
+  return v1
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/grammar/assignment_to_a_sum.mn == (exit 2)
 == conformance/grammar/binary_digit_out_of_base.mn == (exit 2)
@@ -1522,35 +1330,11 @@ block1():
 t0: unreachable @5:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter mix(i128, i128, i128) -> i32 {
-block0(v0: i128, v1: i128, v2: i128):
-  v3: i128 = int -2147483648 @0:0
-  v4: bool = ge v0, v3 @0:0
-  v5: i128 = int 2147483647 @0:0
-  v6: bool = le v0, v5 @0:0
-  v7: bool = and v4, v6 @0:0
-  v8: unit = check t0 v7, v0 @4:8
-  v9: i32 = cast v0 @4:8
-  v10: i128 = int -2147483648 @4:8
-  v11: bool = ge v1, v10 @4:8
-  v12: i128 = int 2147483647 @4:8
-  v13: bool = le v1, v12 @4:8
-  v14: bool = and v11, v13 @4:8
-  v15: unit = check t1 v14, v1 @4:8
-  v16: i32 = cast v1 @4:8
-  v17: i128 = int -2147483648 @4:8
-  v18: bool = ge v2, v17 @4:8
-  v19: i128 = int 2147483647 @4:8
-  v20: bool = le v2, v19 @4:8
-  v21: bool = and v18, v20 @4:8
-  v22: unit = check t2 v21, v2 @4:8
-  v23: i32 = cast v2 @4:8
-  v24: i32 = call f0 v9, v16, v23 @4:8
-  return v24
-t0: narrowing @4:8 ["", " does not fit in `i32`"]
-t1: narrowing @4:8 ["", " does not fit in `i32`"]
-t2: narrowing @4:8 ["", " does not fit in `i32`"]
-t3: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter mix(i32, i32, i32) -> i32 {
+block0(v0: i32, v1: i32, v2: i32):
+  v3: i32 = call f0 v0, v1, v2 @4:8
+  return v3
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/hardware-contracts/branchless_unrolled_loop.mn == (exit 2)
 == conformance/hardware-contracts/branchless_while_loop.mn == (exit 2)
@@ -1621,19 +1405,11 @@ t0: narrowing @3:32 ["", " does not fit in `i32`"]
 t1: unreachable @3:32 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter square(i128) -> i32 {
-block0(v0: i128):
-  v1: i128 = int -2147483648 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 2147483647 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @3:8
-  v7: i32 = cast v0 @3:8
-  v8: i32 = call f0 v7 @3:8
-  return v8
-t0: narrowing @3:8 ["", " does not fit in `i32`"]
-t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter square(i32) -> i32 {
+block0(v0: i32):
+  v1: i32 = call f0 v0 @3:8
+  return v1
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/surface-syntax/keyword_as_a_module_name.mn == (exit 2)
 == conformance/surface-syntax/let_binding.mn == (exit 2)
@@ -1711,19 +1487,11 @@ block0(v0: addr):
 t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter spellings(bool, bool, i128) -> u8 {
-block0(v0: bool, v1: bool, v2: i128):
-  v3: i128 = int 0 @0:0
-  v4: bool = ge v2, v3 @0:0
-  v5: i128 = int 4294967295 @0:0
-  v6: bool = le v2, v5 @0:0
-  v7: bool = and v4, v6 @0:0
-  v8: unit = check t0 v7, v2 @6:8
-  v9: u32 = cast v2 @6:8
-  v10: u8 = call f1 v0, v1, v9 @6:8
-  return v10
-t0: narrowing @6:8 ["", " does not fit in `u32`"]
-t1: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+f3: fn enter spellings(bool, bool, u32) -> u8 {
+block0(v0: bool, v1: bool, v2: u32):
+  v3: u8 = call f1 v0, v1, v2 @6:8
+  return v3
+t0: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/surface-syntax/minimal_module.mn ==
 mente-dump 1 mir
@@ -1757,34 +1525,18 @@ block1():
 t0: unreachable @6:31 ["unreachable reached: control left the code the checker allows"]
 }
 
-f2: fn enter outer(i128) -> i32 {
-block0(v0: i128):
-  v1: i128 = int -2147483648 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 2147483647 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @3:8
-  v7: i32 = cast v0 @3:8
-  v8: i32 = call f0 v7 @3:8
-  return v8
-t0: narrowing @3:8 ["", " does not fit in `i32`"]
-t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f2: fn enter outer(i32) -> i32 {
+block0(v0: i32):
+  v1: i32 = call f0 v0 @3:8
+  return v1
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter after(i128) -> i32 {
-block0(v0: i128):
-  v1: i128 = int -2147483648 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 2147483647 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @6:8
-  v7: i32 = cast v0 @6:8
-  v8: i32 = call f1 v7 @6:8
-  return v8
-t0: narrowing @6:8 ["", " does not fit in `i32`"]
-t1: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+f3: fn enter after(i32) -> i32 {
+block0(v0: i32):
+  v1: i32 = call f1 v0 @6:8
+  return v1
+t0: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/surface-syntax/number_as_a_name.mn == (exit 2)
 == conformance/surface-syntax/path_separator.mn == (exit 2)
@@ -2158,19 +1910,11 @@ t5: narrowing @43:18 ["", " does not fit in `u64`"]
 t6: unreachable @51:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter bsearch(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @6:8
-  v7: u32 = cast v0 @6:8
-  v8: u64 = call f0 v7 @6:8
-  return v8
-t0: narrowing @6:8 ["", " does not fit in `u32`"]
-t1: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter bsearch(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @6:8
+  return v1
+t0: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/collatz.mn ==
 mente-dump 1 mir
@@ -2318,19 +2062,11 @@ t3: narrowing @26:3 ["", " does not fit in `u64`"]
 t4: unreachable @26:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter collatz(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 18446744073709551615 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u64 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u64`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter collatz(u64) -> u64 {
+block0(v0: u64):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/dot.mn ==
 mente-dump 1 mir
@@ -2584,19 +2320,11 @@ t2: narrowing @23:16 ["", " does not fit in `u64`"]
 t3: unreachable @30:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter dot(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u32 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u32`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter dot(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/isort.mn ==
 mente-dump 1 mir
@@ -2849,19 +2577,11 @@ t4: index-out-of-bounds @26:7 ["index ", " is outside an array of length 256"]
 t5: unreachable @33:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter isort(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u32 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u32`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter isort(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/matmul.mn ==
 mente-dump 1 mir
@@ -3266,19 +2986,11 @@ t4: narrowing @39:16 ["", " does not fit in `u64`"]
 t5: unreachable @46:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter matmul(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u32 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u32`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter matmul(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/popcount.mn ==
 mente-dump 1 mir
@@ -3596,19 +3308,11 @@ t3: narrowing @35:19 ["", " does not fit in `u64`"]
 t4: unreachable @38:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter popcount(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u32 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u32`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter popcount(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/prefix.mn ==
 mente-dump 1 mir
@@ -3851,19 +3555,11 @@ t2: narrowing @21:18 ["", " does not fit in `u32`"]
 t3: unreachable @29:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter prefix(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u32 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u32`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter prefix(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/sieve.mn ==
 mente-dump 1 mir
@@ -4091,19 +3787,11 @@ t4: narrowing @31:18 ["", " does not fit in `u64`"]
 t5: unreachable @38:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter sieve(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u32 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u32`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter sieve(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == perf/kernels/sum.mn ==
 mente-dump 1 mir
@@ -4289,19 +3977,11 @@ t1: narrowing @20:16 ["", " does not fit in `u64`"]
 t2: unreachable @27:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter sum(i128) -> u64 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @5:8
-  v7: u32 = cast v0 @5:8
-  v8: u64 = call f0 v7 @5:8
-  return v8
-t0: narrowing @5:8 ["", " does not fit in `u32`"]
-t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter sum(u32) -> u64 {
+block0(v0: u32):
+  v1: u64 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
 }
 == compiler/mente-cli/tests/debuggers/demo.mn ==
 mente-dump 1 mir
@@ -4331,67 +4011,43 @@ block1():
 t0: unreachable @10:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f2: fn enter square(i128) -> u32 {
-block0(v0: i128):
-  v1: i128 = int 0 @0:0
-  v2: bool = ge v0, v1 @0:0
-  v3: i128 = int 4294967295 @0:0
-  v4: bool = le v0, v3 @0:0
-  v5: bool = and v2, v4 @0:0
-  v6: unit = check t0 v5, v0 @3:4
-  v7: u32 = cast v0 @3:4
-  v8: i64 = int 0 @3:4
-  v9: i64 = int 1000 @3:4
-  v10: i64 = cast v7 @3:4
-  v11: bool = ge v10, v8 @3:4
-  v12: i64 = cast v7 @3:4
-  v13: bool = lt v12, v9 @3:4
-  v14: bool = and v11, v13 @3:4
-  v15: unit = check t1 v14, v7, v8, v9 @3:4
-  v16: u32 = call f0 v7 @3:4
-  return v16
-t0: narrowing @3:4 ["", " does not fit in `u32`"]
-t1: refinement @3:4 ["", " lies outside the refinement `[", "..", "]`"]
-t2: unreachable @3:4 ["unreachable reached: control left the code the checker allows"]
+f2: fn enter square(u32) -> u32 {
+block0(v0: u32):
+  v1: i64 = int 0 @0:0
+  v2: i64 = int 1000 @0:0
+  v3: i64 = cast v0 @0:0
+  v4: bool = ge v3, v1 @0:0
+  v5: i64 = cast v0 @0:0
+  v6: bool = lt v5, v2 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v0, v1, v2 @3:4
+  v9: u32 = call f0 v0 @3:4
+  return v9
+t0: refinement @3:4 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @3:4 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter sum_squares(i128, i128) -> u32 {
-block0(v0: i128, v1: i128):
-  v2: i128 = int 0 @0:0
-  v3: bool = ge v0, v2 @0:0
-  v4: i128 = int 4294967295 @0:0
-  v5: bool = le v0, v4 @0:0
-  v6: bool = and v3, v5 @0:0
-  v7: unit = check t0 v6, v0 @7:8
-  v8: u32 = cast v0 @7:8
-  v9: i128 = int 0 @7:8
-  v10: bool = ge v1, v9 @7:8
-  v11: i128 = int 4294967295 @7:8
-  v12: bool = le v1, v11 @7:8
-  v13: bool = and v10, v12 @7:8
-  v14: unit = check t1 v13, v1 @7:8
-  v15: u32 = cast v1 @7:8
-  v16: i64 = int 0 @7:8
-  v17: i64 = int 1000 @7:8
-  v18: i64 = cast v8 @7:8
-  v19: bool = ge v18, v16 @7:8
-  v20: i64 = cast v8 @7:8
-  v21: bool = lt v20, v17 @7:8
-  v22: bool = and v19, v21 @7:8
-  v23: unit = check t2 v22, v8, v16, v17 @7:8
-  v24: i64 = int 0 @7:8
-  v25: i64 = int 1000 @7:8
-  v26: i64 = cast v15 @7:8
-  v27: bool = ge v26, v24 @7:8
-  v28: i64 = cast v15 @7:8
-  v29: bool = lt v28, v25 @7:8
-  v30: bool = and v27, v29 @7:8
-  v31: unit = check t3 v30, v15, v24, v25 @7:8
-  v32: u32 = call f1 v8, v15 @7:8
-  return v32
-t0: narrowing @7:8 ["", " does not fit in `u32`"]
-t1: narrowing @7:8 ["", " does not fit in `u32`"]
-t2: refinement @7:8 ["", " lies outside the refinement `[", "..", "]`"]
-t3: refinement @7:8 ["", " lies outside the refinement `[", "..", "]`"]
-t4: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+f3: fn enter sum_squares(u32, u32) -> u32 {
+block0(v0: u32, v1: u32):
+  v2: i64 = int 0 @0:0
+  v3: i64 = int 1000 @0:0
+  v4: i64 = cast v0 @0:0
+  v5: bool = ge v4, v2 @0:0
+  v6: i64 = cast v0 @0:0
+  v7: bool = lt v6, v3 @0:0
+  v8: bool = and v5, v7 @0:0
+  v9: unit = check t0 v8, v0, v2, v3 @7:8
+  v10: i64 = int 0 @7:8
+  v11: i64 = int 1000 @7:8
+  v12: i64 = cast v1 @7:8
+  v13: bool = ge v12, v10 @7:8
+  v14: i64 = cast v1 @7:8
+  v15: bool = lt v14, v11 @7:8
+  v16: bool = and v13, v15 @7:8
+  v17: unit = check t1 v16, v1, v10, v11 @7:8
+  v18: u32 = call f1 v0, v1 @7:8
+  return v18
+t0: refinement @7:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: refinement @7:8 ["", " lies outside the refinement `[", "..", "]`"]
+t2: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
 }

@@ -1,7 +1,9 @@
 //! Lowering a checked module into MIR (`spec/mir-and-codegen.md` item 2).
 //!
-//! Each function with a body becomes a MIR function, and each also gets an entry, which checks
-//! arguments from outside the program as a call does and then calls it. The lowering follows
+//! Each function with a body becomes a MIR function, and each also gets an entry, which takes
+//! arguments from outside the program, each already narrowed into its parameter's type by
+//! whoever calls the entry ([`crate::native::refusal`]), checks the rest as a call does, and
+//! then calls it. The lowering follows
 //! the reference interpreter (`compiler/mente-interp`) step for step, so that the MIR
 //! interpreter and native code trap where it does and say what it says:
 //!
@@ -104,9 +106,6 @@ const I64: SemaIntTy = SemaIntTy {
 const USIZE: IntTy = IntTy::new(64, false);
 /// The type a loop keeps its measure in, which is never negative there.
 const MEASURE: IntTy = IntTy::new(128, false);
-/// The type an entry takes an integer argument in, so that a value outside the parameter's type
-/// still reaches the narrowing that rejects it.
-const ENTRY: IntTy = IntTy::new(128, true);
 
 fn int_ty(i: &SemaInt) -> Option<SemaIntTy> {
     match i {
@@ -346,19 +345,7 @@ impl<'a> Lower<'a> {
         let sig = sigs[index]
             .as_ref()
             .ok_or("a function without a signature")?;
-        let (mut params, result) = mir_params(sig);
-        if entry {
-            let first = usize::from(matches!(sig.result, Shape::Array(..)));
-            for (p, (is_mut, shape)) in params[first..].iter_mut().zip(&sig.params) {
-                if let (false, Shape::Int(t)) = (is_mut, shape) {
-                    *p = Ty::Int(if t.bits == 128 && !t.signed {
-                        mir(*t)
-                    } else {
-                        ENTRY
-                    });
-                }
-            }
-        }
+        let (params, result) = mir_params(sig);
         let obligations: &'a [Obligation] = if entry { &[] } else { &s.f.obligations };
         let decl = s.f.syntax.name_span;
         let b = Builder::declared_at(
@@ -541,8 +528,9 @@ impl<'a> Lower<'a> {
             .collect()
     }
 
-    /// The entry: a function taking what the lowered one takes, which checks its arguments as a
-    /// call does, at the function's name, and calls it.
+    /// The entry: a function taking what the lowered one takes, each argument already in its
+    /// parameter's type, which checks the rest as a call does, at the function's name, and calls
+    /// it.
     fn entry(mut self) -> Result<cfg::Function, String> {
         let span = self.s.f.syntax.name_span;
         let sig = self.sig_of(self.s.index)?;
@@ -557,14 +545,7 @@ impl<'a> Lower<'a> {
             let p = params.next().ok_or("too few parameters")?;
             let declared = Some(self.s.f.syntax.params[i].ty);
             args.push(match (is_mut, shape) {
-                (false, Shape::Int(t)) => {
-                    let wide = if t.bits == 128 && !t.signed {
-                        mir(*t)
-                    } else {
-                        ENTRY
-                    };
-                    Arg::Value(V::Int(p, wide), span, shape.clone())
-                }
+                (false, Shape::Int(t)) => Arg::Value(V::Int(p, mir(*t)), span, shape.clone()),
                 (false, Shape::Bool) => Arg::Value(V::Bool(p), span, shape.clone()),
                 (false, _) => Arg::Value(V::Arr(p), span, shape.clone()),
                 (true, shape) => Arg::Place(p, shape.clone(), declared, span),
@@ -2032,7 +2013,7 @@ mod tests {
 
     /// Where Tier 1 proves a narrowing, an index, a divisor, a shift amount or a 128-bit
     /// operation, its check is left out of MIR; where it does not, the check stays, and so does
-    /// every check of an entry, whose arguments come from outside the program.
+    /// every check of an entry, whose arguments come from outside the program, already narrowed.
     #[test]
     fn test_tier1_proofs_leave_bounds_and_overflow_checks_out_of_mir() {
         let src = "module m
@@ -2089,8 +2070,8 @@ pub fn pass2(x: u8) -> u8 = take(x + 1)
         ] {
             assert_eq!(both(name), (kinds(kept), kinds(all)), "{name}");
         }
-        // An entry checks its arguments whatever Tier 1 proves.
-        assert_eq!(checks(&proven, "enter half"), kinds(&["narrowing"]));
+        // An entry takes its arguments already narrowed into their types, by whoever calls it.
+        assert_eq!(checks(&proven, "enter half"), kinds(&[]));
     }
 
     /// Where Tier 1 proves a refinement, a `requires` or `ensures` clause, a loop invariant or
@@ -2164,10 +2145,8 @@ pub fn call_both(x: u8[0..5], y: u8[0..5]) -> u8 = both(x, y)
         ] {
             assert_eq!(both(name), (kinds(kept), kinds(all)), "{name}");
         }
-        // An entry checks its arguments' refinements whatever Tier 1 proves.
-        assert_eq!(
-            checks(&proven, "enter give"),
-            kinds(&["narrowing", refinement])
-        );
+        // An entry checks its arguments' refinements whatever Tier 1 proves; their narrowing
+        // into their types is its caller's.
+        assert_eq!(checks(&proven, "enter give"), kinds(&[refinement]));
     }
 }
