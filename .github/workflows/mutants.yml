@@ -104,13 +104,16 @@ jobs:
           if-no-files-found: ignore
 
   full:
-    name: Full run (shard ${{ matrix.shard }} of 4)
+    # Every mutant of the compiler, some thousands at a minute or so each: sixteen shards keep
+    # each within a runner's six hours.
+    name: Full run (shard ${{ matrix.shard }} of 16)
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     runs-on: ubuntu-24.04
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -147,7 +150,7 @@ jobs:
           status=0
           only=()
           if [ -n "$EXAMINE" ]; then only=(--re "$EXAMINE"); fi
-          cargo mutants "${only[@]}" --shard ${{ matrix.shard }}/4 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
+          cargo mutants "${only[@]}" --shard ${{ matrix.shard }}/16 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
           # missed and 3 when one timed out. A mutant that loops without end fails the test
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
