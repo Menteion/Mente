@@ -31,7 +31,7 @@ use cranelift_module::{DataDescription, DataId, FuncId as ClFunc, Linkage, Modul
 use mente_mir::cfg::{self, ArithOp, BitOp, CmpOp, IntTy, Num, Op, Term};
 use mente_mir::NodeId;
 
-use crate::lower::{Lowered, Shape};
+use crate::lower::{Entry, Lowered, Shape};
 use crate::{CodegenError, ObjectWriter, SourcePos, Target};
 
 /// One call the program makes: an entry of the lowered module, by its index, and its
@@ -91,6 +91,35 @@ struct Runtime {
     print: ClFunc,
     udivmod: ClFunc,
     strings: HashMap<String, DataId>,
+}
+
+/// The trap a call of `entry` from outside the program raises on `args` before anything else,
+/// if an argument does not fit its parameter's type: the reference interpreter narrows every
+/// argument into its parameter's type first, in order and element by element, at the function's
+/// name, and reports the first value that does not fit. The entry's own narrowing cannot report
+/// a value its MIR parameter cannot hold, such as one below `i128`'s range for an `i128`
+/// parameter, or any element of an array, so whoever calls the entry reports it instead.
+pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
+    fn first(shape: &Shape, arg: &Arg) -> Option<(Num, &'static str)> {
+        match (shape, arg) {
+            (Shape::Int(t), Arg::Int(n)) => {
+                (!crate::lower::mir(*t).holds(*n)).then_some((*n, t.name))
+            }
+            (Shape::Array(_, elem), Arg::Array(items)) => items.iter().find_map(|a| first(elem, a)),
+            _ => None,
+        }
+    }
+    entry
+        .params
+        .iter()
+        .zip(args)
+        .find_map(|((_, shape), arg)| first(shape, arg))
+        .map(|(n, t)| {
+            format!(
+                "trap[narrowing] at {}:{}: {} does not fit in `{}`",
+                entry.at.line, entry.at.col, n, t
+            )
+        })
 }
 
 /// Writes an object with every function of `lowered`, the runtime, and a `main` that makes the
@@ -178,7 +207,15 @@ pub fn program(
         Translate::function(writer, &mut rt, &ids, f, &mut ctx, &mut fctx, ptr, prefix)?;
         writer.define_function_as(ids[i], &mut ctx, decl, &f.name)?;
     }
-    define_main(writer, &mut rt, &ids, lowered, calls, &mut fctx, ptr, conv)?;
+    define_main(
+        writer,
+        &mut rt,
+        &ids,
+        (lowered, calls),
+        &mut fctx,
+        (ptr, conv),
+        prefix,
+    )?;
     Ok(())
 }
 
@@ -1150,16 +1187,14 @@ fn checked_result(
 
 /// `main`: sets up `call`'s arguments in memory where they are arrays or `mut`, calls its
 /// entry, and writes the result and what each `mut` argument leaves, as `mn run` does.
-#[allow(clippy::too_many_arguments)]
 fn define_main(
     writer: &mut ObjectWriter,
     rt: &mut Runtime,
     ids: &[ClFunc],
-    lowered: &Lowered,
-    calls: &[Call],
+    (lowered, calls): (&Lowered, &[Call]),
     fctx: &mut FunctionBuilderContext,
-    ptr: Type,
-    conv: cranelift_codegen::isa::CallConv,
+    (ptr, conv): (Type, cranelift_codegen::isa::CallConv),
+    prefix: &str,
 ) -> Result<(), CodegenError> {
     let mut sig = ir::Signature::new(conv);
     sig.params.push(AbiParam::new(types::I32));
@@ -1222,7 +1257,7 @@ fn define_main(
             let is = b.ins().icmp_imm_u(IntCC::Equal, index, k as i64);
             b.ins().brif(is, here, &[], tests, &[]);
             b.switch_to_block(here);
-            make_call(writer, rt, ids, lowered, call, &mut b, ptr)?;
+            make_call(writer, rt, ids, (lowered, call), &mut b, ptr, prefix)?;
         }
         b.switch_to_block(tests);
         let none = b.ins().iconst(types::I32, 2);
@@ -1234,15 +1269,16 @@ fn define_main(
 }
 
 /// The code of one call in `main`: its arguments, the call of its entry, and what `mn run`
-/// writes, then a return of 0.
+/// writes, then a return of 0; or, for an argument that does not fit its parameter's type, the
+/// reference interpreter's trap ([`refusal`]).
 fn make_call(
     writer: &mut ObjectWriter,
     rt: &mut Runtime,
     ids: &[ClFunc],
-    lowered: &Lowered,
-    call: &Call,
+    (lowered, call): (&Lowered, &Call),
     b: &mut FunctionBuilder,
     ptr: Type,
+    prefix: &str,
 ) -> Result<(), CodegenError> {
     let entry = lowered
         .entries
@@ -1251,6 +1287,11 @@ fn make_call(
     let mir = &lowered.module.functions[entry.func.0 as usize];
     {
         let mut e = Emit { b, ptr };
+        if let Some(trap) = refusal(entry, &call.args) {
+            emit_text(writer, rt, &mut e, 2, &format!("{}{}\n", prefix, trap))?;
+            emit_exit(writer, rt, &mut e, 1);
+            return Ok(());
+        }
         let mut params = mir.params.iter();
         let mut flat = Vec::new();
         let wide = returns_wide(mir, ptr).then(|| slot(&mut e, 16));
@@ -1608,5 +1649,40 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         assert_eq!(power_of_two(Some(10)), None);
         assert_eq!(power_of_two(Some(0)), None);
         assert_eq!(power_of_two(None), None);
+    }
+
+    /// A call from outside reports the first argument, in order and element by element, that its
+    /// parameter's type cannot hold, as the reference interpreter's narrowing at the function's
+    /// name does, whether or not the entry's MIR parameter could hold it.
+    #[test]
+    fn test_an_argument_outside_its_type_traps_as_the_reference_interpreter_does() {
+        let source = "module m
+pub fn f(a: i128, xs: [2]u8, mut b: u128) -> i128 {
+  b = 0
+  a + xs[0]
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let entry = lowered.entries.iter().find(|e| e.name == "f").unwrap();
+        let int = |n: i128| Arg::Int(Num::from_i128(n));
+        let args = |a: Arg, xs: [i128; 2], b: Arg| vec![a, Arg::Array(xs.map(int).to_vec()), b];
+        let below_i128 = Arg::Int(Num::new(true, (1u128 << 127) + 1));
+        assert_eq!(refusal(entry, &args(int(1), [2, 3], int(4))), None);
+        assert_eq!(
+            refusal(entry, &args(below_i128.clone(), [2, 3], int(4))).as_deref(),
+            Some("trap[narrowing] at 2:8: -170141183460469231731687303715884105729 does not fit in `i128`")
+        );
+        // The first value that does not fit, though a later one does not either.
+        assert_eq!(
+            refusal(entry, &args(int(1), [300, -1], int(-1))).as_deref(),
+            Some("trap[narrowing] at 2:8: 300 does not fit in `u8`")
+        );
+        assert_eq!(
+            refusal(entry, &args(int(1), [2, 3], int(-1))).as_deref(),
+            Some("trap[narrowing] at 2:8: -1 does not fit in `u128`")
+        );
+        // An argument of another shape is not a narrowing; the caller refuses it otherwise.
+        assert_eq!(refusal(entry, &args(Arg::Bool(true), [2, 3], int(4))), None);
     }
 }

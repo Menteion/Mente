@@ -594,6 +594,49 @@ fn test_mn_build_object_writes_the_object_for_any_target() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// An argument from outside the program that does not fit its parameter's type traps alike on the
+/// reference interpreter, through MIR and as native code, wherever it is: a 128-bit parameter, a
+/// `mut` one or an array's element.
+#[test]
+fn test_an_argument_outside_its_type_traps_alike_on_every_path() {
+    let dir = scratch("outside");
+    fs::write(
+        dir.join("m.mn"),
+        "module m
+pub fn f(a: i128) -> i128 = a
+pub fn g(a: u128) -> u128 = a
+pub fn k(mut a: u8) -> bool {
+  a += 1
+  true
+}
+pub fn arr(xs: [2]u128) -> u128 = xs[0]
+",
+    )
+    .unwrap();
+    for (call, trap) in [
+        (
+            "f(-170141183460469231731687303715884105729)",
+            "m.mn: trap[narrowing] at 2:8: -170141183460469231731687303715884105729 does not fit in `i128`",
+        ),
+        ("g(-1)", "m.mn: trap[narrowing] at 3:8: -1 does not fit in `u128`"),
+        ("k(mut 300)", "m.mn: trap[narrowing] at 4:8: 300 does not fit in `u8`"),
+        ("arr([1, -1])", "m.mn: trap[narrowing] at 8:8: -1 does not fit in `u128`"),
+    ] {
+        for path in [None, Some("--mir"), Some("--native")] {
+            let mut args = vec!["run", "m.mn", "--call", call];
+            args.extend(path);
+            let out = mn(&dir, &args);
+            assert_eq!(out.status.code(), Some(1), "{call} {path:?}");
+            assert_eq!(
+                text(&out.stderr).replace("\r\n", "\n").trim_end(),
+                trap,
+                "{call} {path:?}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `mn check --watch` checks a module item by item and reports what it re-parsed and re-checked;
 /// `--rounds` stops it.
 #[test]

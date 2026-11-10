@@ -36,6 +36,14 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
             args.len()
         ));
     }
+    // An argument that does not fit its parameter's type traps before the entry is called.
+    let native_args = args
+        .iter()
+        .map(|(_, v)| native_arg(v))
+        .collect::<Result<Vec<_>, String>>()?;
+    if let Some(trap) = native::refusal(entry, &native_args) {
+        return Err(trap);
+    }
     let mut memory = Memory::default();
     let mut values = Vec::new();
     let sret = match &entry.result {
@@ -646,7 +654,8 @@ pub fn below(n: i8) -> i8 {
         assert_same(compared, &differences, 90);
     }
 
-    /// An argument from outside the program must have its parameter's shape and fit its types.
+    /// An argument from outside the program must have its parameter's shape; one that does not
+    /// fit its types traps as the reference interpreter's narrowing does.
     #[test]
     fn test_mir_runs_refuse_arguments_of_another_shape() {
         let text = "module m\npub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]\n";
@@ -661,9 +670,10 @@ pub fn below(n: i8) -> i8 {
         assert!(call("get([1, true, 3], 0)")
             .unwrap_err()
             .contains("not an integer"));
-        assert!(call("get([1, 2, 300], 0)")
-            .unwrap_err()
-            .contains("lies outside"));
+        assert_eq!(
+            call("get([1, 2, 300], 0)"),
+            Err("trap[narrowing] at 2:8: 300 does not fit in `u8`".to_string())
+        );
         assert!(call("get([1, 2, 3])")
             .unwrap_err()
             .contains("takes 2 arguments"));
