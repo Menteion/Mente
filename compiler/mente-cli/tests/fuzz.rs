@@ -345,7 +345,7 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 1] = ["lower-array-of-2-to-the-32-elements.mn"];
+const PENDING: [&str; 0] = [];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -398,8 +398,7 @@ fn test_fuzz_regressions_replay_without_a_failure() {
 /// its element's size, and a larger array type or literal is `E0223`: as a parameter, as a
 /// local and as a repeat literal, with no crash in any phase.
 #[test]
-#[ignore = "pending E0223 (PR 92)"]
-fn fuzz_array_past_four_gigabytes_is_e0223() {
+fn test_fuzz_array_past_four_gigabytes_is_e0223() {
     let dir = scratch("e0223");
     let local = dir.join("seeds").join("local.mn");
     fs::write(
