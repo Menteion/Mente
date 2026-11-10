@@ -136,7 +136,7 @@ jobs:
             {
               echo "## $f"
               echo '```text'
-              grep -E '^(seeds|[0-9]+ programs|discarded|[0-9]+ calls|[0-9]+ obligations|[0-9]+ programs with|in [0-9])' "$RUNNER_TEMP/$f.txt" || true
+              grep -E '^(seeds|[0-9]+ programs|discarded|[0-9]+ calls|[0-9]+ obligations|[0-9]+ programs with|unfinished|in [0-9])' "$RUNNER_TEMP/$f.txt" || true
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           done

@@ -393,6 +393,8 @@ struct Report {
     calls: u64,
     traps: u64,
     unfinished: u64,
+    /// The programs with calls left out unfinished, with how many.
+    unfinished_in: BTreeMap<String, u64>,
     proven: u64,
     unproven: u64,
     /// Each program with findings: its name, its text and what was found.
@@ -415,6 +417,9 @@ impl Report {
                 self.calls += o.calls;
                 self.traps += o.traps;
                 self.unfinished += o.unfinished;
+                if o.unfinished > 0 {
+                    self.unfinished_in.insert(name.clone(), o.unfinished);
+                }
                 self.proven += o.proven;
                 self.unproven += o.unproven;
                 if !o.findings.is_empty() {
@@ -466,6 +471,18 @@ impl Report {
             self.unproven,
             self.failures.len()
         ));
+        if !self.unfinished_in.is_empty() {
+            let left: Vec<String> = self
+                .unfinished_in
+                .iter()
+                .map(|(name, n)| format!("{} x{}", name, n))
+                .collect();
+            s.push_str(&format!(
+                "
+unfinished calls left out of: {}",
+                left.join(", ")
+            ));
+        }
         s
     }
 
