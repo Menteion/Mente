@@ -149,9 +149,10 @@ fn test_fuzz_replay_passes_a_clean_module() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 2] = [
+const PENDING: [&str; 3] = [
+    "incremental-function-without-parameters.mn",
     "incremental-module-declared-twice.mn",
-    "lower-todo-as-a-value.mn",
+    "tier1-nested-loops.mn",
 ];
 
 fn regressions() -> PathBuf {
@@ -208,17 +209,27 @@ fn fuzz_incremental_module_declared_twice() {
     replay(&[regressions().join("incremental-module-declared-twice.mn")]);
 }
 
-/// Found by `mn fuzz`, and by the program generator before it: a body whose value is `todo`
-/// checks but does not lower ("a value of no type").
+/// Found by `mn fuzz`: a function without a parameter list (`fn` then a name on the next line)
+/// passes a whole check as a declaration without a body, while `mn check --watch`'s session
+/// reads the name as an item of its own and reports `E0101`.
 #[test]
-#[ignore = "pending a fix in mente-codegen's lowering"]
-fn fuzz_lower_todo_as_a_value() {
-    replay(&[regressions().join("lower-todo-as-a-value.mn")]);
+#[ignore = "pending a fix in the declaration parser or mente-sema's incremental session"]
+fn fuzz_incremental_function_without_parameters() {
+    replay(&[regressions().join("incremental-function-without-parameters.mn")]);
 }
 
-/// Found by `mn fuzz`: deep nesting overflows the stack, in the body parser first. Each way of
-/// nesting the fuzzer makes is written out here rather than as a file, at a depth past any
-/// stack `mn` runs on.
+/// Found by `mn fuzz`: Tier 1's time doubles with each nested loop, so 30 nested `while`s
+/// never finish checking.
+#[test]
+#[ignore = "pending a fix in Tier 1's analysis of nested loops"]
+fn fuzz_tier1_nested_loops() {
+    replay(&[regressions().join("tier1-nested-loops.mn")]);
+}
+
+/// Found by `mn fuzz`: deep nesting overflows the stack: in the body parser, the tree dump, the
+/// checker or the incremental session, whichever recurses deepest first. Each way of nesting
+/// the fuzzer makes is written out here rather than as a file, at a depth past any stack `mn`
+/// runs on.
 #[test]
 #[ignore = "pending a nesting limit in the parser and the phases after it"]
 fn fuzz_deep_nesting() {
@@ -243,6 +254,9 @@ fn fuzz_deep_nesting() {
             "while x > 0 { ".repeat(DEPTH),
             " }".repeat(DEPTH)
         ),
+        // No module line and no closing parenthesis: a release build overflowed in
+        // `mn check --watch`'s session before the body parser.
+        format!("fn p={}", "(".repeat(DEPTH)),
     ];
     let dir = scratch("deep");
     let mut files = Vec::new();

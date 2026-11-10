@@ -2438,7 +2438,7 @@ fn fuzz(exe: &Path, opts: &Options, seeds: &[String]) -> i32 {
 }
 
 /// Runs each file under `paths` through every phase, with a few edits, and prints each
-/// failure.
+/// failure. A file that hangs is not run again with the next edit, which would only hang too.
 fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
     let files = seed_corpus(paths);
     if files.is_empty() {
@@ -2457,6 +2457,7 @@ fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
             };
             match worker.exec(&case) {
                 Ok(outcome) => {
+                    let hung = outcome.failures.iter().any(|f| f.kind == Kind::Hang);
                     for f in outcome.failures {
                         if !seen.contains(&f.key()) {
                             println!(
@@ -2468,6 +2469,9 @@ fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
                             );
                             seen.push(f.key());
                         }
+                    }
+                    if hung {
+                        break;
                     }
                 }
                 Err(e) => {
