@@ -127,13 +127,14 @@ pub fn check(
 /// size native code holds in 32 bits.
 pub const ARRAY_BYTES: u128 = u32::MAX as u128;
 
-/// The bytes a value of `t` takes: an integer its type's, or `i64`'s for literals alone, a
-/// `bool` one, an array its length times its element's.
+/// The most bytes a value of `t` takes: an integer its type's, and one of no one type, which
+/// lowering keeps in the machine type that holds its values, sixteen, the widest; a `bool` one,
+/// an array its length times its element's.
 fn bytes(t: &Ty) -> u128 {
     match t {
         Ty::Int(i) => match i {
             Int::One(t) | Int::Mixed(Some(t)) => u128::from(t.bits / 8),
-            _ => 8,
+            Int::Literal | Int::Mixed(None) => 16,
         },
         Ty::Bool => 1,
         Ty::Array(n, elem) => n.saturating_mul(bytes(elem)),
@@ -1415,6 +1416,15 @@ mod tests {
         );
         // A literal of exactly the most bytes is not too large either.
         assert!(all_codes("pub fn f() -> u8 {\n  _ = [0_u8; 4294967295]\n  0\n}").is_empty());
+        // Literals alone may be kept in sixteen bytes each, `u128`'s, and count so.
+        assert_eq!(
+            all_codes("pub fn f() -> u8 {\n  _ = [18446744073709551616; 268435456]\n  0\n}"),
+            ["E0223"]
+        );
+        assert!(
+            all_codes("pub fn f() -> u8 {\n  _ = [18446744073709551616; 268435455]\n  0\n}")
+                .is_empty()
+        );
         // The innermost type that is too large is reported once, and a literal without a
         // written type is reported itself.
         assert_eq!(
