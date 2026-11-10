@@ -3915,6 +3915,10 @@ mod tests {
         // `s < 100` and prove the result in range.
         let src = "pub fn f() -> u8[0..100] {\n  var i: u8 = 0\n  var s: u8 = 0\n  while s < 100 and i < 10\n    invariant s <= 5\n  {\n    var j: u8 = 0\n    while j < s {\n      j += 1\n    }\n    s = j + 1\n    i += 1\n  }\n  s\n}";
         assert_eq!(codes(src), ["E0506", "E0502"]);
+        // Two loops met in the same state are two loops: the second, which raises `s` past the
+        // invariant, must not reuse the first's exit, which leaves the state as it was.
+        let siblings = "pub fn f() -> u8 {\n  var i: u8 = 0\n  var s: u8 = 0\n  while i < 10\n    invariant s <= 10\n  {\n    while i < 0 {\n    }\n    while s < 50 {\n      s += 1\n    }\n    i += 1\n  }\n  s\n}";
+        assert_eq!(codes(siblings), ["E0506"]);
     }
 
     /// The report of the module's last function.
