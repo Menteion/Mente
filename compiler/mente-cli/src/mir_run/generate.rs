@@ -172,6 +172,13 @@ impl R {
         !self.lo.neg || (self.lo.mag <= HALF && (self.hi.neg || self.hi.mag < HALF))
     }
 
+    fn hull(self, o: R) -> R {
+        R {
+            lo: self.lo.min(o.lo),
+            hi: self.hi.max(o.hi),
+        }
+    }
+
     fn meets(self, o: R) -> bool {
         self.lo <= o.hi && o.lo <= self.hi
     }
@@ -1457,16 +1464,21 @@ impl Gen {
     /// An integer expression whose static range meets `t`'s, since one wholly outside it would
     /// always trap where it lands (`E0508`).
     fn narrowed(&mut self, t: IntT, depth: u32) -> E {
+        self.narrowed_range(t, depth).0
+    }
+
+    /// [`Gen::narrowed`], with the expression's static range.
+    fn narrowed_range(&mut self, t: IntT, depth: u32) -> (E, R) {
         for _ in 0..6 {
             let m = self.mark();
             let g = self.int_expr(Want::Any, depth);
             if g.r.meets(t.range()) && g.k.is_none_or(|v| t.range().holds(v)) {
-                return g.e;
+                return (g.e, g.r);
             }
             self.restore(m);
         }
         let n = self.value_in(t.range());
-        self.literal(n, None)
+        (self.literal(n, None), R::point(n))
     }
 
     fn array(&mut self, n: u32, elem: &Ty, depth: u32) -> E {
@@ -1518,12 +1530,29 @@ impl Gen {
     }
 
     /// A value of type `ty` in a place a full expression stands: sometimes an `if`.
+    ///
+    /// An integer `if` takes the hull of its branches' ranges, which must lie within `u128` or
+    /// within `i128` (`E0222`), so branches whose hull does not are generated again.
     fn full(&mut self, ty: &Ty, depth: u32) -> E {
         if !matches!(ty, Ty::Array(..)) && self.rng.chance(10) {
+            let m = self.mark();
             let c = self.bool_expr(depth + 1);
-            let a = self.value(ty, depth + 1);
-            let b = self.value(ty, depth + 1);
-            return E::If(Box::new(c), Box::new(a), Box::new(b));
+            let (a, b, hull) = match ty {
+                Ty::Int(t) => {
+                    let (a, ra) = self.narrowed_range(*t, depth + 1);
+                    let (b, rb) = self.narrowed_range(*t, depth + 1);
+                    (a, b, ra.hull(rb))
+                }
+                _ => (
+                    self.value(ty, depth + 1),
+                    self.value(ty, depth + 1),
+                    R::point(Num::ZERO),
+                ),
+            };
+            if hull.fits() {
+                return E::If(Box::new(c), Box::new(a), Box::new(b));
+            }
+            self.restore(m);
         }
         self.value(ty, depth)
     }
