@@ -462,8 +462,10 @@ fn define_print(
     writer.define_function(rt.print, &mut ctx, SourcePos { line: 1, column: 1 })
 }
 
-/// `mente_rt_udivmod(a_lo, a_hi, b_lo, b_hi, out)`: unsigned 128-bit division by shifting and
-/// subtracting, one bit a round, storing `q_lo, q_hi, r_lo, r_hi` at `out`; `b` is never zero.
+/// `mente_rt_udivmod(a_lo, a_hi, b_lo, b_hi, out)`: unsigned 128-bit division, storing `q_lo,
+/// q_hi, r_lo, r_hi` at `out`; `b` is never zero. When both fit in 64 bits, one 64-bit division;
+/// when the divisor fits in 32 bits, three, a 32-bit digit of the quotient's low half at a time
+/// after its high half; otherwise shifting and subtracting, one bit a round.
 fn define_udivmod(
     writer: &mut ObjectWriter,
     rt: &Runtime,
@@ -486,6 +488,54 @@ fn define_udivmod(
         let [alo, ahi, blo, bhi, out] = b.block_params(entry)[..] else {
             unreachable!("five parameters")
         };
+        // The stores of a quotient and remainder given as 64-bit halves.
+        let store = |b: &mut FunctionBuilder, halves: [Value; 4]| {
+            for (k, v) in halves.into_iter().enumerate() {
+                let fl = trusted(b);
+                b.ins().store(fl, v, out, 8 * k as i32);
+            }
+            b.ins().return_(&[]);
+        };
+        let z = b.ins().iconst(types::I64, 0);
+        // Both in 64 bits: one division.
+        let narrow = b.create_block();
+        let wide = b.create_block();
+        let both = b.ins().bor(ahi, bhi);
+        let small = b.ins().icmp_imm_u(IntCC::Equal, both, 0);
+        b.ins().brif(small, narrow, &[], wide, &[]);
+        b.switch_to_block(narrow);
+        let q = b.ins().udiv(alo, blo);
+        let r = b.ins().urem(alo, blo);
+        store(&mut b, [q, z, r, z]);
+        // A divisor in 32 bits: the high half, then two 32-bit digits, each step's dividend below
+        // the divisor times 2^32, so that its quotient fits a digit.
+        b.switch_to_block(wide);
+        let digits = b.create_block();
+        let serial = b.create_block();
+        let fits = b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, blo, 0xFFFF_FFFF);
+        let short = b.ins().icmp_imm_u(IntCC::Equal, bhi, 0);
+        let short = b.ins().band(short, fits);
+        b.ins().brif(short, digits, &[], serial, &[]);
+        b.switch_to_block(digits);
+        let qhi = b.ins().udiv(ahi, blo);
+        let r1 = b.ins().urem(ahi, blo);
+        let up = b.ins().ishl_imm_u(r1, 32);
+        let top = b.ins().ushr_imm_u(alo, 32);
+        let x = b.ins().bor(up, top);
+        let q1 = b.ins().udiv(x, blo);
+        let r2 = b.ins().urem(x, blo);
+        let up = b.ins().ishl_imm_u(r2, 32);
+        let bottom = b.ins().band_imm_u(alo, 0xFFFF_FFFF);
+        let y = b.ins().bor(up, bottom);
+        let q0 = b.ins().udiv(y, blo);
+        let r = b.ins().urem(y, blo);
+        let q1 = b.ins().ishl_imm_u(q1, 32);
+        let qlo = b.ins().bor(q1, q0);
+        store(&mut b, [qlo, qhi, r, z]);
+        // Otherwise, a bit a round.
+        b.switch_to_block(serial);
         let a = b.ins().iconcat(alo, ahi);
         let d = b.ins().iconcat(blo, bhi);
         let round = b.create_block();
@@ -523,11 +573,7 @@ fn define_udivmod(
         b.switch_to_block(done);
         let (qlo, qhi) = b.ins().isplit(q3);
         let (rlo, rhi) = b.ins().isplit(r3);
-        for (k, v) in [qlo, qhi, rlo, rhi].into_iter().enumerate() {
-            let fl = trusted(&mut b);
-            b.ins().store(fl, v, out, 8 * k as i32);
-        }
-        b.ins().return_(&[]);
+        store(&mut b, [qlo, qhi, rlo, rhi]);
         b.seal_all_blocks();
         b.finalize(frontend);
     }
@@ -690,7 +736,8 @@ impl Translate {
                     ArithOp::Sub => e.b.ins().isub(args[0], args[1]),
                     ArithOp::Mul => e.b.ins().imul(args[0], args[1]),
                     ArithOp::Div | ArithOp::Rem if t == types::I128 => {
-                        let (q, r) = divide128(writer, rt, e, args[0], args[1], i);
+                        let divisor = constant(f, f.args(v)[1]).map(|n| n.mag);
+                        let (q, r) = divide128(writer, rt, e, (args[0], args[1]), divisor, i);
                         if *op == ArithOp::Div {
                             q
                         } else {
@@ -726,7 +773,8 @@ impl Translate {
                         (neg, mag, beyond)
                     }
                     ArithOp::Div | ArithOp::Rem => {
-                        let (q, r) = divide_mag(writer, rt, e, ma, mb);
+                        let divisor = constant(f, f.args(v)[1]).map(|n| n.mag);
+                        let (q, r) = divide_mag(writer, rt, e, (ma, mb), divisor);
                         let no = e.iconst(types::I8, 0);
                         if *op == ArithOp::Div {
                             (e.b.ins().bxor(sa, sb), q, no)
@@ -981,14 +1029,41 @@ fn mul128(e: &mut Emit, a: Value, b: Value) -> (Value, Value) {
     (e.b.ins().iconcat(low_lo, hi), beyond)
 }
 
-/// Quotient and remainder of two magnitudes, through the runtime.
+/// The value of MIR value `v` when it is a constant: an `int`, or a cast of one into a type
+/// that holds it, which keeps its value.
+fn constant(f: &cfg::Function, v: NodeId) -> Option<Num> {
+    let cfg::Ty::Int(t) = f.ty(v) else {
+        return None;
+    };
+    match f.op(v) {
+        Op::Int(bits) => Some(Num::from_bits(*bits, t)),
+        Op::Cast => constant(f, *f.args(v).first()?).filter(|n| t.holds(*n)),
+        _ => None,
+    }
+}
+
+/// The shift that divides by `divisor`, when it is a power of two.
+fn power_of_two(divisor: Option<u128>) -> Option<u32> {
+    divisor
+        .filter(|d| d.is_power_of_two())
+        .map(u128::trailing_zeros)
+}
+
+/// Quotient and remainder of two magnitudes: by a shift and a mask when the divisor is a
+/// constant power of two, and otherwise through the runtime.
 fn divide_mag(
     writer: &mut ObjectWriter,
     rt: &Runtime,
     e: &mut Emit,
-    a: Value,
-    b: Value,
+    (a, b): (Value, Value),
+    divisor: Option<u128>,
 ) -> (Value, Value) {
+    if let Some(k) = power_of_two(divisor) {
+        let unsigned = IntTy::new(128, false);
+        let low = e.int(types::I128, Num::new(false, (1u128 << k) - 1), unsigned);
+        let q = e.b.ins().ushr_imm_u(a, i64::from(k));
+        return (q, e.b.ins().band(a, low));
+    }
     let (alo, ahi) = e.b.ins().isplit(a);
     let (blo, bhi) = e.b.ins().isplit(b);
     let out = slot(e, 32);
@@ -1006,18 +1081,18 @@ fn divide_mag(
 }
 
 /// Exact 128-bit division: the quotient truncated toward zero and the remainder with the
-/// dividend's sign.
+/// dividend's sign; `divisor` is the divisor's magnitude when it is a constant.
 fn divide128(
     writer: &mut ObjectWriter,
     rt: &Runtime,
     e: &mut Emit,
-    a: Value,
-    b: Value,
+    (a, b): (Value, Value),
+    divisor: Option<u128>,
     i: IntTy,
 ) -> (Value, Value) {
     let (sa, ma) = e.sign_mag(a, i);
     let (sb, mb) = e.sign_mag(b, i);
-    let (q, r) = divide_mag(writer, rt, e, ma, mb);
+    let (q, r) = divide_mag(writer, rt, e, (ma, mb), divisor);
     let sq = e.b.ins().bxor(sa, sb);
     let nq = e.b.ins().ineg(q);
     let nr = e.b.ins().ineg(r);
@@ -1478,5 +1553,44 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         for target in [Target::X86_64Linux, Target::Aarch64Linux] {
             assert_eq!(object_path(&dir.join("prog"), target), dir.join("prog.o"));
         }
+    }
+
+    /// A divisor is a constant when it is an `int`, or a cast of one into a type that holds it;
+    /// anything else, a cast that would change it included, is not.
+    #[test]
+    fn test_a_constant_divisor_is_seen_through_casts_that_keep_its_value() {
+        let (i64t, u128t) = (IntTy::new(64, true), IntTy::new(128, false));
+        let mut b = cfg::Builder::new("f", &[cfg::Ty::Int(u128t)], None);
+        let p = b.params(cfg::BlockId(0))[0];
+        let two = b.int(i64t, Num::from_i128(2));
+        let wide = b.inst(Op::Cast, cfg::Ty::Int(u128t), &[two]);
+        let minus = b.int(i64t, Num::from_i128(-3));
+        let wrapped = b.inst(Op::Cast, cfg::Ty::Int(u128t), &[minus]);
+        let sum = b.inst(
+            Op::Arith {
+                op: ArithOp::Add,
+                trap: None,
+            },
+            cfg::Ty::Int(u128t),
+            &[p, wide],
+        );
+        let f = b.finish();
+        assert_eq!(constant(&f, two), Some(Num::from_i128(2)));
+        assert_eq!(constant(&f, wide), Some(Num::from_i128(2)));
+        assert_eq!(constant(&f, minus), Some(Num::from_i128(-3)));
+        assert_eq!(constant(&f, wrapped), None);
+        assert_eq!(constant(&f, p), None);
+        assert_eq!(constant(&f, sum), None);
+    }
+
+    #[test]
+    fn test_a_power_of_two_divisor_divides_by_a_shift() {
+        assert_eq!(power_of_two(Some(1)), Some(0));
+        assert_eq!(power_of_two(Some(2)), Some(1));
+        assert_eq!(power_of_two(Some(8)), Some(3));
+        assert_eq!(power_of_two(Some(1 << 127)), Some(127));
+        assert_eq!(power_of_two(Some(10)), None);
+        assert_eq!(power_of_two(Some(0)), None);
+        assert_eq!(power_of_two(None), None);
     }
 }
