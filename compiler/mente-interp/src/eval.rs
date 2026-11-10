@@ -43,6 +43,18 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
     }
 }
 
+/// Whether `v` has the shape of a value of type `ty`: an integer, a `bool`, or an array of its
+/// length whose elements have its element's shape. Its range is not checked here.
+fn shaped(v: &Value, ty: &Ty) -> bool {
+    match (v, ty) {
+        (Value::Int(_), Ty::Int(_)) | (Value::Bool(_), Ty::Bool) => true,
+        (Value::Array(items), Ty::Array(n, elem)) => {
+            items.len() as u128 == *n && items.iter().all(|i| shaped(i, elem))
+        }
+        _ => false,
+    }
+}
+
 /// One call: its function and the values of its bindings.
 struct Frame<'m> {
     index: usize,
@@ -92,6 +104,18 @@ impl<'m> Machine<'m> {
                 f.syntax.params.len(),
                 args.len()
             )));
+        }
+        // An argument must have its parameter's shape: an integer, a `bool`, or an array of the
+        // parameter's length whose elements have its element's shape. One that does not is no
+        // call of this function, so it is refused before anything runs, on every path alike.
+        let tree = &f.syntax.tree;
+        for (p, v) in f.syntax.params.iter().zip(&args) {
+            if !shaped(v, &Ty::of(tree, p.ty)) {
+                return Err(Stop::BadArguments(format!(
+                    "`{}` does not have its parameter's shape",
+                    v
+                )));
+            }
         }
         let spans = vec![f.syntax.name_span; args.len()];
         self.call(index, args, &spans, f.syntax.name_span, None)

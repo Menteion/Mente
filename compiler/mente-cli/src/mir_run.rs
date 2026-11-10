@@ -36,6 +36,9 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
             args.len()
         ));
     }
+    if let Some(why) = misshapen(entry, &args) {
+        return Err(why);
+    }
     // An argument that does not fit its parameter's type traps before the entry is called.
     let native_args = args
         .iter()
@@ -106,17 +109,25 @@ pub fn native(
     dir: &std::path::Path,
     name: &str,
 ) -> Result<Vec<Printed>, String> {
-    let defined = |f: &String| lowered.entries.iter().any(|e| &e.name == f);
-    let built: Vec<CallArgs> = calls.iter().filter(|(f, _)| defined(f)).cloned().collect();
+    // A call of no function, or with an argument of another shape, is refused, not built.
+    let refused = |(f, args): &CallArgs| match lowered.entries.iter().find(|e| &e.name == f) {
+        None => Some(format!("no function `{}` with a body to run", f)),
+        Some(entry) => misshapen(entry, args),
+    };
+    let built: Vec<CallArgs> = calls
+        .iter()
+        .filter(|c| refused(c).is_none())
+        .cloned()
+        .collect();
     let exe = dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
     if !built.is_empty() {
         build(lowered, &built, &dir.join(format!("{}.mn", name)), "", &exe)?;
     }
     let mut printed = Vec::new();
     let mut k = 0;
-    for (f, _) in calls {
-        if !defined(f) {
-            printed.push(Err(format!("no function `{}` with a body to run", f)));
+    for call in calls {
+        if let Some(why) = refused(call) {
+            printed.push(Err(why));
             continue;
         }
         let out = std::process::Command::new(&exe)
@@ -182,6 +193,9 @@ fn native_calls(lowered: &Lowered, calls: &[CallArgs]) -> Result<Vec<native::Cal
             .iter()
             .position(|e| &e.name == f)
             .ok_or_else(|| format!("no function `{}` with a body to run", f))?;
+        if let Some(why) = misshapen(&lowered.entries[entry], args) {
+            return Err(why);
+        }
         let args = args
             .iter()
             .map(|(_, v)| native_arg(v))
@@ -239,6 +253,26 @@ fn scalar(value: &Value) -> Result<Val, String> {
         Value::Bool(b) => Ok(Val::Bool(*b)),
         v => num(v).map(Val::Int),
     }
+}
+
+/// The refusal of a call from outside the program whose argument does not have its parameter's
+/// shape, in the reference interpreter's words: such a call is no call of the function.
+fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
+    fn shaped(v: &Value, shape: &Shape) -> bool {
+        match (v, shape) {
+            (Value::Int(_), Shape::Int(_)) | (Value::Bool(_), Shape::Bool) => true,
+            (Value::Array(items), Shape::Array(n, elem)) => {
+                items.len() == *n as usize && items.iter().all(|i| shaped(i, elem))
+            }
+            _ => false,
+        }
+    }
+    entry
+        .params
+        .iter()
+        .zip(args)
+        .find(|((_, shape), (_, v))| !shaped(v, shape))
+        .map(|(_, (_, v))| format!("`{}` does not have its parameter's shape", v))
 }
 
 /// Writes `value` of `shape` at `at`; an integer outside its type is refused.
@@ -666,10 +700,18 @@ pub fn below(n: i8) -> i8 {
             run_lowered(&lowered, &f, args)
         };
         assert_eq!(call("get([1, 2, 3], 1)"), Ok(vec!["2".to_string()]));
-        assert!(call("get([1, 2], 0)").unwrap_err().contains("shape"));
-        assert!(call("get([1, true, 3], 0)")
-            .unwrap_err()
-            .contains("not an integer"));
+        assert_eq!(
+            call("get([1, 2], 0)"),
+            Err("`[1, 2]` does not have its parameter's shape".to_string())
+        );
+        assert_eq!(
+            call("get([1, true, 3], 0)"),
+            Err("`[1, true, 3]` does not have its parameter's shape".to_string())
+        );
+        assert_eq!(
+            call("get([1, 2, 3], true)"),
+            Err("`true` does not have its parameter's shape".to_string())
+        );
         assert_eq!(
             call("get([1, 2, 300], 0)"),
             Err("trap[narrowing] at 2:8: 300 does not fit in `u8`".to_string())

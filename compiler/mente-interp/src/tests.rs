@@ -742,3 +742,24 @@ fn test_function_measures_are_lexicographic() {
     let negative = "pub fn r(a: i8, b: i8) -> i8\n  decreases a\n  decreases b\n= 0";
     assert_eq!(kind(negative, "r(1, -1)"), "decreases");
 }
+
+#[test]
+fn test_an_argument_of_another_shape_is_refused_before_anything_runs() {
+    let src = "pub fn h(xs: [2]u8) -> u8 = xs[0]\npub fn b(x: bool) -> bool = x";
+    for (call, value) in [
+        ("h([1])", "[1]"),
+        ("h([1, 2, 3])", "[1, 2, 3]"),
+        ("h([true, 2])", "[true, 2]"),
+        ("h(5)", "5"),
+        ("b(1)", "1"),
+    ] {
+        assert_eq!(
+            run(src, call),
+            format!("`{}` does not have its parameter's shape", value),
+            "{}",
+            call
+        );
+    }
+    assert_eq!(run(src, "h([1, 2])"), "1");
+    assert_eq!(run(src, "b(true)"), "true");
+}
