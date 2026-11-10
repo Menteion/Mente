@@ -153,9 +153,7 @@ fn test_fuzz_runs_a_seed_through_every_phase_thoroughly() {
     let dir = scratch("thorough");
     fs::write(
         dir.join("seeds").join("clean.mn"),
-        "module m
-pub fn f(x: u8) -> u16 = x + 1
-",
+        "module m\npub fn f(x: u8) -> u16 = x + 1\n",
     )
     .unwrap();
     let out = dir.join("out");
@@ -201,13 +199,145 @@ pub fn f(x: u8) -> u16 = x + 1
             summary
         );
     }
-    assert!(
-        summary.contains(
-            "failures: 0
-"
-        ),
+    assert!(summary.contains("failures: 0\n"), "{}", summary);
+    assert!(summary.contains("worker starts: 1\n"), "{}", summary);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `--replay` prints each failure of a file once, over all of its edits, and counts the files
+/// with one; a file that hangs is not run again with the next edit.
+#[test]
+fn test_fuzz_replay_reports_each_failure_once() {
+    let dir = scratch("replay-once");
+    let seeds = dir.join("seeds");
+    fs::write(seeds.join("clean.mn"), "module m\npub fn f() -> u8 = 7\n").unwrap();
+    fs::write(seeds.join("marked.mn"), "module m\n// fuzz-plant\n").unwrap();
+    let run = mn(
+        &["fuzz", "--replay", seeds.to_str().unwrap()],
+        Some("panic"),
+    );
+    let printed = text(&run.stdout);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "{}{}",
+        printed,
+        text(&run.stderr)
+    );
+    assert_eq!(
+        printed.matches("panic in planted").count(),
+        1,
         "{}",
-        summary
+        printed
+    );
+    assert!(
+        printed.contains("marked.mn: panic in planted: a planted panic [at "),
+        "{}",
+        printed
+    );
+    assert!(
+        printed.contains("2 file(s), 1 with a failure"),
+        "{}",
+        printed
+    );
+    let _ = fs::remove_dir_all(&dir);
+
+    // Each hang costs the phase budget and a grace: once, not once for each of four edits.
+    let dir = scratch("replay-hang");
+    let file = dir.join("seeds").join("hang.mn");
+    fs::write(&file, "fuzz-plant").unwrap();
+    let start = std::time::Instant::now();
+    let run = mn(
+        &[
+            "fuzz",
+            "--phase-seconds",
+            "1",
+            "--replay",
+            file.to_str().unwrap(),
+        ],
+        Some("hang"),
+    );
+    let took = start.elapsed();
+    let printed = text(&run.stdout);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "{}{}",
+        printed,
+        text(&run.stderr)
+    );
+    assert_eq!(printed.matches("hang in planted").count(), 1, "{}", printed);
+    assert!(
+        took < std::time::Duration::from_secs(12),
+        "replay took {:?}",
+        took
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Jobs share the runs and the seeds, a campaign without runs goes on for its seconds, and a
+/// corpus without seeds is a usage error.
+#[test]
+fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
+    let dir = scratch("jobs");
+    let seeds = dir.join("seeds");
+    fs::write(seeds.join("a.mn"), "module a\npub fn f() -> u8 = 7\n").unwrap();
+    fs::write(seeds.join("b.mn"), "module b\npub fn g() -> u8 = 8\n").unwrap();
+    let out = dir.join("out");
+    let fuzz = |extra: &[&str]| {
+        let mut args = vec![
+            "fuzz",
+            "--corpus",
+            seeds.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        let run = mn(&args, None);
+        let summary = fs::read_to_string(out.join("summary.txt")).unwrap_or_default();
+        (run, summary)
+    };
+    let (run, summary) = fuzz(&["--jobs", "2", "--runs", "2"]);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "{}{}",
+        text(&run.stdout),
+        text(&run.stderr)
+    );
+    assert!(summary.contains("runs: 2\n"), "{}", summary);
+    assert!(summary.contains("worker starts: 2\n"), "{}", summary);
+    assert!(summary.contains("  lex: 2,"), "{}", summary);
+    // A campaign of one second may find a failure, but it runs, and it ends.
+    let (run, summary) = fuzz(&["--seconds", "1"]);
+    assert!(
+        matches!(run.status.code(), Some(0 | 1)),
+        "{}{}",
+        text(&run.stdout),
+        text(&run.stderr)
+    );
+    let runs: u64 = summary
+        .lines()
+        .find_map(|l| l.strip_prefix("runs: "))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(runs >= 2, "{}", summary);
+    let run = mn(
+        &["fuzz", "--corpus", dir.join("missing").to_str().unwrap()],
+        None,
+    );
+    assert_eq!(run.status.code(), Some(2));
+    assert!(
+        text(&run.stderr).contains("no seed files"),
+        "{}",
+        text(&run.stderr)
+    );
+    let run = mn(&["fuzz", "--bogus"], None);
+    assert_eq!(run.status.code(), Some(2));
+    assert!(
+        text(&run.stderr).contains("Usage: mn fuzz"),
+        "{}",
+        text(&run.stderr)
     );
     let _ = fs::remove_dir_all(&dir);
 }

@@ -1637,7 +1637,7 @@ impl Worker {
                 "fuzz".into(),
                 "--worker".into(),
                 "--phase-seconds".into(),
-                phases.budget.as_secs().max(1).to_string(),
+                phases.budget.as_secs().to_string(),
                 "--stack-kib".into(),
                 (phases.stack >> 10).to_string(),
             ],
@@ -1678,12 +1678,10 @@ impl Worker {
                     if n == 0 {
                         break;
                     }
+                    // A worker keeps its panics quiet, and the fuzzer clears this before each
+                    // case, so it holds little more than a crash's last words.
                     if let Ok(mut t) = keep.lock() {
                         t.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        if t.len() > 16 << 10 {
-                            let cut = floor(t.as_str(), t.len() - (8 << 10));
-                            t.replace_range(..cut, "");
-                        }
                     }
                 }
             });
@@ -2104,6 +2102,24 @@ pub struct Tally {
     pub reached: BTreeMap<String, (u64, Duration)>,
 }
 
+impl Tally {
+    /// Adds another job's tally to this one.
+    pub fn add(&mut self, other: Tally) {
+        self.runs += other.runs;
+        for (phase, (runs, time)) in other.reached {
+            let entry = self.reached.entry(phase).or_default();
+            entry.0 += runs;
+            entry.1 += time;
+        }
+    }
+}
+
+/// Whether a run's input joins the corpus: a mutant, past the seeds, that reached the lowering
+/// without a failure, and so starts later mutants deep in the compiler.
+fn joins_corpus(outcome: &Outcome, run: u64, seeds: usize) -> bool {
+    outcome.failures.is_empty() && outcome.reached("lower") && run >= seeds as u64
+}
+
 /// The failures found so far, by key; `None` while one is being minimized.
 pub type Known = Mutex<BTreeMap<String, Option<Found>>>;
 
@@ -2130,7 +2146,7 @@ pub fn campaign(
             entry.0 += 1;
             entry.1 += outcome.times.get(k).copied().unwrap_or_default();
         }
-        if outcome.failures.is_empty() && outcome.reached("lower") && run >= corpus.len() as u64 {
+        if joins_corpus(&outcome, run, corpus.len()) {
             generator.keep(case.text.clone());
         }
         for failure in outcome.failures {
@@ -2245,18 +2261,34 @@ pub fn seed_corpus(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
 
 const USAGE: &str = "Usage: mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] [--phase-seconds N] [--stack-kib N]\n       mn fuzz --replay <file.mn | dir>...";
 
-/// `mn fuzz`: returns the exit status, 1 when a failure was found, 2 on a usage error.
-pub fn main(args: &[String]) -> i32 {
-    let mut seed = 0u64;
-    let mut runs = None;
-    let mut seconds = None;
-    let mut jobs = 1usize;
-    let mut corpus = Vec::new();
-    let mut out = PathBuf::from("fuzz-out");
-    let mut phases = Phases::default();
-    let mut replay = Vec::new();
-    let mut is_worker = false;
-    let mut replaying = false;
+/// What a command line of `mn fuzz` asks for.
+#[derive(Clone, Debug)]
+pub struct Request {
+    pub opts: Options,
+    /// The seed corpus's paths; the repository's own when empty.
+    pub corpus: Vec<PathBuf>,
+    /// Whether this process is a worker, which runs the phases for another.
+    pub worker: bool,
+    /// The files to replay, when `--replay` asks for that instead of fuzzing.
+    pub replay: Option<Vec<PathBuf>>,
+}
+
+/// Reads a command line of `mn fuzz`, or says what is wrong with it.
+pub fn parse_args(args: &[String]) -> Result<Request, String> {
+    let mut request = Request {
+        opts: Options {
+            seed: 0,
+            runs: None,
+            seconds: 60,
+            jobs: 1,
+            out: PathBuf::from("fuzz-out"),
+            phases: Phases::default(),
+            shallow: false,
+        },
+        corpus: Vec::new(),
+        worker: false,
+        replay: None,
+    };
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         let mut number = |what: &str| -> Result<u64, String> {
@@ -2264,47 +2296,44 @@ pub fn main(args: &[String]) -> i32 {
                 .and_then(|n| n.parse::<u64>().ok())
                 .ok_or_else(|| format!("error: `{}` takes a number", what))
         };
-        let parsed = match a.as_str() {
-            "--seed" => number(a).map(|n| seed = n),
-            "--runs" => number(a).map(|n| runs = Some(n)),
-            "--seconds" => number(a).map(|n| seconds = Some(n)),
-            "--jobs" => number(a).map(|n| jobs = (n as usize).max(1)),
-            "--phase-seconds" => number(a).map(|n| phases.budget = Duration::from_secs(n.max(1))),
-            "--stack-kib" => number(a).map(|n| phases.stack = (n as usize).max(64) << 10),
+        let opts = &mut request.opts;
+        match a.as_str() {
+            "--seed" => opts.seed = number(a)?,
+            "--runs" => opts.runs = Some(number(a)?),
+            "--seconds" => opts.seconds = number(a)?,
+            "--jobs" => opts.jobs = (number(a)? as usize).max(1),
+            "--phase-seconds" => opts.phases.budget = Duration::from_secs(number(a)?.max(1)),
+            "--stack-kib" => opts.phases.stack = (number(a)? as usize).max(64) << 10,
             "--corpus" => match rest.next() {
-                Some(p) => {
-                    corpus.push(PathBuf::from(p));
-                    Ok(())
-                }
-                None => Err("error: `--corpus` takes a path".to_string()),
+                Some(p) => request.corpus.push(PathBuf::from(p)),
+                None => return Err("error: `--corpus` takes a path".to_string()),
             },
             "--out" => match rest.next() {
-                Some(p) => {
-                    out = PathBuf::from(p);
-                    Ok(())
-                }
-                None => Err("error: `--out` takes a directory".to_string()),
+                Some(p) => opts.out = PathBuf::from(p),
+                None => return Err("error: `--out` takes a directory".to_string()),
             },
-            "--worker" => {
-                is_worker = true;
-                Ok(())
-            }
-            "--replay" => {
-                replaying = true;
-                Ok(())
-            }
-            other if replaying && !other.starts_with('-') => {
-                replay.push(PathBuf::from(other));
-                Ok(())
-            }
-            other => Err(format!("error: `mn fuzz` does not know `{}`", other)),
-        };
-        if let Err(e) = parsed {
+            "--worker" => request.worker = true,
+            "--replay" => request.replay = Some(Vec::new()),
+            other => match request.replay.as_mut() {
+                Some(files) if !other.starts_with('-') => files.push(PathBuf::from(other)),
+                _ => return Err(format!("error: `mn fuzz` does not know `{}`", other)),
+            },
+        }
+    }
+    Ok(request)
+}
+
+/// `mn fuzz`: returns the exit status, 1 when a failure was found, 2 on a usage error.
+pub fn main(args: &[String]) -> i32 {
+    let request = match parse_args(args) {
+        Ok(r) => r,
+        Err(e) => {
             eprintln!("{}\n{}", e, USAGE);
             return 2;
         }
-    }
-    if is_worker {
+    };
+    let mut phases = request.opts.phases;
+    if request.worker {
         phases.plant = plant_from_env();
         return worker(phases);
     }
@@ -2315,13 +2344,13 @@ pub fn main(args: &[String]) -> i32 {
             return 2;
         }
     };
-    if replaying {
-        return replay_files(&exe, &phases, &replay);
+    if let Some(files) = &request.replay {
+        return replay_files(&exe, &phases, files);
     }
-    let corpus_paths = if corpus.is_empty() {
+    let corpus_paths = if request.corpus.is_empty() {
         SEED_DIRS.iter().map(PathBuf::from).collect()
     } else {
-        corpus
+        request.corpus
     };
     let seeds: Vec<String> = seed_corpus(&corpus_paths)
         .into_iter()
@@ -2333,16 +2362,7 @@ pub fn main(args: &[String]) -> i32 {
         );
         return 2;
     }
-    let opts = Options {
-        seed,
-        runs,
-        seconds: seconds.unwrap_or(60),
-        jobs,
-        out,
-        phases,
-        shallow: false,
-    };
-    fuzz(&exe, &opts, &seeds)
+    fuzz(&exe, &request.opts, &seeds)
 }
 
 fn fuzz(exe: &Path, opts: &Options, seeds: &[String]) -> i32 {
@@ -2383,12 +2403,7 @@ fn fuzz(exe: &Path, opts: &Options, seeds: &[String]) -> i32 {
     for r in results {
         match r {
             Ok((t, w)) => {
-                total.runs += t.runs;
-                for (p, (n, time)) in t.reached {
-                    let entry = total.reached.entry(p).or_default();
-                    entry.0 += n;
-                    entry.1 += time;
-                }
+                total.add(t);
                 restarts += w;
             }
             Err(e) => {
@@ -2397,36 +2412,41 @@ fn fuzz(exe: &Path, opts: &Options, seeds: &[String]) -> i32 {
             }
         }
     }
-    let took = start.elapsed().as_secs_f64();
     let found: Vec<Found> = known
         .into_inner()
         .map(|k| k.into_values().flatten().collect())
         .unwrap_or_default();
-    let mut summary = format!(
+    let summary = summary(&total, start.elapsed().as_secs_f64(), restarts, &found);
+    print!("{}", summary);
+    if std::fs::create_dir_all(&opts.out).is_ok() {
+        let _ = std::fs::write(opts.out.join("summary.txt"), &summary);
+    }
+    i32::from(!found.is_empty())
+}
+
+/// What a campaign did, as `mn fuzz` prints it and writes it to `summary.txt`.
+fn summary(total: &Tally, seconds: f64, restarts: usize, found: &[Found]) -> String {
+    let mut out = format!(
         "runs: {}\nseconds: {:.0}\nruns per second: {:.1}\nworker starts: {}\nfailures: {}\n",
         total.runs,
-        took,
-        total.runs as f64 / took.max(0.001),
+        seconds,
+        total.runs as f64 / seconds.max(0.001),
         restarts,
         found.len()
     );
-    summary.push_str("phases reached (runs, seconds spent):\n");
+    out.push_str("phases reached (runs, seconds spent):\n");
     for (p, (n, time)) in &total.reached {
-        summary.push_str(&format!("  {}: {}, {:.1}\n", p, n, time.as_secs_f64()));
+        out.push_str(&format!("  {}: {}, {:.1}\n", p, n, time.as_secs_f64()));
     }
-    for f in &found {
-        summary.push_str(&format!(
+    for f in found {
+        out.push_str(&format!(
             "failure {}: {} ({} bytes)\n",
             slug(&f.failure),
             f.failure.key(),
             f.minimized.len()
         ));
     }
-    print!("{}", summary);
-    if std::fs::create_dir_all(&opts.out).is_ok() {
-        let _ = std::fs::write(opts.out.join("summary.txt"), &summary);
-    }
-    i32::from(!found.is_empty())
+    out
 }
 
 /// Runs each file under `paths` through every phase, with a few edits, and prints each
@@ -2685,6 +2705,11 @@ mod tests {
             "{}",
             about
         );
+        assert_eq!(
+            std::fs::read_to_string(out.join(format!("{}.orig.mn", name))).unwrap(),
+            f.original
+        );
+        assert_ne!(f.original, f.minimized);
         let _ = std::fs::remove_dir_all(&out);
     }
 
@@ -3089,5 +3114,181 @@ mod tests {
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "f");
         assert_eq!(functions[0].params.len(), 2);
+    }
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(String::from).collect()
+    }
+
+    /// The command line: its defaults, each flag, the floors of the numbers, and each mistake.
+    #[test]
+    fn test_command_line_is_read_flag_by_flag() {
+        let r = parse_args(&[]).unwrap();
+        assert_eq!(
+            (r.opts.seed, r.opts.runs, r.opts.seconds, r.opts.jobs),
+            (0, None, 60, 1)
+        );
+        assert_eq!(r.opts.out, PathBuf::from("fuzz-out"));
+        assert_eq!(r.opts.phases.budget, Duration::from_secs(PHASE_SECONDS));
+        assert_eq!(r.opts.phases.stack, STACK_BYTES);
+        assert!(r.corpus.is_empty() && !r.worker && r.replay.is_none() && !r.opts.shallow);
+        let r = parse_args(&args(
+            "--seed 7 --runs 5 --seconds 9 --jobs 3 --phase-seconds 2 --stack-kib 128 --corpus a --corpus b --out o",
+        ))
+        .unwrap();
+        assert_eq!(
+            (r.opts.seed, r.opts.runs, r.opts.seconds, r.opts.jobs),
+            (7, Some(5), 9, 3)
+        );
+        assert_eq!(r.opts.phases.budget, Duration::from_secs(2));
+        assert_eq!(r.opts.phases.stack, 128 << 10);
+        assert_eq!(r.corpus, vec![PathBuf::from("a"), PathBuf::from("b")]);
+        assert_eq!(r.opts.out, PathBuf::from("o"));
+        let r = parse_args(&args("--jobs 0 --phase-seconds 0 --stack-kib 1")).unwrap();
+        assert_eq!(r.opts.jobs, 1);
+        assert_eq!(r.opts.phases.budget, Duration::from_secs(1));
+        assert_eq!(r.opts.phases.stack, 64 << 10);
+        assert!(
+            parse_args(&args("--worker --phase-seconds 3"))
+                .unwrap()
+                .worker
+        );
+        assert_eq!(
+            parse_args(&args("--replay x.mn dir")).unwrap().replay,
+            Some(vec![PathBuf::from("x.mn"), PathBuf::from("dir")])
+        );
+        for (line, error) in [
+            ("--seed", "error: `--seed` takes a number"),
+            ("--runs many", "error: `--runs` takes a number"),
+            ("--corpus", "error: `--corpus` takes a path"),
+            ("--out", "error: `--out` takes a directory"),
+            ("--bogus", "error: `mn fuzz` does not know `--bogus`"),
+            ("x.mn", "error: `mn fuzz` does not know `x.mn`"),
+            (
+                "--replay x.mn --bogus",
+                "error: `mn fuzz` does not know `--bogus`",
+            ),
+        ] {
+            assert_eq!(parse_args(&args(line)).unwrap_err(), error, "{}", line);
+        }
+    }
+
+    /// Two jobs' tallies add up phase by phase, and the summary says what they did.
+    #[test]
+    fn test_tallies_add_up_into_the_summary() {
+        let tally = |runs, reached: &[(&str, u64, u64)]| Tally {
+            runs,
+            reached: reached
+                .iter()
+                .map(|(p, n, ms)| (p.to_string(), (*n, Duration::from_millis(*ms))))
+                .collect(),
+        };
+        let mut total = tally(3, &[("lex", 3, 1200), ("check", 2, 300)]);
+        total.add(tally(4, &[("lex", 4, 100), ("lower", 1, 60)]));
+        assert_eq!(total.runs, 7);
+        assert_eq!(
+            total.reached.get("lex"),
+            Some(&(7, Duration::from_millis(1300)))
+        );
+        assert_eq!(
+            total.reached.get("check"),
+            Some(&(2, Duration::from_millis(300)))
+        );
+        assert_eq!(
+            total.reached.get("lower"),
+            Some(&(1, Duration::from_millis(60)))
+        );
+        let found = Found {
+            failure: Failure {
+                phase: "parse".into(),
+                kind: Kind::Hang,
+                message: "took 12000 ms".into(),
+            },
+            minimized: "fn f(".into(),
+            original: "module m\nfn f(".into(),
+            job: 0,
+            run: 9,
+            edit: 1,
+        };
+        let name = slug(&found.failure);
+        assert_eq!(
+            summary(&total, 2.0, 3, std::slice::from_ref(&found)),
+            format!(
+                "runs: 7\nseconds: 2\nruns per second: 3.5\nworker starts: 3\nfailures: 1\n\
+                 phases reached (runs, seconds spent):\n  check: 2, 0.3\n  lex: 7, 1.3\n  lower: 1, 0.1\n\
+                 failure {}: hang in parse (5 bytes)\n",
+                name
+            )
+        );
+        assert!(summary(&Tally::default(), 0.0, 0, &[]).contains("runs per second: 0.0\n"));
+    }
+
+    /// The seed corpus: every `.mn` file under the paths, in order, that is UTF-8.
+    #[test]
+    fn test_seed_corpus_reads_mn_files_in_order() {
+        let dir = std::env::temp_dir().join(format!("mente-fuzz-seeds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("b.mn"), "module b\n").unwrap();
+        std::fs::write(dir.join("a.mn"), "module a\n").unwrap();
+        std::fs::write(dir.join("sub").join("c.mn"), "module c\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "module t\n").unwrap();
+        std::fs::write(dir.join("d.mn"), [0xFF, 0xFE]).unwrap();
+        let read: Vec<String> = seed_corpus(&[dir.clone(), dir.join("a.mn")])
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(
+            read,
+            vec!["module a\n", "module b\n", "module c\n", "module a\n"]
+        );
+        assert!(seed_corpus(&[dir.join("missing")]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A message loses what varies between inputs that meet one bug: the functions a lowering
+    /// error names, numbers, and names in backticks.
+    #[test]
+    fn test_normalize_keeps_what_names_the_bug() {
+        assert_eq!(
+            normalize("entry of g: fn f: v12 at `x` 3, `y` 45"),
+            "v# at `_` #, `_` #"
+        );
+        assert_eq!(normalize("fn f: a value of no type"), "a value of no type");
+        assert_eq!(
+            normalize("fn longer_name: a value of no type"),
+            "a value of no type"
+        );
+        assert_eq!(normalize("fn without a colon"), "fn without a colon");
+        assert_eq!(normalize("v1 v22"), "v# v#");
+        assert_eq!(normalize("`unclosed 7"), "`_`");
+    }
+
+    /// A campaign without a number of runs goes on until its deadline, and no further.
+    #[test]
+    fn test_a_campaign_without_runs_stops_at_its_deadline() {
+        let opts = Options {
+            seed: 3,
+            runs: None,
+            seconds: 0,
+            jobs: 1,
+            out: std::env::temp_dir().join(format!("mente-fuzz-deadline-{}", std::process::id())),
+            phases: phases(None),
+            shallow: true,
+        };
+        let known: Known = Mutex::new(BTreeMap::new());
+        let mut exec = InProcess(opts.phases);
+        let corpus = vec![SEED.to_string()];
+        let past = campaign(0, &opts, &corpus, &mut exec, &known, Instant::now()).unwrap();
+        assert_eq!(past.runs, 0);
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(300);
+        let tally = campaign(0, &opts, &corpus, &mut exec, &known, deadline).unwrap();
+        assert!(tally.runs >= 1);
+        assert!(tally
+            .reached
+            .get("lex")
+            .is_some_and(|(n, _)| *n == tally.runs));
+        let _ = std::fs::remove_dir_all(&opts.out);
     }
 }

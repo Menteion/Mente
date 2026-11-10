@@ -9,3 +9,20 @@ test_workspace = true
 # Spikes are experiments outside the compiler crates: tested, never cited as evidence, and not
 # mutation-tested (docs/design-brief.md, "Spikes before the milestone that needs them").
 exclude_globs = ["spikes/**"]
+
+# The fuzzer (compiler/mente-cli/src/fuzz.rs) is mutation-tested except for two groups of its
+# functions, each named exactly below; its oracle (failure keys, the minimizer, the worker's
+# protocol) is not excluded and is tested.
+exclude_re = [
+  # The input generator's random choices: which mutation, where, how deep, which inputs join
+  # the corpus. Any variant still yields inputs, so no test that does not restate the code can
+  # tell a mutant from the original.
+  '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: .* in (mutate|apply|boundary|replace|token_spans|bytes|non_ascii|spelling|tokens|edge_literal|literals|lines|items|splice|nest|deep_function|nesting|edit_text|joins_corpus|Generator::next_case|Generator::keep)$',
+  '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: replace (mutate|apply|boundary|replace|token_spans|bytes|non_ascii|spelling|tokens|edge_literal|literals|lines|items|splice|nest|deep_function|nesting|edit_text|joins_corpus|Generator::next_case|Generator::keep)( -> .+)? with .+$',
+  # The phase driver's calls whose work shows only when the compiler fails: rendering the
+  # diagnostics, the incremental comparison, the two interpreters' runs and the report of what
+  # they find. On a correct compiler a phase's work is visible only when it crashes, so no
+  # test can tell a mutant from the original.
+  '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: .* in (render|incremental|interpret|run_mir|last_panic|Run(<.+>)?::report)$',
+  '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: replace (render|incremental|interpret|run_mir|last_panic|Run(<.+>)?::report)( -> .+)? with .+$',
+]
