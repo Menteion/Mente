@@ -25,4 +25,8 @@ exclude_re = [
   # test can tell a mutant from the original.
   '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: .* in (render|incremental|interpret|run_mir|last_panic|Run(<.+>)?::report)$',
   '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: replace (render|incremental|interpret|run_mir|last_panic|Run(<.+>)?::report)( -> .+)? with .+$',
+  # Stopping a worker when the fuzzer lets go of it. An idle worker ends anyway once its
+  # standard input closes; this matters only for a worker still busy when a job panics in the
+  # middle of a case, which no test can arrange without a race.
+  '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: replace <impl Drop for Worker>::drop with \(\)$',
 ]
