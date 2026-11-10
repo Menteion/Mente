@@ -3,9 +3,19 @@
 
 [profile.mutants]
 # A mutant that makes a test loop without end is caught when nextest stops the test, which then
-# fails, instead of costing cargo-mutants' timeout for the whole run. The slowest test takes
-# well under this in a debug build on GitHub's runners; the baseline step prints each test's
-# time.
-slow-timeout = { period = "30s", terminate-after = 2 }
+# fails, instead of costing cargo-mutants' timeout for the whole run. Every test but those named
+# below takes at most about 20 s in a debug build on GitHub's runners; the baseline step lists
+# the slowest in the job's summary.
+slow-timeout = { period = "15s", terminate-after = 2 }
 # The first failing test catches the mutant: the rest need not run.
 fail-fast = true
+
+# The tests that run a whole corpus: every module of the repository item by item, the
+# conformance suite on three paths, and every agent program on two. Each takes 35 to 55 s.
+[[profile.mutants.overrides]]
+filter = """
+test(test_a_session_reports_what_the_whole_module_check_does)
+| test(test_three_paths_agree_on_the_conformance_suite)
+| test(test_mir_runs_every_agent_program_as_the_reference_interpreter_does)
+"""
+slow-timeout = { period = "60s", terminate-after = 3 }
