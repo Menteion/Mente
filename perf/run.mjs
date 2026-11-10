@@ -21,24 +21,25 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /// Each kernel, and the work count its function takes: repetitions, or for `collatz` the limit.
-/// Chosen so that each language's run lasts long enough to time, a tenth of a second or more.
+/// Chosen so that the fastest language's run lasts about a tenth of a second or more, except
+/// `bsearch`, whose count keeps Mente's run within the workflow's time (perf/README.md).
 export const KERNELS = [
-  { name: "sum", n: 200000 },
+  { name: "sum", n: 300000 },
   { name: "dot", n: 200000 },
   { name: "prefix", n: 150000 },
   { name: "matmul", n: 15000 },
   { name: "sieve", n: 600 },
-  { name: "bsearch", n: 3000 },
-  { name: "popcount", n: 25000 },
+  { name: "bsearch", n: 400 },
+  { name: "popcount", n: 35000 },
   { name: "isort", n: 25000 },
-  { name: "collatz", n: 1000000 },
+  { name: "collatz", n: 1200000 },
 ];
 
 /// The regression gate: a median wall time of the change's Mente code more than TIME_TOLERANCE
 /// above the base's, or a median instruction count more than INSTRUCTION_TOLERANCE above it,
-/// fails. perf/README.md gives the reasons for both figures.
-export const TIME_TOLERANCE = 0.1;
-export const INSTRUCTION_TOLERANCE = 0.02;
+/// fails. perf/README.md gives the measurements behind both figures.
+export const TIME_TOLERANCE = 0.05;
+export const INSTRUCTION_TOLERANCE = 0.01;
 
 /// The events asked of `perf stat`. `duration_time` is the wall time of the measured process
 /// alone, without perf's own start-up; the others are reported when the platform counts them.
