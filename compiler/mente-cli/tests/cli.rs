@@ -805,3 +805,48 @@ fn test_mn_view_checks_lists_the_run_time_checks_tier1_leaves() {
     assert!(text(&usage.stderr).contains("Usage: mn view --checks"));
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// What the program generator found the paths disagreeing on, each now alike on the reference
+/// interpreter, through MIR and as native code: an array literal's elements narrowed into its
+/// element type, a negation of an `i128` checked at the operator, and `i128`'s smallest literal.
+#[test]
+fn test_generated_disagreements_now_run_alike_on_every_path() {
+    let dir = scratch("generated");
+    fs::write(
+        dir.join("g.mn"),
+        "module m
+pub fn arr(a: u64) -> [2]i8 = [a, 0 - a]
+pub fn neg(a: i128) -> i8 = -a
+pub fn low() -> i128 = -170141183460469231731687303715884105728
+pub fn rep(a: i16) -> [2]u8 = [a - 1; 2]
+",
+    )
+    .unwrap();
+    for (call, status, printed) in [
+        ("arr(1)", 1, "g.mn: trap[narrowing] at 2:31: -1 does not fit in `u64`"),
+        ("arr(0)", 0, "[0, 0]"),
+        (
+            "neg(-170141183460469231731687303715884105728)",
+            1,
+            "g.mn: trap[narrowing] at 3:29: 170141183460469231731687303715884105728 does not fit in `i128`",
+        ),
+        ("neg(5)", 0, "-5"),
+        ("low()", 0, "-170141183460469231731687303715884105728"),
+        ("rep(0)", 1, "g.mn: trap[narrowing] at 5:31: -1 does not fit in `u8`"),
+        ("rep(3)", 0, "[2, 2]"),
+    ] {
+        for path in [None, Some("--mir"), Some("--native")] {
+            let mut args = vec!["run", "g.mn", "--call", call];
+            args.extend(path);
+            let out = mn(&dir, &args);
+            assert_eq!(out.status.code(), Some(status), "{call} {path:?}");
+            let shown = if status == 0 { &out.stdout } else { &out.stderr };
+            assert_eq!(
+                text(shown).replace("\r\n", "\n").trim_end(),
+                printed,
+                "{call} {path:?}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
