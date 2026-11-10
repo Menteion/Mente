@@ -345,7 +345,7 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 0] = [];
+const PENDING: [&str; 1] = ["incremental-malformed-return-type.mn"];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -403,22 +403,11 @@ fn test_fuzz_array_past_four_gigabytes_is_e0223() {
     let local = dir.join("seeds").join("local.mn");
     fs::write(
         &local,
-        "module m
-pub fn f() -> u8 {
-  val a: [4294967296]u8 = [0; 4294967296]
-  a[0]
-}
-",
+        "module m\npub fn f() -> u8 {\n  val a: [4294967296]u8 = [0; 4294967296]\n  a[0]\n}\n",
     )
     .unwrap();
     let wide = dir.join("seeds").join("wide.mn");
-    fs::write(
-        &wide,
-        "module m
-pub fn f(a: [1073741824]i64) -> i64 = 0
-",
-    )
-    .unwrap();
+    fs::write(&wide, "module m\npub fn f(a: [1073741824]i64) -> i64 = 0\n").unwrap();
     let files = [
         regressions().join("lower-array-of-2-to-the-32-elements.mn"),
         local,
@@ -443,6 +432,14 @@ pub fn f(a: [1073741824]i64) -> i64 = 0
         );
     }
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// Found by `mn fuzz`: a malformed return type passes a whole check and swallows what follows,
+/// here a lone `fn`, which `mn check --watch`'s session reads as an item of its own (`E0101`).
+#[test]
+#[ignore = "pending a fix in the declaration parser"]
+fn fuzz_incremental_malformed_return_type() {
+    replay(&[regressions().join("incremental-malformed-return-type.mn")]);
 }
 
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,

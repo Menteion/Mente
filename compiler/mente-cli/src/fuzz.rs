@@ -1927,12 +1927,37 @@ fn worker(phases: Phases) -> i32 {
 // Minimizing
 // -------------------------------------------------------------------------------------------
 
-/// The smallest text the minimizer finds that `fails` still holds for: delta debugging over
-/// lines, then tokens, then characters.
-pub fn minimize(input: &str, fails: &mut dyn FnMut(&str) -> bool) -> String {
+/// Inputs longer than this lose their second half while the failure holds, before delta
+/// debugging, which would build a candidate of nearly their length for each step.
+const LARGE_INPUT: usize = 64 << 10;
+
+/// The most lines, tokens or characters one pass of delta debugging works on; a pass with more
+/// is skipped.
+const MAX_UNITS: usize = 50_000;
+
+/// The smallest text the minimizer finds that `fails` still holds for: a large input halved
+/// first, then delta debugging over lines, tokens and characters. `fails` answers `None` once
+/// the budget is spent, and minimizing stops there with the smallest text so far.
+pub fn minimize(input: &str, fails: &mut dyn FnMut(&str) -> Option<bool>) -> String {
     let mut current = input.to_string();
+    while current.len() > LARGE_INPUT {
+        let half = floor(&current, current.len() / 2);
+        match fails(&current[..half]) {
+            Some(true) => current.truncate(half),
+            Some(false) => break,
+            None => return current,
+        }
+    }
     for split in [split_lines, split_tokens, split_chars] {
-        current = ddmin(split(&current), fails).concat();
+        let units = split(&current);
+        if units.len() > MAX_UNITS {
+            continue;
+        }
+        let (kept, finished) = ddmin(units, fails);
+        current = kept.concat();
+        if !finished {
+            break;
+        }
     }
     current
 }
@@ -1969,8 +1994,12 @@ fn split_chars(text: &str) -> Vec<String> {
     text.chars().map(String::from).collect()
 }
 
-/// Zeller's delta debugging, removing ever smaller chunks while the failure holds.
-fn ddmin(mut units: Vec<String>, fails: &mut dyn FnMut(&str) -> bool) -> Vec<String> {
+/// Zeller's delta debugging, removing ever smaller chunks while the failure holds; with
+/// whether it finished, rather than stopping when the budget was spent.
+fn ddmin(
+    mut units: Vec<String>,
+    fails: &mut dyn FnMut(&str) -> Option<bool>,
+) -> (Vec<String>, bool) {
     let mut n = 2;
     while units.len() >= 2 {
         let chunk = units.len().div_ceil(n);
@@ -1983,13 +2012,16 @@ fn ddmin(mut units: Vec<String>, fails: &mut dyn FnMut(&str) -> bool) -> Vec<Str
                 .chain(&units[end..])
                 .cloned()
                 .collect();
-            if fails(&candidate.concat()) {
-                units = candidate;
-                n = (n - 1).max(2);
-                reduced = true;
-                break;
+            match fails(&candidate.concat()) {
+                Some(true) => {
+                    units = candidate;
+                    n = (n - 1).max(2);
+                    reduced = true;
+                    break;
+                }
+                Some(false) => start = end,
+                None => return (units, false),
             }
-            start = end;
         }
         if !reduced {
             if n >= units.len() {
@@ -1998,7 +2030,7 @@ fn ddmin(mut units: Vec<String>, fails: &mut dyn FnMut(&str) -> bool) -> Vec<Str
             n = (n * 2).min(units.len());
         }
     }
-    units
+    (units, true)
 }
 
 /// What minimizing one failure may spend: runs of the compiler, and time.
@@ -2027,15 +2059,17 @@ fn shrink(exec: &mut dyn Executor, case: &Case, key: &str, budget: Budget) -> St
         tries += 1;
         // Past the budget: more runs than it allows, or more time than it has left.
         if tries > budget.tries || budget.time.checked_sub(start.elapsed()).is_none() {
-            return false;
+            return None;
         }
         let candidate = Case {
             text: text.to_string(),
             ..case.clone()
         };
-        exec.exec(&candidate)
-            .map(|o| o.failures.iter().any(|f| f.key() == key))
-            .unwrap_or(false)
+        Some(
+            exec.exec(&candidate)
+                .map(|o| o.failures.iter().any(|f| f.key() == key))
+                .unwrap_or(false),
+        )
     })
 }
 
@@ -2656,7 +2690,7 @@ mod tests {
         let mut calls = 0;
         let mut fails = |t: &str| {
             calls += 1;
-            t.contains("bad") && t.contains("(((")
+            Some(t.contains("bad") && t.contains("((("))
         };
         let small = minimize(&input, &mut fails);
         assert!(
@@ -2667,7 +2701,7 @@ mod tests {
         assert_eq!(small, "bad(((");
         assert!(calls < 2000, "{} calls", calls);
         // A failure that needs the whole input keeps the whole input.
-        let all = minimize("abc", &mut |t| t == "abc");
+        let all = minimize("abc", &mut |t| Some(t == "abc"));
         assert_eq!(all, "abc");
     }
 
@@ -3474,5 +3508,38 @@ mod tests {
             "{}",
             failures[0].message
         );
+    }
+
+    /// A large input loses its second half while the failure holds, one run a halving, before
+    /// delta debugging; and minimizing stops where it is the moment the budget is spent, however
+    /// large the input.
+    #[test]
+    fn test_minimizing_halves_large_inputs_and_stops_on_a_spent_budget() {
+        let input = format!("{}x{}", "(".repeat(300), "(".repeat(1 << 20));
+        let mut calls = 0;
+        let small = minimize(&input, &mut |t| {
+            calls += 1;
+            Some(t.contains(&"(".repeat(300)))
+        });
+        assert_eq!(small, "(".repeat(300));
+        assert!(calls < 2000, "{} calls", calls);
+        let mut calls = 0;
+        let start = Instant::now();
+        let kept = minimize(&input, &mut |_| {
+            calls += 1;
+            (calls <= 3).then_some(true)
+        });
+        assert_eq!(calls, 4);
+        assert_eq!(kept.len(), input.len() / 8);
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let mut calls = 0;
+        // Two runs shrink the lines to the one that matters; the third, in the next pass, finds
+        // the budget spent, and no later pass runs.
+        let lines = format!("{}keep\n", "drop\n".repeat(3));
+        let kept = minimize(&lines, &mut |t| {
+            calls += 1;
+            (calls <= 2).then_some(t.contains("keep"))
+        });
+        assert_eq!((calls, kept.as_str()), (3, "keep\n"));
     }
 }
