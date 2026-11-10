@@ -64,6 +64,8 @@ This file is the normative grammar of the language `core-calculus.md` defines fo
    ```
    - A function header may also carry what later milestones use, which today's declaration parser already reads: type parameters (`<T>`), an error type (`-> T ! E`), a `from` clause, a `with` clause, and the parameter modes `own` and `in`. In a function with a body, each is reported as a construct of a later milestone (`E0109`).
    - A function without a body is a declaration, which the declaration checks of its own spec file read, such as the `from` check of `regions-and-pools.md`; the body parser reads only functions with a body ([`example-bodies`](../docs/design-review.md#example-bodies)).
+   - `Implemented`: the declaration parser finds where a return type ends by its brackets, so they must close in order, in a declaration as in a function with a body. A `]` or `>` that closes nothing, and a `[` or `<` never closed, make the return type malformed (`E0116`); the scan would otherwise run past the body, or past the items after it.
+     <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_a_return_types_brackets_must_close_in_order" min="1" reason="A return type whose bracket closes nothing or is never closed is E0116, and well-formed ones still parse" -->
 5. `Implemented` **Types**:
    <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_types_m1_lacks_and_malformed_ones_are_reported" min="1" reason="A type M1 lacks or a malformed one is reported, and a later milestone's type names its milestone" -->
    ```ebnf

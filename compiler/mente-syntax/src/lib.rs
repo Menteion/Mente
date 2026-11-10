@@ -1743,7 +1743,7 @@ impl<'a> Parser<'a> {
         let mut error_ty = None;
         if *self.peek() == TokenKind::Arrow {
             self.next();
-            let (ret, err) = self.parse_return_and_error_sig();
+            let (ret, err) = self.parse_return_and_error_sig(&name)?;
             return_ty = Some(ret);
             error_ty = err;
         }
@@ -1868,15 +1868,31 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_return_and_error_sig(&mut self) -> (String, Option<String>) {
+    /// The return type of `name`, and its error type after a `!`, as text. Its brackets and
+    /// type-argument lists must close in order (`E0116`): a closer that closes nothing would
+    /// otherwise take the scan past the body, and an opener never closed would take it past the
+    /// items after it.
+    fn parse_return_and_error_sig(
+        &mut self,
+        name: &str,
+    ) -> Result<(String, Option<String>), Diagnostic> {
         let start = self.span().start;
         let mut end = start;
         let mut bang_pos = None;
-        let mut angle_depth = 0i32;
-        let mut bracket_depth = 0i32;
+        // The `[` and `<` open where the scan is, innermost last.
+        let mut open: Vec<(&str, Span)> = Vec::new();
+        let malformed = |span: Span, what: String| {
+            Diagnostic::error(
+                "E0116",
+                span,
+                format!("the return type of `{}` is malformed: {}", name, what),
+            )
+        };
 
         while *self.peek() != TokenKind::Eof {
             match self.peek() {
+                // A type argument may hold a function type, or a named argument such as
+                // `Ring<CAP = 64>`: only outside every bracket do these end the type.
                 TokenKind::With
                 | TokenKind::Requires
                 | TokenKind::Ensures
@@ -1886,39 +1902,56 @@ impl<'a> Parser<'a> {
                 | TokenKind::Pub
                 | TokenKind::Fn
                 | TokenKind::At
-                    if angle_depth == 0 && bracket_depth == 0 =>
+                    if open.is_empty() =>
                 {
                     break;
                 }
-                TokenKind::Ident(w) if w == "from" && angle_depth == 0 && bracket_depth == 0 => {
-                    break
-                }
+                TokenKind::Ident(w) if w == "from" && open.is_empty() => break,
                 _ => {
                     let tok = self.next();
-                    match tok.kind {
-                        TokenKind::Lt => angle_depth += 1,
-                        TokenKind::Gt => angle_depth -= 1,
-                        // `List<List<u8>>` closes two type-argument lists with one `>>` token.
-                        TokenKind::Shr => angle_depth -= 2,
-                        TokenKind::LBracket => bracket_depth += 1,
-                        TokenKind::RBracket => bracket_depth -= 1,
-                        TokenKind::Bang if angle_depth == 0 && bracket_depth == 0 => {
-                            bang_pos = Some((tok.span.start, tok.span.end));
+                    // `List<List<u8>>` closes two type-argument lists with one `>>` token.
+                    let closes: &[&str] = match tok.kind {
+                        TokenKind::Lt => {
+                            open.push(("<", tok.span));
+                            &[]
                         }
-                        _ => {}
+                        TokenKind::LBracket => {
+                            open.push(("[", tok.span));
+                            &[]
+                        }
+                        TokenKind::Gt => &["<"],
+                        TokenKind::Shr => &["<", "<"],
+                        TokenKind::RBracket => &["["],
+                        TokenKind::Bang if open.is_empty() => {
+                            bang_pos = Some((tok.span.start, tok.span.end));
+                            &[]
+                        }
+                        _ => &[],
+                    };
+                    for opener in closes {
+                        if open.pop().map(|(o, _)| o) != Some(*opener) {
+                            let text = &self.src[tok.span.start..tok.span.end];
+                            return Err(malformed(
+                                tok.span,
+                                format!("`{}` closes no `{}`", text, opener),
+                            ));
+                        }
                     }
                     end = tok.span.end;
                 }
             }
         }
+        if let Some((opener, span)) = open.pop() {
+            return Err(malformed(span, format!("`{}` is never closed", opener)));
+        }
 
-        if let Some((bs, be)) = bang_pos {
+        Ok(if let Some((bs, be)) = bang_pos {
             let ret = self.src[start..bs].trim().to_string();
             let err = self.src[be..end].trim().to_string();
             (ret, Some(err))
         } else {
             (self.src[start..end].trim().to_string(), None)
-        }
+        })
     }
 
     /// A contract clause: to the end of its line, and on past a newline where `spec/grammar.md`,
@@ -2759,6 +2792,46 @@ pub fn after(y: i32) -> i32 = y
             Some("List<fn(u8) -> u8 ! ParseError>")
         );
         assert_eq!(inner_only.error_ty, None);
+    }
+
+    /// A return type's brackets and type-argument lists close in order, or the header is
+    /// malformed (`E0116`): a closer that closes nothing took the scan past the body, which
+    /// left the function a declaration no one checked, and an opener never closed took it past
+    /// the items after it.
+    #[test]
+    fn test_a_return_types_brackets_must_close_in_order() {
+        for (header, at, what) in [
+            ("pub fn f() -> ] = 0", 14, "`]` closes no `[`"),
+            ("pub fn f() -> 20]i32 = 0", 16, "`]` closes no `[`"),
+            ("pub fn f() -> u8> = 0", 16, "`>` closes no `<`"),
+            ("pub fn f() -> List<u8>> = 0", 21, "`>>` closes no `<`"),
+            ("pub fn f() -> [4>u8 = 0", 16, "`>` closes no `<`"),
+            ("pub fn f() -> [4 = 0", 14, "`[` is never closed"),
+            (
+                "pub fn f() -> List<u8\npub fn g() -> u8 = 0",
+                18,
+                "`<` is never closed",
+            ),
+            ("pub fn f() -> ]", 14, "`]` closes no `[`"),
+        ] {
+            let d = parse_module(&format!("module m\n{}\n", header)).unwrap_err();
+            assert_eq!(d.code, "E0116", "{}", header);
+            assert_eq!(d.primary.start, 9 + at, "{}", header);
+            assert_eq!(
+                d.message,
+                format!("the return type of `f` is malformed: {}", what),
+                "{}",
+                header
+            );
+        }
+        for (header, ty) in [
+            ("pub fn f() -> [4]u8[0..=10]", "[4]u8[0..=10]"),
+            ("pub fn f() -> Map<str, List<u8>>", "Map<str, List<u8>>"),
+            ("pub fn f() -> Ring<CAP = 64>", "Ring<CAP = 64>"),
+        ] {
+            let f = only_fn(&format!("module m\n{}\n", header));
+            assert_eq!(f.return_ty.as_deref(), Some(ty));
+        }
     }
 
     #[test]
