@@ -146,10 +146,79 @@ fn test_fuzz_replay_passes_a_clean_module() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A seed runs thorough through the worker: the phases compared run twice, the typed dump and
+/// Tier 1's reports run, and so do the objects and both interpreters.
+#[test]
+fn test_fuzz_runs_a_seed_through_every_phase_thoroughly() {
+    let dir = scratch("thorough");
+    fs::write(
+        dir.join("seeds").join("clean.mn"),
+        "module m
+pub fn f(x: u8) -> u16 = x + 1
+",
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let run = mn(
+        &[
+            "fuzz",
+            "--runs",
+            "1",
+            "--corpus",
+            dir.join("seeds").to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "{}{}",
+        text(&run.stdout),
+        text(&run.stderr)
+    );
+    let summary = fs::read_to_string(out.join("summary.txt")).unwrap();
+    for phase in [
+        "dump-tokens: 2,",
+        "check: 2,",
+        "dump-typed: 2,",
+        "tier1: 1,",
+        "incremental: 1,",
+        "lower: 2,",
+        "lower-without-proofs: 2,",
+        "object x86_64-unknown-linux-gnu: 2,",
+        "object aarch64-unknown-linux-gnu: 2,",
+        "object x86_64-pc-windows-msvc: 2,",
+        "interp: 1,",
+        "mir: 1,",
+        "mir-without-proofs: 1,",
+    ] {
+        assert!(
+            summary.contains(&format!("  {}", phase)),
+            "no {} in {}",
+            phase,
+            summary
+        );
+    }
+    assert!(
+        summary.contains(
+            "failures: 0
+"
+        ),
+        "{}",
+        summary
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 0] = [];
+const PENDING: [&str; 2] = [
+    "incremental-module-without-a-name.mn",
+    "incremental-position-in-a-message.mn",
+];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -195,6 +264,23 @@ fn test_fuzz_regressions_replay_without_a_failure() {
         );
     }
     replay(&files);
+}
+
+/// Found by `mn fuzz`: a module line without a name, then `fn` on the next line. A whole check
+/// says it expected a name and found `fn`; `mn check --watch`'s session, which reads `fn` as the
+/// next item, says it found the end of the file, at another span.
+#[test]
+#[ignore = "pending a fix in mente-sema's incremental session"]
+fn fuzz_incremental_module_without_a_name() {
+    replay(&[regressions().join("incremental-module-without-a-name.mn")]);
+}
+
+/// Found by `mn fuzz`: an unclosed parameter list. The session's message names where the list
+/// opened by its line in the item, 1:9, where a whole check names its line in the module, 3:9.
+#[test]
+#[ignore = "pending a fix in mente-sema's incremental session"]
+fn fuzz_incremental_position_in_a_message() {
+    replay(&[regressions().join("incremental-position-in-a-message.mn")]);
 }
 
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,

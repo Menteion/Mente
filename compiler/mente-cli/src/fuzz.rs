@@ -1184,7 +1184,7 @@ impl Phases {
                 Some(native::Call { entry, args })
             })
             .collect();
-        for (k, target) in mente_codegen::Target::ALL.into_iter().enumerate() {
+        for target in mente_codegen::Target::ALL {
             let name = format!("object {}", target.triple());
             let build = || {
                 native::object(
@@ -1200,13 +1200,7 @@ impl Phases {
                 )
                 .map_err(|e| e.to_string())
             };
-            // Objects are compared on the first target only, to keep runs short.
-            let built = if k == 0 {
-                run.stable(&name, build)
-            } else {
-                run.phase(&name, build)
-            };
-            if let Some(Err(e)) = built {
+            if let Some(Err(e)) = run.stable(&name, build) {
                 run.fail(&name, Kind::NotBuilt, e);
             }
         }
@@ -1220,20 +1214,18 @@ fn diagnostics_of(src: &str) -> Vec<Diagnostic> {
 
 /// Renders each diagnostic in the text form and all of them in the JSON form, as `mn check`
 /// prints them.
-fn render(src: &str, diagnostics: &[Diagnostic]) -> usize {
-    let mut size = 0;
+fn render(src: &str, diagnostics: &[Diagnostic]) {
     for d in diagnostics {
-        size += render_text(d, "fuzz.mn", src).len();
+        std::hint::black_box(render_text(d, "fuzz.mn", src));
     }
     let listings = mente_sema::listings(src);
-    size + render_json(&[FileDiagnostics {
+    std::hint::black_box(render_json(&[FileDiagnostics {
         file: "fuzz.mn",
         src,
         diagnostics,
         todos: &listings.todos,
         axioms: &listings.axioms,
-    }])
-    .len()
+    }]));
 }
 
 /// Checks `src` item by item, as `mn check --watch` does, then again after an edit, and says
@@ -1241,24 +1233,34 @@ fn render(src: &str, diagnostics: &[Diagnostic]) -> usize {
 fn incremental(src: &str, edit: u64, whole: &[Diagnostic]) -> Option<String> {
     let mut session = mente_sema::incremental::Session::new(src);
     if session.diagnostics() != whole {
-        return Some(format!(
-            "{}: the session reports {}, a whole check {}",
-            FIRST_CHECK,
-            codes(session.diagnostics()),
-            codes(whole)
-        ));
+        return Some(difference(FIRST_CHECK, session.diagnostics(), whole));
     }
     let edited = edit_text(src, edit);
     session.update(&edited);
     let fresh = diagnostics_of(&edited);
-    (session.diagnostics() != fresh.as_slice()).then(|| {
-        format!(
-            "{}: the session reports {}, a whole check {}",
-            RE_CHECK,
-            codes(session.diagnostics()),
-            codes(&fresh)
-        )
-    })
+    (session.diagnostics() != fresh.as_slice())
+        .then(|| difference(RE_CHECK, session.diagnostics(), &fresh))
+}
+
+/// How the session's diagnostics differ from a whole check's: the first pair that differs,
+/// each with its code, its byte span and its message.
+fn difference(moment: &str, session: &[Diagnostic], whole: &[Diagnostic]) -> String {
+    let at = (0..session.len().max(whole.len()))
+        .find(|k| session.get(*k) != whole.get(*k))
+        .unwrap_or(0);
+    let show = |d: Option<&Diagnostic>| match d {
+        Some(d) => format!(
+            "{} at {}..{}: {}",
+            d.code, d.primary.start, d.primary.end, d.message
+        ),
+        None => "nothing more".to_string(),
+    };
+    format!(
+        "{}: the session reports {}; a whole check {}",
+        moment,
+        show(session.get(at)),
+        show(whole.get(at))
+    )
 }
 
 /// How a disagreement of the incremental check starts: on a module's first check, or on the
@@ -1289,14 +1291,6 @@ fn standalone(
         Some(f) => (edited, f),
         None => (case.clone(), failure),
     })
-}
-
-fn codes(diagnostics: &[Diagnostic]) -> String {
-    let codes: Vec<String> = diagnostics
-        .iter()
-        .map(|d| format!("{} at {}:{}", d.code, d.primary.line, d.primary.col))
-        .collect();
-    format!("[{}]", codes.join(", "))
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1923,18 +1917,11 @@ fn worker(phases: Phases) -> i32 {
 // -------------------------------------------------------------------------------------------
 
 /// The smallest text the minimizer finds that `fails` still holds for: delta debugging over
-/// lines, then tokens, then characters, repeated while it shrinks.
+/// lines, then tokens, then characters.
 pub fn minimize(input: &str, fails: &mut dyn FnMut(&str) -> bool) -> String {
     let mut current = input.to_string();
-    for _ in 0..3 {
-        let before = current.len();
-        for split in [split_lines, split_tokens, split_chars] {
-            let units = split(&current);
-            current = ddmin(units, fails).concat();
-        }
-        if current.len() == before {
-            break;
-        }
+    for split in [split_lines, split_tokens, split_chars] {
+        current = ddmin(split(&current), fails).concat();
     }
     current
 }
@@ -2625,11 +2612,7 @@ mod tests {
             "{:?}",
             small
         );
-        assert!(
-            small.len() <= "bad(((".len() + 1,
-            "{:?} is not minimal",
-            small
-        );
+        assert_eq!(small, "bad(((");
         assert!(calls < 2000, "{} calls", calls);
         // A failure that needs the whole input keeps the whole input.
         let all = minimize("abc", &mut |t| t == "abc");
@@ -2837,5 +2820,274 @@ mod tests {
             f("parse", Kind::Hang, "no answer within 13 s").key()
         );
         assert_eq!(unescape(&escape("a\tb\nc\\d")), "a\tb\nc\\d");
+    }
+
+    /// The generator is SplitMix64 exactly: its first outputs from seed 0 are the reference
+    /// implementation's, so a seed names one run on every platform.
+    #[test]
+    fn test_rng_is_splitmix64() {
+        let mut rng = Rng::new(0);
+        assert_eq!(rng.next_u64(), 0xE220_A839_7B1D_CDAF);
+        assert_eq!(rng.next_u64(), 0x6E78_9E6A_A1B9_65F4);
+        assert_eq!(rng.next_u64(), 0x06C4_5D18_8009_454F);
+        assert_eq!(rng.below(0), 0);
+        let mut rng = Rng::new(7);
+        let draws: Vec<usize> = (0..1000).map(|_| rng.below(10)).collect();
+        assert!(draws.iter().all(|d| *d < 10));
+        assert!((0..10).all(|d| draws.contains(&d)));
+        let ones = (0..1000).filter(|_| rng.one_in(4)).count();
+        assert!((150..350).contains(&ones), "{} of 1000", ones);
+        assert_eq!(rng.pick(&[]), "");
+        assert_eq!(rng.pick(&["only"]), "only");
+    }
+
+    /// The minimizer's tokens: runs of letters, digits and `_`, runs of white space, and
+    /// every other character alone.
+    #[test]
+    fn test_minimizer_splits_tokens_by_class() {
+        assert_eq!(
+            split_tokens("ab_1  (x)+=\n\u{4E2D}y"),
+            vec!["ab_1", "  ", "(", "x", ")", "+", "=", "\n", "\u{4E2D}y"]
+        );
+        assert_eq!(split_lines("a\nb\n\nc"), vec!["a\n", "b\n", "\n", "c"]);
+        assert_eq!(split_chars("a\u{4E2D}"), vec!["a", "\u{4E2D}"]);
+    }
+
+    /// An executor that answers every case with the same failures, and counts its runs.
+    struct Scripted {
+        failures: Vec<Failure>,
+        runs: usize,
+    }
+
+    impl Executor for Scripted {
+        fn exec(&mut self, _: &Case) -> Result<Outcome, String> {
+            self.runs += 1;
+            Ok(Outcome {
+                failures: self.failures.clone(),
+                ..Outcome::default()
+            })
+        }
+    }
+
+    /// A re-check that disagrees after an edit is reported on the edited text when that text
+    /// disagrees on its own first check, and on the case as it was otherwise; any other
+    /// failure is left as it is, without another run.
+    #[test]
+    fn test_a_disagreement_after_an_edit_is_reported_on_its_own_text() {
+        let edit = (0..100).find(|e| edit_text(SEED, *e) != SEED).unwrap();
+        let case = Case {
+            text: SEED.into(),
+            edit,
+            thorough: false,
+        };
+        let first = Failure {
+            phase: "incremental".into(),
+            kind: Kind::Disagrees,
+            message: format!("{}: x", FIRST_CHECK),
+        };
+        let again = Failure {
+            message: format!("{}: y", RE_CHECK),
+            ..first.clone()
+        };
+        let mut exec = Scripted {
+            failures: vec![first.clone()],
+            runs: 0,
+        };
+        let (c, f) = standalone(&mut exec, &case, again.clone()).unwrap();
+        assert_eq!(
+            (c.text, f, exec.runs),
+            (edit_text(SEED, edit), first.clone(), 1)
+        );
+        for failures in [
+            Vec::new(),
+            vec![Failure {
+                kind: Kind::Panic,
+                ..first.clone()
+            }],
+            vec![Failure {
+                message: format!("{}: z", RE_CHECK),
+                ..first.clone()
+            }],
+        ] {
+            let mut exec = Scripted { failures, runs: 0 };
+            let (c, f) = standalone(&mut exec, &case, again.clone()).unwrap();
+            assert_eq!((c, f), (case.clone(), again.clone()));
+        }
+        let mut exec = Scripted {
+            failures: vec![first.clone()],
+            runs: 0,
+        };
+        for failure in [
+            first.clone(),
+            Failure {
+                kind: Kind::Panic,
+                ..again.clone()
+            },
+        ] {
+            let (c, f) = standalone(&mut exec, &case, failure.clone()).unwrap();
+            assert_eq!((c, f), (case.clone(), failure));
+        }
+        assert_eq!(exec.runs, 0);
+    }
+
+    /// A disagreement names the first pair of diagnostics that differs, in full.
+    #[test]
+    fn test_a_disagreement_names_the_first_diagnostics_that_differ() {
+        let span = |start, end| mente_syntax::Span {
+            start,
+            end,
+            line: 1,
+            col: 1,
+        };
+        let a = Diagnostic::error("E0111", span(3, 3), "opened at 1:9");
+        let b = Diagnostic::error("E0111", span(3, 3), "opened at 3:9");
+        let c = Diagnostic::error("E0101", span(0, 2), "expected a name");
+        assert_eq!(
+            difference(FIRST_CHECK, &[c.clone(), a.clone()], &[c.clone(), b]),
+            format!(
+                "{}: the session reports E0111 at 3..3: opened at 1:9; a whole check E0111 at 3..3: opened at 3:9",
+                FIRST_CHECK
+            )
+        );
+        assert_eq!(
+            difference(RE_CHECK, std::slice::from_ref(&c), &[c.clone(), a]),
+            format!(
+                "{}: the session reports nothing more; a whole check E0111 at 3..3: opened at 1:9",
+                RE_CHECK
+            )
+        );
+        assert_eq!(
+            difference(RE_CHECK, &[], &[]),
+            format!(
+                "{}: the session reports nothing more; a whole check nothing more",
+                RE_CHECK
+            )
+        );
+    }
+
+    /// A worker's end is named from its status and what it wrote last.
+    #[test]
+    fn test_a_crash_is_named_from_the_workers_end() {
+        let overflow = "\nthread 'mn-fuzz-phases' has overflowed its stack\nfatal runtime error: stack overflow\n";
+        assert_eq!(
+            crash_message("signal: 6 (SIGABRT)", overflow),
+            "stack overflow"
+        );
+        assert_eq!(crash_message("exit code: 0xc00000fd", ""), "stack overflow");
+        assert_eq!(
+            crash_message("exit code: 1", "memory allocation of 99 bytes failed\n"),
+            "out of memory"
+        );
+        assert_eq!(
+            crash_message("exit code: 3", "first\nlast words\n\n"),
+            "the worker ended with exit code: 3: last words"
+        );
+        assert_eq!(
+            crash_message("exit code: 3", ""),
+            "the worker ended with exit code: 3: "
+        );
+    }
+
+    /// Kinds travel between a worker and the fuzzer by name, messages escaped, and a
+    /// failure's file is named by its phase, its kind and a hash of its key.
+    #[test]
+    fn test_kinds_and_failures_are_named_stably() {
+        let kinds = [
+            Kind::Panic,
+            Kind::Crash,
+            Kind::Hang,
+            Kind::BrokenMir,
+            Kind::NotLowered,
+            Kind::NotBuilt,
+            Kind::Unstable,
+            Kind::Disagrees,
+        ];
+        for k in kinds {
+            assert_eq!(Kind::named(k.name()), k);
+        }
+        let names: std::collections::BTreeSet<&str> = kinds.iter().map(|k| k.name()).collect();
+        assert_eq!(names.len(), kinds.len());
+        assert_eq!(Kind::named("no such kind"), Kind::Crash);
+        let f = Failure {
+            phase: "object x86_64-unknown-linux-gnu".into(),
+            kind: Kind::NotBuilt,
+            message: "fn f: no ISA".into(),
+        };
+        assert_eq!(
+            slug(&f),
+            "object-x86-64-unknown-linux-gnu-codegen-error-21604be7"
+        );
+        assert_eq!(unescape(&escape("a\tb\r\nc\\d")), "a\tb\r\nc\\d");
+        assert_eq!(escape("a\tb\r\nc\\d"), "a\\tb\\r\\nc\\\\d");
+        assert_eq!(unescape("x\\"), "x\\");
+        assert_eq!(unescape("\\q"), "q");
+    }
+
+    /// Each integer parameter is called at 0, 1, its maximum, and for a signed type -1 and its
+    /// minimum; each `bool` at both values; and a call takes every parameter's first, second
+    /// and third edge, then a mix. Only functions whose parameters are all scalars run.
+    #[test]
+    fn test_functions_are_called_on_the_edges_of_their_types() {
+        use mente_sema::types::IntTy;
+        let int = |name: &'static str, signed, bits| Shape::Int(IntTy { name, signed, bits });
+        assert_eq!(
+            edges(&int("i8", true, 8)),
+            vec![
+                Scalar::Int(false, 0),
+                Scalar::Int(false, 127),
+                Scalar::Int(true, 128),
+                Scalar::Int(true, 1),
+                Scalar::Int(false, 1),
+            ]
+        );
+        assert_eq!(
+            edges(&int("u8", false, 8)),
+            vec![
+                Scalar::Int(false, 0),
+                Scalar::Int(false, 255),
+                Scalar::Int(false, 1)
+            ]
+        );
+        assert_eq!(
+            edges(&int("u128", false, 128))[1],
+            Scalar::Int(false, u128::MAX)
+        );
+        assert_eq!(
+            edges(&int("i128", true, 128))[2],
+            Scalar::Int(true, 1 << 127)
+        );
+        assert_eq!(
+            edges(&Shape::Bool),
+            vec![Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            edge_calls(&[int("u8", false, 8), Shape::Bool]),
+            vec![
+                vec![Scalar::Int(false, 0), Scalar::Bool(false)],
+                vec![Scalar::Int(false, 255), Scalar::Bool(true)],
+                vec![Scalar::Int(false, 1), Scalar::Bool(false)],
+                vec![Scalar::Int(false, 255), Scalar::Bool(false)],
+            ]
+        );
+        assert_eq!(Scalar::zero(&Shape::Bool), Scalar::Bool(false));
+        assert_eq!(Scalar::zero(&int("u8", false, 8)), Scalar::Int(false, 0));
+        assert_eq!(
+            value(&Scalar::Int(true, 128)),
+            Value::Int(Int::from_i128(-128))
+        );
+        assert_eq!(value(&Scalar::Int(false, 7)), Value::Int(Int::from_i128(7)));
+        assert_eq!(value(&Scalar::Bool(true)), Value::Bool(true));
+        assert!(matches!(arg(&Scalar::Bool(true)), native::Arg::Bool(true)));
+        assert!(
+            matches!(arg(&Scalar::Int(true, 5)), native::Arg::Int(n) if n == Num::new(true, 5))
+        );
+        let module = mente_sema::check_program(
+            "module m\npub fn f(a: i32, mut b: bool) -> i32 = a\npub fn g(xs: [2]u8) -> u8 = xs[0]\n",
+        )
+        .unwrap();
+        let functions = scalar_functions(&module);
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "f");
+        assert_eq!(functions[0].params.len(), 2);
     }
 }
