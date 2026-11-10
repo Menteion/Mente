@@ -3904,7 +3904,17 @@ mod tests {
         assert!(twenty <= 2 * ten + 4, "{} then {}", ten, twenty);
         assert!(forty <= 2 * twenty + 4, "{} then {}", twenty, forty);
         assert!(forty <= 8 * 40, "{}", forty);
+        assert!(ten >= 10, "{}", ten);
         assert!(codes(&nested(40)).is_empty());
+    }
+
+    #[test]
+    fn test_a_loop_met_in_another_state_is_analysed_again() {
+        // The outer loop's first round assumes `s <= 5`, its second does not: the inner loop is
+        // met in two states, and the second must not reuse the first's exit, which would keep
+        // `s < 100` and prove the result in range.
+        let src = "pub fn f() -> u8[0..100] {\n  var i: u8 = 0\n  var s: u8 = 0\n  while s < 100 and i < 10\n    invariant s <= 5\n  {\n    var j: u8 = 0\n    while j < s {\n      j += 1\n    }\n    s = j + 1\n    i += 1\n  }\n  s\n}";
+        assert_eq!(codes(src), ["E0506", "E0502"]);
     }
 
     /// The report of the module's last function.
