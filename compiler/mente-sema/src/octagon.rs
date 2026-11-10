@@ -239,9 +239,10 @@ impl Octagon {
         }
     }
 
-    /// The constraints the matrix holds, each as `terms <= c`: one for every bound off the
-    /// diagonal, a coherent pair once, and each diagonal entry below zero, which makes the
-    /// octagon empty, as `[] <= c`. What the SMT cross-check is given of a state (`tier1::smt`).
+    /// The constraints the matrix holds, each as `terms <= c`: every bound off the diagonal, a
+    /// coherent pair once, and each variable's diagonal entry below zero, which makes the octagon
+    /// empty, as `[] <= c`; a constant constraint appears only there. What the SMT cross-check is
+    /// given of a state (`tier1::smt`).
     pub fn constraints(&self) -> Vec<(Vec<Term>, i128)> {
         let d = self.d();
         let term = |node: usize| Term {
@@ -250,13 +251,16 @@ impl Octagon {
         };
         let mut out = Vec::new();
         for i in 0..d {
-            for j in 0..d {
+            // An entry `(i, j)` and its coherent twin `(j ^ 1, i ^ 1)` hold one bound, and the
+            // twin is the one with `j <= i ^ 1`: each pair is listed once, and a unary bound or a
+            // diagonal entry, which pairs with itself or its variable's other node, once.
+            for j in (i ^ 1)..d {
                 let c = self.at(i, j);
                 if i == j {
                     if c < 0 {
                         out.push((Vec::new(), c));
                     }
-                } else if c < INF && (i, j) <= (j ^ 1, i ^ 1) {
+                } else if c < INF {
                     // `V_j - V_i <= c`, and `-V_i` is the node `i ^ 1`.
                     out.push((vec![term(j), term(i ^ 1)], c));
                 }
@@ -511,6 +515,16 @@ mod tests {
             if o.is_empty() {
                 assert!(listed.iter().any(|(t, c)| t.is_empty() && *c < 0), "{cs:?}");
                 continue;
+            }
+            // No constant, and each bound once: a coherent pair holds the same terms in either
+            // order.
+            let mut seen: Vec<(Vec<(usize, bool)>, i128)> = Vec::new();
+            for (t, c) in &listed {
+                assert!(!t.is_empty(), "{listed:?}");
+                let mut key: Vec<(usize, bool)> = t.iter().map(|t| (t.var, t.neg)).collect();
+                key.sort_unstable();
+                assert!(!seen.contains(&(key.clone(), *c)), "{listed:?}");
+                seen.push((key, *c));
             }
             let mut rebuilt = Octagon::new(n);
             for (t, c) in &listed {

@@ -530,14 +530,12 @@ fn run_time_checks(src: &str) -> String {
 fn cmd_smt(args: &[String]) {
     let mut out = None;
     let mut inputs = Vec::new();
-    let mut k = 0;
-    while k < args.len() {
-        if args[k] == "--out" {
-            out = args.get(k + 1).map(PathBuf::from);
-            k += 2;
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if word == "--out" {
+            out = words.next().map(PathBuf::from);
         } else {
-            inputs.push(PathBuf::from(&args[k]));
-            k += 1;
+            inputs.push(PathBuf::from(word));
         }
     }
     let (Some(out), false) = (out, inputs.is_empty()) else {

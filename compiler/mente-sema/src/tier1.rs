@@ -1456,9 +1456,10 @@ impl<'a> Fx<'a> {
     // -- diagnostics -------------------------------------------------------------------------
 
     /// Records an obligation, proven or not. `paths` gives the states Tier 1 decided it on, each
-    /// with the obligation as it stands there. It is called only for an obligation proven while
-    /// the SMT cross-check asks for queries, so that each query is built from the very states of
-    /// the decision and nothing is spent on it otherwise.
+    /// with the obligation as it stands there, computing again what the decision computed where
+    /// it must. It is called only here, and only for an obligation proven while the SMT
+    /// cross-check asks for queries, so that each query is built from the very states of the
+    /// decision and nothing is spent on it otherwise.
     fn record(
         &mut self,
         kind: ObligationKind,
@@ -1466,7 +1467,7 @@ impl<'a> Fx<'a> {
         must: bool,
         proven: bool,
         tag: Tag,
-        paths: impl FnOnce() -> Vec<Path>,
+        paths: impl FnOnce(&mut Self) -> Vec<Path>,
     ) {
         let o = Obligation {
             kind,
@@ -1479,20 +1480,31 @@ impl<'a> Fx<'a> {
         self.record_check(o, paths);
     }
 
-    fn record_check(&mut self, o: Obligation, paths: impl FnOnce() -> Vec<Path>) {
+    fn record_check(&mut self, o: Obligation, paths: impl FnOnce(&mut Self) -> Vec<Path>) {
         if !self.recording {
             return;
         }
         if o.proven && self.queries.is_some() {
+            let paths = self.quietly(paths);
             let query = smt::Query {
                 obligation: self.report.obligations.len(),
-                text: smt::query(self, &o, paths()),
+                text: smt::query(self, &o, paths),
             };
             if let Some(queries) = &mut self.queries {
                 queries.push(query);
             }
         }
         self.report.obligations.push(o);
+    }
+
+    /// Runs `f` with nothing recorded: what it evaluates again records no obligation and emits
+    /// no diagnostic.
+    fn quietly<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let was = self.recording;
+        self.recording = false;
+        let out = f(self);
+        self.recording = was;
+        out
     }
 
     fn anchor(&self) -> Anchor {
@@ -1941,7 +1953,7 @@ impl<'a> Fx<'a> {
             detail,
             tag: t.map_or(Tag::None, |t| Tag::Into(t.name)),
         };
-        self.record_check(o, || vec![(st.clone(), Goal::Fits(v.clone(), t))]);
+        self.record_check(o, |_| vec![(st.clone(), Goal::Fits(v.clone(), t))]);
         // An empty interval is a value no path computes, after an operation that always traps.
         let (tlo, thi) = range.filter(|_| !st.is_empty() && lo <= hi)?;
         if hi < tlo {
@@ -2030,7 +2042,7 @@ impl<'a> Fx<'a> {
             true,
             failing.is_none(),
             tag,
-            || {
+            |_| {
                 let within = Cond::And(Box::new(low), Box::new(high));
                 vec![(st.clone(), Goal::Holds(within))]
             },
@@ -2110,7 +2122,7 @@ impl<'a> Fx<'a> {
             detail: format!("into an array of {}", len),
             tag: Tag::None,
         };
-        self.record_check(o, || vec![(st.clone(), Goal::Index(i.clone(), len))]);
+        self.record_check(o, |_| vec![(st.clone(), Goal::Index(i.clone(), len))]);
     }
 
     /// The function's `ensures`, at a return of `v` or at the end of its body.
@@ -2149,7 +2161,7 @@ impl<'a> Fx<'a> {
                 true,
                 failing.is_none(),
                 tag,
-                || vec![(s, Goal::Holds(k))],
+                |_| vec![(s, Goal::Holds(k))],
             );
             let Some(failing) = failing else {
                 continue;
@@ -2566,7 +2578,7 @@ impl<'a> Fx<'a> {
                     tag: Tag::None,
                 };
                 let bits = lt.map_or(0, |t| t.bits);
-                self.record_check(o, || vec![(st.clone(), Goal::Shift(r.clone(), bits))]);
+                self.record_check(o, |_| vec![(st.clone(), Goal::Shift(r.clone(), bits))]);
                 let v = shift_vals(st, op, l, r, None);
                 self.fits(st, &v, lt, span);
                 return clamp_to(v, lt, st);
@@ -2585,7 +2597,7 @@ impl<'a> Fx<'a> {
                     false,
                     st.is_empty() || lo > 0 || hi < 0,
                     Tag::None,
-                    || vec![(st.clone(), Goal::NonZero(r.clone()))],
+                    |_| vec![(st.clone(), Goal::NonZero(r.clone()))],
                 );
                 if op == BinaryOp::Div {
                     div_vals(st, l, r)
@@ -2914,7 +2926,7 @@ impl<'a> Fx<'a> {
                 true,
                 failing.is_none(),
                 tag,
-                || vec![(st.clone(), Goal::Holds(k))],
+                |_| vec![(st.clone(), Goal::Holds(k))],
             );
             let Some(failing) = failing else {
                 continue;
@@ -3291,7 +3303,7 @@ impl<'a> Fx<'a> {
             true,
             failing.is_none(),
             Tag::Clause(self.span(e)),
-            || vec![(b.clone(), Goal::Holds(never_negative))],
+            |_| vec![(b.clone(), Goal::Holds(never_negative))],
         );
         let Some(failing) = failing else {
             return;
@@ -3441,26 +3453,23 @@ impl<'a> Fx<'a> {
         let found = ends
             .iter()
             .find_map(|end| self.round_fails(end, cond, measures, tracked));
-        // The query of measures that get smaller on every path holds each path's state.
-        let paths: Vec<Path> = if found.is_none() && self.queries.is_some() {
-            ends.iter()
-                .map(|end| {
-                    let (next, after, before) = self.round(end, cond, measures, tracked);
-                    (next, Goal::Holds(lex_less(&after, &before)))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         self.recording = true;
         let span = self.span(measures[0].0);
+        // The query of measures that get smaller on every path holds each path's state.
         self.record(
             ObligationKind::Decreases,
             span,
             true,
             found.is_none(),
             Tag::Smaller,
-            || paths,
+            |fx| {
+                ends.iter()
+                    .map(|end| {
+                        let (next, after, before) = fx.round(end, cond, measures, tracked);
+                        (next, Goal::Holds(lex_less(&after, &before)))
+                    })
+                    .collect()
+            },
         );
         let Some((mut failing, after, before)) = found else {
             return;
@@ -3532,7 +3541,7 @@ impl<'a> Fx<'a> {
                 true,
                 failing.is_none(),
                 tag,
-                || vec![(st.clone(), Goal::Holds(never_negative))],
+                |_| vec![(st.clone(), Goal::Holds(never_negative))],
             );
             if let Some(failing) = failing {
                 let (valuation, _) = self.valuation(&failing, &named, &[]);
@@ -3575,7 +3584,7 @@ impl<'a> Fx<'a> {
             true,
             failing.is_none(),
             Tag::Smaller,
-            || vec![(st.clone(), Goal::Holds(smaller))],
+            |_| vec![(st.clone(), Goal::Holds(smaller))],
         );
         let Some(mut failing) = failing else {
             return;
@@ -3698,18 +3707,13 @@ impl<'a> Fx<'a> {
                 Cand::Expr(e) | Cand::Weak(e) => e,
             });
             let tag = Tag::Clause(clause_of[k]);
-            let paths = if failing.is_none() && self.recording && self.queries.is_some() {
-                self.invariant_paths(st, &back, c)
-            } else {
-                Vec::new()
-            };
             self.record(
                 ObligationKind::Invariant,
                 span,
                 true,
                 failing.is_none(),
                 tag,
-                || paths,
+                |fx| fx.invariant_paths(st, &back, c),
             );
             let Some((state, on_entry)) = failing else {
                 continue;
@@ -3757,18 +3761,16 @@ impl<'a> Fx<'a> {
 
     /// The states a proven written invariant was decided on, for its query: on entry, and
     /// after a round of the body from the head of Houdini's last pass, each with the invariant
-    /// evaluated there as it was then.
+    /// evaluated there as it was then. Called by [`Fx::record`], which records nothing meanwhile.
     fn invariant_paths(&mut self, entry: &Octagon, back: &Octagon, c: Cand) -> Vec<Path> {
-        let was = self.recording;
-        self.recording = false;
-        let mut paths = Vec::new();
-        for from in [entry, back] {
-            let mut s = from.clone();
-            let k = self.cand(&mut s, c);
-            paths.push((s, Goal::Holds(k)));
-        }
-        self.recording = was;
-        paths
+        [entry, back]
+            .into_iter()
+            .map(|from| {
+                let mut s = from.clone();
+                let k = self.cand(&mut s, c);
+                (s, Goal::Holds(k))
+            })
+            .collect()
     }
 }
 

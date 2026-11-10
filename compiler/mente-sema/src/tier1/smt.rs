@@ -84,7 +84,9 @@ pub(super) fn query(fx: &Fx, o: &Obligation, paths: Vec<Path>) -> Option<String>
     let mut cases = Vec::new();
     for (st, goal) in &paths {
         let constraints = st.constraints();
-        let contradiction = constraints.iter().any(|(t, c)| t.is_empty() && *c < 0);
+        // A constant constraint is listed only for a diagonal entry below zero: a
+        // contradiction among the state's constraints.
+        let contradiction = constraints.iter().any(|(t, _)| t.is_empty());
         if st.is_empty() && !contradiction {
             continue;
         }
@@ -114,6 +116,19 @@ fn one_line(text: &str) -> String {
     match text.split_once('\n') {
         Some((first, _)) => format!("{} ...", first.trim_end()),
         None => text.to_string(),
+    }
+}
+
+/// The SMT-LIB relation of a comparison; `None` for an operator that compares nothing.
+fn relation(op: BinaryOp) -> Option<&'static str> {
+    match op {
+        BinaryOp::Lt => Some("<"),
+        BinaryOp::Le => Some("<="),
+        BinaryOp::Gt => Some(">"),
+        BinaryOp::Ge => Some(">="),
+        BinaryOp::Eq => Some("="),
+        BinaryOp::Ne => Some("distinct"),
+        _ => None,
     }
 }
 
@@ -235,16 +250,8 @@ impl<'f, 'a> Writer<'f, 'a> {
         match c {
             Cond::Const(b) => b.to_string(),
             Cond::Cmp(op, l, r) => {
-                let symbol = match op {
-                    BinaryOp::Lt => "<",
-                    BinaryOp::Le => "<=",
-                    BinaryOp::Gt => ">",
-                    BinaryOp::Ge => ">=",
-                    BinaryOp::Eq => "=",
-                    BinaryOp::Ne => "distinct",
-                    _ => {
-                        return self.fresh("Bool", "a condition Tier 1 does not follow".to_string())
-                    }
+                let Some(symbol) = relation(*op) else {
+                    return self.fresh("Bool", "a condition Tier 1 does not follow".to_string());
                 };
                 let (l, r) = (self.term(l, side), self.term(r, side));
                 format!("({} {} {})", symbol, l, r)
@@ -355,7 +362,7 @@ impl<'f, 'a> Writer<'f, 'a> {
                 if unreached > 0 {
                     let _ = writeln!(
                         out,
-                        "; Tier 1 decided it on {} states, of which no path reaches {}.",
+                        "; Tier 1 decided it on {} states; no path reaches the other {}.",
                         total, unreached
                     );
                 }
@@ -377,8 +384,8 @@ impl<'f, 'a> Writer<'f, 'a> {
                 if unreached > 0 {
                     let _ = writeln!(
                         out,
-                        "; No path reaches the {} other states it was decided on.",
-                        unreached
+                        "; No path reaches the other {} of the {} states.",
+                        unreached, total
                     );
                 }
                 out.push_str("(assert (or\n");
@@ -568,6 +575,29 @@ mod tests {
         found[0].clone()
     }
 
+    /// The query of the only obligation of `kind` in the module's function `name` whose text
+    /// holds `needle`.
+    fn pick(src: &str, name: &str, kind: ObligationKind, needle: &str) -> String {
+        let found: Vec<String> = queries(src)
+            .into_iter()
+            .filter(|(n, _)| n == name)
+            .flat_map(|(_, qs)| qs)
+            .filter(|q| q.0 == kind)
+            .filter_map(|q| q.2)
+            .filter(|t| t.contains(needle))
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "{:?} `{}` of {} in {}",
+            kind,
+            needle,
+            name,
+            src
+        );
+        found[0].clone()
+    }
+
     /// The query's text is SMT-LIB 2 as a solver reads it: balanced parentheses, the logic set
     /// first, every symbol declared once before it is used, and one `check-sat`.
     fn well_formed(text: &str) {
@@ -712,6 +742,245 @@ mod tests {
             "{}",
             halved
         );
+        // Added to nothing, the quotient stands alone; each mention is a fresh constant.
+        assert!(
+            halved.contains("(assert (not (and (>= |?0| (- 64)) (<= |?1| 63))))"),
+            "{}",
+            halved
+        );
+    }
+
+    /// `requires a < b` at a call and `ensures result == x`, written in full: the header names
+    /// the clause, a call's arguments and the function's result are values Tier 1 follows and no
+    /// bindings out of scope, and each comparison keeps its relation.
+    #[test]
+    fn test_queries_of_contract_clauses_are_written_in_full() {
+        let called = only(
+            "fn take(a: u8, b: u8) -> u8\n  requires a < b\n= b\npub fn call(x: u8) -> u8 {\n  guard x < 9 else {\n    todo(\"no\")\n  }\n  take(x, 9)\n}",
+            ObligationKind::Requires,
+        );
+        assert_eq!(
+            called,
+            "\
+; Tier 1 discharged this obligation of `call` at 9:3: requires, `a < b`.
+; The query holds Tier 1's facts there and denies the obligation: a solver must answer unsat.
+(set-logic QF_LIA)
+(declare-const |x| Int) ; `x`, a `u8`
+(declare-const |@2| Int) ; argument `a` of the call to `take` at 9:3
+(declare-const |@3| Int) ; argument `b` of the call to `take` at 9:3
+; The type of each binding in scope.
+(assert (and (<= 0 |x|) (<= |x| 255)))
+; Tier 1's state: its interval and octagon constraints.
+(assert (<= (+ (- |x|) (- |x|)) 0))
+(assert (<= (+ |@2| (- |x|)) 0))
+(assert (<= (+ (- |@2|) (- |x|)) 0))
+(assert (<= (+ |@3| (- |x|)) 9))
+(assert (<= (+ (- |@3|) (- |x|)) (- 9)))
+(assert (<= (+ |x| |x|) 16))
+(assert (<= (+ |@2| |x|) 16))
+(assert (<= (+ (- |@2|) |x|) 0))
+(assert (<= (+ |@3| |x|) 17))
+(assert (<= (+ (- |@3|) |x|) (- 1)))
+(assert (<= (+ (- |@2|) (- |@2|)) 0))
+(assert (<= (+ |@3| (- |@2|)) 9))
+(assert (<= (+ (- |@3|) (- |@2|)) (- 9)))
+(assert (<= (+ |@2| |@2|) 16))
+(assert (<= (+ |@3| |@2|) 17))
+(assert (<= (+ (- |@3|) |@2|) (- 1)))
+(assert (<= (+ (- |@3|) (- |@3|)) (- 18)))
+(assert (<= (+ |@3| |@3|) 18))
+; The obligation, denied.
+(assert (not (< |@2| |@3|)))
+(check-sat)
+(exit)
+"
+        );
+        let ensured = only(
+            "pub fn same(x: u8) -> u8\n  ensures result == x\n= x",
+            ObligationKind::Ensures,
+        );
+        assert_eq!(
+            ensured,
+            "\
+; Tier 1 discharged this obligation of `same` at 4:3: ensures, `result == x`.
+; The query holds Tier 1's facts there and denies the obligation: a solver must answer unsat.
+(set-logic QF_LIA)
+(declare-const |x| Int) ; `x`, a `u8`
+(declare-const |result| Int) ; the result of `same`
+; The type of each binding in scope.
+(assert (and (<= 0 |x|) (<= |x| 255)))
+; Tier 1's state: its interval and octagon constraints.
+(assert (<= (+ (- |result|) (- |result|)) 0))
+(assert (<= (+ |x| (- |result|)) 0))
+(assert (<= (+ (- |x|) (- |result|)) 0))
+(assert (<= (+ |result| |result|) 510))
+(assert (<= (+ |x| |result|) 510))
+(assert (<= (+ (- |x|) |result|) 0))
+(assert (<= (+ (- |x|) (- |x|)) 0))
+(assert (<= (+ |x| |x|) 510))
+; The obligation, denied.
+(assert (not (= |result| |x|)))
+(check-sat)
+(exit)
+"
+        );
+    }
+
+    /// Each comparison has its SMT-LIB relation, `!=` too, though no clause in the Tier-1
+    /// fragment uses it; any other operator has none, and a condition on it is not followed.
+    #[test]
+    fn test_each_comparison_has_its_relation() {
+        use mente_syntax::tree::BinaryOp::{Add, And, Eq, Ge, Gt, Le, Lt, Ne};
+        assert_eq!(
+            [Lt, Le, Gt, Ge, Eq, Ne].map(super::relation),
+            ["<", "<=", ">", ">=", "=", "distinct"].map(Some)
+        );
+        assert_eq!([Add, And].map(super::relation), [None, None]);
+    }
+
+    /// A value Tier 1 knows only by its bounds is a fresh constant between them, with no bound
+    /// where it has none; a quotient added to a value keeps the value.
+    #[test]
+    fn test_values_known_by_bounds_are_fresh_constants_between_them() {
+        let both = only("pub fn tri(x: u8) -> u16 = x * 3", ObligationKind::Range);
+        assert!(
+            both.contains("(declare-const |?0| Int) ; a value Tier 1 knows from 0 to 765\n"),
+            "{}",
+            both
+        );
+        assert!(
+            both.contains("; The obligation, denied.\n(assert (<= 0 |?0|))\n(assert (<= |?0| 765))\n(assert (or (< |?0| 0) (> |?0| 65535)))\n"),
+            "{}",
+            both
+        );
+        let above = only(
+            "pub fn up(a: u128, x: u128) -> u128 {\n  guard x > 0 else {\n    todo(\"no\")\n  }\n  a / (x * 2)\n}",
+            ObligationKind::Divisor,
+        );
+        assert!(
+            above.contains("; a value Tier 1 knows from 2 to unbounded\n"),
+            "{}",
+            above
+        );
+        assert!(
+            above
+                .contains("; The obligation, denied.\n(assert (<= 2 |?0|))\n(assert (= |?0| 0))\n"),
+            "{}",
+            above
+        );
+        let below = only(
+            "pub fn down(a: i128, y: i128) -> i128 {\n  guard y < 0 else {\n    todo(\"no\")\n  }\n  a / (y * 2)\n}",
+            ObligationKind::Divisor,
+        );
+        assert!(
+            below.contains("; a value Tier 1 knows from unbounded to -2\n"),
+            "{}",
+            below
+        );
+        assert!(
+            below.contains(
+                "; The obligation, denied.\n(assert (<= |?0| (- 2)))\n(assert (= |?0| 0))\n"
+            ),
+            "{}",
+            below
+        );
+        let middle = only(
+            "pub fn mid(lo: u8, hi: u8) -> u8 {\n  guard lo <= hi else {\n    todo(\"no\")\n  }\n  lo + (hi - lo) / 2\n}",
+            ObligationKind::Range,
+        );
+        assert!(
+            middle.contains("(assert (or (< (+ |lo| |?0|) 0) (> (+ |lo| |?0|) 255)))"),
+            "{}",
+            middle
+        );
+        assert!(
+            middle.contains("(<= (* 2 |?0|) (+ |hi| (- |lo|)))"),
+            "{}",
+            middle
+        );
+    }
+
+    /// Of the states an obligation was decided on, those no path reaches are left out and
+    /// counted; an obligation no path reaches has no query, unless its state's own constraints
+    /// contradict each other.
+    #[test]
+    fn test_states_no_path_reaches_are_left_out() {
+        let one = "pub fn one(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    if i == 200 {\n      return i\n    } else {\n      i += 1\n    }\n  }\n  i\n}";
+        let smaller = pick(one, "one", ObligationKind::Decreases, "decreases.");
+        assert!(
+            smaller.contains(
+                "; Tier 1 decided it on 2 states; no path reaches the other 1.\n; Tier 1's state"
+            ),
+            "{}",
+            smaller
+        );
+        let two = "pub fn two(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    if i == 200 {\n      return i\n    } else if i < 100 {\n      i += 1\n    } else {\n      i += 1\n    }\n  }\n  i\n}";
+        let smaller = pick(two, "two", ObligationKind::Decreases, "decreases.");
+        assert!(
+            smaller.contains("in each of the 2 states Tier 1 decided it on, with that state's constraints.\n; No path reaches the other 1 of the 3 states.\n(assert (or\n"),
+            "{}",
+            smaller
+        );
+        // After `todo`, among constraints that hold a negative constant, no contradiction.
+        let late = queries(
+            "pub fn late(x: u8) -> u8 {\n  guard x > 0 else {\n    todo(\"no\")\n  }\n  x + todo(\"later\")\n}",
+        );
+        assert!(
+            late[0]
+                .1
+                .iter()
+                .any(|q| q.0 == ObligationKind::Range && q.2.is_none()),
+            "{:?}",
+            late
+        );
+        // Under `x > 5` with `x < 3`, the state's constraints contradict each other, once.
+        let never = only(
+            "pub fn never(xs: [4]u8, x: u8) -> bool {\n  guard x < 3 else {\n    todo(\"no\")\n  }\n  x > 5 and xs[x] > 0\n}",
+            ObligationKind::Index,
+        );
+        assert_eq!(never.matches("(assert (<= 0 (- ").count(), 1, "{}", never);
+    }
+
+    /// A variable is named after its binding, a binding called `result` apart from the function's
+    /// result; one out of scope is said to be, and a measure is described by its clause.
+    #[test]
+    fn test_variables_are_named_and_described() {
+        let shadow = only(
+            "pub fn g(x: u8) -> u8\n  ensures result == x\n{\n  val result: u8 = x\n  result\n}",
+            ObligationKind::Ensures,
+        );
+        assert!(
+            shadow.contains("(declare-const |result| Int) ; the result of `g`\n"),
+            "{}",
+            shadow
+        );
+        // Out of scope at the `ensures`, after the block; declared once, as `well_formed` checks.
+        assert!(
+            shadow.contains("(declare-const |result.")
+                && shadow.contains("Int) ; `result`, a `u8`, not in scope here\n"),
+            "{}",
+            shadow
+        );
+        let step = only(
+            "pub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i <= n {\n    val step: u8 = 1\n    i += step\n  }\n  i\n}",
+            ObligationKind::Invariant,
+        );
+        assert!(
+            step.contains("(declare-const |step| Int) ; `step`, a `u8`, not in scope here\n"),
+            "{}",
+            step
+        );
+        let measured = pick(
+            "pub fn sum(n: u8) -> u16\n  requires n < 100\n  decreases n\n{\n  guard n > 0 else {\n    return 0\n  }\n  val m: u8 = n - 1\n  m + sum(m)\n}",
+            "sum",
+            ObligationKind::Decreases,
+            "decreases.",
+        );
+        assert!(
+            measured.contains("Int) ; the measure `n` on entry\n"),
+            "{}",
+            measured
+        );
     }
 
     /// A narrowing into `u128` from a signed source: the query denies it against the type's
@@ -762,6 +1031,11 @@ mod tests {
             invariant[0]
         );
         assert_eq!(invariant[0].matches("(not (<= |i| |n|))").count(), 2);
+        assert!(
+            !invariant[0].contains("No path reaches"),
+            "{}",
+            invariant[0]
+        );
         let measures: Vec<&String> = qs
             .iter()
             .filter(|q| q.0 == ObligationKind::Decreases)

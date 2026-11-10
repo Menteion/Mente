@@ -151,7 +151,8 @@ fn test_the_construct_programs_are_read_from_mir_run() {
 }
 
 /// `mn smt` writes a query a discharged obligation, named by function, line and kind and
-/// headed by its source position, lists those no path reaches, and wants `--out`.
+/// headed by its source position, lists those no path reaches, counts both, and wants `--out`,
+/// before its inputs or after them.
 #[test]
 fn test_mn_smt_writes_a_query_for_each_discharged_obligation() {
     let dir = scratch("constructs");
@@ -160,22 +161,48 @@ fn test_mn_smt_writes_a_query_for_each_discharged_obligation() {
     let out = dir.join("out");
     let run = mn(&[
         "smt",
-        programs.to_str().unwrap(),
         "--out",
         out.to_str().unwrap(),
+        programs.to_str().unwrap(),
     ]);
     let stdout = text(&run.stdout);
     assert!(run.status.success(), "{}{}", stdout, text(&run.stderr));
+    // What mente-sema exports of the same programs, which `mn smt` counts.
+    let (mut functions, mut written, mut unreached) = (0, 0, 0);
+    for p in construct_programs() {
+        for (_, _, queries) in mente_sema::tier1_queries(&p) {
+            functions += 1;
+            for q in queries {
+                match q.text {
+                    Some(_) => written += 1,
+                    None => unreached += 1,
+                }
+            }
+        }
+    }
+    assert!(unreached > 0);
     assert!(
-        stdout.contains(&format!("functions of {} files", n)),
+        stdout.contains(&format!(
+            "Wrote {} queries for {} functions of {} files to `",
+            written, functions, n
+        )),
         "{}",
         stdout
     );
     assert!(
-        stdout.contains("unreached: ") && stdout.contains("range of `add_todo`"),
+        stdout.contains(&format!(
+            "; {} discharged obligations are reached by no path.",
+            unreached
+        )),
         "{}",
         stdout
     );
+    let listed = stdout
+        .lines()
+        .filter(|l| l.starts_with("unreached: "))
+        .count();
+    assert_eq!(listed, unreached, "{}", stdout);
+    assert!(stdout.contains("range of `add_todo`"), "{}", stdout);
     let mut queries = Vec::new();
     let mut stack = vec![out.clone()];
     while let Some(d) = stack.pop() {
@@ -188,7 +215,8 @@ fn test_mn_smt_writes_a_query_for_each_discharged_obligation() {
             }
         }
     }
-    assert!(queries.len() >= 50, "only {} queries", queries.len());
+    assert!(written >= 50, "only {} queries", written);
+    assert_eq!(queries.len(), written);
     for q in &queries {
         let body = fs::read_to_string(q).unwrap();
         assert!(body.starts_with("; source: "), "{}", body);
