@@ -8,6 +8,13 @@ use mente_interp::Value;
 use mente_mir::cfg::{self, Memory, Num, Ty, Val};
 use mente_sema::CheckedModule;
 
+// The generator of programs and the comparison of the three paths on what it generates and on
+// the conformance suite run as tests: CI drives the large runs (`.github/workflows/generated.yml`).
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+mod generate;
+
 /// What a run printed: its value and what each `mut` argument was left holding, or why it
 /// stopped.
 pub type Printed = Result<Vec<String>, String>;
@@ -87,9 +94,19 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
 /// Calls `name` on `args` through the reference interpreter, and prints as `mn run` does.
 #[cfg(test)]
 pub fn reference(module: &CheckedModule, name: &str, args: Vec<(bool, Value)>) -> Printed {
+    reference_within(module, name, args, mente_interp::Limits::default())
+}
+
+/// [`reference`] within `limits`.
+#[cfg(test)]
+pub fn reference_within(
+    module: &CheckedModule,
+    name: &str,
+    args: Vec<(bool, Value)>,
+    limits: mente_interp::Limits,
+) -> Printed {
     let marked: Vec<bool> = args.iter().map(|(m, _)| *m).collect();
     let values = args.into_iter().map(|(_, v)| v).collect();
-    let limits = mente_interp::Limits::default();
     let (v, finals) =
         mente_interp::call_leaving(module, name, values, limits).map_err(|s| s.to_string())?;
     let mut printed = vec![v.to_string()];
@@ -130,10 +147,14 @@ pub fn native(
             printed.push(Err(why));
             continue;
         }
-        let out = std::process::Command::new(&exe)
-            .arg(k.to_string())
-            .output()
-            .map_err(|e| format!("{}: {}", exe.display(), e))?;
+        let Some(out) = run_for(&exe, k, NATIVE_TIME)? else {
+            printed.push(Err(format!(
+                "the program ran for more than {} s",
+                NATIVE_TIME.as_secs()
+            )));
+            k += 1;
+            continue;
+        };
         k += 1;
         let text = |b: &[u8]| String::from_utf8_lossy(b).replace("\r\n", "\n");
         printed.push(match out.status.code() {
@@ -147,6 +168,74 @@ pub fn native(
         });
     }
     Ok(printed)
+}
+
+/// How long one call of native code may run: a call the reference interpreter finishes takes
+/// milliseconds, so a longer one is a code-generation bug that would otherwise hang the run.
+const NATIVE_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Runs `exe` on call `k` and returns what it wrote and how it ended, or `None` when it ran for
+/// longer than `limit` and was stopped.
+fn run_for(
+    exe: &std::path::Path,
+    k: usize,
+    limit: std::time::Duration,
+) -> Result<Option<std::process::Output>, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let fail = |e: std::io::Error| format!("{}: {}", exe.display(), e);
+    let mut child = Command::new(exe)
+        .arg(k.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(fail)?;
+    // Each pipe is read on a thread of its own, so that a program printing more than a pipe
+    // holds is not stopped in its write while this waits for it to end.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                p.read_to_end(&mut bytes).ok();
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(fail)? {
+            break Some(status);
+        }
+        if start.elapsed() > limit {
+            child.kill().ok();
+            child.wait().ok();
+            break None;
+        }
+        if start.elapsed() < std::time::Duration::from_millis(5) {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    Ok(status.map(|status| std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }))
 }
 
 /// Native code for every call of `calls` on a lowered module, linked into the executable
