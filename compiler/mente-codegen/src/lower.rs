@@ -2035,6 +2035,20 @@ mod tests {
         assert!(Shape::of(&SemaTy::Any).is_err());
     }
 
+    /// An array literal of integers of no standard type together keeps its elements exact, in
+    /// the machine type that holds them all, and narrows them only where it lands.
+    #[test]
+    fn test_an_array_literal_of_mixed_integers_keeps_its_elements_exact() {
+        let src = "module m
+pub fn m(a: u128, b: i8[0..10]) -> [2]u128 = [a, b]
+";
+        let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        // Kept in `u128`, which holds both: no narrowing at the literal, none where it lands.
+        assert_eq!(checks(&lowered, "m"), Vec::<String>::new());
+        let text = lowered.module.to_string();
+        assert!(text.contains("slot 32"), "{}", text);
+    }
+
     /// An expression of no type gives no value: a `todo` body, and an `if` whose branches all
     /// return, lower, and nothing reaches their end but the trap that marks it unreachable.
     #[test]

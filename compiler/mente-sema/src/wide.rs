@@ -356,7 +356,9 @@ impl Wide<'_> {
         let Ty::Array(_, elem) = &self.typing.exprs[e.0 as usize] else {
             return;
         };
-        if !matches!(**elem, Ty::Int(_)) || int_ty(elem).is_some() {
+        // Elements of one type are narrowed into it; only those of no standard type together
+        // are kept exact, and the literals alone are points that fit.
+        if !matches!(**elem, Ty::Int(Int::Mixed(None))) {
             return;
         }
         let mut hull: Option<Range> = None;
@@ -434,7 +436,7 @@ impl Wide<'_> {
             return Some(Range::of(t));
         }
         let ra = self.range(a)?;
-        let (exact, larger, negative) = match (op, b) {
+        let (exact, larger, negative, operands) = match (op, b) {
             (Some(op), Some(b)) => {
                 let rb = self.range(b)?;
                 let larger = if rb.magnitude() > ra.magnitude() {
@@ -442,10 +444,17 @@ impl Wide<'_> {
                 } else {
                     a
                 };
-                (arithmetic(op, ra, rb), larger, may_be_negative(op, ra, rb))
+                (
+                    arithmetic(op, ra, rb),
+                    larger,
+                    may_be_negative(op, ra, rb),
+                    vec![ra, rb],
+                )
             }
             // A negation leaves both types only when its operand can be positive, so its result
             // can be negative.
+            // A literal's negation is a constant, which reaches its type's smallest value right
+            // after its `-` (`core-calculus.md` item 5): no operation, so no operand to fit.
             _ => (
                 Some(Range {
                     lo: ra.hi.negated(),
@@ -453,16 +462,16 @@ impl Wide<'_> {
                 }),
                 a,
                 true,
+                match self.tree.expr(a).kind {
+                    ExprKind::Int { .. } => Vec::new(),
+                    _ => vec![ra],
+                },
             ),
         };
-        let operands = [Some(ra), b.and_then(|b| self.range(b))];
         if let Some(r) = exact.filter(|r| r.fits()) {
-            // The operands meet the result in its machine type, so they must fit it too; but a
-            // literal's negation is a constant, which reaches its type's smallest value right
-            // after its `-` (`core-calculus.md` item 5), and no operation.
-            let literal = b.is_none() && matches!(self.tree.expr(a).kind, ExprKind::Int { .. });
-            let hull = operands.into_iter().flatten().fold(r, |h, o| h.hull(o));
-            if literal || hull.fits() {
+            // The operands meet the result in its machine type, so they must fit it too.
+            let hull = operands.into_iter().fold(r, |h, o| h.hull(o));
+            if hull.fits() {
                 return Some(r);
             }
             // The value fits; the operand bound must hold it as the result's type does.
@@ -824,6 +833,10 @@ mod tests {
             "the elements of this array literal give values that no one of `i128` and `u128` holds together, and they are kept in one of them"
         );
         let after = fixed(arr, "bind `b` to `wide: i128` first");
+        assert!(check_source(&after).is_ok(), "{}", after);
+        // The element bound is the one above `i128`, never one whose top is `i128`'s.
+        let top = "pub fn r(a: i128, b: u128) -> [2]i128 {\n  val xs: [2]i128 = [a, b]\n  xs\n}";
+        let after = fixed(top, "bind `b` to `wide: i128` first");
         assert!(check_source(&after).is_ok(), "{}", after);
         for ok in [
             "pub fn r(a: i32, b: u64) -> [2]i128 = [a, b]",
