@@ -589,6 +589,10 @@ mod tests {
             // A list open at the end of an item, and a module line without its name.
             "module m\n\npub fn f(x: u8 {\n}\n",
             "module\nfn",
+            // A return type whose bracket closes nothing, or is never closed, before an item.
+            "module m\n\nfn r() -> ]\nfn\n",
+            "module m\n\npub fn f() -> 20]i32 = 0\npub fn g() -> u8 = 1\n",
+            "module m\n\npub fn f() -> [4 = 0\npub fn g() -> u8 = 1\n",
         ] {
             let s = Session::new(src);
             let whole = check_source(src).err().unwrap_or_default();
