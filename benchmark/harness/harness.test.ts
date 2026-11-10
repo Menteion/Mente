@@ -4,10 +4,10 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { callCost, KNOWN_MODELS, parseModels, requestBody, reserve, settle, worstCost, type Budget } from "./api.ts";
-import { caseResult, childEnv, cleanOutput, menteCaseResult, printedOutcome, trapText, verdictOf, type Proc } from "./build.ts";
+import { caseResult, childEnv, cleanOutput, menteCaseResult, printedOutcome, sandboxed, trapText, verdictOf, type Proc } from "./build.ts";
 import {
   contractExpr,
   examplesBlock,
@@ -569,6 +569,20 @@ test("a run's output is read back in the case's form, a line the agent printed a
   assert.deepEqual(cleanOutput(`${join(process.cwd(), dir)}\\main.rs:3:5 error\r\n${dir}/solution.rs:1:1 note\n\n`, dir), [
     "main.rs:3:5 error",
     "solution.rs:1:1 note",
+  ]);
+});
+
+test("a command is wrapped in the sandbox when one is set, with every path made absolute", () => {
+  // A process starts in its build directory, so a relative path would be read from there.
+  assert.deepEqual(sandboxed("", "out/w", "rustc", ["-o", "x", "main.rs"]), ["rustc", ["-o", "x", "main.rs"]]);
+  assert.deepEqual(sandboxed("", "out/w", "target/release/mn", ["check"]), [resolve("target/release/mn"), ["check"]]);
+  assert.deepEqual(sandboxed("benchmark/harness/sandbox.sh", "out/w", "rustc", ["-o", "x", "main.rs"]), [
+    "bash",
+    [resolve("benchmark/harness/sandbox.sh"), resolve("out/w"), "rustc", "-o", "x", "main.rs"],
+  ]);
+  assert.deepEqual(sandboxed("sb.sh", "out/w", "out/w/main", ["0"]), [
+    "bash",
+    [resolve("sb.sh"), resolve("out/w"), resolve("out/w/main"), "0"],
   ]);
 });
 

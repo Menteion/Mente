@@ -37,6 +37,22 @@ export interface Tools {
   /** The rustup toolchain, set as RUSTUP_TOOLCHAIN; empty to take rustc as it is. */
   rustToolchain: string;
   odin: string;
+  /**
+   * The sandbox wrapper (`sandbox.sh`) every agent build and agent program runs through, or empty
+   * to run them directly. Set in CI only; a developer's machine runs them directly.
+   */
+  sandbox: string;
+}
+
+/**
+ * A command, wrapped so it runs through the sandbox when one is set: `sandbox.sh <workdir> <cmd>
+ * <args>`, run with bash. The process starts in its build directory, so the script, the working
+ * directory and a command given as a path (such as `target/release/mn`) are made absolute against
+ * the driver's own directory; a bare command name is left for PATH to find.
+ */
+export function sandboxed(sandbox: string, workdir: string, cmd: string, args: string[]): [string, string[]] {
+  const command = /[\\/]/.test(cmd) ? resolve(cmd) : cmd;
+  return sandbox ? ["bash", [resolve(sandbox), resolve(workdir), command, ...args]] : [command, args];
 }
 
 export interface Proc {
@@ -180,19 +196,23 @@ interface MenteDiagnostic {
 /** What a run's build of the agent's program reports; the cases go into the program around it. */
 export async function buildProgram(
   lang: Lang,
-  dir: string,
+  where: string,
   program: string,
   sig: Signature,
   cases: Case[],
   tools: Tools,
 ): Promise<Build> {
+  // Absolute, since each process starts in this directory: the source and executable paths the
+  // commands are given must not depend on where they start.
+  const dir = resolve(where);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const exe = join(dir, process.platform === "win32" ? "main.exe" : "main");
   if (lang === "mente") {
     const file = join(dir, "solution.mn");
     writeFileSync(file, `module bench\n\n${program}`);
-    const p = await runProcess(tools.mn, ["check", "--json", file], { timeoutMs: BUILD_TIMEOUT_MS });
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["check", "--json", file]);
+    const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: BUILD_TIMEOUT_MS });
     let diagnostics: MenteDiagnostic[];
     try {
       diagnostics = JSON.parse(p.stdout).diagnostics;
@@ -216,7 +236,8 @@ export async function buildProgram(
     writeFileSync(file, program);
     writeFileSync(join(dir, "main.rs"), rustProgram(sig, cases));
     const env = childEnv(tools.rustToolchain ? { RUSTUP_TOOLCHAIN: tools.rustToolchain } : {});
-    const p = await runProcess(tools.rustc, [...RUST_FLAGS, "-o", exe, "main.rs"], { cwd: dir, env, timeoutMs: BUILD_TIMEOUT_MS });
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.rustc, [...RUST_FLAGS, "-o", exe, "main.rs"]);
+    const p = await runProcess(c, a, { cwd: dir, env, timeoutMs: BUILD_TIMEOUT_MS });
     const ok = p.status === 0 && !p.timedOut;
     return { lang, ok, diagnostics: ok ? [] : cleanOutput(p.stderr || p.stdout, dir), codes: [], file, dir, exe };
   }
@@ -224,7 +245,8 @@ export async function buildProgram(
   writeFileSync(file, `package main\n\n${program}`);
   writeFileSync(join(dir, "harness.odin"), odinProgram(sig, cases));
   const exeName = process.platform === "win32" ? "main.exe" : "main";
-  const p = await runProcess(tools.odin, ["build", ".", `-out:${exeName}`], { cwd: dir, timeoutMs: BUILD_TIMEOUT_MS });
+  const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["build", ".", `-out:${exeName}`]);
+  const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: BUILD_TIMEOUT_MS });
   const ok = p.status === 0 && !p.timedOut;
   return { lang, ok, diagnostics: ok ? [] : cleanOutput(`${p.stderr}${p.stdout}`, dir), codes: [], file, dir, exe };
 }
@@ -236,9 +258,11 @@ export async function runCases(build: Build, sig: Signature, cases: Case[], tool
   for (const [i, c] of cases.entries()) {
     if (build.lang === "mente") {
       const args = ["run", build.file, "--call", c.call, ...(tools.native ? ["--native"] : [])];
-      results.push(menteCaseResult(c, await runProcess(tools.mn, args, { timeoutMs: RUN_TIMEOUT_MS * 6 })));
+      const [cmd, a] = sandboxed(tools.sandbox, build.dir, tools.mn, args);
+      results.push(menteCaseResult(c, await runProcess(cmd, a, { cwd: build.dir, env: childEnv(), timeoutMs: RUN_TIMEOUT_MS * 6 })));
     } else {
-      const p = await runProcess(build.exe, [String(i)], { cwd: build.dir, timeoutMs: RUN_TIMEOUT_MS });
+      const [cmd, a] = sandboxed(tools.sandbox, build.dir, build.exe, [String(i)]);
+      const p = await runProcess(cmd, a, { cwd: build.dir, env: childEnv(), timeoutMs: RUN_TIMEOUT_MS });
       results.push(caseResult(build.lang, c, p, mutCount, build.dir));
     }
   }

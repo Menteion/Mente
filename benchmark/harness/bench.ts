@@ -14,7 +14,11 @@
 //   node benchmark/harness/bench.ts --budget <dollars> [--milestone M1] [--languages mente,rust,odin]
 //     [--models claude-sonnet-5-5,claude-haiku-5-5] [--runs 5] [--tasks all|<id>,<id>]
 //     [--held-out <dir>] [--concurrency 8] [--mn target/release/mn] [--native] [--rustc rustc]
-//     [--odin odin] [--out bench-out]
+//     [--odin odin] [--sandbox benchmark/harness/sandbox.sh] [--out bench-out]
+//
+// Agent programs can read files and open sockets, so in CI it is given --sandbox, which runs every
+// agent build and agent program with least privilege (benchmark/harness/sandbox.sh): no network,
+// and the API key out of reach.
 //
 // It calls the Claude Messages API with the key in ANTHROPIC_API_KEY, and stops before any call
 // that could take its spending past the budget, in US dollars: each call reserves the most it can
@@ -263,6 +267,7 @@ async function main(): Promise<void> {
     rustc: option("rustc", "rustc"),
     rustToolchain: option("rust-toolchain", pins.rust.toolchain),
     odin: option("odin", "odin"),
+    sandbox: option("sandbox", ""),
   };
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
