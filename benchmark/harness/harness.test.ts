@@ -151,22 +151,36 @@ test("a task's core mark and hidden tests are read", () => {
   assert.equal(parseTask(TASK.replace("core: false", "core: true")).core, true);
 });
 
-test("cases are read as a returned value or what a mut argument is left holding", () => {
-  assert.deepEqual(parseCase("clamp(5, 0, 10) == 5"), { call: "clamp(5, 0, 10)", expected: "5", leaves: false });
+test("cases are read as a returned value, what a mut argument is left holding, or both", () => {
+  assert.deepEqual(parseCase("clamp(5, 0, 10) == 5"), {
+    call: "clamp(5, 0, 10)",
+    expected: "5",
+    value: true,
+    leaves: false,
+  });
   assert.deepEqual(parseCase("rev(mut [1, 2]) leaves [2, 1]"), {
     call: "rev(mut [1, 2])",
     expected: "[2, 1]",
+    value: false,
+    leaves: true,
+  });
+  assert.deepEqual(parseCase("next(mut [1, 2]) == true leaves [2, 1]"), {
+    call: "next(mut [1, 2])",
+    expected: "true leaves [2, 1]",
+    value: true,
     leaves: true,
   });
   assert.equal(parseCase("no case here"), null);
 });
 
 test("an outcome is the printed result, what a mut argument leaves, or the trap", () => {
-  const value = { call: "f(1)", expected: "2", leaves: false };
-  const left = { call: "g(mut [1])", expected: "[1]", leaves: true };
+  const value = { call: "f(1)", expected: "2", value: true, leaves: false };
+  const left = { call: "g(mut [1])", expected: "[1]", value: false, leaves: true };
+  const both = { call: "h(mut [1], mut 2)", expected: "true leaves [1], 3", value: true, leaves: true };
   assert.equal(outcome(value, 0, "2\n", ""), "2");
   assert.equal(outcome(left, 0, "()\nleaves [1]\n", ""), "[1]");
   assert.equal(outcome(left, 0, "()\n", ""), "");
+  assert.equal(outcome(both, 0, "true\r\nleaves [1]\r\nleaves 3\r\n", ""), "true leaves [1], 3");
   assert.equal(
     outcome(value, 1, "", "prelim-out/x.mn: trap[narrowing] at 3:5: 256 does not fit in `u8`\n"),
     "trap[narrowing] at 3:5: 256 does not fit in `u8`",
@@ -182,12 +196,14 @@ test("feedback shows the diagnostics, or each example's result", () => {
   const ran = feedbackPrompt(
     [],
     [
-      { call: "f(1)", expected: "2", leaves: false, got: "2", pass: true },
-      { call: "g(mut [1])", expected: "[2]", leaves: true, got: "[1]", pass: false },
+      { call: "f(1)", expected: "2", value: true, leaves: false, got: "2", pass: true },
+      { call: "g(mut [1])", expected: "[2]", value: false, leaves: true, got: "[1]", pass: false },
+      { call: "h(mut [1])", expected: "true leaves [2]", value: true, leaves: true, got: "true leaves [2]", pass: true },
     ],
   );
   assert.match(ran, /PASS f\(1\) == 2\n/);
   assert.match(ran, /FAIL g\(mut \[1\]\) leaves \[2\], got \[1\]/);
+  assert.match(ran, /PASS h\(mut \[1\]\) == true leaves \[2\]\n/);
   assert.doesNotMatch(ran, /rejects/);
 });
 

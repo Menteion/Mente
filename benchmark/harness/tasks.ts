@@ -159,24 +159,38 @@ export function userPrompt(task: Task): string {
   ].join("\n");
 }
 
-/** One example or hidden test: a call, and the value it returns or its `mut` argument holds. */
+/**
+ * One example or hidden test: a call, and what it must print, written as the test writes it after
+ * the call: `v` for `== v`, `w` for `leaves w`, and `v leaves w` for both.
+ */
 export interface Case {
   call: string;
   expected: string;
-  /** `leaves v`: the value the call's `mut` argument holds afterwards. */
+  /** `== v`: the value the call returns. */
+  value: boolean;
+  /** `leaves w`: the values the call's `mut` arguments hold afterwards. */
   leaves: boolean;
 }
 
-/** Reads `f(args) == v` or `f(mut a) leaves v`. */
+/** Reads `f(args) == v`, `f(mut a) leaves w` or `f(mut a) == v leaves w`. */
 export function parseCase(line: string): Case | null {
-  const eq = line.lastIndexOf(" == ");
-  if (eq > 0) return { call: line.slice(0, eq).trim(), expected: line.slice(eq + 4).trim(), leaves: false };
+  const eq = line.indexOf(" == ");
   const lv = line.lastIndexOf(" leaves ");
-  if (lv > 0) return { call: line.slice(0, lv).trim(), expected: line.slice(lv + 8).trim(), leaves: true };
+  const call = (end: number) => line.slice(0, end).trim();
+  if (eq > 0 && lv > eq) {
+    const v = line.slice(eq + 4, lv).trim();
+    const w = line.slice(lv + 8).trim();
+    return { call: call(eq), expected: `${v} leaves ${w}`, value: true, leaves: true };
+  }
+  if (eq > 0) return { call: call(eq), expected: line.slice(eq + 4).trim(), value: true, leaves: false };
+  if (lv > 0) return { call: call(lv), expected: line.slice(lv + 8).trim(), value: false, leaves: true };
   return null;
 }
 
-/** What `mn run --call` printed, as the value a case compares: its result, or the trap. */
+/**
+ * What `mn run --call` printed, in the case's own form: its result, what its `mut` arguments
+ * hold, or both; or the trap.
+ */
 export function outcome(c: Case, status: number | null, stdout: string, stderr: string): string {
   if (status !== 0) {
     const last = stderr.trim().split(/\r?\n/).pop() ?? "";
@@ -184,18 +198,17 @@ export function outcome(c: Case, status: number | null, stdout: string, stderr: 
     return last.replace(/^.*?: (?=trap\[|no function|the run|an array)/, "");
   }
   const lines = stdout.trim().split(/\r?\n/);
-  if (c.leaves) {
-    const left = lines.find((l) => l.startsWith("leaves "));
-    return left ? left.slice("leaves ".length) : "";
-  }
-  return lines[0] ?? "";
+  const left = lines
+    .filter((l) => l.startsWith("leaves "))
+    .map((l) => l.slice("leaves ".length))
+    .join(", ");
+  const result = lines[0] ?? "";
+  if (c.value && c.leaves) return `${result} leaves ${left}`;
+  return c.leaves ? left : result;
 }
 
 /** One case's result, as the agent's feedback shows it. */
-export interface CaseResult {
-  call: string;
-  expected: string;
-  leaves: boolean;
+export interface CaseResult extends Case {
   got: string;
   pass: boolean;
 }
@@ -208,7 +221,7 @@ export function feedbackPrompt(diagnostics: string[], results: CaseResult[]): st
   } else {
     lines.push("The program checks. Its examples ran on the reference interpreter:", "", "```text");
     for (const r of results) {
-      const verb = r.leaves ? "leaves" : "==";
+      const verb = r.value ? "==" : "leaves";
       lines.push(`${r.pass ? "PASS" : "FAIL"} ${r.call} ${verb} ${r.expected}${r.pass ? "" : `, got ${r.got}`}`);
     }
     lines.push("```");
