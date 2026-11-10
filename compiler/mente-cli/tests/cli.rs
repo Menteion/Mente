@@ -547,6 +547,53 @@ pub fn main() -> u8 = half(9)
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `mn build --object` writes only the object, for the host or the `--target` named, in that
+/// target's format; a target or a compilation directory without `--object`, or a target outside
+/// the three, is refused.
+#[test]
+fn test_mn_build_object_writes_the_object_for_any_target() {
+    let dir = scratch("object");
+    fs::write(dir.join("prog.mn"), "module t\npub fn main() -> u8 = 7\n").unwrap();
+    for (triple, magic) in [
+        ("x86_64-unknown-linux-gnu", &b"\x7fELF"[..]),
+        ("aarch64-unknown-linux-gnu", &b"\x7fELF"[..]),
+        ("x86_64-pc-windows-msvc", &[0x64, 0x86][..]),
+    ] {
+        let out = format!("{}.o", triple);
+        let built = mn(
+            &dir,
+            &[
+                "build", "prog.mn", "--object", "--target", triple, "-o", &out,
+            ],
+        );
+        assert_eq!(built.status.code(), Some(0), "{}", text(&built.stderr));
+        assert_eq!(text(&built.stdout).trim_end(), out);
+        let bytes = fs::read(dir.join(&out)).unwrap();
+        assert!(bytes.starts_with(magic), "{}", triple);
+    }
+    // Without `-o`, the object goes beside the source, named for the host's format.
+    let host = mn(&dir, &["build", "prog.mn", "--object"]);
+    assert_eq!(host.status.code(), Some(0), "{}", text(&host.stderr));
+    let name = if cfg!(windows) { "prog.obj" } else { "prog.o" };
+    assert_eq!(text(&host.stdout).trim_end(), name);
+    assert!(dir.join(name).is_file());
+    for args in [
+        &["build", "prog.mn", "--target", "x86_64-unknown-linux-gnu"][..],
+        &["build", "prog.mn", "--compilation-dir", "/src"][..],
+    ] {
+        let refused = mn(&dir, args);
+        assert_eq!(refused.status.code(), Some(2), "{:?}", args);
+        assert!(text(&refused.stderr).contains("go with `--object`"));
+    }
+    let unknown = mn(
+        &dir,
+        &["build", "prog.mn", "--object", "--target", "riscv64"],
+    );
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(text(&unknown.stderr).contains("not `riscv64`"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `mn check --watch` checks a module item by item and reports what it re-parsed and re-checked;
 /// `--rounds` stops it.
 #[test]
@@ -601,9 +648,22 @@ fn test_mn_dump_prints_canonical_forms() {
         "mente-dump 1 typed\n(fn f ((x u8)) u8 () (= x))\n  (binding x u8)\n  (expr 0 2:25 1 u8)\n"
     );
     assert_eq!(mn(&dir, &["dump", "--typed", "d.mn"]).stdout, typed.stdout);
-    let unknown = mn(&dir, &["dump", "--mir", "d.mn"]);
+    let mir = mn(&dir, &["dump", "--mir", "d.mn"]);
+    assert_eq!(mir.status.code(), Some(0));
+    let mir_text = text(&mir.stdout);
+    assert!(
+        mir_text.starts_with("mente-dump 1 mir\nf0: fn f(u8) -> u8 {\nblock0(v0: u8):\n"),
+        "{}",
+        mir_text
+    );
+    assert_eq!(mn(&dir, &["dump", "--mir", "d.mn"]).stdout, mir.stdout);
+    fs::write(dir.join("bad.mn"), "module t\npub fn f(x: u8) -> u8 = y\n").unwrap();
+    let bad = mn(&dir, &["dump", "--mir", "bad.mn"]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(text(&bad.stderr).contains("E0201"), "{}", text(&bad.stderr));
+    let unknown = mn(&dir, &["dump", "--ast", "d.mn"]);
     assert_eq!(unknown.status.code(), Some(2));
-    assert!(text(&unknown.stderr).contains("knows --tokens, --tree and --typed"));
+    assert!(text(&unknown.stderr).contains("knows --tokens, --tree, --typed and --mir"));
     assert_eq!(mn(&dir, &["dump", "d.mn"]).status.code(), Some(2));
     let missing = mn(&dir, &["dump", "--tree", "gone.mn"]);
     assert_eq!(missing.status.code(), Some(2));

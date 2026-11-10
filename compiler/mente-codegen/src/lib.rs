@@ -105,6 +105,11 @@ impl Target {
         }
     }
 
+    /// The target whose triple is `triple`, if it is one of the three.
+    pub fn named(triple: &str) -> Option<Target> {
+        Target::ALL.into_iter().find(|t| t.triple() == triple)
+    }
+
     /// The target of the machine running the compiler, if it is one of the three.
     pub fn host() -> Option<Target> {
         Target::of_system(std::env::consts::ARCH, std::env::consts::OS)
@@ -123,8 +128,7 @@ impl Target {
 
     /// The target an ISA generates code for, if it is one of the three.
     fn of_isa(isa: &dyn TargetIsa) -> Option<Target> {
-        let triple = isa.triple().to_string();
-        Target::ALL.into_iter().find(|t| t.triple() == triple)
+        Target::named(&isa.triple().to_string())
     }
 
     /// A Cranelift ISA for this target that generates position-independent code, optimised at
@@ -584,6 +588,16 @@ mod tests {
                 "{target:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_each_target_is_named_by_its_triple() {
+        for target in Target::ALL {
+            assert_eq!(Target::named(target.triple()), Some(target));
+        }
+        assert_eq!(Target::named("x86_64-unknown-linux"), None);
+        assert_eq!(Target::named("aarch64-pc-windows-msvc"), None);
+        assert_eq!(Target::named(""), None);
     }
 
     #[test]

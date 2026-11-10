@@ -1420,10 +1420,32 @@ fn print_at(
     Ok(())
 }
 
-/// Builds the executable `exe` for the host: every function of `lowered`, the runtime and a
-/// `main` that makes the call `argv[1]` numbers among `calls`, compiled for the host's baseline,
-/// written as an object beside `exe`, and linked. `source` names the `.mn` file in the debug
-/// information; `prefix` starts every trap's message.
+/// The object of a program for `target`: every function of `lowered`, the runtime and a `main`
+/// that makes the call `argv[1]` numbers among `calls`, compiled for `target`'s baseline
+/// processor. `source` names the `.mn` file in the debug information, and `object_name` the
+/// object's own file name, which CodeView records; `prefix` starts every trap's message.
+///
+/// Its bytes depend on these arguments alone: compiling twice, or on another machine, gives the
+/// same object.
+pub fn object(
+    lowered: &Lowered,
+    calls: &[Call],
+    prefix: &str,
+    source: crate::SourceFile,
+    object_name: &str,
+    target: Target,
+) -> Result<Vec<u8>, CodegenError> {
+    let isa = target.isa(
+        cranelift_codegen::settings::OptLevel::Speed,
+        crate::Cpu::Baseline,
+    )?;
+    let mut writer = ObjectWriter::new(isa, source, object_name)?;
+    program(lowered, calls, prefix, &mut writer)?;
+    writer.finish()
+}
+
+/// Builds the executable `exe` for the host: the program's [`object`], written beside `exe`,
+/// and linked.
 pub fn executable(
     lowered: &Lowered,
     calls: &[Call],
@@ -1432,23 +1454,17 @@ pub fn executable(
     exe: &std::path::Path,
 ) -> Result<(), CodegenError> {
     let target = Target::host().ok_or_else(|| err("no native code for this host"))?;
-    let isa = target.isa(
-        cranelift_codegen::settings::OptLevel::Speed,
-        crate::Cpu::Baseline,
-    )?;
-    let object = object_path(exe, target);
-    let name = object
+    let path = object_path(exe, target);
+    let name = path
         .file_name()
         .map_or_else(|| "program.o".into(), |n| n.to_string_lossy().into_owned());
-    let mut writer = ObjectWriter::new(isa, source, &name)?;
-    program(lowered, calls, prefix, &mut writer)?;
-    let bytes = writer.finish()?;
-    std::fs::write(&object, bytes).map_err(|e| err(format!("{}: {e}", object.display())))?;
-    crate::link::link(&object, exe, target)
+    let bytes = object(lowered, calls, prefix, source, &name, target)?;
+    std::fs::write(&path, bytes).map_err(|e| err(format!("{}: {e}", path.display())))?;
+    crate::link::link(&path, exe, target)
 }
 
 /// The object file `executable` writes beside `exe`, with the extension of `target`'s format.
-fn object_path(exe: &std::path::Path, target: Target) -> std::path::PathBuf {
+pub fn object_path(exe: &std::path::Path, target: Target) -> std::path::PathBuf {
     exe.with_extension(match target {
         Target::X86_64Windows => "obj",
         Target::X86_64Linux | Target::Aarch64Linux => "o",

@@ -1,0 +1,4397 @@
+== conformance/core-calculus/assign_to_val.mn == (exit 2)
+== conformance/core-calculus/binding_named_like_a_function.mn == (exit 2)
+== conformance/core-calculus/binding_never_read.mn == (exit 2)
+== conformance/core-calculus/binding_of_mixed_integers.mn == (exit 2)
+== conformance/core-calculus/bit_operation_on_two_types.mn == (exit 2)
+== conformance/core-calculus/break_outside_a_loop.mn == (exit 2)
+== conformance/core-calculus/contracts_used_modularly.mn ==
+mente-dump 1 mir
+f0: fn midpoint(u64, u64) -> u64 {
+block0(v0: u64, v1: u64):
+  v2: i128 = cast v1 @6:9
+  v3: i128 = cast v0 @6:9
+  v4: i128 = sub v2, v3 @6:9
+  v5: i64 = int 2 @6:20
+  v6: i128 = cast v5 @6:8
+  v7: i128 = div v4, v6 @6:8
+  v8: i128 = cast v0 @6:3
+  v9: i128 = add v8, v7 @6:3
+  v10: u64 = cast v9 @6:3
+  v11: bool = le v0, v10 @5:17
+  branch v11, block1(), block2(v11)
+block1():
+  v13: bool = lt v10, v1 @5:37
+  jump block2(v13)
+block2(v12: bool):
+  return v10
+block3():
+  trap t0
+t0: unreachable @5:37 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn search(addr, i32) -> bool {
+block0(v0: addr, v1: i32):
+  v2: i64 = int 0 @9:19
+  v3: u64 = cast v2 @9:19
+  v4: addr = slot 8 @9:19
+  v5: unit = store v4, v3 @9:19
+  v6: u64 = int 16 @10:19
+  v7: addr = slot 8 @10:19
+  v8: unit = store v7, v6 @10:19
+  jump block1()
+block1():
+  v9: u64 = load v4 @11:9
+  v10: u64 = load v7 @11:14
+  v11: bool = lt v9, v10 @11:14
+  branch v11, block2(), block3()
+block2():
+  v12: u64 = load v4 @12:24
+  v13: u64 = load v7 @12:28
+  v14: bool = lt v12, v13 @4:17
+  v15: u64 = call f0 v12, v13 @12:15
+  v16: u64 = int 0 @13:8
+  v17: bool = ge v15, v16 @13:8
+  v18: u64 = int 16 @13:8
+  v19: bool = lt v15, v18 @13:8
+  v20: bool = and v17, v19 @13:8
+  v21: unit = check t0 v20, v15 @13:8
+  v22: addr = elem 4 v0, v15 @13:8
+  v23: i32 = load v22 @13:8
+  v24: bool = lt v23, v1 @13:18
+  branch v24, block4(), block5()
+block3():
+  v42: bool = bool false @21:3
+  return v42
+block4():
+  v25: i64 = int 1 @14:18
+  v26: i128 = cast v15 @14:12
+  v27: i128 = cast v25 @14:12
+  v28: i128 = add v26, v27 @14:12
+  v29: u64 = cast v28 @14:12
+  v30: unit = store v4, v29 @14:12
+  jump block6()
+block5():
+  v31: u64 = int 0 @15:15
+  v32: bool = ge v15, v31 @15:15
+  v33: u64 = int 16 @15:15
+  v34: bool = lt v15, v33 @15:15
+  v35: bool = and v32, v34 @15:15
+  v36: unit = check t1 v35, v15 @15:15
+  v37: addr = elem 4 v0, v15 @15:15
+  v38: i32 = load v37 @15:15
+  v39: bool = gt v38, v1 @15:25
+  branch v39, block7(), block8()
+block6():
+  jump block1()
+block7():
+  v40: unit = store v7, v15 @16:12
+  jump block9()
+block8():
+  v41: bool = bool true @18:14
+  return v41
+block9():
+  jump block6()
+block10():
+  trap t2
+block11():
+  trap t2
+t0: index-out-of-bounds @13:8 ["index ", " is outside an array of length 16"]
+t1: index-out-of-bounds @15:15 ["index ", " is outside an array of length 16"]
+t2: unreachable @21:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter midpoint(i128, i128) -> u64 {
+block0(v0: i128, v1: i128):
+  v2: i128 = int 0 @0:0
+  v3: bool = ge v0, v2 @0:0
+  v4: i128 = int 18446744073709551615 @0:0
+  v5: bool = le v0, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v0 @3:8
+  v8: u64 = cast v0 @3:8
+  v9: i128 = int 0 @3:8
+  v10: bool = ge v1, v9 @3:8
+  v11: i128 = int 18446744073709551615 @3:8
+  v12: bool = le v1, v11 @3:8
+  v13: bool = and v10, v12 @3:8
+  v14: unit = check t1 v13, v1 @3:8
+  v15: u64 = cast v1 @3:8
+  v16: bool = lt v8, v15 @4:17
+  v17: unit = check t2 v16 @3:8
+  v18: u64 = call f0 v8, v15 @3:8
+  return v18
+t0: narrowing @3:8 ["", " does not fit in `usize`"]
+t1: narrowing @3:8 ["", " does not fit in `usize`"]
+t2: requires @3:8 ["`requires (< lo hi)` is false at this call"]
+t3: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter search(addr, i128) -> bool {
+block0(v0: addr, v1: i128):
+  v2: i128 = int -2147483648 @0:0
+  v3: bool = ge v1, v2 @0:0
+  v4: i128 = int 2147483647 @0:0
+  v5: bool = le v1, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v1 @8:8
+  v8: i32 = cast v1 @8:8
+  v9: bool = call f1 v0, v8 @8:8
+  return v9
+t0: narrowing @8:8 ["", " does not fit in `i32`"]
+t1: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/ensures_not_proven_at_a_return.mn == (exit 2)
+== conformance/core-calculus/function_as_value.mn == (exit 2)
+== conformance/core-calculus/guard_that_falls_through.mn == (exit 2)
+== conformance/core-calculus/intermediate_beyond_128_bits.mn == (exit 2)
+== conformance/core-calculus/later_error_type.mn == (exit 2)
+== conformance/core-calculus/later_for_loop.mn == (exit 2)
+== conformance/core-calculus/later_match.mn == (exit 2)
+== conformance/core-calculus/later_string_value.mn == (exit 2)
+== conformance/core-calculus/len_of_a_non_array.mn == (exit 2)
+== conformance/core-calculus/literal_outside_its_suffix.mn == (exit 2)
+== conformance/core-calculus/m1_slice.mn ==
+mente-dump 1 mir
+f0: fn sum_to(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @8:20
+  v2: u64 = cast v1 @8:20
+  v3: addr = slot 8 @8:20
+  v4: unit = store v3, v2 @8:20
+  v5: i64 = int 0 @9:16
+  v6: u32 = cast v5 @9:16
+  v7: addr = slot 4 @9:16
+  v8: unit = store v7, v6 @9:16
+  v9: addr = slot 1 @10:3
+  v10: bool = bool false @10:3
+  v11: unit = store v9, v10 @10:3
+  v12: addr = slot 16 @10:3
+  jump block1()
+block1():
+  v13: u32 = load v7 @10:25
+  v14: bool = le v13, v0 @10:30
+  v15: u32 = load v7 @10:9
+  v16: bool = lt v15, v0 @10:13
+  branch v16, block2(), block3()
+block2():
+  v17: u32 = load v7 @10:46
+  v18: i64 = cast v0 @10:42
+  v19: i64 = cast v17 @10:42
+  v20: i64 = sub v18, v19 @10:42
+  v21: u128 = load v12 @10:42
+  v22: bool = bool false @10:42
+  v23: i64 = int 0 @10:42
+  v24: bool = lt v20, v23 @10:42
+  branch v24, block4(), block5()
+block3():
+  v71: u64 = load v3 @20:10
+  v72: i64 = int 0 @6:21
+  v73: i128 = cast v71 @6:21
+  v74: i128 = cast v72 @6:21
+  v75: bool = ge v73, v74 @6:21
+  return v71
+block4():
+  v26: bool = bool true @10:42
+  jump block6(v26)
+block5():
+  v27: u128 = cast v20 @10:42
+  v28: bool = lt v27, v21 @10:42
+  jump block6(v28)
+block6(v25: bool):
+  v29: i64 = int 0 @10:42
+  v30: bool = lt v20, v29 @10:42
+  branch v30, block7(), block8()
+block7():
+  v32: bool = bool false @10:42
+  jump block9(v32)
+block8():
+  v33: u128 = cast v20 @10:42
+  v34: bool = eq v33, v21 @10:42
+  jump block9(v34)
+block9(v31: bool):
+  v35: bool = and v31, v22 @10:42
+  v36: bool = or v25, v35 @10:42
+  v37: bool = load v9 @10:42
+  v38: bool = not v37 @10:42
+  v39: bool = or v38, v36 @10:42
+  v40: bool = bool true @10:42
+  v41: unit = store v9, v40 @10:42
+  v42: u128 = cast v20 @10:42
+  v43: unit = store v12, v42 @10:42
+  v44: u32 = load v7 @11:5
+  v45: i64 = int 1 @11:10
+  v46: i64 = cast v44 @11:10
+  v47: i64 = add v46, v45 @11:10
+  v48: u32 = cast v47 @11:10
+  v49: unit = store v7, v48 @11:10
+  v50: u32 = load v7 @12:11
+  v51: i64 = int 7 @12:16
+  v52: i64 = cast v50 @12:16
+  v53: bool = ne v52, v51 @12:16
+  branch v53, block10(), block11()
+block10():
+  v54: u32 = load v7 @15:8
+  v55: i64 = int 999 @15:13
+  v56: i64 = cast v54 @15:13
+  v57: bool = eq v56, v55 @15:13
+  branch v57, block13(), block14()
+block11():
+  jump block1()
+block12():
+  trap t1
+block13():
+  jump block3()
+block14():
+  jump block15()
+block15():
+  v58: u64 = load v3 @18:5
+  v59: u32 = load v7 @18:14
+  v60: i128 = cast v58 @18:14
+  v61: i128 = cast v59 @18:14
+  v62: i128 = add v60, v61 @18:14
+  v63: i128 = int 0 @18:14
+  v64: bool = ge v62, v63 @18:14
+  v65: i128 = int 18446744073709551615 @18:14
+  v66: bool = le v62, v65 @18:14
+  v67: bool = and v64, v66 @18:14
+  v68: unit = check t0 v67, v62 @18:14
+  v69: u64 = cast v62 @18:14
+  v70: unit = store v3, v69 @18:14
+  jump block1()
+block16():
+  trap t1
+block17():
+  trap t1
+t0: narrowing @18:14 ["", " does not fit in `u64`"]
+t1: unreachable @6:21 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn swap_first(addr, u8) -> bool {
+block0(v0: addr, v1: u8):
+  v2: i64 = int 0 @24:15
+  v3: u64 = cast v2 @24:13
+  v4: addr = elem 1 v0, v3 @24:13
+  v5: u8 = load v4 @24:13
+  v6: i64 = int 0 @25:5
+  v7: u64 = cast v6 @25:3
+  v8: addr = elem 1 v0, v7 @25:3
+  v9: unit = store v8, v1 @25:3
+  v10: bool = ne v5, v1 @26:10
+  branch v10, block1(), block2(v10)
+block1():
+  v12: u64 = int 4 @26:21
+  v13: i64 = int 0 @26:30
+  v14: i128 = cast v12 @26:30
+  v15: i128 = cast v13 @26:30
+  v16: bool = eq v14, v15 @26:30
+  v17: bool = not v16 @26:30
+  jump block2(v17)
+block2(v11: bool):
+  return v11
+block3():
+  trap t0
+t0: unreachable @26:30 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn caller() -> bool {
+block0():
+  v0: i64 = int 0 @30:24
+  v1: addr = slot 32 @30:24
+  v3: u64 = int 0 @30:24
+  jump block1(v3)
+block1(v2: u64):
+  v4: u64 = int 4 @30:24
+  v5: bool = lt v2, v4 @30:24
+  branch v5, block2(), block3()
+block2():
+  v6: addr = elem 8 v1, v2 @30:24
+  v7: unit = store v6, v0 @30:24
+  v8: u64 = int 1 @30:24
+  v9: u64 = add v2, v8 @30:24
+  jump block1(v9)
+block3():
+  v10: addr = slot 4 @30:24
+  v12: u64 = int 0 @30:24
+  jump block4(v12)
+block4(v11: u64):
+  v13: u64 = int 4 @30:24
+  v14: bool = lt v11, v13 @30:24
+  branch v14, block5(), block6()
+block5():
+  v15: addr = elem 8 v1, v11 @30:24
+  v16: addr = elem 1 v10, v11 @30:24
+  v17: i64 = load v15 @30:24
+  v18: i64 = int 0 @30:24
+  v19: bool = ge v17, v18 @30:24
+  v20: i64 = int 255 @30:24
+  v21: bool = le v17, v20 @30:24
+  v22: bool = and v19, v21 @30:24
+  v23: unit = check t0 v22, v17 @30:23
+  v24: u8 = cast v17 @30:23
+  v25: unit = store v16, v24 @30:23
+  v26: u64 = int 1 @30:23
+  v27: u64 = add v11, v26 @30:23
+  jump block4(v27)
+block6():
+  v28: addr = slot 4 @30:23
+  v29: unit = copy 4 v28, v10 @30:23
+  v30: i64 = int 3 @31:26
+  v31: u8 = cast v30 @31:26
+  v32: bool = call f1 v28, v31 @31:3
+  return v32
+block7():
+  trap t1
+t0: narrowing @30:23 ["", " does not fit in `u8`"]
+t1: unreachable @31:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn masks(u16) -> u16 {
+block0(v0: u16):
+  v1: i64 = int 15 @34:36
+  v2: u16 = cast v1 @34:32
+  v3: u16 = and v0, v2 @34:32
+  v4: i64 = int 2 @34:50
+  v5: u64 = cast v4 @34:45
+  v6: u16 = shl t0 v0, v5 @34:45
+  v7: u16 = not v0 @34:56
+  v8: i64 = int 1 @34:61
+  v9: u64 = cast v8 @34:55
+  v10: u16 = shr v7, v9 @34:55
+  v11: u16 = xor v6, v10 @34:44
+  v12: u16 = or v3, v11 @34:31
+  return v12
+block1():
+  trap t1
+t0: narrowing @34:45 ["", " does not fit in `u16`"]
+t1: unreachable @34:31 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn pick(bool) -> i32 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  v2: i64 = int 1 @36:39
+  v3: i64 = neg v2 @36:39
+  jump block3(v3)
+block2():
+  v4: i64 = int 1 @36:50
+  jump block3(v4)
+block3(v1: i64):
+  v5: i32 = cast v1 @36:50
+  return v5
+block4():
+  trap t0
+t0: unreachable @36:50 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn grid(addr) {
+block0(v0: addr):
+  v1: i64 = int 0 @38:31
+  v2: addr = slot 24 @38:31
+  v4: u64 = int 0 @38:31
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 3 @38:31
+  v6: bool = lt v3, v5 @38:31
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @38:31
+  v8: unit = store v7, v1 @38:31
+  v9: u64 = int 1 @38:31
+  v10: u64 = add v3, v9 @38:31
+  jump block1(v10)
+block3():
+  v11: addr = slot 48 @38:31
+  v13: u64 = int 0 @38:31
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 2 @38:31
+  v15: bool = lt v12, v14 @38:31
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 24 v11, v12 @38:31
+  v17: unit = copy 24 v16, v2 @38:31
+  v18: u64 = int 1 @38:31
+  v19: u64 = add v12, v18 @38:31
+  jump block4(v19)
+block6():
+  v20: addr = slot 6 @38:31
+  v22: u64 = int 0 @38:31
+  jump block7(v22)
+block7(v21: u64):
+  v23: u64 = int 2 @38:31
+  v24: bool = lt v21, v23 @38:31
+  branch v24, block8(), block9()
+block8():
+  v25: addr = elem 24 v11, v21 @38:31
+  v26: addr = elem 3 v20, v21 @38:31
+  v27: addr = slot 3 @38:31
+  v29: u64 = int 0 @38:31
+  jump block10(v29)
+block9():
+  v48: unit = copy 6 v0, v20 @38:29
+  return
+block10(v28: u64):
+  v30: u64 = int 3 @38:31
+  v31: bool = lt v28, v30 @38:31
+  branch v31, block11(), block12()
+block11():
+  v32: addr = elem 8 v25, v28 @38:31
+  v33: addr = elem 1 v27, v28 @38:31
+  v34: i64 = load v32 @38:31
+  v35: i64 = int -128 @38:31
+  v36: bool = ge v34, v35 @38:31
+  v37: i64 = int 127 @38:31
+  v38: bool = le v34, v37 @38:31
+  v39: bool = and v36, v38 @38:31
+  v40: unit = check t0 v39, v34 @38:29
+  v41: i8 = cast v34 @38:29
+  v42: unit = store v33, v41 @38:29
+  v43: u64 = int 1 @38:29
+  v44: u64 = add v28, v43 @38:29
+  jump block10(v44)
+block12():
+  v45: unit = copy 3 v26, v27 @38:29
+  v46: u64 = int 1 @38:29
+  v47: u64 = add v21, v46 @38:29
+  jump block7(v47)
+block13():
+  trap t1
+t0: narrowing @38:29 ["", " does not fit in `i8`"]
+t1: unreachable @38:29 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter sum_to(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @4:8
+  v7: u32 = cast v0 @4:8
+  v8: i64 = int 0 @4:8
+  v9: i64 = int 1000 @4:8
+  v10: i64 = cast v7 @4:8
+  v11: bool = ge v10, v8 @4:8
+  v12: i64 = cast v7 @4:8
+  v13: bool = lt v12, v9 @4:8
+  v14: bool = and v11, v13 @4:8
+  v15: unit = check t1 v14, v7, v8, v9 @4:8
+  v16: i64 = int 0 @5:16
+  v17: i64 = cast v7 @5:16
+  v18: bool = gt v17, v16 @5:16
+  v19: unit = check t2 v18 @4:8
+  v20: u64 = call f0 v7 @4:8
+  return v20
+t0: narrowing @4:8 ["", " does not fit in `u32`"]
+t1: refinement @4:8 ["", " lies outside the refinement `[", "..", "]`"]
+t2: requires @4:8 ["`requires (> n 0)` is false at this call"]
+t3: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter swap_first(addr, i128) -> bool {
+block0(v0: addr, v1: i128):
+  v2: i128 = int 0 @0:0
+  v3: bool = ge v1, v2 @0:0
+  v4: i128 = int 255 @0:0
+  v5: bool = le v1, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v1 @23:8
+  v8: u8 = cast v1 @23:8
+  v9: bool = call f1 v0, v8 @23:8
+  return v9
+t0: narrowing @23:8 ["", " does not fit in `u8`"]
+t1: unreachable @23:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter caller() -> bool {
+block0():
+  v0: bool = call f2 @29:8
+  return v0
+t0: unreachable @29:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter masks(i128) -> u16 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 65535 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @34:8
+  v7: u16 = cast v0 @34:8
+  v8: u16 = call f3 v7 @34:8
+  return v8
+t0: narrowing @34:8 ["", " does not fit in `u16`"]
+t1: unreachable @34:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn enter pick(bool) -> i32 {
+block0(v0: bool):
+  v1: i32 = call f4 v0 @36:8
+  return v1
+t0: unreachable @36:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn enter grid(addr) {
+block0(v0: addr):
+  v1: unit = call f5 v0 @38:8
+  return
+t0: unreachable @38:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/missing_mut_mark.mn == (exit 2)
+== conformance/core-calculus/missing_result.mn == (exit 2)
+== conformance/core-calculus/mut_argument_named_twice.mn == (exit 2)
+== conformance/core-calculus/mut_argument_of_val.mn == (exit 2)
+== conformance/core-calculus/narrowing_that_always_traps.mn == (exit 2)
+== conformance/core-calculus/narrowing_that_may_trap.mn ==
+mente-dump 1 mir
+f0: fn f(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 200 @4:19
+  v2: i64 = cast v0 @4:15
+  v3: i64 = add v2, v1 @4:15
+  v4: i64 = int 0 @4:15
+  v5: bool = ge v3, v4 @4:15
+  v6: i64 = int 255 @4:15
+  v7: bool = le v3, v6 @4:15
+  v8: bool = and v5, v7 @4:15
+  v9: unit = check t0 v8, v3 @4:15
+  v10: u8 = cast v3 @4:15
+  return v10
+block1():
+  trap t1
+t0: narrowing @4:15 ["", " does not fit in `u8`"]
+t1: unreachable @5:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter f(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @3:8
+  v7: u8 = cast v0 @3:8
+  v8: u8 = call f0 v7 @3:8
+  return v8
+t0: narrowing @3:8 ["", " does not fit in `u8`"]
+t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/refinement_not_proven.mn == (exit 2)
+== conformance/core-calculus/refinement_over_a_var.mn == (exit 2)
+== conformance/core-calculus/refinement_proven_by_a_guard.mn ==
+mente-dump 1 mir
+f0: fn next(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 255 @4:13
+  v2: i64 = cast v0 @4:13
+  v3: bool = lt v2, v1 @4:13
+  branch v3, block1(), block2()
+block1():
+  v6: i64 = int 1 @7:14
+  v7: i64 = cast v0 @7:10
+  v8: i64 = add v7, v6 @7:10
+  v9: u8 = cast v8 @7:10
+  return v9
+block2():
+  v4: i64 = int 1 @5:12
+  v5: u8 = cast v4 @5:12
+  return v5
+block3():
+  trap t0
+block4():
+  trap t0
+t0: unreachable @7:10 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn first(addr, u64) -> u8 {
+block0(v0: addr, v1: u64):
+  v2: i64 = int 0 @11:13
+  v3: i128 = cast v1 @11:13
+  v4: i128 = cast v2 @11:13
+  v5: bool = gt v3, v4 @11:13
+  branch v5, block1(), block2()
+block1():
+  v8: i64 = int 1 @14:31
+  v9: i64 = cast v1 @14:27
+  v10: i64 = sub v9, v8 @14:27
+  v11: u64 = cast v10 @14:27
+  v12: addr = elem 1 v0, v11 @15:3
+  v13: u8 = load v12 @15:3
+  return v13
+block2():
+  v6: i64 = int 0 @12:12
+  v7: u8 = cast v6 @12:12
+  return v7
+block3():
+  trap t0
+block4():
+  trap t0
+t0: unreachable @15:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter next(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @3:8
+  v7: u8 = cast v0 @3:8
+  v8: u8 = call f0 v7 @3:8
+  return v8
+t0: narrowing @3:8 ["", " does not fit in `u8`"]
+t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter first(addr, i128) -> u8 {
+block0(v0: addr, v1: i128):
+  v2: i128 = int 0 @0:0
+  v3: bool = ge v1, v2 @0:0
+  v4: i128 = int 18446744073709551615 @0:0
+  v5: bool = le v1, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v1 @10:8
+  v8: u64 = cast v1 @10:8
+  v9: i64 = int 0 @10:8
+  v10: i64 = int 8 @10:8
+  v11: i128 = cast v8 @10:8
+  v12: i128 = cast v9 @10:8
+  v13: bool = ge v11, v12 @10:8
+  v14: i128 = cast v8 @10:8
+  v15: i128 = cast v10 @10:8
+  v16: bool = le v14, v15 @10:8
+  v17: bool = and v13, v16 @10:8
+  v18: unit = check t1 v17, v8, v9, v10 @10:8
+  v19: u8 = call f1 v0, v8 @10:8
+  return v19
+t0: narrowing @10:8 ["", " does not fit in `usize`"]
+t1: refinement @10:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/remainder_and_division_facts.mn ==
+mente-dump 1 mir
+f0: fn bucket(u32, u32) -> u32 {
+block0(v0: u32, v1: u32):
+  v2: i64 = cast v0 @3:54
+  v3: i64 = cast v1 @3:54
+  v4: i64 = rem v2, v3 @3:54
+  v5: u32 = cast v4 @3:54
+  return v5
+block1():
+  trap t0
+t0: unreachable @3:54 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn half(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 2 @5:41
+  v2: i64 = cast v0 @5:37
+  v3: i64 = div v2, v1 @5:37
+  v4: u8 = cast v3 @5:37
+  return v4
+block1():
+  trap t0
+t0: unreachable @5:37 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter bucket(i128, i128) -> u32 {
+block0(v0: i128, v1: i128):
+  v2: i128 = int 0 @0:0
+  v3: bool = ge v0, v2 @0:0
+  v4: i128 = int 4294967295 @0:0
+  v5: bool = le v0, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v0 @3:8
+  v8: u32 = cast v0 @3:8
+  v9: i128 = int 0 @3:8
+  v10: bool = ge v1, v9 @3:8
+  v11: i128 = int 4294967295 @3:8
+  v12: bool = le v1, v11 @3:8
+  v13: bool = and v10, v12 @3:8
+  v14: unit = check t1 v13, v1 @3:8
+  v15: u32 = cast v1 @3:8
+  v16: i64 = int 1 @3:8
+  v17: i64 = int 64 @3:8
+  v18: i64 = cast v15 @3:8
+  v19: bool = ge v18, v16 @3:8
+  v20: i64 = cast v15 @3:8
+  v21: bool = lt v20, v17 @3:8
+  v22: bool = and v19, v21 @3:8
+  v23: unit = check t2 v22, v15, v16, v17 @3:8
+  v24: u32 = call f0 v8, v15 @3:8
+  return v24
+t0: narrowing @3:8 ["", " does not fit in `u32`"]
+t1: narrowing @3:8 ["", " does not fit in `u32`"]
+t2: refinement @3:8 ["", " lies outside the refinement `[", "..", "]`"]
+t3: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter half(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u8 = cast v0 @5:8
+  v8: u8 = call f1 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u8`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/requires_not_proven_at_a_call.mn == (exit 2)
+== conformance/core-calculus/shadowing.mn == (exit 2)
+== conformance/core-calculus/unknown_name.mn == (exit 2)
+== conformance/core-calculus/unused_value.mn == (exit 2)
+== conformance/core-calculus/var_never_assigned.mn == (exit 2)
+== conformance/core-calculus/wrong_number_of_arguments.mn == (exit 2)
+== conformance/core-calculus/wrong_type.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/clause_outside_the_fragment.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/clause_routed_by_checked.mn ==
+mente-dump 1 mir
+f0: fn half(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 2 @6:7
+  v2: i64 = cast v0 @6:3
+  v3: i64 = div v2, v1 @6:3
+  v4: u8 = cast v3 @6:3
+  return v4
+block1():
+  trap t0
+t0: unreachable @6:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn odd(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 2 @11:7
+  v2: i64 = cast v0 @11:3
+  v3: i64 = rem v2, v1 @11:3
+  v4: i64 = int 1 @11:12
+  v5: bool = eq v3, v4 @11:12
+  return v5
+block1():
+  trap t0
+t0: unreachable @11:12 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn twice(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 2 @5:16
+  v2: i64 = cast v0 @5:12
+  v3: i64 = int 0 @5:12
+  v4: bool = ne v1, v3 @5:12
+  v5: unit = check t0 v4 @5:12
+  v6: i64 = rem v2, v1 @5:12
+  v7: i64 = int 0 @5:21
+  v8: bool = eq v6, v7 @5:21
+  v9: unit = check t1 v8 @13:29
+  v10: u8 = call f0 v0 @13:29
+  v11: i64 = int 2 @5:16
+  v12: i64 = cast v0 @5:12
+  v13: i64 = int 0 @5:12
+  v14: bool = ne v11, v13 @5:12
+  v15: unit = check t2 v14 @5:12
+  v16: i64 = rem v12, v11 @5:12
+  v17: i64 = int 0 @5:21
+  v18: bool = eq v16, v17 @5:21
+  v19: unit = check t3 v18 @13:39
+  v20: u8 = call f0 v0 @13:39
+  v21: i64 = cast v10 @13:29
+  v22: i64 = cast v20 @13:29
+  v23: i64 = add v21, v22 @13:29
+  v24: i64 = int 0 @13:29
+  v25: bool = ge v23, v24 @13:29
+  v26: i64 = int 255 @13:29
+  v27: bool = le v23, v26 @13:29
+  v28: bool = and v25, v27 @13:29
+  v29: unit = check t4 v28, v23 @13:29
+  v30: u8 = cast v23 @13:29
+  return v30
+block1():
+  trap t5
+t0: division-by-zero @5:12 ["division by zero"]
+t1: requires @13:29 ["`requires (== (% x 2) 0)` is false at this call"]
+t2: division-by-zero @5:12 ["division by zero"]
+t3: requires @13:39 ["`requires (== (% x 2) 0)` is false at this call"]
+t4: narrowing @13:29 ["", " does not fit in `u8`"]
+t5: unreachable @13:29 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter half(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @4:8
+  v7: u8 = cast v0 @4:8
+  v8: i64 = int 2 @5:16
+  v9: i64 = cast v7 @5:12
+  v10: i64 = int 0 @5:12
+  v11: bool = ne v8, v10 @5:12
+  v12: unit = check t1 v11 @5:12
+  v13: i64 = rem v9, v8 @5:12
+  v14: i64 = int 0 @5:21
+  v15: bool = eq v13, v14 @5:21
+  v16: unit = check t2 v15 @4:8
+  v17: u8 = call f0 v7 @4:8
+  return v17
+t0: narrowing @4:8 ["", " does not fit in `u8`"]
+t1: division-by-zero @5:12 ["division by zero"]
+t2: requires @4:8 ["`requires (== (% x 2) 0)` is false at this call"]
+t3: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter odd(i128) -> bool {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @9:8
+  v7: u8 = cast v0 @9:8
+  v8: i64 = int 0 @10:17
+  v9: i64 = cast v7 @10:17
+  v10: bool = ne v9, v8 @10:17
+  v11: unit = check t1 v10 @9:8
+  v12: bool = call f1 v7 @9:8
+  return v12
+t0: narrowing @9:8 ["", " does not fit in `u8`"]
+t1: requires @9:8 ["`requires (!= x 0)` is false at this call"]
+t2: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter twice(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @13:8
+  v7: u8 = cast v0 @13:8
+  v8: u8 = call f2 v7 @13:8
+  return v8
+t0: narrowing @13:8 ["", " does not fit in `u8`"]
+t1: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/decreases_negative_at_a_call.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/decreases_not_smaller.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/decreases_proven.mn ==
+mente-dump 1 mir
+f0: fn gcd(u32, u32) -> u32 {
+block0(v0: u32, v1: u32):
+  v2: addr = slot 4 @4:16
+  v3: unit = store v2, v0 @4:16
+  v4: addr = slot 4 @5:16
+  v5: unit = store v4, v1 @5:16
+  v6: addr = slot 1 @6:3
+  v7: bool = bool false @6:3
+  v8: unit = store v6, v7 @6:3
+  v9: addr = slot 16 @6:3
+  jump block1()
+block1():
+  v10: u32 = load v4 @6:9
+  v11: i64 = int 0 @6:14
+  v12: i64 = cast v10 @6:14
+  v13: bool = ne v12, v11 @6:14
+  branch v13, block2(), block3()
+block2():
+  v14: u32 = load v4 @6:26
+  v15: u128 = load v9 @6:26
+  v16: bool = bool false @6:26
+  v17: u128 = cast v14 @6:26
+  v18: bool = lt v17, v15 @6:26
+  v19: u128 = cast v14 @6:26
+  v20: bool = eq v19, v15 @6:26
+  v21: bool = and v20, v16 @6:26
+  v22: bool = or v18, v21 @6:26
+  v23: bool = load v6 @6:26
+  v24: bool = not v23 @6:26
+  v25: bool = or v24, v22 @6:26
+  v26: bool = bool true @6:26
+  v27: unit = store v6, v26 @6:26
+  v28: u128 = cast v14 @6:26
+  v29: unit = store v9, v28 @6:26
+  v30: u32 = load v2 @7:13
+  v31: u32 = load v4 @7:17
+  v32: i64 = cast v30 @7:13
+  v33: i64 = cast v31 @7:13
+  v34: i64 = rem v32, v33 @7:13
+  v35: u32 = cast v34 @7:13
+  v36: u32 = load v4 @8:9
+  v37: unit = store v2, v36 @8:9
+  v38: unit = store v4, v35 @9:9
+  jump block1()
+block3():
+  v39: u32 = load v2 @11:3
+  return v39
+block4():
+  trap t0
+t0: unreachable @11:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn isqrt(u64) -> u64 {
+block0(v0: u64):
+  v1: i64 = int 0 @15:17
+  v2: u64 = cast v1 @15:17
+  v3: addr = slot 8 @15:17
+  v4: unit = store v3, v2 @15:17
+  v5: i64 = int 4294967296 @16:17
+  v6: u64 = cast v5 @16:17
+  v7: addr = slot 8 @16:17
+  v8: unit = store v7, v6 @16:17
+  v9: addr = slot 1 @17:3
+  v10: bool = bool false @17:3
+  v11: unit = store v9, v10 @17:3
+  v12: addr = slot 16 @17:3
+  jump block1()
+block1():
+  v13: u64 = load v7 @17:9
+  v14: u64 = load v3 @17:14
+  v15: i128 = cast v13 @17:9
+  v16: i128 = cast v14 @17:9
+  v17: i128 = sub v15, v16 @17:9
+  v18: i64 = int 1 @17:19
+  v19: i128 = cast v18 @17:19
+  v20: bool = gt v17, v19 @17:19
+  branch v20, block2(), block3()
+block2():
+  v21: u64 = load v7 @17:31
+  v22: u64 = load v3 @17:36
+  v23: i128 = cast v21 @17:31
+  v24: i128 = cast v22 @17:31
+  v25: i128 = sub v23, v24 @17:31
+  v26: u128 = load v12 @17:31
+  v27: bool = bool false @17:31
+  v28: i128 = int 0 @17:31
+  v29: bool = lt v25, v28 @17:31
+  branch v29, block4(), block5()
+block3():
+  v68: u64 = load v3 @25:3
+  return v68
+block4():
+  v31: bool = bool true @17:31
+  jump block6(v31)
+block5():
+  v32: u128 = cast v25 @17:31
+  v33: bool = lt v32, v26 @17:31
+  jump block6(v33)
+block6(v30: bool):
+  v34: i128 = int 0 @17:31
+  v35: bool = lt v25, v34 @17:31
+  branch v35, block7(), block8()
+block7():
+  v37: bool = bool false @17:31
+  jump block9(v37)
+block8():
+  v38: u128 = cast v25 @17:31
+  v39: bool = eq v38, v26 @17:31
+  jump block9(v39)
+block9(v36: bool):
+  v40: bool = and v36, v27 @17:31
+  v41: bool = or v30, v40 @17:31
+  v42: bool = load v9 @17:31
+  v43: bool = not v42 @17:31
+  v44: bool = or v43, v41 @17:31
+  v45: bool = bool true @17:31
+  v46: unit = store v9, v45 @17:31
+  v47: u128 = cast v25 @17:31
+  v48: unit = store v12, v47 @17:31
+  v49: u64 = load v3 @18:15
+  v50: u64 = load v7 @18:21
+  v51: u64 = load v3 @18:26
+  v52: i128 = cast v50 @18:21
+  v53: i128 = cast v51 @18:21
+  v54: i128 = sub v52, v53 @18:21
+  v55: i64 = int 2 @18:32
+  v56: i128 = cast v55 @18:20
+  v57: i128 = div v54, v56 @18:20
+  v58: i128 = cast v49 @18:15
+  v59: i128 = add v58, v57 @18:15
+  v60: u64 = cast v59 @18:15
+  v61: u128 = cast v60 @19:8
+  v62: u128 = cast v60 @19:8
+  v63: u128 = mul v61, v62 @19:8
+  v64: u128 = cast v0 @19:21
+  v65: bool = le v63, v64 @19:21
+  branch v65, block10(), block11()
+block10():
+  v66: unit = store v3, v60 @20:12
+  jump block12()
+block11():
+  v67: unit = store v7, v60 @22:12
+  jump block12()
+block12():
+  jump block1()
+block13():
+  trap t0
+t0: unreachable @25:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn pairs(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @29:15
+  v2: u8 = cast v1 @29:15
+  v3: addr = slot 1 @29:15
+  v4: unit = store v3, v2 @29:15
+  v5: i64 = int 0 @30:15
+  v6: u8 = cast v5 @30:15
+  v7: addr = slot 1 @30:15
+  v8: unit = store v7, v6 @30:15
+  v9: addr = slot 1 @31:3
+  v10: bool = bool false @31:3
+  v11: unit = store v9, v10 @31:3
+  v12: addr = slot 16 @31:3
+  v13: addr = slot 16 @31:3
+  jump block1()
+block1():
+  v14: u8 = load v7 @31:25
+  v15: i64 = int 9 @31:30
+  v16: i64 = cast v14 @31:30
+  v17: bool = le v16, v15 @31:30
+  v18: u8 = load v3 @31:9
+  v19: bool = lt v18, v0 @31:13
+  branch v19, block2(), block3()
+block2():
+  v20: u8 = load v3 @31:46
+  v21: i64 = cast v0 @31:42
+  v22: i64 = cast v20 @31:42
+  v23: i64 = sub v21, v22 @31:42
+  v24: i64 = int 9 @31:58
+  v25: u8 = load v7 @31:62
+  v26: i64 = cast v25 @31:58
+  v27: i64 = sub v24, v26 @31:58
+  v28: u128 = load v12 @31:58
+  v29: u128 = load v13 @31:58
+  v30: bool = bool false @31:58
+  v31: i64 = int 0 @31:58
+  v32: bool = lt v27, v31 @31:58
+  branch v32, block4(), block5()
+block3():
+  v87: u8 = load v3 @39:3
+  return v87
+block4():
+  v34: bool = bool true @31:58
+  jump block6(v34)
+block5():
+  v35: u128 = cast v27 @31:58
+  v36: bool = lt v35, v29 @31:58
+  jump block6(v36)
+block6(v33: bool):
+  v37: i64 = int 0 @31:58
+  v38: bool = lt v27, v37 @31:58
+  branch v38, block7(), block8()
+block7():
+  v40: bool = bool false @31:58
+  jump block9(v40)
+block8():
+  v41: u128 = cast v27 @31:58
+  v42: bool = eq v41, v29 @31:58
+  jump block9(v42)
+block9(v39: bool):
+  v43: bool = and v39, v30 @31:58
+  v44: bool = or v33, v43 @31:58
+  v45: i64 = int 0 @31:58
+  v46: bool = lt v23, v45 @31:58
+  branch v46, block10(), block11()
+block10():
+  v48: bool = bool true @31:58
+  jump block12(v48)
+block11():
+  v49: u128 = cast v23 @31:58
+  v50: bool = lt v49, v28 @31:58
+  jump block12(v50)
+block12(v47: bool):
+  v51: i64 = int 0 @31:58
+  v52: bool = lt v23, v51 @31:58
+  branch v52, block13(), block14()
+block13():
+  v54: bool = bool false @31:58
+  jump block15(v54)
+block14():
+  v55: u128 = cast v23 @31:58
+  v56: bool = eq v55, v28 @31:58
+  jump block15(v56)
+block15(v53: bool):
+  v57: bool = and v53, v44 @31:58
+  v58: bool = or v47, v57 @31:58
+  v59: bool = load v9 @31:58
+  v60: bool = not v59 @31:58
+  v61: bool = or v60, v58 @31:58
+  v62: bool = bool true @31:58
+  v63: unit = store v9, v62 @31:58
+  v64: u128 = cast v23 @31:58
+  v65: unit = store v12, v64 @31:58
+  v66: u128 = cast v27 @31:58
+  v67: unit = store v13, v66 @31:58
+  v68: u8 = load v7 @32:8
+  v69: i64 = int 9 @32:12
+  v70: i64 = cast v68 @32:12
+  v71: bool = lt v70, v69 @32:12
+  branch v71, block16(), block17()
+block16():
+  v72: u8 = load v7 @33:7
+  v73: i64 = int 1 @33:12
+  v74: i64 = cast v72 @33:12
+  v75: i64 = add v74, v73 @33:12
+  v76: u8 = cast v75 @33:12
+  v77: unit = store v7, v76 @33:12
+  jump block18()
+block17():
+  v78: u8 = load v3 @35:7
+  v79: i64 = int 1 @35:12
+  v80: i64 = cast v78 @35:12
+  v81: i64 = add v80, v79 @35:12
+  v82: u8 = cast v81 @35:12
+  v83: unit = store v3, v82 @35:12
+  v84: i64 = int 0 @36:11
+  v85: u8 = cast v84 @36:11
+  v86: unit = store v7, v85 @36:11
+  jump block18()
+block18():
+  jump block1()
+block19():
+  trap t0
+t0: unreachable @39:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn down(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @45:11
+  v2: i64 = cast v0 @45:11
+  v3: bool = eq v2, v1 @45:11
+  branch v3, block1(), block2()
+block1():
+  v4: i64 = int 0 @46:12
+  v5: u8 = cast v4 @46:12
+  return v5
+block2():
+  jump block3()
+block3():
+  v6: i64 = int 1 @48:12
+  v7: i64 = cast v0 @48:8
+  v8: i64 = sub v7, v6 @48:8
+  v9: u8 = cast v8 @48:8
+  v10: u8 = call f3 v9 @48:3
+  return v10
+block4():
+  trap t0
+block5():
+  trap t0
+t0: unreachable @48:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter gcd(i128, i128) -> u32 {
+block0(v0: i128, v1: i128):
+  v2: i128 = int 0 @0:0
+  v3: bool = ge v0, v2 @0:0
+  v4: i128 = int 4294967295 @0:0
+  v5: bool = le v0, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v0 @3:8
+  v8: u32 = cast v0 @3:8
+  v9: i128 = int 0 @3:8
+  v10: bool = ge v1, v9 @3:8
+  v11: i128 = int 4294967295 @3:8
+  v12: bool = le v1, v11 @3:8
+  v13: bool = and v10, v12 @3:8
+  v14: unit = check t1 v13, v1 @3:8
+  v15: u32 = cast v1 @3:8
+  v16: u32 = call f0 v8, v15 @3:8
+  return v16
+t0: narrowing @3:8 ["", " does not fit in `u32`"]
+t1: narrowing @3:8 ["", " does not fit in `u32`"]
+t2: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter isqrt(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 18446744073709551615 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @14:8
+  v7: u64 = cast v0 @14:8
+  v8: u64 = call f1 v7 @14:8
+  return v8
+t0: narrowing @14:8 ["", " does not fit in `u64`"]
+t1: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter pairs(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @28:8
+  v7: u8 = cast v0 @28:8
+  v8: u8 = call f2 v7 @28:8
+  return v8
+t0: narrowing @28:8 ["", " does not fit in `u8`"]
+t1: unreachable @28:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter down(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @42:8
+  v7: u8 = cast v0 @42:8
+  v8: u8 = int 0 @43:13
+  v9: bool = ge v7, v8 @43:13
+  v10: unit = check t1 v9 @43:13
+  v11: u8 = call f3 v7 @42:8
+  return v11
+t0: narrowing @42:8 ["", " does not fit in `u8`"]
+t1: decreases @43:13 ["`decreases n` is negative or did not decrease"]
+t2: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/invariant_not_preserved.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
+mente-dump 1 mir
+f0: fn count(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @4:15
+  v2: u8 = cast v1 @4:15
+  v3: addr = slot 1 @4:15
+  v4: unit = store v3, v2 @4:15
+  jump block1()
+block1():
+  v5: u8 = load v3 @5:9
+  v6: bool = lt v5, v0 @5:13
+  branch v6, block2(), block3()
+block2():
+  v7: u8 = load v3 @6:5
+  v8: i64 = int 1 @6:10
+  v9: i64 = cast v7 @6:10
+  v10: i64 = add v9, v8 @6:10
+  v11: u8 = cast v10 @6:10
+  v12: unit = store v3, v11 @6:10
+  jump block1()
+block3():
+  v13: u8 = load v3 @8:3
+  return v13
+block4():
+  trap t0
+t0: unreachable @8:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn first_zero(addr) -> u64 {
+block0(v0: addr):
+  v1: i64 = int 0 @12:18
+  v2: u64 = cast v1 @12:18
+  v3: addr = slot 8 @12:18
+  v4: unit = store v3, v2 @12:18
+  jump block1()
+block1():
+  v5: u64 = load v3 @13:30
+  v6: u64 = int 10 @13:35
+  v7: bool = le v5, v6 @13:35
+  v8: u64 = load v3 @13:9
+  v9: u64 = int 10 @13:13
+  v10: bool = lt v8, v9 @13:13
+  branch v10, block2(), block3()
+block2():
+  v11: u64 = load v3 @14:14
+  v12: addr = elem 1 v0, v11 @14:11
+  v13: u8 = load v12 @14:11
+  v14: i64 = int 0 @14:20
+  v15: i64 = cast v13 @14:20
+  v16: bool = ne v15, v14 @14:20
+  branch v16, block4(), block5()
+block3():
+  v24: u64 = load v3 @19:3
+  return v24
+block4():
+  v17: u64 = load v3 @17:5
+  v18: i64 = int 1 @17:10
+  v19: i128 = cast v17 @17:10
+  v20: i128 = cast v18 @17:10
+  v21: i128 = add v19, v20 @17:10
+  v22: u64 = cast v21 @17:10
+  v23: unit = store v3, v22 @17:10
+  jump block1()
+block5():
+  jump block3()
+block6():
+  trap t0
+block7():
+  trap t0
+t0: unreachable @19:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter count(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @3:8
+  v7: u8 = cast v0 @3:8
+  v8: i64 = int 0 @3:8
+  v9: i64 = int 100 @3:8
+  v10: i64 = cast v7 @3:8
+  v11: bool = ge v10, v8 @3:8
+  v12: i64 = cast v7 @3:8
+  v13: bool = lt v12, v9 @3:8
+  v14: bool = and v11, v13 @3:8
+  v15: unit = check t1 v14, v7, v8, v9 @3:8
+  v16: u8 = call f0 v7 @3:8
+  return v16
+t0: narrowing @3:8 ["", " does not fit in `u8`"]
+t1: refinement @3:8 ["", " lies outside the refinement `[", "..", "]`"]
+t2: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter first_zero(addr) -> u64 {
+block0(v0: addr):
+  v1: u64 = call f1 v0 @11:8
+  return v1
+t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/total_while_without_decreases.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/total_with_decreases_in_the_signature.mn ==
+mente-dump 1 mir
+f0: fn countdown(u32) -> u32 {
+block0(v0: u32):
+  jump block1()
+block1():
+  v1: i64 = int 0 @7:13
+  v2: i64 = cast v0 @7:13
+  v3: bool = gt v2, v1 @7:13
+  branch v3, block2(), block3()
+block2():
+  jump block1()
+block3():
+  return v0
+block4():
+  trap t0
+t0: unreachable @9:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter countdown(i128) -> u32 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @4:8
+  v7: u32 = cast v0 @4:8
+  v8: u32 = int 0 @5:13
+  v9: bool = ge v7, v8 @5:13
+  v10: unit = check t1 v9 @5:13
+  v11: u32 = call f0 v7 @4:8
+  return v11
+t0: narrowing @4:8 ["", " does not fit in `u32`"]
+t1: decreases @5:13 ["`decreases n` is negative or did not decrease"]
+t2: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/total_with_decreases_on_the_loop.mn ==
+mente-dump 1 mir
+f0: fn countdown(u32) -> u32 {
+block0(v0: u32):
+  v1: addr = slot 4 @5:16
+  v2: unit = store v1, v0 @5:16
+  v3: addr = slot 1 @6:3
+  v4: bool = bool false @6:3
+  v5: unit = store v3, v4 @6:3
+  v6: addr = slot 16 @6:3
+  jump block1()
+block1():
+  v7: u32 = load v1 @6:9
+  v8: i64 = int 0 @6:13
+  v9: i64 = cast v7 @6:13
+  v10: bool = gt v9, v8 @6:13
+  branch v10, block2(), block3()
+block2():
+  v11: u32 = load v1 @6:25
+  v12: u128 = load v6 @6:25
+  v13: bool = bool false @6:25
+  v14: u128 = cast v11 @6:25
+  v15: bool = lt v14, v12 @6:25
+  v16: u128 = cast v11 @6:25
+  v17: bool = eq v16, v12 @6:25
+  v18: bool = and v17, v13 @6:25
+  v19: bool = or v15, v18 @6:25
+  v20: bool = load v3 @6:25
+  v21: bool = not v20 @6:25
+  v22: bool = or v21, v19 @6:25
+  v23: bool = bool true @6:25
+  v24: unit = store v3, v23 @6:25
+  v25: u128 = cast v11 @6:25
+  v26: unit = store v6, v25 @6:25
+  v27: u32 = load v1 @7:5
+  v28: i64 = int 1 @7:10
+  v29: i64 = cast v27 @7:10
+  v30: i64 = sub v29, v28 @7:10
+  v31: u32 = cast v30 @7:10
+  v32: unit = store v1, v31 @7:10
+  jump block1()
+block3():
+  v33: u32 = load v1 @9:3
+  return v33
+block4():
+  trap t0
+t0: unreachable @9:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter countdown(i128) -> u32 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @4:8
+  v7: u32 = cast v0 @4:8
+  v8: u32 = call f0 v7 @4:8
+  return v8
+t0: narrowing @4:8 ["", " does not fit in `u32`"]
+t1: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/total_without_a_loop.mn ==
+mente-dump 1 mir
+f0: fn id(u32) -> u32 {
+block0(v0: u32):
+  return v0
+block1():
+  trap t0
+t0: unreachable @4:28 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter id(i128) -> u32 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @4:8
+  v7: u32 = cast v0 @4:8
+  v8: u32 = call f0 v7 @4:8
+  return v8
+t0: narrowing @4:8 ["", " does not fit in `u32`"]
+t1: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/grammar/assignment_to_a_sum.mn == (exit 2)
+== conformance/grammar/binary_digit_out_of_base.mn == (exit 2)
+== conformance/grammar/binding_without_value.mn == (exit 2)
+== conformance/grammar/chained_comparison.mn == (exit 2)
+== conformance/grammar/char_literal.mn == (exit 2)
+== conformance/grammar/expression_expected.mn == (exit 2)
+== conformance/grammar/if_as_an_operand.mn == (exit 2)
+== conformance/grammar/integer_beyond_u128.mn == (exit 2)
+== conformance/grammar/m1_literals_and_operators.mn == (exit 1)
+== conformance/grammar/newlines_and_clauses.mn == (exit 1)
+== conformance/grammar/repeat_count_not_a_literal.mn == (exit 2)
+== conformance/grammar/semicolon_at_line_end.mn == (exit 2)
+== conformance/grammar/suffix_without_underscore.mn == (exit 2)
+== conformance/grammar/two_statements_on_a_line.mn == (exit 2)
+== conformance/grammar/type_m1_lacks.mn == (exit 2)
+== conformance/grammar/unclosed_string.mn == (exit 2)
+== conformance/grammar/unknown_character.mn == (exit 2)
+== conformance/grammar/unknown_escape.mn == (exit 2)
+== conformance/hardware-contracts/branchless_raise.mn == (exit 2)
+== conformance/hardware-contracts/branchless_straight_line.mn ==
+mente-dump 1 mir
+f0: fn mix(i32, i32, i32) -> i32 {
+block0(v0: i32, v1: i32, v2: i32):
+  v3: i32 = and v0, v1 @5:4
+  v4: i32 = xor v0, v2 @5:15
+  v5: i32 = or v3, v4 @5:3
+  return v5
+block1():
+  trap t0
+t0: unreachable @5:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter mix(i128, i128, i128) -> i32 {
+block0(v0: i128, v1: i128, v2: i128):
+  v3: i128 = int -2147483648 @0:0
+  v4: bool = ge v0, v3 @0:0
+  v5: i128 = int 2147483647 @0:0
+  v6: bool = le v0, v5 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v0 @4:8
+  v9: i32 = cast v0 @4:8
+  v10: i128 = int -2147483648 @4:8
+  v11: bool = ge v1, v10 @4:8
+  v12: i128 = int 2147483647 @4:8
+  v13: bool = le v1, v12 @4:8
+  v14: bool = and v11, v13 @4:8
+  v15: unit = check t1 v14, v1 @4:8
+  v16: i32 = cast v1 @4:8
+  v17: i128 = int -2147483648 @4:8
+  v18: bool = ge v2, v17 @4:8
+  v19: i128 = int 2147483647 @4:8
+  v20: bool = le v2, v19 @4:8
+  v21: bool = and v18, v20 @4:8
+  v22: unit = check t2 v21, v2 @4:8
+  v23: i32 = cast v2 @4:8
+  v24: i32 = call f0 v9, v16, v23 @4:8
+  return v24
+t0: narrowing @4:8 ["", " does not fit in `i32`"]
+t1: narrowing @4:8 ["", " does not fit in `i32`"]
+t2: narrowing @4:8 ["", " does not fit in `i32`"]
+t3: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/hardware-contracts/branchless_unrolled_loop.mn == (exit 2)
+== conformance/hardware-contracts/branchless_while_loop.mn == (exit 2)
+== conformance/morphic-layouts/alignment_not_a_power_of_two.mn == (exit 2)
+== conformance/morphic-layouts/bit_fields_short_of_the_backing.mn == (exit 2)
+== conformance/morphic-layouts/bitstruct_partition.mn ==
+mente-dump 1 mir
+== conformance/morphic-layouts/cache_line_layout.mn ==
+mente-dump 1 mir
+== conformance/morphic-layouts/empty_bit_range.mn == (exit 2)
+== conformance/morphic-layouts/empty_byte_range.mn == (exit 2)
+== conformance/morphic-layouts/field_more_aligned_than_its_struct.mn == (exit 2)
+== conformance/morphic-layouts/field_without_bytes.mn == (exit 2)
+== conformance/morphic-layouts/fields_short_of_the_size.mn == (exit 2)
+== conformance/morphic-layouts/fixed_point_fields.mn ==
+mente-dump 1 mir
+== conformance/morphic-layouts/float_in_a_bitstruct.mn == (exit 2)
+== conformance/morphic-layouts/gap_between_bit_fields.mn == (exit 2)
+== conformance/morphic-layouts/gap_between_fields.mn == (exit 2)
+== conformance/morphic-layouts/layout_sized_by_a_bitstruct.mn ==
+mente-dump 1 mir
+== conformance/morphic-layouts/misaligned_field.mn == (exit 2)
+== conformance/morphic-layouts/nested_layout_struct.mn ==
+mente-dump 1 mir
+== conformance/morphic-layouts/overlapping_fields.mn == (exit 2)
+== conformance/morphic-layouts/packed_wire_format.mn ==
+mente-dump 1 mir
+== conformance/morphic-layouts/range_narrower_than_its_type.mn == (exit 2)
+== conformance/morphic-layouts/size_not_a_multiple_of_alignment.mn == (exit 2)
+== conformance/morphic-layouts/target_dependent_type.mn == (exit 2)
+== conformance/morphic-layouts/type_narrower_than_its_bits.mn == (exit 2)
+== conformance/morphic-layouts/type_of_unknown_size.mn == (exit 2)
+== conformance/morphic-layouts/unsupported_backing_type.mn == (exit 2)
+== conformance/morphic-layouts/whole_byte_integer.mn ==
+mente-dump 1 mir
+== conformance/regions-and-pools/from_names_a_kept_parameter.mn ==
+mente-dump 1 mir
+== conformance/regions-and-pools/from_names_an_own_parameter.mn == (exit 2)
+== conformance/regions-and-pools/from_names_no_parameter.mn == (exit 2)
+== conformance/regions-and-pools/from_names_nothing.mn == (exit 2)
+== conformance/regions-and-pools/from_names_two_parameters.mn ==
+mente-dump 1 mir
+== conformance/surface-syntax/async_function.mn == (exit 2)
+== conformance/surface-syntax/await_postfix.mn == (exit 2)
+== conformance/surface-syntax/c_logical_operators.mn == (exit 2)
+== conformance/surface-syntax/c_not.mn == (exit 2)
+== conformance/surface-syntax/cast.mn == (exit 2)
+== conformance/surface-syntax/conditional_operator.mn == (exit 2)
+== conformance/surface-syntax/example_without_its_brace.mn == (exit 2)
+== conformance/surface-syntax/expression_body.mn ==
+mente-dump 1 mir
+f0: fn square(i32) -> i32 {
+block0(v0: i32):
+  v1: i64 = cast v0 @3:32
+  v2: i64 = cast v0 @3:32
+  v3: i64 = mul v1, v2 @3:32
+  v4: i64 = int -2147483648 @3:32
+  v5: bool = ge v3, v4 @3:32
+  v6: i64 = int 2147483647 @3:32
+  v7: bool = le v3, v6 @3:32
+  v8: bool = and v5, v7 @3:32
+  v9: unit = check t0 v8, v3 @3:32
+  v10: i32 = cast v3 @3:32
+  return v10
+block1():
+  trap t1
+t0: narrowing @3:32 ["", " does not fit in `i32`"]
+t1: unreachable @3:32 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter square(i128) -> i32 {
+block0(v0: i128):
+  v1: i128 = int -2147483648 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 2147483647 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @3:8
+  v7: i32 = cast v0 @3:8
+  v8: i32 = call f0 v7 @3:8
+  return v8
+t0: narrowing @3:8 ["", " does not fit in `i32`"]
+t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/surface-syntax/keyword_as_a_module_name.mn == (exit 2)
+== conformance/surface-syntax/let_binding.mn == (exit 2)
+== conformance/surface-syntax/let_mut_binding.mn == (exit 2)
+== conformance/surface-syntax/lifetime.mn == (exit 2)
+== conformance/surface-syntax/mente_spellings.mn ==
+mente-dump 1 mir
+f0: fn bump(addr) {
+block0(v0: addr):
+  v1: i32 = load v0 @4:3
+  v2: i64 = int 1 @4:8
+  v3: i64 = cast v1 @4:8
+  v4: i64 = add v3, v2 @4:8
+  v5: i64 = int -2147483648 @4:8
+  v6: bool = ge v4, v5 @4:8
+  v7: i64 = int 2147483647 @4:8
+  v8: bool = le v4, v7 @4:8
+  v9: bool = and v6, v8 @4:8
+  v10: unit = check t0 v9, v4 @4:8
+  v11: i32 = cast v4 @4:8
+  v12: unit = store v0, v11 @4:8
+  return
+block1():
+  trap t1
+t0: narrowing @4:8 ["", " does not fit in `i32`"]
+t1: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn spellings(bool, bool, u32) -> u8 {
+block0(v0: bool, v1: bool, v2: u32):
+  v3: i64 = int 1 @7:15
+  v4: i32 = cast v3 @8:20
+  v5: addr = slot 4 @8:20
+  v6: unit = store v5, v4 @8:20
+  v7: i32 = load v5 @9:3
+  v8: unit = call f0 v5 @9:3
+  v9: i32 = load v5 @9:3
+  branch v0, block1(), block2(v0)
+block1():
+  jump block2(v1)
+block2(v10: bool):
+  branch v10, block4(v10), block3()
+block3():
+  v12: bool = not v0 @10:29
+  jump block4(v12)
+block4(v11: bool):
+  v13: i64 = int 256 @11:26
+  v14: i64 = cast v2 @11:26
+  v15: bool = lt v14, v13 @11:26
+  branch v15, block5(), block6(v15)
+block5():
+  jump block6(v11)
+block6(v16: bool):
+  branch v16, block7(), block8()
+block7():
+  v18: i64 = int 1 @11:41
+  jump block9(v18)
+block8():
+  v19: i64 = int 0 @11:52
+  jump block9(v19)
+block9(v17: i64):
+  v20: u8 = cast v17 @11:52
+  return v20
+block10():
+  trap t0
+t0: unreachable @12:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter bump(addr) {
+block0(v0: addr):
+  v1: i32 = load v0 @0:0
+  v2: unit = call f0 v0 @3:8
+  v3: i32 = load v0 @3:8
+  return
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter spellings(bool, bool, i128) -> u8 {
+block0(v0: bool, v1: bool, v2: i128):
+  v3: i128 = int 0 @0:0
+  v4: bool = ge v2, v3 @0:0
+  v5: i128 = int 4294967295 @0:0
+  v6: bool = le v2, v5 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v2 @6:8
+  v9: u32 = cast v2 @6:8
+  v10: u8 = call f1 v0, v1, v9 @6:8
+  return v10
+t0: narrowing @6:8 ["", " does not fit in `u32`"]
+t1: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/surface-syntax/minimal_module.mn ==
+mente-dump 1 mir
+== conformance/surface-syntax/nested_braces_in_a_body.mn ==
+mente-dump 1 mir
+f0: fn outer(i32) -> i32 {
+block0(v0: i32):
+  v1: i64 = int 0 @4:10
+  v2: i64 = cast v0 @4:10
+  v3: bool = gt v2, v1 @4:10
+  branch v3, block1(), block2()
+block1():
+  v5: i64 = cast v0 @4:14
+  jump block3(v5)
+block2():
+  v6: i64 = int 0 @4:25
+  jump block3(v6)
+block3(v4: i64):
+  v7: i32 = cast v4 @4:25
+  return v7
+block4():
+  trap t0
+t0: unreachable @4:25 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn after(i32) -> i32 {
+block0(v0: i32):
+  return v0
+block1():
+  trap t0
+t0: unreachable @6:31 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter outer(i128) -> i32 {
+block0(v0: i128):
+  v1: i128 = int -2147483648 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 2147483647 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @3:8
+  v7: i32 = cast v0 @3:8
+  v8: i32 = call f0 v7 @3:8
+  return v8
+t0: narrowing @3:8 ["", " does not fit in `i32`"]
+t1: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter after(i128) -> i32 {
+block0(v0: i128):
+  v1: i128 = int -2147483648 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 2147483647 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @6:8
+  v7: i32 = cast v0 @6:8
+  v8: i32 = call f1 v7 @6:8
+  return v8
+t0: narrowing @6:8 ["", " does not fit in `i32`"]
+t1: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/surface-syntax/number_as_a_name.mn == (exit 2)
+== conformance/surface-syntax/path_separator.mn == (exit 2)
+== conformance/surface-syntax/reference_at_a_call.mn == (exit 2)
+== conformance/surface-syntax/struct_without_its_brace.mn == (exit 2)
+== conformance/surface-syntax/turbofish.mn == (exit 2)
+== conformance/surface-syntax/unclosed_struct.mn == (exit 2)
+== conformance/surface-syntax/unclosed_trait.mn == (exit 2)
+== conformance/surface-syntax/unwrap.mn == (exit 2)
+== perf/kernels/bsearch.mn ==
+mente-dump 1 mir
+f0: fn bsearch(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @7:23
+  v2: addr = slot 32768 @7:23
+  v4: u64 = int 0 @7:23
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 4096 @7:23
+  v6: bool = lt v3, v5 @7:23
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @7:23
+  v8: unit = store v7, v1 @7:23
+  v9: u64 = int 1 @7:23
+  v10: u64 = add v3, v9 @7:23
+  jump block1(v10)
+block3():
+  v11: addr = slot 16384 @7:23
+  v13: u64 = int 0 @7:23
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 4096 @7:23
+  v15: bool = lt v12, v14 @7:23
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 8 v2, v12 @7:23
+  v17: addr = elem 4 v11, v12 @7:23
+  v18: i64 = load v16 @7:23
+  v19: i64 = int 0 @7:23
+  v20: bool = ge v18, v19 @7:23
+  v21: i64 = int 4294967295 @7:23
+  v22: bool = le v18, v21 @7:23
+  v23: bool = and v20, v22 @7:23
+  v24: unit = check t0 v23, v18 @7:22
+  v25: u32 = cast v18 @7:22
+  v26: unit = store v17, v25 @7:22
+  v27: u64 = int 1 @7:22
+  v28: u64 = add v12, v27 @7:22
+  jump block4(v28)
+block6():
+  v29: addr = slot 16384 @7:22
+  v30: unit = copy 16384 v29, v11 @7:22
+  v31: i64 = int 0 @8:26
+  v32: addr = slot 32768 @8:26
+  v34: u64 = int 0 @8:26
+  jump block7(v34)
+block7(v33: u64):
+  v35: u64 = int 4096 @8:26
+  v36: bool = lt v33, v35 @8:26
+  branch v36, block8(), block9()
+block8():
+  v37: addr = elem 8 v32, v33 @8:26
+  v38: unit = store v37, v31 @8:26
+  v39: u64 = int 1 @8:26
+  v40: u64 = add v33, v39 @8:26
+  jump block7(v40)
+block9():
+  v41: addr = slot 16384 @8:26
+  v43: u64 = int 0 @8:26
+  jump block10(v43)
+block10(v42: u64):
+  v44: u64 = int 4096 @8:26
+  v45: bool = lt v42, v44 @8:26
+  branch v45, block11(), block12()
+block11():
+  v46: addr = elem 8 v32, v42 @8:26
+  v47: addr = elem 4 v41, v42 @8:26
+  v48: i64 = load v46 @8:26
+  v49: i64 = int 0 @8:26
+  v50: bool = ge v48, v49 @8:26
+  v51: i64 = int 4294967295 @8:26
+  v52: bool = le v48, v51 @8:26
+  v53: bool = and v50, v52 @8:26
+  v54: unit = check t1 v53, v48 @8:25
+  v55: u32 = cast v48 @8:25
+  v56: unit = store v47, v55 @8:25
+  v57: u64 = int 1 @8:25
+  v58: u64 = add v42, v57 @8:25
+  jump block10(v58)
+block12():
+  v59: addr = slot 16384 @8:25
+  v60: unit = copy 16384 v59, v41 @8:25
+  v61: i64 = int 12345 @9:19
+  v62: u64 = cast v61 @9:19
+  v63: addr = slot 8 @9:19
+  v64: unit = store v63, v62 @9:19
+  v65: i64 = int 0 @10:20
+  v66: u32 = cast v65 @10:20
+  v67: addr = slot 4 @10:20
+  v68: unit = store v67, v66 @10:20
+  v69: i64 = int 0 @11:18
+  v70: u64 = cast v69 @11:18
+  v71: addr = slot 8 @11:18
+  v72: unit = store v71, v70 @11:18
+  jump block13()
+block13():
+  v73: u64 = load v71 @12:9
+  v74: u64 = int 4096 @12:13
+  v75: bool = lt v73, v74 @12:13
+  branch v75, block14(), block15()
+block14():
+  v76: u64 = load v63 @13:13
+  v77: i64 = int 1103515245 @13:20
+  v78: i128 = cast v76 @13:13
+  v79: i128 = cast v77 @13:13
+  v80: i128 = mul v78, v79 @13:13
+  v81: i64 = int 12345 @13:33
+  v82: i128 = cast v81 @13:13
+  v83: i128 = add v80, v82 @13:13
+  v84: i64 = int 2147483648 @13:42
+  v85: i128 = cast v84 @13:12
+  v86: i128 = rem v83, v85 @13:12
+  v87: u64 = cast v86 @13:12
+  v88: unit = store v63, v87 @13:12
+  v89: u32 = load v67 @14:5
+  v90: i64 = int 1 @14:14
+  v91: u64 = load v63 @14:18
+  v92: i64 = int 8 @14:25
+  v93: u64 = cast v92 @14:18
+  v94: u64 = rem v91, v93 @14:18
+  v95: i64 = cast v94 @14:14
+  v96: i64 = add v90, v95 @14:14
+  v97: i64 = cast v89 @14:14
+  v98: i64 = add v97, v96 @14:14
+  v99: i64 = int 0 @14:14
+  v100: bool = ge v98, v99 @14:14
+  v101: i64 = int 4294967295 @14:14
+  v102: bool = le v98, v101 @14:14
+  v103: bool = and v100, v102 @14:14
+  v104: unit = check t2 v103, v98 @14:14
+  v105: u32 = cast v98 @14:14
+  v106: unit = store v67, v105 @14:14
+  v107: u64 = load v71 @15:7
+  v108: u32 = load v67 @15:12
+  v109: addr = elem 4 v29, v107 @15:5
+  v110: unit = store v109, v108 @15:5
+  v111: u64 = load v71 @16:5
+  v112: i64 = int 1 @16:10
+  v113: i128 = cast v111 @16:10
+  v114: i128 = cast v112 @16:10
+  v115: i128 = add v113, v114 @16:10
+  v116: u64 = cast v115 @16:10
+  v117: unit = store v71, v116 @16:10
+  jump block13()
+block15():
+  v118: i64 = int 0 @18:7
+  v119: u64 = cast v118 @18:7
+  v120: unit = store v71, v119 @18:7
+  jump block16()
+block16():
+  v121: u64 = load v71 @19:9
+  v122: u64 = int 4096 @19:13
+  v123: bool = lt v121, v122 @19:13
+  branch v123, block17(), block18()
+block17():
+  v124: u64 = load v63 @20:13
+  v125: i64 = int 1103515245 @20:20
+  v126: i128 = cast v124 @20:13
+  v127: i128 = cast v125 @20:13
+  v128: i128 = mul v126, v127 @20:13
+  v129: i64 = int 12345 @20:33
+  v130: i128 = cast v129 @20:13
+  v131: i128 = add v128, v130 @20:13
+  v132: i64 = int 2147483648 @20:42
+  v133: i128 = cast v132 @20:12
+  v134: i128 = rem v131, v133 @20:12
+  v135: u64 = cast v134 @20:12
+  v136: unit = store v63, v135 @20:12
+  v137: u64 = load v71 @21:10
+  v138: u64 = load v63 @21:15
+  v139: i64 = int 20480 @21:22
+  v140: u64 = cast v139 @21:15
+  v141: u64 = rem v138, v140 @21:15
+  v142: u32 = cast v141 @21:15
+  v143: addr = elem 4 v59, v137 @21:5
+  v144: unit = store v143, v142 @21:5
+  v145: u64 = load v71 @22:5
+  v146: i64 = int 1 @22:10
+  v147: i128 = cast v145 @22:10
+  v148: i128 = cast v146 @22:10
+  v149: i128 = add v147, v148 @22:10
+  v150: u64 = cast v149 @22:10
+  v151: unit = store v71, v150 @22:10
+  jump block16()
+block18():
+  v152: i64 = int 0 @24:20
+  v153: u64 = cast v152 @24:20
+  v154: addr = slot 8 @24:20
+  v155: unit = store v154, v153 @24:20
+  v156: i64 = int 0 @25:16
+  v157: u32 = cast v156 @25:16
+  v158: addr = slot 4 @25:16
+  v159: unit = store v158, v157 @25:16
+  jump block19()
+block19():
+  v160: u32 = load v158 @26:9
+  v161: bool = lt v160, v0 @26:13
+  branch v161, block20(), block21()
+block20():
+  v162: i64 = int 0 @27:22
+  v163: u64 = cast v162 @27:22
+  v164: addr = slot 8 @27:22
+  v165: unit = store v164, v163 @27:22
+  v166: i64 = int 0 @28:20
+  v167: u64 = cast v166 @28:20
+  v168: addr = slot 8 @28:20
+  v169: unit = store v168, v167 @28:20
+  jump block22()
+block21():
+  v283: u64 = load v154 @51:3
+  return v283
+block22():
+  v170: u64 = load v168 @29:11
+  v171: u64 = int 4096 @29:15
+  v172: bool = lt v170, v171 @29:15
+  branch v172, block23(), block24()
+block23():
+  v173: u64 = load v168 @30:22
+  v174: addr = elem 4 v59, v173 @30:17
+  v175: u32 = load v174 @30:17
+  v176: i64 = int 0 @31:23
+  v177: u64 = cast v176 @31:23
+  v178: addr = slot 8 @31:23
+  v179: unit = store v178, v177 @31:23
+  v180: u64 = int 4096 @32:23
+  v181: addr = slot 8 @32:23
+  v182: unit = store v181, v180 @32:23
+  jump block25()
+block24():
+  v252: u64 = load v154 @47:14
+  v253: i64 = int 31 @47:22
+  v254: i128 = cast v252 @47:14
+  v255: i128 = cast v253 @47:14
+  v256: i128 = mul v254, v255 @47:14
+  v257: u64 = load v164 @47:27
+  v258: i128 = cast v257 @47:14
+  v259: i128 = add v256, v258 @47:14
+  v260: i64 = int 1000000007 @47:36
+  v261: i128 = cast v260 @47:13
+  v262: i128 = rem v259, v261 @47:13
+  v263: u64 = cast v262 @47:13
+  v264: unit = store v154, v263 @47:13
+  v265: u32 = load v158 @48:10
+  v266: i64 = int 4096 @48:14
+  v267: i64 = cast v265 @48:10
+  v268: i64 = rem v267, v266 @48:10
+  v269: u64 = load v154 @48:22
+  v270: i64 = int 20480 @48:30
+  v271: u64 = cast v270 @48:22
+  v272: u64 = rem v269, v271 @48:22
+  v273: u32 = cast v272 @48:22
+  v274: u64 = cast v268 @48:5
+  v275: addr = elem 4 v59, v274 @48:5
+  v276: unit = store v275, v273 @48:5
+  v277: u32 = load v158 @49:5
+  v278: i64 = int 1 @49:10
+  v279: i64 = cast v277 @49:10
+  v280: i64 = add v279, v278 @49:10
+  v281: u32 = cast v280 @49:10
+  v282: unit = store v158, v281 @49:10
+  jump block19()
+block25():
+  v183: u64 = load v178 @33:13
+  v184: u64 = load v181 @33:18
+  v185: bool = lt v183, v184 @33:18
+  branch v185, block26(), block27()
+block26():
+  v186: u64 = load v178 @34:20
+  v187: u64 = load v181 @34:25
+  v188: i128 = cast v186 @34:20
+  v189: i128 = cast v187 @34:20
+  v190: i128 = add v188, v189 @34:20
+  v191: i64 = int 2 @34:31
+  v192: i128 = cast v191 @34:19
+  v193: i128 = div v190, v192 @34:19
+  v194: u64 = cast v193 @34:19
+  v195: u64 = int 0 @35:12
+  v196: bool = ge v194, v195 @35:12
+  v197: u64 = int 4096 @35:12
+  v198: bool = lt v194, v197 @35:12
+  v199: bool = and v196, v198 @35:12
+  v200: unit = check t3 v199, v194 @35:12
+  v201: addr = elem 4 v29, v194 @35:12
+  v202: u32 = load v201 @35:12
+  v203: bool = lt v202, v175 @35:21
+  branch v203, block28(), block29()
+block27():
+  v211: u64 = load v164 @41:7
+  v212: u64 = load v178 @41:16
+  v213: i128 = cast v211 @41:16
+  v214: i128 = cast v212 @41:16
+  v215: i128 = add v213, v214 @41:16
+  v216: i128 = int 0 @41:16
+  v217: bool = ge v215, v216 @41:16
+  v218: i128 = int 18446744073709551615 @41:16
+  v219: bool = le v215, v218 @41:16
+  v220: bool = and v217, v219 @41:16
+  v221: unit = check t4 v220, v215 @41:16
+  v222: u64 = cast v215 @41:16
+  v223: unit = store v164, v222 @41:16
+  v224: u64 = load v178 @42:10
+  v225: u64 = int 4096 @42:15
+  v226: bool = lt v224, v225 @42:15
+  branch v226, block31(), block32(v226)
+block28():
+  v204: i64 = int 1 @36:22
+  v205: i128 = cast v194 @36:16
+  v206: i128 = cast v204 @36:16
+  v207: i128 = add v205, v206 @36:16
+  v208: u64 = cast v207 @36:16
+  v209: unit = store v178, v208 @36:16
+  jump block30()
+block29():
+  v210: unit = store v181, v194 @38:16
+  jump block30()
+block30():
+  jump block25()
+block31():
+  v228: u64 = load v178 @42:27
+  v229: addr = elem 4 v29, v228 @42:25
+  v230: u32 = load v229 @42:25
+  v231: bool = eq v230, v175 @42:34
+  jump block32(v231)
+block32(v227: bool):
+  branch v227, block33(), block34()
+block33():
+  v232: u64 = load v164 @43:9
+  v233: i64 = int 1000000 @43:18
+  v234: i128 = cast v232 @43:18
+  v235: i128 = cast v233 @43:18
+  v236: i128 = add v234, v235 @43:18
+  v237: i128 = int 0 @43:18
+  v238: bool = ge v236, v237 @43:18
+  v239: i128 = int 18446744073709551615 @43:18
+  v240: bool = le v236, v239 @43:18
+  v241: bool = and v238, v240 @43:18
+  v242: unit = check t5 v241, v236 @43:18
+  v243: u64 = cast v236 @43:18
+  v244: unit = store v164, v243 @43:18
+  jump block35()
+block34():
+  jump block35()
+block35():
+  v245: u64 = load v168 @45:7
+  v246: i64 = int 1 @45:12
+  v247: i128 = cast v245 @45:12
+  v248: i128 = cast v246 @45:12
+  v249: i128 = add v247, v248 @45:12
+  v250: u64 = cast v249 @45:12
+  v251: unit = store v168, v250 @45:12
+  jump block22()
+block36():
+  trap t6
+t0: narrowing @7:22 ["", " does not fit in `u32`"]
+t1: narrowing @8:25 ["", " does not fit in `u32`"]
+t2: narrowing @14:14 ["", " does not fit in `u32`"]
+t3: index-out-of-bounds @35:12 ["index ", " is outside an array of length 4096"]
+t4: narrowing @41:16 ["", " does not fit in `u64`"]
+t5: narrowing @43:18 ["", " does not fit in `u64`"]
+t6: unreachable @51:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter bsearch(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @6:8
+  v7: u32 = cast v0 @6:8
+  v8: u64 = call f0 v7 @6:8
+  return v8
+t0: narrowing @6:8 ["", " does not fit in `u32`"]
+t1: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/collatz.mn ==
+mente-dump 1 mir
+f0: fn collatz(u64) -> u64 {
+block0(v0: u64):
+  v1: i64 = int 0 @6:20
+  v2: u64 = cast v1 @6:20
+  v3: addr = slot 8 @6:20
+  v4: unit = store v3, v2 @6:20
+  v5: i64 = int 0 @7:22
+  v6: u64 = cast v5 @7:22
+  v7: addr = slot 8 @7:22
+  v8: unit = store v7, v6 @7:22
+  v9: i64 = int 1 @8:20
+  v10: u64 = cast v9 @8:20
+  v11: addr = slot 8 @8:20
+  v12: unit = store v11, v10 @8:20
+  jump block1()
+block1():
+  v13: u64 = load v11 @9:9
+  v14: bool = lt v13, v0 @9:17
+  branch v14, block2(), block3()
+block2():
+  v15: u64 = load v11 @10:13
+  v16: addr = slot 8 @10:13
+  v17: unit = store v16, v15 @10:13
+  v18: i64 = int 0 @11:22
+  v19: u64 = cast v18 @11:22
+  v20: addr = slot 8 @11:22
+  v21: unit = store v20, v19 @11:22
+  jump block4()
+block3():
+  v94: u64 = load v3 @26:3
+  v95: i64 = int 1000 @26:11
+  v96: i128 = cast v94 @26:3
+  v97: i128 = cast v95 @26:3
+  v98: i128 = mul v96, v97 @26:3
+  v99: u64 = load v7 @26:18
+  v100: i128 = cast v99 @26:3
+  v101: i128 = add v98, v100 @26:3
+  v102: i128 = int 0 @26:3
+  v103: bool = ge v101, v102 @26:3
+  v104: i128 = int 18446744073709551615 @26:3
+  v105: bool = le v101, v104 @26:3
+  v106: bool = and v103, v105 @26:3
+  v107: unit = check t3 v106, v101 @26:3
+  v108: u64 = cast v101 @26:3
+  return v108
+block4():
+  v22: u64 = load v16 @12:11
+  v23: i64 = int 1 @12:16
+  v24: i128 = cast v22 @12:16
+  v25: i128 = cast v23 @12:16
+  v26: bool = ne v24, v25 @12:16
+  branch v26, block5(), block6()
+block5():
+  v27: u64 = load v16 @13:10
+  v28: i64 = int 2 @13:14
+  v29: u64 = cast v28 @13:10
+  v30: u64 = rem v27, v29 @13:10
+  v31: i64 = int 0 @13:19
+  v32: i128 = cast v30 @13:19
+  v33: i128 = cast v31 @13:19
+  v34: bool = eq v32, v33 @13:19
+  branch v34, block7(), block8()
+block6():
+  v69: u64 = load v3 @20:5
+  v70: u64 = load v20 @20:14
+  v71: i128 = cast v69 @20:14
+  v72: i128 = cast v70 @20:14
+  v73: i128 = add v71, v72 @20:14
+  v74: i128 = int 0 @20:14
+  v75: bool = ge v73, v74 @20:14
+  v76: i128 = int 18446744073709551615 @20:14
+  v77: bool = le v73, v76 @20:14
+  v78: bool = and v75, v77 @20:14
+  v79: unit = check t2 v78, v73 @20:14
+  v80: u64 = cast v73 @20:14
+  v81: unit = store v3, v80 @20:14
+  v82: u64 = load v20 @21:8
+  v83: u64 = load v7 @21:16
+  v84: bool = gt v82, v83 @21:16
+  branch v84, block10(), block11()
+block7():
+  v35: u64 = load v16 @14:13
+  v36: i64 = int 2 @14:17
+  v37: u64 = cast v36 @14:13
+  v38: u64 = div v35, v37 @14:13
+  v39: unit = store v16, v38 @14:13
+  jump block9()
+block8():
+  v40: i64 = int 3 @16:13
+  v41: u64 = load v16 @16:17
+  v42: i128 = cast v40 @16:13
+  v43: i128 = cast v41 @16:13
+  v44: i128 = mul v42, v43 @16:13
+  v45: i64 = int 1 @16:21
+  v46: i128 = cast v45 @16:13
+  v47: i128 = add v44, v46 @16:13
+  v48: i128 = int 0 @16:13
+  v49: bool = ge v47, v48 @16:13
+  v50: i128 = int 18446744073709551615 @16:13
+  v51: bool = le v47, v50 @16:13
+  v52: bool = and v49, v51 @16:13
+  v53: unit = check t0 v52, v47 @16:13
+  v54: u64 = cast v47 @16:13
+  v55: unit = store v16, v54 @16:13
+  jump block9()
+block9():
+  v56: u64 = load v20 @18:7
+  v57: i64 = int 1 @18:16
+  v58: i128 = cast v56 @18:16
+  v59: i128 = cast v57 @18:16
+  v60: i128 = add v58, v59 @18:16
+  v61: i128 = int 0 @18:16
+  v62: bool = ge v60, v61 @18:16
+  v63: i128 = int 18446744073709551615 @18:16
+  v64: bool = le v60, v63 @18:16
+  v65: bool = and v62, v64 @18:16
+  v66: unit = check t1 v65, v60 @18:16
+  v67: u64 = cast v60 @18:16
+  v68: unit = store v20, v67 @18:16
+  jump block4()
+block10():
+  v85: u64 = load v20 @22:17
+  v86: unit = store v7, v85 @22:17
+  jump block12()
+block11():
+  jump block12()
+block12():
+  v87: u64 = load v11 @24:5
+  v88: i64 = int 1 @24:14
+  v89: i128 = cast v87 @24:14
+  v90: i128 = cast v88 @24:14
+  v91: i128 = add v89, v90 @24:14
+  v92: u64 = cast v91 @24:14
+  v93: unit = store v11, v92 @24:14
+  jump block1()
+block13():
+  trap t4
+t0: narrowing @16:13 ["", " does not fit in `u64`"]
+t1: narrowing @18:16 ["", " does not fit in `u64`"]
+t2: narrowing @20:14 ["", " does not fit in `u64`"]
+t3: narrowing @26:3 ["", " does not fit in `u64`"]
+t4: unreachable @26:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter collatz(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 18446744073709551615 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u64 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u64`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/dot.mn ==
+mente-dump 1 mir
+f0: fn dot(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @6:23
+  v2: addr = slot 32768 @6:23
+  v4: u64 = int 0 @6:23
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 4096 @6:23
+  v6: bool = lt v3, v5 @6:23
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @6:23
+  v8: unit = store v7, v1 @6:23
+  v9: u64 = int 1 @6:23
+  v10: u64 = add v3, v9 @6:23
+  jump block1(v10)
+block3():
+  v11: addr = slot 16384 @6:23
+  v13: u64 = int 0 @6:23
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 4096 @6:23
+  v15: bool = lt v12, v14 @6:23
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 8 v2, v12 @6:23
+  v17: addr = elem 4 v11, v12 @6:23
+  v18: i64 = load v16 @6:23
+  v19: i64 = int 0 @6:23
+  v20: bool = ge v18, v19 @6:23
+  v21: i64 = int 4294967295 @6:23
+  v22: bool = le v18, v21 @6:23
+  v23: bool = and v20, v22 @6:23
+  v24: unit = check t0 v23, v18 @6:22
+  v25: u32 = cast v18 @6:22
+  v26: unit = store v17, v25 @6:22
+  v27: u64 = int 1 @6:22
+  v28: u64 = add v12, v27 @6:22
+  jump block4(v28)
+block6():
+  v29: addr = slot 16384 @6:22
+  v30: unit = copy 16384 v29, v11 @6:22
+  v31: i64 = int 0 @7:23
+  v32: addr = slot 32768 @7:23
+  v34: u64 = int 0 @7:23
+  jump block7(v34)
+block7(v33: u64):
+  v35: u64 = int 4096 @7:23
+  v36: bool = lt v33, v35 @7:23
+  branch v36, block8(), block9()
+block8():
+  v37: addr = elem 8 v32, v33 @7:23
+  v38: unit = store v37, v31 @7:23
+  v39: u64 = int 1 @7:23
+  v40: u64 = add v33, v39 @7:23
+  jump block7(v40)
+block9():
+  v41: addr = slot 16384 @7:23
+  v43: u64 = int 0 @7:23
+  jump block10(v43)
+block10(v42: u64):
+  v44: u64 = int 4096 @7:23
+  v45: bool = lt v42, v44 @7:23
+  branch v45, block11(), block12()
+block11():
+  v46: addr = elem 8 v32, v42 @7:23
+  v47: addr = elem 4 v41, v42 @7:23
+  v48: i64 = load v46 @7:23
+  v49: i64 = int 0 @7:23
+  v50: bool = ge v48, v49 @7:23
+  v51: i64 = int 4294967295 @7:23
+  v52: bool = le v48, v51 @7:23
+  v53: bool = and v50, v52 @7:23
+  v54: unit = check t1 v53, v48 @7:22
+  v55: u32 = cast v48 @7:22
+  v56: unit = store v47, v55 @7:22
+  v57: u64 = int 1 @7:22
+  v58: u64 = add v42, v57 @7:22
+  jump block10(v58)
+block12():
+  v59: addr = slot 16384 @7:22
+  v60: unit = copy 16384 v59, v41 @7:22
+  v61: i64 = int 12345 @8:19
+  v62: u64 = cast v61 @8:19
+  v63: addr = slot 8 @8:19
+  v64: unit = store v63, v62 @8:19
+  v65: i64 = int 0 @9:18
+  v66: u64 = cast v65 @9:18
+  v67: addr = slot 8 @9:18
+  v68: unit = store v67, v66 @9:18
+  jump block13()
+block13():
+  v69: u64 = load v67 @10:9
+  v70: u64 = int 4096 @10:13
+  v71: bool = lt v69, v70 @10:13
+  branch v71, block14(), block15()
+block14():
+  v72: u64 = load v63 @11:13
+  v73: i64 = int 1103515245 @11:20
+  v74: i128 = cast v72 @11:13
+  v75: i128 = cast v73 @11:13
+  v76: i128 = mul v74, v75 @11:13
+  v77: i64 = int 12345 @11:33
+  v78: i128 = cast v77 @11:13
+  v79: i128 = add v76, v78 @11:13
+  v80: i64 = int 2147483648 @11:42
+  v81: i128 = cast v80 @11:12
+  v82: i128 = rem v79, v81 @11:12
+  v83: u64 = cast v82 @11:12
+  v84: unit = store v63, v83 @11:12
+  v85: u64 = load v67 @12:7
+  v86: u64 = load v63 @12:12
+  v87: i64 = int 65536 @12:19
+  v88: u64 = cast v87 @12:12
+  v89: u64 = rem v86, v88 @12:12
+  v90: u32 = cast v89 @12:12
+  v91: addr = elem 4 v29, v85 @12:5
+  v92: unit = store v91, v90 @12:5
+  v93: u64 = load v63 @13:13
+  v94: i64 = int 1103515245 @13:20
+  v95: i128 = cast v93 @13:13
+  v96: i128 = cast v94 @13:13
+  v97: i128 = mul v95, v96 @13:13
+  v98: i64 = int 12345 @13:33
+  v99: i128 = cast v98 @13:13
+  v100: i128 = add v97, v99 @13:13
+  v101: i64 = int 2147483648 @13:42
+  v102: i128 = cast v101 @13:12
+  v103: i128 = rem v100, v102 @13:12
+  v104: u64 = cast v103 @13:12
+  v105: unit = store v63, v104 @13:12
+  v106: u64 = load v67 @14:7
+  v107: u64 = load v63 @14:12
+  v108: i64 = int 65536 @14:19
+  v109: u64 = cast v108 @14:12
+  v110: u64 = rem v107, v109 @14:12
+  v111: u32 = cast v110 @14:12
+  v112: addr = elem 4 v59, v106 @14:5
+  v113: unit = store v112, v111 @14:5
+  v114: u64 = load v67 @15:5
+  v115: i64 = int 1 @15:10
+  v116: i128 = cast v114 @15:10
+  v117: i128 = cast v115 @15:10
+  v118: i128 = add v116, v117 @15:10
+  v119: u64 = cast v118 @15:10
+  v120: unit = store v67, v119 @15:10
+  jump block13()
+block15():
+  v121: i64 = int 0 @17:20
+  v122: u64 = cast v121 @17:20
+  v123: addr = slot 8 @17:20
+  v124: unit = store v123, v122 @17:20
+  v125: i64 = int 0 @18:16
+  v126: u32 = cast v125 @18:16
+  v127: addr = slot 4 @18:16
+  v128: unit = store v127, v126 @18:16
+  jump block16()
+block16():
+  v129: u32 = load v127 @19:9
+  v130: bool = lt v129, v0 @19:13
+  branch v130, block17(), block18()
+block17():
+  v131: i64 = int 0 @20:22
+  v132: u64 = cast v131 @20:22
+  v133: addr = slot 8 @20:22
+  v134: unit = store v133, v132 @20:22
+  v135: i64 = int 0 @21:20
+  v136: u64 = cast v135 @21:20
+  v137: addr = slot 8 @21:20
+  v138: unit = store v137, v136 @21:20
+  jump block19()
+block18():
+  v201: u64 = load v123 @30:3
+  return v201
+block19():
+  v139: u64 = load v137 @22:11
+  v140: u64 = int 4096 @22:15
+  v141: bool = lt v139, v140 @22:15
+  branch v141, block20(), block21()
+block20():
+  v142: u64 = load v133 @23:7
+  v143: u64 = load v137 @23:18
+  v144: addr = elem 4 v29, v143 @23:16
+  v145: u32 = load v144 @23:16
+  v146: u64 = load v137 @23:25
+  v147: addr = elem 4 v59, v146 @23:23
+  v148: u32 = load v147 @23:23
+  v149: u64 = cast v145 @23:16
+  v150: u64 = cast v148 @23:16
+  v151: u64 = mul v149, v150 @23:16
+  v152: i128 = cast v142 @23:16
+  v153: i128 = cast v151 @23:16
+  v154: i128 = add v152, v153 @23:16
+  v155: i128 = int 0 @23:16
+  v156: bool = ge v154, v155 @23:16
+  v157: i128 = int 18446744073709551615 @23:16
+  v158: bool = le v154, v157 @23:16
+  v159: bool = and v156, v158 @23:16
+  v160: unit = check t2 v159, v154 @23:16
+  v161: u64 = cast v154 @23:16
+  v162: unit = store v133, v161 @23:16
+  v163: u64 = load v137 @24:7
+  v164: i64 = int 1 @24:12
+  v165: i128 = cast v163 @24:12
+  v166: i128 = cast v164 @24:12
+  v167: i128 = add v165, v166 @24:12
+  v168: u64 = cast v167 @24:12
+  v169: unit = store v137, v168 @24:12
+  jump block19()
+block21():
+  v170: u64 = load v123 @26:14
+  v171: i64 = int 31 @26:22
+  v172: i128 = cast v170 @26:14
+  v173: i128 = cast v171 @26:14
+  v174: i128 = mul v172, v173 @26:14
+  v175: u64 = load v133 @26:27
+  v176: i128 = cast v175 @26:14
+  v177: i128 = add v174, v176 @26:14
+  v178: i64 = int 1000000007 @26:36
+  v179: i128 = cast v178 @26:13
+  v180: i128 = rem v177, v179 @26:13
+  v181: u64 = cast v180 @26:13
+  v182: unit = store v123, v181 @26:13
+  v183: u32 = load v127 @27:7
+  v184: i64 = int 4096 @27:11
+  v185: i64 = cast v183 @27:7
+  v186: i64 = rem v185, v184 @27:7
+  v187: u64 = load v123 @27:19
+  v188: i64 = int 65536 @27:27
+  v189: u64 = cast v188 @27:19
+  v190: u64 = rem v187, v189 @27:19
+  v191: u32 = cast v190 @27:19
+  v192: u64 = cast v186 @27:5
+  v193: addr = elem 4 v29, v192 @27:5
+  v194: unit = store v193, v191 @27:5
+  v195: u32 = load v127 @28:5
+  v196: i64 = int 1 @28:10
+  v197: i64 = cast v195 @28:10
+  v198: i64 = add v197, v196 @28:10
+  v199: u32 = cast v198 @28:10
+  v200: unit = store v127, v199 @28:10
+  jump block16()
+block22():
+  trap t3
+t0: narrowing @6:22 ["", " does not fit in `u32`"]
+t1: narrowing @7:22 ["", " does not fit in `u32`"]
+t2: narrowing @23:16 ["", " does not fit in `u64`"]
+t3: unreachable @30:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter dot(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u32 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u32`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/isort.mn ==
+mente-dump 1 mir
+f0: fn isort(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @6:27
+  v2: addr = slot 2048 @6:27
+  v4: u64 = int 0 @6:27
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 256 @6:27
+  v6: bool = lt v3, v5 @6:27
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @6:27
+  v8: unit = store v7, v1 @6:27
+  v9: u64 = int 1 @6:27
+  v10: u64 = add v3, v9 @6:27
+  jump block1(v10)
+block3():
+  v11: addr = slot 1024 @6:27
+  v13: u64 = int 0 @6:27
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 256 @6:27
+  v15: bool = lt v12, v14 @6:27
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 8 v2, v12 @6:27
+  v17: addr = elem 4 v11, v12 @6:27
+  v18: i64 = load v16 @6:27
+  v19: i64 = int 0 @6:27
+  v20: bool = ge v18, v19 @6:27
+  v21: i64 = int 4294967295 @6:27
+  v22: bool = le v18, v21 @6:27
+  v23: bool = and v20, v22 @6:27
+  v24: unit = check t0 v23, v18 @6:26
+  v25: u32 = cast v18 @6:26
+  v26: unit = store v17, v25 @6:26
+  v27: u64 = int 1 @6:26
+  v28: u64 = add v12, v27 @6:26
+  jump block4(v28)
+block6():
+  v29: addr = slot 1024 @6:26
+  v30: unit = copy 1024 v29, v11 @6:26
+  v31: i64 = int 12345 @7:19
+  v32: u64 = cast v31 @7:19
+  v33: addr = slot 8 @7:19
+  v34: unit = store v33, v32 @7:19
+  v35: i64 = int 0 @8:18
+  v36: u64 = cast v35 @8:18
+  v37: addr = slot 8 @8:18
+  v38: unit = store v37, v36 @8:18
+  jump block7()
+block7():
+  v39: u64 = load v37 @9:9
+  v40: u64 = int 256 @9:13
+  v41: bool = lt v39, v40 @9:13
+  branch v41, block8(), block9()
+block8():
+  v42: u64 = load v33 @10:13
+  v43: i64 = int 1103515245 @10:20
+  v44: i128 = cast v42 @10:13
+  v45: i128 = cast v43 @10:13
+  v46: i128 = mul v44, v45 @10:13
+  v47: i64 = int 12345 @10:33
+  v48: i128 = cast v47 @10:13
+  v49: i128 = add v46, v48 @10:13
+  v50: i64 = int 2147483648 @10:42
+  v51: i128 = cast v50 @10:12
+  v52: i128 = rem v49, v51 @10:12
+  v53: u64 = cast v52 @10:12
+  v54: unit = store v33, v53 @10:12
+  v55: u64 = load v37 @11:12
+  v56: u64 = load v33 @11:17
+  v57: u32 = cast v56 @11:17
+  v58: addr = elem 4 v29, v55 @11:5
+  v59: unit = store v58, v57 @11:5
+  v60: u64 = load v37 @12:5
+  v61: i64 = int 1 @12:10
+  v62: i128 = cast v60 @12:10
+  v63: i128 = cast v61 @12:10
+  v64: i128 = add v62, v63 @12:10
+  v65: u64 = cast v64 @12:10
+  v66: unit = store v37, v65 @12:10
+  jump block7()
+block9():
+  v67: i64 = int 0 @14:20
+  v68: u64 = cast v67 @14:20
+  v69: addr = slot 8 @14:20
+  v70: unit = store v69, v68 @14:20
+  v71: i64 = int 0 @15:16
+  v72: u32 = cast v71 @15:16
+  v73: addr = slot 4 @15:16
+  v74: unit = store v73, v72 @15:16
+  jump block10()
+block10():
+  v75: u32 = load v73 @16:9
+  v76: bool = lt v75, v0 @16:13
+  branch v76, block11(), block12()
+block11():
+  v77: addr = slot 1024 @17:13
+  v78: unit = copy 1024 v77, v29 @17:13
+  v79: i64 = int 1 @18:20
+  v80: u64 = cast v79 @18:20
+  v81: addr = slot 8 @18:20
+  v82: unit = store v81, v80 @18:20
+  jump block13()
+block12():
+  v199: u64 = load v69 @33:3
+  return v199
+block13():
+  v83: u64 = load v81 @19:11
+  v84: u64 = int 256 @19:15
+  v85: bool = lt v83, v84 @19:15
+  branch v85, block14(), block15()
+block14():
+  v86: u64 = load v81 @20:20
+  v87: addr = elem 4 v77, v86 @20:18
+  v88: u32 = load v87 @20:18
+  v89: u64 = load v81 @21:15
+  v90: addr = slot 8 @21:15
+  v91: unit = store v90, v89 @21:15
+  jump block16()
+block15():
+  v159: u64 = load v69 @29:14
+  v160: i64 = int 31 @29:22
+  v161: i128 = cast v159 @29:14
+  v162: i128 = cast v160 @29:14
+  v163: i128 = mul v161, v162 @29:14
+  v164: u32 = load v73 @29:29
+  v165: i64 = int 256 @29:33
+  v166: i64 = cast v164 @29:29
+  v167: i64 = rem v166, v165 @29:29
+  v168: u64 = cast v167 @29:27
+  v169: addr = elem 4 v77, v168 @29:27
+  v170: u32 = load v169 @29:27
+  v171: i128 = cast v170 @29:14
+  v172: i128 = add v163, v171 @29:14
+  v173: i64 = int 255 @29:42
+  v174: u64 = cast v173 @29:40
+  v175: addr = elem 4 v77, v174 @29:40
+  v176: u32 = load v175 @29:40
+  v177: i128 = cast v176 @29:14
+  v178: i128 = add v172, v177 @29:14
+  v179: i64 = int 1000000007 @29:50
+  v180: i128 = cast v179 @29:13
+  v181: i128 = rem v178, v180 @29:13
+  v182: u64 = cast v181 @29:13
+  v183: unit = store v69, v182 @29:13
+  v184: u32 = load v73 @30:12
+  v185: i64 = int 256 @30:16
+  v186: i64 = cast v184 @30:12
+  v187: i64 = rem v186, v185 @30:12
+  v188: u64 = load v69 @30:23
+  v189: u32 = cast v188 @30:23
+  v190: u64 = cast v187 @30:5
+  v191: addr = elem 4 v29, v190 @30:5
+  v192: unit = store v191, v189 @30:5
+  v193: u32 = load v73 @31:5
+  v194: i64 = int 1 @31:10
+  v195: i64 = cast v193 @31:10
+  v196: i64 = add v195, v194 @31:10
+  v197: u32 = cast v196 @31:10
+  v198: unit = store v73, v197 @31:10
+  jump block10()
+block16():
+  v92: u64 = load v90 @22:13
+  v93: i64 = int 0 @22:17
+  v94: i128 = cast v92 @22:17
+  v95: i128 = cast v93 @22:17
+  v96: bool = gt v94, v95 @22:17
+  branch v96, block19(), block20(v96)
+block17():
+  v113: u64 = load v90 @23:11
+  v114: u64 = load v90 @23:18
+  v115: i64 = int 1 @23:22
+  v116: i128 = cast v114 @23:18
+  v117: i128 = cast v115 @23:18
+  v118: i128 = sub v116, v117 @23:18
+  v119: i128 = int 0 @23:16
+  v120: bool = ge v118, v119 @23:16
+  v121: i128 = int 256 @23:16
+  v122: bool = lt v118, v121 @23:16
+  v123: bool = and v120, v122 @23:16
+  v124: unit = check t2 v123, v118 @23:16
+  v125: u64 = cast v118 @23:16
+  v126: addr = elem 4 v77, v125 @23:16
+  v127: u32 = load v126 @23:16
+  v128: u64 = int 0 @23:9
+  v129: bool = ge v113, v128 @23:9
+  v130: u64 = int 256 @23:9
+  v131: bool = lt v113, v130 @23:9
+  v132: bool = and v129, v131 @23:9
+  v133: unit = check t3 v132, v113 @23:9
+  v134: addr = elem 4 v77, v113 @23:9
+  v135: unit = store v134, v127 @23:9
+  v136: u64 = load v90 @24:9
+  v137: i64 = int 1 @24:14
+  v138: i128 = cast v136 @24:14
+  v139: i128 = cast v137 @24:14
+  v140: i128 = sub v138, v139 @24:14
+  v141: u64 = cast v140 @24:14
+  v142: unit = store v90, v141 @24:14
+  jump block16()
+block18():
+  v143: u64 = load v90 @26:9
+  v144: u64 = int 0 @26:7
+  v145: bool = ge v143, v144 @26:7
+  v146: u64 = int 256 @26:7
+  v147: bool = lt v143, v146 @26:7
+  v148: bool = and v145, v147 @26:7
+  v149: unit = check t4 v148, v143 @26:7
+  v150: addr = elem 4 v77, v143 @26:7
+  v151: unit = store v150, v88 @26:7
+  v152: u64 = load v81 @27:7
+  v153: i64 = int 1 @27:12
+  v154: i128 = cast v152 @27:12
+  v155: i128 = cast v153 @27:12
+  v156: i128 = add v154, v155 @27:12
+  v157: u64 = cast v156 @27:12
+  v158: unit = store v81, v157 @27:12
+  jump block13()
+block19():
+  v98: u64 = load v90 @22:25
+  v99: i64 = int 1 @22:29
+  v100: i128 = cast v98 @22:25
+  v101: i128 = cast v99 @22:25
+  v102: i128 = sub v100, v101 @22:25
+  v103: i128 = int 0 @22:23
+  v104: bool = ge v102, v103 @22:23
+  v105: i128 = int 256 @22:23
+  v106: bool = lt v102, v105 @22:23
+  v107: bool = and v104, v106 @22:23
+  v108: unit = check t1 v107, v102 @22:23
+  v109: u64 = cast v102 @22:23
+  v110: addr = elem 4 v77, v109 @22:23
+  v111: u32 = load v110 @22:23
+  v112: bool = gt v111, v88 @22:34
+  jump block20(v112)
+block20(v97: bool):
+  branch v97, block17(), block18()
+block21():
+  trap t5
+t0: narrowing @6:26 ["", " does not fit in `u32`"]
+t1: index-out-of-bounds @22:23 ["index ", " is outside an array of length 256"]
+t2: index-out-of-bounds @23:16 ["index ", " is outside an array of length 256"]
+t3: index-out-of-bounds @23:9 ["index ", " is outside an array of length 256"]
+t4: index-out-of-bounds @26:7 ["index ", " is outside an array of length 256"]
+t5: unreachable @33:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter isort(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u32 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u32`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/matmul.mn ==
+mente-dump 1 mir
+f0: fn matmul(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @6:23
+  v2: addr = slot 8192 @6:23
+  v4: u64 = int 0 @6:23
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 1024 @6:23
+  v6: bool = lt v3, v5 @6:23
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @6:23
+  v8: unit = store v7, v1 @6:23
+  v9: u64 = int 1 @6:23
+  v10: u64 = add v3, v9 @6:23
+  jump block1(v10)
+block3():
+  v11: addr = slot 4096 @6:23
+  v13: u64 = int 0 @6:23
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 1024 @6:23
+  v15: bool = lt v12, v14 @6:23
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 8 v2, v12 @6:23
+  v17: addr = elem 4 v11, v12 @6:23
+  v18: i64 = load v16 @6:23
+  v19: i64 = int 0 @6:23
+  v20: bool = ge v18, v19 @6:23
+  v21: i64 = int 4294967295 @6:23
+  v22: bool = le v18, v21 @6:23
+  v23: bool = and v20, v22 @6:23
+  v24: unit = check t0 v23, v18 @6:22
+  v25: u32 = cast v18 @6:22
+  v26: unit = store v17, v25 @6:22
+  v27: u64 = int 1 @6:22
+  v28: u64 = add v12, v27 @6:22
+  jump block4(v28)
+block6():
+  v29: addr = slot 4096 @6:22
+  v30: unit = copy 4096 v29, v11 @6:22
+  v31: i64 = int 0 @7:23
+  v32: addr = slot 8192 @7:23
+  v34: u64 = int 0 @7:23
+  jump block7(v34)
+block7(v33: u64):
+  v35: u64 = int 1024 @7:23
+  v36: bool = lt v33, v35 @7:23
+  branch v36, block8(), block9()
+block8():
+  v37: addr = elem 8 v32, v33 @7:23
+  v38: unit = store v37, v31 @7:23
+  v39: u64 = int 1 @7:23
+  v40: u64 = add v33, v39 @7:23
+  jump block7(v40)
+block9():
+  v41: addr = slot 4096 @7:23
+  v43: u64 = int 0 @7:23
+  jump block10(v43)
+block10(v42: u64):
+  v44: u64 = int 1024 @7:23
+  v45: bool = lt v42, v44 @7:23
+  branch v45, block11(), block12()
+block11():
+  v46: addr = elem 8 v32, v42 @7:23
+  v47: addr = elem 4 v41, v42 @7:23
+  v48: i64 = load v46 @7:23
+  v49: i64 = int 0 @7:23
+  v50: bool = ge v48, v49 @7:23
+  v51: i64 = int 4294967295 @7:23
+  v52: bool = le v48, v51 @7:23
+  v53: bool = and v50, v52 @7:23
+  v54: unit = check t1 v53, v48 @7:22
+  v55: u32 = cast v48 @7:22
+  v56: unit = store v47, v55 @7:22
+  v57: u64 = int 1 @7:22
+  v58: u64 = add v42, v57 @7:22
+  jump block10(v58)
+block12():
+  v59: addr = slot 4096 @7:22
+  v60: unit = copy 4096 v59, v41 @7:22
+  v61: i64 = int 0 @8:23
+  v62: addr = slot 8192 @8:23
+  v64: u64 = int 0 @8:23
+  jump block13(v64)
+block13(v63: u64):
+  v65: u64 = int 1024 @8:23
+  v66: bool = lt v63, v65 @8:23
+  branch v66, block14(), block15()
+block14():
+  v67: addr = elem 8 v62, v63 @8:23
+  v68: unit = store v67, v61 @8:23
+  v69: u64 = int 1 @8:23
+  v70: u64 = add v63, v69 @8:23
+  jump block13(v70)
+block15():
+  v71: addr = slot 4096 @8:23
+  v73: u64 = int 0 @8:23
+  jump block16(v73)
+block16(v72: u64):
+  v74: u64 = int 1024 @8:23
+  v75: bool = lt v72, v74 @8:23
+  branch v75, block17(), block18()
+block17():
+  v76: addr = elem 8 v62, v72 @8:23
+  v77: addr = elem 4 v71, v72 @8:23
+  v78: i64 = load v76 @8:23
+  v79: i64 = int 0 @8:23
+  v80: bool = ge v78, v79 @8:23
+  v81: i64 = int 4294967295 @8:23
+  v82: bool = le v78, v81 @8:23
+  v83: bool = and v80, v82 @8:23
+  v84: unit = check t2 v83, v78 @8:22
+  v85: u32 = cast v78 @8:22
+  v86: unit = store v77, v85 @8:22
+  v87: u64 = int 1 @8:22
+  v88: u64 = add v72, v87 @8:22
+  jump block16(v88)
+block18():
+  v89: addr = slot 4096 @8:22
+  v90: unit = copy 4096 v89, v71 @8:22
+  v91: i64 = int 12345 @9:19
+  v92: u64 = cast v91 @9:19
+  v93: addr = slot 8 @9:19
+  v94: unit = store v93, v92 @9:19
+  v95: i64 = int 0 @10:18
+  v96: u64 = cast v95 @10:18
+  v97: addr = slot 8 @10:18
+  v98: unit = store v97, v96 @10:18
+  jump block19()
+block19():
+  v99: u64 = load v97 @11:9
+  v100: u64 = int 1024 @11:13
+  v101: bool = lt v99, v100 @11:13
+  branch v101, block20(), block21()
+block20():
+  v102: u64 = load v93 @12:13
+  v103: i64 = int 1103515245 @12:20
+  v104: i128 = cast v102 @12:13
+  v105: i128 = cast v103 @12:13
+  v106: i128 = mul v104, v105 @12:13
+  v107: i64 = int 12345 @12:33
+  v108: i128 = cast v107 @12:13
+  v109: i128 = add v106, v108 @12:13
+  v110: i64 = int 2147483648 @12:42
+  v111: i128 = cast v110 @12:12
+  v112: i128 = rem v109, v111 @12:12
+  v113: u64 = cast v112 @12:12
+  v114: unit = store v93, v113 @12:12
+  v115: u64 = load v97 @13:7
+  v116: u64 = load v93 @13:12
+  v117: i64 = int 1024 @13:19
+  v118: u64 = cast v117 @13:12
+  v119: u64 = rem v116, v118 @13:12
+  v120: u32 = cast v119 @13:12
+  v121: addr = elem 4 v29, v115 @13:5
+  v122: unit = store v121, v120 @13:5
+  v123: u64 = load v93 @14:13
+  v124: i64 = int 1103515245 @14:20
+  v125: i128 = cast v123 @14:13
+  v126: i128 = cast v124 @14:13
+  v127: i128 = mul v125, v126 @14:13
+  v128: i64 = int 12345 @14:33
+  v129: i128 = cast v128 @14:13
+  v130: i128 = add v127, v129 @14:13
+  v131: i64 = int 2147483648 @14:42
+  v132: i128 = cast v131 @14:12
+  v133: i128 = rem v130, v132 @14:12
+  v134: u64 = cast v133 @14:12
+  v135: unit = store v93, v134 @14:12
+  v136: u64 = load v97 @15:7
+  v137: u64 = load v93 @15:12
+  v138: i64 = int 1024 @15:19
+  v139: u64 = cast v138 @15:12
+  v140: u64 = rem v137, v139 @15:12
+  v141: u32 = cast v140 @15:12
+  v142: addr = elem 4 v59, v136 @15:5
+  v143: unit = store v142, v141 @15:5
+  v144: u64 = load v97 @16:5
+  v145: i64 = int 1 @16:10
+  v146: i128 = cast v144 @16:10
+  v147: i128 = cast v145 @16:10
+  v148: i128 = add v146, v147 @16:10
+  v149: u64 = cast v148 @16:10
+  v150: unit = store v97, v149 @16:10
+  jump block19()
+block21():
+  v151: i64 = int 0 @18:20
+  v152: u64 = cast v151 @18:20
+  v153: addr = slot 8 @18:20
+  v154: unit = store v153, v152 @18:20
+  v155: i64 = int 0 @19:16
+  v156: u32 = cast v155 @19:16
+  v157: addr = slot 4 @19:16
+  v158: unit = store v157, v156 @19:16
+  jump block22()
+block22():
+  v159: u32 = load v157 @20:9
+  v160: bool = lt v159, v0 @20:13
+  branch v160, block23(), block24()
+block23():
+  v161: i64 = int 0 @21:22
+  v162: u64 = cast v161 @21:22
+  v163: addr = slot 8 @21:22
+  v164: unit = store v163, v162 @21:22
+  jump block25()
+block24():
+  v322: u64 = load v153 @46:3
+  return v322
+block25():
+  v165: u64 = load v163 @22:11
+  v166: i64 = int 32 @22:17
+  v167: i128 = cast v165 @22:17
+  v168: i128 = cast v166 @22:17
+  v169: bool = lt v167, v168 @22:17
+  branch v169, block26(), block27()
+block26():
+  v170: i64 = int 0 @23:24
+  v171: u64 = cast v170 @23:24
+  v172: addr = slot 8 @23:24
+  v173: unit = store v172, v171 @23:24
+  jump block28()
+block27():
+  v258: i64 = int 0 @36:22
+  v259: u64 = cast v258 @36:22
+  v260: addr = slot 8 @36:22
+  v261: unit = store v260, v259 @36:22
+  v262: i64 = int 0 @37:20
+  v263: u64 = cast v262 @37:20
+  v264: addr = slot 8 @37:20
+  v265: unit = store v264, v263 @37:20
+  jump block34()
+block28():
+  v174: u64 = load v172 @24:13
+  v175: i64 = int 32 @24:19
+  v176: i128 = cast v174 @24:19
+  v177: i128 = cast v175 @24:19
+  v178: bool = lt v176, v177 @24:19
+  branch v178, block29(), block30()
+block29():
+  v179: i64 = int 0 @25:24
+  v180: u32 = cast v179 @25:24
+  v181: addr = slot 4 @25:24
+  v182: unit = store v181, v180 @25:24
+  v183: i64 = int 0 @26:24
+  v184: u64 = cast v183 @26:24
+  v185: addr = slot 8 @26:24
+  v186: unit = store v185, v184 @26:24
+  jump block31()
+block30():
+  v251: u64 = load v163 @34:7
+  v252: i64 = int 1 @34:14
+  v253: i128 = cast v251 @34:14
+  v254: i128 = cast v252 @34:14
+  v255: i128 = add v253, v254 @34:14
+  v256: u64 = cast v255 @34:14
+  v257: unit = store v163, v256 @34:14
+  jump block25()
+block31():
+  v187: u64 = load v185 @27:15
+  v188: i64 = int 32 @27:19
+  v189: i128 = cast v187 @27:19
+  v190: i128 = cast v188 @27:19
+  v191: bool = lt v189, v190 @27:19
+  branch v191, block32(), block33()
+block32():
+  v192: u32 = load v181 @28:11
+  v193: u64 = load v163 @28:20
+  v194: i64 = int 32 @28:26
+  v195: i128 = cast v193 @28:20
+  v196: i128 = cast v194 @28:20
+  v197: i128 = mul v195, v196 @28:20
+  v198: u64 = load v185 @28:31
+  v199: i128 = cast v198 @28:20
+  v200: i128 = add v197, v199 @28:20
+  v201: u64 = cast v200 @28:18
+  v202: addr = elem 4 v29, v201 @28:18
+  v203: u32 = load v202 @28:18
+  v204: u64 = load v185 @28:38
+  v205: i64 = int 32 @28:42
+  v206: i128 = cast v204 @28:38
+  v207: i128 = cast v205 @28:38
+  v208: i128 = mul v206, v207 @28:38
+  v209: u64 = load v172 @28:47
+  v210: i128 = cast v209 @28:38
+  v211: i128 = add v208, v210 @28:38
+  v212: u64 = cast v211 @28:36
+  v213: addr = elem 4 v59, v212 @28:36
+  v214: u32 = load v213 @28:36
+  v215: u64 = cast v203 @28:18
+  v216: u64 = cast v214 @28:18
+  v217: u64 = mul v215, v216 @28:18
+  v218: u64 = cast v192 @28:18
+  v219: u64 = add v218, v217 @28:18
+  v220: u64 = int 4294967295 @28:18
+  v221: bool = le v219, v220 @28:18
+  v222: unit = check t3 v221, v219 @28:18
+  v223: u32 = cast v219 @28:18
+  v224: unit = store v181, v223 @28:18
+  v225: u64 = load v185 @29:11
+  v226: i64 = int 1 @29:16
+  v227: i128 = cast v225 @29:16
+  v228: i128 = cast v226 @29:16
+  v229: i128 = add v227, v228 @29:16
+  v230: u64 = cast v229 @29:16
+  v231: unit = store v185, v230 @29:16
+  jump block31()
+block33():
+  v232: u64 = load v163 @31:11
+  v233: i64 = int 32 @31:17
+  v234: i128 = cast v232 @31:11
+  v235: i128 = cast v233 @31:11
+  v236: i128 = mul v234, v235 @31:11
+  v237: u64 = load v172 @31:22
+  v238: i128 = cast v237 @31:11
+  v239: i128 = add v236, v238 @31:11
+  v240: u32 = load v181 @31:29
+  v241: u64 = cast v239 @31:9
+  v242: addr = elem 4 v89, v241 @31:9
+  v243: unit = store v242, v240 @31:9
+  v244: u64 = load v172 @32:9
+  v245: i64 = int 1 @32:16
+  v246: i128 = cast v244 @32:16
+  v247: i128 = cast v245 @32:16
+  v248: i128 = add v246, v247 @32:16
+  v249: u64 = cast v248 @32:16
+  v250: unit = store v172, v249 @32:16
+  jump block28()
+block34():
+  v266: u64 = load v264 @38:11
+  v267: u64 = int 1024 @38:15
+  v268: bool = lt v266, v267 @38:15
+  branch v268, block35(), block36()
+block35():
+  v269: u64 = load v260 @39:7
+  v270: u64 = load v264 @39:18
+  v271: addr = elem 4 v89, v270 @39:16
+  v272: u32 = load v271 @39:16
+  v273: i128 = cast v269 @39:16
+  v274: i128 = cast v272 @39:16
+  v275: i128 = add v273, v274 @39:16
+  v276: i128 = int 0 @39:16
+  v277: bool = ge v275, v276 @39:16
+  v278: i128 = int 18446744073709551615 @39:16
+  v279: bool = le v275, v278 @39:16
+  v280: bool = and v277, v279 @39:16
+  v281: unit = check t4 v280, v275 @39:16
+  v282: u64 = cast v275 @39:16
+  v283: unit = store v260, v282 @39:16
+  v284: u64 = load v264 @40:7
+  v285: i64 = int 1 @40:12
+  v286: i128 = cast v284 @40:12
+  v287: i128 = cast v285 @40:12
+  v288: i128 = add v286, v287 @40:12
+  v289: u64 = cast v288 @40:12
+  v290: unit = store v264, v289 @40:12
+  jump block34()
+block36():
+  v291: u64 = load v153 @42:14
+  v292: i64 = int 31 @42:22
+  v293: i128 = cast v291 @42:14
+  v294: i128 = cast v292 @42:14
+  v295: i128 = mul v293, v294 @42:14
+  v296: u64 = load v260 @42:27
+  v297: i128 = cast v296 @42:14
+  v298: i128 = add v295, v297 @42:14
+  v299: i64 = int 1000000007 @42:36
+  v300: i128 = cast v299 @42:13
+  v301: i128 = rem v298, v300 @42:13
+  v302: u64 = cast v301 @42:13
+  v303: unit = store v153, v302 @42:13
+  v304: u32 = load v157 @43:7
+  v305: i64 = int 1024 @43:11
+  v306: i64 = cast v304 @43:7
+  v307: i64 = rem v306, v305 @43:7
+  v308: u64 = load v153 @43:19
+  v309: i64 = int 1024 @43:27
+  v310: u64 = cast v309 @43:19
+  v311: u64 = rem v308, v310 @43:19
+  v312: u32 = cast v311 @43:19
+  v313: u64 = cast v307 @43:5
+  v314: addr = elem 4 v29, v313 @43:5
+  v315: unit = store v314, v312 @43:5
+  v316: u32 = load v157 @44:5
+  v317: i64 = int 1 @44:10
+  v318: i64 = cast v316 @44:10
+  v319: i64 = add v318, v317 @44:10
+  v320: u32 = cast v319 @44:10
+  v321: unit = store v157, v320 @44:10
+  jump block22()
+block37():
+  trap t5
+t0: narrowing @6:22 ["", " does not fit in `u32`"]
+t1: narrowing @7:22 ["", " does not fit in `u32`"]
+t2: narrowing @8:22 ["", " does not fit in `u32`"]
+t3: narrowing @28:18 ["", " does not fit in `u32`"]
+t4: narrowing @39:16 ["", " does not fit in `u64`"]
+t5: unreachable @46:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter matmul(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u32 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u32`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/popcount.mn ==
+mente-dump 1 mir
+f0: fn popcount(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @6:23
+  v2: addr = slot 32768 @6:23
+  v4: u64 = int 0 @6:23
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 4096 @6:23
+  v6: bool = lt v3, v5 @6:23
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @6:23
+  v8: unit = store v7, v1 @6:23
+  v9: u64 = int 1 @6:23
+  v10: u64 = add v3, v9 @6:23
+  jump block1(v10)
+block3():
+  v11: addr = slot 32768 @6:23
+  v13: u64 = int 0 @6:23
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 4096 @6:23
+  v15: bool = lt v12, v14 @6:23
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 8 v2, v12 @6:23
+  v17: addr = elem 8 v11, v12 @6:23
+  v18: i64 = load v16 @6:23
+  v19: i64 = int 0 @6:23
+  v20: bool = ge v18, v19 @6:23
+  v21: unit = check t0 v20, v18 @6:22
+  v22: u64 = cast v18 @6:22
+  v23: unit = store v17, v22 @6:22
+  v24: u64 = int 1 @6:22
+  v25: u64 = add v12, v24 @6:22
+  jump block4(v25)
+block6():
+  v26: addr = slot 32768 @6:22
+  v27: unit = copy 32768 v26, v11 @6:22
+  v28: i64 = int 12345 @7:19
+  v29: u64 = cast v28 @7:19
+  v30: addr = slot 8 @7:19
+  v31: unit = store v30, v29 @7:19
+  v32: i64 = int 0 @8:18
+  v33: u64 = cast v32 @8:18
+  v34: addr = slot 8 @8:18
+  v35: unit = store v34, v33 @8:18
+  jump block7()
+block7():
+  v36: u64 = load v34 @9:9
+  v37: u64 = int 4096 @9:13
+  v38: bool = lt v36, v37 @9:13
+  branch v38, block8(), block9()
+block8():
+  v39: u64 = load v30 @10:13
+  v40: i64 = int 1103515245 @10:20
+  v41: i128 = cast v39 @10:13
+  v42: i128 = cast v40 @10:13
+  v43: i128 = mul v41, v42 @10:13
+  v44: i64 = int 12345 @10:33
+  v45: i128 = cast v44 @10:13
+  v46: i128 = add v43, v45 @10:13
+  v47: i64 = int 2147483648 @10:42
+  v48: i128 = cast v47 @10:12
+  v49: i128 = rem v46, v48 @10:12
+  v50: u64 = cast v49 @10:12
+  v51: unit = store v30, v50 @10:12
+  v52: u64 = load v30 @11:16
+  v53: u64 = load v30 @12:13
+  v54: i64 = int 1103515245 @12:20
+  v55: i128 = cast v53 @12:13
+  v56: i128 = cast v54 @12:13
+  v57: i128 = mul v55, v56 @12:13
+  v58: i64 = int 12345 @12:33
+  v59: i128 = cast v58 @12:13
+  v60: i128 = add v57, v59 @12:13
+  v61: i64 = int 2147483648 @12:42
+  v62: i128 = cast v61 @12:12
+  v63: i128 = rem v60, v62 @12:12
+  v64: u64 = cast v63 @12:12
+  v65: unit = store v30, v64 @12:12
+  v66: u64 = load v30 @13:15
+  v67: u64 = load v30 @14:13
+  v68: i64 = int 1103515245 @14:20
+  v69: i128 = cast v67 @14:13
+  v70: i128 = cast v68 @14:13
+  v71: i128 = mul v69, v70 @14:13
+  v72: i64 = int 12345 @14:33
+  v73: i128 = cast v72 @14:13
+  v74: i128 = add v71, v73 @14:13
+  v75: i64 = int 2147483648 @14:42
+  v76: i128 = cast v75 @14:12
+  v77: i128 = rem v74, v76 @14:12
+  v78: u64 = cast v77 @14:12
+  v79: unit = store v30, v78 @14:12
+  v80: u64 = load v34 @15:7
+  v81: i64 = int 8589934592 @15:19
+  v82: i128 = cast v52 @15:12
+  v83: i128 = cast v81 @15:12
+  v84: i128 = mul v82, v83 @15:12
+  v85: i64 = int 4 @15:38
+  v86: i128 = cast v66 @15:32
+  v87: i128 = cast v85 @15:32
+  v88: i128 = mul v86, v87 @15:32
+  v89: i128 = add v84, v88 @15:12
+  v90: u64 = load v30 @15:42
+  v91: i64 = int 4 @15:49
+  v92: u64 = cast v91 @15:42
+  v93: u64 = rem v90, v92 @15:42
+  v94: i128 = cast v93 @15:12
+  v95: i128 = add v89, v94 @15:12
+  v96: u64 = cast v95 @15:12
+  v97: addr = elem 8 v26, v80 @15:5
+  v98: unit = store v97, v96 @15:5
+  v99: u64 = load v34 @16:5
+  v100: i64 = int 1 @16:10
+  v101: i128 = cast v99 @16:10
+  v102: i128 = cast v100 @16:10
+  v103: i128 = add v101, v102 @16:10
+  v104: u64 = cast v103 @16:10
+  v105: unit = store v34, v104 @16:10
+  jump block7()
+block9():
+  v106: i64 = int 0 @18:20
+  v107: u64 = cast v106 @18:20
+  v108: addr = slot 8 @18:20
+  v109: unit = store v108, v107 @18:20
+  v110: i64 = int 0 @19:16
+  v111: u32 = cast v110 @19:16
+  v112: addr = slot 4 @19:16
+  v113: unit = store v112, v111 @19:16
+  jump block10()
+block10():
+  v114: u32 = load v112 @20:9
+  v115: bool = lt v114, v0 @20:13
+  branch v115, block11(), block12()
+block11():
+  v116: i64 = int 0 @21:22
+  v117: u64 = cast v116 @21:22
+  v118: addr = slot 8 @21:22
+  v119: unit = store v118, v117 @21:22
+  v120: i64 = int 0 @22:20
+  v121: u64 = cast v120 @22:20
+  v122: addr = slot 8 @22:20
+  v123: unit = store v122, v121 @22:20
+  jump block13()
+block12():
+  v274: u64 = load v108 @38:3
+  return v274
+block13():
+  v124: u64 = load v122 @23:11
+  v125: u64 = int 4096 @23:15
+  v126: bool = lt v124, v125 @23:15
+  branch v126, block14(), block15()
+block14():
+  v127: u64 = load v122 @24:17
+  v128: addr = elem 8 v26, v127 @24:15
+  v129: u64 = load v128 @24:15
+  v130: addr = slot 8 @24:15
+  v131: unit = store v130, v129 @24:15
+  v132: u64 = load v130 @25:11
+  v133: u64 = load v130 @25:17
+  v134: i64 = int 1 @25:22
+  v135: u64 = cast v134 @25:17
+  v136: u64 = shr v133, v135 @25:17
+  v137: i64 = int 6148914691236517205 @25:27
+  v138: u64 = cast v137 @25:16
+  v139: u64 = and v136, v138 @25:16
+  v140: i128 = cast v132 @25:11
+  v141: i128 = cast v139 @25:11
+  v142: i128 = sub v140, v141 @25:11
+  v143: i128 = int 0 @25:11
+  v144: bool = ge v142, v143 @25:11
+  v145: i128 = int 18446744073709551615 @25:11
+  v146: bool = le v142, v145 @25:11
+  v147: bool = and v144, v146 @25:11
+  v148: unit = check t1 v147, v142 @25:11
+  v149: u64 = cast v142 @25:11
+  v150: unit = store v130, v149 @25:11
+  v151: u64 = load v130 @26:12
+  v152: i64 = int 3689348814741910323 @26:16
+  v153: u64 = cast v152 @26:12
+  v154: u64 = and v151, v153 @26:12
+  v155: u64 = load v130 @26:40
+  v156: i64 = int 2 @26:45
+  v157: u64 = cast v156 @26:40
+  v158: u64 = shr v155, v157 @26:40
+  v159: i64 = int 3689348814741910323 @26:50
+  v160: u64 = cast v159 @26:39
+  v161: u64 = and v158, v160 @26:39
+  v162: i128 = cast v154 @26:11
+  v163: i128 = cast v161 @26:11
+  v164: i128 = add v162, v163 @26:11
+  v165: u64 = cast v164 @26:11
+  v166: unit = store v130, v165 @26:11
+  v167: u64 = load v130 @27:12
+  v168: u64 = load v130 @27:17
+  v169: i64 = int 4 @27:22
+  v170: u64 = cast v169 @27:17
+  v171: u64 = shr v168, v170 @27:17
+  v172: i128 = cast v167 @27:12
+  v173: i128 = cast v171 @27:12
+  v174: i128 = add v172, v173 @27:12
+  v175: i64 = int 1085102592571150095 @27:28
+  v176: u64 = cast v174 @27:11
+  v177: u64 = cast v175 @27:11
+  v178: u64 = and v176, v177 @27:11
+  v179: unit = store v130, v178 @27:11
+  v180: u64 = load v130 @28:11
+  v181: u64 = load v130 @28:16
+  v182: i64 = int 8 @28:21
+  v183: u64 = cast v182 @28:16
+  v184: u64 = shr v181, v183 @28:16
+  v185: i128 = cast v180 @28:11
+  v186: i128 = cast v184 @28:11
+  v187: i128 = add v185, v186 @28:11
+  v188: u64 = cast v187 @28:11
+  v189: unit = store v130, v188 @28:11
+  v190: u64 = load v130 @29:11
+  v191: u64 = load v130 @29:16
+  v192: i64 = int 16 @29:21
+  v193: u64 = cast v192 @29:16
+  v194: u64 = shr v191, v193 @29:16
+  v195: i128 = cast v190 @29:11
+  v196: i128 = cast v194 @29:11
+  v197: i128 = add v195, v196 @29:11
+  v198: u64 = cast v197 @29:11
+  v199: unit = store v130, v198 @29:11
+  v200: u64 = load v130 @30:11
+  v201: u64 = load v130 @30:16
+  v202: i64 = int 32 @30:21
+  v203: u64 = cast v202 @30:16
+  v204: u64 = shr v201, v203 @30:16
+  v205: i128 = cast v200 @30:11
+  v206: i128 = cast v204 @30:11
+  v207: i128 = add v205, v206 @30:11
+  v208: u64 = cast v207 @30:11
+  v209: unit = store v130, v208 @30:11
+  v210: u64 = load v118 @31:7
+  v211: u64 = load v130 @31:16
+  v212: i64 = int 127 @31:20
+  v213: u64 = cast v212 @31:16
+  v214: u64 = and v211, v213 @31:16
+  v215: i128 = cast v210 @31:16
+  v216: i128 = cast v214 @31:16
+  v217: i128 = add v215, v216 @31:16
+  v218: i128 = int 0 @31:16
+  v219: bool = ge v217, v218 @31:16
+  v220: i128 = int 18446744073709551615 @31:16
+  v221: bool = le v217, v220 @31:16
+  v222: bool = and v219, v221 @31:16
+  v223: unit = check t2 v222, v217 @31:16
+  v224: u64 = cast v217 @31:16
+  v225: unit = store v118, v224 @31:16
+  v226: u64 = load v122 @32:7
+  v227: i64 = int 1 @32:12
+  v228: i128 = cast v226 @32:12
+  v229: i128 = cast v227 @32:12
+  v230: i128 = add v228, v229 @32:12
+  v231: u64 = cast v230 @32:12
+  v232: unit = store v122, v231 @32:12
+  jump block13()
+block15():
+  v233: u64 = load v108 @34:14
+  v234: i64 = int 31 @34:22
+  v235: i128 = cast v233 @34:14
+  v236: i128 = cast v234 @34:14
+  v237: i128 = mul v235, v236 @34:14
+  v238: u64 = load v118 @34:27
+  v239: i128 = cast v238 @34:14
+  v240: i128 = add v237, v239 @34:14
+  v241: i64 = int 1000000007 @34:36
+  v242: i128 = cast v241 @34:13
+  v243: i128 = rem v240, v242 @34:13
+  v244: u64 = cast v243 @34:13
+  v245: unit = store v108, v244 @34:13
+  v246: u32 = load v112 @35:7
+  v247: i64 = int 4096 @35:11
+  v248: i64 = cast v246 @35:7
+  v249: i64 = rem v248, v247 @35:7
+  v250: u64 = load v108 @35:19
+  v251: i64 = int 8589934592 @35:27
+  v252: i128 = cast v250 @35:19
+  v253: i128 = cast v251 @35:19
+  v254: i128 = mul v252, v253 @35:19
+  v255: u64 = load v118 @35:40
+  v256: i128 = cast v255 @35:19
+  v257: i128 = add v254, v256 @35:19
+  v258: i128 = int 0 @35:19
+  v259: bool = ge v257, v258 @35:19
+  v260: i128 = int 18446744073709551615 @35:19
+  v261: bool = le v257, v260 @35:19
+  v262: bool = and v259, v261 @35:19
+  v263: unit = check t3 v262, v257 @35:19
+  v264: u64 = cast v257 @35:19
+  v265: u64 = cast v249 @35:5
+  v266: addr = elem 8 v26, v265 @35:5
+  v267: unit = store v266, v264 @35:5
+  v268: u32 = load v112 @36:5
+  v269: i64 = int 1 @36:10
+  v270: i64 = cast v268 @36:10
+  v271: i64 = add v270, v269 @36:10
+  v272: u32 = cast v271 @36:10
+  v273: unit = store v112, v272 @36:10
+  jump block10()
+block16():
+  trap t4
+t0: narrowing @6:22 ["", " does not fit in `u64`"]
+t1: narrowing @25:11 ["", " does not fit in `u64`"]
+t2: narrowing @31:16 ["", " does not fit in `u64`"]
+t3: narrowing @35:19 ["", " does not fit in `u64`"]
+t4: unreachable @38:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter popcount(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u32 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u32`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/prefix.mn ==
+mente-dump 1 mir
+f0: fn prefix(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @6:23
+  v2: addr = slot 32768 @6:23
+  v4: u64 = int 0 @6:23
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 4096 @6:23
+  v6: bool = lt v3, v5 @6:23
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @6:23
+  v8: unit = store v7, v1 @6:23
+  v9: u64 = int 1 @6:23
+  v10: u64 = add v3, v9 @6:23
+  jump block1(v10)
+block3():
+  v11: addr = slot 16384 @6:23
+  v13: u64 = int 0 @6:23
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 4096 @6:23
+  v15: bool = lt v12, v14 @6:23
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 8 v2, v12 @6:23
+  v17: addr = elem 4 v11, v12 @6:23
+  v18: i64 = load v16 @6:23
+  v19: i64 = int 0 @6:23
+  v20: bool = ge v18, v19 @6:23
+  v21: i64 = int 4294967295 @6:23
+  v22: bool = le v18, v21 @6:23
+  v23: bool = and v20, v22 @6:23
+  v24: unit = check t0 v23, v18 @6:22
+  v25: u32 = cast v18 @6:22
+  v26: unit = store v17, v25 @6:22
+  v27: u64 = int 1 @6:22
+  v28: u64 = add v12, v27 @6:22
+  jump block4(v28)
+block6():
+  v29: addr = slot 16384 @6:22
+  v30: unit = copy 16384 v29, v11 @6:22
+  v31: i64 = int 0 @7:26
+  v32: addr = slot 32768 @7:26
+  v34: u64 = int 0 @7:26
+  jump block7(v34)
+block7(v33: u64):
+  v35: u64 = int 4096 @7:26
+  v36: bool = lt v33, v35 @7:26
+  branch v36, block8(), block9()
+block8():
+  v37: addr = elem 8 v32, v33 @7:26
+  v38: unit = store v37, v31 @7:26
+  v39: u64 = int 1 @7:26
+  v40: u64 = add v33, v39 @7:26
+  jump block7(v40)
+block9():
+  v41: addr = slot 16384 @7:26
+  v43: u64 = int 0 @7:26
+  jump block10(v43)
+block10(v42: u64):
+  v44: u64 = int 4096 @7:26
+  v45: bool = lt v42, v44 @7:26
+  branch v45, block11(), block12()
+block11():
+  v46: addr = elem 8 v32, v42 @7:26
+  v47: addr = elem 4 v41, v42 @7:26
+  v48: i64 = load v46 @7:26
+  v49: i64 = int 0 @7:26
+  v50: bool = ge v48, v49 @7:26
+  v51: i64 = int 4294967295 @7:26
+  v52: bool = le v48, v51 @7:26
+  v53: bool = and v50, v52 @7:26
+  v54: unit = check t1 v53, v48 @7:25
+  v55: u32 = cast v48 @7:25
+  v56: unit = store v47, v55 @7:25
+  v57: u64 = int 1 @7:25
+  v58: u64 = add v42, v57 @7:25
+  jump block10(v58)
+block12():
+  v59: addr = slot 16384 @7:25
+  v60: unit = copy 16384 v59, v41 @7:25
+  v61: i64 = int 12345 @8:19
+  v62: u64 = cast v61 @8:19
+  v63: addr = slot 8 @8:19
+  v64: unit = store v63, v62 @8:19
+  v65: i64 = int 0 @9:18
+  v66: u64 = cast v65 @9:18
+  v67: addr = slot 8 @9:18
+  v68: unit = store v67, v66 @9:18
+  jump block13()
+block13():
+  v69: u64 = load v67 @10:9
+  v70: u64 = int 4096 @10:13
+  v71: bool = lt v69, v70 @10:13
+  branch v71, block14(), block15()
+block14():
+  v72: u64 = load v63 @11:13
+  v73: i64 = int 1103515245 @11:20
+  v74: i128 = cast v72 @11:13
+  v75: i128 = cast v73 @11:13
+  v76: i128 = mul v74, v75 @11:13
+  v77: i64 = int 12345 @11:33
+  v78: i128 = cast v77 @11:13
+  v79: i128 = add v76, v78 @11:13
+  v80: i64 = int 2147483648 @11:42
+  v81: i128 = cast v80 @11:12
+  v82: i128 = rem v79, v81 @11:12
+  v83: u64 = cast v82 @11:12
+  v84: unit = store v63, v83 @11:12
+  v85: u64 = load v67 @12:7
+  v86: u64 = load v63 @12:12
+  v87: i64 = int 65536 @12:19
+  v88: u64 = cast v87 @12:12
+  v89: u64 = rem v86, v88 @12:12
+  v90: u32 = cast v89 @12:12
+  v91: addr = elem 4 v29, v85 @12:5
+  v92: unit = store v91, v90 @12:5
+  v93: u64 = load v67 @13:5
+  v94: i64 = int 1 @13:10
+  v95: i128 = cast v93 @13:10
+  v96: i128 = cast v94 @13:10
+  v97: i128 = add v95, v96 @13:10
+  v98: u64 = cast v97 @13:10
+  v99: unit = store v67, v98 @13:10
+  jump block13()
+block15():
+  v100: i64 = int 0 @15:20
+  v101: u64 = cast v100 @15:20
+  v102: addr = slot 8 @15:20
+  v103: unit = store v102, v101 @15:20
+  v104: i64 = int 0 @16:16
+  v105: u32 = cast v104 @16:16
+  v106: addr = slot 4 @16:16
+  v107: unit = store v106, v105 @16:16
+  jump block16()
+block16():
+  v108: u32 = load v106 @17:9
+  v109: bool = lt v108, v0 @17:13
+  branch v109, block17(), block18()
+block17():
+  v110: i64 = int 0 @18:24
+  v111: u32 = cast v110 @18:24
+  v112: addr = slot 4 @18:24
+  v113: unit = store v112, v111 @18:24
+  v114: i64 = int 0 @19:20
+  v115: u64 = cast v114 @19:20
+  v116: addr = slot 8 @19:20
+  v117: unit = store v116, v115 @19:20
+  jump block19()
+block18():
+  v190: u64 = load v102 @29:3
+  return v190
+block19():
+  v118: u64 = load v116 @20:11
+  v119: u64 = int 4096 @20:15
+  v120: bool = lt v118, v119 @20:15
+  branch v120, block20(), block21()
+block20():
+  v121: u32 = load v112 @21:7
+  v122: u64 = load v116 @21:20
+  v123: addr = elem 4 v29, v122 @21:18
+  v124: u32 = load v123 @21:18
+  v125: i64 = cast v121 @21:18
+  v126: i64 = cast v124 @21:18
+  v127: i64 = add v125, v126 @21:18
+  v128: i64 = int 0 @21:18
+  v129: bool = ge v127, v128 @21:18
+  v130: i64 = int 4294967295 @21:18
+  v131: bool = le v127, v130 @21:18
+  v132: bool = and v129, v131 @21:18
+  v133: unit = check t2 v132, v127 @21:18
+  v134: u32 = cast v127 @21:18
+  v135: unit = store v112, v134 @21:18
+  v136: u64 = load v116 @22:12
+  v137: u32 = load v112 @22:17
+  v138: addr = elem 4 v59, v136 @22:7
+  v139: unit = store v138, v137 @22:7
+  v140: u64 = load v116 @23:7
+  v141: i64 = int 1 @23:12
+  v142: i128 = cast v140 @23:12
+  v143: i128 = cast v141 @23:12
+  v144: i128 = add v142, v143 @23:12
+  v145: u64 = cast v144 @23:12
+  v146: unit = store v116, v145 @23:12
+  jump block19()
+block21():
+  v147: u64 = load v102 @25:14
+  v148: i64 = int 31 @25:22
+  v149: i128 = cast v147 @25:14
+  v150: i128 = cast v148 @25:14
+  v151: i128 = mul v149, v150 @25:14
+  v152: u32 = load v106 @25:32
+  v153: i64 = int 4096 @25:36
+  v154: i64 = cast v152 @25:32
+  v155: i64 = rem v154, v153 @25:32
+  v156: u64 = cast v155 @25:27
+  v157: addr = elem 4 v59, v156 @25:27
+  v158: u32 = load v157 @25:27
+  v159: i128 = cast v158 @25:14
+  v160: i128 = add v151, v159 @25:14
+  v161: i64 = int 4095 @25:49
+  v162: u64 = cast v161 @25:44
+  v163: addr = elem 4 v59, v162 @25:44
+  v164: u32 = load v163 @25:44
+  v165: i128 = cast v164 @25:14
+  v166: i128 = add v160, v165 @25:14
+  v167: i64 = int 1000000007 @25:58
+  v168: i128 = cast v167 @25:13
+  v169: i128 = rem v166, v168 @25:13
+  v170: u64 = cast v169 @25:13
+  v171: unit = store v102, v170 @25:13
+  v172: u32 = load v106 @26:7
+  v173: i64 = int 4096 @26:11
+  v174: i64 = cast v172 @26:7
+  v175: i64 = rem v174, v173 @26:7
+  v176: u64 = load v102 @26:19
+  v177: i64 = int 65536 @26:27
+  v178: u64 = cast v177 @26:19
+  v179: u64 = rem v176, v178 @26:19
+  v180: u32 = cast v179 @26:19
+  v181: u64 = cast v175 @26:5
+  v182: addr = elem 4 v29, v181 @26:5
+  v183: unit = store v182, v180 @26:5
+  v184: u32 = load v106 @27:5
+  v185: i64 = int 1 @27:10
+  v186: i64 = cast v184 @27:10
+  v187: i64 = add v186, v185 @27:10
+  v188: u32 = cast v187 @27:10
+  v189: unit = store v106, v188 @27:10
+  jump block16()
+block22():
+  trap t3
+t0: narrowing @6:22 ["", " does not fit in `u32`"]
+t1: narrowing @7:25 ["", " does not fit in `u32`"]
+t2: narrowing @21:18 ["", " does not fit in `u32`"]
+t3: unreachable @29:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter prefix(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u32 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u32`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/sieve.mn ==
+mente-dump 1 mir
+f0: fn sieve(u32) -> u64 {
+block0(v0: u32):
+  v1: bool = bool false @6:34
+  v2: addr = slot 262144 @6:34
+  v4: u64 = int 0 @6:34
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 262144 @6:34
+  v6: bool = lt v3, v5 @6:34
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 1 v2, v3 @6:34
+  v8: unit = store v7, v1 @6:34
+  v9: u64 = int 1 @6:34
+  v10: u64 = add v3, v9 @6:34
+  jump block1(v10)
+block3():
+  v11: addr = slot 262144 @6:34
+  v12: unit = copy 262144 v11, v2 @6:34
+  v13: i64 = int 0 @7:20
+  v14: u64 = cast v13 @7:20
+  v15: addr = slot 8 @7:20
+  v16: unit = store v15, v14 @7:20
+  v17: i64 = int 0 @8:16
+  v18: u32 = cast v17 @8:16
+  v19: addr = slot 4 @8:16
+  v20: unit = store v19, v18 @8:16
+  jump block4()
+block4():
+  v21: u32 = load v19 @9:9
+  v22: bool = lt v21, v0 @9:13
+  branch v22, block5(), block6()
+block5():
+  v23: i64 = int 262144 @10:24
+  v24: u32 = load v19 @10:33
+  v25: i64 = int 8 @10:37
+  v26: i64 = cast v24 @10:33
+  v27: i64 = rem v26, v25 @10:33
+  v28: i64 = sub v23, v27 @10:24
+  v29: u64 = cast v28 @10:24
+  v30: i64 = int 0 @11:20
+  v31: u64 = cast v30 @11:20
+  v32: addr = slot 8 @11:20
+  v33: unit = store v32, v31 @11:20
+  jump block7()
+block6():
+  v164: u64 = load v15 @38:3
+  return v164
+block7():
+  v34: u64 = load v32 @12:11
+  v35: bool = lt v34, v29 @12:15
+  branch v35, block8(), block9()
+block8():
+  v36: u64 = load v32 @13:17
+  v37: bool = bool false @13:22
+  v38: addr = elem 1 v11, v36 @13:7
+  v39: unit = store v38, v37 @13:7
+  v40: u64 = load v32 @14:7
+  v41: i64 = int 1 @14:12
+  v42: i128 = cast v40 @14:12
+  v43: i128 = cast v41 @14:12
+  v44: i128 = add v42, v43 @14:12
+  v45: u64 = cast v44 @14:12
+  v46: unit = store v32, v45 @14:12
+  jump block7()
+block9():
+  v47: i64 = int 2 @16:20
+  v48: u64 = cast v47 @16:20
+  v49: addr = slot 8 @16:20
+  v50: unit = store v49, v48 @16:20
+  jump block10()
+block10():
+  v51: u64 = load v49 @17:11
+  v52: u64 = load v49 @17:15
+  v53: u128 = cast v51 @17:11
+  v54: u128 = cast v52 @17:11
+  v55: u128 = mul v53, v54 @17:11
+  v56: u128 = cast v29 @17:19
+  v57: bool = lt v55, v56 @17:19
+  branch v57, block11(), block12()
+block11():
+  v58: u64 = load v49 @18:24
+  v59: u64 = int 0 @18:14
+  v60: bool = ge v58, v59 @18:14
+  v61: u64 = int 262144 @18:14
+  v62: bool = lt v58, v61 @18:14
+  v63: bool = and v60, v62 @18:14
+  v64: unit = check t0 v63, v58 @18:14
+  v65: addr = elem 1 v11, v58 @18:14
+  v66: bool = load v65 @18:14
+  v67: bool = not v66 @18:14
+  branch v67, block13(), block14()
+block12():
+  v111: i64 = int 0 @27:22
+  v112: u64 = cast v111 @27:22
+  v113: addr = slot 8 @27:22
+  v114: unit = store v113, v112 @27:22
+  v115: i64 = int 2 @28:20
+  v116: u64 = cast v115 @28:20
+  v117: addr = slot 8 @28:20
+  v118: unit = store v117, v116 @28:20
+  jump block19()
+block13():
+  v68: u64 = load v49 @19:24
+  v69: u64 = load v49 @19:28
+  v70: u128 = cast v68 @19:24
+  v71: u128 = cast v69 @19:24
+  v72: u128 = mul v70, v71 @19:24
+  v73: u128 = int 18446744073709551615 @19:24
+  v74: bool = le v72, v73 @19:24
+  v75: unit = check t1 v74, v72 @19:24
+  v76: u64 = cast v72 @19:24
+  v77: addr = slot 8 @19:24
+  v78: unit = store v77, v76 @19:24
+  jump block16()
+block14():
+  jump block15()
+block15():
+  v98: u64 = load v49 @25:7
+  v99: i64 = int 1 @25:12
+  v100: i128 = cast v98 @25:12
+  v101: i128 = cast v99 @25:12
+  v102: i128 = add v100, v101 @25:12
+  v103: i128 = int 0 @25:12
+  v104: bool = ge v102, v103 @25:12
+  v105: i128 = int 18446744073709551615 @25:12
+  v106: bool = le v102, v105 @25:12
+  v107: bool = and v104, v106 @25:12
+  v108: unit = check t3 v107, v102 @25:12
+  v109: u64 = cast v102 @25:12
+  v110: unit = store v49, v109 @25:12
+  jump block10()
+block16():
+  v79: u64 = load v77 @20:15
+  v80: bool = lt v79, v29 @20:19
+  branch v80, block17(), block18()
+block17():
+  v81: u64 = load v77 @21:21
+  v82: bool = bool true @21:26
+  v83: addr = elem 1 v11, v81 @21:11
+  v84: unit = store v83, v82 @21:11
+  v85: u64 = load v77 @22:11
+  v86: u64 = load v49 @22:16
+  v87: i128 = cast v85 @22:16
+  v88: i128 = cast v86 @22:16
+  v89: i128 = add v87, v88 @22:16
+  v90: i128 = int 0 @22:16
+  v91: bool = ge v89, v90 @22:16
+  v92: i128 = int 18446744073709551615 @22:16
+  v93: bool = le v89, v92 @22:16
+  v94: bool = and v91, v93 @22:16
+  v95: unit = check t2 v94, v89 @22:16
+  v96: u64 = cast v89 @22:16
+  v97: unit = store v77, v96 @22:16
+  jump block16()
+block18():
+  jump block15()
+block19():
+  v119: u64 = load v117 @29:11
+  v120: bool = lt v119, v29 @29:15
+  branch v120, block20(), block21()
+block20():
+  v121: u64 = load v117 @30:24
+  v122: addr = elem 1 v11, v121 @30:14
+  v123: bool = load v122 @30:14
+  v124: bool = not v123 @30:14
+  branch v124, block22(), block23()
+block21():
+  v145: u64 = load v15 @35:14
+  v146: i64 = int 31 @35:22
+  v147: i128 = cast v145 @35:14
+  v148: i128 = cast v146 @35:14
+  v149: i128 = mul v147, v148 @35:14
+  v150: u64 = load v113 @35:27
+  v151: i128 = cast v150 @35:14
+  v152: i128 = add v149, v151 @35:14
+  v153: i64 = int 1000000007 @35:36
+  v154: i128 = cast v153 @35:13
+  v155: i128 = rem v152, v154 @35:13
+  v156: u64 = cast v155 @35:13
+  v157: unit = store v15, v156 @35:13
+  v158: u32 = load v19 @36:5
+  v159: i64 = int 1 @36:10
+  v160: i64 = cast v158 @36:10
+  v161: i64 = add v160, v159 @36:10
+  v162: u32 = cast v161 @36:10
+  v163: unit = store v19, v162 @36:10
+  jump block4()
+block22():
+  v125: u64 = load v113 @31:9
+  v126: i64 = int 1 @31:18
+  v127: i128 = cast v125 @31:18
+  v128: i128 = cast v126 @31:18
+  v129: i128 = add v127, v128 @31:18
+  v130: i128 = int 0 @31:18
+  v131: bool = ge v129, v130 @31:18
+  v132: i128 = int 18446744073709551615 @31:18
+  v133: bool = le v129, v132 @31:18
+  v134: bool = and v131, v133 @31:18
+  v135: unit = check t4 v134, v129 @31:18
+  v136: u64 = cast v129 @31:18
+  v137: unit = store v113, v136 @31:18
+  jump block24()
+block23():
+  jump block24()
+block24():
+  v138: u64 = load v117 @33:7
+  v139: i64 = int 1 @33:12
+  v140: i128 = cast v138 @33:12
+  v141: i128 = cast v139 @33:12
+  v142: i128 = add v140, v141 @33:12
+  v143: u64 = cast v142 @33:12
+  v144: unit = store v117, v143 @33:12
+  jump block19()
+block25():
+  trap t5
+t0: index-out-of-bounds @18:14 ["index ", " is outside an array of length 262144"]
+t1: narrowing @19:24 ["", " does not fit in `usize`"]
+t2: narrowing @22:16 ["", " does not fit in `usize`"]
+t3: narrowing @25:12 ["", " does not fit in `usize`"]
+t4: narrowing @31:18 ["", " does not fit in `u64`"]
+t5: unreachable @38:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter sieve(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u32 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u32`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== perf/kernels/sum.mn ==
+mente-dump 1 mir
+f0: fn sum(u32) -> u64 {
+block0(v0: u32):
+  v1: i64 = int 0 @6:23
+  v2: addr = slot 32768 @6:23
+  v4: u64 = int 0 @6:23
+  jump block1(v4)
+block1(v3: u64):
+  v5: u64 = int 4096 @6:23
+  v6: bool = lt v3, v5 @6:23
+  branch v6, block2(), block3()
+block2():
+  v7: addr = elem 8 v2, v3 @6:23
+  v8: unit = store v7, v1 @6:23
+  v9: u64 = int 1 @6:23
+  v10: u64 = add v3, v9 @6:23
+  jump block1(v10)
+block3():
+  v11: addr = slot 16384 @6:23
+  v13: u64 = int 0 @6:23
+  jump block4(v13)
+block4(v12: u64):
+  v14: u64 = int 4096 @6:23
+  v15: bool = lt v12, v14 @6:23
+  branch v15, block5(), block6()
+block5():
+  v16: addr = elem 8 v2, v12 @6:23
+  v17: addr = elem 4 v11, v12 @6:23
+  v18: i64 = load v16 @6:23
+  v19: i64 = int 0 @6:23
+  v20: bool = ge v18, v19 @6:23
+  v21: i64 = int 4294967295 @6:23
+  v22: bool = le v18, v21 @6:23
+  v23: bool = and v20, v22 @6:23
+  v24: unit = check t0 v23, v18 @6:22
+  v25: u32 = cast v18 @6:22
+  v26: unit = store v17, v25 @6:22
+  v27: u64 = int 1 @6:22
+  v28: u64 = add v12, v27 @6:22
+  jump block4(v28)
+block6():
+  v29: addr = slot 16384 @6:22
+  v30: unit = copy 16384 v29, v11 @6:22
+  v31: i64 = int 12345 @7:19
+  v32: u64 = cast v31 @7:19
+  v33: addr = slot 8 @7:19
+  v34: unit = store v33, v32 @7:19
+  v35: i64 = int 0 @8:18
+  v36: u64 = cast v35 @8:18
+  v37: addr = slot 8 @8:18
+  v38: unit = store v37, v36 @8:18
+  jump block7()
+block7():
+  v39: u64 = load v37 @9:9
+  v40: u64 = int 4096 @9:13
+  v41: bool = lt v39, v40 @9:13
+  branch v41, block8(), block9()
+block8():
+  v42: u64 = load v33 @10:13
+  v43: i64 = int 1103515245 @10:20
+  v44: i128 = cast v42 @10:13
+  v45: i128 = cast v43 @10:13
+  v46: i128 = mul v44, v45 @10:13
+  v47: i64 = int 12345 @10:33
+  v48: i128 = cast v47 @10:13
+  v49: i128 = add v46, v48 @10:13
+  v50: i64 = int 2147483648 @10:42
+  v51: i128 = cast v50 @10:12
+  v52: i128 = rem v49, v51 @10:12
+  v53: u64 = cast v52 @10:12
+  v54: unit = store v33, v53 @10:12
+  v55: u64 = load v37 @11:7
+  v56: u64 = load v33 @11:12
+  v57: i64 = int 1048576 @11:19
+  v58: u64 = cast v57 @11:12
+  v59: u64 = rem v56, v58 @11:12
+  v60: u32 = cast v59 @11:12
+  v61: addr = elem 4 v29, v55 @11:5
+  v62: unit = store v61, v60 @11:5
+  v63: u64 = load v37 @12:5
+  v64: i64 = int 1 @12:10
+  v65: i128 = cast v63 @12:10
+  v66: i128 = cast v64 @12:10
+  v67: i128 = add v65, v66 @12:10
+  v68: u64 = cast v67 @12:10
+  v69: unit = store v37, v68 @12:10
+  jump block7()
+block9():
+  v70: i64 = int 0 @14:20
+  v71: u64 = cast v70 @14:20
+  v72: addr = slot 8 @14:20
+  v73: unit = store v72, v71 @14:20
+  v74: i64 = int 0 @15:16
+  v75: u32 = cast v74 @15:16
+  v76: addr = slot 4 @15:16
+  v77: unit = store v76, v75 @15:16
+  jump block10()
+block10():
+  v78: u32 = load v76 @16:9
+  v79: bool = lt v78, v0 @16:13
+  branch v79, block11(), block12()
+block11():
+  v80: i64 = int 0 @17:22
+  v81: u64 = cast v80 @17:22
+  v82: addr = slot 8 @17:22
+  v83: unit = store v82, v81 @17:22
+  v84: i64 = int 0 @18:20
+  v85: u64 = cast v84 @18:20
+  v86: addr = slot 8 @18:20
+  v87: unit = store v86, v85 @18:20
+  jump block13()
+block12():
+  v144: u64 = load v72 @27:3
+  return v144
+block13():
+  v88: u64 = load v86 @19:11
+  v89: u64 = int 4096 @19:15
+  v90: bool = lt v88, v89 @19:15
+  branch v90, block14(), block15()
+block14():
+  v91: u64 = load v82 @20:7
+  v92: u64 = load v86 @20:18
+  v93: addr = elem 4 v29, v92 @20:16
+  v94: u32 = load v93 @20:16
+  v95: i128 = cast v91 @20:16
+  v96: i128 = cast v94 @20:16
+  v97: i128 = add v95, v96 @20:16
+  v98: i128 = int 0 @20:16
+  v99: bool = ge v97, v98 @20:16
+  v100: i128 = int 18446744073709551615 @20:16
+  v101: bool = le v97, v100 @20:16
+  v102: bool = and v99, v101 @20:16
+  v103: unit = check t1 v102, v97 @20:16
+  v104: u64 = cast v97 @20:16
+  v105: unit = store v82, v104 @20:16
+  v106: u64 = load v86 @21:7
+  v107: i64 = int 1 @21:12
+  v108: i128 = cast v106 @21:12
+  v109: i128 = cast v107 @21:12
+  v110: i128 = add v108, v109 @21:12
+  v111: u64 = cast v110 @21:12
+  v112: unit = store v86, v111 @21:12
+  jump block13()
+block15():
+  v113: u64 = load v72 @23:14
+  v114: i64 = int 31 @23:22
+  v115: i128 = cast v113 @23:14
+  v116: i128 = cast v114 @23:14
+  v117: i128 = mul v115, v116 @23:14
+  v118: u64 = load v82 @23:27
+  v119: i128 = cast v118 @23:14
+  v120: i128 = add v117, v119 @23:14
+  v121: i64 = int 1000000007 @23:36
+  v122: i128 = cast v121 @23:13
+  v123: i128 = rem v120, v122 @23:13
+  v124: u64 = cast v123 @23:13
+  v125: unit = store v72, v124 @23:13
+  v126: u32 = load v76 @24:7
+  v127: i64 = int 4096 @24:11
+  v128: i64 = cast v126 @24:7
+  v129: i64 = rem v128, v127 @24:7
+  v130: u64 = load v72 @24:19
+  v131: i64 = int 1048576 @24:27
+  v132: u64 = cast v131 @24:19
+  v133: u64 = rem v130, v132 @24:19
+  v134: u32 = cast v133 @24:19
+  v135: u64 = cast v129 @24:5
+  v136: addr = elem 4 v29, v135 @24:5
+  v137: unit = store v136, v134 @24:5
+  v138: u32 = load v76 @25:5
+  v139: i64 = int 1 @25:10
+  v140: i64 = cast v138 @25:10
+  v141: i64 = add v140, v139 @25:10
+  v142: u32 = cast v141 @25:10
+  v143: unit = store v76, v142 @25:10
+  jump block10()
+block16():
+  trap t2
+t0: narrowing @6:22 ["", " does not fit in `u32`"]
+t1: narrowing @20:16 ["", " does not fit in `u64`"]
+t2: unreachable @27:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter sum(i128) -> u64 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @5:8
+  v7: u32 = cast v0 @5:8
+  v8: u64 = call f0 v7 @5:8
+  return v8
+t0: narrowing @5:8 ["", " does not fit in `u32`"]
+t1: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+== compiler/mente-cli/tests/debuggers/demo.mn ==
+mente-dump 1 mir
+f0: fn square(u32) -> u32 {
+block0(v0: u32):
+  v1: i64 = cast v0 @4:3
+  v2: i64 = cast v0 @4:3
+  v3: i64 = mul v1, v2 @4:3
+  v4: u32 = cast v3 @4:3
+  return v4
+block1():
+  trap t0
+t0: unreachable @4:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn sum_squares(u32, u32) -> u32 {
+block0(v0: u32, v1: u32):
+  v2: u32 = call f0 v0 @8:28
+  v3: u32 = call f0 v1 @9:28
+  v4: i64 = cast v2 @10:3
+  v5: i64 = cast v3 @10:3
+  v6: i64 = add v4, v5 @10:3
+  v7: u32 = cast v6 @10:3
+  return v7
+block1():
+  trap t0
+t0: unreachable @10:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter square(i128) -> u32 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 4294967295 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @3:4
+  v7: u32 = cast v0 @3:4
+  v8: i64 = int 0 @3:4
+  v9: i64 = int 1000 @3:4
+  v10: i64 = cast v7 @3:4
+  v11: bool = ge v10, v8 @3:4
+  v12: i64 = cast v7 @3:4
+  v13: bool = lt v12, v9 @3:4
+  v14: bool = and v11, v13 @3:4
+  v15: unit = check t1 v14, v7, v8, v9 @3:4
+  v16: u32 = call f0 v7 @3:4
+  return v16
+t0: narrowing @3:4 ["", " does not fit in `u32`"]
+t1: refinement @3:4 ["", " lies outside the refinement `[", "..", "]`"]
+t2: unreachable @3:4 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter sum_squares(i128, i128) -> u32 {
+block0(v0: i128, v1: i128):
+  v2: i128 = int 0 @0:0
+  v3: bool = ge v0, v2 @0:0
+  v4: i128 = int 4294967295 @0:0
+  v5: bool = le v0, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v0 @7:8
+  v8: u32 = cast v0 @7:8
+  v9: i128 = int 0 @7:8
+  v10: bool = ge v1, v9 @7:8
+  v11: i128 = int 4294967295 @7:8
+  v12: bool = le v1, v11 @7:8
+  v13: bool = and v10, v12 @7:8
+  v14: unit = check t1 v13, v1 @7:8
+  v15: u32 = cast v1 @7:8
+  v16: i64 = int 0 @7:8
+  v17: i64 = int 1000 @7:8
+  v18: i64 = cast v8 @7:8
+  v19: bool = ge v18, v16 @7:8
+  v20: i64 = cast v8 @7:8
+  v21: bool = lt v20, v17 @7:8
+  v22: bool = and v19, v21 @7:8
+  v23: unit = check t2 v22, v8, v16, v17 @7:8
+  v24: i64 = int 0 @7:8
+  v25: i64 = int 1000 @7:8
+  v26: i64 = cast v15 @7:8
+  v27: bool = ge v26, v24 @7:8
+  v28: i64 = cast v15 @7:8
+  v29: bool = lt v28, v25 @7:8
+  v30: bool = and v27, v29 @7:8
+  v31: unit = check t3 v30, v15, v24, v25 @7:8
+  v32: u32 = call f1 v8, v15 @7:8
+  return v32
+t0: narrowing @7:8 ["", " does not fit in `u32`"]
+t1: narrowing @7:8 ["", " does not fit in `u32`"]
+t2: refinement @7:8 ["", " lies outside the refinement `[", "..", "]`"]
+t3: refinement @7:8 ["", " lies outside the refinement `[", "..", "]`"]
+t4: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
