@@ -2,7 +2,7 @@
 # each fixture under benchmark/harness/fixtures/ is built through the harness, with the Rust and
 # Odin that benchmark/harness/toolchains.json pins, as an agent's program would be, and must pass
 # every example and hidden test of its task, or end its adversarial task's probe with the verdict
-# it names. It also checks every `odin` block of benchmark/control/odin.md with `odin check`.
+# it names. A step of its own checks every `odin` block of benchmark/control/odin.md with `odin check`.
 # The harness's unit tests also run in CI's Documentation job.
 name: Harness
 
@@ -39,5 +39,10 @@ jobs:
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
         run: node benchmark/harness/fixtures.ts --odin "$ODIN" --out "$RUNNER_TEMP/fixtures-out"
+      - name: Check the Odin document's code blocks
+        if: always() && steps.toolchains.outcome == 'success'
+        env:
+          ODIN: ${{ steps.toolchains.outputs.odin }}
+        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --out "$RUNNER_TEMP/document-out"
       - name: Test the harness
         run: npm run test:harness
