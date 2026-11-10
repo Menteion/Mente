@@ -737,29 +737,54 @@ impl fmt::Display for Stop {
     }
 }
 
-/// Memory, byte-addressed: the slots of every frame, and what a caller sets up.
-#[derive(Default, Debug)]
+/// Memory, byte-addressed: the slots of every frame, and what a caller sets up. A copy lets
+/// one setup start many runs, as the mutation gate's do.
+///
+/// Each allocation is a slot of its own, and every load, store and copy must stay inside one:
+/// an access that crosses into the next slot or past the last is broken MIR, as an index no
+/// check kept inside its array makes, never a read of the neighbouring slot's bytes.
+#[derive(Clone, Default, Debug)]
 pub struct Memory {
     bytes: Vec<u8>,
+    /// Where each slot starts and ends, in the order allocated, so by address.
+    slots: Vec<(usize, usize)>,
+    /// What every new byte holds before it is written: 0 by default. Native code's stack slots
+    /// hold whatever was there, so a run that fills them with another byte shows a read of
+    /// memory nothing wrote, as the mutation gate's runs do.
+    fill: u8,
 }
 
 impl Memory {
+    /// Memory whose new bytes each hold `fill` until written.
+    pub fn filled(fill: u8) -> Memory {
+        Memory {
+            bytes: Vec::new(),
+            slots: Vec::new(),
+            fill,
+        }
+    }
+
     /// `n` new bytes, aligned to 16, their address returned.
     pub fn alloc(&mut self, n: u32) -> u64 {
         let at = self.bytes.len().next_multiple_of(16);
-        self.bytes.resize(at + n as usize, 0);
+        self.bytes.resize(at + n as usize, self.fill);
+        self.slots.push((at, at + n as usize));
         at as u64
     }
 
+    /// The bytes an access of `n` at `at` covers, which must lie inside one slot.
     fn range(&self, at: u64, n: usize) -> Result<std::ops::Range<usize>, Stop> {
-        let start = at as usize;
-        if start
-            .checked_add(n)
-            .is_none_or(|end| end > self.bytes.len())
-        {
-            return Err(Stop::Broken(format!("an access of {} bytes at {}", n, at)));
+        let start = usize::try_from(at).unwrap_or(usize::MAX);
+        // The slot holding `start` is the last that begins at or before it.
+        let k = self.slots.partition_point(|(s, _)| *s <= start);
+        let slot = k.checked_sub(1).and_then(|k| self.slots.get(k));
+        match (start.checked_add(n), slot) {
+            (Some(end), Some((_, last))) if end <= *last => Ok(start..end),
+            _ => Err(Stop::Broken(format!(
+                "an access of {} bytes at {} outside its slot",
+                n, at
+            ))),
         }
-        Ok(start..start + n)
     }
 
     pub fn store(&mut self, at: u64, v: Val, ty: Ty) -> Result<(), Stop> {
@@ -800,6 +825,7 @@ impl Memory {
 
     fn release(&mut self, to: usize) {
         self.bytes.truncate(to);
+        self.slots.retain(|(s, _)| *s < to);
     }
 
     /// Bytes in use: what a caller set up, and the slots of the calls still running.
@@ -834,13 +860,26 @@ pub fn run(
     memory: &mut Memory,
     limits: Limits,
 ) -> Result<Val, Stop> {
+    run_counting(m, f, args, memory, limits).0
+}
+
+/// Runs as [`run`] does, and also gives the number of instructions the run executed, so that
+/// a caller can bound another run by what this one took.
+pub fn run_counting(
+    m: &Module,
+    f: FuncId,
+    args: &[Val],
+    memory: &mut Memory,
+    limits: Limits,
+) -> (Result<Val, Stop>, u64) {
     let mut machine = Machine {
         m,
         memory,
         limits,
         steps: 0,
     };
-    machine.run(f, args)
+    let result = machine.run(f, args);
+    (result, machine.steps)
 }
 
 struct Machine<'a> {
@@ -1087,11 +1126,13 @@ impl<'m> Machine<'m> {
                 if i.neg {
                     return Err(broken("a negative index unchecked"));
                 }
-                let offset = u64::try_from(i.mag)
+                let base = addr(0)?;
+                let at = u64::try_from(i.mag)
                     .ok()
                     .and_then(|i| i.checked_mul(u64::from(*stride)))
+                    .and_then(|offset| base.checked_add(offset))
                     .ok_or_else(|| broken("an index beyond memory"))?;
-                Val::Addr(addr(0)? + offset)
+                Val::Addr(at)
             }
             Op::Load => self.memory.load(addr(0)?, ty)?,
             Op::Store => {
@@ -1809,6 +1850,78 @@ mod tests {
         assert!(verify(&Module { functions: vec![f] })
             .unwrap_err()
             .contains("does not exist"));
+    }
+
+    /// A slot read before it is written holds the memory's fill, 0 unless another is asked
+    /// for, and a copy of memory starts runs of its own; a run counts what it executed.
+    #[test]
+    fn test_unwritten_memory_holds_its_fill_and_runs_count_their_steps() {
+        // `fn peek() -> u16`: a slot's first two bytes, never written.
+        let mut b = Builder::new("peek", &[], Some(Ty::Int(IntTy::new(16, false))));
+        let s = b.inst(Op::Slot { bytes: 2 }, Ty::Addr, &[]);
+        let v = b.inst(Op::Load, Ty::Int(IntTy::new(16, false)), &[s]);
+        b.end(Term::Return(Some(v)));
+        let m = module(vec![b.finish()]);
+        let peek =
+            |memory: &mut Memory| run_counting(&m, FuncId(0), &[], memory, Limits::default());
+        assert_eq!(peek(&mut Memory::default()), (Ok(int(0)), 2));
+        let mut poisoned = Memory::filled(0xA5);
+        let at = poisoned.alloc(1);
+        let copy = poisoned.clone();
+        assert_eq!(peek(&mut poisoned), (Ok(int(0xA5A5)), 2));
+        assert_eq!(copy.load(at, Ty::Int(U8)), Ok(int(0xA5)));
+        assert_eq!(copy.used(), 1);
+    }
+
+    /// An index no check kept inside its array, as a mutant that removes the check makes, is
+    /// broken MIR wherever its access leaves the slot: into the gap before the next slot, across
+    /// a slot's end, past the last slot or beyond every address, and never a panic.
+    #[test]
+    fn test_accesses_outside_their_slot_are_broken_mir() {
+        // `fn at(i) -> u16`: a u16 at byte `i` of a 3-byte slot, with a 4-byte slot after it.
+        let at = |index: i128, signed: bool| {
+            let t = IntTy::new(64, signed);
+            let u16 = IntTy::new(16, false);
+            let mut b = Builder::new("at", &[Ty::Int(t)], Some(Ty::Int(u16)));
+            let i = b.params(BlockId(0))[0];
+            let s = b.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
+            let _next = b.inst(Op::Slot { bytes: 4 }, Ty::Addr, &[]);
+            let e = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[s, i]);
+            let v = b.inst(Op::Load, Ty::Int(u16), &[e]);
+            b.end(Term::Return(Some(v)));
+            run(
+                &module(vec![b.finish()]),
+                FuncId(0),
+                &[int(index)],
+                &mut Memory::filled(7),
+                Limits::default(),
+            )
+        };
+        let broken = |r: Result<Val, Stop>| matches!(r, Err(Stop::Broken(why)) if why.contains("outside its slot"));
+        assert_eq!(at(1, false), Ok(int(0x0707)));
+        assert!(
+            broken(at(2, false)),
+            "the load's second byte leaves the slot"
+        );
+        assert!(broken(at(5, false)), "the gap between the slots");
+        assert!(
+            broken(at(19, false)),
+            "the next slot's last byte and past it"
+        );
+        assert!(
+            broken(at(i128::from(u64::MAX), false)),
+            "the address overflows"
+        );
+        assert!(matches!(at(-1, true), Err(Stop::Broken(_))));
+        // An address inside another slot reads it: slots are told apart by address alone.
+        assert_eq!(at(16, false), Ok(int(0x0707)));
+        // A slot released on return is gone with its frame.
+        let mut memory = Memory::filled(0);
+        let kept = memory.alloc(2);
+        memory.alloc(2);
+        memory.release(16);
+        assert_eq!(memory.load(kept, Ty::Int(U8)), Ok(int(0)));
+        assert!(memory.load(16, Ty::Int(U8)).is_err());
     }
 
     #[test]

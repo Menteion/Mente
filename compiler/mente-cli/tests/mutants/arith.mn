@@ -1,0 +1,43 @@
+// Exact arithmetic in a machine type wide enough for its static range, narrowed where the value
+// lands, and checked arithmetic on 128-bit operands.
+// call: add(200, 55)
+// call: add(200, 56)
+// call: add(0, 0)
+// call: sub(3, 5)
+// call: sub(5, 3)
+// call: mul(16, 16)
+// call: mul(15, 17)
+// call: sq(18446744073709551615)
+// call: big(170141183460469231731687303715884105727, 1)
+// call: big(170141183460469231731687303715884105727, 0)
+// call: big(-170141183460469231731687303715884105728, -1)
+// call: wide(170141183460469231731687303715884105727, 2)
+// call: wide(-3, 7)
+// call: wide(-170141183460469231731687303715884105728, 1)
+// call: neg(5)
+// call: neg(-128)
+// call: neg(0)
+// call: neg(-127)
+// call: neg(-5)
+// call: flip(-170141183460469231731687303715884105728)
+// call: flip(7)
+module arith
+
+pub fn add(a: u8, b: u8) -> u8 = a + b
+
+pub fn sub(a: u8, b: u8) -> i16 = a - b
+
+pub fn mul(a: u8, b: u8) -> u8 = a * b
+
+pub fn sq(a: u64) -> u128 {
+  val p: u128 = a * a
+  p + 1
+}
+
+pub fn big(a: i128, b: i128) -> i128 = a + b
+
+pub fn wide(a: i128, b: i128) -> i128 = a * b - b
+
+pub fn neg(a: i8) -> i8 = -a
+
+pub fn flip(a: i128) -> i128 = -a

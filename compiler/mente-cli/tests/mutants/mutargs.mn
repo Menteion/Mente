@@ -1,0 +1,49 @@
+// `mut` arguments: a binding, an element and an array, passed on to a callee, and what each is
+// left holding.
+// call: one(mut 4)
+// call: one(mut 255)
+// call: element(mut [1, 2, 3], 1)
+// call: element(mut [1, 2, 3], 0)
+// call: element(mut [1, 2, 3], 3)
+// call: pair(mut [5, 6])
+// call: flip(mut true)
+// call: flip(mut false)
+// call: twice(mut 3)
+// call: twice(mut 200)
+// call: one(mut 254)
+// call: element(mut [1, 2, 3], 2)
+// call: twice(mut 128)
+// call: twice(mut 127)
+// call: bump(mut 7)
+// call: swap(mut [1, 2])
+module mutargs
+
+fn bump(mut x: u8) {
+  x += 1
+}
+
+fn swap(mut xs: [2]u8) {
+  val t: u8 = xs[0]
+  xs[0] = xs[1]
+  xs[1] = t
+}
+
+pub fn one(mut x: u8) {
+  bump(mut x)
+}
+
+pub fn element(mut xs: [3]u8, i: usize) {
+  bump(mut xs[i])
+}
+
+pub fn pair(mut xs: [2]u8) {
+  swap(mut xs)
+}
+
+pub fn flip(mut b: bool) {
+  b = not b
+}
+
+pub fn twice(mut x: u8) {
+  x *= 2
+}

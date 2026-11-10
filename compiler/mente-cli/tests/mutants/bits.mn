@@ -1,0 +1,64 @@
+// Bit operations on integers and booleans, `~` and `not`, and shifts: amounts outside the
+// width, a left shift that leaves its type, and a right shift that rounds toward negative
+// infinity.
+// call: both(12, 10)
+// call: either(12, 10)
+// call: one(12, 10)
+// call: mixed(256, 1)
+// call: mixed(3, 1)
+// call: flip(5)
+// call: flip(-128)
+// call: flipu(5)
+// call: shl(3, 2)
+// call: shl(64, 2)
+// call: shl(1, 8)
+// call: shl(1, 7)
+// call: shr(-7, 1)
+// call: shr(7, 1)
+// call: shr(-7, -1)
+// call: shr(-128, 7)
+// call: shr(1, 8)
+// call: big(1, 126)
+// call: big(1, 127)
+// call: big(-1, 127)
+// call: big(3, 127)
+// call: alone(true, false)
+// call: alone(false, true)
+// call: alone(true, true)
+// call: alone(false, false)
+// call: any3(false, false, true)
+// call: any3(false, false, false)
+// call: all3(true, true, false)
+// call: all3(true, true, true)
+// call: mixed(255, 0)
+// call: shr(-7, 0)
+// call: big(1, 128)
+// call: any3(true, false, false)
+// call: any3(false, true, false)
+// call: all3(false, true, true)
+// call: all3(true, false, true)
+module bits
+
+pub fn both(a: u8, b: u8) -> u8 = a & b
+
+pub fn either(a: u8, b: u8) -> u8 = a | b
+
+pub fn one(a: u8, b: u8) -> u8 = a ^ b
+
+pub fn mixed(a: u16, b: u16) -> u8 = a | b
+
+pub fn flip(a: i8) -> i8 = ~a
+
+pub fn flipu(a: u8) -> u8 = ~a
+
+pub fn shl(x: u8, k: u8) -> u8 = x << k
+
+pub fn shr(x: i8, k: i8) -> i8 = x >> k
+
+pub fn big(x: i128, k: u8) -> i128 = x << k
+
+pub fn alone(a: bool, b: bool) -> bool = (a and not b) or (b and not a)
+
+pub fn any3(a: bool, b: bool, c: bool) -> bool = a or b or c
+
+pub fn all3(a: bool, b: bool, c: bool) -> bool = a and b and c

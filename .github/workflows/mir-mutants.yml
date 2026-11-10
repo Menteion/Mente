@@ -1,0 +1,59 @@
+# The MIR mutation gate on lowered code, with the benchmark's agent programs as well as the
+# gate's own corpus, in release on GitHub's runners and never on a developer's machine
+# (compiler/mente-cli/src/mir_mutants.rs). `mn test --mutate` in ci.yml runs the gated corpus
+# alone on every pull request. The agent programs' calls are their tasks' fixed examples and
+# hidden tests, so their survivors are reported, in the run summary and the uploaded log, and
+# never fail the job; a survivor of the gated corpus without a written reason does.
+name: MIR mutants
+
+on:
+  pull_request:
+    paths:
+      - "compiler/mente-mir/**"
+      - "compiler/mente-codegen/**"
+      - "compiler/mente-sema/**"
+      - "compiler/mente-cli/src/mir_mutants.rs"
+      - "compiler/mente-cli/tests/mutants/**"
+      - ".github/workflows/mir-mutants.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mir-mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: MIR mutation gate with the agent programs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Build mn
+        run: cargo build --release --locked --bin mn
+      - name: Run the gate
+        run: |
+          status=0
+          ./target/release/mn test --mutate --agent-programs examples > gate.txt || status=$?
+          {
+            echo '## MIR mutation gate on lowered code'
+            echo '```text'
+            sed -n '/^MIR mutation gate/,$p' gate.txt | grep -v '^  survives: '
+            echo '```'
+            echo "Survivors of the agent programs, reported: $(grep -c '^  survives: ' gate.txt || true) (in the uploaded log)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mir-mutants
+          path: gate.txt
+          if-no-files-found: ignore
