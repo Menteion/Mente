@@ -1,13 +1,13 @@
 ---
 title: Mente Language Card
 version: 0.1.0
-status: draft
-date: 2026-11-09
+status: first version
+date: 2026-11-10
 ---
 
-# Mente Language Card (draft)
+# Mente Language Card
 
-How to write Mente as of milestone M1, for an agent that has never seen it. This is the draft the syntax probe uses ([`syntax-probe`](design-review.md#syntax-probe)); the first version closes M1 ([`language-card`](design-review.md#language-card)). Every `mente` block below passes `mn check`, which a test holds it to. The full rules are in `spec/core-calculus.md` and `spec/grammar.md`.
+How to write Mente 0.1.0, the language of milestone M1, for an agent that has never seen it. This is the card's first version ([`language-card`](design-review.md#language-card)); `mn card` prints the card of the compiler you have. Every `mente` block below passes `mn check`, and the card stays within 2,000 words; tests hold it to both. The full rules are in `spec/core-calculus.md` and `spec/grammar.md`.
 
 ## What M1 has
 
@@ -62,7 +62,6 @@ pub fn total(a: [4]u32) -> u32 {
 - An array is a value: binding, passing and returning it copies it. Two names never share one.
 - A refined type narrows an integer type: `u8[0..10]` holds 0 to 9, `i32[-5..=5]` holds -5 to 5. A bound is an integer literal, a `val` or read-only parameter, or `name.len`.
 - Literals take the type around them, and literals alone make an `i64`. `255_u8` states it.
-- `val x = a + b` takes the type of `a` and `b`. When they have different integer types, state it: `val total: u32 = small + big`.
 
 ## Integer arithmetic
 
@@ -70,7 +69,7 @@ pub fn total(a: [4]u32) -> u32 {
 - A value is checked against its type where it lands: a binding, an assignment, an argument, a returned value, an array element. A value outside the range traps at run time, or is an error at compile time if the type is refined and the compiler cannot prove it fits.
 - There are no casts and no `as`: any integer expression may flow into any integer type, and is checked where it lands.
 - An intermediate result must fit in `u128` or `i128`, judged from the operands' types: `a * a * a` for a `u64` is an error. Bind part of it first, `val product: u128 = a * a`; arithmetic on a `u128` or `i128` is checked at each operator.
-- `val x = a + b` takes the operands' type when they share one. When they differ, state the type: `val x: u64 = a + b`.
+- A binding without a type takes its operands' type, and the exact value is checked against it there: on `i32` operands, `val width = hi - lo + 1` is an `i32` and traps when the range spans all of `i32`. Write the type whenever the value may not fit its operands' type, or when they have different types: `val width: i64 = hi - lo + 1`.
 - A zero divisor traps, and so does an index outside its array.
 
 ## Operators
@@ -125,7 +124,7 @@ pub fn sign(x: i32) -> i32 = if x < 0 { -1 } else if x > 0 { 1 } else { 0 }
 ```
 
 - `if c { ... } else { ... }` is an expression when it has `else`. An `if` inside an operator's operand needs parentheses: `1 + (if c { 2 } else { 3 })`.
-- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A loop that needs a fact the compiler cannot infer states it after the condition: `while i < n invariant total <= i * 255 {`.
+- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A loop that needs a fact the compiler cannot infer states it after the condition: `while i < n invariant k <= i {`.
 - `guard c else { ... }` continues when `c` holds. Its block must leave: `return`, `break`, `continue`, `todo` or `unreachable`.
 - There is no `for`, `match`, ternary `? :`, `loop` or `do`.
 
