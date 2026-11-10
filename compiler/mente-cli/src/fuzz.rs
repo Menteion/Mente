@@ -51,7 +51,7 @@ use mente_syntax::TokenKind;
 
 /// The stack the phases run on: the one `mn` runs its work on, deep enough for the nesting
 /// limit (`E0127`) in a debug build.
-const STACK_BYTES: usize = 256 << 20;
+const STACK_BYTES: usize = crate::STACK;
 
 /// How long one phase may take on one input before it counts as a hang.
 const PHASE_SECONDS: u64 = 10;
