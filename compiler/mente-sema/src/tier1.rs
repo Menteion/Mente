@@ -999,6 +999,12 @@ struct Fx<'a> {
     retries: Vec<Retry>,
     /// When the SMT cross-check asks for them, the query of each obligation discharged so far.
     queries: Option<Vec<smt::Query>>,
+    /// Each loop analysed outside the recording pass, with its entry state and its exit state,
+    /// which depends on nothing else there: without it a loop would be analysed again for every
+    /// round of every loop around it, in time exponential in their nesting.
+    loop_memo: Vec<(StmtId, Octagon, Octagon)>,
+    /// The passes over a loop's body, for the test that keeps them linear in nesting.
+    passes: usize,
 }
 
 /// An `E0502` that declaring a `var` refined might fix: the diagnostic's index in the report,
@@ -1287,6 +1293,8 @@ impl<'a> Fx<'a> {
             tracks: Vec::new(),
             retries: Vec::new(),
             queries: None,
+            loop_memo: Vec::new(),
+            passes: 0,
         };
         let shape = f.syntax.result.map(|t| fx.own_shape(t));
         fx.result_shape = shape;
@@ -3225,6 +3233,7 @@ impl<'a> Fx<'a> {
         (s, cond, body): (StmtId, ExprId, BlockId),
         entry: &Octagon,
     ) -> (Octagon, Octagon) {
+        self.passes += 1;
         let mut at = head.clone();
         let c = self.cond(&mut at, cond);
         let mut b = at.clone();
@@ -3629,6 +3638,15 @@ impl<'a> Fx<'a> {
         invariants: &[ExprId],
         body: BlockId,
     ) {
+        // Outside the recording pass nothing is recorded, so a loop met again with the same
+        // entry state leaves the state it left before.
+        if !self.recording {
+            if let Some((_, _, exit)) = self.loop_memo.iter().find(|(k, e, _)| *k == s && e == st) {
+                *st = exit.clone();
+                return;
+            }
+        }
+        let entry = (!self.recording).then(|| st.clone());
         let mut changed = Vec::new();
         self.changed_block(body, &mut changed);
         // Candidates come only from the loop's text: the written invariants first, then the
@@ -3757,6 +3775,9 @@ impl<'a> Fx<'a> {
         let (_, exit) = self.pass(&head, (s, cond, body), st);
         self.heads.pop();
         *st = exit;
+        if let Some(entry) = entry {
+            self.loop_memo.push((s, entry, st.clone()));
+        }
     }
 
     /// The states a proven written invariant was decided on, for its query: on entry, and
@@ -3831,6 +3852,73 @@ mod tests {
             out.push(check(&f, &callees, &text));
         }
         out
+    }
+
+    /// The passes over loop bodies Tier 1 makes in the module's last function.
+    fn passes(src: &str) -> usize {
+        let text = module(src);
+        let m = mente_syntax::parse_module(&text).unwrap();
+        let parsed = mente_syntax::parse_bodies(&text, &m);
+        let names: Vec<String> = parsed.iter().map(|p| p.name.clone()).collect();
+        let signatures: Vec<Option<Signature>> = parsed
+            .iter()
+            .map(|p| p.syntax.as_ref().map(Signature::of))
+            .collect();
+        let callees: Vec<Option<Callee>> = parsed
+            .iter()
+            .map(|p| p.syntax.as_ref().map(|syntax| Callee { syntax }))
+            .collect();
+        let syntax = parsed.last().and_then(|p| p.syntax.as_ref()).unwrap();
+        let (resolution, _) = crate::names::resolve(syntax, &names);
+        let (typing, _) = crate::check::check(syntax, &resolution, &signatures);
+        let f = Function {
+            syntax,
+            resolution: &resolution,
+            typing: &typing,
+            routing: Routing::default(),
+        };
+        let mut fx = Fx::new(&f, &callees, &text);
+        fx.route();
+        let mut st = Octagon::new(fx.count);
+        fx.entry(&mut st);
+        fx.body(&mut st);
+        fx.passes
+    }
+
+    #[test]
+    fn test_nested_loops_are_analysed_in_time_linear_in_their_nesting() {
+        let nested = |depth: usize| {
+            format!(
+                "pub fn deep(x: i32) -> i32 {{\n{}{}  x\n}}",
+                "  while x > 0 {\n".repeat(depth),
+                "  }\n".repeat(depth)
+            )
+        };
+        let (ten, twenty, forty) = (
+            passes(&nested(10)),
+            passes(&nested(20)),
+            passes(&nested(40)),
+        );
+        // Each loop met again in the same state is not analysed again, so doubling the nesting
+        // doubles the passes; before, every level doubled them.
+        assert!(twenty <= 2 * ten + 4, "{} then {}", ten, twenty);
+        assert!(forty <= 2 * twenty + 4, "{} then {}", twenty, forty);
+        assert!(forty <= 8 * 40, "{}", forty);
+        assert!(ten >= 10, "{}", ten);
+        assert!(codes(&nested(40)).is_empty());
+    }
+
+    #[test]
+    fn test_a_loop_met_in_another_state_is_analysed_again() {
+        // The outer loop's first round assumes `s <= 5`, its second does not: the inner loop is
+        // met in two states, and the second must not reuse the first's exit, which would keep
+        // `s < 100` and prove the result in range.
+        let src = "pub fn f() -> u8[0..100] {\n  var i: u8 = 0\n  var s: u8 = 0\n  while s < 100 and i < 10\n    invariant s <= 5\n  {\n    var j: u8 = 0\n    while j < s {\n      j += 1\n    }\n    s = j + 1\n    i += 1\n  }\n  s\n}";
+        assert_eq!(codes(src), ["E0506", "E0502"]);
+        // Two loops met in the same state are two loops: the second, which raises `s` past the
+        // invariant, must not reuse the first's exit, which leaves the state as it was.
+        let siblings = "pub fn f() -> u8 {\n  var i: u8 = 0\n  var s: u8 = 0\n  while i < 10\n    invariant s <= 10\n  {\n    while i < 0 {\n    }\n    while s < 50 {\n      s += 1\n    }\n    i += 1\n  }\n  s\n}";
+        assert_eq!(codes(siblings), ["E0506"]);
     }
 
     /// The report of the module's last function.
