@@ -1,0 +1,45 @@
+```rust
+pub fn spiral(m: [[i32; 5]; 4]) -> [i32; 20] {
+    let mut out = [0i32; 20];
+    let mut k = 0usize;
+    let (mut top, mut bottom, mut left, mut right) = (0i32, 3i32, 0i32, 4i32);
+
+    while top <= bottom && left <= right {
+        // Top row, left to right
+        for c in left..=right {
+            out[k] = m[top as usize][c as usize];
+            k += 1;
+        }
+        top += 1;
+
+        // Right column, top to bottom
+        if top <= bottom {
+            for r in top..=bottom {
+                out[k] = m[r as usize][right as usize];
+                k += 1;
+            }
+            right -= 1;
+        }
+
+        // Bottom row, right to left
+        if top <= bottom && left <= right {
+            for c in (left..=right).rev() {
+                out[k] = m[bottom as usize][c as usize];
+                k += 1;
+            }
+            bottom -= 1;
+        }
+
+        // Left column, bottom to top
+        if left <= right && top <= bottom {
+            for r in (top..=bottom).rev() {
+                out[k] = m[r as usize][left as usize];
+                k += 1;
+            }
+            left += 1;
+        }
+    }
+
+    out
+}
+```

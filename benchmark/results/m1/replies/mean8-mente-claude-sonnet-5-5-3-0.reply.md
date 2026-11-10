@@ -1,0 +1,11 @@
+```mente
+pub fn mean8(a: [8]i64) -> i64 {
+  var i: usize = 0
+  var sum: i128 = 0
+  while i < 8 {
+    sum += a[i]
+    i += 1
+  }
+  sum / 8
+}
+```

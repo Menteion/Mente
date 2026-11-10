@@ -1,0 +1,19 @@
+```mente
+pub fn sort8(a: [8]i32) -> [8]i32 {
+  var r: [8]i32 = a
+  var i: usize = 0
+  while i < 8 {
+    var j: usize = 0
+    while j < 7 - i {
+      if r[j] > r[j + 1] {
+        val t = r[j]
+        r[j] = r[j + 1]
+        r[j + 1] = t
+      }
+      j += 1
+    }
+    i += 1
+  }
+  r
+}
+```

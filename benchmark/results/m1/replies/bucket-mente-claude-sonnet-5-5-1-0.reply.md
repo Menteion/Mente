@@ -1,0 +1,20 @@
+```mente
+pub fn bucket(x: i32, lo: i32, hi: i32, n: u32[1..=64]) -> u32[0..64]
+  requires lo < hi
+  ensures result < n
+{
+  guard x >= lo else {
+    return 0
+  }
+  guard x <= hi else {
+    return n - 1
+  }
+  val width: i64 = hi - lo + 1
+  val offset: i64 = x - lo
+  val b: i64 = offset * n / width
+  guard b >= 0 and b < n else {
+    unreachable("offset is between 0 and width - 1, so b is below n")
+  }
+  b
+}
+```

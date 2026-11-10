@@ -1,0 +1,13 @@
+```mente
+pub fn index_of_max(a: [8]i32) -> usize[0..8] {
+  var best: usize[0..8] = 0
+  var i: usize[0..8] = 1
+  while i < 8 invariant i >= 1 {
+    if a[i] > a[best] {
+      best = i
+    }
+    i += 1
+  }
+  best
+}
+```
