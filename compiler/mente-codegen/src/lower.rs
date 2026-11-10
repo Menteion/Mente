@@ -2116,6 +2116,39 @@ pub fn g(c: bool) -> i32 {
 
     /// The kinds of the checks in the lowered function `name`, sorted: each `Check`'s trap kind,
     /// and `checked` for an operation that traps by itself.
+    /// A literal's negation is a constant in MIR, on a literal without a suffix and with one of
+    /// every type but `u128`, whose negation is an instruction the operator checks.
+    #[test]
+    fn test_a_literals_negation_is_a_constant_but_on_u128() {
+        let src = "module m
+pub fn bare(x: u8) -> i16 = x + -5
+pub fn on_u8(x: u8) -> i16 = x + -5_u8
+pub fn on_u64(x: u64) -> i128 = x + -5_u64
+pub fn on_i8(x: i8) -> i16 = x + -5_i8
+pub fn on_i128(x: i128) -> i128 = x + -5_i128
+pub fn on_u128() -> u128 = -0_u128
+";
+        let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        let negations = |name: &str| {
+            let f = lowered.module.functions.iter().find(|f| f.name == name);
+            f.unwrap()
+                .ops
+                .iter()
+                .filter(|op| matches!(op, Op::Neg { .. }))
+                .count()
+        };
+        for (name, n) in [
+            ("bare", 0),
+            ("on_u8", 0),
+            ("on_u64", 0),
+            ("on_i8", 0),
+            ("on_i128", 0),
+            ("on_u128", 1),
+        ] {
+            assert_eq!(negations(name), n, "{}", name);
+        }
+    }
+
     fn checks(lowered: &Lowered, name: &str) -> Vec<String> {
         let f = lowered
             .module

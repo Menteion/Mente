@@ -602,7 +602,7 @@ impl<'m> Machine<'m> {
                 }
                 let v = self.eval(frame, *value, ctx)?;
                 let v = match &f.typing.exprs[e.0 as usize] {
-                    Ty::Array(_, elem) => self.narrow_plain(v, elem, span)?,
+                    Ty::Array(_, elem_ty) => self.narrow_plain(v, elem_ty, span)?,
                     _ => v,
                 };
                 Value::Array(vec![v; *count as usize])

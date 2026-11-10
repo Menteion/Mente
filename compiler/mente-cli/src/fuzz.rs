@@ -3584,6 +3584,17 @@ mod tests {
         });
         assert_eq!((kept.len(), calls), (MAX_UNITS + 1, 0));
     }
+
+    /// `floor` steps back to a character boundary, never forward, and stops at the text's end.
+    #[test]
+    fn test_floor_steps_back_to_a_character_boundary() {
+        // A two-byte character at bytes 1 and 2.
+        let text = "a\u{e9}!";
+        assert_eq!(floor(text, 2), 1);
+        assert_eq!(floor(text, 3), 3);
+        assert_eq!(floor(text, 9), text.len());
+    }
+
     /// After a reduction, delta debugging goes on with one chunk fewer, as Zeller's ddmin does:
     /// the candidates it tries for a failure that needs the first unit and the last.
     #[test]

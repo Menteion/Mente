@@ -1121,16 +1121,19 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    // The tokens end with `Eof`, and only `next` moves `pos`, never past it: so `pos` always
+    // names a token.
     fn peek(&self) -> &TokenKind {
-        &self.tokens[self.pos.min(self.tokens.len() - 1)].kind
+        &self.tokens[self.pos].kind
     }
 
     fn span(&self) -> Span {
-        self.tokens[self.pos.min(self.tokens.len() - 1)].span
+        self.tokens[self.pos].span
     }
 
+    /// The next token, and past it; at `Eof`, `Eof` again.
     fn next(&mut self) -> Token {
-        let tok = self.tokens[self.pos.min(self.tokens.len() - 1)].clone();
+        let tok = self.tokens[self.pos].clone();
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
         }
@@ -3106,6 +3109,31 @@ pub struct S {
                 err.message
             );
         }
+    }
+
+    /// The declaration parser's cursor stays at `Eof` however often it is moved past it.
+    #[test]
+    fn test_the_cursor_stays_at_the_end() {
+        let src = "module m";
+        let (tokens, _) = lex(src);
+        let mut p = Parser {
+            src,
+            tokens,
+            pos: 0,
+            last_end: 0,
+        };
+        let kinds: Vec<TokenKind> = (0..5).map(|_| p.next().kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                TokenKind::Module,
+                TokenKind::Ident("m".into()),
+                TokenKind::Eof,
+                TokenKind::Eof,
+                TokenKind::Eof
+            ]
+        );
+        assert_eq!((p.peek(), p.span().start), (&TokenKind::Eof, src.len()));
     }
 
     #[test]

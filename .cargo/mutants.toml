@@ -14,9 +14,10 @@ test_tool = "nextest"
 # mutation-tested (docs/design-brief.md, "Spikes before the milestone that needs them").
 exclude_globs = ["spikes/**"]
 
-# The fuzzer (compiler/mente-cli/src/fuzz.rs) is mutation-tested except for two groups of its
-# functions, each named exactly below; its oracle (failure keys, the minimizer, the worker's
-# protocol) is not excluded and is tested.
+# Mutants no test can tell from the original, each named exactly below with its reason. The
+# fuzzer (compiler/mente-cli/src/fuzz.rs) is mutation-tested except for two groups of its
+# functions and one method; its oracle (failure keys, the minimizer, the worker's protocol) is
+# not excluded and is tested.
 exclude_re = [
   # The input generator's random choices: which mutation, where, how deep, which inputs join
   # the corpus. Any variant still yields inputs, so no test that does not restate the code can
@@ -33,4 +34,9 @@ exclude_re = [
   # standard input closes; this matters only for a worker still busy when a job panics in the
   # middle of a case, which no test can arrange without a race.
   '^compiler/mente-cli/src/fuzz\.rs(:\d+:\d+)?: replace <impl Drop for Worker>::drop with \(\)$',
+  # The reference interpreter's narrowing of a repeat's value to the element type its typing
+  # gives: that type differs from the value's only where the repeat lands in a typed place,
+  # which narrows the same value at the same span, so no program tells the arm's deletion from
+  # the original. It stays because the spec states the rule at the literal.
+  '^compiler/mente-interp/src/eval\.rs(:\d+:\d+)?: delete match arm Ty::Array\(_, elem_ty\) in Machine(<.+>)?::eval$',
 ]

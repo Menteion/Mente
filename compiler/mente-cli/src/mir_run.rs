@@ -787,6 +787,25 @@ mod tests {
         assert_same(compared, &differences, 90);
     }
 
+    /// `write` refuses a value of another shape by itself, an array of another length among
+    /// them, though its callers check every argument's shape first.
+    #[test]
+    fn test_write_refuses_a_value_of_another_shape() {
+        let text = "module m
+pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
+";
+        let module = mente_sema::check_program(text).unwrap();
+        let lowered = lower::lower(&module).unwrap();
+        let shape = &lowered.entries[0].params[0].1;
+        let (_, args) = mente_interp::parse_call_modes("get([1, 2], 0)").unwrap();
+        let mut memory = Memory::default();
+        let at = memory.alloc(shape.size());
+        assert_eq!(
+            write(&mut memory, at, shape, &args[0].1),
+            Err("`[1, 2]` does not have its parameter's shape".to_string())
+        );
+    }
+
     /// An argument from outside the program must have its parameter's shape; one that does not
     /// fit its types traps as the reference interpreter's narrowing does.
     #[test]
