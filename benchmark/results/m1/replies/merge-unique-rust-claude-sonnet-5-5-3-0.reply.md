@@ -1,0 +1,31 @@
+```rust
+pub fn merge_unique(a: [i32; 8], b: [i32; 8], out: &mut [i32; 16]) -> usize {
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut n = 0usize;
+    while i < 8 || j < 8 {
+        let v = if i >= 8 {
+            let v = b[j];
+            j += 1;
+            v
+        } else if j >= 8 {
+            let v = a[i];
+            i += 1;
+            v
+        } else if a[i] <= b[j] {
+            let v = a[i];
+            i += 1;
+            v
+        } else {
+            let v = b[j];
+            j += 1;
+            v
+        };
+        if n == 0 || out[n - 1] != v {
+            out[n] = v;
+            n += 1;
+        }
+    }
+    n
+}
+```

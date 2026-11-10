@@ -1,0 +1,16 @@
+```mente
+pub fn isqrt(n: u64) -> u64 {
+  val x: u128 = n
+  var lo: u128 = 0
+  var hi: u128 = 4294967296
+  while hi - lo > 1 {
+    val mid = (lo + hi) / 2
+    if mid * mid <= x {
+      lo = mid
+    } else {
+      hi = mid
+    }
+  }
+  lo
+}
+```

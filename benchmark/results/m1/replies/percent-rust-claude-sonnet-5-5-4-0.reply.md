@@ -1,0 +1,7 @@
+```rust
+/// Requires: `whole > 0 && part <= whole`.
+/// The result is in `0..=100`.
+pub fn percent(part: u32, whole: u32) -> u32 {
+    ((part as u64) * 100 / (whole as u64)) as u32
+}
+```
