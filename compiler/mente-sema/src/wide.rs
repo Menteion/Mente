@@ -320,19 +320,19 @@ impl Wide<'_> {
                     None => {}
                 }
                 let mut hull: Option<Range> = None;
-                let mut highest: Option<(ExprId, Num)> = None;
+                let mut ranges = Vec::new();
                 for t in tails.into_iter().flatten() {
                     let r = self.range(t)?;
                     hull = Some(hull.map_or(r, |h| h.hull(r)));
-                    if highest.is_none_or(|(_, hi)| r.hi > hi) {
-                        highest = Some((t, r.hi));
-                    }
+                    ranges.push((t, r));
                 }
-                match (hull, highest) {
-                    // The branches' values meet in one machine type, so their hull must fit one.
-                    // A hull that fits neither holds a negative value and one above `i128`, which
-                    // the highest branch gives: bound to an `i128` in its branch, it fits.
-                    (Some(h), Some((tail, _))) if !h.fits() => {
+                // The branches' values meet in one machine type, so their hull must fit one. A
+                // hull that fits neither holds a negative value and one above `i128`, which a
+                // branch reaching above `i128` gives: bound to an `i128` in its branch, it fits.
+                let top = Num::new(false, i128::MAX.unsigned_abs());
+                let above = ranges.iter().find(|(_, r)| r.hi > top).map(|(t, _)| *t);
+                match (hull, above) {
+                    (Some(h), Some(tail)) if !h.fits() => {
                         self.report_if(span, tail);
                         None
                     }
@@ -716,6 +716,16 @@ mod tests {
             "{}",
             after
         );
+        assert!(check_source(&after).is_ok(), "{}", after);
+        // The fix binds the branch that reaches above `i128`, never one whose top is `i128`'s.
+        let top = "pub fn f(c: bool, a: i128, b: u128) -> i8 {
+  if c {
+    a
+  } else {
+    b
+  }
+}";
+        let after = fixed(top, "bind `b` to `wide: i128` first");
         assert!(check_source(&after).is_ok(), "{}", after);
         // An `else if` chain is judged as a whole.
         assert_eq!(

@@ -146,27 +146,11 @@ t0: narrowing @4:3 ["", " does not fit in `i64`"]
 t1: unreachable @4:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn enter pick(bool, i128, i128) -> i64 {
-block0(v0: bool, v1: i128, v2: i128):
-  v3: i128 = int -9223372036854775808 @0:0
-  v4: bool = ge v1, v3 @0:0
-  v5: i128 = int 9223372036854775807 @0:0
-  v6: bool = le v1, v5 @0:0
-  v7: bool = and v4, v6 @0:0
-  v8: unit = check t0 v7, v1 @3:8
-  v9: i64 = cast v1 @3:8
-  v10: i128 = int 0 @3:8
-  v11: bool = ge v2, v10 @3:8
-  v12: i128 = int 18446744073709551615 @3:8
-  v13: bool = le v2, v12 @3:8
-  v14: bool = and v11, v13 @3:8
-  v15: unit = check t1 v14, v2 @3:8
-  v16: u64 = cast v2 @3:8
-  v17: i64 = call f0 v0, v9, v16 @3:8
-  return v17
-t0: narrowing @3:8 ["", " does not fit in `i64`"]
-t1: narrowing @3:8 ["", " does not fit in `u64`"]
-t2: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+f1: fn enter pick(bool, i64, u64) -> i64 {
+block0(v0: bool, v1: i64, v2: u64):
+  v3: i64 = call f0 v0, v1, v2 @3:8
+  return v3
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/intermediate_beyond_128_bits.mn == (exit 2)
 == conformance/core-calculus/later_error_type.mn == (exit 2)
