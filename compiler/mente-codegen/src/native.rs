@@ -1685,4 +1685,59 @@ pub fn f(a: i128, xs: [2]u8, mut b: u128) -> i128 {
         // An argument of another shape is not a narrowing; the caller refuses it otherwise.
         assert_eq!(refusal(entry, &args(Arg::Bool(true), [2, 3], int(4))), None);
     }
+
+    /// The symbols of an object that are not the program's own functions: what it imports, and
+    /// each function it defines whose name does not start with `mente_f`.
+    fn platform_symbols(bytes: &[u8]) -> BTreeSet<String> {
+        use object::{Object as _, ObjectSymbol as _, SymbolKind};
+        let file = object::File::parse(bytes).unwrap();
+        file.symbols()
+            .filter(|s| s.is_undefined() || (s.is_definition() && s.kind() == SymbolKind::Text))
+            .map(|s| s.name().unwrap().to_string())
+            .filter(|name| !name.is_empty() && !name.starts_with("mente_f"))
+            .collect()
+    }
+
+    /// Every function and import of a native program beyond its Mente functions is listed in
+    /// the platform layer, and every symbol listed there is in some target's object.
+    #[test]
+    fn test_every_symbol_outside_the_program_is_listed_in_the_platform_layer() {
+        let doc = include_str!("../../../docs/platform-layer.md");
+        let listed: BTreeSet<String> = doc
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|rest| rest.split_once('`'))
+            .map(|(name, _)| name.to_string())
+            .collect();
+        // A copy of an array, a 128-bit division and a trap, so that every part is used.
+        let source = "module m
+pub fn f(xs: [8]u64, d: u128) -> u64 {
+  var ys: [8]u64 = xs
+  ys[0] = 1
+  val q: u64 = 1000 / d
+  ys[0] + q
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let mut seen = BTreeSet::new();
+        for target in Target::ALL {
+            let mut w = writer(target);
+            program(&lowered, &[], "", &mut w).unwrap();
+            let symbols = platform_symbols(&w.finish().unwrap());
+            for name in &symbols {
+                assert!(
+                    listed.contains(name),
+                    "{target:?}: `{name}` is in the object but not in docs/platform-layer.md"
+                );
+            }
+            seen.extend(symbols);
+        }
+        for name in &listed {
+            assert!(
+                seen.contains(name),
+                "docs/platform-layer.md lists `{name}`, which no object has"
+            );
+        }
+    }
 }

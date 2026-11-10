@@ -388,7 +388,7 @@ Planned as [`self-hosting-plan`](design-review.md#self-hosting-plan). Stage 2 is
 - **Canonical forms for every phase's output.** Tokens, the AST with its digests, the typed AST with its diagnostics, and MIR each have a deterministic serialised form that can be compared byte for byte. Stage 1's determinism checks need them anyway; in stage 2 they let each phase be replaced alone and compared byte for byte with the Rust phase it replaces.
 - **A translatable subset of Rust, enforced.** The principle of writing the Rust compiler the way Mente code would be written (section 7.7) becomes lints in CI: no lifetimes in structs, no language feature without a Mente counterpart, data held in index-based and `SoA` tables.
 - **Verification tools stay in Rust.** The reference interpreter, the program generator and the conformance runner are never self-hosted. A self-hosted compiler checked only by itself would rest on a circular argument; the Rust reference interpreter stays an independent judge.
-- **The runtime and the standard library are written in Mente** wherever the language allows, from the milestone that builds them. What cannot be, such as fiber context switches and system calls, forms a minimal platform layer, listed with the reason for each item.
+- **The runtime and the standard library are written in Mente** wherever the language allows, from the milestone that builds them. What cannot be, such as fiber context switches and system calls, forms a minimal platform layer, listed with the reason for each item in [docs/platform-layer.md](platform-layer.md).
 
 #### How the compiler is rewritten
 
