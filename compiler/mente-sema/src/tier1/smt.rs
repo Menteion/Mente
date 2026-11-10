@@ -714,6 +714,36 @@ mod tests {
         );
     }
 
+    /// A narrowing into `u128` from a signed source: the query denies it against the type's
+    /// whole range, from 0 to 2^128 - 1, and Tier 1 discharges it only where the value cannot be
+    /// negative, so that no query of it is satisfiable.
+    #[test]
+    fn test_a_narrowing_into_u128_is_denied_against_the_whole_type() {
+        let guarded = only(
+            "pub fn widen(x: i8) -> u128 {\n  guard x >= 0 else {\n    todo(\"no\")\n  }\n  x\n}",
+            ObligationKind::Range,
+        );
+        assert!(
+            guarded.contains(
+                "(assert (or (< |x| 0) (> |x| 340282366920938463463374607431768211455)))"
+            ),
+            "{}",
+            guarded
+        );
+        assert!(
+            guarded.contains("(assert (<= (+ (- |x|) (- |x|)) 0))"),
+            "the guard's fact `x >= 0`: {}",
+            guarded
+        );
+        // Without the guard `x` may be -1, which `u128` cannot hold: a run-time check, no query.
+        let unguarded = queries("pub fn widen(x: i8) -> u128 = x");
+        assert!(
+            unguarded[0].1.iter().all(|q| q.0 != ObligationKind::Range),
+            "{:?}",
+            unguarded
+        );
+    }
+
     /// A loop's obligations decided on several states deny the obligation in each of them.
     #[test]
     fn test_obligations_of_several_states_are_denied_in_each() {
