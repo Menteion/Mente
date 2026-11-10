@@ -1,0 +1,48 @@
+The returned count has matched every time, and the failure output hides what `out` holds afterwards, so I cannot tell what is wrong. This version builds the result in a local array and copies it into `out` element by element at the end:
+
+```mente
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var res: [16]i32 = out
+  var i: usize[0..=8] = 0
+  var j: usize[0..=8] = 0
+  var n: usize[0..=16] = 0
+  var have = false
+  var last: i32 = 0
+  var v: i32 = 0
+  while i < 8 or j < 8 {
+    if i < 8 {
+      if j < 8 {
+        if a[i] <= b[j] {
+          v = a[i]
+          i += 1
+        } else {
+          v = b[j]
+          j += 1
+        }
+      } else {
+        v = a[i]
+        i += 1
+      }
+    } else {
+      if j < 8 {
+        v = b[j]
+        j += 1
+      }
+    }
+    if not have or v != last {
+      if n < 16 {
+        res[n] = v
+        n += 1
+      }
+      last = v
+      have = true
+    }
+  }
+  var k: usize[0..=16] = 0
+  while k < n {
+    out[k] = res[k]
+    k += 1
+  }
+  n
+}
+```

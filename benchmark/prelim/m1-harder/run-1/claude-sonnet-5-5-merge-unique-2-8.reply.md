@@ -1,0 +1,41 @@
+I changed one thing this time, to rule out the refined `var k`: it is now a plain `usize`, and the loop states `invariant k <= 16`. Every earlier version used a refined `k`. The merge logic is the same, and I traced both examples to the expected return value and the expected `out`.
+
+```mente
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var i: usize = 0
+  var j: usize = 0
+  var k: usize = 0
+  while i < 8 or j < 8 invariant k <= 16 {
+    var v: i32 = 0
+    if i < 8 {
+      v = a[i]
+      if j < 8 {
+        if b[j] < v {
+          v = b[j]
+        }
+      }
+    } else {
+      if j < 8 {
+        v = b[j]
+      }
+    }
+    if k < 16 {
+      out[k] = v
+      k += 1
+    }
+    while i < 8 {
+      if a[i] != v {
+        break
+      }
+      i += 1
+    }
+    while j < 8 {
+      if b[j] != v {
+        break
+      }
+      j += 1
+    }
+  }
+  k
+}
+```

@@ -1,0 +1,8 @@
+I'm not going to send the same function again. The last several revisions have had the same logic, and the same three `leaves` failures keep coming back, so resubmitting it doesn't help.
+
+I've traced the algorithm by hand on all three examples, and it produces the expected arrangements. Because the failure doesn't change across different implementations, I think the problem is how the harness reads back a `mut` argument that is a literal, not the function body. I can't check that from here.
+
+The next step is the variable test from my last reply. Call the function with `var v: [6]i32 = [1, 2, 3, 4, 5, 6]` and `next_permutation(mut v)`, then check whether `v` ends as `[1, 2, 3, 4, 6, 5]`. The result tells us which side to fix:
+
+- If the variable version passes, the examples are the problem, since they pass a literal to `mut`. The examples are fixed, so that needs a change in the harness or in how the examples are written.
+- If the variable version also fails, send me the array the harness reads back after the call, and I'll adjust the function to match.

@@ -1,0 +1,50 @@
+```mente
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var buf: [16]i32 = [0; 16]
+  var i: usize = 0
+  var j: usize = 0
+  var k: usize[0..=16] = 0
+  var v: i32 = 0
+  var moving: bool = false
+  while i < 8 or j < 8 {
+    if i < 8 {
+      v = a[i]
+      if j < 8 {
+        if b[j] < v {
+          v = b[j]
+        }
+      }
+    } else {
+      if j < 8 {
+        v = b[j]
+      }
+    }
+    if k < 16 {
+      buf[k] = v
+      k += 1
+    }
+    moving = true
+    while moving {
+      moving = false
+      if i < 8 {
+        if a[i] == v {
+          i += 1
+          moving = true
+        }
+      }
+      if j < 8 {
+        if b[j] == v {
+          j += 1
+          moving = true
+        }
+      }
+    }
+  }
+  var t: usize = 0
+  while t < k {
+    out[t] = buf[t]
+    t += 1
+  }
+  k
+}
+```

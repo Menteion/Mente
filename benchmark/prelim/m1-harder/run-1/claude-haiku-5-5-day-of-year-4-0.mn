@@ -1,0 +1,42 @@
+module prelim
+
+pub fn day_of_year(year: u32[1..=9999], month: u8[1..=12], day: u8[1..=31]) -> u16[1..=366] {
+  val leap: bool = (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
+  val feb: u16 = if leap { 29 } else { 28 }
+  var offset: u16 = 0
+  if month > 1 {
+    offset += 31
+  }
+  if month > 2 {
+    offset += feb
+  }
+  if month > 3 {
+    offset += 31
+  }
+  if month > 4 {
+    offset += 30
+  }
+  if month > 5 {
+    offset += 31
+  }
+  if month > 6 {
+    offset += 30
+  }
+  if month > 7 {
+    offset += 31
+  }
+  if month > 8 {
+    offset += 31
+  }
+  if month > 9 {
+    offset += 30
+  }
+  if month > 10 {
+    offset += 31
+  }
+  if month > 11 {
+    offset += 30
+  }
+  val total: u16[1..=366] = offset + day
+  total
+}

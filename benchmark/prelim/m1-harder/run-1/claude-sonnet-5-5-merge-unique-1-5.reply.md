@@ -1,0 +1,49 @@
+I could not find a bug by tracing the code. Every version I wrote gives the right count and the right contents of `out` when I trace both examples by hand, yet the interpreter still reports the same failure. I suspect the interpreter's handling of the `mut out` argument rather than the merge logic, but I have not confirmed that. This is the plainest version of the algorithm.
+
+```mente
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var i: usize = 0
+  var j: usize = 0
+  var count: usize[0..=16] = 0
+  var have_last: bool = false
+  var last: i32 = 0
+  while i < 8 or j < 8 {
+    var v: i32 = 0
+    if i < 8 {
+      v = a[i]
+      if j < 8 {
+        if b[j] < v {
+          v = b[j]
+        }
+      }
+    } else if j < 8 {
+      v = b[j]
+    }
+    if i < 8 {
+      if a[i] == v {
+        i += 1
+      }
+    }
+    if j < 8 {
+      if b[j] == v {
+        j += 1
+      }
+    }
+    var is_new: bool = true
+    if have_last {
+      if last == v {
+        is_new = false
+      }
+    }
+    if is_new {
+      if count < 16 {
+        out[count] = v
+        count += 1
+      }
+      last = v
+      have_last = true
+    }
+  }
+  return count
+}
+```

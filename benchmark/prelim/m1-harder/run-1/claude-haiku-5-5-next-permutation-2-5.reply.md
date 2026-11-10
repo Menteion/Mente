@@ -1,0 +1,10 @@
+I haven't made progress, and I'm not going to send another copy of the same function. This is the fifth reply, and every one has failed the same three `leaves` checks, while the return values are right every time.
+
+I've traced the algorithm by hand on all three examples, and it gives the expected arrangements. The failure doesn't change across implementations: one writes straight to `a`, one uses a copy `b` assigned back at the end, and one unrolls every swap. So the body is probably not what's failing.
+
+I need one of these from the harness before I can make a useful change:
+
+1. **A variable test.** Call the function as `var v: [6]i32 = [1, 2, 3, 4, 5, 6]` followed by `next_permutation(mut v)`, then read `v`. If that passes, the problem is that the harness can't write back to a literal argument, and the examples need changing.
+2. **The actual `leaves` value.** The harness output shows only `got true` and `got false`. Printing the array it reads back after the call would show whether it's unchanged, partly changed, or mismatched.
+
+Either result tells me where to look next. Once I have one of them, I'll write a version aimed at that cause instead of resubmitting the same logic.

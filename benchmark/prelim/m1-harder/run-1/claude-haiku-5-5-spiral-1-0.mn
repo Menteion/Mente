@@ -1,0 +1,35 @@
+module prelim
+
+pub fn spiral(m: [4][5]i32) -> [20]i32 {
+  var out: [20]i32 = [0; 20]
+  var seen: [4][5]bool = [[false, false, false, false, false], [false, false, false, false, false], [false, false, false, false, false], [false, false, false, false, false]]
+  var r: i32 = 0
+  var c: i32 = 0
+  var dr: i32 = 0
+  var dc: i32 = 1
+  var k: usize = 0
+  while k < 20 {
+    val ur: usize = r
+    val uc: usize = c
+    seen[ur][uc] = true
+    out[k] = m[ur][uc]
+    k += 1
+    if not is_free(r + dr, c + dc, seen) {
+      val t = dr
+      dr = dc
+      dc = -t
+    }
+    r += dr
+    c += dc
+  }
+  out
+}
+
+fn is_free(r: i32, c: i32, seen: [4][5]bool) -> bool {
+  if r < 0 or r > 3 or c < 0 or c > 4 {
+    return false
+  }
+  val ur: usize = r
+  val uc: usize = c
+  not seen[ur][uc]
+}

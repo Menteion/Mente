@@ -1,0 +1,6 @@
+module prelim
+
+pub fn set_first(mut a: [6]i32) -> bool {
+  a[0] = 9
+  true
+}

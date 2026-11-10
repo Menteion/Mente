@@ -1,0 +1,7 @@
+module prelim
+
+pub fn probe(mut out: [4]i32) -> usize[0..=4] {
+  out[0] = 7
+  out[3] = 9
+  2
+}

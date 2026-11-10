@@ -1,0 +1,7 @@
+module prelim
+
+pub fn probe() -> bool {
+  var v: [6]i32 = [1, 2, 3, 4, 5, 6]
+  val r = next_permutation(mut v)
+  r and v[4] == 6 and v[5] == 5
+}

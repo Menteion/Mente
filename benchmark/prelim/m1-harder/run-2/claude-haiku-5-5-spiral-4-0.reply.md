@@ -1,0 +1,41 @@
+```mente
+pub fn spiral(m: [4][5]i32) -> [20]i32 {
+  var out: [20]i32 = [0; 20]
+  var top: usize = 0
+  var bottom: usize = 3
+  var left: usize = 0
+  var right: usize = 4
+  var k: usize = 0
+  while k < 20 {
+    var c: usize = left
+    while c <= right {
+      out[k] = m[top][c]
+      k += 1
+      c += 1
+    }
+    top += 1
+    var r: usize = top
+    while r <= bottom {
+      out[k] = m[r][right]
+      k += 1
+      r += 1
+    }
+    right -= 1
+    var d: usize = right + 1
+    while d > left {
+      d -= 1
+      out[k] = m[bottom][d]
+      k += 1
+    }
+    bottom -= 1
+    var e: usize = bottom + 1
+    while e > top {
+      e -= 1
+      out[k] = m[e][left]
+      k += 1
+    }
+    left += 1
+  }
+  out
+}
+```

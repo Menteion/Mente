@@ -90,21 +90,32 @@ pub fn reference(module: &CheckedModule, name: &str, args: Vec<(bool, Value)>) -
 
 /// Native code for every call of `calls` on a lowered module: one executable, built in
 /// `dir`, whose `main` makes the call its first argument numbers. Each call runs in a process
-/// of its own and prints what `mn run` prints, its trap without the file's name.
+/// of its own and prints what `mn run` prints, its trap without the file's name; a call of a
+/// function the module does not define prints what MIR prints, and is not built.
 pub fn native(
     lowered: &Lowered,
     calls: &[CallArgs],
     dir: &std::path::Path,
     name: &str,
 ) -> Result<Vec<Printed>, String> {
+    let defined = |f: &String| lowered.entries.iter().any(|e| &e.name == f);
+    let built: Vec<CallArgs> = calls.iter().filter(|(f, _)| defined(f)).cloned().collect();
     let exe = dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
-    build(lowered, calls, &dir.join(format!("{}.mn", name)), "", &exe)?;
+    if !built.is_empty() {
+        build(lowered, &built, &dir.join(format!("{}.mn", name)), "", &exe)?;
+    }
     let mut printed = Vec::new();
-    for k in 0..calls.len() {
+    let mut k = 0;
+    for (f, _) in calls {
+        if !defined(f) {
+            printed.push(Err(format!("no function `{}` with a body to run", f)));
+            continue;
+        }
         let out = std::process::Command::new(&exe)
             .arg(k.to_string())
             .output()
             .map_err(|e| format!("{}: {}", exe.display(), e))?;
+        k += 1;
         let text = |b: &[u8]| String::from_utf8_lossy(b).replace("\r\n", "\n");
         printed.push(match out.status.code() {
             Some(0) => Ok(text(&out.stdout).lines().map(String::from).collect()),
@@ -310,7 +321,13 @@ mod tests {
             .collect();
         let mut compared = 0;
         let mut differences = Vec::new();
-        for dir in ["probe/m1", "prelim/m1", "prelim/m1-non-core"] {
+        for dir in [
+            "probe/m1",
+            "prelim/m1",
+            "prelim/m1-non-core",
+            "prelim/m1-harder/run-1",
+            "prelim/m1-harder/run-2",
+        ] {
             for entry in fs::read_dir(root.join(dir)).unwrap().flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if !name.ends_with(".mn") {
@@ -445,7 +462,7 @@ mod tests {
         // Division, remainder and their zero divisor.
         (
             "pub fn div(a: i32, b: i32) -> i32 = a / b\npub fn rem(a: i32, b: i32) -> i32 = a % b",
-            &["div(-7, 2)", "rem(-7, 2)", "rem(7, -2)", "div(1, 0)", "rem(1, 0)"],
+            &["div(-7, 2)", "missing(1)", "rem(-7, 2)", "rem(7, -2)", "div(1, 0)", "rem(1, 0)"],
         ),
         // Division of 128-bit operands, checked; of narrower ones in a 128-bit machine type; and
         // of unsigned 64-bit values above the signed range.

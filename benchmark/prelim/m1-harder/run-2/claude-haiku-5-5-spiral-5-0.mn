@@ -1,0 +1,45 @@
+module prelim
+
+pub fn spiral(m: [4][5]i32) -> [20]i32 {
+  var out: [20]i32 = [0; 20]
+  var k: usize = 0
+  var top: usize = 0
+  var bot: usize = 4
+  var left: usize = 0
+  var right: usize = 5
+  while top < bot and left < right {
+    var c = left
+    while c < right {
+      out[k] = m[top][c]
+      k += 1
+      c += 1
+    }
+    top += 1
+    var r = top
+    while r < bot {
+      out[k] = m[r][right - 1]
+      k += 1
+      r += 1
+    }
+    right -= 1
+    if top < bot {
+      var d = right
+      while d > left {
+        d -= 1
+        out[k] = m[bot - 1][d]
+        k += 1
+      }
+      bot -= 1
+      if left < right {
+        var e = bot
+        while e > top {
+          e -= 1
+          out[k] = m[e][left]
+          k += 1
+        }
+      }
+    }
+    left += 1
+  }
+  out
+}
