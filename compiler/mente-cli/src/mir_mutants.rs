@@ -1028,6 +1028,92 @@ mod tests {
         }
     }
 
+    /// The verdict counts each outcome under its family, the gated programs apart from the
+    /// reported ones, and every call and skipped mutant.
+    #[test]
+    fn test_the_verdict_counts_every_outcome() {
+        let outcome = |id: &str, family, killed: Option<Kill>| Outcome {
+            id: id.into(),
+            family,
+            loc: Loc::default(),
+            killed: killed.map(|k| (k, "f(1)".to_string())),
+        };
+        let gated = ProgramRun {
+            name: "g".into(),
+            gated: true,
+            outcomes: vec![
+                outcome("g::f/b0.i0/lt>le", Family::Cmp, Some(Kill::Output)),
+                outcome("g::f/b0.i1/lt>ge", Family::Cmp, Some(Kill::Broken)),
+                outcome("g::f/b0.i2/int+1", Family::Const, Some(Kill::Timeout)),
+                outcome("g::f/b0.i3/int-1", Family::Const, None),
+                outcome("g::f/b0.i4/flip", Family::Const, None),
+            ],
+            skipped: vec![("g::f/b0.i5/shl>id".into(), Family::Identity)],
+            problems: Vec::new(),
+            calls: 3,
+        };
+        let reported = |name: &str| ProgramRun {
+            name: name.into(),
+            gated: false,
+            outcomes: vec![outcome(
+                &format!("{}::h/b1.term/swap", name),
+                Family::Branch,
+                None,
+            )],
+            skipped: vec![
+                (format!("{}::h/b1.i0/shl>id", name), Family::Identity),
+                (format!("{}::h/b1.i1/shl>id", name), Family::Identity),
+            ],
+            problems: Vec::new(),
+            calls: 2,
+        };
+        let eq = Equivalences::parse("g::f/b0.i3/int-1 -- reasoned\n").unwrap();
+        let report = verdict(&[gated, reported("r"), reported("s")], &eq);
+        assert_eq!((report.programs, report.calls), ((1, 2), 7));
+        let get = |m: &BTreeMap<Family, Counts>, f| m.get(&f).copied().unwrap_or_default();
+        let counts = |mutants, killed, broken, timeout, equivalent, survived, skipped| Counts {
+            mutants,
+            killed,
+            broken,
+            timeout,
+            equivalent,
+            survived,
+            skipped,
+        };
+        assert_eq!(get(&report.gated, Family::Cmp), counts(2, 2, 1, 0, 0, 0, 0));
+        assert_eq!(
+            get(&report.gated, Family::Const),
+            counts(3, 1, 0, 1, 1, 1, 0)
+        );
+        assert_eq!(
+            get(&report.gated, Family::Identity),
+            counts(0, 0, 0, 0, 0, 0, 1)
+        );
+        assert_eq!(
+            get(&report.reported, Family::Branch),
+            counts(2, 0, 0, 0, 0, 2, 0)
+        );
+        assert_eq!(
+            get(&report.reported, Family::Identity),
+            counts(0, 0, 0, 0, 0, 0, 4)
+        );
+        assert_eq!(report.unexplained.len(), 1);
+        assert_eq!(report.unexplained_reported.len(), 2);
+    }
+
+    /// A call whose array argument has another length is refused alike by the reference
+    /// interpreter and MIR before anything runs, so it reaches no mutant and is no problem.
+    #[test]
+    fn test_calls_of_another_shape_are_left_out() {
+        let p = program(
+            "pub fn h(xs: [2]u8) -> u8 = xs[0]",
+            &["h([1, 2])", "h([1])", "h([1, 2, 3])"],
+        );
+        let run = run_program(&p);
+        assert!(run.problems.is_empty(), "{:?}", run.problems);
+        assert_eq!(run.calls, 1);
+    }
+
     /// A program MIR runs differently from the reference interpreter, or one that does not
     /// check, is a problem of its own; a call MIR never reaches tells no mutant apart.
     #[test]
