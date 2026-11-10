@@ -50,7 +50,8 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
      <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_integer_arithmetic_is_exact_and_narrowed_where_it_lands" min="1" reason="Arithmetic is exact and narrowed where it lands" -->
      <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_division_truncates_and_a_zero_divisor_traps" min="1" reason="Division truncates, the remainder takes the left sign, zero traps" -->
      <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_bits_and_shifts_work_in_their_type" min="1" reason="Bit operations and shifts work in their type" -->
-     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_wide_arithmetic_is_checked_at_each_operator" min="1" reason="128-bit operands are checked at each operator" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_wide_arithmetic_is_checked_at_each_operator" min="1" reason="128-bit operands are checked at each operator, a negation included" -->
+     <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_array_literal_elements_are_narrowed_into_its_element_type" min="1" reason="An array literal narrows each element into its element type" -->
      <!-- @assert-count target="compiler/mente-interp/src/int.rs" symbol="fn test_integers_add_subtract_and_multiply_exactly" min="1" reason="Exact integers add, subtract and multiply" -->
 5. `Specified` **The type of an unannotated binding** ([`integer-inference`](../docs/design-review.md#integer-inference)):
    - `val x = e` and `var x = e` take `e`'s type. When the integer operands of `e` all have one type, `e` has that type, so `a + b` with `a` and `b` of type `u8` is a `u8`, and a sum above 255 traps at the binding.

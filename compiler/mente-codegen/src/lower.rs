@@ -1368,10 +1368,7 @@ impl<'a> Lower<'a> {
                     V::Bool(b) => V::Bool(self.inst(Op::Not, Ty::Bool, &[b])),
                     v => v,
                 },
-                UnaryOp::Neg => {
-                    let v = self.expr(*operand)?;
-                    self.negate(e, *operand, v, span)?
-                }
+                UnaryOp::Neg => self.negate(e, *operand, span)?,
                 UnaryOp::BitNot => {
                     let t = self.int_of(*operand).unwrap_or(I64);
                     let v = self.expr(*operand)?;
@@ -1643,7 +1640,22 @@ impl<'a> Lower<'a> {
         self.jump(join, args);
     }
 
-    fn negate(&mut self, e: ExprId, operand: ExprId, v: V, span: Span) -> Result<V, String> {
+    fn negate(&mut self, e: ExprId, operand: ExprId, span: Span) -> Result<V, String> {
+        // A literal's negation is a constant. `-170141183460469231731687303715884105728` is
+        // `i128`'s smallest value, though its literal lies outside `i128` (`core-calculus.md`
+        // item 5) and no operation could hold both; and on a literal of any type but `u128`,
+        // whose negation the operator checks, it never traps.
+        if let ExprKind::Int { value, .. } = self.tree().expr(operand).kind {
+            if self
+                .int_of(operand)
+                .is_none_or(|w| w.signed || w.bits < 128)
+            {
+                let n = Num::new(value != 0, value);
+                let m = machine(n, n).ok_or("a literal beyond 128 bits")?;
+                return Ok(V::Int(self.int(m, n), m));
+            }
+        }
+        let v = self.expr(operand)?;
         let V::Int(x, t) = v else {
             return Ok(v);
         };
