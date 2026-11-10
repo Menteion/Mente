@@ -1,0 +1,34 @@
+module isort
+
+/// Sorts a copy of 256 values by insertion sort, `reps` times. After each round one value of
+/// the original changes, so no round can be computed once for all of them.
+pub fn isort(reps: u32) -> u64 {
+  var source: [256]u32 = [0; 256]
+  var seed: u64 = 12345
+  var i: usize = 0
+  while i < source.len {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    source[i] = seed
+    i += 1
+  }
+  var check: u64 = 0
+  var r: u32 = 0
+  while r < reps {
+    var w = source
+    var k: usize = 1
+    while k < w.len {
+      val item = w[k]
+      var j = k
+      while j > 0 and w[j - 1] > item {
+        w[j] = w[j - 1]
+        j -= 1
+      }
+      w[j] = item
+      k += 1
+    }
+    check = (check * 31 + w[r % 256] + w[255]) % 1000000007
+    source[r % 256] = check
+    r += 1
+  }
+  check
+}

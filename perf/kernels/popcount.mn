@@ -1,0 +1,39 @@
+module popcount
+
+/// Counts the bits set in 4,096 64-bit values with the shift-and-mask method, `reps` times.
+/// After each round one value changes, so no round can be computed once for all of them.
+pub fn popcount(reps: u32) -> u64 {
+  var a: [4096]u64 = [0; 4096]
+  var seed: u64 = 12345
+  var i: usize = 0
+  while i < a.len {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    val high = seed
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    val low = seed
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    a[i] = high * 8589934592 + low * 4 + seed % 4
+    i += 1
+  }
+  var check: u64 = 0
+  var r: u32 = 0
+  while r < reps {
+    var total: u64 = 0
+    var j: usize = 0
+    while j < a.len {
+      var x = a[j]
+      x = x - ((x >> 1) & 0x5555555555555555)
+      x = (x & 0x3333333333333333) + ((x >> 2) & 0x3333333333333333)
+      x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0F
+      x = x + (x >> 8)
+      x = x + (x >> 16)
+      x = x + (x >> 32)
+      total += x & 0x7F
+      j += 1
+    }
+    check = (check * 31 + total) % 1000000007
+    a[r % 4096] = check * 8589934592 + total
+    r += 1
+  }
+  check
+}

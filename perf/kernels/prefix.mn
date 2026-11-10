@@ -1,0 +1,30 @@
+module prefix
+
+/// The running sums of 4,096 values, `reps` times. After each round one value changes, so no
+/// round can be computed once for all of them.
+pub fn prefix(reps: u32) -> u64 {
+  var a: [4096]u32 = [0; 4096]
+  var sums: [4096]u32 = [0; 4096]
+  var seed: u64 = 12345
+  var i: usize = 0
+  while i < a.len {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    a[i] = seed % 65536
+    i += 1
+  }
+  var check: u64 = 0
+  var r: u32 = 0
+  while r < reps {
+    var running: u32 = 0
+    var j: usize = 0
+    while j < a.len {
+      running += a[j]
+      sums[j] = running
+      j += 1
+    }
+    check = (check * 31 + sums[r % 4096] + sums[4095]) % 1000000007
+    a[r % 4096] = check % 65536
+    r += 1
+  }
+  check
+}
