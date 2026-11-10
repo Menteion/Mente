@@ -303,6 +303,152 @@ impl Tree {
         &self.types[id.0 as usize]
     }
 
+    /// The node of the greatest height, an expression, a block or a type counting one level
+    /// each, and its height, when the tree is higher than `limit`: the node at exactly
+    /// `limit + 1`, the innermost that goes too deep. Computed without recursion, since it
+    /// guards every phase that recurses over the tree.
+    pub fn too_deep(&self, limit: u32) -> Option<Span> {
+        #[derive(Clone, Copy)]
+        enum Node {
+            E(u32),
+            S(u32),
+            B(u32),
+            T(u32),
+        }
+        let mut heights: [Vec<Option<u32>>; 4] = [
+            vec![None; self.exprs.len()],
+            vec![None; self.stmts.len()],
+            vec![None; self.blocks.len()],
+            vec![None; self.types.len()],
+        ];
+        let slot = |n: Node| match n {
+            Node::E(i) => (0, i as usize),
+            Node::S(i) => (1, i as usize),
+            Node::B(i) => (2, i as usize),
+            Node::T(i) => (3, i as usize),
+        };
+        let children = |n: Node, out: &mut Vec<Node>| {
+            out.clear();
+            match n {
+                Node::E(i) => match &self.exprs[i as usize].kind {
+                    ExprKind::Unary { operand, .. } => out.push(Node::E(operand.0)),
+                    ExprKind::Binary { lhs, rhs, .. } => {
+                        out.extend([Node::E(lhs.0), Node::E(rhs.0)]);
+                    }
+                    ExprKind::Index { base, index } => {
+                        out.extend([Node::E(base.0), Node::E(index.0)]);
+                    }
+                    ExprKind::Field { base, .. } => out.push(Node::E(base.0)),
+                    ExprKind::Call { args, .. } => {
+                        out.extend(args.iter().map(|a| Node::E(a.value.0)));
+                    }
+                    ExprKind::Array(items) => out.extend(items.iter().map(|e| Node::E(e.0))),
+                    ExprKind::Repeat { value, .. } => out.push(Node::E(value.0)),
+                    ExprKind::If {
+                        cond,
+                        then,
+                        otherwise,
+                    } => {
+                        out.extend([Node::E(cond.0), Node::B(then.0)]);
+                        match otherwise {
+                            Some(Else::Block(b)) => out.push(Node::B(b.0)),
+                            Some(Else::If(e)) => out.push(Node::E(e.0)),
+                            None => {}
+                        }
+                    }
+                    _ => {}
+                },
+                Node::S(i) => match &self.stmts[i as usize].kind {
+                    StmtKind::Binding { ty, init, .. } => {
+                        out.extend(ty.map(|t| Node::T(t.0)));
+                        out.push(Node::E(init.0));
+                    }
+                    StmtKind::Assign { place, value, .. } => {
+                        out.extend([Node::E(place.0), Node::E(value.0)]);
+                    }
+                    StmtKind::While {
+                        cond,
+                        invariants,
+                        decreases,
+                        body,
+                    } => {
+                        out.push(Node::E(cond.0));
+                        out.extend(invariants.iter().chain(decreases).map(|e| Node::E(e.0)));
+                        out.push(Node::B(body.0));
+                    }
+                    StmtKind::Guard { cond, otherwise } => {
+                        out.extend([Node::E(cond.0), Node::B(otherwise.0)]);
+                    }
+                    StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
+                        out.push(Node::E(e.0));
+                    }
+                    _ => {}
+                },
+                Node::B(i) => {
+                    out.extend(self.blocks[i as usize].stmts.iter().map(|s| Node::S(s.0)))
+                }
+                Node::T(i) => {
+                    if let TypeKind::Array { elem, .. } = &self.types[i as usize].kind {
+                        out.push(Node::T(elem.0));
+                    }
+                }
+            }
+        };
+        let span = |n: Node| match n {
+            Node::E(i) => self.exprs[i as usize].span,
+            Node::S(i) => self.stmts[i as usize].span,
+            Node::B(i) => self.blocks[i as usize].span,
+            Node::T(i) => self.types[i as usize].span,
+        };
+        let roots = (0..self.exprs.len() as u32)
+            .map(Node::E)
+            .chain((0..self.stmts.len() as u32).map(Node::S))
+            .chain((0..self.blocks.len() as u32).map(Node::B))
+            .chain((0..self.types.len() as u32).map(Node::T));
+        let mut found = None;
+        let mut stack: Vec<(Node, bool)> = Vec::new();
+        let mut kids = Vec::new();
+        for root in roots {
+            let (k, i) = slot(root);
+            if heights[k][i].is_some() {
+                continue;
+            }
+            stack.push((root, false));
+            while let Some((n, expanded)) = stack.pop() {
+                let (k, i) = slot(n);
+                if heights[k][i].is_some() {
+                    continue;
+                }
+                children(n, &mut kids);
+                if expanded {
+                    let below = kids
+                        .iter()
+                        .filter_map(|c| {
+                            let (ck, ci) = slot(*c);
+                            heights[ck][ci]
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    // A statement only wraps what it holds; the rest are levels.
+                    let h = below + u32::from(!matches!(n, Node::S(_)));
+                    heights[k][i] = Some(h);
+                    if h == limit + 1 && found.is_none() {
+                        found = Some(span(n));
+                    }
+                } else {
+                    stack.push((n, true));
+                    for c in kids.clone() {
+                        let (ck, ci) = slot(c);
+                        if heights[ck][ci].is_none() {
+                            stack.push((c, false));
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
     pub fn push_expr(&mut self, kind: ExprKind, span: Span) -> ExprId {
         self.exprs.push(Expr { kind, span });
         ExprId(self.exprs.len() as u32 - 1)

@@ -1470,6 +1470,23 @@ block0(v0: u8):
   return v1
 t0: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/grammar/nesting_beyond_256_levels.mn == (exit 2)
+== conformance/grammar/nesting_within_the_limit.mn ==
+mente-dump 1 mir
+f0: fn nested(u8) -> u8 {
+block0(v0: u8):
+  return v0
+block1():
+  trap t0
+t0: unreachable @3:230 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter nested(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f0 v0 @3:8
+  return v1
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/grammar/newlines_and_clauses.mn ==
 mente-dump 1 mir
 f0: fn spread(i32, i32) -> i32 {

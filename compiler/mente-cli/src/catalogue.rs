@@ -404,6 +404,19 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f(x: u32) -> u8 = x\n",
     ),
     emitted(
+        "E0127",
+        FailureClass::Syntax,
+        "spec/grammar.md",
+        "Code nested too deep",
+        "Expressions, blocks and types may nest at most 256 levels deep in a function, since the \
+         parser and every phase after it recurse over them. Parentheses, unary operators, \
+         blocks, `else if`, array literals and array types each count a level, and so does \
+         each link of a long chain such as `x + 1 + 1 + ...`. Give a nested part a name with \
+         `val`, or move it into a function of its own.",
+        "module m\npub fn f(x: u8) -> u8 = (((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))\n",
+        "module m\npub fn f(x: u8) -> u8 = ((x))\n",
+    ),
+    emitted(
         "E0201",
         FailureClass::UnknownName,
         "spec/core-calculus.md",

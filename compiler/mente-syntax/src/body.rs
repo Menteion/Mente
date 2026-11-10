@@ -46,9 +46,32 @@ pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>
         errors: Vec::new(),
         recovering: false,
         nest: 0,
+        depth: 0,
     };
     let syntax = p.function();
+    // A tree too high for the phases that recurse over it, such as a long chain of `+`,
+    // which the parser reads in a loop.
+    if p.errors.is_empty() {
+        if let Some(span) = syntax.tree.too_deep(NESTING_LIMIT) {
+            p.errors.push(too_deep(span));
+        }
+    }
     (syntax, p.errors)
+}
+
+/// How deep expressions, blocks and types may nest in a function: the parser and every phase
+/// after it recurse over them, and none may run out of stack.
+pub const NESTING_LIMIT: u32 = 256;
+
+fn too_deep(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        "E0127",
+        span,
+        format!(
+            "this code nests deeper than {} levels of expressions, blocks and types; give a nested part a name with `val`, or a function of its own",
+            NESTING_LIMIT
+        ),
+    )
 }
 
 /// Where a later milestone brings a construct; `None` when no milestone has it yet.
@@ -66,6 +89,8 @@ struct Parser {
     recovering: bool,
     /// How many `(` and `[` are open, inside which a newline is whitespace.
     nest: u32,
+    /// How deep the parser has descended into expressions, blocks and types.
+    depth: u32,
 }
 
 impl Parser {
@@ -145,9 +170,23 @@ impl Parser {
 
     // ---------------------------------------------------------------- errors
 
+    /// Descends one level, or reports the function as nesting too deep (`E0127`) and skips to
+    /// its end, so that the parser itself never recurses past the limit.
+    fn deeper(&mut self) -> bool {
+        if self.depth >= NESTING_LIMIT {
+            let d = too_deep(self.span());
+            self.error(d);
+            self.pos = self.tokens.len() - 1;
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
     /// Reports `d`, unless the parser is already recovering from an error.
     fn error(&mut self, d: Diagnostic) {
-        if !self.recovering {
+        // After `E0127` the rest of the function is skipped, and nothing more is said of it.
+        if !self.recovering && !self.errors.iter().any(|e| e.code == "E0127") {
             self.errors.push(d);
         }
         self.recovering = true;
@@ -156,7 +195,7 @@ impl Parser {
     /// Reports `d` and goes on: for another language's idiom whose meaning is plain, so the
     /// rest of the statement is still checked.
     fn note(&mut self, d: Diagnostic) {
-        if !self.recovering {
+        if !self.recovering && !self.errors.iter().any(|e| e.code == "E0127") {
             self.errors.push(d);
         }
     }
@@ -376,6 +415,16 @@ impl Parser {
 
     fn ty(&mut self) -> TypeId {
         let start = self.span();
+        if !self.deeper() {
+            return self.tree.push_type(TypeKind::Error, start);
+        }
+        let t = self.ty_within();
+        self.depth -= 1;
+        t
+    }
+
+    fn ty_within(&mut self) -> TypeId {
+        let start = self.span();
         match self.peek().clone() {
             TokenKind::Ident(n) if INT_TYPES.contains(&n.as_str()) => {
                 self.bump();
@@ -511,6 +560,19 @@ impl Parser {
     // ---------------------------------------------------------------- statements
 
     fn block(&mut self) -> BlockId {
+        let open = self.span();
+        if !self.deeper() {
+            return self.tree.push_block(Block {
+                stmts: Vec::new(),
+                span: open,
+            });
+        }
+        let b = self.block_within();
+        self.depth -= 1;
+        b
+    }
+
+    fn block_within(&mut self) -> BlockId {
         let open = self.span();
         if !self.expect(&TokenKind::LBrace, "`{`") {
             return self.tree.push_block(Block {
@@ -791,6 +853,16 @@ impl Parser {
 
     /// A full expression, which may be an `if` (`grammar.md`, item 7).
     fn expr(&mut self) -> ExprId {
+        let start = self.span();
+        if !self.deeper() {
+            return self.tree.push_expr(ExprKind::Error, start);
+        }
+        let e = self.expr_within();
+        self.depth -= 1;
+        e
+    }
+
+    fn expr_within(&mut self) -> ExprId {
         if !self.at(&TokenKind::If) {
             return self.binary(0);
         }
@@ -1347,7 +1419,11 @@ impl Parser {
 
     fn unary(&mut self, op: UnaryOp, operand_bp: u8) -> ExprKind {
         self.bump();
+        if !self.deeper() {
+            return ExprKind::Error;
+        }
         let operand = self.binary(operand_bp);
+        self.depth -= 1;
         ExprKind::Unary { op, operand }
     }
 
@@ -1366,7 +1442,15 @@ impl Parser {
         let mut otherwise = None;
         if !self.recovering && self.eat(&TokenKind::Else) {
             otherwise = Some(if self.at(&TokenKind::If) {
-                Else::If(self.if_expr())
+                // Each `else if` nests one level deeper.
+                let start = self.span();
+                if self.deeper() {
+                    let e = self.if_expr();
+                    self.depth -= 1;
+                    Else::If(e)
+                } else {
+                    Else::If(self.tree.push_expr(ExprKind::Error, start))
+                }
             } else {
                 Else::Block(self.block())
             });
@@ -2495,6 +2579,7 @@ _ == b"
             errors: Vec::new(),
             recovering: false,
             nest: 0,
+            depth: 0,
         };
         for _ in 0..6 {
             p.bump();
@@ -2512,5 +2597,61 @@ _ == b"
         assert_eq!(int_suffix("0xab_cd"), None);
         assert_eq!(int_suffix("1_000"), None);
         assert_eq!(int_suffix("7"), None);
+    }
+
+    /// Every shape of nesting stops at the limit with `E0127`, the parser's own recursion and a
+    /// long chain the parser reads in a loop alike, and code within the limit parses. Each runs
+    /// on a stack of the size `mn` gives its work.
+    #[test]
+    fn test_code_nested_past_the_limit_is_rejected() {
+        let codes = |src: String| {
+            std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn(move || {
+                    let m = crate::parse_module(&src).unwrap();
+                    crate::parse_bodies(&src, &m)
+                        .into_iter()
+                        .flat_map(|p| p.errors)
+                        .map(|d| d.code)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        let r = |s: &str, n: usize| s.repeat(n);
+        let f = |body: String| format!("module m\npub fn d(x: i32) -> i32 = {}\n", body);
+        let past = [
+            f(format!("{}x{}", r("(", 300), r(")", 300))),
+            f(format!("{}x{}", r("(", 50_000), r(")", 50_000))),
+            f(format!("x{}", r(" + 0", 300))),
+            f(format!("{}x", r("- ", 300))),
+            f(format!(
+                "if x > 0 {{ 1 }}{} else {{ 3 }}",
+                r(" else if x > 1 { 2 }", 300)
+            )),
+            f(format!("[{}x{}][0]", r("[", 300), r("]", 300))),
+            format!("module m\npub fn d(x: {}i32) -> i32 = 0\n", r("[1]", 300)),
+            format!(
+                "module m\npub fn d(x: i32) -> i32 {{\n{}{}  x\n}}\n",
+                r("  while x > 0 {\n", 300),
+                r("  }\n", 300)
+            ),
+        ];
+        for src in past {
+            assert_eq!(
+                codes(src.clone()),
+                ["E0127"],
+                "{}",
+                &src[..src.len().min(80)]
+            );
+        }
+        for src in [
+            f(format!("{}x{}", r("(", 200), r(")", 200))),
+            f(format!("x{}", r(" + 0", 200))),
+            f(format!("{}x", r("- ", 200))),
+        ] {
+            assert!(codes(src.clone()).is_empty(), "{}", &src[..80]);
+        }
     }
 }

@@ -118,6 +118,10 @@
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1","primary":{"file":"integer_beyond_u128.mn","start":57,"end":96,"line":3,"column":22},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/m1_literals_and_operators.mn ==
 {"version":1,"diagnostics":[],"todos":[{"reason":"a \\\"quoted\\\" tab\\t and line\\n and \\\\","span":{"file":"m1_literals_and_operators.mn","start":227,"end":271,"line":8,"column":3}}],"trusted":[]}
+== grammar/nesting_beyond_256_levels.mn ==
+{"version":1,"diagnostics":[{"code":"E0127","severity":"error","message":"this code nests deeper than 256 levels of expressions, blocks and types; give a nested part a name with `val`, or a function of its own","primary":{"file":"nesting_beyond_256_levels.mn","start":319,"end":320,"line":3,"column":284},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== grammar/nesting_within_the_limit.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == grammar/newlines_and_clauses.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == grammar/repeat_count_not_a_literal.mn ==

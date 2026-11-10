@@ -982,7 +982,13 @@ pub fn dump_tree(src: &str) -> String {
         )),
         Ok(module) => {
             for parsed in parse_bodies(src, &module) {
-                if let Some(f) = parsed.syntax {
+                // A tree that nests too deep is not rendered, since rendering recurses over it.
+                if let Some(d) = parsed.errors.iter().find(|d| d.code == "E0127") {
+                    out.push_str(&format!(
+                        "error {}:{} {}\n",
+                        d.primary.line, d.primary.col, d.code
+                    ));
+                } else if let Some(f) = parsed.syntax {
                     out.push_str(&tree::Tree::render_fn(&f));
                     out.push('\n');
                 }

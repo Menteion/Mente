@@ -43,7 +43,26 @@ const CARD_WORD_BUDGET: usize = 2_000;
 mod latency;
 mod mir_run;
 
+/// The stack `mn`'s work runs on: every phase recurses over a function's tree, as deep as the
+/// nesting limit allows (`E0127`), and a debug build's frames need more than a main thread's
+/// stack holds for that.
+const STACK: usize = 256 << 20;
+
 fn main() {
+    match std::thread::Builder::new().stack_size(STACK).spawn(run) {
+        Ok(work) => {
+            if work.join().is_err() {
+                process::exit(101);
+            }
+        }
+        Err(e) => {
+            eprintln!("error: mn could not start its work: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+fn run() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         print_help();
