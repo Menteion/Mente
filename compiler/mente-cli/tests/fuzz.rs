@@ -345,10 +345,7 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 2] = [
-    "incremental-module-without-a-name.mn",
-    "incremental-position-in-a-message.mn",
-];
+const PENDING: [&str; 0] = [];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -394,23 +391,6 @@ fn test_fuzz_regressions_replay_without_a_failure() {
         );
     }
     replay(&files);
-}
-
-/// Found by `mn fuzz`: a module line without a name, then `fn` on the next line. A whole check
-/// says it expected a name and found `fn`; `mn check --watch`'s session, which reads `fn` as the
-/// next item, says it found the end of the file, at another span.
-#[test]
-#[ignore = "pending a fix in mente-sema's incremental session"]
-fn fuzz_incremental_module_without_a_name() {
-    replay(&[regressions().join("incremental-module-without-a-name.mn")]);
-}
-
-/// Found by `mn fuzz`: an unclosed parameter list. The session's message names where the list
-/// opened by its line in the item, 1:9, where a whole check names its line in the module, 3:9.
-#[test]
-#[ignore = "pending a fix in mente-sema's incremental session"]
-fn fuzz_incremental_position_in_a_message() {
-    replay(&[regressions().join("incremental-position-in-a-message.mn")]);
 }
 
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,
