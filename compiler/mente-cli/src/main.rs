@@ -30,6 +30,7 @@ use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, 
 use mente_syntax::parse_module;
 
 mod catalogue;
+mod fuzz;
 
 /// The language card of the language version this compiler implements, which ships with it
 /// (`docs/design-review.md`, `language-evolution`).
@@ -81,6 +82,7 @@ fn run() {
         "card" => print!("{}", CARD),
         "dump" => cmd_dump(&args[1..]),
         "smt" => cmd_smt(&args[1..]),
+        "fuzz" => cmd_fuzz(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -111,6 +113,13 @@ fn print_help() {
     println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
+    println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
+    println!("                               Fuzz every phase of the compiler, and minimize each crash found");
+}
+
+/// Fuzzes the compiler, or replays files through every phase (`fuzz.rs`).
+fn cmd_fuzz(args: &[String]) {
+    process::exit(fuzz::main(args));
 }
 
 /// Prints one phase's output for a module in its canonical form, which two implementations of
