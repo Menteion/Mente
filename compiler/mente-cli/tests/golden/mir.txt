@@ -1,3 +1,4 @@
+== conformance/core-calculus/array_beyond_4_gib.mn == (exit 2)
 == conformance/core-calculus/array_literal_beyond_128_bits.mn == (exit 2)
 == conformance/core-calculus/array_literal_of_mixed_integers.mn ==
 mente-dump 1 mir
@@ -23,6 +24,26 @@ f1: fn enter pair(addr, i32, u64) {
 block0(v0: addr, v1: i32, v2: u64):
   v3: unit = call f0 v0, v1, v2 @3:8
   return
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/array_within_4_gib.mn ==
+mente-dump 1 mir
+f0: fn first(addr) -> u8 {
+block0(v0: addr):
+  v1: i64 = int 0 @3:40
+  v2: u64 = cast v1 @3:37
+  v3: addr = elem 1 v0, v2 @3:37
+  v4: u8 = load v3 @3:37
+  return v4
+block1():
+  trap t0
+t0: unreachable @3:37 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter first(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = call f0 v0 @3:8
+  return v1
 t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/assign_to_val.mn == (exit 2)

@@ -1,0 +1,3 @@
+// expect: E0223
+module conformance
+pub fn first(xs: [4294967296]u8) -> u8 = 0

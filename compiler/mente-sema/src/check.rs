@@ -18,7 +18,7 @@ use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
 use mente_syntax::tree::BinaryOp::{BitAnd, BitOr, BitXor, Shl, Shr};
 use mente_syntax::tree::{
     Arg, AssignOp, BinaryOp, BlockId, Body, ContractKind, Else, ExprId, ExprKind, FnSyntax, StmtId,
-    StmtKind, Tree, TypeId, UnaryOp,
+    StmtKind, Tree, TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
 
@@ -119,7 +119,66 @@ pub fn check(
         Some(Body::Block(b)) => c.body(b),
         None => {}
     }
+    c.arrays_in_one_piece();
     (c.typing, c.errors)
+}
+
+/// The most bytes an array may hold: it is a value kept in one piece, in one stack slot, whose
+/// size native code holds in 32 bits.
+pub const ARRAY_BYTES: u128 = u32::MAX as u128;
+
+/// The bytes a value of `t` takes: an integer its type's, or `i64`'s for literals alone, a
+/// `bool` one, an array its length times its element's.
+fn bytes(t: &Ty) -> u128 {
+    match t {
+        Ty::Int(i) => match i {
+            Int::One(t) | Int::Mixed(Some(t)) => u128::from(t.bits / 8),
+            _ => 8,
+        },
+        Ty::Bool => 1,
+        Ty::Array(n, elem) => n.saturating_mul(bytes(elem)),
+        _ => 0,
+    }
+}
+
+impl Checker<'_> {
+    /// `E0223` for each array type, and each array literal, that holds more than
+    /// [`ARRAY_BYTES`]: the innermost such type, and a literal whose type no written type
+    /// already reports.
+    fn arrays_in_one_piece(&mut self) {
+        let mut reported = Vec::new();
+        for (i, node) in self.tree.types.iter().enumerate() {
+            let TypeKind::Array { elem, .. } = &node.kind else {
+                continue;
+            };
+            let t = Ty::of(self.tree, TypeId(i as u32));
+            if bytes(&t) > ARRAY_BYTES && bytes(&Ty::of(self.tree, *elem)) <= ARRAY_BYTES {
+                reported.push(node.span);
+                let text = self.tree.render_type(TypeId(i as u32));
+                self.too_large(node.span, &text, bytes(&t));
+            }
+        }
+        for (i, e) in self.tree.exprs.iter().enumerate() {
+            if !matches!(e.kind, ExprKind::Array(_) | ExprKind::Repeat { .. }) {
+                continue;
+            }
+            let t = self.typing.exprs[i].clone();
+            if bytes(&t) > ARRAY_BYTES && reported.is_empty() {
+                self.too_large(e.span, &t.spelling(), bytes(&t));
+            }
+        }
+    }
+
+    fn too_large(&mut self, span: Span, text: &str, bytes: u128) {
+        self.errors.push(Diagnostic::error(
+            "E0223",
+            span,
+            format!(
+                "an array of type `{}` holds {} bytes, more than the {} an array, a value kept in one piece, may hold",
+                text, bytes, ARRAY_BYTES
+            ),
+        ));
+    }
 }
 
 struct Checker<'a> {
@@ -1330,6 +1389,41 @@ mod tests {
         assert_eq!(
             codes("pub fn f() {\n  var v = todo(\"x\")\n  touch(mut v)\n}"),
             NONE
+        );
+    }
+
+    #[test]
+    fn test_an_array_holds_at_most_4_gib() {
+        let d = all_diagnostics("pub fn f(x: [4294967296]u8) -> u8 = 0");
+        assert_eq!(d.len(), 1, "{:?}", d);
+        assert_eq!(d[0].code, "E0223");
+        assert_eq!(
+            d[0].message,
+            "an array of type `[4294967296]u8` holds 4294967296 bytes, more than the 4294967295 an array, a value kept in one piece, may hold"
+        );
+        // The bytes count, not the elements: a `u32` takes four.
+        assert_eq!(
+            all_codes("pub fn f(x: [1073741824]u32) -> u8 = 0"),
+            ["E0223"]
+        );
+        assert!(all_codes("pub fn f(x: [1073741823]u32) -> u8 = 0").is_empty());
+        assert!(all_codes("pub fn f(x: [4294967295]u8) -> u8 = 0").is_empty());
+        // A `bool` takes one.
+        assert_eq!(
+            all_codes("pub fn f(x: [4294967296]bool) -> u8 = 0"),
+            ["E0223"]
+        );
+        // A literal of exactly the most bytes is not too large either.
+        assert!(all_codes("pub fn f() -> u8 {\n  _ = [0_u8; 4294967295]\n  0\n}").is_empty());
+        // The innermost type that is too large is reported once, and a literal without a
+        // written type is reported itself.
+        assert_eq!(
+            all_codes("pub fn f(x: [2][4294967296]u8) -> u8 = 0"),
+            ["E0223"]
+        );
+        assert_eq!(
+            all_codes("pub fn f() -> u8 {\n  _ = [0_u8; 4294967296]\n  0\n}"),
+            ["E0223"]
         );
     }
 

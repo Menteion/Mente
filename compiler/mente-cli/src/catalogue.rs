@@ -666,6 +666,18 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn cube(a: u64) -> u128 {\n  val c: u128 = a * a * a\n  c\n}\n",
         "module m\npub fn cube(a: u64) -> u128 {\n  val product: u128 = a * a\n  val c: u128 = product * a\n  c\n}\n",
     ),
+    emitted(
+        "E0223",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "An array too large to be a value",
+        "An array is a value kept in one piece, copied whole and held in one stack slot, whose \
+         size native code holds in 32 bits. So an array may hold at most 4,294,967,295 bytes: its \
+         length times its element's size. Keep fewer elements, split the data, or wait for \
+         `List<T>` in M2, which keeps its elements apart from the value.",
+        "module m\npub fn f(x: [4294967296]u8) -> u8 = 0\n",
+        "module m\npub fn f(x: [4096]u8) -> u8 = 0\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

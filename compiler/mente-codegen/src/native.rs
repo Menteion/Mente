@@ -1253,6 +1253,11 @@ fn define_main(
         let index = b.block_params(dispatch)[0];
         let mut tests = b.create_block();
         b.ins().jump(tests, &[]);
+        let mut shared = Shared {
+            slot: b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 1, 4)),
+            used: 0,
+            most: 1,
+        };
         for (k, call) in calls.iter().enumerate() {
             b.switch_to_block(tests);
             let here = b.create_block();
@@ -1260,8 +1265,18 @@ fn define_main(
             let is = b.ins().icmp_imm_u(IntCC::Equal, index, k as i64);
             b.ins().brif(is, here, &[], tests, &[]);
             b.switch_to_block(here);
-            make_call(writer, rt, ids, (lowered, call), &mut b, ptr, prefix)?;
+            shared.used = 0;
+            make_call(
+                writer,
+                rt,
+                ids,
+                (lowered, call),
+                (&mut b, &mut shared),
+                ptr,
+                prefix,
+            )?;
         }
+        b.func.sized_stack_slots[shared.slot].size = shared.most;
         b.switch_to_block(tests);
         let none = b.ins().iconst(types::I32, 2);
         b.ins().return_(&[none]);
@@ -1279,7 +1294,7 @@ fn make_call(
     rt: &mut Runtime,
     ids: &[ClFunc],
     (lowered, call): (&Lowered, &Call),
-    b: &mut FunctionBuilder,
+    (b, shared): (&mut FunctionBuilder, &mut Shared),
     ptr: Type,
     prefix: &str,
 ) -> Result<(), CodegenError> {
@@ -1297,11 +1312,15 @@ fn make_call(
         }
         let mut params = mir.params.iter();
         let mut flat = Vec::new();
-        let wide = returns_wide(mir, ptr).then(|| slot(&mut e, 16));
+        let wide = if returns_wide(mir, ptr) {
+            Some(shared.take(&mut e, 16)?)
+        } else {
+            None
+        };
         flat.extend(wide);
         let sret = if matches!(entry.result, Shape::Array(..)) {
             params.next();
-            let slot = slot(&mut e, entry.result.size());
+            let slot = shared.take(&mut e, entry.result.size())?;
             flat.push(slot);
             Some(slot)
         } else {
@@ -1323,7 +1342,7 @@ fn make_call(
                 }
                 (false, Shape::Bool, Arg::Bool(x)) => flat.push(e.iconst(types::I8, i64::from(*x))),
                 (_, shape, arg) => {
-                    let at = slot(&mut e, shape.size());
+                    let at = shared.take(&mut e, shape.size())?;
                     store_arg(&mut e, at, shape, arg)?;
                     flat.push(at);
                     if *is_mut {
@@ -1363,6 +1382,34 @@ fn make_call(
         e.b.ins().return_(&[zero]);
     }
     Ok(())
+}
+
+/// The stack space `main`'s calls keep their arguments and results in. One call runs in a
+/// process, so every call takes its space from the start of one slot, as large as the most any
+/// call takes, rather than a slot of its own: `main`'s frame is then one call's, not the sum of
+/// them all, which a few calls with a 64 KiB array each would take past a 1 MiB stack.
+struct Shared {
+    slot: ir::StackSlot,
+    /// The bytes the current call has taken.
+    used: u32,
+    /// The most bytes any call has taken, the slot's size once every call is made.
+    most: u32,
+}
+
+impl Shared {
+    /// The address of `bytes` more of the slot for the current call, 16-byte aligned.
+    fn take(&mut self, e: &mut Emit, bytes: u32) -> Result<Value, CodegenError> {
+        let at = self.used;
+        let end = bytes
+            .max(1)
+            .checked_next_multiple_of(16)
+            .and_then(|n| at.checked_add(n))
+            .filter(|&n| i32::try_from(n).is_ok())
+            .ok_or_else(|| err("the arguments of one call take more than 2 GiB"))?;
+        self.used = end;
+        self.most = self.most.max(end);
+        Ok(e.b.ins().stack_addr(e.ptr, self.slot, at as i32))
+    }
 }
 
 fn slot(e: &mut Emit, bytes: u32) -> Value {
@@ -1601,6 +1648,34 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         ] {
             assert!(build(wrong).is_err());
         }
+    }
+
+    /// Every call in `main` keeps its arguments in the same stack space, since only one runs:
+    /// its frame holds one call's array, not one per call, which a few dozen calls of 64 KiB
+    /// arrays would take past a 1 MiB stack.
+    #[test]
+    fn test_mains_calls_share_their_stack_space() {
+        let source = "module m\npub fn first(xs: [4096]u8) -> u8 = xs[0]\n";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let zeros = Arg::Array(vec![Arg::Int(Num::from_i128(0)); 4096]);
+        let calls: Vec<Call> = (0..32)
+            .map(|_| Call {
+                entry: 0,
+                args: vec![zeros.clone()],
+            })
+            .collect();
+        let mut w = writer(Target::X86_64Windows);
+        program(&lowered, &calls, "", &mut w).unwrap();
+        let Some(FuncOrDataId::Func(id)) = w.module().get_name("main") else {
+            panic!("no `main`");
+        };
+        let main = w.functions.iter().find(|c| c.id == id).unwrap();
+        assert!(
+            (4096..2 * 4096).contains(&main.stack_slots),
+            "{}",
+            main.stack_slots
+        );
     }
 
     #[test]
