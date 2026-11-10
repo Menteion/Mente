@@ -269,6 +269,24 @@ These are why the design scored 4 rather than 5. Each problem with a key is an e
 - For anything that reaches native code, build it, run it, and assert its output or exit code.
 - A test that only restates the implementation proves nothing. Ask what program would break the feature, and write that program.
 
+**Every change carries its checks** ([`quality-per-change`](design-review.md#quality-per-change))
+
+- **Edges before code.** A rule about integers or types gets its edge cases as conformance programs, ones that must pass and ones that must fail, before its code. The edges are:
+  - each type's smallest and largest values, and 0;
+  - a negative value entering an unsigned type;
+  - operands of different signedness, a narrower signed one beside a `u128`, and an `i128` beside a `u128`;
+  - nested `if` and `else if`;
+  - for a call from outside the program, arguments outside their types and of the wrong shape.
+
+  A case the spec does not settle is settled in the spec first, never by one execution path alone.
+- **One source of truth.** A fact about the language, such as a type's range, is defined in one place and read by every phase. A special case in the code, such as a branch on 128-bit types, is pointed out in review and has a test that reaches it.
+- **A fix proves itself.** A fix comes with a test seen to fail without it, and goes through `cargo-mutants` and the MIR mutation gate like any change.
+- **Checks in the same pull request.** New syntax or a new rule extends the program generator in the pull request that adds it. Each change passes, where they apply:
+  - the comparison of the three execution paths on generated programs;
+  - the SMT cross-check;
+  - the MIR mutation gate;
+  - the fuzzer's short run.
+
 **No stand-ins**
 
 - A feature that does not work yet stays `Specified`. Never write code that only looks like it: a constant where a measurement belongs, a proof that returns `true`, an emitter that prints a fixed string.
@@ -572,7 +590,7 @@ Each review is recorded in [`docs/milestone-reviews.md`](milestone-reviews.md). 
 
 #### Every milestone ends when
 
-Each criterion applies from the milestone in which the instrument it uses becomes active (the quality-system table above).
+Each criterion applies from the milestone in which the instrument it uses becomes active (the quality-system table above). A checkpoint inside a milestone ends the same way: only when every instrument the table activates by that checkpoint runs automatically and passes. A checkpoint whose instrument is missing stays open ([`quality-per-change`](design-review.md#quality-per-change)).
 
 1. The spec changed first: new behaviour entered `spec/` as `Specified` with its directives, and labels rose to `Implemented` only with their tests, in the commit that justifies them.
 2. Every new spec claim has conformance programs, both ones that must pass and ones that must fail.

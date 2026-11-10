@@ -37,6 +37,11 @@ This file is the switchboard, not the rulebook.
    - **Guardrail #2 (Dual-Track Codegen — [`mir-and-codegen.md`](spec/mir-and-codegen.md))**: Complete all high-level semantic optimizations (bounds erasure, Ghost Contract `Assume`, `AoSoA` offsets, `@branchless` select) in `MirRegionSoA` before lowering to Cranelift or any later backend.
    - **Guardrail #3 (Provenance Escape Diagnostics — [`regions-and-pools.md`](spec/regions-and-pools.md))**: Never expose internal region IDs in errors; `E0310` MUST prescribe either `in arena: Arena` or `Pool<T>` / `Handle<T>`.
    - **Guardrail #4 (Ecosystem Absorption — [`comptime-and-ffi.md`](spec/comptime-and-ffi.md))**: `mn bind` auto-synthesizes quarantined `extern "C"` + `with FFI` + `@layout` bindings from C headers, and from Rust libraries through their `cbindgen` headers (stage 4).
+6. **Every change carries its checks** ([`quality-per-change`](docs/design-review.md#quality-per-change); `docs/design-brief.md` section 5):
+   - Write a rule's edge cases as conformance programs before its code: type limits and 0, negative values entering unsigned types, mixed signedness, `i128` beside `u128`, nested `if`, and out-of-type or misshapen arguments. Settle a case the spec leaves open in the spec first.
+   - Define each fact about the language once, and read it everywhere. Test every special case the code makes.
+   - A fix comes with a test seen to fail without it.
+   - New syntax or a new rule extends the program generator in the same pull request. A checkpoint closes only when the instruments scheduled for it run in CI and pass.
 
 ---
 
