@@ -27,7 +27,7 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
      <!-- @assert-count target="compiler/mente-sema/src/names.rs" symbol="fn test_a_refinement_bound_names_a_binding_that_cannot_change" min="1" reason="A bound over a var or a mut parameter is E0209" -->
 3. `Specified` **`bool` and arrays**:
    - `bool` holds `true` and `false`. No integer converts to `bool` or back.
-   - `[N]T` holds `N` values of type `T`, where `N` is a non-negative integer literal and `T` is any M1 type, arrays included. `a.len` is `N`. An index may have any integer type, and is checked against `0 ..= N - 1`. An array is a value: binding, passing and returning it copies it, and no two bindings ever share one.
+   - `[N]T` holds `N` values of type `T`, where `N` is a non-negative integer literal without a suffix, since it is a count and takes no type and `T` is any M1 type, arrays included. `a.len` is `N`. An index may have any integer type, and is checked against `0 ..= N - 1`. An array is a value: binding, passing and returning it copies it, and no two bindings ever share one.
    - `Implemented`: no integer becomes a `bool`, an array flows only into an array of its length, an index has any integer type, and `.len` of an array is a `usize`; `.len` of anything else is an error (`E0215`).
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_indexes_and_fields_apply_to_arrays" min="1" reason="Indexes and .len apply to arrays" -->
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_array_literals_have_one_element_type" min="1" reason="Array literals have one element type and arrays match in length" -->
