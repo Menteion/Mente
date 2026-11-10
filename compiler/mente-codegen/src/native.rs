@@ -793,8 +793,10 @@ impl Translate {
                 trap: Some(site),
             } => {
                 let i = int(rty)?;
-                let (sa, ma) = e.sign_mag(args[0], i);
-                let (sb, mb) = e.sign_mag(args[1], i);
+                // Each operand in its own type, which may differ from the checked one.
+                let (ta, tb) = (int(f.ty(f.args(v)[0]))?, int(f.ty(f.args(v)[1]))?);
+                let (sa, ma) = e.sign_mag(args[0], ta);
+                let (sb, mb) = e.sign_mag(args[1], tb);
                 let (neg, mag, beyond) = match op {
                     ArithOp::Add | ArithOp::Sub => {
                         let sb = if *op == ArithOp::Sub {

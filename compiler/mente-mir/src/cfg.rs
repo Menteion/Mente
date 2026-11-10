@@ -637,7 +637,12 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
         Op::Param => return Err("a parameter among a block's instructions".into()),
         Op::Int(_) => (Want::Int, vec![], None),
         Op::Bool(_) => (Want::Is(Ty::Bool), vec![], None),
-        Op::Arith { trap, .. } => (Want::Int, vec![same, same], reported(trap)),
+        // A checked operation computes its exact result before it checks it, so its operands
+        // may keep their own types: an `i32` times a `u128`, checked against `u128`.
+        Op::Arith { trap: Some(t), .. } => {
+            (Want::Int, vec![Want::Int, Want::Int], reported(&Some(*t)))
+        }
+        Op::Arith { trap: None, .. } => (Want::Int, vec![same, same], None),
         Op::Neg { trap } => (Want::Int, vec![same], reported(trap)),
         Op::Bits(_) => (Want::IntOrBool, vec![same, same], None),
         Op::Not => (Want::IntOrBool, vec![same], None),
@@ -1386,6 +1391,40 @@ mod tests {
                 "trap[division-by-zero] at 2:5: division by zero".into()
             ))
         );
+    }
+
+    #[test]
+    fn test_a_checked_operation_takes_operands_of_their_own_types() {
+        // An `i64` times a `u128`, checked against `u128`: computed exactly, then checked.
+        let product = |checked: bool| {
+            let mut b = Builder::new("mul", &[Ty::Int(I64), Ty::Int(U128)], Some(Ty::Int(U128)));
+            let [x, y] = b.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let trap = checked.then(|| b.trap_site("narrowing", &["", " does not fit in `u128`"]));
+            let p = b.inst(
+                Op::Arith {
+                    op: ArithOp::Mul,
+                    trap,
+                },
+                Ty::Int(U128),
+                &[x, y],
+            );
+            b.end(Term::Return(Some(p)));
+            Module {
+                functions: vec![b.finish()],
+            }
+        };
+        let m = product(true);
+        verify(&m).unwrap();
+        assert_eq!(run0(&m, 0, &[int(-3), int(0)]), Ok(int(0)));
+        assert_eq!(run0(&m, 0, &[int(3), int(4)]), Ok(int(12)));
+        assert_eq!(
+            run0(&m, 0, &[int(-3), int(4)]).unwrap_err().to_string(),
+            "trap[narrowing] at 0:0: -12 does not fit in `u128`"
+        );
+        // An exact operation's operands share its type.
+        assert!(verify(&product(false)).is_err());
     }
 
     #[test]
