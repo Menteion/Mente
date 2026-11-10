@@ -1520,11 +1520,18 @@ fn install_hook() {
                     all.push((current.id(), text));
                 }
             }
-            if !quiet && !SILENT.load(Ordering::Relaxed) {
+            if passes_on(current.name(), SILENT.load(Ordering::Relaxed)) {
                 previous(info);
             }
         }));
     });
+}
+
+/// Whether the hook before ours shows a panic on the thread named `thread`: not when a phase
+/// thread catches it, and never in a worker (`silent`), whose standard error is read only for
+/// a crash's last words.
+fn passes_on(thread: Option<&str>, silent: bool) -> bool {
+    thread != Some(PHASE_THREAD) && !silent
 }
 
 /// The message and place of the panic this phase thread just caught.
@@ -1784,11 +1791,13 @@ impl Executor for Worker {
                         });
                     } else if line == "done" {
                         lap(&mut outcome);
+                        debug_assert_eq!(outcome.times.len(), outcome.reached.len());
                         return Ok(outcome);
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     lap(&mut outcome);
+                    debug_assert_eq!(outcome.times.len(), outcome.reached.len());
                     self.stop();
                     outcome.failures.push(Failure {
                         phase: last,
@@ -1802,6 +1811,7 @@ impl Executor for Worker {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     lap(&mut outcome);
+                    debug_assert_eq!(outcome.times.len(), outcome.reached.len());
                     let (status, tail) = self.stop();
                     outcome.failures.push(Failure {
                         phase: last,
@@ -3290,5 +3300,58 @@ mod tests {
             .get("lex")
             .is_some_and(|(n, _)| *n == tally.runs));
         let _ = std::fs::remove_dir_all(&opts.out);
+    }
+
+    /// Each panic a phase thread catches is reported with its own message and place, the
+    /// second as well as the first.
+    #[test]
+    fn test_each_caught_panic_keeps_its_own_message() {
+        install_hook();
+        let failures = std::thread::Builder::new()
+            .name(PHASE_THREAD.to_string())
+            .spawn(|| {
+                let mut events = Vec::new();
+                let mut sink = |e| events.push(e);
+                let mut run = Run {
+                    budget: Duration::from_secs(60),
+                    thorough: false,
+                    sink: &mut sink,
+                };
+                run.phase("first", || panic!("the first panic"));
+                run.phase("second", || panic!("the second panic"));
+                events
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        let messages: Vec<String> = failures
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Failure(f) => Some(f.message),
+                Event::Phase(_) => None,
+            })
+            .collect();
+        assert_eq!(messages.len(), 2, "{:?}", messages);
+        assert!(
+            messages[0].starts_with("the first panic [at "),
+            "{:?}",
+            messages
+        );
+        assert!(
+            messages[1].starts_with("the second panic [at "),
+            "{:?}",
+            messages
+        );
+    }
+
+    /// A panic reaches the hook before ours unless a phase thread caught it or a worker keeps
+    /// it quiet.
+    #[test]
+    fn test_only_uncaught_panics_outside_a_worker_are_shown() {
+        assert!(passes_on(None, false));
+        assert!(passes_on(Some("main"), false));
+        assert!(!passes_on(Some(PHASE_THREAD), false));
+        assert!(!passes_on(None, true));
+        assert!(!passes_on(Some(PHASE_THREAD), true));
     }
 }
