@@ -309,9 +309,10 @@ fn parse_item(text: &str) -> Parsed {
                 ..Parsed::default()
             }
         }
+        // An item of more than one function is checked with the whole module, which holds
+        // any `module` line too.
         _ => Parsed {
             other: true,
-            header,
             ..Parsed::default()
         },
     }
@@ -548,6 +549,7 @@ mod tests {
         for src in [
             "module c\nmodule c\n",
             "module m\n\npub fn f() -> u8 = 1\nmodule n\n",
+            "module m\n\npub fn f() -> u8 = 1\nmodule n pub fn g() -> u8 = 2\n",
         ] {
             let s = Session::new(src);
             let whole = check_source(src).err().unwrap_or_default();
