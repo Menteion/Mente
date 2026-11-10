@@ -1014,7 +1014,8 @@ impl Gen {
         let wide = a.cls.wide().or(b.cls.wide());
         let r = match wide {
             Some(t) => t.range(),
-            None => arithmetic(op, a.r, b.r).filter(|r| r.fits())?,
+            // The operands meet the value in one machine type, so they must fit it with it.
+            None => arithmetic(op, a.r, b.r).filter(|r| r.hull(a.r).hull(b.r).fits())?,
         };
         let k = match (a.k, b.k) {
             (Some(x), Some(y)) => {
@@ -1198,7 +1199,8 @@ impl Gen {
                 hi: a.r.lo.negated(),
             },
         };
-        if !r.fits() {
+        let literal = matches!(a.e, E::Lit(_));
+        if !r.fits() || !(literal || a.cls.wide().is_some() || r.hull(a.r).fits()) {
             return None;
         }
         let wide = a.cls.wide();
@@ -1521,12 +1523,32 @@ impl Gen {
         }
     }
 
+    /// An array literal of `n` values of type `elem`. Integer elements of different types are
+    /// kept exact in one machine type until the array lands, so their ranges' hull must lie
+    /// within `u128` or within `i128` (`E0222`); elements whose hull does not are generated
+    /// again, and then a repeat of one value stands in.
     fn array_literal(&mut self, n: u32, elem: &Ty, depth: u32) -> E {
         if n == 0 || self.rng.chance(30) {
             let v = self.value(elem, depth + 1);
             return E::Repeat(Box::new(v), n);
         }
-        E::Array((0..n).map(|_| self.value(elem, depth + 1)).collect())
+        let Ty::Int(t) = elem else {
+            return E::Array((0..n).map(|_| self.value(elem, depth + 1)).collect());
+        };
+        for _ in 0..4 {
+            let m = self.mark();
+            let items: Vec<(E, R)> = (0..n).map(|_| self.narrowed_range(*t, depth + 1)).collect();
+            let hull = items
+                .iter()
+                .skip(1)
+                .fold(items[0].1, |h, (_, r)| h.hull(*r));
+            if hull.fits() {
+                return E::Array(items.into_iter().map(|(e, _)| e).collect());
+            }
+            self.restore(m);
+        }
+        let v = self.value(elem, depth + 1);
+        E::Repeat(Box::new(v), n)
     }
 
     /// A value of type `ty` in a place a full expression stands: sometimes an `if`.
@@ -2031,7 +2053,8 @@ impl Gen {
                         }
                         let fits = t.bits == 128
                             || v.cls.wide().is_some()
-                            || arithmetic(op, place_range, v.r).is_some_and(|r| r.fits());
+                            || arithmetic(op, place_range, v.r)
+                                .is_some_and(|r| r.hull(place_range).hull(v.r).fits());
                         if !fits {
                             return Vec::new();
                         }
