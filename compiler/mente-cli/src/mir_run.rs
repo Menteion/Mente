@@ -8,6 +8,13 @@ use mente_interp::Value;
 use mente_mir::cfg::{self, Memory, Num, Ty, Val};
 use mente_sema::CheckedModule;
 
+// The generator of programs and the comparison of the three paths on what it generates and on
+// the conformance suite run as tests: CI drives the large runs (`.github/workflows/generated.yml`).
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+mod generate;
+
 /// What a run printed: its value and what each `mut` argument was left holding, or why it
 /// stopped.
 pub type Printed = Result<Vec<String>, String>;
@@ -87,9 +94,19 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
 /// Calls `name` on `args` through the reference interpreter, and prints as `mn run` does.
 #[cfg(test)]
 pub fn reference(module: &CheckedModule, name: &str, args: Vec<(bool, Value)>) -> Printed {
+    reference_within(module, name, args, mente_interp::Limits::default())
+}
+
+/// [`reference`] within `limits`.
+#[cfg(test)]
+pub fn reference_within(
+    module: &CheckedModule,
+    name: &str,
+    args: Vec<(bool, Value)>,
+    limits: mente_interp::Limits,
+) -> Printed {
     let marked: Vec<bool> = args.iter().map(|(m, _)| *m).collect();
     let values = args.into_iter().map(|(_, v)| v).collect();
-    let limits = mente_interp::Limits::default();
     let (v, finals) =
         mente_interp::call_leaving(module, name, values, limits).map_err(|s| s.to_string())?;
     let mut printed = vec![v.to_string()];
@@ -108,6 +125,19 @@ pub fn native(
     calls: &[CallArgs],
     dir: &std::path::Path,
     name: &str,
+) -> Result<Vec<Printed>, String> {
+    native_within(lowered, calls, dir, name, None)
+}
+
+/// [`native`], each call stopped after `limit` when one is given: a comparison of paths gives
+/// native code only calls the reference interpreter finishes quickly, so a call that runs much
+/// longer is a code-generation bug, which would otherwise hang the comparison.
+pub fn native_within(
+    lowered: &Lowered,
+    calls: &[CallArgs],
+    dir: &std::path::Path,
+    name: &str,
+    limit: Option<std::time::Duration>,
 ) -> Result<Vec<Printed>, String> {
     // A call of no function, or with an argument of another shape, is refused, not built.
     let refused = |(f, args): &CallArgs| match lowered.entries.iter().find(|e| &e.name == f) {
@@ -130,11 +160,15 @@ pub fn native(
             printed.push(Err(why));
             continue;
         }
-        let out = std::process::Command::new(&exe)
-            .arg(k.to_string())
-            .output()
-            .map_err(|e| format!("{}: {}", exe.display(), e))?;
+        let ran = run_for(&exe, k, limit)?;
         k += 1;
+        let Some(out) = ran else {
+            printed.push(Err(format!(
+                "the program ran for more than {} ms",
+                limit.unwrap_or_default().as_millis()
+            )));
+            continue;
+        };
         let text = |b: &[u8]| String::from_utf8_lossy(b).replace("\r\n", "\n");
         printed.push(match out.status.code() {
             Some(0) => Ok(text(&out.stdout).lines().map(String::from).collect()),
@@ -147,6 +181,71 @@ pub fn native(
         });
     }
     Ok(printed)
+}
+
+/// Runs `exe` on call `k` and returns what it wrote and how it ended; with a `limit`, `None`
+/// when it ran for longer and was stopped.
+fn run_for(
+    exe: &std::path::Path,
+    k: usize,
+    limit: Option<std::time::Duration>,
+) -> Result<Option<std::process::Output>, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let fail = |e: std::io::Error| format!("{}: {}", exe.display(), e);
+    let mut command = Command::new(exe);
+    command.arg(k.to_string());
+    let Some(limit) = limit else {
+        return command.output().map(Some).map_err(fail);
+    };
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(fail)?;
+    // Each pipe is read on a thread of its own, so that a program printing more than a pipe
+    // holds is not stopped in its write while this waits for it to end.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                p.read_to_end(&mut bytes).ok();
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    // A millisecond at a time, at most `limit` of them; sleeping can only make the wait longer.
+    let mut status = None;
+    for _ in 0..limit.as_millis() {
+        status = child.try_wait().map_err(fail)?;
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    if status.is_none() {
+        child.kill().ok();
+        child.wait().ok();
+    }
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    Ok(status.map(|status| std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }))
 }
 
 /// Native code for every call of `calls` on a lowered module, linked into the executable

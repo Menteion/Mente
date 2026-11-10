@@ -1,0 +1,146 @@
+# Generated programs and the conformance suite on the three execution paths (docs/design-brief.md,
+# "The quality system": a generator of well-typed programs, three execution paths, soundness by
+# execution; exit criteria 4 and 5). Each call runs on the reference interpreter, on MIR with
+# every check, on MIR without the checks Tier 1 proved, and as native code, and all four must
+# print the same: a difference where the reference interpreter traps and the MIR without proven
+# checks does not is a wrong proof. The comparison is compiler/mente-cli/src/mir_run/differential.rs.
+#
+# A pull request runs a fixed range of seeds that fits a few minutes; the nightly run takes a new
+# range each day. Every run prints its range, and a failure names its seed, which replays with
+#   MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1 cargo test --release -p mente-cli -- --ignored --nocapture generated_programs_run_alike
+# These runs never belong on a laptop.
+# Every action is pinned to a full commit SHA; Dependabot proposes updates.
+name: Generated programs
+
+on:
+  pull_request:
+    paths:
+      - "compiler/**"
+      - "conformance/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/generated.yml"
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      first_seed:
+        description: "First seed"
+        required: true
+        default: "0"
+      programs:
+        description: "Programs to generate on each platform"
+        required: true
+        default: "1000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: generated-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every program with a difference, with its text, not only the first few.
+  MENTE_GEN_SHOW: "50"
+
+jobs:
+  paths:
+    name: Generated programs (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native code runs each call in a process of its own and links an executable a program,
+          # both slower on Windows, which therefore takes fewer programs.
+          - name: x86-64 Linux
+            os: ubuntu-24.04
+            pr_programs: 400
+            nightly_programs: 6000
+            nightly_exhaustive: 65536
+          - name: x86-64 Windows
+            os: windows-2025
+            pr_programs: 150
+            nightly_programs: 1500
+            nightly_exhaustive: 16384
+          - name: AArch64 Linux
+            os: ubuntu-24.04-arm
+            pr_programs: 400
+            nightly_programs: 6000
+            nightly_exhaustive: 65536
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: |
+          rustup toolchain install
+          rustc --version
+      - name: Choose the seeds
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_FIRST: ${{ github.event.inputs.first_seed }}
+          INPUT_PROGRAMS: ${{ github.event.inputs.programs }}
+          PR_PROGRAMS: ${{ matrix.pr_programs }}
+          NIGHTLY_PROGRAMS: ${{ matrix.nightly_programs }}
+          NIGHTLY_EXHAUSTIVE: ${{ matrix.nightly_exhaustive }}
+        run: |
+          case "$EVENT" in
+            schedule)
+              # A new range each day: the day's number since 1970 times the programs a night.
+              day=$(( $(date -u +%s) / 86400 ))
+              first=$(( day * NIGHTLY_PROGRAMS ))
+              programs=$NIGHTLY_PROGRAMS
+              exhaustive=$NIGHTLY_EXHAUSTIVE ;;
+            workflow_dispatch)
+              first=$INPUT_FIRST
+              programs=$INPUT_PROGRAMS
+              exhaustive=$NIGHTLY_EXHAUSTIVE ;;
+            *)
+              first=0
+              programs=$PR_PROGRAMS
+              exhaustive=4096 ;;
+          esac
+          case "$first$programs" in *[!0-9]*) echo "seeds must be numbers"; exit 1 ;; esac
+          {
+            echo "MENTE_GEN_FIRST_SEED=$first"
+            echo "MENTE_GEN_PROGRAMS=$programs"
+            echo "CONFORMANCE_EXHAUSTIVE=$exhaustive"
+          } >> "$GITHUB_ENV"
+          echo "Seeds $first ..= $(( first + programs - 1 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build the comparison in release
+        run: cargo test --release --locked -p mente-cli --no-run
+      - name: Generated programs on the three paths
+        run: |
+          cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
+            mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths \
+            2>&1 | tee "$RUNNER_TEMP/generated.txt"
+      - name: The conformance suite on the three paths
+        # Its result stands on its own, whatever the generated programs found.
+        if: ${{ !cancelled() }}
+        env:
+          MENTE_GEN_CALLS: "64"
+        run: |
+          export MENTE_GEN_EXHAUSTIVE="$CONFORMANCE_EXHAUSTIVE"
+          cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
+            mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths \
+            2>&1 | tee "$RUNNER_TEMP/conformance.txt"
+      - name: Summary
+        if: always()
+        run: |
+          for f in generated conformance; do
+            [ -f "$RUNNER_TEMP/$f.txt" ] || continue
+            {
+              echo "## $f"
+              echo '```text'
+              grep -E '^(seeds|[0-9]+ programs|discarded|[0-9]+ calls|[0-9]+ obligations|[0-9]+ programs with|unfinished|in [0-9])' "$RUNNER_TEMP/$f.txt" || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
