@@ -1,0 +1,8 @@
+module prelim
+
+I have nothing new to change. The harness output is identical to the last several rounds, and I can't see the array the function actually produces, so I can't tell which slots differ. I've traced both examples by hand and they should produce the expected arrays. Submitting the same function again would not help.
+
+Two things would let me make progress:
+
+1. **Run the `mut` probe alone.** Call `mut_probe(mut [0, 0, 0, 0]) == 0 leaves [7, 0, 0, 0]` with `mut_probe` as the only function in the file. If it fails, the reference interpreter is not copying element writes back from a `mut` array, and the bug is in the interpreter, not in `merge_unique`.
+2. **Send the actual `leaves` value** the harness printed for the first example. I'll compare it slot by slot with the expected array and fix whatever differs.

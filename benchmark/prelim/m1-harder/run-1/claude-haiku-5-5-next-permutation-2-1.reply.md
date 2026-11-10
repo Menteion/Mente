@@ -1,0 +1,55 @@
+The return values were already right. The `leaves` values were not, so I've rewritten the function to work on a local copy `b` and assign it back to `a` once at the end, with no early return. That avoids relying on how the `mut` argument is written back.
+
+```mente
+pub fn next_permutation(mut a: [6]i32) -> bool {
+  var b: [6]i32 = a
+  var k: usize = 5
+  var found = false
+  var pivot: usize = 0
+  while k > 0 {
+    k -= 1
+    if not found and b[k] < b[k + 1] {
+      found = true
+      pivot = k
+    }
+  }
+  var result = true
+  if not found {
+    var lo: usize = 0
+    var hi: usize = 5
+    while lo < hi {
+      val tmp = b[lo]
+      b[lo] = b[hi]
+      b[hi] = tmp
+      lo += 1
+      hi -= 1
+    }
+    result = false
+  } else {
+    var j: usize = 6
+    var chosen = false
+    var pick: usize = 0
+    while not chosen {
+      j -= 1
+      if b[j] > b[pivot] {
+        chosen = true
+        pick = j
+      }
+    }
+    val keep = b[pivot]
+    b[pivot] = b[pick]
+    b[pick] = keep
+    var lo2: usize = pivot + 1
+    var hi2: usize = 5
+    while lo2 < hi2 {
+      val tmp2 = b[lo2]
+      b[lo2] = b[hi2]
+      b[hi2] = tmp2
+      lo2 += 1
+      hi2 -= 1
+    }
+  }
+  a = b
+  result
+}
+```

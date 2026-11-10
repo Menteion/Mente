@@ -1,0 +1,7 @@
+module prelim
+
+pub fn touch(mut a: [6]i32) -> bool {
+  a[4] = 6
+  a[5] = 5
+  true
+}

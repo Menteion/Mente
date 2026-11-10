@@ -1,0 +1,9 @@
+module prelim
+
+I'm not going to submit another version. The function you have is the same one I've been sending, and I can't change its leaves output without evidence I don't have.
+
+The count is correct in every run, and my hand trace of both examples gives the expected leaves. So the body is probably fine, and the failure is in how the examples call it. They pass array literals to `mut` parameters, and the card says `mut` takes a place. I can't confirm this from the output, and I can't edit the examples.
+
+To make progress, I need one of these:
+1. The leaves value the interpreter actually returns for the first example. If it shows the expected 12 values in order, the failure is in the harness.
+2. Confirmation that literal arguments to `mut` are supported. If they aren't, the examples need to pass a `var`, for example `var v: [16]i32 = [0, 0, ...]` then `merge_unique(a, b, mut v)`.

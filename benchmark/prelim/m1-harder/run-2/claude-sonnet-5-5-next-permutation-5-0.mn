@@ -1,0 +1,31 @@
+module prelim
+
+pub fn next_permutation(mut a: [6]i32) -> bool {
+  var i: usize = 5
+  while i > 0 {
+    if a[i - 1] < a[i] {
+      break
+    }
+    i -= 1
+  }
+  if i > 0 {
+    val p = i - 1
+    var j: usize = 5
+    while a[j] <= a[p] {
+      j -= 1
+    }
+    val t = a[p]
+    a[p] = a[j]
+    a[j] = t
+  }
+  var l = i
+  var r: usize = 5
+  while l < r {
+    val s = a[l]
+    a[l] = a[r]
+    a[r] = s
+    l += 1
+    r -= 1
+  }
+  i > 0
+}

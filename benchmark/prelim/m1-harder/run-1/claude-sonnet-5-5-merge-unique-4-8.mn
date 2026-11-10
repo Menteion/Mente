@@ -1,0 +1,57 @@
+module prelim
+
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var res: [16]i32 = out
+  var i: usize = 0
+  var j: usize = 0
+  var k: usize[0..=16] = 0
+  while i < 8 or j < 8 {
+    var take_a: bool = false
+    if i < 8 and j < 8 {
+      take_a = a[i] <= b[j]
+    } else {
+      take_a = i < 8
+    }
+    var v: i32 = 0
+    if take_a {
+      guard i < 8 else {
+        unreachable("take_a only holds while i is below 8")
+      }
+      v = a[i]
+    } else {
+      guard j < 8 else {
+        unreachable("the loop condition leaves j below 8")
+      }
+      v = b[j]
+    }
+    if i < 8 {
+      if a[i] == v {
+        i += 1
+      }
+    }
+    if j < 8 {
+      if b[j] == v {
+        j += 1
+      }
+    }
+    var fresh: bool = true
+    if k > 0 {
+      if res[k - 1] == v {
+        fresh = false
+      }
+    }
+    if fresh {
+      guard k < 16 else {
+        unreachable("distinct values number at most 16")
+      }
+      res[k] = v
+      k += 1
+    }
+  }
+  var m: usize = 0
+  while m < 16 {
+    out[m] = res[m]
+    m += 1
+  }
+  k
+}

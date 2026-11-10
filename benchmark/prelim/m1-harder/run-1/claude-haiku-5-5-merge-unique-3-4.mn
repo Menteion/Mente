@@ -1,0 +1,6 @@
+module prelim
+
+pub fn mut_probe(mut out: [4]i32) -> i32 {
+  out[0] = 7
+  0
+}

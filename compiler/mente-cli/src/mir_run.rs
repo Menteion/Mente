@@ -310,7 +310,13 @@ mod tests {
             .collect();
         let mut compared = 0;
         let mut differences = Vec::new();
-        for dir in ["probe/m1", "prelim/m1", "prelim/m1-non-core"] {
+        for dir in [
+            "probe/m1",
+            "prelim/m1",
+            "prelim/m1-non-core",
+            "prelim/m1-harder/run-1",
+            "prelim/m1-harder/run-2",
+        ] {
             for entry in fs::read_dir(root.join(dir)).unwrap().flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if !name.ends_with(".mn") {

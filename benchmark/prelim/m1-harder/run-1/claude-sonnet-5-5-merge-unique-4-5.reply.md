@@ -1,0 +1,57 @@
+```mente
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var i: usize = 0
+  var j: usize = 0
+  var k: usize[0..=16] = 0
+  while i < 8 and j < 8 {
+    val x = a[i]
+    val y = b[j]
+    val v = if x <= y { x } else { y }
+    if x == v {
+      i += 1
+    }
+    if y == v {
+      j += 1
+    }
+    var fresh: bool = true
+    if k > 0 {
+      if out[k - 1] == v {
+        fresh = false
+      }
+    }
+    if fresh and k < 16 {
+      out[k] = v
+      k += 1
+    }
+  }
+  while i < 8 {
+    val x = a[i]
+    i += 1
+    var fresh: bool = true
+    if k > 0 {
+      if out[k - 1] == x {
+        fresh = false
+      }
+    }
+    if fresh and k < 16 {
+      out[k] = x
+      k += 1
+    }
+  }
+  while j < 8 {
+    val y = b[j]
+    j += 1
+    var fresh: bool = true
+    if k > 0 {
+      if out[k - 1] == y {
+        fresh = false
+      }
+    }
+    if fresh and k < 16 {
+      out[k] = y
+      k += 1
+    }
+  }
+  k
+}
+```

@@ -1,0 +1,43 @@
+```mente
+pub fn next_permutation(mut a: [6]i32) -> bool {
+  var found = false
+  var pivot: usize = 0
+  var i: usize = 0
+  while i < 5 {
+    if a[i] < a[i + 1] {
+      pivot = i
+      found = true
+    }
+    i += 1
+  }
+  if not found {
+    var p: usize = 0
+    var q: usize = 5
+    while p < q {
+      val t0 = a[p]
+      a[p] = a[q]
+      a[q] = t0
+      p += 1
+      q -= 1
+    }
+    return false
+  }
+  var j: usize = 5
+  while a[j] <= a[pivot] {
+    j -= 1
+  }
+  val t1 = a[pivot]
+  a[pivot] = a[j]
+  a[j] = t1
+  var lo: usize = pivot + 1
+  var hi: usize = 5
+  while lo < hi {
+    val t2 = a[lo]
+    a[lo] = a[hi]
+    a[hi] = t2
+    lo += 1
+    hi -= 1
+  }
+  true
+}
+```

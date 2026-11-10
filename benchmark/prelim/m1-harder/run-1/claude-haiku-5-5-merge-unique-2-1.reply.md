@@ -1,0 +1,44 @@
+The return values were right; the `mut` array was not. I'm building the merged result in a local `var res` and assigning it to `out` once, after the loop, so the caller's array gets the whole result in one assignment.
+
+```mente
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var res: [16]i32 = out
+  var i: usize = 0
+  var j: usize = 0
+  var k: usize = 0
+  while i < 8 or j < 8 {
+    guard k < 16 else {
+      unreachable("at most 16 distinct values are written")
+    }
+    val v: i32 = if i < 8 {
+      if j < 8 {
+        if a[i] <= b[j] { a[i] } else { b[j] }
+      } else {
+        a[i]
+      }
+    } else {
+      b[j]
+    }
+    val fresh = if k == 0 { true } else { res[k - 1] != v }
+    if fresh {
+      res[k] = v
+      k += 1
+    }
+    if i < 8 {
+      if a[i] == v {
+        i += 1
+      }
+    }
+    if j < 8 {
+      if b[j] == v {
+        j += 1
+      }
+    }
+  }
+  out = res
+  guard k <= 16 else {
+    unreachable("at most 16 distinct values are written")
+  }
+  k
+}
+```

@@ -1,0 +1,13 @@
+I'm not going to send another version of the function. Four rounds of feedback have shown the same thing: the return values match, the leaves check fails, and the leaves check is the only part I can't observe. Changing the function's internals hasn't moved that result, so another rewrite would just be guessing.
+
+I've traced the current function by hand on all three examples, and each gives the expected array and return value. One of two things is going on, and the feedback doesn't separate them:
+
+1. The harness passes literal arguments to `mut` parameters and discards the copy-back, so `leaves` never reflects the function's writes.
+2. The interpreter's `mut` copy-back is broken for array parameters, or it doesn't copy back when the call's return value is `bool`.
+
+To separate them, I need the actual value the harness reports for `leaves` on the first example. Two checks would settle it:
+
+- Call the function with a variable: `var v: [6]i32 = [1, 2, 3, 4, 5, 6]`, then `next_permutation(mut v)`, then print `v`. If it prints `[1, 2, 3, 4, 6, 5]`, the function is correct and the harness is at fault for literal arguments.
+- Call a trivial `mut` function, such as one that sets `a[0] = 9` and returns `true`, with a literal and with a variable. If the literal case doesn't show `9`, the interpreter isn't copying back to literals.
+
+Send me either result, or the `leaves` value the harness printed, and I'll either fix the function or write the examples in a form the interpreter accepts.

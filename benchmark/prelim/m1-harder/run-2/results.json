@@ -1,0 +1,1807 @@
+{
+  "models": [
+    {
+      "id": "claude-sonnet-5-5",
+      "input": 2,
+      "output": 10
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "input": 0.1,
+      "output": 0.5
+    }
+  ],
+  "api_version": "2026-10-21",
+  "max_tokens": 16000,
+  "max_repairs": 10,
+  "thinking": "adaptive, each model's default; display omitted",
+  "sampling": "the defaults; API version 2026-10-21 accepts no temperature",
+  "commit": "32f212c9b31fcffd42c32440761e3aa6456f89dc",
+  "budget": 5,
+  "tasks": "merge-unique,next-permutation,spiral",
+  "system_prompt": "You write code in Mente, a new programming language that no model has been trained on.\nEverything you know about Mente is in its language card, below. Use only what it describes.\n\n# Mente Language Card (draft)\n\nHow to write Mente as of milestone M1, for an agent that has never seen it. This is the draft the syntax probe uses ([`syntax-probe`](design-review.md#syntax-probe)); the first version closes M1 ([`language-card`](design-review.md#language-card)). Every `mente` block below passes `mn check`, which a test holds it to. The full rules are in `spec/core-calculus.md` and `spec/grammar.md`.\n\n## What M1 has\n\nIntegers, `bool`, fixed-size arrays `[N]T`, functions with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and `continue`, `guard`, `return`, `requires` and `ensures`, refined integer types such as `u8[0..10]`, `todo` and `unreachable`. Nothing else: no strings, floats, structs, enums, slices, `for` loops, methods, generics, closures or error types yet. Using one is an error that names the milestone that brings it.\n\n## A module\n\n```mente\nmodule demo\n\n/// The larger of two values.\npub fn larger(a: i32, b: i32) -> i32 {\n  if a > b {\n    a\n  } else {\n    b\n  }\n}\n\npub fn square(x: i64) -> i64 = x * x\n```\n\n- A file is a module: `module name`, then declarations. `pub` makes a function visible outside the module.\n- A function's body is a block, or `= expression` for one expression.\n- A block's value is its last expression. `return value` leaves early.\n- A statement ends at the end of its line. There are no semicolons.\n- A line goes on to the next only when it ends with an operator, `,`, `(`, `[`, `{` or `=`, or inside parentheses and brackets. `else`, `{` and `invariant` may start their own line.\n\n## Bindings\n\n```mente\nmodule demo\n\npub fn total(a: [4]u32) -> u32 {\n  val first = a[0]\n  var sum: u32 = first\n  sum += a[1] + a[2] + a[3]\n  sum\n}\n```\n\n- `val` never changes; `var` can be assigned. Write `val` and `var`, never `let` or `let mut`.\n- A name is declared once in a function, its parameters and inner blocks included: no shadowing, and no binding named like a function of the module. Use a new name.\n- Every `val` and `var` is read, and every `var` is assigned somewhere; otherwise write `val`.\n- Every value is used. Discard one on purpose with `_ = f(x)`.\n- Assignment `x = e`, element assignment `a[i] = e`, and `+= -= *= /= %= &= |= ^= <<= >>=` apply to a `var` or a `mut` parameter.\n\n## Types\n\n- Integer types `i8` `i16` `i32` `i64` `i128`, `u8` `u16` `u32` `u64` `u128`, and `usize` (64 bits, unsigned). `bool`.\n- `[N]T` is an array of `N` values of type `T`; `N` is an integer literal. `a.len` is `N`. `[0; 8]` is eight zeros; `[1, 2, 3]` lists the elements.\n- An array is a value: binding, passing and returning it copies it. Two names never share one.\n- A refined type narrows an integer type: `u8[0..10]` holds 0 to 9, `i32[-5..=5]` holds -5 to 5. A bound is an integer literal, a `val` or read-only parameter, or `name.len`.\n- Literals take the type around them, and literals alone make an `i64`. `255_u8` states it.\n- `val x = a + b` takes the type of `a` and `b`. When they have different integer types, state it: `val total: u32 = small + big`.\n\n## Integer arithmetic\n\n- `+ - * / %` compute the exact result, whatever the types; `/` truncates toward zero, `%` takes the sign of the left operand.\n- A value is checked against its type where it lands: a binding, an assignment, an argument, a returned value, an array element. A value outside the range traps at run time, or is an error at compile time if the type is refined and the compiler cannot prove it fits.\n- There are no casts and no `as`: any integer expression may flow into any integer type, and is checked where it lands.\n- An intermediate result must fit in `u128` or `i128`, judged from the operands' types: `a * a * a` for a `u64` is an error. Bind part of it first, `val product: u128 = a * a`; arithmetic on a `u128` or `i128` is checked at each operator.\n- `val x = a + b` takes the operands' type when they share one. When they differ, state the type: `val x: u64 = a + b`.\n- A zero divisor traps, and so does an index outside its array.\n\n## Operators\n\nFrom loosest to tightest:\n\n| Operators | Meaning |\n| :--- | :--- |\n| `or` | logical or |\n| `and` | logical and |\n| `not` | logical not |\n| `==` `!=` `<` `<=` `>` `>=` | comparison; they do not chain |\n| `\\|` | bitwise or |\n| `^` | bitwise xor |\n| `&` | bitwise and |\n| `<<` `>>` | shifts |\n| `+` `-` | sum |\n| `*` `/` `%` | product |\n| `-` `~` | negation, bitwise not |\n| `a[i]` `a.len` | index, length |\n\n- Write `and`, `or`, `not`, never `&&`, `||` or `!`.\n- `not a == b` means `not (a == b)`. `x & mask == 0` means `(x & mask) == 0`.\n- `a < b < c` is an error: write `a < b and b < c`.\n\n## Control flow\n\n```mente\nmodule demo\n\npub fn count_down(n: u32) -> u32 {\n  var i = n\n  var steps: u32 = 0\n  while i > 0 {\n    i -= 1\n    if i == 3 {\n      continue\n    }\n    steps += 1\n  }\n  steps\n}\n\npub fn safe_div(a: i32, b: i32) -> i32 {\n  guard b != 0 else {\n    return 0\n  }\n  a / b\n}\n\npub fn sign(x: i32) -> i32 = if x < 0 { -1 } else if x > 0 { 1 } else { 0 }\n```\n\n- `if c { ... } else { ... }` is an expression when it has `else`. An `if` inside an operator's operand needs parentheses: `1 + (if c { 2 } else { 3 })`.\n- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A loop that needs a fact the compiler cannot infer states it after the condition: `while i < n invariant total <= i * 255 {`.\n- `guard c else { ... }` continues when `c` holds. Its block must leave: `return`, `break`, `continue`, `todo` or `unreachable`.\n- There is no `for`, `match`, ternary `? :`, `loop` or `do`.\n\n## Functions and `mut`\n\n```mente\nmodule demo\n\npub fn swap(mut a: [4]i32, i: usize[0..4], j: usize[0..4]) {\n  val t = a[i]\n  a[i] = a[j]\n  a[j] = t\n}\n\npub fn demo() -> i32 {\n  var v: [4]i32 = [1, 2, 3, 4]\n  swap(mut v, 0, 3)\n  v[0]\n}\n```\n\n- Parameters are read-only by default. A `mut` parameter receives a place, marked at the call: `swap(mut v, 0, 3)`. It is copied in when the call starts and copied back when it returns. The place has the parameter's type exactly: `var count: i32 = 0` for a `mut` parameter of type `i32`.\n- Never write `&x` or `&mut x`. There are no references, pointers or lifetimes.\n- In one call, a `mut` argument's variable may not appear in any other argument: `f(mut a[i], a[j])` is an error.\n- A function that returns nothing has no `->`.\n\n## Contracts\n\n```mente\nmodule demo\n\npub fn wrap_index(i: usize, len: usize) -> usize\n  requires len > 0\n  ensures result < len\n{\n  i % len\n}\n\npub fn scaled(x: u32, factor: u32) -> u32[0..=1000] {\n  val y = x * factor\n  guard y <= 1000 else {\n    return 1000\n  }\n  y\n}\n```\n\n- `requires` holds at every call, and `ensures` at every return, where `result` is the returned value.\n- The compiler proves contracts, refinements and loop invariants with simple interval and difference reasoning. When it cannot, it reports a value it could not rule out and suggests fixes. If declaring a `var` with a refined type lets it prove the value, it suggests that first: prefer it, since nothing is left to check at run time. Otherwise it suggests a `guard`, after which the condition is a known fact. A `guard` that only states a fact you know but the compiler cannot prove ends in `unreachable(\"why\")`, never in an invented value. A plain integer type needs no proof: it is checked at run time.\n- Write a contract, a refinement or an `invariant` only where the code needs the guarantee; the compiler infers the facts a loop's condition gives.\n\n## Unfinished and impossible cases\n\n- `todo(\"reason\")` stands for any value and traps when it runs. Use it for work you have not finished, never a placeholder that looks finished.\n- `unreachable(\"reason\")` stands for any value too, for a case you know cannot happen. It traps if it ever runs, and the compiler removes it where it proves the case impossible.\n\n## Habits from other languages that Mente rejects\n\n```text\nlet x = 1                // val x = 1\nlet mut y = 2            // var y = 2\nx = 1;                   // x = 1 (no semicolons)\nf(&mut v)                // f(mut v)\na && b, a || b, !a       // a and b, a or b, not a\nc ? a : b                // if c { a } else { b }\nx as u8                  // val y: u8 = x (checked where it lands)\nfor i in 0..n { }        // a while loop with a counter\n```",
+  "runs": [
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "merge-unique",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.02642,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1844,
+            "output_tokens_details": {
+              "thinking_tokens": 1431
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.02642,
+          "file": "claude-sonnet-5-5-merge-unique-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "merge-unique",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.02765,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1967,
+            "output_tokens_details": {
+              "thinking_tokens": 1533
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.02765,
+          "file": "claude-sonnet-5-5-merge-unique-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "merge-unique",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.02195,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1397,
+            "output_tokens_details": {
+              "thinking_tokens": 1051
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.02195,
+          "file": "claude-sonnet-5-5-merge-unique-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "merge-unique",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.02707,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1909,
+            "output_tokens_details": {
+              "thinking_tokens": 1494
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.02707,
+          "file": "claude-sonnet-5-5-merge-unique-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "merge-unique",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0292,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2122,
+            "output_tokens_details": {
+              "thinking_tokens": 1756
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0292,
+          "file": "claude-sonnet-5-5-merge-unique-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "next-permutation",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.019974,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1235,
+            "output_tokens_details": {
+              "thinking_tokens": 980
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.019974,
+          "file": "claude-sonnet-5-5-next-permutation-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "next-permutation",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.020754,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1313,
+            "output_tokens_details": {
+              "thinking_tokens": 1066
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.020754,
+          "file": "claude-sonnet-5-5-next-permutation-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "next-permutation",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.020554,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1293,
+            "output_tokens_details": {
+              "thinking_tokens": 1046
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.020554,
+          "file": "claude-sonnet-5-5-next-permutation-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "next-permutation",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.018904,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1128,
+            "output_tokens_details": {
+              "thinking_tokens": 873
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.018904,
+          "file": "claude-sonnet-5-5-next-permutation-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "next-permutation",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.019404,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1178,
+            "output_tokens_details": {
+              "thinking_tokens": 936
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.019404,
+          "file": "claude-sonnet-5-5-next-permutation-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "spiral",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.020594,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1250,
+            "output_tokens_details": {
+              "thinking_tokens": 872
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.020594,
+          "file": "claude-sonnet-5-5-spiral-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "spiral",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.023124,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1503,
+            "output_tokens_details": {
+              "thinking_tokens": 1131
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.023124,
+          "file": "claude-sonnet-5-5-spiral-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "spiral",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.027144,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1905,
+            "output_tokens_details": {
+              "thinking_tokens": 1545
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.027144,
+          "file": "claude-sonnet-5-5-spiral-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "spiral",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.020304,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1221,
+            "output_tokens_details": {
+              "thinking_tokens": 859
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.020304,
+          "file": "claude-sonnet-5-5-spiral-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "task": "spiral",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.022544,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1445,
+            "output_tokens_details": {
+              "thinking_tokens": 1100
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.022544,
+          "file": "claude-sonnet-5-5-spiral-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "merge-unique",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0017765,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2755,
+            "output_tokens_details": {
+              "thinking_tokens": 2455
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0017765,
+          "file": "claude-haiku-5-5-merge-unique-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "merge-unique",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0024655,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 4133,
+            "output_tokens_details": {
+              "thinking_tokens": 3648
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0024655,
+          "file": "claude-haiku-5-5-merge-unique-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "merge-unique",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.002319,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 3840,
+            "output_tokens_details": {
+              "thinking_tokens": 3514
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.002319,
+          "file": "claude-haiku-5-5-merge-unique-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "merge-unique",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0020365,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 3275,
+            "output_tokens_details": {
+              "thinking_tokens": 2950
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0020365,
+          "file": "claude-haiku-5-5-merge-unique-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "merge-unique",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0017695,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3990,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2741,
+            "output_tokens_details": {
+              "thinking_tokens": 2370
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0017695,
+          "file": "claude-haiku-5-5-merge-unique-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "merge_unique([1, 3, 5, 7, 9, 11, 13, 15], [2, 3, 4, 5, 6, 7, 8, 9], mut [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])",
+              "expected": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": true,
+              "got": "12 leaves [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "merge_unique([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8], mut [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])",
+              "expected": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "value": true,
+              "leaves": true,
+              "got": "8 leaves [1, 2, 3, 4, 5, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "next-permutation",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0013602,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 1958,
+            "output_tokens_details": {
+              "thinking_tokens": 1562
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0013602,
+          "file": "claude-haiku-5-5-next-permutation-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "next-permutation",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0020976999999999997,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 3433,
+            "output_tokens_details": {
+              "thinking_tokens": 3074
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0020976999999999997,
+          "file": "claude-haiku-5-5-next-permutation-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "next-permutation",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0015797,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2397,
+            "output_tokens_details": {
+              "thinking_tokens": 2024
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0015797,
+          "file": "claude-haiku-5-5-next-permutation-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "next-permutation",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0014197,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2077,
+            "output_tokens_details": {
+              "thinking_tokens": 1797
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0014197,
+          "file": "claude-haiku-5-5-next-permutation-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "next-permutation",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0017822,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 3812,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2802,
+            "output_tokens_details": {
+              "thinking_tokens": 2531
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0017822,
+          "file": "claude-haiku-5-5-next-permutation-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "next_permutation(mut [1, 2, 3, 4, 5, 6])",
+              "expected": "true leaves [1, 2, 3, 4, 6, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 2, 3, 4, 6, 5]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [6, 5, 4, 3, 2, 1])",
+              "expected": "false leaves [1, 2, 3, 4, 5, 6]",
+              "value": true,
+              "leaves": true,
+              "got": "false leaves [1, 2, 3, 4, 5, 6]",
+              "pass": true
+            },
+            {
+              "call": "next_permutation(mut [1, 3, 5, 4, 2, 0])",
+              "expected": "true leaves [1, 4, 0, 2, 3, 5]",
+              "value": true,
+              "leaves": true,
+              "got": "true leaves [1, 4, 0, 2, 3, 5]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "spiral",
+      "run": 1,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0014872000000000002,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2165,
+            "output_tokens_details": {
+              "thinking_tokens": 1846
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0014872000000000002,
+          "file": "claude-haiku-5-5-spiral-1-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "spiral",
+      "run": 2,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0017397,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2670,
+            "output_tokens_details": {
+              "thinking_tokens": 2280
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0017397,
+          "file": "claude-haiku-5-5-spiral-2-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "spiral",
+      "run": 3,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0015712,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2333,
+            "output_tokens_details": {
+              "thinking_tokens": 1957
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0015712,
+          "file": "claude-haiku-5-5-spiral-3-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "spiral",
+      "run": 4,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0024471999999999996,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 4085,
+            "output_tokens_details": {
+              "thinking_tokens": 3743
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0024471999999999996,
+          "file": "claude-haiku-5-5-spiral-4-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "task": "spiral",
+      "run": 5,
+      "solved": true,
+      "repairs": 0,
+      "builds": true,
+      "failed_cases": [],
+      "cost": 0.0014547,
+      "attempts": [
+        {
+          "attempt": 0,
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 4047,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2100,
+            "output_tokens_details": {
+              "thinking_tokens": 1753
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+          },
+          "cost": 0.0014547,
+          "file": "claude-haiku-5-5-spiral-5-0.mn",
+          "diagnostics": [],
+          "classes": [],
+          "examples": [
+            {
+              "call": "spiral([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20]])",
+              "expected": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 2, 3, 4, 5, 10, 15, 20, 19, 18, 17, 16, 11, 6, 7, 8, 9, 14, 13, 12]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])",
+              "expected": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "value": true,
+              "leaves": false,
+              "got": "[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+              "pass": true
+            },
+            {
+              "call": "spiral([[0, 1, 2, 3, 4], [-1, 0, 1, 2, 3], [-2, -1, 0, 1, 2], [-3, -2, -1, 0, 1]])",
+              "expected": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "value": true,
+              "leaves": false,
+              "got": "[0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -3, -2, -1, 0, 1, 2, 1, 0, -1]",
+              "pass": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "spent": 0.37289649999999996,
+  "stopped_early": false
+}

@@ -1,0 +1,10 @@
+module prelim
+
+I can't revise this further without more information, and I'm not going to submit another unchanged rewrite.
+
+The function traces correctly on all three examples: it returns the right boolean and produces `[1,2,3,4,6,5]`, `[1,2,3,4,5,6]`, and `[1,4,0,2,3,5]`. Four submissions have now failed the same `leaves` check, and nothing in the feedback shows what value the interpreter actually left in `a`. So I can't tell whether the problem is in the function or in how the harness passes and compares `mut` arguments.
+
+I need one of these to move forward:
+
+1. The value the interpreter reports in `a` after the first example. Then I can see whether the write-back is missing, partial, or different from what I traced.
+2. A confirmed rule for `mut` arguments. The card says a `mut` parameter receives a place, and the examples pass array literals. If literals aren't allowed, the examples have to bind to a `var` first, and I'd write the function to match that form.
