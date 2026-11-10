@@ -149,9 +149,8 @@ fn test_fuzz_replay_passes_a_clean_module() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 4] = [
+const PENDING: [&str; 3] = [
     "incremental-function-without-parameters.mn",
-    "incremental-module-declared-twice.mn",
     "incremental-unindented-body.mn",
     "tier1-nested-loops.mn",
 ];
@@ -200,14 +199,6 @@ fn test_fuzz_regressions_replay_without_a_failure() {
         );
     }
     replay(&files);
-}
-
-/// Found by `mn fuzz`: `mn check --watch`'s session misses `E0111` on a module that names
-/// itself twice, which a whole check reports.
-#[test]
-#[ignore = "pending a fix in mente-sema's incremental session"]
-fn fuzz_incremental_module_declared_twice() {
-    replay(&[regressions().join("incremental-module-declared-twice.mn")]);
 }
 
 /// Found by `mn fuzz`: a function without a parameter list (`fn` then a name on the next line)
