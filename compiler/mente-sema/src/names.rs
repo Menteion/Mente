@@ -52,6 +52,18 @@ pub struct Resolution {
     pub calls: Vec<Option<usize>>,
     /// For each statement of the tree, the binding a `val` or `var` declares.
     pub stmts: Vec<Option<BindingId>>,
+    /// Each refinement bound that names a binding, for the type checker to check its type.
+    pub bounds: Vec<NamedBound>,
+}
+
+/// A refinement's bound that names a binding: `name`, or `name.len`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NamedBound {
+    /// The refined type the bound belongs to.
+    pub ty: TypeId,
+    /// Whether it reads the binding's length, `name.len`.
+    pub len: bool,
+    pub binding: BindingId,
 }
 
 /// Resolves the names of `f`, whose module declares `functions`, in order.
@@ -68,6 +80,7 @@ pub fn resolve(f: &FnSyntax, functions: &[String]) -> (Resolution, Vec<Diagnosti
             names: vec![None; count],
             calls: vec![None; count],
             stmts: vec![None; f.tree.stmts.len()],
+            bounds: Vec::new(),
         },
         scopes: vec![Vec::new()],
         declared: HashMap::new(),
@@ -510,6 +523,11 @@ impl Resolver {
                         }
                         Some(id) => {
                             self.reads[id.0 as usize] += 1;
+                            self.resolution.bounds.push(NamedBound {
+                                ty: t,
+                                len: !needs_fixed,
+                                binding: id,
+                            });
                             let kind = self.binding(id).kind;
                             let changes = matches!(
                                 kind,
