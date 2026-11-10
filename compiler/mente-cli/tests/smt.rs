@@ -81,7 +81,11 @@ fn construct_programs() -> Vec<String> {
         .expect("CONSTRUCTS in src/mir_run.rs");
     let rest = &MIR_RUN[start..];
     let open = rest.find("= &[").expect("the list of CONSTRUCTS") + "= &[".len();
-    let close = rest.find("\n    ];").expect("the end of CONSTRUCTS");
+    // The list closes on a line of its own, at the indentation of its `const`.
+    let close = rest
+        .find("\n];")
+        .or_else(|| rest.find("\n    ];"))
+        .expect("the end of CONSTRUCTS");
     let list = &rest[open..close];
     assert!(
         !list.contains("r#\"") && !list.contains("r\""),

@@ -1,0 +1,116 @@
+// without proofs
+// Contracts and refinements whose checks stay, Tier 1 left out: `requires` at a call, `ensures`
+// at each return, a loop's invariant and measure, a recursive function's measure, and
+// refinements with literal and parameter bounds, inclusive or not. Each check is written so
+// that some call makes it fail and some call passes it at its edge.
+// call: call(9)
+// call: call(4)
+// call: call(3)
+// call: need(4)
+// call: need(3)
+// call: up(3, 1)
+// call: up(3, 0)
+// call: up(0, 0)
+// call: up(9, 246)
+// call: up(9, 247)
+// call: up(10, 1)
+// call: up(12, 1)
+// call: walk(0, 5, 255, 1)
+// call: walk(0, 0, 255, 1)
+// call: walk(0, 4, 255, 0)
+// call: walk(4, 5, 4, 0)
+// call: walk(0, 5, 4, 1)
+// call: walk(0, 5, 3, 1)
+// call: walk(0, 200, 255, 1)
+// call: walk(0, 201, 255, 1)
+// call: walk(0, 250, 255, 1)
+// call: walk(0, 5, 255, 2)
+// call: walk(200, 201, 255, 56)
+// call: down(10, 1)
+// call: down(1, 0)
+// call: down(255, 0)
+// call: down(102, 17)
+// call: down(24, 1)
+// call: down(0, 1)
+// call: down(3, 0)
+// call: down(2, 3)
+// call: down(4, 2)
+// call: lit(9)
+// call: lit(10)
+// call: lit(0)
+// call: named(3, 2)
+// call: named(3, 3)
+// call: named(3, 5)
+// call: named(0, 0)
+// call: range(-3)
+// call: range(2)
+// call: range(3)
+// call: range(-4)
+// call: keep(mut 3)
+// call: keep(mut 9)
+// call: keep(mut 10)
+// call: keep(mut 15)
+// call: keep(mut 19)
+// call: keep(mut 20)
+// call: twice(mut 127)
+// call: twice(mut 128)
+// call: twice(mut 0)
+// call: small([1, 9], 0)
+// call: small([0, 9], 1)
+// call: small([1, 9], 2)
+// call: small([1, 10], 0)
+// call: small([10, 1], 1)
+// call: small([9, 1], 0)
+module contracts
+
+fn need(x: u8) -> u8
+  requires x > 3
+= x
+
+pub fn call(x: u8) -> u8 = need(x)
+
+pub fn up(x: u8, d: u8) -> u8
+  ensures result > x
+{
+  guard x < 10 else {
+    return x
+  }
+  x + d
+}
+
+pub fn walk(lo: u8, n: u8, m: u8, step: u8) -> u8 {
+  var i: u8 = lo
+  while i < n invariant i <= 200 decreases m - i {
+    i += step
+  }
+  i
+}
+
+pub fn down(n: u8, k: u8) -> u8
+  decreases n
+{
+  guard n > 0 else {
+    return n
+  }
+  val m: u8 = n - k
+  m + down(m, k)
+}
+
+pub fn lit(i: usize) -> usize[0..=9] = i
+
+pub fn named(n: usize, i: usize) -> usize {
+  val k: usize[0..n] = i
+  k
+}
+
+pub fn range(x: i8) -> i8[-3..3] = x
+
+fn twice(mut x: u8) {
+  x *= 2
+}
+
+pub fn keep(mut k: u8[0..20]) {
+  twice(mut k)
+}
+
+pub fn small(xs: [2]u8[0..10], i: usize) -> u8 = xs[i]

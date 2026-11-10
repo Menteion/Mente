@@ -1,0 +1,75 @@
+// Comparisons within a type and across types, a u128 against a signed integer among them, and
+// the values of an `if`.
+// call: gt(5, -1)
+// call: gt(0, 3)
+// call: gt(3, 3)
+// call: gt(4, 3)
+// call: lt(-1, 0)
+// call: lt(4, 4)
+// call: lt(3, 4)
+// call: lt(5, 4)
+// call: eq(3, 3)
+// call: eq(3, -3)
+// call: eq(4, 3)
+// call: ne(3, 3)
+// call: ne(3, -3)
+// call: ne(2, 3)
+// call: le(3, -1)
+// call: le(3, 3)
+// call: le(4, 3)
+// call: le(2, 3)
+// call: ge(-1, 3)
+// call: ge(4, 3)
+// call: ge(3, 3)
+// call: ge(2, 3)
+// call: same(true, false)
+// call: same(true, true)
+// call: differ(true, false)
+// call: differ(false, false)
+// call: pick(true, 200, -5)
+// call: pick(false, 200, -5)
+// call: bigger(3, 9)
+// call: bigger(9, 3)
+// call: bigger(4, 4)
+// call: sign(-8)
+// call: sign(8)
+// call: sign(0)
+// call: gt(0, 0)
+// call: lt(0, 0)
+// call: eq(0, 0)
+// call: eq(5, -1)
+// call: le(0, 0)
+// call: ge(0, 0)
+// call: sign(-1)
+// call: sign(1)
+module compare
+
+pub fn gt(a: u128, b: i64) -> bool = a > b
+
+pub fn lt(a: i64, b: u128) -> bool = a < b
+
+pub fn eq(a: u128, b: i8) -> bool = a == b
+
+pub fn ne(a: u8, b: i8) -> bool = a != b
+
+pub fn le(a: u128, b: i64) -> bool = a <= b
+
+pub fn ge(a: i64, b: u128) -> bool = a >= b
+
+pub fn same(a: bool, b: bool) -> bool = a == b
+
+pub fn differ(a: bool, b: bool) -> bool = a != b
+
+pub fn pick(c: bool, a: u8, b: i16) -> i16 = if c { a } else { b }
+
+pub fn bigger(a: i32, b: i32) -> i32 = if a >= b { a } else { b }
+
+pub fn sign(x: i32) -> i8 {
+  if x < 0 {
+    return -1
+  }
+  if x > 0 {
+    return 1
+  }
+  0
+}

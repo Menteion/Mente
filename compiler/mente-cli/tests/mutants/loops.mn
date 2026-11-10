@@ -1,0 +1,78 @@
+// Loops: a count, an accumulation, `break`, `continue` behind a `guard`, and short circuits that
+// guard an index.
+// call: count(0)
+// call: count(5)
+// call: total(4, 3)
+// call: total(0, 3)
+// call: total(3, 0)
+// call: total(5, 51)
+// call: total(2, 128)
+// call: find([4, 5, 6, 7, 8], 7)
+// call: find([4, 5, 6, 7, 8], 4)
+// call: find([4, 5, 6, 7, 8], 9)
+// call: odd(7, 1)
+// call: odd(1, 1)
+// call: odd(0, 1)
+// call: odd(2, 1)
+// call: odd(3, 0)
+// call: odd(9, 51)
+// call: odd(9, 52)
+// call: odd(7, 64)
+// call: first([1, 2, 3], 1)
+// call: first([1, 2, 3], 0)
+// call: first([1, 2, 3], 7)
+// call: first([1, 2, 3], 3)
+// call: some([1, 2, 3], 7)
+// call: some([1, 2, 3], 0)
+// call: some([1, 2, 3], 2)
+// call: first([1, 2, 3], 2)
+// call: some([1, 2, 3], 1)
+// call: some([1, 2, 0], 2)
+// call: some([1, 2, 3], 3)
+module loops
+
+pub fn count(n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n {
+    i += 1
+  }
+  i
+}
+
+pub fn total(n: u8, step: u8) -> u8 {
+  var i: u8 = 0
+  var s: u8 = 0
+  while i < n {
+    i += 1
+    s += step
+  }
+  s
+}
+
+pub fn find(xs: [5]u8, v: u8) -> usize {
+  var i: usize = 0
+  while i < 5 {
+    if xs[i] == v {
+      break
+    }
+    i += 1
+  }
+  i
+}
+
+pub fn odd(n: u8, w: u8) -> u8 {
+  var i: u8 = 0
+  var s: u8 = 0
+  while i < n {
+    i += 1
+    guard i % 2 == 1 else {
+      continue
+    }
+    s += w
+  }
+  s
+}
+
+pub fn first(xs: [3]u8, i: usize) -> bool = i < 3 and xs[i] > 1
+
+pub fn some(xs: [3]u8, i: usize) -> bool = i >= 3 or xs[i] > 1

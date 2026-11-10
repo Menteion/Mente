@@ -119,6 +119,42 @@ fn test_mn_test_mutate_runs_the_demo_gate() {
     let out = text(&mutate.stdout);
     assert!(mutate.status.success(), "{}", text(&mutate.stderr));
     assert!(out.contains("4/4 mutants killed (100.0%)"), "{}", out);
+    // Beside it, the gate on lowered code over its own corpus, without the agent programs.
+    assert!(
+        out.contains("MIR mutation gate on lowered code: ")
+            && out.contains(
+                "[PASS] every mutant of the gated programs is killed or has a written reason"
+            ),
+        "{}",
+        out
+    );
+    assert!(!out.contains("Reported programs"), "{}", out);
+    assert!(!text(&plain.stdout).contains("lowered code"));
+}
+
+/// The gate on lowered code fails `mn test --mutate` when it cannot find its corpus, as from a
+/// folder outside the repository.
+#[test]
+fn test_mn_test_mutate_fails_without_the_gate_corpus() {
+    let dir = scratch("no-corpus");
+    fs::copy(
+        repo_root().join("examples/01_refinement_and_units.mn"),
+        dir.join("a.mn"),
+    )
+    .unwrap();
+    fs::copy(
+        repo_root().join("examples/01_refinement_and_units.expected"),
+        dir.join("a.expected"),
+    )
+    .unwrap();
+    let out = mn(&dir, &["test", "--mutate", "."]);
+    fs::remove_dir_all(&dir).ok();
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("compiler/mente-cli/tests/mutants"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]

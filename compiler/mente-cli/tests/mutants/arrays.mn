@@ -1,0 +1,83 @@
+// Arrays: indexes read and written, nested, and outside their arrays; literals, repeats and
+// lengths; a copy that stays apart; arrays of other element types and of booleans.
+// call: get([1, 2, 3], 2)
+// call: get([1, 2, 3], 0)
+// call: get([1, 2, 3], 3)
+// call: set(1, 9)
+// call: set(0, 9)
+// call: set(2, 9)
+// call: set(5, 9)
+// call: grid(1, 0, 9)
+// call: grid(0, 1, 9)
+// call: grid(1, 1, 9)
+// call: grid(0, 2, 9)
+// call: grid(2, 0, 9)
+// call: grid(1, 2, 9)
+// call: grid(2, 1, 9)
+// call: bump(0)
+// call: bump(1)
+// call: bump(2)
+// call: bump(3)
+// call: bump(4)
+// call: bump(5)
+// call: len([1, 2, 3, 4])
+// call: fill(4)
+// call: apart()
+// call: widen([1, 2])
+// call: shrink([1, 2])
+// call: shrink([1, 300])
+// call: shrink([256, 2])
+// call: flags(mut [true, false])
+// call: flags(mut [false, true])
+// call: pick32([1, 4000000000, 3], 1)
+// call: pick32([1, 2, 3], 0)
+// call: set(3, 9)
+// call: shrink([255, 0])
+// call: pick32([1, 2, 3], 2)
+// call: pick32([1, 2, 3], 3)
+module arrays
+
+pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
+
+pub fn set(i: usize, v: u8) -> [3]u8 {
+  var xs: [3]u8 = [0, 255, 7]
+  xs[i] = v
+  xs
+}
+
+pub fn grid(i: usize, j: usize, v: u8) -> [2][2]u8 {
+  var g: [2][2]u8 = [[0, 255], [3, 4]]
+  g[i][j] = v
+  g
+}
+
+pub fn bump(i: usize) -> [5]u8 {
+  var xs: [5]u8 = [0, 245, 246, 255, 7]
+  xs[i] += 10
+  xs
+}
+
+pub fn len(xs: [4]u8) -> usize = xs.len
+
+pub fn fill(v: u8) -> [3]u8 = [v; 3]
+
+pub fn apart() -> [3]u8 {
+  var a: [2]u8 = [0, 255]
+  val b: [2]u8 = a
+  a[0] = 7
+  [a[0], b[0], a[1]]
+}
+
+pub fn widen(xs: [2]u8) -> [2]u16 {
+  xs
+}
+
+pub fn shrink(xs: [2]u16) -> [2]u8 {
+  xs
+}
+
+pub fn flags(mut fs: [2]bool) {
+  fs[0] = not fs[0]
+}
+
+pub fn pick32(xs: [3]u32, i: usize) -> u32 = xs[i]

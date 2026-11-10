@@ -1,0 +1,35 @@
+// Division and remainder: truncation toward zero, the remainder's sign, a zero divisor, an
+// overflow, and 128-bit operands, which are checked.
+// call: div(-7, 2)
+// call: div(7, -2)
+// call: div(7, 2)
+// call: div(1, 0)
+// call: div(-2147483648, -1)
+// call: rem(-7, 2)
+// call: rem(7, -2)
+// call: rem(7, 2)
+// call: rem(1, 0)
+// call: q(-170141183460469231731687303715884105728, -1)
+// call: q(-100000000000000000000007, 10)
+// call: q(7, 0)
+// call: r(-100000000000000000000007, 10)
+// call: r(7, 0)
+// call: half(7)
+// call: half(65535)
+// call: mid(18446744073709551615, 18446744073709551613)
+// call: mid(0, 1)
+// call: div(-2147483648, 1)
+// call: div(2147483647, 1)
+module divide
+
+pub fn div(a: i32, b: i32) -> i32 = a / b
+
+pub fn rem(a: i32, b: i32) -> i32 = a % b
+
+pub fn q(a: i128, b: i128) -> i128 = a / b
+
+pub fn r(a: i128, b: i128) -> i128 = a % b
+
+pub fn half(a: u16) -> u16 = a / 2
+
+pub fn mid(lo: usize, hi: usize) -> usize = (lo + hi) / 2

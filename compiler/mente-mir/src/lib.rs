@@ -8,8 +8,11 @@
 //! - An in-memory interpreter and an opcode-flipping mutation gate.
 //! - [`cfg`]: the MIR of M1's checkpoint (c), an SSA control-flow graph with block parameters,
 //!   stored as structure of arrays, with its verifier and interpreter.
+//! - [`cfg_mutate`]: mutation operators over that MIR, which the mutation gate on lowered code
+//!   runs in memory.
 
 pub mod cfg;
+pub mod cfg_mutate;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

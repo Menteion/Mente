@@ -1,0 +1,50 @@
+// `todo`, `unreachable`, a discarded result, operations on a branch that leaves, and a callee's
+// array result.
+// call: later(0)
+// call: later(2)
+// call: never(12)
+// call: never(3)
+// call: never(10)
+// call: drop(255)
+// call: drop(4)
+// call: half(true)
+// call: half(false)
+// call: add_todo(1)
+// call: use_mk(7)
+// call: later(1)
+// call: never(9)
+// call: noisy(254)
+// call: mk(7)
+module traps
+
+pub fn later(x: u8) -> u8 {
+  guard x > 0 else {
+    todo("zero is not handled")
+  }
+  x
+}
+
+pub fn never(x: u8) -> u8 {
+  guard x < 10 else {
+    unreachable("x is a digit")
+  }
+  x
+}
+
+fn noisy(x: u8) -> u8 = x + 1
+
+pub fn drop(x: u8) -> u8 {
+  _ = noisy(x)
+  x
+}
+
+pub fn half(c: bool) -> u8 = if c { todo("not yet") } else { 5 }
+
+pub fn add_todo(x: u8) -> u8 = x + todo("later")
+
+fn mk(v: u8) -> [2]u8 = [v, 9]
+
+pub fn use_mk(v: u8) -> u8 {
+  val a: [2]u8 = mk(v)
+  a[1]
+}

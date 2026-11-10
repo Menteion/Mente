@@ -41,6 +41,7 @@ const CARD: &str = include_str!("../../../docs/language-card.md");
 const CARD_WORD_BUDGET: usize = 2_000;
 #[cfg(test)]
 mod latency;
+mod mir_mutants;
 mod mir_run;
 
 fn main() {
@@ -966,6 +967,13 @@ fn cmd_test(args: &[String]) {
             mut_rep.kill_score_pct,
             t0.elapsed().as_micros()
         );
+        // The gate on lowered code, run from the repository's root; `--reported` adds the
+        // programs whose calls are fixed, whose survivors are reported.
+        let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let reported = args.iter().any(|a| a == "--reported");
+        if !mir_mutants::command(&root, reported) {
+            process::exit(1);
+        }
     }
     println!("Note: @example bodies are not executed yet.");
 }
