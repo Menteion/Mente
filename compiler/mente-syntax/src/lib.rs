@@ -2348,6 +2348,17 @@ mod tests {
             dump_tree("module m\nlet x = 1\n"),
             "mente-dump 1 tree\nerror 2:1 E0111\n"
         );
+        // A function nested too deep is reported, not rendered; one with another error in its
+        // body is rendered, its error a node of its own.
+        let deep = format!(
+            "module m\npub fn d(x: u8) -> u8 = x{}\n",
+            " + 0".repeat(300)
+        );
+        assert_eq!(dump_tree(&deep), "mente-dump 1 tree\nerror 2:25 E0127\n");
+        assert_eq!(
+            dump_tree("module m\npub fn d(x: u8) -> u8 = )\n"),
+            "mente-dump 1 tree\n(fn d ((x u8)) u8 () (= <error>))\n"
+        );
     }
 
     #[test]
