@@ -53,6 +53,11 @@ jobs:
     env:
       # Whether the secret exists, never the secret itself.
       HAS_HELD_OUT: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}
+      # The pinned Rust lives outside the runner's home, so the sandbox, which gives the build HOME
+      # in its working directory, still finds the toolchain through RUSTUP_HOME.
+      RUSTUP_HOME: ${{ runner.temp }}/rustup
+      # Every agent build and agent program runs through this, with least privilege.
+      SANDBOX: benchmark/harness/sandbox.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,7 +105,7 @@ jobs:
           if [ "$HAS_HELD_OUT" = true ]; then held_out=(--held-out held-out-set); fi
           node benchmark/harness/bench.ts --budget "$BUDGET" --models "$MODELS" --languages "$LANGUAGES" \
             --milestone "$MILESTONE" --runs "$RUNS" --tasks "$TASKS" --mn target/release/mn --odin "$ODIN" \
-            "${held_out[@]}" --out bench-out
+            --sandbox "$SANDBOX" "${held_out[@]}" --out bench-out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

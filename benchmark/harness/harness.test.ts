@@ -7,7 +7,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { callCost, KNOWN_MODELS, parseModels, requestBody, reserve, settle, worstCost, type Budget } from "./api.ts";
-import { caseResult, childEnv, cleanOutput, menteCaseResult, printedOutcome, trapText, verdictOf, type Proc } from "./build.ts";
+import { caseResult, childEnv, cleanOutput, menteCaseResult, printedOutcome, sandboxed, trapText, verdictOf, type Proc } from "./build.ts";
 import {
   contractExpr,
   examplesBlock,
@@ -570,6 +570,15 @@ test("a run's output is read back in the case's form, a line the agent printed a
     "main.rs:3:5 error",
     "solution.rs:1:1 note",
   ]);
+});
+
+test("a command is wrapped in the sandbox when one is set, and left alone when it is not", () => {
+  assert.deepEqual(sandboxed("", "/w", "rustc", ["-o", "x", "main.rs"]), ["rustc", ["-o", "x", "main.rs"]]);
+  assert.deepEqual(sandboxed("benchmark/harness/sandbox.sh", "/w", "rustc", ["-o", "x", "main.rs"]), [
+    "bash",
+    ["benchmark/harness/sandbox.sh", "/w", "rustc", "-o", "x", "main.rs"],
+  ]);
+  assert.deepEqual(sandboxed("sb.sh", "/w", "/abs/main", []), ["bash", ["sb.sh", "/w", "/abs/main"]]);
 });
 
 test("the processes the harness starts, the agent's programs among them, see no secret", () => {

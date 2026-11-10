@@ -2,8 +2,10 @@
 # each fixture under benchmark/harness/fixtures/ is built through the harness, with the Rust and
 # Odin that benchmark/harness/toolchains.json pins, as an agent's program would be, and must pass
 # every example and hidden test of its task, or end its adversarial task's probe with the verdict
-# it names. A step of its own checks every `odin` block of benchmark/control/odin.md with `odin check`.
-# The harness's unit tests also run in CI's Documentation job.
+# it names. Every build and every program runs through the sandbox (benchmark/harness/sandbox.sh),
+# the same as the measured run, so CI exercises it. A step of its own checks every `odin` block of
+# benchmark/control/odin.md with `odin check`, and another proves the sandbox denies an agent
+# program the API key and the network. The harness's unit tests also run in CI's Documentation job.
 name: Harness
 
 on:
@@ -25,6 +27,11 @@ jobs:
     name: Fixtures in Rust and Odin
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # The pinned Rust lives outside the runner's home, so the sandbox, which gives the build HOME
+      # in its working directory, still finds the toolchain through RUSTUP_HOME.
+      RUSTUP_HOME: ${{ runner.temp }}/rustup
+      SANDBOX: benchmark/harness/sandbox.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,14 +42,19 @@ jobs:
       - name: Install the benchmark's Rust and Odin
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
-      - name: Build and run the fixtures through the harness
+      - name: Build and run the fixtures through the sandbox
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/fixtures.ts --odin "$ODIN" --out "$RUNNER_TEMP/fixtures-out"
+        run: node benchmark/harness/fixtures.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
       - name: Check the Odin document's code blocks
         if: always() && steps.toolchains.outcome == 'success'
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --out "$RUNNER_TEMP/document-out"
+        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/document-out"
+      - name: Prove the sandbox denies the key and the network
+        if: always() && steps.toolchains.outcome == 'success'
+        env:
+          ODIN: ${{ steps.toolchains.outputs.odin }}
+        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
       - name: Test the harness
         run: npm run test:harness

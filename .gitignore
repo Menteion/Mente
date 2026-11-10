@@ -20,3 +20,11 @@ Thumbs.db
 node_modules/
 mutants.out/
 mutants.out.old/
+
+# The agent-benchmark harness's output directories, written when it runs
+benchmark/harness/prelim-out/
+prelim-out/
+fixtures-out/
+document-out/
+sandbox-out/
+bench-out/
