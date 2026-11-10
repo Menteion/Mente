@@ -5,6 +5,10 @@
 # against the whole workspace's tests.
 test_workspace = true
 
+# Through nextest, whose profile `mutants` (.config/nextest.toml) stops a test that runs too
+# long, so that a mutant that loops without end fails a test within 40 seconds.
+test_tool = "nextest"
+
 
 # Spikes are experiments outside the compiler crates: tested, never cited as evidence, and not
 # mutation-tested (docs/design-brief.md, "Spikes before the milestone that needs them").

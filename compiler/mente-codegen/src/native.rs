@@ -1659,7 +1659,8 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         let module = mente_sema::check_program_without_proofs(source).unwrap();
         let lowered = crate::lower::lower(&module).unwrap();
         let zeros = Arg::Array(vec![Arg::Int(Num::from_i128(0)); 4096]);
-        let calls: Vec<Call> = (0..32)
+        // Eight calls, so that one slot each would take four times what one shared takes.
+        let calls: Vec<Call> = (0..8)
             .map(|_| Call {
                 entry: 0,
                 args: vec![zeros.clone()],
