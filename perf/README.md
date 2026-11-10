@@ -57,13 +57,33 @@ node --test perf/run.test.mjs
 
 What the disassembly of the x86-64 code `mn build` writes shows, at the commit of the first result (examined in an object built on Windows, whose code differs from Linux's only in the calling convention), together with the AArch64 counters below. These are observations to direct later work, not decisions: [`tight-loops`](../docs/design-review.md#tight-loops) is still proposed.
 
-- **`bsearch`'s midpoint calls a 128-bit division.** `(lo + hi) / 2` of two `usize` is an exact intermediate that may need 65 bits, so it is computed in 128 bits, and its division by 2 calls the generated runtime's 128-bit division, a 128-step shift-and-subtract loop of about 6,000 instructions, on every step of every search. No shift replaces a division by a power of two, and no 64-bit path serves a dividend whose high half is zero. `x / 2` on one `usize`, and `(lo + hi) / 2` on refined bounds, do not call it; `lo + (hi - lo) / 2` does. The checksum is right; the time is not. The kernel stays as written, since it is the midpoint every language writes, and its work count rises again once the division is fixed.
+- **`bsearch`'s midpoint was a call of the bit-serial 128-bit division.** `(lo + hi) / 2` of two `usize` is an exact intermediate that may need 65 bits, so it is computed in 128 bits, and its division by 2 called the generated runtime's 128-step shift-and-subtract loop, about 6,000 instructions, on every step of every search. Since commit "Divide 128-bit values without the bit-serial routine where possible", a division by a constant power of two is a shift and a mask, and the runtime divides with one 64-bit division when both operands fit in 64 bits and with three when the divisor fits in 32. `bsearch` went from 12,098 ms to 159 ms on x86-64 and from 9,110 ms to 178 ms on AArch64 ("The gate's first comparison" below). Its work count stays at 400 rounds for now, so its C run is still short.
 - **Every `var` lives in memory.** Each loop variable is a stack slot that every iteration loads and stores; Cranelift does not promote stack slots to registers.
 - **Exact intermediates in 128 bits.** A `u64` sum such as `total += a[j]` is computed as a pair of 64-bit halves and range-checked with a compare-and-select sequence before it is stored.
 - **No vectorisation.** Cranelift has no auto-vectoriser, and `@simd` comes in M5. The references execute about one instruction per element of `sum` and `dot` on AArch64, as code vectorised with the baseline's NEON does; Mente executes about 37 and 43.
 - **The checks are the smaller part.** Rust with overflow checks costs between nothing (`isort`) and five times (`sum` on AArch64, where the checks stop vectorisation) against Rust without, while Mente trails the fastest reference by 3 to 31 times outside `bsearch`. Most of the gap is the code around the checks.
 
 ## Results
+
+### The gate's first comparison, and its one exception
+
+2026-11-10, PR #69 (commit "Build the base compiler apart from the change in the Performance job", `83e19ff`) against `main` at `6305c99`, workflow run 42752671802: the first run in which the base's compiler and the change's were built apart, so the first that compared two compilers. x86-64: an AMD EPYC 7763; AArch64: a Neoverse-N2. Change over base, in median time and, on AArch64, in instructions:
+
+| Kernel | x86-64 time | AArch64 time | AArch64 instructions | Gap now, x86-64 | Gap now, AArch64 |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| `sum` | 0.926 | 0.940 | 0.958 | 18.5× | 29.5× |
+| `dot` | 0.801 | 1.002 | **1.033** | 9.5× | 18.1× |
+| `prefix` | 0.828 | 0.938 | 0.963 | 4.5× | 5.4× |
+| `matmul` | 0.835 | 0.979 | 0.920 | 5.3× | 7.6× |
+| `sieve` | 1.002 | 1.004 | 1.000 | 6.9× | 9.4× |
+| `bsearch` | 0.013 | 0.020 | 0.011 | 2.2× | 6.3× |
+| `popcount` | 0.919 | 0.982 | 0.968 | 5.9× | 4.9× |
+| `isort` | 0.989 | 0.987 | 0.925 | 9.6× | 10.1× |
+| `collatz` | 0.920 | 0.995 | 1.000 | 3.3× | 4.7× |
+
+The kernels other than `bsearch` gained too, since their seeds and checksums divide by constants (`% 2147483648` is now a shift).
+
+**The exception.** `dot` on AArch64 executed 3.3% more instructions than the base, at the same time, beyond the gate's 1%, so the gate failed. Its hot loop, `total += a[j] * b[j]`, divides nothing; the change rewrote only its setup's divisions and the one of each round. Built with both compilers for x86-64 and disassembled, `dot`'s function shows its registers and stack slots shifted throughout, not only at the divisions: Cranelift's register allocator answered the different code elsewhere in the function, and the loop landed on a slightly different allocation. Norman accepted the regression on 2026-11-10, and the change was merged with the gate failing for this kernel alone. The tolerances stay as they are, and this change is the base every later comparison measures against.
 
 ### First result
 
@@ -101,6 +121,6 @@ Rust with overflow checks took 1.0 to 2.2 times as long as Rust without on x86-6
 
 Mente's code runs at a high IPC but executes 5 to 32 times the instructions outside `bsearch`, which is the gap above. `sieve` and `collatz` also take far more branch misses than the references. Cache misses are alike where the data outgrows the cache: `sieve` misses 87.9 M times in Mente and 86.6 M in each reference.
 
-**Noise, and the gate's tolerances.** In both runs so far the base's and the change's compilers built byte-identical executables, so their comparison measured the noise alone. Their medians differed by at most 0.9% on x86-64 and 0.2% on AArch64, and their instruction counts agreed to five digits. A single executable's rounds spread by up to ±9% on x86-64, which is why the gate compares medians of interleaved rounds. The time tolerance, 5%, is five times the largest difference seen; the instruction tolerance, 1%, is far above the variation of a count that agreed to five digits. The figures above are for one CPU: the first run (commit "Measure tight-loop kernels against C, C++ and Rust on Actions", `6e81fe8`, with the earlier work counts) drew an AMD EPYC 9V74 for x86-64 instead, and its gaps were 18.7× for `sum`, 11.7× for `dot`, 5.5× for `prefix`, 7.0× for `matmul`, 6.5× for `sieve`, 542.7× for `bsearch`, 6.3× for `popcount`, 8.5× for `isort` and 3.3× for `collatz`. Hosted runners do not promise a CPU, which is why the gate only compares two compilers on one runner, and a gap is always quoted with its CPU.
+**Noise, and the gate's tolerances.** In both runs so far the base's and the change's compilers built byte-identical executables, so their comparison measured the noise alone. That was the workflow's doing, not the change's: both compilers were built into one target directory, where cargo took the base's fresh build for the change's and reused it, so the job measured one compiler twice (fixed by commit "Build the base compiler apart from the change in the Performance job"). The figures below still measure noise: one executable against itself. Their medians differed by at most 0.9% on x86-64 and 0.2% on AArch64, and their instruction counts agreed to five digits. A single executable's rounds spread by up to ±9% on x86-64, which is why the gate compares medians of interleaved rounds. The time tolerance, 5%, is five times the largest difference seen; the instruction tolerance, 1%, is far above the variation of a count that agreed to five digits. The figures above are for one CPU: the first run (commit "Measure tight-loop kernels against C, C++ and Rust on Actions", `6e81fe8`, with the earlier work counts) drew an AMD EPYC 9V74 for x86-64 instead, and its gaps were 18.7× for `sum`, 11.7× for `dot`, 5.5× for `prefix`, 7.0× for `matmul`, 6.5× for `sieve`, 542.7× for `bsearch`, 6.3× for `popcount`, 8.5× for `isort` and 3.3× for `collatz`. Hosted runners do not promise a CPU, which is why the gate only compares two compilers on one runner, and a gap is always quoted with its CPU.
 
 **Cost.** A run took 9 minutes on x86-64 and 13 on AArch64, the two in parallel, building both compilers and measuring for 7 and 10 minutes.

@@ -464,6 +464,14 @@ mod tests {
             "pub fn div(a: i32, b: i32) -> i32 = a / b\npub fn rem(a: i32, b: i32) -> i32 = a % b",
             &["div(-7, 2)", "missing(1)", "rem(-7, 2)", "rem(7, -2)", "div(1, 0)", "rem(1, 0)"],
         ),
+        // 128-bit division by each path of native code: a constant power of two by a shift, the
+        // midpoint of two `usize` values among them; both operands in 64 bits by one division; a
+        // divisor in 32 bits by three; any other by a bit a round. Signed ones with negative
+        // dividends: the quotient truncates toward zero, the remainder takes the dividend's sign.
+        (
+            "pub fn half(a: u128) -> u128 = a / 2\npub fn mid(lo: usize, hi: usize) -> usize = (lo + hi) / 2\npub fn quarter(a: i128) -> i128 = a / 4\npub fn low(a: i128) -> i128 = a % 8\npub fn one(a: u128) -> u128 = a / 1\npub fn tenth(a: u128) -> u128 = a / 10\npub fn rest(a: u128, b: u128) -> u128 = a % b\npub fn ratio(a: i128, b: i128) -> i128 = a / b",
+            &["half(340282366920938463463374607431768211455)", "half(3)", "mid(18446744073709551615, 18446744073709551613)", "mid(0, 1)", "quarter(-170141183460469231731687303715884105728)", "quarter(-7)", "quarter(7)", "low(-13)", "low(13)", "one(5)", "tenth(340282366920938463463374607431768211455)", "rest(340282366920938463463374607431768211455, 4294967296)", "rest(1000, 7)", "rest(18446744073709551616, 4294967295)", "rest(5, 0)", "ratio(-100000000000000000000000, 4294967295)", "ratio(-7, 2)", "ratio(-170141183460469231731687303715884105728, -1)"],
+        ),
         // Division of 128-bit operands, checked; of narrower ones in a 128-bit machine type; and
         // of unsigned 64-bit values above the signed range.
         (
