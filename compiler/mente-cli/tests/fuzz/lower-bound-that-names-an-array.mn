@@ -1,0 +1,3 @@
+fn f(xs:[8]u8,n:usize[xs..8])->u8{guard n>0 else{return 0}
+val last:usize[0..8]=1
+xs[last]}

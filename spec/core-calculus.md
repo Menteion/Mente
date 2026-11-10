@@ -25,6 +25,8 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
      <!-- @assert-count target="compiler/mente-sema/src/types.rs" symbol="fn test_mixed_operands_suggest_the_smallest_type_that_holds_both" min="1" reason="The suggested type holds both ranges" -->
    - `Implemented`: a refinement's bound is a literal, a `val`, a read-only parameter, or `.len` of an array; a bound that names a `var` or a `mut` parameter is an error (`E0209`).
      <!-- @assert-count target="compiler/mente-sema/src/names.rs" symbol="fn test_a_refinement_bound_names_a_binding_that_cannot_change" min="1" reason="A bound over a var or a mut parameter is E0209" -->
+   - `Implemented`: a bound that names a binding has the type it reads: `name` an integer, and `name.len` an array; any other is an error (`E0203`).
+     <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_a_refinements_bound_has_the_type_it_reads" min="1" reason="A bound naming an array, or the length of an integer, is E0203" -->
 3. `Specified` **`bool` and arrays**:
    - `bool` holds `true` and `false`. No integer converts to `bool` or back.
    - `[N]T` holds `N` values of type `T`, where `N` is a non-negative integer literal without a suffix, since it is a count and takes no type and `T` is any M1 type, arrays included. `a.len` is `N`. An index may have any integer type, and is checked against `0 ..= N - 1`. An array is a value: binding, passing and returning it copies it, and no two bindings ever share one.

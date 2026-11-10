@@ -120,6 +120,7 @@ pub fn check(
         None => {}
     }
     c.arrays_in_one_piece();
+    c.bounds_have_their_types();
     (c.typing, c.errors)
 }
 
@@ -167,6 +168,32 @@ impl Checker<'_> {
             if bytes(&t) > ARRAY_BYTES && reported.is_empty() {
                 self.too_large(e.span, &t.spelling(), bytes(&t));
             }
+        }
+    }
+
+    /// `E0203` for each refinement bound whose binding has another type than it reads: a bound
+    /// `name` is an integer, and `name.len` reads an array's length. A bound that names an array
+    /// is given the fix that reads its length.
+    fn bounds_have_their_types(&mut self) {
+        for b in &self.resolution.bounds {
+            let ty = &self.typing.bindings[b.binding.0 as usize];
+            let name = &self.resolution.bindings[b.binding.0 as usize].name;
+            let span = self.tree.ty(b.ty).span;
+            let message = match (b.len, ty) {
+                (false, Ty::Int(_) | Ty::Any) | (true, Ty::Array(..) | Ty::Any) => continue,
+                (false, t) => format!(
+                    "a refinement's bound is an integer, but `{}` is `{}`",
+                    name,
+                    t.spelling()
+                ),
+                (true, t) => format!(
+                    "`{}.len` reads an array's length, but `{}` is `{}`",
+                    name,
+                    name,
+                    t.spelling()
+                ),
+            };
+            self.errors.push(Diagnostic::error("E0203", span, message));
         }
     }
 
@@ -1297,6 +1324,37 @@ mod tests {
             codes("pub fn f() -> u8 = todo(\"x\").len + todo(\"y\")[0]"),
             NONE
         );
+    }
+
+    /// A refinement's bound has the type it reads: `name` an integer, `name.len` an array
+    /// (the fuzzer's finding 15, which checked and could not be lowered).
+    #[test]
+    fn test_a_refinements_bound_has_the_type_it_reads() {
+        let d = all_diagnostics("pub fn f(xs: [8]u8, n: usize[xs..=8]) -> u8 = 0");
+        assert_eq!(d.len(), 1, "{:?}", d);
+        assert_eq!(
+            (d[0].code, d[0].message.as_str()),
+            (
+                "E0203",
+                "a refinement's bound is an integer, but `xs` is `[8]u8`"
+            )
+        );
+        assert_eq!(
+            all_codes("pub fn f(k: u8, n: usize[0..k.len]) -> u8 = 0"),
+            ["E0203"]
+        );
+        assert_eq!(
+            all_codes("pub fn f(b: bool, n: usize[0..b]) -> u8 = 0"),
+            ["E0203"]
+        );
+        // A binding of its type, a parameter or a `val`, is a bound.
+        assert!(
+            all_codes("pub fn f(xs: [8]u8, k: usize, n: usize[k..xs.len]) -> u8 = 0").is_empty()
+        );
+        assert!(all_codes(
+            "pub fn f(xs: [8]u8) -> u8 {\n  val k: usize = 2\n  val n: usize[0..k] = 1\n  xs[n]\n}"
+        )
+        .is_empty());
     }
 
     #[test]
