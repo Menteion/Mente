@@ -1,29 +1,45 @@
-// Checks the harness end to end in Rust and Odin (benchmark/README.md, "The harness"): each
+// Checks the harness end to end in Mente, Rust and Odin (benchmark/README.md, "The harness"): each
 // fixture under fixtures/<language>/ is a solution of a public M1 task, built through the harness
 // as an agent's program would be. A solve task's fixture must build and pass every example and
 // hidden test. An adversarial task's fixture starts with a line `// expect: <verdict>`, and its
 // probe must end with that verdict. Every public M1 solve task needs a fixture in each language.
+// The Mente fixtures are programs the preliminary runs' agents wrote and the hidden tests passed.
 // With `--check document`, it checks instead each `odin` block of the control document,
 // benchmark/control/odin.md, with `odin check`, as the document says its blocks are; `--check all`
 // does both.
 //
-//   node benchmark/harness/fixtures.ts [--check fixtures|document|all] [--languages rust,odin] [--rustc rustc]
-//     [--rust-toolchain <toolchain>] [--odin odin] [--sandbox benchmark/harness/sandbox.sh] [--out fixtures-out]
+//   node benchmark/harness/fixtures.ts [--check fixtures|document|all] [--languages mente,rust,odin]
+//     [--mn mn] [--rustc rustc] [--rust-toolchain <toolchain>] [--odin odin]
+//     [--sandbox benchmark/harness/sandbox.sh] [--out fixtures-out]
 //
 // In CI it is given --sandbox, so the fixtures and the document blocks build and run under the same
-// sandbox as the measured run (benchmark/harness/sandbox.sh).
+// sandbox as the measured run (benchmark/harness/sandbox.sh), and --out lies outside the workspace,
+// which the sandbox hides.
 //
 // It runs in the workflow "Harness", which installs the toolchains toolchains.json pins; the Rust
 // toolchain defaults to that pin, and `--rust-toolchain ""` takes `rustc` as it is.
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildProgram, childEnv, cleanOutput, dropExecutable, runCases, runProcess, sandboxed, verdictOf, type Tools } from "./build.ts";
+import {
+  REPOSITORY,
+  buildProgram,
+  checkOutside,
+  childEnv,
+  cleanOutput,
+  dropExecutable,
+  runCases,
+  runProcess,
+  rustcInSysroot,
+  sandboxed,
+  verdictOf,
+  type Tools,
+} from "./build.ts";
 import { parseSignature, type Lang } from "./languages.ts";
 import { parseCase, parseTask, type Case } from "./tasks.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const EXTENSIONS: Record<string, string> = { rust: "rs", odin: "odin" };
+const EXTENSIONS: Record<string, string> = { mente: "mn", rust: "rs", odin: "odin" };
 
 /** The `odin` code blocks of a Markdown document. */
 function odinBlocks(markdown: string): string[] {
@@ -44,19 +60,23 @@ async function main(): Promise<void> {
   const fixtures = check !== "document";
   const document = check !== "fixtures";
   const tools: Tools = {
-    mn: "",
+    mn: option("mn", ""),
     native: false,
     rustc: option("rustc", "rustc"),
     rustToolchain: option("rust-toolchain", pins.rust.toolchain),
     odin: option("odin", "odin"),
     sandbox: option("sandbox", ""),
+    hide: [REPOSITORY],
   };
   for (const lang of languages) {
     if (!(lang in EXTENSIONS)) throw new Error(`no fixtures for ${lang}`);
   }
+  checkOutside(out, tools);
+  if (fixtures && languages.includes("mente") && !tools.mn) throw new Error("the Mente fixtures need --mn");
   if (fixtures && languages.includes("rust")) {
+    tools.rustc = await rustcInSysroot(tools.rustc, tools.rustToolchain);
     const env = childEnv(tools.rustToolchain ? { RUSTUP_TOOLCHAIN: tools.rustToolchain } : {});
-    console.log((await runProcess(tools.rustc, ["--version"], { env, timeoutMs: 60_000 })).stdout.trim());
+    console.log(`${(await runProcess(tools.rustc, ["--version"], { env, timeoutMs: 60_000 })).stdout.trim()} at ${tools.rustc}`);
   }
   if (document || languages.includes("odin")) {
     console.log((await runProcess(tools.odin, ["version"], { timeoutMs: 60_000 })).stdout.trim());
@@ -117,7 +137,7 @@ async function main(): Promise<void> {
       rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "block.odin"), block);
-      const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["check", ".", "-no-entry-point"]);
+      const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["check", ".", "-no-entry-point"], tools.hide);
       const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: 120_000 });
       // The block goes into the log beside the compiler's message, so that its author can fix it.
       if (p.status !== 0) failures.push(`odin document block ${i + 1}: odin check rejects it\n${block}\n${cleanOutput(p.stderr + p.stdout, dir).join("\n")}`);

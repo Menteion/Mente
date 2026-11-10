@@ -3,11 +3,24 @@
 // toolchain: the workflow "Harness" builds and runs the fixtures through rustc and odin.
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { callCost, KNOWN_MODELS, parseModels, requestBody, reserve, settle, worstCost, type Budget } from "./api.ts";
-import { caseResult, childEnv, cleanOutput, menteCaseResult, printedOutcome, sandboxed, trapText, verdictOf, type Proc } from "./build.ts";
+import {
+  REPOSITORY,
+  caseResult,
+  checkOutside,
+  childEnv,
+  cleanOutput,
+  insideAny,
+  menteCaseResult,
+  printedOutcome,
+  sandboxed,
+  trapText,
+  verdictOf,
+  type Proc,
+} from "./build.ts";
 import {
   contractExpr,
   examplesBlock,
@@ -584,6 +597,25 @@ test("a command is wrapped in the sandbox when one is set, with every path made 
     "bash",
     [resolve("sb.sh"), resolve("out/w"), resolve("out/w/main"), "0"],
   ]);
+  // The paths to hide go first, each after --hide, made absolute.
+  assert.deepEqual(sandboxed("sb.sh", "/t/w", "odin", ["build", "."], ["repo", "held"]), [
+    "bash",
+    [resolve("sb.sh"), "--hide", resolve("repo"), "--hide", resolve("held"), resolve("/t/w"), "odin", "build", "."],
+  ]);
+  assert.deepEqual(sandboxed("", "/t/w", "odin", ["build"], ["repo"]), ["odin", ["build"]]);
+});
+
+test("an output directory inside a path the sandbox hides is refused", () => {
+  assert.equal(insideAny("/r/repo", ["/r/repo"]), true);
+  assert.equal(insideAny("/r/repo/bench-out", ["/r/repo"]), true);
+  assert.equal(insideAny("/r/repository-out", ["/r/repo"]), false);
+  assert.equal(insideAny("/t/bench-out", ["/r/repo", "/r/held"]), false);
+  const tools = { mn: "", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "sb.sh", hide: [REPOSITORY] };
+  assert.throws(() => checkOutside(join(REPOSITORY, "bench-out"), tools), /must lie outside/);
+  assert.doesNotThrow(() => checkOutside(resolve(REPOSITORY, "..", "bench-out"), tools));
+  // Without a sandbox nothing is hidden, so any output will do.
+  assert.doesNotThrow(() => checkOutside(join(REPOSITORY, "bench-out"), { ...tools, sandbox: "" }));
+  assert.ok(existsSync(join(REPOSITORY, "benchmark", "README.md")), "REPOSITORY is this repository's root");
 });
 
 test("the processes the harness starts, the agent's programs among them, see no secret", () => {

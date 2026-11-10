@@ -1,0 +1,42 @@
+pub fn merge_unique(a: [8]i32, b: [8]i32, mut out: [16]i32) -> usize[0..=16] {
+  var i: usize[0..=8] = 0
+  var j: usize[0..=8] = 0
+  var n: usize[0..=16] = 0
+  var have: bool = false
+  var last: i32 = 0
+  while i < 8 or j < 8 {
+    var v: i32 = 0
+    if i < 8 and j < 8 {
+      if a[i] < b[j] {
+        v = a[i]
+        i += 1
+      } else if a[i] > b[j] {
+        v = b[j]
+        j += 1
+      } else {
+        v = a[i]
+        i += 1
+        j += 1
+      }
+    } else if i < 8 {
+      v = a[i]
+      i += 1
+    } else {
+      guard j < 8 else {
+        unreachable("the loop condition leaves j below 8")
+      }
+      v = b[j]
+      j += 1
+    }
+    if not have or last != v {
+      guard n < 16 else {
+        unreachable("at most 16 distinct values come from 16 inputs")
+      }
+      out[n] = v
+      n += 1
+      have = true
+      last = v
+    }
+  }
+  n
+}

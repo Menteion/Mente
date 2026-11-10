@@ -47,12 +47,15 @@ import {
 } from "./api.ts";
 import {
   BUILD_MODES,
+  REPOSITORY,
   buildProgram,
+  checkOutside,
   childEnv,
   dropExecutable,
   failureClass,
   runCases,
   runProcess,
+  rustcInSysroot,
   verdictOf,
   type Build,
   type Tools,
@@ -268,7 +271,11 @@ async function main(): Promise<void> {
     rustToolchain: option("rust-toolchain", pins.rust.toolchain),
     odin: option("odin", "odin"),
     sandbox: option("sandbox", ""),
+    // The repository and the held-out checkout, which the sandbox hides from agent code, so that a
+    // program written for a public task cannot read a held-out task and print it.
+    hide: [REPOSITORY, ...(heldOutDir ? [heldOutDir] : [])],
   };
+  checkOutside(out, tools);
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
 
@@ -276,6 +283,7 @@ async function main(): Promise<void> {
   const versions: Partial<Record<Lang, string>> = {};
   if (languages.includes("mente")) versions.mente = `mn at ${process.env.GITHUB_SHA ?? "a local build"}`;
   if (languages.includes("rust")) {
+    tools.rustc = await rustcInSysroot(tools.rustc, tools.rustToolchain);
     const env = childEnv(tools.rustToolchain ? { RUSTUP_TOOLCHAIN: tools.rustToolchain } : {});
     versions.rust = (await runProcess(tools.rustc, ["--version"], { env, timeoutMs: 60_000 })).stdout.trim();
     if (!versions.rust.startsWith(`rustc ${pins.rust.toolchain} `)) throw new Error(`rustc is ${versions.rust}, not ${pins.rust.toolchain}`);

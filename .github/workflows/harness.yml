@@ -1,11 +1,13 @@
-# The agent-benchmark harness end to end in Rust and Odin (benchmark/README.md, "The harness"):
-# each fixture under benchmark/harness/fixtures/ is built through the harness, with the Rust and
-# Odin that benchmark/harness/toolchains.json pins, as an agent's program would be, and must pass
-# every example and hidden test of its task, or end its adversarial task's probe with the verdict
-# it names. Every build and every program runs through the sandbox (benchmark/harness/sandbox.sh),
-# the same as the measured run, so CI exercises it. A step of its own checks every `odin` block of
-# benchmark/control/odin.md with `odin check`, and another proves the sandbox denies an agent
-# program the API key and the network. The harness's unit tests also run in CI's Documentation job.
+# The agent-benchmark harness end to end in Mente, Rust and Odin (benchmark/README.md, "The
+# harness"): each fixture under benchmark/harness/fixtures/ is built through the harness, with mn
+# built here and the Rust and Odin that benchmark/harness/toolchains.json pins, as an agent's
+# program would be, and must pass every example and hidden test of its task, or end its adversarial
+# task's probe with the verdict it names. Every build and every program runs through the sandbox
+# (benchmark/harness/sandbox.sh), the same as the measured run, so CI exercises it; their working
+# directories and mn lie outside the workspace, which the sandbox hides. A step of its own checks
+# every `odin` block of benchmark/control/odin.md with `odin check`, and another proves the sandbox
+# denies an agent program the API key, the network, the workspace, the held-out set and writes
+# outside its own directory. The harness's unit tests also run in CI's Documentation job.
 name: Harness
 
 on:
@@ -41,13 +43,22 @@ jobs:
         # toolchain through RUSTUP_HOME. The runner context is not available in a job-level env, so
         # this is set from a step, where $RUNNER_TEMP is.
         run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Build mn and put it outside the workspace
+        # The sandbox hides the workspace from agent code, so mn runs from the runner's temp.
+        run: |
+          cargo build --locked --release --bin mn
+          install -D target/release/mn "$RUNNER_TEMP/bin/mn"
       - name: Install the benchmark's Rust and Odin
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
       - name: Build and run the fixtures through the sandbox
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/fixtures.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
+        run: >-
+          node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN"
+          --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
       - name: Check the Odin document's code blocks
         if: always() && steps.toolchains.outcome == 'success'
         env:
