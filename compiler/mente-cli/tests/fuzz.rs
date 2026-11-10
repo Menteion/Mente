@@ -514,8 +514,9 @@ fn test_fuzz_unfinished_deep_chain_is_e0127_and_no_crash() {
 /// Each is written out here rather than as a file, at a depth far past the limit.
 #[test]
 fn test_fuzz_deep_nesting_is_e0127_and_no_crash() {
-    // Twenty times the limit: enough to cross it in every shape, and quick in a debug build.
-    const DEPTH: usize = 5_000;
+    // Four times the limit: past it in every shape, and quick through every phase in a debug
+    // build, which a per-test time limit asks for.
+    const DEPTH: usize = 1_000;
     let expression = |nest: String| format!("module m\npub fn deep(x: i32) -> i32 = {}\n", nest);
     let modules = [
         expression(format!("{}x{}", "(".repeat(DEPTH), ")".repeat(DEPTH))),

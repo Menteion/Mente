@@ -3542,4 +3542,46 @@ mod tests {
         });
         assert_eq!((calls, kept.as_str()), (3, "keep\n"));
     }
+
+    /// The halving starts only past `LARGE_INPUT`, and a pass is skipped only past
+    /// `MAX_UNITS`: at exactly either bound the minimizer works as on any smaller input.
+    #[test]
+    fn test_minimizing_keeps_its_bounds_exactly() {
+        let mut calls = 0;
+        let mut always = |_: &str| {
+            calls += 1;
+            Some(true)
+        };
+        // Exactly LARGE_INPUT bytes in one token: not halved, and its characters, more than
+        // MAX_UNITS, are not a pass, so nothing runs and nothing changes.
+        let at_large = "a".repeat(LARGE_INPUT);
+        assert_eq!(minimize(&at_large, &mut always).len(), LARGE_INPUT);
+        assert_eq!(calls, 0);
+        // One byte more: halved once, and then small enough for every pass.
+        let mut calls = 0;
+        let past_large = "a".repeat(LARGE_INPUT + 1);
+        let small = minimize(&past_large, &mut |_| {
+            calls += 1;
+            Some(true)
+        });
+        assert_eq!(small, "a");
+        assert!(calls > 1, "{} calls", calls);
+        // Exactly MAX_UNITS characters: their pass runs, down to one.
+        let mut calls = 0;
+        let at_units = "a".repeat(MAX_UNITS);
+        let small = minimize(&at_units, &mut |_| {
+            calls += 1;
+            Some(true)
+        });
+        assert_eq!(small, "a");
+        assert!(calls > 1, "{} calls", calls);
+        // One more character: its pass is skipped.
+        let mut calls = 0;
+        let past_units = "a".repeat(MAX_UNITS + 1);
+        let kept = minimize(&past_units, &mut |_| {
+            calls += 1;
+            Some(true)
+        });
+        assert_eq!((kept.len(), calls), (MAX_UNITS + 1, 0));
+    }
 }
