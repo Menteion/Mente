@@ -477,12 +477,13 @@ fn fuzz_incremental_expression_body_cut_short() {
     replay(&[regressions().join("incremental-expression-body-cut-short.mn")]);
 }
 
-/// Found by `mn fuzz`: a body with another parse error, an unclosed `[` or a trailing `+`, is
-/// not held to the nesting limit, so `mn dump --tree` renders its over-deep tree: quadratic, and
-/// a stack overflow at a few hundred thousand links even on the stack `mn` runs on. Each shape
-/// is written out here rather than as a file.
+/// Found by `mn fuzz`: a body with another parse error, an unclosed `[` or a trailing `+`, was
+/// not held to the nesting limit, so `mn dump --tree` rendered its over-deep tree: quadratic, and
+/// a stack overflow at a few hundred thousand links even on the stack `mn` runs on. A too-high
+/// tree is `E0127` whether or not its body has another error, and no phase crashes or hangs.
+/// Each shape is written out here rather than as a file.
 #[test]
-#[ignore = "pending the nesting limit for a body with another parse error"]
+#[ignore = "pending E0127 for a body with another parse error"]
 fn fuzz_dump_tree_of_an_unfinished_deep_chain() {
     const DEPTH: usize = 300_000;
     let dir = scratch("unfinished");
@@ -498,7 +499,20 @@ fn fuzz_dump_tree_of_an_unfinished_deep_chain() {
         " + 1".repeat(DEPTH)
     );
     fs::write(&plus, chain).unwrap();
-    replay(&[index, plus]);
+    let files = [index, plus];
+    replay(&files);
+    for file in &files {
+        let run = mn(&["check", file.to_str().unwrap()], None);
+        let printed = text(&run.stdout) + &text(&run.stderr);
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{}: {}",
+            file.display(),
+            printed
+        );
+        assert!(printed.contains("E0127"), "{}: no E0127", file.display());
+    }
     let _ = fs::remove_dir_all(&dir);
 }
 
