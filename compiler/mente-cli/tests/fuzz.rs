@@ -434,12 +434,39 @@ fn test_fuzz_array_past_four_gigabytes_is_e0223() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Found by `mn fuzz`: a malformed return type passes a whole check and swallows what follows,
-/// here a lone `fn`, which `mn check --watch`'s session reads as an item of its own (`E0101`).
+/// Found by `mn fuzz`: a malformed return type passed a whole check and swallowed what followed,
+/// here a lone `fn`, which `mn check --watch`'s session read as an item of its own (`E0101`). A
+/// return type whose `]` or `>` closes nothing, or whose `[` or `<` is never closed, is `E0116`,
+/// and the session and a whole check agree.
 #[test]
-#[ignore = "pending a fix in the declaration parser"]
+#[ignore = "pending E0116 for a malformed return type (PR 93)"]
 fn fuzz_incremental_malformed_return_type() {
-    replay(&[regressions().join("incremental-malformed-return-type.mn")]);
+    let dir = scratch("e0116");
+    let unclosed = dir.join("seeds").join("unclosed.mn");
+    fs::write(&unclosed, "module m\npub fn f() -> [4 = 0\n").unwrap();
+    let files = [
+        regressions().join("incremental-malformed-return-type.mn"),
+        unclosed,
+    ];
+    replay(&files);
+    for file in &files {
+        let run = mn(&["check", file.to_str().unwrap()], None);
+        let printed = text(&run.stdout) + &text(&run.stderr);
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{}: {}",
+            file.display(),
+            printed
+        );
+        assert!(
+            printed.contains("E0116"),
+            "{}: no E0116 in {}",
+            file.display(),
+            printed
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,
