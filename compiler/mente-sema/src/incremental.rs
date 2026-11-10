@@ -593,6 +593,11 @@ mod tests {
             "module m\n\nfn r() -> ]\nfn\n",
             "module m\n\npub fn f() -> 20]i32 = 0\npub fn g() -> u8 = 1\n",
             "module m\n\npub fn f() -> [4 = 0\npub fn g() -> u8 = 1\n",
+            // An expression body or a contract that would go on past a newline, before a line
+            // that begins an item: a declaration, or a comment in the first column.
+            "module m\n\nfn t() =\npub fn g() -> i32 = 0\n",
+            "module m\n\npub fn f(x: i32) -> i32 = x +\n// note\n  1\n",
+            "module m\n\npub fn f(x: i32) -> i32\n  requires x >\npub fn g() -> i32 = 0\n",
         ] {
             let s = Session::new(src);
             let whole = check_source(src).err().unwrap_or_default();

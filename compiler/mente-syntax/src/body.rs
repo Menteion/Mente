@@ -50,8 +50,9 @@ pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>
     };
     let syntax = p.function();
     // A tree too high for the phases that recurse over it, such as a long chain of `+`,
-    // which the parser reads in a loop.
-    if p.errors.is_empty() {
+    // which the parser reads in a loop: measured after another error too, since a phase that
+    // reads a tree with errors, as `mn dump --tree` does, recurses over it all the same.
+    if !p.errors.iter().any(|e| e.code == "E0127") {
         if let Some(span) = syntax.tree.too_deep(NESTING_LIMIT) {
             p.errors.push(too_deep(span));
         }
@@ -2671,6 +2672,20 @@ _ == b"
             f(format!("{}x", r("- ", 200))),
         ] {
             assert!(codes(src.clone()).is_empty(), "{}", &src[..80]);
+        }
+        // A chain past the limit with another error in it is measured too: `mn dump --tree`
+        // recurses over a tree with errors (the fuzzer's finding 12).
+        for (src, other) in [
+            (f(format!("x{}[0", r("[0]", 300))), "E0111"),
+            (f(format!("x{} +", r(" + 1", 300))), "E0110"),
+        ] {
+            let got = codes(src.clone());
+            assert!(
+                got.contains(&"E0127") && got.contains(&other),
+                "{}: {:?}",
+                &src[..80],
+                got
+            );
         }
     }
 }
