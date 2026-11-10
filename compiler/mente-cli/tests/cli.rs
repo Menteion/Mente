@@ -895,3 +895,47 @@ pub fn k(a: i128, b: u128) -> i128 = a + b
     }
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// An expression of no type, a `todo` body or an `if` whose branches all return, runs alike on
+/// the reference interpreter, through MIR and as native code.
+#[test]
+fn test_expressions_of_no_type_run_alike_on_every_path() {
+    let dir = scratch("never");
+    fs::write(
+        dir.join("n.mn"),
+        "module m
+pub fn f() -> i32 = todo(\"x\")
+pub fn g(c: bool) -> i32 {
+  if c {
+    return 1
+  } else {
+    return 2
+  }
+}
+",
+    )
+    .unwrap();
+    for (call, status, printed) in [
+        ("f()", 1, "n.mn: trap[todo] at 2:21: todo reached: x"),
+        ("g(true)", 0, "1"),
+        ("g(false)", 0, "2"),
+    ] {
+        for path in [None, Some("--mir"), Some("--native")] {
+            let mut args = vec!["run", "n.mn", "--call", call];
+            args.extend(path);
+            let out = mn(&dir, &args);
+            assert_eq!(out.status.code(), Some(status), "{call} {path:?}");
+            let shown = if status == 0 {
+                &out.stdout
+            } else {
+                &out.stderr
+            };
+            assert_eq!(
+                text(shown).replace("\r\n", "\n").trim_end(),
+                printed,
+                "{call} {path:?}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
