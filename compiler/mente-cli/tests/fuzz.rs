@@ -393,12 +393,57 @@ fn test_fuzz_regressions_replay_without_a_failure() {
     replay(&files);
 }
 
-/// Found by `mn fuzz`: an array type of 2^32 elements or more checks, but does not lower ("an
-/// array of 4294967296 elements").
+/// Found by `mn fuzz`: an array type of 2^32 elements or more checked, but did not lower ("an
+/// array of 4294967296 elements"). An array holds at most 4,294,967,295 bytes, its length times
+/// its element's size, and a larger array type or literal is `E0223`: as a parameter, as a
+/// local and as a repeat literal, with no crash in any phase.
 #[test]
-#[ignore = "pending a limit on array lengths in the checker, or their lowering"]
-fn fuzz_lower_array_of_2_to_the_32_elements() {
-    replay(&[regressions().join("lower-array-of-2-to-the-32-elements.mn")]);
+#[ignore = "pending E0223 (PR 92)"]
+fn fuzz_array_past_four_gigabytes_is_e0223() {
+    let dir = scratch("e0223");
+    let local = dir.join("seeds").join("local.mn");
+    fs::write(
+        &local,
+        "module m
+pub fn f() -> u8 {
+  val a: [4294967296]u8 = [0; 4294967296]
+  a[0]
+}
+",
+    )
+    .unwrap();
+    let wide = dir.join("seeds").join("wide.mn");
+    fs::write(
+        &wide,
+        "module m
+pub fn f(a: [1073741824]i64) -> i64 = 0
+",
+    )
+    .unwrap();
+    let files = [
+        regressions().join("lower-array-of-2-to-the-32-elements.mn"),
+        local,
+        wide,
+    ];
+    replay(&files);
+    for file in &files {
+        let run = mn(&["check", file.to_str().unwrap()], None);
+        let printed = text(&run.stdout) + &text(&run.stderr);
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{}: {}",
+            file.display(),
+            printed
+        );
+        assert!(
+            printed.contains("E0223"),
+            "{}: no E0223 in {}",
+            file.display(),
+            printed
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,
