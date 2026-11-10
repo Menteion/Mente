@@ -126,6 +126,38 @@ fn test_wide_arithmetic_is_checked_at_each_operator() {
         ("narrowing".to_string(), 4, 3)
     );
     assert_eq!(run(cube, "h(1000)"), "1000000000");
+    // A negation of an `i128` is checked at the operator, before its value lands anywhere.
+    let neg = "pub fn n(a: i128) -> i8 = -a";
+    assert_eq!(
+        run(neg, "n(-170141183460469231731687303715884105728)"),
+        "trap[narrowing] at 2:27: 170141183460469231731687303715884105728 does not fit in `i128`"
+    );
+    assert_eq!(run(neg, "n(5)"), "-5");
+    // A literal reaches `i128`'s smallest value right after its unary `-`.
+    assert_eq!(
+        run(
+            "pub fn m() -> i128 = -170141183460469231731687303715884105728",
+            "m()"
+        ),
+        "-170141183460469231731687303715884105728"
+    );
+}
+
+#[test]
+fn test_array_literal_elements_are_narrowed_into_its_element_type() {
+    // The literal's element type comes from its elements, `u64`, before it lands in `[2]i8`.
+    let src = "pub fn f(a: u64) -> [2]i8 = [a, 0 - a]";
+    assert_eq!(
+        run(src, "f(1)"),
+        "trap[narrowing] at 2:29: -1 does not fit in `u64`"
+    );
+    assert_eq!(run(src, "f(0)"), "[0, 0]");
+    let repeat = "pub fn g(a: i16) -> [2]u8 = [a - 1; 2]";
+    assert_eq!(
+        run(repeat, "g(0)"),
+        "trap[narrowing] at 2:29: -1 does not fit in `u8`"
+    );
+    assert_eq!(run(repeat, "g(3)"), "[2, 2]");
 }
 
 #[test]
@@ -709,4 +741,25 @@ fn test_function_measures_are_lexicographic() {
     // Each part is never negative.
     let negative = "pub fn r(a: i8, b: i8) -> i8\n  decreases a\n  decreases b\n= 0";
     assert_eq!(kind(negative, "r(1, -1)"), "decreases");
+}
+
+#[test]
+fn test_an_argument_of_another_shape_is_refused_before_anything_runs() {
+    let src = "pub fn h(xs: [2]u8) -> u8 = xs[0]\npub fn b(x: bool) -> bool = x";
+    for (call, value) in [
+        ("h([1])", "[1]"),
+        ("h([1, 2, 3])", "[1, 2, 3]"),
+        ("h([true, 2])", "[true, 2]"),
+        ("h(5)", "5"),
+        ("b(1)", "1"),
+    ] {
+        assert_eq!(
+            run(src, call),
+            format!("`{}` does not have its parameter's shape", value),
+            "{}",
+            call
+        );
+    }
+    assert_eq!(run(src, "h([1, 2])"), "1");
+    assert_eq!(run(src, "b(true)"), "true");
 }

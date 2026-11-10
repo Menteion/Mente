@@ -43,6 +43,18 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
     }
 }
 
+/// Whether `v` has the shape of a value of type `ty`: an integer, a `bool`, or an array of its
+/// length whose elements have its element's shape. Its range is not checked here.
+fn shaped(v: &Value, ty: &Ty) -> bool {
+    match (v, ty) {
+        (Value::Int(_), Ty::Int(_)) | (Value::Bool(_), Ty::Bool) => true,
+        (Value::Array(items), Ty::Array(n, elem)) => {
+            items.len() as u128 == *n && items.iter().all(|i| shaped(i, elem))
+        }
+        _ => false,
+    }
+}
+
 /// One call: its function and the values of its bindings.
 struct Frame<'m> {
     index: usize,
@@ -92,6 +104,18 @@ impl<'m> Machine<'m> {
                 f.syntax.params.len(),
                 args.len()
             )));
+        }
+        // An argument must have its parameter's shape: an integer, a `bool`, or an array of the
+        // parameter's length whose elements have its element's shape. One that does not is no
+        // call of this function, so it is refused before anything runs, on every path alike.
+        let tree = &f.syntax.tree;
+        for (p, v) in f.syntax.params.iter().zip(&args) {
+            if !shaped(v, &Ty::of(tree, p.ty)) {
+                return Err(Stop::BadArguments(format!(
+                    "`{}` does not have its parameter's shape",
+                    v
+                )));
+            }
         }
         let spans = vec![f.syntax.name_span; args.len()];
         self.call(index, args, &spans, f.syntax.name_span, None)
@@ -469,7 +493,15 @@ impl<'m> Machine<'m> {
             }
             ExprKind::Unary { op, operand } => match op {
                 UnaryOp::Not => Value::Bool(!self.cond(frame, *operand)?),
-                UnaryOp::Neg => Value::Int(self.int(frame, *operand, ctx)?.negate()),
+                UnaryOp::Neg => {
+                    let x = self.int(frame, *operand, ctx)?.negate();
+                    // On an `i128` or `u128` operand, checked at the operator (`core-calculus.md`,
+                    // item 4).
+                    match int_ty(&f.typing.exprs[operand.0 as usize]).filter(|t| t.bits == 128) {
+                        Some(t) => Value::Int(fit(x, t, span)?),
+                        None => Value::Int(x),
+                    }
+                }
                 UnaryOp::BitNot => {
                     let ty = &f.typing.exprs[operand.0 as usize];
                     let t = int_ty(ty).or(ctx).unwrap_or(I64);
@@ -546,14 +578,21 @@ impl<'m> Machine<'m> {
                 }
                 result
             }
+            // Each element is narrowed into the literal's element type, at the literal
+            // (`core-calculus.md`, item 4).
             ExprKind::Array(items) => {
-                let elem = match &f.typing.exprs[e.0 as usize] {
-                    Ty::Array(_, elem) => int_ty(elem),
+                let elem_ty = match &f.typing.exprs[e.0 as usize] {
+                    Ty::Array(_, elem) => Some(elem.as_ref()),
                     _ => None,
                 };
+                let elem = elem_ty.and_then(int_ty);
                 let mut values = Vec::new();
                 for &i in items {
-                    values.push(self.eval(frame, i, elem.or(ctx))?);
+                    let v = self.eval(frame, i, elem.or(ctx))?;
+                    values.push(match elem_ty {
+                        Some(t) => self.narrow_plain(v, t, span)?,
+                        None => v,
+                    });
                 }
                 Value::Array(values)
             }
@@ -562,6 +601,10 @@ impl<'m> Machine<'m> {
                     return Err(Exit::Stop(Stop::TooLarge(*count)));
                 }
                 let v = self.eval(frame, *value, ctx)?;
+                let v = match &f.typing.exprs[e.0 as usize] {
+                    Ty::Array(_, elem) => self.narrow_plain(v, elem, span)?,
+                    _ => v,
+                };
                 Value::Array(vec![v; *count as usize])
             }
             ExprKind::If {

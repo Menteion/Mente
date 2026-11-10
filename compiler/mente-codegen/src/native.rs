@@ -31,7 +31,7 @@ use cranelift_module::{DataDescription, DataId, FuncId as ClFunc, Linkage, Modul
 use mente_mir::cfg::{self, ArithOp, BitOp, CmpOp, IntTy, Num, Op, Term};
 use mente_mir::NodeId;
 
-use crate::lower::{Lowered, Shape};
+use crate::lower::{Entry, Lowered, Shape};
 use crate::{CodegenError, ObjectWriter, SourcePos, Target};
 
 /// One call the program makes: an entry of the lowered module, by its index, and its
@@ -91,6 +91,36 @@ struct Runtime {
     print: ClFunc,
     udivmod: ClFunc,
     strings: HashMap<String, DataId>,
+}
+
+/// The trap a call of `entry` from outside the program raises on `args` before anything else,
+/// if an argument does not fit its parameter's type: the reference interpreter narrows every
+/// argument into its parameter's type first, in order and element by element, at the function's
+/// name, and reports the first value that does not fit. The entry takes each argument in its
+/// parameter's own type, which cannot hold such a value, so whoever calls the entry narrows
+/// every argument this way first; the entry then checks the refinements, as the interpreter
+/// does once every argument is narrowed.
+pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
+    fn first(shape: &Shape, arg: &Arg) -> Option<(Num, &'static str)> {
+        match (shape, arg) {
+            (Shape::Int(t), Arg::Int(n)) => {
+                (!crate::lower::mir(*t).holds(*n)).then_some((*n, t.name))
+            }
+            (Shape::Array(_, elem), Arg::Array(items)) => items.iter().find_map(|a| first(elem, a)),
+            _ => None,
+        }
+    }
+    entry
+        .params
+        .iter()
+        .zip(args)
+        .find_map(|((_, shape), arg)| first(shape, arg))
+        .map(|(n, t)| {
+            format!(
+                "trap[narrowing] at {}:{}: {} does not fit in `{}`",
+                entry.at.line, entry.at.col, n, t
+            )
+        })
 }
 
 /// Writes an object with every function of `lowered`, the runtime, and a `main` that makes the
@@ -178,7 +208,15 @@ pub fn program(
         Translate::function(writer, &mut rt, &ids, f, &mut ctx, &mut fctx, ptr, prefix)?;
         writer.define_function_as(ids[i], &mut ctx, decl, &f.name)?;
     }
-    define_main(writer, &mut rt, &ids, lowered, calls, &mut fctx, ptr, conv)?;
+    define_main(
+        writer,
+        &mut rt,
+        &ids,
+        (lowered, calls),
+        &mut fctx,
+        (ptr, conv),
+        prefix,
+    )?;
     Ok(())
 }
 
@@ -755,8 +793,10 @@ impl Translate {
                 trap: Some(site),
             } => {
                 let i = int(rty)?;
-                let (sa, ma) = e.sign_mag(args[0], i);
-                let (sb, mb) = e.sign_mag(args[1], i);
+                // Each operand in its own type, which may differ from the checked one.
+                let (ta, tb) = (int(f.ty(f.args(v)[0]))?, int(f.ty(f.args(v)[1]))?);
+                let (sa, ma) = e.sign_mag(args[0], ta);
+                let (sb, mb) = e.sign_mag(args[1], tb);
                 let (neg, mag, beyond) = match op {
                     ArithOp::Add | ArithOp::Sub => {
                         let sb = if *op == ArithOp::Sub {
@@ -1150,16 +1190,14 @@ fn checked_result(
 
 /// `main`: sets up `call`'s arguments in memory where they are arrays or `mut`, calls its
 /// entry, and writes the result and what each `mut` argument leaves, as `mn run` does.
-#[allow(clippy::too_many_arguments)]
 fn define_main(
     writer: &mut ObjectWriter,
     rt: &mut Runtime,
     ids: &[ClFunc],
-    lowered: &Lowered,
-    calls: &[Call],
+    (lowered, calls): (&Lowered, &[Call]),
     fctx: &mut FunctionBuilderContext,
-    ptr: Type,
-    conv: cranelift_codegen::isa::CallConv,
+    (ptr, conv): (Type, cranelift_codegen::isa::CallConv),
+    prefix: &str,
 ) -> Result<(), CodegenError> {
     let mut sig = ir::Signature::new(conv);
     sig.params.push(AbiParam::new(types::I32));
@@ -1222,7 +1260,7 @@ fn define_main(
             let is = b.ins().icmp_imm_u(IntCC::Equal, index, k as i64);
             b.ins().brif(is, here, &[], tests, &[]);
             b.switch_to_block(here);
-            make_call(writer, rt, ids, lowered, call, &mut b, ptr)?;
+            make_call(writer, rt, ids, (lowered, call), &mut b, ptr, prefix)?;
         }
         b.switch_to_block(tests);
         let none = b.ins().iconst(types::I32, 2);
@@ -1234,15 +1272,16 @@ fn define_main(
 }
 
 /// The code of one call in `main`: its arguments, the call of its entry, and what `mn run`
-/// writes, then a return of 0.
+/// writes, then a return of 0; or, for an argument that does not fit its parameter's type, the
+/// reference interpreter's trap ([`refusal`]).
 fn make_call(
     writer: &mut ObjectWriter,
     rt: &mut Runtime,
     ids: &[ClFunc],
-    lowered: &Lowered,
-    call: &Call,
+    (lowered, call): (&Lowered, &Call),
     b: &mut FunctionBuilder,
     ptr: Type,
+    prefix: &str,
 ) -> Result<(), CodegenError> {
     let entry = lowered
         .entries
@@ -1251,6 +1290,11 @@ fn make_call(
     let mir = &lowered.module.functions[entry.func.0 as usize];
     {
         let mut e = Emit { b, ptr };
+        if let Some(trap) = refusal(entry, &call.args) {
+            emit_text(writer, rt, &mut e, 2, &format!("{}{}\n", prefix, trap))?;
+            emit_exit(writer, rt, &mut e, 1);
+            return Ok(());
+        }
         let mut params = mir.params.iter();
         let mut flat = Vec::new();
         let wide = returns_wide(mir, ptr).then(|| slot(&mut e, 16));
@@ -1420,10 +1464,32 @@ fn print_at(
     Ok(())
 }
 
-/// Builds the executable `exe` for the host: every function of `lowered`, the runtime and a
-/// `main` that makes the call `argv[1]` numbers among `calls`, compiled for the host's baseline,
-/// written as an object beside `exe`, and linked. `source` names the `.mn` file in the debug
-/// information; `prefix` starts every trap's message.
+/// The object of a program for `target`: every function of `lowered`, the runtime and a `main`
+/// that makes the call `argv[1]` numbers among `calls`, compiled for `target`'s baseline
+/// processor. `source` names the `.mn` file in the debug information, and `object_name` the
+/// object's own file name, which CodeView records; `prefix` starts every trap's message.
+///
+/// Its bytes depend on these arguments alone: compiling twice, or on another machine, gives the
+/// same object.
+pub fn object(
+    lowered: &Lowered,
+    calls: &[Call],
+    prefix: &str,
+    source: crate::SourceFile,
+    object_name: &str,
+    target: Target,
+) -> Result<Vec<u8>, CodegenError> {
+    let isa = target.isa(
+        cranelift_codegen::settings::OptLevel::Speed,
+        crate::Cpu::Baseline,
+    )?;
+    let mut writer = ObjectWriter::new(isa, source, object_name)?;
+    program(lowered, calls, prefix, &mut writer)?;
+    writer.finish()
+}
+
+/// Builds the executable `exe` for the host: the program's [`object`], written beside `exe`,
+/// and linked.
 pub fn executable(
     lowered: &Lowered,
     calls: &[Call],
@@ -1432,23 +1498,17 @@ pub fn executable(
     exe: &std::path::Path,
 ) -> Result<(), CodegenError> {
     let target = Target::host().ok_or_else(|| err("no native code for this host"))?;
-    let isa = target.isa(
-        cranelift_codegen::settings::OptLevel::Speed,
-        crate::Cpu::Baseline,
-    )?;
-    let object = object_path(exe, target);
-    let name = object
+    let path = object_path(exe, target);
+    let name = path
         .file_name()
         .map_or_else(|| "program.o".into(), |n| n.to_string_lossy().into_owned());
-    let mut writer = ObjectWriter::new(isa, source, &name)?;
-    program(lowered, calls, prefix, &mut writer)?;
-    let bytes = writer.finish()?;
-    std::fs::write(&object, bytes).map_err(|e| err(format!("{}: {e}", object.display())))?;
-    crate::link::link(&object, exe, target)
+    let bytes = object(lowered, calls, prefix, source, &name, target)?;
+    std::fs::write(&path, bytes).map_err(|e| err(format!("{}: {e}", path.display())))?;
+    crate::link::link(&path, exe, target)
 }
 
 /// The object file `executable` writes beside `exe`, with the extension of `target`'s format.
-fn object_path(exe: &std::path::Path, target: Target) -> std::path::PathBuf {
+pub fn object_path(exe: &std::path::Path, target: Target) -> std::path::PathBuf {
     exe.with_extension(match target {
         Target::X86_64Windows => "obj",
         Target::X86_64Linux | Target::Aarch64Linux => "o",
@@ -1592,5 +1652,95 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         assert_eq!(power_of_two(Some(10)), None);
         assert_eq!(power_of_two(Some(0)), None);
         assert_eq!(power_of_two(None), None);
+    }
+
+    /// A call from outside reports the first argument, in order and element by element, that its
+    /// parameter's type cannot hold, as the reference interpreter's narrowing at the function's
+    /// name does, whether or not the entry's MIR parameter could hold it.
+    #[test]
+    fn test_an_argument_outside_its_type_traps_as_the_reference_interpreter_does() {
+        let source = "module m
+pub fn f(a: i128, xs: [2]u8, mut b: u128) -> i128 {
+  b = 0
+  a + xs[0]
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let entry = lowered.entries.iter().find(|e| e.name == "f").unwrap();
+        let int = |n: i128| Arg::Int(Num::from_i128(n));
+        let args = |a: Arg, xs: [i128; 2], b: Arg| vec![a, Arg::Array(xs.map(int).to_vec()), b];
+        let below_i128 = Arg::Int(Num::new(true, (1u128 << 127) + 1));
+        assert_eq!(refusal(entry, &args(int(1), [2, 3], int(4))), None);
+        assert_eq!(
+            refusal(entry, &args(below_i128.clone(), [2, 3], int(4))).as_deref(),
+            Some("trap[narrowing] at 2:8: -170141183460469231731687303715884105729 does not fit in `i128`")
+        );
+        // The first value that does not fit, though a later one does not either.
+        assert_eq!(
+            refusal(entry, &args(int(1), [300, -1], int(-1))).as_deref(),
+            Some("trap[narrowing] at 2:8: 300 does not fit in `u8`")
+        );
+        assert_eq!(
+            refusal(entry, &args(int(1), [2, 3], int(-1))).as_deref(),
+            Some("trap[narrowing] at 2:8: -1 does not fit in `u128`")
+        );
+        // An argument of another shape is not a narrowing; the caller refuses it otherwise.
+        assert_eq!(refusal(entry, &args(Arg::Bool(true), [2, 3], int(4))), None);
+    }
+
+    /// The symbols of an object that are not the program's own functions: what it imports, and
+    /// each function it defines whose name does not start with `mente_f`.
+    fn platform_symbols(bytes: &[u8]) -> BTreeSet<String> {
+        use object::{Object as _, ObjectSymbol as _, SymbolKind};
+        let file = object::File::parse(bytes).unwrap();
+        file.symbols()
+            .filter(|s| s.is_undefined() || (s.is_definition() && s.kind() == SymbolKind::Text))
+            .map(|s| s.name().unwrap().to_string())
+            .filter(|name| !name.is_empty() && !name.starts_with("mente_f"))
+            .collect()
+    }
+
+    /// Every function and import of a native program beyond its Mente functions is listed in
+    /// the platform layer, and every symbol listed there is in some target's object.
+    #[test]
+    fn test_every_symbol_outside_the_program_is_listed_in_the_platform_layer() {
+        let doc = include_str!("../../../docs/platform-layer.md");
+        let listed: BTreeSet<String> = doc
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|rest| rest.split_once('`'))
+            .map(|(name, _)| name.to_string())
+            .collect();
+        // A copy of an array, a 128-bit division and a trap, so that every part is used.
+        let source = "module m
+pub fn f(xs: [8]u64, d: u128) -> u64 {
+  var ys: [8]u64 = xs
+  ys[0] = 1
+  val q: u64 = 1000 / d
+  ys[0] + q
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let mut seen = BTreeSet::new();
+        for target in Target::ALL {
+            let mut w = writer(target);
+            program(&lowered, &[], "", &mut w).unwrap();
+            let symbols = platform_symbols(&w.finish().unwrap());
+            for name in &symbols {
+                assert!(
+                    listed.contains(name),
+                    "{target:?}: `{name}` is in the object but not in docs/platform-layer.md"
+                );
+            }
+            seen.extend(symbols);
+        }
+        for name in &listed {
+            assert!(
+                seen.contains(name),
+                "docs/platform-layer.md lists `{name}`, which no object has"
+            );
+        }
     }
 }

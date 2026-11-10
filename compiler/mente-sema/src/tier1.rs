@@ -525,9 +525,12 @@ fn rem_interval(st: &Octagon, l: &Val, r: &Val) -> (i128, i128) {
 }
 
 /// The range of an integer type; a 128-bit one reaches beyond the domain, so it is unbounded.
+/// The range of an integer type in the domain. The 128-bit types reach past the domain's bound,
+/// so their upper end is unbounded, and so is `i128`'s lower end; `u128` keeps its lower end,
+/// 0, without which a negative value would be proven to fit it.
 fn int_range(t: IntTy) -> (i128, i128) {
     if t.bits == 128 {
-        return (-INF, INF);
+        return (if t.signed { -INF } else { 0 }, INF);
     }
     (-(t.min_magnitude() as i128), t.max() as i128)
 }
@@ -4179,6 +4182,23 @@ mod tests {
             obligations("pub fn f(a: i8, b: i8) -> i32 = a + b"),
             [(Range, false, true)]
         );
+        // A value that may be negative is never proven to fit `u128`, whose range starts at 0
+        // though its top lies past the domain's bound; one that is never negative is.
+        for src in [
+            "pub fn f(x: i8) -> u128 = x",
+            "pub fn f(p: i32) -> u128 = 4 * p",
+            "pub fn f(p: i32) -> u128 = p + 1",
+        ] {
+            assert_eq!(obligations(src), [(Range, false, false)], "{}", src);
+        }
+        assert_eq!(
+            obligations("pub fn f(x: u64) -> u128 = x"),
+            [(Range, false, true)]
+        );
+        assert_eq!(
+            obligations("pub fn f(x: i8[0..=5]) -> u128 = x"),
+            [(Range, false, true)]
+        );
         // An array argument narrows each element into the parameter's element type.
         assert_eq!(
             obligations("pub fn g(xs: [2]u8) -> u8 = xs[0]\npub fn f(ys: [2]u8) -> u8 = g(ys)"),
@@ -4836,6 +4856,8 @@ mod tests {
         let u64_ = IntTy::named("u64").unwrap_or(crate::types::I64);
         assert_eq!(int_range(u8_), (0, 255));
         assert_eq!(int_range(i128_), (-INF, INF));
+        let u128_ = IntTy::named("u128").unwrap_or(crate::types::I64);
+        assert_eq!(int_range(u128_), (0, INF));
         assert_eq!(int_range(u64_), (0, u64::MAX as i128));
         assert_eq!(bit_not(&TOP, Some(u8_)), TOP);
         assert_eq!(bit_not(&Val::Lin(vec![], 1), None), TOP);
@@ -5334,6 +5356,11 @@ mod tests {
         assert_eq!(
             messages("pub fn f(x: u8) -> i8 = x - 400"),
             ["Tier 1 proves `x - 400` is at most -145 here, outside `i8` (-128 to 127), so this narrowing always traps"]
+        );
+        // A constant near the domain's bound, whose bounds' sums once overflowed the octagon.
+        assert_eq!(
+            messages("pub fn f() -> usize = 5_i128 - 14761039043817650164173161250659845712_i128"),
+            ["Tier 1 proves `5_i128 - 14761039043817650164173161250659845712_i128` is at most -14761039043817650164173161250659845707 here, outside `usize` (0 to 18446744073709551615), so this narrowing always traps"]
         );
         for src in [
             "pub fn f(x: u8) {\n  var y: u8 = 0\n  y = x + 256\n  _ = y\n}",

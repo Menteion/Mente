@@ -1,7 +1,9 @@
 //! Lowering a checked module into MIR (`spec/mir-and-codegen.md` item 2).
 //!
-//! Each function with a body becomes a MIR function, and each also gets an entry, which checks
-//! arguments from outside the program as a call does and then calls it. The lowering follows
+//! Each function with a body becomes a MIR function, and each also gets an entry, which takes
+//! arguments from outside the program, each already narrowed into its parameter's type by
+//! whoever calls the entry ([`crate::native::refusal`]), checks the rest as a call does, and
+//! then calls it. The lowering follows
 //! the reference interpreter (`compiler/mente-interp`) step for step, so that the MIR
 //! interpreter and native code trap where it does and say what it says:
 //!
@@ -47,6 +49,9 @@ pub struct Entry {
     pub func: FuncId,
     pub params: Vec<(bool, Shape)>,
     pub result: Shape,
+    /// The function's name in the source, where a call from outside the program reports an
+    /// argument its parameter's type cannot hold.
+    pub at: Loc,
 }
 
 /// The shape of a value: an integer of a type, a boolean, an array, or nothing.
@@ -101,9 +106,6 @@ const I64: SemaIntTy = SemaIntTy {
 const USIZE: IntTy = IntTy::new(64, false);
 /// The type a loop keeps its measure in, which is never negative there.
 const MEASURE: IntTy = IntTy::new(128, false);
-/// The type an entry takes an integer argument in, so that a value outside the parameter's type
-/// still reaches the narrowing that rejects it.
-const ENTRY: IntTy = IntTy::new(128, true);
 
 fn int_ty(i: &SemaInt) -> Option<SemaIntTy> {
     match i {
@@ -215,6 +217,10 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
                 func,
                 params: sig.params.clone(),
                 result: sig.result.clone(),
+                at: Loc {
+                    line: f.syntax.name_span.line,
+                    col: f.syntax.name_span.col,
+                },
             });
         }
     }
@@ -339,19 +345,7 @@ impl<'a> Lower<'a> {
         let sig = sigs[index]
             .as_ref()
             .ok_or("a function without a signature")?;
-        let (mut params, result) = mir_params(sig);
-        if entry {
-            let first = usize::from(matches!(sig.result, Shape::Array(..)));
-            for (p, (is_mut, shape)) in params[first..].iter_mut().zip(&sig.params) {
-                if let (false, Shape::Int(t)) = (is_mut, shape) {
-                    *p = Ty::Int(if t.bits == 128 && !t.signed {
-                        mir(*t)
-                    } else {
-                        ENTRY
-                    });
-                }
-            }
-        }
+        let (params, result) = mir_params(sig);
         let obligations: &'a [Obligation] = if entry { &[] } else { &s.f.obligations };
         let decl = s.f.syntax.name_span;
         let b = Builder::declared_at(
@@ -534,8 +528,9 @@ impl<'a> Lower<'a> {
             .collect()
     }
 
-    /// The entry: a function taking what the lowered one takes, which checks its arguments as a
-    /// call does, at the function's name, and calls it.
+    /// The entry: a function taking what the lowered one takes, each argument already in its
+    /// parameter's type, which checks the rest as a call does, at the function's name, and calls
+    /// it.
     fn entry(mut self) -> Result<cfg::Function, String> {
         let span = self.s.f.syntax.name_span;
         let sig = self.sig_of(self.s.index)?;
@@ -550,14 +545,7 @@ impl<'a> Lower<'a> {
             let p = params.next().ok_or("too few parameters")?;
             let declared = Some(self.s.f.syntax.params[i].ty);
             args.push(match (is_mut, shape) {
-                (false, Shape::Int(t)) => {
-                    let wide = if t.bits == 128 && !t.signed {
-                        mir(*t)
-                    } else {
-                        ENTRY
-                    };
-                    Arg::Value(V::Int(p, wide), span, shape.clone())
-                }
+                (false, Shape::Int(t)) => Arg::Value(V::Int(p, mir(*t)), span, shape.clone()),
                 (false, Shape::Bool) => Arg::Value(V::Bool(p), span, shape.clone()),
                 (false, _) => Arg::Value(V::Arr(p), span, shape.clone()),
                 (true, shape) => Arg::Place(p, shape.clone(), declared, span),
@@ -1310,8 +1298,14 @@ impl<'a> Lower<'a> {
 
     // -- expressions -----------------------------------------------------------------------
 
+    /// The shape of `e`'s value. An expression of no type, such as a `todo` or an `if` whose
+    /// branches all leave, gives no value, `V::Never`, and its shape is never used: it is
+    /// given as `Unit`.
     fn shape(&self, e: ExprId) -> Result<Shape, String> {
-        Shape::of(&self.s.f.typing.exprs[e.0 as usize])
+        match &self.s.f.typing.exprs[e.0 as usize] {
+            SemaTy::Any => Ok(Shape::Unit),
+            t => Shape::of(t),
+        }
     }
 
     fn interval(&self, e: ExprId) -> Option<Interval> {
@@ -1361,10 +1355,7 @@ impl<'a> Lower<'a> {
                     V::Bool(b) => V::Bool(self.inst(Op::Not, Ty::Bool, &[b])),
                     v => v,
                 },
-                UnaryOp::Neg => {
-                    let v = self.expr(*operand)?;
-                    self.negate(e, *operand, v, span)?
-                }
+                UnaryOp::Neg => self.negate(e, *operand, span)?,
                 UnaryOp::BitNot => {
                     let t = self.int_of(*operand).unwrap_or(I64);
                     let v = self.expr(*operand)?;
@@ -1617,6 +1608,10 @@ impl<'a> Lower<'a> {
         };
         self.meet(v, join, join_ty);
         self.b.switch(join);
+        // An `if` of no type has branches that all leave, so nothing reaches its end.
+        if matches!(self.s.f.typing.exprs[e.0 as usize], SemaTy::Any) {
+            return Ok(V::Never);
+        }
         Ok(match (join_ty, self.b.params(join).first()) {
             (Some(Ty::Int(t)), Some(&p)) => V::Int(p, t),
             (Some(Ty::Bool), Some(&p)) => V::Bool(p),
@@ -1636,7 +1631,22 @@ impl<'a> Lower<'a> {
         self.jump(join, args);
     }
 
-    fn negate(&mut self, e: ExprId, operand: ExprId, v: V, span: Span) -> Result<V, String> {
+    fn negate(&mut self, e: ExprId, operand: ExprId, span: Span) -> Result<V, String> {
+        // A literal's negation is a constant. `-170141183460469231731687303715884105728` is
+        // `i128`'s smallest value, though its literal lies outside `i128` (`core-calculus.md`
+        // item 5) and no operation could hold both; and on a literal of any type but `u128`,
+        // whose negation the operator checks, it never traps.
+        if let ExprKind::Int { value, .. } = self.tree().expr(operand).kind {
+            if self
+                .int_of(operand)
+                .is_none_or(|w| w.signed || w.bits < 128)
+            {
+                let n = Num::new(value != 0, value);
+                let m = machine(n, n).ok_or("a literal beyond 128 bits")?;
+                return Ok(V::Int(self.int(m, n), m));
+            }
+        }
+        let v = self.expr(operand)?;
         let V::Int(x, t) = v else {
             return Ok(v);
         };
@@ -1770,20 +1780,31 @@ impl<'a> Lower<'a> {
                     Some(w) => mir(w),
                     None => self.op_type(&[li, ri, ctx], ta)?,
                 };
-                let x = self.cast(a, ta, m);
-                let y = self.cast(b, tb, m);
+                // An operand whose type the operation's does not hold, an `i32` beside a `u128`,
+                // keeps its own: only a checked operation, which computes its exact result
+                // first, takes operands of other types.
+                let keeps =
+                    |t: IntTy| wide.is_some() && !(m.min() <= t.min() && t.max() <= m.max());
+                let mixed = keeps(ta) || keeps(tb);
+                let x = if keeps(ta) { a } else { self.cast(a, ta, m) };
+                let (y, ty) = if keeps(tb) {
+                    (b, tb)
+                } else {
+                    (self.cast(b, tb, m), m)
+                };
                 let divides = matches!(arith, ArithOp::Div | ArithOp::Rem);
                 let divisor = Key::at(tree.expr(re).span, Tag::None);
                 if divides && !self.proven(ObligationKind::Divisor, divisor) {
-                    let zero = self.int(m, Num::ZERO);
+                    let zero = self.int(ty, Num::ZERO);
                     let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
                     self.check(ok, "division-by-zero", &["division by zero"], &[], span);
                 }
                 // An operation on a 128-bit operand is checked unless Tier 1 proves its result
-                // fits.
+                // fits, and always when its operands have other types.
                 let trap = wide
                     .filter(|w| {
-                        !self.proven(ObligationKind::Range, Key::at(span, Tag::Into(w.name)))
+                        mixed
+                            || !self.proven(ObligationKind::Range, Key::at(span, Tag::Into(w.name)))
                     })
                     .map(|w| {
                         let after = format!(" does not fit in `{}`", w.name);
@@ -1967,6 +1988,39 @@ mod tests {
         assert!(Shape::of(&SemaTy::Any).is_err());
     }
 
+    /// An expression of no type gives no value: a `todo` body, and an `if` whose branches all
+    /// return, lower, and nothing reaches their end but the trap that marks it unreachable.
+    #[test]
+    fn test_an_expression_of_no_type_lowers_to_no_value() {
+        let source = "module m
+pub fn f() -> i32 = todo(\"x\")
+pub fn g(c: bool) -> i32 {
+  if c {
+    return 1
+  } else {
+    return 2
+  }
+}
+";
+        let module = mente_sema::check_program(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let text = lowered.module.to_string();
+        assert!(text.contains("todo reached: x"), "{}", text);
+        let g = lowered
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "g")
+            .unwrap();
+        // Both branches return; the block after the `if` only traps.
+        let returns = g
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.term, Term::Return(_)))
+            .count();
+        assert_eq!(returns, 2, "{}", g);
+    }
+
     #[test]
     fn test_machine_types_are_the_narrowest_that_hold_a_range() {
         let n = Num::from_i128;
@@ -2025,7 +2079,7 @@ mod tests {
 
     /// Where Tier 1 proves a narrowing, an index, a divisor, a shift amount or a 128-bit
     /// operation, its check is left out of MIR; where it does not, the check stays, and so does
-    /// every check of an entry, whose arguments come from outside the program.
+    /// every check of an entry, whose arguments come from outside the program, already narrowed.
     #[test]
     fn test_tier1_proofs_leave_bounds_and_overflow_checks_out_of_mir() {
         let src = "module m
@@ -2082,8 +2136,8 @@ pub fn pass2(x: u8) -> u8 = take(x + 1)
         ] {
             assert_eq!(both(name), (kinds(kept), kinds(all)), "{name}");
         }
-        // An entry checks its arguments whatever Tier 1 proves.
-        assert_eq!(checks(&proven, "enter half"), kinds(&["narrowing"]));
+        // An entry takes its arguments already narrowed into their types, by whoever calls it.
+        assert_eq!(checks(&proven, "enter half"), kinds(&[]));
     }
 
     /// Where Tier 1 proves a refinement, a `requires` or `ensures` clause, a loop invariant or
@@ -2157,10 +2211,8 @@ pub fn call_both(x: u8[0..5], y: u8[0..5]) -> u8 = both(x, y)
         ] {
             assert_eq!(both(name), (kinds(kept), kinds(all)), "{name}");
         }
-        // An entry checks its arguments' refinements whatever Tier 1 proves.
-        assert_eq!(
-            checks(&proven, "enter give"),
-            kinds(&["narrowing", refinement])
-        );
+        // An entry checks its arguments' refinements whatever Tier 1 proves; their narrowing
+        // into their types is its caller's.
+        assert_eq!(checks(&proven, "enter give"), kinds(&[refinement]));
     }
 }

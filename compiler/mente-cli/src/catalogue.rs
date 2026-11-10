@@ -643,7 +643,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
          operation of narrower operands has a static range, from its operands' types, literal \
          values, `.len` and refinements with literal bounds; one that might leave both types \
          is an error. The fix binds an operand to a `u128` or an `i128` first: an operation \
-         with a 128-bit operand is checked at the operator, against that type.",
+         with a 128-bit operand is checked at the operator, against that type. The branches of \
+         an `if` meet in one machine type too, so an `if` whose branches' values fit no one of \
+         the two together, such as an `i64` and a `u128`, is an error as well; its fix binds \
+         the higher branch's value to an `i128` inside that branch.",
         "module m\npub fn cube(a: u64) -> u128 {\n  val c: u128 = a * a * a\n  c\n}\n",
         "module m\npub fn cube(a: u64) -> u128 {\n  val product: u128 = a * a\n  val c: u128 = product * a\n  c\n}\n",
     ),

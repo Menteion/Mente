@@ -36,6 +36,17 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
             args.len()
         ));
     }
+    if let Some(why) = misshapen(entry, &args) {
+        return Err(why);
+    }
+    // An argument that does not fit its parameter's type traps before the entry is called.
+    let native_args = args
+        .iter()
+        .map(|(_, v)| native_arg(v))
+        .collect::<Result<Vec<_>, String>>()?;
+    if let Some(trap) = native::refusal(entry, &native_args) {
+        return Err(trap);
+    }
     let mut memory = Memory::default();
     let mut values = Vec::new();
     let sret = match &entry.result {
@@ -98,17 +109,25 @@ pub fn native(
     dir: &std::path::Path,
     name: &str,
 ) -> Result<Vec<Printed>, String> {
-    let defined = |f: &String| lowered.entries.iter().any(|e| &e.name == f);
-    let built: Vec<CallArgs> = calls.iter().filter(|(f, _)| defined(f)).cloned().collect();
+    // A call of no function, or with an argument of another shape, is refused, not built.
+    let refused = |(f, args): &CallArgs| match lowered.entries.iter().find(|e| &e.name == f) {
+        None => Some(format!("no function `{}` with a body to run", f)),
+        Some(entry) => misshapen(entry, args),
+    };
+    let built: Vec<CallArgs> = calls
+        .iter()
+        .filter(|c| refused(c).is_none())
+        .cloned()
+        .collect();
     let exe = dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
     if !built.is_empty() {
         build(lowered, &built, &dir.join(format!("{}.mn", name)), "", &exe)?;
     }
     let mut printed = Vec::new();
     let mut k = 0;
-    for (f, _) in calls {
-        if !defined(f) {
-            printed.push(Err(format!("no function `{}` with a body to run", f)));
+    for call in calls {
+        if let Some(why) = refused(call) {
+            printed.push(Err(why));
             continue;
         }
         let out = std::process::Command::new(&exe)
@@ -140,6 +159,33 @@ pub fn build(
     prefix: &str,
     exe: &std::path::Path,
 ) -> Result<(), String> {
+    let calls = native_calls(lowered, calls)?;
+    let source = source_file(source, None)?;
+    native::executable(lowered, &calls, prefix, source, exe).map_err(|e| e.to_string())
+}
+
+/// The object `build` would link, for `target`, written to `out`. Its debug information
+/// records `directory` as the compilation directory, `source`'s own directory by default.
+pub fn object(
+    lowered: &Lowered,
+    calls: &[CallArgs],
+    (source, directory): (&std::path::Path, Option<&str>),
+    prefix: &str,
+    (target, out): (mente_codegen::Target, &std::path::Path),
+) -> Result<(), String> {
+    let calls = native_calls(lowered, calls)?;
+    let source = source_file(source, directory)?;
+    let name = out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let bytes = native::object(lowered, &calls, prefix, source, &name, target)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(out, bytes).map_err(|e| format!("{}: {}", out.display(), e))
+}
+
+/// Each call of `calls` as native code makes it: its entry's index and its arguments.
+fn native_calls(lowered: &Lowered, calls: &[CallArgs]) -> Result<Vec<native::Call>, String> {
     let mut native_calls = Vec::new();
     for (f, args) in calls {
         let entry = lowered
@@ -147,25 +193,39 @@ pub fn build(
             .iter()
             .position(|e| &e.name == f)
             .ok_or_else(|| format!("no function `{}` with a body to run", f))?;
+        if let Some(why) = misshapen(&lowered.entries[entry], args) {
+            return Err(why);
+        }
         let args = args
             .iter()
             .map(|(_, v)| native_arg(v))
             .collect::<Result<Vec<_>, String>>()?;
         native_calls.push(native::Call { entry, args });
     }
+    Ok(native_calls)
+}
+
+/// The source file the debug information names: `source`'s file name, in `directory`, or in
+/// `source`'s own directory made absolute.
+fn source_file(
+    source: &std::path::Path,
+    directory: Option<&str>,
+) -> Result<mente_codegen::SourceFile, String> {
     let absolute =
         std::path::absolute(source).map_err(|e| format!("{}: {}", source.display(), e))?;
-    let source = mente_codegen::SourceFile {
+    Ok(mente_codegen::SourceFile {
         path: absolute
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        directory: absolute
-            .parent()
-            .map(|d| d.display().to_string())
-            .unwrap_or_default(),
-    };
-    native::executable(lowered, &native_calls, prefix, source, exe).map_err(|e| e.to_string())
+        directory: match directory {
+            Some(d) => d.to_string(),
+            None => absolute
+                .parent()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default(),
+        },
+    })
 }
 
 fn native_arg(value: &Value) -> Result<native::Arg, String> {
@@ -193,6 +253,26 @@ fn scalar(value: &Value) -> Result<Val, String> {
         Value::Bool(b) => Ok(Val::Bool(*b)),
         v => num(v).map(Val::Int),
     }
+}
+
+/// The refusal of a call from outside the program whose argument does not have its parameter's
+/// shape, in the reference interpreter's words: such a call is no call of the function.
+fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
+    fn shaped(v: &Value, shape: &Shape) -> bool {
+        match (v, shape) {
+            (Value::Int(_), Shape::Int(_)) | (Value::Bool(_), Shape::Bool) => true,
+            (Value::Array(items), Shape::Array(n, elem)) => {
+                items.len() == *n as usize && items.iter().all(|i| shaped(i, elem))
+            }
+            _ => false,
+        }
+    }
+    entry
+        .params
+        .iter()
+        .zip(args)
+        .find(|((_, shape), (_, v))| !shaped(v, shape))
+        .map(|(_, (_, v))| format!("`{}` does not have its parameter's shape", v))
 }
 
 /// Writes `value` of `shape` at `at`; an integer outside its type is refused.
@@ -608,7 +688,8 @@ pub fn below(n: i8) -> i8 {
         assert_same(compared, &differences, 90);
     }
 
-    /// An argument from outside the program must have its parameter's shape and fit its types.
+    /// An argument from outside the program must have its parameter's shape; one that does not
+    /// fit its types traps as the reference interpreter's narrowing does.
     #[test]
     fn test_mir_runs_refuse_arguments_of_another_shape() {
         let text = "module m\npub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]\n";
@@ -619,13 +700,22 @@ pub fn below(n: i8) -> i8 {
             run_lowered(&lowered, &f, args)
         };
         assert_eq!(call("get([1, 2, 3], 1)"), Ok(vec!["2".to_string()]));
-        assert!(call("get([1, 2], 0)").unwrap_err().contains("shape"));
-        assert!(call("get([1, true, 3], 0)")
-            .unwrap_err()
-            .contains("not an integer"));
-        assert!(call("get([1, 2, 300], 0)")
-            .unwrap_err()
-            .contains("lies outside"));
+        assert_eq!(
+            call("get([1, 2], 0)"),
+            Err("`[1, 2]` does not have its parameter's shape".to_string())
+        );
+        assert_eq!(
+            call("get([1, true, 3], 0)"),
+            Err("`[1, true, 3]` does not have its parameter's shape".to_string())
+        );
+        assert_eq!(
+            call("get([1, 2, 3], true)"),
+            Err("`true` does not have its parameter's shape".to_string())
+        );
+        assert_eq!(
+            call("get([1, 2, 300], 0)"),
+            Err("trap[narrowing] at 2:8: 300 does not fit in `u8`".to_string())
+        );
         assert!(call("get([1, 2, 3])")
             .unwrap_err()
             .contains("takes 2 arguments"));
