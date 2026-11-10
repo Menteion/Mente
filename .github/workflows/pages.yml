@@ -1,0 +1,118 @@
+# The documentation site (docs/design-review.md, `docs-site`): built with mdBook from the
+# repository's own sources by site/build.mjs on every pull request that touches them, checked for
+# broken links, and published to GitHub Pages under each milestone tag as a pre-release.
+# Every action is pinned to a full commit SHA, as in ci.yml.
+name: Pages
+
+on:
+  pull_request:
+    paths:
+      - "spec/**"
+      - "docs/**"
+      - "README.md"
+      - "ROADMAP.md"
+      - "compiler/mente-cli/src/catalogue.rs"
+      - "compiler/mente-cli/src/main.rs"
+      - "site/**"
+      - "package.json"
+      - ".github/workflows/pages.yml"
+  push:
+    branches: [main]
+    # A tag push ignores the paths filter, so every milestone tag is built and published.
+    tags: ["m*"]
+    paths:
+      - "spec/**"
+      - "docs/**"
+      - "README.md"
+      - "ROADMAP.md"
+      - "compiler/mente-cli/src/catalogue.rs"
+      - "compiler/mente-cli/src/main.rs"
+      - "site/**"
+      - "package.json"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # mdBook is a CI tool, not a workspace dependency: the release binary, checked against the
+  # SHA-256 GitHub records for it. Raise both together.
+  MDBOOK_VERSION: "0.5.4"
+  MDBOOK_SHA256: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Test the site generator and its link check
+        run: npm run test:site
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/mdbook
+          key: mdbook-${{ runner.os }}-${{ env.MDBOOK_VERSION }}-${{ env.MDBOOK_SHA256 }}
+      - name: Install mdBook
+        run: |
+          if [ ! -x "$HOME/.local/mdbook/mdbook" ]; then
+            archive="$RUNNER_TEMP/mdbook.tar.gz"
+            curl -sSfL -o "$archive" \
+              "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+            echo "${MDBOOK_SHA256}  ${archive}" | sha256sum -c -
+            mkdir -p "$HOME/.local/mdbook"
+            tar -xzf "$archive" -C "$HOME/.local/mdbook"
+          fi
+          "$HOME/.local/mdbook/mdbook" --version
+      - name: Build mn, whose `mn explain` the error-code pages come from
+        run: cargo build --locked --bin mn
+      - name: Build the site and check every link
+        env:
+          # A milestone tag names the edition; anything else is an unreleased build of its commit.
+          SITE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          SITE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node site/build.mjs --mn target/debug/mn --mdbook "$HOME/.local/mdbook/mdbook"
+      - name: Keep the built site for review
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docs-site
+          path: target/site/book
+          retention-days: 14
+      - name: Upload the site for GitHub Pages
+        if: github.ref_type == 'tag'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: target/site/book
+
+  deploy:
+    # Only a milestone tag publishes. The github-pages environment must allow the tag (a
+    # deployment tag rule `m*`), since by default it admits only the default branch.
+    name: Publish to GitHub Pages
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'm')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
