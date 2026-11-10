@@ -345,7 +345,7 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 1] = ["incremental-malformed-return-type.mn"];
+const PENDING: [&str; 0] = [];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -439,8 +439,7 @@ fn test_fuzz_array_past_four_gigabytes_is_e0223() {
 /// return type whose `]` or `>` closes nothing, or whose `[` or `<` is never closed, is `E0116`,
 /// and the session and a whole check agree.
 #[test]
-#[ignore = "pending E0116 for a malformed return type (PR 93)"]
-fn fuzz_incremental_malformed_return_type() {
+fn test_fuzz_malformed_return_type_is_e0116() {
     let dir = scratch("e0116");
     let unclosed = dir.join("seeds").join("unclosed.mn");
     fs::write(&unclosed, "module m\npub fn f() -> [4 = 0\n").unwrap();
