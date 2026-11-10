@@ -1000,19 +1000,45 @@ pub struct ItemStart {
 }
 
 /// Splits a module's text into its top-level items, each running from its start to the next
-/// one's, for parsing and checking item by item. An item starts at a line whose first column
-/// holds a letter, `_`, `@` or `/`; the attributes, doc comments and comments right above an
-/// item belong to it, and the module's first item starts at its first byte. A line that starts
-/// with anything else, such as the `{`, `=` or `}` of a function, continues the item above it.
+/// one's, for parsing and checking item by item. An item starts at a line outside every bracket
+/// whose first column holds a word that begins a declaration, such as `pub`, `fn` or `struct`,
+/// or an `@` or a `/`; the attributes, doc comments and comments right above an item belong to
+/// it, and the module's first item starts at its first byte. Any other line continues the item
+/// above it: the `{`, `=` or `}` of a function, and a line of its body or of its expression
+/// body however it is indented.
 pub fn split_items(src: &str) -> Vec<ItemStart> {
+    const DECLARES: [&str; 14] = [
+        "module",
+        "import",
+        "pub",
+        "extern",
+        "struct",
+        "bitstruct",
+        "enum",
+        "trait",
+        "type",
+        "unit",
+        "fn",
+        "actor",
+        "const",
+        "comptime",
+    ];
     let mut starts = vec![ItemStart { offset: 0, line: 1 }];
     // Whether the current item holds anything but attributes and comments yet.
     let mut has_body = false;
+    // How many brackets are open at the start of the line.
+    let mut depth = 0i64;
     let mut offset = 0;
     for (i, line) in src.split_inclusive('\n').enumerate() {
         let first = line.chars().next().unwrap_or(' ');
-        let starts_item = first.is_ascii_alphabetic() || matches!(first, '_' | '@' | '/');
+        let word = line
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or("");
         let prefix = matches!(first, '@' | '/');
+        let starts_item =
+            depth <= 0 && (prefix || (first.is_ascii_alphabetic() && DECLARES.contains(&word)));
+        depth += bracket_change(line);
         if starts_item && has_body {
             starts.push(ItemStart {
                 offset,
@@ -1026,6 +1052,27 @@ pub fn split_items(src: &str) -> Vec<ItemStart> {
         offset += line.len();
     }
     starts
+}
+
+/// How many brackets a line opens, less those it closes, outside its comment and its string
+/// literals.
+fn bracket_change(line: &str) -> i64 {
+    let mut change = 0;
+    let mut in_string = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if in_string => {
+                chars.next();
+            }
+            '"' => in_string = !in_string,
+            '/' if !in_string && chars.peek() == Some(&'/') => break,
+            '(' | '[' | '{' if !in_string => change += 1,
+            ')' | ']' | '}' if !in_string => change -= 1,
+            _ => {}
+        }
+    }
+    change
 }
 
 /// Parses a `.mn` source string into a structured `ModuleFile`.
@@ -2346,7 +2393,7 @@ mod tests {
 
     #[test]
     fn test_a_module_splits_into_its_top_level_items() {
-        let src = "module m\n\n/// Doc.\n@total\npub fn f(x: u8) -> u8\n  requires x > 0\n{\n  x\n}\n// note\n\npub fn g() = 1\n_x\n";
+        let src = "module m\n\n/// Doc.\n@total\npub fn f(x: u8) -> u8\n  requires x > 0\n{\n  x\n}\n// note\n\npub fn g() = 1\n_x\nfn h() -> u8 {\nval y = 1\ny\n}\n";
         let starts = split_items(src);
         let texts: Vec<&str> = starts
             .iter()
@@ -2358,8 +2405,8 @@ mod tests {
             [
                 "module m\n\n",
                 "/// Doc.\n@total\npub fn f(x: u8) -> u8\n  requires x > 0\n{\n  x\n}\n",
-                "// note\n\npub fn g() = 1\n",
-                "_x\n",
+                "// note\n\npub fn g() = 1\n_x\n",
+                "fn h() -> u8 {\nval y = 1\ny\n}\n",
             ]
         );
         assert_eq!(
@@ -2370,7 +2417,15 @@ mod tests {
             }
         );
         assert_eq!(starts[2].line, 10);
-        assert_eq!(starts[3].line, 13);
+        assert_eq!(starts[3].line, 14);
+        // A word that begins no declaration continues the item, and so does a line inside
+        // brackets, however it is indented; a bracket in a comment or a string counts for none.
+        assert_eq!(split_items("module x\nfn\nm\n").len(), 2);
+        assert_eq!(split_items("pub fn f() -> u8 =\nx\n").len(), 1);
+        assert_eq!(
+            split_items("pub fn f() -> u8 {\n  todo(\"{\")\n  // {\n}\npub fn g() = 1\n").len(),
+            2
+        );
         // An expression body on its own line continues its function.
         assert_eq!(split_items("pub fn f() -> u8\n= 1\n").len(), 1);
         assert_eq!(split_items("").len(), 1);
