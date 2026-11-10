@@ -243,7 +243,8 @@ fn fuzz_incremental_unindented_body() {
 #[test]
 #[ignore = "pending the nesting limit (E0127)"]
 fn fuzz_deep_nesting() {
-    const DEPTH: usize = 50_000;
+    // Twenty times the limit: enough to cross it in every shape, and quick in a debug build.
+    const DEPTH: usize = 5_000;
     let expression = |nest: String| format!("module m\npub fn deep(x: i32) -> i32 = {}\n", nest);
     let modules = [
         expression(format!("{}x{}", "(".repeat(DEPTH), ")".repeat(DEPTH))),
