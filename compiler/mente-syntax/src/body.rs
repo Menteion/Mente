@@ -453,6 +453,14 @@ impl Parser {
                     return self.tree.push_type(TypeKind::Error, start);
                 }
                 let len = match self.peek().clone() {
+                    // A count, which takes no type: `[300_i8]i32` names a type it lies outside.
+                    TokenKind::IntLit(_, raw) if int_suffix(&raw).is_some() => {
+                        self.bad_type(
+                            "an array's length is an integer literal without a suffix, as in `[4]u8`"
+                                .into(),
+                        );
+                        return self.tree.push_type(TypeKind::Error, start);
+                    }
                     TokenKind::IntLit(v, _) => {
                         self.bump();
                         v
@@ -1733,6 +1741,17 @@ mod tests {
 
     fn codes(src: &str) -> Vec<&'static str> {
         errors(src).into_iter().map(|e| e.0).collect()
+    }
+
+    #[test]
+    fn test_an_array_length_takes_no_suffix() {
+        assert_eq!(codes("var x: [3_i8]i32 = [0; 3]"), ["E0116"]);
+        assert_eq!(codes("var x: [300_i8]i32 = [0; 3]"), ["E0116"]);
+        assert!(codes(
+            "var x: [3]i32 = [0; 3]
+_ = x"
+        )
+        .is_empty());
     }
 
     #[test]

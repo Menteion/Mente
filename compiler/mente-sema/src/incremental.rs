@@ -280,6 +280,12 @@ impl Session {
 
 /// Parses one item's text on its own.
 fn parse_item(text: &str) -> Parsed {
+    // Its first token, past doc comments, is `module`.
+    let header = lex(text)
+        .0
+        .iter()
+        .find(|t| !matches!(t.kind, TokenKind::DocComment(_)))
+        .is_some_and(|t| t.kind == TokenKind::Module);
     let module = match parse_module(text) {
         Ok(m) => m,
         Err(d) => {
@@ -294,16 +300,11 @@ fn parse_item(text: &str) -> Parsed {
             return Parsed {
                 error: Some((rank, d)),
                 at_end,
+                header,
                 ..Parsed::default()
             };
         }
     };
-    // Its first token, past doc comments, is `module`.
-    let header = lex(text)
-        .0
-        .iter()
-        .find(|t| !matches!(t.kind, TokenKind::DocComment(_)))
-        .is_some_and(|t| t.kind == TokenKind::Module);
     match module.items.as_slice() {
         [] => Parsed {
             header,
@@ -604,6 +605,8 @@ mod tests {
             ("module\nfn", true),
             ("module m\npub fn f(\n", false),
             ("module m\npub fn fn() -> u8 = 1\npub fn g(\n", false),
+            // A second module line, without its name, that fails to parse on its own.
+            ("module p\nmodule", true),
         ] {
             let s = Session::new(src);
             let expected = check_source(src).err().unwrap_or_default();
