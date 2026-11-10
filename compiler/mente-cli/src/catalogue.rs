@@ -678,6 +678,18 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f(x: [4294967296]u8) -> u8 = 0\n",
         "module m\npub fn f(x: [4096]u8) -> u8 = 0\n",
     ),
+    emitted(
+        "E0224",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A call of a function without a body",
+        "A function written without a body is a declaration, which the checks of its own spec \
+         file read but which nothing in M1 can run, so a call of it is refused where it is \
+         written. Give the function a body; functions declared outside Mente, in an `extern` \
+         block, come in M4.",
+        "module m\npub fn id(x: u8) -> u8\npub fn f() -> u8 = id(1)\n",
+        "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id(1)\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

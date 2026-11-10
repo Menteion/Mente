@@ -1,0 +1,4 @@
+module conformance
+pub fn id(x: u8) -> u8b fn f(a: u8) {
+  id(a)
+}

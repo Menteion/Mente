@@ -513,8 +513,20 @@ impl Checker<'_> {
     }
 
     fn call(&mut self, at: ExprId, callee: &str, args: &[Arg]) -> Ty {
-        let signature = self.resolution.calls[at.0 as usize]
-            .and_then(|i| self.signatures.get(i).cloned().flatten());
+        let resolved = self.resolution.calls[at.0 as usize];
+        let signature = resolved.and_then(|i| self.signatures.get(i).cloned().flatten());
+        // A function of the module without a signature has no body: a declaration, which
+        // nothing in M1 can run.
+        if resolved.is_some() && signature.is_none() {
+            self.errors.push(Diagnostic::error(
+                "E0224",
+                self.tree.expr(at).span,
+                format!(
+                    "`{}` has no body, so this call has nothing to run; M1 calls only a function with a body",
+                    callee
+                ),
+            ));
+        }
         let Some(sig) = signature else {
             for (i, a) in args.iter().enumerate() {
                 self.value(a.value);
@@ -1378,8 +1390,17 @@ mod tests {
             codes("pub fn f() -> bool = id(not 1, 2)"),
             ["E0203", "E0213", "E0203"]
         );
-        assert_eq!(codes("pub fn f() = declared(true, 1)"), NONE);
-        assert_eq!(codes("pub fn f() -> u8 = declared(not 1)"), ["E0203"]);
+        // A declaration without a body cannot be called, and no more is checked of the call
+        // than its arguments.
+        assert_eq!(codes("pub fn f() = declared(true, 1)"), ["E0224"]);
+        assert_eq!(
+            messages("pub fn f() = declared(true, 1)"),
+            ["`declared` has no body, so this call has nothing to run; M1 calls only a function with a body"]
+        );
+        assert_eq!(
+            codes("pub fn f() -> u8 = declared(not 1)"),
+            ["E0224", "E0203"]
+        );
         assert_eq!(codes("pub fn f() -> u8 = nothing()"), ["E0203"]);
         assert_eq!(
             messages("pub fn f() -> u8 = nothing()"),
@@ -1821,7 +1842,10 @@ mod tests {
             messages("pub fn bump(mut x: u8) -> bool = true\npub fn f() -> u8\n  ensures bump(mut result)\n= 1"),
             ["cannot pass as `mut` `result`, the value an `ensures` clause reads"]
         );
-        assert_eq!(codes("pub fn f(v: u8) {\n  declared(mut v)\n}"), ["E0206"]);
+        assert_eq!(
+            codes("pub fn f(v: u8) {\n  declared(mut v)\n}"),
+            ["E0224", "E0206"]
+        );
         assert_eq!(codes("pub fn f(v: u8) {\n  touch(mut v, 1)\n}"), ["E0213"]);
     }
 
@@ -1873,7 +1897,7 @@ mod tests {
         assert_eq!(codes_of("  two(mut v, v + v)"), ["E0207", "E0207"]);
         assert_eq!(codes_of("  two(mut v, w)"), NONE);
         assert_eq!(codes_of("  both(mut v, mut xs[0])"), NONE);
-        assert_eq!(codes_of("  declared(mut v)"), NONE);
+        assert_eq!(codes_of("  declared(mut v)"), ["E0224"]);
         assert_eq!(
             codes(
                 "pub fn rev(b: u8, mut a: u8) {

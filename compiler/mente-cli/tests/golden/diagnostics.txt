@@ -18,6 +18,8 @@
 {"version":1,"diagnostics":[{"code":"E0216","severity":"error","message":"`&` works on the bits of one integer type, but its operands are `u8` and `u16`; bind one of them to a `val` of the other's type first","primary":{"file":"bit_operation_on_two_types.mn","start":69,"end":74,"line":3,"column":34},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/break_outside_a_loop.mn ==
 {"version":1,"diagnostics":[{"code":"E0208","severity":"error","message":"`break` stands only inside a `while` loop","primary":{"file":"break_outside_a_loop.mn","start":51,"end":56,"line":4,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/call_without_body.mn ==
+{"version":1,"diagnostics":[{"code":"E0224","severity":"error","message":"`id` has no body, so this call has nothing to run; M1 calls only a function with a body","primary":{"file":"call_without_body.mn","start":78,"end":83,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/contracts_used_modularly.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/ensures_not_proven_at_a_return.mn ==

@@ -4924,10 +4924,11 @@ mod tests {
             bump
         );
         assert_eq!(codes(&element), ["E0502"]);
-        // A function without a body may change its `mut` argument to anything of its type.
-        let opaque = "pub fn touch(mut x: u8)\npub fn f() -> u8[0..5] {\n  var z: u8 = 1\n  touch(mut z)\n  z\n}";
+        // A function whose contract says nothing of its `mut` argument may change it to anything
+        // of its type, whatever its body does.
+        let opaque = "pub fn touch(mut x: u8) {\n  x = 1\n}\npub fn f() -> u8[0..5] {\n  var z: u8 = 1\n  touch(mut z)\n  z\n}";
         assert_eq!(codes(opaque), ["E0502"]);
-        let opaque_element = "pub fn touch(mut x: u8)\npub fn f() -> u8[0..5] {\n  var zs: [1]u8 = [1]\n  touch(mut zs[0])\n  3\n}";
+        let opaque_element = "pub fn touch(mut x: u8) {\n  x = 1\n}\npub fn f() -> u8[0..5] {\n  var zs: [1]u8 = [1]\n  touch(mut zs[0])\n  3\n}";
         assert_eq!(codes(opaque_element), NONE);
         let array = "pub fn fill(mut xs: [2]u8[0..3]) {\n  xs[0] = 1\n}\npub fn f() -> [2]u8[0..3] {\n  var zs: [2]u8[0..3] = [0, 0]\n  fill(mut zs)\n  zs\n}";
         assert_eq!(codes(array), NONE);
@@ -4984,12 +4985,13 @@ mod tests {
         // Recursion uses the function's own contract.
         let rec = "pub fn down(n: u8) -> u8\n  ensures result == 0\n{\n  if n == 0 {\n    return 0\n  }\n  down(n - 1)\n}";
         assert_eq!(codes(rec), NONE);
-        // A callee's `requires` about an array length, and a call of a function without a body.
+        // A callee's `requires` about an array length, and a callee whose result its contract
+        // does not bound.
         let len = "pub fn first(xs: [3]u8)\n  requires xs.len > 2\n{\n}\npub fn f(ys: [3]u8) {\n  first(ys)\n}";
         assert_eq!(codes(len), NONE);
         let short = "pub fn first(xs: [3]u8)\n  requires xs.len > 3\n{\n}\npub fn f(ys: [3]u8) {\n  first(ys)\n}";
         assert_eq!(codes(short), ["E0504"]);
-        let opaque = "pub fn ext(x: u8) -> u8\npub fn f(x: u8) -> u8[0..5] = ext(x)";
+        let opaque = "pub fn ext(x: u8) -> u8 = x\npub fn f(x: u8) -> u8[0..5] = ext(x)";
         assert_eq!(codes(opaque), ["E0502"]);
         // The facts of the callee's `ensures` relate its result to the caller's bindings.
         let rel = "pub fn more(x: u8[0..200]) -> u8\n  ensures result > x and result <= x + 5\n= x + 1\npub fn f(y: u8[0..10]) -> u8[1..16] = more(y)";
@@ -5443,7 +5445,7 @@ mod tests {
 
     #[test]
     fn test_a_loop_measure_follows_every_change_of_its_bindings() {
-        let base = "pub fn bump(mut x: u8)\n  ensures x > 0\n{\n  x = 1\n}\npub fn ext(mut x: u8)\npub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 1\nCHANGE\n  }\n  i\n}";
+        let base = "pub fn bump(mut x: u8)\n  ensures x > 0\n{\n  x = 1\n}\npub fn ext(mut x: u8) {\n  x = 1\n}\npub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n decreases n - i {\n    i += 1\nCHANGE\n  }\n  i\n}";
         assert_eq!(codes(&base.replace("CHANGE\n", "")), NONE);
         for change in [
             "    bump(mut i)\n",
