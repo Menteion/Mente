@@ -345,7 +345,7 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 1] = ["incremental-expression-body-cut-short.mn"];
+const PENDING: [&str; 0] = [];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -468,24 +468,16 @@ fn test_fuzz_malformed_return_type_is_e0116() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Found by `mn fuzz`: an expression body cut short, its `=` followed by the next item. A whole
-/// check expects an expression and finds `pub`; `mn check --watch`'s session, which ends the
-/// item there, finds the end of the function instead, at another span.
-#[test]
-#[ignore = "pending a fix in mente-sema's incremental session"]
-fn fuzz_incremental_expression_body_cut_short() {
-    replay(&[regressions().join("incremental-expression-body-cut-short.mn")]);
-}
-
 /// Found by `mn fuzz`: a body with another parse error, an unclosed `[` or a trailing `+`, was
 /// not held to the nesting limit, so `mn dump --tree` rendered its over-deep tree: quadratic, and
 /// a stack overflow at a few hundred thousand links even on the stack `mn` runs on. A too-high
 /// tree is `E0127` whether or not its body has another error, and no phase crashes or hangs.
 /// Each shape is written out here rather than as a file.
 #[test]
-#[ignore = "pending E0127 for a body with another parse error"]
-fn fuzz_dump_tree_of_an_unfinished_deep_chain() {
-    const DEPTH: usize = 300_000;
+fn test_fuzz_unfinished_deep_chain_is_e0127_and_no_crash() {
+    // Twenty times the limit: past it in both shapes, and quick through every phase in a debug
+    // build, as the 300,000 links CI met are not.
+    const DEPTH: usize = 5_000;
     let dir = scratch("unfinished");
     let index = dir.join("seeds").join("index.mn");
     let chain = format!(
