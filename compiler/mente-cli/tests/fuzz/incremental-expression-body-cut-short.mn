@@ -1,0 +1,4 @@
+module m
+
+fn t() =
+pub fn g() -> i32 = 0
