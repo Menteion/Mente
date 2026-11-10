@@ -1,7 +1,8 @@
 # Mutation testing of the compiler with cargo-mutants, on GitHub's runners and never on a
 # developer's machine (ROADMAP.md, M0a). A pull request mutates only the lines it changes;
 # the full run is split across runners, weekly and on demand, when it may take only the mutants a
-# regex names. Tests run through nextest. Settings: .cargo/mutants.toml and .config/nextest.toml.
+# regex names, or only some of its shards. Tests run through nextest. Settings:
+# .cargo/mutants.toml and .config/nextest.toml.
 name: Mutants
 
 on:
@@ -19,6 +20,10 @@ on:
     inputs:
       examine:
         description: "Only the mutants whose names match this regex, as cargo-mutants --re reads it; empty for all"
+        required: false
+        default: ""
+      shards:
+        description: "Only these of the sixteen shards, as a JSON list such as [11, 12]; empty for all"
         required: false
         default: ""
 
@@ -80,6 +85,11 @@ jobs:
       - name: Mutate the lines this pull request changes
         run: |
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
+          # A mutant that allocates or writes without end would take the runner down with it, as
+          # it took two shards of the first full run: each process may reserve at most 8 GB and
+          # write a file of at most 2 GB, so that such a test fails instead and the mutant is
+          # caught.
+          ulimit -v 8388608 -f 2097152
           status=0
           cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/4 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
@@ -111,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: ${{ fromJSON(inputs.shards || '[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
@@ -147,6 +157,11 @@ jobs:
         env:
           EXAMINE: ${{ inputs.examine }}
         run: |
+          # A mutant that allocates or writes without end would take the runner down with it, as
+          # it took two shards of the first full run: each process may reserve at most 8 GB and
+          # write a file of at most 2 GB, so that such a test fails instead and the mutant is
+          # caught.
+          ulimit -v 8388608 -f 2097152
           status=0
           only=()
           if [ -n "$EXAMINE" ]; then only=(--re "$EXAMINE"); fi
