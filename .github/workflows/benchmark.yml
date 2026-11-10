@@ -53,15 +53,17 @@ jobs:
     env:
       # Whether the secret exists, never the secret itself.
       HAS_HELD_OUT: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}
-      # The pinned Rust lives outside the runner's home, so the sandbox, which gives the build HOME
-      # in its working directory, still finds the toolchain through RUSTUP_HOME.
-      RUSTUP_HOME: ${{ runner.temp }}/rustup
       # Every agent build and agent program runs through this, with least privilege.
       SANDBOX: benchmark/harness/sandbox.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Put the pinned Rust outside the home
+        # So the sandbox, which gives the build HOME in its working directory, still finds the
+        # toolchain through RUSTUP_HOME. The runner context is not available in a job-level env, so
+        # this is set from a step, where $RUNNER_TEMP is.
+        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
       - name: Build mn

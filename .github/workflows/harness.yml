@@ -28,9 +28,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      # The pinned Rust lives outside the runner's home, so the sandbox, which gives the build HOME
-      # in its working directory, still finds the toolchain through RUSTUP_HOME.
-      RUSTUP_HOME: ${{ runner.temp }}/rustup
       SANDBOX: benchmark/harness/sandbox.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,6 +36,11 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+      - name: Put the pinned Rust outside the home
+        # So the sandbox, which gives the build HOME in its working directory, still finds the
+        # toolchain through RUSTUP_HOME. The runner context is not available in a job-level env, so
+        # this is set from a step, where $RUNNER_TEMP is.
+        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
       - name: Install the benchmark's Rust and Odin
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
