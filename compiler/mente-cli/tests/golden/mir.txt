@@ -52,6 +52,7 @@ t0: unreachable @3:8 ["unreachable reached: control left the code the checker al
 == conformance/core-calculus/binding_of_mixed_integers.mn == (exit 2)
 == conformance/core-calculus/bit_operation_on_two_types.mn == (exit 2)
 == conformance/core-calculus/break_outside_a_loop.mn == (exit 2)
+== conformance/core-calculus/call_without_body.mn == (exit 2)
 == conformance/core-calculus/contracts_used_modularly.mn ==
 mente-dump 1 mir
 f0: fn midpoint(u64, u64) -> u64 {

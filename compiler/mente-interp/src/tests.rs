@@ -649,11 +649,7 @@ fn test_depth_counts_nested_calls_only() {
         Ok(Value::Int(Int::from_u128(20)))
     );
     assert_eq!(run(down, "down(5000)"), "0");
-    let declared = "pub fn later(x: u8) -> u8\npub fn now() -> u8 = later(1)";
-    assert_eq!(
-        run(declared, "now()"),
-        "no function `later` with a body to run"
-    );
+    // A call of a function without a body does not check (`E0224`), so no run meets one.
     // Only a call of a function by itself compares measures.
     let pair = "pub fn m(n: u8) -> u8\n  decreases n\n= n\npub fn caller(n: u8) -> u8\n  decreases n\n= m(n)";
     assert_eq!(run(pair, "caller(3)"), "3");
