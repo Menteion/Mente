@@ -987,6 +987,7 @@ fn test_array_literals_of_mixed_integers_run_alike_on_every_path() {
 pub fn r(a: i32, b: u64) -> [2]i128 = [a, b]
 pub fn q(a: i32, b: u64) -> [2]i64 = [a, b]
 pub fn m(a: u128, b: i8[0..10]) -> [2]u128 = [a, b]
+pub fn p() -> [2]u128 = [18446744073709551616; 2]
 ",
     )
     .unwrap();
@@ -997,6 +998,8 @@ pub fn m(a: u128, b: i8[0..10]) -> [2]u128 = [a, b]
             "[-1, 18446744073709551615]",
         ),
         ("q(-1, 5)", 0, "[-1, 5]"),
+        // A repeat of a literal alone, kept in the type that holds it, not in `i64`.
+        ("p()", 0, "[18446744073709551616, 18446744073709551616]"),
         (
             "m(340282366920938463463374607431768211455, 5)",
             0,

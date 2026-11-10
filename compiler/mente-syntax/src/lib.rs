@@ -2473,6 +2473,8 @@ mod tests {
             // A line that begins no item still continues the code above it.
             "module m\npub fn f(x: i32) -> i32 = x +\n  1\npub fn g() -> i32 = 0\n",
             "module m\npub fn h(x: i32) -> i32 =\nx + 1\nfn k() -> u8 = 2\n",
+            // Spaces and a comment between the last token and the item's line.
+            "module m\nfn t() =   // to do\npub fn g() -> i32 = 0\n",
         ] {
             let lines: Vec<u32> = split_items(src)[1..].iter().map(|s| s.line).collect();
             let fns: Vec<u32> = parse_module(src)
@@ -2485,6 +2487,45 @@ mod tests {
                 })
                 .collect();
             assert_eq!(fns, lines, "{}", src);
+        }
+        // A return type ends before a declaration that is no token the scan stops at.
+        let m = parse_module("module m\npub fn f() -> u8\nstruct S {\n  x: u8\n}\n").unwrap();
+        let [ItemDecl::Fn(f), ItemDecl::Struct(s)] = &m.items[..] else {
+            panic!("{:?}", m.items)
+        };
+        assert_eq!((f.return_ty.as_deref(), s.name.as_str()), (Some("u8"), "S"));
+        // An expression body ends at the end of its line when nothing continues it.
+        let d = parse_module("module m\npub fn g() -> u8 = 1\n_x\n").unwrap_err();
+        assert_eq!((d.code, d.primary.line), ("E0111", 3));
+    }
+
+    /// The brackets a module's text opens count across lines, outside strings and comments, so
+    /// that a line in the first column inside a body, a list or an index, such as a comment,
+    /// starts no item; a bracket in a string or a comment counts for none, and so does one a
+    /// division or an escape stands before.
+    #[test]
+    fn test_a_split_counts_only_the_brackets_code_opens() {
+        let g = "pub fn g() -> u8 = 2\n";
+        // The lines the items start on: the first, and `g`'s unless `f` holds it. A comment
+        // split off wrongly would take `g` into its own item, so the lines tell, not the count.
+        for (src, g_starts) in [
+            ("pub fn f() -> u8 {\n// note\n  1\n}\n", true),
+            ("pub fn f(\n// note\n  x: u8) -> u8 = x\n", true),
+            ("pub fn f(xs: [2]u8) -> u8 = xs[\n// note\n  0]\n", true),
+            ("pub fn f() -> u8 {\n  todo(\"}\")\n// note\n  1\n}\n", true),
+            ("pub fn f() -> u8 {\n  todo(\"\\\"{\")\n}\n", true),
+            ("pub fn f(x: u8) -> u8 { x / (1) }\n", true),
+            ("pub fn f() -> u8 { // {\n  1\n}\n", true),
+            // A backslash outside a string escapes nothing: its `(` stays open.
+            ("pub fn f() -> u8 = \\(\n// note\n", false),
+        ] {
+            let lines: Vec<u32> = split_items(&format!("{}{}", src, g))
+                .iter()
+                .map(|s| s.line)
+                .collect();
+            let g_line = src.lines().count() as u32 + 1;
+            let expected: &[u32] = if g_starts { &[1, g_line] } else { &[1] };
+            assert_eq!(lines, expected, "{}", src);
         }
     }
 

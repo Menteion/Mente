@@ -3584,4 +3584,23 @@ mod tests {
         });
         assert_eq!((kept.len(), calls), (MAX_UNITS + 1, 0));
     }
+    /// After a reduction, delta debugging goes on with one chunk fewer, as Zeller's ddmin does:
+    /// the candidates it tries for a failure that needs the first unit and the last.
+    #[test]
+    fn test_ddmin_takes_one_chunk_fewer_after_a_reduction() {
+        let units = split_chars("abcdefgh");
+        let mut tried = Vec::new();
+        let (kept, finished) = ddmin(units, &mut |c: &str| {
+            tried.push(c.to_string());
+            Some(c.contains('a') && c.contains('h'))
+        });
+        assert_eq!((kept.concat(), finished), ("ah".to_string(), true));
+        assert_eq!(
+            tried,
+            [
+                "efgh", "abcd", "cdefgh", "abefgh", "efgh", "abgh", "gh", "ab", "bgh", "agh", "gh",
+                "ah", "h", "a"
+            ]
+        );
+    }
 }

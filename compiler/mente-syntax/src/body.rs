@@ -194,9 +194,11 @@ impl Parser {
     }
 
     /// Reports `d` and goes on: for another language's idiom whose meaning is plain, so the
-    /// rest of the statement is still checked.
+    /// rest of the statement is still checked. An idiom is read only outside recovery, since
+    /// an error stops its statement's parse before any idiom after it.
     fn note(&mut self, d: Diagnostic) {
-        if !self.recovering && !self.errors.iter().any(|e| e.code == "E0127") {
+        debug_assert!(!self.recovering, "an idiom noted while recovering");
+        if !self.errors.iter().any(|e| e.code == "E0127") {
             self.errors.push(d);
         }
     }
@@ -2672,6 +2674,19 @@ _ == b"
             f(format!("{}x", r("- ", 200))),
         ] {
             assert!(codes(src.clone()).is_empty(), "{}", &src[..80]);
+        }
+        // The depth goes back down after each construct, so siblings never add up to the limit.
+        for stmt in [
+            "_ = -x",
+            "_ = if x > 0 { 1 } else { 2 }",
+            "_ = if x > 0 { 1 } else if x > 1 { 2 } else { 3 }",
+            "while x > 0 {\n  }",
+        ] {
+            let src = format!(
+                "module m\npub fn d(x: i32) -> i32 {{\n{}  0\n}}\n",
+                format!("  {}\n", stmt).repeat(300)
+            );
+            assert!(codes(src).is_empty(), "300 of {}", stmt);
         }
         // A chain past the limit with another error in it is measured too: `mn dump --tree`
         // recurses over a tree with errors (the fuzzer's finding 12).

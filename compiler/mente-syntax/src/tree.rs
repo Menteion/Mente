@@ -699,3 +699,56 @@ fn render_bound(b: &Bound) -> String {
         Bound::Len(n) => format!("{}.len", n),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A function whose body is `body`, as the module holds it, and its syntax tree.
+    fn parsed(body: &str) -> (String, crate::tree::FnSyntax) {
+        let src = format!("module m\npub fn d(x: i32) -> i32 {}\n", body);
+        let module = crate::parse_module(&src).unwrap();
+        let p = crate::parse_bodies(&src, &module).remove(0);
+        assert!(p.errors.is_empty(), "{}: {:?}", body, p.errors);
+        (src, p.syntax.unwrap())
+    }
+
+    /// The tree's height as [`Tree::too_deep`](super::Tree::too_deep) measures it: the least
+    /// limit it finds nothing past.
+    fn height(body: &str) -> u32 {
+        let (_, f) = parsed(body);
+        (0..).find(|&l| f.tree.too_deep(l).is_none()).unwrap()
+    }
+
+    /// Each kind of node counts what it holds, an expression, a block or a type one level and a
+    /// statement none, and the node reported is the one at exactly a level past the limit.
+    #[test]
+    fn test_the_height_counts_every_node_kind_and_reports_the_first_level_past() {
+        // `x[0][0][0]`: three indexes above `x`.
+        const C: &str = "x[0][0][0]";
+        assert_eq!(height(&format!("= {}", C)), 4);
+        for (body, levels) in [
+            ("= -C", 1),
+            ("= C.len", 1),
+            ("= f(C)", 1),
+            ("= [C]", 1),
+            ("= [C; 2]", 1),
+            // The condition's comparison, then the `if`.
+            ("= if C > 0 { 1 } else { 2 }", 2),
+            ("= if x > 0 { 1 } else if C > 0 { 2 } else { 3 }", 3),
+            // The block, then the statement, which adds none.
+            ("{\n  val y: i32 = C\n  0\n}", 1),
+            ("{\n  y = C\n  0\n}", 1),
+            ("{\n  while C > 0 {\n  }\n  0\n}", 2),
+            ("{\n  guard C > 0 else {\n    return 0\n  }\n  0\n}", 2),
+            ("{\n  return C\n}", 1),
+            ("{\n  _ = C\n  0\n}", 1),
+            ("{\n  C\n}", 1),
+        ] {
+            let body = body.replace('C', C);
+            assert_eq!(height(&body), 4 + levels, "{}", body);
+        }
+        let (src, f) = parsed(&format!("= {}", C));
+        let at = f.tree.too_deep(3).unwrap();
+        assert_eq!(&src[at.start..at.end], C);
+        assert!(f.tree.too_deep(4).is_none());
+    }
+}
