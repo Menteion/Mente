@@ -14,7 +14,9 @@ use std::collections::HashMap;
 
 use mente_syntax::diagnostics::Diagnostic;
 use mente_syntax::tree::FnSyntax;
-use mente_syntax::{lex, parse_bodies, parse_module, split_items, ItemDecl, ItemStart, Span};
+use mente_syntax::{
+    lex, parse_bodies, parse_module, split_items, ItemDecl, ItemStart, Span, TokenKind,
+};
 
 use crate::check::{self, Signature};
 use crate::{check_source, names, tier1, verify_function_contracts, wide};
@@ -30,6 +32,8 @@ struct Parsed {
     /// The item declares something other than one function, which the session checks with the
     /// whole module.
     other: bool,
+    /// The item starts with a `module` line, which only the first item may hold.
+    header: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -153,7 +157,9 @@ impl Session {
             .iter()
             .filter_map(|(_, text)| self.cache.get(text).map(|e| &e.parsed))
             .collect();
-        if entries.iter().any(|p| p.other) {
+        // A `module` line after the first item is no declaration, which the whole module's
+        // check reports (`E0111`), though the item parsed alone is a module of its own.
+        if entries.iter().any(|p| p.other) || entries.iter().skip(1).any(|p| p.header) {
             self.work.whole = true;
             return check_source(&self.src).err().unwrap_or_default();
         }
@@ -277,8 +283,17 @@ fn parse_item(text: &str) -> Parsed {
             };
         }
     };
+    // Its first token, past doc comments, is `module`.
+    let header = lex(text)
+        .0
+        .iter()
+        .find(|t| !matches!(t.kind, TokenKind::DocComment(_)))
+        .is_some_and(|t| t.kind == TokenKind::Module);
     match module.items.as_slice() {
-        [] => Parsed::default(),
+        [] => Parsed {
+            header,
+            ..Parsed::default()
+        },
         [ItemDecl::Fn(f)] => {
             let parsed = parse_bodies(text, &module).into_iter().next();
             let (syntax, body) = parsed.map_or((None, Vec::new()), |p| (p.syntax, p.errors));
@@ -290,11 +305,13 @@ fn parse_item(text: &str) -> Parsed {
                     body,
                     routing: tier1::Routing::of(&f.attrs),
                 }),
+                header,
                 ..Parsed::default()
             }
         }
         _ => Parsed {
             other: true,
+            header,
             ..Parsed::default()
         },
     }
@@ -524,6 +541,21 @@ mod tests {
         let w = edited(&mut s, "= lo\n", "= 0\n");
         assert_eq!((w.parsed, w.checked), (1, 1));
         assert!(s.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn test_a_module_line_after_the_first_item_is_reported_as_the_whole_check_does() {
+        for src in [
+            "module c\nmodule c\n",
+            "module m\n\npub fn f() -> u8 = 1\nmodule n\n",
+        ] {
+            let s = Session::new(src);
+            let whole = check_source(src).err().unwrap_or_default();
+            assert!(!whole.is_empty(), "{}", src);
+            let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
+            assert_eq!(codes(s.diagnostics()), codes(&whole), "{}", src);
+            assert!(s.work().whole, "{}", src);
+        }
     }
 
     #[test]

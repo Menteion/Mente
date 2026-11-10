@@ -1270,6 +1270,19 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
+        // A list still open at the end of the file is no list.
+        if depth > 0 {
+            return Err(Diagnostic::error(
+                "E0111",
+                self.span(),
+                format!(
+                    "expected `)` to close the list opened at {}:{}, found {}",
+                    open.span.line,
+                    open.span.col,
+                    self.found()
+                ),
+            ));
+        }
         Ok(self.src[start_byte..end_byte].trim().to_string())
     }
 
@@ -2799,6 +2812,18 @@ pub struct S {
                 .collect::<Vec<_>>(),
             vec!["a"]
         );
+    }
+
+    #[test]
+    fn test_a_parameter_list_open_at_the_end_of_the_file_is_rejected() {
+        let err = parse_module("module m\npub fn f( -> i32 = 1\n").unwrap_err();
+        assert_eq!(err.code, "E0111");
+        assert_eq!(
+            err.message,
+            "expected `)` to close the list opened at 2:9, found the end of the file"
+        );
+        assert!(parse_module("module m\npub fn f() -> i32 = 1\n").is_ok());
+        assert!(parse_module("module m\npub fn f(x: [2]u8) -> u8 = (x[0])\n").is_ok());
     }
 
     #[test]
