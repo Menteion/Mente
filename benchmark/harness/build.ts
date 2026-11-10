@@ -46,10 +46,13 @@ export interface Tools {
 
 /**
  * A command, wrapped so it runs through the sandbox when one is set: `sandbox.sh <workdir> <cmd>
- * <args>`, run with bash. With no sandbox the command is returned unchanged.
+ * <args>`, run with bash. The process starts in its build directory, so the script, the working
+ * directory and a command given as a path (such as `target/release/mn`) are made absolute against
+ * the driver's own directory; a bare command name is left for PATH to find.
  */
 export function sandboxed(sandbox: string, workdir: string, cmd: string, args: string[]): [string, string[]] {
-  return sandbox ? ["bash", [sandbox, workdir, cmd, ...args]] : [cmd, args];
+  const command = /[\\/]/.test(cmd) ? resolve(cmd) : cmd;
+  return sandbox ? ["bash", [resolve(sandbox), resolve(workdir), command, ...args]] : [command, args];
 }
 
 export interface Proc {
@@ -193,12 +196,15 @@ interface MenteDiagnostic {
 /** What a run's build of the agent's program reports; the cases go into the program around it. */
 export async function buildProgram(
   lang: Lang,
-  dir: string,
+  where: string,
   program: string,
   sig: Signature,
   cases: Case[],
   tools: Tools,
 ): Promise<Build> {
+  // Absolute, since each process starts in this directory: the source and executable paths the
+  // commands are given must not depend on where they start.
+  const dir = resolve(where);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const exe = join(dir, process.platform === "win32" ? "main.exe" : "main");
