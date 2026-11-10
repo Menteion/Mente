@@ -1,0 +1,170 @@
+# The SMT cross-check of Tier 1 (docs/design-brief.md, "The quality system"): every obligation
+# Tier 1 discharges, in every program that Tier 1 runs on, is written by `mn smt` as an SMT-LIB 2
+# query in QF_LIA built from the state Tier 1 decided it on (compiler/mente-sema/src/tier1/smt.rs),
+# and Z3 must answer `unsat` to each. Any other answer, `sat`, `unknown`, a timeout or an error,
+# fails the job and prints the query with its source position: a satisfiable query means Tier 1
+# discharged an obligation that does not follow from its own facts, a soundness bug.
+#
+# What it proves: each obligation follows from the facts Tier 1 held where it decided it. What it
+# does not: that those facts were derived soundly from the program, which soundness by execution
+# checks. An obligation discharged where no path reaches it is listed, not queried.
+#
+# Z3 is installed here from its release, pinned and checksummed; it is never a build dependency.
+# Solving runs on GitHub Actions only, never on a laptop.
+name: SMT cross-check
+
+on:
+  pull_request:
+    paths:
+      - "compiler/mente-sema/**"
+      - "compiler/mente-syntax/**"
+      - "compiler/mente-cli/tests/smt.rs"
+      - "compiler/mente-cli/src/mir_run.rs"
+      - "conformance/**"
+      - "examples/**"
+      - "benchmark/probe/**"
+      - "benchmark/prelim/**"
+      - "perf/kernels/**"
+      - ".github/workflows/smt.yml"
+  push:
+    branches: [main]
+    paths:
+      - "compiler/mente-sema/**"
+      - "compiler/mente-syntax/**"
+      - "compiler/mente-cli/tests/smt.rs"
+      - "compiler/mente-cli/src/mir_run.rs"
+      - "conformance/**"
+      - "examples/**"
+      - "benchmark/probe/**"
+      - "benchmark/prelim/**"
+      - "perf/kernels/**"
+      - ".github/workflows/smt.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smt-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  Z3_VERSION: "5.3.3"
+  Z3_ASSET: z3-5.3.3-x64-glibc-2.39
+  # GitHub's digest of the release asset.
+  Z3_SHA256: d56f60b06f432f33de5810f7f1a384a339131f361e2d54d08ea83eea14326880
+
+jobs:
+  z3:
+    name: Tier 1 against Z3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Install Z3 ${{ env.Z3_VERSION }}, checksummed
+        run: |
+          set -euo pipefail
+          zip="$RUNNER_TEMP/z3.zip"
+          curl -fsSL --retry 3 -o "$zip" \
+            "https://github.com/Z3Prover/z3/releases/download/z3-${Z3_VERSION}/${Z3_ASSET}.zip"
+          echo "${Z3_SHA256}  $zip" | sha256sum -c -
+          unzip -q "$zip" -d "$RUNNER_TEMP/z3"
+          bin=$(dirname "$(find "$RUNNER_TEMP/z3" -type f -name z3 -path '*/bin/*' | head -n 1)")
+          chmod +x "$bin/z3"
+          echo "$bin" >> "$GITHUB_PATH"
+          version=$("$bin/z3" --version)
+          echo "$version"
+          case "$version" in
+            *"Z3 version ${Z3_VERSION} "*) ;;
+            *) echo "::error::expected Z3 ${Z3_VERSION}"; exit 1 ;;
+          esac
+      - name: Write the construct programs of mir_run.rs, and build mn
+        run: |
+          MENTE_SMT_CONSTRUCTS="$RUNNER_TEMP/constructs" \
+            cargo test --release --locked -p mente-cli --test smt -- --ignored --exact write_construct_programs --nocapture
+          cargo build --release --locked --bin mn
+      - name: Export a query for each obligation Tier 1 discharges
+        run: |
+          set -euo pipefail
+          # The examples, the conformance programs that must pass, the agent programs, the
+          # construct programs and the tight-loop kernels: every module Tier 1 runs on.
+          mapfile -t pass < <(for f in conformance/*/*.mn; do
+            if [ "$(head -n 1 "$f")" = "// expect: pass" ]; then echo "$f"; fi
+          done)
+          mapfile -t agents < <(find benchmark/probe benchmark/prelim -name '*.mn' | sort)
+          start=$(date +%s%N)
+          ./target/release/mn smt examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels \
+            --out "$RUNNER_TEMP/smt" | tee "$RUNNER_TEMP/export.txt"
+          ms=$(( ($(date +%s%N) - start) / 1000000 ))
+          printf 'EXPORT_SECONDS=%d.%03d\n' $((ms / 1000)) $((ms % 1000)) >> "$GITHUB_ENV"
+      - name: Ask Z3 for each query
+        run: |
+          set -euo pipefail
+          find "$RUNNER_TEMP/smt" -name '*.smt2' | sort > "$RUNNER_TEMP/queries.txt"
+          total=$(wc -l < "$RUNNER_TEMP/queries.txt")
+          # A floor, so that an export that silently lost its programs fails.
+          if [ "$total" -lt 5000 ]; then
+            echo "::error::only $total queries were written; the export lost programs"
+            exit 1
+          fi
+          # One solver process a query, as many at once as the runner has cores; one line each:
+          # Z3's whole answer on one line, a tab, then the query's path.
+          check() {
+            answer=$(z3 -T:60 "$1" 2>&1 | tr '\n' ' ' | sed 's/ *$//')
+            printf '%s\t%s\n' "$answer" "$1"
+          }
+          export -f check
+          start=$(date +%s%N)
+          xargs -a "$RUNNER_TEMP/queries.txt" -d '\n' -P "$(nproc)" -n 1 bash -c 'check "$1"' _ \
+            > "$RUNNER_TEMP/answers.txt"
+          ms=$(( ($(date +%s%N) - start) / 1000000 ))
+          seconds=$(printf '%d.%03d' $((ms / 1000)) $((ms % 1000)))
+          answered=$(wc -l < "$RUNNER_TEMP/answers.txt")
+          awk -F '\t' '$1 != "unsat"' "$RUNNER_TEMP/answers.txt" > "$RUNNER_TEMP/failures.txt"
+          failed=$(wc -l < "$RUNNER_TEMP/failures.txt")
+          unreached=$(grep -c '^unreached: ' "$RUNNER_TEMP/export.txt" || true)
+          {
+            echo "### SMT cross-check"
+            echo
+            echo "| | |"
+            echo "| :--- | ---: |"
+            echo "| Queries written | $total |"
+            echo "| Answered \`unsat\` | $((answered - failed)) |"
+            echo "| Any other answer | $failed |"
+            echo "| Discharged where no path reaches, not queried | $unreached |"
+            echo "| Export, seconds | $EXPORT_SECONDS |"
+            echo "| Z3 ${Z3_VERSION} on every query, seconds, $(nproc) at once | $seconds |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$answered" -ne "$total" ]; then
+            echo "::error::Z3 answered $answered of $total queries"
+            exit 1
+          fi
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::Z3 did not answer unsat to $failed queries: Tier 1 discharged an obligation that does not follow from its facts, or the export is wrong"
+            head -n 20 "$RUNNER_TEMP/failures.txt" | while IFS=$'\t' read -r answer path; do
+              echo "::group::$answer: $(head -n 1 "$path" | sed 's/^; source: //')"
+              echo "Z3 answered: $answer"
+              cat "$path"
+              echo "::endgroup::"
+            done
+            exit 1
+          fi
+      - name: Keep the queries of a failed run
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smt-queries
+          path: |
+            ${{ runner.temp }}/smt
+            ${{ runner.temp }}/answers.txt
+            ${{ runner.temp }}/export.txt
+          if-no-files-found: ignore
+          retention-days: 14

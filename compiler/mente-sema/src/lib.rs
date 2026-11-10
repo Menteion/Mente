@@ -95,6 +95,23 @@ pub fn tier1_reports(src: &str) -> Vec<(String, tier1::Report)> {
     }
 }
 
+/// For each function whose names and types check, in source order, its name, what Tier 1 found,
+/// and each obligation Tier 1 discharged as an SMT-LIB 2 query for the SMT cross-check, which
+/// `mn smt` writes (`tier1::smt`).
+pub fn tier1_queries(src: &str) -> Vec<(String, tier1::Report, Vec<tier1::smt::Query>)> {
+    match parse_module(src) {
+        Ok(module) => {
+            let b = bodies_with(src, &module, true, true);
+            b.reports
+                .into_iter()
+                .zip(b.queries)
+                .map(|((name, report), queries)| (name, report, queries))
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 /// What `mn check` lists beside a module's diagnostics: every `todo` with its reason, and
 /// every trusted clause, one of an `@prove` function outside the Tier-1 fragment, assumed until
 /// `mn prove` runs. Each comes with its place, in source order.
@@ -218,10 +235,17 @@ struct Bodies {
     functions: Vec<Option<CheckedFn>>,
     errors: Vec<Diagnostic>,
     reports: Vec<(String, tier1::Report)>,
+    /// For each report, the queries of the obligations Tier 1 discharged, when asked for.
+    queries: Vec<Vec<tier1::smt::Query>>,
     todos: Vec<(Span, String)>,
 }
 
 fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
+    bodies_with(src, module, prove, false)
+}
+
+/// [`bodies`], with Tier 1 writing the query of each obligation it discharges when `queries`.
+fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bodies {
     let parsed = mente_syntax::parse_bodies(src, module);
     let mut todos: Vec<(Span, String)> = parsed
         .iter()
@@ -253,6 +277,7 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
     let mut errors = Vec::new();
     let mut checked = Vec::new();
     let mut reports = Vec::new();
+    let mut discharged = Vec::new();
     for (p, routing) in parsed.iter().zip(&routings) {
         errors.extend(p.errors.iter().cloned());
         let done = match (&p.syntax, p.errors.is_empty()) {
@@ -269,10 +294,15 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
                         typing: &typing,
                         routing: *routing,
                     };
-                    let report = tier1::check(&f, &callees, src);
+                    let (report, written) = if queries {
+                        tier1::check_with_queries(&f, &callees, src)
+                    } else {
+                        (tier1::check(&f, &callees, src), Vec::new())
+                    };
                     found.extend(report.diagnostics.iter().cloned());
                     obligations = report.obligations.clone();
                     reports.push((p.name.clone(), report));
+                    discharged.push(written);
                 }
                 errors.extend(found);
                 Some((resolution, typing, obligations))
@@ -299,6 +329,7 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
         functions,
         errors,
         reports,
+        queries: discharged,
         todos,
     }
 }

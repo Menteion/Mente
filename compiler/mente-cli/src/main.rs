@@ -61,6 +61,7 @@ fn main() {
         "build" => cmd_build(&args[1..]),
         "card" => print!("{}", CARD),
         "dump" => cmd_dump(&args[1..]),
+        "smt" => cmd_smt(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -520,6 +521,86 @@ fn run_time_checks(src: &str) -> String {
         ));
     }
     out
+}
+
+/// `mn smt <file.mn | dir>... --out <dir>`: writes each obligation Tier 1 discharges as an
+/// SMT-LIB 2 query, for an SMT solver to answer `unsat` (`mente_sema::tier1::smt`). Each goes in
+/// a file of its own, `<dir>/<the file's path without .mn>/<function>-<line>-<kind>.smt2`, whose
+/// first line is `; source: <file>:<line>:<col>`. An obligation no path reaches, which no query
+/// can check, is listed instead. Exits 2 when a file cannot be read or written.
+fn cmd_smt(args: &[String]) {
+    let mut out = None;
+    let mut inputs = Vec::new();
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if word == "--out" {
+            out = words.next().map(PathBuf::from);
+        } else {
+            inputs.push(PathBuf::from(word));
+        }
+    }
+    let (Some(out), false) = (out, inputs.is_empty()) else {
+        eprintln!("Usage: mn smt <file.mn | dir>... --out <dir>");
+        process::exit(2);
+    };
+    let fail = |what: String| -> ! {
+        eprintln!("error: {}", what);
+        process::exit(2);
+    };
+    let files: Vec<PathBuf> = inputs.iter().flat_map(|p| collect_mn_files(p)).collect();
+    let (mut written, mut unreached, mut functions) = (0, 0, 0);
+    for file in &files {
+        let shown = file.display().to_string();
+        let src = fs::read_to_string(file)
+            .unwrap_or_else(|e| fail(format!("cannot read `{}`: {}", shown, e)));
+        let relative: PathBuf = file
+            .with_extension("")
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(part) => Some(part),
+                _ => None,
+            })
+            .collect();
+        let dir = out.join(relative);
+        let mut seen: std::collections::HashMap<String, usize> = Default::default();
+        for (name, report, queries) in mente_sema::tier1_queries(&src) {
+            functions += 1;
+            for q in queries {
+                let o = &report.obligations[q.obligation];
+                let place = format!("{}:{}:{}", shown, o.span.line, o.span.col);
+                let Some(text) = q.text else {
+                    println!(
+                        "unreached: {}: {} of `{}`, discharged where no path reaches it, which no query can check",
+                        place,
+                        o.kind.name(),
+                        name
+                    );
+                    unreached += 1;
+                    continue;
+                };
+                let base = format!("{}-{}-{}", name, o.span.line, o.kind.name());
+                let n = seen.entry(base.clone()).or_insert(0);
+                *n += 1;
+                let path = match *n {
+                    1 => dir.join(format!("{}.smt2", base)),
+                    n => dir.join(format!("{}-{}.smt2", base, n)),
+                };
+                fs::create_dir_all(&dir)
+                    .unwrap_or_else(|e| fail(format!("cannot create `{}`: {}", dir.display(), e)));
+                fs::write(&path, format!("; source: {}\n{}", place, text))
+                    .unwrap_or_else(|e| fail(format!("cannot write `{}`: {}", path.display(), e)));
+                written += 1;
+            }
+        }
+    }
+    println!(
+        "Wrote {} queries for {} functions of {} files to `{}`; {} discharged obligations are reached by no path.",
+        written,
+        functions,
+        files.len(),
+        out.display(),
+        unreached
+    );
 }
 
 /// What `mn check` prints after a file's diagnostics: one line for each `todo` and for each
