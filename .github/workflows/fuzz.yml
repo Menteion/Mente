@@ -1,0 +1,90 @@
+# The compiler's own fuzzer, `mn fuzz` (compiler/mente-cli/src/fuzz.rs; docs/design-brief.md, M1's
+# exit criterion 6, "fuzzing finds no crash"): mutants of the repository's .mn programs through
+# every phase, each in a worker process on the 256 MiB stack `mn` runs its work on. Built in release
+# with overflow checks and debug assertions, so an arithmetic overflow panics as in a debug build.
+# A pull request touching the compiler gets a two-minute smoke run with a fixed seed; the nightly
+# run takes its seed from the run number and fuzzes for 45 minutes on every core of the runner.
+# Each failure, minimized, is uploaded as the artifact `fuzz-failures` and fails the job.
+# Heavy runs belong here, never on a developer's machine.
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "compiler/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "0 19 * * *" # 03:00 in Taipei
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed (empty for the run number)
+        default: ""
+      seconds:
+        description: Seconds of fuzzing
+        default: "2700"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
+  CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-24.04
+    # The fuzzing budget, then up to 90 s of minimizing for each new failure.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 120 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Build mn
+        run: cargo build --locked --release --bin mn
+      - name: Fuzz
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_SEED: ${{ inputs.seed }}
+          INPUT_SECONDS: ${{ inputs.seconds }}
+        run: |
+          case "$EVENT" in
+            pull_request) seed=1; seconds=120 ;;
+            workflow_dispatch) seed="${INPUT_SEED:-$GITHUB_RUN_NUMBER}"; seconds="${INPUT_SECONDS:-2700}" ;;
+            *) seed="$GITHUB_RUN_NUMBER"; seconds=2700 ;;
+          esac
+          status=0
+          target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out || status=$?
+          {
+            echo "## mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)"
+            echo '```text'
+            cat fuzz-out/summary.txt 2>/dev/null || echo "no summary: mn fuzz exited with $status"
+            echo '```'
+            for about in fuzz-out/*.txt; do
+              case "$about" in */summary.txt) continue ;; esac
+              [ -f "$about" ] || continue
+              echo "### ${about#fuzz-out/}"
+              echo '```text'
+              cat "$about"
+              echo '--- minimized input (first 40 lines):'
+              head -n 40 "${about%.txt}.mn"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: fuzz-failures
+          path: fuzz-out
+          if-no-files-found: ignore

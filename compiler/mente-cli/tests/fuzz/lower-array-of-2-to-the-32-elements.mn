@@ -1,0 +1,3 @@
+module m
+
+pub fn f(out: [4294967296]u8) -> u8 = 0
