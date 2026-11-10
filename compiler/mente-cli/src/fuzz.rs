@@ -1005,7 +1005,8 @@ impl Run<'_> {
         let start = Instant::now();
         let result = std::panic::catch_unwind(AssertUnwindSafe(f));
         let took = start.elapsed();
-        if took > self.budget {
+        // Over the budget: it took more than the budget has.
+        if self.budget.checked_sub(took).is_none() {
             self.fail(
                 name,
                 Kind::Hang,
@@ -2000,14 +2001,32 @@ fn ddmin(mut units: Vec<String>, fails: &mut dyn FnMut(&str) -> bool) -> Vec<Str
     units
 }
 
-/// Minimizes `case`, keeping the failure whose key is `key`, within the minimizer's budget.
-fn shrink(exec: &mut dyn Executor, case: &Case, key: &str, deadline: Instant) -> String {
+/// What minimizing one failure may spend: runs of the compiler, and time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Budget {
+    tries: usize,
+    time: Duration,
+}
+
+impl Budget {
+    /// The budget of a failure found at `now`: near or past the campaign's deadline, the
+    /// shorter time.
+    fn at(now: Instant, deadline: Instant) -> Budget {
+        Budget {
+            tries: MINIMIZE_TRIES,
+            time: MINIMIZE_TIME.min(MINIMIZE_LATE.max(deadline.saturating_duration_since(now))),
+        }
+    }
+}
+
+/// Minimizes `case`, keeping the failure whose key is `key`, within `budget`.
+fn shrink(exec: &mut dyn Executor, case: &Case, key: &str, budget: Budget) -> String {
     let start = Instant::now();
-    let time = MINIMIZE_TIME.min(MINIMIZE_LATE.max(deadline.saturating_duration_since(start)));
     let mut tries = 0;
     minimize(&case.text, &mut |text| {
         tries += 1;
-        if tries > MINIMIZE_TRIES || start.elapsed() > time {
+        // Past the budget: more runs than it allows, or more time than it has left.
+        if tries > budget.tries || budget.time.checked_sub(start.elapsed()).is_none() {
             return false;
         }
         let candidate = Case {
@@ -2179,7 +2198,7 @@ pub fn campaign(
                 continue;
             }
             eprintln!("[fuzz] job {} run {}: new failure: {}", job, run, key);
-            let minimized = shrink(exec, &case, &key, deadline);
+            let minimized = shrink(exec, &case, &key, Budget::at(Instant::now(), deadline));
             let found = Found {
                 failure,
                 minimized,
@@ -3356,5 +3375,104 @@ mod tests {
         assert!(!passes_on(Some(PHASE_THREAD), false));
         assert!(!passes_on(None, true));
         assert!(!passes_on(Some(PHASE_THREAD), true));
+    }
+
+    /// Minimizing spends no more runs than its budget allows, and none once its time is gone;
+    /// near or past the campaign's deadline it has the shorter time.
+    #[test]
+    fn test_minimizing_keeps_to_its_budget() {
+        let failing = Failure {
+            phase: "planted".into(),
+            kind: Kind::Panic,
+            message: "planted [at fuzz.rs:1:1]".into(),
+        };
+        let case = Case {
+            text: "a".repeat(64),
+            edit: 0,
+            thorough: false,
+        };
+        let mut exec = Scripted {
+            failures: vec![failing.clone()],
+            runs: 0,
+        };
+        let hour = Duration::from_secs(3600);
+        let small = shrink(
+            &mut exec,
+            &case,
+            &failing.key(),
+            Budget {
+                tries: 3,
+                time: hour,
+            },
+        );
+        assert_eq!((exec.runs, small.len()), (3, 8));
+        let mut exec = Scripted {
+            failures: vec![failing.clone()],
+            runs: 0,
+        };
+        let small = shrink(
+            &mut exec,
+            &case,
+            &failing.key(),
+            Budget {
+                tries: 1000,
+                time: hour,
+            },
+        );
+        assert_eq!((exec.runs, small.as_str()), (6, "a"));
+        let mut exec = Scripted {
+            failures: vec![failing.clone()],
+            runs: 0,
+        };
+        let budget = Budget {
+            tries: 1000,
+            time: Duration::ZERO,
+        };
+        // The first run may see no time pass yet on a coarse clock, and no other runs.
+        assert!(shrink(&mut exec, &case, &failing.key(), budget).len() >= 32);
+        assert!(exec.runs <= 1);
+        let now = Instant::now();
+        assert_eq!(Budget::at(now, now + hour).time, MINIMIZE_TIME);
+        assert_eq!(Budget::at(now, now).time, MINIMIZE_LATE);
+        assert_eq!(
+            Budget::at(now, now + Duration::from_secs(45)).time,
+            Duration::from_secs(45)
+        );
+        assert_eq!(Budget::at(now, now).tries, MINIMIZE_TRIES);
+    }
+
+    /// A phase that takes longer than its budget is a hang, named with both times; one within
+    /// its budget is not.
+    #[test]
+    fn test_a_phase_over_its_budget_is_a_hang() {
+        let mut events = Vec::new();
+        let mut sink = |e| events.push(e);
+        let mut run = Run {
+            budget: Duration::from_millis(20),
+            thorough: false,
+            sink: &mut sink,
+        };
+        assert_eq!(run.phase("quick", || 7), Some(7));
+        let slow = run.phase("slow", || std::thread::sleep(Duration::from_millis(60)));
+        assert_eq!(slow, Some(()));
+        let failures: Vec<Failure> = events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Failure(f) => Some(f),
+                Event::Phase(_) => None,
+            })
+            .collect();
+        assert_eq!(failures.len(), 1, "{:?}", failures);
+        assert_eq!(
+            (failures[0].phase.as_str(), failures[0].kind),
+            ("slow", Kind::Hang)
+        );
+        assert!(
+            failures[0]
+                .message
+                .ends_with(" ms, over the phase budget of 20 ms"),
+            "{}",
+            failures[0].message
+        );
     }
 }
