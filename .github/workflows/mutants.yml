@@ -1,6 +1,7 @@
 # Mutation testing of the compiler with cargo-mutants, on GitHub's runners and never on a
 # developer's machine (ROADMAP.md, M0a). A pull request mutates only the lines it changes;
-# the full run is split across runners, weekly and on demand. Settings: .cargo/mutants.toml.
+# the full run is split across runners, weekly and on demand, when it may take only the mutants a
+# regex names. Tests run through nextest. Settings: .cargo/mutants.toml and .config/nextest.toml.
 name: Mutants
 
 on:
@@ -10,10 +11,16 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/mutants.toml"
+      - ".config/nextest.toml"
       - ".github/workflows/mutants.yml"
   schedule:
     - cron: "0 18 * * 0" # Mondays, 02:00 in Taipei
   workflow_dispatch:
+    inputs:
+      examine:
+        description: "Only the mutants whose names match this regex, as cargo-mutants --re reads it; empty for all"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -25,6 +32,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_MUTANTS_VERSION: "27.1.0"
+  CARGO_NEXTEST_VERSION: "0.9.149"
+  # The nextest profile that stops a test running too long (.config/nextest.toml).
+  NEXTEST_PROFILE: mutants
 
 jobs:
   in-diff:
@@ -50,22 +60,42 @@ jobs:
           key: cargo-mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}
       - name: Install cargo-mutants
         run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-nextest
+          key: cargo-nextest-${{ runner.os }}-${{ env.CARGO_NEXTEST_VERSION }}
+      - name: Install cargo-nextest
+        run: command -v cargo-nextest || cargo install cargo-nextest --locked --version "$CARGO_NEXTEST_VERSION"
+      - name: Run the tests once without a mutant
+        # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
+        # runs the whole workspace's tests, so the timeout it set from that baseline was often
+        # its 20 s minimum, and cut a mutant's tests short before any had failed. This baseline
+        # runs what every mutant runs, and cargo-mutants skips its own.
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace 2>&1 | tee baseline.log
+          { echo "## Slowest tests without a mutant"; echo '```text'
+            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | head -10
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Mutate the lines this pull request changes
         run: |
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           status=0
-          cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/4 --in-place --no-shuffle || status=$?
-          # The outcome files decide, not the exit code: cargo-mutants exits 3 whenever a mutant
-          # timed out, even when others were missed. A timeout made a loop never end, which any
-          # test run would notice, so it counts as caught; a missed mutant fails the job.
+          cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/4 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
+          # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
+          # missed and 3 when one timed out. A mutant that loops without end fails the test
+          # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
+          # minutes against the baseline's one or two, is not known to be caught, and fails the
+          # job as a missed one does.
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
-          if [ -s mutants.out/timeout.txt ]; then
-            echo "Timed out, counted as caught: $(wc -l < mutants.out/timeout.txt)" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -s mutants.out/missed.txt ]; then
-            { echo "## Missed mutants"; echo "```text"; cat mutants.out/missed.txt; echo "```"; } >> "$GITHUB_STEP_SUMMARY"
-            exit 2
-          fi
+          failed=0
+          for outcome in missed timeout; do
+            if [ -s "mutants.out/$outcome.txt" ]; then
+              { echo "## Mutants $outcome"; echo '```text'; cat "mutants.out/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              failed=2
+            fi
+          done
+          exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -93,21 +123,45 @@ jobs:
           key: cargo-mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}
       - name: Install cargo-mutants
         run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-nextest
+          key: cargo-nextest-${{ runner.os }}-${{ env.CARGO_NEXTEST_VERSION }}
+      - name: Install cargo-nextest
+        run: command -v cargo-nextest || cargo install cargo-nextest --locked --version "$CARGO_NEXTEST_VERSION"
+      - name: Run the tests once without a mutant
+        # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
+        # runs the whole workspace's tests, so the timeout it set from that baseline was often
+        # its 20 s minimum, and cut a mutant's tests short before any had failed. This baseline
+        # runs what every mutant runs, and cargo-mutants skips its own.
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace 2>&1 | tee baseline.log
+          { echo "## Slowest tests without a mutant"; echo '```text'
+            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | head -10
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Mutate this shard of the compiler
+        env:
+          EXAMINE: ${{ inputs.examine }}
         run: |
           status=0
-          cargo mutants --shard ${{ matrix.shard }}/4 --in-place --no-shuffle || status=$?
-          # The outcome files decide, not the exit code: cargo-mutants exits 3 whenever a mutant
-          # timed out, even when others were missed. A timeout made a loop never end, which any
-          # test run would notice, so it counts as caught; a missed mutant fails the job.
+          only=()
+          if [ -n "$EXAMINE" ]; then only=(--re "$EXAMINE"); fi
+          cargo mutants "${only[@]}" --shard ${{ matrix.shard }}/4 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
+          # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
+          # missed and 3 when one timed out. A mutant that loops without end fails the test
+          # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
+          # minutes against the baseline's one or two, is not known to be caught, and fails the
+          # job as a missed one does.
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
-          if [ -s mutants.out/timeout.txt ]; then
-            echo "Timed out, counted as caught: $(wc -l < mutants.out/timeout.txt)" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -s mutants.out/missed.txt ]; then
-            { echo "## Missed mutants"; echo "```text"; cat mutants.out/missed.txt; echo "```"; } >> "$GITHUB_STEP_SUMMARY"
-            exit 2
-          fi
+          failed=0
+          for outcome in missed timeout; do
+            if [ -s "mutants.out/$outcome.txt" ]; then
+              { echo "## Mutants $outcome"; echo '```text'; cat "mutants.out/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              failed=2
+            fi
+          done
+          exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

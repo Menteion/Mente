@@ -1,0 +1,11 @@
+# cargo-nextest settings. Only the mutation runs use nextest (.github/workflows/mutants.yml),
+# for its time limit on each test; every other check runs the tests with `cargo test`.
+
+[profile.mutants]
+# A mutant that makes a test loop without end is caught when nextest stops the test, which then
+# fails, instead of costing cargo-mutants' timeout for the whole run. The slowest test takes
+# well under this in a debug build on GitHub's runners; the baseline step prints each test's
+# time.
+slow-timeout = { period = "30s", terminate-after = 2 }
+# The first failing test catches the mutant: the rest need not run.
+fail-fast = true
