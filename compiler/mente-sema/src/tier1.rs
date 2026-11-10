@@ -11,6 +11,9 @@
 //! valuation Tier 1 cannot rule out, never an input that fails ([`tier1-counterexample`]), with a
 //! `guard` as its suggested fix; one that may stay a run-time check is only recorded.
 //!
+//! [`check_with_queries`] also writes each obligation Tier 1 discharges as an SMT-LIB 2 query, for
+//! the SMT cross-check in CI ([`smt`]).
+//!
 //! [`tier1-counterexample`]: ../../docs/design-review.md#tier1-counterexample
 
 use std::collections::BTreeSet;
@@ -26,6 +29,10 @@ use crate::check::Typing;
 use crate::names::{BindingKind, Resolution};
 use crate::octagon::{Octagon, Term, BIG, INF};
 use crate::types::{Int, IntTy, Ty};
+
+pub mod smt;
+
+use smt::{Goal, Path};
 
 /// How a function routes its clauses outside the Tier-1 fragment: `@checked` makes them
 /// run-time checks, `@prove` trusted axioms until `mn prove` runs.
@@ -80,6 +87,23 @@ pub enum ObligationKind {
     /// A `decreases` measure, never negative and smaller at each round or recursive call:
     /// must be proven.
     Decreases,
+}
+
+impl ObligationKind {
+    /// The kind as one word, as `mn smt` names a query: `index`, `requires`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ObligationKind::Refinement => "refinement",
+            ObligationKind::Range => "range",
+            ObligationKind::Index => "index",
+            ObligationKind::Divisor => "divisor",
+            ObligationKind::Shift => "shift",
+            ObligationKind::Requires => "requires",
+            ObligationKind::Ensures => "ensures",
+            ObligationKind::Invariant => "invariant",
+            ObligationKind::Decreases => "decreases",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -973,6 +997,8 @@ struct Fx<'a> {
     tracks: Vec<Track>,
     /// The `E0502`s a refined `var` might fix.
     retries: Vec<Retry>,
+    /// When the SMT cross-check asks for them, the query of each obligation discharged so far.
+    queries: Option<Vec<smt::Query>>,
 }
 
 /// An `E0502` that declaring a `var` refined might fix: the diagnostic's index in the report,
@@ -995,24 +1021,52 @@ struct Track {
 /// Checks one function, whose callees are `callees` in module order (`None` for a function
 /// without a body). `src` is the text its spans point into, for the fixes.
 pub fn check(f: &Function, callees: &[Option<Callee>], src: &str) -> Report {
-    let (mut report, retries) = run(f, callees, src);
+    checked(f, callees, src, false).0
+}
+
+/// [`check`], with each obligation Tier 1 discharges written as an SMT-LIB 2 query for the SMT
+/// cross-check ([`smt`]). Only `mn smt` asks for them, and [`check`] spends nothing on them.
+pub fn check_with_queries(
+    f: &Function,
+    callees: &[Option<Callee>],
+    src: &str,
+) -> (Report, Vec<smt::Query>) {
+    checked(f, callees, src, true)
+}
+
+fn checked(
+    f: &Function,
+    callees: &[Option<Callee>],
+    src: &str,
+    queries: bool,
+) -> (Report, Vec<smt::Query>) {
+    let (mut report, retries, queries) = run(f, callees, src, queries);
     for r in &retries {
         if let Some(fix) = refined_var_fix(f, callees, src, &report.diagnostics, r) {
             report.diagnostics[r.diagnostic].fixes.insert(0, fix);
         }
     }
     report.diagnostics.sort_by_key(|d| d.primary.start);
-    report
+    (report, queries)
 }
 
-/// One pass of Tier 1 over a function, its diagnostics in the order it found them.
-fn run(f: &Function, callees: &[Option<Callee>], src: &str) -> (Report, Vec<Retry>) {
+/// One pass of Tier 1 over a function, its diagnostics in the order it found them, and the
+/// query of each obligation it discharged when `queries`.
+fn run(
+    f: &Function,
+    callees: &[Option<Callee>],
+    src: &str,
+    queries: bool,
+) -> (Report, Vec<Retry>, Vec<smt::Query>) {
     let mut fx = Fx::new(f, callees, src);
+    if queries {
+        fx.queries = Some(Vec::new());
+    }
     fx.route();
     let mut st = Octagon::new(fx.count);
     fx.entry(&mut st);
     fx.body(&mut st);
-    (fx.report, fx.retries)
+    (fx.report, fx.retries, fx.queries.unwrap_or_default())
 }
 
 /// The fix that declares a `var` refined, offered before the `guard` for the `E0502` of `r`, when
@@ -1061,7 +1115,7 @@ fn refined_var_fix(
             syntax: &syntax,
             ..*f
         };
-        let after = run(&g, callees, src).0.diagnostics;
+        let after = run(&g, callees, src, false).0.diagnostics;
         let fixed = after.iter().all(|d| key(d) != failed);
         let nothing_new = after
             .iter()
@@ -1232,6 +1286,7 @@ impl<'a> Fx<'a> {
             entry_measures,
             tracks: Vec::new(),
             retries: Vec::new(),
+            queries: None,
         };
         let shape = f.syntax.result.map(|t| fx.own_shape(t));
         fx.result_shape = shape;
@@ -1400,29 +1455,56 @@ impl<'a> Fx<'a> {
 
     // -- diagnostics -------------------------------------------------------------------------
 
-    fn record(&mut self, kind: ObligationKind, span: Span, must: bool, proven: bool, tag: Tag) {
-        self.record_check(kind, span, must, proven, String::new(), tag);
-    }
-
-    fn record_check(
+    /// Records an obligation, proven or not. `paths` gives the states Tier 1 decided it on, each
+    /// with the obligation as it stands there, computing again what the decision computed where
+    /// it must. It is called only here, and only for an obligation proven while the SMT
+    /// cross-check asks for queries, so that each query is built from the very states of the
+    /// decision and nothing is spent on it otherwise.
+    fn record(
         &mut self,
         kind: ObligationKind,
         span: Span,
         must: bool,
         proven: bool,
-        detail: String,
         tag: Tag,
+        paths: impl FnOnce(&mut Self) -> Vec<Path>,
     ) {
-        if self.recording {
-            self.report.obligations.push(Obligation {
-                kind,
-                span,
-                must,
-                proven,
-                detail,
-                tag,
-            });
+        let o = Obligation {
+            kind,
+            span,
+            must,
+            proven,
+            detail: String::new(),
+            tag,
+        };
+        self.record_check(o, paths);
+    }
+
+    fn record_check(&mut self, o: Obligation, paths: impl FnOnce(&mut Self) -> Vec<Path>) {
+        if !self.recording {
+            return;
         }
+        if o.proven && self.queries.is_some() {
+            let paths = self.quietly(paths);
+            let query = smt::Query {
+                obligation: self.report.obligations.len(),
+                text: smt::query(self, &o, paths),
+            };
+            if let Some(queries) = &mut self.queries {
+                queries.push(query);
+            }
+        }
+        self.report.obligations.push(o);
+    }
+
+    /// Runs `f` with nothing recorded: what it evaluates again records no obligation and emits
+    /// no diagnostic.
+    fn quietly<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let was = self.recording;
+        self.recording = false;
+        let out = f(self);
+        self.recording = was;
+        out
     }
 
     fn anchor(&self) -> Anchor {
@@ -1863,14 +1945,15 @@ impl<'a> Fx<'a> {
         let detail = t.map_or("into its type".to_string(), |t| {
             format!("into `{}`", t.name)
         });
-        self.record_check(
-            ObligationKind::Range,
+        let o = Obligation {
+            kind: ObligationKind::Range,
             span,
-            false,
-            st.is_empty() || proven,
+            must: false,
+            proven: st.is_empty() || proven,
             detail,
-            t.map_or(Tag::None, |t| Tag::Into(t.name)),
-        );
+            tag: t.map_or(Tag::None, |t| Tag::Into(t.name)),
+        };
+        self.record_check(o, |_| vec![(st.clone(), Goal::Fits(v.clone(), t))]);
         // An empty interval is a value no path computes, after an operation that always traps.
         let (tlo, thi) = range.filter(|_| !st.is_empty() && lo <= hi)?;
         if hi < tlo {
@@ -1959,6 +2042,10 @@ impl<'a> Fx<'a> {
             true,
             failing.is_none(),
             tag,
+            |_| {
+                let within = Cond::And(Box::new(low), Box::new(high));
+                vec![(st.clone(), Goal::Holds(within))]
+            },
         );
         let (Some(mut s), true) = (failing, self.recording) else {
             return;
@@ -2027,14 +2114,15 @@ impl<'a> Fx<'a> {
     fn index_check(&mut self, st: &Octagon, i: &Val, len: u128, span: Span) {
         let (lo, hi) = interval(st, i);
         let n = i128::try_from(len).unwrap_or(INF);
-        self.record_check(
-            ObligationKind::Index,
+        let o = Obligation {
+            kind: ObligationKind::Index,
             span,
-            false,
-            st.is_empty() || (lo >= 0 && hi < n),
-            format!("into an array of {}", len),
-            Tag::None,
-        );
+            must: false,
+            proven: st.is_empty() || (lo >= 0 && hi < n),
+            detail: format!("into an array of {}", len),
+            tag: Tag::None,
+        };
+        self.record_check(o, |_| vec![(st.clone(), Goal::Index(i.clone(), len))]);
     }
 
     /// The function's `ensures`, at a return of `v` or at the end of its body.
@@ -2067,7 +2155,14 @@ impl<'a> Fx<'a> {
             let k = self.cond(&mut s, c.expr);
             let failing = self.refute(&s, &k);
             let tag = Tag::Clause(self.span(c.expr));
-            self.record(ObligationKind::Ensures, span, true, failing.is_none(), tag);
+            self.record(
+                ObligationKind::Ensures,
+                span,
+                true,
+                failing.is_none(),
+                tag,
+                |_| vec![(s, Goal::Holds(k))],
+            );
             let Some(failing) = failing else {
                 continue;
             };
@@ -2474,14 +2569,16 @@ impl<'a> Fx<'a> {
             BinaryOp::Shl | BinaryOp::Shr => {
                 let (lo, hi) = interval(st, r);
                 let width = lt.map_or(0, |t| i128::from(t.bits));
-                self.record_check(
-                    ObligationKind::Shift,
-                    rspan,
-                    false,
-                    st.is_empty() || (lo >= 0 && hi < width),
-                    lt.map_or(String::new(), |t| format!("below {}", t.bits)),
-                    Tag::None,
-                );
+                let o = Obligation {
+                    kind: ObligationKind::Shift,
+                    span: rspan,
+                    must: false,
+                    proven: st.is_empty() || (lo >= 0 && hi < width),
+                    detail: lt.map_or(String::new(), |t| format!("below {}", t.bits)),
+                    tag: Tag::None,
+                };
+                let bits = lt.map_or(0, |t| t.bits);
+                self.record_check(o, |_| vec![(st.clone(), Goal::Shift(r.clone(), bits))]);
                 let v = shift_vals(st, op, l, r, None);
                 self.fits(st, &v, lt, span);
                 return clamp_to(v, lt, st);
@@ -2500,6 +2597,7 @@ impl<'a> Fx<'a> {
                     false,
                     st.is_empty() || lo > 0 || hi < 0,
                     Tag::None,
+                    |_| vec![(st.clone(), Goal::NonZero(r.clone()))],
                 );
                 if op == BinaryOp::Div {
                     div_vals(st, l, r)
@@ -2822,7 +2920,14 @@ impl<'a> Fx<'a> {
             let k = self.callee_cond(st, &c, &site, clause.expr, false);
             let failing = self.refute(st, &k);
             let tag = Tag::Clause(callee.tree.expr(clause.expr).span);
-            self.record(ObligationKind::Requires, span, true, failing.is_none(), tag);
+            self.record(
+                ObligationKind::Requires,
+                span,
+                true,
+                failing.is_none(),
+                tag,
+                |_| vec![(st.clone(), Goal::Holds(k))],
+            );
             let Some(failing) = failing else {
                 continue;
             };
@@ -3190,13 +3295,15 @@ impl<'a> Fx<'a> {
         if !self.recording {
             return;
         }
-        let failing = self.refute(b, &cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0)));
+        let never_negative = cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0));
+        let failing = self.refute(b, &never_negative);
         self.record(
             ObligationKind::Decreases,
             self.span(e),
             true,
             failing.is_none(),
             Tag::Clause(self.span(e)),
+            |_| vec![(b.clone(), Goal::Holds(never_negative))],
         );
         let Some(failing) = failing else {
             return;
@@ -3299,6 +3406,20 @@ impl<'a> Fx<'a> {
         measures: &[(ExprId, usize, usize)],
         tracked: &[bool],
     ) -> Option<(Octagon, Vec<Val>, Vec<Val>)> {
+        let (next, after, before) = self.round(end, cond, measures, tracked);
+        let failing = self.refute(&next, &lex_less(&after, &before))?;
+        Some((failing, after, before))
+    }
+
+    /// The state in which the next round starts after the path of a round that ends in `end`,
+    /// with the measures' values then and at the round's start.
+    fn round(
+        &mut self,
+        end: &Octagon,
+        cond: ExprId,
+        measures: &[(ExprId, usize, usize)],
+        tracked: &[bool],
+    ) -> (Octagon, Vec<Val>, Vec<Val>) {
         let mut next = end.clone();
         let c = self.cond(&mut next, cond);
         self.assume(&mut next, &c, true);
@@ -3315,8 +3436,7 @@ impl<'a> Fx<'a> {
                 before.push(var_val(m.1));
             }
         }
-        let failing = self.refute(&next, &lex_less(&after, &before))?;
-        Some((failing, after, before))
+        (next, after, before)
     }
 
     fn measure_decreases(
@@ -3335,12 +3455,21 @@ impl<'a> Fx<'a> {
             .find_map(|end| self.round_fails(end, cond, measures, tracked));
         self.recording = true;
         let span = self.span(measures[0].0);
+        // The query of measures that get smaller on every path holds each path's state.
         self.record(
             ObligationKind::Decreases,
             span,
             true,
             found.is_none(),
             Tag::Smaller,
+            |fx| {
+                ends.iter()
+                    .map(|end| {
+                        let (next, after, before) = fx.round(end, cond, measures, tracked);
+                        (next, Goal::Holds(lex_less(&after, &before)))
+                    })
+                    .collect()
+            },
         );
         let Some((mut failing, after, before)) = found else {
             return;
@@ -3403,7 +3532,8 @@ impl<'a> Fx<'a> {
             let v = self.callee_val(st, c, site, clause.expr, false);
             let text = print(&callee.tree, clause.expr, &no_subst).0;
             let what = format!("the measure `{}` of `{}`", text, callee.name);
-            let failing = self.refute(st, &cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0)));
+            let never_negative = cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0));
+            let failing = self.refute(st, &never_negative);
             let tag = Tag::Clause(callee.tree.expr(clause.expr).span);
             self.record(
                 ObligationKind::Decreases,
@@ -3411,6 +3541,7 @@ impl<'a> Fx<'a> {
                 true,
                 failing.is_none(),
                 tag,
+                |_| vec![(st.clone(), Goal::Holds(never_negative))],
             );
             if let Some(failing) = failing {
                 let (valuation, _) = self.valuation(&failing, &named, &[]);
@@ -3445,13 +3576,15 @@ impl<'a> Fx<'a> {
             return;
         }
         let entry: Vec<Val> = self.entry_measures.iter().map(|m| var_val(m.0)).collect();
-        let failing = self.refute(st, &lex_less(&values, &entry));
+        let smaller = lex_less(&values, &entry);
+        let failing = self.refute(st, &smaller);
         self.record(
             ObligationKind::Decreases,
             span,
             true,
             failing.is_none(),
             Tag::Smaller,
+            |_| vec![(st.clone(), Goal::Holds(smaller))],
         );
         let Some(mut failing) = failing else {
             return;
@@ -3580,6 +3713,7 @@ impl<'a> Fx<'a> {
                 true,
                 failing.is_none(),
                 tag,
+                |fx| fx.invariant_paths(st, &back, c),
             );
             let Some((state, on_entry)) = failing else {
                 continue;
@@ -3623,6 +3757,20 @@ impl<'a> Fx<'a> {
         let (_, exit) = self.pass(&head, (s, cond, body), st);
         self.heads.pop();
         *st = exit;
+    }
+
+    /// The states a proven written invariant was decided on, for its query: on entry, and
+    /// after a round of the body from the head of Houdini's last pass, each with the invariant
+    /// evaluated there as it was then. Called by [`Fx::record`], which records nothing meanwhile.
+    fn invariant_paths(&mut self, entry: &Octagon, back: &Octagon, c: Cand) -> Vec<Path> {
+        [entry, back]
+            .into_iter()
+            .map(|from| {
+                let mut s = from.clone();
+                let k = self.cand(&mut s, c);
+                (s, Goal::Holds(k))
+            })
+            .collect()
     }
 }
 

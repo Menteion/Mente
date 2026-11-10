@@ -239,6 +239,36 @@ impl Octagon {
         }
     }
 
+    /// The constraints the matrix holds, each as `terms <= c`: every bound off the diagonal, a
+    /// coherent pair once, and each variable's diagonal entry below zero, which makes the octagon
+    /// empty, as `[] <= c`; a constant constraint appears only there. What the SMT cross-check is
+    /// given of a state (`tier1::smt`).
+    pub fn constraints(&self) -> Vec<(Vec<Term>, i128)> {
+        let d = self.d();
+        let term = |node: usize| Term {
+            var: node / 2,
+            neg: node % 2 == 1,
+        };
+        let mut out = Vec::new();
+        for i in 0..d {
+            // An entry `(i, j)` and its coherent twin `(j ^ 1, i ^ 1)` hold one bound, and the
+            // twin is the one with `j <= i ^ 1`: each pair is listed once, and a unary bound or a
+            // diagonal entry, which pairs with itself or its variable's other node, once.
+            for j in (i ^ 1)..d {
+                let c = self.at(i, j);
+                if i == j {
+                    if c < 0 {
+                        out.push((Vec::new(), c));
+                    }
+                } else if c < INF {
+                    // `V_j - V_i <= c`, and `-V_i` is the node `i ^ 1`.
+                    out.push((vec![term(j), term(i ^ 1)], c));
+                }
+            }
+        }
+        out
+    }
+
     /// A point of the octagon: each of `vars` in turn takes the value within its bounds that
     /// is closest to zero, which is then fixed, so the result satisfies every constraint.
     pub fn pick(&self, vars: &[usize]) -> Option<Vec<i128>> {
@@ -448,6 +478,67 @@ mod tests {
             let nearest = points.iter().map(|p| p[0].abs()).min().unwrap();
             assert_eq!(picked[0].abs(), nearest, "{picked:?} {cs:?}");
         }
+    }
+
+    /// The constraints an octagon lists hold exactly its points, so that a solver given them is
+    /// given the state: against brute force over a box a little wider than the octagon's, and
+    /// rebuilt into the same matrix. An empty octagon lists a contradiction.
+    #[test]
+    fn test_constraints_hold_exactly_the_points_of_the_octagon() {
+        let mut r = Rng(0x2545_f491_4f6c_dd1d);
+        let n = 3;
+        for _ in 0..300 {
+            let mut o = Octagon::new(n);
+            let mut cs = Vec::new();
+            for v in 0..n {
+                cs.push((vec![x(v)], 5));
+                cs.push((vec![nx(v)], 5));
+            }
+            for _ in 0..(1 + r.below(5)) {
+                cs.push(random_constraint(&mut r, n));
+            }
+            for (t, c) in &cs {
+                o.add_lin(t, *c);
+            }
+            let listed = o.constraints();
+            for a in -6..=6 {
+                for b in -6..=6 {
+                    for c in -6..=6 {
+                        let p = [a, b, c];
+                        let holds = |all: &[(Vec<Term>, i128)]| {
+                            all.iter().all(|(t, k)| satisfies(&p, t, *k))
+                        };
+                        assert_eq!(holds(&cs), holds(&listed), "{p:?} {cs:?} {listed:?}");
+                    }
+                }
+            }
+            if o.is_empty() {
+                assert!(listed.iter().any(|(t, c)| t.is_empty() && *c < 0), "{cs:?}");
+                continue;
+            }
+            // No constant, and each bound once: a coherent pair holds the same terms in either
+            // order.
+            let mut seen: Vec<(Vec<(usize, bool)>, i128)> = Vec::new();
+            for (t, c) in &listed {
+                assert!(!t.is_empty(), "{listed:?}");
+                let mut key: Vec<(usize, bool)> = t.iter().map(|t| (t.var, t.neg)).collect();
+                key.sort_unstable();
+                assert!(!seen.contains(&(key.clone(), *c)), "{listed:?}");
+                seen.push((key, *c));
+            }
+            let mut rebuilt = Octagon::new(n);
+            for (t, c) in &listed {
+                rebuilt.add_lin(t, *c);
+            }
+            assert_eq!(rebuilt, o, "{cs:?}");
+        }
+        assert_eq!(Octagon::new(2).constraints(), Vec::new());
+        let mut o = Octagon::new(2);
+        o.add_lin(&[x(0), nx(1)], 3);
+        assert_eq!(o.constraints(), vec![(vec![nx(1), x(0)], 3)]);
+        o.add_lin(&[x(1)], 4);
+        assert!(o.constraints().contains(&(vec![x(1), x(1)], 8)));
+        assert!(o.constraints().contains(&(vec![x(0), x(0)], 14)));
     }
 
     #[test]
