@@ -1,0 +1,39 @@
+module sieve
+
+/// Counts the primes below a limit near 262,144 with the sieve of Eratosthenes, `reps` times.
+/// The limit changes from round to round, so no round can be computed once for all of them.
+pub fn sieve(reps: u32) -> u64 {
+  var composite: [262144]bool = [false; 262144]
+  var check: u64 = 0
+  var r: u32 = 0
+  while r < reps {
+    val limit: usize = 262144 - r % 8
+    var c: usize = 0
+    while c < limit {
+      composite[c] = false
+      c += 1
+    }
+    var p: usize = 2
+    while p * p < limit {
+      if not composite[p] {
+        var m: usize = p * p
+        while m < limit {
+          composite[m] = true
+          m += p
+        }
+      }
+      p += 1
+    }
+    var count: u64 = 0
+    var n: usize = 2
+    while n < limit {
+      if not composite[n] {
+        count += 1
+      }
+      n += 1
+    }
+    check = (check * 31 + count) % 1000000007
+    r += 1
+  }
+  check
+}

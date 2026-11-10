@@ -1,0 +1,106 @@
+# The tight-loop kernels of perf/ (perf/README.md): M1's performance baselines for Mente's native
+# code, with hardware counters where the runner exposes them, and the gap to C, C++ and Rust
+# ("Measurement protocols" in ROADMAP.md). The base branch's compiler and this change's build
+# every kernel on one runner and are measured side by side, since only a comparison on one
+# machine means anything on shared runners; a change slower than the base beyond the tolerances
+# in perf/run.mjs fails. The gaps are reported, not enforced. Not a required check. Benchmarks
+# run here, never on a laptop.
+name: Performance
+
+on:
+  pull_request:
+    paths:
+      - "compiler/**"
+      - "perf/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/perf.yml"
+  push:
+    branches: [main]
+    paths:
+      - "compiler/**"
+      - "perf/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/perf.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kernels:
+    name: Tight-loop kernels (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64 Linux
+            os: ubuntu-24.04
+          - name: AArch64 Linux
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # One target directory for both compilers, so the dependencies are built once.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Install clang 18
+        run: |
+          command -v clang-18 >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q clang-18; }
+          clang-18 --version | head -1
+      - name: Install perf and let it count
+        # Hardware counters are counted only where the platform exposes them; the measuring
+        # script records what it got, and falls back to wall time alone without perf.
+        continue-on-error: true
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)" \
+            || sudo apt-get install -y -q linux-tools-common linux-tools-generic
+          sudo sysctl -w kernel.perf_event_paranoid=-1
+          perf --version
+          perf stat -e cycles,instructions,branches,branch-misses,cache-references,cache-misses -- true
+      - name: Test the measuring script
+        run: node --test perf/run.test.mjs
+      - name: Build the base branch's compiler
+        run: |
+          # A pull request compares with its base; a push to main, with the commit before it.
+          if [ -n "$GITHUB_BASE_REF" ]; then base="origin/$GITHUB_BASE_REF"; else base="HEAD~1"; fi
+          git worktree add ../base "$base"
+          (cd ../base && rustup toolchain install && cargo build --release --locked --bin mn)
+          cp "$CARGO_TARGET_DIR/release/mn" "$RUNNER_TEMP/mn-base"
+      - name: Build this change's compiler
+        run: |
+          cargo build --release --locked --bin mn
+          cp "$CARGO_TARGET_DIR/release/mn" "$RUNNER_TEMP/mn"
+      - name: Measure
+        run: |
+          node perf/run.mjs --mn "$RUNNER_TEMP/mn" --base-mn "$RUNNER_TEMP/mn-base" \
+            --out "$RUNNER_TEMP/perf-results.json" --work "$RUNNER_TEMP/perf-work"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: perf-results-${{ matrix.os }}
+          path: ${{ runner.temp }}/perf-results.json
+          if-no-files-found: ignore

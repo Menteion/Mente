@@ -1,0 +1,52 @@
+module bsearch
+
+/// Looks up 4,096 keys in a sorted array of 4,096 values by binary search, `reps` times, and
+/// sums where each search ends and how many keys it finds. After each round one key changes,
+/// so no round can be computed once for all of them.
+pub fn bsearch(reps: u32) -> u64 {
+  var a: [4096]u32 = [0; 4096]
+  var keys: [4096]u32 = [0; 4096]
+  var seed: u64 = 12345
+  var value: u32 = 0
+  var i: usize = 0
+  while i < a.len {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    value += 1 + seed % 8
+    a[i] = value
+    i += 1
+  }
+  i = 0
+  while i < keys.len {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    keys[i] = seed % 20480
+    i += 1
+  }
+  var check: u64 = 0
+  var r: u32 = 0
+  while r < reps {
+    var total: u64 = 0
+    var q: usize = 0
+    while q < keys.len {
+      val key = keys[q]
+      var lo: usize = 0
+      var hi: usize = a.len
+      while lo < hi {
+        val mid = (lo + hi) / 2
+        if a[mid] < key {
+          lo = mid + 1
+        } else {
+          hi = mid
+        }
+      }
+      total += lo
+      if lo < a.len and a[lo] == key {
+        total += 1000000
+      }
+      q += 1
+    }
+    check = (check * 31 + total) % 1000000007
+    keys[r % 4096] = check % 20480
+    r += 1
+  }
+  check
+}

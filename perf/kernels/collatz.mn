@@ -1,0 +1,27 @@
+module collatz
+
+/// The total number of Collatz steps from every start below `limit` down to 1, and the
+/// largest, combined: a scalar loop of divisions, multiplications and branches.
+pub fn collatz(limit: u64) -> u64 {
+  var total: u64 = 0
+  var longest: u64 = 0
+  var start: u64 = 1
+  while start < limit {
+    var x = start
+    var steps: u64 = 0
+    while x != 1 {
+      if x % 2 == 0 {
+        x = x / 2
+      } else {
+        x = 3 * x + 1
+      }
+      steps += 1
+    }
+    total += steps
+    if steps > longest {
+      longest = steps
+    }
+    start += 1
+  }
+  total * 1000 + longest
+}
