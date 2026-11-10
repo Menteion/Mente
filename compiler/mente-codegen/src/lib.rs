@@ -243,6 +243,9 @@ struct CompiledFunction {
     size: u32,
     ranges: Vec<CodeRange>,
     unwind: Option<UnwindInfo>,
+    /// The bytes of its stack slots, which tests read.
+    #[cfg(test)]
+    stack_slots: u32,
 }
 
 /// A defined function as the object holds it, which the debug information describes.
@@ -469,6 +472,8 @@ impl ObjectWriter {
             size,
             ranges,
             unwind,
+            #[cfg(test)]
+            stack_slots: ctx.func.sized_stack_slots.values().map(|s| s.size).sum(),
         });
         Ok(())
     }

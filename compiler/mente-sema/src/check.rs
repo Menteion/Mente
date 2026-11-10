@@ -1408,6 +1408,13 @@ mod tests {
         );
         assert!(all_codes("pub fn f(x: [1073741823]u32) -> u8 = 0").is_empty());
         assert!(all_codes("pub fn f(x: [4294967295]u8) -> u8 = 0").is_empty());
+        // A `bool` takes one.
+        assert_eq!(
+            all_codes("pub fn f(x: [4294967296]bool) -> u8 = 0"),
+            ["E0223"]
+        );
+        // A literal of exactly the most bytes is not too large either.
+        assert!(all_codes("pub fn f() -> u8 {\n  _ = [0_u8; 4294967295]\n  0\n}").is_empty());
         // The innermost type that is too large is reported once, and a literal without a
         // written type is reported itself.
         assert_eq!(
