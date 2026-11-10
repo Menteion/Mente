@@ -16,6 +16,8 @@
     "check:benchmark": "node benchmark/check.mjs",
     "test:benchmark": "node --test benchmark/check.test.mjs",
     "test:harness": "node --test benchmark/harness/harness.test.ts",
+    "site": "node site/build.mjs",
+    "test:site": "node --test site/site.test.mjs",
     "verify:docs": "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief"
   },
   "devDependencies": {
