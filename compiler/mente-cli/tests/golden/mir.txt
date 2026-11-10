@@ -1338,8 +1338,277 @@ t0: unreachable @4:8 ["unreachable reached: control left the code the checker al
 == conformance/grammar/expression_expected.mn == (exit 2)
 == conformance/grammar/if_as_an_operand.mn == (exit 2)
 == conformance/grammar/integer_beyond_u128.mn == (exit 2)
-== conformance/grammar/m1_literals_and_operators.mn == (exit 1)
-== conformance/grammar/newlines_and_clauses.mn == (exit 1)
+== conformance/grammar/m1_literals_and_operators.mn ==
+mente-dump 1 mir
+f0: fn hex() -> u8 {
+block0():
+  v0: i64 = int 255 @3:22
+  v1: u8 = cast v0 @3:22
+  return v1
+block1():
+  trap t0
+t0: unreachable @3:22 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn bin() -> u8 {
+block0():
+  v0: i64 = int 165 @4:22
+  v1: u8 = cast v0 @4:22
+  return v1
+block1():
+  trap t0
+t0: unreachable @4:22 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn grouped() -> u64 {
+block0():
+  v0: i64 = int 1000000 @5:27
+  v1: u64 = cast v0 @5:27
+  return v1
+block1():
+  trap t0
+t0: unreachable @5:27 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn widest() -> u128 {
+block0():
+  v0: u128 = int 340282366920938463463374607431768211455 @6:27
+  return v0
+block1():
+  trap t0
+t0: unreachable @6:27 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn escapes() -> i32 {
+block0():
+  trap t0
+block1():
+  trap t1
+t0: todo @8:3 ["todo reached: a \\\"quoted\\\" tab\\t and line\\n and \\\\"]
+t1: unreachable @8:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn bits(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 15 @10:32
+  v2: u8 = cast v1 @10:28
+  v3: u8 = and v0, v2 @10:28
+  v4: u8 = not v0 @10:40
+  v5: u8 = xor v3, v4 @10:28
+  return v5
+block1():
+  trap t0
+t0: unreachable @10:28 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter hex() -> u8 {
+block0():
+  v0: u8 = call f0 @3:8
+  return v0
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter bin() -> u8 {
+block0():
+  v0: u8 = call f1 @4:8
+  return v0
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter grouped() -> u64 {
+block0():
+  v0: u64 = call f2 @5:8
+  return v0
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter widest() -> u128 {
+block0():
+  v0: u128 = call f3 @6:8
+  return v0
+t0: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn enter escapes() -> i32 {
+block0():
+  v0: i32 = call f4 @7:8
+  return v0
+t0: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn enter bits(i128) -> u8 {
+block0(v0: i128):
+  v1: i128 = int 0 @0:0
+  v2: bool = ge v0, v1 @0:0
+  v3: i128 = int 255 @0:0
+  v4: bool = le v0, v3 @0:0
+  v5: bool = and v2, v4 @0:0
+  v6: unit = check t0 v5, v0 @10:8
+  v7: u8 = cast v0 @10:8
+  v8: u8 = call f5 v7 @10:8
+  return v8
+t0: narrowing @10:8 ["", " does not fit in `u8`"]
+t1: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/grammar/newlines_and_clauses.mn ==
+mente-dump 1 mir
+f0: fn spread(i32, i32) -> i32 {
+block0(v0: i32, v1: i32):
+  v2: i64 = cast v1 @8:15
+  v3: i64 = cast v0 @8:15
+  v4: i64 = sub v2, v3 @8:15
+  v5: i64 = int -2147483648 @8:15
+  v6: bool = ge v4, v5 @8:15
+  v7: i64 = int 2147483647 @8:15
+  v8: bool = le v4, v7 @8:15
+  v9: bool = and v6, v8 @8:15
+  v10: unit = check t0 v9, v4 @8:15
+  v11: i32 = cast v4 @8:15
+  v12: i32 = call f1 v0, v1 @10:15
+  v13: addr = slot 4 @12:11
+  v14: unit = store v13, v0 @12:11
+  v15: addr = slot 1 @13:3
+  v16: bool = bool false @13:3
+  v17: unit = store v15, v16 @13:3
+  v18: addr = slot 16 @13:3
+  jump block1()
+block1():
+  v19: i32 = load v13 @14:15
+  v20: bool = le v19, v1 @14:20
+  v21: i32 = load v13 @13:9
+  v22: bool = lt v21, v1 @13:13
+  branch v22, block2(), block3()
+block2():
+  v23: i32 = load v13 @15:20
+  v24: i64 = cast v1 @15:15
+  v25: i64 = cast v23 @15:15
+  v26: i64 = sub v24, v25 @15:15
+  v27: u128 = load v18 @15:15
+  v28: bool = bool false @15:15
+  v29: i64 = int 0 @15:15
+  v30: bool = lt v26, v29 @15:15
+  branch v30, block4(), block5()
+block3():
+  v56: i64 = int 10 @19:14
+  v57: i64 = cast v11 @19:14
+  v58: bool = gt v57, v56 @19:14
+  branch v58, block10(), block11()
+block4():
+  v32: bool = bool true @15:15
+  jump block6(v32)
+block5():
+  v33: u128 = cast v26 @15:15
+  v34: bool = lt v33, v27 @15:15
+  jump block6(v34)
+block6(v31: bool):
+  v35: i64 = int 0 @15:15
+  v36: bool = lt v26, v35 @15:15
+  branch v36, block7(), block8()
+block7():
+  v38: bool = bool false @15:15
+  jump block9(v38)
+block8():
+  v39: u128 = cast v26 @15:15
+  v40: bool = eq v39, v27 @15:15
+  jump block9(v40)
+block9(v37: bool):
+  v41: bool = and v37, v28 @15:15
+  v42: bool = or v31, v41 @15:15
+  v43: bool = load v15 @15:15
+  v44: bool = not v43 @15:15
+  v45: bool = or v44, v42 @15:15
+  v46: bool = bool true @15:15
+  v47: unit = store v15, v46 @15:15
+  v48: u128 = cast v26 @15:15
+  v49: unit = store v18, v48 @15:15
+  v50: i32 = load v13 @17:5
+  v51: i64 = int 1 @17:10
+  v52: i64 = cast v50 @17:10
+  v53: i64 = add v52, v51 @17:10
+  v54: i32 = cast v53 @17:10
+  v55: unit = store v13, v54 @17:10
+  jump block1()
+block10():
+  return v12
+block11():
+  return v11
+block12():
+  trap t1
+block13():
+  trap t1
+block14():
+  trap t1
+t0: narrowing @8:15 ["", " does not fit in `i32`"]
+t1: unreachable @24:12 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn add(i32, i32) -> i32 {
+block0(v0: i32, v1: i32):
+  v2: i64 = cast v0 @28:37
+  v3: i64 = cast v1 @28:37
+  v4: i64 = add v2, v3 @28:37
+  v5: i64 = int -2147483648 @28:37
+  v6: bool = ge v4, v5 @28:37
+  v7: i64 = int 2147483647 @28:37
+  v8: bool = le v4, v7 @28:37
+  v9: bool = and v6, v8 @28:37
+  v10: unit = check t0 v9, v4 @28:37
+  v11: i32 = cast v4 @28:37
+  return v11
+block1():
+  trap t1
+t0: narrowing @28:37 ["", " does not fit in `i32`"]
+t1: unreachable @28:37 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter spread(i128, i128) -> i32 {
+block0(v0: i128, v1: i128):
+  v2: i128 = int -2147483648 @0:0
+  v3: bool = ge v0, v2 @0:0
+  v4: i128 = int 2147483647 @0:0
+  v5: bool = le v0, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v0 @4:8
+  v8: i32 = cast v0 @4:8
+  v9: i128 = int -2147483648 @4:8
+  v10: bool = ge v1, v9 @4:8
+  v11: i128 = int 2147483647 @4:8
+  v12: bool = le v1, v11 @4:8
+  v13: bool = and v10, v12 @4:8
+  v14: unit = check t1 v13, v1 @4:8
+  v15: i32 = cast v1 @4:8
+  v16: bool = le v8, v15 @6:5
+  v17: unit = check t2 v16 @4:8
+  v18: i32 = call f0 v8, v15 @4:8
+  return v18
+t0: narrowing @4:8 ["", " does not fit in `i32`"]
+t1: narrowing @4:8 ["", " does not fit in `i32`"]
+t2: requires @4:8 ["`requires (<= lo hi)` is false at this call"]
+t3: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter add(i128, i128) -> i32 {
+block0(v0: i128, v1: i128):
+  v2: i128 = int -2147483648 @0:0
+  v3: bool = ge v0, v2 @0:0
+  v4: i128 = int 2147483647 @0:0
+  v5: bool = le v0, v4 @0:0
+  v6: bool = and v3, v5 @0:0
+  v7: unit = check t0 v6, v0 @28:8
+  v8: i32 = cast v0 @28:8
+  v9: i128 = int -2147483648 @28:8
+  v10: bool = ge v1, v9 @28:8
+  v11: i128 = int 2147483647 @28:8
+  v12: bool = le v1, v11 @28:8
+  v13: bool = and v10, v12 @28:8
+  v14: unit = check t1 v13, v1 @28:8
+  v15: i32 = cast v1 @28:8
+  v16: i32 = call f1 v8, v15 @28:8
+  return v16
+t0: narrowing @28:8 ["", " does not fit in `i32`"]
+t1: narrowing @28:8 ["", " does not fit in `i32`"]
+t2: unreachable @28:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/grammar/repeat_count_not_a_literal.mn == (exit 2)
 == conformance/grammar/semicolon_at_line_end.mn == (exit 2)
 == conformance/grammar/suffix_without_underscore.mn == (exit 2)

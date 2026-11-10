@@ -1298,8 +1298,14 @@ impl<'a> Lower<'a> {
 
     // -- expressions -----------------------------------------------------------------------
 
+    /// The shape of `e`'s value. An expression of no type, such as a `todo` or an `if` whose
+    /// branches all leave, gives no value, `V::Never`, and its shape is never used: it is
+    /// given as `Unit`.
     fn shape(&self, e: ExprId) -> Result<Shape, String> {
-        Shape::of(&self.s.f.typing.exprs[e.0 as usize])
+        match &self.s.f.typing.exprs[e.0 as usize] {
+            SemaTy::Any => Ok(Shape::Unit),
+            t => Shape::of(t),
+        }
     }
 
     fn interval(&self, e: ExprId) -> Option<Interval> {
@@ -1602,6 +1608,10 @@ impl<'a> Lower<'a> {
         };
         self.meet(v, join, join_ty);
         self.b.switch(join);
+        // An `if` of no type has branches that all leave, so nothing reaches its end.
+        if matches!(self.s.f.typing.exprs[e.0 as usize], SemaTy::Any) {
+            return Ok(V::Never);
+        }
         Ok(match (join_ty, self.b.params(join).first()) {
             (Some(Ty::Int(t)), Some(&p)) => V::Int(p, t),
             (Some(Ty::Bool), Some(&p)) => V::Bool(p),
@@ -1976,6 +1986,39 @@ mod tests {
             Ok(Shape::Array(2, Box::new(Shape::Bool)))
         );
         assert!(Shape::of(&SemaTy::Any).is_err());
+    }
+
+    /// An expression of no type gives no value: a `todo` body, and an `if` whose branches all
+    /// return, lower, and nothing reaches their end but the trap that marks it unreachable.
+    #[test]
+    fn test_an_expression_of_no_type_lowers_to_no_value() {
+        let source = "module m
+pub fn f() -> i32 = todo(\"x\")
+pub fn g(c: bool) -> i32 {
+  if c {
+    return 1
+  } else {
+    return 2
+  }
+}
+";
+        let module = mente_sema::check_program(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let text = lowered.module.to_string();
+        assert!(text.contains("todo reached: x"), "{}", text);
+        let g = lowered
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "g")
+            .unwrap();
+        // Both branches return; the block after the `if` only traps.
+        let returns = g
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.term, Term::Return(_)))
+            .count();
+        assert_eq!(returns, 2, "{}", g);
     }
 
     #[test]
