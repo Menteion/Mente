@@ -1,0 +1,9 @@
+// expect: E0222
+module conformance
+pub fn pick(c: bool, a: i64, b: u128) -> i64 {
+  if c {
+    a
+  } else {
+    b
+  }
+}

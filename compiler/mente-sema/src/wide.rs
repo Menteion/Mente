@@ -6,8 +6,9 @@
 //! `.len`'s the array's length, a name's its declared refinement's when both bounds are literals,
 //! an `if`'s the hull of its branches', and any other integer's its type's range. An operation
 //! whose range does not lie within `u128` or within `i128` is `E0222`, whose fix binds an operand
-//! to a `u128` or an `i128` first. Every intermediate therefore fits one 128-bit machine type,
-//! in which native code computes it without a check.
+//! to a `u128` or an `i128` first; so is an `if` whose branches' hull does not, whose fix binds
+//! a branch's value to an `i128` inside that branch. Every intermediate therefore fits one
+//! 128-bit machine type, in which native code computes it without a check.
 //!
 //! [`wide-intermediates`]: ../../docs/design-review.md#wide-intermediates
 
@@ -319,11 +320,24 @@ impl Wide<'_> {
                     None => {}
                 }
                 let mut hull: Option<Range> = None;
+                let mut highest: Option<(ExprId, Num)> = None;
                 for t in tails.into_iter().flatten() {
                     let r = self.range(t)?;
                     hull = Some(hull.map_or(r, |h| h.hull(r)));
+                    if highest.is_none_or(|(_, hi)| r.hi > hi) {
+                        highest = Some((t, r.hi));
+                    }
                 }
-                hull.or(typed)
+                match (hull, highest) {
+                    // The branches' values meet in one machine type, so their hull must fit one.
+                    // A hull that fits neither holds a negative value and one above `i128`, which
+                    // the highest branch gives: bound to an `i128` in its branch, it fits.
+                    (Some(h), Some((tail, _))) if !h.fits() => {
+                        self.report_if(span, tail);
+                        None
+                    }
+                    _ => hull.or(typed),
+                }
             }
             _ => typed,
         }
@@ -416,19 +430,35 @@ impl Wide<'_> {
     fn report(&mut self, at: Span, bind: ExprId, machine: &str) {
         let src = self.src;
         let text = |s: Span| src.get(s.start..s.end).unwrap_or("").to_string();
-        let operand = self.tree.expr(bind).span;
-        let mut d = Diagnostic::error(
-            "E0222",
-            at,
-            format!(
-                "the exact value of `{}` might need more than 128 bits, and an intermediate is \
-                 computed exactly only within `i128` or `u128`",
-                text(at)
-            ),
+        let message = format!(
+            "the exact value of `{}` might need more than 128 bits, and an intermediate is \
+             computed exactly only within `i128` or `u128`",
+            text(at)
         );
+        self.report_with(at, at, bind, machine, message);
+    }
+
+    /// `E0222` for the `if` at `at`, whose branches' values fit no one 128-bit type together;
+    /// the fix binds `tail`, the value of the branch that reaches highest, to an `i128` inside
+    /// that branch, so that it is computed only when the branch is taken.
+    fn report_if(&mut self, at: Span, tail: ExprId) {
+        let message = "the branches of this `if` give values that no one of `i128` and `u128` \
+                       holds together, and they meet in one of them"
+            .to_string();
+        let place = self.tree.expr(tail).span;
+        self.report_with(at, place, tail, "i128", message);
+    }
+
+    /// `E0222` at `at`, whose fix binds `bind` to `machine` before the statement that holds
+    /// `place`.
+    fn report_with(&mut self, at: Span, place: Span, bind: ExprId, machine: &str, message: String) {
+        let src = self.src;
+        let text = |s: Span| src.get(s.start..s.end).unwrap_or("").to_string();
+        let operand = self.tree.expr(bind).span;
+        let mut d = Diagnostic::error("E0222", at, message);
         let name = self.fresh(bind);
         let line = format!("val {}: {} = {}", name, machine, text(operand));
-        let edits = match self.insertion(at, &line) {
+        let edits = match self.insertion(place, &line) {
             Some(insert) => Some(vec![
                 insert,
                 Edit {
@@ -666,6 +696,40 @@ mod tests {
             "bind `a * b` to `product: i128` first",
         );
         assert!(check_source(&diff).is_ok(), "{}", diff);
+    }
+
+    #[test]
+    fn test_an_if_whose_branches_leave_128_bits_together_is_e0222() {
+        // An `i64` and a `u128`: no one 128-bit type holds both, where the branches meet.
+        let mixed = "pub fn f(c: bool, a: i64, b: u128) -> i64 {\n  if c {\n    a\n  } else {\n    b\n  }\n}";
+        let d = check_source(&module(mixed)).unwrap_err();
+        assert_eq!(d.len(), 1, "{:?}", d);
+        assert_eq!(
+            d[0].message,
+            "the branches of this `if` give values that no one of `i128` and `u128` holds together, and they meet in one of them"
+        );
+        assert_eq!((d[0].primary.line, d[0].primary.col), (3, 3));
+        // The fix binds the highest branch's value inside its branch, where it alone is computed.
+        let after = fixed(mixed, "bind `b` to `wide: i128` first");
+        assert!(
+            after.contains("  } else {\n    val wide: i128 = b\n    wide\n  }"),
+            "{}",
+            after
+        );
+        assert!(check_source(&after).is_ok(), "{}", after);
+        // An `else if` chain is judged as a whole.
+        assert_eq!(
+            codes("pub fn f(c: bool, d: bool, a: i8, b: u8, e: u128) -> i8 {\n  if c {\n    a\n  } else if d {\n    b\n  } else {\n    e\n  }\n}"),
+            ["E0222"]
+        );
+        // Branches whose hull fits one type are fine, signed or not.
+        for ok in [
+            "pub fn f(c: bool, a: i64, b: u64) -> i64 = if c { a } else { b }",
+            "pub fn f(c: bool, a: u8, b: u128) -> u8 = if c { a } else { b }",
+            "pub fn f(c: bool, a: i128, b: u64) -> i8 = if c { a } else { b }",
+        ] {
+            assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
+        }
     }
 
     #[test]
