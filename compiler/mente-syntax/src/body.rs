@@ -2679,6 +2679,7 @@ _ == b"
         for stmt in [
             "_ = -x",
             "_ = if x > 0 { 1 } else { 2 }",
+            "_ = if x > 0 { 1 } else if x > 1 { 2 } else { 3 }",
             "while x > 0 {\n  }",
         ] {
             let src = format!(

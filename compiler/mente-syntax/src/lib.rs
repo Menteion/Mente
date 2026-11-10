@@ -2506,23 +2506,26 @@ mod tests {
     #[test]
     fn test_a_split_counts_only_the_brackets_code_opens() {
         let g = "pub fn g() -> u8 = 2\n";
-        for (src, items) in [
-            ("pub fn f() -> u8 {\n// note\n  1\n}\n", 2),
-            ("pub fn f(\n// note\n  x: u8) -> u8 = x\n", 2),
-            ("pub fn f(xs: [2]u8) -> u8 = xs[\n// note\n  0]\n", 2),
-            ("pub fn f() -> u8 {\n  todo(\"}\")\n// note\n  1\n}\n", 2),
-            ("pub fn f() -> u8 {\n  todo(\"\\\"{\")\n}\n", 2),
-            ("pub fn f(x: u8) -> u8 { x / (1) }\n", 2),
-            ("pub fn f() -> u8 { // {\n  1\n}\n", 2),
+        // The lines the items start on: the first, and `g`'s unless `f` holds it. A comment
+        // split off wrongly would take `g` into its own item, so the lines tell, not the count.
+        for (src, g_starts) in [
+            ("pub fn f() -> u8 {\n// note\n  1\n}\n", true),
+            ("pub fn f(\n// note\n  x: u8) -> u8 = x\n", true),
+            ("pub fn f(xs: [2]u8) -> u8 = xs[\n// note\n  0]\n", true),
+            ("pub fn f() -> u8 {\n  todo(\"}\")\n// note\n  1\n}\n", true),
+            ("pub fn f() -> u8 {\n  todo(\"\\\"{\")\n}\n", true),
+            ("pub fn f(x: u8) -> u8 { x / (1) }\n", true),
+            ("pub fn f() -> u8 { // {\n  1\n}\n", true),
             // A backslash outside a string escapes nothing: its `(` stays open.
-            ("pub fn f() -> u8 = \\(\n// note\n", 1),
+            ("pub fn f() -> u8 = \\(\n// note\n", false),
         ] {
-            assert_eq!(
-                split_items(&format!("{}{}", src, g)).len(),
-                items,
-                "{}",
-                src
-            );
+            let lines: Vec<u32> = split_items(&format!("{}{}", src, g))
+                .iter()
+                .map(|s| s.line)
+                .collect();
+            let g_line = src.lines().count() as u32 + 1;
+            let expected: &[u32] = if g_starts { &[1, g_line] } else { &[1] };
+            assert_eq!(lines, expected, "{}", src);
         }
     }
 
