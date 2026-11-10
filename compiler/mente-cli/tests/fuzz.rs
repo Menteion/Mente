@@ -345,7 +345,10 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 /// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
 /// test below. A fix removes its file's name here and its test, and the file joins the main
 /// test.
-const PENDING: [&str; 0] = [];
+const PENDING: [&str; 2] = [
+    "incremental-module-line-after-the-first.mn",
+    "lower-array-of-2-to-the-32-elements.mn",
+];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -391,6 +394,23 @@ fn test_fuzz_regressions_replay_without_a_failure() {
         );
     }
     replay(&files);
+}
+
+/// Found by `mn fuzz`: a second `module` line without a name. A whole check says it expected
+/// a declaration and found `module`; `mn check --watch`'s session, which reads the line as an
+/// item of its own, says it expected a name and found the end of the file.
+#[test]
+#[ignore = "pending a fix in mente-sema's incremental session"]
+fn fuzz_incremental_module_line_after_the_first() {
+    replay(&[regressions().join("incremental-module-line-after-the-first.mn")]);
+}
+
+/// Found by `mn fuzz`: an array type of 2^32 elements or more checks, but does not lower ("an
+/// array of 4294967296 elements").
+#[test]
+#[ignore = "pending a limit on array lengths in the checker, or their lowering"]
+fn fuzz_lower_array_of_2_to_the_32_elements() {
+    replay(&[regressions().join("lower-array-of-2-to-the-32-elements.mn")]);
 }
 
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,
