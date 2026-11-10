@@ -31,7 +31,7 @@ use mente_sema::tier1::ObligationKind;
 use mente_sema::CheckedModule;
 
 use super::generate::{self, CallPlan, Mode};
-use super::{native, reference_within, run_lowered, CallArgs, Printed};
+use super::{native_within, reference_within, run_lowered, CallArgs, Printed};
 
 /// The reference interpreter's limits in a comparison: a generated call does a few thousand
 /// steps at most, far below MIR's own limit.
@@ -40,6 +40,10 @@ const STEPS: Limits = Limits {
     max_steps: 1_000_000,
     max_array: 1 << 24,
 };
+
+/// How long native code may take on a call the reference interpreter finished within [`STEPS`],
+/// which takes milliseconds: a call that runs longer is a code-generation bug.
+const NATIVE_TIME: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// What a difference between the paths means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -214,7 +218,7 @@ fn compare_module(
     let natively = match scratch {
         Some(dir) if !finished.is_empty() => {
             let list: Vec<CallArgs> = finished.iter().map(|(c, _)| (*c).clone()).collect();
-            match native(&lowered, &list, dir, "program") {
+            match native_within(&lowered, &list, dir, "program", Some(NATIVE_TIME)) {
                 Ok(all) => Some(all),
                 Err(e) => {
                     finding(Kind::Codegen, "", format!("not built: {}", e));
@@ -809,6 +813,32 @@ mod tests {
             f.detail.contains("Tier 1 proved Index at 3:"),
             "{}",
             f.detail
+        );
+    }
+
+    /// A call of native code that runs past its limit is stopped and reported, and the calls
+    /// after it still run, each its own.
+    #[test]
+    fn test_native_calls_stop_at_their_time_limit() {
+        let src = "module m\npub fn spin(n: u32) -> u32 {\n  while n > 0 {\n  }\n  n\n}\n";
+        let module = mente_sema::check_program(src).unwrap();
+        let lowered = lower::lower(&module).unwrap();
+        let call = |n: u128| {
+            (
+                "spin".to_string(),
+                vec![(false, Value::Int(Int::from_u128(n)))],
+            )
+        };
+        let dir = scratch("limit");
+        let limit = std::time::Duration::from_millis(300);
+        let got = native_within(&lowered, &[call(1), call(0)], &dir, "spin", Some(limit));
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            got,
+            Ok(vec![
+                Err("the program ran for more than 300 ms".to_string()),
+                Ok(vec!["0".to_string()]),
+            ])
         );
     }
 

@@ -126,6 +126,19 @@ pub fn native(
     dir: &std::path::Path,
     name: &str,
 ) -> Result<Vec<Printed>, String> {
+    native_within(lowered, calls, dir, name, None)
+}
+
+/// [`native`], each call stopped after `limit` when one is given: a comparison of paths gives
+/// native code only calls the reference interpreter finishes quickly, so a call that runs much
+/// longer is a code-generation bug, which would otherwise hang the comparison.
+pub fn native_within(
+    lowered: &Lowered,
+    calls: &[CallArgs],
+    dir: &std::path::Path,
+    name: &str,
+    limit: Option<std::time::Duration>,
+) -> Result<Vec<Printed>, String> {
     // A call of no function, or with an argument of another shape, is refused, not built.
     let refused = |(f, args): &CallArgs| match lowered.entries.iter().find(|e| &e.name == f) {
         None => Some(format!("no function `{}` with a body to run", f)),
@@ -147,15 +160,15 @@ pub fn native(
             printed.push(Err(why));
             continue;
         }
-        let Some(out) = run_for(&exe, k, NATIVE_TIME)? else {
+        let ran = run_for(&exe, k, limit)?;
+        k += 1;
+        let Some(out) = ran else {
             printed.push(Err(format!(
-                "the program ran for more than {} s",
-                NATIVE_TIME.as_secs()
+                "the program ran for more than {} ms",
+                limit.unwrap_or_default().as_millis()
             )));
-            k += 1;
             continue;
         };
-        k += 1;
         let text = |b: &[u8]| String::from_utf8_lossy(b).replace("\r\n", "\n");
         printed.push(match out.status.code() {
             Some(0) => Ok(text(&out.stdout).lines().map(String::from).collect()),
@@ -170,22 +183,22 @@ pub fn native(
     Ok(printed)
 }
 
-/// How long one call of native code may run: a call the reference interpreter finishes takes
-/// milliseconds, so a longer one is a code-generation bug that would otherwise hang the run.
-const NATIVE_TIME: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// Runs `exe` on call `k` and returns what it wrote and how it ended, or `None` when it ran for
-/// longer than `limit` and was stopped.
+/// Runs `exe` on call `k` and returns what it wrote and how it ended; with a `limit`, `None`
+/// when it ran for longer and was stopped.
 fn run_for(
     exe: &std::path::Path,
     k: usize,
-    limit: std::time::Duration,
+    limit: Option<std::time::Duration>,
 ) -> Result<Option<std::process::Output>, String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let fail = |e: std::io::Error| format!("{}: {}", exe.display(), e);
-    let mut child = Command::new(exe)
-        .arg(k.to_string())
+    let mut command = Command::new(exe);
+    command.arg(k.to_string());
+    let Some(limit) = limit else {
+        return command.output().map(Some).map_err(fail);
+    };
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -213,22 +226,19 @@ fn run_for(
             .take()
             .map(|p| Box::new(p) as Box<dyn Read + Send>),
     );
-    let start = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(fail)? {
-            break Some(status);
+    // A millisecond at a time, at most `limit` of them; sleeping can only make the wait longer.
+    let mut status = None;
+    for _ in 0..limit.as_millis() {
+        status = child.try_wait().map_err(fail)?;
+        if status.is_some() {
+            break;
         }
-        if start.elapsed() > limit {
-            child.kill().ok();
-            child.wait().ok();
-            break None;
-        }
-        if start.elapsed() < std::time::Duration::from_millis(5) {
-            std::thread::yield_now();
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    };
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    if status.is_none() {
+        child.kill().ok();
+        child.wait().ok();
+    }
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
     Ok(status.map(|status| std::process::Output {
