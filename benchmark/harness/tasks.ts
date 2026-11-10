@@ -15,10 +15,14 @@ export interface Task {
   description: string;
   /** Whether the signature uses only the core of the language (benchmark/README.md). */
   core: boolean;
+  /** The declarations of `## Types`, each line without its first four spaces. */
+  types: string[];
   signature: string[];
   examples: string[];
   /** The hidden tests, which only scoring reads and no prompt ever shows. */
   hidden: string[];
+  /** An adversarial task's probe: the calls its `## Probe` names, written in backticks. */
+  probe: string[];
 }
 
 /**
@@ -56,10 +60,18 @@ export function parseTask(text: string): Task {
     core: front.core === "true",
     title,
     description: section(body, "Task").join("\n").trim(),
+    types: indented(section(body, "Types")),
     signature: indented(section(body, "Signature")),
     examples: indented(section(body, "Examples")),
     hidden: indented(section(body, "Hidden tests")),
+    probe: probeCalls(section(body, "Probe").join("\n"), indented(section(body, "Signature"))[0] ?? ""),
   };
+}
+
+/** The calls of the task's own function that a probe names in backticks. */
+function probeCalls(probe: string, signature: string): string[] {
+  const name = /^(\w+)/.exec(signature)?.[1] ?? "";
+  return [...probe.matchAll(/`(\w+\([^`]*\))`/g)].map((m) => m[1]).filter((call) => call.startsWith(`${name}(`));
 }
 
 /** The lines of a `## name` section, up to the next heading of that level. */
@@ -147,14 +159,18 @@ export function userPrompt(task: Task): string {
     menteSignature(task.signature),
     "```",
     "",
-    "## Examples",
-    "",
-    "Each example calls the function. `== v` is the value it must return; `leaves v` is the value its `mut` argument holds after the call.",
-    "",
-    "```text",
-    ...task.examples,
-    "```",
-    "",
+    ...(task.examples.length === 0
+      ? []
+      : [
+          "## Examples",
+          "",
+          "Each example calls the function. `== v` is the value it must return; `leaves v` is the value its `mut` argument holds after the call.",
+          "",
+          "```text",
+          ...task.examples,
+          "```",
+          "",
+        ]),
     "Write the function, with exactly this signature, in one ```mente block. Write only the function: no module line, no other functions and no explanation.",
   ].join("\n");
 }
@@ -211,6 +227,8 @@ export function outcome(c: Case, status: number | null, stdout: string, stderr: 
 export interface CaseResult extends Case {
   got: string;
   pass: boolean;
+  /** Why a case failed: `wrong result`, `trap` or `timeout`; absent when it passed. */
+  fault?: string;
 }
 
 /** The feedback after a program: what `mn check` reported, else each example's result. */

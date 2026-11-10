@@ -1,0 +1,48 @@
+# The agent-benchmark harness end to end in Rust and Odin (benchmark/README.md, "The harness"):
+# each fixture under benchmark/harness/fixtures/ is built through the harness, with the Rust and
+# Odin that benchmark/harness/toolchains.json pins, as an agent's program would be, and must pass
+# every example and hidden test of its task, or end its adversarial task's probe with the verdict
+# it names. A step of its own checks every `odin` block of benchmark/control/odin.md with `odin check`.
+# The harness's unit tests also run in CI's Documentation job.
+name: Harness
+
+on:
+  pull_request:
+    paths:
+      - "benchmark/**"
+      - ".github/workflows/harness.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixtures:
+    name: Fixtures in Rust and Odin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the benchmark's Rust and Odin
+        id: toolchains
+        run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
+      - name: Build and run the fixtures through the harness
+        env:
+          ODIN: ${{ steps.toolchains.outputs.odin }}
+        run: node benchmark/harness/fixtures.ts --odin "$ODIN" --out "$RUNNER_TEMP/fixtures-out"
+      - name: Check the Odin document's code blocks
+        if: always() && steps.toolchains.outcome == 'success'
+        env:
+          ODIN: ${{ steps.toolchains.outputs.odin }}
+        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --out "$RUNNER_TEMP/document-out"
+      - name: Test the harness
+        run: npm run test:harness
