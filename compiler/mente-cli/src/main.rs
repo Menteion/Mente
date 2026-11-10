@@ -8,6 +8,7 @@
 //!   result or the trap.
 //! - `mn build <file.mn> [--call "f(args)"] [-o <exe>]`: Builds the call as an executable, with
 //!   debug information, that prints what `mn run` prints.
+//! - `mn card`: Prints the language card of the language version this compiler implements.
 //! - `mn check [--json] <path>` : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification;
 //!   `--json` prints the diagnostics in the versioned JSON form of `spec/diagnostics.md`.
 //! - `mn explain [code]`        : What an error code means, from the catalogue in `catalogue.rs`.
@@ -28,6 +29,15 @@ use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, 
 use mente_syntax::parse_module;
 
 mod catalogue;
+
+/// The language card of the language version this compiler implements, which ships with it
+/// (`docs/design-review.md`, `language-evolution`).
+const CARD: &str = include_str!("../../../docs/language-card.md");
+
+/// The most words the language card may hold, its front matter aside, so that it stays a card
+/// and never grows into a second specification (`docs/design-review.md`, `language-card`).
+#[cfg(test)]
+const CARD_WORD_BUDGET: usize = 2_000;
 #[cfg(test)]
 mod latency;
 mod mir_run;
@@ -47,6 +57,7 @@ fn main() {
         "explain" => cmd_explain(&args[1..]),
         "run" => cmd_run(&args[1..]),
         "build" => cmd_build(&args[1..]),
+        "card" => print!("{}", CARD),
         "dump" => cmd_dump(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
@@ -70,8 +81,10 @@ fn print_help() {
     println!("  mn dump --tokens|--tree|--typed <file.mn>");
     println!("                               Print a phase's output in its canonical form");
     println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"] [--mir | --native]");
-    println!("  mn build <file.mn> [--call \"f(1, [2, 3])\"] [-o <exe>]");
     println!("                               Run main, or one call, on the reference interpreter");
+    println!("  mn build <file.mn> [--call \"f(1, [2, 3])\"] [-o <exe>]");
+    println!("                               Build main, or one call, as a native executable");
+    println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
 }
@@ -1049,6 +1062,29 @@ mod tests {
             rest = &body[end..];
         }
         assert!(snippets > 0, "the language card has no mente block");
+    }
+
+    /// The card stays within its word budget, front matter aside, and names the language
+    /// version it describes, which is this compiler's.
+    #[test]
+    fn test_the_language_card_keeps_within_its_word_budget_and_names_its_version() {
+        let (front, body) = CARD
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .expect("the card starts with front matter");
+        let words = body.split_whitespace().count();
+        assert!(
+            words <= CARD_WORD_BUDGET,
+            "the language card has {} words, over its budget of {}",
+            words,
+            CARD_WORD_BUDGET
+        );
+        let version = front
+            .lines()
+            .find_map(|l| l.strip_prefix("version: "))
+            .expect("the card names its language version");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert!(body.contains(&format!("Mente {}", version)));
     }
 
     #[test]

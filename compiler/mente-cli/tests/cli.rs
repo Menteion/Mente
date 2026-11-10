@@ -359,6 +359,7 @@ fn test_mn_help_lists_every_command() {
             "mn spec",
             "mn explain [code]",
             "mn build <file.mn>",
+            "mn card",
         ] {
             assert!(
                 out.contains(command),
@@ -477,6 +478,15 @@ fn test_mn_run_mir_prints_what_the_interpreter_prints() {
     assert_eq!(missing.status.code(), Some(1));
     assert!(text(&missing.stderr).contains("no function `nothing`"));
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `mn card` prints the language card the compiler was built with, word for word.
+#[test]
+fn test_mn_card_prints_the_language_card_it_ships_with() {
+    let run = mn(&repo_root(), &["card"]);
+    assert!(run.status.success());
+    let card = fs::read_to_string(repo_root().join("docs/language-card.md")).unwrap();
+    assert_eq!(text(&run.stdout), card);
 }
 
 /// `mn build` writes an executable that makes the call and prints what `mn run` prints, its
