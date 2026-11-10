@@ -34,6 +34,9 @@ struct Parsed {
     other: bool,
     /// The item starts with a `module` line, which only the first item may hold.
     header: bool,
+    /// The declaration parser's error lies at the item's end, where the whole module's parser
+    /// would find the next item's first token rather than the end of the file.
+    at_end: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +175,17 @@ impl Session {
                 Some((e.0, at.offset, relocate(&e.1, *at)))
             })
             .min_by_key(|(rank, offset, _)| (*rank, *offset));
-        if let Some((_, _, d)) = first_error {
+        if let Some((_, offset, d)) = first_error {
+            // An error at an item's end, before another item, says what the item's own text
+            // ends with; the whole module's parser goes on into the next item instead.
+            let last = self.items.last().map_or(0, |(at, _)| at.offset);
+            let at_end = self.items.iter().any(|(at, text)| {
+                at.offset == offset && self.cache.get(text).is_some_and(|e| e.parsed.at_end)
+            });
+            if at_end && offset < last {
+                self.work.whole = true;
+                return check_source(&self.src).err().unwrap_or_default();
+            }
             return vec![d];
         }
         let functions: Vec<&Function> = self
@@ -277,8 +290,10 @@ fn parse_item(text: &str) -> Parsed {
             } else {
                 2
             };
+            let at_end = d.primary.start >= text.trim_end().len();
             return Parsed {
                 error: Some((rank, d)),
+                at_end,
                 ..Parsed::default()
             };
         }
@@ -570,11 +585,31 @@ mod tests {
             "module m\n\npub fn h(x: i32) -> i32 =\nx + 1\n",
             // A function without its parameter list, split over two lines.
             "module x\nfn\nm\n",
+            // A list open at the end of an item, and a module line without its name.
+            "module m\n\npub fn f(x: u8 {\n}\n",
+            "module\nfn",
         ] {
             let s = Session::new(src);
             let whole = check_source(src).err().unwrap_or_default();
-            let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
-            assert_eq!(codes(s.diagnostics()), codes(&whole), "{}", src);
+            assert_eq!(s.diagnostics(), whole.as_slice(), "{}", src);
+        }
+    }
+
+    /// An error at an item's end, before another item, is what splitting made, so the session
+    /// asks the whole module; an error at the last item's end, or inside an item, is the whole
+    /// module's error too, and the session reports it without the whole module's check.
+    #[test]
+    fn test_only_an_error_at_an_items_end_before_another_sends_the_session_whole() {
+        for (src, whole) in [
+            ("module\nfn", true),
+            ("module m\npub fn f(\n", false),
+            ("module m\npub fn fn() -> u8 = 1\npub fn g(\n", false),
+        ] {
+            let s = Session::new(src);
+            let expected = check_source(src).err().unwrap_or_default();
+            assert!(!expected.is_empty(), "{}", src);
+            assert_eq!(s.diagnostics(), expected.as_slice(), "{}", src);
+            assert_eq!(s.work().whole, whole, "{}", src);
         }
     }
 

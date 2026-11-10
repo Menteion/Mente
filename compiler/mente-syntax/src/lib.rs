@@ -1323,18 +1323,15 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        // A list still open at the end of the file is no list.
+        // A list still open at the end of the file is no list. Where it opens is a related
+        // span, never text, so that a position moved with the module stays right.
         if depth > 0 {
             return Err(Diagnostic::error(
                 "E0111",
                 self.span(),
-                format!(
-                    "expected `)` to close the list opened at {}:{}, found {}",
-                    open.span.line,
-                    open.span.col,
-                    self.found()
-                ),
-            ));
+                format!("expected `)` to close this list, found {}", self.found()),
+            )
+            .with_related(open.span, "the list opens here"));
         }
         Ok(self.src[start_byte..end_byte].trim().to_string())
     }
@@ -2900,8 +2897,10 @@ pub struct S {
         assert_eq!(err.code, "E0111");
         assert_eq!(
             err.message,
-            "expected `)` to close the list opened at 2:9, found the end of the file"
+            "expected `)` to close this list, found the end of the file"
         );
+        assert_eq!((err.related[0].span.line, err.related[0].span.col), (2, 9));
+        assert_eq!(err.related[0].message, "the list opens here");
         assert!(parse_module("module m\npub fn f() -> i32 = 1\n").is_ok());
         assert!(parse_module("module m\npub fn f(x: [2]u8) -> u8 = (x[0])\n").is_ok());
         // A function without a parameter list is no function, on one line or two.
