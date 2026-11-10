@@ -45,9 +45,21 @@ export interface Tools {
   sandbox: string;
   /**
    * What the sandbox covers with an empty tmpfs besides $GITHUB_WORKSPACE: this repository and the
-   * held-out checkout, wherever it is, so no agent code can read a task's files.
+   * held-out checkout, wherever it is, so no agent code can read a task's files. The output
+   * directory must lie outside them.
    */
   hide: string[];
+  /**
+   * The output directory, in which every build's directory lies: the sandbox covers it too, all
+   * but the build's own directory, so no build can read another run's folder, a held-out run's
+   * prompts, programs and records among them. Empty for none.
+   */
+  cover: string;
+}
+
+/** Every path the sandbox hides from a build: the hidden ones and the output directory. */
+export function hiddenPaths(tools: Tools): string[] {
+  return [...tools.hide, ...(tools.cover ? [tools.cover] : [])];
 }
 
 /** This repository's root, which the sandbox hides from agent code. */
@@ -252,7 +264,7 @@ export async function buildProgram(
   if (lang === "mente") {
     const file = join(dir, "solution.mn");
     writeFileSync(file, `module bench\n\n${program}`);
-    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["check", "--json", file], tools.hide);
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["check", "--json", file], hiddenPaths(tools));
     const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: BUILD_TIMEOUT_MS });
     let diagnostics: MenteDiagnostic[];
     try {
@@ -277,7 +289,7 @@ export async function buildProgram(
     writeFileSync(file, program);
     writeFileSync(join(dir, "main.rs"), rustProgram(sig, cases));
     const env = childEnv(tools.rustToolchain ? { RUSTUP_TOOLCHAIN: tools.rustToolchain } : {});
-    const [c, a] = sandboxed(tools.sandbox, dir, tools.rustc, [...RUST_FLAGS, "-o", exe, "main.rs"], tools.hide);
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.rustc, [...RUST_FLAGS, "-o", exe, "main.rs"], hiddenPaths(tools));
     const p = await runProcess(c, a, { cwd: dir, env, timeoutMs: BUILD_TIMEOUT_MS });
     const ok = p.status === 0 && !p.timedOut;
     return { lang, ok, diagnostics: ok ? [] : cleanOutput(p.stderr || p.stdout, dir), codes: [], file, dir, exe };
@@ -286,7 +298,7 @@ export async function buildProgram(
   writeFileSync(file, `package main\n\n${program}`);
   writeFileSync(join(dir, "harness.odin"), odinProgram(sig, cases));
   const exeName = process.platform === "win32" ? "main.exe" : "main";
-  const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["build", ".", `-out:${exeName}`], tools.hide);
+  const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["build", ".", `-out:${exeName}`], hiddenPaths(tools));
   const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: BUILD_TIMEOUT_MS });
   const ok = p.status === 0 && !p.timedOut;
   return { lang, ok, diagnostics: ok ? [] : cleanOutput(`${p.stderr}${p.stdout}`, dir), codes: [], file, dir, exe };
@@ -299,10 +311,10 @@ export async function runCases(build: Build, sig: Signature, cases: Case[], tool
   for (const [i, c] of cases.entries()) {
     if (build.lang === "mente") {
       const args = ["run", build.file, "--call", c.call, ...(tools.native ? ["--native"] : [])];
-      const [cmd, a] = sandboxed(tools.sandbox, build.dir, tools.mn, args, tools.hide);
+      const [cmd, a] = sandboxed(tools.sandbox, build.dir, tools.mn, args, hiddenPaths(tools));
       results.push(menteCaseResult(c, await runProcess(cmd, a, { cwd: build.dir, env: childEnv(), timeoutMs: RUN_TIMEOUT_MS * 6 })));
     } else {
-      const [cmd, a] = sandboxed(tools.sandbox, build.dir, build.exe, [String(i)], tools.hide);
+      const [cmd, a] = sandboxed(tools.sandbox, build.dir, build.exe, [String(i)], hiddenPaths(tools));
       const p = await runProcess(cmd, a, { cwd: build.dir, env: childEnv(), timeoutMs: RUN_TIMEOUT_MS });
       results.push(caseResult(build.lang, c, p, mutCount, build.dir));
     }

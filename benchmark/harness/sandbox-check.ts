@@ -4,8 +4,11 @@
 // the driver's process (through /proc), from a planted credential file and from its own
 // environment; to see a network interface; to read benchmark/README.md from the workspace and a
 // file standing in for the held-out set, which lives outside the workspace and is hidden by name;
-// to write into a directory outside its own; and to write into its own. Three Odin canaries read
-// the credential file, the workspace file and the held-out stand-in at compile time with `#load`.
+// to read a file planted under <out>/held-out/, standing in for a held-out run's record beside the
+// canary's own folder, as a public run's build sits beside the held-out runs' in a measured run; to
+// write into a directory outside its own; and to write into its own. Four Odin canaries read the
+// credential file, the workspace file, the held-out stand-in and the held-out run's file at compile
+// time with `#load`.
 // With the sandbox each attempt must fail, except the write into the canary's own directory, which
 // the builds need. Without it, as a control, every attempt must succeed, so that a green result
 // proves the sandbox and is not a canary that could never read anything.
@@ -34,7 +37,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MARKER = "BENCH-DRIVER-MARKER-7f3a91c2";
-const ROUTES = ["env", "proc", "file", "net", "ws", "held", "write", "work"] as const;
+const ROUTES = ["env", "proc", "file", "net", "ws", "held", "run", "write", "work"] as const;
 type Route = (typeof ROUTES)[number];
 
 function option(name: string, fallback: string): string {
@@ -88,6 +91,12 @@ async function main(): Promise<void> {
   // A path inside the repository is hidden too, as the measured run hides the held-out checkout
   // inside the workspace; the sandbox must take it in its stride, or no canary would run.
   const hide = [REPOSITORY, join(REPOSITORY, "benchmark"), heldOutDir];
+  // Another run's folder under --out, as a held-out run's record lies beside a public run's build.
+  // The output directory is covered all but each build's own folder, as the measured run covers it.
+  const otherRun = join(out, "held-out", "held-out-1-rust-model-1", "record.json");
+  mkdirSync(dirname(otherRun), { recursive: true });
+  writeFileSync(otherRun, `${MARKER}\n`);
+  const hidden = [...hide, out];
   // The driver carries the marker in its own environment, so /proc reaches it only unconfined.
   process.env.BENCH_CANARY_DRIVER = MARKER;
 
@@ -103,7 +112,7 @@ async function main(): Promise<void> {
     if (built.status !== 0) throw new Error(`the canary did not build: ${built.stderr}`);
 
     const run = async (confined: boolean): Promise<Run> => {
-      const [cmd, args] = sandboxed(confined ? sandbox : "", rustDir, exe, [credential, workspaceFile, heldOutFile, outside], hide);
+      const [cmd, args] = sandboxed(confined ? sandbox : "", rustDir, exe, [credential, workspaceFile, heldOutFile, outside, otherRun], hidden);
       // The needle lets the canary find the marker in /proc; a non-secret name, so it is forwarded.
       const env = childEnv({ BENCH_CANARY_NEEDLE: MARKER, BENCH_CANARY_ENV: "set" });
       const p = await runProcess(cmd, args, { cwd: rustDir, env, timeoutMs: RUN_TIMEOUT_MS });
@@ -140,6 +149,7 @@ async function main(): Promise<void> {
       ["credential file", credential],
       ["workspace file", workspaceFile],
       ["held-out stand-in", heldOutFile],
+      ["held-out run's file", otherRun],
     ];
     for (const [i, [what, path]] of targets.entries()) {
       const odinDir = join(out, `odin-${i + 1}`);
@@ -147,7 +157,7 @@ async function main(): Promise<void> {
       const program = `package main\n\nMARKER :: #load(${JSON.stringify(path)}, string)\n\nmain :: proc() {\n\tif len(MARKER) == 0 {\n\t\tpanic("empty")\n\t}\n}\n`;
       writeFileSync(join(odinDir, "load.odin"), program);
       const build = async (confined: boolean) => {
-        const [cmd, args] = sandboxed(confined ? sandbox : "", odinDir, odin, ["build", ".", "-out:load"], hide);
+        const [cmd, args] = sandboxed(confined ? sandbox : "", odinDir, odin, ["build", ".", "-out:load"], hidden);
         return runProcess(cmd, args, { cwd: odinDir, env: childEnv(), timeoutMs: BUILD_TIMEOUT_MS });
       };
       const odinControl = await build(false);
@@ -168,7 +178,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(
-    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set and writes outside the working directory, and #load of each at build time",
+    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set, another run's folder and writes outside the working directory, and #load of each at build time",
   );
 }
 

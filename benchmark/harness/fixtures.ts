@@ -19,7 +19,7 @@
 // It runs in the workflow "Harness", which installs the toolchains toolchains.json pins; the Rust
 // toolchain defaults to that pin, and `--rust-toolchain ""` takes `rustc` as it is.
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   REPOSITORY,
@@ -28,6 +28,7 @@ import {
   childEnv,
   cleanOutput,
   dropExecutable,
+  hiddenPaths,
   runCases,
   runProcess,
   rustcInSysroot,
@@ -67,6 +68,8 @@ async function main(): Promise<void> {
     odin: option("odin", "odin"),
     sandbox: option("sandbox", ""),
     hide: [REPOSITORY],
+    // The output directory, covered all but each fixture's own directory, as in the measured run.
+    cover: resolve(out),
   };
   for (const lang of languages) {
     if (!(lang in EXTENSIONS)) throw new Error(`no fixtures for ${lang}`);
@@ -137,7 +140,7 @@ async function main(): Promise<void> {
       rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "block.odin"), block);
-      const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["check", ".", "-no-entry-point"], tools.hide);
+      const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["check", ".", "-no-entry-point"], hiddenPaths(tools));
       const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: 120_000 });
       // The block goes into the log beside the compiler's message, so that its author can fix it.
       if (p.status !== 0) failures.push(`odin document block ${i + 1}: odin check rejects it\n${block}\n${cleanOutput(p.stderr + p.stdout, dir).join("\n")}`);

@@ -28,7 +28,7 @@
 // held-out task only by its place in the set, so that its results leave the runner only as totals.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   API_VERSION,
@@ -274,6 +274,9 @@ async function main(): Promise<void> {
     // The repository and the held-out checkout, which the sandbox hides from agent code, so that a
     // program written for a public task cannot read a held-out task and print it.
     hide: [REPOSITORY, ...(heldOutDir ? [heldOutDir] : [])],
+    // The output directory, covered all but each build's own directory, so no build reads another
+    // run's folder: a public program never sees a held-out run's prompts, programs or records.
+    cover: resolve(out),
   };
   checkOutside(out, tools);
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
@@ -352,7 +355,9 @@ async function main(): Promise<void> {
     }
   }
 
-  mkdirSync(out, { recursive: true });
+  // The runs' folders exist before the first build, so that the sandbox has them to cover.
+  mkdirSync(join(out, "runs"), { recursive: true });
+  mkdirSync(join(out, "held-out"), { recursive: true });
   const budget: Budget = { limit: Number(budgetText), spent: 0, reserved: 0, stopped: false };
   const ctx: Context = { apiKey, budget, systems, tools, out };
   const done: Detailed[] = [];

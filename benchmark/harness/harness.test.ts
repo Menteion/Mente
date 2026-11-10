@@ -13,6 +13,7 @@ import {
   checkOutside,
   childEnv,
   cleanOutput,
+  hiddenPaths,
   insideAny,
   menteCaseResult,
   printedOutcome,
@@ -610,9 +611,14 @@ test("an output directory inside a path the sandbox hides is refused", () => {
   assert.equal(insideAny("/r/repo/bench-out", ["/r/repo"]), true);
   assert.equal(insideAny("/r/repository-out", ["/r/repo"]), false);
   assert.equal(insideAny("/t/bench-out", ["/r/repo", "/r/held"]), false);
-  const tools = { mn: "", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "sb.sh", hide: [REPOSITORY] };
+  const out = resolve(REPOSITORY, "..", "bench-out");
+  const tools = { mn: "", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "sb.sh", hide: [REPOSITORY], cover: out };
   assert.throws(() => checkOutside(join(REPOSITORY, "bench-out"), tools), /must lie outside/);
-  assert.doesNotThrow(() => checkOutside(resolve(REPOSITORY, "..", "bench-out"), tools));
+  // The output directory is covered itself, yet it is where the builds go, so it is not refused.
+  assert.doesNotThrow(() => checkOutside(out, tools));
+  // Each build is shown the hidden paths and the output directory, whose own folder stays visible.
+  assert.deepEqual(hiddenPaths(tools), [REPOSITORY, out]);
+  assert.deepEqual(hiddenPaths({ ...tools, cover: "" }), [REPOSITORY]);
   // Without a sandbox nothing is hidden, so any output will do.
   assert.doesNotThrow(() => checkOutside(join(REPOSITORY, "bench-out"), { ...tools, sandbox: "" }));
   assert.ok(existsSync(join(REPOSITORY, "benchmark", "README.md")), "REPOSITORY is this repository's root");

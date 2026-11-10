@@ -4,7 +4,8 @@
 # and open sockets, and a compiler runs the agent's code at build time (Odin's `#load`, Rust's
 # build scripts and proc macros), so the agent's code is untrusted. Anything it printed would land
 # in results.json, whose artifacts are public. This wrapper denies it the API key, the network, the
-# workspace (where the held-out set is checked out), and any write outside its own directory.
+# workspace (where the held-out set is checked out), every other run's folder, and any write
+# outside its own directory.
 #
 #   sandbox.sh [--hide <path>]... <workdir> <command> [args...]
 #
@@ -16,13 +17,17 @@
 #   - a cleared environment rebuilt from a small allowlist, so the key is not in the command's own
 #     environment either;
 #   - a mount namespace in which an empty tmpfs covers $GITHUB_WORKSPACE and every --hide path
-#     (the held-out checkout, wherever it is), an unreadable empty directory covers each credential
-#     directory under the runner's home, /tmp is a private tmpfs, and the root filesystem is
-#     read-only, so the toolchains cannot be changed; only <workdir> stays writable;
+#     (the held-out checkout, wherever it is, and the runs' output directory), an unreadable empty
+#     directory covers each credential directory under the runner's home, /tmp is a private tmpfs,
+#     and the root filesystem is read-only, so the toolchains cannot be changed;
+#   - <workdir> alone stays visible and writable: when it lies inside a hidden path, as each build's
+#     directory lies inside the output directory, it is put back at its own path inside the tmpfs,
+#     so the command sees its own directory and none of the other runs' folders beside it;
 #   - a drop to the runner's own user with no new privileges, so the command is never root.
 # It takes real root through sudo rather than an unprivileged user namespace, which Ubuntu 24.04
-# restricts by default. <workdir> must already exist and must lie outside every hidden path. CI
-# only: a developer's machine runs the harness without it.
+# restricts by default. <workdir> must already exist; it must not be a hidden path nor contain one,
+# since showing it would show what is hidden. CI only: a developer's machine runs the harness
+# without it.
 set -euo pipefail
 
 hide=()
@@ -38,24 +43,17 @@ workdir="$(realpath "$1")"
 shift
 
 # The paths an empty tmpfs covers: the workspace and those the harness names, as real paths,
-# without repeats. The working directory must lie outside all of them, or it would be covered too.
+# without repeats, and of nested ones only the outermost, since an inner path is covered with its
+# outer one and is gone once that is covered.
 hidden=()
 for p in "${GITHUB_WORKSPACE:-}" "${hide[@]}"; do
   [ -n "$p" ] && [ -e "$p" ] || continue
   real="$(realpath "$p")"
-  case "$workdir/" in
-    "$real"/*)
-      echo "sandbox.sh: the working directory $workdir lies inside the hidden $real" >&2
-      exit 2
-      ;;
-  esac
   case " ${hidden[*]:-} " in
     *" $real "*) ;;
     *) hidden+=("$real") ;;
   esac
 done
-# A path inside another hidden one is covered with it, and is gone once that is covered, as the
-# held-out checkout inside the workspace is; only the outermost paths are mounted over.
 outermost=()
 for p in "${hidden[@]:-}"; do
   [ -n "$p" ] || continue
@@ -69,9 +67,28 @@ for p in "${hidden[@]:-}"; do
 done
 hidden=("${outermost[@]:-}")
 
-# An unreadable empty directory, bound over each credential directory.
+# The working directory must not be a hidden path nor contain one, since it stays visible; when it
+# lies inside one, it is put back inside the tmpfs that covers it.
+inside=false
+for h in "${hidden[@]:-}"; do
+  [ -n "$h" ] || continue
+  case "$h/" in
+    "$workdir"/*)
+      echo "sandbox.sh: the working directory $workdir is, or contains, the hidden $h" >&2
+      exit 2
+      ;;
+  esac
+  case "$workdir/" in "$h"/*) inside=true ;; esac
+done
+
+# Scratch directories: an unreadable empty one, bound over each credential directory, and, when the
+# working directory is to be put back, one to hold it while its parent is covered.
 empty="$(mktemp -d)"
 chmod 000 "$empty"
+stash=""
+if $inside; then
+  stash="$(mktemp -d)"
+fi
 
 # The only environment that crosses into the sandbox: never a secret. The harness exports the
 # toolchain variables the build needs; they carry no secret.
@@ -89,12 +106,17 @@ done
 exec sudo -n unshare --net --pid --mount --uts --ipc --fork --mount-proc --kill-child -- \
   /usr/bin/env \
   "BENCH_HOME=$HOME" "BENCH_UID=$(id -u)" "BENCH_GID=$(id -g)" "BENCH_EMPTY=$empty" \
-  "BENCH_WORKDIR=$workdir" "BENCH_HIDDEN=$(printf '%s\n' "${hidden[@]:-}")" \
+  "BENCH_WORKDIR=$workdir" "BENCH_STASH=$stash" "BENCH_HIDDEN=$(printf '%s\n' "${hidden[@]:-}")" \
   bash -c '
     set -euo pipefail
     mount --make-rprivate /
-    # The working directory as a mount of its own, so it stays writable under a read-only root.
-    mount --bind "$BENCH_WORKDIR" "$BENCH_WORKDIR"
+    # The working directory as a mount of its own, so it stays writable under a read-only root:
+    # held aside while a hidden path above it is covered, or bound onto itself.
+    if [ -n "$BENCH_STASH" ]; then
+      mount --bind "$BENCH_WORKDIR" "$BENCH_STASH"
+    else
+      mount --bind "$BENCH_WORKDIR" "$BENCH_WORKDIR"
+    fi
     for d in .ssh .config .aws .docker .gnupg .kube .npm; do
       if [ -d "$BENCH_HOME/$d" ]; then
         mount --bind "$BENCH_EMPTY" "$BENCH_HOME/$d"
@@ -108,6 +130,11 @@ exec sudo -n unshare --net --pid --mount --uts --ipc --fork --mount-proc --kill-
         mount --bind /dev/null "$p"
       fi
     done <<< "$BENCH_HIDDEN"
+    # The working directory, put back at its own path inside the tmpfs that covers its parent.
+    if [ -n "$BENCH_STASH" ]; then
+      mkdir -p "$BENCH_WORKDIR"
+      mount --move "$BENCH_STASH" "$BENCH_WORKDIR"
+    fi
     # A private /tmp, unless the working directory is in it.
     case "$BENCH_WORKDIR/" in
       /tmp/*) ;;
