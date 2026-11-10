@@ -6,7 +6,7 @@
 test_workspace = true
 
 # Through nextest, whose profile `mutants` (.config/nextest.toml) stops a test that runs too
-# long, so that a mutant that loops without end fails a test within 30 seconds.
+# long, so that a mutant that loops without end fails a test within 40 seconds.
 test_tool = "nextest"
 
 
