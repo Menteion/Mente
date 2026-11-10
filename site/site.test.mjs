@@ -6,11 +6,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { checkBook, directiveErrors } from './check.mjs';
+import { checkBook, directiveErrors, splitElements, stripComments } from './check.mjs';
 import {
   annotateRegister,
   countTasks,
+  escapeHtml,
+  escapeMarkdownText,
   fenceMask,
+  inlineHtml,
   insertAfterTitle,
   labelMeanings,
   mapOutsideCode,
@@ -84,6 +87,41 @@ test('text outside code spans is transformed and code spans are kept', () => {
   const upper = (s) => s.toUpperCase();
   assert.equal(mapOutsideCode('a `b` c ``d ` e`` f', upper), 'A `b` C ``d ` e`` F');
   assert.equal(mapOutsideCode('an ` unmatched tick', upper), 'AN ` UNMATCHED TICK');
+});
+
+test('a title is escaped for Markdown with its backslashes first, and its code spans kept', () => {
+  // A backslash already in the text is doubled, so it cannot escape what follows it.
+  assert.equal(escapeMarkdownText('a\\b'), 'a\\\\b');
+  assert.equal(escapeMarkdownText('a\\[b]'), 'a\\\\\\[b\\]');
+  assert.equal(escapeMarkdownText('x | *y* <T>'), 'x \\| \\*y\\* \\<T\\>');
+  // Inside a code span the text is literal already: nothing is added.
+  assert.equal(escapeMarkdownText('`&&`, `||` or `\\` from C'), '`&&`\\, `||` or `\\` from C');
+  assert.equal(escapeMarkdownText('an ` unmatched tick'), 'an \\` unmatched tick');
+});
+
+test('a title is rendered as HTML with its code spans as code', () => {
+  assert.equal(inlineHtml('`&&`, `||` or `!` from C'), '<code>&amp;&amp;</code>, <code>||</code> or <code>!</code> from C');
+  assert.equal(inlineHtml('a\\b `c\\d` <T> "q"'), 'a\\b <code>c\\d</code> &lt;T&gt; &quot;q&quot;');
+  assert.equal(inlineHtml('`` a`b ``'), '<code>a`b</code>');
+  assert.equal(escapeHtml(`\\"'<&>`), '\\&quot;&#39;&lt;&amp;&gt;');
+});
+
+test('comments end where the HTML tokenizer ends them, nested or overlapping markers included', () => {
+  assert.equal(stripComments('a<!-- b -->c'), 'ac');
+  // A nested opener does not nest: the first `-->` closes the comment, and the rest is text.
+  assert.equal(stripComments('a<!-- <!-- b -->c-->d'), 'ac-->d');
+  // Two comments in a row, and a closer with no opener, which is text.
+  assert.equal(stripComments('<!-- a --><!-- b -->c-->'), 'c-->');
+  assert.equal(stripComments('a<!-->b<!--->c'), 'abc');
+  assert.equal(stripComments('a<!--b--!>c'), 'ac');
+  assert.equal(stripComments('a<!--b -- c-->d'), 'ad');
+  assert.equal(stripComments('a<!-- never closed'), 'a');
+});
+
+test('elements are split from the text around them by scanning', () => {
+  const { inside, outside } = splitElements('a<pre>1</pre>b<prefix>c<pre class="x">2</pre>d<pre>3', 'pre');
+  assert.deepEqual(inside, ['<pre>1</pre>', '<pre class="x">2</pre>', '<pre>3']);
+  assert.equal(outside, 'ab<prefix>cd');
 });
 
 test('table rows split at unescaped pipes only', () => {
@@ -223,6 +261,16 @@ test('a directive shown to the reader is an error, one described in inline code 
   assert.deepEqual(directiveErrors('a.html', page('<p>&lt;!-- @spec-item id="x" --&gt;</p>')), [
     'a.html: a directive is shown as text',
   ]);
+  // A directive's text after a comment that a nested opener closed early is shown, and caught.
+  assert.deepEqual(directiveErrors('a.html', page('<p><!-- <!-- x --> &lt;!-- @assert-count target="a" --&gt;</p>')), [
+    'a.html: a directive is shown as text',
+  ]);
+  // So is one whose opener straddles a comment the browser removes.
+  assert.deepEqual(directiveErrors('a.html', page('<p>&lt;!-<!-- x -->- @assert-count --&gt;</p>')), [
+    'a.html: a directive is shown as text',
+  ]);
+  // An unclosed comment hides everything after it.
+  assert.deepEqual(directiveErrors('a.html', page('<p>x<!-- &lt;!-- @assert-count --&gt;</p>')), []);
 });
 
 test('the book check finds broken links, missing fragments and links outside the site', () => {

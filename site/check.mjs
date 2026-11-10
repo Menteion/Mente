@@ -38,20 +38,81 @@ export function linksOf(html) {
 }
 
 /**
+ * The HTML with its comments removed, each ending where the HTML tokenizer ends it: at the first
+ * `-->` or `--!>` after its `<!--`, at once for `<!-->` and `<!--->`, and at the end of the text if
+ * it is never closed. A scan from one comment boundary to the next, so that markers nested in or
+ * straddling a comment are judged as a browser judges them, never pieced back together.
+ */
+export function stripComments(html) {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const open = html.indexOf('<!--', i);
+    if (open === -1) return out + html.slice(i);
+    out += html.slice(i, open);
+    const body = open + '<!--'.length;
+    if (html.startsWith('>', body)) {
+      i = body + 1;
+      continue;
+    }
+    if (html.startsWith('->', body)) {
+      i = body + 2;
+      continue;
+    }
+    const ends = [html.indexOf('-->', body), html.indexOf('--!>', body)].filter((n) => n !== -1);
+    if (ends.length === 0) return out;
+    const end = Math.min(...ends);
+    i = end + (html.startsWith('-->', end) ? '-->'.length : '--!>'.length);
+  }
+}
+
+/** The index of the next `<tag>` or `<tag ...>` at or after `from`, or -1. */
+function openTag(html, tag, from) {
+  for (let i = html.indexOf(`<${tag}`, from); i !== -1; i = html.indexOf(`<${tag}`, i + 1)) {
+    if (/[\s>]/.test(html[i + tag.length + 1] ?? '')) return i;
+  }
+  return -1;
+}
+
+/** Splits HTML into the `<tag>` elements it holds and the text around them, by scanning. */
+export function splitElements(html, tag) {
+  const close = `</${tag}>`;
+  const inside = [];
+  let outside = '';
+  let i = 0;
+  for (;;) {
+    const open = openTag(html, tag, i);
+    if (open === -1) break;
+    outside += html.slice(i, open);
+    const end = html.indexOf(close, open);
+    if (end === -1) {
+      inside.push(html.slice(open));
+      i = html.length;
+      break;
+    }
+    inside.push(html.slice(open, end + close.length));
+    i = end + close.length;
+  }
+  return { inside, outside: outside + html.slice(i) };
+}
+
+/**
  * Errors for a directive of the sources that a page shows instead of hiding: its comment opener
  * rendered as text, in a code block (an over-indented directive) or in prose. A directive written
  * on purpose inside inline code, as spec/README.md does to describe one, is allowed.
  */
 export function directiveErrors(rel, html) {
   const main = /<main>([\s\S]*)<\/main>/.exec(html)?.[1] ?? '';
-  const visible = main.replace(/<!--[\s\S]*?-->/g, '');
+  const visible = stripComments(main);
   const directive = /&lt;!--\s*@(?:assert-|spec-item)/;
   const errors = [];
-  for (const pre of visible.matchAll(/<pre[\s\S]*?<\/pre>/g)) {
-    if (directive.test(pre[0])) errors.push(`${rel}: a directive is shown as a code block`);
+  const blocks = splitElements(visible, 'pre');
+  if (blocks.inside.some((pre) => directive.test(pre))) {
+    errors.push(`${rel}: a directive is shown as a code block`);
   }
-  const prose = visible.replace(/<pre[\s\S]*?<\/pre>/g, '').replace(/<code[\s\S]*?<\/code>/g, '');
-  if (directive.test(prose)) errors.push(`${rel}: a directive is shown as text`);
+  if (directive.test(splitElements(blocks.outside, 'code').outside)) {
+    errors.push(`${rel}: a directive is shown as text`);
+  }
   return errors;
 }
 

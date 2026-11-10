@@ -20,12 +20,72 @@ const DIRECTIVE_LINE = /^\s*<!--\s*@assert-[\s\S]*-->\s*$/;
 /** The start of a list item, a heading, or a blank line: where a claim's own lines end. */
 const BLOCK_START = /^\s*(?:$|[-*+]\s|\d+[.)]\s|#)/;
 
+/** Text made safe for HTML content and quoted attribute values; a backslash needs nothing in HTML. */
 export function escapeHtml(text) {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Every ASCII punctuation character, the backslash first: CommonMark lets each be escaped. */
+const MARKDOWN_PUNCTUATION = /[\\!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~]/g;
+
+/**
+ * A title (plain text with code spans, such as a catalogue entry's) made safe for Markdown inline
+ * content such as link text or a heading: outside code spans every ASCII punctuation character,
+ * the backslash included, is escaped so that it reads as written; a code span is kept, since its
+ * text is already literal and an escape inside it would show.
+ */
+export function escapeMarkdownText(text) {
+  return mapOutsideCode(text, (part) => part.replace(MARKDOWN_PUNCTUATION, '\\$&'));
+}
+
+/** The same kind of title as HTML: its text escaped, its code spans as `<code>`. */
+export function inlineHtml(text) {
+  let out = '';
+  let rest = '';
+  const flush = () => {
+    out += escapeHtml(rest);
+    rest = '';
+  };
+  for (let i = 0; i < text.length; ) {
+    if (text[i] !== '`') {
+      rest += text[i];
+      i += 1;
+      continue;
+    }
+    let n = 0;
+    while (text[i + n] === '`') n += 1;
+    const close = closingRun(text, i + n, n);
+    if (close === -1) {
+      rest += text.slice(i, i + n);
+      i += n;
+      continue;
+    }
+    flush();
+    out += `<code>${escapeHtml(text.slice(i + n, close).replace(/^ (.*) $/, '$1'))}</code>`;
+    i = close + n;
+  }
+  flush();
+  return out;
+}
+
+/** The index of the next run of exactly `n` backticks at or after `from`, or -1. */
+function closingRun(line, from, n) {
+  for (let j = from; j < line.length; ) {
+    if (line[j] !== '`') {
+      j += 1;
+      continue;
+    }
+    let m = 0;
+    while (line[j + m] === '`') m += 1;
+    if (m === n) return j;
+    j += m;
+  }
+  return -1;
 }
 
 /** Markdown reduced to plain text, for an HTML attribute. */
@@ -80,20 +140,7 @@ export function mapOutsideCode(line, fn) {
     }
     let n = 0;
     while (line[i + n] === '`') n += 1;
-    let close = -1;
-    for (let j = i + n; j < line.length; ) {
-      if (line[j] !== '`') {
-        j += 1;
-        continue;
-      }
-      let m = 0;
-      while (line[j + m] === '`') m += 1;
-      if (m === n) {
-        close = j;
-        break;
-      }
-      j += m;
-    }
+    const close = closingRun(line, i + n, n);
     if (close === -1) {
       text += line.slice(i, i + n);
       i += n;

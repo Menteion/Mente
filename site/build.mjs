@@ -20,7 +20,9 @@ import {
   annotateRegister,
   countTasks,
   escapeHtml,
+  escapeMarkdownText,
   firstTitle,
+  inlineHtml,
   insertAfterTitle,
   labelMeanings,
   markClaims,
@@ -132,7 +134,19 @@ function specOrder(specReadme) {
 }
 
 function summaryLink(title, target) {
-  return `[${title.replace(/[[\]]/g, '\\$&')}](${target})`;
+  return `[${escapeMarkdownText(title)}](${target})`;
+}
+
+/** An HTML table, so that a title's `|` or `\` needs no Markdown escape. Cells are HTML already. */
+function htmlTable(head, rows, align) {
+  const cell = (tag, html, i) => `<${tag}${align[i] === 'right' ? ' style="text-align: right"' : ''}>${html}</${tag}>`;
+  return [
+    '<div class="table-wrapper"><table>',
+    `<thead><tr>${head.map((h, i) => cell('th', h, i)).join('')}</tr></thead>`,
+    '<tbody>',
+    ...rows.map((r) => `<tr>${r.map((c, i) => cell('td', c, i)).join('')}</tr>`),
+    '</tbody></table></div>',
+  ].join('\n');
 }
 
 function countsLine(counts, badge) {
@@ -236,14 +250,17 @@ function main() {
     if (rel === 'spec/README.md') {
       const rows = specFiles.map((f) => {
         const c = specCounts.get(f);
-        return `| [${titles.get(f).replace(/\|/g, '\\|')}](${path.posix.basename(f)}) | ${LABELS.map((l) => c[l] || '').join(' | ')} |`;
+        const page = path.posix.basename(f).replace(/\.md$/, '.html');
+        return [`<a href="${page}">${inlineHtml(titles.get(f))}</a>`, ...LABELS.map((l) => String(c[l] || ''))];
       });
-      const totals = LABELS.map((l) => specFiles.reduce((n, f) => n + specCounts.get(f)[l], 0));
+      const totals = LABELS.map((l) => String(specFiles.reduce((n, f) => n + specCounts.get(f)[l], 0)));
       summary =
         `Claims by file and maturity. Each label's tooltip on a page says what it means.\n\n` +
-        `| File | ${LABELS.map((l) => maturityBadge(l)).join(' | ')} |\n` +
-        `| :--- | ${LABELS.map(() => '---:').join(' | ')} |\n` +
-        `${rows.join('\n')}\n| **All files** | ${totals.join(' | ')} |`;
+        htmlTable(
+          ['File', ...LABELS.map((l) => maturityBadge(l))],
+          [...rows, ['<strong>All files</strong>', ...totals]],
+          ['left', ...LABELS.map(() => 'right')],
+        );
     } else if (rel.startsWith('spec/') && summary) {
       summary += ` [What the labels mean](${prefix}spec/README.md#how-to-read-this-specification).`;
     }
@@ -273,8 +290,12 @@ function main() {
     const s = CODE_STATUS[status];
     return s.label ? maturityBadge(s.label, s.title).replace(`>${s.label}<`, `>${status}<`) : statusBadge(status, s.title);
   };
-  const indexRows = codes.map((e) =>
-    `| [${e.code}](${e.code}.md) | ${e.title.replace(/\|/g, '\\|')} | ${codeBadge(e.status)} | ${e.failureClass} |`);
+  const indexRows = codes.map((e) => [
+    `<a href="${e.code}.html">${e.code}</a>`,
+    inlineHtml(e.title),
+    codeBadge(e.status),
+    escapeHtml(e.failureClass),
+  ]);
   write('errors/README.md', [
     '# Error codes',
     '',
@@ -288,16 +309,14 @@ function main() {
       `The catalogue lives in [\`compiler/mente-cli/src/catalogue.rs\`](${repoUrl}/blob/${ref}/compiler/mente-cli/src/catalogue.rs), ` +
       `and [diagnostics](../spec/diagnostics.md) specifies it. A code is never reused.`,
     '',
-    '| Code | Title | Status | Failure class |',
-    '| :--- | :--- | :--- | :--- |',
-    ...indexRows,
+    htmlTable(['Code', 'Title', 'Status', 'Failure class'], indexRows, []),
   ].join('\n'));
   titles.set('errors/README.md', 'Error codes');
 
   for (const e of codes) {
     if (!book.has(e.spec)) throw new Error(`${e.code} is governed by ${e.spec}, which is not a page of the site`);
     const lines = [
-      `# ${e.code}: ${e.title}`,
+      `# ${e.code}: ${escapeMarkdownText(e.title)}`,
       '',
       prerelease('../'),
       '',
