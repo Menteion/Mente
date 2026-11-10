@@ -140,6 +140,33 @@ pub fn build(
     prefix: &str,
     exe: &std::path::Path,
 ) -> Result<(), String> {
+    let calls = native_calls(lowered, calls)?;
+    let source = source_file(source, None)?;
+    native::executable(lowered, &calls, prefix, source, exe).map_err(|e| e.to_string())
+}
+
+/// The object `build` would link, for `target`, written to `out`. Its debug information
+/// records `directory` as the compilation directory, `source`'s own directory by default.
+pub fn object(
+    lowered: &Lowered,
+    calls: &[CallArgs],
+    (source, directory): (&std::path::Path, Option<&str>),
+    prefix: &str,
+    (target, out): (mente_codegen::Target, &std::path::Path),
+) -> Result<(), String> {
+    let calls = native_calls(lowered, calls)?;
+    let source = source_file(source, directory)?;
+    let name = out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let bytes = native::object(lowered, &calls, prefix, source, &name, target)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(out, bytes).map_err(|e| format!("{}: {}", out.display(), e))
+}
+
+/// Each call of `calls` as native code makes it: its entry's index and its arguments.
+fn native_calls(lowered: &Lowered, calls: &[CallArgs]) -> Result<Vec<native::Call>, String> {
     let mut native_calls = Vec::new();
     for (f, args) in calls {
         let entry = lowered
@@ -153,19 +180,30 @@ pub fn build(
             .collect::<Result<Vec<_>, String>>()?;
         native_calls.push(native::Call { entry, args });
     }
+    Ok(native_calls)
+}
+
+/// The source file the debug information names: `source`'s file name, in `directory`, or in
+/// `source`'s own directory made absolute.
+fn source_file(
+    source: &std::path::Path,
+    directory: Option<&str>,
+) -> Result<mente_codegen::SourceFile, String> {
     let absolute =
         std::path::absolute(source).map_err(|e| format!("{}: {}", source.display(), e))?;
-    let source = mente_codegen::SourceFile {
+    Ok(mente_codegen::SourceFile {
         path: absolute
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        directory: absolute
-            .parent()
-            .map(|d| d.display().to_string())
-            .unwrap_or_default(),
-    };
-    native::executable(lowered, &native_calls, prefix, source, exe).map_err(|e| e.to_string())
+        directory: match directory {
+            Some(d) => d.to_string(),
+            None => absolute
+                .parent()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default(),
+        },
+    })
 }
 
 fn native_arg(value: &Value) -> Result<native::Arg, String> {

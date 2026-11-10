@@ -7,7 +7,8 @@
 //!   interpreter, with `--mir` through MIR, or with `--native` as native code, and prints the
 //!   result or the trap.
 //! - `mn build <file.mn> [--call "f(args)"] [-o <exe>]`: Builds the call as an executable, with
-//!   debug information, that prints what `mn run` prints.
+//!   debug information, that prints what `mn run` prints; with `--object`, writes only its
+//!   object, for the host or the `--target` named.
 //! - `mn card`: Prints the language card of the language version this compiler implements.
 //! - `mn check [--json] <path>` : Full syntax, 64B Cache-Line `@layout`, `bitstruct`, `@total` & `@branchless` verification;
 //!   `--json` prints the diagnostics in the versioned JSON form of `spec/diagnostics.md`.
@@ -78,12 +79,14 @@ fn print_help() {
     );
     println!("                               Verify .mn syntax, 64B Cache-Line @layout, bitstruct, @total & @branchless contracts");
     println!("  mn explain [code]            Explain an error code, or list them all");
-    println!("  mn dump --tokens|--tree|--typed <file.mn>");
+    println!("  mn dump --tokens|--tree|--typed|--mir <file.mn>");
     println!("                               Print a phase's output in its canonical form");
     println!("  mn run <file.mn> [--call \"f(1, [2, 3])\"] [--mir | --native]");
     println!("                               Run main, or one call, on the reference interpreter");
     println!("  mn build <file.mn> [--call \"f(1, [2, 3])\"] [-o <exe>]");
     println!("                               Build main, or one call, as a native executable");
+    println!("           [--object [--target <triple>] [--compilation-dir <dir>]]");
+    println!("                               ...or write only its object, for the host or another target");
     println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
@@ -98,7 +101,7 @@ fn cmd_dump(args: &[String]) {
         .map(String::as_str);
     let path = args.iter().find(|a| !a.starts_with('-'));
     let (Some(phase), Some(path)) = (phase, path) else {
-        eprintln!("Usage: mn dump --tokens|--tree|--typed <file.mn>");
+        eprintln!("Usage: mn dump --tokens|--tree|--typed|--mir <file.mn>");
         process::exit(2);
     };
     let src = match fs::read_to_string(path) {
@@ -112,9 +115,24 @@ fn cmd_dump(args: &[String]) {
         "--tokens" => mente_syntax::dump_tokens(&src),
         "--tree" => mente_syntax::dump_tree(&src),
         "--typed" => mente_sema::dump_typed(&src),
+        "--mir" => match mente_sema::check_program(&src) {
+            Err(diagnostics) => {
+                for d in &diagnostics {
+                    eprint!("{}", render_text(d, path, &src));
+                }
+                process::exit(2);
+            }
+            Ok(module) => match mente_codegen::lower::lower(&module) {
+                Ok(lowered) => format!("mente-dump 1 mir\n{}", lowered.module),
+                Err(e) => {
+                    eprintln!("error: not lowered: {}", e);
+                    process::exit(1);
+                }
+            },
+        },
         other => {
             eprintln!(
-                "error: `mn dump` knows --tokens, --tree and --typed, not `{}`",
+                "error: `mn dump` knows --tokens, --tree, --typed and --mir, not `{}`",
                 other
             );
             process::exit(2);
@@ -202,22 +220,78 @@ fn cmd_build(args: &[String]) {
     let mut call = None;
     let mut path = None;
     let mut out = None;
+    let mut object = false;
+    let mut target = None;
+    let mut directory = None;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         if a == "--call" {
             call = rest.next().cloned();
         } else if a == "-o" {
             out = rest.next().cloned();
+        } else if a == "--object" {
+            object = true;
+        } else if a == "--target" {
+            target = Some(rest.next().cloned().unwrap_or_default());
+        } else if a == "--compilation-dir" {
+            directory = rest.next().cloned();
         } else if !a.starts_with('-') {
             path = Some(a.clone());
         }
     }
     let Some(path) = path else {
-        eprintln!("Usage: mn build <file.mn> [--call \"f(args)\"] [-o <exe>]");
+        eprintln!("Usage: mn build <file.mn> [--call \"f(args)\"] [-o <exe>] [--object [--target <triple>] [--compilation-dir <dir>]]");
         process::exit(2);
+    };
+    if !object && (target.is_some() || directory.is_some()) {
+        eprintln!("error: `--target` and `--compilation-dir` go with `--object`: only the host's executables are linked");
+        process::exit(2);
+    }
+    let target = match target {
+        None => mente_codegen::Target::host(),
+        Some(triple) => {
+            let named = mente_codegen::Target::named(&triple);
+            if named.is_none() {
+                eprintln!(
+                    "error: `--target` takes one of {}, not `{}`",
+                    mente_codegen::Target::ALL
+                        .map(mente_codegen::Target::triple)
+                        .join(", "),
+                    triple
+                );
+                process::exit(2);
+            }
+            named
+        }
     };
     let (module, name, args) = checked_call(&path, call);
     let source = Path::new(&path);
+    if object {
+        let Some(target) = target else {
+            eprintln!("error: no native code for this host; name a `--target`");
+            process::exit(1);
+        };
+        let out = out
+            .map(PathBuf::from)
+            .unwrap_or_else(|| mente_codegen::native::object_path(source, target));
+        let built = mente_codegen::lower::lower(&module).and_then(|lowered| {
+            mir_run::object(
+                &lowered,
+                &[(name, args)],
+                (source, directory.as_deref()),
+                &format!("{}: ", path),
+                (target, &out),
+            )
+        });
+        match built {
+            Ok(()) => println!("{}", out.display()),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+        return;
+    }
     let exe = out
         .map(PathBuf::from)
         .unwrap_or_else(|| source.with_extension(env::consts::EXE_EXTENSION));

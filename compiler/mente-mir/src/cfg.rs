@@ -1206,6 +1206,20 @@ impl fmt::Display for Function {
     }
 }
 
+/// Each function in order, numbered as a call names it, with a blank line between two: the
+/// canonical text of a module, which `mn dump --mir` prints.
+impl fmt::Display for Module {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, f) in self.functions.iter().enumerate() {
+            if i > 0 {
+                writeln!(out)?;
+            }
+            write!(out, "f{}: {}", i, f)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,6 +1307,23 @@ mod tests {
             "{}",
             printed
         );
+    }
+
+    #[test]
+    fn test_a_module_prints_each_function_numbered_as_calls_name_it() {
+        let mut b = Builder::new("twice", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let n = b.params(BlockId(0))[0];
+        let s = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[n]);
+        b.end(Term::Return(Some(s)));
+        let m = module(vec![sum(), b.finish()]);
+        let printed = m.to_string();
+        let first = m.functions[0].to_string();
+        let second = m.functions[1].to_string();
+        assert_eq!(printed, format!("f0: {}\nf1: {}", first, second));
+        assert!(second.contains("= call f0 v0 @0:0\n"), "{}", second);
+        // The same module prints the same text every time.
+        assert_eq!(printed, m.to_string());
+        assert_eq!(Module { functions: vec![] }.to_string(), "");
     }
 
     #[test]
