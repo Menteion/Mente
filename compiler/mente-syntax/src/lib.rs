@@ -1182,7 +1182,8 @@ impl<'a> Parser<'a> {
             let attrs = self.parse_attrs()?;
             if attrs.len() == 1 && attrs[0].name == "example" {
                 let title = attrs[0].args.trim_matches('"').to_string();
-                let body_tokens = self.consume_balanced_braces()?;
+                let opened = ("@example", attrs[0].args.as_str(), attrs[0].span);
+                let body_tokens = self.consume_balanced_braces(opened)?;
                 items.push(ItemDecl::Example(ExampleDecl { title, body_tokens }));
                 continue;
             }
@@ -1374,7 +1375,12 @@ impl<'a> Parser<'a> {
         Ok(self.src[start_byte..end_byte].trim().to_string())
     }
 
-    fn consume_balanced_braces(&mut self) -> Result<Vec<TokenKind>, Diagnostic> {
+    /// The tokens of a body in braces, the outer pair left out. A body the file ends inside is
+    /// unclosed (`E0103`), as a declaration is: `what name`, opened at `name_span`.
+    fn consume_balanced_braces(
+        &mut self,
+        (what, name, name_span): (&str, &str, Span),
+    ) -> Result<Vec<TokenKind>, Diagnostic> {
         let mut collected = Vec::new();
         if *self.peek() != TokenKind::LBrace {
             return Err(Diagnostic::error(
@@ -1400,6 +1406,9 @@ impl<'a> Parser<'a> {
                 }
                 other => collected.push(other),
             }
+        }
+        if depth > 0 {
+            self.expect_closing_brace(what, name, name_span)?;
         }
         Ok(collected)
     }
@@ -1852,7 +1861,7 @@ impl<'a> Parser<'a> {
                 last = tok.kind;
             }
         } else if *self.peek() == TokenKind::LBrace {
-            body_tokens = self.consume_balanced_braces()?;
+            body_tokens = self.consume_balanced_braces(("fn", &name, name_span))?;
         }
 
         Ok(FnDecl {
@@ -1954,6 +1963,15 @@ impl<'a> Parser<'a> {
         }
         if let Some((opener, span)) = open.pop() {
             return Err(malformed(span, format!("`{}` is never closed", opener)));
+        }
+        // `->` with nothing after it, which the body parser would report alike, but which a
+        // function without a body would otherwise keep as a declaration no one checks.
+        if end == start {
+            return Err(Diagnostic::error(
+                "E0116",
+                self.span(),
+                format!("expected a type, found {}", self.found()),
+            ));
         }
 
         Ok(if let Some((bs, be)) = bang_pos {
@@ -2915,6 +2933,12 @@ pub fn after(y: i32) -> i32 = y
                 header
             );
         }
+        // `->` with no type after it, before another item (the fuzzer's finding 14).
+        let d = parse_module("module m\nfn id() ->\nfn f() -> u8 = 1\n").unwrap_err();
+        assert_eq!(
+            (d.code, d.message.as_str(), d.primary.line),
+            ("E0116", "expected a type, found `fn`", 3)
+        );
         for (header, ty) in [
             ("pub fn f() -> [4]u8[0..=10]", "[4]u8[0..=10]"),
             ("pub fn f() -> Map<str, List<u8>>", "Map<str, List<u8>>"),
@@ -3103,6 +3127,12 @@ pub struct S {
                 "module m\npub trait Probe {\n  fn hit(self) -> bool\n",
                 "`trait Probe` has no closing `}`",
             ),
+            // A function's body the file ends inside (the fuzzer's finding 13).
+            (
+                "module m\npub fn open() -> u8 {\n  1\n",
+                "`fn open` has no closing `}`",
+            ),
+            ("module m\nfn n(){{{]}}\nfn", "`fn n` has no closing `}`"),
         ] {
             let err = parse_module(code).unwrap_err();
             assert_eq!(err.code, "E0103");

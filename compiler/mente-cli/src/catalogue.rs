@@ -140,9 +140,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::Syntax,
         "spec/surface-syntax.md",
         "A declaration has no closing brace",
-        "A `struct`, `bitstruct`, `enum` or `trait` opened with `{` is not closed before the file \
-         ends. The diagnostic points at where the parser stopped, names the declaration in a \
-         related span, and suggests a `}`; the right place may be earlier.",
+        "A `struct`, `bitstruct`, `enum` or `trait` opened with `{`, or a function's body, is not \
+         closed before the file ends. The diagnostic points at where the parser stopped, names \
+         the declaration in a related span, and suggests a `}`; the right place may be earlier.",
         "module m\npub enum Side { Left, Right\n",
         "module m\npub enum Side { Left, Right }\n",
     ),
