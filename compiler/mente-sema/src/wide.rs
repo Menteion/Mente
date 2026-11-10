@@ -7,8 +7,10 @@
 //! an `if`'s the hull of its branches', and any other integer's its type's range. An operation
 //! whose range does not lie within `u128` or within `i128` is `E0222`, whose fix binds an operand
 //! to a `u128` or an `i128` first; so is an `if` whose branches' hull does not, whose fix binds
-//! a branch's value to an `i128` inside that branch. Every intermediate therefore fits one
-//! 128-bit machine type, in which native code computes it without a check.
+//! a branch's value to an `i128` inside that branch. The same holds wherever values meet in one
+//! machine type: an operation's operands with its result, and the elements of an array literal
+//! of integers of no one type. Every intermediate therefore fits one 128-bit machine type, in
+//! which native code computes it without a check.
 //!
 //! [`wide-intermediates`]: ../../docs/design-review.md#wide-intermediates
 
@@ -310,6 +312,10 @@ impl Wide<'_> {
             ExprKind::Binary { op, lhs, rhs } if is_arithmetic(*op) => {
                 self.operation(span, Some(*op), *lhs, Some(*rhs), None)
             }
+            ExprKind::Array(items) => {
+                self.array(span, e, items);
+                typed
+            }
             ExprKind::If {
                 then, otherwise, ..
             } => {
@@ -340,6 +346,39 @@ impl Wide<'_> {
                 }
             }
             _ => typed,
+        }
+    }
+
+    /// `E0222` for an array literal at `at` whose elements, integers of no one type, kept exact
+    /// until the array lands, fit no one 128-bit type together. Its fix binds the element that
+    /// reaches above `i128` to an `i128` first.
+    fn array(&mut self, at: Span, e: ExprId, items: &[ExprId]) {
+        let Ty::Array(_, elem) = &self.typing.exprs[e.0 as usize] else {
+            return;
+        };
+        // Elements of one type are narrowed into it; only those of no standard type together
+        // are kept exact, and the literals alone are points that fit.
+        if !matches!(**elem, Ty::Int(Int::Mixed(None))) {
+            return;
+        }
+        let mut hull: Option<Range> = None;
+        let mut ranges = Vec::new();
+        for &i in items {
+            let Some(r) = self.range(i) else {
+                return;
+            };
+            hull = Some(hull.map_or(r, |h| h.hull(r)));
+            ranges.push((i, r));
+        }
+        let top = Num::new(false, i128::MAX.unsigned_abs());
+        let above = ranges.iter().find(|(_, r)| r.hi > top).map(|(i, _)| *i);
+        if let (Some(h), Some(item)) = (hull, above) {
+            if !h.fits() {
+                let message = "the elements of this array literal give values that no one of \
+                               `i128` and `u128` holds together, and they are kept in one of them"
+                    .to_string();
+                self.report_with(at, at, item, "i128", message);
+            }
         }
     }
 
@@ -397,7 +436,7 @@ impl Wide<'_> {
             return Some(Range::of(t));
         }
         let ra = self.range(a)?;
-        let (exact, larger, negative) = match (op, b) {
+        let (exact, larger, negative, operands) = match (op, b) {
             (Some(op), Some(b)) => {
                 let rb = self.range(b)?;
                 let larger = if rb.magnitude() > ra.magnitude() {
@@ -405,10 +444,17 @@ impl Wide<'_> {
                 } else {
                     a
                 };
-                (arithmetic(op, ra, rb), larger, may_be_negative(op, ra, rb))
+                (
+                    arithmetic(op, ra, rb),
+                    larger,
+                    may_be_negative(op, ra, rb),
+                    vec![ra, rb],
+                )
             }
             // A negation leaves both types only when its operand can be positive, so its result
             // can be negative.
+            // A literal's negation is a constant, which reaches its type's smallest value right
+            // after its `-` (`core-calculus.md` item 5): no operation, so no operand to fit.
             _ => (
                 Some(Range {
                     lo: ra.hi.negated(),
@@ -416,10 +462,28 @@ impl Wide<'_> {
                 }),
                 a,
                 true,
+                match self.tree.expr(a).kind {
+                    ExprKind::Int { .. } => Vec::new(),
+                    _ => vec![ra],
+                },
             ),
         };
         if let Some(r) = exact.filter(|r| r.fits()) {
-            return Some(r);
+            // The operands meet the result in its machine type, so they must fit it too.
+            let hull = operands.into_iter().fold(r, |h, o| h.hull(o));
+            if hull.fits() {
+                return Some(r);
+            }
+            // The value fits; the operand bound must hold it as the result's type does.
+            let machine = if r.lo.neg { "i128" } else { "u128" };
+            let src = self.src;
+            let message = format!(
+                "the operands of `{}` fit no one of `i128` and `u128` together with its value, \
+                 and an operation computes in one of them",
+                src.get(at.start..at.end).unwrap_or("")
+            );
+            self.report_with(at, at, bind.unwrap_or(larger), machine, message);
+            return None;
         }
         // The operand is bound to the 128-bit type the operation's result needs.
         let machine = if negative { "i128" } else { "u128" };
@@ -737,6 +801,47 @@ mod tests {
             "pub fn f(c: bool, a: i64, b: u64) -> i64 = if c { a } else { b }",
             "pub fn f(c: bool, a: u8, b: u128) -> u8 = if c { a } else { b }",
             "pub fn f(c: bool, a: i128, b: u64) -> i8 = if c { a } else { b }",
+        ] {
+            assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
+        }
+    }
+
+    #[test]
+    fn test_values_that_meet_in_one_machine_type_fit_one_together() {
+        // An operation's operands meet its value: a negative one beside one above `i128`.
+        let ops = "pub fn s(a: u8, b: i8) -> u128 {\n  val v: u128 = b + (a + 170141183460469231731687303715884105727)\n  v\n}";
+        let d = check_source(&module(ops)).unwrap_err();
+        assert_eq!(
+            d[0].message,
+            "the operands of `b + (a + 170141183460469231731687303715884105727)` fit no one of `i128` and `u128` together with its value, and an operation computes in one of them"
+        );
+        // Bound to a `u128`, which holds the never-negative value, the operand makes the
+        // operation one on a `u128`, checked at the operator.
+        let after = fixed(
+            ops,
+            "bind `a + 170141183460469231731687303715884105727` to `sum: u128` first",
+        );
+        assert!(check_source(&after).is_ok(), "{}", after);
+        assert!(codes("pub fn s(a: u8, b: i8) -> u128 = b + (a + 100)").is_empty());
+        // A literal's negation is a constant, `i128`'s smallest value included.
+        assert!(codes("pub fn m() -> i128 = -170141183460469231731687303715884105728").is_empty());
+        // An array literal of integers of no one type keeps its elements in one machine type.
+        let arr = "pub fn r(a: i32, b: u128) -> [2]i128 {\n  val xs: [2]i128 = [a, b]\n  xs\n}";
+        let d = check_source(&module(arr)).unwrap_err();
+        assert_eq!(
+            d[0].message,
+            "the elements of this array literal give values that no one of `i128` and `u128` holds together, and they are kept in one of them"
+        );
+        let after = fixed(arr, "bind `b` to `wide: i128` first");
+        assert!(check_source(&after).is_ok(), "{}", after);
+        // The element bound is the one above `i128`, never one whose top is `i128`'s.
+        let top = "pub fn r(a: i128, b: u128) -> [2]i128 {\n  val xs: [2]i128 = [a, b]\n  xs\n}";
+        let after = fixed(top, "bind `b` to `wide: i128` first");
+        assert!(check_source(&after).is_ok(), "{}", after);
+        for ok in [
+            "pub fn r(a: i32, b: u64) -> [2]i128 = [a, b]",
+            "pub fn r(a: u64, b: u128) -> [2]u128 = [a, b]",
+            "pub fn r(a: i8, b: i8) -> [2]i8 = [a, b]",
         ] {
             assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
         }

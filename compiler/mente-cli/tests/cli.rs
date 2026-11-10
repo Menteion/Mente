@@ -939,3 +939,55 @@ pub fn g(c: bool) -> i32 {
     }
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// An array literal of integers of no one type keeps its elements exact, in a machine type that
+/// holds them all, until the array lands, alike on every path.
+#[test]
+fn test_array_literals_of_mixed_integers_run_alike_on_every_path() {
+    let dir = scratch("mixed-literals");
+    fs::write(
+        dir.join("l.mn"),
+        "module m
+pub fn r(a: i32, b: u64) -> [2]i128 = [a, b]
+pub fn q(a: i32, b: u64) -> [2]i64 = [a, b]
+pub fn m(a: u128, b: i8[0..10]) -> [2]u128 = [a, b]
+",
+    )
+    .unwrap();
+    for (call, status, printed) in [
+        (
+            "r(-1, 18446744073709551615)",
+            0,
+            "[-1, 18446744073709551615]",
+        ),
+        ("q(-1, 5)", 0, "[-1, 5]"),
+        (
+            "m(340282366920938463463374607431768211455, 5)",
+            0,
+            "[340282366920938463463374607431768211455, 5]",
+        ),
+        (
+            "q(-1, 18446744073709551615)",
+            1,
+            "l.mn: trap[narrowing] at 3:38: 18446744073709551615 does not fit in `i64`",
+        ),
+    ] {
+        for path in [None, Some("--mir"), Some("--native")] {
+            let mut args = vec!["run", "l.mn", "--call", call];
+            args.extend(path);
+            let out = mn(&dir, &args);
+            assert_eq!(out.status.code(), Some(status), "{call} {path:?}");
+            let shown = if status == 0 {
+                &out.stdout
+            } else {
+                &out.stderr
+            };
+            assert_eq!(
+                text(shown).replace("\r\n", "\n").trim_end(),
+                printed,
+                "{call} {path:?}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}

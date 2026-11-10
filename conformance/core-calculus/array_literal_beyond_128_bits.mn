@@ -1,0 +1,6 @@
+// expect: E0222
+module conformance
+pub fn pair(a: i32, b: u128) -> [2]i128 {
+  val xs: [2]i128 = [a, b]
+  xs
+}
