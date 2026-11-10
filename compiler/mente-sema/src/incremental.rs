@@ -595,6 +595,24 @@ mod tests {
         }
     }
 
+    /// An error at an item's end, before another item, is what splitting made, so the session
+    /// asks the whole module; an error at the last item's end, or inside an item, is the whole
+    /// module's error too, and the session reports it without the whole module's check.
+    #[test]
+    fn test_only_an_error_at_an_items_end_before_another_sends_the_session_whole() {
+        for (src, whole) in [
+            ("module\nfn", true),
+            ("module m\npub fn f(\n", false),
+            ("module m\npub fn fn() -> u8 = 1\npub fn g(\n", false),
+        ] {
+            let s = Session::new(src);
+            let expected = check_source(src).err().unwrap_or_default();
+            assert!(!expected.is_empty(), "{}", src);
+            assert_eq!(s.diagnostics(), expected.as_slice(), "{}", src);
+            assert_eq!(s.work().whole, whole, "{}", src);
+        }
+    }
+
     #[test]
     fn test_a_module_with_more_than_functions_is_checked_whole() {
         let mut s = Session::new(MODULE);
