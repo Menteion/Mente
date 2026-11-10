@@ -1087,6 +1087,28 @@ mod tests {
         assert!(body.contains(&format!("Mente {}", version)));
     }
 
+    /// The control language's document, which the benchmark gives the agent that writes Odin,
+    /// is the size of the card within 15%, front matters aside (`docs/design-review.md`,
+    /// `control-language`).
+    #[test]
+    fn test_the_control_document_is_the_size_of_the_language_card() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let words = |text: &str| {
+            text.split_once("\n---\n")
+                .map_or(text, |(_, body)| body)
+                .split_whitespace()
+                .count()
+        };
+        let card = words(CARD);
+        let odin = words(&fs::read_to_string(root.join("benchmark/control/odin.md")).unwrap());
+        assert!(
+            odin * 100 >= card * 85 && odin * 100 <= card * 115,
+            "the Odin document has {} words and the card {}: more than 15% apart",
+            odin,
+            card
+        );
+    }
+
     #[test]
     fn test_examples_pass_their_declaration_checks_and_report_what_they_expect() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
