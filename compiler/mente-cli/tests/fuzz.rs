@@ -265,8 +265,8 @@ fn fuzz_deep_nesting() {
             " }".repeat(DEPTH)
         ),
         // No module line and no closing parenthesis: a release build overflowed in
-        // `mn check --watch`'s session before the body parser.
-        format!("fn p={}", "(".repeat(DEPTH)),
+        // `mn check --watch`'s session before the body parser, on `fn p=((((`.
+        format!("fn p() -> i32 = {}", "(".repeat(DEPTH)),
     ];
     let dir = scratch("deep");
     let mut files = Vec::new();
