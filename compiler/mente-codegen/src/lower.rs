@@ -47,6 +47,9 @@ pub struct Entry {
     pub func: FuncId,
     pub params: Vec<(bool, Shape)>,
     pub result: Shape,
+    /// The function's name in the source, where a call from outside the program reports an
+    /// argument its parameter's type cannot hold.
+    pub at: Loc,
 }
 
 /// The shape of a value: an integer of a type, a boolean, an array, or nothing.
@@ -215,6 +218,10 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
                 func,
                 params: sig.params.clone(),
                 result: sig.result.clone(),
+                at: Loc {
+                    line: f.syntax.name_span.line,
+                    col: f.syntax.name_span.col,
+                },
             });
         }
     }
