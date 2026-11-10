@@ -998,6 +998,37 @@ pub fn dump_tree(src: &str) -> String {
     out
 }
 
+/// The words that begin a declaration in a line's first column.
+const DECLARES: [&str; 14] = [
+    "module",
+    "import",
+    "pub",
+    "extern",
+    "struct",
+    "bitstruct",
+    "enum",
+    "trait",
+    "type",
+    "unit",
+    "fn",
+    "actor",
+    "const",
+    "comptime",
+];
+
+/// Whether a line outside every bracket begins a top-level item, as `text` starts it: its
+/// first column holds a word that begins a declaration, or an `@` or a `/` (an attribute or a
+/// comment above an item). [`split_items`] splits a module there, and the declaration parser
+/// ends an expression body, a contract or a return type there, so the two read the same items.
+fn begins_item(text: &str) -> bool {
+    let first = text.chars().next().unwrap_or(' ');
+    let word = text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or("");
+    matches!(first, '@' | '/') || (first.is_ascii_alphabetic() && DECLARES.contains(&word))
+}
+
 /// Where one top-level item's text starts: its byte offset and its line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItemStart {
@@ -1013,22 +1044,6 @@ pub struct ItemStart {
 /// above it: the `{`, `=` or `}` of a function, and a line of its body or of its expression
 /// body however it is indented.
 pub fn split_items(src: &str) -> Vec<ItemStart> {
-    const DECLARES: [&str; 14] = [
-        "module",
-        "import",
-        "pub",
-        "extern",
-        "struct",
-        "bitstruct",
-        "enum",
-        "trait",
-        "type",
-        "unit",
-        "fn",
-        "actor",
-        "const",
-        "comptime",
-    ];
     let mut starts = vec![ItemStart { offset: 0, line: 1 }];
     // Whether the current item holds anything but attributes and comments yet.
     let mut has_body = false;
@@ -1036,14 +1051,8 @@ pub fn split_items(src: &str) -> Vec<ItemStart> {
     let mut depth = 0i64;
     let mut offset = 0;
     for (i, line) in src.split_inclusive('\n').enumerate() {
-        let first = line.chars().next().unwrap_or(' ');
-        let word = line
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .next()
-            .unwrap_or("");
-        let prefix = matches!(first, '@' | '/');
-        let starts_item =
-            depth <= 0 && (prefix || (first.is_ascii_alphabetic() && DECLARES.contains(&word)));
+        let prefix = matches!(line.chars().next(), Some('@' | '/'));
+        let starts_item = depth <= 0 && begins_item(line);
         depth += bracket_change(line);
         if starts_item && has_body {
             starts.push(ItemStart {
@@ -1830,6 +1839,7 @@ impl<'a> Parser<'a> {
                     || self.span().line == last_line
                     || continues_statement(&last)
                     || matches!(self.peek(), TokenKind::Else | TokenKind::LBrace))
+                && !(depth <= 0 && self.item_begins_here())
             {
                 let tok = self.next();
                 match tok.kind {
@@ -1907,6 +1917,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 TokenKind::Ident(w) if w == "from" && open.is_empty() => break,
+                _ if open.is_empty() && self.item_begins_here() => break,
                 _ => {
                     let tok = self.next();
                     // `List<List<u8>>` closes two type-argument lists with one `>>` token.
@@ -1956,6 +1967,16 @@ impl<'a> Parser<'a> {
 
     /// A contract clause: to the end of its line, and on past a newline where `spec/grammar.md`,
     /// item 2, says it goes on; it stops before the body's `{` or `=`.
+    /// Whether a top-level item begins between the last token and the next: a line there, from
+    /// its first column, that [`begins_item`]. Code that would go on past a newline ends there.
+    fn item_begins_here(&self) -> bool {
+        let from = self.tokens[self.pos.saturating_sub(1)].span.end;
+        let to = self.span().start;
+        self.src[from..to]
+            .match_indices('\n')
+            .any(|(i, _)| begins_item(&self.src[from + i + 1..]))
+    }
+
     fn consume_contract_expr(&mut self) -> String {
         let start = self.span().start;
         let mut end = start;
@@ -1965,6 +1986,7 @@ impl<'a> Parser<'a> {
         while *self.peek() != TokenKind::Eof
             && (depth > 0 || self.span().line == last_line || continues_statement(&last))
             && !(depth == 0 && matches!(self.peek(), TokenKind::LBrace | TokenKind::Eq))
+            && !(depth <= 0 && self.item_begins_here())
         {
             let tok = self.next();
             match tok.kind {
@@ -2436,6 +2458,34 @@ mod tests {
             dump_tree("module m\npub fn d(x: u8) -> u8 = )\n"),
             "mente-dump 1 tree\n(fn d ((x u8)) u8 () (= <error>))\n"
         );
+    }
+
+    /// The declaration parser ends each function where [`split_items`] starts the next item:
+    /// an expression body, a contract or a return type that would go on past a newline stops
+    /// before a line that begins an item, so a whole check and a session read the same items
+    /// (the fuzzer's finding 11).
+    #[test]
+    fn test_the_declaration_parser_ends_items_where_a_module_splits() {
+        for src in [
+            "module m\nfn t() =\npub fn g() -> i32 = 0\n",
+            "module m\npub fn f(x: i32) -> i32\n  requires x >\npub fn g() -> i32 = 0\n",
+            "module m\npub fn f() -> u8\nfn g() -> u8 = 0\n",
+            // A line that begins no item still continues the code above it.
+            "module m\npub fn f(x: i32) -> i32 = x +\n  1\npub fn g() -> i32 = 0\n",
+            "module m\npub fn h(x: i32) -> i32 =\nx + 1\nfn k() -> u8 = 2\n",
+        ] {
+            let lines: Vec<u32> = split_items(src)[1..].iter().map(|s| s.line).collect();
+            let fns: Vec<u32> = parse_module(src)
+                .unwrap()
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    ItemDecl::Fn(f) => Some(f.line),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(fns, lines, "{}", src);
+        }
     }
 
     #[test]
