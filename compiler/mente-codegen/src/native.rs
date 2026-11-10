@@ -96,9 +96,10 @@ struct Runtime {
 /// The trap a call of `entry` from outside the program raises on `args` before anything else,
 /// if an argument does not fit its parameter's type: the reference interpreter narrows every
 /// argument into its parameter's type first, in order and element by element, at the function's
-/// name, and reports the first value that does not fit. The entry's own narrowing cannot report
-/// a value its MIR parameter cannot hold, such as one below `i128`'s range for an `i128`
-/// parameter, or any element of an array, so whoever calls the entry reports it instead.
+/// name, and reports the first value that does not fit. The entry takes each argument in its
+/// parameter's own type, which cannot hold such a value, so whoever calls the entry narrows
+/// every argument this way first; the entry then checks the refinements, as the interpreter
+/// does once every argument is narrowed.
 pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
     fn first(shape: &Shape, arg: &Arg) -> Option<(Num, &'static str)> {
         match (shape, arg) {
