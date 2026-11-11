@@ -2074,6 +2074,16 @@ pub fn f(mut p: Pair) {
             all_codes("pub fn f() -> u8 {\n  _ = [0_u8; 4294967296]\n  0\n}"),
             ["E0223"]
         );
+        // A literal whose written type is reported is not reported again, and a value that is
+        // no literal, such as a call's result, is reported where its type is written only.
+        assert_eq!(
+            all_codes("pub fn f() -> u8 {\n  val a: [4294967296]u8 = [0; 4294967296]\n  a[0]\n}"),
+            ["E0223"]
+        );
+        assert_eq!(
+            all_codes("pub fn g() -> [4294967296]u8 = todo(\"x\")\npub fn f() -> u8 = g()[0]"),
+            ["E0223"]
+        );
     }
 
     /// An array holds at most 4,294,967,295 elements, whatever their size, wherever its type is
