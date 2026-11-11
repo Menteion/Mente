@@ -1,0 +1,18 @@
+<!-- Mente's mark: an octagon, for the octagon domain Tier 1 proves in, stamped with an M.
+     The light version, for light backgrounds; mente-logo-dark.svg is the same path in a light ink. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <path
+    fill="#0F172A"
+    fill-rule="evenodd"
+    clip-rule="evenodd"
+    d="
+      M 160,36 L 352,36 L 476,160 L 476,352 L 352,476 L 160,476 L 36,352 L 36,160 Z
+      M 120,376 L 120,332 L 140,332 L 140,180 L 120,180 L 120,136
+      L 204,136 L 256,216 L 308,136 L 392,136
+      L 392,180 L 372,180 L 372,332 L 392,332 L 392,376
+      L 300,376 L 300,332 L 318,332 L 318,224
+      L 256,316 L 194,224
+      L 194,332 L 212,332 L 212,376 Z
+    "
+  />
+</svg>
