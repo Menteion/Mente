@@ -1739,8 +1739,8 @@ impl Parser {
         if self.cond_nest == Some(self.nest) {
             return false;
         }
-        let at = |k: usize| &self.tokens[(self.pos + k).min(self.tokens.len() - 1)].kind;
-        matches!(at(1), TokenKind::Ident(_)) && at(2) == &TokenKind::Colon
+        let at = |k: usize| self.tokens.get(self.pos + k).map(|t| &t.kind);
+        matches!(at(1), Some(TokenKind::Ident(_))) && at(2) == Some(&TokenKind::Colon)
     }
 
     /// Rust's struct literal `Name { f: e }` (`E0129`), read as `Name(f: e)` after its
@@ -1752,10 +1752,8 @@ impl Parser {
         self.nest += 1;
         let fields = self.field_inits(&TokenKind::RBrace);
         self.nest -= 1;
-        if self.recovering || !self.at(&TokenKind::RBrace) {
-            if !self.recovering {
-                self.expected("`}` to close the fields");
-            }
+        // The fields end at `}`, or at an error `field_inits` reported.
+        if self.recovering {
             return ExprKind::Error;
         }
         let close = self.bump().span;
@@ -2129,6 +2127,30 @@ mod tests {
             apply_fix(src, &errors[0].fixes[0]).unwrap(),
             "struct P {\n  i: u8\n  j: u8\n}"
         );
+        // An invariant block is passed over to its closing brace, nested braces included, and
+        // the fields after it are read; one left open ends at the end of the struct's tokens.
+        for src in [
+            "struct R {\n  invariant {\n    lo < 3\n  }\n  lo: u8\n}",
+            "struct R {\n  invariant {\n    { lo }\n    {\n      { lo }\n    }\n  }\n  lo: u8\n}",
+            "struct R {\n  invariant { lo < 3 }\n  lo: u8\n}",
+        ] {
+            let (s, errors) = parse_struct_src(src);
+            assert_eq!(
+                errors.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0109"],
+                "{}",
+                src
+            );
+            assert_eq!(
+                s.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                ["lo"],
+                "{}",
+                src
+            );
+        }
+        let (s, errors) = parse_struct_src("struct R {\n  lo: u8\n  invariant {\n    lo < 3\n");
+        assert_eq!(errors[0].code, "E0109");
+        assert_eq!(s.fields.len(), 1);
         // Type parameters, an invariant, a default and a type of a later milestone.
         for (src, message) in [
             (
@@ -2216,6 +2238,37 @@ mod tests {
         assert!(codes("if c {\n  return\n}").is_empty());
         assert!(codes("while ok {\n  break\n}").is_empty());
         assert_eq!(codes("guard ok { x: 1 }"), ["E0111"]);
+        // A name and a block that does not begin `name:` are no struct literal.
+        assert_eq!(codes("_ = x { y }"), ["E0112"]);
+        // After a struct literal its statement ends at the end of its line, as any other: the
+        // `-x` below is a statement of its own, not a subtraction.
+        assert_eq!(codes("val p = P { a: 1 }\np.a"), ["E0129"]);
+        let (f, _) = parse("fn f() {\n_ = P { a: 1 }\n-x\n}");
+        let Some(Body::Block(b)) = f.body else {
+            panic!("a block body");
+        };
+        assert_eq!(f.tree.block(b).stmts.len(), 2);
+        // A literal left open ends at its first error.
+        assert_eq!(
+            self::errors("_ = P { a: 1 ]"),
+            [(
+                "E0111",
+                "expected `,` or the end of the fields, found `]`".to_string()
+            )]
+        );
+        // The lookahead stops at the last token.
+        assert_eq!(
+            parse("fn f() = P { a")
+                .1
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>(),
+            ["E0111"]
+        );
+        // A named argument is `name:` and a value, whether a space follows the colon or not;
+        // `name::` is no named argument but a path.
+        assert_eq!(expr("P(a:b)"), "(new P (a b))");
+        assert_eq!(codes("_ = f(x::y)"), ["E0123"]);
     }
 
     #[test]
@@ -3148,6 +3201,16 @@ _ == b"
                 r(" else if x > 1 { 2 }", 300)
             )),
             f(format!("[{}x{}][0]", r("[", 300), r("]", 300))),
+            // Structs being built, nested, and a chain the parser reads in a loop inside them:
+            // within the parser's limit each, past it together.
+            f(format!("P(a: x{})", r(" + 0", 300))),
+            f(format!("{}x{}", r("P(a: ", 300), r(")", 300))),
+            f(format!(
+                "{}x{}{}",
+                r("P(a: ", 120),
+                r(" + 0", 200),
+                r(")", 120)
+            )),
             format!("module m\npub fn d(x: {}i32) -> i32 = 0\n", r("[1]", 300)),
             format!(
                 "module m\npub fn d(x: i32) -> i32 {{\n{}{}  x\n}}\n",
@@ -3183,6 +3246,26 @@ _ == b"
             );
             assert!(codes(src).is_empty(), "300 of {}", stmt);
         }
+        // A struct's field type nested past the limit is reported once, and one within it is
+        // read.
+        let struct_codes = |src: String| {
+            std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn(move || {
+                    let m = crate::parse_module(&src).unwrap();
+                    crate::parse_structs(&src, &m)
+                        .into_iter()
+                        .flat_map(|p| p.errors)
+                        .map(|d| d.code)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        let deep = |n: usize| format!("module m\nstruct S {{\n  a: {}u8\n}}\n", r("[1]", n));
+        assert_eq!(struct_codes(deep(300)), ["E0127"]);
+        assert!(struct_codes(deep(200)).is_empty());
         // A chain past the limit with another error in it is measured too: `mn dump --tree`
         // recurses over a tree with errors (the fuzzer's finding 12).
         for (src, other) in [

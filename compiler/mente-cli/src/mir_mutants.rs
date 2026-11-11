@@ -1136,6 +1136,29 @@ mod tests {
         assert_eq!(run.calls, 1);
     }
 
+    /// A struct argument written into memory has each of its struct's fields: another number
+    /// of fields is refused, whatever else checked the call before.
+    #[test]
+    fn test_a_struct_argument_is_written_only_with_each_field() {
+        let text = "module m\npub struct P {\n  a: u8\n  b: u8\n}\npub fn h(p: P) -> u8 = p.a\n";
+        let lowered = lower::lower(&mente_sema::check_program(text).unwrap()).unwrap();
+        let shape = &lowered.entries[0].params[0].1;
+        let value = |fields: &[&str]| {
+            Value::Struct(
+                "P".into(),
+                fields
+                    .iter()
+                    .map(|f| (f.to_string(), Value::Int(mente_interp::Int::from_u128(1))))
+                    .collect(),
+            )
+        };
+        let mut memory = Memory::filled(POISON);
+        let at = memory.alloc(shape.size());
+        assert!(write(&mut memory, at, shape, &value(&["a", "b"])).is_some());
+        assert!(write(&mut memory, at, shape, &value(&["a"])).is_none());
+        assert!(write(&mut memory, at, shape, &value(&["a", "b", "c"])).is_none());
+    }
+
     /// A program MIR runs differently from the reference interpreter, or one that does not
     /// check, is a problem of its own; a call MIR never reaches tells no mutant apart.
     #[test]

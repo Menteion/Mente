@@ -934,6 +934,44 @@ pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
         assert!(call("get([1, 2, 3])")
             .unwrap_err()
             .contains("takes 2 arguments"));
+        // A struct's argument is a value of that struct, each field once in order, of its type.
+        let text =
+            "module m\npub struct P {\n  a: u8\n  b: [2]u16\n}\npub fn h(p: P) -> u8 = p.a\n";
+        let lowered = lower::lower(&mente_sema::check_program(text).unwrap()).unwrap();
+        let call = |c: &str| {
+            let (f, args) = mente_interp::parse_call_modes(c).expect("a call");
+            run_lowered(&lowered, &f, args)
+        };
+        assert_eq!(call("h(P(a: 1, b: [2, 3]))"), Ok(vec!["1".to_string()]));
+        for wrong in [
+            "Q(a: 1, b: [2, 3])",
+            "P(a: 1)",
+            "P(a: 1, b: [2, 3], c: 4)",
+            "P(a: 1, c: [2, 3])",
+            "P(b: [2, 3], a: 1)",
+            "P(a: true, b: [2, 3])",
+            "P(a: 1, b: [2])",
+        ] {
+            assert_eq!(
+                call(&format!("h({})", wrong)),
+                Err(format!("`{}` does not have its parameter's shape", wrong))
+            );
+        }
+        // Writing one into memory refuses another number of fields itself.
+        let shape = &lowered.entries[0].params[0].1;
+        let value = |fields: &[&str]| {
+            Value::Struct(
+                "P".into(),
+                fields
+                    .iter()
+                    .map(|f| (f.to_string(), Value::Int(mente_interp::Int::from_u128(1))))
+                    .collect(),
+            )
+        };
+        let mut memory = Memory::default();
+        let at = memory.alloc(shape.size());
+        assert!(write(&mut memory, at, shape, &value(&["a"])).is_err());
+        assert!(write(&mut memory, at, shape, &value(&["a", "b", "c"])).is_err());
     }
 
     /// Each construct the lowering handles, run on calls that reach every path of it, prints

@@ -1060,6 +1060,12 @@ mod tests {
             messages(&with("pub fn f() -> Pair = Piar(i: 0)")),
             ["there is no struct named `Piar` here; did you mean `Pair`?"]
         );
+        // The error lies at the name alone.
+        let src = module(&with("pub fn f() -> Pair = Piar(i: 0)"));
+        let d = check_source(&src).err().unwrap_or_default();
+        let d = d.iter().find(|d| d.code == "E0201").unwrap();
+        let at = src.rfind("Piar").unwrap();
+        assert_eq!((d.primary.start, d.primary.end), (at, at + 4));
         assert_eq!(codes(&with("pub fn f(p: Piar) -> u8 = 0")), ["E0116"]);
         assert_eq!(
             codes(&with(

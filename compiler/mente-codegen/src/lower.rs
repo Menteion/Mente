@@ -184,16 +184,6 @@ impl Shape {
         }
     }
 
-    /// The alignment in memory: an integer's width, an array's element's, a struct's layout's.
-    pub fn align(&self) -> u32 {
-        match self {
-            Shape::Int(t) => t.bits / 8,
-            Shape::Array(_, e) => e.align(),
-            Shape::Struct(s) => s.align,
-            Shape::Bool | Shape::Unit => 1,
-        }
-    }
-
     /// Whether a value of this shape lives in memory, passed and returned by its address: an
     /// array or a struct.
     pub fn in_memory(&self) -> bool {
@@ -1364,7 +1354,8 @@ impl<'a> Lower<'a> {
         span: Span,
         key: Key,
     ) -> Result<(), String> {
-        if self.proven(ObligationKind::Refinement, key) {
+        // What is checked is defined once, by `refines`.
+        if self.proven(ObligationKind::Refinement, key) || !self.refines(tree, d) {
             return Ok(());
         }
         match (v, &tree.ty(d).kind, shape) {
@@ -1377,9 +1368,6 @@ impl<'a> Lower<'a> {
                 _,
             ) => self.in_range(x, t, r, span),
             (V::Mem(a), TypeKind::Array { elem, .. }, Shape::Array(len, es)) => {
-                if !self.refines(tree, *elem) {
-                    return Ok(());
-                }
                 let (elem, es, len) = (*elem, (**es).clone(), *len);
                 self.each(len, &mut |l, i| {
                     let at = l.inst(Op::Elem { stride: es.size() }, Ty::Addr, &[a, i]);
@@ -1387,7 +1375,7 @@ impl<'a> Lower<'a> {
                     l.refined(x, &es, (tree, elem), span, key)
                 })
             }
-            (V::Mem(a), TypeKind::Named(name), Shape::Struct(s)) if self.entry => {
+            (V::Mem(a), TypeKind::Named(name), Shape::Struct(s)) => {
                 let def = self
                     .m
                     .structs
@@ -2334,7 +2322,8 @@ impl<'a> Lower<'a> {
         Ok(match (&sig.result, sret) {
             (Shape::Int(t), _) => V::Int(r, mir(*t)),
             (Shape::Bool, _) => V::Bool(r),
-            (shape, Some(slot)) if shape.in_memory() => V::Mem(slot),
+            // Only a result kept in memory has a slot.
+            (_, Some(slot)) => V::Mem(slot),
             _ => V::Unit,
         })
     }
@@ -2567,6 +2556,203 @@ pub fn kept() -> u8 {
         // The literal's copy into the binding, then the argument's copy before `bump` runs.
         assert_eq!(copies("changed"), 2);
         assert_eq!(copies("kept"), 1);
+    }
+
+    /// An argument read from a binding is copied exactly where a later operand may change that
+    /// binding, by a `mut` argument or an assignment, wherever the operand holds it: in an
+    /// operator, an index, an `if`'s blocks, a loop's condition or body, a guard's condition.
+    /// An element or a field of the binding counts as the binding. Nothing else copies it.
+    #[test]
+    fn test_an_argument_is_copied_only_where_a_later_operand_may_change_its_binding() {
+        let src = "module m
+pub struct P {
+  xs: [2]u8
+}
+fn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k
+fn bump(mut xs: [2]u8) -> u8 {
+  xs[0] = 7
+  0
+}
+fn bump_rows(mut m: [2][2]u8) -> u8 {
+  m[0][0] = 7
+  0
+}
+fn bump_p(mut p: P) -> u8 {
+  p.xs[0] = 7
+  0
+}
+fn id(k: u8) -> u8 = k
+pub fn read_later(c: bool) -> u8 {
+  val xs: [2]u8 = [1, 2]
+  first(xs, id(xs[0]))
+}
+pub fn other_binding(c: bool) -> u8 {
+  val xs: [2]u8 = [1, 2]
+  var ys: [2]u8 = [3, 4]
+  first(xs, bump(mut ys))
+}
+pub fn in_an_operator(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, 0 + bump(mut xs))
+}
+pub fn in_an_index(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  val ys: [2]u8 = [3, 4]
+  first(xs, ys[bump(mut xs) % 2])
+}
+pub fn if_unchanged(c: bool) -> u8 {
+  val xs: [2]u8 = [1, 2]
+  first(xs, if c { 1 } else { 2 })
+}
+pub fn if_assigns(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, if c {
+    xs[0] = 7
+    0
+  } else {
+    0
+  })
+}
+pub fn loop_condition(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, if c {
+    while bump(mut xs) > 5 {
+    }
+    0
+  } else {
+    0
+  })
+}
+pub fn loop_body(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, if c {
+    var i: u8 = 0
+    while i < 1 {
+      xs[0] = 7
+      i = 1
+    }
+    0
+  } else {
+    0
+  })
+}
+pub fn guard_condition(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, if c {
+    guard bump(mut xs) == 0 else {
+      return 1
+    }
+    0
+  } else {
+    0
+  })
+}
+pub fn an_element(c: bool) -> u8 {
+  var m: [2][2]u8 = [[1, 2], [3, 4]]
+  first(m[0], bump_rows(mut m))
+}
+pub fn a_field(c: bool) -> u8 {
+  var p = P(xs: [1, 2])
+  first(p.xs, bump_p(mut p))
+}
+pub fn changed_by_itself(c: bool) -> u8 {
+  var m: [2][2]u8 = [[1, 2], [3, 4]]
+  first(m[bump_rows(mut m) % 2], 0)
+}
+pub fn an_element_kept(c: bool) -> u8 {
+  val m: [2][2]u8 = [[1, 2], [3, 4]]
+  first(m[0], id(0))
+}
+pub fn a_field_kept(c: bool) -> u8 {
+  val p = P(xs: [1, 2])
+  first(p.xs, id(0))
+}
+pub fn indexed_kept(c: bool) -> u8 {
+  val m: [2][2]u8 = [[1, 2], [3, 4]]
+  first(m[id(1) % 2], 0)
+}
+";
+        let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        let count = |name: &str, copy: bool| {
+            let f = lowered
+                .module
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap();
+            f.ops
+                .iter()
+                .filter(|op| {
+                    if copy {
+                        matches!(op, Op::Copy { .. })
+                    } else {
+                        matches!(op, Op::Check { .. })
+                    }
+                })
+                .count()
+        };
+        // Each binding's literal is copied into it; the argument is copied once more where it
+        // may change.
+        for (name, bindings, kept) in [
+            ("read_later", 1, false),
+            ("other_binding", 2, false),
+            ("in_an_operator", 1, true),
+            ("in_an_index", 2, true),
+            ("if_unchanged", 1, false),
+            ("if_assigns", 1, true),
+            ("loop_condition", 1, true),
+            ("loop_body", 1, true),
+            ("guard_condition", 1, true),
+        ] {
+            assert_eq!(count(name, true), bindings + usize::from(kept), "{}", name);
+        }
+        // An element or a field read from the binding is copied as the binding is: one copy
+        // more than the same call whose later operand changes nothing.
+        assert_eq!(
+            count("an_element", true),
+            count("an_element_kept", true) + 1
+        );
+        assert_eq!(count("a_field", true), count("a_field_kept", true) + 1);
+        // An index whose own operand changes the array copies the array before indexing it,
+        // and the element it gives is not copied again: no later operand changes the copy.
+        assert_eq!(
+            count("changed_by_itself", true),
+            count("indexed_kept", true) + 1
+        );
+    }
+
+    /// A struct's fields are checked against their refinements where a value enters from
+    /// outside, a function's parameters, and not where a `mut` argument comes back from a call:
+    /// the callee's stores into its fields are checked where they are made.
+    #[test]
+    fn test_a_structs_fields_are_checked_where_it_enters_and_not_when_it_comes_back() {
+        let src = "module m
+pub struct R {
+  a: u8[0..10]
+}
+fn set(mut r: R) -> u8 {
+  r.a = 3
+  0
+}
+pub fn passes(mut r: R) -> u8 = set(mut r)
+";
+        let lowered = lower(&mente_sema::check_program_without_proofs(src).unwrap()).unwrap();
+        let checks = |name: &str| {
+            let f = lowered
+                .module
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap();
+            f.ops
+                .iter()
+                .filter(|op| matches!(op, Op::Check { .. }))
+                .count()
+        };
+        // The entry, which takes `r` from outside, checks `r.a`; the function itself, after
+        // `set` gives `r` back, checks nothing.
+        assert!(checks("enter passes") > 0);
+        assert_eq!(checks("passes"), 0);
     }
 
     #[test]

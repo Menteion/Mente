@@ -1872,6 +1872,30 @@ pub fn f() -> Pair = Pair(i: 0, j: 1)"
             messages("pub fn f() -> u8 = id(x: 1)"),
             ["`id` is a function, whose arguments are positional; only the arguments that build a struct are named"]
         );
+        // Positional arguments of the right number still flow into their fields' types; of
+        // another number, into none. The fix that names them is given only for the right
+        // number and no `mut`.
+        assert_eq!(
+            codes(&with("pub fn f() -> Pair = Pair(true, 1)")),
+            ["E0203", "E0226"]
+        );
+        assert_eq!(codes(&with("pub fn f() -> Pair = Pair(true)")), ["E0226"]);
+        assert_eq!(
+            codes(&with("pub fn f() -> Pair = Pair(true, 1, 2)")),
+            ["E0226"]
+        );
+        let fixes = |src: &str| {
+            diagnostics(&with(src))
+                .iter()
+                .find(|d| d.code == "E0226")
+                .map(|d| d.fixes.len())
+        };
+        assert_eq!(fixes("pub fn f() -> Pair = Pair(0, 1)"), Some(1));
+        assert_eq!(fixes("pub fn f() -> Pair = Pair(0)"), Some(0));
+        assert_eq!(
+            fixes("pub fn f(x: u8) -> Pair {\n  var y = x\n  Pair(mut y, 1)\n}"),
+            Some(0)
+        );
     }
 
     /// `a.name` reads an array's `len` or a struct's field (`E0215` otherwise, with the closest
@@ -1977,6 +2001,18 @@ pub fn f(mut p: Pair) {
 }
 pub fn f(mut p: Pair, c: bool) {
   put(mut p.i, if c { p.i } else { 0 })
+}"
+            )),
+            ["E0207"]
+        );
+        // And inside a struct being built.
+        assert_eq!(
+            codes(&with(
+                "fn keep(mut a: u8, q: Pair) {
+  a = q.i
+}
+pub fn f(mut p: Pair) {
+  keep(mut p.i, Pair(i: p.i, j: 0))
 }"
             )),
             ["E0207"]

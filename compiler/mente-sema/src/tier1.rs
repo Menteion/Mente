@@ -215,14 +215,16 @@ fn form(tree: &Tree, e: ExprId, names: &Names) -> Result<Form, String> {
             constant: i128::try_from(*value).unwrap_or(i128::MAX),
         }),
         ExprKind::Name(n) if (names.is_int)(n) => Ok(var(n.clone())),
-        ExprKind::Field { base, name } => match &tree.expr(*base).kind {
-            ExprKind::Name(n) => match (names.len_of)(n) {
-                Some(len) if name == "len" => Ok(Form {
+        // Of a binding's fields, only an array's length is a value Tier 1 knows.
+        ExprKind::Field { base, name } => match (&tree.expr(*base).kind, name.as_str()) {
+            (ExprKind::Name(n), "len") => match (names.len_of)(n) {
+                Some(len) => Ok(Form {
                     vars: Vec::new(),
                     constant: i128::try_from(len).unwrap_or(i128::MAX),
                 }),
-                _ => Err("a field of a struct".to_string()),
+                None => Err("a field of a struct".to_string()),
             },
+            (ExprKind::Name(_), _) => Err("a field of a struct".to_string()),
             _ => Err("a field of a value that is not a binding".to_string()),
         },
         ExprKind::Unary {
@@ -1423,7 +1425,7 @@ impl<'a> Fx<'a> {
             TypeKind::Array { len, elem } => {
                 Shape::Array(*len, Box::new(self.callee_shape(c, site, args, *elem)))
             }
-            TypeKind::Named(name) => Shape::Struct(name.clone()),
+            // A struct tells a call's checks nothing more: its fields hold their refinements.
             _ => Shape::Other,
         }
     }
@@ -6022,6 +6024,23 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
             )),
             NONE
         );
+        // A refined field of a struct inside another, and of a struct in an array inside
+        // another, is proven where it is stored through the outer one.
+        let nested = "pub struct O {
+  inner: D
+  ds: [2]D
+}
+";
+        let with_o = |f: &str| format!("{}{}{}", d, nested, f);
+        for store in ["o.inner.d = x", "o.ds[1].d = x"] {
+            let f = format!("pub fn f(mut o: O, x: u8) {{\n  {}\n}}", store);
+            assert_eq!(codes(&with_o(&f)), ["E0502"], "{}", store);
+            let f = format!(
+                "pub fn f(mut o: O, x: u8) {{\n  guard x < 10 else {{\n    return\n  }}\n  {}\n}}",
+                store
+            );
+            assert_eq!(codes(&with_o(&f)), NONE, "{}", store);
+        }
         assert_eq!(
             codes(&with("pub fn f(g: D) -> u8[0..19] = g.d + g.d")),
             NONE
@@ -6089,15 +6108,23 @@ pub fn f() -> B = B(b: 300)"
             )),
             ["E0502"]
         );
-        // A clause that reads a field lies outside the Tier-1 fragment.
-        assert_eq!(
-            codes(&with(
-                "pub fn f(g: D) -> u8
-  requires g.d > 2
-= g.d"
-            )),
-            ["E0503"]
-        );
+        // A clause that reads a field lies outside the Tier-1 fragment, and says so; a field
+        // named `len` too, which is no array's length.
+        for (field, decl) in [("d", ""), ("len", "pub struct L {\n  len: u8\n}\n")] {
+            let src = format!(
+                "{}pub fn f(g: {}) -> u8\n  requires g.{} > 2\n= g.{}",
+                decl,
+                if decl.is_empty() { "D" } else { "L" },
+                field,
+                field
+            );
+            assert_eq!(codes(&with(&src)), ["E0503"], "{}", src);
+            assert!(
+                messages(&with(&src))[0].contains("a field of a struct"),
+                "{}",
+                messages(&with(&src))[0]
+            );
+        }
     }
 }
 

@@ -123,11 +123,6 @@ impl Structs {
         self.defs.iter().find(|d| d.name == name)
     }
 
-    /// The names of the module's structs, for suggestions.
-    pub fn names(&self) -> Vec<String> {
-        self.defs.iter().map(|d| d.name.clone()).collect()
-    }
-
     /// The size and alignment in bytes of a value of `t` (`core-calculus.md`, item 21): an
     /// integer takes its width and is aligned to it, `usize` 8 bytes, `bool` 1 byte, `[N]T` `N`
     /// times `T`'s size, aligned as `T`, and a struct its layout's. An integer of no one type
@@ -801,6 +796,18 @@ mod tests {
             "{}",
             d[0].message
         );
+        // A bare `u` is no width at all; an array's element type is checked as a field's.
+        let (_, d) = declared("module m\nstruct Segment {\n  p: u\n}\n");
+        assert!(
+            d[0].message
+                .starts_with("`u` is not a type: the types are the integer types"),
+            "{}",
+            d[0].message
+        );
+        assert_eq!(
+            codes("module m\nstruct S {\n  p: [2][3]Piar\n}\nstruct Pair {\n  x: u8\n}\n"),
+            ["E0116"]
+        );
         assert_eq!(
             codes("module m\n@layout(size: 1, align: 1)\nstruct L {\n  @bytes(0..1) a: u8\n}\nstruct S {\n  l: L\n}\n"),
             ["E0109"]
@@ -958,5 +965,22 @@ struct {} {{
         ));
         assert!(d.is_empty(), "{:?}", d);
         assert_eq!(s.get("H").unwrap().layout.as_ref().map(|l| l.size), Some(1));
+    }
+
+    /// Each array a field's type holds is checked once, at that field, and the innermost too
+    /// large is the one reported; a struct is laid out after the structs its fields hold,
+    /// wherever they are declared.
+    #[test]
+    fn test_a_fields_arrays_are_checked_at_that_field() {
+        let (_, d) =
+            declared("module m\nstruct S {\n  a: u8\n  b: [2][4294967296]u8\n  c: u8\n}\n");
+        assert_eq!(d.len(), 1, "{:?}", d);
+        assert_eq!(d[0].code, "E0223");
+        // At the inner array `[4294967296]u8`, on the field's line.
+        assert_eq!((d[0].primary.line, d[0].primary.col), (4, 9));
+        let (s, d) =
+            declared("module m\nstruct S {\n  t: T\n  u: [2]T\n}\nstruct T {\n  a: u16\n}\n");
+        assert!(d.is_empty(), "{:?}", d);
+        assert_eq!(s.get("S").unwrap().layout.as_ref().map(|l| l.size), Some(6));
     }
 }
