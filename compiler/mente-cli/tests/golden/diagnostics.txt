@@ -260,6 +260,10 @@
 {"version":1,"diagnostics":[{"code":"E0413","severity":"error","message":"struct `S` has field `b` overlaps the previous field: it starts at byte 2, before byte 4 where that field ends","primary":{"file":"overlapping_fields.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"start `b` at byte 4","applicability":"suggestion","edits":[{"span":{"file":"overlapping_fields.mn","start":106,"end":118,"line":6,"column":3},"replacement":"@bytes(4..8)"}]}]}],"todos":[],"trusted":[]}
 == morphic-layouts/packed_wire_format.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== morphic-layouts/plain_struct_in_a_layout.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== morphic-layouts/plain_struct_in_a_narrow_range.mn ==
+{"version":1,"diagnostics":[{"code":"E0415","severity":"error","message":"field `Rec.p` of type `Pair` requires 8 bytes, but `@bytes(8..13)` spans 5 bytes","primary":{"file":"plain_struct_in_a_narrow_range.mn","start":148,"end":161,"line":11,"column":3},"related":[],"fixes":[{"message":"make `p` 8 bytes wide","applicability":"suggestion","edits":[{"span":{"file":"plain_struct_in_a_narrow_range.mn","start":148,"end":161,"line":11,"column":3},"replacement":"@bytes(8..16)"}]}]}],"todos":[],"trusted":[]}
 == morphic-layouts/range_narrower_than_its_type.mn ==
 {"version":1,"diagnostics":[{"code":"E0415","severity":"error","message":"field `S.b` of type `u32` requires 4 bytes, but `@bytes(4..6)` spans 2 bytes","primary":{"file":"range_narrower_than_its_type.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"make `b` 4 bytes wide","applicability":"suggestion","edits":[{"span":{"file":"range_narrower_than_its_type.mn","start":106,"end":118,"line":6,"column":3},"replacement":"@bytes(4..8)"}]}]}],"todos":[],"trusted":[]}
 == morphic-layouts/size_not_a_multiple_of_alignment.mn ==

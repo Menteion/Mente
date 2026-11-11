@@ -3445,6 +3445,9 @@ mente-dump 2 mir
 == conformance/morphic-layouts/overlapping_fields.mn == (exit 2)
 == conformance/morphic-layouts/packed_wire_format.mn ==
 mente-dump 2 mir
+== conformance/morphic-layouts/plain_struct_in_a_layout.mn ==
+mente-dump 2 mir
+== conformance/morphic-layouts/plain_struct_in_a_narrow_range.mn == (exit 2)
 == conformance/morphic-layouts/range_narrower_than_its_type.mn == (exit 2)
 == conformance/morphic-layouts/size_not_a_multiple_of_alignment.mn == (exit 2)
 == conformance/morphic-layouts/target_dependent_type.mn == (exit 2)

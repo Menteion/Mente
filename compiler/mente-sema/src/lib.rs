@@ -62,7 +62,8 @@ pub fn check_module(
     src: &str,
     module: &ModuleFile,
 ) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
-    combine(verify_module(module), check_bodies(src, module))
+    let b = bodies(src, module, true);
+    combine(verify_module_with(module, &b.structs), b.errors)
 }
 
 /// The declaration checks' verdict, then the bodies' diagnostics.
@@ -180,7 +181,7 @@ fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
     let module = parse_module(src).map_err(|d| vec![d])?;
     let b = bodies(src, &module, prove);
     let (functions, body_errors, structs) = (b.functions, b.errors, b.structs);
-    combine(verify_module(&module), body_errors)?;
+    combine(verify_module_with(&module, &structs), body_errors)?;
     Ok(CheckedModule {
         names: module
             .items
@@ -350,8 +351,18 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
     }
 }
 
-/// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`.
+/// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`, without
+/// the sizes of its plain structs, which [`verify_module_with`] takes.
 pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
+    verify_module_with(module, &structs::Structs::default())
+}
+
+/// [`verify_module`], a `@layout` struct's field of a plain struct sized and aligned by that
+/// struct's layout (`core-calculus.md`, item 21), which `structs` holds.
+pub fn verify_module_with(
+    module: &ModuleFile,
+    structs: &structs::Structs,
+) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut layout_proofs = Vec::new();
     let mut bitstruct_proofs = Vec::new();
@@ -381,6 +392,14 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
                 }
             }
             _ => {}
+        }
+    }
+    for d in &structs.defs {
+        if let Some(l) = &d.layout {
+            if let (Ok(size), Ok(align)) = (usize::try_from(l.size), usize::try_from(l.align)) {
+                named_sizes.entry(d.name.clone()).or_insert(size);
+                named_aligns.entry(d.name.clone()).or_insert(align);
+            }
         }
     }
 
@@ -1425,6 +1444,51 @@ pub struct Event {
         assert!(verify_module(&parse_module(&misplaced).unwrap()).is_ok());
         let unpacked = misplaced.replace("@packed\n", "");
         assert!(first_error(&unpacked).to_string().contains("E0418"));
+    }
+
+    /// A `@layout` struct's field of a plain struct is sized and aligned by the plain struct's
+    /// own layout (`core-calculus.md`, item 21): `Pair` takes 8 bytes, aligned to 4.
+    #[test]
+    fn test_layout_field_may_be_a_plain_struct() {
+        let code = "module m
+pub struct Pair {
+  a: u32
+  b: u8
+}
+@layout(size: 16, align: 8)
+pub struct Rec {
+  @bytes(0..8) pub id: u64
+  @bytes(8..16) pub p: Pair
+}
+";
+        assert!(check_source(code).is_ok(), "{:?}", check_source(code).err());
+        let codes = |src: &str| -> Vec<&str> {
+            check_source(src)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        let narrow = code.replace(
+            "@bytes(8..16) pub p: Pair",
+            "@bytes(8..13) pub p: Pair
+  @bytes(13..16) pub pad: [3]u8",
+        );
+        assert_eq!(codes(&narrow), ["E0415"]);
+        let misaligned = code
+            .replace("@layout(size: 16, align: 8)", "@layout(size: 12, align: 4)")
+            .replace(
+                "@bytes(0..8) pub id: u64
+  @bytes(8..16) pub p: Pair",
+                "@bytes(0..2) pub id: u16
+  @bytes(2..10) pub p: Pair
+  @bytes(10..12) pub pad: u16",
+            );
+        assert_eq!(codes(&misaligned), ["E0418"]);
+        // Without the plain structs' layouts, as `verify_module` alone reads a module, the
+        // size is unknown.
+        assert!(first_error(code).to_string().contains("E0417"));
     }
 
     #[test]
