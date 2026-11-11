@@ -3908,6 +3908,40 @@ mod tests {
         assert!(codes(&nested(40)).is_empty());
     }
 
+    /// A function past [`RELATIONAL_LIMIT`](crate::octagon::RELATIONAL_LIMIT) variables is
+    /// proven over each variable's bounds alone (Norman's decision, `tier1-variable-cap`): a
+    /// relation between two variables proves nothing there, each one's bounds still do, and its
+    /// cost no longer grows with the cube of its size.
+    #[test]
+    fn test_a_function_past_the_variable_limit_is_proven_over_bounds() {
+        // Each nested call of `g` takes variables of its own: its argument and its result.
+        let with = |calls: usize| {
+            format!(
+                "pub fn g(v: u8) -> u8 = v\npub fn r(n: u8) -> u8\n  decreases n\n{{\n  if n == 0 {{\n    return 0\n  }}\n  _ = {}1{}\n  r(n - 1)\n}}",
+                "g(".repeat(calls),
+                ")".repeat(calls)
+            )
+        };
+        // That the argument `n - 1` is below `n` is a relation: an octagon proves the measure
+        // smaller, and bounds alone do not.
+        assert_eq!(codes(&with(10)), NONE);
+        assert_eq!(codes(&with(70)), ["E0507"]);
+        // Bounds alone still prove what bounds prove.
+        assert_eq!(
+            codes("pub fn g(v: u8) -> u8 = v\npub fn f(x: u8[0..10]) -> u8 {\n  _ = g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))\n  x + 1\n}"),
+            NONE
+        );
+        // Two hundred nested calls once took seconds; over bounds they take a moment.
+        let start = std::time::Instant::now();
+        let deep = with(200);
+        assert_eq!(codes(&deep), ["E0507"]);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
     #[test]
     fn test_a_loop_met_in_another_state_is_analysed_again() {
         // The outer loop's first round assumes `s <= 5`, its second does not: the inner loop is
