@@ -312,6 +312,13 @@ impl Key {
 /// index itself, where Tier 1 records it.
 type Indexing = (V, Span, Span);
 
+/// Whether a place's indexes end in one of no value, after which the place is never reached.
+fn reaches_never(indexes: &[Indexing]) -> bool {
+    indexes
+        .last()
+        .is_some_and(|(i, _, _)| matches!(i, V::Never))
+}
+
 /// One function's lowering.
 struct Lower<'a> {
     m: &'a CheckedModule,
@@ -869,6 +876,9 @@ impl<'a> Lower<'a> {
         let tree = self.tree();
         let span = tree.expr(value).span;
         let (root, indexes) = self.place_path(place)?;
+        if reaches_never(&indexes) {
+            return Ok(V::Never);
+        }
         let shape = self.shape(place)?;
         let declared = self.place_type(root, indexes.len());
         let (new, from) = match op {
@@ -897,12 +907,16 @@ impl<'a> Lower<'a> {
     }
 
     /// The root binding of a place and its indexes, evaluated left to right, each with the
-    /// span of its indexing and of the index itself.
+    /// span of its indexing and of the index itself. An index of no value, such as a `todo`,
+    /// ends them: nothing after it is reached ([`reaches_never`]).
     fn place_path(&mut self, e: ExprId) -> Result<(usize, Vec<Indexing>), String> {
         let tree = self.tree();
         match &tree.expr(e).kind {
             ExprKind::Index { base, index } => {
                 let (root, mut indexes) = self.place_path(*base)?;
+                if reaches_never(&indexes) {
+                    return Ok((root, indexes));
+                }
                 let i = self.expr(*index)?;
                 indexes.push((i, tree.expr(e).span, tree.expr(*index).span));
                 Ok((root, indexes))
@@ -1468,6 +1482,9 @@ impl<'a> Lower<'a> {
                     let aspan = tree.expr(a.value).span;
                     values.push(if a.is_mut {
                         let (root, indexes) = self.place_path(a.value)?;
+                        if reaches_never(&indexes) {
+                            return Ok(V::Never);
+                        }
                         let at = self.address(root, &indexes)?;
                         Arg::Place(
                             at,
