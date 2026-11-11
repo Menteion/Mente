@@ -1290,8 +1290,10 @@ impl<'a> Parser<'a> {
                 docs.push(d);
                 self.next();
             }
+            // A doc comment at the end of an item documents nothing, as it does when the item
+            // is parsed alone; the items after it are parsed still.
             if *self.peek() == TokenKind::Eof {
-                break;
+                continue;
             }
             let attrs = self.parse_attrs()?;
             if attrs.len() == 1 && attrs[0].name == "example" {
@@ -2789,6 +2791,29 @@ mod tests {
             kinds.contains(&TokenKind::Val)
                 && !kinds.iter().any(|k| matches!(k, TokenKind::DocComment(_)))
         );
+    }
+
+    /// A doc comment that ends an item, after its signature on the same line, documents
+    /// nothing, and the items after it are parsed as they are when each is parsed alone.
+    #[test]
+    fn test_a_doc_comment_ending_an_item_leaves_the_items_after_it() {
+        let m =
+            parse_module("module m\npub fn take(x: u8) /// doc\n\npub fn f() -> u8 = 1\n").unwrap();
+        let names: Vec<&str> = m
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ItemDecl::Fn(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["take", "f"]);
+        assert!(m.items.iter().all(|i| match i {
+            ItemDecl::Fn(f) => f.docs.is_empty(),
+            _ => true,
+        }));
+        let err = parse_module("module m\nfn e()///\nfn").unwrap_err();
+        assert_eq!(err.code, "E0101");
     }
 
     #[test]
