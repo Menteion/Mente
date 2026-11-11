@@ -828,15 +828,33 @@ impl Memory {
         Ok(())
     }
 
-    fn release(&mut self, to: usize) {
-        self.bytes.truncate(to);
-        self.slots.retain(|(s, _)| *s < to);
+    /// Where memory stands, for a call to give back on its return.
+    fn mark(&self) -> Mark {
+        Mark {
+            bytes: self.bytes.len(),
+            slots: self.slots.len(),
+        }
+    }
+
+    /// Gives back the bytes and the slots allocated since `to`. Slots are counted, not found by
+    /// address: a slot of no bytes made just before a call begins at the address the call's own
+    /// memory does, yet belongs to the caller.
+    fn release(&mut self, to: Mark) {
+        self.bytes.truncate(to.bytes);
+        self.slots.truncate(to.slots);
     }
 
     /// Bytes in use: what a caller set up, and the slots of the calls still running.
     pub fn used(&self) -> usize {
         self.bytes.len()
     }
+}
+
+/// How much memory, in bytes and in slots, was in use when a call began.
+#[derive(Clone, Copy, Debug)]
+struct Mark {
+    bytes: usize,
+    slots: usize,
 }
 
 /// The resources a run may use.
@@ -901,7 +919,7 @@ struct Frame<'m> {
     vals: Vec<Val>,
     block: BlockId,
     next: usize,
-    mark: usize,
+    mark: Mark,
     dest: Option<NodeId>,
 }
 
@@ -940,7 +958,7 @@ impl<'m> Machine<'m> {
             vals: vec![Val::Unit; f.ops.len()],
             block: BlockId(0),
             next: 0,
-            mark: self.memory.used(),
+            mark: self.memory.mark(),
             dest,
         };
         enter(&mut frame, BlockId(0), args)?;
@@ -1988,10 +2006,22 @@ mod tests {
         // A slot released on return is gone with its frame.
         let mut memory = Memory::filled(0);
         let kept = memory.alloc(2);
+        let call = memory.mark();
         memory.alloc(2);
-        memory.release(16);
+        memory.release(call);
         assert_eq!(memory.load(kept, Ty::Int(U8)), Ok(int(0)));
         assert!(memory.load(16, Ty::Int(U8)).is_err());
+        // A slot of no bytes made just before a call begins where the call's memory does, and
+        // stays with its frame when the call returns.
+        let mut memory = Memory::filled(0);
+        memory.alloc(2);
+        let empty = memory.alloc(0);
+        let call = memory.mark();
+        let callee = memory.alloc(2);
+        assert_eq!(callee, empty);
+        memory.release(call);
+        assert_eq!(memory.copy(empty, empty, 0), Ok(()));
+        assert!(memory.load(callee, Ty::Int(U8)).is_err());
     }
 
     #[test]
