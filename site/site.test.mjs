@@ -212,7 +212,11 @@ test('the logo goes above the first page, in its light version and its dark one'
 
 test('the dark logo and the favicon are the light logo\'s mark, and the CSS picks one by theme', () => {
   const asset = (f) => fs.readFileSync(new URL(`assets/${f}`, import.meta.url));
-  const svg = (f) => asset(f).toString('utf8').replace(/\r\n/g, '\n').replace(/<!--[\s\S]*?-->\n/g, '');
+  // Each file from its root element on: the comment before it names the version.
+  const svg = (f) => {
+    const text = asset(f).toString('utf8').replace(/\r\n/g, '\n');
+    return text.slice(text.indexOf('<svg '));
+  };
   const [light, dark] = LOGO_FILES.map(svg);
   // The same path, the ink alone changed: dark navy on light themes, near white on dark ones.
   assert.match(light, /fill="#0F172A"/);
