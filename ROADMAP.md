@@ -87,12 +87,20 @@ Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter mode
 **Decided first:** [`error-conversion`](docs/design-review.md#error-conversion), [`value-copy-cost`](docs/design-review.md#value-copy-cost), [`sympathetic-defaults`](docs/design-review.md#sympathetic-defaults), [`cost-report`](docs/design-review.md#cost-report). **Spike before it**, held on 2026-11-11 ([`error-return-spike`](docs/design-review.md#error-return-spike); commit "Record the error-return spike's result"): `T ! E` returned in two registers through Cranelift's multi-value returns.
 
 - [x] **Design closure first**, done on 2026-11-11 (commit "Write M2's design closure into the core calculus and the grammar"; [`m2-design-closure`](docs/design-review.md#m2-design-closure)): `spec/core-calculus.md` and `spec/grammar.md` extended to M2's language before any of its code, carrying the decisions of [`struct-enum-syntax`](docs/design-review.md#struct-enum-syntax), [`match-patterns`](docs/design-review.md#match-patterns), [`optional-semantics`](docs/design-review.md#optional-semantics), [`error-union-semantics`](docs/design-review.md#error-union-semantics), [`str-text-model`](docs/design-review.md#str-text-model), [`slice-ranges`](docs/design-review.md#slice-ranges), [`list-string-m2`](docs/design-review.md#list-string-m2), [`struct-invariants-m2`](docs/design-review.md#struct-invariants-m2), [`view-source-freeze`](docs/design-review.md#view-source-freeze), [`view-provenance-sources`](docs/design-review.md#view-provenance-sources), [`read-only-views`](docs/design-review.md#read-only-views), [`own-invalidation`](docs/design-review.md#own-invalidation), [`copy-and-drop`](docs/design-review.md#copy-and-drop), [`exclusivity-projections`](docs/design-review.md#exclusivity-projections), [`struct-field-order`](docs/design-review.md#struct-field-order), [`enum-layout`](docs/design-review.md#enum-layout), [`example-01-m2`](docs/design-review.md#example-01-m2).
-- [ ] `struct`, `enum` with exhaustive `match`, `?T`, and `T ! E` with `raise`, `!` and `catch`.
+- [ ] `struct`, `enum` with exhaustive `match`, `?T`, and `T ! E` with `raise`, `!` and `catch`. Plain structs done on 2026-11-12 (commit "Implement plain structs through every phase of the compiler").
 - [ ] Slices and `str` as views with provenance, `from` checked in bodies, and **Engineering Guardrail #3**'s `E0310`, in the same milestone, so that no view is ever unchecked.
 - [ ] The `mut` and `own` parameter modes beside the read-only one, with the Law of Exclusivity, `own` invalidation and copy-in/copy-out; `List<T>` and `String`. The `in` mode comes with arenas in M3.
 - [ ] The cost report begins: type layouts, and the runtime checks Tier 1 left in place.
+- [ ] What the review of plain structs (pull request 116) left, each fix with a test seen to fail without it:
+  - Tier 1 follows a field path, which its fragment names (`ghost-contracts-and-totality.md`), as it follows a local. A `decreases` over a field is now always `E0507`, with a `guard` Tier 1 cannot use and no valuation, short of **Engineering Guardrail #1**.
+  - A refinement bounded at a 128-bit type's limit is proven. Now every value entering one, `0` included, draws `E0502` with a valuation that is false: for a parameter since M1, and for a field.
+  - Diagnostics in module order. A struct's now come before every function's.
+  - Struct lookup that does not grow with the number of structs. Checking is now quadratic in it: about 10 s for 20,000 structs in a debug build.
+  - Native printing of a large result in a loop. It is now unrolled leaf by leaf, as M1's arrays are: over 3 minutes to compile a 64 KB result.
+  - `mn fuzz` runs functions with struct and array parameters, and the program generator reaches refined array elements in a field and exclusive field ranges.
+  - `E0109` names the compiler's milestone; it still says "M1 does not have it".
 
-Runs in full at the end: example 01's binary search.
+Runs in full at the end: example 01's binary search. The benchmark's M2 tasks declare positional payloads (`Deposit(i64)`), so the harness names each payload's field when it maps a task to Mente, whose variants have only named fields.
 
 ### M3: regions and layouts
 
