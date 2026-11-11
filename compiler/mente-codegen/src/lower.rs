@@ -1656,6 +1656,10 @@ impl<'a> Lower<'a> {
                 // reads the array as it was, as a value is, so it is copied first.
                 let b = self.kept(b, *base, &[*index])?;
                 let i = self.expr(*index)?;
+                // An index that never gives a value, such as `unreachable(...)`, ends the path.
+                if matches!(i, V::Never) {
+                    return Ok(V::Never);
+                }
                 let V::Mem(a) = b else {
                     return Ok(V::Never);
                 };

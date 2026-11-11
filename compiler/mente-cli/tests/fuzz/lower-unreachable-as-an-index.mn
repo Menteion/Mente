@@ -1,0 +1,2 @@
+fn n(a:[8]i64)->i64{val s:i8=a[unreachable("")]+a[7]
+s}

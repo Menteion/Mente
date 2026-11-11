@@ -434,6 +434,15 @@ fn test_fuzz_array_past_four_gigabytes_is_e0223() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Found by `mn fuzz`: an element read whose index never gives a value, `a[unreachable("")]`,
+/// checked but did not lower ("an index that is not an integer"); M1's lowering had it too. The
+/// read ends where its index does, as a stored element's path already did.
+#[test]
+fn test_fuzz_unreachable_as_an_index_lowers() {
+    let file = regressions().join("lower-unreachable-as-an-index.mn");
+    replay(std::slice::from_ref(&file));
+}
+
 /// Found by `mn fuzz`: an assignment to what is no place (`E0114`) went on to read its value,
 /// and noted the idiom `&` there while recovering from the error, which the body parser
 /// asserts it never does. The error now ends the statement, as every error does.
