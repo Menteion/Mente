@@ -90,6 +90,11 @@ jobs:
           # write a file of at most 2 GB, so that such a test fails instead and the mutant is
           # caught.
           ulimit -v 8388608 -f 2097152
+          # Memory and disk once a minute, in the job's log, so that a runner lost in the middle of
+          # a run leaves a trace of why: two shards of the first full runs lost theirs.
+          (while sleep 60; do
+            echo "resources: $(free -m | awk '/^Mem:/ {print $3 " of " $2 " MB used"}'), $(df -h / | awk 'NR == 2 {print $4 " of disk free"}')"
+          done) &
           status=0
           cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/4 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
@@ -162,6 +167,11 @@ jobs:
           # write a file of at most 2 GB, so that such a test fails instead and the mutant is
           # caught.
           ulimit -v 8388608 -f 2097152
+          # Memory and disk once a minute, in the job's log, so that a runner lost in the middle of
+          # a run leaves a trace of why: two shards of the first full runs lost theirs.
+          (while sleep 60; do
+            echo "resources: $(free -m | awk '/^Mem:/ {print $3 " of " $2 " MB used"}'), $(df -h / | awk 'NR == 2 {print $4 " of disk free"}')"
+          done) &
           status=0
           only=()
           if [ -n "$EXAMINE" ]; then only=(--re "$EXAMINE"); fi
