@@ -907,27 +907,6 @@ fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
     st.add_exact(var, lo.and_then(|x| x.plus(c)), hi.and_then(|x| x.plus(c)));
 }
 
-/// The bounds of `v`, exactly: a single term's from its variable's, beyond the octagon's
-/// reach included, and any other value's from its interval. `None` for none.
-fn exact_range(st: &Octagon, v: &Val) -> (Option<Exact>, Option<Exact>) {
-    if let Val::Lin(terms, c) = v {
-        if let [t] = terms.as_slice() {
-            let (lo, hi) = st.exact_bounds(t.var);
-            let (lo, hi) = if t.neg {
-                (hi.map(Exact::negated), lo.map(Exact::negated))
-            } else {
-                (lo, hi)
-            };
-            return (lo.and_then(|x| x.plus(*c)), hi.and_then(|x| x.plus(*c)));
-        }
-    }
-    let (lo, hi) = interval(st, v);
-    (
-        (lo > -INF).then(|| Exact::from_i128(lo)),
-        (hi < INF).then(|| Exact::from_i128(hi)),
-    )
-}
-
 /// Narrows `st` to the points where `t + k op c` holds, `c` a constant beyond the octagon's
 /// reach, as an exact bound of `t`'s variable.
 fn constrain_far(st: &mut Octagon, op: BinaryOp, t: Term, k: i128, c: Exact) {
@@ -2610,6 +2589,14 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// The bounds of `v` in `st`, exactly, beyond the octagon's reach included: those the
+    /// scratch variable takes from it. `None` for none.
+    fn exact_range(&self, st: &Octagon, v: &Val) -> (Option<Exact>, Option<Exact>) {
+        let mut s = st.clone();
+        self.assign(&mut s, self.scratch, v);
+        s.exact_bounds(self.scratch)
+    }
+
     /// A state in which `c` fails, or `None` when it holds wherever `st` does.
     fn refute(&self, st: &Octagon, c: &Cond) -> Option<Octagon> {
         let mut s = st.clone();
@@ -2819,7 +2806,7 @@ impl<'a> Fx<'a> {
             None => far(r.hi_lit).map(|c| (true, c)),
         };
         let message = if let Some((upper, c)) = far_side {
-            let (lo, hi) = exact_range(&s, v);
+            let (lo, hi) = self.exact_range(&s, v);
             let value = if upper {
                 let first = if r.inclusive {
                     c.plus(1).unwrap_or(c)
@@ -5214,6 +5201,21 @@ mod tests {
         assert_eq!(
             messages(&format!("{}pub fn f(y: i128) -> i128 = take(y)", take)),
             ["Tier 1 cannot rule out that `y` is -170141183460469231731687303715884105728, outside `i128[-170141183460469231731687303715884105727..=0]`, the type of parameter `x` of `take`"]
+        );
+        // The value named is the nearest one outside the bound that the state allows, which a
+        // guard may put past the bound's own nearest, on either side.
+        assert_eq!(
+            messages("pub fn take(x: u128[0..340282366920938463463374607431768211400]) -> u128 = x\npub fn f(y: u128) -> u128 {\n  guard y > 340282366920938463463374607431768211450 else {\n    return 0\n  }\n  take(y)\n}"),
+            ["Tier 1 cannot rule out that `y` is 340282366920938463463374607431768211451, outside `u128[0..340282366920938463463374607431768211400]`, the type of parameter `x` of `take`"]
+        );
+        assert_eq!(
+            messages("pub fn take(x: i128[-170141183460469231731687303715884105000..=0]) -> i128 = x\npub fn f(y: i128) -> i128 {\n  guard y < -170141183460469231731687303715884105700 else {\n    return 0\n  }\n  take(y)\n}"),
+            ["Tier 1 cannot rule out that `y` is -170141183460469231731687303715884105701, outside `i128[-170141183460469231731687303715884105000..=0]`, the type of parameter `x` of `take`"]
+        );
+        // So it is for a sum, of the bounds its terms give it.
+        assert_eq!(
+            messages("pub fn f(y: u64, z: u64) -> i128[100000000000000000000000000000000000000..=170141183460469231731687303715884105727] = y + z"),
+            ["Tier 1 cannot rule out that `y + z` is 36893488147419103230, outside `i128[100000000000000000000000000000000000000..=170141183460469231731687303715884105727]`, the type of the result of `f`"]
         );
         // An inclusive bound at a 128-bit type's end holds every value of the type: a value
         // nothing narrows is proven, at either end of a refinement, a sum of two too.
