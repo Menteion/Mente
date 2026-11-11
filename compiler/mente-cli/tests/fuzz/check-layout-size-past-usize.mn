@@ -1,0 +1,1 @@
+fn e()->[]@layout(size:18446744073709551615,align:4)struct S{}

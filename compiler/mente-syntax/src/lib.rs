@@ -1822,15 +1822,15 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 TokenKind::Requires => {
                     self.next();
-                    requires.push(self.consume_contract_expr());
+                    requires.push(self.consume_contract_expr()?);
                 }
                 TokenKind::Ensures => {
                     self.next();
-                    ensures.push(self.consume_contract_expr());
+                    ensures.push(self.consume_contract_expr()?);
                 }
                 TokenKind::Decreases => {
                     self.next();
-                    decreases.push(self.consume_contract_expr());
+                    decreases.push(self.consume_contract_expr()?);
                 }
                 _ => break,
             }
@@ -1998,28 +1998,61 @@ impl<'a> Parser<'a> {
             .any(|(i, _)| begins_item(&self.src[from + i + 1..]))
     }
 
-    fn consume_contract_expr(&mut self) -> String {
+    /// Its brackets close in order (`E0111`), as a return type's do: a closer that closes
+    /// nothing, or an opener never closed, would take the scan past the body or the items after
+    /// it. Outside every bracket a `{` begins the body; inside one it opens a block.
+    fn consume_contract_expr(&mut self) -> Result<String, Diagnostic> {
         let start = self.span().start;
         let mut end = start;
-        let mut depth = 0i32;
+        // The brackets open where the scan is, innermost last, with the closer each needs.
+        let mut open: Vec<(TokenKind, &str)> = Vec::new();
         let mut last_line = self.span().line;
         let mut last = TokenKind::Requires;
         while *self.peek() != TokenKind::Eof
-            && (depth > 0 || self.span().line == last_line || continues_statement(&last))
-            && !(depth == 0 && matches!(self.peek(), TokenKind::LBrace | TokenKind::Eq))
-            && !(depth <= 0 && self.item_begins_here())
+            && (!open.is_empty() || self.span().line == last_line || continues_statement(&last))
+            && !(open.is_empty() && matches!(self.peek(), TokenKind::LBrace | TokenKind::Eq))
+            && !(open.is_empty() && self.item_begins_here())
         {
             let tok = self.next();
             match tok.kind {
-                TokenKind::LParen | TokenKind::LBracket => depth += 1,
-                TokenKind::RParen | TokenKind::RBracket => depth -= 1,
+                TokenKind::LParen => open.push((TokenKind::RParen, ")")),
+                TokenKind::LBracket => open.push((TokenKind::RBracket, "]")),
+                TokenKind::LBrace => open.push((TokenKind::RBrace, "}")),
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => match open.pop() {
+                    Some((closer, _)) if closer == tok.kind => {}
+                    expected => {
+                        let text = &self.src[tok.span.start..tok.span.end];
+                        return Err(Diagnostic::error(
+                            "E0111",
+                            tok.span,
+                            match expected {
+                                Some((_, closer)) => format!(
+                                    "expected `{}` to close a bracket of this contract, found `{}`",
+                                    closer, text
+                                ),
+                                None => format!("`{}` closes no bracket of this contract", text),
+                            },
+                        ));
+                    }
+                },
                 _ => {}
             }
             last_line = tok.span.line;
             end = tok.span.end;
             last = tok.kind;
         }
-        self.src[start..end].trim().to_string()
+        if let Some((_, closer)) = open.pop() {
+            return Err(Diagnostic::error(
+                "E0111",
+                self.span(),
+                format!(
+                    "expected `{}` to close a bracket of this contract, found {}",
+                    closer,
+                    self.found()
+                ),
+            ));
+        }
+        Ok(self.src[start..end].trim().to_string())
     }
 }
 
@@ -2910,6 +2943,38 @@ pub fn after(y: i32) -> i32 = y
     /// malformed (`E0116`): a closer that closes nothing took the scan past the body, which
     /// left the function a declaration no one checked, and an opener never closed took it past
     /// the items after it.
+    /// A contract's brackets close in order, or the header is malformed (`E0111`); inside a
+    /// bracket a `{` opens a block, and outside every bracket it begins the body (the fuzzer's
+    /// finding 18).
+    #[test]
+    fn test_a_contracts_brackets_must_close_in_order() {
+        for (contract, message) in [
+            (
+                "requires (}\n= 1",
+                "expected `)` to close a bracket of this contract, found `}`",
+            ),
+            (
+                "requires x > 0)\n= 1",
+                "`)` closes no bracket of this contract",
+            ),
+            (
+                "requires (x > 0",
+                "expected `)` to close a bracket of this contract, found the end of the file",
+            ),
+        ] {
+            let src = format!("module m\nfn e(x: u8) -> u8\n  {}\n", contract);
+            let d = parse_module(&src).unwrap_err();
+            assert_eq!((d.code, d.message.as_str()), ("E0111", message), "{}", src);
+        }
+        let f = only_fn(
+            "module m\nfn e(x: u8) -> u8\n  requires (if x > 0 { true } else { false })\n{\n  x\n}\n",
+        );
+        assert_eq!(
+            f.requires,
+            ["(if x > 0 { true } else { false })".to_string()]
+        );
+    }
+
     #[test]
     fn test_a_return_types_brackets_must_close_in_order() {
         for (header, at, what) in [

@@ -598,6 +598,8 @@ mod tests {
             "module m\n\nfn t() =\npub fn g() -> i32 = 0\n",
             "module m\n\npub fn f(x: i32) -> i32 = x +\n// note\n  1\n",
             "module m\n\npub fn f(x: i32) -> i32\n  requires x >\npub fn g() -> i32 = 0\n",
+            // A contract whose bracket another closes, before an item (the fuzzer's finding 18).
+            "module m\n\nfn e()->2\nrequires(}\npub",
         ] {
             let s = Session::new(src);
             let whole = check_source(src).err().unwrap_or_default();
