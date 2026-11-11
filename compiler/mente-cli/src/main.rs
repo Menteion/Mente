@@ -153,7 +153,7 @@ fn cmd_dump(args: &[String]) {
                 process::exit(2);
             }
             Ok(module) => match mente_codegen::lower::lower(&module) {
-                Ok(lowered) => format!("mente-dump 1 mir\n{}", lowered.module),
+                Ok(lowered) => format!("mente-dump 2 mir\n{}", lowered.module),
                 Err(e) => {
                     eprintln!("error: not lowered: {}", e);
                     process::exit(1);

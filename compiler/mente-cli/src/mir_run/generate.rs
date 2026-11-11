@@ -1,5 +1,5 @@
-//! A generator of well-typed M1 programs, deterministic from a seed, and of arguments for the
-//! public functions of any checked module (`docs/design-brief.md`, "The quality system": a
+//! A generator of well-typed programs of M1 and M2's structs, deterministic from a seed, and of
+//! arguments for the public functions of any checked module (`docs/design-brief.md`, "The quality system": a
 //! generator of well-typed programs, in the manner of Csmith).
 //!
 //! A program is built to pass every check by construction, as far as the generator can tell:
@@ -17,11 +17,18 @@
 //! a shift amount or a narrowing, from which Tier 1 proves checks the lowering leaves out; a
 //! `Refined` one adds refined parameters, bindings and results, `requires`, `ensures`, loop
 //! `invariant`s and `decreases` measures, written so that Tier 1 can prove them.
+//!
+//! A program may declare structs before its functions, each holding integers, `bool`s, small
+//! arrays and the structs declared before it, so that none contains itself; a `Refined` one
+//! gives some fields refinements with literal bounds. Its functions build structs field by
+//! field, read fields down through arrays and other structs, store into fields, pass fields as
+//! `mut` arguments, and take and give structs as parameters, results and `if` values.
 
 use std::cmp::Ordering;
 use std::fmt;
 
 use mente_interp::{Int, Value};
+use mente_sema::structs::Structs;
 use mente_sema::CheckedModule;
 use mente_syntax::tree::{Bound, Tree, TypeId, TypeKind};
 
@@ -325,12 +332,13 @@ impl IntT {
     }
 }
 
-/// A type of M1.
+/// A type of M1, or a struct the program declares.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Int(IntT),
     Bool,
     Array(u32, Box<Ty>),
+    Struct(String),
 }
 
 impl fmt::Display for Ty {
@@ -339,18 +347,43 @@ impl fmt::Display for Ty {
             Ty::Int(t) => write!(f, "{}", t.name),
             Ty::Bool => write!(f, "bool"),
             Ty::Array(n, e) => write!(f, "[{}]{}", n, e),
+            Ty::Struct(name) => write!(f, "{}", name),
         }
     }
 }
 
 /// Whether a value of type `from` flows into a place of type `into`: integers into integers,
-/// narrowed, and arrays of the same lengths element by element.
+/// narrowed, arrays of the same lengths element by element, and a struct into itself.
 fn flows(from: &Ty, into: &Ty) -> bool {
     match (from, into) {
         (Ty::Int(_), Ty::Int(_)) | (Ty::Bool, Ty::Bool) => true,
         (Ty::Array(n, a), Ty::Array(m, b)) => n == m && flows(a, b),
+        (Ty::Struct(a), Ty::Struct(b)) => a == b,
         _ => false,
     }
+}
+
+/// A struct the program declares.
+#[derive(Clone, Debug)]
+struct GStruct {
+    name: String,
+    fields: Vec<GField>,
+}
+
+#[derive(Clone, Debug)]
+struct GField {
+    name: String,
+    ty: Ty,
+    /// A refinement with literal bounds, in a `Refined` program.
+    refine: Option<R>,
+    is_pub: bool,
+}
+
+/// A step of a place from its root binding: an index into an array of a length, or a field.
+#[derive(Clone, Debug)]
+enum PStep {
+    Index(u32),
+    Field(String),
 }
 
 /// A binary operator, by its precedence (`grammar.md`, item 7).
@@ -428,6 +461,10 @@ enum E {
     Name(String),
     Index(Box<E>, Box<E>),
     Len(Box<E>),
+    /// A struct's field.
+    Field(Box<E>, String),
+    /// A struct built with its fields, in the order of its declaration.
+    Construct(String, Vec<(String, E)>),
     Call(String, Vec<(bool, E)>),
     Neg(Box<E>),
     BitNot(Box<E>),
@@ -463,7 +500,7 @@ impl E {
             E::Bin(op, ..) => op.level(),
             E::Not(_) => NOT,
             E::Neg(_) | E::BitNot(_) => UNARY,
-            E::Index(..) | E::Len(_) => POSTFIX,
+            E::Index(..) | E::Len(_) | E::Field(..) => POSTFIX,
             _ => PRIMARY,
         }
     }
@@ -486,6 +523,24 @@ impl E {
             E::Len(b) => {
                 b.print(POSTFIX, out);
                 out.push_str(".len");
+            }
+            E::Field(b, name) => {
+                b.print(POSTFIX, out);
+                out.push('.');
+                out.push_str(name);
+            }
+            E::Construct(name, fields) => {
+                out.push_str(name);
+                out.push('(');
+                for (k, (f, v)) in fields.iter().enumerate() {
+                    if k > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(f);
+                    out.push_str(": ");
+                    v.print(0, out);
+                }
+                out.push(')');
             }
             E::Call(f, args) => {
                 out.push_str(f);
@@ -764,6 +819,8 @@ struct Mark {
 struct Gen {
     rng: Rng,
     mode: Mode,
+    /// The structs declared so far.
+    structs: Vec<GStruct>,
     sigs: Vec<Sig>,
     /// The function being generated, which may call itself once when it has a measure.
     current: Option<Sig>,
@@ -791,6 +848,7 @@ impl Gen {
         Gen {
             rng: Rng::new(seed),
             mode,
+            structs: Vec::new(),
             sigs: Vec::new(),
             current: None,
             recursion: None,
@@ -809,8 +867,16 @@ impl Gen {
     }
 
     fn module(&mut self) -> String {
-        let count = 1 + self.rng.below(5) as usize;
         let mut out = String::from("module generated\n");
+        // Structs first, each holding only those declared before it, so none contains itself.
+        if self.rng.chance(60) {
+            for k in 0..1 + self.rng.below(3) as usize {
+                let text = self.struct_decl(k);
+                out.push('\n');
+                out.push_str(&text);
+            }
+        }
+        let count = 1 + self.rng.below(5) as usize;
         for k in 0..count {
             let public = k + 1 == count || self.rng.chance(50);
             let text = self.function(k, public);
@@ -818,6 +884,231 @@ impl Gen {
             out.push_str(&text);
         }
         out
+    }
+
+    // ---------------------------------------------------------------- structs
+
+    /// A struct of one to four fields, and its declaration's text.
+    fn struct_decl(&mut self, k: usize) -> String {
+        let name = format!("S{}", k);
+        let mut fields = Vec::new();
+        for j in 0..1 + self.rng.below(4) as usize {
+            let ty = self.field_ty();
+            let refine = match &ty {
+                Ty::Int(t) if self.mode == Mode::Refined && self.rng.chance(40) => {
+                    let lo = self.value_in(R {
+                        lo: t.min().max(Num::small(-50)),
+                        hi: t.max().min(Num::small(50)),
+                    });
+                    let width = Num::new(false, u128::from(self.rng.below(100)));
+                    Some(R {
+                        lo,
+                        hi: lo.add(width).map_or(t.max(), |h| h.min(t.max())),
+                    })
+                }
+                _ => None,
+            };
+            fields.push(GField {
+                name: format!("x{}", j),
+                ty,
+                refine,
+                is_pub: self.rng.chance(30),
+            });
+        }
+        let mut out = String::new();
+        if self.rng.chance(50) {
+            out.push_str("pub ");
+        }
+        out.push_str(&format!("struct {} {{\n", name));
+        for f in &fields {
+            let p = if f.is_pub { "pub " } else { "" };
+            match (&f.ty, f.refine) {
+                (Ty::Int(t), Some(r)) => out.push_str(&format!(
+                    "  {}{}: {}[{}..={}]\n",
+                    p, f.name, t.name, r.lo, r.hi
+                )),
+                (ty, _) => out.push_str(&format!("  {}{}: {}\n", p, f.name, ty)),
+            }
+        }
+        out.push_str("}\n");
+        self.structs.push(GStruct { name, fields });
+        out
+    }
+
+    /// A field's type: an integer, a `bool`, a small array, or a struct declared before.
+    fn field_ty(&mut self) -> Ty {
+        let earlier = self.structs.len() as u64;
+        match self.rng.below(100) {
+            0..=59 => Ty::Int(self.int_ty()),
+            60..=71 => Ty::Bool,
+            72..=84 => {
+                let n = 1 + self.rng.below(4) as u32;
+                let elem = if self.rng.chance(70) {
+                    Ty::Int(self.int_ty())
+                } else {
+                    Ty::Bool
+                };
+                Ty::Array(n, Box::new(elem))
+            }
+            85..=89 if earlier > 0 => {
+                let k = self.rng.below(earlier) as usize;
+                let n = 1 + self.rng.below(3) as u32;
+                Ty::Array(n, Box::new(Ty::Struct(self.structs[k].name.clone())))
+            }
+            _ if earlier > 0 => {
+                let k = self.rng.below(earlier) as usize;
+                Ty::Struct(self.structs[k].name.clone())
+            }
+            _ => Ty::Int(self.int_ty()),
+        }
+    }
+
+    fn fields_of(&self, name: &str) -> Vec<GField> {
+        self.structs
+            .iter()
+            .find(|s| s.name == name)
+            .map_or_else(Vec::new, |s| s.fields.clone())
+    }
+
+    /// A struct built field by field, each value landing in its field's type, a refined
+    /// field's inside its refinement.
+    fn construct(&mut self, name: &str, depth: u32) -> E {
+        let mut fields = Vec::new();
+        for f in self.fields_of(name) {
+            let v = match (&f.ty, f.refine) {
+                (Ty::Int(_), Some(r)) => self.refined_value(r),
+                (ty, _) => self.value(ty, depth + 1),
+            };
+            fields.push((f.name, v));
+        }
+        E::Construct(name.to_string(), fields)
+    }
+
+    /// A value Tier 1 proves inside `r`: a literal, or now and then a name guarded into it.
+    fn refined_value(&mut self, r: R) -> E {
+        if self.rng.chance(30) {
+            if let Some((x, xr, _)) = self.int_name(None, false) {
+                if !(r.lo <= xr.lo && xr.hi <= r.hi) {
+                    self.pending.push(E::bin(
+                        Op::And,
+                        E::bin(Op::Ge, x.clone(), E::num(r.lo)),
+                        E::bin(Op::Le, x.clone(), E::num(r.hi)),
+                    ));
+                }
+                return x;
+            }
+        }
+        let n = self.value_in(r);
+        E::num(n)
+    }
+
+    /// A value of struct `name`: a binding's, a call's, a part of another value, or a new one.
+    fn struct_value(&mut self, name: &str, depth: u32) -> E {
+        let want = Ty::Struct(name.to_string());
+        let names: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| self.binds[id].ty == want)
+            .collect();
+        match self.rng.below(100) {
+            0..=29 if !names.is_empty() => {
+                let id = *self.rng.pick(&names);
+                self.read(id)
+            }
+            30..=44 => match self.call(depth, |t| *t == want) {
+                Some((e, _)) => e,
+                None => self.construct(name, depth),
+            },
+            45..=59 => match self.part(&|t: &Ty| *t == want, true) {
+                Some((e, _)) => e,
+                None => self.construct(name, depth),
+            },
+            _ => self.construct(name, depth),
+        }
+    }
+
+    /// Whether a value of `ty` holds a part `want` accepts, itself or through non-empty arrays
+    /// and fields.
+    fn reaches(&self, ty: &Ty, want: &dyn Fn(&Ty) -> bool) -> bool {
+        want(ty)
+            || match ty {
+                Ty::Array(n, inner) => *n > 0 && self.reaches(inner, want),
+                Ty::Struct(s) => self.fields_of(s).iter().any(|f| self.reaches(&f.ty, want)),
+                _ => false,
+            }
+    }
+
+    /// A part of a visible binding that `want` accepts, down through indexes and fields, with
+    /// its type; one below the binding itself when `below`. The binding counts as read.
+    fn part(&mut self, want: &dyn Fn(&Ty) -> bool, below: bool) -> Option<(E, Ty)> {
+        let ids: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| {
+                let ty = &self.binds[id].ty;
+                let inner = match ty {
+                    Ty::Array(n, inner) => *n > 0 && self.reaches(inner, want),
+                    Ty::Struct(s) => self.fields_of(s).iter().any(|f| self.reaches(&f.ty, want)),
+                    _ => false,
+                };
+                inner || (!below && want(ty))
+            })
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let id = *self.rng.pick(&ids);
+        let mut e = self.read(id);
+        let mut ty = self.binds[id].ty.clone();
+        let mut first = below;
+        loop {
+            let deeper = match &ty {
+                Ty::Array(n, inner) => *n > 0 && self.reaches(inner, want),
+                Ty::Struct(s) => self.fields_of(s).iter().any(|f| self.reaches(&f.ty, want)),
+                _ => false,
+            };
+            if want(&ty) && !first && (!deeper || self.rng.chance(50)) {
+                return Some((e, ty));
+            }
+            first = false;
+            match ty.clone() {
+                Ty::Array(n, inner) if deeper => {
+                    let i = self.index(n);
+                    e = E::Index(Box::new(e), Box::new(i));
+                    ty = *inner;
+                }
+                Ty::Struct(s) if deeper => {
+                    let options: Vec<GField> = self
+                        .fields_of(&s)
+                        .into_iter()
+                        .filter(|f| self.reaches(&f.ty, want))
+                        .collect();
+                    let f = self.rng.pick(&options).clone();
+                    e = E::Field(Box::new(e), f.name);
+                    ty = f.ty;
+                }
+                _ => return want(&ty).then_some((e, ty)),
+            }
+        }
+    }
+
+    /// A value of type `t` that lands anywhere it goes: zero, `false`, or a refinement's least.
+    fn default_of(&self, t: &Ty, range: Option<R>) -> E {
+        match t {
+            Ty::Int(_) => E::num(range.map_or(Num::ZERO, |r| r.lo)),
+            Ty::Bool => E::Lit("false".into()),
+            Ty::Array(n, e) => E::Repeat(Box::new(self.default_of(e, None)), *n),
+            Ty::Struct(name) => E::Construct(
+                name.clone(),
+                self.fields_of(name)
+                    .into_iter()
+                    .map(|f| {
+                        let v = self.default_of(&f.ty, f.refine);
+                        (f.name, v)
+                    })
+                    .collect(),
+            ),
+        }
     }
 
     // ---------------------------------------------------------------- types and literals
@@ -831,6 +1122,10 @@ impl Gen {
     }
 
     fn ty(&mut self, depth: u32) -> Ty {
+        if !self.structs.is_empty() && self.rng.chance(15) {
+            let k = self.rng.below(self.structs.len() as u64) as usize;
+            return Ty::Struct(self.structs[k].name.clone());
+        }
         match self.rng.below(100) {
             0..=69 => Ty::Int(self.int_ty()),
             70..=84 => Ty::Bool,
@@ -1328,27 +1623,15 @@ impl Gen {
         }
     }
 
-    /// An element of an array binding, down to an integer of the type `want` asks for.
+    /// An element of an array binding or a field of a struct, down through both, to an
+    /// integer of the type `want` asks for. Its range is its type's, which `E0222` takes for a
+    /// field, refined or not.
     fn element(&mut self, want: Want) -> Option<G> {
-        let ids: Vec<usize> = self
-            .visible()
-            .into_iter()
-            .filter(|&id| match leaf(&self.binds[id].ty) {
-                (Ty::Int(t), true) => !matches!(want, Want::Exact(w) if w != *t),
-                _ => false,
-            })
-            .collect();
-        if ids.is_empty() {
-            return None;
-        }
-        let id = *self.rng.pick(&ids);
-        let mut e = self.read(id);
-        let mut ty = self.binds[id].ty.clone();
-        while let Ty::Array(n, inner) = ty {
-            let i = self.index(n);
-            e = E::Index(Box::new(e), Box::new(i));
-            ty = *inner;
-        }
+        let accept = |t: &Ty| match t {
+            Ty::Int(u) => !matches!(want, Want::Exact(w) if w != *u),
+            _ => false,
+        };
+        let (e, ty) = self.part(&accept, true)?;
         let Ty::Int(t) = ty else { return None };
         Some(G {
             e,
@@ -1438,21 +1721,10 @@ impl Gen {
     }
 
     fn bool_leaf(&mut self) -> E {
-        let ids: Vec<usize> = self
-            .visible()
-            .into_iter()
-            .filter(|&id| matches!(leaf(&self.binds[id].ty), (Ty::Bool, true)))
-            .collect();
-        if !ids.is_empty() && self.rng.chance(75) {
-            let id = *self.rng.pick(&ids);
-            let mut e = self.read(id);
-            let mut ty = self.binds[id].ty.clone();
-            while let Ty::Array(n, inner) = ty {
-                let i = self.index(n);
-                e = E::Index(Box::new(e), Box::new(i));
-                ty = *inner;
+        if self.rng.chance(75) {
+            if let Some((e, _)) = self.part(&|t: &Ty| *t == Ty::Bool, false) {
+                return e;
             }
-            return e;
         }
         E::Lit(if self.rng.chance(50) { "true" } else { "false" }.into())
     }
@@ -1463,6 +1735,7 @@ impl Gen {
             Ty::Int(t) => self.narrowed(*t, depth),
             Ty::Bool => self.bool_expr(depth),
             Ty::Array(n, elem) => self.array(*n, elem, depth),
+            Ty::Struct(name) => self.struct_value(name, depth),
         }
     }
 
@@ -1742,57 +2015,91 @@ impl Gen {
     }
 
     /// A place of type `ty` exactly, or of any type: a `var` or a `mut` parameter, or an element
-    /// of one. Returns its root binding.
+    /// or a field of one, down to four steps. A place for a `mut` argument, of a type given, is
+    /// never a refined field, whose refinement the callee's value would have to be proven in on
+    /// its way back. Returns its root binding.
     fn place(&mut self, ty: Option<&Ty>) -> Option<(usize, E)> {
-        let mut options: Vec<(usize, Vec<u32>)> = Vec::new();
+        let mut options: Vec<(usize, Vec<PStep>)> = Vec::new();
         for id in self.visible() {
             if !matches!(self.binds[id].kind, Kind::Var | Kind::MutParam) {
                 continue;
             }
-            // Each depth of indexing into the binding gives a place.
-            let mut t = &self.binds[id].ty;
-            let mut lens = Vec::new();
-            loop {
-                if ty.is_none_or(|w| w == t) {
-                    options.push((id, lens.clone()));
+            // Each step into the binding gives a place.
+            let mut todo: Vec<(Ty, Vec<PStep>, bool)> =
+                vec![(self.binds[id].ty.clone(), Vec::new(), false)];
+            while let Some((t, steps, refined)) = todo.pop() {
+                if ty.is_none_or(|w| *w == t && !refined) {
+                    options.push((id, steps.clone()));
                 }
-                match t {
+                if steps.len() >= 4 {
+                    continue;
+                }
+                match &t {
                     Ty::Array(n, inner) if *n > 0 => {
-                        lens.push(*n);
-                        t = inner;
+                        let mut s = steps.clone();
+                        s.push(PStep::Index(*n));
+                        todo.push(((**inner).clone(), s, false));
                     }
-                    _ => break,
+                    Ty::Struct(name) => {
+                        for f in self.fields_of(name) {
+                            let mut s = steps.clone();
+                            s.push(PStep::Field(f.name.clone()));
+                            todo.push((f.ty, s, f.refine.is_some()));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
         if options.is_empty() {
             return None;
         }
-        let (id, lens) = self.rng.pick(&options).clone();
+        let (id, steps) = self.rng.pick(&options).clone();
         let mut e = E::name(&self.binds[id].name);
         self.exclude.push(id);
-        for n in lens {
-            let i = self.index(n);
-            e = E::Index(Box::new(e), Box::new(i));
+        for step in steps {
+            e = match step {
+                PStep::Index(n) => {
+                    let i = self.index(n);
+                    E::Index(Box::new(e), Box::new(i))
+                }
+                PStep::Field(f) => E::Field(Box::new(e), f),
+            };
         }
         self.exclude.pop();
         Some((id, e))
     }
 
     fn place_ty(&self, id: usize, e: &E) -> Ty {
-        let mut depth = 0;
-        let mut x = e;
-        while let E::Index(b, _) = x {
-            depth += 1;
-            x = b;
+        match e {
+            E::Index(b, _) => match self.place_ty(id, b) {
+                Ty::Array(_, inner) => *inner,
+                t => t,
+            },
+            E::Field(b, f) => match self.place_ty(id, b) {
+                Ty::Struct(s) => self
+                    .fields_of(&s)
+                    .into_iter()
+                    .find(|g| g.name == *f)
+                    .map_or(Ty::Bool, |g| g.ty),
+                t => t,
+            },
+            _ => self.binds[id].ty.clone(),
         }
-        let mut t = self.binds[id].ty.clone();
-        for _ in 0..depth {
-            if let Ty::Array(_, inner) = t {
-                t = *inner;
-            }
-        }
-        t
+    }
+
+    /// The refinement of a field place, when it is one.
+    fn place_refine(&self, id: usize, e: &E) -> Option<R> {
+        let E::Field(b, f) = e else {
+            return None;
+        };
+        let Ty::Struct(s) = self.place_ty(id, b) else {
+            return None;
+        };
+        self.fields_of(&s)
+            .into_iter()
+            .find(|g| g.name == *f)
+            .and_then(|g| g.refine)
     }
 
     // ---------------------------------------------------------------- statements
@@ -1829,7 +2136,7 @@ impl Gen {
             97 => S::Expr(E::Builtin("unreachable", "ruled out".into())),
             _ => S::Return(self.current.as_ref().and_then(|s| s.ret.clone()).map(|t| {
                 let r = self.current.as_ref().and_then(|s| s.ret_range);
-                default(&t, r)
+                self.default_of(&t, r)
             })),
         }
     }
@@ -1872,7 +2179,7 @@ impl Gen {
                                 E::bin(Op::Le, v.clone(), E::num(r.hi)),
                             ),
                             Block {
-                                stmts: vec![S::Return(Some(default(ty, Some(r))))],
+                                stmts: vec![S::Return(Some(self.default_of(ty, Some(r))))],
                                 tail: None,
                             },
                         ));
@@ -2002,6 +2309,11 @@ impl Gen {
         if self.rng.chance(25) {
             return Some((Ty::Bool, self.bool_expr(depth)));
         }
+        if !self.structs.is_empty() && self.rng.chance(20) {
+            let k = self.rng.below(self.structs.len() as u64) as usize;
+            let name = self.structs[k].name.clone();
+            return Some((Ty::Struct(name.clone()), self.construct(&name, depth)));
+        }
         let g = self.int_expr(Want::Any, depth);
         let t = match g.cls {
             Cls::One(t) => t,
@@ -2073,8 +2385,11 @@ impl Gen {
             return Vec::new();
         };
         let ty = self.place_ty(id, &place);
-        let (op, value) = match &ty {
-            Ty::Int(t) if self.rng.chance(50) => {
+        let refine = self.place_refine(id, &place);
+        let (op, value) = match (&ty, refine) {
+            // A refined field takes a value proven inside its refinement.
+            (Ty::Int(_), Some(r)) => ("=", self.refined_value(r)),
+            (Ty::Int(t), None) if self.rng.chance(50) => {
                 let place_range = match &place {
                     E::Name(_) => self.binds[id].range.unwrap_or(t.range()),
                     _ => t.range(),
@@ -2388,7 +2703,7 @@ impl Gen {
         self.current = Some(sig.clone());
         let mut first = Vec::new();
         if self.recursion.is_some() {
-            let leave = S::Return(ret.as_ref().map(|t| default(t, ret_range)));
+            let leave = S::Return(ret.as_ref().map(|t| self.default_of(t, ret_range)));
             first.push(S::Guard(
                 E::bin(Op::Gt, E::name("n"), E::Lit("0".into())),
                 Block {
@@ -2651,15 +2966,6 @@ impl Gen {
     }
 }
 
-/// The type at the bottom of nested arrays, and whether every array on the way is non-empty.
-fn leaf(ty: &Ty) -> (&Ty, bool) {
-    match ty {
-        Ty::Array(0, inner) => (leaf(inner).0, false),
-        Ty::Array(_, inner) => leaf(inner),
-        t => (t, true),
-    }
-}
-
 fn compound(op: Op) -> &'static str {
     match op {
         Op::Add => "+=",
@@ -2672,15 +2978,6 @@ fn compound(op: Op) -> &'static str {
         Op::BitXor => "^=",
         Op::Shl => "<<=",
         _ => ">>=",
-    }
-}
-
-/// A literal value of type `t`, inside `range` when one is given.
-fn default(t: &Ty, range: Option<R>) -> E {
-    match t {
-        Ty::Int(_) => E::num(range.map_or(Num::ZERO, |r| r.lo)),
-        Ty::Bool => E::Lit("false".into()),
-        Ty::Array(n, e) => E::Repeat(Box::new(default(e, None)), *n),
     }
 }
 
@@ -2702,9 +2999,11 @@ enum Domain {
     Int(IntT, Option<(Bound, Bound, bool)>),
     Bool,
     Array(u32, Box<Domain>),
+    /// A struct by its name, and each field's name and values in the order of its declaration.
+    Struct(String, Vec<(String, Domain)>),
 }
 
-fn domain(tree: &Tree, t: TypeId) -> Option<Domain> {
+fn domain(tree: &Tree, t: TypeId, structs: &Structs) -> Option<Domain> {
     Some(match &tree.ty(t).kind {
         TypeKind::Int { name, refinement } => Domain::Int(
             IntT::named(name)?,
@@ -2713,8 +3012,18 @@ fn domain(tree: &Tree, t: TypeId) -> Option<Domain> {
                 .map(|r| (r.lo.clone(), r.hi.clone(), r.inclusive)),
         ),
         TypeKind::Bool => Domain::Bool,
-        TypeKind::Array { len, elem } => {
-            Domain::Array(u32::try_from(*len).ok()?, Box::new(domain(tree, *elem)?))
+        TypeKind::Array { len, elem } => Domain::Array(
+            u32::try_from(*len).ok()?,
+            Box::new(domain(tree, *elem, structs)?),
+        ),
+        TypeKind::Named(name) => {
+            let def = structs.get(name)?;
+            let fields = def
+                .fields
+                .iter()
+                .map(|f| Some((f.name.clone(), domain(def.tree(), f.decl, structs)?)))
+                .collect::<Option<Vec<_>>>()?;
+            Domain::Struct(name.clone(), fields)
         }
         TypeKind::Error => return None,
     })
@@ -2755,7 +3064,13 @@ pub fn calls(src: &str, module: &CheckedModule, seed: u64, plan: CallPlan) -> Ve
             .syntax
             .params
             .iter()
-            .map(|p| Some((p.name.clone(), p.is_mut, domain(tree, p.ty)?)))
+            .map(|p| {
+                Some((
+                    p.name.clone(),
+                    p.is_mut,
+                    domain(tree, p.ty, &module.structs)?,
+                ))
+            })
             .collect();
         let Some(params) = params else { continue };
         for args in function_calls(&params, &mut rng, plan) {
@@ -2822,7 +3137,7 @@ fn every(params: &[(String, bool, Domain)], limit: u128) -> Option<Vec<Vec<Value
                 }
                 v
             }
-            Domain::Array(..) => return None,
+            Domain::Array(..) | Domain::Struct(..) => return None,
         };
         total = total.checked_mul(values.len() as u128)?;
         if total > limit {
@@ -2911,6 +3226,17 @@ fn pick(
                 }
             }
             Some(Some(Value::Array(items)))
+        }
+        // A field's refinement has literal bounds, which name no parameter.
+        Domain::Struct(name, fields) => {
+            let mut out = Vec::new();
+            for (f, d) in fields {
+                match pick(d, params, values, rng, how)? {
+                    Some(v) => out.push((f.clone(), v)),
+                    None => return Some(None),
+                }
+            }
+            Some(Some(Value::Struct(name.clone(), out)))
         }
         Domain::Int(t, r) => {
             let (lo, hi) = match r {

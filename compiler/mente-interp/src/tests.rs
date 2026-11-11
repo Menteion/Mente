@@ -766,3 +766,79 @@ fn test_an_argument_of_another_shape_is_refused_before_anything_runs() {
     assert_eq!(run(src, "h([1, 2])"), "1");
     assert_eq!(run(src, "b(true)"), "true");
 }
+
+/// A struct is a value built field by field, each value narrowed into its field's type and
+/// checked against its refinement where it lands, in the order written; binding, passing and
+/// returning it copies it; a field of a `var` or a `mut` parameter is a place, read and stored
+/// through indexes and other fields, and passed as `mut`, its final value copied back.
+#[test]
+fn test_structs_are_values_built_in_field_order() {
+    let decls = "pub struct P {\n  a: u8\n  b: i8[-3..=3]\n}\npub struct Q {\n  p: P\n  xs: [2]P\n  f: bool\n}\n";
+    let with = |f: &str| format!("{}{}", decls, f);
+    let make = with("pub fn make(a: i16, b: i16) -> P = P(a: a, b: b)");
+    assert_eq!(run(&make, "make(255, -3)"), "P(a: 255, b: -3)");
+    // The first field's value traps before the second's is checked.
+    assert_eq!(
+        trapped(&make, "make(256, 9)"),
+        ("narrowing".to_string(), 11, 41)
+    );
+    assert_eq!(
+        trapped(&make, "make(2, 4)"),
+        ("refinement".to_string(), 11, 47)
+    );
+    let places = with("pub fn set(mut q: Q, i: usize, v: u8) -> u8 {\n  q.p.a = v\n  q.xs[i].a += 1\n  q.xs[1] = q.p\n  q.f = not q.f\n  q.xs[0].a\n}");
+    let q = "Q(p: P(a: 1, b: 0), xs: [P(a: 2, b: 1), P(a: 3, b: 2)], f: false)";
+    assert_eq!(run(&places, &format!("set(mut {}, 0, 7)", q)), "3");
+    assert_eq!(
+        kind(&places, &format!("set(mut {}, 2, 7)", q)),
+        "index-out-of-bounds"
+    );
+    let (v, finals) = call_leaving(
+        &module(&places),
+        "set",
+        vec![
+            parse_call(&format!("f({})", q)).unwrap().1.remove(0),
+            Value::Int(Int::from_u128(1)),
+            Value::Int(Int::from_u128(9)),
+        ],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(v.to_string(), "2");
+    assert_eq!(
+        finals[0].to_string(),
+        "Q(p: P(a: 9, b: 0), xs: [P(a: 2, b: 1), P(a: 9, b: 0)], f: true)"
+    );
+    // A copy stays apart from its original, and a store into a refined field is checked.
+    let copy = with("pub fn copy(p: P) -> [2]u8 {\n  var q = p\n  q.a = 9\n  [p.a, q.a]\n}");
+    assert_eq!(run(&copy, "copy(P(a: 1, b: 0))"), "[1, 9]");
+    let store = with("pub fn store(mut p: P, v: i8) {\n  p.b = v\n}");
+    assert_eq!(kind(&store, "store(mut P(a: 1, b: 0), 5)"), "refinement");
+    // A `mut` field argument takes the callee's final value back into its refinement.
+    let back =
+        with("fn grow(mut n: i8) {\n  n += 3\n}\npub fn field(mut p: P) {\n  grow(mut p.b)\n}");
+    assert_eq!(kind(&back, "field(mut P(a: 1, b: 0))"), "()");
+    assert_eq!(kind(&back, "field(mut P(a: 1, b: 1))"), "refinement");
+}
+
+/// A struct prints as Mente writes it, `Name(field: v, ...)`, in the order of its declaration,
+/// and a call from outside reads it in that form; one whose fields are named otherwise, or lie
+/// outside their types or refinements, is refused or traps as an argument does.
+#[test]
+fn test_a_struct_value_prints_and_reads_back_in_one_form() {
+    let src = "pub struct P {\n  a: u8\n  b: i8[-3..=3]\n}\npub struct W {\n  p: P\n  wide: i128\n}\npub fn id(w: W) -> W = w";
+    let w = "W(p: P(a: 255, b: -3), wide: -170141183460469231731687303715884105728)";
+    assert_eq!(run(src, &format!("id({})", w)), w);
+    assert_eq!(
+        parse_call("f(P(a: 1, b: -2), [P(a: 0, b: 0)])").map(|(_, a)| a.len()),
+        Some(2)
+    );
+    assert_eq!(parse_call("f(P(a: 1 b: 2))"), None);
+    assert_eq!(parse_call("f(P(1, 2))"), None);
+    assert!(run(src, "id(W(wide: 0, p: P(a: 1, b: 0)))")
+        .contains("does not have its parameter's shape"));
+    assert!(run(src, "id(V(p: P(a: 1, b: 0), wide: 0))")
+        .contains("does not have its parameter's shape"));
+    assert_eq!(kind(src, "id(W(p: P(a: 256, b: 0), wide: 0))"), "narrowing");
+    assert_eq!(kind(src, "id(W(p: P(a: 1, b: 4), wide: 0))"), "refinement");
+}

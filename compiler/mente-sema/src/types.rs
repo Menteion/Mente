@@ -1,4 +1,4 @@
-//! The types of M1 (`spec/core-calculus.md`, items 2 to 5).
+//! The types of M1 (`spec/core-calculus.md`, items 2 to 5), and M2's structs (item 13).
 //!
 //! An integer type is a range, and any integer value flows into any integer type, checked where
 //! it is narrowed; so the type checker compares integer types only where the spec makes one
@@ -133,6 +133,9 @@ pub enum Ty {
     Int(Int),
     Bool,
     Array(u128, Box<Ty>),
+    /// A struct of the module, by its name: two structs are one type only when they are one
+    /// declaration, and a module declares a name once.
+    Struct(String),
     /// What a statement produces, and a call of a function without a result type: no value.
     Unit,
     /// `todo`, `unreachable`, and what a diagnostic replaced: any type, so that one mistake is
@@ -151,6 +154,7 @@ impl Ty {
             TypeKind::Int { name, .. } => IntTy::named(name).map_or(Ty::Any, Ty::int),
             TypeKind::Bool => Ty::Bool,
             TypeKind::Array { len, elem } => Ty::Array(*len, Box::new(Ty::of(tree, *elem))),
+            TypeKind::Named(name) => Ty::Struct(name.clone()),
             TypeKind::Error => Ty::Any,
         }
     }
@@ -222,7 +226,9 @@ impl Ty {
     /// How a diagnostic names the type: `` `u8` ``, `` `[4]u8` ``, "an integer", "no value".
     pub fn describe(&self) -> String {
         match self {
-            Ty::Int(Int::One(_)) | Ty::Bool | Ty::Array(..) => format!("`{}`", self.spelling()),
+            Ty::Int(Int::One(_)) | Ty::Bool | Ty::Array(..) | Ty::Struct(_) => {
+                format!("`{}`", self.spelling())
+            }
             Ty::Int(_) => "an integer".to_string(),
             Ty::Unit => "no value".to_string(),
             Ty::Any => "any type".to_string(),
@@ -236,6 +242,7 @@ impl Ty {
             Ty::Int(_) => "integer".to_string(),
             Ty::Bool => "bool".to_string(),
             Ty::Array(n, e) => format!("[{}]{}", n, e.spelling()),
+            Ty::Struct(name) => name.clone(),
             Ty::Unit => "()".to_string(),
             Ty::Any => "_".to_string(),
         }

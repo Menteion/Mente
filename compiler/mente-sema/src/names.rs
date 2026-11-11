@@ -17,6 +17,8 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
+use crate::structs::{unknown_type, Structs};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BindingId(pub u32);
 
@@ -66,10 +68,16 @@ pub struct NamedBound {
     pub binding: BindingId,
 }
 
-/// Resolves the names of `f`, whose module declares `functions`, in order.
-pub fn resolve(f: &FnSyntax, functions: &[String]) -> (Resolution, Vec<Diagnostic>) {
+/// Resolves the names of `f`, whose module declares `functions`, in order, and `structs`.
+pub fn resolve(
+    f: &FnSyntax,
+    functions: &[String],
+    structs: &Structs,
+) -> (Resolution, Vec<Diagnostic>) {
     let count = f.tree.exprs.len();
     let mut r = Resolver {
+        structs,
+        struct_names: structs.defs.iter().map(|d| d.name.clone()).collect(),
         functions: functions
             .iter()
             .enumerate()
@@ -97,7 +105,10 @@ pub fn resolve(f: &FnSyntax, functions: &[String]) -> (Resolution, Vec<Diagnosti
     (r.resolution, r.errors)
 }
 
-struct Resolver {
+struct Resolver<'a> {
+    structs: &'a Structs,
+    /// The names of the module's structs.
+    struct_names: HashSet<String>,
     functions: HashMap<String, usize>,
     resolution: Resolution,
     /// The bindings visible at each open block, innermost last.
@@ -116,7 +127,7 @@ struct Resolver {
     errors: Vec<Diagnostic>,
 }
 
-impl Resolver {
+impl Resolver<'_> {
     fn binding(&self, id: BindingId) -> &Binding {
         &self.resolution.bindings[id.0 as usize]
     }
@@ -178,8 +189,8 @@ impl Resolver {
         BindingId(self.resolution.bindings.len() as u32 - 1)
     }
 
-    /// Declares a name in the innermost block. A name of a function of the module is `E0220`,
-    /// and a second declaration in the function is `E0202`.
+    /// Declares a name in the innermost block. A name of a function or a struct of the module is
+    /// `E0220`, and a second declaration in the function is `E0202`.
     fn declare(
         &mut self,
         name: &str,
@@ -188,13 +199,20 @@ impl Resolver {
         ty: Option<TypeId>,
     ) -> BindingId {
         let id = self.push_binding(name, span, kind, ty);
-        if self.functions.contains_key(name) {
+        let declared_as = if self.functions.contains_key(name) {
+            Some("a function")
+        } else if self.struct_names.contains(name) {
+            Some("a struct")
+        } else {
+            None
+        };
+        if let Some(what) = declared_as {
             let d = Diagnostic::error(
                 "E0220",
                 span,
                 format!(
-                    "`{}` is the name of a function of this module; a name means one thing, so give this binding another",
-                    name
+                    "`{}` is the name of {} of this module; a name means one thing, so give this binding another",
+                    name, what
                 ),
             );
             self.clashing.insert(name.to_string());
@@ -347,6 +365,8 @@ impl Resolver {
             ExprKind::Call { callee, args } => {
                 if let Some(&index) = self.functions.get(callee) {
                     self.resolution.calls[e.0 as usize] = Some(index);
+                } else if self.struct_names.contains(callee) {
+                    // A struct built with positional arguments, which the type checker reports.
                 } else if self.lookup(callee).is_some() {
                     self.errors.push(Diagnostic::error(
                         "E0204",
@@ -370,6 +390,23 @@ impl Resolver {
                     } else {
                         self.expr(tree, a.value);
                     }
+                }
+            }
+            ExprKind::Construct { name, fields } => {
+                if let Some(&index) = self.functions.get(name) {
+                    // A function called with named arguments, which the type checker reports.
+                    self.resolution.calls[e.0 as usize] = Some(index);
+                } else if !self.struct_names.contains(name) {
+                    let mut candidates: Vec<String> = self.struct_names.iter().cloned().collect();
+                    candidates.sort();
+                    let name_span = Span {
+                        end: span.start + name.len(),
+                        ..span
+                    };
+                    self.unknown(name, name_span, "struct", candidates);
+                }
+                for f in fields {
+                    self.expr(tree, f.value);
                 }
             }
             ExprKind::Unary { operand, .. } => self.expr(tree, *operand),
@@ -425,6 +462,15 @@ impl Resolver {
                     n, n
                 ),
             ));
+        } else if self.struct_names.contains(n) {
+            self.errors.push(Diagnostic::error(
+                "E0204",
+                span,
+                format!(
+                    "`{}` is a struct, not a value: build one with its fields, as in `{}(field: value)`",
+                    n, n
+                ),
+            ));
         } else {
             let candidates = self.visible();
             self.unknown(n, span, "binding", candidates);
@@ -446,6 +492,7 @@ impl Resolver {
                 self.place(tree, *base, read);
                 self.expr(tree, *index);
             }
+            ExprKind::Field { base, .. } => self.place(tree, *base, read),
             _ => self.expr(tree, e),
         }
     }
@@ -548,6 +595,11 @@ impl Resolver {
                 }
             }
             TypeKind::Array { elem, .. } => self.ty(tree, *elem),
+            TypeKind::Named(n) => {
+                if let Some(d) = unknown_type(self.structs, n, span, &self.struct_names) {
+                    self.errors.push(d);
+                }
+            }
             _ => {}
         }
     }
@@ -582,7 +634,7 @@ impl Resolver {
 }
 
 /// The candidate closest to `name`, within two edits and not more than a third of its length.
-fn closest(name: &str, candidates: &[String]) -> Option<String> {
+pub(crate) fn closest(name: &str, candidates: &[String]) -> Option<String> {
     let limit = (name.len() / 3).clamp(1, 2);
     candidates
         .iter()
@@ -822,7 +874,7 @@ mod tests {
         let Some(g) = parsed[1].syntax.as_ref() else {
             panic!("g has a body");
         };
-        let (r, errors) = resolve(g, &names);
+        let (r, errors) = resolve(g, &names, &Structs::default());
         assert_eq!(errors, Vec::new());
         assert_eq!(r.bindings.len(), 1);
         assert_eq!(r.bindings[0].name, "y");
@@ -943,6 +995,51 @@ mod tests {
             all_codes(&format!("{}pub fn f(i: usize) -> u8 {{\n  var xs: [2]u8 = [1, 2]\n  bump(mut xs[i])\n  xs[0]\n}}", both)),
             NONE
         );
+    }
+
+    /// A name means one thing in a module: no binding takes the name of a struct (`E0220`), a
+    /// struct's name is no value (`E0204`), a struct built of a name that is none is `E0201`
+    /// with the closest struct suggested, and a type that names nothing is `E0116`.
+    #[test]
+    fn test_no_binding_takes_the_name_of_a_struct() {
+        let pair = "pub struct Pair {
+  i: u8
+}
+";
+        let with = |f: &str| format!("{}{}", pair, f);
+        assert_eq!(codes(&with("pub fn f(Pair: u8) -> u8 = Pair")), ["E0220"]);
+        assert_eq!(
+            messages(&with("pub fn f(a: u8) -> u8 {
+  val Pair = a
+  Pair
+}")),
+            ["`Pair` is the name of a struct of this module; a name means one thing, so give this binding another"]
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8 {
+  val p = Pair
+  0
+}"
+            )),
+            ["E0204"]
+        );
+        assert_eq!(codes(&with("pub fn f() -> Pair = Piar(i: 0)")), ["E0201"]);
+        assert_eq!(
+            messages(&with("pub fn f() -> Pair = Piar(i: 0)")),
+            ["there is no struct named `Piar` here; did you mean `Pair`?"]
+        );
+        assert_eq!(codes(&with("pub fn f(p: Piar) -> u8 = 0")), ["E0116"]);
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8 {
+  val p: [2]Pear = todo(\"x\")
+  0
+}"
+            )),
+            ["E0116"]
+        );
+        assert_eq!(codes(&with("pub fn f(p: Pair) -> u8 = p.i")), NONE);
     }
 
     #[test]

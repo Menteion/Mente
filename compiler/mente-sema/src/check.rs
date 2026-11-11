@@ -14,15 +14,16 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
+use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::BinaryOp::{BitAnd, BitOr, BitXor, Shl, Shr};
 use mente_syntax::tree::{
-    Arg, AssignOp, BinaryOp, BlockId, Body, ContractKind, Else, ExprId, ExprKind, FnSyntax, StmtId,
-    StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    Arg, AssignOp, BinaryOp, BlockId, Body, ContractKind, Else, ExprId, ExprKind, FieldInit,
+    FnSyntax, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
 
-use crate::names::{BindingId, BindingKind, Resolution};
+use crate::names::{closest, BindingId, BindingKind, Resolution};
+use crate::structs::{Structs, VALUE_BYTES};
 use crate::types::{Int, IntTy, Ty, USIZE};
 
 /// Any integer type, as a place that takes one.
@@ -68,11 +69,13 @@ pub struct Typing {
 }
 
 /// Checks the types of `f`, whose names `resolution` binds. `signatures` holds, for each
-/// function of the module in order, its signature when its body was parsed.
+/// function of the module in order, its signature when its body was parsed, and `structs` the
+/// module's structs.
 pub fn check(
     f: &FnSyntax,
     resolution: &Resolution,
     signatures: &[Option<Signature>],
+    structs: &Structs,
 ) -> (Typing, Vec<Diagnostic>) {
     let tree = &f.tree;
     let result = f.result.map(|t| Ty::of(tree, t));
@@ -87,6 +90,7 @@ pub fn check(
         .collect();
     let mut c = Checker {
         tree,
+        structs,
         name: &f.name,
         resolution,
         signatures,
@@ -126,24 +130,15 @@ pub fn check(
 
 /// The most bytes an array may hold: it is a value kept in one piece, in one stack slot, whose
 /// size native code holds in 32 bits.
-pub const ARRAY_BYTES: u128 = u32::MAX as u128;
-
-/// The most bytes a value of `t` takes: an integer its type's, and one of no one type, which
-/// lowering keeps in the machine type that holds its values, sixteen, the widest; a `bool` one,
-/// an array its length times its element's.
-fn bytes(t: &Ty) -> u128 {
-    match t {
-        Ty::Int(i) => match i {
-            Int::One(t) | Int::Mixed(Some(t)) => u128::from(t.bits / 8),
-            Int::Literal | Int::Mixed(None) => 16,
-        },
-        Ty::Bool => 1,
-        Ty::Array(n, elem) => n.saturating_mul(bytes(elem)),
-        _ => 0,
-    }
-}
+pub const ARRAY_BYTES: u128 = VALUE_BYTES;
 
 impl Checker<'_> {
+    /// The most bytes a value of `t` takes, as its layout gives them (`Structs::layout_of`);
+    /// none for a type without one.
+    fn bytes(&self, t: &Ty) -> u128 {
+        self.structs.layout_of(t).map_or(0, |(size, _)| size)
+    }
+
     /// `E0223` for each array type, and each array literal, that holds more than
     /// [`ARRAY_BYTES`]: the innermost such type, and a literal whose type no written type
     /// already reports.
@@ -154,10 +149,11 @@ impl Checker<'_> {
                 continue;
             };
             let t = Ty::of(self.tree, TypeId(i as u32));
-            if bytes(&t) > ARRAY_BYTES && bytes(&Ty::of(self.tree, *elem)) <= ARRAY_BYTES {
+            let elem = Ty::of(self.tree, *elem);
+            if self.bytes(&t) > ARRAY_BYTES && self.bytes(&elem) <= ARRAY_BYTES {
                 reported.push(node.span);
                 let text = self.tree.render_type(TypeId(i as u32));
-                self.too_large(node.span, &text, bytes(&t));
+                self.too_large(node.span, &text, self.bytes(&t));
             }
         }
         for (i, e) in self.tree.exprs.iter().enumerate() {
@@ -165,8 +161,8 @@ impl Checker<'_> {
                 continue;
             }
             let t = self.typing.exprs[i].clone();
-            if bytes(&t) > ARRAY_BYTES && reported.is_empty() {
-                self.too_large(e.span, &t.spelling(), bytes(&t));
+            if self.bytes(&t) > ARRAY_BYTES && reported.is_empty() {
+                self.too_large(e.span, &t.spelling(), self.bytes(&t));
             }
         }
     }
@@ -211,6 +207,7 @@ impl Checker<'_> {
 
 struct Checker<'a> {
     tree: &'a Tree,
+    structs: &'a Structs,
     name: &'a str,
     resolution: &'a Resolution,
     signatures: &'a [Option<Signature>],
@@ -308,8 +305,9 @@ impl Checker<'_> {
                 self.binary(e, *op, (*lhs, &l), (*rhs, &r))
             }
             ExprKind::Index { base, index } => self.index(*base, *index),
-            ExprKind::Field { base, .. } => self.field(e, *base),
+            ExprKind::Field { base, name } => self.field(e, *base, name),
             ExprKind::Call { callee, args } => self.call(e, callee, args),
+            ExprKind::Construct { name, fields } => self.construct(e, name, fields),
             ExprKind::Array(items) => self.array(items),
             ExprKind::Repeat { value, count } => {
                 let elem = self.value(*value);
@@ -492,28 +490,284 @@ impl Checker<'_> {
         }
     }
 
-    /// `.len`, the only field the body parser accepts.
-    fn field(&mut self, at: ExprId, base: ExprId) -> Ty {
-        match self.value(base) {
-            Ty::Array(..) => Ty::int(USIZE),
-            Ty::Any => Ty::Any,
-            other => {
-                let span = self.tree.expr(at).span;
-                self.errors.push(Diagnostic::error(
-                    "E0215",
-                    span,
-                    format!(
-                        "`.len` is an array's length, but this is {}",
-                        other.describe()
+    /// `a.name`: an array's `len`, or a field of a struct (`E0215` for one the value lacks).
+    fn field(&mut self, at: ExprId, base: ExprId, name: &str) -> Ty {
+        let span = self.tree.expr(at).span;
+        // The name ends the expression's text.
+        let name_span = Span {
+            start: span.end - name.len(),
+            col: span.col + (span.end - span.start - name.len()) as u32,
+            ..span
+        };
+        let found = self.value(base);
+        let message = match &found {
+            Ty::Array(..) if name == "len" => return Ty::int(USIZE),
+            Ty::Any => return Ty::Any,
+            Ty::Array(..) => format!(
+                "an array has one field, `.len`, its length, but not `.{}`; an element is read with an index, as in `a[i]`",
+                name
+            ),
+            Ty::Struct(s) => {
+                let Some(def) = self.structs.get(s) else {
+                    return Ty::Any;
+                };
+                if let Some((_, f)) = def.field(name) {
+                    return f.ty.clone();
+                }
+                // A declaration that did not check may lack the field it meant to have.
+                if !def.ok {
+                    return Ty::Any;
+                }
+                let names: Vec<String> = def.fields.iter().map(|f| f.name.clone()).collect();
+                let close = closest(name, &names);
+                let message = match &close {
+                    Some(c) => format!("`{}` has no field `{}`; did you mean `{}`?", s, name, c),
+                    None => format!(
+                        "`{}` has no field `{}`; its fields are {}",
+                        s,
+                        name,
+                        names
+                            .iter()
+                            .map(|n| format!("`{}`", n))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
-                ));
-                Ty::Any
+                };
+                let mut d = Diagnostic::error("E0215", name_span, message);
+                if let Some(c) = close {
+                    d = d.with_fix(
+                        Applicability::Suggestion,
+                        format!("write `{}`", c),
+                        name_span,
+                        c,
+                    );
+                }
+                self.errors.push(d);
+                return Ty::Any;
+            }
+            other if name == "len" => format!(
+                "`.len` is an array's length, but this is {}",
+                other.describe()
+            ),
+            other => format!(
+                "`.{}` reads a field of a struct, but this is {}",
+                name,
+                other.describe()
+            ),
+        };
+        self.errors.push(Diagnostic::error("E0215", span, message));
+        Ty::Any
+    }
+
+    /// `Name(field: value, ...)`: a struct built with every field once, in the order of its
+    /// declaration (`E0226`), each value flowing into its field's type; or a function called
+    /// with named arguments (`E0227`).
+    fn construct(&mut self, at: ExprId, name: &str, fields: &[FieldInit]) -> Ty {
+        let span = self.span(at);
+        if self.resolution.calls[at.0 as usize].is_some() {
+            for f in fields {
+                self.value(f.value);
+            }
+            let edits = fields
+                .iter()
+                .map(|f| Edit {
+                    span: Span {
+                        end: self.span(f.value).start,
+                        ..f.name_span
+                    },
+                    replacement: String::new(),
+                })
+                .collect();
+            let mut d = Diagnostic::error(
+                "E0227",
+                span,
+                format!(
+                    "`{}` is a function, whose arguments are positional; only the arguments that build a struct are named",
+                    name
+                ),
+            );
+            d.fixes.push(Fix {
+                message: "pass the arguments by position, in the order of the parameters".into(),
+                applicability: Applicability::Suggestion,
+                edits,
+            });
+            self.errors.push(d);
+            return Ty::Any;
+        }
+        let Some(def) = self.structs.get(name) else {
+            for f in fields {
+                self.value(f.value);
+            }
+            return Ty::Any;
+        };
+        let declared: Vec<(String, Ty)> = def
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.ty.clone()))
+            .collect();
+        let ok = def.ok;
+        // Each value flows into its field's type, wherever it stands.
+        for f in fields {
+            match declared.iter().find(|(n, _)| *n == f.name) {
+                Some((_, ty)) => {
+                    let place = format!("for field `{}` of `{}`", f.name, name);
+                    self.expect(f.value, ty, &place);
+                }
+                None => {
+                    self.value(f.value);
+                }
             }
         }
+        if ok {
+            if let Some(d) = self.field_order(span, name, fields, &declared) {
+                self.errors.push(d);
+            }
+        }
+        Ty::Struct(name.to_string())
+    }
+
+    /// `E0226` for a struct built without naming each field once, in the order of its
+    /// declaration: the first field it names that the struct lacks, or names a second time, or
+    /// out of order, or else the fields it leaves out.
+    fn field_order(
+        &self,
+        span: Span,
+        name: &str,
+        fields: &[FieldInit],
+        declared: &[(String, Ty)],
+    ) -> Option<Diagnostic> {
+        let names: Vec<String> = declared.iter().map(|(n, _)| n.clone()).collect();
+        let list = |ns: &[&String]| {
+            ns.iter()
+                .map(|n| format!("`{}`", n))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let order = list(&names.iter().collect::<Vec<_>>());
+        for (k, f) in fields.iter().enumerate() {
+            if !names.contains(&f.name) {
+                let close = closest(&f.name, &names);
+                let message = match &close {
+                    Some(c) => format!(
+                        "`{}` has no field `{}`; did you mean `{}`?",
+                        name, f.name, c
+                    ),
+                    None => format!(
+                        "`{}` has no field `{}`; its fields are {}",
+                        name, f.name, order
+                    ),
+                };
+                let mut d = Diagnostic::error("E0226", f.name_span, message);
+                if let Some(c) = close {
+                    d = d.with_fix(
+                        Applicability::Suggestion,
+                        format!("write `{}`", c),
+                        f.name_span,
+                        c,
+                    );
+                }
+                return Some(d);
+            }
+            if fields[..k].iter().any(|g| g.name == f.name) {
+                return Some(Diagnostic::error(
+                    "E0226",
+                    f.name_span,
+                    format!(
+                        "field `{}` of `{}` is named twice; a struct is built with each field once",
+                        f.name, name
+                    ),
+                ));
+            }
+        }
+        let written: Vec<&String> = fields.iter().map(|f| &f.name).collect();
+        let missing: Vec<&String> = names.iter().filter(|n| !written.contains(n)).collect();
+        if !missing.is_empty() {
+            return Some(Diagnostic::error(
+                "E0226",
+                span,
+                format!(
+                    "this `{}` leaves out {}; a field has no default, so a struct is built with every field, in the order of its declaration: {}",
+                    name,
+                    list(&missing),
+                    order
+                ),
+            ));
+        }
+        if written.iter().zip(&names).all(|(a, b)| *a == b) {
+            return None;
+        }
+        // Every field once, out of order.
+        let first = fields.first()?.name_span;
+        let last = fields.last()?;
+        let whole = Span {
+            end: self.span(last.value).end,
+            ..first
+        };
+        Some(Diagnostic::error(
+            "E0226",
+            whole,
+            format!(
+                "the fields of `{}` are named in the order of its declaration, which is the order their values are evaluated in: {}",
+                name, order
+            ),
+        ))
     }
 
     fn call(&mut self, at: ExprId, callee: &str, args: &[Arg]) -> Ty {
         let resolved = self.resolution.calls[at.0 as usize];
+        // A struct built with positional arguments.
+        if resolved.is_none() {
+            if let Some(def) = self.structs.get(callee) {
+                let declared: Vec<(String, Ty)> = def
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect();
+                for (k, a) in args.iter().enumerate() {
+                    match declared.get(k).filter(|_| args.len() == declared.len()) {
+                        Some((n, ty)) => {
+                            let place = format!("for field `{}` of `{}`", n, callee);
+                            self.expect(a.value, ty, &place);
+                        }
+                        None => {
+                            self.value(a.value);
+                        }
+                    }
+                }
+                let span = self.span(at);
+                let order = declared
+                    .iter()
+                    .map(|(n, _)| format!("`{}`", n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut d = Diagnostic::error(
+                    "E0226",
+                    span,
+                    format!(
+                        "a struct is built with its fields named, in the order of its declaration, as in `{}({}: ...)`: {}",
+                        callee,
+                        declared.first().map_or("", |(n, _)| n.as_str()),
+                        order
+                    ),
+                );
+                if args.len() == declared.len() && !args.iter().any(|a| a.is_mut) {
+                    d.fixes.push(Fix {
+                        message: "name each field".into(),
+                        applicability: Applicability::MachineApplicable,
+                        edits: args
+                            .iter()
+                            .zip(&declared)
+                            .map(|(a, (n, _))| Edit {
+                                span: insertion_point(self.span(a.value)),
+                                replacement: format!("{}: ", n),
+                            })
+                            .collect(),
+                    });
+                }
+                self.errors.push(d);
+                return Ty::Struct(callee.to_string());
+            }
+        }
         let signature = resolved.and_then(|i| self.signatures.get(i).cloned().flatten());
         // A function of the module without a signature has no body: a declaration, which
         // nothing in M1 can run.
@@ -676,11 +930,11 @@ impl Checker<'_> {
         }
     }
 
-    /// The binding at the root of a place: `a` for `a`, `a[i]` and `a[i][j]`.
+    /// The binding at the root of a place: `a` for `a`, `a[i]`, `a[i][j]` and `a.f[i]`.
     fn root(&self, place: ExprId) -> Option<BindingId> {
         match &self.tree.expr(place).kind {
             ExprKind::Name(_) => self.resolution.names[place.0 as usize],
-            ExprKind::Index { base, .. } => self.root(*base),
+            ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => self.root(*base),
             _ => None,
         }
     }
@@ -707,13 +961,64 @@ impl Checker<'_> {
                     self.names_in(a.value, out);
                 }
             }
+            ExprKind::Construct { fields, .. } => {
+                for f in fields {
+                    self.names_in(f.value, out);
+                }
+            }
             ExprKind::Array(items) => {
                 for &i in items {
                     self.names_in(i, out);
                 }
             }
             ExprKind::Repeat { value, .. } => self.names_in(*value, out),
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                self.names_in(*cond, out);
+                self.names_in_block(*then, out);
+                match otherwise {
+                    Some(Else::Block(b)) => self.names_in_block(*b, out),
+                    Some(Else::If(i)) => self.names_in(*i, out),
+                    None => {}
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Every resolved name in the statements of block `b`.
+    fn names_in_block(&self, b: BlockId, out: &mut Vec<(BindingId, Span)>) {
+        for &s in &self.tree.block(b).stmts {
+            match &self.tree.stmt(s).kind {
+                StmtKind::Binding { init: e, .. }
+                | StmtKind::Discard(e)
+                | StmtKind::Expr(e)
+                | StmtKind::Return(Some(e)) => self.names_in(*e, out),
+                StmtKind::Assign { place, value, .. } => {
+                    self.names_in(*place, out);
+                    self.names_in(*value, out);
+                }
+                StmtKind::While {
+                    cond,
+                    invariants,
+                    decreases,
+                    body,
+                } => {
+                    self.names_in(*cond, out);
+                    for &e in invariants.iter().chain(decreases) {
+                        self.names_in(e, out);
+                    }
+                    self.names_in_block(*body, out);
+                }
+                StmtKind::Guard { cond, otherwise } => {
+                    self.names_in(*cond, out);
+                    self.names_in_block(*otherwise, out);
+                }
+                StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+            }
         }
     }
 
@@ -1067,11 +1372,11 @@ fn negated_literals(tree: &Tree) -> HashSet<ExprId> {
         .collect()
 }
 
-/// Whether `e` names a place: a binding, or an element of one.
+/// Whether `e` names a place: a binding, or an element or a field of one.
 pub fn is_place(tree: &Tree, e: ExprId) -> bool {
     match &tree.expr(e).kind {
         ExprKind::Name(_) => true,
-        ExprKind::Index { base, .. } => is_place(tree, *base),
+        ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => is_place(tree, *base),
         _ => false,
     }
 }
@@ -1164,8 +1469,10 @@ mod tests {
         let Some(f) = parsed.last().and_then(|p| p.syntax.clone()) else {
             return Vec::new();
         };
-        let (resolution, _) = crate::names::resolve(&f, &names);
-        let (typing, errors) = check(&f, &resolution, &signatures);
+        let parsed_structs = mente_syntax::parse_structs(&text, &module);
+        let (structs, _) = crate::structs::declare(&module, &parsed_structs);
+        let (resolution, _) = crate::names::resolve(&f, &names, &structs);
+        let (typing, errors) = check(&f, &resolution, &signatures, &structs);
         assert_eq!(errors, Vec::new());
         assert_eq!(typing.exprs.len(), f.tree.exprs.len());
         resolution
@@ -1469,6 +1776,202 @@ mod tests {
         assert_eq!(
             codes("pub fn f() {\n  var v = todo(\"x\")\n  touch(mut v)\n}"),
             NONE
+        );
+    }
+
+    const PAIR: &str = "pub struct Pair {
+  i: u8
+  j: u16
+}
+pub struct Box2 {
+  p: Pair
+  xs: [2]Pair
+}
+";
+
+    /// A struct is built with every field once, in the order of its declaration, each value
+    /// flowing into its field's type (`E0226`, `E0203`); a function takes no named
+    /// arguments (`E0227`). Positional arguments of the right number get a fix that names them.
+    #[test]
+    fn test_structs_are_built_with_every_field_once_in_order() {
+        let with = |f: &str| format!("{}{}", PAIR, f);
+        assert_eq!(codes(&with("pub fn f() -> Pair = Pair(i: 0, j: 1)")), NONE);
+        assert_eq!(
+            binding_types(&with(
+                "pub fn f() -> u16 {
+  val p = Pair(i: 0, j: 1)
+  val b = Box2(p: p, xs: [p, p])
+  b.xs[1].j
+}"
+            )),
+            [("p", "Pair"), ("b", "Box2")].map(|(n, t)| (n.to_string(), t.to_string()))
+        );
+        for (src, message) in [
+            ("pub fn f() -> Pair = Pair(i: 0)", "this `Pair` leaves out `j`; a field has no default, so a struct is built with every field, in the order of its declaration: `i`, `j`"),
+            ("pub fn f() -> Pair = Pair(j: 1, i: 0)", "the fields of `Pair` are named in the order of its declaration, which is the order their values are evaluated in: `i`, `j`"),
+            ("pub fn f() -> Pair = Pair(i: 0, zz: 1)", "`Pair` has no field `zz`; its fields are `i`, `j`"),
+            ("pub fn f() -> Pair = Pair(i: 0, jj: 1)", "`Pair` has no field `jj`; did you mean `j`?"),
+            ("pub fn f() -> Pair = Pair(i: 0, i: 1, j: 2)", "field `i` of `Pair` is named twice; a struct is built with each field once"),
+            ("pub fn f() -> Pair = Pair(0, 1)", "a struct is built with its fields named, in the order of its declaration, as in `Pair(i: ...)`: `i`, `j`"),
+        ] {
+            assert_eq!(codes(&with(src)), ["E0226"], "{}", src);
+            assert_eq!(messages(&with(src)), [message], "{}", src);
+        }
+        let positional = with("pub fn f() -> Pair = Pair(0, 1)");
+        let d = &diagnostics(
+            "pub struct Pair {
+  i: u8
+  j: u16
+}
+pub fn f() -> Pair = Pair(0, 1)",
+        )[0];
+        assert_eq!(
+            mente_syntax::diagnostics::apply_fix(
+                &module(
+                    "pub struct Pair {
+  i: u8
+  j: u16
+}
+pub fn f() -> Pair = Pair(0, 1)"
+                ),
+                &d.fixes[0]
+            )
+            .unwrap(),
+            module(
+                "pub struct Pair {
+  i: u8
+  j: u16
+}
+pub fn f() -> Pair = Pair(i: 0, j: 1)"
+            )
+        );
+        assert_eq!(codes(&positional), ["E0226"]);
+        assert_eq!(
+            codes(&with("pub fn f() -> Pair = Pair(i: true, j: 1)")),
+            ["E0203"]
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> Box2 = Box2(p: Pair(i: 0, j: 1), xs: [1, 2])"
+            )),
+            ["E0203"]
+        );
+        assert_eq!(codes("pub fn f() -> u8 = id(x: 1)"), ["E0227"]);
+        assert_eq!(
+            messages("pub fn f() -> u8 = id(x: 1)"),
+            ["`id` is a function, whose arguments are positional; only the arguments that build a struct are named"]
+        );
+    }
+
+    /// `a.name` reads an array's `len` or a struct's field (`E0215` otherwise, with the closest
+    /// field suggested); a field of a `var` or a `mut` parameter is a place, assigned and passed
+    /// as `mut` (`E0205`, `E0206`), whose root binding no other argument names (`E0207`), a
+    /// field of another argument too, and through an `if`; `==` on structs is a type error.
+    #[test]
+    fn test_fields_are_read_and_stored_through_places() {
+        let with = |f: &str| format!("{}{}", PAIR, f);
+        assert_eq!(
+            codes(&with(
+                "pub fn f(b: Box2, k: usize) -> u16 = b.p.i + b.xs[k].j + b.xs.len"
+            )),
+            NONE
+        );
+        assert_eq!(codes(&with("pub fn f(b: Box2) -> u8 = b.q")), ["E0215"]);
+        assert_eq!(
+            messages(&with("pub fn f(p: Pair) -> u8 = p.ii")),
+            ["`Pair` has no field `ii`; did you mean `i`?"]
+        );
+        assert_eq!(
+            messages(&with("pub fn f(p: Pair) -> u8 = p.len")),
+            ["`Pair` has no field `len`; its fields are `i`, `j`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: u8) -> u8 = x.size"),
+            ["`.size` reads a field of a struct, but this is `u8`"]
+        );
+        assert_eq!(messages("pub fn f(x: [2]u8) -> u8 = x.size"), ["an array has one field, `.len`, its length, but not `.size`; an element is read with an index, as in `a[i]`"]);
+        assert_eq!(
+            codes(&with(
+                "pub fn f(mut b: Box2, k: usize) {
+  b.p.i = 1
+  b.xs[k].j += 2
+  b.xs[0] = b.p
+}"
+            )),
+            NONE
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f(b: Box2) {
+  b.p.i = 1
+}"
+            )),
+            ["E0205"]
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8 {
+  val p = Pair(i: 0, j: 1)
+  touch(mut p.i)
+  p.i
+}"
+            )),
+            ["E0206"]
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f(mut p: Pair) {
+  touch(mut p.i)
+}"
+            )),
+            NONE
+        );
+        assert_eq!(
+            codes(&with(
+                "fn two(mut a: u8, mut b: u16) {
+  a = 1
+  b = 2
+}
+pub fn f(mut p: Pair) {
+  two(mut p.i, mut p.j)
+}"
+            )),
+            ["E0207"]
+        );
+        assert_eq!(
+            codes(&with(
+                "fn put(mut a: u8, b: u16) {
+  a = 1
+}
+pub fn f(mut p: Pair) {
+  put(mut p.i, p.j)
+}"
+            )),
+            ["E0207"]
+        );
+        assert_eq!(
+            codes(&with(
+                "fn put(mut a: u8, b: u8) {
+  a = b
+}
+pub fn f(mut p: Pair, c: bool) {
+  put(mut p.i, if c { p.i } else { 0 })
+}"
+            )),
+            ["E0207"]
+        );
+        // `mut` field arguments have the parameter's type exactly.
+        assert_eq!(
+            codes(&with(
+                "pub fn f(mut p: Pair) {
+  touch(mut p.j)
+}"
+            )),
+            ["E0203"]
+        );
+        assert_eq!(
+            codes(&with("pub fn f(a: Pair, b: Pair) -> bool = a == b")),
+            ["E0203"]
         );
     }
 

@@ -1,0 +1,129 @@
+// Structs: fields at their layout's offsets, read and stored, nested and in arrays; built in the
+// order of their fields, each value narrowed into its field and checked against its refinement;
+// copied, chosen by an `if`, passed as `mut` fields, given from outside the program with a field
+// outside its type or its refinement, and kept as an argument though a later one changes it.
+// without proofs
+// call: make(7, 3)
+// call: make(255, 0)
+// call: make(256, 0)
+// call: make(7, -1)
+// call: make(7, 4)
+// call: make(7, 5)
+// call: make(7, -5)
+// call: make(7, -6)
+// call: make(7, 127)
+// call: make(7, 128)
+// call: make(7, -128)
+// call: make(7, -129)
+// call: checked(R(lo: 4, p: P(a: 1, b: 2, xs: [3, 4])), 10)
+// call: checked(R(lo: -5, p: P(a: 1, b: 2, xs: [3, 4])), -10)
+// call: checked(R(lo: 5, p: P(a: 1, b: 2, xs: [3, 4])), 0)
+// call: checked(R(lo: -6, p: P(a: 1, b: 2, xs: [3, 4])), 0)
+// call: checked(R(lo: 0, p: P(a: 1, b: 32767, xs: [3, 4])), 0)
+// call: checked(R(lo: 1, p: P(a: 1, b: 32767, xs: [3, 4])), 0)
+// call: checked(R(lo: 0, p: P(a: 1, b: -32768, xs: [3, 4])), 0)
+// call: checked(R(lo: -1, p: P(a: 1, b: -32768, xs: [3, 4])), 0)
+// call: store(mut R(lo: 0, p: P(a: 1, b: 2, xs: [3, 4])), 4)
+// call: store(mut R(lo: 0, p: P(a: 1, b: 2, xs: [3, 4])), 5)
+// call: store(mut R(lo: 0, p: P(a: 1, b: 2, xs: [3, 4])), -5)
+// call: store(mut R(lo: 0, p: P(a: 1, b: 2, xs: [3, 4])), -6)
+// call: store(mut R(lo: 4, p: P(a: 1, b: 2, xs: [3, 4])), 0)
+// call: store(mut R(lo: 5, p: P(a: 1, b: 2, xs: [3, 4])), 0)
+// call: store(mut R(lo: -5, p: P(a: 1, b: 2, xs: [3, 4])), 0)
+// call: store(mut R(lo: -6, p: P(a: 1, b: 2, xs: [3, 4])), 0)
+// call: read(Q(p: P(a: 1, b: 2, xs: [30, 400]), flag: true, wide: 5000), 0)
+// call: read(Q(p: P(a: 1, b: 2, xs: [30, 400]), flag: true, wide: 5000), 1)
+// call: read(Q(p: P(a: 1, b: 2, xs: [30, 400]), flag: true, wide: 5000), 2)
+// call: read(Q(p: P(a: 200, b: -5, xs: [4000000000, 7]), flag: false, wide: -9), 0)
+// call: read(Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 170141183460469231731687303715884105727), 1)
+// call: read(Q(p: P(a: 256, b: 0, xs: [3, 4]), flag: true, wide: 5), 0)
+// call: set(mut Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 5), 9, 0)
+// call: set(mut Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: false, wide: 5), 9, 1)
+// call: set(mut Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 5), 9, 2)
+// call: field(mut Q(p: P(a: 254, b: 0, xs: [0, 6]), flag: false, wide: 8), 1)
+// call: field(mut Q(p: P(a: 255, b: 0, xs: [0, 6]), flag: false, wide: 8), 1)
+// call: field(mut Q(p: P(a: 1, b: 0, xs: [0, 6]), flag: false, wide: 8), -1)
+// call: field(mut Q(p: P(a: 0, b: 0, xs: [0, 6]), flag: false, wide: 8), -1)
+// call: copy(Q(p: P(a: 6, b: -5, xs: [10, 11]), flag: true, wide: -1), 1)
+// call: pick(true, P(a: 1, b: 1, xs: [1, 2]), P(a: 2, b: 2, xs: [3, 4]))
+// call: pick(false, P(a: 1, b: 1, xs: [1, 2]), P(a: 2, b: 2, xs: [3, 4]))
+// call: row(P(a: 1, b: 2, xs: [3, 4]), 5, 1, 0)
+// call: row(P(a: 1, b: 2, xs: [3, 4]), 0, 0, 1)
+// call: row(P(a: 1, b: 2, xs: [3, 4]), -1, 1, 1)
+// call: row(P(a: 1, b: 2, xs: [3, 4]), 6, 2, 0)
+// call: row(P(a: 1, b: 2, xs: [3, 4]), 6, 0, 2)
+// call: first(P(a: 1, b: 0, xs: [0, 0]), 2)
+// call: first(P(a: 250, b: 0, xs: [0, 0]), 5)
+// call: first(P(a: 251, b: 0, xs: [0, 0]), 5)
+// call: first(P(a: 0, b: 0, xs: [0, 0]), 0)
+// call: change(mut P(a: 1, b: 3, xs: [5, 6]), 9)
+// call: kept(P(a: 1, b: 3, xs: [5, 6]), 7)
+module structs
+
+pub struct P {
+  a: u8
+  b: i16
+  xs: [2]u32
+}
+
+pub struct Q {
+  p: P
+  flag: bool
+  wide: i128
+}
+
+pub struct R {
+  lo: i8[-5..5]
+  p: P
+}
+
+pub fn make(a: u16, b: i16) -> R = R(lo: b, p: P(a: a, b: b, xs: [a, b]))
+
+pub fn checked(r: R, k: i16) -> i16 = r.lo + r.p.b + k
+
+pub fn store(mut r: R, v: i8) {
+  r.lo = v
+}
+
+pub fn read(q: Q, i: usize) -> i128 = q.p.a + q.p.b + q.p.xs[i] + q.wide
+
+pub fn set(mut q: Q, v: u8, i: usize) {
+  q.p.a = v
+  q.p.xs[i] = v
+  q.flag = not q.flag
+}
+
+fn bump(mut n: u8, d: i8) {
+  n = n + d
+}
+
+pub fn field(mut q: Q, d: i8) {
+  bump(mut q.p.a, d)
+}
+
+pub fn copy(q: Q, v: u8) -> Q {
+  var r = q
+  r.p.a = v
+  r.wide = q.p.a
+  r
+}
+
+pub fn pick(c: bool, a: P, b: P) -> P = if c { a } else { b }
+
+pub fn row(p: P, x: i16, j: usize, k: usize) -> [2]P {
+  var ps = [p, p]
+  ps[j].xs[k] = x
+  ps
+}
+
+pub fn first(p: P, k: u8) -> u8 = p.a + k
+
+pub fn change(mut p: P, v: u8) -> u8 {
+  p.a = v
+  v
+}
+
+pub fn kept(p0: P, v: u8) -> u8 {
+  var p = p0
+  first(p, change(mut p, v))
+}

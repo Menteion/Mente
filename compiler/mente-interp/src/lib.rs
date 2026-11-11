@@ -22,16 +22,19 @@ use mente_syntax::Span;
 
 pub use int::Int;
 
-/// A value of M1: an integer, a `bool`, an array, or no value.
+/// A value of M2's slice: an integer, a `bool`, an array, a struct, or no value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
     Int(Int),
     Bool(bool),
     Array(Vec<Value>),
+    /// A struct by its name, with its fields' names and values in the order of its declaration.
+    Struct(String, Vec<(String, Value)>),
     Unit,
 }
 
-/// The canonical form of a value: `42`, `-1`, `true`, `[1, 2, 3]`, `()`.
+/// The canonical form of a value, Mente's own syntax for it (`core-calculus.md`, item 23):
+/// `42`, `-1`, `true`, `[1, 2, 3]`, `Pair(i: 0, j: 1)`, `()`.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -46,6 +49,16 @@ impl fmt::Display for Value {
                     write!(f, "{}", v)?;
                 }
                 write!(f, "]")
+            }
+            Value::Struct(name, fields) => {
+                write!(f, "{}(", name)?;
+                for (i, (n, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", n, v)?;
+                }
+                write!(f, ")")
             }
             Value::Unit => write!(f, "()"),
         }
@@ -258,8 +271,9 @@ pub fn run_main(module: &CheckedModule, limits: Limits) -> Result<Value, Stop> {
     call(module, "main", Vec::new(), limits)
 }
 
-/// Reads a call written as `name(arg, ...)`, whose arguments are integer, `bool` and array
-/// literals, such as `clamp(-3, 0, 10)` or `sum([1, 2, 3])`.
+/// Reads a call written as `name(arg, ...)`, whose arguments are integer, `bool`, array and
+/// struct values in the form a value prints in (`core-calculus.md`, item 23), such as
+/// `clamp(-3, 0, 10)`, `sum([1, 2, 3])` or `norm(Point(x: 3, y: -4))`.
 pub fn parse_call(text: &str) -> Option<(String, Vec<Value>)> {
     parse_call_modes(text).map(|(name, args)| (name, args.into_iter().map(|(_, v)| v).collect()))
 }
@@ -344,16 +358,52 @@ impl Reader {
                     }
                 }
             }
-            't' | 'f' => {
-                let rest: String = self.chars[self.pos..].iter().take(5).collect();
-                if rest.starts_with("true") {
-                    self.pos += 4;
-                    Some(Value::Bool(true))
-                } else if rest.starts_with("false") {
-                    self.pos += 5;
-                    Some(Value::Bool(false))
-                } else {
-                    None
+            c if c.is_ascii_alphabetic() || *c == '_' => {
+                let start = self.pos;
+                while self
+                    .chars
+                    .get(self.pos)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    self.pos += 1;
+                }
+                let word: String = self.chars[start..self.pos].iter().collect();
+                match word.as_str() {
+                    "true" => return Some(Value::Bool(true)),
+                    "false" => return Some(Value::Bool(false)),
+                    _ => {}
+                }
+                // A struct: `Name(field: value, ...)`, every field named.
+                self.skip_space();
+                if self.next()? != '(' {
+                    return None;
+                }
+                let mut fields = Vec::new();
+                loop {
+                    self.skip_space();
+                    let start = self.pos;
+                    while self
+                        .chars
+                        .get(self.pos)
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    {
+                        self.pos += 1;
+                    }
+                    let field: String = self.chars[start..self.pos].iter().collect();
+                    if field.is_empty() || field.starts_with(|c: char| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    self.skip_space();
+                    if self.next()? != ':' {
+                        return None;
+                    }
+                    fields.push((field, self.value()?));
+                    self.skip_space();
+                    match self.next()? {
+                        ',' => continue,
+                        ')' => return Some(Value::Struct(word, fields)),
+                        _ => return None,
+                    }
                 }
             }
             _ => {

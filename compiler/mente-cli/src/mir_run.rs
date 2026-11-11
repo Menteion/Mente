@@ -58,13 +58,12 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
     }
     let mut memory = Memory::default();
     let mut values = Vec::new();
-    let sret = match &entry.result {
-        Shape::Array(..) => {
-            let at = memory.alloc(entry.result.size());
-            values.push(Val::Addr(at));
-            Some(at)
-        }
-        _ => None,
+    let sret = if entry.result.in_memory() {
+        let at = memory.alloc(entry.result.size());
+        values.push(Val::Addr(at));
+        Some(at)
+    } else {
+        None
     };
     let mut places = Vec::new();
     for ((is_mut, shape), (_, value)) in entry.params.iter().zip(&args) {
@@ -338,6 +337,12 @@ fn native_arg(value: &Value) -> Result<native::Arg, String> {
                 .map(native_arg)
                 .collect::<Result<Vec<_>, String>>()?,
         ),
+        Value::Struct(_, fields) => native::Arg::Struct(
+            fields
+                .iter()
+                .map(|(_, v)| native_arg(v))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
         v => native::Arg::Int(num(v)?),
     })
 }
@@ -364,6 +369,15 @@ fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
             (Value::Int(_), Shape::Int(_)) | (Value::Bool(_), Shape::Bool) => true,
             (Value::Array(items), Shape::Array(n, elem)) => {
                 items.len() == *n as usize && items.iter().all(|i| shaped(i, elem))
+            }
+            (Value::Struct(name, fields), Shape::Struct(st)) => {
+                *name == st.name
+                    && fields.len() == st.fields.len()
+                    && st
+                        .fields
+                        .iter()
+                        .zip(fields)
+                        .all(|(f, (n, v))| f.name == *n && shaped(v, &f.shape))
             }
             _ => false,
         }
@@ -398,6 +412,12 @@ fn write(memory: &mut Memory, at: u64, shape: &Shape, value: &Value) -> Result<(
             }
             Ok(())
         }
+        (Shape::Struct(st), Value::Struct(_, fields)) if fields.len() == st.fields.len() => {
+            for (f, (_, item)) in st.fields.iter().zip(fields) {
+                write(memory, at + u64::from(f.offset), &f.shape, item)?;
+            }
+            Ok(())
+        }
         _ => Err(format!("`{}` does not have its parameter's shape", value)),
     }
 }
@@ -418,6 +438,20 @@ fn read(memory: &Memory, at: u64, shape: &Shape) -> Result<String, String> {
                 .map(|k| read(memory, at + u64::from(elem.size()) * k, elem))
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(format!("[{}]", items.join(", ")))
+        }
+        Shape::Struct(st) => {
+            let fields = st
+                .fields
+                .iter()
+                .map(|f| {
+                    Ok(format!(
+                        "{}: {}",
+                        f.name,
+                        read(memory, at + u64::from(f.offset), &f.shape)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{}({})", st.name, fields.join(", ")))
         }
         Shape::Unit => Ok("()".into()),
     }
@@ -576,6 +610,20 @@ pub fn below(n: i8) -> i8 {
     (
         "pub fn later(x: u8) -> u8 {\n  guard x > 0 else {\n    todo(\"zero is not handled\")\n  }\n  x\n}\npub fn never(x: u8) -> u8 {\n  guard x < 10 else {\n    unreachable(\"x is a digit\")\n  }\n  x\n}\nfn noisy(x: u8) -> u8 = x + 1\npub fn drop(x: u8) -> u8 {\n  _ = noisy(x)\n  x\n}",
         &["later(0)", "later(2)", "never(12)", "never(3)", "drop(255)", "drop(4)"],
+    ),
+    // Structs: built in the order of their fields, read, stored through places, passed as
+    // `mut` fields, copied, chosen by an `if`, and given from outside the program with a field
+    // outside its type or its refinement.
+    (
+        "pub struct P {\n  a: u8\n  b: i16[-5..5]\n  xs: [2]u32\n}\npub struct Q {\n  p: P\n  flag: bool\n  wide: u128\n}\npub fn make(a: u16, b: i16) -> P {\n  guard b >= -5 and b < 5 else {\n    return P(a: 0, b: 0, xs: [0, 0])\n  }\n  P(a: a, b: b, xs: [1, 2])\n}\npub fn read(q: Q) -> u128 = q.p.a + q.p.xs[1] + q.wide\npub fn set(mut q: Q, v: u8, i: usize) {\n  q.p.a = v\n  q.p.xs[i] = 9\n  q.flag = not q.flag\n}\nfn bump(mut n: u8) {\n  n += 1\n}\npub fn field(mut q: Q) {\n  bump(mut q.p.a)\n}\npub fn copy(q: Q) -> [2]u8 {\n  var r = q\n  r.p.a = 1\n  [q.p.a, r.p.a]\n}\npub fn pick(c: bool, a: P, b: P) -> P = if c { a } else { b }",
+        &["make(7, 3)", "make(300, 3)", "make(7, 9)", "read(Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 340282366920938463463374607431768211450))", "read(Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 340282366920938463463374607431768211455))", "read(Q(p: P(a: 1, b: 7, xs: [3, 4]), flag: true, wide: 0))", "read(Q(p: P(a: 256, b: 7, xs: [3, 4]), flag: true, wide: 0))", "set(mut Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 0), 5, 1)", "set(mut Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 0), 5, 2)", "field(mut Q(p: P(a: 254, b: 0, xs: [0, 0]), flag: false, wide: 0))", "field(mut Q(p: P(a: 255, b: 0, xs: [0, 0]), flag: false, wide: 0))", "copy(Q(p: P(a: 6, b: -5, xs: [0, 0]), flag: false, wide: 0))", "pick(false, P(a: 1, b: 1, xs: [1, 1]), P(a: 2, b: 2, xs: [2, 2]))"],
+    ),
+    // An argument read from a binding keeps its value though a later operand changes the
+    // binding, as a value does: through a `mut` argument, an index, an `if`'s branch or an
+    // assignment in a block.
+    (
+        "fn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k\nfn bump(mut xs: [2]u8) -> u8 {\n  xs[0] = 7\n  0\n}\npub fn arrays() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, bump(mut xs))\n}\nfn one(mut xs: [2]u8) -> usize {\n  xs[1] = 50\n  1\n}\npub fn index() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  xs[one(mut xs)]\n}\npub fn branch(c: bool) -> u8 {\n  var xs: [2]u8 = [1, 2]\n  val ys: [2]u8 = [3, 4]\n  first(if c { xs } else { ys }, bump(mut xs))\n}\npub fn assigned(c: bool) -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, if c {\n    xs[0] = 40\n    0\n  } else {\n    1\n  })\n}",
+        &["arrays()", "index()", "branch(true)", "branch(false)", "assigned(true)", "assigned(false)"],
     ),
     // An empty array kept across a call: its slot of no bytes begins where the call's memory
     // does, and stays with its frame when the call returns (the generator's seed 88).

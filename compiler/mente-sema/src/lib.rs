@@ -10,6 +10,7 @@ pub mod check;
 pub mod incremental;
 pub mod names;
 pub mod octagon;
+pub mod structs;
 pub mod tier1;
 pub mod types;
 pub mod wide;
@@ -152,6 +153,8 @@ pub struct CheckedFn {
 pub struct CheckedModule {
     pub names: Vec<String>,
     pub functions: Vec<Option<CheckedFn>>,
+    /// The module's structs, with their fields and layouts.
+    pub structs: structs::Structs,
 }
 
 impl CheckedModule {
@@ -176,7 +179,7 @@ pub fn check_program_without_proofs(src: &str) -> Result<CheckedModule, Vec<Diag
 fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
     let module = parse_module(src).map_err(|d| vec![d])?;
     let b = bodies(src, &module, prove);
-    let (functions, body_errors) = (b.functions, b.errors);
+    let (functions, body_errors, structs) = (b.functions, b.errors, b.structs);
     combine(verify_module(&module), body_errors)?;
     Ok(CheckedModule {
         names: module
@@ -188,6 +191,7 @@ fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
             })
             .collect(),
         functions,
+        structs,
     })
 }
 
@@ -238,6 +242,7 @@ struct Bodies {
     /// For each report, the queries of the obligations Tier 1 discharged, when asked for.
     queries: Vec<Vec<tier1::smt::Query>>,
     todos: Vec<(Span, String)>,
+    structs: structs::Structs,
 }
 
 fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
@@ -246,6 +251,16 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
 
 /// [`bodies`], with Tier 1 writing the query of each obligation it discharges when `queries`.
 fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bodies {
+    // The structs first: every function reads their fields and layouts. Their diagnostics come
+    // before the functions'.
+    let parsed_structs = mente_syntax::parse_structs(src, module);
+    let mut errors: Vec<Diagnostic> = parsed_structs
+        .iter()
+        .flat_map(|p| p.errors.iter().cloned())
+        .collect();
+    let (structs, declared) = structs::declare(module, &parsed_structs);
+    errors.extend(declared);
+    errors.sort_by_key(|d| d.primary.start);
     let parsed = mente_syntax::parse_bodies(src, module);
     let mut todos: Vec<(Span, String)> = parsed
         .iter()
@@ -274,7 +289,6 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .iter()
         .map(|p| p.syntax.as_ref().map(|syntax| tier1::Callee { syntax }))
         .collect();
-    let mut errors = Vec::new();
     let mut checked = Vec::new();
     let mut reports = Vec::new();
     let mut discharged = Vec::new();
@@ -282,8 +296,8 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         errors.extend(p.errors.iter().cloned());
         let done = match (&p.syntax, p.errors.is_empty()) {
             (Some(syntax), true) => {
-                let (resolution, mut found) = names::resolve(syntax, &names);
-                let (typing, typed) = check::check(syntax, &resolution, &signatures);
+                let (resolution, mut found) = names::resolve(syntax, &names, &structs);
+                let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs);
                 found.extend(typed);
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
@@ -293,6 +307,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                         resolution: &resolution,
                         typing: &typing,
                         routing: *routing,
+                        structs: &structs,
                     };
                     let (report, written) = if queries {
                         tier1::check_with_queries(&f, &callees, src)
@@ -331,6 +346,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         reports,
         queries: discharged,
         todos,
+        structs,
     }
 }
 
@@ -1009,11 +1025,11 @@ mod tests {
     fn test_typed_functions_dump_with_their_diagnostics() {
         assert_eq!(
             dump_typed("module m\npub fn f(x: u8) -> u8 {\n  val y = x + 1\n  y\n}\npub fn g() -> u8 = zz\n"),
-            "mente-dump 1 typed\n(fn f ((x u8)) u8 () {(val y (+ x 1)); y})\n  (binding x u8)\n  (binding y u8)\n  (expr 0 3:11 1 u8)\n  (expr 1 3:15 1 integer)\n  (expr 2 3:11 5 u8)\n  (expr 3 4:3 1 u8)\n(fn g () u8 () (= zz))\n  (expr 0 6:20 2 _)\n6:20 E0201\n"
+            "mente-dump 2 typed\n(fn f ((x u8)) u8 () {(val y (+ x 1)); y})\n  (binding x u8)\n  (binding y u8)\n  (expr 0 3:11 1 u8)\n  (expr 1 3:15 1 integer)\n  (expr 2 3:11 5 u8)\n  (expr 3 4:3 1 u8)\n(fn g () u8 () (= zz))\n  (expr 0 6:20 2 _)\n6:20 E0201\n"
         );
         assert_eq!(
             dump_typed("module m\nlet x = 1\n"),
-            "mente-dump 1 typed\n2:1 E0111\n"
+            "mente-dump 2 typed\n2:1 E0111\n"
         );
     }
 

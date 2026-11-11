@@ -48,6 +48,8 @@ pub enum Arg {
     Int(Num),
     Bool(bool),
     Array(Vec<Arg>),
+    /// A struct's fields, in the order of its declaration.
+    Struct(Vec<Arg>),
 }
 
 fn err(message: impl Into<String>) -> CodegenError {
@@ -107,6 +109,11 @@ pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
                 (!crate::lower::mir(*t).holds(*n)).then_some((*n, t.name))
             }
             (Shape::Array(_, elem), Arg::Array(items)) => items.iter().find_map(|a| first(elem, a)),
+            (Shape::Struct(st), Arg::Struct(fields)) => st
+                .fields
+                .iter()
+                .zip(fields)
+                .find_map(|(f, a)| first(&f.shape, a)),
             _ => None,
         }
     }
@@ -1318,7 +1325,7 @@ fn make_call(
             None
         };
         flat.extend(wide);
-        let sret = if matches!(entry.result, Shape::Array(..)) {
+        let sret = if entry.result.in_memory() {
             params.next();
             let slot = shared.take(&mut e, entry.result.size())?;
             flat.push(slot);
@@ -1445,6 +1452,13 @@ fn store_arg(e: &mut Emit, at: Value, shape: &Shape, arg: &Arg) -> Result<(), Co
                 store_arg(e, a, elem, item)?;
             }
         }
+        (Shape::Struct(st), Arg::Struct(fields)) if fields.len() == st.fields.len() => {
+            for (f, item) in st.fields.iter().zip(fields) {
+                let off = e.iconst(e.ptr, i64::from(f.offset));
+                let a = e.b.ins().iadd(at, off);
+                store_arg(e, a, &f.shape, item)?;
+            }
+        }
         _ => return Err(err("an argument of another shape than its parameter")),
     }
     Ok(())
@@ -1505,6 +1519,18 @@ fn print_at(
                 print_at(writer, rt, e, a, elem)?;
             }
             emit_text(writer, rt, e, 1, "]")?;
+        }
+        // `Name(field: v, ...)`, the fields in the order of the declaration.
+        Shape::Struct(st) => {
+            emit_text(writer, rt, e, 1, &format!("{}(", st.name))?;
+            for (k, f) in st.fields.iter().enumerate() {
+                let sep = if k > 0 { ", " } else { "" };
+                emit_text(writer, rt, e, 1, &format!("{}{}: ", sep, f.name))?;
+                let off = e.iconst(e.ptr, i64::from(f.offset));
+                let a = e.b.ins().iadd(at, off);
+                print_at(writer, rt, e, a, &f.shape)?;
+            }
+            emit_text(writer, rt, e, 1, ")")?;
         }
         Shape::Unit => emit_text(writer, rt, e, 1, "()")?,
     }

@@ -15,15 +15,20 @@
 //!   parameters' refinements, the callee's `requires` at the call, and its `decreases` measure,
 //!   because those traps are located in the caller; the callee checks its `ensures` at each
 //!   return;
-//! - a `var` and every array live in memory, and a `mut` argument is the address of its place.
+//! - a `var`, every array and every struct live in memory, a struct's fields where the layout of
+//!   `mente_sema::structs` places them, and a `mut` argument is the address of its place.
 //!
 //! Every check is kept: erasing those Tier 1 proves is a separate step.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use mente_mir::cfg::{
     self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Term, Ty,
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
+use mente_sema::structs::Structs;
 use mente_sema::tier1::{Obligation, ObligationKind, Tag};
 use mente_sema::types::{Int as SemaInt, IntTy as SemaIntTy, Ty as SemaTy};
 use mente_sema::wide::{self, Interval};
@@ -54,23 +59,114 @@ pub struct Entry {
     pub at: Loc,
 }
 
-/// The shape of a value: an integer of a type, a boolean, an array, or nothing.
+/// The shape of a value: an integer of a type, a boolean, an array, a struct, or nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shape {
     Int(SemaIntTy),
     Bool,
     Array(u32, Box<Shape>),
+    /// A struct, its fields where its layout places them.
+    Struct(Arc<StructShape>),
     Unit,
 }
 
+/// A struct as memory holds it: its fields in the order of its declaration, each at the offset
+/// its layout gives it, and its size and alignment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructShape {
+    pub name: String,
+    pub fields: Vec<FieldShape>,
+    pub size: u32,
+    pub align: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldShape {
+    pub name: String,
+    pub offset: u32,
+    pub shape: Shape,
+}
+
+impl StructShape {
+    /// The field named `name`, with its index in the declaration.
+    pub fn field(&self, name: &str) -> Option<(usize, &FieldShape)> {
+        self.fields.iter().enumerate().find(|(_, f)| f.name == name)
+    }
+}
+
+/// The shape of each struct of a module, made from the layouts the checker gives them
+/// (`mente_sema::structs`), which is the one place a layout is defined.
+#[derive(Clone, Debug, Default)]
+pub struct Shapes(HashMap<String, Arc<StructShape>>);
+
+impl Shapes {
+    pub fn of(structs: &Structs) -> Result<Shapes, String> {
+        let mut shapes = Shapes::default();
+        for d in &structs.defs {
+            shapes.add(structs, &d.name)?;
+        }
+        Ok(shapes)
+    }
+
+    fn add(&mut self, structs: &Structs, name: &str) -> Result<Arc<StructShape>, String> {
+        if let Some(s) = self.0.get(name) {
+            return Ok(s.clone());
+        }
+        let def = structs
+            .get(name)
+            .ok_or_else(|| format!("no struct `{}`", name))?;
+        let layout = def
+            .layout
+            .as_ref()
+            .ok_or_else(|| format!("a struct `{}` without a layout", name))?;
+        let bytes = |n: u128| u32::try_from(n).map_err(|_| format!("a struct of {} bytes", n));
+        let mut fields = Vec::new();
+        for (f, &offset) in def.fields.iter().zip(&layout.offsets) {
+            let shape = self.shape_of(structs, &f.ty)?;
+            fields.push(FieldShape {
+                name: f.name.clone(),
+                offset: bytes(offset)?,
+                shape,
+            });
+        }
+        let s = Arc::new(StructShape {
+            name: name.to_string(),
+            fields,
+            size: bytes(layout.size)?,
+            align: bytes(layout.align)?,
+        });
+        self.0.insert(name.to_string(), s.clone());
+        Ok(s)
+    }
+
+    /// The shape of `t`, adding the shapes of the structs it holds first.
+    fn shape_of(&mut self, structs: &Structs, t: &SemaTy) -> Result<Shape, String> {
+        match t {
+            SemaTy::Struct(n) => Ok(Shape::Struct(self.add(structs, n)?)),
+            SemaTy::Array(n, e) => Ok(Shape::Array(
+                u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?,
+                Box::new(self.shape_of(structs, e)?),
+            )),
+            other => Shape::of(other, self),
+        }
+    }
+}
+
 impl Shape {
-    pub fn of(t: &SemaTy) -> Result<Shape, String> {
+    pub fn of(t: &SemaTy, shapes: &Shapes) -> Result<Shape, String> {
         Ok(match t {
             SemaTy::Int(i) => Shape::Int(int_ty(i).unwrap_or(I64)),
             SemaTy::Bool => Shape::Bool,
             SemaTy::Array(n, e) => Shape::Array(
                 u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?,
-                Box::new(Shape::of(e)?),
+                Box::new(Shape::of(e, shapes)?),
+            ),
+            SemaTy::Struct(n) => Shape::Struct(
+                shapes
+                    .0
+                    .get(n)
+                    .cloned()
+                    .ok_or_else(|| format!("a struct `{}` without a shape", n))?,
             ),
             SemaTy::Unit => Shape::Unit,
             SemaTy::Any => return Err("a value of no type".into()),
@@ -83,16 +179,33 @@ impl Shape {
             Shape::Int(t) => t.bits / 8,
             Shape::Bool => 1,
             Shape::Array(n, e) => n * e.size(),
+            Shape::Struct(s) => s.size,
             Shape::Unit => 0,
         }
     }
 
-    /// The MIR type of a value of this shape: an array is the address of its first element.
+    /// The alignment in memory: an integer's width, an array's element's, a struct's layout's.
+    pub fn align(&self) -> u32 {
+        match self {
+            Shape::Int(t) => t.bits / 8,
+            Shape::Array(_, e) => e.align(),
+            Shape::Struct(s) => s.align,
+            Shape::Bool | Shape::Unit => 1,
+        }
+    }
+
+    /// Whether a value of this shape lives in memory, passed and returned by its address: an
+    /// array or a struct.
+    pub fn in_memory(&self) -> bool {
+        matches!(self, Shape::Array(..) | Shape::Struct(_))
+    }
+
+    /// The MIR type of a value of this shape: an array or a struct is its address.
     pub fn ty(&self) -> Ty {
         match self {
             Shape::Int(t) => Ty::Int(mir(*t)),
             Shape::Bool => Ty::Bool,
-            Shape::Array(..) => Ty::Addr,
+            Shape::Array(..) | Shape::Struct(_) => Ty::Addr,
             Shape::Unit => Ty::Unit,
         }
     }
@@ -136,8 +249,8 @@ fn machine(lo: Num, hi: Num) -> Option<IntTy> {
 enum V {
     Int(NodeId, IntTy),
     Bool(NodeId),
-    /// An array: the address of its first element.
-    Arr(NodeId),
+    /// An array or a struct, in memory: its address.
+    Mem(NodeId),
     Unit,
     /// Control left: a trap, a return, a `break` or a `continue`.
     Never,
@@ -159,16 +272,20 @@ struct Sig {
     result: Shape,
 }
 
+/// A declared type: a type node in the tree it lives in, a function's or a struct's.
+type Declared<'t> = Option<(&'t Tree, TypeId)>;
+
 /// An argument of a call: a value with the span it is narrowed at and its expression's shape,
 /// or for a `mut` parameter the address of a place, with its declared type.
 #[derive(Clone, Debug)]
-enum Arg {
+enum Arg<'t> {
     Value(V, Span, Shape),
-    Place(NodeId, Shape, Option<TypeId>, Span),
+    Place(NodeId, Shape, Declared<'t>, Span),
 }
 
 /// Lowers every function of `m` that has a body, and gives each its entry.
 pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
+    let shapes = Shapes::of(&m.structs)?;
     let mut sigs = Vec::new();
     let mut count = 0u32;
     for f in &m.functions {
@@ -179,10 +296,10 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
                     .syntax
                     .params
                     .iter()
-                    .map(|p| Ok((p.is_mut, Shape::of(&SemaTy::of(tree, p.ty))?)))
+                    .map(|p| Ok((p.is_mut, Shape::of(&SemaTy::of(tree, p.ty), &shapes)?)))
                     .collect::<Result<Vec<_>, String>>()?;
                 let result = match f.syntax.result {
-                    Some(t) => Shape::of(&SemaTy::of(tree, t))?,
+                    Some(t) => Shape::of(&SemaTy::of(tree, t), &shapes)?,
                     None => Shape::Unit,
                 };
                 count += 1;
@@ -198,7 +315,7 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
     let mut module = cfg::Module::default();
     for (i, f) in m.functions.iter().enumerate() {
         if let Some(f) = f {
-            let lowered = Lower::new(m, &sigs, i, false)?
+            let lowered = Lower::new(m, &sigs, &shapes, i, false)?
                 .function()
                 .map_err(|e| format!("fn {}: {}", f.syntax.name, e))?;
             module.functions.push(lowered);
@@ -208,7 +325,7 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
     for (i, f) in m.functions.iter().enumerate() {
         if let (Some(f), Some(sig)) = (f, &sigs[i]) {
             let func = FuncId(module.functions.len() as u32);
-            let entry = Lower::new(m, &sigs, i, true)?
+            let entry = Lower::new(m, &sigs, &shapes, i, true)?
                 .entry()
                 .map_err(|e| format!("entry of {}: {}", f.syntax.name, e))?;
             module.functions.push(entry);
@@ -228,11 +345,11 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
     Ok(Lowered { module, entries })
 }
 
-/// The MIR parameters of a function of `sig`: an array result's address first, then each
-/// parameter, a `mut` one or an array as an address; and its MIR result.
+/// The MIR parameters of a function of `sig`: the address of a result in memory first, then
+/// each parameter, a `mut` one or one in memory as an address; and its MIR result.
 fn mir_params(sig: &Sig) -> (Vec<Ty>, Option<Ty>) {
     let mut params = Vec::new();
-    if matches!(sig.result, Shape::Array(..)) {
+    if sig.result.in_memory() {
         params.push(Ty::Addr);
     }
     for (is_mut, shape) in &sig.params {
@@ -308,21 +425,31 @@ impl Key {
     }
 }
 
-/// An index of a place: its value, the span of its indexing, where it traps, and the span of the
-/// index itself, where Tier 1 records it.
-type Indexing = (V, Span, Span);
+/// A step of a place from its root binding: an index, with its value, the span of its indexing,
+/// where it traps, and the span of the index itself, where Tier 1 records it; or a field, by
+/// its index in the struct's declaration.
+#[derive(Clone, Copy, Debug)]
+enum Step {
+    Index(V, Span, Span),
+    Field(usize),
+}
 
-/// Whether a place's indexes end in one of no value, after which the place is never reached.
-fn reaches_never(indexes: &[Indexing]) -> bool {
-    indexes
+/// Whether a place's steps end in an index of no value, after which the place is never reached.
+fn reaches_never(steps: &[Step]) -> bool {
+    steps
         .last()
-        .is_some_and(|(i, _, _)| matches!(i, V::Never))
+        .is_some_and(|s| matches!(s, Step::Index(V::Never, _, _)))
 }
 
 /// One function's lowering.
 struct Lower<'a> {
     m: &'a CheckedModule,
     sigs: &'a [Option<Sig>],
+    shapes: &'a Shapes,
+    /// Whether this is an entry, whose arguments come from outside the program: a struct's
+    /// fields are checked against their refinements there, which a value made inside the
+    /// program always holds.
+    entry: bool,
     s: Scope<'a>,
     b: Builder,
     /// Whether each block has its terminator; one that never gets one is unreachable.
@@ -345,6 +472,7 @@ impl<'a> Lower<'a> {
     fn new(
         m: &'a CheckedModule,
         sigs: &'a [Option<Sig>],
+        shapes: &'a Shapes,
         index: usize,
         entry: bool,
     ) -> Result<Lower<'a>, String> {
@@ -367,6 +495,8 @@ impl<'a> Lower<'a> {
         Ok(Lower {
             m,
             sigs,
+            shapes,
+            entry,
             s,
             b,
             ended: vec![false],
@@ -477,7 +607,7 @@ impl<'a> Lower<'a> {
     fn function(mut self) -> Result<cfg::Function, String> {
         let sig = self.sig_of(self.s.index)?;
         let mut params = self.b.params(BlockId(0)).into_iter();
-        if matches!(sig.result, Shape::Array(..)) {
+        if sig.result.in_memory() {
             self.sret = params.next();
         }
         for (i, (is_mut, shape)) in sig.params.iter().enumerate() {
@@ -542,7 +672,7 @@ impl<'a> Lower<'a> {
         let span = self.s.f.syntax.name_span;
         let sig = self.sig_of(self.s.index)?;
         let mut params = self.b.params(BlockId(0)).into_iter();
-        let sret = if matches!(sig.result, Shape::Array(..)) {
+        let sret = if sig.result.in_memory() {
             params.next()
         } else {
             None
@@ -550,11 +680,11 @@ impl<'a> Lower<'a> {
         let mut args = Vec::new();
         for (i, (is_mut, shape)) in sig.params.iter().enumerate() {
             let p = params.next().ok_or("too few parameters")?;
-            let declared = Some(self.s.f.syntax.params[i].ty);
+            let declared = Some((self.tree(), self.s.f.syntax.params[i].ty));
             args.push(match (is_mut, shape) {
                 (false, Shape::Int(t)) => Arg::Value(V::Int(p, mir(*t)), span, shape.clone()),
                 (false, Shape::Bool) => Arg::Value(V::Bool(p), span, shape.clone()),
-                (false, _) => Arg::Value(V::Arr(p), span, shape.clone()),
+                (false, _) => Arg::Value(V::Mem(p), span, shape.clone()),
                 (true, shape) => Arg::Place(p, shape.clone(), declared, span),
             });
         }
@@ -576,7 +706,7 @@ impl<'a> Lower<'a> {
             return Ok(());
         }
         let result = self.sig_of(self.s.index)?.result.clone();
-        let declared = self.s.f.syntax.result;
+        let declared = self.s.f.syntax.result.map(|t| (self.tree(), t));
         let v = self.land(v, &shape, &result, declared, span)?;
         let tree = self.tree();
         for c in self.clauses(ContractKind::Ensures) {
@@ -591,7 +721,7 @@ impl<'a> Lower<'a> {
                 .position(|b| b.kind == BindingKind::Result && b.span == clause)
             {
                 self.s.locals[id] = Some(match v {
-                    V::Arr(a) => Local::Place(a, result.clone()),
+                    V::Mem(a) => Local::Place(a, result.clone()),
                     v => Local::Value(v),
                 });
             }
@@ -601,7 +731,7 @@ impl<'a> Lower<'a> {
         }
         match v {
             V::Int(n, _) | V::Bool(n) => self.end(Term::Return(Some(n))),
-            V::Arr(a) => {
+            V::Mem(a) => {
                 let to = self.sret.ok_or("an array result with nowhere to go")?;
                 self.at(span);
                 self.inst(
@@ -677,16 +807,17 @@ impl<'a> Lower<'a> {
                     return Ok(V::Unit);
                 };
                 let id = id.0 as usize;
-                let shape = Shape::of(&self.s.f.typing.bindings[id])?;
+                let shape = Shape::of(&self.s.f.typing.bindings[id], self.shapes)?;
                 let v = self.expr(*init)?;
                 let from = self.shape(*init)?;
-                let v = self.land(v, &from, &shape, *ty, tree.expr(*init).span)?;
+                let declared = ty.map(|t| (tree, t));
+                let v = self.land(v, &from, &shape, declared, tree.expr(*init).span)?;
                 if matches!(v, V::Never) {
                     return Ok(V::Never);
                 }
                 let is_var = self.s.f.resolution.bindings[id].kind == BindingKind::Var;
                 let local = match (v, is_var) {
-                    (V::Arr(a), _) => Local::Place(self.copy(a, &shape), shape),
+                    (V::Mem(a), _) => Local::Place(self.copy(a, &shape), shape),
                     (v, false) => Local::Value(v),
                     (v, true) => {
                         let slot = self.inst(
@@ -875,16 +1006,16 @@ impl<'a> Lower<'a> {
     fn assign(&mut self, place: ExprId, op: AssignOp, value: ExprId) -> Result<V, String> {
         let tree = self.tree();
         let span = tree.expr(value).span;
-        let (root, indexes) = self.place_path(place)?;
-        if reaches_never(&indexes) {
+        let (root, steps) = self.place_path(place)?;
+        if reaches_never(&steps) {
             return Ok(V::Never);
         }
         let shape = self.shape(place)?;
-        let declared = self.place_type(root, indexes.len());
+        let declared = self.place_type(root, &steps);
         let (new, from) = match op {
             AssignOp::Set => (self.expr(value)?, self.shape(value)?),
             AssignOp::Compound(op) => {
-                let at = self.address(root, &indexes)?;
+                let at = self.address(root, &steps)?;
                 let current = self.load(at, &shape);
                 let rhs = self.expr(value)?;
                 let iv = Self::place_interval(&shape);
@@ -901,25 +1032,37 @@ impl<'a> Lower<'a> {
         if matches!(new, V::Never) {
             return Ok(V::Never);
         }
-        let at = self.address(root, &indexes)?;
+        let at = self.address(root, &steps)?;
         self.store_shaped(at, new, &shape);
         Ok(V::Unit)
     }
 
-    /// The root binding of a place and its indexes, evaluated left to right, each with the
-    /// span of its indexing and of the index itself. An index of no value, such as a `todo`,
-    /// ends them: nothing after it is reached ([`reaches_never`]).
-    fn place_path(&mut self, e: ExprId) -> Result<(usize, Vec<Indexing>), String> {
+    /// The root binding of a place and its steps, its indexes evaluated left to right, each
+    /// with the span of its indexing and of the index itself. An index of no value, such as a
+    /// `todo`, ends them: nothing after it is reached ([`reaches_never`]).
+    fn place_path(&mut self, e: ExprId) -> Result<(usize, Vec<Step>), String> {
         let tree = self.tree();
         match &tree.expr(e).kind {
             ExprKind::Index { base, index } => {
-                let (root, mut indexes) = self.place_path(*base)?;
-                if reaches_never(&indexes) {
-                    return Ok((root, indexes));
+                let (root, mut steps) = self.place_path(*base)?;
+                if reaches_never(&steps) {
+                    return Ok((root, steps));
                 }
                 let i = self.expr(*index)?;
-                indexes.push((i, tree.expr(e).span, tree.expr(*index).span));
-                Ok((root, indexes))
+                steps.push(Step::Index(i, tree.expr(e).span, tree.expr(*index).span));
+                Ok((root, steps))
+            }
+            ExprKind::Field { base, name } => {
+                let (root, mut steps) = self.place_path(*base)?;
+                if reaches_never(&steps) {
+                    return Ok((root, steps));
+                }
+                let Shape::Struct(s) = self.shape(*base)? else {
+                    return Err("a field of a value that is not a struct".into());
+                };
+                let (k, _) = s.field(name).ok_or("a field the struct lacks")?;
+                steps.push(Step::Field(k));
+                Ok((root, steps))
             }
             _ => Ok((
                 self.s.f.resolution.names[e.0 as usize]
@@ -930,33 +1073,68 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// The declared type of a place, when its root binding states one.
-    fn place_type(&self, root: usize, depth: usize) -> Option<TypeId> {
-        let tree = self.tree();
-        let mut ty = self.s.f.resolution.bindings.get(root)?.ty?;
-        for _ in 0..depth {
-            match &tree.ty(ty).kind {
-                TypeKind::Array { elem, .. } => ty = *elem,
+    /// The declared type of a place: its root binding's, when it states one, down its indexes;
+    /// a field's, in its struct's declaration, whatever its root states.
+    fn place_type(&self, root: usize, steps: &[Step]) -> Declared<'a> {
+        let f = self.s.f;
+        let mut declared = f
+            .resolution
+            .bindings
+            .get(root)?
+            .ty
+            .map(|t| (self.tree(), t));
+        let mut ty = f.typing.bindings.get(root)?.clone();
+        for step in steps {
+            match (step, ty) {
+                (Step::Index(..), SemaTy::Array(_, elem)) => {
+                    declared = declared.and_then(|(tree, t)| match &tree.ty(t).kind {
+                        TypeKind::Array { elem, .. } => Some((tree, *elem)),
+                        _ => None,
+                    });
+                    ty = *elem;
+                }
+                (Step::Field(k), SemaTy::Struct(s)) => {
+                    let def = self.m.structs.get(&s)?;
+                    let field = def.fields.get(*k)?;
+                    declared = Some((def.tree(), field.decl));
+                    ty = field.ty.clone();
+                }
                 _ => return None,
             }
         }
-        Some(ty)
+        declared
     }
 
     /// The address of a place, each index checked against its array's length.
-    fn address(&mut self, root: usize, indexes: &[Indexing]) -> Result<NodeId, String> {
+    fn address(&mut self, root: usize, steps: &[Step]) -> Result<NodeId, String> {
         let local = self.s.locals[root].clone().ok_or("a place never bound")?;
         let Local::Place(mut at, mut shape) = local else {
             return Err("a place that is not in memory".into());
         };
-        for (i, span, key) in indexes {
-            let Shape::Array(len, elem) = shape else {
-                return Err("an index into a value that is not an array".into());
-            };
-            at = self.element(at, len, &elem, *i, (*span, *key))?;
-            shape = *elem;
+        for step in steps {
+            match (step, shape) {
+                (Step::Index(i, span, key), Shape::Array(len, elem)) => {
+                    at = self.element(at, len, &elem, *i, (*span, *key))?;
+                    shape = *elem;
+                }
+                (Step::Field(k), Shape::Struct(s)) => {
+                    let f = s.fields.get(*k).ok_or("a field the struct lacks")?;
+                    at = self.field_addr(at, f.offset);
+                    shape = f.shape.clone();
+                }
+                _ => return Err("a step into a value that has no such part".into()),
+            }
         }
         Ok(at)
+    }
+
+    /// The address `offset` bytes past `base`, where a field lies.
+    fn field_addr(&mut self, base: NodeId, offset: u32) -> NodeId {
+        if offset == 0 {
+            return base;
+        }
+        let k = self.int(USIZE, Num::new(false, u128::from(offset)));
+        self.inst(Op::Elem { stride: 1 }, Ty::Addr, &[base, k])
     }
 
     /// The address of element `i` of an array of `len` elements of `elem` at `base`; an index
@@ -1004,7 +1182,7 @@ impl<'a> Lower<'a> {
         match shape {
             Shape::Int(t) => V::Int(self.inst(Op::Load, Ty::Int(mir(*t)), &[at]), mir(*t)),
             Shape::Bool => V::Bool(self.inst(Op::Load, Ty::Bool, &[at])),
-            Shape::Array(..) => V::Arr(at),
+            Shape::Array(..) | Shape::Struct(_) => V::Mem(at),
             Shape::Unit => V::Unit,
         }
     }
@@ -1017,7 +1195,7 @@ impl<'a> Lower<'a> {
 
     fn store_shaped(&mut self, at: NodeId, v: V, shape: &Shape) {
         match v {
-            V::Arr(a) => {
+            V::Mem(a) => {
                 self.inst(
                     Op::Copy {
                         bytes: shape.size(),
@@ -1030,7 +1208,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// A new slot holding a copy of the array at `a`.
+    /// A new slot holding a copy of the array or struct at `a`.
     fn copy(&mut self, a: NodeId, shape: &Shape) -> NodeId {
         let bytes = shape.size();
         let slot = self.inst(Op::Slot { bytes }, Ty::Addr, &[]);
@@ -1084,7 +1262,7 @@ impl<'a> Lower<'a> {
         v: V,
         from: &Shape,
         to: &Shape,
-        declared: Option<TypeId>,
+        declared: Declared<'a>,
         span: Span,
     ) -> Result<V, String> {
         let v = self.narrow(v, from, to, span, Some(span))?;
@@ -1108,11 +1286,11 @@ impl<'a> Lower<'a> {
             (V::Int(n, t), _, Shape::Int(into)) => {
                 V::Int(self.narrow_int(n, t, *into, span, key), mir(*into))
             }
-            (V::Arr(a), Shape::Array(_, fe), Shape::Array(len, te)) => {
+            (V::Mem(a), Shape::Array(_, fe), Shape::Array(len, te)) => {
                 // Elements of the same type stay where they are; of another type, they are
                 // narrowed into a new array.
                 if fe == te {
-                    return Ok(V::Arr(a));
+                    return Ok(V::Mem(a));
                 }
                 let slot = self.inst(Op::Slot { bytes: to.size() }, Ty::Addr, &[]);
                 let (fe, te, len) = ((**fe).clone(), (**te).clone(), *len);
@@ -1124,7 +1302,7 @@ impl<'a> Lower<'a> {
                     l.store_shaped(dst, x, &te);
                     Ok(())
                 })?;
-                V::Arr(slot)
+                V::Mem(slot)
             }
             (v, _, _) => v,
         })
@@ -1176,19 +1354,19 @@ impl<'a> Lower<'a> {
     }
 
     /// Checks a value of `shape` against the refinements of the declared type `d`, elementwise
-    /// for an array, trapping at `span`, unless Tier 1 proves under `key` that it fits them.
+    /// for an array, trapping at `span`, unless Tier 1 proves under `key` that it fits them; in
+    /// an entry, fieldwise for a struct too.
     fn refined(
         &mut self,
         v: V,
         shape: &Shape,
-        d: TypeId,
+        (tree, d): (&'a Tree, TypeId),
         span: Span,
         key: Key,
     ) -> Result<(), String> {
         if self.proven(ObligationKind::Refinement, key) {
             return Ok(());
         }
-        let tree = self.tree();
         match (v, &tree.ty(d).kind, shape) {
             (
                 V::Int(x, t),
@@ -1198,18 +1376,49 @@ impl<'a> Lower<'a> {
                 },
                 _,
             ) => self.in_range(x, t, r, span),
-            (V::Arr(a), TypeKind::Array { elem, .. }, Shape::Array(len, es)) => {
-                if leaf_refinement(tree, *elem).is_none() {
+            (V::Mem(a), TypeKind::Array { elem, .. }, Shape::Array(len, es)) => {
+                if !self.refines(tree, *elem) {
                     return Ok(());
                 }
                 let (elem, es, len) = (*elem, (**es).clone(), *len);
                 self.each(len, &mut |l, i| {
                     let at = l.inst(Op::Elem { stride: es.size() }, Ty::Addr, &[a, i]);
                     let x = l.load(at, &es);
-                    l.refined(x, &es, elem, span, key)
+                    l.refined(x, &es, (tree, elem), span, key)
                 })
             }
+            (V::Mem(a), TypeKind::Named(name), Shape::Struct(s)) if self.entry => {
+                let def = self
+                    .m
+                    .structs
+                    .get(name)
+                    .ok_or("a struct without a declaration")?;
+                for (fs, fd) in s.fields.iter().zip(&def.fields) {
+                    if !self.refines(def.tree(), fd.decl) {
+                        continue;
+                    }
+                    let at = self.field_addr(a, fs.offset);
+                    let x = self.load(at, &fs.shape);
+                    self.refined(x, &fs.shape, (def.tree(), fd.decl), span, key)?;
+                }
+                Ok(())
+            }
             _ => Ok(()),
+        }
+    }
+
+    /// Whether a value of the declared type `t` has a refinement [`Self::refined`] checks: at the
+    /// bottom of its arrays, or, in an entry, in its structs' fields.
+    fn refines(&self, tree: &Tree, t: TypeId) -> bool {
+        match &tree.ty(t).kind {
+            TypeKind::Int { refinement, .. } => refinement.is_some(),
+            TypeKind::Array { elem, .. } => self.refines(tree, *elem),
+            TypeKind::Named(name) if self.entry => self
+                .m
+                .structs
+                .get(name)
+                .is_some_and(|d| d.fields.iter().any(|f| self.refines(d.tree(), f.decl))),
+            _ => false,
         }
     }
 
@@ -1316,6 +1525,7 @@ impl<'a> Lower<'a> {
     /// branches all leave, gives no value, `V::Never`, and its shape is never used: it is
     /// given as `Unit`.
     fn shape(&self, e: ExprId) -> Result<Shape, String> {
+        let shapes = self.shapes;
         match &self.s.f.typing.exprs[e.0 as usize] {
             SemaTy::Any => Ok(Shape::Unit),
             SemaTy::Array(n, elem) if self.mixed(elem) => {
@@ -1325,7 +1535,7 @@ impl<'a> Lower<'a> {
                 let items: Vec<ExprId> = match &tree.expr(e).kind {
                     ExprKind::Array(items) => items.clone(),
                     ExprKind::Repeat { value, .. } => vec![*value],
-                    _ => return Shape::of(&self.s.f.typing.exprs[e.0 as usize]),
+                    _ => return Shape::of(&self.s.f.typing.exprs[e.0 as usize], shapes),
                 };
                 let mut lo: Option<Num> = None;
                 let mut hi: Option<Num> = None;
@@ -1347,7 +1557,7 @@ impl<'a> Lower<'a> {
                 let n = u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?;
                 Ok(Shape::Array(n, Box::new(Shape::Int(t))))
             }
-            t => Shape::of(t),
+            t => Shape::of(t, shapes),
         }
     }
 
@@ -1454,8 +1664,11 @@ impl<'a> Lower<'a> {
             },
             ExprKind::Index { base, index } => {
                 let b = self.expr(*base)?;
+                // An array read from a place is its address; an index that changes the place
+                // reads the array as it was, as a value is, so it is copied first.
+                let b = self.kept(b, *base, &[*index])?;
                 let i = self.expr(*index)?;
-                let V::Arr(a) = b else {
+                let V::Mem(a) = b else {
                     return Ok(V::Never);
                 };
                 let Shape::Array(len, elem) = self.shape(*base)? else {
@@ -1464,52 +1677,87 @@ impl<'a> Lower<'a> {
                 let at = self.element(a, len, &elem, i, (span, tree.expr(*index).span))?;
                 self.load(at, &elem)
             }
-            ExprKind::Field { base, .. } => match self.shape(*base)? {
-                // M1's only field is `.len`.
+            ExprKind::Field { base, name } => match self.shape(*base)? {
                 Shape::Array(len, _) => {
                     self.expr(*base)?;
                     let n = Num::new(false, u128::from(len));
                     V::Int(self.int(USIZE, n), USIZE)
                 }
-                _ => return Err("a field of a value that is not an array".into()),
+                // A struct's value is its address, so its field is read where it lies.
+                Shape::Struct(s) => {
+                    let V::Mem(a) = self.expr(*base)? else {
+                        return Ok(V::Never);
+                    };
+                    let (_, f) = s.field(name).ok_or("a field the struct lacks")?;
+                    let at = self.field_addr(a, f.offset);
+                    self.load(at, &f.shape)
+                }
+                _ => return Err("a field of a value that is neither an array nor a struct".into()),
             },
+            // Each value is narrowed into its field's type and checked against its refinement,
+            // in the order written, which is the declaration's, and stored where the layout
+            // places its field.
+            ExprKind::Construct { name, fields } => {
+                let shape = self.shape(e)?;
+                let Shape::Struct(s) = &shape else {
+                    return Err("a struct built of a type that is not a struct".into());
+                };
+                let def = self
+                    .m
+                    .structs
+                    .get(name)
+                    .ok_or("a struct without a declaration")?;
+                let slot = self.inst(Op::Slot { bytes: s.size }, Ty::Addr, &[]);
+                for fi in fields {
+                    let (k, fs) = s.field(&fi.name).ok_or("a field the struct lacks")?;
+                    let decl = def.fields.get(k).ok_or("a field the struct lacks")?.decl;
+                    let v = self.expr(fi.value)?;
+                    let from = self.shape(fi.value)?;
+                    let at = tree.expr(fi.value).span;
+                    let v = self.land(v, &from, &fs.shape, Some((def.tree(), decl)), at)?;
+                    if matches!(v, V::Never) {
+                        return Ok(V::Never);
+                    }
+                    let to = self.field_addr(slot, fs.offset);
+                    self.store_shaped(to, v, &fs.shape);
+                }
+                V::Mem(slot)
+            }
             ExprKind::Call { args, .. } => {
                 let index =
                     self.s.f.resolution.calls[e.0 as usize].ok_or("a call never resolved")?;
                 let callee = self.sig_of(index)?;
                 let mut values = Vec::new();
-                for (a, (_, shape)) in args.iter().zip(&callee.params) {
+                for (k, (a, (_, shape))) in args.iter().zip(&callee.params).enumerate() {
                     let aspan = tree.expr(a.value).span;
                     values.push(if a.is_mut {
-                        let (root, indexes) = self.place_path(a.value)?;
-                        if reaches_never(&indexes) {
+                        let (root, steps) = self.place_path(a.value)?;
+                        if reaches_never(&steps) {
                             return Ok(V::Never);
                         }
-                        let at = self.address(root, &indexes)?;
-                        Arg::Place(
-                            at,
-                            shape.clone(),
-                            self.place_type(root, indexes.len()),
-                            aspan,
-                        )
+                        let at = self.address(root, &steps)?;
+                        Arg::Place(at, shape.clone(), self.place_type(root, &steps), aspan)
                     } else {
                         let v = self.expr(a.value)?;
                         if matches!(v, V::Never) {
                             return Ok(V::Never);
                         }
+                        // A value read from a place, which a later argument may change, is
+                        // passed as it was when it was evaluated.
+                        let later: Vec<ExprId> = args[k + 1..].iter().map(|a| a.value).collect();
+                        let v = self.kept(v, a.value, &later)?;
                         Arg::Value(v, aspan, self.shape(a.value)?)
                     });
                 }
-                let sret = match &callee.result {
-                    Shape::Array(..) => Some(self.inst(
+                let sret = callee.result.in_memory().then(|| {
+                    self.inst(
                         Op::Slot {
                             bytes: callee.result.size(),
                         },
                         Ty::Addr,
                         &[],
-                    )),
-                    _ => None,
-                };
+                    )
+                });
                 let recursive = index == self.s.index;
                 self.call(index, values, span, sret, recursive)?
             }
@@ -1555,7 +1803,7 @@ impl<'a> Lower<'a> {
                     );
                     self.store_shaped(at, v, elem);
                 }
-                V::Arr(slot)
+                V::Mem(slot)
             }
             ExprKind::Repeat { value, .. } => {
                 let shape = self.shape(e)?;
@@ -1588,7 +1836,7 @@ impl<'a> Lower<'a> {
                     l.store_shaped(at, v, &elem);
                     Ok(())
                 })?;
-                V::Arr(slot)
+                V::Mem(slot)
             }
             ExprKind::If {
                 cond,
@@ -1597,6 +1845,136 @@ impl<'a> Lower<'a> {
             } => self.if_expr(e, *cond, *then, *otherwise)?,
             ExprKind::Error => return Err("an expression the parser could not read".into()),
         })
+    }
+
+    /// The value `v` of `e`, kept as it is now while `after` is evaluated: an array or struct
+    /// read from a place is that place's memory, which `after` may change through a `mut`
+    /// argument or an assignment, so it is then copied first. Any other value is its own.
+    fn kept(&mut self, v: V, e: ExprId, after: &[ExprId]) -> Result<V, String> {
+        let V::Mem(a) = v else {
+            return Ok(v);
+        };
+        let mut roots = Vec::new();
+        self.aliases(e, &mut roots);
+        if roots.is_empty() || !after.iter().any(|&x| self.may_change_expr(x, &roots)) {
+            return Ok(v);
+        }
+        let shape = self.shape(e)?;
+        Ok(V::Mem(self.copy(a, &shape)))
+    }
+
+    /// The bindings whose memory the value of `e` may be: the root of a place, or of the places
+    /// an `if` gives.
+    fn aliases(&self, e: ExprId, out: &mut Vec<usize>) {
+        let tree = self.tree();
+        match &tree.expr(e).kind {
+            ExprKind::Name(_) => {
+                out.extend(self.s.f.resolution.names[e.0 as usize].map(|b| b.0 as usize))
+            }
+            ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => self.aliases(*base, out),
+            ExprKind::If {
+                then, otherwise, ..
+            } => {
+                let tail =
+                    |b: AstBlock| match tree.block(b).stmts.last().map(|s| &tree.stmt(*s).kind) {
+                        Some(StmtKind::Expr(x)) => Some(*x),
+                        _ => None,
+                    };
+                if let Some(x) = tail(*then) {
+                    self.aliases(x, out);
+                }
+                match otherwise {
+                    Some(Else::Block(b)) => {
+                        if let Some(x) = tail(*b) {
+                            self.aliases(x, out);
+                        }
+                    }
+                    Some(Else::If(i)) => self.aliases(*i, out),
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether evaluating `e` may change a binding of `roots`: by a `mut` argument or an
+    /// assignment, anywhere in it, whose place has one of them at its root.
+    fn may_change_expr(&self, e: ExprId, roots: &[usize]) -> bool {
+        let tree = self.tree();
+        let sub = |x: ExprId| self.may_change_expr(x, roots);
+        match &tree.expr(e).kind {
+            ExprKind::Call { args, .. } => args.iter().any(|a| {
+                (a.is_mut && self.root_of(a.value).is_some_and(|r| roots.contains(&r)))
+                    || sub(a.value)
+            }),
+            ExprKind::Construct { fields, .. } => fields.iter().any(|f| sub(f.value)),
+            ExprKind::Unary { operand, .. } => sub(*operand),
+            ExprKind::Binary { lhs, rhs, .. } => sub(*lhs) || sub(*rhs),
+            ExprKind::Index { base, index } => sub(*base) || sub(*index),
+            ExprKind::Field { base, .. } => sub(*base),
+            ExprKind::Array(items) => items.iter().any(|&i| sub(i)),
+            ExprKind::Repeat { value, .. } => sub(*value),
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                sub(*cond)
+                    || self.may_change_block(*then, roots)
+                    || match otherwise {
+                        Some(Else::Block(b)) => self.may_change_block(*b, roots),
+                        Some(Else::If(i)) => sub(*i),
+                        None => false,
+                    }
+            }
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Error => false,
+        }
+    }
+
+    fn may_change_block(&self, b: AstBlock, roots: &[usize]) -> bool {
+        let tree = self.tree();
+        let sub = |x: ExprId| self.may_change_expr(x, roots);
+        tree.block(b)
+            .stmts
+            .iter()
+            .any(|&s| match &tree.stmt(s).kind {
+                StmtKind::Assign { place, value, .. } => {
+                    self.root_of(*place).is_some_and(|r| roots.contains(&r))
+                        || sub(*place)
+                        || sub(*value)
+                }
+                StmtKind::Binding { init: x, .. }
+                | StmtKind::Discard(x)
+                | StmtKind::Expr(x)
+                | StmtKind::Return(Some(x)) => sub(*x),
+                StmtKind::While {
+                    cond,
+                    invariants,
+                    decreases,
+                    body,
+                } => {
+                    sub(*cond)
+                        || invariants.iter().chain(decreases).any(|&x| sub(x))
+                        || self.may_change_block(*body, roots)
+                }
+                StmtKind::Guard { cond, otherwise } => {
+                    sub(*cond) || self.may_change_block(*otherwise, roots)
+                }
+                StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => false,
+            })
+    }
+
+    /// The binding at the root of a place.
+    fn root_of(&self, e: ExprId) -> Option<usize> {
+        match &self.tree().expr(e).kind {
+            ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => self.root_of(*base),
+            _ => self.s.f.resolution.names[e.0 as usize].map(|b| b.0 as usize),
+        }
     }
 
     /// The integer type of an expression, as the interpreter's operations take it.
@@ -1650,7 +2028,7 @@ impl<'a> Lower<'a> {
                     .ok_or("an `if` beyond 128 bits")?,
             )),
             (Shape::Int(t), None) => Some(Ty::Int(mir(*t))),
-            (Shape::Bool | Shape::Array(..), _) => Some(shape.ty()),
+            (Shape::Bool | Shape::Array(..) | Shape::Struct(_), _) => Some(shape.ty()),
             _ => None,
         };
         let yes = self.block(&[]);
@@ -1679,7 +2057,7 @@ impl<'a> Lower<'a> {
         Ok(match (join_ty, self.b.params(join).first()) {
             (Some(Ty::Int(t)), Some(&p)) => V::Int(p, t),
             (Some(Ty::Bool), Some(&p)) => V::Bool(p),
-            (Some(Ty::Addr), Some(&p)) => V::Arr(p),
+            (Some(Ty::Addr), Some(&p)) => V::Mem(p),
             _ => V::Unit,
         })
     }
@@ -1689,7 +2067,7 @@ impl<'a> Lower<'a> {
         let args = match (v, ty) {
             (V::Never, _) => return,
             (V::Int(n, t), Some(Ty::Int(to))) => vec![self.cast(n, t, to)],
-            (V::Bool(n) | V::Arr(n), Some(_)) => vec![n],
+            (V::Bool(n) | V::Mem(n), Some(_)) => vec![n],
             _ => vec![],
         };
         self.jump(join, args);
@@ -1892,7 +2270,7 @@ impl<'a> Lower<'a> {
     fn call(
         &mut self,
         index: usize,
-        args: Vec<Arg>,
+        args: Vec<Arg<'a>>,
         at: Span,
         sret: Option<NodeId>,
         recursive: bool,
@@ -1910,11 +2288,11 @@ impl<'a> Lower<'a> {
                         return Ok(V::Never);
                     }
                     callee.locals[i] = Some(match v {
-                        V::Arr(a) => Local::Place(a, shape.clone()),
+                        V::Mem(a) => Local::Place(a, shape.clone()),
                         v => Local::Value(v),
                     });
                     match v {
-                        V::Int(n, _) | V::Bool(n) | V::Arr(n) => n,
+                        V::Int(n, _) | V::Bool(n) | V::Mem(n) => n,
                         _ => return Err("an argument without a value".into()),
                     }
                 }
@@ -1939,17 +2317,24 @@ impl<'a> Lower<'a> {
         let (_, result_ty) = mir_params(sig);
         self.at(at);
         let r = self.inst(Op::Call(sig.func), result_ty.unwrap_or(Ty::Unit), &mir_args);
-        // A `mut` place takes back what the callee left, which enters its refinement.
+        // A `mut` place takes back what the callee left, which enters its refinement. A struct's
+        // fields hold theirs in any value the callee leaves, so they are not checked again.
+        let entry = std::mem::replace(&mut self.entry, false);
         for arg in &args {
             if let Arg::Place(a, shape, Some(d), arg_span) = arg {
                 let v = self.load(*a, shape);
-                self.refined(v, shape, *d, at, Key::at(*arg_span, Tag::Back))?;
+                let back = self.refined(v, shape, *d, at, Key::at(*arg_span, Tag::Back));
+                if back.is_err() {
+                    self.entry = entry;
+                }
+                back?;
             }
         }
+        self.entry = entry;
         Ok(match (&sig.result, sret) {
             (Shape::Int(t), _) => V::Int(r, mir(*t)),
             (Shape::Bool, _) => V::Bool(r),
-            (Shape::Array(..), Some(slot)) => V::Arr(slot),
+            (shape, Some(slot)) if shape.in_memory() => V::Mem(slot),
             _ => V::Unit,
         })
     }
@@ -1958,7 +2343,7 @@ impl<'a> Lower<'a> {
     /// and the `decreases` measure, against `caller`'s for a recursive call.
     fn callee_checks(
         &mut self,
-        args: &[Arg],
+        args: &[Arg<'a>],
         at: Span,
         recursive: bool,
         caller: Option<Vec<V>>,
@@ -1968,12 +2353,12 @@ impl<'a> Lower<'a> {
             let (Arg::Value(_, span, _) | Arg::Place(_, _, _, span)) = arg;
             let span = *span;
             if let Some(local) = self.s.locals[i].clone() {
-                let shape = Shape::of(&SemaTy::of(tree, p.ty))?;
+                let shape = Shape::of(&SemaTy::of(tree, p.ty), self.shapes)?;
                 let v = match local {
                     Local::Value(v) => v,
                     Local::Place(a, s) => self.load(a, &s),
                 };
-                self.refined(v, &shape, p.ty, span, Key::call(span, Tag::None))?;
+                self.refined(v, &shape, (tree, p.ty), span, Key::call(span, Tag::None))?;
             }
         }
         for c in self.clauses(ContractKind::Requires) {
@@ -1995,15 +2380,6 @@ impl<'a> Lower<'a> {
             }
         }
         Ok(())
-    }
-}
-
-/// The refinement of the integer type at the bottom of `t`'s arrays, when it has one.
-fn leaf_refinement(tree: &Tree, t: TypeId) -> Option<&Refinement> {
-    match &tree.ty(t).kind {
-        TypeKind::Int { refinement, .. } => refinement.as_ref(),
-        TypeKind::Array { elem, .. } => leaf_refinement(tree, *elem),
-        _ => None,
     }
 }
 
@@ -2046,10 +2422,13 @@ mod tests {
         assert_eq!(Shape::Int(U16).ty(), Ty::Int(IntTy::new(16, false)));
         assert_eq!(Shape::Bool.ty(), Ty::Bool);
         assert_eq!(
-            Shape::of(&SemaTy::Array(2, Box::new(SemaTy::Bool))),
+            Shape::of(
+                &SemaTy::Array(2, Box::new(SemaTy::Bool)),
+                &Shapes::default()
+            ),
             Ok(Shape::Array(2, Box::new(Shape::Bool)))
         );
-        assert!(Shape::of(&SemaTy::Any).is_err());
+        assert!(Shape::of(&SemaTy::Any, &Shapes::default()).is_err());
     }
 
     /// An array literal of integers of no standard type together keeps its elements exact, in
@@ -2097,6 +2476,97 @@ pub fn g(c: bool) -> i32 {
             .filter(|b| matches!(b.term, Term::Return(_)))
             .count();
         assert_eq!(returns, 2, "{}", g);
+    }
+
+    /// A struct lies in one slot, its fields at the offsets the checker's layout gives them,
+    /// largest alignment first: here `wide` at 0, `n` at 16, `flag` at 20; a field is read
+    /// and stored there, and a struct is passed and returned by its address, as an array is.
+    #[test]
+    fn test_struct_fields_lie_where_the_layout_places_them() {
+        let src = "module m
+pub struct S {
+  flag: bool
+  n: u32
+  wide: i128
+}
+pub fn make(n: u32) -> S = S(flag: true, n: n, wide: 7)
+pub fn get(s: S) -> u32 = s.n
+pub fn set(mut s: S) {
+  s.flag = false
+}
+";
+        let m = mente_sema::check_program(src).unwrap();
+        let shapes = Shapes::of(&m.structs).unwrap();
+        let Shape::Struct(st) = Shape::of(&SemaTy::Struct("S".into()), &shapes).unwrap() else {
+            panic!("a struct's shape");
+        };
+        let offsets: Vec<(String, u32)> = st
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.offset))
+            .collect();
+        assert_eq!(
+            offsets,
+            [("flag", 20), ("n", 16), ("wide", 0)].map(|(n, o)| (n.to_string(), o))
+        );
+        assert_eq!((st.size, st.align), (32, 16));
+        let lowered = lower(&m).unwrap();
+        let text = lowered.module.to_string();
+        let f = |name: &str| {
+            lowered
+                .module
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .to_string()
+        };
+        // `make` returns through the address its caller passes, and builds in a slot of 32.
+        assert!(f("make").contains("fn make(addr, u32)"), "{}", text);
+        assert!(f("make").contains("slot 32"), "{}", text);
+        // A field away from the start is reached at its offset.
+        assert!(f("get").contains("elem 1"), "{}", f("get"));
+        assert!(f("get").contains("= int 16"), "{}", f("get"));
+        assert!(f("set").contains("= int 20"), "{}", f("set"));
+    }
+
+    /// An array or a struct read from a binding is passed by its address, and copied first only
+    /// where a later operand may change the binding: so the value an argument has is the one it
+    /// had when it was evaluated, as the reference interpreter has it.
+    #[test]
+    fn test_an_argument_keeps_its_value_though_a_later_operand_changes_it() {
+        let src = "module m
+fn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k
+fn bump(mut xs: [2]u8) -> u8 {
+  xs[0] = 7
+  0
+}
+pub fn changed() -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, bump(mut xs))
+}
+pub fn kept() -> u8 {
+  var xs: [2]u8 = [1, 2]
+  xs[1] = 3
+  first(xs, 0)
+}
+";
+        let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        let copies = |name: &str| {
+            let f = lowered
+                .module
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap();
+            f.ops
+                .iter()
+                .filter(|op| matches!(op, Op::Copy { .. }))
+                .count()
+        };
+        // The literal's copy into the binding, then the argument's copy before `bump` runs.
+        assert_eq!(copies("changed"), 2);
+        assert_eq!(copies("kept"), 1);
     }
 
     #[test]

@@ -19,6 +19,7 @@ use mente_syntax::{
 };
 
 use crate::check::{self, Signature};
+use crate::structs::{clashes, Structs};
 use crate::{check_source, names, tier1, verify_function_contracts, wide};
 
 /// What parsing one item gives, every span relative to the item.
@@ -39,6 +40,8 @@ struct Parsed {
 #[derive(Clone, Debug)]
 struct Function {
     name: String,
+    /// Where its name is declared, relative to the item.
+    name_span: Span,
     /// The declaration checks' error.
     declaration: Option<Diagnostic>,
     /// The syntax tree of its body, when it has one.
@@ -229,8 +232,10 @@ impl Session {
                 continue;
             }
             self.work.checked += 1;
-            let (resolution, mut found) = names::resolve(syntax, &names);
-            let (typing, typed) = check::check(syntax, &resolution, &signatures);
+            // A module of functions alone has no structs; one with any is checked whole.
+            let structs = Structs::default();
+            let (resolution, mut found) = names::resolve(syntax, &names, &structs);
+            let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs);
             found.extend(typed);
             found.extend(wide::check(syntax, &resolution, &typing, text));
             if found.is_empty() {
@@ -239,6 +244,7 @@ impl Session {
                     resolution: &resolution,
                     typing: &typing,
                     routing: f.routing,
+                    structs: &structs,
                 };
                 found.extend(tier1::check(&function, &callees, text).diagnostics);
             }
@@ -255,7 +261,16 @@ impl Session {
             }
         }
         let mut declarations = Vec::new();
-        let mut bodies = Vec::new();
+        // A name declared twice, which the whole module's check reports before every function.
+        let named: Vec<(String, Span)> = self
+            .items
+            .iter()
+            .filter_map(|(at, text)| {
+                let f = self.cache.get(text)?.parsed.function.as_ref()?;
+                Some((f.name.clone(), relocate_span(f.name_span, *at)))
+            })
+            .collect();
+        let mut bodies = clashes(named.iter().map(|(n, s)| (n.as_str(), *s, "a function")));
         for (at, text) in &self.items {
             let Some(entry) = self.cache.get(text) else {
                 continue;
@@ -311,6 +326,7 @@ fn parse_item(text: &str) -> Parsed {
             Parsed {
                 function: Some(Function {
                     name: f.name.clone(),
+                    name_span: f.name_span,
                     declaration: verify_function_contracts(f).err(),
                     syntax,
                     body,
@@ -330,13 +346,18 @@ fn parse_item(text: &str) -> Parsed {
 }
 
 /// A diagnostic of an item, with its spans moved from the item's start to the module's.
-fn relocate(d: &Diagnostic, at: ItemStart) -> Diagnostic {
-    let shift = |s: Span| Span {
+/// A span of an item, relative to the item, at its place in the module.
+fn relocate_span(s: Span, at: ItemStart) -> Span {
+    Span {
         start: s.start + at.offset,
         end: s.end + at.offset,
         line: s.line + at.line - 1,
         col: s.col,
-    };
+    }
+}
+
+fn relocate(d: &Diagnostic, at: ItemStart) -> Diagnostic {
+    let shift = |s: Span| relocate_span(s, at);
     let mut d = d.clone();
     d.primary = shift(d.primary);
     for label in &mut d.related {

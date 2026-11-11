@@ -114,3 +114,6 @@ compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i12/int-1 -- k afte
 compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i16/lt>le -- keep's body already checked k against [0..20) after its only change, so k is never 20 and `<= 20` agrees with `< 20`
 compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i17/and>or -- keep's body already checked k against [0..20) after its only change, so both halves hold and `or` gives what `and` gives
 compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i18/check-removed -- keep's body already checked k against [0..20) after its only change, so this check never fails
+
+# A sum of two u8 fields or parameters, narrowed into u8: never negative, as arith.mn's add.
+compiler/mente-cli/tests/mutants/structs.mn::first/b0.i6/int-1 -- p.a + k of two u8 is never negative, so its narrowing's lower bound holds as `>= -1` wherever it holds as `>= 0`

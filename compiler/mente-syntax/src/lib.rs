@@ -762,6 +762,41 @@ pub struct ParsedFn {
     pub errors: Vec<Diagnostic>,
 }
 
+/// One struct of a module, as [`parse_structs`] reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedStruct {
+    pub name: String,
+    pub syntax: tree::StructSyntax,
+    /// What the body parser reported in it.
+    pub errors: Vec<Diagnostic>,
+}
+
+/// Whether a struct is one of M2's calculus (`core-calculus.md`, item 13): every struct but one
+/// with `@layout`, whose declaration `morphic-layouts.md` governs and whose values come in M3.
+pub fn is_value_struct(s: &StructDecl) -> bool {
+    !s.attrs.iter().any(|a| a.name == "layout")
+}
+
+/// Every struct of `module` that is one of M2's calculus ([`is_value_struct`]), in order, parsed
+/// under M2's grammar (`grammar.md`, item 10).
+pub fn parse_structs(src: &str, module: &ModuleFile) -> Vec<ParsedStruct> {
+    module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ItemDecl::Struct(s) if is_value_struct(s) && !s.tokens.is_empty() => {
+                let (syntax, errors) = body::parse_struct(src, &s.tokens);
+                Some(ParsedStruct {
+                    name: s.name.clone(),
+                    syntax,
+                    errors,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Every function of `module`, in order, with the syntax tree of each one that has a body.
 pub fn parse_bodies(src: &str, module: &ModuleFile) -> Vec<ParsedFn> {
     let mut functions = Vec::new();
@@ -846,6 +881,9 @@ pub struct StructDecl {
     pub generics: String,
     pub fields: Vec<StructFieldDecl>,
     pub invariants: Vec<String>,
+    /// Every token of the struct, from `struct` to its closing `}`, which the body parser reads
+    /// under M2's grammar ([`parse_structs`]).
+    pub tokens: Vec<Token>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -944,7 +982,7 @@ pub struct ModuleFile {
 }
 
 /// The version of the canonical dumps, which rises when any dump's form changes.
-pub const DUMP_VERSION: u32 = 1;
+pub const DUMP_VERSION: u32 = 2;
 
 /// The canonical form of a module's tokens: a header line, then one token per line as
 /// `line:col Kind text`, the kind the name of its [`TokenKind`] variant and the text its source
@@ -970,9 +1008,10 @@ pub fn dump_tokens(src: &str) -> String {
     out
 }
 
-/// The canonical form of a module's syntax trees: a header line, then each function with a
-/// body as [`tree::Tree::render_fn`] writes it, one per line. A module the declaration parser
-/// rejects dumps its error as `error line:col code`.
+/// The canonical form of a module's syntax trees: a header line, then each struct of M2's
+/// calculus as [`tree::Tree::render_struct`] writes it and each function with a body as
+/// [`tree::Tree::render_fn`] does, one per line, in the order of the module. A module the
+/// declaration parser rejects dumps its error as `error line:col code`.
 pub fn dump_tree(src: &str) -> String {
     let mut out = format!("mente-dump {} tree\n", DUMP_VERSION);
     match parse_module(src) {
@@ -981,17 +1020,29 @@ pub fn dump_tree(src: &str) -> String {
             d.primary.line, d.primary.col, d.code
         )),
         Ok(module) => {
+            // A tree that nests too deep is not rendered, since rendering recurses over it.
+            let too_deep = |errors: &[Diagnostic]| {
+                errors
+                    .iter()
+                    .find(|d| d.code == "E0127")
+                    .map(|d| format!("error {}:{} {}", d.primary.line, d.primary.col, d.code))
+            };
+            let mut lines: Vec<(usize, String)> = Vec::new();
+            for parsed in parse_structs(src, &module) {
+                let line = too_deep(&parsed.errors)
+                    .unwrap_or_else(|| tree::Tree::render_struct(&parsed.syntax));
+                lines.push((parsed.syntax.name_span.start, line));
+            }
             for parsed in parse_bodies(src, &module) {
-                // A tree that nests too deep is not rendered, since rendering recurses over it.
-                if let Some(d) = parsed.errors.iter().find(|d| d.code == "E0127") {
-                    out.push_str(&format!(
-                        "error {}:{} {}\n",
-                        d.primary.line, d.primary.col, d.code
-                    ));
-                } else if let Some(f) = parsed.syntax {
-                    out.push_str(&tree::Tree::render_fn(&f));
-                    out.push('\n');
+                if let Some(f) = &parsed.syntax {
+                    let line = too_deep(&parsed.errors).unwrap_or_else(|| tree::Tree::render_fn(f));
+                    lines.push((f.name_span.start, line));
                 }
+            }
+            lines.sort_by_key(|(at, _)| *at);
+            for (_, line) in lines {
+                out.push_str(&line);
+                out.push('\n');
             }
         }
     }
@@ -1521,6 +1572,7 @@ impl<'a> Parser<'a> {
         attrs: Vec<Attr>,
         is_pub: bool,
     ) -> Result<StructDecl, Diagnostic> {
+        let struct_index = self.pos;
         self.next(); // consume 'struct'
         let (name, name_span) = self.expect_name()?;
         let generics = if *self.peek() == TokenKind::Lt {
@@ -1618,6 +1670,7 @@ impl<'a> Parser<'a> {
             generics,
             fields,
             invariants,
+            tokens: self.tokens[struct_index..self.pos].to_vec(),
         })
     }
 
@@ -2531,19 +2584,19 @@ mod tests {
     fn test_tokens_and_trees_dump_in_their_canonical_forms() {
         assert_eq!(
             dump_tokens("pub fn f() = a\\b"),
-            "mente-dump 1 tokens\n1:1 Pub pub\n1:5 Fn fn\n1:8 Ident f\n1:9 LParen (\n1:10 RParen )\n1:12 Eq =\n1:14 Ident a\n1:16 Ident b\n"
+            "mente-dump 2 tokens\n1:1 Pub pub\n1:5 Fn fn\n1:8 Ident f\n1:9 LParen (\n1:10 RParen )\n1:12 Eq =\n1:14 Ident a\n1:16 Ident b\n"
         );
         assert_eq!(
             dump_tokens("/// a\\b\nmodule m"),
-            "mente-dump 1 tokens\n1:1 DocComment /// a\\\\b\n2:1 Module module\n2:8 Ident m\n"
+            "mente-dump 2 tokens\n1:1 DocComment /// a\\\\b\n2:1 Module module\n2:8 Ident m\n"
         );
         assert_eq!(
             dump_tree("module m\npub fn f(mut x: u8, y: bool) -> u8\n  requires y\n  ensures result > 0\n  decreases x\n{\n  x\n}\npub fn g() = 1\npub fn h()\n"),
-            "mente-dump 1 tree\n(fn f ((mut x u8) (y bool)) u8 ((requires y) (ensures (> result 0)) (decreases x)) {x})\n(fn g () () () (= 1))\n"
+            "mente-dump 2 tree\n(fn f ((mut x u8) (y bool)) u8 ((requires y) (ensures (> result 0)) (decreases x)) {x})\n(fn g () () () (= 1))\n"
         );
         assert_eq!(
             dump_tree("module m\nlet x = 1\n"),
-            "mente-dump 1 tree\nerror 2:1 E0111\n"
+            "mente-dump 2 tree\nerror 2:1 E0111\n"
         );
         // A function nested too deep is reported, not rendered; one with another error in its
         // body is rendered, its error a node of its own.
@@ -2551,10 +2604,10 @@ mod tests {
             "module m\npub fn d(x: u8) -> u8 = x{}\n",
             " + 0".repeat(300)
         );
-        assert_eq!(dump_tree(&deep), "mente-dump 1 tree\nerror 2:25 E0127\n");
+        assert_eq!(dump_tree(&deep), "mente-dump 2 tree\nerror 2:25 E0127\n");
         assert_eq!(
             dump_tree("module m\npub fn d(x: u8) -> u8 = )\n"),
-            "mente-dump 1 tree\n(fn d ((x u8)) u8 () (= <error>))\n"
+            "mente-dump 2 tree\n(fn d ((x u8)) u8 () (= <error>))\n"
         );
     }
 
