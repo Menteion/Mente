@@ -1103,13 +1103,40 @@ pub fn parse_module(src: &str) -> Result<ModuleFile, Diagnostic> {
         return Err(lifetime_idiom(&tokens, at));
     }
     let total_token_count = tokens.len().saturating_sub(1);
+    let ends = item_ends(src, &tokens);
     let mut p = Parser {
         src,
         tokens,
         pos: 0,
         last_end: 0,
+        ends,
+        item: 0,
     };
     p.parse_file(total_token_count)
+}
+
+/// Where each item of [`split_items`] ends among `tokens`: the index of the next item's first
+/// token, and of `Eof` for the last. The declaration parser reads each item within its own
+/// tokens, so that the whole module's check and a `--watch` session, which parses each item's text
+/// alone, read the same items: no scan of one item runs into the next.
+fn item_ends(src: &str, tokens: &[Token]) -> Vec<usize> {
+    let eof = tokens.len().saturating_sub(1);
+    // Both lists ascend, so one pass over the tokens finds every item's first token. `Eof`
+    // starts at the text's length, past every item's start, so the pass stops there at the
+    // latest.
+    let mut at = 0;
+    let mut ends: Vec<usize> = split_items(src)
+        .iter()
+        .skip(1)
+        .map(|s| {
+            while tokens[at].span.start < s.offset {
+                at += 1;
+            }
+            at
+        })
+        .collect();
+    ends.push(eof);
+    ends
 }
 
 struct Parser<'a> {
@@ -1118,27 +1145,54 @@ struct Parser<'a> {
     pos: usize,
     /// Where the last token taken ends, so a construct's span can close there.
     last_end: usize,
+    /// Where each item ends ([`item_ends`]), and which item is read.
+    ends: Vec<usize>,
+    item: usize,
 }
 
+/// What the parser reads at the end of an item, as it does at the end of the file.
+static EOF: TokenKind = TokenKind::Eof;
+
 impl<'a> Parser<'a> {
-    // The tokens end with `Eof`, and only `next` moves `pos`, never past it: so `pos` always
-    // names a token.
+    // The tokens end with `Eof`, and only `next` and `next_item` move `pos`, never past the item's
+    // end: so `pos` always names a token, and the item ends at `limit`, which reads as `Eof`.
+    fn limit(&self) -> usize {
+        self.ends[self.item]
+    }
+
     fn peek(&self) -> &TokenKind {
-        &self.tokens[self.pos].kind
+        if self.pos >= self.limit() {
+            &EOF
+        } else {
+            &self.tokens[self.pos].kind
+        }
     }
 
     fn span(&self) -> Span {
         self.tokens[self.pos].span
     }
 
-    /// The next token, and past it; at `Eof`, `Eof` again.
+    /// The next token, and past it; at the item's end, `Eof` again.
     fn next(&mut self) -> Token {
-        let tok = self.tokens[self.pos].clone();
-        if self.pos + 1 < self.tokens.len() {
+        let mut tok = self.tokens[self.pos].clone();
+        if self.pos >= self.limit() {
+            tok.kind = TokenKind::Eof;
+        } else {
             self.pos += 1;
         }
         self.last_end = tok.span.end;
         tok
+    }
+
+    /// Moves on to the next item, whether this one's tokens are all read or not; false at the
+    /// last.
+    fn next_item(&mut self) -> bool {
+        if self.item + 1 >= self.ends.len() {
+            return false;
+        }
+        self.pos = self.limit();
+        self.item += 1;
+        true
     }
 
     /// From the start of `start` to the end of the last token taken.
@@ -1151,7 +1205,7 @@ impl<'a> Parser<'a> {
 
     /// The token about to be read, as an error message names it.
     fn found(&self) -> String {
-        match self.peek() {
+        match &self.tokens[self.pos].kind {
             TokenKind::Eof => String::from("the end of the file"),
             _ => {
                 let sp = self.span();
@@ -1173,7 +1227,13 @@ impl<'a> Parser<'a> {
         }
 
         let mut items = Vec::new();
-        while *self.peek() != TokenKind::Eof {
+        loop {
+            if *self.peek() == TokenKind::Eof {
+                if self.next_item() {
+                    continue;
+                }
+                break;
+            }
             let mut docs = std::mem::take(&mut pending_docs);
             while let TokenKind::DocComment(d) = self.peek().clone() {
                 docs.push(d);
@@ -1851,7 +1911,6 @@ impl<'a> Parser<'a> {
                     || self.span().line == last_line
                     || continues_statement(&last)
                     || matches!(self.peek(), TokenKind::Else | TokenKind::LBrace))
-                && !(depth <= 0 && self.item_begins_here())
             {
                 let tok = self.next();
                 match tok.kind {
@@ -1929,7 +1988,6 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 TokenKind::Ident(w) if w == "from" && open.is_empty() => break,
-                _ if open.is_empty() && self.item_begins_here() => break,
                 _ => {
                     let tok = self.next();
                     // `List<List<u8>>` closes two type-argument lists with one `>>` token.
@@ -1988,19 +2046,6 @@ impl<'a> Parser<'a> {
 
     /// A contract clause: to the end of its line, and on past a newline where `spec/grammar.md`,
     /// item 2, says it goes on; it stops before the body's `{` or `=`.
-    /// Whether a top-level item begins between the last token and the next: a line there, from
-    /// its first column, that [`begins_item`]. Code that would go on past a newline ends there.
-    fn item_begins_here(&self) -> bool {
-        let from = self.tokens[self.pos.saturating_sub(1)].span.end;
-        let to = self.span().start;
-        self.src[from..to]
-            .match_indices('\n')
-            .any(|(i, _)| begins_item(&self.src[from + i + 1..]))
-    }
-
-    /// Its brackets close in order (`E0111`), as a return type's do: a closer that closes
-    /// nothing, or an opener never closed, would take the scan past the body or the items after
-    /// it. Outside every bracket a `{` begins the body; inside one it opens a block.
     fn consume_contract_expr(&mut self) -> Result<String, Diagnostic> {
         let start = self.span().start;
         let mut end = start;
@@ -2011,7 +2056,6 @@ impl<'a> Parser<'a> {
         while *self.peek() != TokenKind::Eof
             && (!open.is_empty() || self.span().line == last_line || continues_statement(&last))
             && !(open.is_empty() && matches!(self.peek(), TokenKind::LBrace | TokenKind::Eq))
-            && !(open.is_empty() && self.item_begins_here())
         {
             let tok = self.next();
             match tok.kind {
@@ -2551,6 +2595,43 @@ mod tests {
         // An expression body ends at the end of its line when nothing continues it.
         let d = parse_module("module m\npub fn g() -> u8 = 1\n_x\n").unwrap_err();
         assert_eq!((d.code, d.primary.line), ("E0111", 3));
+    }
+
+    /// The declaration parser reads each item within the text [`split_items`] gives it, as a
+    /// `--watch` session does: whatever a malformed item holds, its error lies within it or at
+    /// the next item's first token, never further. Before, a scan that misread one item's end
+    /// ran into the next, or to the end of the file (the fuzzer's findings 10, 11, 13 and 18).
+    #[test]
+    fn test_no_scan_of_one_item_runs_into_the_next() {
+        let next = "pub fn g() -> u8 = 1\n";
+        for broken in [
+            "fn r() -> ]",
+            "fn r() -> [4",
+            "fn r() -> u8>",
+            "fn id() ->",
+            "fn t() =",
+            "fn e(x: u8) -> u8\n  requires (x",
+            "fn e()->2\nrequires(}",
+            "fn n(){{{]}}",
+            "fn n() {",
+        ] {
+            let src = format!("module m\n{}\n{}", broken, next);
+            // Where the next item starts, as the split finds it: a bracket left open joins `g`
+            // to the broken item, as it would a line that continues an expression.
+            let g = split_items(&src).get(2).map_or(src.len(), |s| s.offset);
+            // The declaration parser's error, or else the body parser's.
+            let errors = match parse_module(&src) {
+                Err(d) => vec![d],
+                Ok(m) => parse_bodies(&src, &m)
+                    .into_iter()
+                    .flat_map(|p| p.errors)
+                    .collect(),
+            };
+            assert!(!errors.is_empty(), "{}", broken);
+            for d in errors {
+                assert!(d.primary.start <= g, "{}: {:?}", broken, d);
+            }
+        }
     }
 
     /// The brackets a module's text opens count across lines, outside strings and comments, so
@@ -3181,11 +3262,14 @@ pub struct S {
     fn test_the_cursor_stays_at_the_end() {
         let src = "module m";
         let (tokens, _) = lex(src);
+        let ends = vec![tokens.len() - 1];
         let mut p = Parser {
             src,
             tokens,
             pos: 0,
             last_end: 0,
+            ends,
+            item: 0,
         };
         let kinds: Vec<TokenKind> = (0..5).map(|_| p.next().kind).collect();
         assert_eq!(
@@ -3225,7 +3309,7 @@ pub struct S {
                 "module m\npub fn open() -> u8 {\n  1\n",
                 "`fn open` has no closing `}`",
             ),
-            ("module m\nfn n(){{{]}}\nfn", "`fn n` has no closing `}`"),
+            ("module m\nfn n(){{{]}}\n", "`fn n` has no closing `}`"),
         ] {
             let err = parse_module(code).unwrap_err();
             assert_eq!(err.code, "E0103");
