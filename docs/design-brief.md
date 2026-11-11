@@ -281,7 +281,7 @@ These are why the design scored 4 rather than 5. Each problem with a key is an e
   A case the spec does not settle is settled in the spec first, never by one execution path alone.
 - **One source of truth.** A fact about the language, such as a type's range, is defined in one place and read by every phase. A special case in the code, such as a branch on 128-bit types, is pointed out in review and has a test that reaches it.
 - **A fix proves itself.** A fix comes with a test seen to fail without it, and goes through `cargo-mutants` and the MIR mutation gate like any change.
-- **Checks in the same pull request.** New syntax or a new rule extends the program generator in the pull request that adds it. Each change passes, where they apply:
+- **Checks in the same pull request.** New syntax or a new rule extends the program generator in the pull request that adds it; a test fails on a construct of the grammar that no checked generated program reaches (`mir-and-codegen.md`, item 2). Each change passes, where they apply:
   - the comparison of the three execution paths on generated programs;
   - the SMT cross-check;
   - the MIR mutation gate;

@@ -11,6 +11,8 @@ use mente_sema::CheckedModule;
 // The generator of programs and the comparison of the three paths on what it generates and on
 // the conformance suite run as tests: CI drives the large runs (`.github/workflows/generated.yml`).
 #[cfg(test)]
+mod coverage;
+#[cfg(test)]
 mod differential;
 #[cfg(test)]
 mod generate;
