@@ -1,0 +1,19 @@
+# The spike before M2 on returning `T ! E` in registers through Cranelift's multi-value returns
+# (README.md). A workspace of its own, like spikes/cranelift-debug-info, with only the Cranelift
+# crates Norman approved on 2026-11-09 (docs/design-review.md, debug-info and
+# dependency-approval), at the versions compiler/mente-codegen pins.
+[workspace]
+
+[package]
+name = "spike-error-return-registers"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0 WITH LLVM-exception"
+publish = false
+
+[dependencies]
+cranelift-codegen = { version = "=0.137.1", features = ["unwind", "x86", "arm64"] }
+cranelift-frontend = "=0.137.1"
+cranelift-module = "=0.137.1"
+cranelift-object = "=0.137.1"
+cranelift-native = "=0.137.1"
