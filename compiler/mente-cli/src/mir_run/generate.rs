@@ -290,6 +290,8 @@ pub const INTS: [IntT; 11] = [
 
 const U8: IntT = INTS[0];
 const USIZE: IntT = INTS[5];
+/// The type of an expression of literals alone.
+const I64: IntT = INTS[9];
 
 impl IntT {
     pub fn named(name: &str) -> Option<IntT> {
@@ -713,7 +715,8 @@ struct Sig {
 
 #[derive(Clone, Debug)]
 enum S {
-    Bind(usize, String, E),
+    /// A binding, with the type it states, or none when it takes its initializer's.
+    Bind(usize, Option<String>, E),
     Assign(E, &'static str, E),
     Discard(E),
     Expr(E),
@@ -1860,7 +1863,7 @@ impl Gen {
                         let name = self.fresh("v");
                         let id = self.declare(name.clone(), ty.clone(), Kind::Val, None);
                         self.binds[id].read = true;
-                        stmts.push(S::Bind(id, ty.to_string(), e));
+                        stmts.push(S::Bind(id, Some(ty.to_string()), e));
                         let v = E::name(&name);
                         stmts.push(S::Guard(
                             E::bin(
@@ -1934,6 +1937,22 @@ impl Gen {
     }
 
     fn binding(&mut self, depth: u32) -> Vec<S> {
+        if self.rng.chance(20) {
+            let m = self.mark();
+            if let Some((ty, init)) = self.inferred(depth) {
+                let kind = if self.rng.chance(50) {
+                    Kind::Var
+                } else {
+                    Kind::Val
+                };
+                let mut out = self.flush();
+                let name = self.fresh("v");
+                let id = self.declare(name, ty, kind, None);
+                out.push(S::Bind(id, None, init));
+                return out;
+            }
+            self.restore(m);
+        }
         let ty = self.ty(0);
         let mut range = None;
         let mut ty_text = ty.to_string();
@@ -1971,8 +1990,26 @@ impl Gen {
         let mut out = self.flush();
         let name = self.fresh("v");
         let id = self.declare(name, ty, kind, range);
-        out.push(S::Bind(id, ty_text, init));
+        out.push(S::Bind(id, Some(ty_text), init));
         out
+    }
+
+    /// The initializer of a binding that states no type, with the type it takes
+    /// (`core-calculus.md` item 5): its integer operands' one type, `i64` for literals alone, or
+    /// `bool`. None when the operands have several types, which needs a stated type (`E0212`),
+    /// or when the value cannot land in the type.
+    fn inferred(&mut self, depth: u32) -> Option<(Ty, E)> {
+        if self.rng.chance(25) {
+            return Some((Ty::Bool, self.bool_expr(depth)));
+        }
+        let g = self.int_expr(Want::Any, depth);
+        let t = match g.cls {
+            Cls::One(t) => t,
+            Cls::Lit => I64,
+            Cls::Mixed => return None,
+        };
+        (g.r.meets(t.range()) && g.k.is_none_or(|v| t.range().holds(v)))
+            .then_some((Ty::Int(t), g.e))
     }
 
     /// `x + k` or `x - k`, guarded so that it fits `t`; no guard when `x`'s range already makes
@@ -2083,15 +2120,30 @@ impl Gen {
         out
     }
 
+    /// An `if`, now and then with `else if`s: each condition of the chain is generated first, so
+    /// that what they need is guarded before the whole statement.
     fn if_statement(&mut self, depth: u32) -> Vec<S> {
-        let cond = self.bool_expr(0);
+        let mut conds = vec![self.bool_expr(0)];
+        while conds.len() < 4 && self.rng.chance(25) {
+            conds.push(self.bool_expr(0));
+        }
         let mut out = self.flush();
-        let then = self.block(depth + 1, None, Vec::new(), None);
-        let els = self
+        let mut els = self
             .rng
             .chance(50)
             .then(|| self.block(depth + 1, None, Vec::new(), None));
-        out.push(S::If(cond, then, els));
+        while let Some(cond) = conds.pop() {
+            let then = self.block(depth + 1, None, Vec::new(), None);
+            let s = S::If(cond, then, els);
+            if conds.is_empty() {
+                out.push(s);
+                break;
+            }
+            els = Some(Block {
+                stmts: vec![s],
+                tail: None,
+            });
+        }
         out
     }
 
@@ -2150,7 +2202,11 @@ impl Gen {
             }
         }
         let mut out = self.flush();
-        out.push(S::Bind(id, t.name.to_string(), E::Lit(init.to_string())));
+        out.push(S::Bind(
+            id,
+            Some(t.name.to_string()),
+            E::Lit(init.to_string()),
+        ));
         let step = S::Assign(c.clone(), if up { "+=" } else { "-=" }, E::Lit("1".into()));
         // After the step the counter lies in 1 ..= bound going up, 0 ..= bound - 1 going down, as
         // far as Tier 1 can tell: the loop's condition bounds it on one side only, its type or an
@@ -2544,7 +2600,12 @@ impl Gen {
                 } else {
                     "val"
                 };
-                out.push_str(&format!("{} {}: {} = {}\n", kw, b.name, ty, init.text()));
+                match ty {
+                    Some(ty) => {
+                        out.push_str(&format!("{} {}: {} = {}\n", kw, b.name, ty, init.text()))
+                    }
+                    None => out.push_str(&format!("{} {} = {}\n", kw, b.name, init.text())),
+                }
             }
             S::Assign(p, op, v) => out.push_str(&format!("{} {} {}\n", p.text(), op, v.text())),
             S::Discard(e) => out.push_str(&format!("_ = {}\n", e.text())),
@@ -2552,9 +2613,18 @@ impl Gen {
             S::If(c, then, els) => {
                 out.push_str(&format!("if {} {{\n", c.text()));
                 self.print_block(then, indent + 1, out);
-                if let Some(e) = els {
-                    out.push_str(&format!("{}}} else {{\n", pad));
-                    self.print_block(e, indent + 1, out);
+                let mut els = els.as_ref();
+                while let Some(e) = els {
+                    // An `else` block that holds one `if` alone is written `else if`.
+                    if let (None, [S::If(c, then, next)]) = (&e.tail, e.stmts.as_slice()) {
+                        out.push_str(&format!("{}}} else if {} {{\n", pad, c.text()));
+                        self.print_block(then, indent + 1, out);
+                        els = next.as_ref();
+                    } else {
+                        out.push_str(&format!("{}}} else {{\n", pad));
+                        self.print_block(e, indent + 1, out);
+                        els = None;
+                    }
                 }
                 out.push_str(&format!("{}}}\n", pad));
             }

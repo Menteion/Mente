@@ -11,6 +11,8 @@ use mente_sema::CheckedModule;
 // The generator of programs and the comparison of the three paths on what it generates and on
 // the conformance suite run as tests: CI drives the large runs (`.github/workflows/generated.yml`).
 #[cfg(test)]
+mod coverage;
+#[cfg(test)]
 mod differential;
 #[cfg(test)]
 mod generate;
@@ -574,6 +576,12 @@ pub fn below(n: i8) -> i8 {
     (
         "pub fn later(x: u8) -> u8 {\n  guard x > 0 else {\n    todo(\"zero is not handled\")\n  }\n  x\n}\npub fn never(x: u8) -> u8 {\n  guard x < 10 else {\n    unreachable(\"x is a digit\")\n  }\n  x\n}\nfn noisy(x: u8) -> u8 = x + 1\npub fn drop(x: u8) -> u8 {\n  _ = noisy(x)\n  x\n}",
         &["later(0)", "later(2)", "never(12)", "never(3)", "drop(255)", "drop(4)"],
+    ),
+    // An empty array kept across a call: its slot of no bytes begins where the call's memory
+    // does, and stays with its frame when the call returns (the generator's seed 88).
+    (
+        "fn one() -> u8 = 1\npub fn empty() -> u8 {\n  var xs: [0]u8 = [0; 0]\n  val k: u8 = one()\n  xs = xs\n  k\n}",
+        &["empty()"],
     ),
 ];
 

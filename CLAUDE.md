@@ -41,7 +41,7 @@ This file is the switchboard, not the rulebook.
    - Write a rule's edge cases as conformance programs before its code: type limits and 0, negative values entering unsigned types, mixed signedness, `i128` beside `u128`, nested `if`, and out-of-type or misshapen arguments. Settle a case the spec leaves open in the spec first.
    - Define each fact about the language once, and read it everywhere. Test every special case the code makes.
    - A fix comes with a test seen to fail without it.
-   - New syntax or a new rule extends the program generator in the same pull request. A checkpoint closes only when the instruments scheduled for it run in CI and pass.
+   - New syntax or a new rule extends the program generator in the same pull request; `test_generated_programs_reach_every_construct_of_the_grammar` fails on syntax no generated program reaches. A checkpoint closes only when the instruments scheduled for it run in CI and pass.
 
 ---
 
