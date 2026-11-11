@@ -374,8 +374,11 @@ struct GStruct {
 struct GField {
     name: String,
     ty: Ty,
-    /// A refinement with literal bounds, in a `Refined` program.
+    /// A refinement with literal bounds, in a `Refined` program: of an integer field, or of
+    /// each element of an array of integers.
     refine: Option<R>,
+    /// Whether the refinement is written with an exclusive end, `lo..hi + 1`.
+    exclusive: bool,
     is_pub: bool,
 }
 
@@ -894,8 +897,17 @@ impl Gen {
         let mut fields = Vec::new();
         for j in 0..1 + self.rng.below(4) as usize {
             let ty = self.field_ty();
-            let refine = match &ty {
-                Ty::Int(t) if self.mode == Mode::Refined && self.rng.chance(40) => {
+            // An integer field, or the elements of an array of integers, may be refined.
+            let int = match &ty {
+                Ty::Int(t) => Some(*t),
+                Ty::Array(_, e) => match **e {
+                    Ty::Int(t) => Some(t),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let refine = match int {
+                Some(t) if self.mode == Mode::Refined && self.rng.chance(40) => {
                     let lo = self.value_in(R {
                         lo: t.min().max(Num::small(-50)),
                         hi: t.max().min(Num::small(50)),
@@ -908,10 +920,16 @@ impl Gen {
                 }
                 _ => None,
             };
+            // An exclusive end where one past the last value fits the type.
+            let exclusive = match (int, refine) {
+                (Some(t), Some(r)) => r.hi < t.max() && self.rng.chance(50),
+                _ => false,
+            };
             fields.push(GField {
                 name: format!("x{}", j),
                 ty,
                 refine,
+                exclusive,
                 is_pub: self.rng.chance(30),
             });
         }
@@ -922,11 +940,17 @@ impl Gen {
         out.push_str(&format!("struct {} {{\n", name));
         for f in &fields {
             let p = if f.is_pub { "pub " } else { "" };
+            let range = |r: R| match (f.exclusive, r.hi.add(Num::small(1))) {
+                (true, Some(end)) => format!("[{}..{}]", r.lo, end),
+                _ => format!("[{}..={}]", r.lo, r.hi),
+            };
             match (&f.ty, f.refine) {
-                (Ty::Int(t), Some(r)) => out.push_str(&format!(
-                    "  {}{}: {}[{}..={}]\n",
-                    p, f.name, t.name, r.lo, r.hi
-                )),
+                (Ty::Int(t), Some(r)) => {
+                    out.push_str(&format!("  {}{}: {}{}\n", p, f.name, t.name, range(r)))
+                }
+                (Ty::Array(n, e), Some(r)) => {
+                    out.push_str(&format!("  {}{}: [{}]{}{}\n", p, f.name, n, e, range(r)))
+                }
                 (ty, _) => out.push_str(&format!("  {}{}: {}\n", p, f.name, ty)),
             }
         }
@@ -977,11 +1001,21 @@ impl Gen {
         for f in self.fields_of(name) {
             let v = match (&f.ty, f.refine) {
                 (Ty::Int(_), Some(r)) => self.refined_value(r),
+                (Ty::Array(n, _), Some(r)) => self.refined_array(*n, r),
                 (ty, _) => self.value(ty, depth + 1),
             };
             fields.push((f.name, v));
         }
         E::Construct(name.to_string(), fields)
+    }
+
+    /// An array of `n` values Tier 1 proves inside `r`: one repeated, or each its own.
+    fn refined_array(&mut self, n: u32, r: R) -> E {
+        if n > 0 && n <= 4 && self.rng.chance(50) {
+            E::Array((0..n).map(|_| self.refined_value(r)).collect())
+        } else {
+            E::Repeat(Box::new(self.refined_value(r)), n)
+        }
     }
 
     /// A value Tier 1 proves inside `r`: a literal, or now and then a name guarded into it.
@@ -1102,7 +1136,8 @@ impl Gen {
         match t {
             Ty::Int(_) => E::num(range.map_or(Num::ZERO, |r| r.lo)),
             Ty::Bool => E::Lit("false".into()),
-            Ty::Array(n, e) => E::Repeat(Box::new(self.default_of(e, None)), *n),
+            // A refinement of an array is its elements'.
+            Ty::Array(n, e) => E::Repeat(Box::new(self.default_of(e, range)), *n),
             Ty::Struct(name) => E::Construct(
                 name.clone(),
                 self.fields_of(name)
@@ -2089,7 +2124,7 @@ impl Gen {
                     Ty::Array(n, inner) if *n > 0 => {
                         let mut s = steps.clone();
                         s.push(PStep::Index(*n));
-                        todo.push(((**inner).clone(), s, false));
+                        todo.push(((**inner).clone(), s, refined));
                     }
                     Ty::Struct(name) => {
                         for f in self.fields_of(name) {
@@ -2139,18 +2174,25 @@ impl Gen {
         }
     }
 
-    /// The refinement of a field place, when it is one.
+    /// The refinement of a field place, when it is one: of an integer field, or of an array
+    /// field's elements, which an element of it has too.
     fn place_refine(&self, id: usize, e: &E) -> Option<R> {
-        let E::Field(b, f) = e else {
-            return None;
-        };
-        let Ty::Struct(s) = self.place_ty(id, b) else {
-            return None;
-        };
-        self.fields_of(&s)
-            .into_iter()
-            .find(|g| g.name == *f)
-            .and_then(|g| g.refine)
+        match e {
+            E::Field(b, f) => {
+                let Ty::Struct(s) = self.place_ty(id, b) else {
+                    return None;
+                };
+                self.fields_of(&s)
+                    .into_iter()
+                    .find(|g| g.name == *f)
+                    .and_then(|g| g.refine)
+            }
+            E::Index(b, _) => match self.place_ty(id, b) {
+                Ty::Array(_, inner) if matches!(*inner, Ty::Int(_)) => self.place_refine(id, b),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     // ---------------------------------------------------------------- statements
@@ -2438,8 +2480,10 @@ impl Gen {
         let ty = self.place_ty(id, &place);
         let refine = self.place_refine(id, &place);
         let (op, value) = match (&ty, refine) {
-            // A refined field takes a value proven inside its refinement.
+            // A refined field takes a value proven inside its refinement, and an array whose
+            // elements are refined, elements proven so.
             (Ty::Int(_), Some(r)) => ("=", self.refined_value(r)),
+            (Ty::Array(n, _), Some(r)) => ("=", self.refined_array(*n, r)),
             (Ty::Int(t), None) if self.rng.chance(50) => {
                 let place_range = match &place {
                     E::Name(_) => self.binds[id].range.unwrap_or(t.range()),

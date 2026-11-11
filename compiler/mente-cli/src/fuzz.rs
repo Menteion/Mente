@@ -77,6 +77,10 @@ const MINIMIZE_LATE: Duration = Duration::from_secs(20);
 /// The most functions of one module the interpreters run.
 const MAX_FUNCTIONS: usize = 16;
 
+/// The most values, each element and field counted, of the arguments of a function the fuzzer
+/// runs: larger arrays only slow each call down.
+const MAX_ARGUMENT_VALUES: usize = 256;
+
 /// The limits of every interpreted call: tight, since only a crash matters. The reference
 /// interpreter copies an array value at each assignment, so it gets fewer steps and smaller
 /// arrays.
@@ -1298,26 +1302,61 @@ fn standalone(
 // Running functions on edge values
 // -------------------------------------------------------------------------------------------
 
-/// A scalar argument: an integer by sign and magnitude, or a `bool`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// An argument: an integer by sign and magnitude, a `bool`, or an array or a struct of them,
+/// its fields in the order of the declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Scalar {
     Int(bool, u128),
     Bool(bool),
+    Array(Vec<Scalar>),
+    Struct(String, Vec<(String, Scalar)>),
 }
 
 impl Scalar {
+    /// The first edge: 0, `false`, and an array or a struct of them.
     fn zero(shape: &Shape) -> Scalar {
-        match shape {
-            Shape::Bool => Scalar::Bool(false),
-            _ => Scalar::Int(false, 0),
-        }
+        edges(shape).swap_remove(0)
+    }
+}
+
+/// How many values an argument of `shape` is built of, each element and field counted.
+fn values_of(shape: &Shape) -> usize {
+    match shape {
+        Shape::Array(n, elem) => (*n as usize)
+            .saturating_mul(values_of(elem))
+            .saturating_add(1),
+        Shape::Struct(st) => st
+            .fields
+            .iter()
+            .fold(1, |sum: usize, f| sum.saturating_add(values_of(&f.shape))),
+        _ => 1,
     }
 }
 
 /// The values worth calling a parameter of `shape` with: 0, 1, its maximum, and for a signed
-/// type -1 and its minimum; `false` and `true`.
+/// type -1 and its minimum; `false` and `true`; an array with every element at one edge of
+/// its type, and a struct with each field at its own edge of that rank.
 fn edges(shape: &Shape) -> Vec<Scalar> {
     match shape {
+        Shape::Array(n, elem) => edges(elem)
+            .into_iter()
+            .map(|e| Scalar::Array(vec![e; *n as usize]))
+            .collect(),
+        Shape::Struct(st) => {
+            let each: Vec<Vec<Scalar>> = st.fields.iter().map(|f| edges(&f.shape)).collect();
+            let rounds = each.iter().map(Vec::len).max().unwrap_or(1);
+            (0..rounds)
+                .map(|k| {
+                    let fields = st
+                        .fields
+                        .iter()
+                        .zip(&each)
+                        .map(|(f, e)| (f.name.clone(), e[k % e.len()].clone()))
+                        .collect();
+                    Scalar::Struct(st.name.clone(), fields)
+                })
+                .collect()
+        }
         Shape::Int(t) if t.signed => {
             let max = (1u128 << (t.bits - 1)) - 1;
             vec![
@@ -1355,14 +1394,14 @@ fn edge_calls(params: &[Shape]) -> Vec<Vec<Scalar>> {
                 .enumerate()
                 .map(|(i, e)| {
                     let at = if k < 3 { k } else { i + 1 };
-                    e[at % e.len()]
+                    e[at % e.len()].clone()
                 })
                 .collect()
         })
         .collect()
 }
 
-/// A function whose parameters are all integers or `bool`s.
+/// A function the fuzzer runs: its parameters integers, `bool`s, arrays and structs.
 struct Function {
     name: String,
     params: Vec<Shape>,
@@ -1386,7 +1425,9 @@ fn scalar_functions(module: &CheckedModule) -> Vec<Function> {
                 .collect::<Option<Vec<Shape>>>()?;
             params
                 .iter()
-                .all(|p| matches!(p, Shape::Int(_) | Shape::Bool))
+                .map(values_of)
+                .fold(0, usize::saturating_add)
+                .le(&MAX_ARGUMENT_VALUES)
                 .then(|| Function {
                     name: f.syntax.name.clone(),
                     params,
@@ -1397,17 +1438,26 @@ fn scalar_functions(module: &CheckedModule) -> Vec<Function> {
 }
 
 fn value(s: &Scalar) -> Value {
-    match *s {
-        Scalar::Bool(b) => Value::Bool(b),
-        Scalar::Int(neg, mag) if neg => Value::Int(Int::from_u128(mag).negate()),
-        Scalar::Int(_, mag) => Value::Int(Int::from_u128(mag)),
+    match s {
+        Scalar::Bool(b) => Value::Bool(*b),
+        Scalar::Int(neg, mag) if *neg => Value::Int(Int::from_u128(*mag).negate()),
+        Scalar::Int(_, mag) => Value::Int(Int::from_u128(*mag)),
+        Scalar::Array(items) => Value::Array(items.iter().map(value).collect()),
+        Scalar::Struct(name, fields) => Value::Struct(
+            name.clone(),
+            fields.iter().map(|(n, v)| (n.clone(), value(v))).collect(),
+        ),
     }
 }
 
 fn arg(s: &Scalar) -> native::Arg {
-    match *s {
-        Scalar::Bool(b) => native::Arg::Bool(b),
-        Scalar::Int(neg, mag) => native::Arg::Int(Num::new(neg, mag)),
+    match s {
+        Scalar::Bool(b) => native::Arg::Bool(*b),
+        Scalar::Int(neg, mag) => native::Arg::Int(Num::new(*neg, *mag)),
+        Scalar::Array(items) => native::Arg::Array(items.iter().map(arg).collect()),
+        Scalar::Struct(_, fields) => {
+            native::Arg::Struct(fields.iter().map(|(_, v)| arg(v)).collect())
+        }
     }
 }
 
@@ -1458,18 +1508,17 @@ fn run_mir(lowered: &Lowered, functions: &[Function]) -> Option<String> {
                 values.push(Val::Addr(memory.alloc(entry.result.size())));
             }
             for ((is_mut, shape), s) in entry.params.iter().zip(&call) {
-                let v = match *s {
-                    Scalar::Bool(b) => Val::Bool(b),
-                    Scalar::Int(neg, mag) => Val::Int(Num::new(neg, mag)),
-                };
-                if *is_mut {
-                    let at = memory.alloc(shape.size());
-                    if memory.store(at, v, shape.ty()).is_err() {
-                        continue 'calls;
+                match (*is_mut, s) {
+                    (false, Scalar::Bool(b)) => values.push(Val::Bool(*b)),
+                    (false, Scalar::Int(neg, mag)) => values.push(Val::Int(Num::new(*neg, *mag))),
+                    // An array, a struct or a `mut` argument lies in memory, as MIR takes it.
+                    _ => {
+                        let at = memory.alloc(shape.size());
+                        if crate::mir_run::write(&mut memory, at, shape, &value(s)).is_err() {
+                            continue 'calls;
+                        }
+                        values.push(Val::Addr(at));
                     }
-                    values.push(Val::Addr(at));
-                } else {
-                    values.push(v);
                 }
             }
             if let Err(cfg::Stop::Broken(why)) =
@@ -3118,8 +3167,10 @@ mod tests {
     }
 
     /// Each integer parameter is called at 0, 1, its maximum, and for a signed type -1 and its
-    /// minimum; each `bool` at both values; and a call takes every parameter's first, second
-    /// and third edge, then a mix. Only functions whose parameters are all scalars run.
+    /// minimum; each `bool` at both values; an array with every element at one edge, and a
+    /// struct with each field at its edge of a rank; and a call takes every parameter's first,
+    /// second and third edge, then a mix. Functions with arrays and structs run too, up to a
+    /// number of values.
     #[test]
     fn test_functions_are_called_on_the_edges_of_their_types() {
         use mente_sema::types::IntTy;
@@ -3176,13 +3227,63 @@ mod tests {
             matches!(arg(&Scalar::Int(true, 5)), native::Arg::Int(n) if n == Num::new(true, 5))
         );
         let module = mente_sema::check_program(
-            "module m\npub fn f(a: i32, mut b: bool) -> i32 = a\npub fn g(xs: [2]u8) -> u8 = xs[0]\n",
+            "module m\npub struct P {\n  a: i8\n  b: bool\n}\npub fn f(a: i32, mut b: bool) -> i32 = a\npub fn g(xs: [2]u8) -> u8 = xs[0]\npub fn h(p: P) -> i8 = p.a\npub fn big(xs: [300]u8) -> u8 = xs[0]\n",
         )
         .unwrap();
         let functions = scalar_functions(&module);
-        assert_eq!(functions.len(), 1);
-        assert_eq!(functions[0].name, "f");
-        assert_eq!(functions[0].params.len(), 2);
+        assert_eq!(
+            functions
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["f", "g", "h"],
+            "a function of more values than the fuzzer takes is left out"
+        );
+        let array = edges(&functions[1].params[0]);
+        assert_eq!(array.len(), 3);
+        assert_eq!(
+            array[1],
+            Scalar::Array(vec![Scalar::Int(false, 255), Scalar::Int(false, 255)])
+        );
+        let record = edges(&functions[2].params[0]);
+        assert_eq!(record.len(), 5, "as many as its field of the most edges");
+        assert_eq!(
+            record[1],
+            Scalar::Struct(
+                "P".into(),
+                vec![
+                    ("a".into(), Scalar::Int(false, 127)),
+                    ("b".into(), Scalar::Bool(true))
+                ]
+            )
+        );
+        assert_eq!(
+            record[2],
+            Scalar::Struct(
+                "P".into(),
+                vec![
+                    ("a".into(), Scalar::Int(true, 128)),
+                    ("b".into(), Scalar::Bool(false))
+                ]
+            )
+        );
+        assert_eq!(Scalar::zero(&functions[2].params[0]), record[0]);
+        assert_eq!(
+            value(&record[1]),
+            Value::Struct(
+                "P".into(),
+                vec![
+                    ("a".into(), Value::Int(Int::from_i128(127))),
+                    ("b".into(), Value::Bool(true))
+                ]
+            )
+        );
+        assert!(matches!(arg(&array[1]), native::Arg::Array(items) if items.len() == 2));
+        assert!(matches!(arg(&record[1]), native::Arg::Struct(fields) if fields.len() == 2));
+        // Each runs on both interpreters without a failure.
+        let lowered = mente_codegen::lower::lower(&module).unwrap();
+        assert_eq!(interpret(&module, &functions), None);
+        assert_eq!(run_mir(&lowered, &functions), None);
     }
 
     fn args(line: &str) -> Vec<String> {

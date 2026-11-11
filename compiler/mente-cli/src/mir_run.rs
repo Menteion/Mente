@@ -391,7 +391,12 @@ fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
 }
 
 /// Writes `value` of `shape` at `at`; an integer outside its type is refused.
-fn write(memory: &mut Memory, at: u64, shape: &Shape, value: &Value) -> Result<(), String> {
+pub(crate) fn write(
+    memory: &mut Memory,
+    at: u64,
+    shape: &Shape,
+    value: &Value,
+) -> Result<(), String> {
     match (shape, value) {
         (Shape::Int(t), v) => {
             let n = num(v)?;

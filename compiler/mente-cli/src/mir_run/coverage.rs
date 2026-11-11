@@ -158,6 +158,8 @@ const PLACES: &[&str] = &[
     "array of structs",
     "struct of structs",
     "refined field",
+    "refined array element in a field",
+    "exclusive field range",
     "field read through an index that calls with mut",
 ];
 
@@ -337,9 +339,26 @@ fn reached_struct(s: &StructSyntax, seen: &mut BTreeSet<String>) {
         match &tree.ty(f.ty).kind {
             TypeKind::Named(_) => mark("struct of structs"),
             TypeKind::Int {
-                refinement: Some(_),
+                refinement: Some(r),
                 ..
-            } => mark("refined field"),
+            } => {
+                mark("refined field");
+                if !r.inclusive {
+                    mark("exclusive field range");
+                }
+            }
+            TypeKind::Array { elem, .. } => {
+                if let TypeKind::Int {
+                    refinement: Some(r),
+                    ..
+                } = &tree.ty(*elem).kind
+                {
+                    mark("refined array element in a field");
+                    if !r.inclusive {
+                        mark("exclusive field range");
+                    }
+                }
+            }
             _ => {}
         }
     }
