@@ -47,6 +47,7 @@ pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>
         recovering: false,
         nest: 0,
         depth: 0,
+        index_nest: None,
     };
     let syntax = p.function();
     // A tree too high for the phases that recurse over it, such as a long chain of `+`,
@@ -92,6 +93,8 @@ struct Parser {
     nest: u32,
     /// How deep the parser has descended into expressions, blocks and types.
     depth: u32,
+    /// `nest` inside the brackets of the index being parsed, where a range makes a view.
+    index_nest: Option<u32>,
 }
 
 impl Parser {
@@ -1104,8 +1107,15 @@ impl Parser {
                     self.later(span, "a `mut` projection `p[mut h]`", Some("M3"));
                     return true;
                 }
+                if self.at(&TokenKind::DotDot) {
+                    let span = self.span();
+                    self.later(span, "a view `x[..]`", Some("M2"));
+                    return true;
+                }
                 self.nest += 1;
+                let outer = self.index_nest.replace(self.nest);
                 let index = self.expr();
+                self.index_nest = outer;
                 if !self.recovering {
                     self.expect(&TokenKind::RBracket, "`]` to close the index");
                 }
@@ -1191,6 +1201,11 @@ impl Parser {
             }
             TokenKind::PipeGt => {
                 self.later(at, "the pipe `|>`", None);
+                true
+            }
+            // Directly inside an index's brackets a range makes a view, which M2 brings.
+            TokenKind::DotDot | TokenKind::DotDotEq if self.index_nest == Some(self.nest) => {
+                self.later(at, "a range `x[a..b]`", Some("M2"));
                 true
             }
             TokenKind::DotDot | TokenKind::DotDotEq => {
@@ -2283,6 +2298,28 @@ _ == b"
                 "a field other than `.len` comes in M2; M1 does not have it",
             ),
             (
+                "val v = xs[..]",
+                "a view `x[..]` comes in M2; M1 does not have it",
+            ),
+            (
+                "val v = xs[1..3]",
+                "a range `x[a..b]` comes in M2; M1 does not have it",
+            ),
+            (
+                "val v = xs[1..=3]",
+                "a range `x[a..b]` comes in M2; M1 does not have it",
+            ),
+            // A range inside a call inside an index is an expression's range, not a view's.
+            (
+                "val v = xs[f(1..3)]",
+                "a range in an expression is in no milestone yet; M1 does not have it",
+            ),
+            // An index's brackets end with it: a range later at the same depth is an expression's.
+            (
+                "val v = f(g(xs[0]), h(k(1..3)))",
+                "a range in an expression is in no milestone yet; M1 does not have it",
+            ),
+            (
                 "val r = f()?",
                 "error propagation (`?` and `!`) comes in M2; M1 does not have it",
             ),
@@ -2602,6 +2639,7 @@ _ == b"
             recovering: false,
             nest: 0,
             depth: 0,
+            index_nest: None,
         };
         for _ in 0..6 {
             p.bump();
