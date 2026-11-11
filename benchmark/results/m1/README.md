@@ -4,7 +4,7 @@ The first measured run of the agent benchmark ([`benchmark/README.md`](../../REA
 
 ## How it ran
 
-- **Workflow**: "Agent benchmark", run 42754141549, on commit `6305c99`, 2026-11-10. `results.json` records the run in full, the held-out set as totals only.
+- **Workflow**: "Agent benchmark", run 42754141549, on commit `6305c99`, 2026-11-10; the result recorded for tag `m1`. `results.json` records the run in full, the held-out set as totals only.
 - **Tasks**: the 20 public M1 tasks (18 solve tasks, 7 of them not core, and 2 adversarial ones), and the 6 held-out M1 solve tasks, read from the private repository at the commit `corpus.lock` names.
 - **Models**: `claude-sonnet-5-5` and `claude-haiku-5-5`, each with its default thinking and effort, Messages API version `2026-10-21`, no fallback model, prompt caching on the system prompt.
 - **Languages and what each agent saw**:
