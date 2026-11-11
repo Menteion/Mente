@@ -65,14 +65,14 @@ pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0])
 }
 
 @example("branch-free cell integration on a 64-byte cache line") {
-  var cell = DeterministicCell {
+  var cell = DeterministicCell(
     id: 1,
     potential: 0.5_q16_16,
     threshold: 1.0_q16_16,
     resting: 0.0_q16_16,
-    last_header: SpikeHeader { region_id: 2, priority: 5, inhibitory: false, target_idx: 42 },
+    last_header: SpikeHeader(region_id: 2, priority: 5, inhibitory: false, target_idx: 42),
     dendrite_w: [0.0_q1_15; 20],
-  }
+  )
 
   // mut at the call site shows at a glance that this line changes cell in place
   val did_fire = integrate_cell(mut cell, 0.75_q16_16, 2)

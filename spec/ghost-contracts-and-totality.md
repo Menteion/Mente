@@ -57,14 +57,14 @@ date: 2026-11-04
 4. `Specified` **Tier-1 solver predictability and concrete counterexample diagnostics (Engineering Guardrail #1)**:
    - To eliminate the "SMT butterfly effect" (where a minor code edit causes unpredictable solver timeouts in Dafny/LiquidHaskell), Tier 1 MUST remain strictly within **polynomial-time decidable abstract domains**: Interval Arithmetic (`[min, max]`) plus the **Octagon / Difference-Bound Matrix (DBM) domain** ($\pm x \pm y \le c$, solved in $O(V^3)$ incremental Floyd-Warshall closure).
    - **Contracts are used modularly**: at each call, Tier 1 checks the callee's `requires` and then assumes its `ensures`; it never analyses the callee's body, which keeps every caller's proof independent of callee bodies (`holographic-module.md`). A fact the two domains cannot derive is supplied by a function whose `ensures` states it inside them and whose body is proven once by Tier 2, a trusted axiom until `mn prove` runs.
-   - The standard library's `midpoint` is the canonical case:
+   - `midpoint` is the canonical case, which example 01 writes in its own module ([`example-01-m2`](../docs/design-review.md#example-01-m2)):
      ```rust
      pub fn midpoint(lo: usize, hi: usize) -> usize
        requires lo < hi
        ensures lo <= result and result < hi
      = lo + (hi - lo) / 2
      ```
-     Its body divides by 2, a coefficient no octagon constraint can hold, so Tier 1 alone would lose the relation between `mid` and `hi`. Through the contract, a binary search's `items[mid]` is proven in bounds from octagon facts only (`examples/01_refinement_and_units.mn`).
+     Its body divides by 2, a coefficient no octagon constraint holds; Tier 1 proves the contract from it through its facts of division by a positive constant (`core-calculus.md`, item 8), once. A binary search's caller then proves `items[mid]` in bounds from the contract alone, without the body (`examples/01_refinement_and_units.mn`). A fact Tier 1 cannot derive at all is where such a contract waits for Tier 2.
    - Whenever Tier 1 cannot discharge a `requires` or slice-bounds obligation, the compiler MUST NOT emit a generic "precondition might not hold" message. It MUST emit:
      1. A **concrete valuation Tier 1 cannot rule out**, read from the violated DBM boundary (e.g., `Tier 1 cannot rule out lo = 0, hi = 0, which violates requires items.len > 0`). Octagons over-approximate, notably after the join at the end of an `if`, so no execution may reach the valuation, and the diagnostic never calls it an input that fails ([`tier1-counterexample`](../docs/design-review.md#tier1-counterexample)).
      2. A **copy-pasteable 1-line `guard` prescription** (e.g., `Help: insert 'guard items.len > 0 else return none' before line 43 to narrow the interval`). It is the diagnostic's fix, with applicability `suggestion`: a `guard` changes what the function does on the inputs it excludes (`diagnostics.md`). Where declaring a `var` refined lets Tier 1 prove the obligation, that declaration is offered first, since it leaves no run-time check ([`refine-binding-fix`](../docs/design-review.md#refine-binding-fix)).
