@@ -43,7 +43,7 @@ use mente_syntax::Span;
 
 use super::{Cond, Fx, Obligation, Site, Tag, Val};
 use crate::names::BindingKind;
-use crate::octagon::{Octagon, Term, INF};
+use crate::octagon::{Exact, Octagon, Term, INF};
 use crate::types::{Int, IntTy, Ty};
 
 /// What an obligation states, for its query to deny.
@@ -90,7 +90,17 @@ pub(super) fn query(fx: &Fx, o: &Obligation, paths: Vec<Path>) -> Option<String>
         if st.is_empty() && !contradiction {
             continue;
         }
-        let facts: Vec<String> = constraints.iter().map(|(t, c)| w.le(t, *c)).collect();
+        let mut facts: Vec<String> = constraints.iter().map(|(t, c)| w.le(t, *c)).collect();
+        // The bounds the state keeps beyond the octagon's reach, exactly.
+        for (v, lower, upper) in st.far_constraints() {
+            let x = w.var(&Term::pos(v));
+            if let Some(l) = lower {
+                facts.push(format!("(<= {} {})", exact_num(l), x));
+            }
+            if let Some(u) = upper {
+                facts.push(format!("(<= {} {})", x, exact_num(u)));
+            }
+        }
         let mut denial = Vec::new();
         let denied = w.deny(goal, &mut denial);
         denial.push(denied);
@@ -108,6 +118,15 @@ fn num(v: i128) -> String {
         format!("(- {})", v.unsigned_abs())
     } else {
         v.to_string()
+    }
+}
+
+/// An exact integer as an SMT-LIB numeral, negative ones as `(- n)`.
+fn exact_num(v: Exact) -> String {
+    let text = v.to_string();
+    match text.strip_prefix('-') {
+        Some(m) => format!("(- {})", m),
+        None => text,
     }
 }
 
@@ -255,6 +274,14 @@ impl<'f, 'a> Writer<'f, 'a> {
                 };
                 let (l, r) = (self.term(l, side), self.term(r, side));
                 format!("({} {} {})", symbol, l, r)
+            }
+            Cond::Far(op, far) => {
+                let (v, c) = (&far.0, &far.1);
+                let Some(symbol) = relation(*op) else {
+                    return self.fresh("Bool", "a condition Tier 1 does not follow".to_string());
+                };
+                let v = self.term(v, side);
+                format!("({} {} {})", symbol, v, exact_num(*c))
             }
             Cond::And(a, b) => {
                 let (a, b) = (self.cond(a, side), self.cond(b, side));
@@ -1010,6 +1037,36 @@ mod tests {
             unguarded[0].1.iter().all(|q| q.0 != ObligationKind::Range),
             "{:?}",
             unguarded
+        );
+    }
+
+    /// A refinement at a 128-bit type's limit is denied against its exact bound, and the
+    /// bounds the state keeps beyond the octagon's reach are among the query's facts.
+    #[test]
+    fn test_bounds_beyond_the_octagon_are_written_exactly() {
+        let q = only(
+            "pub fn take(x: u128[0..340282366920938463463374607431768211455]) -> u128 = x\npub fn f(y: u128[0..340282366920938463463374607431768211455]) -> u128 = take(y)",
+            ObligationKind::Refinement,
+        );
+        assert!(
+            q.contains("340282366920938463463374607431768211454)"),
+            "the bound kept beyond the octagon: {}",
+            q
+        );
+        assert!(
+            q.contains("(< |x| 340282366920938463463374607431768211455)")
+                || q.contains("340282366920938463463374607431768211455)))"),
+            "the refinement denied exactly: {}",
+            q
+        );
+        let i = only(
+            "pub fn take(x: i128[-170141183460469231731687303715884105728..=0]) -> i128 = x\npub fn f() -> i128 = take(-170141183460469231731687303715884105728)",
+            ObligationKind::Refinement,
+        );
+        assert!(
+            i.contains("(- 170141183460469231731687303715884105728)"),
+            "a negative bound as a numeral: {}",
+            i
         );
     }
 

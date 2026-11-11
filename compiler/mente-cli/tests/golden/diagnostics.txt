@@ -37,7 +37,7 @@
 == core-calculus/break_outside_a_loop.mn ==
 {"version":1,"diagnostics":[{"code":"E0208","severity":"error","message":"`break` stands only inside a `while` loop","primary":{"file":"break_outside_a_loop.mn","start":51,"end":56,"line":4,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/call_without_body.mn ==
-{"version":1,"diagnostics":[{"code":"E0224","severity":"error","message":"`id` has no body, so this call has nothing to run; M1 calls only a function with a body","primary":{"file":"call_without_body.mn","start":78,"end":83,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0224","severity":"error","message":"`id` has no body, so this call has nothing to run; M2 calls only a function with a body","primary":{"file":"call_without_body.mn","start":78,"end":83,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/contracts_used_modularly.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/ensures_not_proven_at_a_return.mn ==
@@ -51,7 +51,7 @@
 == core-calculus/field_the_struct_lacks.mn ==
 {"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`Pair` has no field `frist`; did you mean `first`?","primary":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"related":[],"fixes":[{"message":"write `first`","applicability":"suggestion","edits":[{"span":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"replacement":"first"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/function_as_value.mn ==
-{"version":1,"diagnostics":[{"code":"E0204","severity":"error","message":"`id` is a function, which M1 only calls: write `id(...)`","primary":{"file":"function_as_value.mn","start":82,"end":84,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0204","severity":"error","message":"`id` is a function, which M2 only calls: write `id(...)`","primary":{"file":"function_as_value.mn","start":82,"end":84,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/guard_that_falls_through.mn ==
 {"version":1,"diagnostics":[{"code":"E0211","severity":"error","message":"the `else` of a `guard` must not reach its end: leave by `return`, `break`, `continue`, `todo` or `unreachable`","primary":{"file":"guard_that_falls_through.mn","start":79,"end":94,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/if_beyond_128_bits.mn ==
@@ -61,19 +61,19 @@
 == core-calculus/intermediate_beyond_128_bits.mn ==
 {"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the exact value of `a * a * a` might need more than 128 bits, and an intermediate is computed exactly only within `i128` or `u128`","primary":{"file":"intermediate_beyond_128_bits.mn","start":82,"end":91,"line":4,"column":17},"related":[],"fixes":[{"message":"bind `a * a` to `product: u128` first","applicability":"suggestion","edits":[{"span":{"file":"intermediate_beyond_128_bits.mn","start":66,"end":66,"line":4,"column":1},"replacement":"  val product: u128 = a * a\n"},{"span":{"file":"intermediate_beyond_128_bits.mn","start":82,"end":87,"line":4,"column":17},"replacement":"product"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/later_error_type.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an error type `T ! E` comes in M2; M1 does not have it","primary":{"file":"later_error_type.mn","start":60,"end":61,"line":3,"column":25},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an error type `T ! E` comes later in M2; the compiler does not have it yet","primary":{"file":"later_error_type.mn","start":60,"end":61,"line":3,"column":25},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/later_for_loop.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `for` loop is in no milestone yet; M1 does not have it","primary":{"file":"later_for_loop.mn","start":70,"end":73,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `for` loop is in no milestone yet; M2 does not have it","primary":{"file":"later_for_loop.mn","start":70,"end":73,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/later_match.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"`match` comes in M2; M1 does not have it","primary":{"file":"later_match.mn","start":72,"end":77,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"`match` comes later in M2; the compiler does not have it yet","primary":{"file":"later_match.mn","start":72,"end":77,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/later_string_value.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string value comes in M2; M1 does not have it","primary":{"file":"later_string_value.mn","start":66,"end":72,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string value comes later in M2; the compiler does not have it yet","primary":{"file":"later_string_value.mn","start":66,"end":72,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/layout_struct_as_a_value.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_as_a_value.mn","start":131,"end":136,"line":8,"column":17},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M2 does not have it","primary":{"file":"layout_struct_as_a_value.mn","start":131,"end":136,"line":8,"column":17},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/layout_struct_built.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_built.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M2 does not have it","primary":{"file":"layout_struct_built.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/layout_struct_called.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_called.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M2 does not have it","primary":{"file":"layout_struct_called.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/len_of_a_non_array.mn ==
 {"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`.len` is an array's length, but this is `u8`","primary":{"file":"len_of_a_non_array.mn","start":63,"end":68,"line":3,"column":28},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/literal_outside_its_suffix.mn ==
@@ -104,6 +104,16 @@
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/refined_field_store_not_proven.mn ==
 {"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 10`, outside `u8[0..10]`, the type of `g.d`","primary":{"file":"refined_field_store_not_proven.mn","start":115,"end":116,"line":8,"column":9},"related":[],"fixes":[{"message":"insert `guard x < 10 else { return }`","applicability":"suggestion","edits":[{"span":{"file":"refined_field_store_not_proven.mn","start":107,"end":107,"line":8,"column":1},"replacement":"  guard x < 10 else { return }\n"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/refinement_at_the_i128_limits.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/refinement_at_the_i128_limits_not_proven.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out that `170141183460469231731687303715884105727` is 170141183460469231731687303715884105727, outside `i128[-170141183460469231731687303715884105728..=170141183460469231731687303715884105726]`, the type of parameter `x` of `take`","primary":{"file":"refinement_at_the_i128_limits_not_proven.mn","start":186,"end":225,"line":5,"column":33},"related":[],"fixes":[{"message":"insert `guard 170141183460469231731687303715884105727 <= 170141183460469231731687303715884105726 else { todo(\"170141183460469231731687303715884105727 <= 170141183460469231731687303715884105726 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refinement_at_the_i128_limits_not_proven.mn","start":179,"end":226,"line":5,"column":26},"replacement":"{\n  guard 170141183460469231731687303715884105727 <= 170141183460469231731687303715884105726 else { todo(\"170141183460469231731687303715884105727 <= 170141183460469231731687303715884105726 is false here\") }\n  take(170141183460469231731687303715884105727)\n}"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/refinement_at_the_u128_limit.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/refinement_at_the_u128_limit_literal_outside.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out that `340282366920938463463374607431768211455` is 340282366920938463463374607431768211455, outside `u128[0..340282366920938463463374607431768211455]`, the type of parameter `x` of `take`","primary":{"file":"refinement_at_the_u128_limit_literal_outside.mn","start":146,"end":185,"line":5,"column":33},"related":[],"fixes":[{"message":"insert `guard 340282366920938463463374607431768211455 < 340282366920938463463374607431768211455 else { todo(\"340282366920938463463374607431768211455 < 340282366920938463463374607431768211455 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refinement_at_the_u128_limit_literal_outside.mn","start":139,"end":186,"line":5,"column":26},"replacement":"{\n  guard 340282366920938463463374607431768211455 < 340282366920938463463374607431768211455 else { todo(\"340282366920938463463374607431768211455 < 340282366920938463463374607431768211455 is false here\") }\n  take(340282366920938463463374607431768211455)\n}"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/refinement_at_the_u128_limit_not_proven.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out that `y` is 340282366920938463463374607431768211455, outside `u128[0..340282366920938463463374607431768211455]`, the type of parameter `x` of `take`","primary":{"file":"refinement_at_the_u128_limit_not_proven.mn","start":236,"end":237,"line":6,"column":36},"related":[],"fixes":[{"message":"insert `guard y < 340282366920938463463374607431768211455 else { todo(\"y < 340282366920938463463374607431768211455 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refinement_at_the_u128_limit_not_proven.mn","start":229,"end":238,"line":6,"column":29},"replacement":"{\n  guard y < 340282366920938463463374607431768211455 else { todo(\"y < 340282366920938463463374607431768211455 is false here\") }\n  take(y)\n}"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/refinement_not_proven.mn ==
 {"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 255`, where `x + 1` is 256, outside `u8[1..=255]`, the type of the result of `next`","primary":{"file":"refinement_not_proven.mn","start":81,"end":86,"line":4,"column":10},"related":[],"fixes":[{"message":"insert `guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refinement_not_proven.mn","start":72,"end":72,"line":4,"column":1},"replacement":"  guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }\n"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/refinement_over_a_var.mn ==
@@ -131,9 +141,9 @@
 == core-calculus/struct_containing_itself_through_others.mn ==
 {"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`A` contains itself: its field `b` holds `B`, whose field `a` holds `A`, so a value of it would have no end","primary":{"file":"struct_containing_itself_through_others.mn","start":47,"end":48,"line":3,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_containing_itself_through_others.mn","start":53,"end":54,"line":4,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_field_default.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a field's default value is in no milestone yet; M1 does not have it","primary":{"file":"struct_field_default.mn","start":63,"end":64,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a field's default value is in no milestone yet; M2 does not have it","primary":{"file":"struct_field_default.mn","start":63,"end":64,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_field_of_a_later_type.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string or list type (`String`) comes in M2; M1 does not have it","primary":{"file":"struct_field_of_a_later_type.mn","start":63,"end":69,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string or list type (`String`) comes later in M2; the compiler does not have it yet","primary":{"file":"struct_field_of_a_later_type.mn","start":63,"end":69,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_fields_at_their_limits.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/struct_in_two_cycles.mn ==
@@ -148,6 +158,10 @@
 {"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`bool` is a type of the language; a name means one thing, so give this struct another","primary":{"file":"struct_named_like_bool.mn","start":47,"end":51,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_nested_and_arrays.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_refined_field_at_the_u128_limit_not_proven.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `y = 340282366920938463463374607431768211455`, outside `u128[0..340282366920938463463374607431768211455]`, the type of field `big` of `Limits`","primary":{"file":"struct_refined_field_at_the_u128_limit_not_proven.mn","start":159,"end":160,"line":7,"column":45},"related":[],"fixes":[{"message":"insert `guard y < 340282366920938463463374607431768211455 else { todo(\"y < 340282366920938463463374607431768211455 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"struct_refined_field_at_the_u128_limit_not_proven.mn","start":145,"end":161,"line":7,"column":31},"replacement":"{\n  guard y < 340282366920938463463374607431768211455 else { todo(\"y < 340282366920938463463374607431768211455 is false here\") }\n  Limits(big: y)\n}"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/struct_refined_fields_at_128_bit_limits.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/struct_refined_fields_at_their_bounds.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/struct_type_unknown.mn ==
@@ -155,9 +169,9 @@
 == core-calculus/struct_values_are_copied.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/struct_with_an_invariant.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an invariant relating a struct's fields comes in a later milestone; M1 does not have it","primary":{"file":"struct_with_an_invariant.mn","start":76,"end":85,"line":7,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an invariant relating a struct's fields comes in a later milestone; M2 does not have it","primary":{"file":"struct_with_an_invariant.mn","start":76,"end":85,"line":7,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_with_type_parameters.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a struct's type parameters comes in M4; M1 does not have it","primary":{"file":"struct_with_type_parameters.mn","start":52,"end":53,"line":3,"column":17},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a struct's type parameters comes in M4; M2 does not have it","primary":{"file":"struct_with_type_parameters.mn","start":52,"end":53,"line":3,"column":17},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_within_4_gib.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/two_declarations_of_one_name.mn ==
@@ -174,6 +188,12 @@
 {"version":1,"diagnostics":[{"code":"E0213","severity":"error","message":"`id` takes 1 argument, but this call passes 2","primary":{"file":"wrong_number_of_arguments.mn","start":82,"end":90,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/wrong_type.mn ==
 {"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"expected `bool` as the condition of `if`, found `u8`","primary":{"file":"wrong_type.mn","start":65,"end":66,"line":4,"column":6},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== diagnostics/function_before_struct.mn ==
+{"version":1,"diagnostics":[{"code":"E0221","severity":"error","message":"the literal 300_u8 lies outside `u8`, which holds 0 to 255","primary":{"file":"function_before_struct.mn","start":150,"end":156,"line":4,"column":20},"related":[],"fixes":[]},{"code":"E0128","severity":"error","message":"a field ends at the end of its line, so Mente writes no `,` after one","primary":{"file":"function_before_struct.mn","start":180,"end":181,"line":7,"column":8},"related":[],"fixes":[{"message":"remove the `,`","applicability":"machine-applicable","edits":[{"span":{"file":"function_before_struct.mn","start":180,"end":181,"line":7,"column":8},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== diagnostics/layout_after_a_function.mn ==
+{"version":1,"diagnostics":[{"code":"E0221","severity":"error","message":"the literal 300_u8 lies outside `u8`, which holds 0 to 255","primary":{"file":"layout_after_a_function.mn","start":152,"end":158,"line":4,"column":20},"related":[],"fixes":[]},{"code":"E0416","severity":"error","message":"struct `R` declares `size: 4`, but its fields end at byte 2","primary":{"file":"layout_after_a_function.mn","start":160,"end":186,"line":6,"column":1},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== diagnostics/names_and_types_in_source_order.mn ==
+{"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"expected `bool` for `a`, found an integer","primary":{"file":"names_and_types_in_source_order.mn","start":174,"end":175,"line":5,"column":17},"related":[],"fixes":[]},{"code":"E0201","severity":"error","message":"there is no binding named `nope` here","primary":{"file":"names_and_types_in_source_order.mn","start":186,"end":190,"line":7,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/clause_outside_the_fragment.mn ==
 {"version":1,"diagnostics":[{"code":"E0503","severity":"error","message":"`requires x % 2 == 0` lies outside the Tier-1 fragment, since it uses `%`; mark `half` `@checked` to check it at run time, or `@prove` to make it a trusted axiom until `mn prove` runs","primary":{"file":"clause_outside_the_fragment.mn","start":72,"end":82,"line":4,"column":12},"related":[],"fixes":[{"message":"mark `half` `@checked`: the clause becomes a run-time check","applicability":"suggestion","edits":[{"span":{"file":"clause_outside_the_fragment.mn","start":36,"end":36,"line":3,"column":1},"replacement":"@checked\n"}]},{"message":"mark `half` `@prove`: the clause becomes a trusted axiom until `mn prove` runs","applicability":"suggestion","edits":[{"span":{"file":"clause_outside_the_fragment.mn","start":36,"end":36,"line":3,"column":1},"replacement":"@prove\n"}]}]}],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/clause_routed_by_checked.mn ==
@@ -241,11 +261,11 @@
 == grammar/unknown_escape.mn ==
 {"version":1,"diagnostics":[{"code":"E0107","severity":"error","message":"`\\q` is not an escape Mente knows; a string literal may use `\\\"`, `\\\\`, `\\n` and `\\t`","primary":{"file":"unknown_escape.mn","start":65,"end":67,"line":4,"column":10},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == hardware-contracts/branchless_raise.mn ==
-{"version":1,"diagnostics":[{"code":"E0402","severity":"error","message":"function `pick` is marked `@branchless`, but contains `raise`","primary":{"file":"branchless_raise.mn","start":67,"end":71,"line":4,"column":8},"related":[],"fixes":[]},{"code":"E0109","severity":"error","message":"an error type `T ! E` comes in M2; M1 does not have it","primary":{"file":"branchless_raise.mn","start":87,"end":88,"line":4,"column":28},"related":[],"fixes":[]},{"code":"E0109","severity":"error","message":"`raise` comes in M2; M1 does not have it","primary":{"file":"branchless_raise.mn","start":104,"end":109,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0402","severity":"error","message":"function `pick` is marked `@branchless`, but contains `raise`","primary":{"file":"branchless_raise.mn","start":67,"end":71,"line":4,"column":8},"related":[],"fixes":[]},{"code":"E0109","severity":"error","message":"an error type `T ! E` comes later in M2; the compiler does not have it yet","primary":{"file":"branchless_raise.mn","start":87,"end":88,"line":4,"column":28},"related":[],"fixes":[]},{"code":"E0109","severity":"error","message":"`raise` comes later in M2; the compiler does not have it yet","primary":{"file":"branchless_raise.mn","start":104,"end":109,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == hardware-contracts/branchless_straight_line.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == hardware-contracts/branchless_unrolled_loop.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `for` loop is in no milestone yet; M1 does not have it","primary":{"file":"branchless_unrolled_loop.mn","start":79,"end":82,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `for` loop is in no milestone yet; M2 does not have it","primary":{"file":"branchless_unrolled_loop.mn","start":79,"end":82,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == hardware-contracts/branchless_while_loop.mn ==
 {"version":1,"diagnostics":[{"code":"E0401","severity":"error","message":"function `spin` is marked `@branchless`, but contains a `while` loop","primary":{"file":"branchless_while_loop.mn","start":55,"end":59,"line":4,"column":8},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == morphic-layouts/alignment_not_a_power_of_two.mn ==

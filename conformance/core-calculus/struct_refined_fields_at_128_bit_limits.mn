@@ -1,0 +1,19 @@
+// expect: pass
+module conformance
+// Fields refined at the limits of the 128-bit types, built, read, stored and passed on.
+pub struct Limits {
+  big: u128[0..340282366920938463463374607431768211455]
+  wide: i128[-170141183460469231731687303715884105728..=170141183460469231731687303715884105726]
+}
+
+pub fn edges() -> Limits = Limits(big: 340282366920938463463374607431768211454, wide: -170141183460469231731687303715884105728)
+
+pub fn other_edges() -> Limits = Limits(big: 0, wide: 170141183460469231731687303715884105726)
+
+pub fn from(y: u64, z: i64) -> Limits = Limits(big: y, wide: z)
+
+pub fn read(l: Limits) -> u128[0..340282366920938463463374607431768211455] = l.big
+
+pub fn stored(mut l: Limits, y: u32) {
+  l.big = y
+}

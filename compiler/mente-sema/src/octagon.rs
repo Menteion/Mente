@@ -6,6 +6,11 @@
 //! constraint costs O(n^2): a shortest-path relaxation for the new edge and its coherent twin,
 //! then tightening and strengthening (Mine; Bagnara, Hill and Zaffanella for integers).
 //!
+//! The matrix keeps constants up to [`BIG`]; the 128-bit types' ranges reach past it. A bound of
+//! one variable beyond it, from such a type, a refinement or a `guard`, is kept exactly beside
+//! the matrix, as an [`Exact`], so that a value of `u128[0..u128::MAX]` is known to lie below
+//! its bound though the matrix cannot say so.
+//!
 //! Past [`RELATIONAL_LIMIT`] variables it is a box instead: each variable's bounds alone, which
 //! cost linear time where the matrix costs quadratic, so that Tier 1's cost stays bounded however
 //! large a function grows. A relation between two variables then narrows each one's bounds by
@@ -38,6 +43,85 @@ fn floor_half(v: i128) -> i128 {
     v.div_euclid(2)
 }
 
+/// An integer of the range the 128-bit types span together, `-(2^128 - 1)` to `2^128 - 1`,
+/// kept exactly: a bound beyond the matrix's reach. Zero is never negative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Exact {
+    negative: bool,
+    magnitude: u128,
+}
+
+impl Exact {
+    pub fn new(negative: bool, magnitude: u128) -> Exact {
+        Exact {
+            negative: negative && magnitude != 0,
+            magnitude,
+        }
+    }
+
+    pub fn from_i128(v: i128) -> Exact {
+        Exact::new(v < 0, v.unsigned_abs())
+    }
+
+    /// The value as an `i128`, when it is one.
+    pub fn to_i128(self) -> Option<i128> {
+        if self.negative {
+            0i128.checked_sub_unsigned(self.magnitude)
+        } else {
+            i128::try_from(self.magnitude).ok()
+        }
+    }
+
+    pub fn negated(self) -> Exact {
+        Exact::new(!self.negative, self.magnitude)
+    }
+
+    /// `self + d`, or `None` past the range.
+    pub fn plus(self, d: i128) -> Option<Exact> {
+        let d = Exact::from_i128(d);
+        if self.negative == d.negative {
+            let m = self.magnitude.checked_add(d.magnitude)?;
+            Some(Exact::new(self.negative, m))
+        } else if self.magnitude >= d.magnitude {
+            Some(Exact::new(self.negative, self.magnitude - d.magnitude))
+        } else {
+            Some(Exact::new(d.negative, d.magnitude - self.magnitude))
+        }
+    }
+
+    /// Whether the matrix cannot keep it as a constant.
+    pub fn is_far(self) -> bool {
+        self.magnitude >= BIG.unsigned_abs()
+    }
+}
+
+impl Ord for Exact {
+    fn cmp(&self, other: &Exact) -> std::cmp::Ordering {
+        match (self.negative, other.negative) {
+            (false, false) => self.magnitude.cmp(&other.magnitude),
+            (true, true) => other.magnitude.cmp(&self.magnitude),
+            (false, true) => std::cmp::Ordering::Greater,
+            (true, false) => std::cmp::Ordering::Less,
+        }
+    }
+}
+
+impl PartialOrd for Exact {
+    fn partial_cmp(&self, other: &Exact) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::fmt::Display for Exact {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if self.negative {
+            write!(f, "-{}", self.magnitude)
+        } else {
+            write!(f, "{}", self.magnitude)
+        }
+    }
+}
+
 /// One term of a linear expression: `+x` or `-x`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Term {
@@ -62,7 +146,7 @@ impl Term {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Octagon {
     n: usize,
     /// The matrix, `2n` by `2n`; or, for a box, each node's unary entry alone: `m[a]` bounds
@@ -71,7 +155,27 @@ pub struct Octagon {
     /// Whether it is a box, past [`RELATIONAL_LIMIT`] variables.
     boxed: bool,
     empty: bool,
+    /// Each variable's lower and upper bounds beyond the matrix's reach, kept exactly; none
+    /// until one is added, so that an octagon stays small where no 128-bit bound arises.
+    far: Option<Box<[FarBounds]>>,
 }
+
+/// A variable's lower and upper bounds beyond the matrix's reach.
+type FarBounds = (Option<Exact>, Option<Exact>);
+
+/// Two octagons are equal when they hold the same bounds: a table of far bounds made but empty
+/// is no table.
+impl PartialEq for Octagon {
+    fn eq(&self, other: &Octagon) -> bool {
+        self.n == other.n
+            && self.boxed == other.boxed
+            && self.empty == other.empty
+            && self.m == other.m
+            && (0..self.n).all(|v| self.far_of(v) == other.far_of(v))
+    }
+}
+
+impl Eq for Octagon {}
 
 impl Octagon {
     /// The octagon of `n` unconstrained variables: a box past [`RELATIONAL_LIMIT`].
@@ -83,6 +187,7 @@ impl Octagon {
                 m: vec![INF; d],
                 boxed: true,
                 empty: false,
+                far: None,
             };
         }
         let mut m = vec![INF; d * d];
@@ -94,7 +199,81 @@ impl Octagon {
             m,
             boxed: false,
             empty: false,
+            far: None,
         }
+    }
+
+    /// The bounds of `var` kept beyond the matrix's reach.
+    fn far_of(&self, var: usize) -> FarBounds {
+        self.far.as_ref().map_or((None, None), |f| f[var])
+    }
+
+    /// The table of bounds beyond the matrix's reach, made on first use.
+    fn far_mut(&mut self) -> &mut [FarBounds] {
+        let n = self.n;
+        self.far
+            .get_or_insert_with(|| vec![(None, None); n].into_boxed_slice())
+    }
+
+    /// Adds `lower <= var <= upper`, either side optional: a bound the matrix can keep goes
+    /// there, and one beyond its reach beside it, exactly.
+    pub fn add_exact(&mut self, var: usize, lower: Option<Exact>, upper: Option<Exact>) {
+        if self.empty {
+            return;
+        }
+        if let Some(l) = lower {
+            match l.to_i128().filter(|_| !l.is_far()) {
+                Some(c) => self.add_lin(&[Term::pos(var).negated()], -c),
+                None => {
+                    let kept = &mut self.far_mut()[var].0;
+                    *kept = Some(kept.map_or(l, |k| k.max(l)));
+                }
+            }
+        }
+        if let Some(u) = upper {
+            match u.to_i128().filter(|_| !u.is_far()) {
+                Some(c) => self.add_lin(&[Term::pos(var)], c),
+                None => {
+                    let kept = &mut self.far_mut()[var].1;
+                    *kept = Some(kept.map_or(u, |k| k.min(u)));
+                }
+            }
+        }
+        if let (Some(l), Some(u)) = self.exact_bounds(var) {
+            if l > u {
+                self.empty = true;
+            }
+        }
+    }
+
+    /// The bounds of `var` kept beyond the matrix's reach alone.
+    pub fn far_bounds(&self, var: usize) -> (Option<Exact>, Option<Exact>) {
+        self.far_of(var)
+    }
+
+    /// The bounds of `var`, exactly, from the matrix and beyond it; `None` for none.
+    pub fn exact_bounds(&self, var: usize) -> (Option<Exact>, Option<Exact>) {
+        let (lo, hi) = self.bounds(var);
+        let (far_lo, far_hi) = self.far_of(var);
+        let lo = (lo > -INF).then(|| Exact::from_i128(lo));
+        let hi = (hi < INF).then(|| Exact::from_i128(hi));
+        let tighter = |a: Option<Exact>, b: Option<Exact>, upper: bool| match (a, b) {
+            (Some(a), Some(b)) => Some(if upper { a.min(b) } else { a.max(b) }),
+            (a, b) => a.or(b),
+        };
+        (tighter(lo, far_lo, false), tighter(hi, far_hi, true))
+    }
+
+    /// The bounds kept beyond the matrix's reach: each variable with any, and its lower and
+    /// upper ones. What the SMT cross-check is given of them (`tier1::smt`).
+    pub fn far_constraints(&self) -> Vec<(usize, Option<Exact>, Option<Exact>)> {
+        self.far.as_ref().map_or(Vec::new(), |f| {
+            f.iter()
+                .enumerate()
+                .filter(|(_, (l, u))| l.is_some() || u.is_some())
+                .map(|(v, (l, u))| (v, *l, *u))
+                .collect()
+        })
     }
 
     /// Whether it relates its variables, rather than keeping their bounds alone.
@@ -239,8 +418,31 @@ impl Octagon {
         let c = c.max(-BIG);
         if self.boxed {
             self.add_box(terms, c);
+        } else {
+            self.add_matrix(terms, c);
+        }
+        self.check_far();
+    }
+
+    /// Empties the octagon where a variable's bounds in the matrix and beyond it leave no value.
+    fn check_far(&mut self) {
+        if self.empty || self.far.is_none() {
             return;
         }
+        for v in 0..self.n {
+            if self.far_of(v) == (None, None) {
+                continue;
+            }
+            if let (Some(l), Some(u)) = self.exact_bounds(v) {
+                if l > u {
+                    self.empty = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn add_matrix(&mut self, terms: &[Term], c: i128) {
         match terms {
             [] => {
                 if c < 0 {
@@ -299,6 +501,9 @@ impl Octagon {
 
     /// Forgets everything known about `var`.
     pub fn forget(&mut self, var: usize) {
+        if let Some(f) = &mut self.far {
+            f[var] = (None, None);
+        }
         if self.boxed {
             self.m[2 * var] = INF;
             self.m[2 * var + 1] = INF;
@@ -329,11 +534,27 @@ impl Octagon {
             .zip(&other.m)
             .map(|(a, b)| *a.max(b))
             .collect();
+        // A bound beyond the matrix holds after the join where it holds on both sides, the
+        // weaker of the two.
+        let far = match (&self.far, &other.far) {
+            (Some(a), Some(b)) => Some(
+                a.iter()
+                    .zip(b.iter())
+                    .map(|(a, b)| {
+                        let lower = a.0.zip(b.0).map(|(x, y)| x.min(y));
+                        let upper = a.1.zip(b.1).map(|(x, y)| x.max(y));
+                        (lower, upper)
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
         Octagon {
             n: self.n,
             m,
             boxed: self.boxed,
             empty: false,
+            far,
         }
     }
 
@@ -388,8 +609,16 @@ impl Octagon {
         let mut s = self.clone();
         let mut out = Vec::new();
         for &v in vars {
-            let (lo, hi) = s.bounds(v);
-            let value = 0.clamp(lo, hi);
+            let (mut lo, mut hi) = s.bounds(v);
+            // A bound beyond the matrix that an `i128` holds narrows the choice too.
+            let (far_lo, far_hi) = s.far_of(v);
+            if let Some(l) = far_lo.and_then(Exact::to_i128) {
+                lo = lo.max(l);
+            }
+            if let Some(u) = far_hi.and_then(Exact::to_i128) {
+                hi = hi.min(u);
+            }
+            let value = 0.clamp(lo, hi.max(lo));
             s.add_lin(&[Term::pos(v)], value);
             s.add_lin(&[Term::pos(v).negated()], -value);
             if s.empty {
@@ -410,6 +639,83 @@ mod tests {
     }
     fn nx(v: usize) -> Term {
         Term { var: v, neg: true }
+    }
+
+    /// An exact integer orders, shifts and converts across the whole range of the 128-bit
+    /// types, and knows which values the matrix cannot keep.
+    #[test]
+    fn test_exact_integers_span_the_128_bit_types() {
+        let max = Exact::new(false, u128::MAX);
+        let min = Exact::new(true, 1u128 << 127);
+        assert!(min < Exact::from_i128(-1) && Exact::from_i128(-1) < Exact::from_i128(0));
+        assert!(Exact::from_i128(0) < max);
+        assert_eq!(Exact::new(true, 0), Exact::from_i128(0));
+        assert_eq!(max.plus(1), None);
+        assert_eq!(max.plus(-1), Some(Exact::new(false, u128::MAX - 1)));
+        assert_eq!(Exact::from_i128(-3).plus(5), Some(Exact::from_i128(2)));
+        assert_eq!(Exact::from_i128(3).plus(-5), Some(Exact::from_i128(-2)));
+        assert_eq!(min.to_i128(), Some(i128::MIN));
+        assert_eq!(max.to_i128(), None);
+        assert_eq!(min.negated().to_i128(), None);
+        assert_eq!(max.to_string(), "340282366920938463463374607431768211455");
+        assert_eq!(min.to_string(), "-170141183460469231731687303715884105728");
+        assert!(max.is_far() && min.is_far());
+        assert!(!Exact::from_i128(BIG - 1).is_far() && Exact::from_i128(BIG).is_far());
+    }
+
+    /// A bound beyond the matrix's reach is kept exactly beside it: it narrows the variable, a
+    /// contradiction with the matrix empties the octagon, a join keeps the weaker of two, a
+    /// variable forgotten loses it, and a valuation respects it. A bound within reach goes in
+    /// the matrix.
+    #[test]
+    fn test_bounds_beyond_the_matrix_are_kept_exactly() {
+        let max = Exact::new(false, u128::MAX);
+        let mut o = Octagon::new(2);
+        o.add_exact(0, Some(Exact::from_i128(0)), Some(max));
+        assert_eq!(o.bounds(0), (0, INF));
+        assert_eq!(o.far_bounds(0), (None, Some(max)));
+        assert_eq!(o.exact_bounds(0), (Some(Exact::from_i128(0)), Some(max)));
+        assert_eq!(o.far_constraints(), vec![(0, None, Some(max))]);
+        // Tighter wins, looser is ignored.
+        let below = max.plus(-1).unwrap();
+        o.add_exact(0, None, Some(below));
+        o.add_exact(0, None, Some(max));
+        assert_eq!(o.far_bounds(0), (None, Some(below)));
+        // A lower bound past the upper one leaves no value, beyond the matrix or within it.
+        let mut empty = o.clone();
+        empty.add_exact(0, Some(max), None);
+        assert!(empty.is_empty());
+        let mut far_low = Octagon::new(1);
+        far_low.add_exact(0, Some(max), None);
+        assert!(!far_low.is_empty());
+        far_low.add_lin(&[x(0)], 10);
+        assert!(far_low.is_empty(), "the matrix's bound below the far one");
+        // A join keeps a far bound both sides hold, the weaker.
+        let mut other = Octagon::new(2);
+        other.add_exact(0, None, Some(max));
+        let joined = o.join(&other);
+        assert_eq!(joined.far_bounds(0), (None, Some(max)));
+        assert_eq!(o.join(&Octagon::new(2)).far_bounds(0), (None, None));
+        // Forgetting a variable forgets its far bounds, and a table emptied equals none.
+        let mut forgot = o.clone();
+        forgot.forget(0);
+        assert_eq!(forgot.far_bounds(0), (None, None));
+        let mut fresh = Octagon::new(2);
+        fresh.add_lin(&[nx(0)], 0);
+        assert_eq!(forgot.far_constraints(), Vec::new());
+        assert_ne!(forgot, o);
+        let mut plain = Octagon::new(2);
+        plain.forget(0);
+        assert_eq!(forgot, plain);
+        // A valuation respects a far bound an i128 holds.
+        let mut low = Octagon::new(1);
+        low.add_exact(0, Some(Exact::from_i128(BIG + 5)), None);
+        assert_eq!(low.pick(&[0]), Some(vec![BIG + 5]));
+        // Within reach, a bound is the matrix's.
+        let mut near = Octagon::new(1);
+        near.add_exact(0, Some(Exact::from_i128(-3)), Some(Exact::from_i128(7)));
+        assert_eq!(near.bounds(0), (-3, 7));
+        assert_eq!(near.far_bounds(0), (None, None));
     }
 
     /// Past [`RELATIONAL_LIMIT`] variables an octagon is a box: each variable's bounds alone,

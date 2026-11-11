@@ -1371,7 +1371,7 @@ impl<'a> Parser<'a> {
             Some((what, milestone)) => Diagnostic::error(
                 "E0109",
                 self.span(),
-                format!("{} comes in {}; M1 does not have it", what, milestone),
+                crate::diagnostics::later_message(what, Some(milestone)),
             ),
             None => Diagnostic::error(
                 "E0111",
@@ -2561,17 +2561,17 @@ mod tests {
             (
                 "module m\nimport net\n",
                 "E0109",
-                "an `import` comes in M6; M1 does not have it",
+                "an `import` comes in M6; M2 does not have it",
             ),
             (
                 "module m\nextern \"C\" {\n}\n",
                 "E0109",
-                "an `extern` block comes in M4; M1 does not have it",
+                "an `extern` block comes in M4; M2 does not have it",
             ),
             (
                 "module m\nactor A {\n}\n",
                 "E0109",
-                "an `actor` comes in M7; M1 does not have it",
+                "an `actor` comes in M7; M2 does not have it",
             ),
         ];
         for (src, code, message) in cases {

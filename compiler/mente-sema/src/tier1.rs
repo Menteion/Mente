@@ -27,7 +27,7 @@ use mente_syntax::{Attr, Span};
 
 use crate::check::Typing;
 use crate::names::{BindingKind, Resolution};
-use crate::octagon::{Octagon, Term, BIG, INF};
+use crate::octagon::{Exact, Octagon, Term, BIG, INF};
 use crate::types::{Int, IntTy, Ty};
 
 pub mod smt;
@@ -647,6 +647,23 @@ struct Refine {
     /// The integer type and refinement a `var` can be declared with to meet this one, when
     /// both bounds are literals.
     declared: Option<(String, Refinement)>,
+    /// Each bound, exactly, when it is a literal: one beyond the octagon's reach, such as the
+    /// end of `u128[0..340282366920938463463374607431768211455]`, is checked against it.
+    lo_lit: Option<Exact>,
+    hi_lit: Option<Exact>,
+}
+
+/// A refinement's bound, exactly, when it is a literal.
+fn bound_exact(b: &Bound) -> Option<Exact> {
+    match b {
+        Bound::Int { negative, value } => Some(Exact::new(*negative, *value)),
+        _ => None,
+    }
+}
+
+/// A literal bound beyond the octagon's reach, which only an exact comparison checks.
+fn far(b: Option<Exact>) -> Option<Exact> {
+    b.filter(|c| c.is_far())
 }
 
 /// The integer type `name` refined by `r`, when both bounds are literals: a `var` declared
@@ -746,6 +763,9 @@ fn bound_int(negative: bool, value: u128) -> Val {
 enum Cond {
     Const(bool),
     Cmp(BinaryOp, Box<Val>, Box<Val>),
+    /// A value compared with a constant beyond the octagon's reach, kept exactly; boxed, so
+    /// that a condition stays small in the frames of nested expressions.
+    Far(BinaryOp, Box<(Val, Exact)>),
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
     Not(Box<Cond>),
@@ -780,6 +800,17 @@ fn tuple(values: &[i128]) -> String {
     }
 }
 
+/// The comparison with its operands swapped: `a < b` is `b > a`.
+fn mirror(op: BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Lt => BinaryOp::Gt,
+        BinaryOp::Le => BinaryOp::Ge,
+        BinaryOp::Gt => BinaryOp::Lt,
+        BinaryOp::Ge => BinaryOp::Le,
+        other => other,
+    }
+}
+
 fn flip(op: BinaryOp) -> BinaryOp {
     match op {
         BinaryOp::Lt => BinaryOp::Ge,
@@ -788,6 +819,86 @@ fn flip(op: BinaryOp) -> BinaryOp {
         BinaryOp::Ge => BinaryOp::Lt,
         BinaryOp::Eq => BinaryOp::Ne,
         _ => BinaryOp::Eq,
+    }
+}
+
+/// After `var = terms + c`: the bounds beyond the octagon's reach that a single term carries,
+/// shifted by `c` and negated with the term. A sum of more terms carries none, which is sound.
+fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
+    let [t] = terms else {
+        return;
+    };
+    let (lo, hi) = st.far_bounds(t.var);
+    if lo.is_none() && hi.is_none() {
+        return;
+    }
+    let (lo, hi) = if t.neg {
+        (hi.map(Exact::negated), lo.map(Exact::negated))
+    } else {
+        (lo, hi)
+    };
+    st.add_exact(var, lo.and_then(|x| x.plus(c)), hi.and_then(|x| x.plus(c)));
+}
+
+/// The bounds of `v`, exactly: a single term's from its variable's, beyond the octagon's
+/// reach included, and any other value's from its interval. `None` for none.
+fn exact_range(st: &Octagon, v: &Val) -> (Option<Exact>, Option<Exact>) {
+    if let Val::Lin(terms, c) = v {
+        if let [t] = terms.as_slice() {
+            let (lo, hi) = st.exact_bounds(t.var);
+            let (lo, hi) = if t.neg {
+                (hi.map(Exact::negated), lo.map(Exact::negated))
+            } else {
+                (lo, hi)
+            };
+            return (lo.and_then(|x| x.plus(*c)), hi.and_then(|x| x.plus(*c)));
+        }
+    }
+    let (lo, hi) = interval(st, v);
+    (
+        (lo > -INF).then(|| Exact::from_i128(lo)),
+        (hi < INF).then(|| Exact::from_i128(hi)),
+    )
+}
+
+/// Narrows `st` to the points where `v op c` holds, `c` a constant beyond the octagon's reach:
+/// for a single term, as an exact bound of its variable; for any other value, to nothing
+/// where its bounds already rule the comparison out.
+fn constrain_far(st: &mut Octagon, op: BinaryOp, v: &Val, c: Exact) {
+    if let Val::Lin(terms, k) = v {
+        if let [t] = terms.as_slice() {
+            // `±x + k op c` is `±x op c - k`, and `-x op b` is `x op' -b`.
+            let Some(b) = c.plus(k.checked_neg().unwrap_or(i128::MAX)) else {
+                return;
+            };
+            let (op, b) = if t.neg {
+                (mirror(op), b.negated())
+            } else {
+                (op, b)
+            };
+            let (lower, upper) = match op {
+                BinaryOp::Lt => (None, b.plus(-1)),
+                BinaryOp::Le => (None, Some(b)),
+                BinaryOp::Gt => (b.plus(1), None),
+                BinaryOp::Ge => (Some(b), None),
+                BinaryOp::Eq => (Some(b), Some(b)),
+                _ => (None, None),
+            };
+            st.add_exact(t.var, lower, upper);
+            return;
+        }
+    }
+    let (lo, hi) = exact_range(st, v);
+    let impossible = match op {
+        BinaryOp::Lt => lo.is_some_and(|l| l >= c),
+        BinaryOp::Le => lo.is_some_and(|l| l > c),
+        BinaryOp::Gt => hi.is_some_and(|h| h <= c),
+        BinaryOp::Ge => hi.is_some_and(|h| h < c),
+        BinaryOp::Eq => lo.is_some_and(|l| l > c) || hi.is_some_and(|h| h < c),
+        _ => false,
+    };
+    if impossible {
+        st.set_empty();
     }
 }
 
@@ -1269,6 +1380,11 @@ impl<'a> Fx<'a> {
                     | ExprKind::Binary {
                         op: BinaryOp::Rem, ..
                     } if int => Site::Value(alloc(true).unwrap_or(0)),
+                    // A literal beyond the octagon's reach is a variable whose exact bounds
+                    // hold its value.
+                    ExprKind::Int { value, .. } if Exact::new(false, *value).is_far() => {
+                        Site::Value(alloc(true).unwrap_or(0))
+                    }
                     _ => Site::None,
                 }
             })
@@ -1368,6 +1484,8 @@ impl<'a> Fx<'a> {
                         hi_text: bound_text(&r.hi),
                         text: tree.render_type(t),
                         declared: literal_refinement(name, r),
+                        lo_lit: bound_exact(&r.lo),
+                        hi_lit: bound_exact(&r.hi),
                     })
                 }),
             },
@@ -1419,6 +1537,8 @@ impl<'a> Fx<'a> {
                         hi_text: text(&r.hi),
                         text: tree.render_type(t),
                         declared: literal_refinement(name, r),
+                        lo_lit: bound_exact(&r.lo),
+                        hi_lit: bound_exact(&r.hi),
                     })
                 }),
             },
@@ -1460,6 +1580,8 @@ impl<'a> Fx<'a> {
                         hi_text: bound_text(&r.hi),
                         text: tree.render_type(t),
                         declared: literal_refinement(name, r),
+                        lo_lit: bound_exact(&r.lo),
+                        hi_lit: bound_exact(&r.hi),
                     })
                 }),
             },
@@ -1485,6 +1607,18 @@ impl<'a> Fx<'a> {
     }
 
     /// An expression of this function as written, with how tightly it binds.
+    /// The value of `e` exactly, when it is an integer literal, negated or not.
+    fn literal(&self, e: ExprId) -> Option<Exact> {
+        match &self.tree.expr(e).kind {
+            ExprKind::Int { value, .. } => Some(Exact::new(false, *value)),
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => self.literal(*operand).map(Exact::negated),
+            _ => None,
+        }
+    }
+
     fn own_text(&self, e: ExprId) -> (String, u8) {
         let expr = self.tree.expr(e);
         match self.src.get(expr.span.start..expr.span.end) {
@@ -1867,12 +2001,16 @@ impl<'a> Fx<'a> {
             self.assign(st, s, v);
             st.forget(var);
             constrain_offset(st, var, &[Term::pos(s)], 0, 0, 0);
+            copy_far(st, var, &[Term::pos(s)], 0);
             st.forget(s);
             return;
         }
         st.forget(var);
         match v {
-            Val::Lin(t, c) => constrain_offset(st, var, t, *c, 0, 0),
+            Val::Lin(t, c) => {
+                constrain_offset(st, var, t, *c, 0, 0);
+                copy_far(st, var, t, *c);
+            }
             Val::Quot { base, num, div } => {
                 let (nlo, nhi) = lin_interval(st, &num.0, num.1);
                 constrain_offset(
@@ -1976,6 +2114,10 @@ impl<'a> Fx<'a> {
                 let op = if polarity { *op } else { flip(*op) };
                 self.constrain(st, op, l, r);
             }
+            Cond::Far(op, far) => {
+                let op = if polarity { *op } else { flip(*op) };
+                constrain_far(st, op, &far.0, far.1);
+            }
             Cond::Unknown => {}
         }
     }
@@ -1993,16 +2135,28 @@ impl<'a> Fx<'a> {
             if let Some(t) = int {
                 let (lo, hi) = int_range(*t);
                 constrain_offset(st, var, &[], 0, lo, hi);
+                // The ends of a 128-bit type lie beyond the octagon's reach, and are kept
+                // beside it.
+                if t.bits == 128 {
+                    let lower = t.signed.then(|| Exact::new(true, t.min_magnitude()));
+                    st.add_exact(var, lower, Some(Exact::new(false, t.max())));
+                }
             }
             if let Some(r) = refine {
                 let v = var_val(var);
-                self.constrain(st, BinaryOp::Ge, &v, &r.lo);
                 let op = if r.inclusive {
                     BinaryOp::Le
                 } else {
                     BinaryOp::Lt
                 };
-                self.constrain(st, op, &v, &r.hi);
+                match far(r.lo_lit) {
+                    Some(c) => constrain_far(st, BinaryOp::Ge, &v, c),
+                    None => self.constrain(st, BinaryOp::Ge, &v, &r.lo),
+                }
+                match far(r.hi_lit) {
+                    Some(c) => constrain_far(st, op, &v, c),
+                    None => self.constrain(st, op, &v, &r.hi),
+                }
             }
         }
     }
@@ -2125,8 +2279,15 @@ impl<'a> Fx<'a> {
         } else {
             BinaryOp::Lt
         };
-        let low = cmp(BinaryOp::Ge, v.clone(), r.lo.clone());
-        let high = cmp(high_op, v.clone(), r.hi.clone());
+        // A literal bound beyond the octagon's reach is compared exactly.
+        let low = match far(r.lo_lit) {
+            Some(c) => Cond::Far(BinaryOp::Ge, Box::new((v.clone(), c))),
+            None => cmp(BinaryOp::Ge, v.clone(), r.lo.clone()),
+        };
+        let high = match far(r.hi_lit) {
+            Some(c) => Cond::Far(high_op, Box::new((v.clone(), c))),
+            None => cmp(high_op, v.clone(), r.hi.clone()),
+        };
         let fail_low = self.refute(st, &low);
         let fail_high = self.refute(st, &high);
         let failing = fail_low.clone().or(fail_high.clone());
@@ -2144,38 +2305,71 @@ impl<'a> Fx<'a> {
         let (Some(mut s), true) = (failing, self.recording) else {
             return;
         };
-        // The probe holds the value, outside the refinement on the side that fails.
-        let probe = var_val(self.probe);
-        self.assign(&mut s, self.probe, v);
-        let (op, bound) = match fail_low {
-            Some(_) => (BinaryOp::Ge, &r.lo),
-            None => (high_op, &r.hi),
-        };
-        self.assume(&mut s, &cmp(op, probe, bound.clone()), false);
-        let (valuation, values) = self.valuation(&s, &[], &[self.probe]);
-        let value = values.first().copied();
         let outside = format!("outside `{}`, the type of {}", r.text, place);
         let shown = what
             .as_ref()
             .map_or("the value".to_string(), |w| format!("`{}`", w.0));
-        let core = format!("{} is {}, {}", shown, value.unwrap_or(0), outside);
-        // The valuation determines the value only when the value is linear in the bindings in
-        // scope; otherwise Tier 1 knows only an interval for it, and names a point of that alone.
         let in_scope = |t: &Term| self.scope.iter().any(|b| self.vars[*b] == Some(t.var));
-        let message = match v {
-            Val::Lin(t, _) if !t.is_empty() && t.iter().all(in_scope) => {
-                let named = what.as_ref().is_some_and(|w| {
-                    self.scope
-                        .iter()
-                        .any(|b| self.resolution.bindings[*b].name == w.0)
-                });
-                if named {
-                    format!("Tier 1 cannot rule out `{}`, {}", valuation, outside)
+        let named = what.as_ref().is_some_and(|w| {
+            self.scope
+                .iter()
+                .any(|b| self.resolution.bindings[*b].name == w.0)
+        });
+        // A side whose bound lies beyond the octagon's reach fails at a value Tier 1 names
+        // exactly: the nearest one outside the bound that the failing state allows.
+        let far_side = match fail_low {
+            Some(_) => far(r.lo_lit).map(|c| (false, c)),
+            None => far(r.hi_lit).map(|c| (true, c)),
+        };
+        let message = if let Some((upper, c)) = far_side {
+            let (lo, hi) = exact_range(&s, v);
+            let value = if upper {
+                let first = if r.inclusive {
+                    c.plus(1).unwrap_or(c)
                 } else {
-                    format!("Tier 1 cannot rule out `{}`, where {}", valuation, core)
-                }
+                    c
+                };
+                lo.map_or(first, |l| l.max(first))
+            } else {
+                let last = c.plus(-1).unwrap_or(c);
+                hi.map_or(last, |h| h.min(last))
+            };
+            match v {
+                Val::Lin(t, 0) if named && t.len() == 1 && t.iter().all(in_scope) => format!(
+                    "Tier 1 cannot rule out `{} = {}`, {}",
+                    what.as_ref().map_or("", |w| w.0.as_str()),
+                    value,
+                    outside
+                ),
+                _ => format!(
+                    "Tier 1 cannot rule out that {} is {}, {}",
+                    shown, value, outside
+                ),
             }
-            _ => format!("Tier 1 cannot rule out that {}", core),
+        } else {
+            // The probe holds the value, outside the refinement on the side that fails.
+            let probe = var_val(self.probe);
+            self.assign(&mut s, self.probe, v);
+            let (op, bound) = match fail_low {
+                Some(_) => (BinaryOp::Ge, &r.lo),
+                None => (high_op, &r.hi),
+            };
+            self.assume(&mut s, &cmp(op, probe, bound.clone()), false);
+            let (valuation, values) = self.valuation(&s, &[], &[self.probe]);
+            let value = values.first().copied();
+            let core = format!("{} is {}, {}", shown, value.unwrap_or(0), outside);
+            // The valuation determines the value only when the value is linear in the bindings in
+            // scope; otherwise Tier 1 knows only an interval for it, and names a point of that alone.
+            match v {
+                Val::Lin(t, _) if !t.is_empty() && t.iter().all(in_scope) => {
+                    if named {
+                        format!("Tier 1 cannot rule out `{}`, {}", valuation, outside)
+                    } else {
+                        format!("Tier 1 cannot rule out `{}`, where {}", valuation, core)
+                    }
+                }
+                _ => format!("Tier 1 cannot rule out that {}", core),
+            }
         };
         let read = what.as_ref().and_then(|w| {
             self.scope
@@ -2540,10 +2734,25 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// An integer literal: a constant, or, beyond the octagon's reach, its variable, held at
+    /// the value exactly. Apart from [`Self::eval`], whose frame every nested expression
+    /// stacks up.
+    fn int_val(&self, st: &mut Octagon, e: ExprId, value: u128) -> Val {
+        match self.sites[e.0 as usize] {
+            Site::Value(var) => {
+                let exact = Exact::new(false, value);
+                st.forget(var);
+                st.add_exact(var, Some(exact), Some(exact));
+                var_val(var)
+            }
+            _ => int_literal(value),
+        }
+    }
+
     fn eval(&mut self, st: &mut Octagon, e: ExprId) -> Val {
         let (tree, typing) = (self.tree, self.typing);
         match &tree.expr(e).kind {
-            ExprKind::Int { value, .. } => int_literal(*value),
+            ExprKind::Int { value, .. } => self.int_val(st, e, *value),
             ExprKind::Name(_) => match self.resolution.names[e.0 as usize] {
                 Some(b) => {
                     let b = b.0 as usize;
@@ -2847,7 +3056,11 @@ impl<'a> Fx<'a> {
             } => {
                 let l = self.eval(st, *lhs);
                 let r = self.eval(st, *rhs);
-                cmp(*op, l, r)
+                match (far(self.literal(*lhs)), far(self.literal(*rhs))) {
+                    (_, Some(c)) => Cond::Far(*op, Box::new((l, c))),
+                    (Some(c), None) => Cond::Far(mirror(*op), Box::new((r, c))),
+                    (None, None) => cmp(*op, l, r),
+                }
             }
             _ => {
                 self.eval(st, e);
@@ -4194,6 +4407,101 @@ mod tests {
         assert!(diagnostics(len)[0].fixes[0]
             .message
             .contains("guard k < 4 else"));
+    }
+
+    /// A refinement whose bound lies beyond the octagon's reach, at a 128-bit type's limit, is
+    /// checked exactly: every value Tier 1 bounds within it is proven, `0` and a literal at the
+    /// bound included, and so is a value carrying the same refinement or narrowed by a `guard`;
+    /// one it cannot bound draws `E0502` with the exact value it cannot rule out, and the guard
+    /// that proves it.
+    #[test]
+    fn test_refinements_at_a_128_bit_limit_are_checked_exactly() {
+        let u = "340282366920938463463374607431768211455";
+        let take = format!("pub fn take(x: u128[0..{}]) -> u128 = x\n", u);
+        let with = |f: &str| format!("{}{}", take, f);
+        for f in [
+            "pub fn f() -> u128 = take(0)".to_string(),
+            "pub fn f(y: u64) -> u128 = take(y)".to_string(),
+            "pub fn f() -> u128 = take(340282366920938463463374607431768211454)".to_string(),
+            format!("pub fn f(y: u128[0..{}]) -> u128 = take(y)", u),
+            format!("pub fn f(y: u128[0..{}]) -> u128[0..{}] = y", u, u),
+            format!(
+                "pub fn f(y: u128) -> u128 {{\n  guard y < {} else {{\n    return 0\n  }}\n  take(y)\n}}",
+                u
+            ),
+            format!(
+                "pub fn f(y: u128) -> u128 {{\n  guard {} > y else {{\n    return 0\n  }}\n  take(y + 0)\n}}",
+                u
+            ),
+        ] {
+            assert_eq!(codes(&with(&f)), NONE, "{}", f);
+        }
+        let d = diagnostics(&with("pub fn f(y: u128) -> u128 = take(y)"));
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            d[0].message,
+            format!(
+                "Tier 1 cannot rule out that `y` is {}, outside `u128[0..{}]`, the type of parameter `x` of `take`",
+                u, u
+            )
+        );
+        // Its guard is one Tier 1 can use: applied, the function checks.
+        let src = format!("module m\n{}", with("pub fn f(y: u128) -> u128 = take(y)"));
+        let fixed = mente_syntax::diagnostics::apply_fix(&src, &d[0].fixes[0]).unwrap();
+        assert!(
+            fixed.contains(&format!("guard y < {} else", u)),
+            "{}",
+            fixed
+        );
+        assert!(crate::check_source(&fixed).is_ok(), "{}", fixed);
+        assert_eq!(
+            messages(&with(&format!("pub fn f() -> u128 = take({})", u))),
+            [format!(
+                "Tier 1 cannot rule out that `{}` is {}, outside `u128[0..{}]`, the type of parameter `x` of `take`",
+                u, u, u
+            )]
+        );
+        // A binding of its own refinement names its value, and a sum names the nearest
+        // value past the bound.
+        let r = format!("pub fn f(y: u128) -> u128[0..{}] = y", u);
+        assert_eq!(
+            messages(&r),
+            [format!(
+                "Tier 1 cannot rule out `y = {}`, outside `u128[0..{}]`, the type of the result of `f`",
+                u, u
+            )]
+        );
+        // The i128 limits: its smallest value and one below its largest.
+        let lo = "-170141183460469231731687303715884105728";
+        let hi = "170141183460469231731687303715884105726";
+        let take = format!("pub fn take(x: i128[{}..={}]) -> i128 = x\n", lo, hi);
+        let with = |f: &str| format!("{}{}", take, f);
+        for f in [
+            "pub fn f() -> i128 = take(0)".to_string(),
+            format!("pub fn f() -> i128 = take({})", lo),
+            format!("pub fn f() -> i128 = take({})", hi),
+            "pub fn f(y: i64) -> i128 = take(y)".to_string(),
+            format!(
+                "pub fn f(y: i128) -> i128 {{\n  guard y <= {} else {{\n    return 0\n  }}\n  take(y)\n}}",
+                hi
+            ),
+        ] {
+            assert_eq!(codes(&with(&f)), NONE, "{}", f);
+        }
+        assert_eq!(
+            messages(&with("pub fn f(y: i128) -> i128 = take(y)")),
+            [format!(
+                "Tier 1 cannot rule out that `y` is 170141183460469231731687303715884105727, outside `i128[{}..={}]`, the type of parameter `x` of `take`",
+                lo, hi
+            )]
+        );
+        // A lower bound beyond reach: values below it are named exactly too.
+        let take =
+            "pub fn take(x: i128[-170141183460469231731687303715884105727..=0]) -> i128 = x\n";
+        assert_eq!(
+            messages(&format!("{}pub fn f(y: i128) -> i128 = take(y)", take)),
+            ["Tier 1 cannot rule out that `y` is -170141183460469231731687303715884105728, outside `i128[-170141183460469231731687303715884105727..=0]`, the type of parameter `x` of `take`"]
+        );
     }
 
     #[test]

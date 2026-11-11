@@ -89,6 +89,9 @@ impl StructDef {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Structs {
     pub defs: Vec<StructDef>,
+    /// Each struct's position in `defs` by its name, the first declared of a name: a lookup
+    /// does not grow with the number of structs.
+    index: HashMap<String, usize>,
     /// Each type the module declares whose values M2 does not have.
     pub later: HashMap<String, Later>,
 }
@@ -110,17 +113,40 @@ impl Later {
         Diagnostic::error(
             "E0109",
             span,
-            format!(
-                "{} (`{}`) comes in {}; M1 does not have it",
-                self.what, n, self.milestone
+            mente_syntax::diagnostics::later_message(
+                &format!("{} (`{}`)", self.what, n),
+                Some(self.milestone),
             ),
         )
     }
 }
 
 impl Structs {
+    /// Adds a struct's declaration, after the module's earlier ones.
+    fn push(&mut self, def: StructDef) {
+        self.index
+            .entry(def.name.clone())
+            .or_insert(self.defs.len());
+        self.defs.push(def);
+    }
+
+    /// The position in `defs` of the struct named `name`, the first declared of that name.
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.index.get(name).copied()
+    }
+
     pub fn get(&self, name: &str) -> Option<&StructDef> {
-        self.defs.iter().find(|d| d.name == name)
+        self.position(name).map(|i| &self.defs[i])
+    }
+
+    /// Whether the module declares a struct named `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.index.contains_key(name)
+    }
+
+    /// The names of the module's structs, in the order of their declarations, for suggestions.
+    pub fn names(&self) -> Vec<String> {
+        self.defs.iter().map(|d| d.name.clone()).collect()
     }
 
     /// The size and alignment in bytes of a value of `t` (`core-calculus.md`, item 21): an
@@ -234,8 +260,8 @@ pub fn declare(module: &ModuleFile, parsed: &[ParsedStruct]) -> (Structs, Vec<Di
         }
     }
     let mut structs = Structs {
-        defs: Vec::new(),
         later,
+        ..Structs::default()
     };
     for p in parsed {
         let syntax = p.syntax.clone();
@@ -248,7 +274,7 @@ pub fn declare(module: &ModuleFile, parsed: &[ParsedStruct]) -> (Structs, Vec<Di
                 decl: f.ty,
             })
             .collect();
-        structs.defs.push(StructDef {
+        structs.push(StructDef {
             name: p.name.clone(),
             syntax,
             fields,
@@ -256,12 +282,11 @@ pub fn declare(module: &ModuleFile, parsed: &[ParsedStruct]) -> (Structs, Vec<Di
             layout: None,
         });
     }
-    let names: HashSet<String> = structs.defs.iter().map(|d| d.name.clone()).collect();
     for i in 0..structs.defs.len() {
         if !structs.defs[i].ok {
             continue;
         }
-        let found = check_fields(&structs, &structs.defs[i], &names);
+        let found = check_fields(&structs, &structs.defs[i]);
         if !found.is_empty() {
             structs.defs[i].ok = false;
         }
@@ -330,7 +355,7 @@ fn layout(structs: &mut Structs, i: usize, state: &mut [Visit], errors: &mut Vec
         .fields
         .iter()
         .flat_map(|f| held(&f.ty))
-        .filter_map(|n| structs.defs.iter().position(|d| d.name == n))
+        .filter_map(|n| structs.position(&n))
         .collect();
     for d in deps {
         layout(structs, d, state, errors);
@@ -422,7 +447,7 @@ fn held(t: &Ty) -> Vec<String> {
 
 /// The checks of one declaration's fields: each type is one M2 has, each refinement bound a
 /// literal, and each field named once.
-fn check_fields(structs: &Structs, def: &StructDef, names: &HashSet<String>) -> Vec<Diagnostic> {
+fn check_fields(structs: &Structs, def: &StructDef) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
     let tree = def.tree();
     let mut seen: HashMap<&str, Span> = HashMap::new();
@@ -443,7 +468,7 @@ fn check_fields(structs: &Structs, def: &StructDef, names: &HashSet<String>) -> 
                 seen.insert(&f.name, f.name_span);
             }
         }
-        check_type(structs, def, tree, f.ty, names, &mut errors);
+        check_type(structs, def, tree, f.ty, &mut errors);
     }
     errors
 }
@@ -454,17 +479,16 @@ fn check_type(
     def: &StructDef,
     tree: &Tree,
     t: TypeId,
-    names: &HashSet<String>,
     errors: &mut Vec<Diagnostic>,
 ) {
     let node = tree.ty(t);
     match &node.kind {
         TypeKind::Named(n) => {
-            if let Some(d) = unknown_type(structs, n, node.span, names) {
+            if let Some(d) = unknown_type(structs, n, node.span) {
                 errors.push(d);
             }
         }
-        TypeKind::Array { elem, .. } => check_type(structs, def, tree, *elem, names, errors),
+        TypeKind::Array { elem, .. } => check_type(structs, def, tree, *elem, errors),
         TypeKind::Int {
             refinement: Some(r),
             ..
@@ -477,9 +501,12 @@ fn check_type(
                     Diagnostic::error(
                         "E0109",
                         node.span,
-                        format!(
-                            "a refinement that names `{}`, another field, relates two fields, an invariant, which comes in a later milestone; M1 does not have it",
-                            n
+                        mente_syntax::diagnostics::later_message(
+                            &format!(
+                                "a refinement that names `{}`, another field, relates two fields, an invariant, which",
+                                n
+                            ),
+                            Some("a later milestone"),
                         ),
                     )
                 } else {
@@ -502,20 +529,16 @@ fn check_type(
 /// The diagnostic for a type named `n` that is not a struct of the module, if it is none: a type
 /// whose values a later milestone brings (`E0109`), or a name that is no type at all (`E0116`),
 /// with the closest struct's name, or the integer type an odd width resembles, suggested.
-pub fn unknown_type(
-    structs: &Structs,
-    n: &str,
-    span: Span,
-    names: &HashSet<String>,
-) -> Option<Diagnostic> {
-    if names.contains(n) {
+pub fn unknown_type(structs: &Structs, n: &str, span: Span) -> Option<Diagnostic> {
+    if structs.contains(n) {
         return None;
     }
     if let Some(later) = structs.later.get(n) {
         return Some(later.diagnostic(n, span));
     }
-    let mut candidates: Vec<String> = names.iter().cloned().collect();
+    let mut candidates = structs.names();
     candidates.sort();
+    candidates.dedup();
     let close = closest(n, &candidates);
     let odd_width = matches!(n.as_bytes().first(), Some(b'u' | b'i'))
         && n.len() > 1
@@ -554,12 +577,6 @@ pub fn unknown_type(
 /// Each struct that contains itself, directly or through other structs and arrays (`E0225`),
 /// once for each cycle, at the first of its structs to be declared.
 fn self_containing(structs: &Structs) -> Vec<(usize, Diagnostic)> {
-    let index: HashMap<&str, usize> = structs
-        .defs
-        .iter()
-        .enumerate()
-        .map(|(i, d)| (d.name.as_str(), i))
-        .collect();
     // Each struct's edges: the field and the struct it holds in place.
     let edges: Vec<Vec<(usize, usize)>> = structs
         .defs
@@ -571,7 +588,7 @@ fn self_containing(structs: &Structs) -> Vec<(usize, Diagnostic)> {
                 .flat_map(|(k, f)| {
                     held(&f.ty)
                         .into_iter()
-                        .filter_map(|n| index.get(n.as_str()).map(|&j| (k, j)))
+                        .filter_map(|n| structs.position(&n).map(|j| (k, j)))
                         .collect::<Vec<_>>()
                 })
                 .collect()
@@ -965,6 +982,38 @@ struct {} {{
         ));
         assert!(d.is_empty(), "{:?}", d);
         assert_eq!(s.get("H").unwrap().layout.as_ref().map(|l| l.size), Some(1));
+    }
+
+    /// A struct is found by its name through an index, the first declared of a name, so that a
+    /// lookup does not grow with the number of structs; a long chain of structs, each holding
+    /// the one before, is laid out whole.
+    #[test]
+    fn test_a_struct_is_found_by_its_name_through_an_index() {
+        let (s, _) = declared(
+            "module m\nstruct A {\n  x: u8\n}\nstruct B {\n  a: A\n}\nstruct A {\n  y: u16\n}\n",
+        );
+        assert_eq!(s.index.len(), 2);
+        for (name, &i) in &s.index {
+            assert_eq!(&s.defs[i].name, name);
+        }
+        assert_eq!(s.position("A"), Some(0));
+        assert_eq!(s.position("B"), Some(1));
+        assert_eq!(s.get("A").map(|d| d.fields[0].name.as_str()), Some("x"));
+        assert!(s.contains("B") && !s.contains("C"));
+        assert_eq!(s.position("C"), None);
+        let n = 3000;
+        let mut src = String::from("module m\nstruct S0 {\n  a: u8\n}\n");
+        for i in 1..n {
+            src.push_str(&format!("struct S{} {{\n  p: S{}\n  a: u8\n}}\n", i, i - 1));
+        }
+        let (s, d) = declared(&src);
+        assert!(d.is_empty(), "{:?}", &d[..d.len().min(3)]);
+        assert_eq!(s.index.len(), n);
+        let last = format!("S{}", n - 1);
+        assert_eq!(
+            s.get(&last).and_then(|d| d.layout.as_ref()).map(|l| l.size),
+            Some(n as u128)
+        );
     }
 
     /// Each array a field's type holds is checked once, at that field, and the innermost too

@@ -787,8 +787,9 @@ impl Checker<'_> {
                 "E0224",
                 self.tree.expr(at).span,
                 format!(
-                    "`{}` has no body, so this call has nothing to run; M1 calls only a function with a body",
-                    callee
+                    "`{}` has no body, so this call has nothing to run; {} calls only a function with a body",
+                    callee,
+                    mente_syntax::diagnostics::MILESTONE
                 ),
             ));
         }
@@ -1706,14 +1707,14 @@ mod tests {
         assert_eq!(codes("pub fn f() -> bool = id(1, 2)"), ["E0213", "E0203"]);
         assert_eq!(
             codes("pub fn f() -> bool = id(not 1, 2)"),
-            ["E0203", "E0213", "E0203"]
+            ["E0213", "E0203", "E0203"]
         );
         // A declaration without a body cannot be called, and no more is checked of the call
         // than its arguments.
         assert_eq!(codes("pub fn f() = declared(true, 1)"), ["E0224"]);
         assert_eq!(
             messages("pub fn f() = declared(true, 1)"),
-            ["`declared` has no body, so this call has nothing to run; M1 calls only a function with a body"]
+            ["`declared` has no body, so this call has nothing to run; M2 calls only a function with a body"]
         );
         assert_eq!(
             codes("pub fn f() -> u8 = declared(not 1)"),
@@ -1877,7 +1878,7 @@ pub fn f() -> Pair = Pair(i: 0, j: 1)"
         // number and no `mut`.
         assert_eq!(
             codes(&with("pub fn f() -> Pair = Pair(true, 1)")),
-            ["E0203", "E0226"]
+            ["E0226", "E0203"]
         );
         assert_eq!(codes(&with("pub fn f() -> Pair = Pair(true)")), ["E0226"]);
         assert_eq!(

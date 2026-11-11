@@ -1,0 +1,8 @@
+// expect: E0203 E0201
+module conformance
+// Within a function too: the type error on its first line, then the unknown name below it.
+pub fn g(x: u8) -> u8 {
+  val a: bool = 1
+  _ = a
+  nope + x
+}

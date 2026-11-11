@@ -1,0 +1,8 @@
+// expect: E0221 E0128
+module conformance
+// Diagnostics come in the order of the module: the function's error, then the struct's.
+pub fn f() -> u8 = 300_u8
+
+pub struct S {
+  a: u8,
+}

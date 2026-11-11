@@ -276,6 +276,8 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
       <!-- @assert-count target="compiler/mente-sema/src/structs.rs" symbol="fn test_fields_are_placed_by_alignment_largest_first" min="1" reason="Fields are placed by alignment, largest first, ties in declaration order" -->
       <!-- @assert-count target="compiler/mente-sema/src/structs.rs" symbol="fn test_layouts_are_read_from_the_declarations" min="1" reason="Each struct's layout follows from its fields' types" -->
       <!-- @assert-count target="compiler/mente-sema/src/structs.rs" symbol="fn test_a_struct_holds_at_most_4_gib" min="1" reason="A struct over 4 GiB is E0223, reported once" -->
+    - `Implemented`: the checker finds a struct by its name through an index, the first declared of a name, so that checking a module's structs grows with their number, not with its square; a chain of structs each holding the one before is laid out whole.
+      <!-- @assert-count target="compiler/mente-sema/src/structs.rs" symbol="fn test_a_struct_is_found_by_its_name_through_an_index" min="1" reason="Struct lookup goes through an index kept with the declarations" -->
 22. `Specified` **Equality** ([`list-string-m2`](../docs/design-review.md#list-string-m2)):
     - `==` and `!=` compare two values of one comparable type: integers, across types, as in item 4; `bool`; text, byte by byte, a `str` with a `String` included; and arrays, views, structs, enums and `?T` of comparable types, element by element, field by field, by variant and payload, and by presence and value.
     - A `List` is compared through views: `xs[..] == ys[..]`. Ordering stays with integers.
