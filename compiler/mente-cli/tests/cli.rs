@@ -948,11 +948,31 @@ pub fn g(c: bool) -> i32 {
     return 2
   }
 }
+pub fn set(mut a: [2]i32) {
+  a[todo(\"i\")] = 1
+}
+fn take(mut v: i32) {
+  v = 0
+}
+pub fn pass(mut a: [2]i32) {
+  take(mut a[todo(\"j\")])
+}
 ",
     )
     .unwrap();
     for (call, status, printed) in [
         ("f()", 1, "n.mn: trap[todo] at 2:21: todo reached: x"),
+        // An index of no value: the place is never reached (the fuzzer's finding 20).
+        (
+            "set(mut [1, 2])",
+            1,
+            "n.mn: trap[todo] at 11:5: todo reached: i",
+        ),
+        (
+            "pass(mut [1, 2])",
+            1,
+            "n.mn: trap[todo] at 17:14: todo reached: j",
+        ),
         ("g(true)", 0, "1"),
         ("g(false)", 0, "2"),
     ] {

@@ -1,0 +1,6 @@
+fn e(mut a:[0]i32){var i:usize=0
+while i<5{val j=i
+val t=a[i]
+a[i]=a[j]
+a[todo("")]=t
+i=1}}

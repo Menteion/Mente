@@ -34,9 +34,6 @@ struct Parsed {
     other: bool,
     /// The item starts with a `module` line, which only the first item may hold.
     header: bool,
-    /// The declaration parser's error lies at the item's end, where the whole module's parser
-    /// would find the next item's first token rather than the end of the file.
-    at_end: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -176,13 +173,13 @@ impl Session {
             })
             .min_by_key(|(rank, offset, _)| (*rank, *offset));
         if let Some((_, offset, d)) = first_error {
-            // An error at an item's end, before another item, says what the item's own text
-            // ends with; the whole module's parser goes on into the next item instead.
+            // An item's error, before another item: the whole module's parser reads the same
+            // item within its own tokens, but where they end it names the next item's first
+            // token, which this item's text alone cannot, so the session asks the whole
+            // module, whose check stops at this error, cheaply. The last item's end is the
+            // file's end for both.
             let last = self.items.last().map_or(0, |(at, _)| at.offset);
-            let at_end = self.items.iter().any(|(at, text)| {
-                at.offset == offset && self.cache.get(text).is_some_and(|e| e.parsed.at_end)
-            });
-            if at_end && offset < last {
+            if offset < last {
                 self.work.whole = true;
                 return check_source(&self.src).err().unwrap_or_default();
             }
@@ -296,10 +293,8 @@ fn parse_item(text: &str) -> Parsed {
             } else {
                 2
             };
-            let at_end = d.primary.start >= text.trim_end().len();
             return Parsed {
                 error: Some((rank, d)),
-                at_end,
                 header,
                 ..Parsed::default()
             };
@@ -607,17 +602,19 @@ mod tests {
         }
     }
 
-    /// An error at an item's end, before another item, is what splitting made, so the session
-    /// asks the whole module; an error at the last item's end, or inside an item, is the whole
-    /// module's error too, and the session reports it without the whole module's check.
+    /// A parse error in an item before another sends the session to the whole module's check,
+    /// whose words for the item's end name the next item's first token; the last item's error
+    /// is the session's own, since its end is the file's end for both.
     #[test]
-    fn test_only_an_error_at_an_items_end_before_another_sends_the_session_whole() {
+    fn test_a_parse_error_before_another_item_sends_the_session_whole() {
         for (src, whole) in [
             ("module\nfn", true),
             ("module m\npub fn f(\n", false),
-            ("module m\npub fn fn() -> u8 = 1\npub fn g(\n", false),
+            ("module m\npub fn fn() -> u8 = 1\npub fn g(\n", true),
             // A second module line, without its name, that fails to parse on its own.
             ("module p\nmodule", true),
+            // An error inside an item whose words name the item's end (the fuzzer's finding 19).
+            ("module m\nfn t()->8 from\npub", true),
         ] {
             let s = Session::new(src);
             let expected = check_source(src).err().unwrap_or_default();
