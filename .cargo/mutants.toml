@@ -43,4 +43,9 @@ exclude_re = [
   # refuses such a call (E0224), so Tier 1 never meets one and no test can reach it. It stays for
   # the functions M4 declares in `extern` blocks, whose calls Tier 1 will meet again.
   '^compiler/mente-sema/src/tier1\.rs(:\d+:\d+)?: replace Fx(<.+>)?::clobber with \(\)$',
+  # Tier 1's forgetting of a call site's variables before and after the call: each is assigned
+  # before it is read at every evaluation of the call, and a loop's head is rebuilt from the
+  # state before the loop, so a value a site held at one evaluation never reaches the next, and
+  # no test can tell. The forgetting keeps the states small.
+  '^compiler/mente-sema/src/tier1\.rs(:\d+:\d+)?: replace forget_site with \(\)$',
 ]

@@ -83,15 +83,6 @@ fn combine<T>(
     Err(errors)
 }
 
-/// Parses each function with a body, then resolves the names and checks the types of each one
-/// the body parser reports nothing in, then runs Tier 1 on each one those report nothing in,
-/// function by function in source order.
-pub fn check_bodies(src: &str, module: &ModuleFile) -> Vec<Diagnostic> {
-    let mut errors = bodies(src, module, true).errors;
-    in_source_order(&mut errors);
-    errors
-}
-
 /// For each function whose names and types check, in source order, its name and what Tier 1
 /// found: every obligation, proven or left to run time, which `mn view --checks` lists.
 pub fn tier1_reports(src: &str) -> Vec<(String, tier1::Report)> {

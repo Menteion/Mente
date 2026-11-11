@@ -60,7 +60,7 @@ impl Exact {
     }
 
     pub fn from_i128(v: i128) -> Exact {
-        Exact::new(v < 0, v.unsigned_abs())
+        Exact::new(v.is_negative(), v.unsigned_abs())
     }
 
     /// The value as an `i128`, when it is one.
@@ -426,13 +426,16 @@ impl Octagon {
 
     /// Empties the octagon where a variable's bounds in the matrix and beyond it leave no value.
     fn check_far(&mut self) {
-        if self.empty || self.far.is_none() {
+        let Some(far) = &self.far else {
             return;
-        }
-        for v in 0..self.n {
-            if self.far_of(v) == (None, None) {
-                continue;
-            }
+        };
+        let kept: Vec<usize> = far
+            .iter()
+            .enumerate()
+            .filter(|(_, (l, u))| l.is_some() || u.is_some())
+            .map(|(v, _)| v)
+            .collect();
+        for v in kept {
             if let (Some(l), Some(u)) = self.exact_bounds(v) {
                 if l > u {
                     self.empty = true;

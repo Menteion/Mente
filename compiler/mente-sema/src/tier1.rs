@@ -201,7 +201,6 @@ impl Form {
 /// fixed-size array, whose `.len` is the constant `N` of its type `[N]T`.
 pub struct Names<'a> {
     pub is_int: &'a dyn Fn(&str) -> bool,
-    pub len_of: &'a dyn Fn(&str) -> Option<u128>,
     /// The type of a field path of a binding, `s.a.b` as `s` and `["a", "b"]`, when it has one.
     pub path_ty: &'a dyn Fn(&str, &[String]) -> Option<Ty>,
 }
@@ -242,8 +241,8 @@ fn form(tree: &Tree, e: ExprId, names: &Names) -> Result<Form, String> {
                 return Err("a field of a value that is not a binding".to_string());
             };
             if let Some((last, prefix)) = path.split_last() {
+                // The array a path names, the binding itself when it is one.
                 let len = match (names.path_ty)(root, prefix) {
-                    _ if prefix.is_empty() => (names.len_of)(root),
                     Some(Ty::Array(n, _)) => Some(n),
                     _ => None,
                 };
@@ -875,7 +874,6 @@ fn mentions(v: &Val, var: usize) -> bool {
     match v {
         Val::Lin(t, _) => has(t),
         Val::Quot { base, num, .. } => has(&base.0) || has(&num.0),
-        Val::Arr(e) => mentions(e, var),
         _ => false,
     }
 }
@@ -2041,17 +2039,6 @@ impl<'a> Fx<'a> {
         }
     }
 
-    fn own_len(&self, name: &str) -> Option<u128> {
-        self.resolution
-            .bindings
-            .iter()
-            .zip(&self.typing.bindings)
-            .find_map(|(b, t)| match t {
-                Ty::Array(len, _) if b.name == name => Some(*len),
-                _ => None,
-            })
-    }
-
     fn own_int(&self, name: &str) -> bool {
         self.resolution
             .bindings
@@ -2072,7 +2059,6 @@ impl<'a> Fx<'a> {
         };
         let names = Names {
             is_int: &|n| self.own_int(n),
-            len_of: &|n| self.own_len(n),
             path_ty: &path,
         };
         outside_fragment(self.tree, e, &names)
@@ -2086,20 +2072,12 @@ impl<'a> Fx<'a> {
                 .iter()
                 .any(|p| p.name == n && is_int_type(&s.tree, p.ty))
         };
-        let len_of = |n: &str| {
-            let p = s.params.iter().find(|p| p.name == n)?;
-            match s.tree.ty(p.ty).kind {
-                TypeKind::Array { len, .. } => Some(len),
-                _ => None,
-            }
-        };
         let path = |n: &str, names: &[String]| {
             let p = s.params.iter().find(|p| p.name == n)?;
             path_ty(self.structs, &Ty::of(&s.tree, p.ty), names)
         };
         let names = Names {
             is_int: &is_int,
-            len_of: &len_of,
             path_ty: &path,
         };
         outside_fragment(&s.tree, e, &names)
@@ -5029,6 +5007,52 @@ mod tests {
                 u, u
             )]
         );
+        // A value of two terms entering a refinement directly, a result here, is bounded by
+        // its interval: a sum of two `i8`s lies within both far bounds, a sum of two `u128`s
+        // may pass the upper one, and a negated sum the lower one.
+        let both = "i128[-170141183460469231731687303715884105727..=170141183460469231731687303715884105726]";
+        assert_eq!(
+            codes(&format!("pub fn f(y: i8, z: i8) -> {} = y + z", both)),
+            NONE
+        );
+        assert_eq!(
+            codes(&format!(
+                "pub fn f(y: u128, z: u128) -> u128[0..{}] = y + z",
+                u
+            )),
+            ["E0502"]
+        );
+        assert_eq!(
+            codes("pub fn f(y: u128, z: u128) -> i128[-170141183460469231731687303715884105727..=0] = -y - z"),
+            ["E0502"]
+        );
+        assert_eq!(
+            messages("pub fn f(y: u128, z: u128) -> i128[-170141183460469231731687303715884105727..=0] = -y - z"),
+            ["Tier 1 cannot rule out that `-y - z` is -170141183460469231731687303715884105728, outside `i128[-170141183460469231731687303715884105727..=0]`, the type of the result of `f`"]
+        );
+        // A negative literal in a guard is exact too.
+        assert_eq!(
+            codes("pub fn take(x: i128[-170141183460469231731687303715884105727..=0]) -> i128 = x\npub fn f(y: i128) -> i128 {\n  guard y >= -170141183460469231731687303715884105727 and y <= 0 else {\n    return 0\n  }\n  take(y)\n}"),
+            NONE
+        );
+        // A guard's equality with a far constant bounds its binding both ways, and a guard on
+        // two terms that no value passes leaves what follows unreachable.
+        let upper = format!("pub fn take(x: u128[0..{}]) -> u128 = x\n", u);
+        assert_eq!(
+            codes(&format!(
+                "{}pub fn f(y: u128) -> u128 {{\n  guard y == 340282366920938463463374607431768211454 else {{\n    return 0\n  }}\n  take(y)\n}}",
+                upper
+            )),
+            NONE
+        );
+        assert_eq!(
+            codes("pub fn f(y: u8, z: u8) -> u8[0..1] {\n  guard y + z - 600 <= -170141183460469231731687303715884105727 else {\n    return 0\n  }\n  y\n}"),
+            NONE
+        );
+        assert_eq!(
+            codes("pub fn f(y: u8, z: u8) -> u8[0..1] {\n  guard y + z - 600 < -170141183460469231731687303715884105727 else {\n    return 0\n  }\n  y\n}"),
+            NONE
+        );
         // The i128 limits: its smallest value and one below its largest.
         let lo = "-170141183460469231731687303715884105728";
         let hi = "170141183460469231731687303715884105726";
@@ -6875,6 +6899,16 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
             "pub fn f(mut p: P) -> u8[1..2] {\n  p.a = 1\n  p.b = 2\n  p = P(a: p.b, b: p.a)\n  p.b\n}",
             // A compound store.
             "pub fn f(mut p: P) -> u8[6..7] {\n  p.a = 5\n  p.a += 1\n  p.a\n}",
+            // A quotient that reads a path another lands in first reads it as it was.
+            "pub fn f(mut p: P) -> u8[2..3] {\n  p.a = 4\n  p.b = 8\n  p = P(a: p.b, b: p.a / 2)\n  p.b\n}",
+            // A value that reads its own path keeps its relation to it.
+            "pub fn f(mut p: P, x: u8[0..100]) -> u8[1..2] {\n  p.a = x\n  p = P(a: p.a + 1, b: 0)\n  p.a - x\n}",
+            // A `requires` over a `mut` parameter's field reads the argument's at the call, and
+            // an `ensures` over a read-only one's reads it after.
+            "fn need(mut q: P)\n  requires q.a > 2\n{\n  q.a = 0\n}\npub fn f(x: u8[3..9]) {\n  var q = P(a: x, b: 0)\n  need(mut q)\n}",
+            "fn get(q: P) -> u8\n  ensures result == q.a\n= q.a\npub fn f(x: u8[3..4]) -> u8[3..4] = get(P(a: x, b: 0))",
+            // An array field's `.len` is a constant in a clause.
+            "pub struct B {\n  xs: [3]u8\n}\npub fn f(b: B) -> u8\n  requires b.xs.len == 3\n= b.xs[2]",
             // A literal's earlier value that a later one changes reads as it was.
             "pub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  val q = P(a: p.a, b: bump(mut p))\n  q.a\n}\nfn bump(mut p: P) -> u8 {\n  p.a = 9\n  0\n}",
         ] {
@@ -6894,6 +6928,16 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
         assert_eq!(
             messages(&with("pub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  touch(mut p)\n  p.a\n}")),
             ["Tier 1 cannot rule out `p.a = 1, p.b = 0`, outside `u8[0..1]`, the type of the result of `f`"]
+        );
+        // A value of paths in scope that is not one names them; one Tier 1 reads afresh, an
+        // array element's field, is named alone though a struct is in scope.
+        assert_eq!(
+            messages(&with("pub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  touch(mut p)\n  p.a + 0\n}")),
+            ["Tier 1 cannot rule out `p.a = 1, p.b = 0`, where `p.a + 0` is 1, outside `u8[0..1]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages(&with("pub fn f(mut ps: [2]P, q: P) -> u8[0..1] {\n  ps[0].a = 0\n  ps[0].a\n}")),
+            ["Tier 1 cannot rule out that `ps[0].a` is 1, outside `u8[0..1]`, the type of the result of `f`"]
         );
         // A path counts toward the variable cap: a struct of 130 fields puts a function past
         // it, where a proof that needs a relation fails.

@@ -3227,7 +3227,7 @@ mod tests {
             matches!(arg(&Scalar::Int(true, 5)), native::Arg::Int(n) if n == Num::new(true, 5))
         );
         let module = mente_sema::check_program(
-            "module m\npub struct P {\n  a: i8\n  b: bool\n}\npub fn f(a: i32, mut b: bool) -> i32 = a\npub fn g(xs: [2]u8) -> u8 = xs[0]\npub fn h(p: P) -> i8 = p.a\npub fn big(xs: [300]u8) -> u8 = xs[0]\n",
+            "module m\npub struct P {\n  a: i8\n  b: bool\n}\npub fn f(a: i32, mut b: bool) -> i32 = a\npub fn g(xs: [2]u8) -> u8 = xs[0]\npub fn h(p: P) -> i8 = p.a\npub fn big(xs: [300]u8) -> u8 = xs[0]\npub struct Q {\n  xs: [300]u8\n}\npub fn bigger(q: Q) -> u8 = 0\n",
         )
         .unwrap();
         let functions = scalar_functions(&module);
@@ -3237,7 +3237,7 @@ mod tests {
                 .map(|f| f.name.as_str())
                 .collect::<Vec<_>>(),
             ["f", "g", "h"],
-            "a function of more values than the fuzzer takes is left out"
+            "a function of more values than the fuzzer takes is left out, in a struct too"
         );
         let array = edges(&functions[1].params[0]);
         assert_eq!(array.len(), 3);

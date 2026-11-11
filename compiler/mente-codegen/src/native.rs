@@ -1512,36 +1512,35 @@ fn print_at(
         }
         Shape::Array(len, elem) => {
             emit_text(writer, rt, e, 1, "[")?;
-            if *len > 0 {
-                // for i in 0..len: a separator before every element but the first, then it.
-                let head = e.b.create_block();
-                let body = e.b.create_block();
-                let sep = e.b.create_block();
-                let item = e.b.create_block();
-                let after = e.b.create_block();
-                e.b.append_block_param(head, e.ptr);
-                let zero = e.iconst(e.ptr, 0);
-                e.b.ins().jump(head, &[zero.into()]);
-                e.b.switch_to_block(head);
-                let i = e.b.block_params(head)[0];
-                let more =
-                    e.b.ins()
-                        .icmp_imm_u(IntCC::UnsignedLessThan, i, i64::from(*len));
-                e.b.ins().brif(more, body, &[], after, &[]);
-                e.b.switch_to_block(body);
-                let first = e.b.ins().icmp_imm_u(IntCC::Equal, i, 0);
-                e.b.ins().brif(first, item, &[], sep, &[]);
-                e.b.switch_to_block(sep);
-                emit_text(writer, rt, e, 1, ", ")?;
-                e.b.ins().jump(item, &[]);
-                e.b.switch_to_block(item);
-                let off = e.b.ins().imul_imm_u(i, i64::from(elem.size()));
-                let a = e.b.ins().iadd(at, off);
-                print_at(writer, rt, e, a, elem)?;
-                let next = e.b.ins().iadd_imm_u(i, 1);
-                e.b.ins().jump(head, &[next.into()]);
-                e.b.switch_to_block(after);
-            }
+            // for i in 0..len, an empty array included: a separator before every element but
+            // the first, then it.
+            let head = e.b.create_block();
+            let body = e.b.create_block();
+            let sep = e.b.create_block();
+            let item = e.b.create_block();
+            let after = e.b.create_block();
+            e.b.append_block_param(head, e.ptr);
+            let zero = e.iconst(e.ptr, 0);
+            e.b.ins().jump(head, &[zero.into()]);
+            e.b.switch_to_block(head);
+            let i = e.b.block_params(head)[0];
+            let more =
+                e.b.ins()
+                    .icmp_imm_u(IntCC::UnsignedLessThan, i, i64::from(*len));
+            e.b.ins().brif(more, body, &[], after, &[]);
+            e.b.switch_to_block(body);
+            let first = e.b.ins().icmp_imm_u(IntCC::Equal, i, 0);
+            e.b.ins().brif(first, item, &[], sep, &[]);
+            e.b.switch_to_block(sep);
+            emit_text(writer, rt, e, 1, ", ")?;
+            e.b.ins().jump(item, &[]);
+            e.b.switch_to_block(item);
+            let off = e.b.ins().imul_imm_u(i, i64::from(elem.size()));
+            let a = e.b.ins().iadd(at, off);
+            print_at(writer, rt, e, a, elem)?;
+            let next = e.b.ins().iadd_imm_u(i, 1);
+            e.b.ins().jump(head, &[next.into()]);
+            e.b.switch_to_block(after);
             emit_text(writer, rt, e, 1, "]")?;
         }
         // `Name(field: v, ...)`, the fields in the order of the declaration.
