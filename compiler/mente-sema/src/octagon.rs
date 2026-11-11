@@ -5,6 +5,15 @@
 //! Entry `m[i][j]` bounds `V_j - V_i`, where `V_2k = +x_k` and `V_2k+1 = -x_k`. Adding one
 //! constraint costs O(n^2): a shortest-path relaxation for the new edge and its coherent twin,
 //! then tightening and strengthening (Mine; Bagnara, Hill and Zaffanella for integers).
+//!
+//! Past [`RELATIONAL_LIMIT`] variables it is a box instead: each variable's bounds alone, which
+//! cost linear time where the matrix costs quadratic, so that Tier 1's cost stays bounded however
+//! large a function grows. A relation between two variables then narrows each one's bounds by
+//! the other's, once, and is dropped, which is sound and only weaker.
+
+/// The most variables an octagon relates; past them it is a box. The largest function of the
+/// repository's corpus has 53 (Norman's decision, `tier1-variable-cap`).
+pub const RELATIONAL_LIMIT: usize = 128;
 
 /// No bound. Sums saturate here; a bound at or beyond it is no bound, so the 128-bit types,
 /// whose ranges reach past it, are unbounded in the domain.
@@ -56,19 +65,92 @@ impl Term {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Octagon {
     n: usize,
+    /// The matrix, `2n` by `2n`; or, for a box, each node's unary entry alone: `m[a]` bounds
+    /// `V_a - V_(a ^ 1)`, twice the node's term.
     m: Vec<i128>,
+    /// Whether it is a box, past [`RELATIONAL_LIMIT`] variables.
+    boxed: bool,
     empty: bool,
 }
 
 impl Octagon {
-    /// The octagon of `n` unconstrained variables.
+    /// The octagon of `n` unconstrained variables: a box past [`RELATIONAL_LIMIT`].
     pub fn new(n: usize) -> Octagon {
         let d = 2 * n;
+        if n > RELATIONAL_LIMIT {
+            return Octagon {
+                n,
+                m: vec![INF; d],
+                boxed: true,
+                empty: false,
+            };
+        }
         let mut m = vec![INF; d * d];
         for k in 0..d {
             m[k * d + k] = 0;
         }
-        Octagon { n, m, empty: false }
+        Octagon {
+            n,
+            m,
+            boxed: false,
+            empty: false,
+        }
+    }
+
+    /// Whether it relates its variables, rather than keeping their bounds alone.
+    pub fn is_relational(&self) -> bool {
+        !self.boxed
+    }
+
+    /// A node's unary entry: the bound of twice its term.
+    fn unary(&self, a: usize) -> i128 {
+        if self.boxed {
+            self.m[a]
+        } else {
+            self.at(a ^ 1, a)
+        }
+    }
+
+    /// A box's new bound `v` on twice node `a`'s term, tightened to an even number; a
+    /// variable whose two bounds cross empties the box.
+    fn bound_box(&mut self, a: usize, v: i128) {
+        if v >= INF || v >= self.m[a] {
+            return;
+        }
+        self.m[a] = (2 * floor_half(v)).max(-INF);
+        let k = a & !1;
+        if add(self.m[k], self.m[k + 1]) < 0 {
+            self.empty = true;
+        }
+    }
+
+    /// Adds `terms <= c` to a box: a bound on one term; and for two, each one's bound by the
+    /// other's least value, once.
+    fn add_box(&mut self, terms: &[Term], c: i128) {
+        match terms {
+            [] => {
+                if c < 0 {
+                    self.empty = true;
+                }
+            }
+            [t] => self.bound_box(t.node(), 2 * c),
+            [s, t] if s.var == t.var => {
+                if s.neg == t.neg {
+                    self.bound_box(s.node(), c);
+                } else if c < 0 {
+                    self.empty = true;
+                }
+            }
+            [s, t] => {
+                // `s + t <= c` and `-t <= u` give `s <= c + u`; with no `u`, the sum saturates
+                // at `INF`, no bound, which `bound_box` passes over.
+                for (a, b) in [(*s, *t), (*t, *s)] {
+                    let v = add(c, self.upper(&[b.negated()]));
+                    self.bound_box(a.node(), 2 * v);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn vars(&self) -> usize {
@@ -151,10 +233,14 @@ impl Octagon {
     /// Adds `terms <= c`, for at most two terms; a longer sum is ignored, which is sound. A
     /// constant beyond [`BIG`] is weakened to no bound, or to `-BIG`.
     pub fn add_lin(&mut self, terms: &[Term], c: i128) {
-        if c >= BIG {
+        if c >= BIG || self.empty {
             return;
         }
         let c = c.max(-BIG);
+        if self.boxed {
+            self.add_box(terms, c);
+            return;
+        }
         match terms {
             [] => {
                 if c < 0 {
@@ -180,14 +266,20 @@ impl Octagon {
         match terms {
             [] => 0,
             [t] => {
-                let a = t.node();
-                let v = self.at(a ^ 1, a);
+                let v = self.unary(t.node());
                 if v >= INF {
                     INF
                 } else {
                     floor_half(v)
                 }
             }
+            // A box relates nothing: two terms are at most the sum of each one's bound, or, of
+            // one variable, twice it or nothing.
+            [s, t] if self.boxed => match (s.var == t.var, s.neg == t.neg) {
+                (true, true) => self.unary(s.node()),
+                (true, false) => 0,
+                (false, _) => add(self.upper(&[*s]), self.upper(&[*t])),
+            },
             [s, t] => self.at(t.node() ^ 1, s.node()),
             _ => INF,
         }
@@ -207,6 +299,11 @@ impl Octagon {
 
     /// Forgets everything known about `var`.
     pub fn forget(&mut self, var: usize) {
+        if self.boxed {
+            self.m[2 * var] = INF;
+            self.m[2 * var + 1] = INF;
+            return;
+        }
         let d = self.d();
         for node in [2 * var, 2 * var + 1] {
             for k in 0..d {
@@ -235,6 +332,7 @@ impl Octagon {
         Octagon {
             n: self.n,
             m,
+            boxed: self.boxed,
             empty: false,
         }
     }
@@ -250,6 +348,18 @@ impl Octagon {
             neg: node % 2 == 1,
         };
         let mut out = Vec::new();
+        if self.boxed {
+            // Each node's bound on twice its term, and an empty box as a false constant.
+            if self.empty {
+                out.push((Vec::new(), -1));
+            }
+            for a in 0..d {
+                if self.m[a] < INF {
+                    out.push((vec![term(a), term(a)], self.m[a]));
+                }
+            }
+            return out;
+        }
         for i in 0..d {
             // An entry `(i, j)` and its coherent twin `(j ^ 1, i ^ 1)` hold one bound, and the
             // twin is the one with `j <= i ^ 1`: each pair is listed once, and a unary bound or a
@@ -300,6 +410,67 @@ mod tests {
     }
     fn nx(v: usize) -> Term {
         Term { var: v, neg: true }
+    }
+
+    /// Past [`RELATIONAL_LIMIT`] variables an octagon is a box: each variable's bounds alone,
+    /// which a constraint on two variables narrows by the other's bounds, once.
+    #[test]
+    fn test_past_the_limit_an_octagon_keeps_bounds_alone() {
+        let n = RELATIONAL_LIMIT + 1;
+        assert!(Octagon::new(RELATIONAL_LIMIT).is_relational());
+        let mut b = Octagon::new(n);
+        assert!(!b.is_relational());
+        b.add_lin(&[x(0)], 5); // a <= 5
+        b.add_lin(&[nx(0)], 0); // a >= 0
+        b.add_lin(&[x(1), nx(0)], 0); // b - a <= 0, so b <= 5
+        assert_eq!((b.bounds(0), b.bounds(1)), ((0, 5), (-INF, 5)));
+        // The relation itself is gone: `b - a` is bounded by their bounds alone, where an
+        // octagon keeps it.
+        assert_eq!(b.upper(&[x(1), nx(0)]), 5);
+        let mut o = Octagon::new(2);
+        o.add_lin(&[x(0)], 5);
+        o.add_lin(&[nx(0)], 0);
+        o.add_lin(&[x(1), nx(0)], 0);
+        assert_eq!(o.upper(&[x(1), nx(0)]), 0);
+        // What it gives the SMT cross-check: each bound on twice a term.
+        assert_eq!(
+            b.constraints(),
+            [
+                (vec![x(0), x(0)], 10),
+                (vec![nx(0), nx(0)], 0),
+                (vec![x(1), x(1)], 10)
+            ]
+        );
+        // Forgetting and joining act on the bounds.
+        let mut f = b.clone();
+        f.forget(0);
+        assert_eq!((f.bounds(0), f.bounds(1)), ((-INF, INF), (-INF, 5)));
+        let mut g = Octagon::new(n);
+        g.add_lin(&[x(0)], 9);
+        g.add_lin(&[nx(0)], -7);
+        assert_eq!(b.join(&g).bounds(0), (0, 9));
+        assert!(!b.join(&g).is_relational());
+        // Of one variable: `c + c <= 8` bounds `c` by 4, and `c - c` is 0.
+        let mut h = Octagon::new(n);
+        h.add_lin(&[x(2), x(2)], 8);
+        assert_eq!(h.bounds(2), (-INF, 4));
+        assert_eq!((h.upper(&[x(2), x(2)]), h.upper(&[x(2), nx(2)])), (8, 0));
+        h.add_lin(&[x(2), nx(2)], -1);
+        assert!(h.is_empty());
+        // A weaker bound leaves the stronger one, and true constants change nothing.
+        let mut w = b.clone();
+        w.add_lin(&[x(0)], 9);
+        w.add_lin(&[], 0);
+        w.add_lin(&[x(1), nx(1)], 0);
+        assert_eq!((w.bounds(0), w.is_empty()), ((0, 5), false));
+        // Bounds that cross, or a false constant, empty a box.
+        let mut e = b.clone();
+        e.add_lin(&[nx(0)], -6);
+        assert!(e.is_empty());
+        let mut z = b.clone();
+        z.add_lin(&[], -1);
+        assert!(z.is_empty());
+        assert_eq!(z.constraints()[0], (Vec::new(), -1));
     }
 
     #[test]
