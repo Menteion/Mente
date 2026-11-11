@@ -20,7 +20,7 @@ date: 2026-11-04
    - `Implemented`: `MorphicLayout::byte_offset` in `mente-mir` computes an element's field offset under each of the three layouts. No container type exists yet.
      <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_morphic_layout_offsets" min="1" reason="byte_offset gives the AoS, SoA and Tiled offsets" -->
 2. **Two-tier struct byte layout**:
-   - `Specified` **Plain `struct` (default)**: The compiler MAY reorder fields by descending alignment to eliminate implicit padding bytes.
+   - `Specified` **Plain `struct` (default)**: The compiler places the fields by alignment, the largest first, and fields of equal alignment in the order of declaration, so that the padding is the least a rule a reader can follow gives; the cost report shows the result ([`struct-field-order`](../docs/design-review.md#struct-field-order); `core-calculus.md`, item 21).
    - `Implemented` **Verified `@layout(size: S, align: A)` + `@bytes(start..end)`** (`verify_explicit_struct_layout`, `compiler/mente-sema/src/lib.rs`): locks field order and statically verifies that:
      <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_layout_rejects_bad_geometry" min="1" reason="The size, alignment, missing-range, empty-range and shortfall errors" -->
      <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_rejects_struct_with_padding_hole" min="1" reason="A gap between fields is rejected with E0413" -->

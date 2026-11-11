@@ -96,7 +96,7 @@ Runs in full at the end: example 01's binary search.
 
 ### M3: regions and layouts
 
-**Spike before it:** copy-in/copy-out of `SoA` and `Tiled` elements, lowered through MIR and Cranelift.
+**Decided first:** [`pool-mut-write`](docs/design-review.md#pool-mut-write). **Spike before it:** copy-in/copy-out of `SoA` and `Tiled` elements, lowered through MIR and Cranelift.
 
 - [ ] Arenas with a chunk per task and the `in` parameter mode that passes one, `Pool<T>` / `Handle<T>`, and `Local<T>` / `Shared<T>`.
 - [ ] `@layout` structs and `bitstruct`s in native code: alignment, little-endian bytes, `@packed` and `@endian(big)`.

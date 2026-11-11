@@ -26,13 +26,12 @@ date: 2026-11-04
 | **Consuming transfer (`Own`)** | `own x: T` | `f(own a)` | Ownership transferred to `f`; `a` is statically invalidated at caller after call. | Register / bitwise move transfer; drop responsibility moves to callee. |
 
 2. **Mandatory dual-site annotation**:
-   - `Specified`: both `mut` and `own` MUST be written at the function declaration site (`fn step(mut p: Particle)`) **and** at every call site (`step(mut p)`). Call sites sit inside unparsed bodies, so nothing checks the call-site rule yet.
+   - `Specified`: both `mut` and `own` MUST be written at the function declaration site (`fn step(mut p: Particle)`) **and** at every call site (`step(mut p)`). A call that changes its receiver is marked the same way, `mut xs.push(v)`, since the receiver is an argument ([`exclusivity-projections`](../docs/design-review.md#exclusivity-projections)). The compiler checks the call-site rule for `mut` since M1, and for `own` and receivers from M2.
    - `Implemented`: the declaration site is parsed, and `parse_param_list` records `mut` and `own`.
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_parameter_modes_are_recorded" min="1" reason="mut and own are recorded at the declaration site" -->
 3. `Specified` **Law of Exclusivity and move invalidation**:
-   - Within any call expression, two arguments passed as `mut` (or one `mut` and one read-only / `own`) MUST NOT overlap in root storage path.
-   - Any binding passed with `own` MUST NOT be read or mutated on any subsequent path unless re-initialized.
-   - No checker exists yet.
+   - Within any call expression, the root binding of an argument passed as `mut` or `own`, a marked receiver included, MUST NOT appear in any other argument, whatever the projections: `f(mut s.a, mut s.b)` is rejected as `f(mut a[i], a[j])` is ([`exclusivity-projections`](../docs/design-review.md#exclusivity-projections)). `core-calculus.md` (items 7 and 20) states the rule the checker implements.
+   - Any binding passed with `own` MUST NOT be read or mutated on any subsequent path unless re-initialized: a binding moved on any path is dead where the paths join, only whole local bindings and `own` parameters move, and no flag is kept at run time ([`own-invalidation`](../docs/design-review.md#own-invalidation); `core-calculus.md`, item 20).
 4. `Specified` **`mut` is defined by copy-in/copy-out**:
    - The meaning of `f(mut a)` is: `a`'s value is copied into the callee's parameter, the callee works on that copy, and the final value is copied back into `a` when `f` returns. The write-back happens on every exit from `f`, including `raise`, `!` propagation and task cancellation, so a caller sees the same result whichever way `f` ends.
    - Because the Law of Exclusivity forbids any other access to `a` while `f` runs, no program can tell copy-in/copy-out from passing a pointer to `a`'s storage. The compiler passes a pointer whenever `a` is stored contiguously, and pays for a copy only where it must.

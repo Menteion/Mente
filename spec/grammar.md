@@ -1,17 +1,17 @@
 ---
-title: The Grammar of M1's Surface Syntax
-version: 0.1.0
+title: The Grammar of Mente's Surface Syntax
+version: 0.2.0
 status: active
-date: 2026-11-08
+date: 2026-11-11
 ---
 
-# The Grammar of M1's Surface Syntax
+# The Grammar of Mente's Surface Syntax
 
 **Governs:** `compiler/mente-syntax`
 
-This file is the normative grammar of the language `core-calculus.md` defines for M1 ([`grammar-home`](../docs/design-review.md#grammar-home)). The body parser follows it; `surface-syntax.md` gives the reasons for the syntax, and `core-calculus.md` gives the meaning of each form. It grows with each milestone.
+This file is the normative grammar of the language `core-calculus.md` defines ([`grammar-home`](../docs/design-review.md#grammar-home)). The body parser follows it; `surface-syntax.md` gives the reasons for the syntax, and `core-calculus.md` gives the meaning of each form. It grows with each milestone: items 1 to 8 are M1's grammar, which the parser implements, and items 9 to 13 extend it to M2's, written in M2's design closure ([`m2-design-closure`](../docs/design-review.md#m2-design-closure)).
 
-**Notation.** The grammar is EBNF: `rule = ... ;` defines a rule, `|` separates choices, `[ x ]` is optional, `{ x }` repeats zero or more times, `( ... )` groups, and terminals are quoted. Names in angle brackets, such as `<newline>`, are described in words.
+**Notation.** The grammar is EBNF: `rule = ... ;` defines a rule, `|` separates choices, `[ x ]` is optional, `{ x }` repeats zero or more times, `( ... )` groups, and terminals are quoted. Names in angle brackets, such as `<newline>`, are described in words. In M2's items, `rule += ... ;` adds choices to an M1 rule, and `rule = ... ;` replaces it.
 
 ## 1. Specification
 
@@ -134,6 +134,64 @@ This file is the normative grammar of the language `core-calculus.md` defines fo
    - `Implemented` **Other languages' idioms**: each idiom of `surface-syntax.md`, item 8, is reported with a diagnostic of its own.
      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_other_languages_idioms_name_the_mente_spelling" min="1" reason="Each idiom has its own code" -->
 
+9. `Specified` **M2's lexical additions** ([`str-text-model`](../docs/design-review.md#str-text-model)):
+   ```ebnf
+   byte literal     = "b'" ( <an ASCII character but "'", "\" or a newline> | escape ) "'" ;
+   escape           = "\" ( '"' | "'" | "\" | "n" | "t" | "r" | "0" | "x" hex digit hex digit ) ;
+   string literal   = '"' { <any character but '"', "\" or a newline> | escape } '"' ;
+   ```
+   - In a string literal `\x` reaches at most `7F`, so that every literal is valid UTF-8; in a byte literal it is any byte. An escape beyond these is `E0107`, and `\x80` and above in a string literal too.
+   - M2 uses the reserved words `struct`, `enum`, `match`, `own`, `raise`, `catch` and `none` as keywords, and the tokens `!`, `?`, `?.` and `=>`. `??` stays without a meaning, and the other reserved words stay reserved.
+10. `Specified` **M2's declarations** ([`struct-enum-syntax`](../docs/design-review.md#struct-enum-syntax)):
+    ```ebnf
+    item          = { doc comment } { attribute } [ "pub" ] ( function | struct | enum ) ;
+    struct        = "struct" identifier "{" field { field } "}" ;          (* one field per line *)
+    field         = { attribute } [ "pub" ] identifier ":" type ;
+    enum          = "enum" identifier "{" variant { variant } "}" ;        (* one variant per line *)
+    variant       = identifier [ "(" payload field { "," payload field } [ "," ] ")" ] ;
+    payload field = identifier ":" type ;
+    ```
+    - Fields and variants end at a newline, as statements do. A comma after one is an error whose fix removes it; inside a variant's parentheses, commas separate the payload's fields.
+    - A struct has at least one field. A field has no default (`core-calculus.md`, item 13): `= e` after a field's type is an error. Type parameters after a struct's or an enum's name, and an `invariant` block, are constructs of later milestones (`E0109`).
+11. `Specified` **M2's types and signatures**:
+    ```ebnf
+    type          += "?" type | "[" "]" type | "str" | "String" | "List" "<" type ">" | identifier ;
+    result        = type [ "!" identifier ] | "!" identifier ;
+    function      = "fn" identifier "(" [ parameter { "," parameter } [ "," ] ] ")"
+                    [ "->" result [ "from" identifier { "," identifier } ] ] { contract } ( block | "=" expression ) ;
+    parameter     = [ "mut" | "own" ] identifier ":" type ;
+    ```
+    - `?` and `[]` bind to the type after them: `?[]u8` is an optional view, and `[]?u8` a view of optional bytes. An identifier names a struct or an enum of the module.
+    - `!` in a result is the error union (`core-calculus.md`, item 16): `-> u32 ! ParseError`, and `-> ! IoError` for a function that gives no value.
+12. `Specified` **M2's statements and expressions** ([`match-patterns`](../docs/design-review.md#match-patterns), [`optional-semantics`](../docs/design-review.md#optional-semantics), [`error-union-semantics`](../docs/design-review.md#error-union-semantics), [`slice-ranges`](../docs/design-review.md#slice-ranges), [`exclusivity-projections`](../docs/design-review.md#exclusivity-projections)):
+    ```ebnf
+    guard         = "guard" ( expression | "val" identifier "=" expression ) "else" block ;
+    if expression = "if" ( expression | "val" identifier "=" expression ) block [ "else" ( block | if expression ) ] ;
+    discard       = "_" "=" [ "own" ] expression ;
+    place         = identifier { "[" expression "]" | "." identifier } ;
+    expression    += match | raise ;
+    match         = "match" expression "{" arm { arm } "}" ;                (* one arm per line *)
+    arm           = pattern "=>" ( expression | block ) ;
+    pattern       = identifier "." identifier [ "(" binding { "," binding } [ "," ] ")" ]
+                  | [ "-" ] integer literal | "true" | "false" | "none" | identifier | "_" ;
+    binding       = identifier ":" ( identifier | "_" ) ;
+    raise         = "raise" expression ;
+    unary         += "mut" postfix ;                                         (* a call that changes its receiver *)
+    postfix       = primary { "[" ( expression | range ) "]" | "." identifier [ arguments ]
+                            | "?." identifier | "!" | "catch" "{" arm { arm } "}" } ;
+    range         = ".." | expression ".." expression ;
+    primary       += "none" | string literal | byte literal ;
+    call          = identifier arguments ;
+    arguments     = "(" [ argument { "," argument } [ "," ] ] ")" ;
+    argument      = [ "mut" | "own" ] expression | identifier ":" expression ;
+    ```
+    - Arguments are positional or named, never both in one list. A named list builds a struct, `Pair(i: 0, j: 1)`, or a variant's payload, `Shape.Rect(w: 3, h: 4)`; a function takes positional arguments. The shapes `a.b` and `a.b(...)` are a field, a variant or a call on a receiver as name resolution finds `a`: a binding, an enum, or `List` and `String`, whose static calls are `List.new()`, `List.from(v)`, `String.new()` and `String.from(s)`. No binding is named like a type of its module, so `a` is never both.
+    - `mut` before a postfix that ends in a call marks a call that changes its receiver: `mut xs.push(v)`, and `val last = mut xs.pop()`. After `mut` in an argument, a postfix that ends in a call is such a call, and any other is a place.
+    - `!` and `catch` follow a call. `!` binds as a postfix operator, so `f(x)! + 1` adds to the value. The lexer reads `!=` as one token, so `f()!= 3` is a comparison; `f()! == 3` compares the value.
+    - `match` and `raise` stand alone as full expressions, as `if` does; inside an operator's operand they need parentheses.
+    - Arms end at a newline, as statements do, and a comma after one is an error whose fix removes it. A newline after `=>` does not end the arm, and a line that starts with `catch` continues the call before it, as one that starts with `else` continues an `if`.
+13. `Specified` **What the parser reports in M2**: each form of another language that M2's constructs meet is reported with a fix to Mente's spelling (`surface-syntax.md`, item 8): Rust's struct literal `Name { f: e }`, to `Name(f: e)`; Rust's `?` after a call, to `!`; `if let` and `guard let`, to `if val` and `guard val`; `Some(x)` and `None`, to `x` and `none`; `Vec::new()` and `vec![]`, to `List.new()`; a positional payload in a variant's declaration, to named fields; and a comma after a field, a variant or an arm, removed.
+
 ## 2. Decision rationale and rejected alternatives
 
 | Alternative considered | Reason for rejection |
@@ -145,6 +203,9 @@ This file is the normative grammar of the language `core-calculus.md` defines fo
 | **Chained comparisons, as in Python (`a < b < c`)** | Readers from Rust and C would take `a < b < c` as `(a < b) < c`. An error with a one-step fix is clearer than either meaning. |
 | **Requiring `else` on the line of the closing brace, as Go does** | Both styles are common in agents' training data; a line that starts with `else` can only continue an `if`, so allowing it costs nothing. |
 | **Loop invariants and measures as statements at the top of the body** | They describe the loop as a whole, as `requires` describes a function, so they sit in its header where Tier 1 and `mn view` read them, as example 01's `while lo < hi decreases hi - lo` already does. |
+| **Commas between fields, variants and match arms (Rust)** | Mente ends a statement at a newline, and a declaration's fields and a `match`'s arms are written one per line alike, so one separator serves all of them. A comma has a fix that removes it, which teaches the rule in one step. |
+| **`if let` and `guard let` (Swift), or `if (x != null)` narrowing** | `val` is Mente's word for a binding that never changes, and the present value of a `?T` gets a name of its own (`core-calculus.md`, item 15). |
+| **An unmarked call that changes its receiver (Rust's `v.push(x)`, Swift's mutating methods)** | `mut` is written at every call site that changes an argument (`mutable-value-semantics.md`, item 2), and a receiver is an argument. `mut xs.push(v)` shows the change where it happens. |
 | **A grammar file for a parser generator** | A generator would add a dependency, which the front-end crates do not take, and a second source of truth beside the hand-written Pratt parser. The EBNF here is for reading; the conformance suite tests the parser against it. |
 
 ## 3. Verification assertions

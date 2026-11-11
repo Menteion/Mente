@@ -1,15 +1,15 @@
 ---
-title: The Core Calculus of M1
-version: 0.1.0
+title: The Core Calculus
+version: 0.2.0
 status: active
-date: 2026-11-08
+date: 2026-11-11
 ---
 
-# The Core Calculus of M1
+# The Core Calculus
 
-**Governs:** `compiler/mente-syntax`, `compiler/mente-sema`, `compiler/mente-mir`, and the reference interpreter `mente-interp` once it exists
+**Governs:** `compiler/mente-syntax`, `compiler/mente-sema`, `compiler/mente-mir`, `compiler/mente-codegen` and the reference interpreter `mente-interp`
 
-This file is normative for the language of milestone M1 ([`core-calculus-home`](../docs/design-review.md#core-calculus-home)). It says which programs M1 accepts, what they compute, and when they trap. The reference interpreter implements it rule by rule; the conformance suite tests it; MIR and native code must agree with it, since the three execution paths are compared (`ROADMAP.md`, M1). Each milestone extends it. Its concrete syntax is in `grammar.md`; where another spec file says more about a mechanism, this file states only what M1 takes from it.
+This file is normative for the language of milestones M1 and M2 ([`core-calculus-home`](../docs/design-review.md#core-calculus-home)). It says which programs each accepts, what they compute, and when they trap. The reference interpreter implements it rule by rule; the conformance suite tests it; MIR and native code must agree with it, since the three execution paths are compared (`ROADMAP.md`, M1). Each milestone extends it before any of its code: items 1 to 10 are M1's language, which the compiler implements, and items 11 to 23 extend it to M2's, written in M2's design closure ([`m2-design-closure`](../docs/design-review.md#m2-design-closure)). Its concrete syntax is in `grammar.md`; where another spec file says more about a mechanism, this file states only what the milestone takes from it.
 
 ## 1. Specification
 
@@ -163,6 +163,90 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
      <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_logic_short_circuits_and_branches_choose" min="1" reason="and and or short-circuit, and branches choose" -->
      <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_calls_from_outside_name_a_function_and_its_arguments" min="1" reason="main runs, and a call names a function with a body" -->
      <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_runs_stop_at_their_limits" min="1" reason="A run stops at its step and array limits" -->
+11. `Specified` **What M2 adds** ([`m2-design-closure`](../docs/design-review.md#m2-design-closure)):
+    - Structs (item 13), enums with `match` (item 14), optional values `?T` (item 15), the error union `T ! E` with `raise`, postfix `!` and `catch` (item 16), the views `[]T` and `str` (item 17), text and `String` (item 18), `List<T>` (item 19), the `own` parameter mode and calls on a receiver (item 20), and the layout of every type (item 21).
+    - The `in` mode waits for arenas in M3. Generics, traits, effects, floating-point and fixed-point values, units, regions and parallelism stay outside M2, and a program that uses them is rejected as in M1 (item 1).
+    - Every rule of items 1 to 10 holds in M2 unless an item below says otherwise.
+12. `Specified` **Plain and owning types** ([`copy-and-drop`](../docs/design-review.md#copy-and-drop), [`value-copy-cost`](../docs/design-review.md#value-copy-cost)):
+    - Every type is plain or owning, by its structure. An owning type holds a heap buffer: `String`, `List<T>`, and every array, struct, enum and `?T` that holds an owning type. Every other type is plain: integers, `bool`, views, and arrays, structs, enums and `?T` of plain types.
+    - A plain value is copied, bit for bit, wherever it is bound, assigned, passed or returned, and `own` never makes its binding unusable.
+    - An owning value is never copied implicitly. A place of owning type gives its value only where `own` is written or where its life ends anyway: `val b = own a` and `f(own a)` move it, `a.clone()` copies it at a cost the code shows, and `return a` and a body's last expression `a` move a local binding or an `own` parameter, since nothing after them can read it. Anywhere else, as in `val b = a`, `b = a`, a field of a struct being built or an element of an array literal, it is an error whose fixes are `own a` and `a.clone()`. An owning value that no binding holds, such as a call's result, moves to where it lands.
+    - A read-only argument of owning type is passed without a copy: the callee reads the caller's value, which the Law of Exclusivity keeps unchanged for the call (item 20).
+    - An owning value is freed, every buffer it holds included, when the binding that holds it ends: at the end of its block, in the reverse order of declaration; on every exit from the block, by `return`, `break`, `continue`, `raise` or `!`; and when a value is assigned over it, after the new value is computed. A moved binding is not freed, since its value lives on elsewhere. An owning value that nothing holds, such as a call's result passed to a read-only parameter, is freed at the end of its statement.
+    - Before M4 no type has a destructor of its own: freeing returns memory and does nothing else, so the order in which the parts of one value are freed cannot be observed.
+13. `Specified` **Structs** ([`struct-enum-syntax`](../docs/design-review.md#struct-enum-syntax), [`struct-invariants-m2`](../docs/design-review.md#struct-invariants-m2)):
+    - `struct Name { field: T ... }` declares a nominal type that holds one value of each field. Two structs are one type only when they are one declaration. A struct with a field that is or holds a view holds a view (item 17).
+    - No binding is named like a struct or an enum of its module, as none is named like a function (item 6), so `a.b` always reads as one thing (`grammar.md`, item 12).
+    - `Name(field: e, ...)` builds one. It names every field once, in the order of the declaration, and evaluates the values in that order. No field has a default: a field left out is an error that names it.
+    - `s.field` reads a field. A field of a `var` or of a `mut` parameter is a place: `s.field = e`, `s.field[i] = e` and `f(mut s.field)` change it.
+    - A field may have a refined integer type. A value entering it, when the struct is built or the field stored, is narrowed there and must be proven by Tier 1 (item 8). An invariant relating several fields is a construct of a later milestone (`E0109`).
+    - A type that contains itself, directly or through structs, enums, arrays and `?T`, is an error, since its size would have no end. `List<T>` holds its elements on the heap, so a struct may hold a `List` of itself.
+14. `Specified` **Enums and `match`** ([`struct-enum-syntax`](../docs/design-review.md#struct-enum-syntax), [`match-patterns`](../docs/design-review.md#match-patterns)):
+    - `enum Name { A, B(field: T, ...) ... }` declares a nominal type whose value is one of its variants. A variant holds nothing, or a payload of named fields.
+    - A variant is always named with its enum: `Name.A`, and `Name.B(field: e, ...)`, built as a struct is (item 13).
+    - `match e { pattern => arm ... }` evaluates `e` once and runs the first arm whose pattern matches it. An arm is an expression or a block. A `match` gives a value whose type its arms share, or stands as a statement, as `if` does.
+    - A pattern is one of these, and none nests inside another:
+      - a variant, `Name.A` or `Name.B(field: x, ...)`, which names every field of the payload in order and binds each to a name or to `_`;
+      - an integer literal, with `-` before it or not, or `true` or `false`;
+      - for a `?T`, `none`, or a name, which binds the present value (item 15);
+      - `_`, which matches what no earlier arm matched, and only on an integer.
+    - No arm has a guard.
+    - A `match` is exhaustive: every variant of an enum, both values of `bool`, `none` and a present value of a `?T`, and every integer of the scrutinee's type, its refinement's range when it has one, is matched by an arm. So `u8[0..3]` is covered by `0`, `1` and `2`, and a variant added to an enum makes every `match` on it an error until it names the variant. An arm that no value can reach, behind an earlier arm or outside the scrutinee's range, is an error.
+    - A pattern's binding is a read-only projection of the scrutinee: nothing is copied or moved, and the scrutinee's place is frozen within the arm, as a view's source is (item 17).
+15. `Specified` **Optional values** ([`optional-semantics`](../docs/design-review.md#optional-semantics)):
+    - `?T` holds `none` or a present value of `T`. It is a tagged type of its own: `??T` holds `none`, or a present `?T`, which may itself be `none`.
+    - `none` takes its type from the place it lands in. Where no place gives one, as in `val x = none`, it is an error that asks for the type.
+    - A value of `T` becomes a `?T` only where it lands in a place of that type, at the narrowing points of item 4: a binding's initializer, an assignment, an argument, a returned value, a field being built, an element of an array literal and an element store. Nowhere else does a `T` stand for a `?T`.
+    - A present value is reached only by binding it to a new name: `guard val v = e else { ... }`, `if val v = e { ... } else { ... }`, or `match e { none => ... v => ... }`. `e == none` and `e != none` are comparisons and narrow nothing, since one name never has two types (item 6). The new name is a read-only projection, as a pattern's binding is (item 14).
+    - `e?.field` reads a field of a present struct, and gives `none` when `e` is `none`; for a field of type `U` its type is `?U`. It only reads: a write through `?.` is an error whose fix narrows with `guard val` first, so a write never silently does nothing.
+16. `Specified` **The error union `T ! E`** ([`error-union-semantics`](../docs/design-review.md#error-union-semantics), [`error-conversion`](../docs/design-review.md#error-conversion)):
+    - A function's result type may be `T ! E`, or `! E` for a function that gives no value, where `E` is an enum. `T ! E` is a result type only: no binding, field, parameter or type argument has it. In `?T ! E` the error is outermost.
+    - `raise e`, where `e` has the function's error type, ends the function with that error. It is an expression of no value, as `todo` is. `mut` parameters are copied back on this exit as on every other (`mutable-value-semantics.md`, item 4), and `ensures` clauses hold at normal returns only.
+    - A call of a function that can fail is handled where it is written, by postfix `!` or by `catch`. A call handled by neither is an error, `_ = f()` included.
+    - `f()!` gives `f`'s value, or ends the calling function with `f`'s error. It stands only in a function whose error type is `f`'s; another error type is converted with `catch`.
+    - `f() catch { arm ... }` gives `f`'s value, or runs the arm that matches its error. The arms are patterns over the variants of `f`'s error type, exhaustive as `match`'s are, or one arm that binds the whole error to a name: `f() catch { e => raise AppError.Parse(cause: e) }`. Each arm gives a value of `f`'s value type, or leaves by `return`, `raise`, `break`, `continue`, `todo` or `unreachable`. The error an arm binds is that arm's: an owning one is freed at the arm's end unless it is moved.
+    - `!` is a postfix operator, so `f(x)! + 1` adds to `f`'s value. `f()!= 3` is `f() != 3`, a comparison of a call left unhandled, which is an error; `f()! == 3` compares the value.
+    - When `main` fails, the program ends with its error, printed as item 23 says, and with an exit status of its own, apart from a trap's.
+    - Native code returns `T ! E` as `error-handling-abi.md` (item 2) says: a tag and a payload in two registers when the payload fits 8 bytes, the payload in a buffer the caller passes when it does not ([`error-return-spike`](../docs/design-review.md#error-return-spike)).
+17. `Specified` **Views** ([`slice-ranges`](../docs/design-review.md#slice-ranges), [`read-only-views`](../docs/design-review.md#read-only-views), [`view-source-freeze`](../docs/design-review.md#view-source-freeze), [`view-provenance-sources`](../docs/design-review.md#view-provenance-sources)):
+    - A view is a read-only window onto values held elsewhere: `[]T` onto a contiguous run of `T`, and `str` onto UTF-8 text (item 18). A view is plain: copying it copies the window, never the values.
+    - A view is made only explicitly, from an array, a `List`, a `String` or another view: `xs[..]` views the whole, and `xs[a..b]` the elements from `a` up to but not including `b`. `a` and `b` may have any integer type. `0 <= a <= b <= xs.len` is checked at run time, and the check is erased where Tier 1 proves it; a range outside it traps. A range has no open end and no `..=`.
+    - `v[i]` reads an element, its index checked as an array's is, and `v.len` is the window's length. Nothing writes through a view: an element store through one is an error. A `var` view, or a `mut` view parameter, can be given another window, which changes no element.
+    - A view's sources are the owners and views it was made from, and a `var` view's are those of every value assigned to it. While a binding holds a view, or a struct or enum that holds one, its sources are frozen for the whole block that declares the binding: nothing assigns to them or to any part of them, passes them as `mut` or `own`, or calls what changes them. A view that no binding holds, such as the argument of `f(xs[..])`, freezes its sources for its statement. A view of a value that no binding holds, such as a call's result, is an error.
+    - A function that returns a view, or a value that holds one, takes it from its parameters, as its signature says (`regions-and-pools.md`, item 1): by default from every read-only parameter that is or holds a view, and with `from p, q` from the ones named. Only such parameters can be sources: a `from` that names a `mut` or `own` parameter, or an owner such as an array, a `List` or a `String`, is an error (`E0311`). A caller holds the result as a view of its arguments' sources.
+    - A view that would outlive its sources, stored where it lasts longer than they do, is an error (`E0310`). Its fixes are an owned copy in M2 (`String.from`, `List.from`) and, as Engineering Guardrail #3 requires, an arena or a `Pool<T>` with `Handle<T>`, which come in M3.
+18. `Specified` **Text** ([`str-text-model`](../docs/design-review.md#str-text-model)):
+    - A `str` is always valid UTF-8, and its `.len` counts bytes. A string literal is a `str` of static storage, a source that nothing frees.
+    - A `str` has no index. `s.bytes()` is a `[]u8` view of its bytes. `s[a..b]` is a `str` whose bounds must also fall on character boundaries: one that cuts a character traps, unless Tier 1 proves it does not.
+    - `String` is UTF-8 text a value owns (item 12): `String.new()` is empty, `String.from(s)` copies a `str`, `mut t.push(s)` appends one, `t.len` counts bytes, `t[..]` and `t[a..b]` are views of it, and `t.clone()` copies it.
+    - A byte literal `b'x'` is the `u8` of an ASCII character. String literals gain the escapes `\r`, `\0` and `\xNN` for `NN` up to `7F`, so that every literal is valid UTF-8 (`grammar.md`, item 9).
+19. `Specified` **`List<T>`** ([`list-string-m2`](../docs/design-review.md#list-string-m2), [`sympathetic-defaults`](../docs/design-review.md#sympathetic-defaults)):
+    - `List<T>` is a growable run of values of `T` that it owns, contiguous on the heap. Its operations are a closed set, and no others exist before M4's traits:
+      - `List.new()`, an empty list whose element type comes from the place it lands in, as `none`'s does, and `List.from(v)`, a copy of a view `v` of plain elements;
+      - `xs.len`; `xs[i]`, which reads an element, its index checked; and `xs[i] = e`, which stores one in a `var` or `mut` list;
+      - `mut xs.push(e)`, which appends `e`, moving it as `own` does when `T` is owning; `mut xs.pop()`, which removes the last element and gives it as a `?T`, `none` when the list is empty; and `mut xs.swap(i, j)`, which exchanges two elements, each index checked;
+      - `xs[..]` and `xs[a..b]`, which are views (item 17), and `xs.clone()`, a copy with each element cloned.
+    - A push onto a full list doubles its capacity, to at least four elements, and moves its elements once; the cost report shows where this happens. An allocation that fails, or that asks for more bytes than an address holds, traps with a kind of its own.
+20. `Specified` **Parameter modes, moves and exclusivity** ([`own-invalidation`](../docs/design-review.md#own-invalidation), [`exclusivity-projections`](../docs/design-review.md#exclusivity-projections)):
+    - M2 has three parameter modes: read-only, `mut` and `own` (`mutable-value-semantics.md`). `in` comes with arenas in M3.
+    - An `own` parameter receives a value the callee owns, to free or move on. The argument is marked, `f(own a)`, and is a whole local binding or an `own` parameter: nothing moves out of a field or an element, and a read-only or `mut` parameter never moves, since its caller still holds it.
+    - A binding moved on any path is dead where the paths join, and reading it there is an error. Only assigning a `var` on every path brings it back. Where one branch moves a binding, every other branch moves it too or discards it with `_ = own a`, so no flag is kept at run time. A binding declared outside a loop and moved inside it is brought back before the loop's next round, or the loop leaves after the move.
+    - Within one call, the root binding of a `mut` or `own` argument appears in no other argument: item 7's rule, for every projection. `f(mut s.a, mut s.b)`, `f(own a, a.len)` and `f(mut xs[i], xs[j])` are errors.
+    - A call that changes its receiver is marked: `mut xs.push(v)`. The receiver counts as a `mut` argument, so `mut xs.push(xs[0])` is an error whose fix reads the element first. A call that only reads its receiver, such as `s.bytes()`, is not marked.
+21. `Specified` **Layouts** ([`struct-field-order`](../docs/design-review.md#struct-field-order), [`enum-layout`](../docs/design-review.md#enum-layout), [`sympathetic-defaults`](../docs/design-review.md#sympathetic-defaults)):
+    - On M2's targets: an integer type takes its width, `usize` 8 bytes, and a refined integer its base type's size; `bool` takes 1 byte, holding 0 or 1; `[N]T` takes `N` times `T`'s size, aligned as `T`; a view takes 16 bytes, an address and a length, aligned to 8; and `String` and `List<T>` take 24 bytes, an address, a length and a capacity, aligned to 8.
+    - A struct without `@layout` places its fields by alignment, the largest first, fields of equal alignment in the order of declaration, each at the next multiple of its alignment, and its size is rounded up to its largest alignment. A struct with `@layout` keeps the order it declares (`morphic-layouts.md`).
+    - An enum's tag is the smallest unsigned integer type that numbers its variants, `u8` up to 256 of them, and comes first. The payloads share the space after it, at the largest payload's alignment, and the size is rounded up to the enum's alignment. An enum without payloads is its tag.
+    - `?T` puts a `u8` tag before `T`, unless `T` has a niche, a bit pattern no value of `T` holds, which then stands for `none`: `bool`'s 2; for a refined integer, the base type's value just below the lower bound, or just above the upper bound when the lower is the base type's least; an enum's first unused tag value; and the null address, which no view, `String` or `List` holds. A niche serves one level: `??T` puts a tag before its `?T`.
+    - These are the sizes, alignments and padding the cost report shows for each type ([`cost-report`](../docs/design-review.md#cost-report)).
+22. `Specified` **Equality** ([`list-string-m2`](../docs/design-review.md#list-string-m2)):
+    - `==` and `!=` compare two values of one comparable type: integers, across types, as in item 4; `bool`; text, byte by byte, a `str` with a `String` included; and arrays, views, structs, enums and `?T` of comparable types, element by element, field by field, by variant and payload, and by presence and value.
+    - A `List` is compared through views: `xs[..] == ys[..]`. Ordering stays with integers.
+23. `Specified` **Traps, the program's result and printed values in M2** ([`example-01-m2`](../docs/design-review.md#example-01-m2)):
+    - M2 adds three traps: a range outside its owner (item 17), a `str` range that cuts a character (item 18), and an allocation that fails (item 19). An index into a view or a list traps as an array's does. A raised error is not a trap: it is a value, handled by `!` or `catch`.
+    - `main`'s result may have any M2 type, `T ! E` included.
+    - The reference interpreter, MIR and native code print a value in one form, Mente's own syntax for it, so that a printed value reads back as a `--call` argument (`comptime-and-ffi.md`): an integer in decimal; `true` and `false`; `[a, b]` for an array, a view or a list; a string literal, with the escapes of `grammar.md`, for a `str` or a `String`; `Name(field: v, ...)` for a struct; `Name.A` and `Name.B(field: v, ...)` for a variant; `none`, and the present value of a `?T`, with `?` before it when `T` is itself optional; and `raise` followed by the error for a call that fails.
+    - `mn run --call` reads its arguments in the same forms. The run holds an argument given for a view parameter for the length of the call.
 
 ## 2. Decision rationale and rejected alternatives
 
@@ -176,6 +260,13 @@ This file is normative for the language of milestone M1 ([`core-calculus-home`](
 | **Flooring division, as in Python** | Hardware, C, Rust and the languages agents know best truncate toward zero; a flooring function can be added beside `/` without changing what `/` means. |
 | **Exclusivity by index (allowing `f(mut a[i], a[j])` when `i != j` is proven)** | It would make the Law of Exclusivity depend on Tier 1 proving a disequality, which octagons cannot hold in general. M1 takes the simple rule by root binding; a relaxation can come later without breaking programs that M1 accepts. |
 | **A small-step semantics written as inference rules** | The rules here are prose, one claim each, so the tools hold each one to its evidence as it is implemented. A mechanised model is not built in stage 1 ([`mechanised-model`](../docs/design-review.md#mechanised-model)). |
+| **Assignment of an owning value as an implicit move (Rust), or copy-on-write (Swift)** | A move at `val b = a` leaves `a` dead where nothing marks it, while `own` is written at every call that moves. Copy-on-write puts the cost of a copy at a later write, after a count is checked at run time, where neither a reader nor the cost report can place it ([`value-copy-cost`](../docs/design-review.md#value-copy-cost)). A `return` moves without a mark only because nothing after it can read the binding. |
+| **Field defaults, and fields in any order at construction** | A default builds part of a value where the reader of the construction does not see it, and `= []` would allocate unseen. One order, the declaration's, makes every construction of a type read alike and evaluate in field order. Both can be added later without breaking a program. |
+| **Freeing an owning value at its last use** | The end of its block is a point a reader sees, as a view's frozen sources end there too ([`view-source-freeze`](../docs/design-review.md#view-source-freeze)); a last use moves when the code changes. |
+| **Narrowing a `?T` binding after `if x != none` (Kotlin, TypeScript)** | One name would have two types in two regions of its block, against one name, one binding (item 6). `guard val v = x` gives the present value a name of its own. |
+| **A `some(v)` constructor and pattern** | A `T` lands in a `?T` place as an integer lands in a narrower type, and `match` binds the present value by name; a constructor would be a second spelling of the same value. |
+| **`List<i64>.new()`, or a list literal `[]`, to start a list** | The element type is already written where the list lands, as `none`'s is. `[]` would allocate where it reads like an array, and is the array literal's. |
+| **`-> void ! E` or a unit type for a function that fails without a value** | M2 has no unit type, and a type that holds nothing would be written only here. `-> ! E` says the function gives nothing but may fail. |
 
 ## 3. Verification assertions
 
