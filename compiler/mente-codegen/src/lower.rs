@@ -2617,6 +2617,26 @@ pub fn if_assigns(c: bool) -> u8 {
     0
   })
 }
+pub fn assigned_value(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  var ys: [2]u8 = [3, 4]
+  first(xs, if c {
+    ys[0] = bump(mut xs)
+    ys[0]
+  } else {
+    0
+  })
+}
+pub fn assigned_place(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  var ys: [2]u8 = [3, 4]
+  first(xs, if c {
+    ys[bump(mut xs) % 2] = 0
+    ys[0]
+  } else {
+    0
+  })
+}
 pub fn loop_condition(c: bool) -> u8 {
   var xs: [2]u8 = [1, 2]
   first(xs, if c {
@@ -2704,6 +2724,8 @@ pub fn indexed_kept(c: bool) -> u8 {
             ("in_an_index", 2, true),
             ("if_unchanged", 1, false),
             ("if_assigns", 1, true),
+            ("assigned_value", 2, true),
+            ("assigned_place", 2, true),
             ("loop_condition", 1, true),
             ("loop_body", 1, true),
             ("guard_condition", 1, true),
