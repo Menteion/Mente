@@ -2874,7 +2874,8 @@ impl<'a> Fx<'a> {
             _ => None,
         };
         let Some((site, c)) = known else {
-            // A function without a body: its `mut` arguments may change.
+            // A function without a body: its `mut` arguments may change. The checker refuses
+            // such a call (`E0224`) until M4's `extern` functions; this keeps Tier 1 sound then.
             for a in args {
                 self.eval(st, a.value);
                 if a.is_mut {
