@@ -1,0 +1,5 @@
+// expect: E0228
+module conformance
+pub struct u8 {
+  a: u16
+}

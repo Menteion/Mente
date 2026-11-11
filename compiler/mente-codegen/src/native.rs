@@ -48,6 +48,8 @@ pub enum Arg {
     Int(Num),
     Bool(bool),
     Array(Vec<Arg>),
+    /// A struct's fields, in the order of its declaration.
+    Struct(Vec<Arg>),
 }
 
 fn err(message: impl Into<String>) -> CodegenError {
@@ -107,6 +109,11 @@ pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
                 (!crate::lower::mir(*t).holds(*n)).then_some((*n, t.name))
             }
             (Shape::Array(_, elem), Arg::Array(items)) => items.iter().find_map(|a| first(elem, a)),
+            (Shape::Struct(st), Arg::Struct(fields)) => st
+                .fields
+                .iter()
+                .zip(fields)
+                .find_map(|(f, a)| first(&f.shape, a)),
             _ => None,
         }
     }
@@ -1318,7 +1325,7 @@ fn make_call(
             None
         };
         flat.extend(wide);
-        let sret = if matches!(entry.result, Shape::Array(..)) {
+        let sret = if entry.result.in_memory() {
             params.next();
             let slot = shared.take(&mut e, entry.result.size())?;
             flat.push(slot);
@@ -1445,6 +1452,13 @@ fn store_arg(e: &mut Emit, at: Value, shape: &Shape, arg: &Arg) -> Result<(), Co
                 store_arg(e, a, elem, item)?;
             }
         }
+        (Shape::Struct(st), Arg::Struct(fields)) if fields.len() == st.fields.len() => {
+            for (f, item) in st.fields.iter().zip(fields) {
+                let off = e.iconst(e.ptr, i64::from(f.offset));
+                let a = e.b.ins().iadd(at, off);
+                store_arg(e, a, &f.shape, item)?;
+            }
+        }
         _ => return Err(err("an argument of another shape than its parameter")),
     }
     Ok(())
@@ -1505,6 +1519,18 @@ fn print_at(
                 print_at(writer, rt, e, a, elem)?;
             }
             emit_text(writer, rt, e, 1, "]")?;
+        }
+        // `Name(field: v, ...)`, the fields in the order of the declaration.
+        Shape::Struct(st) => {
+            emit_text(writer, rt, e, 1, &format!("{}(", st.name))?;
+            for (k, f) in st.fields.iter().enumerate() {
+                let sep = if k > 0 { ", " } else { "" };
+                emit_text(writer, rt, e, 1, &format!("{}{}: ", sep, f.name))?;
+                let off = e.iconst(e.ptr, i64::from(f.offset));
+                let a = e.b.ins().iadd(at, off);
+                print_at(writer, rt, e, a, &f.shape)?;
+            }
+            emit_text(writer, rt, e, 1, ")")?;
         }
         Shape::Unit => emit_text(writer, rt, e, 1, "()")?,
     }
@@ -1645,6 +1671,27 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
             vec![Arg::Array(vec![int(1), int(2), int(3), int(4)])],
             vec![Arg::Array(vec![int(1), Arg::Bool(true), int(3)])],
             vec![int(1)],
+        ] {
+            assert!(build(wrong).is_err());
+        }
+        // A struct's argument holds each of its fields, of its field's shape.
+        let source =
+            "module m\npub struct P {\n  a: u8\n  b: [2]u16\n}\npub fn h(p: P) -> u8 = p.a\n";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let h = lowered.entries.iter().position(|e| e.name == "h").unwrap();
+        let build = |args: Vec<Arg>| {
+            let mut w = writer(Target::X86_64Linux);
+            program(&lowered, &[Call { entry: h, args }], "", &mut w)
+        };
+        let pair = || Arg::Array(vec![int(2), int(3)]);
+        assert!(build(vec![Arg::Struct(vec![int(1), pair()])]).is_ok());
+        for wrong in [
+            vec![Arg::Struct(vec![int(1)])],
+            vec![Arg::Struct(vec![int(1), pair(), int(4)])],
+            vec![Arg::Struct(vec![int(1), int(2)])],
+            vec![Arg::Struct(vec![])],
+            vec![pair()],
         ] {
             assert!(build(wrong).is_err());
         }

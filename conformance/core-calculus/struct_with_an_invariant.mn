@@ -1,0 +1,10 @@
+// expect: E0109
+module conformance
+pub struct Range {
+  lo: u8
+  hi: u8
+
+  invariant {
+    lo <= hi
+  }
+}

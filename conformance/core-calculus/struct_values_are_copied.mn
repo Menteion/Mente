@@ -1,0 +1,28 @@
+// expect: pass
+module conformance
+pub struct Cell {
+  value: u8
+  seen: bool
+}
+
+pub fn apart() -> [2]u8 {
+  var a = Cell(value: 1, seen: false)
+  val b = a
+  a.value = 7
+  [a.value, b.value]
+}
+
+fn change(c: Cell) -> Cell {
+  var d = c
+  d.seen = true
+  d
+}
+
+pub fn passed() -> bool {
+  val c = Cell(value: 2, seen: false)
+  val d = change(c)
+  d.seen and not c.seen
+}
+
+// Values are evaluated in the order of the fields, which is also the order written.
+pub fn ordered(x: u8) -> Cell = Cell(value: x / 2, seen: x > 3)

@@ -5,11 +5,12 @@
 //! a statement by an [`Exit`]: a `return`, a `break`, a `continue`, or a stop.
 
 use mente_sema::names::BindingId;
+use mente_sema::structs::Structs;
 use mente_sema::types::{Int as IntType, IntTy, Ty, I64};
 use mente_sema::{CheckedFn, CheckedModule};
 use mente_syntax::tree::{
     AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind, Refinement,
-    StmtId, StmtKind, TypeId, TypeKind, UnaryOp,
+    StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
 
@@ -43,17 +44,32 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
     }
 }
 
-/// Whether `v` has the shape of a value of type `ty`: an integer, a `bool`, or an array of its
-/// length whose elements have its element's shape. Its range is not checked here.
-fn shaped(v: &Value, ty: &Ty) -> bool {
+/// Whether `v` has the shape of a value of type `ty`: an integer, a `bool`, an array of its
+/// length whose elements have its element's shape, or a struct of its name whose fields are
+/// named as its declaration names them, in order, each of its field's shape. Its range is not
+/// checked here.
+fn shaped(v: &Value, ty: &Ty, structs: &Structs) -> bool {
     match (v, ty) {
         (Value::Int(_), Ty::Int(_)) | (Value::Bool(_), Ty::Bool) => true,
         (Value::Array(items), Ty::Array(n, elem)) => {
-            items.len() as u128 == *n && items.iter().all(|i| shaped(i, elem))
+            items.len() as u128 == *n && items.iter().all(|i| shaped(i, elem, structs))
+        }
+        (Value::Struct(name, fields), Ty::Struct(s)) if name == s => {
+            structs.get(s).is_some_and(|def| {
+                def.fields.len() == fields.len()
+                    && def
+                        .fields
+                        .iter()
+                        .zip(fields)
+                        .all(|(d, (n, v))| d.name == *n && shaped(v, &d.ty, structs))
+            })
         }
         _ => false,
     }
 }
+
+/// A declared type: a type node in the tree it lives in, a function's or a struct's.
+type Declared<'t> = Option<(&'t Tree, TypeId)>;
 
 /// One call: its function and the values of its bindings.
 struct Frame<'m> {
@@ -64,9 +80,16 @@ struct Frame<'m> {
     measure: Option<Vec<Int>>,
 }
 
-/// A place a `mut` argument or an assignment names: its root binding and the indexes into it,
-/// each with the span of its indexing.
-type Place = (BindingId, Vec<(Int, Span)>);
+/// A step from a place's root binding: an index with the span of its indexing, or a field by its
+/// index in the struct's declaration.
+#[derive(Clone, Debug)]
+enum Step {
+    Index(Int, Span),
+    Field(usize),
+}
+
+/// A place a `mut` argument or an assignment names: its root binding and the steps into it.
+type Place = (BindingId, Vec<Step>);
 
 pub(crate) struct Machine<'m> {
     module: &'m CheckedModule,
@@ -110,7 +133,7 @@ impl<'m> Machine<'m> {
         // call of this function, so it is refused before anything runs, on every path alike.
         let tree = &f.syntax.tree;
         for (p, v) in f.syntax.params.iter().zip(&args) {
-            if !shaped(v, &Ty::of(tree, p.ty)) {
+            if !shaped(v, &Ty::of(tree, p.ty), &self.module.structs) {
                 return Err(Stop::BadArguments(format!(
                     "`{}` does not have its parameter's shape",
                     v
@@ -191,7 +214,7 @@ impl<'m> Machine<'m> {
         // A refinement may name another parameter, so each is checked once all are bound.
         for (i, p) in f.syntax.params.iter().enumerate() {
             let v = frame.slots[i].clone().unwrap_or(Value::Unit);
-            self.refined(frame, &v, Some(p.ty), spans[i])?;
+            self.refined(frame, &v, Some((tree, p.ty)), spans[i])?;
         }
         for c in &f.syntax.contracts {
             match c.kind {
@@ -223,14 +246,12 @@ impl<'m> Machine<'m> {
             frame.measure = Some(measure);
         }
         let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
+        let declared = f.syntax.result.map(|t| (tree, t));
         let (result, ret_span) = match f.syntax.body {
             Some(Body::Expr(e)) => {
                 let v = self.eval(frame, e, int_ty(&result_ty))?;
                 let span = tree.expr(e).span;
-                (
-                    self.narrow(frame, v, f.syntax.result, &result_ty, span)?,
-                    span,
-                )
+                (self.narrow(frame, v, declared, &result_ty, span)?, span)
             }
             Some(Body::Block(b)) => match self.block(frame, b) {
                 Ok(v) => {
@@ -239,10 +260,7 @@ impl<'m> Machine<'m> {
                         .stmts
                         .last()
                         .map_or(tree.block(b).span, |&s| tree.stmt(s).span);
-                    (
-                        self.narrow(frame, v, f.syntax.result, &result_ty, span)?,
-                        span,
-                    )
+                    (self.narrow(frame, v, declared, &result_ty, span)?, span)
                 }
                 Err(Exit::Return(v, span)) => (v, span),
                 Err(e) => return Err(e),
@@ -297,7 +315,8 @@ impl<'m> Machine<'m> {
                 };
                 let plain = f.typing.bindings[id.0 as usize].clone();
                 let v = self.eval(frame, *init, int_ty(&plain))?;
-                let v = self.narrow(frame, v, *ty, &plain, tree.expr(*init).span)?;
+                let declared = ty.map(|t| (tree, t));
+                let v = self.narrow(frame, v, declared, &plain, tree.expr(*init).span)?;
                 frame.slots[id.0 as usize] = Some(v);
             }
             StmtKind::Assign { place, op, value } => self.assign(frame, *place, *op, *value)?,
@@ -319,7 +338,8 @@ impl<'m> Machine<'m> {
                 let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
                 let span = tree.expr(*e).span;
                 let v = self.eval(frame, *e, int_ty(&result_ty))?;
-                let v = self.narrow(frame, v, f.syntax.result, &result_ty, span)?;
+                let declared = f.syntax.result.map(|t| (tree, t));
+                let v = self.narrow(frame, v, declared, &result_ty, span)?;
                 return Err(Exit::Return(v, span));
             }
             StmtKind::Break => return Err(Exit::Break),
@@ -406,15 +426,29 @@ impl<'m> Machine<'m> {
         self.write(frame, &path, new)
     }
 
-    /// The root binding of a place and its indexes, evaluated left to right.
+    /// The root binding of a place and its steps, its indexes evaluated left to right.
     fn place(&mut self, frame: &mut Frame<'m>, e: ExprId) -> Flow<Place> {
         let f = frame.f;
         match &f.syntax.tree.expr(e).kind {
             ExprKind::Index { base, index } => {
-                let (root, mut indexes) = self.place(frame, *base)?;
+                let (root, mut steps) = self.place(frame, *base)?;
                 let i = self.int(frame, *index, None)?;
-                indexes.push((i, f.syntax.tree.expr(e).span));
-                Ok((root, indexes))
+                steps.push(Step::Index(i, f.syntax.tree.expr(e).span));
+                Ok((root, steps))
+            }
+            ExprKind::Field { base, name } => {
+                let (root, mut steps) = self.place(frame, *base)?;
+                let k = match &f.typing.exprs[base.0 as usize] {
+                    Ty::Struct(s) => self
+                        .module
+                        .structs
+                        .get(s)
+                        .and_then(|d| d.field(name))
+                        .map_or(0, |(k, _)| k),
+                    _ => 0,
+                };
+                steps.push(Step::Field(k));
+                Ok((root, steps))
             }
             _ => Ok((
                 f.resolution.names[e.0 as usize].unwrap_or(BindingId(0)),
@@ -423,41 +457,72 @@ impl<'m> Machine<'m> {
         }
     }
 
-    /// The declared type of a place, when its root binding states one.
-    fn place_type(&self, frame: &Frame<'m>, (root, indexes): &Place) -> Option<TypeId> {
-        let tree = &frame.f.syntax.tree;
-        let mut ty = frame.f.resolution.bindings.get(root.0 as usize)?.ty?;
-        for _ in indexes {
-            match &tree.ty(ty).kind {
-                TypeKind::Array { elem, .. } => ty = *elem,
+    /// The declared type of a place: its root binding's, when it states one, down its indexes;
+    /// a field's, in its struct's declaration, whatever its root states.
+    fn place_type(&self, frame: &Frame<'m>, (root, steps): &Place) -> Declared<'m> {
+        let f = frame.f;
+        let mut declared = f
+            .resolution
+            .bindings
+            .get(root.0 as usize)?
+            .ty
+            .map(|t| (&f.syntax.tree, t));
+        let mut ty = f.typing.bindings.get(root.0 as usize)?.clone();
+        for step in steps {
+            match (step, ty) {
+                (Step::Index(..), Ty::Array(_, elem)) => {
+                    declared = declared.and_then(|(tree, t)| match &tree.ty(t).kind {
+                        TypeKind::Array { elem, .. } => Some((tree, *elem)),
+                        _ => None,
+                    });
+                    ty = *elem;
+                }
+                (Step::Field(k), Ty::Struct(s)) => {
+                    let def = self.module.structs.get(&s)?;
+                    let field = def.fields.get(*k)?;
+                    declared = Some((def.tree(), field.decl));
+                    ty = field.ty.clone();
+                }
                 _ => return None,
             }
         }
-        Some(ty)
+        declared
     }
 
-    fn read(&self, frame: &Frame<'m>, (root, indexes): &Place) -> Flow<Value> {
+    fn read(&self, frame: &Frame<'m>, (root, steps): &Place) -> Flow<Value> {
         let mut v = frame.slots[root.0 as usize]
             .as_ref()
             .unwrap_or(&Value::Unit);
-        for (i, span) in indexes {
-            v = element(v, *i, *span)?;
+        for step in steps {
+            v = match step {
+                Step::Index(i, span) => element(v, *i, *span)?,
+                Step::Field(k) => match v {
+                    Value::Struct(_, fields) => fields.get(*k).map_or(v, |(_, f)| f),
+                    _ => v,
+                },
+            };
         }
         Ok(v.clone())
     }
 
-    fn write(&self, frame: &mut Frame<'m>, (root, indexes): &Place, new: Value) -> Flow<()> {
+    fn write(&self, frame: &mut Frame<'m>, (root, steps): &Place, new: Value) -> Flow<()> {
         let mut v = frame.slots[root.0 as usize].get_or_insert(Value::Unit);
-        for (i, span) in indexes {
-            let Value::Array(items) = v else {
-                return Ok(());
-            };
-            let len = items.len();
-            match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
-                Some(k) if k < len => v = &mut items[k],
-                _ => {
-                    return trap(TrapKind::IndexOutOfBounds { index: *i, len }, *span);
+        for step in steps {
+            match (step, v) {
+                (Step::Index(i, span), Value::Array(items)) => {
+                    let len = items.len();
+                    match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
+                        Some(k) if k < len => v = &mut items[k],
+                        _ => {
+                            return trap(TrapKind::IndexOutOfBounds { index: *i, len }, *span);
+                        }
+                    }
                 }
+                (Step::Field(k), Value::Struct(_, fields)) => match fields.get_mut(*k) {
+                    Some((_, f)) => v = f,
+                    None => return Ok(()),
+                },
+                _ => return Ok(()),
             }
         }
         *v = new;
@@ -542,10 +607,33 @@ impl<'m> Machine<'m> {
                 let i = self.int(frame, *index, None)?;
                 element(&b, i, span)?.clone()
             }
-            ExprKind::Field { base, .. } => match self.eval(frame, *base, None)? {
+            // The base is a value first, as an index's is, so that a field read through an
+            // index reads the value the base had when it was evaluated, its indexes evaluated,
+            // and each checked, from left to right (`core-calculus.md`, items 10 and 12).
+            ExprKind::Field { base, name } => match self.eval(frame, *base, None)? {
                 Value::Array(items) => Value::Int(Int::from_u128(items.len() as u128)),
+                Value::Struct(_, fields) => fields
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map_or(Value::Unit, |(_, v)| v),
                 _ => Value::Unit,
             },
+            // Each value is narrowed into its field's type and refinement where it lands, in the
+            // order written, which is the declaration's (`core-calculus.md`, item 13).
+            ExprKind::Construct { name, fields } => {
+                let def = self.module.structs.get(name);
+                let mut values = Vec::new();
+                for fi in fields {
+                    let field = def.and_then(|d| d.field(&fi.name)).map(|(_, f)| f);
+                    let fty = field.map_or(Ty::Any, |f| f.ty.clone());
+                    let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
+                    let v = self.eval(frame, fi.value, int_ty(&fty))?;
+                    let at = tree.expr(fi.value).span;
+                    let v = self.narrow(frame, v, declared, &fty, at)?;
+                    values.push((fi.name.clone(), v));
+                }
+                Value::Struct(name.clone(), values)
+            }
             ExprKind::Call { args, .. } => {
                 let Some(index) = f.resolution.calls[e.0 as usize] else {
                     return Ok(Value::Unit);
@@ -716,7 +804,7 @@ impl<'m> Machine<'m> {
         &self,
         frame: &Frame<'m>,
         v: Value,
-        declared: Option<TypeId>,
+        declared: Declared<'m>,
         plain: &Ty,
         span: Span,
     ) -> Flow<Value> {
@@ -737,22 +825,34 @@ impl<'m> Machine<'m> {
                 .map(|v| self.narrow_plain(v, elem, span))
                 .collect::<Flow<Vec<Value>>>()
                 .map(Value::Array),
+            // A struct's fields, each into its type, in the order of the declaration: a value
+            // built in the program already lies there, one from outside it may not.
+            (Value::Struct(name, fields), Ty::Struct(s)) => {
+                let Some(def) = self.module.structs.get(s) else {
+                    return Ok(Value::Struct(name, fields));
+                };
+                let mut out = Vec::new();
+                for ((n, v), d) in fields.into_iter().zip(&def.fields) {
+                    out.push((n, self.narrow_plain(v, &d.ty, span)?));
+                }
+                Ok(Value::Struct(name, out))
+            }
             (v, _) => Ok(v),
         }
     }
 
-    /// Checks a value against the refinements of a declared type, elementwise for an array.
+    /// Checks a value against the refinements of a declared type, elementwise for an array and
+    /// fieldwise for a struct, whose fields have the refinements its declaration gives them.
     fn refined(
         &self,
         frame: &Frame<'m>,
         v: &Value,
-        declared: Option<TypeId>,
+        declared: Declared<'_>,
         span: Span,
     ) -> Flow<()> {
-        let Some(id) = declared else {
+        let Some((tree, id)) = declared else {
             return Ok(());
         };
-        let tree = &frame.f.syntax.tree;
         match (v, &tree.ty(id).kind) {
             (
                 Value::Int(x),
@@ -763,7 +863,16 @@ impl<'m> Machine<'m> {
             ) => self.in_range(frame, *x, r, span),
             (Value::Array(items), TypeKind::Array { elem, .. }) => {
                 for item in items {
-                    self.refined(frame, item, Some(*elem), span)?;
+                    self.refined(frame, item, Some((tree, *elem)), span)?;
+                }
+                Ok(())
+            }
+            (Value::Struct(_, fields), TypeKind::Named(s)) => {
+                let Some(def) = self.module.structs.get(s) else {
+                    return Ok(());
+                };
+                for ((_, v), d) in fields.iter().zip(&def.fields) {
+                    self.refined(frame, v, Some((def.tree(), d.decl)), span)?;
                 }
                 Ok(())
             }

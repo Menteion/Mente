@@ -1,0 +1,18 @@
+// expect: pass
+module conformance
+// Every argument of a call is evaluated, left to right, before any is narrowed into its
+// parameter's type, so a narrowing inside a later argument comes first: `x` entering `u16` at
+// `g(x)` and at the field `a` may trap, and `x` entering `u8` is then safe.
+fn g(a: u16) -> u8 = 0
+
+fn f(a: u8, b: u8) -> u8 = a
+
+pub fn h(x: i8) -> u8 = f(x, g(x))
+
+pub struct P {
+  a: u128
+}
+
+fn take(a: u8, p: P) -> u8 = a
+
+pub fn k(x: i8) -> u8 = take(x, P(a: x))

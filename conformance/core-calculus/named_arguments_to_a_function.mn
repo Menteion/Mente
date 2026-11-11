@@ -1,0 +1,5 @@
+// expect: E0227
+module conformance
+fn add(a: u8, b: u8) -> u8 = a + b
+
+pub fn sum() -> u8 = add(a: 1, b: 2)

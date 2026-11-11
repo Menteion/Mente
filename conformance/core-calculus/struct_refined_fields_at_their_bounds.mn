@@ -1,0 +1,30 @@
+// expect: pass
+module conformance
+pub struct Window {
+  lo: u8[0..10]
+  hi: i8[-5..=5]
+  big: u128[1..=1267650600228229401496703205376]
+  span: i128[-1000..0]
+}
+
+pub fn edges() -> Window = Window(lo: 9, hi: -5, big: 1267650600228229401496703205376, span: -1)
+
+pub fn other_edges() -> Window = Window(lo: 0, hi: 5, big: 1, span: -1000)
+
+pub fn guarded(x: u8, y: i8) -> Window {
+  guard x < 10 and y >= -5 and y <= 5 else {
+    return other_edges()
+  }
+  Window(lo: x, hi: y, big: x + 1, span: y - 6)
+}
+
+// A refined field's range is a fact where it is read.
+pub fn twice(w: Window) -> u8[0..19] = w.lo + w.lo
+
+pub fn bump(mut w: Window) {
+  val lo = w.lo
+  guard lo < 9 else {
+    return
+  }
+  w.lo = lo + 1
+}

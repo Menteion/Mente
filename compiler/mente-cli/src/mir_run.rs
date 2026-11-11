@@ -58,13 +58,12 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
     }
     let mut memory = Memory::default();
     let mut values = Vec::new();
-    let sret = match &entry.result {
-        Shape::Array(..) => {
-            let at = memory.alloc(entry.result.size());
-            values.push(Val::Addr(at));
-            Some(at)
-        }
-        _ => None,
+    let sret = if entry.result.in_memory() {
+        let at = memory.alloc(entry.result.size());
+        values.push(Val::Addr(at));
+        Some(at)
+    } else {
+        None
     };
     let mut places = Vec::new();
     for ((is_mut, shape), (_, value)) in entry.params.iter().zip(&args) {
@@ -338,6 +337,12 @@ fn native_arg(value: &Value) -> Result<native::Arg, String> {
                 .map(native_arg)
                 .collect::<Result<Vec<_>, String>>()?,
         ),
+        Value::Struct(_, fields) => native::Arg::Struct(
+            fields
+                .iter()
+                .map(|(_, v)| native_arg(v))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
         v => native::Arg::Int(num(v)?),
     })
 }
@@ -364,6 +369,15 @@ fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
             (Value::Int(_), Shape::Int(_)) | (Value::Bool(_), Shape::Bool) => true,
             (Value::Array(items), Shape::Array(n, elem)) => {
                 items.len() == *n as usize && items.iter().all(|i| shaped(i, elem))
+            }
+            (Value::Struct(name, fields), Shape::Struct(st)) => {
+                *name == st.name
+                    && fields.len() == st.fields.len()
+                    && st
+                        .fields
+                        .iter()
+                        .zip(fields)
+                        .all(|(f, (n, v))| f.name == *n && shaped(v, &f.shape))
             }
             _ => false,
         }
@@ -398,6 +412,12 @@ fn write(memory: &mut Memory, at: u64, shape: &Shape, value: &Value) -> Result<(
             }
             Ok(())
         }
+        (Shape::Struct(st), Value::Struct(_, fields)) if fields.len() == st.fields.len() => {
+            for (f, (_, item)) in st.fields.iter().zip(fields) {
+                write(memory, at + u64::from(f.offset), &f.shape, item)?;
+            }
+            Ok(())
+        }
         _ => Err(format!("`{}` does not have its parameter's shape", value)),
     }
 }
@@ -418,6 +438,20 @@ fn read(memory: &Memory, at: u64, shape: &Shape) -> Result<String, String> {
                 .map(|k| read(memory, at + u64::from(elem.size()) * k, elem))
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(format!("[{}]", items.join(", ")))
+        }
+        Shape::Struct(st) => {
+            let fields = st
+                .fields
+                .iter()
+                .map(|f| {
+                    Ok(format!(
+                        "{}: {}",
+                        f.name,
+                        read(memory, at + u64::from(f.offset), &f.shape)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{}({})", st.name, fields.join(", ")))
         }
         Shape::Unit => Ok("()".into()),
     }
@@ -576,6 +610,26 @@ pub fn below(n: i8) -> i8 {
     (
         "pub fn later(x: u8) -> u8 {\n  guard x > 0 else {\n    todo(\"zero is not handled\")\n  }\n  x\n}\npub fn never(x: u8) -> u8 {\n  guard x < 10 else {\n    unreachable(\"x is a digit\")\n  }\n  x\n}\nfn noisy(x: u8) -> u8 = x + 1\npub fn drop(x: u8) -> u8 {\n  _ = noisy(x)\n  x\n}",
         &["later(0)", "later(2)", "never(12)", "never(3)", "drop(255)", "drop(4)"],
+    ),
+    // Structs: built in the order of their fields, read, stored through places, passed as
+    // `mut` fields, copied, chosen by an `if`, and given from outside the program with a field
+    // outside its type or its refinement.
+    (
+        "pub struct P {\n  a: u8\n  b: i16[-5..5]\n  xs: [2]u32\n}\npub struct Q {\n  p: P\n  flag: bool\n  wide: u128\n}\npub fn make(a: u16, b: i16) -> P {\n  guard b >= -5 and b < 5 else {\n    return P(a: 0, b: 0, xs: [0, 0])\n  }\n  P(a: a, b: b, xs: [1, 2])\n}\npub fn read(q: Q) -> u128 = q.p.a + q.p.xs[1] + q.wide\npub fn set(mut q: Q, v: u8, i: usize) {\n  q.p.a = v\n  q.p.xs[i] = 9\n  q.flag = not q.flag\n}\nfn bump(mut n: u8) {\n  n += 1\n}\npub fn field(mut q: Q) {\n  bump(mut q.p.a)\n}\npub fn copy(q: Q) -> [2]u8 {\n  var r = q\n  r.p.a = 1\n  [q.p.a, r.p.a]\n}\npub fn pick(c: bool, a: P, b: P) -> P = if c { a } else { b }",
+        &["make(7, 3)", "make(300, 3)", "make(7, 9)", "read(Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 340282366920938463463374607431768211450))", "read(Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 340282366920938463463374607431768211455))", "read(Q(p: P(a: 1, b: 7, xs: [3, 4]), flag: true, wide: 0))", "read(Q(p: P(a: 256, b: 7, xs: [3, 4]), flag: true, wide: 0))", "set(mut Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 0), 5, 1)", "set(mut Q(p: P(a: 1, b: 2, xs: [3, 4]), flag: true, wide: 0), 5, 2)", "field(mut Q(p: P(a: 254, b: 0, xs: [0, 0]), flag: false, wide: 0))", "field(mut Q(p: P(a: 255, b: 0, xs: [0, 0]), flag: false, wide: 0))", "copy(Q(p: P(a: 6, b: -5, xs: [0, 0]), flag: false, wide: 0))", "pick(false, P(a: 1, b: 1, xs: [1, 1]), P(a: 2, b: 2, xs: [2, 2]))"],
+    ),
+    // An argument read from a binding keeps its value though a later operand changes the
+    // binding, as a value does: through a `mut` argument, an index, an `if`'s branch or an
+    // assignment in a block.
+    (
+        "fn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k\nfn bump(mut xs: [2]u8) -> u8 {\n  xs[0] = 7\n  0\n}\npub fn arrays() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, bump(mut xs))\n}\nfn one(mut xs: [2]u8) -> usize {\n  xs[1] = 50\n  1\n}\npub fn index() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  xs[one(mut xs)]\n}\npub fn branch(c: bool) -> u8 {\n  var xs: [2]u8 = [1, 2]\n  val ys: [2]u8 = [3, 4]\n  first(if c { xs } else { ys }, bump(mut xs))\n}\npub fn assigned(c: bool) -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, if c {\n    xs[0] = 40\n    0\n  } else {\n    1\n  })\n}",
+        &["arrays()", "index()", "branch(true)", "branch(false)", "assigned(true)", "assigned(false)"],
+    ),
+    // A field read through an index reads its base as it was when it was evaluated, its path
+    // evaluated left to right, each index checked before the next is evaluated.
+    (
+        "// A field read through an index reads the value its base had when it was evaluated, and its\n// path is evaluated from left to right, each index checked before the next is evaluated.\npub struct D {\n  d: u8\n}\n\npub struct S {\n  xs: [2]D\n}\n\npub struct O {\n  ys: [2]D\n}\n\nfn one(mut xs: [2]D) -> usize {\n  xs[1].d = 50\n  1\n}\n\npub fn through_index() -> u8 {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)].d\n}\n\npub fn element() -> D {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)]\n}\n\nfn reset(mut s: S) -> usize {\n  s.xs[0].d = 99\n  0\n}\n\npub fn through_field() -> u8 {\n  var s = S(xs: [D(d: 1), D(d: 2)])\n  s.xs[reset(mut s)].d\n}\n\npub fn rd(xs: [2]O, i: usize, j: usize, k: usize) -> u8 = xs[i].ys[j / k].d",
+        &["through_index()", "element()", "through_field()", "rd([O(ys: [D(d: 1), D(d: 2)]), O(ys: [D(d: 3), D(d: 4)])], 5, 1, 0)", "rd([O(ys: [D(d: 1), D(d: 2)]), O(ys: [D(d: 3), D(d: 4)])], 1, 1, 0)", "rd([O(ys: [D(d: 1), D(d: 2)]), O(ys: [D(d: 3), D(d: 4)])], 1, 1, 1)"],
     ),
     // An empty array kept across a call: its slot of no bytes begins where the call's memory
     // does, and stays with its frame when the call returns (the generator's seed 88).
@@ -816,6 +870,41 @@ pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
 
     /// An argument from outside the program must have its parameter's shape; one that does not
     /// fit its types traps as the reference interpreter's narrowing does.
+    /// MIR keeps a value as it was when it was evaluated (`core-calculus.md`, item 12): a
+    /// struct or an array argument that a later argument changes, and a field read through an
+    /// index that changes its base; and it checks each index of a path before evaluating the
+    /// next. Each value is the one the spec gives, not only the interpreter's.
+    #[test]
+    fn test_mir_keeps_a_value_as_it_was_evaluated() {
+        let extra = "pub fn argument() -> u8 {\n  var p = D(d: 1)\n  get(p, set(mut p))\n}\nfn get(p: D, k: u8) -> u8 = p.d + k\nfn set(mut p: D) -> u8 {\n  p.d = 9\n  0\n}\nfn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k\nfn bump(mut xs: [2]u8) -> u8 {\n  xs[0] = 7\n  0\n}\npub fn arrays() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, bump(mut xs))\n}";
+        let src = format!("module m\n{}\n{}\n", "// A field read through an index reads the value its base had when it was evaluated, and its\n// path is evaluated from left to right, each index checked before the next is evaluated.\npub struct D {\n  d: u8\n}\n\npub struct S {\n  xs: [2]D\n}\n\npub struct O {\n  ys: [2]D\n}\n\nfn one(mut xs: [2]D) -> usize {\n  xs[1].d = 50\n  1\n}\n\npub fn through_index() -> u8 {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)].d\n}\n\npub fn element() -> D {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)]\n}\n\nfn reset(mut s: S) -> usize {\n  s.xs[0].d = 99\n  0\n}\n\npub fn through_field() -> u8 {\n  var s = S(xs: [D(d: 1), D(d: 2)])\n  s.xs[reset(mut s)].d\n}\n\npub fn rd(xs: [2]O, i: usize, j: usize, k: usize) -> u8 = xs[i].ys[j / k].d", extra);
+        let m = mente_sema::check_program(&src).unwrap();
+        let o = "O(ys: [D(d: 1), D(d: 2)])";
+        for (call, want) in [
+            ("argument()".to_string(), Ok("1")),
+            ("arrays()".to_string(), Ok("1")),
+            ("through_index()".to_string(), Ok("2")),
+            ("element()".to_string(), Ok("D(d: 2)")),
+            ("through_field()".to_string(), Ok("1")),
+            (format!("rd([{}, {}], 1, 1, 1)", o, o), Ok("2")),
+            (
+                format!("rd([{}, {}], 5, 1, 0)", o, o),
+                Err("trap[index-out-of-bounds]"),
+            ),
+            (
+                format!("rd([{}, {}], 1, 1, 0)", o, o),
+                Err("trap[division-by-zero]"),
+            ),
+        ] {
+            let (name, args) = mente_interp::parse_call_modes(&call).unwrap();
+            match (run(&m, &name, args), want) {
+                (Ok(lines), Ok(w)) => assert_eq!(lines, vec![w.to_string()], "{}", call),
+                (Err(text), Err(w)) => assert!(text.starts_with(w), "{}: {}", call, text),
+                (got, w) => panic!("{}: {:?}, expected {:?}", call, got, w),
+            }
+        }
+    }
+
     #[test]
     fn test_mir_runs_refuse_arguments_of_another_shape() {
         let text = "module m\npub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]\n";
@@ -845,6 +934,44 @@ pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
         assert!(call("get([1, 2, 3])")
             .unwrap_err()
             .contains("takes 2 arguments"));
+        // A struct's argument is a value of that struct, each field once in order, of its type.
+        let text =
+            "module m\npub struct P {\n  a: u8\n  b: [2]u16\n}\npub fn h(p: P) -> u8 = p.a\n";
+        let lowered = lower::lower(&mente_sema::check_program(text).unwrap()).unwrap();
+        let call = |c: &str| {
+            let (f, args) = mente_interp::parse_call_modes(c).expect("a call");
+            run_lowered(&lowered, &f, args)
+        };
+        assert_eq!(call("h(P(a: 1, b: [2, 3]))"), Ok(vec!["1".to_string()]));
+        for wrong in [
+            "Q(a: 1, b: [2, 3])",
+            "P(a: 1)",
+            "P(a: 1, b: [2, 3], c: 4)",
+            "P(a: 1, c: [2, 3])",
+            "P(b: [2, 3], a: 1)",
+            "P(a: true, b: [2, 3])",
+            "P(a: 1, b: [2])",
+        ] {
+            assert_eq!(
+                call(&format!("h({})", wrong)),
+                Err(format!("`{}` does not have its parameter's shape", wrong))
+            );
+        }
+        // Writing one into memory refuses another number of fields itself.
+        let shape = &lowered.entries[0].params[0].1;
+        let value = |fields: &[&str]| {
+            Value::Struct(
+                "P".into(),
+                fields
+                    .iter()
+                    .map(|f| (f.to_string(), Value::Int(mente_interp::Int::from_u128(1))))
+                    .collect(),
+            )
+        };
+        let mut memory = Memory::default();
+        let at = memory.alloc(shape.size());
+        assert!(write(&mut memory, at, shape, &value(&["a"])).is_err());
+        assert!(write(&mut memory, at, shape, &value(&["a", "b", "c"])).is_err());
     }
 
     /// Each construct the lowering handles, run on calls that reach every path of it, prints

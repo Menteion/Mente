@@ -1,0 +1,8 @@
+// expect: E0129
+module conformance
+pub struct Pair {
+  i: u8
+  j: u8
+}
+
+pub fn make() -> Pair = Pair { i: 0, j: 1 }

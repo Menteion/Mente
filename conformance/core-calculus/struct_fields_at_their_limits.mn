@@ -1,0 +1,27 @@
+// expect: pass
+module conformance
+pub struct Limits {
+  a: u8
+  b: i8
+  c: u128
+  d: i128
+  e: usize
+  f: bool
+}
+
+pub fn lowest() -> Limits = Limits(a: 0, b: -128, c: 0, d: -170141183460469231731687303715884105728, e: 0, f: false)
+
+pub fn highest() -> Limits = Limits(a: 255, b: 127, c: 340282366920938463463374607431768211455, d: 170141183460469231731687303715884105727, e: 18446744073709551615, f: true)
+
+// Mixed signedness: a negative `i16` entering `u8` and `usize`, a large one entering `i8`, each
+// checked where it lands.
+pub fn from(x: i16, y: u64) -> Limits = Limits(a: x, b: x, c: y, d: x, e: x, f: x < 0)
+
+// `i128` beside `u128`: each field keeps its own type, and the sum is exact.
+pub fn sum(l: Limits) -> i128 {
+  val low: i128 = l.d
+  val c: u64 = l.e
+  low + c + l.a + l.b
+}
+
+pub fn high(l: Limits) -> u128 = l.c

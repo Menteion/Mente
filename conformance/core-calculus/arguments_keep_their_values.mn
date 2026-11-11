@@ -1,0 +1,57 @@
+// expect: pass
+module conformance
+// An argument is a value from the moment it is evaluated: an array or a struct read from a
+// binding keeps that value though a later operand changes the binding.
+pub struct P {
+  a: u8
+}
+
+fn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k
+
+fn bump(mut xs: [2]u8) -> u8 {
+  xs[0] = 7
+  0
+}
+
+pub fn arrays() -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, bump(mut xs))
+}
+
+fn get(p: P, k: u8) -> u8 = p.a + k
+
+fn set(mut p: P) -> u8 {
+  p.a = 9
+  0
+}
+
+pub fn structs() -> u8 {
+  var p = P(a: 1)
+  get(p, set(mut p))
+}
+
+fn one(mut xs: [2]u8) -> usize {
+  xs[1] = 50
+  1
+}
+
+pub fn index() -> u8 {
+  var xs: [2]u8 = [1, 2]
+  xs[one(mut xs)]
+}
+
+pub fn branch(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  val ys: [2]u8 = [3, 4]
+  first(if c { xs } else { ys }, bump(mut xs))
+}
+
+pub fn assigned(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  first(xs, if c {
+    xs[0] = 40
+    0
+  } else {
+    1
+  })
+}

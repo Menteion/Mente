@@ -10,6 +10,7 @@ pub mod check;
 pub mod incremental;
 pub mod names;
 pub mod octagon;
+pub mod structs;
 pub mod tier1;
 pub mod types;
 pub mod wide;
@@ -61,7 +62,8 @@ pub fn check_module(
     src: &str,
     module: &ModuleFile,
 ) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
-    combine(verify_module(module), check_bodies(src, module))
+    let b = bodies(src, module, true);
+    combine(verify_module_with(module, &b.structs), b.errors)
 }
 
 /// The declaration checks' verdict, then the bodies' diagnostics.
@@ -152,6 +154,8 @@ pub struct CheckedFn {
 pub struct CheckedModule {
     pub names: Vec<String>,
     pub functions: Vec<Option<CheckedFn>>,
+    /// The module's structs, with their fields and layouts.
+    pub structs: structs::Structs,
 }
 
 impl CheckedModule {
@@ -176,8 +180,8 @@ pub fn check_program_without_proofs(src: &str) -> Result<CheckedModule, Vec<Diag
 fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
     let module = parse_module(src).map_err(|d| vec![d])?;
     let b = bodies(src, &module, prove);
-    let (functions, body_errors) = (b.functions, b.errors);
-    combine(verify_module(&module), body_errors)?;
+    let (functions, body_errors, structs) = (b.functions, b.errors, b.structs);
+    combine(verify_module_with(&module, &structs), body_errors)?;
     Ok(CheckedModule {
         names: module
             .items
@@ -188,6 +192,7 @@ fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
             })
             .collect(),
         functions,
+        structs,
     })
 }
 
@@ -238,6 +243,7 @@ struct Bodies {
     /// For each report, the queries of the obligations Tier 1 discharged, when asked for.
     queries: Vec<Vec<tier1::smt::Query>>,
     todos: Vec<(Span, String)>,
+    structs: structs::Structs,
 }
 
 fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
@@ -246,6 +252,16 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
 
 /// [`bodies`], with Tier 1 writing the query of each obligation it discharges when `queries`.
 fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bodies {
+    // The structs first: every function reads their fields and layouts. Their diagnostics come
+    // before the functions'.
+    let parsed_structs = mente_syntax::parse_structs(src, module);
+    let mut errors: Vec<Diagnostic> = parsed_structs
+        .iter()
+        .flat_map(|p| p.errors.iter().cloned())
+        .collect();
+    let (structs, declared) = structs::declare(module, &parsed_structs);
+    errors.extend(declared);
+    errors.sort_by_key(|d| d.primary.start);
     let parsed = mente_syntax::parse_bodies(src, module);
     let mut todos: Vec<(Span, String)> = parsed
         .iter()
@@ -274,7 +290,6 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .iter()
         .map(|p| p.syntax.as_ref().map(|syntax| tier1::Callee { syntax }))
         .collect();
-    let mut errors = Vec::new();
     let mut checked = Vec::new();
     let mut reports = Vec::new();
     let mut discharged = Vec::new();
@@ -282,8 +297,8 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         errors.extend(p.errors.iter().cloned());
         let done = match (&p.syntax, p.errors.is_empty()) {
             (Some(syntax), true) => {
-                let (resolution, mut found) = names::resolve(syntax, &names);
-                let (typing, typed) = check::check(syntax, &resolution, &signatures);
+                let (resolution, mut found) = names::resolve(syntax, &names, &structs);
+                let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs);
                 found.extend(typed);
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
@@ -293,6 +308,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                         resolution: &resolution,
                         typing: &typing,
                         routing: *routing,
+                        structs: &structs,
                     };
                     let (report, written) = if queries {
                         tier1::check_with_queries(&f, &callees, src)
@@ -331,11 +347,22 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         reports,
         queries: discharged,
         todos,
+        structs,
     }
 }
 
-/// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`.
+/// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`, without
+/// the sizes of its plain structs, which [`verify_module_with`] takes.
 pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
+    verify_module_with(module, &structs::Structs::default())
+}
+
+/// [`verify_module`], a `@layout` struct's field of a plain struct sized and aligned by that
+/// struct's layout (`core-calculus.md`, item 21), which `structs` holds.
+pub fn verify_module_with(
+    module: &ModuleFile,
+    structs: &structs::Structs,
+) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut layout_proofs = Vec::new();
     let mut bitstruct_proofs = Vec::new();
@@ -365,6 +392,14 @@ pub fn verify_module(module: &ModuleFile) -> Result<ModuleVerificationReport, Ve
                 }
             }
             _ => {}
+        }
+    }
+    for d in &structs.defs {
+        if let Some(l) = &d.layout {
+            if let (Ok(size), Ok(align)) = (usize::try_from(l.size), usize::try_from(l.align)) {
+                named_sizes.entry(d.name.clone()).or_insert(size);
+                named_aligns.entry(d.name.clone()).or_insert(align);
+            }
         }
     }
 
@@ -1009,11 +1044,11 @@ mod tests {
     fn test_typed_functions_dump_with_their_diagnostics() {
         assert_eq!(
             dump_typed("module m\npub fn f(x: u8) -> u8 {\n  val y = x + 1\n  y\n}\npub fn g() -> u8 = zz\n"),
-            "mente-dump 1 typed\n(fn f ((x u8)) u8 () {(val y (+ x 1)); y})\n  (binding x u8)\n  (binding y u8)\n  (expr 0 3:11 1 u8)\n  (expr 1 3:15 1 integer)\n  (expr 2 3:11 5 u8)\n  (expr 3 4:3 1 u8)\n(fn g () u8 () (= zz))\n  (expr 0 6:20 2 _)\n6:20 E0201\n"
+            "mente-dump 2 typed\n(fn f ((x u8)) u8 () {(val y (+ x 1)); y})\n  (binding x u8)\n  (binding y u8)\n  (expr 0 3:11 1 u8)\n  (expr 1 3:15 1 integer)\n  (expr 2 3:11 5 u8)\n  (expr 3 4:3 1 u8)\n(fn g () u8 () (= zz))\n  (expr 0 6:20 2 _)\n6:20 E0201\n"
         );
         assert_eq!(
             dump_typed("module m\nlet x = 1\n"),
-            "mente-dump 1 typed\n2:1 E0111\n"
+            "mente-dump 2 typed\n2:1 E0111\n"
         );
     }
 
@@ -1409,6 +1444,51 @@ pub struct Event {
         assert!(verify_module(&parse_module(&misplaced).unwrap()).is_ok());
         let unpacked = misplaced.replace("@packed\n", "");
         assert!(first_error(&unpacked).to_string().contains("E0418"));
+    }
+
+    /// A `@layout` struct's field of a plain struct is sized and aligned by the plain struct's
+    /// own layout (`core-calculus.md`, item 21): `Pair` takes 8 bytes, aligned to 4.
+    #[test]
+    fn test_layout_field_may_be_a_plain_struct() {
+        let code = "module m
+pub struct Pair {
+  a: u32
+  b: u8
+}
+@layout(size: 16, align: 8)
+pub struct Rec {
+  @bytes(0..8) pub id: u64
+  @bytes(8..16) pub p: Pair
+}
+";
+        assert!(check_source(code).is_ok(), "{:?}", check_source(code).err());
+        let codes = |src: &str| -> Vec<&str> {
+            check_source(src)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        let narrow = code.replace(
+            "@bytes(8..16) pub p: Pair",
+            "@bytes(8..13) pub p: Pair
+  @bytes(13..16) pub pad: [3]u8",
+        );
+        assert_eq!(codes(&narrow), ["E0415"]);
+        let misaligned = code
+            .replace("@layout(size: 16, align: 8)", "@layout(size: 12, align: 4)")
+            .replace(
+                "@bytes(0..8) pub id: u64
+  @bytes(8..16) pub p: Pair",
+                "@bytes(0..2) pub id: u16
+  @bytes(2..10) pub p: Pair
+  @bytes(10..12) pub pad: u16",
+            );
+        assert_eq!(codes(&misaligned), ["E0418"]);
+        // Without the plain structs' layouts, as `verify_module` alone reads a module, the
+        // size is unknown.
+        assert!(first_error(code).to_string().contains("E0417"));
     }
 
     #[test]

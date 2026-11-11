@@ -1,0 +1,37 @@
+// expect: pass
+module conformance
+pub struct Point {
+  x: i32
+  y: i32
+}
+
+pub struct Segment {
+  from: Point
+  to: Point
+  weights: [3]u8
+}
+
+pub fn origin() -> Point = Point(x: 0, y: 0)
+
+pub fn segment(a: Point, b: Point) -> Segment = Segment(from: a, to: b, weights: [1, 2, 3])
+
+pub fn length(s: Segment) -> i64 = s.to.x - s.from.x + s.to.y - s.from.y
+
+pub fn moved(s: Segment, dx: i32, i: usize) -> Segment {
+  var t = s
+  t.to.x = s.to.x + dx
+  t.weights[i] = 9
+  t.from = origin()
+  t
+}
+
+pub fn row(n: i32) -> [3]Point {
+  var ps: [3]Point = [origin(), origin(), origin()]
+  ps[1].x = n
+  ps[2] = Point(x: n, y: n)
+  ps
+}
+
+pub fn pick(c: bool, a: Point, b: Point) -> Point = if c { a } else { b }
+
+pub fn main() -> Segment = moved(segment(origin(), Point(x: 3, y: 4)), 2, 0)

@@ -1,0 +1,15 @@
+// expect: E0225 E0225
+module conformance
+// Two cycles through `A`, one by `B` and one by `C`, are two errors.
+pub struct A {
+  b: B
+  c: C
+}
+
+pub struct B {
+  a: A
+}
+
+pub struct C {
+  a: A
+}

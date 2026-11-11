@@ -64,6 +64,8 @@ pub struct Function<'a> {
     pub resolution: &'a Resolution,
     pub typing: &'a Typing,
     pub routing: Routing,
+    /// The module's structs, whose fields' refinements Tier 1 proves and takes as facts.
+    pub structs: &'a crate::structs::Structs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,14 +215,16 @@ fn form(tree: &Tree, e: ExprId, names: &Names) -> Result<Form, String> {
             constant: i128::try_from(*value).unwrap_or(i128::MAX),
         }),
         ExprKind::Name(n) if (names.is_int)(n) => Ok(var(n.clone())),
-        ExprKind::Field { base, name } => match &tree.expr(*base).kind {
-            ExprKind::Name(n) => Ok(match (names.len_of)(n) {
-                Some(len) => Form {
+        // Of a binding's fields, only an array's length is a value Tier 1 knows.
+        ExprKind::Field { base, name } => match (&tree.expr(*base).kind, name.as_str()) {
+            (ExprKind::Name(n), "len") => match (names.len_of)(n) {
+                Some(len) => Ok(Form {
                     vars: Vec::new(),
                     constant: i128::try_from(len).unwrap_or(i128::MAX),
-                },
-                None => var(format!("{}.{}", n, name)),
-            }),
+                }),
+                None => Err("a field of a struct".to_string()),
+            },
+            (ExprKind::Name(_), _) => Err("a field of a struct".to_string()),
             _ => Err("a field of a value that is not a binding".to_string()),
         },
         ExprKind::Unary {
@@ -512,6 +516,10 @@ fn div_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
         _ => {}
     }
     let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
+    // A divisor of no value, after a narrowing that always traps, gives a quotient of none.
+    if c > d {
+        return Val::Itv(c, d);
+    }
     if c > 0 {
         // A positive divisor keeps the dividend's sign; the quotient's ends come from the
         // dividend's ends over the divisor's.
@@ -666,7 +674,16 @@ enum Shape {
         refine: Option<Box<Refine>>,
     },
     Array(u128, Box<Shape>),
+    /// A struct of the module, whose fields have the shapes its declaration gives them.
+    Struct(String),
     Other,
+}
+
+/// A step from a place's root binding to the place: an index, or a field.
+#[derive(Clone, Debug)]
+enum Step {
+    Index(ExprId),
+    Field(String),
 }
 
 impl Shape {
@@ -677,6 +694,7 @@ impl Shape {
                 refine: None,
             },
             Ty::Array(n, e) => Shape::Array(*n, Box::new(Shape::plain(e))),
+            Ty::Struct(name) => Shape::Struct(name.clone()),
             _ => Shape::Other,
         }
     }
@@ -689,7 +707,8 @@ impl Shape {
                 refine: refine.clone(),
             },
             Shape::Array(n, e) => Shape::Array(*n, Box::new(e.refinements())),
-            Shape::Other => Shape::Other,
+            // A struct's fields hold their refinements wherever its value goes.
+            Shape::Struct(_) | Shape::Other => Shape::Other,
         }
     }
 
@@ -876,6 +895,13 @@ fn print(tree: &Tree, e: ExprId, subst: Subst) -> (String, u8) {
                 .collect();
             format!("{}({})", callee, args.join(", "))
         }
+        ExprKind::Construct { name, fields } => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, at(f.value, 0)))
+                .collect();
+            format!("{}({})", name, fields.join(", "))
+        }
         ExprKind::Array(items) => {
             let items: Vec<String> = items.iter().map(|i| at(*i, 0)).collect();
             format!("[{}]", items.join(", "))
@@ -964,6 +990,7 @@ struct Fx<'a> {
     resolution: &'a Resolution,
     typing: &'a Typing,
     routing: Routing,
+    structs: &'a crate::structs::Structs,
     callees: &'a [Option<Callee<'a>>],
     src: &'a str,
     /// The octagon variable of each integer binding.
@@ -1238,6 +1265,7 @@ impl<'a> Fx<'a> {
                     }
                     ExprKind::If { .. }
                     | ExprKind::Index { .. }
+                    | ExprKind::Field { .. }
                     | ExprKind::Binary {
                         op: BinaryOp::Rem, ..
                     } if int => Site::Value(alloc(true).unwrap_or(0)),
@@ -1272,6 +1300,7 @@ impl<'a> Fx<'a> {
             resolution: f.resolution,
             typing: f.typing,
             routing: f.routing,
+            structs: f.structs,
             callees,
             src,
             vars,
@@ -1343,6 +1372,7 @@ impl<'a> Fx<'a> {
                 }),
             },
             TypeKind::Array { len, elem } => Shape::Array(*len, Box::new(self.own_shape(*elem))),
+            TypeKind::Named(name) => Shape::Struct(name.clone()),
             _ => Shape::Other,
         }
     }
@@ -1395,8 +1425,63 @@ impl<'a> Fx<'a> {
             TypeKind::Array { len, elem } => {
                 Shape::Array(*len, Box::new(self.callee_shape(c, site, args, *elem)))
             }
+            // A struct tells a call's checks nothing more: its fields hold their refinements.
             _ => Shape::Other,
         }
+    }
+
+    /// The shape of field `field` of struct `name`, as its declaration gives it: a field's
+    /// refinement has literal bounds.
+    fn field_shape(&self, name: &str, field: &str) -> Shape {
+        let Some(def) = self.structs.get(name) else {
+            return Shape::Other;
+        };
+        let Some((_, f)) = def.field(field) else {
+            return Shape::Other;
+        };
+        Self::declared_shape(def.tree(), f.decl)
+    }
+
+    /// The shape a type of a struct's declaration names, in its tree.
+    fn declared_shape(tree: &Tree, t: TypeId) -> Shape {
+        match &tree.ty(t).kind {
+            TypeKind::Int { name, refinement } => Shape::Int {
+                int: IntTy::named(name),
+                refine: refinement.as_ref().map(|r| {
+                    let bound = |b: &Bound| match b {
+                        Bound::Int { negative, value } => bound_int(*negative, *value),
+                        _ => TOP,
+                    };
+                    Box::new(Refine {
+                        lo: bound(&r.lo),
+                        hi: bound(&r.hi),
+                        inclusive: r.inclusive,
+                        lo_text: bound_text(&r.lo),
+                        hi_text: bound_text(&r.hi),
+                        text: tree.render_type(t),
+                        declared: literal_refinement(name, r),
+                    })
+                }),
+            },
+            TypeKind::Array { len, elem } => {
+                Shape::Array(*len, Box::new(Self::declared_shape(tree, *elem)))
+            }
+            TypeKind::Named(name) => Shape::Struct(name.clone()),
+            _ => Shape::Other,
+        }
+    }
+
+    /// The shape of the place a root binding and its steps name.
+    fn place_shape(&self, root: Option<usize>, steps: &[Step]) -> Shape {
+        let mut shape = root.map_or(Shape::Other, |b| self.binding_shape(b));
+        for step in steps {
+            shape = match (step, &shape) {
+                (Step::Index(_), _) => shape.element(),
+                (Step::Field(f), Shape::Struct(name)) => self.field_shape(name, f),
+                (Step::Field(_), _) => Shape::Other,
+            };
+        }
+        shape
     }
 
     /// An expression of this function as written, with how tightly it binds.
@@ -1936,7 +2021,7 @@ impl<'a> Fx<'a> {
                 Val::Itv(lo, hi)
             }
             Shape::Array(_, e) => Val::Arr(Box::new(self.summary(st, e))),
-            Shape::Other => Val::Other,
+            Shape::Struct(_) | Shape::Other => Val::Other,
         }
     }
 
@@ -2021,7 +2106,8 @@ impl<'a> Fx<'a> {
                 let place = format!("each element of {}", place);
                 self.narrow(st, &each, elem, (span, tag), &place, None);
             }
-            Shape::Other => {}
+            // A value of a struct already holds its fields' refinements.
+            Shape::Struct(_) | Shape::Other => {}
         }
     }
 
@@ -2343,12 +2429,17 @@ impl<'a> Fx<'a> {
         Val::Other
     }
 
-    /// The root binding of a place and its indexes, outermost first.
-    fn place_parts(&self, e: ExprId, indexes: &mut Vec<ExprId>) -> Option<usize> {
+    /// The root binding of a place and its steps, indexes and fields, outermost first.
+    fn place_parts(&self, e: ExprId, steps: &mut Vec<Step>) -> Option<usize> {
         match &self.tree.expr(e).kind {
             ExprKind::Index { base, index } => {
-                let root = self.place_parts(*base, indexes);
-                indexes.push(*index);
+                let root = self.place_parts(*base, steps);
+                steps.push(Step::Index(*index));
+                root
+            }
+            ExprKind::Field { base, name } => {
+                let root = self.place_parts(*base, steps);
+                steps.push(Step::Field(name.clone()));
                 root
             }
             _ => self.resolution.names[e.0 as usize].map(|b| b.0 as usize),
@@ -2356,19 +2447,18 @@ impl<'a> Fx<'a> {
     }
 
     fn assign_stmt(&mut self, st: &mut Octagon, place: ExprId, op: AssignOp, value: ExprId) {
-        let mut indexes = Vec::new();
-        let root = self.place_parts(place, &mut indexes);
-        let mut shape = root.map_or(Shape::Other, |b| self.binding_shape(b));
-        for &i in &indexes {
-            let iv = self.eval(st, i);
-            if let Shape::Array(n, _) = shape {
-                self.index_check(st, &iv, n, self.span(i));
+        let mut steps = Vec::new();
+        let root = self.place_parts(place, &mut steps);
+        for (k, step) in steps.iter().enumerate() {
+            if let Step::Index(i) = step {
+                let iv = self.eval(st, *i);
+                if let Shape::Array(n, _) = self.place_shape(root, &steps[..k]) {
+                    self.index_check(st, &iv, n, self.span(*i));
+                }
             }
-            shape = shape.element();
         }
-        let scalar = root
-            .filter(|_| indexes.is_empty())
-            .and_then(|b| self.vars[b]);
+        let shape = self.place_shape(root, &steps);
+        let scalar = root.filter(|_| steps.is_empty()).and_then(|b| self.vars[b]);
         let text = self.own_text(place);
         let place_name = format!("`{}`", text.0);
         let v = match op {
@@ -2523,23 +2613,43 @@ impl<'a> Fx<'a> {
                     return each;
                 };
                 self.assign(st, var, &each);
-                let mut indexes = Vec::new();
-                if let Some(root) = self.place_parts(e, &mut indexes) {
-                    let shape = indexes
-                        .iter()
-                        .fold(self.binding_shape(root), |s, _| s.element());
+                let mut steps = Vec::new();
+                if let Some(root) = self.place_parts(e, &mut steps) {
+                    let shape = self.place_shape(Some(root), &steps);
                     self.facts(st, var, &shape);
                 }
                 var_val(var)
             }
-            ExprKind::Field { base, .. } => {
+            ExprKind::Field { base, name } => {
                 self.eval(st, *base);
                 match &typing.exprs[base.0 as usize] {
                     Ty::Array(n, _) => int_literal(*n),
+                    // A field read is a value Tier 1 does not follow from a store: it lies in its
+                    // type, and in its refinement, which every value of the struct holds.
+                    Ty::Struct(s) => {
+                        let shape = self.field_shape(s, name);
+                        let each = self.summary(st, &shape);
+                        let Site::Value(var) = self.sites[e.0 as usize] else {
+                            return each;
+                        };
+                        self.assign(st, var, &each);
+                        self.facts(st, var, &shape);
+                        var_val(var)
+                    }
                     _ => TOP,
                 }
             }
             ExprKind::Call { args, .. } => self.call(st, e, args),
+            ExprKind::Construct { name, fields } => {
+                // Each value enters its field's type, in the order written, which is the
+                // declaration's.
+                for f in fields {
+                    let shape = self.field_shape(name, &f.name);
+                    let place = format!("field `{}` of `{}`", f.name, name);
+                    self.eval_into(st, f.value, &shape, &place);
+                }
+                Val::Other
+            }
             ExprKind::Array(items) => {
                 let mut each: Option<Val> = None;
                 for &i in items {
@@ -2890,17 +3000,34 @@ impl<'a> Fx<'a> {
         for &v in site.ins.iter().chain(&site.outs).flatten() {
             st.forget(v);
         }
-        // Each argument enters its parameter's plain type, left to right ...
+        // Every argument is evaluated, left to right, its value kept as it is then, before any
+        // enters its parameter's type, as the reference interpreter does: a narrowing inside a
+        // later argument comes before an earlier argument's ...
         let mut vals = Vec::new();
-        for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
+        for (k, a) in args.iter().enumerate() {
             let v = self.eval(st, a.value);
+            match site.ins.get(k).copied().flatten() {
+                Some(var) => {
+                    self.assign(st, var, &v);
+                    vals.push(var_val(var));
+                }
+                None => vals.push(v),
+            }
+        }
+        // ... then each enters its parameter's plain type, left to right ...
+        for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
             let plain = Shape::plain(&Ty::of(&callee.tree, p.ty));
-            self.narrow(st, &v, &plain, (self.span(a.value), Tag::None), "", None);
+            self.narrow(
+                st,
+                &vals[k],
+                &plain,
+                (self.span(a.value), Tag::None),
+                "",
+                None,
+            );
             if let Some(var) = site.ins[k] {
-                self.assign(st, var, &v);
                 self.facts(st, var, &plain);
             }
-            vals.push(v);
         }
         // ... then its refinement, once every argument is in.
         for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
@@ -2987,12 +3114,9 @@ impl<'a> Fx<'a> {
                 },
                 var_val,
             );
-            let mut indexes = Vec::new();
-            let root = self.place_parts(a.value, &mut indexes);
-            let mut shape = root.map_or(Shape::Other, |b| self.binding_shape(b));
-            for _ in &indexes {
-                shape = shape.element();
-            }
+            let mut steps = Vec::new();
+            let root = self.place_parts(a.value, &mut steps);
+            let shape = self.place_shape(root, &steps);
             let place = format!("`{}`", self.own_text(a.value).0);
             self.narrow(
                 st,
@@ -3002,10 +3126,7 @@ impl<'a> Fx<'a> {
                 &place,
                 None,
             );
-            if let Some(var) = root
-                .filter(|_| indexes.is_empty())
-                .and_then(|b| self.vars[b])
-            {
+            if let Some(var) = root.filter(|_| steps.is_empty()).and_then(|b| self.vars[b]) {
                 self.track(st, var, &back);
                 self.assign(st, var, &back);
                 self.facts(st, var, &shape);
@@ -3817,6 +3938,8 @@ mod tests {
             Err(d) => panic!("{:?}", d),
         };
         let parsed = mente_syntax::parse_bodies(&text, &m);
+        let parsed_structs = mente_syntax::parse_structs(&text, &m);
+        let (structs, _) = crate::structs::declare(&m, &parsed_structs);
         let routings: Vec<Routing> = m
             .items
             .iter()
@@ -3840,15 +3963,16 @@ mod tests {
                 continue;
             };
             assert!(p.errors.is_empty(), "{:?}", p.errors);
-            let (resolution, errors) = crate::names::resolve(syntax, &names);
+            let (resolution, errors) = crate::names::resolve(syntax, &names, &structs);
             assert!(errors.is_empty(), "{:?}", errors);
-            let (typing, errors) = crate::check::check(syntax, &resolution, &signatures);
+            let (typing, errors) = crate::check::check(syntax, &resolution, &signatures, &structs);
             assert!(errors.is_empty(), "{:?}", errors);
             let f = Function {
                 syntax,
                 resolution: &resolution,
                 typing: &typing,
                 routing: *routing,
+                structs: &structs,
             };
             out.push(check(&f, &callees, &text));
         }
@@ -3870,13 +3994,15 @@ mod tests {
             .map(|p| p.syntax.as_ref().map(|syntax| Callee { syntax }))
             .collect();
         let syntax = parsed.last().and_then(|p| p.syntax.as_ref()).unwrap();
-        let (resolution, _) = crate::names::resolve(syntax, &names);
-        let (typing, _) = crate::check::check(syntax, &resolution, &signatures);
+        let structs = crate::structs::Structs::default();
+        let (resolution, _) = crate::names::resolve(syntax, &names, &structs);
+        let (typing, _) = crate::check::check(syntax, &resolution, &signatures, &structs);
         let f = Function {
             syntax,
             resolution: &resolution,
             typing: &typing,
             routing: Routing::default(),
+            structs: &structs,
         };
         let mut fx = Fx::new(&f, &callees, &text);
         fx.route();
@@ -5807,6 +5933,199 @@ mod tests {
             );
         }
     }
+    /// A divisor whose value is empty, after a shift whose narrowing always traps, is no
+    /// division by zero in Tier 1 itself: the shift stays a run-time check, and the rest is
+    /// checked.
+    #[test]
+    fn test_a_divisor_after_a_narrowing_that_always_traps_is_checked_without_a_crash() {
+        for src in [
+            "pub fn f() -> i8 = 7_i8 / (0_u8 - 1 >> 5)",
+            "pub fn f() -> i8 = 7_i8 % (0_u8 - 1 >> 5)",
+            "pub fn f(x: i8) -> i8 = x / (0_u8 - 1 >> 5)",
+        ] {
+            assert_eq!(codes(src), NONE, "{}", src);
+            assert!(!report(src).obligations.is_empty(), "{}", src);
+        }
+    }
+
+    /// Every argument of a call is evaluated before any enters its parameter's type, as the
+    /// reference interpreter has it: a narrowing inside a later argument comes first, and knows
+    /// nothing that an earlier argument's narrowing would establish.
+    #[test]
+    fn test_arguments_are_narrowed_once_all_are_evaluated() {
+        let src = "fn g(a: u16) -> u8 = 0
+fn f(a: u8, b: u8) -> u8 = a
+pub fn h(x: i8) -> u8 = f(x, g(x))";
+        let r = report(src);
+        let at = |col: u32| {
+            r.obligations
+                .iter()
+                .filter(|o| o.kind == Range && o.span.line == 4 && o.span.col == col)
+                .map(|o| o.proven)
+                .collect::<Vec<_>>()
+        };
+        // `x` into `g`'s `u16` first, which may trap; then `x` into `f`'s `u8`, which
+        // the check before makes safe.
+        assert_eq!(at(32), [false]);
+        assert_eq!(at(27), [true]);
+        let structs = "pub struct P {
+  a: u128
+}
+fn take(a: u8, p: P) -> u8 = a
+pub fn k(x: i8) -> u8 = take(x, P(a: x))";
+        let r = report(structs);
+        let field: Vec<bool> = r
+            .obligations
+            .iter()
+            .filter(|o| o.kind == Range && o.span.line == 6 && o.span.col == 38)
+            .map(|o| o.proven)
+            .collect();
+        assert_eq!(field, [false]);
+    }
+
+    /// A value entering a refined field is proven where the struct is built and where the field
+    /// is stored, a `mut` field argument's on its way back too; a refined field's range is a
+    /// fact wherever it is read, of a field of a field and of an element's field too.
+    #[test]
+    fn test_refined_fields_are_proven_where_they_enter_and_known_where_read() {
+        let d = "pub struct D {
+  d: u8[0..10]
+}
+";
+        let with = |f: &str| format!("{}{}", d, f);
+        assert_eq!(codes(&with("pub fn f(x: u8) -> D = D(d: x)")), ["E0502"]);
+        assert!(messages(&with("pub fn f(x: u8) -> D = D(d: x)"))[0]
+            .ends_with("outside `u8[0..10]`, the type of field `d` of `D`"));
+        assert_eq!(codes(&with("pub fn f(x: u8[0..10]) -> D = D(d: x)")), NONE);
+        assert_eq!(
+            codes(&with(
+                "pub fn f(x: u8) -> D {
+  guard x < 10 else {
+    return D(d: 0)
+  }
+  D(d: x)
+}"
+            )),
+            NONE
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f(mut g: D, x: u8) {
+  g.d = x
+}"
+            )),
+            ["E0502"]
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f(mut g: D) {
+  g.d = 9
+}"
+            )),
+            NONE
+        );
+        // A refined field of a struct inside another, and of a struct in an array inside
+        // another, is proven where it is stored through the outer one.
+        let nested = "pub struct O {
+  inner: D
+  ds: [2]D
+}
+";
+        let with_o = |f: &str| format!("{}{}{}", d, nested, f);
+        for store in ["o.inner.d = x", "o.ds[1].d = x"] {
+            let f = format!("pub fn f(mut o: O, x: u8) {{\n  {}\n}}", store);
+            assert_eq!(codes(&with_o(&f)), ["E0502"], "{}", store);
+            let f = format!(
+                "pub fn f(mut o: O, x: u8) {{\n  guard x < 10 else {{\n    return\n  }}\n  {}\n}}",
+                store
+            );
+            assert_eq!(codes(&with_o(&f)), NONE, "{}", store);
+        }
+        assert_eq!(
+            codes(&with("pub fn f(g: D) -> u8[0..19] = g.d + g.d")),
+            NONE
+        );
+        assert_eq!(codes(&with("pub fn f(g: D) -> u8[0..9] = g.d")), ["E0502"]);
+        let e = format!(
+            "{}pub struct E {{
+  inner: D
+  xs: [2]D
+}}
+",
+            d
+        );
+        assert_eq!(
+            codes(&format!("{}pub fn f(e: E) -> u8[0..10] = e.inner.d", e)),
+            NONE
+        );
+        assert_eq!(
+            codes(&format!(
+                "{}pub fn f(e: E, i: usize) -> u8[0..10] = e.xs[i].d",
+                e
+            )),
+            NONE
+        );
+        // A `mut` field argument is proven on its way back into the field's refinement.
+        assert_eq!(
+            codes(&with(
+                "fn bump(mut n: u8) {
+  n += 1
+}
+pub fn f(mut g: D) {
+  bump(mut g.d)
+}"
+            )),
+            ["E0502"]
+        );
+        assert_eq!(
+            codes(&with(
+                "fn zero(mut n: u8[0..10]) {
+  n = 0
+}
+pub fn f(mut g: D) {
+  zero(mut g.d)
+}"
+            )),
+            NONE
+        );
+        // A narrowing into a field that always traps, and a field read Tier 1 does not follow
+        // from a store: each read is a value of the field's range.
+        assert_eq!(
+            codes(
+                "pub struct B {
+  b: u8
+}
+pub fn f() -> B = B(b: 300)"
+            ),
+            ["E0508"]
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f(mut g: D) -> u8[0..1] {
+  g.d = 0
+  g.d
+}"
+            )),
+            ["E0502"]
+        );
+        // A clause that reads a field lies outside the Tier-1 fragment, and says so; a field
+        // named `len` too, which is no array's length.
+        for (field, decl) in [("d", ""), ("len", "pub struct L {\n  len: u8\n}\n")] {
+            let src = format!(
+                "{}pub fn f(g: {}) -> u8\n  requires g.{} > 2\n= g.{}",
+                decl,
+                if decl.is_empty() { "D" } else { "L" },
+                field,
+                field
+            );
+            assert_eq!(codes(&with(&src)), ["E0503"], "{}", src);
+            assert!(
+                messages(&with(&src))[0].contains("a field of a struct"),
+                "{}",
+                messages(&with(&src))[0]
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5834,13 +6153,15 @@ mod timing {
             .map(|p| p.syntax.as_ref().map(|syntax| Callee { syntax }))
             .collect();
         let syntax = parsed[1].syntax.as_ref().unwrap();
-        let (resolution, _) = crate::names::resolve(syntax, &names);
-        let (typing, _) = crate::check::check(syntax, &resolution, &signatures);
+        let structs = crate::structs::Structs::default();
+        let (resolution, _) = crate::names::resolve(syntax, &names, &structs);
+        let (typing, _) = crate::check::check(syntax, &resolution, &signatures, &structs);
         let f = Function {
             syntax,
             resolution: &resolution,
             typing: &typing,
             routing: Routing::default(),
+            structs: &structs,
         };
         let first = check(&f, &callees, text);
         assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);

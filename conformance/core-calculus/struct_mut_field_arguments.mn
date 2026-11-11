@@ -1,0 +1,37 @@
+// expect: pass
+module conformance
+pub struct Counter {
+  count: u16
+  limits: [2]u16
+}
+
+pub struct Pair {
+  left: Counter
+  right: Counter
+}
+
+fn bump(mut n: u16) {
+  n += 1
+}
+
+fn reset(mut c: Counter) {
+  c.count = 0
+  c.limits[0] = 0
+}
+
+pub fn fields(mut p: Pair, i: usize) {
+  bump(mut p.left.count)
+  bump(mut p.right.limits[i])
+  reset(mut p.right)
+}
+
+pub fn local() -> Pair {
+  var p = Pair(left: Counter(count: 1, limits: [2, 3]), right: Counter(count: 4, limits: [5, 6]))
+  bump(mut p.left.count)
+  reset(mut p.right)
+  p
+}
+
+pub fn element(mut cs: [2]Counter, i: usize) {
+  bump(mut cs[i].count)
+}

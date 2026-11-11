@@ -1,0 +1,9 @@
+// expect: E0225
+module conformance
+pub struct A {
+  b: [2]B
+}
+
+pub struct B {
+  a: A
+}

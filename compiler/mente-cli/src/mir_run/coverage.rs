@@ -1,5 +1,6 @@
-//! What of M1's grammar the program generator reaches (`docs/design-review.md`,
-//! `quality-per-change`: new syntax extends the generator in the same pull request).
+//! What of the grammar the program generator reaches (`docs/design-review.md`,
+//! `quality-per-change`: new syntax extends the generator in the same pull request): M1's, and
+//! M2's structs.
 //!
 //! Each table below names the constructs of one part of a function's syntax tree, and its
 //! patterns name every variant and every field, without a wildcard. A construct added to the
@@ -11,8 +12,9 @@ use std::collections::BTreeSet;
 
 use mente_sema::types::INT_TYPES;
 use mente_syntax::tree::{
-    Arg, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, ExprKind, FnSyntax, Param,
-    Refinement, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    Arg, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, ExprId, ExprKind,
+    FieldSyntax, FnSyntax, Param, Refinement, StmtKind, StructSyntax, Tree, TypeId, TypeKind,
+    UnaryOp,
 };
 
 use super::generate;
@@ -41,8 +43,9 @@ constructs!(expr_kind, EXPRS: ExprKind {
     ExprKind::Unary { op: _, operand: _ } => "unary operation",
     ExprKind::Binary { op: _, lhs: _, rhs: _ } => "binary operation",
     ExprKind::Index { base: _, index: _ } => "index",
-    ExprKind::Field { base: _, name: _ } => "length",
+    ExprKind::Field { base: _, name: _ } => "field read",
     ExprKind::Call { callee: _, args: _ } => "call",
+    ExprKind::Construct { name: _, fields: _ } => "struct construction",
     ExprKind::Array(_) => "array literal",
     ExprKind::Repeat { value: _, count: _ } => "repeated array",
     ExprKind::If { cond: _, then: _, otherwise: None } => "if without else",
@@ -119,6 +122,7 @@ constructs!(type_kind, TYPES: TypeKind {
     TypeKind::Int { name: _, refinement: Some(_) } => "refined integer type",
     TypeKind::Bool => "bool",
     TypeKind::Array { len: _, elem: _ } => "array type",
+    TypeKind::Named(_) => "struct type",
     TypeKind::Error => "type error",
 });
 
@@ -138,6 +142,24 @@ constructs!(param_kind, PARAMS: Param {
     Param { is_mut: false, name: _, name_span: _, ty: _ } => "parameter",
     Param { is_mut: true, name: _, name_span: _, ty: _ } => "mut parameter",
 });
+
+constructs!(field_kind, FIELDS: FieldSyntax {
+    FieldSyntax { is_pub: false, name: _, name_span: _, ty: _ } => "field",
+    FieldSyntax { is_pub: true, name: _, name_span: _, ty: _ } => "pub field",
+});
+
+/// What the expressions and statements of a function reach beyond their kinds: which field a
+/// read names, and the places that hold a field.
+const PLACES: &[&str] = &[
+    "length",
+    "struct field",
+    "assignment to a field",
+    "mut field argument",
+    "array of structs",
+    "struct of structs",
+    "refined field",
+    "field read through an index that calls with mut",
+];
 
 constructs!(contract_kind, CONTRACTS: Contract {
     Contract { kind: ContractKind::Requires, expr: _ } => "requires",
@@ -204,15 +226,32 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
             } => mark(&format!("literal of {}", s)),
             ExprKind::Unary { op, .. } => mark(unary_kind(op)),
             ExprKind::Binary { op, .. } => mark(binary_kind(op)),
-            ExprKind::Call { args, .. } => args.iter().for_each(|a| mark(arg_kind(a))),
+            ExprKind::Call { args, .. } => {
+                for a in args {
+                    mark(arg_kind(a));
+                    if a.is_mut && holds_field(tree, a.value) {
+                        mark("mut field argument");
+                    }
+                }
+            }
+            ExprKind::Field { name, .. } if name == "len" => mark("length"),
+            ExprKind::Field { base, .. } => {
+                mark("struct field");
+                if indexed_by_a_mut_call(tree, *base) {
+                    mark("field read through an index that calls with mut");
+                }
+            }
             _ => {}
         }
     }
     for s in stmts {
         mark(stmt_kind(&s.kind));
         match &s.kind {
-            StmtKind::Assign { op, .. } => {
+            StmtKind::Assign { op, place, .. } => {
                 mark(assign_kind(op));
+                if holds_field(tree, *place) {
+                    mark("assignment to a field");
+                }
                 if let AssignOp::Compound(op) = op {
                     mark(&format!("{}=", op.symbol()));
                 }
@@ -239,12 +278,80 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
                     mark(bound_kind(&r.hi));
                 }
             }
-            TypeKind::Array { elem, .. } => {
-                if matches!(tree.types[elem.0 as usize].kind, TypeKind::Array { .. }) {
-                    mark("array of arrays");
-                }
-            }
+            TypeKind::Array { elem, .. } => match tree.types[elem.0 as usize].kind {
+                TypeKind::Array { .. } => mark("array of arrays"),
+                TypeKind::Named(_) => mark("array of structs"),
+                _ => {}
+            },
             _ => {}
+        }
+    }
+}
+
+/// Whether a place holds a field: `s.f`, `s.f[i]`, `xs[i].f`.
+fn holds_field(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Field { .. } => true,
+        ExprKind::Index { base, .. } => holds_field(tree, *base),
+        _ => false,
+    }
+}
+
+/// Whether a place's path holds an index whose expression calls with a `mut` argument.
+fn indexed_by_a_mut_call(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Index { base, index } => {
+            calls_with_mut(tree, *index) || indexed_by_a_mut_call(tree, *base)
+        }
+        ExprKind::Field { base, .. } => indexed_by_a_mut_call(tree, *base),
+        _ => false,
+    }
+}
+
+fn calls_with_mut(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Call { args, .. } => {
+            args.iter().any(|a| a.is_mut) || args.iter().any(|a| calls_with_mut(tree, a.value))
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            calls_with_mut(tree, *lhs) || calls_with_mut(tree, *rhs)
+        }
+        ExprKind::Unary { operand, .. } => calls_with_mut(tree, *operand),
+        _ => false,
+    }
+}
+
+/// The constructs a struct declaration holds.
+fn reached_struct(s: &StructSyntax, seen: &mut BTreeSet<String>) {
+    let StructSyntax {
+        name: _,
+        name_span: _,
+        fields,
+        tree,
+    } = s;
+    let mut mark = |name: &str| {
+        seen.insert(name.to_string());
+    };
+    for f in fields {
+        mark(field_kind(f));
+        match &tree.ty(f.ty).kind {
+            TypeKind::Named(_) => mark("struct of structs"),
+            TypeKind::Int {
+                refinement: Some(_),
+                ..
+            } => mark("refined field"),
+            _ => {}
+        }
+    }
+    for t in &tree.types {
+        mark(type_kind(&t.kind));
+        if let TypeKind::Int { name, refinement } = &t.kind {
+            mark(&format!("type {}", name));
+            if let Some(r) = refinement {
+                mark(range_kind(r));
+                mark(bound_kind(&r.lo));
+                mark(bound_kind(&r.hi));
+            }
         }
     }
 }
@@ -255,6 +362,30 @@ fn functions(src: &str) -> Vec<FnSyntax> {
     let (fns, diags) = mente_syntax::parse_functions(src, &module);
     assert!(diags.is_empty(), "{:?}\n{}", diags, src);
     fns
+}
+
+/// The structs of `src`, which must parse.
+fn structs(src: &str) -> Vec<StructSyntax> {
+    let module = mente_syntax::parse_module(src).unwrap_or_else(|d| {
+        panic!(
+            "{:?}
+{}",
+            d, src
+        )
+    });
+    mente_syntax::parse_structs(src, &module)
+        .into_iter()
+        .map(|p| {
+            assert!(
+                p.errors.is_empty(),
+                "{:?}
+{}",
+                p.errors,
+                src
+            );
+            p.syntax
+        })
+        .collect()
 }
 
 /// The compound assignments the grammar has, as the parser reads them: each binary operator
@@ -294,6 +425,8 @@ fn grammar() -> BTreeSet<String> {
         CONTRACTS,
         RESULTS,
         BODIES,
+        FIELDS,
+        PLACES,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -324,6 +457,9 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             functions(&p.text)
                 .iter()
                 .for_each(|f| reached(f, &mut seen));
+            structs(&p.text)
+                .iter()
+                .for_each(|s| reached_struct(s, &mut seen));
         }
     }
     for name in &seen {

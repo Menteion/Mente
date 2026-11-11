@@ -13,7 +13,8 @@
 use crate::diagnostics::{Applicability, Diagnostic};
 use crate::tree::{
     Arg, AssignOp, BinaryOp, Block, BlockId, Body, Bound, Contract, ContractKind, Else, ExprId,
-    ExprKind, FnSyntax, Param, Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    ExprKind, FieldInit, FieldSyntax, FnSyntax, Param, Refinement, StmtId, StmtKind, StructSyntax,
+    Tree, TypeId, TypeKind, UnaryOp,
 };
 use crate::{Span, Token, TokenKind};
 
@@ -22,33 +23,30 @@ pub const INT_TYPES: [&str; 11] = [
     "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "usize",
 ];
 
+/// A type the language names but a later milestone brings: the milestone, and what it is.
+pub fn later_type(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "str" | "String" | "List" => Some(("M2", "a string or list type")),
+        "f32" | "f64" | "dec" | "sat" | "wrap" => {
+            Some(("M5", "a floating-point, decimal or saturating type"))
+        }
+        "Arena" | "Pool" | "Handle" | "Local" | "Shared" | "SoA" | "Tiled" => {
+            Some(("M3", "an arena, pool or layout type"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `name` names a type of the language, now or in a later milestone: an integer type,
+/// `bool`, or a [`later_type`]. No declaration of a module takes such a name.
+pub fn language_type(name: &str) -> bool {
+    INT_TYPES.contains(&name) || name == "bool" || later_type(name).is_some()
+}
+
 /// Parses one function from its tokens, `fn` to the end of its body, which `src` holds at the
 /// tokens' spans.
 pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>) {
-    let mut tokens = tokens.to_vec();
-    let last = tokens.last().map(|t| t.span).unwrap_or_default();
-    tokens.push(Token {
-        kind: TokenKind::Eof,
-        span: Span {
-            start: last.end,
-            end: last.end,
-            line: last.line,
-            col: last.col,
-        },
-    });
-    let base = tokens[0].span.start;
-    let mut p = Parser {
-        text: src[base..last.end.max(base)].to_string(),
-        base,
-        tokens,
-        pos: 0,
-        tree: Tree::default(),
-        errors: Vec::new(),
-        recovering: false,
-        nest: 0,
-        depth: 0,
-        index_nest: None,
-    };
+    let mut p = Parser::new(src, tokens);
     let syntax = p.function();
     // A tree too high for the phases that recurse over it, such as a long chain of `+`,
     // which the parser reads in a loop: measured after another error too, since a phase that
@@ -58,6 +56,17 @@ pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>
             p.errors.push(too_deep(span));
         }
     }
+    (syntax, p.errors)
+}
+
+/// Parses one struct declaration from its tokens, `struct` to its closing `}`, which `src`
+/// holds at the tokens' spans (`grammar.md`, item 10): one field per line, each a name and a
+/// type. Type parameters, an `invariant` block and a field's default are constructs of later
+/// milestones (`E0109`); a comma after a field is another language's separator (`E0128`), whose
+/// fix removes it.
+pub fn parse_struct(src: &str, tokens: &[Token]) -> (StructSyntax, Vec<Diagnostic>) {
+    let mut p = Parser::new(src, tokens);
+    let syntax = p.struct_decl();
     (syntax, p.errors)
 }
 
@@ -95,9 +104,40 @@ struct Parser {
     depth: u32,
     /// `nest` inside the brackets of the index being parsed, where a range makes a view.
     index_nest: Option<u32>,
+    /// `nest` where the condition or clause being parsed stands, where a `{` after a name opens
+    /// the block that follows, never another language's struct literal.
+    cond_nest: Option<u32>,
 }
 
 impl Parser {
+    fn new(src: &str, tokens: &[Token]) -> Parser {
+        let mut tokens = tokens.to_vec();
+        let last = tokens.last().map(|t| t.span).unwrap_or_default();
+        tokens.push(Token {
+            kind: TokenKind::Eof,
+            span: Span {
+                start: last.end,
+                end: last.end,
+                line: last.line,
+                col: last.col,
+            },
+        });
+        let base = tokens[0].span.start;
+        Parser {
+            text: src[base..last.end.max(base)].to_string(),
+            base,
+            tokens,
+            pos: 0,
+            tree: Tree::default(),
+            errors: Vec::new(),
+            recovering: false,
+            nest: 0,
+            depth: 0,
+            index_nest: None,
+            cond_nest: None,
+        }
+    }
+
     // ---------------------------------------------------------------- tokens
 
     fn peek(&self) -> &TokenKind {
@@ -343,7 +383,9 @@ impl Parser {
                 _ => break,
             };
             self.bump();
+            let outer = self.cond_nest.replace(self.nest);
             let expr = self.expr();
+            self.cond_nest = outer;
             contracts.push(Contract { kind, expr });
             self.skip_to_clauses();
         }
@@ -372,6 +414,147 @@ impl Parser {
             contracts,
             body,
             tree: std::mem::take(&mut self.tree),
+        }
+    }
+
+    // ---------------------------------------------------------------- structs
+
+    fn struct_decl(&mut self) -> StructSyntax {
+        self.bump(); // `struct`
+        let (name, name_span) = self.name("a struct's name");
+        let mut fields = Vec::new();
+        if !self.recovering && self.at(&TokenKind::Lt) {
+            let span = self.span();
+            self.later(span, "a struct's type parameters", Some("M4"));
+            while !matches!(self.peek(), TokenKind::LBrace | TokenKind::Eof) {
+                self.bump();
+            }
+            self.recovering = false;
+        }
+        if !self.recovering && self.expect(&TokenKind::LBrace, "`{` and the struct's fields") {
+            loop {
+                match self.peek() {
+                    TokenKind::RBrace | TokenKind::Eof => break,
+                    TokenKind::DocComment(_) => {
+                        self.bump();
+                        continue;
+                    }
+                    _ => {}
+                }
+                let before = self.pos;
+                self.field(&mut fields);
+                if self.recovering {
+                    self.skip_statement();
+                } else {
+                    self.statement_end("a field");
+                }
+                if self.pos == before {
+                    self.bump();
+                }
+            }
+            if fields.is_empty() && self.errors.is_empty() {
+                let d = Diagnostic::error(
+                    "E0111",
+                    name_span,
+                    format!(
+                        "`struct {}` has no field; a struct has at least one, as in `x: i32` on a line of its own",
+                        name
+                    ),
+                );
+                self.error(d);
+            }
+        }
+        if !self.errors.iter().any(|e| e.code == "E0127") {
+            if let Some(span) = self.tree.too_deep(NESTING_LIMIT) {
+                self.errors.push(too_deep(span));
+            }
+        }
+        StructSyntax {
+            name,
+            name_span,
+            fields,
+            tree: std::mem::take(&mut self.tree),
+        }
+    }
+
+    /// One field of a struct, `{ attribute } [ "pub" ] name ":" type`, or an `invariant` block,
+    /// which a later milestone brings.
+    fn field(&mut self, fields: &mut Vec<FieldSyntax>) {
+        if self.at(&TokenKind::Invariant) {
+            let span = self.span();
+            self.later(
+                span,
+                "an invariant relating a struct's fields",
+                Some("a later milestone"),
+            );
+            self.bump();
+            if self.at(&TokenKind::LBrace) {
+                let mut depth = 0i32;
+                loop {
+                    match self.peek() {
+                        TokenKind::Eof => break,
+                        TokenKind::LBrace => depth += 1,
+                        TokenKind::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                    self.bump();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            self.recovering = false;
+            return;
+        }
+        // An attribute of a field is a layout's (`morphic-layouts.md`), which a struct without
+        // `@layout` does not read.
+        while self.at(&TokenKind::At) && !self.recovering {
+            self.bump();
+            self.name("an attribute's name");
+            if self.at(&TokenKind::LParen) {
+                let close = self.closing_paren();
+                while self.pos <= close && !self.at(&TokenKind::Eof) {
+                    self.bump();
+                }
+            }
+        }
+        if self.recovering {
+            return;
+        }
+        let is_pub = self.eat(&TokenKind::Pub);
+        let (name, name_span) = self.name("a field's name");
+        if self.recovering || !self.expect(&TokenKind::Colon, "`:` and the field's type") {
+            return;
+        }
+        let ty = self.ty();
+        if self.recovering {
+            return;
+        }
+        fields.push(FieldSyntax {
+            is_pub,
+            name,
+            name_span,
+            ty,
+        });
+        if self.at(&TokenKind::Eq) && !self.newline_before() {
+            let span = self.span();
+            self.later(span, "a field's default value", None);
+            return;
+        }
+        if self.at(&TokenKind::Comma) && !self.newline_before() {
+            let comma = self.bump().span;
+            let d = Diagnostic::error(
+                "E0128",
+                comma,
+                "a field ends at the end of its line, so Mente writes no `,` after one",
+            )
+            .with_fix(
+                Applicability::MachineApplicable,
+                "remove the `,`",
+                comma,
+                "",
+            );
+            self.note(d);
         }
     }
 
@@ -490,27 +673,25 @@ impl Parser {
                 self.tree.push_type(TypeKind::Error, start)
             }
             TokenKind::Ident(n) => {
-                let milestone = match n.as_str() {
-                    "str" | "String" | "List" => Some(("M2", "a string or list type")),
-                    "f32" | "f64" | "dec" | "sat" | "wrap" => {
-                        Some(("M5", "a floating-point, decimal or saturating type"))
-                    }
-                    "Arena" | "Pool" | "Handle" | "Local" | "Shared" | "SoA" | "Tiled" => {
-                        Some(("M3", "an arena, pool or layout type"))
-                    }
-                    _ => None,
-                };
-                match milestone {
-                    Some((m, what)) => {
-                        let what = format!("{} (`{}`)", what, n);
-                        self.later(start, &what, Some(m));
-                    }
-                    None => self.bad_type(format!(
-                        "`{}` is not a type of M1, whose types are the integer types, `bool` and arrays `[N]T`; structs and enums come in M2",
-                        n
-                    )),
+                if let Some((m, what)) = later_type(&n) {
+                    let what = format!("{} (`{}`)", what, n);
+                    self.later(start, &what, Some(m));
+                    return self.tree.push_type(TypeKind::Error, start);
                 }
-                self.tree.push_type(TypeKind::Error, start)
+                // Any other name names a declaration of the module, which the checker finds;
+                // a fixed-point type such as `q16.16` is none.
+                self.bump();
+                if self.at(&TokenKind::Dot) && !self.newline_before() {
+                    let what = format!("a fixed-point type (`{}.`)", n);
+                    self.later(start, &what, Some("M5"));
+                    return self.tree.push_type(TypeKind::Error, start);
+                }
+                if self.at(&TokenKind::Lt) && !self.newline_before() {
+                    let span = self.span();
+                    self.later(span, "a type argument list", Some("M4"));
+                    return self.tree.push_type(TypeKind::Error, start);
+                }
+                self.tree.push_type(TypeKind::Named(n), start)
             }
             _ => {
                 self.bad_type(format!("expected a type, found {}", self.found()));
@@ -595,6 +776,7 @@ impl Parser {
             });
         }
         let saved_nest = self.nest;
+        let saved_cond = self.cond_nest.take();
         self.nest = 0;
         let mut stmts = Vec::new();
         loop {
@@ -615,19 +797,20 @@ impl Parser {
             if self.recovering {
                 self.skip_statement();
             } else {
-                self.statement_end();
+                self.statement_end("a statement");
             }
             if self.pos == before {
                 self.bump();
             }
         }
         self.nest = saved_nest;
+        self.cond_nest = saved_cond;
         let span = self.span_from(open);
         self.tree.push_block(Block { stmts, span })
     }
 
-    /// After a statement, the next one starts on a new line (`E0112`).
-    fn statement_end(&mut self) {
+    /// After a statement, or a field of a struct, the next one starts on a new line (`E0112`).
+    fn statement_end(&mut self, what: &str) {
         if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) || self.newline_before() {
             return;
         }
@@ -667,7 +850,8 @@ impl Parser {
             "E0112",
             at,
             format!(
-                "a statement ends at the end of its line, and {} starts another on the same line",
+                "{} ends at the end of its line, and {} starts another on the same line",
+                what,
                 self.found()
             ),
         )
@@ -741,12 +925,17 @@ impl Parser {
                                 "E0114",
                                 place,
                                 format!(
-                                    "`{}` is not a place to assign to; a place is a name, or an element of one such as `a[i]`",
+                                    "`{}` is not a place to assign to; a place is a name, or an element or a field of one such as `a[i]` or `s.f`",
                                     self.text_of(place)
                                 ),
                             )
                             .with_related(op_span, "assigned here");
                             self.error(d);
+                            // An error stops its statement's parse, as everywhere, so that no
+                            // idiom in the value is read while recovering.
+                            return self
+                                .tree
+                                .push_stmt(StmtKind::Expr(target), self.span_from(start));
                         }
                         self.bump();
                         let value = self.expr();
@@ -852,13 +1041,16 @@ impl Parser {
 
     /// A condition or a clause: an expression that is not itself an `if`.
     fn cond(&mut self) -> ExprId {
-        self.binary(0)
+        let outer = self.cond_nest.replace(self.nest);
+        let e = self.binary(0);
+        self.cond_nest = outer;
+        e
     }
 
     fn is_place(&self, e: ExprId) -> bool {
         match &self.tree.expr(e).kind {
             ExprKind::Name(_) => true,
-            ExprKind::Index { base, .. } => self.is_place(*base),
+            ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => self.is_place(*base),
             _ => false,
         }
     }
@@ -1173,10 +1365,8 @@ impl Parser {
                     self.note(d);
                     return true;
                 }
-                if self.at(&TokenKind::LParen) {
+                if self.at(&TokenKind::LParen) && !self.newline_before() {
                     self.later(name_span, "a method call", Some("M2"));
-                } else if name != "len" {
-                    self.later(name_span, "a field other than `.len`", Some("M2"));
                 } else {
                     let span = self.span_from(start);
                     *lhs = self
@@ -1269,6 +1459,8 @@ impl Parser {
                     } else {
                         self.call(n)
                     }
+                } else if self.struct_literal_follows() {
+                    self.struct_literal(n, start)
                 } else {
                     ExprKind::Name(n)
                 }
@@ -1492,12 +1684,146 @@ impl Parser {
         )
     }
 
+    /// Whether the next tokens begin a named argument, `name:` (`grammar.md`, item 12), and not
+    /// the `::` of a path.
+    fn named_argument_follows(&self) -> bool {
+        let third = &self.tokens[(self.pos + 2).min(self.tokens.len() - 1)];
+        matches!(self.peek(), TokenKind::Ident(_))
+            && self.peek_second() == &TokenKind::Colon
+            && !(third.kind == TokenKind::Colon && third.span.start == self.second().span.end)
+    }
+
+    /// The named arguments of a struct being built, up to `close`: `name: value`, separated by
+    /// commas. Arguments are positional or named, never both in one list.
+    fn field_inits(&mut self, close: &TokenKind) -> Vec<FieldInit> {
+        let mut fields = Vec::new();
+        while !self.at(close) && !self.recovering {
+            let before = self.pos;
+            if !self.named_argument_follows() {
+                let d = Diagnostic::error(
+                    "E0111",
+                    self.span(),
+                    format!(
+                        "expected a field's name and `:`, found {}; the arguments that build a struct are all named, as in `Pair(i: 0, j: 1)`",
+                        self.found()
+                    ),
+                );
+                self.error(d);
+                break;
+            }
+            let (name, name_span) = self.name("a field's name");
+            self.bump(); // `:`
+            let value = self.expr();
+            fields.push(FieldInit {
+                name,
+                name_span,
+                value,
+            });
+            if self.pos == before {
+                break;
+            }
+            if !self.recovering && !self.eat(&TokenKind::Comma) && !self.at(close) {
+                self.expected("`,` or the end of the fields");
+            }
+        }
+        fields
+    }
+
+    /// Whether a `{` after a name opens another language's struct literal, `Name { f: e }`: it
+    /// stands on the name's line and holds `field:`, and the name does not end a condition, where
+    /// the `{` opens the block that follows.
+    fn struct_literal_follows(&self) -> bool {
+        if !self.at(&TokenKind::LBrace) || self.newline_before() {
+            return false;
+        }
+        if self.cond_nest == Some(self.nest) {
+            return false;
+        }
+        let at = |k: usize| self.tokens.get(self.pos + k).map(|t| &t.kind);
+        matches!(at(1), Some(TokenKind::Ident(_))) && at(2) == Some(&TokenKind::Colon)
+    }
+
+    /// Rust's struct literal `Name { f: e }` (`E0129`), read as `Name(f: e)` after its
+    /// diagnostic, whose fix writes it so.
+    fn struct_literal(&mut self, name: String, start: Span) -> ExprKind {
+        self.bump();
+        // The first field's name, where the `(` that replaces `{` ends.
+        let first = self.span().start;
+        self.nest += 1;
+        let fields = self.field_inits(&TokenKind::RBrace);
+        self.nest -= 1;
+        // The fields end at `}`, or at an error `field_inits` reported.
+        if self.recovering {
+            return ExprKind::Error;
+        }
+        let close = self.bump().span;
+        let d = Diagnostic::error(
+            "E0129",
+            Span {
+                end: close.end,
+                ..start
+            },
+            format!(
+                "Mente builds a struct with its fields in parentheses, as in `{}(field: value)`, not in braces",
+                name
+            ),
+        );
+        let mut d = d;
+        d.fixes.push(crate::diagnostics::Fix {
+            message: "write the fields in parentheses".into(),
+            applicability: Applicability::MachineApplicable,
+            edits: vec![
+                crate::diagnostics::Edit {
+                    span: Span {
+                        start: start.end,
+                        end: first,
+                        ..start
+                    },
+                    replacement: "(".into(),
+                },
+                crate::diagnostics::Edit {
+                    span: Span {
+                        start: self.tokens[self.pos - 2].span.end,
+                        ..close
+                    },
+                    replacement: ")".into(),
+                },
+            ],
+        });
+        self.note(d);
+        ExprKind::Construct { name, fields }
+    }
+
     fn call(&mut self, callee: String) -> ExprKind {
         self.bump(); // `(`
         self.nest += 1;
+        // A list whose first argument is named builds a struct.
+        if self.named_argument_follows() {
+            let fields = self.field_inits(&TokenKind::RParen);
+            if !self.recovering {
+                self.bump(); // `)`
+            }
+            self.nest -= 1;
+            return ExprKind::Construct {
+                name: callee,
+                fields,
+            };
+        }
         let mut args = Vec::new();
         while !self.at(&TokenKind::RParen) && !self.recovering {
             let before = self.pos;
+            if self.named_argument_follows() {
+                let d = Diagnostic::error(
+                    "E0111",
+                    self.span(),
+                    format!(
+                        "expected an argument, found the field name {}; a function's arguments are all positional, and only those that build a struct are named",
+                        self.found()
+                    ),
+                );
+                self.error(d);
+                break;
+            }
             if self.at(&TokenKind::Amp) && self.peek_second() == &TokenKind::Mut {
                 // A call's `&mut x` is Rust's spelling of `mut x`: the rewrite is unique.
                 let amp = self.bump().span;
@@ -1526,7 +1852,7 @@ impl Parser {
                     "E0114",
                     span,
                     format!(
-                        "after `mut`, an argument is a place, a name or an element of one, not `{}`",
+                        "after `mut`, an argument is a place, a name or an element or a field of one, not `{}`",
                         self.text_of(span)
                     ),
                 );
@@ -1759,6 +2085,190 @@ mod tests {
 
     fn codes(src: &str) -> Vec<&'static str> {
         errors(src).into_iter().map(|e| e.0).collect()
+    }
+
+    /// A struct declaration, `grammar.md` item 10.
+    fn parse_struct_src(src: &str) -> (StructSyntax, Vec<Diagnostic>) {
+        let (tokens, errors) = lex(src);
+        assert!(errors.is_empty(), "{:?}", errors);
+        let tokens: Vec<Token> = tokens
+            .into_iter()
+            .filter(|t| t.kind != TokenKind::Eof)
+            .collect();
+        parse_struct(src, &tokens)
+    }
+
+    fn struct_codes(src: &str) -> Vec<&'static str> {
+        parse_struct_src(src).1.iter().map(|d| d.code).collect()
+    }
+
+    /// A struct's fields stand one per line, each a name and a type of M2's grammar, a struct's
+    /// name among them; attributes and doc comments above a field are read and left aside.
+    #[test]
+    fn test_struct_declarations_take_one_field_per_line() {
+        let (s, errors) = parse_struct_src(
+            "struct Seg {\n  /// The start.\n  pub from: Point\n  @bytes(0..4) len: u32[0..=100]\n  xs: [2][3]bool\n}",
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
+        assert_eq!(
+            Tree::render_struct(&s),
+            "(struct Seg (pub from Point) (len u32[0..=100]) (xs [2][3]bool))"
+        );
+        assert_eq!(s.fields[1].name, "len");
+        // At least one field, each on its own line, with no comma after it.
+        assert_eq!(struct_codes("struct E {\n}"), ["E0111"]);
+        assert_eq!(struct_codes("struct P {\n  i: u8 j: u8\n}"), ["E0112"]);
+        assert_eq!(struct_codes("struct P {\n  i u8\n}"), ["E0111"]);
+        let src = "struct P {\n  i: u8,\n  j: u8\n}";
+        let (s, errors) = parse_struct_src(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0128"]);
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "struct P {\n  i: u8\n  j: u8\n}"
+        );
+        // An invariant block is passed over to its closing brace, nested braces included, and
+        // the fields after it are read; one left open ends at the end of the struct's tokens.
+        for src in [
+            "struct R {\n  invariant {\n    lo < 3\n  }\n  lo: u8\n}",
+            "struct R {\n  invariant {\n    { lo }\n    {\n      { lo }\n    }\n  }\n  lo: u8\n}",
+            "struct R {\n  invariant { lo < 3 }\n  lo: u8\n}",
+        ] {
+            let (s, errors) = parse_struct_src(src);
+            assert_eq!(
+                errors.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0109"],
+                "{}",
+                src
+            );
+            assert_eq!(
+                s.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                ["lo"],
+                "{}",
+                src
+            );
+        }
+        let (s, errors) = parse_struct_src("struct R {\n  lo: u8\n  invariant {\n    lo < 3\n");
+        assert_eq!(errors[0].code, "E0109");
+        assert_eq!(s.fields.len(), 1);
+        // Type parameters, an invariant, a default and a type of a later milestone.
+        for (src, message) in [
+            (
+                "struct B<T> {\n  v: u8\n}",
+                "a struct's type parameters comes in M4; M1 does not have it",
+            ),
+            (
+                "struct R {\n  lo: u8\n  invariant {\n    lo < 3\n  }\n}",
+                "an invariant relating a struct's fields comes in a later milestone; M1 does not have it",
+            ),
+            (
+                "struct C {\n  n: u8 = 0\n}",
+                "a field's default value is in no milestone yet; M1 does not have it",
+            ),
+            (
+                "struct N {\n  name: String\n}",
+                "a string or list type (`String`) comes in M2; M1 does not have it",
+            ),
+            (
+                "struct F {\n  level: q16.16\n}",
+                "a fixed-point type (`q16.`) comes in M5; M1 does not have it",
+            ),
+            (
+                "struct H {\n  h: Handle<F>\n}",
+                "an arena, pool or layout type (`Handle`) comes in M3; M1 does not have it",
+            ),
+            (
+                "struct G {\n  g: Box<u8>\n}",
+                "a type argument list comes in M4; M1 does not have it",
+            ),
+        ] {
+            let errors: Vec<(&str, String)> = parse_struct_src(src)
+                .1
+                .into_iter()
+                .map(|d| (d.code, d.message))
+                .collect();
+            assert_eq!(errors, vec![("E0109", String::from(message))], "{}", src);
+        }
+    }
+
+    /// A call with named arguments builds a struct, one with positional arguments calls a
+    /// function, and a list never mixes the two; a field of a place is a place.
+    #[test]
+    fn test_structs_are_built_with_named_arguments_and_fields_are_places() {
+        assert_eq!(expr("Pair(i: 0, j: a + 1)"), "(new Pair (i 0) (j (+ a 1)))");
+        assert_eq!(expr("Pair(i: 0,\n  j: 1,\n)"), "(new Pair (i 0) (j 1))");
+        assert_eq!(
+            expr("s.inner.x + xs[1].y"),
+            "(+ (. (. s inner) x) (. (index xs 1) y))"
+        );
+        assert_eq!(expr("f(Pair(i: 0), 1)"), "(call f (new Pair (i 0)) 1)");
+        assert_eq!(codes("val p = Pair(i: 0, 1)"), ["E0111"]);
+        assert_eq!(codes("val p = f(1, i: 0)"), ["E0111"]);
+        assert_eq!(
+            block("s.f = 1\ns.f[i] = 2\nxs[i].f += 3\ng(mut s.a.b, mut xs[0].c)"),
+            "{(= (. s f) 1); (= (index (. s f) i) 2); (+= (. (index xs i) f) 3); (call g mut (. (. s a) b) mut (. (index xs 0) c))}"
+        );
+        assert_eq!(codes("f().x = 1"), ["E0114"]);
+        // A method call is still a later construct; a field may take any name.
+        assert_eq!(codes("val n = s.size()"), ["E0109"]);
+        assert_eq!(expr("s.len"), "(. s len)");
+    }
+
+    /// Rust's struct literal is read as Mente's after its diagnostic, whose fix writes it so;
+    /// after a condition, `{` opens the block that follows.
+    #[test]
+    fn test_a_struct_literal_in_braces_gets_its_fix() {
+        let src = "fn f() = Pair { i: 0, j: x + 1 }";
+        let (f, errors) = parse(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0129"]);
+        let Some(Body::Expr(e)) = f.body else {
+            panic!("an expression body");
+        };
+        assert_eq!(f.tree.render_expr(e), "(new Pair (i 0) (j (+ x 1)))");
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "fn f() = Pair(i: 0, j: x + 1)"
+        );
+        let multi = "fn f() = Pair {\n  i: 0,\n  j: 1\n}";
+        let (_, errors) = parse(multi);
+        assert_eq!(
+            apply_fix(multi, &errors[0].fixes[0]).unwrap(),
+            "fn f() = Pair(i: 0,\n  j: 1)"
+        );
+        assert!(codes("if c {\n  return\n}").is_empty());
+        assert!(codes("while ok {\n  break\n}").is_empty());
+        assert_eq!(codes("guard ok { x: 1 }"), ["E0111"]);
+        // A name and a block that does not begin `name:` are no struct literal.
+        assert_eq!(codes("_ = x { y }"), ["E0112"]);
+        // After a struct literal its statement ends at the end of its line, as any other: the
+        // `-x` below is a statement of its own, not a subtraction.
+        assert_eq!(codes("val p = P { a: 1 }\np.a"), ["E0129"]);
+        let (f, _) = parse("fn f() {\n_ = P { a: 1 }\n-x\n}");
+        let Some(Body::Block(b)) = f.body else {
+            panic!("a block body");
+        };
+        assert_eq!(f.tree.block(b).stmts.len(), 2);
+        // A literal left open ends at its first error.
+        assert_eq!(
+            self::errors("_ = P { a: 1 ]"),
+            [(
+                "E0111",
+                "expected `,` or the end of the fields, found `]`".to_string()
+            )]
+        );
+        // The lookahead stops at the last token.
+        assert_eq!(
+            parse("fn f() = P { a")
+                .1
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>(),
+            ["E0111"]
+        );
+        // A named argument is `name:` and a value, whether a space follows the colon or not;
+        // `name::` is no named argument but a path.
+        assert_eq!(expr("P(a:b)"), "(new P (a b))");
+        assert_eq!(codes("_ = f(x::y)"), ["E0123"]);
     }
 
     #[test]
@@ -2150,16 +2660,24 @@ _ == b"
             vec![(
                 "E0114",
                 String::from(
-                    "`a + b` is not a place to assign to; a place is a name, or an element of one such as `a[i]`"
+                    "`a + b` is not a place to assign to; a place is a name, or an element or a field of one such as `a[i]` or `s.f`"
                 )
             )]
+        );
+        // The error ends the statement: an idiom in the value, such as `&`, is not read.
+        assert_eq!(
+            errors("b + 1 = &mut")
+                .iter()
+                .map(|(code, _)| *code)
+                .collect::<Vec<_>>(),
+            ["E0114"]
         );
         assert_eq!(
             errors("f(mut a + b)"),
             vec![(
                 "E0114",
                 String::from(
-                    "after `mut`, an argument is a place, a name or an element of one, not `a + b`"
+                    "after `mut`, an argument is a place, a name or an element or a field of one, not `a + b`"
                 )
             )]
         );
@@ -2185,11 +2703,6 @@ _ == b"
     #[test]
     fn test_types_m1_lacks_and_malformed_ones_are_reported() {
         let cases = [
-            (
-                "fn f(x: int) = x",
-                "E0116",
-                "`int` is not a type of M1, whose types are the integer types, `bool` and arrays `[N]T`; structs and enums come in M2",
-            ),
             (
                 "fn f(x: [n]u8) = x",
                 "E0116",
@@ -2292,10 +2805,6 @@ _ == b"
             (
                 "val l = xs.count()",
                 "a method call comes in M2; M1 does not have it",
-            ),
-            (
-                "val p = point.x",
-                "a field other than `.len` comes in M2; M1 does not have it",
             ),
             (
                 "val v = xs[..]",
@@ -2640,6 +3149,7 @@ _ == b"
             nest: 0,
             depth: 0,
             index_nest: None,
+            cond_nest: None,
         };
         for _ in 0..6 {
             p.bump();
@@ -2691,6 +3201,16 @@ _ == b"
                 r(" else if x > 1 { 2 }", 300)
             )),
             f(format!("[{}x{}][0]", r("[", 300), r("]", 300))),
+            // Structs being built, nested, and a chain the parser reads in a loop inside them:
+            // within the parser's limit each, past it together.
+            f(format!("P(a: x{})", r(" + 0", 300))),
+            f(format!("{}x{}", r("P(a: ", 300), r(")", 300))),
+            f(format!(
+                "{}x{}{}",
+                r("P(a: ", 120),
+                r(" + 0", 200),
+                r(")", 120)
+            )),
             format!("module m\npub fn d(x: {}i32) -> i32 = 0\n", r("[1]", 300)),
             format!(
                 "module m\npub fn d(x: i32) -> i32 {{\n{}{}  x\n}}\n",
@@ -2726,6 +3246,26 @@ _ == b"
             );
             assert!(codes(src).is_empty(), "300 of {}", stmt);
         }
+        // A struct's field type nested past the limit is reported once, and one within it is
+        // read.
+        let struct_codes = |src: String| {
+            std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn(move || {
+                    let m = crate::parse_module(&src).unwrap();
+                    crate::parse_structs(&src, &m)
+                        .into_iter()
+                        .flat_map(|p| p.errors)
+                        .map(|d| d.code)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        let deep = |n: usize| format!("module m\nstruct S {{\n  a: {}u8\n}}\n", r("[1]", n));
+        assert_eq!(struct_codes(deep(300)), ["E0127"]);
+        assert!(struct_codes(deep(200)).is_empty());
         // A chain past the limit with another error in it is measured too: `mn dump --tree`
         // recurses over a tree with errors (the fuzzer's finding 12).
         for (src, other) in [

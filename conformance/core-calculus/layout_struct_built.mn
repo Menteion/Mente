@@ -1,0 +1,11 @@
+// expect: E0109
+module conformance
+@layout(size: 8, align: 8)
+pub struct Stamp {
+  @bytes(0..8) pub nanos: u64
+}
+
+pub fn f() -> u64 {
+  _ = Stamp(nanos: 1)
+  0
+}

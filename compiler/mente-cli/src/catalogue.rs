@@ -123,7 +123,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
          found something else: a number, a symbol, a keyword or the end of the file. Keywords \
          such as `raise` or `from` cannot be names.",
         "module m\npub struct 42 {\n}\n",
-        "module m\npub struct Answer {\n}\n",
+        "module m\npub struct Answer {\n  value: u8\n}\n",
     ),
     emitted(
         "E0102",
@@ -206,12 +206,14 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::LaterMilestone,
         "spec/core-calculus.md",
         "A construct of a later milestone",
-        "M1 is a thin slice of the language: integers, `bool`, fixed-size arrays, functions \
-         with read-only and `mut` parameters, `val` and `var`, `if`, `while` with `break` and \
-         `continue`, `guard`, `return`, contracts, refined integer types and `todo`. A \
-         construct of a later milestone, such as a string, a float, `match`, a struct's field, \
-         a method call, an error type or an effect clause, is reported with the milestone that \
-         brings it. A few, such as `for` loops and the pipe `|>`, are in no milestone yet.",
+        "The compiler implements M1, a thin slice of the language: integers, `bool`, \
+         fixed-size arrays, functions with read-only and `mut` parameters, `val` and `var`, \
+         `if`, `while` with `break` and `continue`, `guard`, `return`, contracts, refined \
+         integer types and `todo`; and of M2 so far, structs of those types. A construct of a \
+         later milestone, such as a string, a float, `match`, a method call, an error type, a \
+         `@layout` struct as a value, a struct's type parameters or invariant, or an effect \
+         clause, is reported with the milestone that brings it. A few, such as `for` loops, \
+         the pipe `|>` and a field's default value, are in no milestone yet.",
         "module m\npub fn f() -> i32 {\n  val s = \"text\"\n  0\n}\n",
         "module m\npub fn f() -> i32 {\n  val n = 1\n  n\n}\n",
     ),
@@ -266,8 +268,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "spec/grammar.md",
         "Not a place",
         "Assignment, compound assignment and a `mut` argument need a place: a name, or an \
-         element of one such as `a[i]` or `a[i][j]`. Any other expression has no storage to \
-         change.",
+         element or a field of one such as `a[i]`, `a[i][j]` or `s.f[i]`. Any other \
+         expression has no storage to change.",
         "module m\npub fn f(a: i32) -> i32 {\n  var b = a\n  b + 1 = 2\n  b\n}\n",
         "module m\npub fn f(a: i32) -> i32 {\n  var b = a\n  b = 2\n  b\n}\n",
     ),
@@ -286,11 +288,12 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0116",
         FailureClass::Type,
         "spec/grammar.md",
-        "A type M1 does not have, or a malformed one",
-        "M1's types are the integer types `i8` to `i128`, `u8` to `u128` and `usize`, each with \
-         an optional refinement such as `u8[0..10]`, `bool`, and arrays `[N]T` whose length is \
-         an integer literal. A refinement's bound is an integer literal, a name, or `name.len`. \
-         Structs and enums come in M2.",
+        "A type the compiler does not have, or a malformed one",
+        "The types are the integer types `i8` to `i128`, `u8` to `u128` and `usize`, each \
+         with an optional refinement such as `u8[0..10]`, `bool`, arrays `[N]T` whose length is \
+         an integer literal, and the structs the module declares. A refinement's bound is an \
+         integer literal, a name, or `name.len`. A name that is no type is an error, and the \
+         closest struct's name is suggested; enums come later in M2.",
         "module m\npub fn f(x: int) -> i32 = 0\n",
         "module m\npub fn f(x: i32) -> i32 = 0\n",
     ),
@@ -417,6 +420,27 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f(x: u8) -> u8 = ((x))\n",
     ),
     emitted(
+        "E0128",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "A comma after a field",
+        "A struct's fields are written one per line, and a field ends at the end of its line as \
+         a statement does, so Mente writes no `,` after one as Rust does. The fix removes it.",
+        "module m\npub struct Pair {\n  i: u8,\n  j: u8\n}\n",
+        "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\n",
+    ),
+    emitted(
+        "E0129",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "A struct literal in braces, from Rust",
+        "Mente builds a struct as a call with named arguments, `Pair(i: 0, j: 1)`, so that \
+         nothing after a condition reads as a block or a literal alike. Rust's `Pair { i: 0, j: \
+         1 }` is read as that after its diagnostic, and the fix writes the parentheses.",
+        "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair { i: 0, j: 1 }\n",
+        "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair(i: 0, j: 1)\n",
+    ),
+    emitted(
         "E0201",
         FailureClass::UnknownName,
         "spec/core-calculus.md",
@@ -459,8 +483,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::Type,
         "spec/core-calculus.md",
         "A function used as a value, or a value called",
-        "M1 has no function values: the name of a function is only called, as in `f(x)`, and \
-         the name of a binding is never called.",
+        "Mente has no function values: the name of a function is only called, as in `f(x)`, \
+         and the name of a binding is never called. The name of a struct is not a value either: \
+         a struct is built with its fields, as in `Pair(i: 0, j: 1)`.",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id\n",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id(1)\n",
     ),
@@ -469,9 +494,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::Type,
         "spec/core-calculus.md",
         "An assignment to a binding that cannot change",
-        "Assignment and element assignment apply to a `var` or a `mut` parameter. A `val` never \
-         changes, and a read-only parameter is a value the function cannot change: declare the \
-         binding with `var`, or make the parameter `mut`, which is suggested.",
+        "Assignment to a binding, an element or a field applies to a `var` or a `mut` \
+         parameter. A `val` never changes, and a read-only parameter is a value the function \
+         cannot change, a struct's fields included: declare the binding with `var`, or make the \
+         parameter `mut`, which is suggested.",
         "module m\npub fn f() -> u8 {\n  val x = 1\n  x = 2\n  x\n}\n",
         "module m\npub fn f() -> u8 {\n  var x = 1\n  x = 2\n  x\n}\n",
     ),
@@ -481,7 +507,7 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "spec/core-calculus.md",
         "A `mut` argument that cannot change",
         "A `mut` argument is a place the call changes, so it is a `var` or a `mut` parameter, \
-         or an element of one.",
+         or an element or a field of one.",
         "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  val v: u8 = 0\n  bump(mut v)\n}\n",
         "module m\npub fn bump(mut x: u8) {\n  x += 1\n}\npub fn f() {\n  var v: u8 = 0\n  bump(mut v)\n}\n",
     ),
@@ -492,8 +518,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A `mut` argument named by another argument",
         "Within one call, the binding of a `mut` argument appears in no other argument, so that \
          a parameter the callee changes never overlaps another: `f(mut a[i], a[j])` and `f(mut \
-         a[i], mut a[j])` are errors whatever `i` and `j` are. Copy what the other argument \
-         needs into a `val` first.",
+         a[i], mut a[j])` are errors whatever `i` and `j` are, and so is `f(mut s.a, mut \
+         s.b)`, two fields of one struct. Copy what the other argument needs into a `val` \
+         first.",
         "module m\npub fn put(mut x: u8, y: u8) {\n  x = y\n}\npub fn f() {\n  var xs: [2]u8 = [0, 1]\n  put(mut xs[0], xs[1])\n}\n",
         "module m\npub fn put(mut x: u8, y: u8) {\n  x = y\n}\npub fn f() {\n  var xs: [2]u8 = [0, 1]\n  val y = xs[1]\n  put(mut xs[0], y)\n}\n",
     ),
@@ -574,10 +601,12 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0215",
         FailureClass::Type,
         "spec/core-calculus.md",
-        "`.len` of a value that is not an array",
-        "`.len`, the only field M1 has, is the length of an array.",
-        "module m\npub fn f(x: u8) -> usize = x.len\n",
-        "module m\npub fn f(x: [4]u8) -> usize = x.len\n",
+        "A field the value does not have",
+        "`a.name` reads a field: `.len` is the length of an array, which has no other field, and \
+         a struct has the fields its declaration names. A field a struct lacks is an error, and \
+         the closest field's name is suggested.",
+        "module m\npub struct Pair {\n  first: u8\n}\npub fn f(p: Pair) -> u8 = p.frist\n",
+        "module m\npub struct Pair {\n  first: u8\n}\npub fn f(p: Pair) -> u8 = p.first\n",
     ),
     emitted(
         "E0216",
@@ -628,10 +657,11 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0220",
         FailureClass::ForeignIdiom,
         "spec/core-calculus.md",
-        "A binding named like a function of its module",
+        "A binding named like a function or a type of its module",
         "A name means one thing in a function and its module: a parameter, a `val` or a `var` \
-         never takes the name of a function of the module, as Rust lets a local hide one. \
-         Renaming the binding and its uses is suggested.",
+         never takes the name of a function or a type of the module, a struct with or without \
+         `@layout`, a bitstruct or an enum, as Rust lets a local hide one, so that `a.b` \
+         always reads as one thing. Renaming the binding and its uses is suggested.",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) -> u8 {\n  val id = a\n  id\n}\n",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) -> u8 {\n  val b = a\n  b\n}\n",
     ),
@@ -670,11 +700,13 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0223",
         FailureClass::Type,
         "spec/core-calculus.md",
-        "An array too large to be a value",
-        "An array is a value kept in one piece, copied whole and held in one stack slot, whose \
-         size native code holds in 32 bits. So an array may hold at most 4,294,967,295 bytes: its \
-         length times its element's size. Keep fewer elements, split the data, or wait for \
-         `List<T>` in M2, which keeps its elements apart from the value.",
+        "An array or a struct too large to be a value",
+        "An array or a struct is a value kept in one piece, copied whole and held in one stack \
+         slot, whose size native code holds in 32 bits. So it may hold at most 4,294,967,295 \
+         bytes: an array its length times its element's size, a struct its fields as its layout \
+         places them. An array holds at most 4,294,967,295 elements too, whatever their size, \
+         since native code counts them in 32 bits as well. Keep fewer elements, split the data, \
+         or wait for `List<T>`, later in M2, which keeps its elements apart from the value.",
         "module m\npub fn f(x: [4294967296]u8) -> u8 = 0\n",
         "module m\npub fn f(x: [4096]u8) -> u8 = 0\n",
     ),
@@ -689,6 +721,55 @@ pub const CATALOGUE: &[CodeEntry] = &[
          block, come in M4.",
         "module m\npub fn id(x: u8) -> u8\npub fn f() -> u8 = id(1)\n",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id(1)\n",
+    ),
+    emitted(
+        "E0225",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A type that contains itself",
+        "A struct holds each field's value in place, so a struct that holds itself, directly or \
+         through other structs and arrays, would have no end. The diagnostic names the fields \
+         of the cycle, and each field that closes one is reported, so two cycles through one \
+         struct are two errors. A `List<T>`, which comes later in M2, keeps its elements \
+         apart, so a struct may hold a list of itself.",
+        "module m\npub struct Node {\n  value: u8\n  next: Node\n}\n",
+        "module m\npub struct Node {\n  value: u8\n  next: u8\n}\n",
+    ),
+    emitted(
+        "E0226",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A struct built without each field once, in order",
+        "A struct is built with its fields named, `Pair(i: 0, j: 1)`, every field once and in \
+         the order of its declaration, which is the order the values are evaluated in. No field \
+         has a default, so one left out is an error that names it; a field the struct lacks, \
+         one named twice, fields out of order and positional arguments are errors too. For \
+         positional arguments of the right number, the fix names them.",
+        "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair(i: 0)\n",
+        "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair(i: 0, j: 1)\n",
+    ),
+    emitted(
+        "E0227",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "Named arguments in a call of a function",
+        "Arguments are positional or named, never both: a named list builds a struct, and a \
+         function takes its arguments by position, in the order of its parameters. Removing the \
+         names is suggested; check that the values are in the parameters' order.",
+        "module m\nfn add(a: u8, b: u8) -> u8 = a + b\npub fn f() -> u8 = add(a: 1, b: 2)\n",
+        "module m\nfn add(a: u8, b: u8) -> u8 = a + b\npub fn f() -> u8 = add(1, 2)\n",
+    ),
+    emitted(
+        "E0228",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A name declared twice in a module or a struct",
+        "A module declares a name once, whatever it names, a function or a struct, so a call and \
+         a struct being built never mean two things; and a struct names each field once. The \
+         language declares its own types, so no struct or bitstruct takes the name of an integer \
+         type, `bool`, or a type a later milestone brings, such as `String` or `Pool`.",
+        "module m\npub struct Pair {\n  i: u8\n  i: u16\n}\n",
+        "module m\npub struct Pair {\n  i: u8\n  j: u16\n}\n",
     ),
     reserved(
         "E0310",
@@ -1253,6 +1334,7 @@ mod tests {
                 _ if e.code == "E0109" => FailureClass::LaterMilestone,
                 _ if e.code == "E0116" => FailureClass::Type,
                 _ if ("E0118"..="E0126").contains(&e.code) => FailureClass::ForeignIdiom,
+                _ if e.code == "E0128" || e.code == "E0129" => FailureClass::ForeignIdiom,
                 _ if e.code == "E0201" => FailureClass::UnknownName,
                 _ if e.code == "E0202" || e.code == "E0220" => FailureClass::ForeignIdiom,
                 _ if e.code == "E0208" => FailureClass::Syntax,

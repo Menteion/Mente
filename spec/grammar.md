@@ -52,7 +52,7 @@ This file is the normative grammar of the language `core-calculus.md` defines ([
    item        = { doc comment } { attribute } [ "pub" ] function ;
    attribute   = "@" identifier [ "(" <balanced tokens> ")" ] ;
    ```
-   - A module may also declare the forms other spec files govern: `struct` and its `@layout` and `@bytes` (`morphic-layouts.md`), `bitstruct` and `@bits`, `enum`, `trait` and `unit`, and `@example` blocks. Today's declaration parser reads them; they are outside M1's calculus. Anything else at the top level is an error: `import`, `extern` and `actor` with the milestone that brings them (`E0109`), and any other token as not a declaration (`E0111`).
+   - A module may also declare the forms other spec files govern: a `struct` with `@layout` and `@bytes` (`morphic-layouts.md`), `bitstruct` and `@bits`, `enum`, `trait` and `unit`, and `@example` blocks. Today's declaration parser reads them; they are outside the calculus the compiler implements. A `struct` without `@layout` is M2's (item 10). Anything else at the top level is an error: `import`, `extern` and `actor` with the milestone that brings them (`E0109`), and any other token as not a declaration (`E0111`).
 4. `Implemented` **Functions**:
    <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_contracts_and_parameters_of_a_header" min="1" reason="A header's parameters, result type and contracts parse, and a missing body is reported" -->
    <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_parse_functions_reads_each_function_with_a_body" min="1" reason="Every function with a body is parsed, and one without a body is not" -->
@@ -153,6 +153,8 @@ This file is the normative grammar of the language `core-calculus.md` defines ([
     ```
     - Fields and variants end at a newline, as statements do. A comma after one is an error whose fix removes it; inside a variant's parentheses, commas separate the payload's fields.
     - A struct has at least one field. A field has no default (`core-calculus.md`, item 13): `= e` after a field's type is an error. Type parameters after a struct's or an enum's name, and an `invariant` block, are constructs of later milestones (`E0109`).
+    - `Implemented`: the body parser reads each struct without `@layout` under this grammar, one field per line, an attribute or a doc comment above a field read and left aside. A struct without a field, or a field without its `:` and type, is `E0111`; two fields on one line are `E0112`; a comma after a field is `E0128`, whose machine-applicable fix removes it; type parameters, an `invariant` block, a field's default and a type of a later milestone are `E0109`.
+      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_struct_declarations_take_one_field_per_line" min="1" reason="A struct's fields stand one per line, and each form M2 lacks is reported" -->
 11. `Specified` **M2's types and signatures**:
     ```ebnf
     type          += "?" type | "[" "]" type | "str" | "String" | "List" "<" type ">" | identifier ;
@@ -162,6 +164,8 @@ This file is the normative grammar of the language `core-calculus.md` defines ([
     parameter     = [ "mut" | "own" ] identifier ":" type ;
     ```
     - `?` and `[]` bind to the type after them: `?[]u8` is an optional view, and `[]?u8` a view of optional bytes. An identifier names a struct or an enum of the module.
+    - `Implemented`: an identifier that is no integer type, `bool` or a type of a later milestone is a named type, which the checker finds among the module's structs; a fixed-point type such as `q16.16` and a type argument list are reported as constructs of later milestones (`E0109`).
+      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_struct_declarations_take_one_field_per_line" min="1" reason="A struct's name is a type, and q16.16 and type arguments are later constructs" -->
     - `!` in a result is the error union (`core-calculus.md`, item 16): `-> u32 ! ParseError`, and `-> ! IoError` for a function that gives no value.
 12. `Specified` **M2's statements and expressions** ([`match-patterns`](../docs/design-review.md#match-patterns), [`optional-semantics`](../docs/design-review.md#optional-semantics), [`error-union-semantics`](../docs/design-review.md#error-union-semantics), [`slice-ranges`](../docs/design-review.md#slice-ranges), [`exclusivity-projections`](../docs/design-review.md#exclusivity-projections)):
     ```ebnf
@@ -185,12 +189,16 @@ This file is the normative grammar of the language `core-calculus.md` defines ([
     arguments     = "(" [ argument { "," argument } [ "," ] ] ")" ;
     argument      = [ "mut" | "own" ] expression | identifier ":" expression ;
     ```
-    - Arguments are positional or named, never both in one list. A named list builds a struct, `Pair(i: 0, j: 1)`, or a variant's payload, `Shape.Rect(w: 3, h: 4)`; a function takes positional arguments. The shapes `a.b` and `a.b(...)` are a field, a variant or a call on a receiver as name resolution finds `a`: a binding, an enum, or `List` and `String`, whose static calls are `List.new()`, `List.from(v)`, `String.new()` and `String.from(s)`. No binding is named like a type of its module, so `a` is never both.
+    - Arguments are positional or named, never both in one list. A named list builds a struct, `Pair(i: 0, j: 1)`, or a variant's payload, `Shape.Rect(w: 3, h: 4)`; a function takes positional arguments.
+    - `Implemented`: a call whose first argument is named builds a struct and one whose first is not calls a function, and a list that mixes the two is `E0111`; `a.name` reads a field; a place is a name followed by indexes and fields, after `mut` in an argument too.
+      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_structs_are_built_with_named_arguments_and_fields_are_places" min="1" reason="Named lists build structs, and places hold fields" --> The shapes `a.b` and `a.b(...)` are a field, a variant or a call on a receiver as name resolution finds `a`: a binding, an enum, or `List` and `String`, whose static calls are `List.new()`, `List.from(v)`, `String.new()` and `String.from(s)`. No binding is named like a type of its module, so `a` is never both.
     - `mut` before a postfix that ends in a call marks a call that changes its receiver: `mut xs.push(v)`, and `val last = mut xs.pop()`. After `mut` in an argument, a postfix that ends in a call is such a call, and any other is a place.
     - `!` and `catch` follow a call. `!` binds as a postfix operator, so `f(x)! + 1` adds to the value. The lexer reads `!=` as one token, so `f()!= 3` is a comparison; `f()! == 3` compares the value.
     - `match` and `raise` stand alone as full expressions, as `if` does; inside an operator's operand they need parentheses.
     - Arms end at a newline, as statements do, and a comma after one is an error whose fix removes it. A newline after `=>` does not end the arm, and a line that starts with `catch` continues the call before it, as one that starts with `else` continues an `if`.
 13. `Specified` **What the parser reports in M2**: each form of another language that M2's constructs meet is reported with a fix to Mente's spelling (`surface-syntax.md`, item 8): Rust's struct literal `Name { f: e }`, to `Name(f: e)`; Rust's `?` after a call, to `!`; `if let` and `guard let`, to `if val` and `guard val`; `Some(x)` and `None`, to `x` and `none`; `Vec::new()` and `vec![]`, to `List.new()`; a positional payload in a variant's declaration, to named fields; and a comma after a field, a variant or an arm, removed.
+    - `Implemented`: Rust's struct literal `Name { f: e }` is `E0129`, read as `Name(f: e)` after it, whose machine-applicable fix writes the parentheses; after a condition, `{` opens the block that follows. A comma after a field is `E0128` (item 10).
+      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_a_struct_literal_in_braces_gets_its_fix" min="1" reason="A struct literal in braces is E0129 with a fix that applies" -->
 
 ## 2. Decision rationale and rejected alternatives
 

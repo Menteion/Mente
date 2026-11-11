@@ -350,13 +350,12 @@ fn prepare(
     }
     let mut memory = Memory::filled(POISON);
     let mut values = Vec::new();
-    let sret = match &entry.result {
-        Shape::Array(..) => {
-            let at = memory.alloc(entry.result.size());
-            values.push(Val::Addr(at));
-            Some((at, entry.result.clone()))
-        }
-        _ => None,
+    let sret = if entry.result.in_memory() {
+        let at = memory.alloc(entry.result.size());
+        values.push(Val::Addr(at));
+        Some((at, entry.result.clone()))
+    } else {
+        None
     };
     let mut places = Vec::new();
     for ((is_mut, shape), (_, value)) in entry.params.iter().zip(&args) {
@@ -429,6 +428,12 @@ fn native_arg(value: &Value) -> Option<native::Arg> {
         Value::Array(items) => {
             native::Arg::Array(items.iter().map(native_arg).collect::<Option<Vec<_>>>()?)
         }
+        Value::Struct(_, fields) => native::Arg::Struct(
+            fields
+                .iter()
+                .map(|(_, v)| native_arg(v))
+                .collect::<Option<Vec<_>>>()?,
+        ),
         Value::Unit => return None,
     })
 }
@@ -460,6 +465,12 @@ fn write(memory: &mut Memory, at: u64, shape: &Shape, value: &Value) -> Option<(
             }
             Some(())
         }
+        (Shape::Struct(st), Value::Struct(_, fields)) if fields.len() == st.fields.len() => {
+            for (f, (_, item)) in st.fields.iter().zip(fields) {
+                write(memory, at + u64::from(f.offset), &f.shape, item)?;
+            }
+            Some(())
+        }
         _ => None,
     }
 }
@@ -480,6 +491,17 @@ fn read(memory: &Memory, at: u64, shape: &Shape) -> Result<String, String> {
                 .map(|k| read(memory, at + u64::from(elem.size()) * k, elem))
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(format!("[{}]", items.join(", ")))
+        }
+        Shape::Struct(st) => {
+            let fields = st
+                .fields
+                .iter()
+                .map(|f| {
+                    let v = read(memory, at + u64::from(f.offset), &f.shape)?;
+                    Ok(format!("{}: {}", f.name, v))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{}({})", st.name, fields.join(", ")))
         }
         Shape::Unit => Ok("()".into()),
     }
@@ -1112,6 +1134,29 @@ mod tests {
         let run = run_program(&p);
         assert!(run.problems.is_empty(), "{:?}", run.problems);
         assert_eq!(run.calls, 1);
+    }
+
+    /// A struct argument written into memory has each of its struct's fields: another number
+    /// of fields is refused, whatever else checked the call before.
+    #[test]
+    fn test_a_struct_argument_is_written_only_with_each_field() {
+        let text = "module m\npub struct P {\n  a: u8\n  b: u8\n}\npub fn h(p: P) -> u8 = p.a\n";
+        let lowered = lower::lower(&mente_sema::check_program(text).unwrap()).unwrap();
+        let shape = &lowered.entries[0].params[0].1;
+        let value = |fields: &[&str]| {
+            Value::Struct(
+                "P".into(),
+                fields
+                    .iter()
+                    .map(|f| (f.to_string(), Value::Int(mente_interp::Int::from_u128(1))))
+                    .collect(),
+            )
+        };
+        let mut memory = Memory::filled(POISON);
+        let at = memory.alloc(shape.size());
+        assert!(write(&mut memory, at, shape, &value(&["a", "b"])).is_some());
+        assert!(write(&mut memory, at, shape, &value(&["a"])).is_none());
+        assert!(write(&mut memory, at, shape, &value(&["a", "b", "c"])).is_none());
     }
 
     /// A program MIR runs differently from the reference interpreter, or one that does not

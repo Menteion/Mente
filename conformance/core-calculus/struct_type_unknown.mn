@@ -1,0 +1,7 @@
+// expect: E0116
+module conformance
+pub struct Pair {
+  i: u8
+}
+
+pub fn first(p: Piar) -> u8 = 0

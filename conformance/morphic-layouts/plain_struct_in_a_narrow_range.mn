@@ -1,0 +1,13 @@
+// expect: E0415
+module conformance
+pub struct Pair {
+  a: u32
+  b: u8
+}
+
+@layout(size: 16, align: 8)
+pub struct Rec {
+  @bytes(0..8) pub id: u64
+  @bytes(8..13) pub p: Pair
+  @bytes(13..16) pub pad: [3]u8
+}

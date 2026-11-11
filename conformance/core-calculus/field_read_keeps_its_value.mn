@@ -1,0 +1,42 @@
+// expect: pass
+module conformance
+// A field read through an index reads the value its base had when it was evaluated, and its
+// path is evaluated from left to right, each index checked before the next is evaluated.
+pub struct D {
+  d: u8
+}
+
+pub struct S {
+  xs: [2]D
+}
+
+pub struct O {
+  ys: [2]D
+}
+
+fn one(mut xs: [2]D) -> usize {
+  xs[1].d = 50
+  1
+}
+
+pub fn through_index() -> u8 {
+  var xs: [2]D = [D(d: 1), D(d: 2)]
+  xs[one(mut xs)].d
+}
+
+pub fn element() -> D {
+  var xs: [2]D = [D(d: 1), D(d: 2)]
+  xs[one(mut xs)]
+}
+
+fn reset(mut s: S) -> usize {
+  s.xs[0].d = 99
+  0
+}
+
+pub fn through_field() -> u8 {
+  var s = S(xs: [D(d: 1), D(d: 2)])
+  s.xs[reset(mut s)].d
+}
+
+pub fn rd(xs: [2]O, i: usize, j: usize, k: usize) -> u8 = xs[i].ys[j / k].d

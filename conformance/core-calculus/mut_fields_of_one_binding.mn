@@ -1,0 +1,16 @@
+// expect: E0207
+module conformance
+pub struct Pair {
+  i: u8
+  j: u8
+}
+
+fn swap(mut a: u8, mut b: u8) {
+  val t = a
+  a = b
+  b = t
+}
+
+pub fn flip(mut p: Pair) {
+  swap(mut p.i, mut p.j)
+}

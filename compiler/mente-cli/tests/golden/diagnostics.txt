@@ -1,15 +1,33 @@
+== core-calculus/arguments_keep_their_values.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/arguments_narrowed_once_all_are_evaluated.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/array_beyond_4_gib.mn ==
 {"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296]u8` holds 4294967296 bytes, more than the 4294967295 an array, a value kept in one piece, may hold","primary":{"file":"array_beyond_4_gib.mn","start":53,"end":67,"line":3,"column":18},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/array_literal_beyond_128_bits.mn ==
 {"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the elements of this array literal give values that no one of `i128` and `u128` holds together, and they are kept in one of them","primary":{"file":"array_literal_beyond_128_bits.mn","start":98,"end":104,"line":4,"column":21},"related":[],"fixes":[{"message":"bind `b` to `wide: i128` first","applicability":"suggestion","edits":[{"span":{"file":"array_literal_beyond_128_bits.mn","start":78,"end":78,"line":4,"column":1},"replacement":"  val wide: i128 = b\n"},{"span":{"file":"array_literal_beyond_128_bits.mn","start":102,"end":103,"line":4,"column":25},"replacement":"wide"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/array_literal_of_mixed_integers.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/array_of_the_most_elements.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/array_of_too_many_elements_in_a_body.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296][0]u8` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size","primary":{"file":"array_of_too_many_elements_in_a_body.mn","start":61,"end":84,"line":4,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/array_of_too_many_elements_in_a_field.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296]Z` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size","primary":{"file":"array_of_too_many_elements_in_a_field.mn","start":157,"end":170,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/array_of_too_many_elements_in_a_signature.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296][0]u8` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size","primary":{"file":"array_of_too_many_elements_in_a_signature.mn","start":49,"end":66,"line":3,"column":14},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/array_within_4_gib.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/assign_to_a_field_of_a_val.mn ==
+{"version":1,"diagnostics":[{"code":"E0205","severity":"error","message":"cannot assign to `p`: it is a read-only parameter; make it `mut p`, and pass `mut` at its calls","primary":{"file":"assign_to_a_field_of_a_val.mn","start":95,"end":98,"line":8,"column":3},"related":[],"fixes":[{"message":"make `p` a `mut` parameter","applicability":"suggestion","edits":[{"span":{"file":"assign_to_a_field_of_a_val.mn","start":76,"end":76,"line":7,"column":12},"replacement":"mut "}]}]}],"todos":[],"trusted":[]}
 == core-calculus/assign_to_val.mn ==
 {"version":1,"diagnostics":[{"code":"E0205","severity":"error","message":"cannot assign to `x`: it is a `val`, which never changes; declare it with `var`","primary":{"file":"assign_to_val.mn","start":69,"end":70,"line":5,"column":3},"related":[{"message":"declared here","span":{"file":"assign_to_val.mn","start":61,"end":62,"line":4,"column":7}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/binding_named_like_a_function.mn ==
 {"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`id` is the name of a function of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_function.mn","start":93,"end":95,"line":5,"column":7},"related":[],"fixes":[{"message":"rename this `id` and its uses to `id2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_function.mn","start":93,"end":95,"line":5,"column":7},"replacement":"id2"},{"span":{"file":"binding_named_like_a_function.mn","start":102,"end":104,"line":6,"column":3},"replacement":"id2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/binding_named_like_a_layout_struct.mn ==
+{"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Stamp` is the name of a struct of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_layout_struct.mn","start":228,"end":233,"line":10,"column":7},"related":[],"fixes":[{"message":"rename this `Stamp` and its uses to `Stamp2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_layout_struct.mn","start":228,"end":233,"line":10,"column":7},"replacement":"Stamp2"},{"span":{"file":"binding_named_like_a_layout_struct.mn","start":240,"end":245,"line":11,"column":3},"replacement":"Stamp2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/binding_named_like_a_struct.mn ==
+{"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Pair` is the name of a struct of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_struct.mn","start":101,"end":105,"line":8,"column":7},"related":[],"fixes":[{"message":"rename this `Pair` and its uses to `Pair2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_struct.mn","start":101,"end":105,"line":8,"column":7},"replacement":"Pair2"},{"span":{"file":"binding_named_like_a_struct.mn","start":114,"end":118,"line":9,"column":3},"replacement":"Pair2"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/binding_never_read.mn ==
 {"version":1,"diagnostics":[{"code":"E0218","severity":"error","message":"`clamped` is never read; use it where it was meant to be used, or remove it","primary":{"file":"binding_never_read.mn","start":66,"end":73,"line":4,"column":7},"related":[],"fixes":[{"message":"remove `clamped`","applicability":"suggestion","edits":[{"span":{"file":"binding_never_read.mn","start":62,"end":77,"line":4,"column":3},"replacement":""}]}]}],"todos":[],"trusted":[]}
 == core-calculus/binding_of_mixed_integers.mn ==
@@ -24,6 +42,14 @@
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/ensures_not_proven_at_a_return.mn ==
 {"version":1,"diagnostics":[{"code":"E0505","severity":"error","message":"Tier 1 cannot rule out `x = 255, result = 255`, which violates `ensures result > x` of `inc` at this return","primary":{"file":"ensures_not_proven_at_a_return.mn","start":110,"end":111,"line":7,"column":12},"related":[],"fixes":[{"message":"insert `guard x > x else { todo(\"x > x is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"ensures_not_proven_at_a_return.mn","start":99,"end":99,"line":7,"column":1},"replacement":"    guard x > x else { todo(\"x > x is false here\") }\n"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/field_declared_twice.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`i` is already a field of `Pair`; a struct names each field once","primary":{"file":"field_declared_twice.mn","start":64,"end":65,"line":5,"column":3},"related":[{"message":"first declared here","span":{"file":"field_declared_twice.mn","start":56,"end":57,"line":4,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/field_narrowing_that_always_traps.mn ==
+{"version":1,"diagnostics":[{"code":"E0508","severity":"error","message":"Tier 1 proves `300` is at least 300 here, outside `u8` (0 to 255), so this narrowing always traps","primary":{"file":"field_narrowing_that_always_traps.mn","start":96,"end":99,"line":7,"column":32},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/field_read_keeps_its_value.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/field_the_struct_lacks.mn ==
+{"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`Pair` has no field `frist`; did you mean `first`?","primary":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"related":[],"fixes":[{"message":"write `first`","applicability":"suggestion","edits":[{"span":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"replacement":"first"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/function_as_value.mn ==
 {"version":1,"diagnostics":[{"code":"E0204","severity":"error","message":"`id` is a function, which M1 only calls: write `id(...)`","primary":{"file":"function_as_value.mn","start":82,"end":84,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/guard_that_falls_through.mn ==
@@ -42,6 +68,12 @@
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"`match` comes in M2; M1 does not have it","primary":{"file":"later_match.mn","start":72,"end":77,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/later_string_value.mn ==
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string value comes in M2; M1 does not have it","primary":{"file":"later_string_value.mn","start":66,"end":72,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/layout_struct_as_a_value.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_as_a_value.mn","start":131,"end":136,"line":8,"column":17},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/layout_struct_built.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_built.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/layout_struct_called.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_called.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/len_of_a_non_array.mn ==
 {"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`.len` is an array's length, but this is `u8`","primary":{"file":"len_of_a_non_array.mn","start":63,"end":68,"line":3,"column":28},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/literal_outside_its_suffix.mn ==
@@ -56,12 +88,22 @@
 {"version":1,"diagnostics":[{"code":"E0207","severity":"error","message":"`xs` is passed as `mut` in this call, so no other argument may name it; copy what this argument needs into a `val` first","primary":{"file":"mut_argument_named_twice.mn","start":132,"end":134,"line":8,"column":18},"related":[{"message":"passed as `mut` here","span":{"file":"mut_argument_named_twice.mn","start":125,"end":130,"line":8,"column":11}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/mut_argument_of_val.mn ==
 {"version":1,"diagnostics":[{"code":"E0206","severity":"error","message":"cannot pass as `mut` `v`: it is a `val`, which never changes; declare it with `var`","primary":{"file":"mut_argument_of_val.mn","start":112,"end":113,"line":8,"column":12},"related":[{"message":"declared here","span":{"file":"mut_argument_of_val.mn","start":91,"end":92,"line":7,"column":7}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/mut_fields_of_one_binding.mn ==
+{"version":1,"diagnostics":[{"code":"E0207","severity":"error","message":"`p` is passed as `mut` in this call, so no other argument may name it; copy what this argument needs into a `val` first","primary":{"file":"mut_fields_of_one_binding.mn","start":183,"end":184,"line":15,"column":21},"related":[{"message":"passed as `mut` here","span":{"file":"mut_fields_of_one_binding.mn","start":174,"end":177,"line":15,"column":12}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/named_arguments_to_a_function.mn ==
+{"version":1,"diagnostics":[{"code":"E0227","severity":"error","message":"`add` is a function, whose arguments are positional; only the arguments that build a struct are named","primary":{"file":"named_arguments_to_a_function.mn","start":93,"end":108,"line":5,"column":22},"related":[],"fixes":[{"message":"pass the arguments by position, in the order of the parameters","applicability":"suggestion","edits":[{"span":{"file":"named_arguments_to_a_function.mn","start":97,"end":100,"line":5,"column":26},"replacement":""},{"span":{"file":"named_arguments_to_a_function.mn","start":103,"end":106,"line":5,"column":32},"replacement":""}]}]}],"todos":[],"trusted":[]}
 == core-calculus/narrowing_that_always_traps.mn ==
 {"version":1,"diagnostics":[{"code":"E0508","severity":"error","message":"Tier 1 proves `x + 300` is at least 300 here, outside `u8` (0 to 255), so this narrowing always traps","primary":{"file":"narrowing_that_always_traps.mn","start":74,"end":81,"line":4,"column":15},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/narrowing_that_may_trap.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/operands_beyond_128_bits.mn ==
 {"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the operands of `b + (a + 170141183460469231731687303715884105727)` fit no one of `i128` and `u128` together with its value, and an operation computes in one of them","primary":{"file":"operands_beyond_128_bits.mn","start":89,"end":138,"line":4,"column":17},"related":[],"fixes":[{"message":"bind `a + 170141183460469231731687303715884105727` to `sum: u128` first","applicability":"suggestion","edits":[{"span":{"file":"operands_beyond_128_bits.mn","start":73,"end":73,"line":4,"column":1},"replacement":"  val sum: u128 = a + 170141183460469231731687303715884105727\n"},{"span":{"file":"operands_beyond_128_bits.mn","start":94,"end":137,"line":4,"column":22},"replacement":"sum"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/refined_field_not_proven.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 10`, outside `u8[0..10]`, the type of field `d` of `Digit`","primary":{"file":"refined_field_not_proven.mn","start":113,"end":114,"line":7,"column":41},"related":[],"fixes":[{"message":"insert `guard x < 10 else { todo(\"x < 10 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refined_field_not_proven.mn","start":102,"end":115,"line":7,"column":30},"replacement":"{\n  guard x < 10 else { todo(\"x < 10 is false here\") }\n  Digit(d: x)\n}"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/refined_field_proven_by_a_guard.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/refined_field_store_not_proven.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 10`, outside `u8[0..10]`, the type of `g.d`","primary":{"file":"refined_field_store_not_proven.mn","start":115,"end":116,"line":8,"column":9},"related":[],"fixes":[{"message":"insert `guard x < 10 else { return }`","applicability":"suggestion","edits":[{"span":{"file":"refined_field_store_not_proven.mn","start":107,"end":107,"line":8,"column":1},"replacement":"  guard x < 10 else { return }\n"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/refinement_not_proven.mn ==
 {"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 255`, where `x + 1` is 256, outside `u8[1..=255]`, the type of the result of `next`","primary":{"file":"refinement_not_proven.mn","start":81,"end":86,"line":4,"column":10},"related":[],"fixes":[{"message":"insert `guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refinement_not_proven.mn","start":72,"end":72,"line":4,"column":1},"replacement":"  guard x + 1 <= 255 else { todo(\"x + 1 <= 255 is false here\") }\n"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/refinement_over_a_var.mn ==
@@ -74,6 +116,54 @@
 {"version":1,"diagnostics":[{"code":"E0504","severity":"error","message":"Tier 1 cannot rule out `n = 0`, which violates `requires lo < hi` of `pick` at this call","primary":{"file":"requires_not_proven_at_a_call.mn","start":119,"end":129,"line":7,"column":25},"related":[],"fixes":[{"message":"insert `guard 0 < n else { todo(\"0 < n is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"requires_not_proven_at_a_call.mn","start":117,"end":129,"line":7,"column":23},"replacement":"{\n  guard 0 < n else { todo(\"0 < n is false here\") }\n  pick(0, n)\n}"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/shadowing.mn ==
 {"version":1,"diagnostics":[{"code":"E0202","severity":"error","message":"`x` is already declared in this function; Mente has no shadowing, so give this one a new name","primary":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"related":[{"message":"first declared here","span":{"file":"shadowing.mn","start":45,"end":46,"line":3,"column":10}}],"fixes":[{"message":"rename this `x` and its uses to `x2`","applicability":"suggestion","edits":[{"span":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"replacement":"x2"},{"span":{"file":"shadowing.mn","start":74,"end":75,"line":5,"column":3},"replacement":"x2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/struct_beyond_4_gib.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"a struct of type `Huge` holds 4294967296 bytes, more than the 4294967295 a value, kept in one piece, may hold","primary":{"file":"struct_beyond_4_gib.mn","start":47,"end":51,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_built_by_position.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"a struct is built with its fields named, in the order of its declaration, as in `Pair(i: ...)`: `i`, `j`","primary":{"file":"struct_built_by_position.mn","start":97,"end":107,"line":8,"column":25},"related":[],"fixes":[{"message":"name each field","applicability":"machine-applicable","edits":[{"span":{"file":"struct_built_by_position.mn","start":102,"end":102,"line":8,"column":30},"replacement":"i: "},{"span":{"file":"struct_built_by_position.mn","start":105,"end":105,"line":8,"column":33},"replacement":"j: "}]}]}],"todos":[],"trusted":[]}
+== core-calculus/struct_built_out_of_order.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"the fields of `Pair` are named in the order of its declaration, which is the order their values are evaluated in: `i`, `j`","primary":{"file":"struct_built_out_of_order.mn","start":102,"end":112,"line":8,"column":30},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_built_without_a_field.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"this `Pair` leaves out `j`; a field has no default, so a struct is built with every field, in the order of its declaration: `i`, `j`","primary":{"file":"struct_built_without_a_field.mn","start":97,"end":107,"line":8,"column":25},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_compared_with_eq.mn ==
+{"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"`==` compares two integers or two bools, not `Pair` and `Pair`","primary":{"file":"struct_compared_with_eq.mn","start":105,"end":111,"line":7,"column":41},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_containing_itself.mn ==
+{"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`Node` contains itself through its field `next`, so a value of it would have no end; a `List<Node>`, which comes later in M2, may hold it, since a list keeps its elements apart","primary":{"file":"struct_containing_itself.mn","start":47,"end":51,"line":3,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_containing_itself.mn","start":68,"end":72,"line":5,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_containing_itself_through_others.mn ==
+{"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`A` contains itself: its field `b` holds `B`, whose field `a` holds `A`, so a value of it would have no end","primary":{"file":"struct_containing_itself_through_others.mn","start":47,"end":48,"line":3,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_containing_itself_through_others.mn","start":53,"end":54,"line":4,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_field_default.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a field's default value is in no milestone yet; M1 does not have it","primary":{"file":"struct_field_default.mn","start":63,"end":64,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_field_of_a_later_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string or list type (`String`) comes in M2; M1 does not have it","primary":{"file":"struct_field_of_a_later_type.mn","start":63,"end":69,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_fields_at_their_limits.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_in_two_cycles.mn ==
+{"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`A` contains itself: its field `b` holds `B`, whose field `a` holds `A`, so a value of it would have no end","primary":{"file":"struct_in_two_cycles.mn","start":123,"end":124,"line":4,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_in_two_cycles.mn","start":129,"end":130,"line":5,"column":3}}],"fixes":[]},{"code":"E0225","severity":"error","message":"`A` contains itself: its field `c` holds `C`, whose field `a` holds `A`, so a value of it would have no end","primary":{"file":"struct_in_two_cycles.mn","start":123,"end":124,"line":4,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_in_two_cycles.mn","start":136,"end":137,"line":6,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_mut_field_arguments.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_named_like_a_later_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`String` is a type of the language; a name means one thing, so give this struct another","primary":{"file":"struct_named_like_a_later_type.mn","start":132,"end":138,"line":4,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_named_like_an_integer_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`u8` is a type of the language; a name means one thing, so give this struct another","primary":{"file":"struct_named_like_an_integer_type.mn","start":47,"end":49,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_named_like_bool.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`bool` is a type of the language; a name means one thing, so give this struct another","primary":{"file":"struct_named_like_bool.mn","start":47,"end":51,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_nested_and_arrays.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_refined_fields_at_their_bounds.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_type_unknown.mn ==
+{"version":1,"diagnostics":[{"code":"E0116","severity":"error","message":"`Piar` is not a type of this module; did you mean `Pair`?","primary":{"file":"struct_type_unknown.mn","start":81,"end":85,"line":7,"column":17},"related":[],"fixes":[{"message":"write `Pair`","applicability":"suggestion","edits":[{"span":{"file":"struct_type_unknown.mn","start":81,"end":85,"line":7,"column":17},"replacement":"Pair"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/struct_values_are_copied.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_with_an_invariant.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an invariant relating a struct's fields comes in a later milestone; M1 does not have it","primary":{"file":"struct_with_an_invariant.mn","start":76,"end":85,"line":7,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_with_type_parameters.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a struct's type parameters comes in M4; M1 does not have it","primary":{"file":"struct_with_type_parameters.mn","start":52,"end":53,"line":3,"column":17},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_within_4_gib.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/two_declarations_of_one_name.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`Pair` is already declared in this module, as a struct; a name means one thing in a module, so give this function another","primary":{"file":"two_declarations_of_one_name.mn","start":72,"end":76,"line":7,"column":8},"related":[{"message":"first declared here","span":{"file":"two_declarations_of_one_name.mn","start":47,"end":51,"line":3,"column":12}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/two_functions_of_one_name.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`f` is already declared in this module, as a function; a name means one thing in a module, so give this function another","primary":{"file":"two_functions_of_one_name.mn","start":65,"end":66,"line":5,"column":8},"related":[{"message":"first declared here","span":{"file":"two_functions_of_one_name.mn","start":43,"end":44,"line":3,"column":8}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/unknown_name.mn ==
 {"version":1,"diagnostics":[{"code":"E0201","severity":"error","message":"there is no binding named `cuont` here; did you mean `count`?","primary":{"file":"unknown_name.mn","start":64,"end":69,"line":3,"column":29},"related":[],"fixes":[{"message":"write `count`","applicability":"suggestion","edits":[{"span":{"file":"unknown_name.mn","start":64,"end":69,"line":3,"column":29},"replacement":"count"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/unused_value.mn ==
@@ -107,7 +197,7 @@
 == ghost-contracts-and-totality/total_without_a_loop.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == grammar/assignment_to_a_sum.mn ==
-{"version":1,"diagnostics":[{"code":"E0114","severity":"error","message":"`b + 1` is not a place to assign to; a place is a name, or an element of one such as `a[i]`","primary":{"file":"assignment_to_a_sum.mn","start":76,"end":81,"line":5,"column":3},"related":[{"message":"assigned here","span":{"file":"assignment_to_a_sum.mn","start":82,"end":83,"line":5,"column":9}}],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0114","severity":"error","message":"`b + 1` is not a place to assign to; a place is a name, or an element or a field of one such as `a[i]` or `s.f`","primary":{"file":"assignment_to_a_sum.mn","start":76,"end":81,"line":5,"column":3},"related":[{"message":"assigned here","span":{"file":"assignment_to_a_sum.mn","start":82,"end":83,"line":5,"column":9}}],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/binary_digit_out_of_base.mn ==
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"`2` is not a binary digit","primary":{"file":"binary_digit_out_of_base.mn","start":55,"end":60,"line":3,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/binding_without_value.mn ==
@@ -134,12 +224,16 @@
 {"version":1,"diagnostics":[{"code":"E0117","severity":"error","message":"the count of `[value; count]` is an integer literal, not `n`","primary":{"file":"repeat_count_not_a_literal.mn","start":80,"end":81,"line":4,"column":15},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/semicolon_at_line_end.mn ==
 {"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"`;` does not end a statement in Mente; a newline does","primary":{"file":"semicolon_at_line_end.mn","start":67,"end":68,"line":4,"column":12},"related":[],"fixes":[{"message":"remove the `;`","applicability":"machine-applicable","edits":[{"span":{"file":"semicolon_at_line_end.mn","start":67,"end":68,"line":4,"column":12},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== grammar/struct_without_fields.mn ==
+{"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"`struct Empty` has no field; a struct has at least one, as in `x: i32` on a line of its own","primary":{"file":"struct_without_fields.mn","start":47,"end":52,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/suffix_without_underscore.mn ==
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"a literal's suffix starts with `_`: write `5_ms`","primary":{"file":"suffix_without_underscore.mn","start":56,"end":59,"line":3,"column":21},"related":[],"fixes":[{"message":"insert `_` before `ms`","applicability":"machine-applicable","edits":[{"span":{"file":"suffix_without_underscore.mn","start":57,"end":57,"line":3,"column":22},"replacement":"_"}]}]}],"todos":[],"trusted":[]}
+== grammar/two_fields_on_a_line.mn ==
+{"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"a field ends at the end of its line, and `j` starts another on the same line","primary":{"file":"two_fields_on_a_line.mn","start":62,"end":63,"line":4,"column":9},"related":[],"fixes":[{"message":"start it on a new line","applicability":"machine-applicable","edits":[{"span":{"file":"two_fields_on_a_line.mn","start":61,"end":62,"line":4,"column":8},"replacement":"\n"}]}]}],"todos":[],"trusted":[]}
 == grammar/two_statements_on_a_line.mn ==
 {"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"a statement ends at the end of its line, and `x` starts another on the same line","primary":{"file":"two_statements_on_a_line.mn","start":68,"end":69,"line":4,"column":13},"related":[],"fixes":[{"message":"start it on a new line","applicability":"machine-applicable","edits":[{"span":{"file":"two_statements_on_a_line.mn","start":67,"end":68,"line":4,"column":12},"replacement":"\n"}]}]}],"todos":[],"trusted":[]}
 == grammar/type_m1_lacks.mn ==
-{"version":1,"diagnostics":[{"code":"E0116","severity":"error","message":"`int` is not a type of M1, whose types are the integer types, `bool` and arrays `[N]T`; structs and enums come in M2","primary":{"file":"type_m1_lacks.mn","start":48,"end":51,"line":3,"column":13},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0116","severity":"error","message":"`int` is not a type: the types are the integer types, `bool`, arrays `[N]T` and the structs of the module","primary":{"file":"type_m1_lacks.mn","start":48,"end":51,"line":3,"column":13},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/unclosed_string.mn ==
 {"version":1,"diagnostics":[{"code":"E0106","severity":"error","message":"this string literal is not closed on its line; close it with `\"`, and write a line break inside it as `\\n`","primary":{"file":"unclosed_string.mn","start":63,"end":75,"line":4,"column":8},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/unknown_character.mn ==
@@ -190,6 +284,10 @@
 {"version":1,"diagnostics":[{"code":"E0413","severity":"error","message":"struct `S` has field `b` overlaps the previous field: it starts at byte 2, before byte 4 where that field ends","primary":{"file":"overlapping_fields.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"start `b` at byte 4","applicability":"suggestion","edits":[{"span":{"file":"overlapping_fields.mn","start":106,"end":118,"line":6,"column":3},"replacement":"@bytes(4..8)"}]}]}],"todos":[],"trusted":[]}
 == morphic-layouts/packed_wire_format.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== morphic-layouts/plain_struct_in_a_layout.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== morphic-layouts/plain_struct_in_a_narrow_range.mn ==
+{"version":1,"diagnostics":[{"code":"E0415","severity":"error","message":"field `Rec.p` of type `Pair` requires 8 bytes, but `@bytes(8..13)` spans 5 bytes","primary":{"file":"plain_struct_in_a_narrow_range.mn","start":148,"end":161,"line":11,"column":3},"related":[],"fixes":[{"message":"make `p` 8 bytes wide","applicability":"suggestion","edits":[{"span":{"file":"plain_struct_in_a_narrow_range.mn","start":148,"end":161,"line":11,"column":3},"replacement":"@bytes(8..16)"}]}]}],"todos":[],"trusted":[]}
 == morphic-layouts/range_narrower_than_its_type.mn ==
 {"version":1,"diagnostics":[{"code":"E0415","severity":"error","message":"field `S.b` of type `u32` requires 4 bytes, but `@bytes(4..6)` spans 2 bytes","primary":{"file":"range_narrower_than_its_type.mn","start":106,"end":118,"line":6,"column":3},"related":[],"fixes":[{"message":"make `b` 4 bytes wide","applicability":"suggestion","edits":[{"span":{"file":"range_narrower_than_its_type.mn","start":106,"end":118,"line":6,"column":3},"replacement":"@bytes(4..8)"}]}]}],"todos":[],"trusted":[]}
 == morphic-layouts/size_not_a_multiple_of_alignment.mn ==
@@ -224,6 +322,8 @@
 {"version":1,"diagnostics":[{"code":"E0124","severity":"error","message":"Mente writes `not`, not `!`","primary":{"file":"c_not.mn","start":64,"end":65,"line":3,"column":29},"related":[],"fixes":[{"message":"write `not`","applicability":"machine-applicable","edits":[{"span":{"file":"c_not.mn","start":64,"end":66,"line":3,"column":29},"replacement":"not a"}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/cast.mn ==
 {"version":1,"diagnostics":[{"code":"E0126","severity":"error","message":"Mente has no casts: an integer converts where it lands, checked there, so bind it with the type it needs, as in `val y: u8 = x`","primary":{"file":"cast.mn","start":63,"end":65,"line":3,"column":28},"related":[],"fixes":[{"message":"remove the cast","applicability":"suggestion","edits":[{"span":{"file":"cast.mn","start":62,"end":68,"line":3,"column":27},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== surface-syntax/comma_after_a_field.mn ==
+{"version":1,"diagnostics":[{"code":"E0128","severity":"error","message":"a field ends at the end of its line, so Mente writes no `,` after one","primary":{"file":"comma_after_a_field.mn","start":61,"end":62,"line":4,"column":8},"related":[],"fixes":[{"message":"remove the `,`","applicability":"machine-applicable","edits":[{"span":{"file":"comma_after_a_field.mn","start":61,"end":62,"line":4,"column":8},"replacement":""}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/conditional_operator.mn ==
 {"version":1,"diagnostics":[{"code":"E0125","severity":"error","message":"Mente has no `? :`; write `if c { a } else { b }`","primary":{"file":"conditional_operator.mn","start":65,"end":66,"line":3,"column":30},"related":[],"fixes":[{"message":"write it as an `if` expression","applicability":"machine-applicable","edits":[{"span":{"file":"conditional_operator.mn","start":63,"end":72,"line":3,"column":28},"replacement":"if c { 1 } else { 2 }"}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/example_without_its_brace.mn ==
@@ -250,6 +350,8 @@
 {"version":1,"diagnostics":[{"code":"E0123","severity":"error","message":"Mente separates the parts of a path with `.`, not `::`","primary":{"file":"path_separator.mn","start":73,"end":75,"line":3,"column":38},"related":[],"fixes":[{"message":"write `.`","applicability":"suggestion","edits":[{"span":{"file":"path_separator.mn","start":73,"end":75,"line":3,"column":38},"replacement":"."}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/reference_at_a_call.mn ==
 {"version":1,"diagnostics":[{"code":"E0119","severity":"error","message":"a call passes a place to change as `mut x`, not `&mut x`","primary":{"file":"reference_at_a_call.mn","start":112,"end":116,"line":8,"column":8},"related":[],"fixes":[{"message":"write `mut`","applicability":"machine-applicable","edits":[{"span":{"file":"reference_at_a_call.mn","start":112,"end":116,"line":8,"column":8},"replacement":"mut"}]}]}],"todos":[],"trusted":[]}
+== surface-syntax/struct_literal_with_braces.mn ==
+{"version":1,"diagnostics":[{"code":"E0129","severity":"error","message":"Mente builds a struct with its fields in parentheses, as in `Pair(field: value)`, not in braces","primary":{"file":"struct_literal_with_braces.mn","start":97,"end":116,"line":8,"column":25},"related":[],"fixes":[{"message":"write the fields in parentheses","applicability":"machine-applicable","edits":[{"span":{"file":"struct_literal_with_braces.mn","start":101,"end":104,"line":8,"column":29},"replacement":"("},{"span":{"file":"struct_literal_with_braces.mn","start":114,"end":116,"line":8,"column":42},"replacement":")"}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/struct_without_its_brace.mn ==
 {"version":1,"diagnostics":[{"code":"E0102","severity":"error","message":"expected `{` after `struct S`, found `a`","primary":{"file":"struct_without_its_brace.mn","start":51,"end":52,"line":4,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == surface-syntax/turbofish.mn ==

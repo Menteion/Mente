@@ -1,0 +1,14 @@
+// expect: pass
+module conformance
+// A plain struct in a `@layout` struct is sized and aligned by its own layout
+// (`core-calculus.md`, item 21): `Pair` takes 8 bytes, aligned to 4.
+pub struct Pair {
+  a: u32
+  b: u8
+}
+
+@layout(size: 16, align: 8)
+pub struct Rec {
+  @bytes(0..8) pub id: u64
+  @bytes(8..16) pub p: Pair
+}

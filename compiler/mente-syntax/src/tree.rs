@@ -1,9 +1,11 @@
-//! The syntax tree of one M1 function (`spec/grammar.md`, items 4 to 7).
+//! The syntax tree of one function (`spec/grammar.md`, items 4 to 7, and the parts of items 10
+//! to 12 that M2's structs bring), and of one struct declaration.
 //!
 //! The nodes of a function live in the tables of its [`Tree`] and refer to each other by index,
 //! as `MirRegionSoA` does, so the tree has no pointers and no lifetimes. A node keeps the span
 //! of the text it was parsed from. [`Tree::render_expr`] prints an expression in one canonical
-//! form, fully parenthesised, which the tests compare against.
+//! form, fully parenthesised, which the tests compare against. A struct declaration keeps its
+//! fields' types in a tree of its own ([`StructSyntax`]).
 
 use crate::Span;
 
@@ -100,6 +102,14 @@ pub struct Arg {
     pub value: ExprId,
 }
 
+/// A field's value where a struct is built: `name: value`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldInit {
+    pub name: String,
+    pub name_span: Span,
+    pub value: ExprId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExprKind {
     /// An integer literal: its value, and its suffix when it has one (`u8` for `255_u8`).
@@ -126,14 +136,20 @@ pub enum ExprKind {
         base: ExprId,
         index: ExprId,
     },
-    /// `a.len`, the only field M1 has.
+    /// `a.name`: an array's `len`, or a struct's field.
     Field {
         base: ExprId,
         name: String,
     },
+    /// `f(a, b)`, whose arguments are positional.
     Call {
         callee: String,
         args: Vec<Arg>,
+    },
+    /// `Name(field: value, ...)`, whose arguments are named: a struct being built.
+    Construct {
+        name: String,
+        fields: Vec<FieldInit>,
     },
     Array(Vec<ExprId>),
     /// `[value; count]`, with `count` an integer literal.
@@ -236,6 +252,8 @@ pub enum TypeKind {
         len: u128,
         elem: TypeId,
     },
+    /// A type named by a declaration of the module: a struct.
+    Named(String),
     /// What a diagnostic replaced.
     Error,
 }
@@ -283,6 +301,25 @@ pub struct FnSyntax {
     pub result: Option<TypeId>,
     pub contracts: Vec<Contract>,
     pub body: Option<Body>,
+    pub tree: Tree,
+}
+
+/// One field of a struct declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldSyntax {
+    pub is_pub: bool,
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeId,
+}
+
+/// One struct declaration (`grammar.md`, item 10): its fields in the order written, their types
+/// in its own tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructSyntax {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<FieldSyntax>,
     pub tree: Tree,
 }
 
@@ -341,6 +378,9 @@ impl Tree {
                     ExprKind::Field { base, .. } => out.push(Node::E(base.0)),
                     ExprKind::Call { args, .. } => {
                         out.extend(args.iter().map(|a| Node::E(a.value.0)));
+                    }
+                    ExprKind::Construct { fields, .. } => {
+                        out.extend(fields.iter().map(|f| Node::E(f.value.0)));
                     }
                     ExprKind::Array(items) => out.extend(items.iter().map(|e| Node::E(e.0))),
                     ExprKind::Repeat { value, .. } => out.push(Node::E(value.0)),
@@ -556,6 +596,14 @@ impl Tree {
                 out.push(')');
                 out
             }
+            ExprKind::Construct { name, fields } => {
+                let mut out = format!("(new {}", name);
+                for f in fields {
+                    out.push_str(&format!(" ({} {})", f.name, self.render_expr(f.value)));
+                }
+                out.push(')');
+                out
+            }
             ExprKind::Array(items) => {
                 let inner: Vec<String> = items.iter().map(|e| self.render_expr(*e)).collect();
                 format!("[{}]", inner.join(" "))
@@ -681,8 +729,23 @@ impl Tree {
             },
             TypeKind::Bool => String::from("bool"),
             TypeKind::Array { len, elem } => format!("[{}]{}", len, self.render_type(*elem)),
+            TypeKind::Named(name) => name.clone(),
             TypeKind::Error => String::from("<error>"),
         }
+    }
+
+    /// A struct declaration in its canonical form: `(struct Name (field type) ...)`, a public
+    /// field as `(pub field type)`.
+    pub fn render_struct(s: &StructSyntax) -> String {
+        let fields: Vec<String> = s
+            .fields
+            .iter()
+            .map(|f| {
+                let p = if f.is_pub { "pub " } else { "" };
+                format!("({}{} {})", p, f.name, s.tree.render_type(f.ty))
+            })
+            .collect();
+        format!("(struct {} {})", s.name, fields.join(" "))
     }
 }
 

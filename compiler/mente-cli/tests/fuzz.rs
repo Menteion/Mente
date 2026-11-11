@@ -434,6 +434,29 @@ fn test_fuzz_array_past_four_gigabytes_is_e0223() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Found by `mn fuzz`: an element read whose index never gives a value, `a[unreachable("")]`,
+/// checked but did not lower ("an index that is not an integer"); M1's lowering had it too. The
+/// read ends where its index does, as a stored element's path already did.
+#[test]
+fn test_fuzz_unreachable_as_an_index_lowers() {
+    let file = regressions().join("lower-unreachable-as-an-index.mn");
+    replay(std::slice::from_ref(&file));
+}
+
+/// Found by `mn fuzz`: an assignment to what is no place (`E0114`) went on to read its value,
+/// and noted the idiom `&` there while recovering from the error, which the body parser
+/// asserts it never does. The error now ends the statement, as every error does.
+#[test]
+fn test_fuzz_reference_after_an_assignment_to_no_place_is_e0114() {
+    let file = regressions().join("parse-reference-after-an-assignment-to-no-place.mn");
+    replay(std::slice::from_ref(&file));
+    let run = mn(&["check", file.to_str().unwrap()], None);
+    let printed = text(&run.stdout) + &text(&run.stderr);
+    assert_eq!(run.status.code(), Some(1), "{}", printed);
+    assert!(printed.contains("E0114"), "no E0114 in {}", printed);
+    assert!(!printed.contains("E0119"), "an idiom read in {}", printed);
+}
+
 /// Found by `mn fuzz`: a malformed return type passed a whole check and swallowed what followed,
 /// here a lone `fn`, which `mn check --watch`'s session read as an item of its own (`E0101`). A
 /// return type whose `]` or `>` closes nothing, or whose `[` or `<` is never closed, is `E0116`,

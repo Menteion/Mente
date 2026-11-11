@@ -1369,6 +1369,9 @@ struct Function {
 }
 
 fn scalar_functions(module: &CheckedModule) -> Vec<Function> {
+    let Ok(shapes) = mente_codegen::lower::Shapes::of(&module.structs) else {
+        return Vec::new();
+    };
     module
         .functions
         .iter()
@@ -1379,7 +1382,7 @@ fn scalar_functions(module: &CheckedModule) -> Vec<Function> {
                 .syntax
                 .params
                 .iter()
-                .map(|p| Shape::of(&mente_sema::types::Ty::of(tree, p.ty)).ok())
+                .map(|p| Shape::of(&mente_sema::types::Ty::of(tree, p.ty), &shapes).ok())
                 .collect::<Option<Vec<Shape>>>()?;
             params
                 .iter()
@@ -1451,7 +1454,7 @@ fn run_mir(lowered: &Lowered, functions: &[Function]) -> Option<String> {
             }
             let mut memory = Memory::default();
             let mut values = Vec::new();
-            if let Shape::Array(..) = entry.result {
+            if entry.result.in_memory() {
                 values.push(Val::Addr(memory.alloc(entry.result.size())));
             }
             for ((is_mut, shape), s) in entry.params.iter().zip(&call) {

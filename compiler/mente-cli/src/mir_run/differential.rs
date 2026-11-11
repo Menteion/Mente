@@ -751,6 +751,23 @@ mod tests {
         assert_eq!(fewer.iter().filter(|c| c.0 == "small").count(), 6);
     }
 
+    /// A function whose arguments the reference interpreter could not hold, more values than
+    /// a literal of its may have, is not called: here 2^32 empty arrays, and an array just past
+    /// the limit inside a struct; one at the limit is.
+    #[test]
+    fn test_calls_leave_out_arguments_too_large_to_hold() {
+        let most = mente_interp::Limits::default().max_array;
+        let src = format!(
+            "module m\npub struct S {{\n  xs: [{}]u8\n}}\npub fn empty(xs: [4294967295][0]u8) -> u8 = 0\npub fn held(s: S) -> u8 = 0\npub fn at(xs: [{}]u8) -> u8 = 0\npub fn small(x: u8) -> u8 = x\n",
+            most,
+            most - 1
+        );
+        let module = mente_sema::check_program(&src).unwrap();
+        let calls = generate::calls(&src, &module, 7, FEW);
+        let called: std::collections::BTreeSet<&str> = calls.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(called, ["at", "small"].into_iter().collect());
+    }
+
     /// Generated programs of every mode, each call on the four paths: the reference
     /// interpreter, MIR with every check, MIR without the checks Tier 1 proved, and native code
     /// print the same.

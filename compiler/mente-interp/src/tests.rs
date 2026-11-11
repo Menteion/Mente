@@ -766,3 +766,119 @@ fn test_an_argument_of_another_shape_is_refused_before_anything_runs() {
     assert_eq!(run(src, "h([1, 2])"), "1");
     assert_eq!(run(src, "b(true)"), "true");
 }
+
+/// A struct is a value built field by field, each value narrowed into its field's type and
+/// checked against its refinement where it lands, in the order written; binding, passing and
+/// returning it copies it; a field of a `var` or a `mut` parameter is a place, read and stored
+/// through indexes and other fields, and passed as `mut`, its final value copied back.
+#[test]
+fn test_structs_are_values_built_in_field_order() {
+    let decls = "pub struct P {\n  a: u8\n  b: i8[-3..=3]\n}\npub struct Q {\n  p: P\n  xs: [2]P\n  f: bool\n}\n";
+    let with = |f: &str| format!("{}{}", decls, f);
+    let make = with("pub fn make(a: i16, b: i16) -> P = P(a: a, b: b)");
+    assert_eq!(run(&make, "make(255, -3)"), "P(a: 255, b: -3)");
+    // The first field's value traps before the second's is checked.
+    assert_eq!(
+        trapped(&make, "make(256, 9)"),
+        ("narrowing".to_string(), 11, 41)
+    );
+    assert_eq!(
+        trapped(&make, "make(2, 4)"),
+        ("refinement".to_string(), 11, 47)
+    );
+    let places = with("pub fn set(mut q: Q, i: usize, v: u8) -> u8 {\n  q.p.a = v\n  q.xs[i].a += 1\n  q.xs[1] = q.p\n  q.f = not q.f\n  q.xs[0].a\n}");
+    let q = "Q(p: P(a: 1, b: 0), xs: [P(a: 2, b: 1), P(a: 3, b: 2)], f: false)";
+    assert_eq!(run(&places, &format!("set(mut {}, 0, 7)", q)), "3");
+    assert_eq!(
+        kind(&places, &format!("set(mut {}, 2, 7)", q)),
+        "index-out-of-bounds"
+    );
+    let (v, finals) = call_leaving(
+        &module(&places),
+        "set",
+        vec![
+            parse_call(&format!("f({})", q)).unwrap().1.remove(0),
+            Value::Int(Int::from_u128(1)),
+            Value::Int(Int::from_u128(9)),
+        ],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(v.to_string(), "2");
+    assert_eq!(
+        finals[0].to_string(),
+        "Q(p: P(a: 9, b: 0), xs: [P(a: 2, b: 1), P(a: 9, b: 0)], f: true)"
+    );
+    // A copy stays apart from its original, and a store into a refined field is checked.
+    let copy = with("pub fn copy(p: P) -> [2]u8 {\n  var q = p\n  q.a = 9\n  [p.a, q.a]\n}");
+    assert_eq!(run(&copy, "copy(P(a: 1, b: 0))"), "[1, 9]");
+    let store = with("pub fn store(mut p: P, v: i8) {\n  p.b = v\n}");
+    assert_eq!(kind(&store, "store(mut P(a: 1, b: 0), 5)"), "refinement");
+    // A `mut` field argument takes the callee's final value back into its refinement.
+    let back =
+        with("fn grow(mut n: i8) {\n  n += 3\n}\npub fn field(mut p: P) {\n  grow(mut p.b)\n}");
+    assert_eq!(kind(&back, "field(mut P(a: 1, b: 0))"), "()");
+    assert_eq!(kind(&back, "field(mut P(a: 1, b: 1))"), "refinement");
+}
+
+/// A struct prints as Mente writes it, `Name(field: v, ...)`, in the order of its declaration,
+/// and a call from outside reads it in that form; one whose fields are named otherwise, or lie
+/// outside their types or refinements, is refused or traps as an argument does.
+#[test]
+fn test_a_struct_value_prints_and_reads_back_in_one_form() {
+    let src = "pub struct P {\n  a: u8\n  b: i8[-3..=3]\n}\npub struct W {\n  p: P\n  wide: i128\n}\npub fn id(w: W) -> W = w";
+    let w = "W(p: P(a: 255, b: -3), wide: -170141183460469231731687303715884105728)";
+    assert_eq!(run(src, &format!("id({})", w)), w);
+    assert_eq!(
+        parse_call("f(P(a: 1, b: -2), [P(a: 0, b: 0)])").map(|(_, a)| a.len()),
+        Some(2)
+    );
+    assert_eq!(parse_call("f(P(a: 1 b: 2))"), None);
+    assert_eq!(parse_call("f(P(1, 2))"), None);
+    // A field's name is a name: not empty, and not beginning with a digit.
+    assert_eq!(parse_call("f(P(: 1))"), None);
+    assert_eq!(parse_call("f(P(1a: 1))"), None);
+    assert_eq!(parse_call("f(P(a: 1, : 2))"), None);
+    assert!(parse_call("f(P(a1: 1, _b: 2))").is_some());
+    // A value has its parameter's shape: its struct, each field once in order, of its type.
+    for wrong in [
+        "id(W(wide: 0, p: P(a: 1, b: 0)))",
+        "id(V(p: P(a: 1, b: 0), wide: 0))",
+        "id(W(p: P(a: 1, c: 0), wide: 0))",
+        "id(W(p: P(a: true, b: 0), wide: 0))",
+        "id(W(p: P(a: 1, b: 0), wide: [0]))",
+        "id(W(p: P(a: 1), wide: 0))",
+        "id(W(p: P(a: 1, b: 0, b: 0), wide: 0))",
+    ] {
+        assert!(
+            run(src, wrong).contains("does not have its parameter's shape"),
+            "{}",
+            wrong
+        );
+    }
+    assert_eq!(kind(src, "id(W(p: P(a: 256, b: 0), wide: 0))"), "narrowing");
+    assert_eq!(kind(src, "id(W(p: P(a: 1, b: 4), wide: 0))"), "refinement");
+}
+
+/// A value keeps the value it had when it was evaluated (`core-calculus.md`, items 10 and 12):
+/// an argument read from a binding that a later argument changes, and a field read through an
+/// index that changes the binding the index reads; and a field's path is evaluated left to
+/// right, each index checked before the next is evaluated.
+#[test]
+fn test_a_value_keeps_the_value_it_was_evaluated_to() {
+    let src = "pub struct D {\n  d: u8\n}\npub struct S {\n  xs: [2]D\n}\npub struct O {\n  ys: [2]D\n}\nfn get(p: D, k: u8) -> u8 = p.d + k\nfn set(mut p: D) -> u8 {\n  p.d = 9\n  0\n}\npub fn argument() -> u8 {\n  var p = D(d: 1)\n  get(p, set(mut p))\n}\nfn one(mut xs: [2]D) -> usize {\n  xs[1].d = 50\n  1\n}\npub fn through_index() -> u8 {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)].d\n}\npub fn element() -> D {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)]\n}\nfn reset(mut s: S) -> usize {\n  s.xs[0].d = 99\n  0\n}\npub fn through_field() -> u8 {\n  var s = S(xs: [D(d: 1), D(d: 2)])\n  s.xs[reset(mut s)].d\n}\npub fn rd(xs: [2]O, i: usize, j: usize, k: usize) -> u8 = xs[i].ys[j / k].d";
+    assert_eq!(run(src, "argument()"), "1");
+    assert_eq!(run(src, "through_index()"), "2");
+    assert_eq!(run(src, "element()"), "D(d: 2)");
+    assert_eq!(run(src, "through_field()"), "1");
+    let o = "O(ys: [D(d: 1), D(d: 2)])";
+    assert_eq!(
+        kind(src, &format!("rd([{}, {}], 5, 1, 0)", o, o)),
+        "index-out-of-bounds"
+    );
+    assert_eq!(
+        kind(src, &format!("rd([{}, {}], 1, 1, 0)", o, o)),
+        "division-by-zero"
+    );
+    assert_eq!(run(src, &format!("rd([{}, {}], 1, 1, 1)", o, o)), "2");
+}
