@@ -461,39 +461,45 @@ pub fn verify_explicit_struct_layout(
     let layout = extract_layout_attr(s).map_or(s.name_span, |(_, _, span)| span);
     let layout_text =
         |size: usize, align: usize| format!("@layout(size: {}, align: {})", size, align);
+    // A fix is offered only where its numbers exist: the next power of two above an alignment,
+    // and the next multiple of it above a size, may lie past `usize`.
     if !align.is_power_of_two() {
-        let next = align.next_power_of_two().max(1);
-        return Err(Diagnostic::error(
+        let d = Diagnostic::error(
             "E0410",
             layout,
             format!(
                 "struct `{}`: alignment {} is not a power of two",
                 s.name, align
             ),
-        )
-        .with_fix(
-            Applicability::Suggestion,
-            format!("align it to {} bytes", next),
-            layout,
-            layout_text(expected_size, next),
-        ));
+        );
+        return Err(match align.checked_next_power_of_two() {
+            Some(next) => d.with_fix(
+                Applicability::Suggestion,
+                format!("align it to {} bytes", next.max(1)),
+                layout,
+                layout_text(expected_size, next.max(1)),
+            ),
+            None => d,
+        });
     }
     if !expected_size.is_multiple_of(align) {
-        let rounded = expected_size.div_ceil(align) * align;
-        return Err(Diagnostic::error(
+        let d = Diagnostic::error(
             "E0411",
             layout,
             format!(
                 "struct `{}`: size {} is not a multiple of its alignment {}",
                 s.name, expected_size, align
             ),
-        )
-        .with_fix(
-            Applicability::Suggestion,
-            format!("round the size up to {} bytes", rounded),
-            layout,
-            layout_text(rounded, align),
-        ));
+        );
+        return Err(match expected_size.div_ceil(align).checked_mul(align) {
+            Some(rounded) => d.with_fix(
+                Applicability::Suggestion,
+                format!("round the size up to {} bytes", rounded),
+                layout,
+                layout_text(rounded, align),
+            ),
+            None => d,
+        });
     }
 
     let packed = s.attrs.iter().any(|a| a.name == "packed");
@@ -1326,6 +1332,15 @@ pub struct Sample {
                 "E0414",
             ),
             (good.replace("size: 8", "size: 12"), "E0416"),
+            // Whose fix would lie past `usize` (the fuzzer's findings 16 and 17).
+            (
+                good.replace("align: 4", "align: 18446744073709551615"),
+                "E0410",
+            ),
+            (
+                good.replace("size: 8", "size: 18446744073709551615"),
+                "E0411",
+            ),
         ];
         for (code, expected) in cases {
             let err = first_error(&code);
