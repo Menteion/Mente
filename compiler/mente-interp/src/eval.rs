@@ -607,20 +607,16 @@ impl<'m> Machine<'m> {
                 let i = self.int(frame, *index, None)?;
                 element(&b, i, span)?.clone()
             }
-            ExprKind::Field { base, name } => match &f.typing.exprs[base.0 as usize] {
-                // A field of a place is read where it is, without a copy of the whole.
-                Ty::Struct(_) if mente_sema::check::is_place(tree, *base) => {
-                    let path = self.place(frame, e)?;
-                    self.read(frame, &path)?
-                }
-                _ => match self.eval(frame, *base, None)? {
-                    Value::Array(items) => Value::Int(Int::from_u128(items.len() as u128)),
-                    Value::Struct(_, fields) => fields
-                        .into_iter()
-                        .find(|(n, _)| n == name)
-                        .map_or(Value::Unit, |(_, v)| v),
-                    _ => Value::Unit,
-                },
+            // The base is a value first, as an index's is, so that a field read through an
+            // index reads the value the base had when it was evaluated, its indexes evaluated,
+            // and each checked, from left to right (`core-calculus.md`, items 10 and 12).
+            ExprKind::Field { base, name } => match self.eval(frame, *base, None)? {
+                Value::Array(items) => Value::Int(Int::from_u128(items.len() as u128)),
+                Value::Struct(_, fields) => fields
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map_or(Value::Unit, |(_, v)| v),
+                _ => Value::Unit,
             },
             // Each value is narrowed into its field's type and refinement where it lands, in the
             // order written, which is the declaration's (`core-calculus.md`, item 13).

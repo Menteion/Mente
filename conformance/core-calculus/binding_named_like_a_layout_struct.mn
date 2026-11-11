@@ -1,0 +1,12 @@
+// expect: E0220
+module conformance
+// A `@layout` struct is a type of the module too, though its values come in M3.
+@layout(size: 8, align: 8)
+pub struct Stamp {
+  @bytes(0..8) pub nanos: u64
+}
+
+pub fn f(a: u64) -> u64 {
+  val Stamp = a
+  Stamp
+}

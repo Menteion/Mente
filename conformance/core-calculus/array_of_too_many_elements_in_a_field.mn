@@ -1,0 +1,11 @@
+// expect: E0223
+module conformance
+// An array holds at most 4,294,967,295 elements, whatever their size.
+pub struct Z {
+  a: [0]u8
+}
+
+pub struct H {
+  zs: [4294967296]Z
+  b: u8
+}

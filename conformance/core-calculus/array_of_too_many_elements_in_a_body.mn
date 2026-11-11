@@ -1,0 +1,6 @@
+// expect: E0223
+module conformance
+pub fn f() -> u8 {
+  _ = [[0_u8; 0]; 4294967296]
+  0
+}

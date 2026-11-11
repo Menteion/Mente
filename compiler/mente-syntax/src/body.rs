@@ -23,6 +23,26 @@ pub const INT_TYPES: [&str; 11] = [
     "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "usize",
 ];
 
+/// A type the language names but a later milestone brings: the milestone, and what it is.
+pub fn later_type(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "str" | "String" | "List" => Some(("M2", "a string or list type")),
+        "f32" | "f64" | "dec" | "sat" | "wrap" => {
+            Some(("M5", "a floating-point, decimal or saturating type"))
+        }
+        "Arena" | "Pool" | "Handle" | "Local" | "Shared" | "SoA" | "Tiled" => {
+            Some(("M3", "an arena, pool or layout type"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `name` names a type of the language, now or in a later milestone: an integer type,
+/// `bool`, or a [`later_type`]. No declaration of a module takes such a name.
+pub fn language_type(name: &str) -> bool {
+    INT_TYPES.contains(&name) || name == "bool" || later_type(name).is_some()
+}
+
 /// Parses one function from its tokens, `fn` to the end of its body, which `src` holds at the
 /// tokens' spans.
 pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>) {
@@ -653,17 +673,7 @@ impl Parser {
                 self.tree.push_type(TypeKind::Error, start)
             }
             TokenKind::Ident(n) => {
-                let milestone = match n.as_str() {
-                    "str" | "String" | "List" => Some(("M2", "a string or list type")),
-                    "f32" | "f64" | "dec" | "sat" | "wrap" => {
-                        Some(("M5", "a floating-point, decimal or saturating type"))
-                    }
-                    "Arena" | "Pool" | "Handle" | "Local" | "Shared" | "SoA" | "Tiled" => {
-                        Some(("M3", "an arena, pool or layout type"))
-                    }
-                    _ => None,
-                };
-                if let Some((m, what)) = milestone {
+                if let Some((m, what)) = later_type(&n) {
                     let what = format!("{} (`{}`)", what, n);
                     self.later(start, &what, Some(m));
                     return self.tree.push_type(TypeKind::Error, start);
@@ -921,6 +931,11 @@ impl Parser {
                             )
                             .with_related(op_span, "assigned here");
                             self.error(d);
+                            // An error stops its statement's parse, as everywhere, so that no
+                            // idiom in the value is read while recovering.
+                            return self
+                                .tree
+                                .push_stmt(StmtKind::Expr(target), self.span_from(start));
                         }
                         self.bump();
                         let value = self.expr();
@@ -2595,6 +2610,14 @@ _ == b"
                     "`a + b` is not a place to assign to; a place is a name, or an element or a field of one such as `a[i]` or `s.f`"
                 )
             )]
+        );
+        // The error ends the statement: an idiom in the value, such as `&`, is not read.
+        assert_eq!(
+            errors("b + 1 = &mut")
+                .iter()
+                .map(|(code, _)| *code)
+                .collect::<Vec<_>>(),
+            ["E0114"]
         );
         assert_eq!(
             errors("f(mut a + b)"),

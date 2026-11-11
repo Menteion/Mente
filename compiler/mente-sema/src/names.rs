@@ -105,6 +105,18 @@ pub fn resolve(
     (r.resolution, r.errors)
 }
 
+impl Resolver<'_> {
+    /// What type of the module `name` names, if it names one: a struct, or a type whose values
+    /// come later.
+    fn type_kind(&self, name: &str) -> Option<&'static str> {
+        if self.struct_names.contains(name) {
+            Some("a struct")
+        } else {
+            self.structs.later.get(name).map(|l| l.kind)
+        }
+    }
+}
+
 struct Resolver<'a> {
     structs: &'a Structs,
     /// The names of the module's structs.
@@ -201,10 +213,8 @@ impl Resolver<'_> {
         let id = self.push_binding(name, span, kind, ty);
         let declared_as = if self.functions.contains_key(name) {
             Some("a function")
-        } else if self.struct_names.contains(name) {
-            Some("a struct")
         } else {
-            None
+            self.type_kind(name)
         };
         if let Some(what) = declared_as {
             let d = Diagnostic::error(
@@ -367,6 +377,12 @@ impl Resolver<'_> {
                     self.resolution.calls[e.0 as usize] = Some(index);
                 } else if self.struct_names.contains(callee) {
                     // A struct built with positional arguments, which the type checker reports.
+                } else if let Some(later) = self.structs.later.get(callee) {
+                    let name_span = Span {
+                        end: span.start + callee.len(),
+                        ..span
+                    };
+                    self.errors.push(later.diagnostic(callee, name_span));
                 } else if self.lookup(callee).is_some() {
                     self.errors.push(Diagnostic::error(
                         "E0204",
@@ -396,6 +412,12 @@ impl Resolver<'_> {
                 if let Some(&index) = self.functions.get(name) {
                     // A function called with named arguments, which the type checker reports.
                     self.resolution.calls[e.0 as usize] = Some(index);
+                } else if let Some(later) = self.structs.later.get(name) {
+                    let name_span = Span {
+                        end: span.start + name.len(),
+                        ..span
+                    };
+                    self.errors.push(later.diagnostic(name, name_span));
                 } else if !self.struct_names.contains(name) {
                     let mut candidates: Vec<String> = self.struct_names.iter().cloned().collect();
                     candidates.sort();
@@ -469,6 +491,15 @@ impl Resolver<'_> {
                 format!(
                     "`{}` is a struct, not a value: build one with its fields, as in `{}(field: value)`",
                     n, n
+                ),
+            ));
+        } else if let Some(later) = self.structs.later.get(n) {
+            self.errors.push(Diagnostic::error(
+                "E0204",
+                span,
+                format!(
+                    "`{}` is {} of this module, a type, not a value; {} comes in {}",
+                    n, later.kind, later.what, later.milestone
                 ),
             ));
         } else {
@@ -1001,7 +1032,7 @@ mod tests {
     /// struct's name is no value (`E0204`), a struct built of a name that is none is `E0201`
     /// with the closest struct suggested, and a type that names nothing is `E0116`.
     #[test]
-    fn test_no_binding_takes_the_name_of_a_struct() {
+    fn test_no_binding_takes_the_name_of_a_type_of_its_module() {
         let pair = "pub struct Pair {
   i: u8
 }
@@ -1040,6 +1071,74 @@ mod tests {
             ["E0116"]
         );
         assert_eq!(codes(&with("pub fn f(p: Pair) -> u8 = p.i")), NONE);
+        // Every type the module declares counts, those whose values come later too: a
+        // `@layout` struct, a bitstruct and an enum.
+        let later = "@layout(size: 8, align: 8)
+pub struct Stamp {
+  @bytes(0..8) pub nanos: u64
+}
+pub bitstruct Tag : u8 {
+  @bits(0..8) pub raw: u8
+}
+pub enum Mode {
+  On
+  Off
+}
+";
+        let with = |f: &str| format!("{}{}", later, f);
+        assert_eq!(
+            messages(&with("pub fn f(a: u8) -> u8 {
+  val Stamp = a
+  Stamp
+}")),
+            ["`Stamp` is the name of a struct of this module; a name means one thing, so give this binding another"]
+        );
+        assert_eq!(
+            messages(&with("pub fn f(Tag: u8) -> u8 = Tag")),
+            ["`Tag` is the name of a bitstruct of this module; a name means one thing, so give this binding another"]
+        );
+        assert_eq!(
+            messages(&with("pub fn f(a: u8) -> u8 {
+  var Mode = a
+  Mode = 1
+  Mode
+}")),
+            ["`Mode` is the name of an enum of this module; a name means one thing, so give this binding another"]
+        );
+        // Building one, by name or by position, is a construct of its milestone, and its name is
+        // no value.
+        for build in ["Stamp(nanos: 1)", "Stamp(1)"] {
+            assert_eq!(
+                messages(&with(&format!(
+                    "pub fn f() -> u8 {{
+  _ = {}
+  0
+}}",
+                    build
+                ))),
+                ["a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it"],
+                "{}",
+                build
+            );
+        }
+        assert_eq!(
+            messages(&with(
+                "pub fn f() -> u8 {
+  _ = Tag(raw: 1)
+  0
+}"
+            )),
+            ["a bitstruct as a value (`Tag`) comes in M3; M1 does not have it"]
+        );
+        assert_eq!(
+            messages(&with(
+                "pub fn f() -> u8 {
+  val m = Mode
+  0
+}"
+            )),
+            ["`Mode` is an enum of this module, a type, not a value; an enum comes in M2"]
+        );
     }
 
     #[test]

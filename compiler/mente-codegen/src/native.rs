@@ -1674,6 +1674,27 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         ] {
             assert!(build(wrong).is_err());
         }
+        // A struct's argument holds each of its fields, of its field's shape.
+        let source =
+            "module m\npub struct P {\n  a: u8\n  b: [2]u16\n}\npub fn h(p: P) -> u8 = p.a\n";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let h = lowered.entries.iter().position(|e| e.name == "h").unwrap();
+        let build = |args: Vec<Arg>| {
+            let mut w = writer(Target::X86_64Linux);
+            program(&lowered, &[Call { entry: h, args }], "", &mut w)
+        };
+        let pair = || Arg::Array(vec![int(2), int(3)]);
+        assert!(build(vec![Arg::Struct(vec![int(1), pair()])]).is_ok());
+        for wrong in [
+            vec![Arg::Struct(vec![int(1)])],
+            vec![Arg::Struct(vec![int(1), pair(), int(4)])],
+            vec![Arg::Struct(vec![int(1), int(2)])],
+            vec![Arg::Struct(vec![])],
+            vec![pair()],
+        ] {
+            assert!(build(wrong).is_err());
+        }
     }
 
     /// Every call in `main` keeps its arguments in the same stack space, since only one runs:

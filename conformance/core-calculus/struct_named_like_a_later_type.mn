@@ -1,0 +1,6 @@
+// expect: E0228
+module conformance
+// `String` is a type M2 brings later; a struct of the module may not take its name.
+pub struct String {
+  bytes: [8]u8
+}

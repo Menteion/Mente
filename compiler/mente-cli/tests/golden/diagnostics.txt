@@ -8,6 +8,14 @@
 {"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the elements of this array literal give values that no one of `i128` and `u128` holds together, and they are kept in one of them","primary":{"file":"array_literal_beyond_128_bits.mn","start":98,"end":104,"line":4,"column":21},"related":[],"fixes":[{"message":"bind `b` to `wide: i128` first","applicability":"suggestion","edits":[{"span":{"file":"array_literal_beyond_128_bits.mn","start":78,"end":78,"line":4,"column":1},"replacement":"  val wide: i128 = b\n"},{"span":{"file":"array_literal_beyond_128_bits.mn","start":102,"end":103,"line":4,"column":25},"replacement":"wide"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/array_literal_of_mixed_integers.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/array_of_the_most_elements.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/array_of_too_many_elements_in_a_body.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296][0]u8` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size","primary":{"file":"array_of_too_many_elements_in_a_body.mn","start":61,"end":84,"line":4,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/array_of_too_many_elements_in_a_field.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296]Z` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size","primary":{"file":"array_of_too_many_elements_in_a_field.mn","start":157,"end":170,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/array_of_too_many_elements_in_a_signature.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296][0]u8` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size","primary":{"file":"array_of_too_many_elements_in_a_signature.mn","start":49,"end":66,"line":3,"column":14},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/array_within_4_gib.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/assign_to_a_field_of_a_val.mn ==
@@ -16,6 +24,8 @@
 {"version":1,"diagnostics":[{"code":"E0205","severity":"error","message":"cannot assign to `x`: it is a `val`, which never changes; declare it with `var`","primary":{"file":"assign_to_val.mn","start":69,"end":70,"line":5,"column":3},"related":[{"message":"declared here","span":{"file":"assign_to_val.mn","start":61,"end":62,"line":4,"column":7}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/binding_named_like_a_function.mn ==
 {"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`id` is the name of a function of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_function.mn","start":93,"end":95,"line":5,"column":7},"related":[],"fixes":[{"message":"rename this `id` and its uses to `id2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_function.mn","start":93,"end":95,"line":5,"column":7},"replacement":"id2"},{"span":{"file":"binding_named_like_a_function.mn","start":102,"end":104,"line":6,"column":3},"replacement":"id2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/binding_named_like_a_layout_struct.mn ==
+{"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Stamp` is the name of a struct of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_layout_struct.mn","start":228,"end":233,"line":10,"column":7},"related":[],"fixes":[{"message":"rename this `Stamp` and its uses to `Stamp2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_layout_struct.mn","start":228,"end":233,"line":10,"column":7},"replacement":"Stamp2"},{"span":{"file":"binding_named_like_a_layout_struct.mn","start":240,"end":245,"line":11,"column":3},"replacement":"Stamp2"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/binding_named_like_a_struct.mn ==
 {"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Pair` is the name of a struct of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_struct.mn","start":101,"end":105,"line":8,"column":7},"related":[],"fixes":[{"message":"rename this `Pair` and its uses to `Pair2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_struct.mn","start":101,"end":105,"line":8,"column":7},"replacement":"Pair2"},{"span":{"file":"binding_named_like_a_struct.mn","start":114,"end":118,"line":9,"column":3},"replacement":"Pair2"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/binding_never_read.mn ==
@@ -36,6 +46,8 @@
 {"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`i` is already a field of `Pair`; a struct names each field once","primary":{"file":"field_declared_twice.mn","start":64,"end":65,"line":5,"column":3},"related":[{"message":"first declared here","span":{"file":"field_declared_twice.mn","start":56,"end":57,"line":4,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/field_narrowing_that_always_traps.mn ==
 {"version":1,"diagnostics":[{"code":"E0508","severity":"error","message":"Tier 1 proves `300` is at least 300 here, outside `u8` (0 to 255), so this narrowing always traps","primary":{"file":"field_narrowing_that_always_traps.mn","start":96,"end":99,"line":7,"column":32},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/field_read_keeps_its_value.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/field_the_struct_lacks.mn ==
 {"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`Pair` has no field `frist`; did you mean `first`?","primary":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"related":[],"fixes":[{"message":"write `first`","applicability":"suggestion","edits":[{"span":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"replacement":"first"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/function_as_value.mn ==
@@ -58,6 +70,10 @@
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string value comes in M2; M1 does not have it","primary":{"file":"later_string_value.mn","start":66,"end":72,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/layout_struct_as_a_value.mn ==
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_as_a_value.mn","start":131,"end":136,"line":8,"column":17},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/layout_struct_built.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_built.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/layout_struct_called.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it","primary":{"file":"layout_struct_called.mn","start":141,"end":146,"line":9,"column":7},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/len_of_a_non_array.mn ==
 {"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`.len` is an array's length, but this is `u8`","primary":{"file":"len_of_a_non_array.mn","start":63,"end":68,"line":3,"column":28},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/literal_outside_its_suffix.mn ==
@@ -120,8 +136,16 @@
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string or list type (`String`) comes in M2; M1 does not have it","primary":{"file":"struct_field_of_a_later_type.mn","start":63,"end":69,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_fields_at_their_limits.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_in_two_cycles.mn ==
+{"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`A` contains itself: its field `b` holds `B`, whose field `a` holds `A`, so a value of it would have no end","primary":{"file":"struct_in_two_cycles.mn","start":123,"end":124,"line":4,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_in_two_cycles.mn","start":129,"end":130,"line":5,"column":3}}],"fixes":[]},{"code":"E0225","severity":"error","message":"`A` contains itself: its field `c` holds `C`, whose field `a` holds `A`, so a value of it would have no end","primary":{"file":"struct_in_two_cycles.mn","start":123,"end":124,"line":4,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_in_two_cycles.mn","start":136,"end":137,"line":6,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_mut_field_arguments.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/struct_named_like_a_later_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`String` is a type of the language; a name means one thing, so give this struct another","primary":{"file":"struct_named_like_a_later_type.mn","start":132,"end":138,"line":4,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_named_like_an_integer_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`u8` is a type of the language; a name means one thing, so give this struct another","primary":{"file":"struct_named_like_an_integer_type.mn","start":47,"end":49,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/struct_named_like_bool.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`bool` is a type of the language; a name means one thing, so give this struct another","primary":{"file":"struct_named_like_bool.mn","start":47,"end":51,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_nested_and_arrays.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/struct_refined_fields_at_their_bounds.mn ==

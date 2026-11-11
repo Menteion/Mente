@@ -23,7 +23,7 @@ use mente_syntax::tree::{
 use mente_syntax::Span;
 
 use crate::names::{closest, BindingId, BindingKind, Resolution};
-use crate::structs::{Structs, VALUE_BYTES};
+use crate::structs::{too_many_elements, Structs, ARRAY_ELEMENTS, VALUE_BYTES};
 use crate::types::{Int, IntTy, Ty, USIZE};
 
 /// Any integer type, as a place that takes one.
@@ -141,28 +141,39 @@ impl Checker<'_> {
 
     /// `E0223` for each array type, and each array literal, that holds more than
     /// [`ARRAY_BYTES`]: the innermost such type, and a literal whose type no written type
-    /// already reports.
+    /// already reports; and for each one that holds more than [`ARRAY_ELEMENTS`] elements of
+    /// a size that keeps it within those bytes.
     fn arrays_in_one_piece(&mut self) {
         let mut reported = Vec::new();
         for (i, node) in self.tree.types.iter().enumerate() {
-            let TypeKind::Array { elem, .. } = &node.kind else {
+            let TypeKind::Array { elem, len } = &node.kind else {
                 continue;
             };
             let t = Ty::of(self.tree, TypeId(i as u32));
             let elem = Ty::of(self.tree, *elem);
+            let text = self.tree.render_type(TypeId(i as u32));
             if self.bytes(&t) > ARRAY_BYTES && self.bytes(&elem) <= ARRAY_BYTES {
                 reported.push(node.span);
-                let text = self.tree.render_type(TypeId(i as u32));
                 self.too_large(node.span, &text, self.bytes(&t));
+            } else if *len > ARRAY_ELEMENTS {
+                reported.push(node.span);
+                self.errors.push(too_many_elements(node.span, &text, *len));
             }
         }
         for (i, e) in self.tree.exprs.iter().enumerate() {
-            if !matches!(e.kind, ExprKind::Array(_) | ExprKind::Repeat { .. }) {
+            if !matches!(e.kind, ExprKind::Array(_) | ExprKind::Repeat { .. })
+                || !reported.is_empty()
+            {
                 continue;
             }
             let t = self.typing.exprs[i].clone();
-            if self.bytes(&t) > ARRAY_BYTES && reported.is_empty() {
+            if self.bytes(&t) > ARRAY_BYTES {
                 self.too_large(e.span, &t.spelling(), self.bytes(&t));
+            } else if let ExprKind::Repeat { count, .. } = &e.kind {
+                if *count > ARRAY_ELEMENTS {
+                    self.errors
+                        .push(too_many_elements(e.span, &t.spelling(), *count));
+                }
             }
         }
     }
@@ -1881,6 +1892,16 @@ pub fn f() -> Pair = Pair(i: 0, j: 1)"
             messages(&with("pub fn f(p: Pair) -> u8 = p.ii")),
             ["`Pair` has no field `ii`; did you mean `i`?"]
         );
+        // The error lies at the field's name, its line and column too, and so does its fix.
+        let src = module(&with("pub fn f(b: Box2) -> u8 = b.xs[0].jj"));
+        let d = check_source(&src).err().unwrap_or_default();
+        let d = d.iter().find(|d| d.code == "E0215").unwrap();
+        let at = src.rfind("jj").unwrap();
+        let line_start = src[..at].rfind('\n').map_or(0, |k| k + 1);
+        assert_eq!((d.primary.start, d.primary.end), (at, at + 2));
+        assert_eq!(d.primary.col as usize, at - line_start + 1);
+        assert_eq!(d.primary.line as usize, src[..at].matches('\n').count() + 1);
+        assert_eq!(d.fixes[0].edits[0].span, d.primary);
         assert_eq!(
             messages(&with("pub fn f(p: Pair) -> u8 = p.len")),
             ["`Pair` has no field `len`; its fields are `i`, `j`"]
@@ -2015,6 +2036,41 @@ pub fn f(mut p: Pair, c: bool) {
         );
         assert_eq!(
             all_codes("pub fn f() -> u8 {\n  _ = [0_u8; 4294967296]\n  0\n}"),
+            ["E0223"]
+        );
+    }
+
+    /// An array holds at most 4,294,967,295 elements, whatever their size, wherever its type is
+    /// written or its literal built.
+    #[test]
+    fn test_an_array_holds_at_most_4294967295_elements() {
+        let d = all_diagnostics("pub fn f(x: [4294967296][0]u8) -> u8 = 0");
+        assert_eq!(d.len(), 1, "{:?}", d);
+        assert_eq!(d[0].code, "E0223");
+        assert_eq!(
+            d[0].message,
+            "an array of type `[4294967296][0]u8` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size"
+        );
+        assert!(all_codes("pub fn f(x: [4294967295][0]u8) -> u8 = 0").is_empty());
+        assert_eq!(
+            all_codes("pub fn f() -> [4294967296][0]bool = todo(\"x\")"),
+            ["E0223"]
+        );
+        assert_eq!(
+            all_codes(
+                "pub fn f() -> usize {\n  val xs: [1][4294967296][0]u8 = todo(\"x\")\n  xs.len\n}"
+            ),
+            ["E0223"]
+        );
+        // A literal without a written type, and one of exactly the most elements.
+        assert_eq!(
+            all_codes("pub fn f() -> u8 {\n  _ = [[0_u8; 0]; 4294967296]\n  0\n}"),
+            ["E0223"]
+        );
+        assert!(all_codes("pub fn f() -> u8 {\n  _ = [[0_u8; 0]; 4294967295]\n  0\n}").is_empty());
+        // Of the module's own struct of no bytes.
+        assert_eq!(
+            all_codes("pub struct Z {\n  a: [0]u8\n}\npub fn f(zs: [4294967296]Z) -> u8 = 0"),
             ["E0223"]
         );
     }

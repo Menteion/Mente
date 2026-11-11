@@ -1,0 +1,15 @@
+// expect: pass
+module conformance
+pub struct Z {
+  a: [0]u8
+}
+
+pub struct H {
+  zs: [4294967295]Z
+  b: u8
+}
+
+pub fn f(xs: [4294967295][0]u8, h: H) -> u8 {
+  _ = [[0_u8; 0]; 4294967295]
+  h.b
+}

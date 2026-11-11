@@ -1073,7 +1073,12 @@ impl Gen {
             first = false;
             match ty.clone() {
                 Ty::Array(n, inner) if deeper => {
-                    let i = self.index(n);
+                    // Into an array of structs, now and then by an index that may change it.
+                    let call = matches!(*inner, Ty::Struct(_)) && self.rng.chance(60);
+                    let i = match call.then(|| self.index_call()).flatten() {
+                        Some(c) => E::bin(Op::Rem, c, E::Lit(n.to_string())),
+                        None => self.index(n),
+                    };
                     e = E::Index(Box::new(e), Box::new(i));
                     ty = *inner;
                 }
@@ -1136,7 +1141,14 @@ impl Gen {
                 } else {
                     1 + self.rng.below(5) as u32
                 };
-                Ty::Array(n, Box::new(self.ty(depth + 1)))
+                let elem = self.ty(depth + 1);
+                // Arrays of structs are often of two, as the functions that change them take.
+                let n = if matches!(elem, Ty::Struct(_)) && self.rng.chance(60) {
+                    2
+                } else {
+                    n
+                };
+                Ty::Array(n, Box::new(elem))
             }
         }
     }
@@ -1671,11 +1683,50 @@ impl Gen {
                 }
                 None => E::Lit("0".into()),
             },
-            80..=95 => match self.int_name(None, true) {
+            80..=89 => match self.int_name(None, true) {
                 Some((e, ..)) => E::bin(Op::Rem, e, E::Lit(n.to_string())),
                 None => E::Lit((n - 1).to_string()),
             },
+            90..=95 => match self.index_call() {
+                Some(e) => E::bin(Op::Rem, e, E::Lit(n.to_string())),
+                None => E::Lit((n - 1).to_string()),
+            },
             _ => E::Lit(n.to_string()),
+        }
+    }
+
+    /// A call whose result is an integer, for an index, which traps where it is negative: one
+    /// with `mut` arguments may change the array it indexes, which is read as it was before the index is evaluated
+    /// (`core-calculus.md`, items 10 and 12). Its own arguments make no further calls.
+    fn index_call(&mut self) -> Option<E> {
+        if self.no_calls {
+            return None;
+        }
+        let options: Vec<Sig> = self
+            .sigs
+            .iter()
+            .filter(|s| matches!(s.ret, Some(Ty::Int(_))))
+            .filter(|s| s.params.iter().any(|p| p.is_mut))
+            .filter(|s| self.cost + self.mult * s.cost <= COST_BUDGET)
+            .cloned()
+            .collect();
+        if options.is_empty() {
+            return None;
+        }
+        let sig = self.rng.pick(&options).clone();
+        let m = self.mark();
+        self.no_calls = true;
+        let e = self.arguments(&sig, false, 2);
+        self.no_calls = false;
+        match e {
+            Some(e) => {
+                self.cost += self.mult * sig.cost;
+                Some(e)
+            }
+            None => {
+                self.restore(m);
+                None
+            }
         }
     }
 
@@ -2636,7 +2687,24 @@ impl Gen {
                 refine,
             });
         }
-        let ret = self.rng.chance(80).then(|| self.ty(0));
+        // Now and then a function that changes an array of structs and gives an index, which
+        // a caller holding such an array may index it with (`index_call`).
+        let changer = !self.structs.is_empty() && self.rng.chance(30);
+        if changer {
+            let k = self.rng.below(self.structs.len() as u64) as usize;
+            let name = self.structs[k].name.clone();
+            params.push(Param {
+                name: format!("p{}", params.len()),
+                is_mut: true,
+                ty: Ty::Array(2, Box::new(Ty::Struct(name))),
+                refine: None,
+            });
+        }
+        let ret = if changer {
+            Some(Ty::Int(USIZE))
+        } else {
+            self.rng.chance(80).then(|| self.ty(0))
+        };
         let mut ret_refined = false;
         let mut ensures = Vec::new();
         let mut ret_range = None;
@@ -3003,6 +3071,22 @@ enum Domain {
     Struct(String, Vec<(String, Domain)>),
 }
 
+impl Domain {
+    /// The values an argument of this domain is built of, itself, each element and each field
+    /// counted one each: `[4294967295][0]u8` holds 4,294,967,296, though none is a scalar.
+    fn values(&self) -> u128 {
+        match self {
+            Domain::Int(..) | Domain::Bool => 1,
+            Domain::Array(n, elem) => u128::from(*n)
+                .saturating_mul(elem.values())
+                .saturating_add(1),
+            Domain::Struct(_, fields) => fields
+                .iter()
+                .fold(1, |sum, (_, f)| sum.saturating_add(f.values())),
+        }
+    }
+}
+
 fn domain(tree: &Tree, t: TypeId, structs: &Structs) -> Option<Domain> {
     Some(match &tree.ty(t).kind {
         TypeKind::Int { name, refinement } => Domain::Int(
@@ -3073,6 +3157,12 @@ pub fn calls(src: &str, module: &CheckedModule, seed: u64, plan: CallPlan) -> Ve
             })
             .collect();
         let Some(params) = params else { continue };
+        // A function whose arguments the reference interpreter could not hold, as it could
+        // not build a literal of more elements, is not called.
+        let most = mente_interp::Limits::default().max_array;
+        if params.iter().any(|(_, _, d)| d.values() > most) {
+            continue;
+        }
         for args in function_calls(&params, &mut rng, plan) {
             out.push((name.clone(), args));
         }

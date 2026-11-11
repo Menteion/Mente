@@ -9,7 +9,8 @@
 //! A declaration's checks: each field's type is one M2 has, a struct of the module included
 //! (`E0116` for a name that is none, `E0109` for a type whose values a later milestone brings);
 //! a refinement's bound is a literal, since no binding is visible in a declaration (`E0201`); a
-//! name is declared once in a module and a field once in a struct (`E0228`); no struct contains
+//! name is declared once in a module, none named like a type of the language, and a field once
+//! in a struct (`E0228`); no struct contains
 //! itself (`E0225`); and a struct's value fits in one piece (`E0223`).
 
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,23 @@ use crate::types::{Int, IntTy, Ty, INT_TYPES};
 /// The most bytes a value may hold: it is kept in one piece, in one stack slot, whose size
 /// native code holds in 32 bits (`core-calculus.md`, items 3 and 21).
 pub const VALUE_BYTES: u128 = u32::MAX as u128;
+
+/// The most elements an array may hold, whatever their size: native code counts them, as it
+/// does bytes, in 32 bits (`core-calculus.md`, item 3).
+pub const ARRAY_ELEMENTS: u128 = u32::MAX as u128;
+
+/// `E0223` for an array type, written `text` at `span`, of `len` elements, more than
+/// [`ARRAY_ELEMENTS`].
+pub fn too_many_elements(span: Span, text: &str, len: u128) -> Diagnostic {
+    Diagnostic::error(
+        "E0223",
+        span,
+        format!(
+            "an array of type `{}` holds {} elements, more than the {} an array may hold, whatever their size",
+            text, len, ARRAY_ELEMENTS
+        ),
+    )
+}
 
 /// Where a struct's fields lie in its value (`core-calculus.md`, item 21): its size and
 /// alignment in bytes, and each field's offset, in the order of the declaration.
@@ -71,9 +89,33 @@ impl StructDef {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Structs {
     pub defs: Vec<StructDef>,
-    /// Each type the module declares whose values M2 does not have: what it is, and the
-    /// milestone that brings its values.
-    pub later: HashMap<String, (&'static str, &'static str)>,
+    /// Each type the module declares whose values M2 does not have.
+    pub later: HashMap<String, Later>,
+}
+
+/// A type a module declares whose values a later milestone brings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Later {
+    /// What the declaration is: "a struct", "a bitstruct", "an enum" or "a trait".
+    pub kind: &'static str,
+    /// What a use of it as a value or a type would be.
+    pub what: &'static str,
+    /// The milestone that brings it.
+    pub milestone: &'static str,
+}
+
+impl Later {
+    /// `E0109` for a use of the type named `n` at `span`.
+    pub fn diagnostic(&self, n: &str, span: Span) -> Diagnostic {
+        Diagnostic::error(
+            "E0109",
+            span,
+            format!(
+                "{} (`{}`) comes in {}; M1 does not have it",
+                self.what, n, self.milestone
+            ),
+        )
+    }
 }
 
 impl Structs {
@@ -138,34 +180,64 @@ pub fn place_fields(fields: &[(u128, u128)]) -> Layout {
 /// declare. The diagnostics come in the order of the module.
 pub fn declare(module: &ModuleFile, parsed: &[ParsedStruct]) -> (Structs, Vec<Diagnostic>) {
     let mut later = HashMap::new();
+    let mut add = |name: &str, kind, what, milestone| {
+        later.insert(
+            name.to_string(),
+            Later {
+                kind,
+                what,
+                milestone,
+            },
+        );
+    };
     // A name is declared once in a module: a function, a struct of any kind or a bitstruct.
     let mut items: Vec<(&str, Span, &'static str)> = Vec::new();
+    // And no struct or bitstruct takes the name of a type of the language.
+    let mut reserved: Vec<(&str, Span, &'static str)> = Vec::new();
     for item in &module.items {
         let (name, span, what) = match item {
             ItemDecl::Fn(f) => (&f.name, f.name_span, "a function"),
             ItemDecl::Struct(s) => {
                 if !mente_syntax::is_value_struct(s) {
-                    later.insert(s.name.clone(), ("a `@layout` struct as a value", "M3"));
+                    add(&s.name, "a struct", "a `@layout` struct as a value", "M3");
                 }
                 (&s.name, s.name_span, "a struct")
             }
             ItemDecl::BitStruct(b) => {
-                later.insert(b.name.clone(), ("a bitstruct as a value", "M3"));
+                add(&b.name, "a bitstruct", "a bitstruct as a value", "M3");
                 (&b.name, b.name_span, "a bitstruct")
             }
             ItemDecl::Enum(e) => {
-                later.insert(e.name.clone(), ("an enum", "M2"));
+                add(&e.name, "an enum", "an enum", "M2");
                 continue;
             }
             ItemDecl::Trait(t) => {
-                later.insert(t.name.clone(), ("a trait as a type", "M4"));
+                add(&t.name, "a trait", "a trait as a type", "M4");
                 continue;
             }
             ItemDecl::Unit(_) | ItemDecl::Example(_) => continue,
         };
+        if what != "a function" {
+            reserved.push((name, span, what));
+        }
         items.push((name, span, what));
     }
     let mut errors = clashes(items);
+    let mut named_like_the_language = HashSet::new();
+    for (name, span, what) in reserved {
+        if mente_syntax::body::language_type(name) {
+            named_like_the_language.insert(name.to_string());
+            errors.push(Diagnostic::error(
+                "E0228",
+                span,
+                format!(
+                    "`{}` is a type of the language; a name means one thing, so give this {} another",
+                    name,
+                    what.trim_start_matches("a ")
+                ),
+            ));
+        }
+    }
     let mut structs = Structs {
         defs: Vec::new(),
         later,
@@ -185,7 +257,7 @@ pub fn declare(module: &ModuleFile, parsed: &[ParsedStruct]) -> (Structs, Vec<Di
             name: p.name.clone(),
             syntax,
             fields,
-            ok: p.errors.is_empty(),
+            ok: p.errors.is_empty() && !named_like_the_language.contains(&p.name),
             layout: None,
         });
     }
@@ -275,10 +347,11 @@ fn layout(structs: &mut Structs, i: usize, state: &mut [Visit], errors: &mut Vec
     let def = &structs.defs[i];
     let mut sizes = Vec::new();
     let mut reported = false;
+    let mut too_many = false;
     for f in &def.fields {
         let tree = def.tree();
         for (k, node) in tree.types.iter().enumerate() {
-            let TypeKind::Array { elem, .. } = &node.kind else {
+            let TypeKind::Array { elem, len } = &node.kind else {
                 continue;
             };
             if !within(f.decl, TypeId(k as u32), tree) {
@@ -299,6 +372,11 @@ fn layout(structs: &mut Structs, i: usize, state: &mut [Visit], errors: &mut Vec
                             VALUE_BYTES
                         ),
                     ));
+                } else if *len > ARRAY_ELEMENTS {
+                    reported = true;
+                    too_many = true;
+                    let text = tree.render_type(TypeId(k as u32));
+                    errors.push(too_many_elements(node.span, &text, *len));
                 }
             }
         }
@@ -306,6 +384,10 @@ fn layout(structs: &mut Structs, i: usize, state: &mut [Visit], errors: &mut Vec
             Some(l) => sizes.push(l),
             None => return,
         }
+    }
+    if too_many {
+        structs.defs[i].ok = false;
+        return;
     }
     let placed = place_fields(&sizes);
     if placed.size > VALUE_BYTES {
@@ -434,15 +516,8 @@ pub fn unknown_type(
     if names.contains(n) {
         return None;
     }
-    if let Some((what, milestone)) = structs.later.get(n) {
-        return Some(Diagnostic::error(
-            "E0109",
-            span,
-            format!(
-                "{} (`{}`) comes in {}; M1 does not have it",
-                what, n, milestone
-            ),
-        ));
+    if let Some(later) = structs.later.get(n) {
+        return Some(later.diagnostic(n, span));
     }
     let mut candidates: Vec<String> = names.iter().cloned().collect();
     candidates.sort();
@@ -508,32 +583,24 @@ fn self_containing(structs: &Structs) -> Vec<(usize, Diagnostic)> {
         })
         .collect();
     let mut found = Vec::new();
-    let mut in_cycle = vec![false; structs.defs.len()];
     let mut state = vec![Visit::New; structs.defs.len()];
     // The path of the search: each struct with the field it was left by.
     let mut path: Vec<(usize, usize)> = Vec::new();
     for root in 0..structs.defs.len() {
-        visit(
-            root,
-            &edges,
-            &mut state,
-            &mut path,
-            &mut in_cycle,
-            &mut found,
-            structs,
-        );
+        visit(root, &edges, &mut state, &mut path, &mut found, structs);
     }
     found.sort_by_key(|(i, _)| structs.defs[*i].syntax.name_span.start);
     found
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A depth-first search over the structs, in the order of their declarations and fields. Each
+/// field that leads back to a struct still open on the search's path closes a cycle, which is
+/// reported once, so that two cycles through one struct are two errors.
 fn visit(
     i: usize,
     edges: &[Vec<(usize, usize)>],
     state: &mut [Visit],
     path: &mut Vec<(usize, usize)>,
-    in_cycle: &mut [bool],
     found: &mut Vec<(usize, Diagnostic)>,
     structs: &Structs,
 ) {
@@ -547,25 +614,20 @@ fn visit(
             Visit::Open => {
                 let start = path.iter().position(|(s, _)| *s == j).unwrap_or(0);
                 let cycle: Vec<(usize, usize)> = path[start..].to_vec();
-                if cycle.iter().all(|(s, _)| !in_cycle[*s]) {
-                    for (s, _) in &cycle {
-                        in_cycle[*s] = true;
-                    }
-                    // Reported at the struct of the cycle declared first.
-                    let first = cycle
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, (s, _))| structs.defs[*s].syntax.name_span.start)
-                        .map_or(0, |(k, _)| k);
-                    let ordered: Vec<(usize, usize)> = cycle[first..]
-                        .iter()
-                        .chain(&cycle[..first])
-                        .copied()
-                        .collect();
-                    found.push((ordered[0].0, cycle_diagnostic(structs, &ordered)));
-                }
+                // Reported at the struct of the cycle declared first.
+                let first = cycle
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, (s, _))| structs.defs[*s].syntax.name_span.start)
+                    .map_or(0, |(k, _)| k);
+                let ordered: Vec<(usize, usize)> = cycle[first..]
+                    .iter()
+                    .chain(&cycle[..first])
+                    .copied()
+                    .collect();
+                found.push((ordered[0].0, cycle_diagnostic(structs, &ordered)));
             }
-            Visit::New => visit(j, edges, state, path, in_cycle, found, structs),
+            Visit::New => visit(j, edges, state, path, found, structs),
             Visit::Done => {}
         }
         path.pop();
@@ -693,6 +755,32 @@ mod tests {
             ),
             ["E0225", "E0225"]
         );
+        // Two cycles through one struct are two errors too, each naming its own.
+        let (_, d) = declared(
+            "module m\nstruct A {\n  b: B\n  c: C\n}\nstruct B {\n  a: A\n}\nstruct C {\n  a: A\n}\n",
+        );
+        assert_eq!(
+            d.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(),
+            [
+                "`A` contains itself: its field `b` holds `B`, whose field `a` holds `A`, so a value of it would have no end",
+                "`A` contains itself: its field `c` holds `C`, whose field `a` holds `A`, so a value of it would have no end",
+            ]
+        );
+        // The structs are searched in the order of their declarations, and each field that
+        // leads back into a struct still open on the search closes a cycle, reported once: here
+        // A -> B -> A, C -> D -> C, and through B -> C and D -> A, A -> B -> C -> D -> A.
+        let (_, d) = declared(
+            "module m\nstruct A {\n  b: B\n}\nstruct B {\n  a: A\n  c: C\n}\nstruct C {\n  d: D\n}\nstruct D {\n  c: C\n  a: A\n}\n",
+        );
+        assert!(d.iter().all(|d| d.code == "E0225"));
+        assert_eq!(
+            d.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(),
+            [
+                "`A` contains itself: its field `b` holds `B`, whose field `a` holds `A`, so a value of it would have no end",
+                "`A` contains itself: its field `b` holds `B`, whose field `c` holds `C`, whose field `d` holds `D`, whose field `a` holds `A`, so a value of it would have no end",
+                "`C` contains itself: its field `d` holds `D`, whose field `c` holds `C`, so a value of it would have no end",
+            ]
+        );
     }
 
     #[test]
@@ -757,6 +845,71 @@ mod tests {
             "`P` is already declared in this module, as a function; a name means one thing in a module, so give this struct another"
         );
         assert_eq!(d[0].related[0].span.line, 2);
+        // No struct or bitstruct takes the name of a type of the language: an integer type,
+        // `bool`, or one a later milestone brings. Such a struct is not one of the module's.
+        for name in [
+            "u8", "usize", "i128", "bool", "String", "str", "List", "f64", "Pool",
+        ] {
+            let (s, d) = declared(&format!(
+                "module m
+struct {} {{
+  a: u8
+}}
+",
+                name
+            ));
+            assert_eq!(
+                d.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0228"],
+                "{}",
+                name
+            );
+            assert_eq!(
+                d[0].message,
+                format!(
+                    "`{}` is a type of the language; a name means one thing, so give this struct another",
+                    name
+                )
+            );
+            assert!(!s.get(name).unwrap().ok, "{}", name);
+        }
+        assert_eq!(
+            codes(
+                "module m
+@layout(size: 1, align: 1)
+struct u16 {
+  @bytes(0..1) a: u8
+}
+"
+            ),
+            ["E0228"]
+        );
+        assert_eq!(
+            codes(
+                "module m
+bitstruct Arena : u8 {
+  @bits(0..8) raw: u8
+}
+"
+            ),
+            ["E0228"]
+        );
+        // A name the language does not keep is free: `U8`, `Bool`, `u24`.
+        for name in ["U8", "Bool", "u24", "Strings"] {
+            assert!(
+                codes(&format!(
+                    "module m
+struct {} {{
+  a: u8
+}}
+",
+                    name
+                ))
+                .is_empty(),
+                "{}",
+                name
+            );
+        }
     }
 
     /// A struct holds at most 4,294,967,295 bytes; a field's array beyond them is reported at the
@@ -776,5 +929,34 @@ mod tests {
             codes("module m\nstruct H {\n  a: [3000000000]u8\n}\nstruct S {\n  x: H\n  y: H\n}\n"),
             ["E0223"]
         );
+    }
+
+    /// A field's array holds at most 4,294,967,295 elements, whatever their size: elements of
+    /// no bytes keep its size within the limit, but not its count.
+    #[test]
+    fn test_a_fields_array_holds_at_most_4294967295_elements() {
+        let z = "module m\nstruct Z {\n  a: [0]u8\n}\n";
+        let (s, d) = declared(&format!(
+            "{}struct H {{\n  zs: [4294967296]Z\n  b: u8\n}}\n",
+            z
+        ));
+        assert_eq!(d.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0223"]);
+        assert_eq!(
+            d[0].message,
+            "an array of type `[4294967296]Z` holds 4294967296 elements, more than the 4294967295 an array may hold, whatever their size"
+        );
+        assert_eq!(d[0].primary.line, 6);
+        assert!(!s.get("H").unwrap().ok);
+        // Nested, each array is counted: the inner one here.
+        assert_eq!(
+            codes(&format!("{}struct H {{\n  zs: [2][4294967296]Z\n}}\n", z)),
+            ["E0223"]
+        );
+        let (s, d) = declared(&format!(
+            "{}struct H {{\n  zs: [4294967295]Z\n  b: u8\n}}\n",
+            z
+        ));
+        assert!(d.is_empty(), "{:?}", d);
+        assert_eq!(s.get("H").unwrap().layout.as_ref().map(|l| l.size), Some(1));
     }
 }

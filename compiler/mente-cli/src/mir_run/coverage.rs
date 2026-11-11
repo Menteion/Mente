@@ -158,6 +158,7 @@ const PLACES: &[&str] = &[
     "array of structs",
     "struct of structs",
     "refined field",
+    "field read through an index that calls with mut",
 ];
 
 constructs!(contract_kind, CONTRACTS: Contract {
@@ -234,7 +235,12 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
                 }
             }
             ExprKind::Field { name, .. } if name == "len" => mark("length"),
-            ExprKind::Field { .. } => mark("struct field"),
+            ExprKind::Field { base, .. } => {
+                mark("struct field");
+                if indexed_by_a_mut_call(tree, *base) {
+                    mark("field read through an index that calls with mut");
+                }
+            }
             _ => {}
         }
     }
@@ -287,6 +293,30 @@ fn holds_field(tree: &Tree, e: ExprId) -> bool {
     match &tree.expr(e).kind {
         ExprKind::Field { .. } => true,
         ExprKind::Index { base, .. } => holds_field(tree, *base),
+        _ => false,
+    }
+}
+
+/// Whether a place's path holds an index whose expression calls with a `mut` argument.
+fn indexed_by_a_mut_call(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Index { base, index } => {
+            calls_with_mut(tree, *index) || indexed_by_a_mut_call(tree, *base)
+        }
+        ExprKind::Field { base, .. } => indexed_by_a_mut_call(tree, *base),
+        _ => false,
+    }
+}
+
+fn calls_with_mut(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Call { args, .. } => {
+            args.iter().any(|a| a.is_mut) || args.iter().any(|a| calls_with_mut(tree, a.value))
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            calls_with_mut(tree, *lhs) || calls_with_mut(tree, *rhs)
+        }
+        ExprKind::Unary { operand, .. } => calls_with_mut(tree, *operand),
         _ => false,
     }
 }

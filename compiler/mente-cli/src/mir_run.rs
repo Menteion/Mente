@@ -625,6 +625,12 @@ pub fn below(n: i8) -> i8 {
         "fn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k\nfn bump(mut xs: [2]u8) -> u8 {\n  xs[0] = 7\n  0\n}\npub fn arrays() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, bump(mut xs))\n}\nfn one(mut xs: [2]u8) -> usize {\n  xs[1] = 50\n  1\n}\npub fn index() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  xs[one(mut xs)]\n}\npub fn branch(c: bool) -> u8 {\n  var xs: [2]u8 = [1, 2]\n  val ys: [2]u8 = [3, 4]\n  first(if c { xs } else { ys }, bump(mut xs))\n}\npub fn assigned(c: bool) -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, if c {\n    xs[0] = 40\n    0\n  } else {\n    1\n  })\n}",
         &["arrays()", "index()", "branch(true)", "branch(false)", "assigned(true)", "assigned(false)"],
     ),
+    // A field read through an index reads its base as it was when it was evaluated, its path
+    // evaluated left to right, each index checked before the next is evaluated.
+    (
+        "// A field read through an index reads the value its base had when it was evaluated, and its\n// path is evaluated from left to right, each index checked before the next is evaluated.\npub struct D {\n  d: u8\n}\n\npub struct S {\n  xs: [2]D\n}\n\npub struct O {\n  ys: [2]D\n}\n\nfn one(mut xs: [2]D) -> usize {\n  xs[1].d = 50\n  1\n}\n\npub fn through_index() -> u8 {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)].d\n}\n\npub fn element() -> D {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)]\n}\n\nfn reset(mut s: S) -> usize {\n  s.xs[0].d = 99\n  0\n}\n\npub fn through_field() -> u8 {\n  var s = S(xs: [D(d: 1), D(d: 2)])\n  s.xs[reset(mut s)].d\n}\n\npub fn rd(xs: [2]O, i: usize, j: usize, k: usize) -> u8 = xs[i].ys[j / k].d",
+        &["through_index()", "element()", "through_field()", "rd([O(ys: [D(d: 1), D(d: 2)]), O(ys: [D(d: 3), D(d: 4)])], 5, 1, 0)", "rd([O(ys: [D(d: 1), D(d: 2)]), O(ys: [D(d: 3), D(d: 4)])], 1, 1, 0)", "rd([O(ys: [D(d: 1), D(d: 2)]), O(ys: [D(d: 3), D(d: 4)])], 1, 1, 1)"],
+    ),
     // An empty array kept across a call: its slot of no bytes begins where the call's memory
     // does, and stays with its frame when the call returns (the generator's seed 88).
     (
@@ -864,6 +870,41 @@ pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
 
     /// An argument from outside the program must have its parameter's shape; one that does not
     /// fit its types traps as the reference interpreter's narrowing does.
+    /// MIR keeps a value as it was when it was evaluated (`core-calculus.md`, item 12): a
+    /// struct or an array argument that a later argument changes, and a field read through an
+    /// index that changes its base; and it checks each index of a path before evaluating the
+    /// next. Each value is the one the spec gives, not only the interpreter's.
+    #[test]
+    fn test_mir_keeps_a_value_as_it_was_evaluated() {
+        let extra = "pub fn argument() -> u8 {\n  var p = D(d: 1)\n  get(p, set(mut p))\n}\nfn get(p: D, k: u8) -> u8 = p.d + k\nfn set(mut p: D) -> u8 {\n  p.d = 9\n  0\n}\nfn first(xs: [2]u8, k: u8) -> u8 = xs[0] + k\nfn bump(mut xs: [2]u8) -> u8 {\n  xs[0] = 7\n  0\n}\npub fn arrays() -> u8 {\n  var xs: [2]u8 = [1, 2]\n  first(xs, bump(mut xs))\n}";
+        let src = format!("module m\n{}\n{}\n", "// A field read through an index reads the value its base had when it was evaluated, and its\n// path is evaluated from left to right, each index checked before the next is evaluated.\npub struct D {\n  d: u8\n}\n\npub struct S {\n  xs: [2]D\n}\n\npub struct O {\n  ys: [2]D\n}\n\nfn one(mut xs: [2]D) -> usize {\n  xs[1].d = 50\n  1\n}\n\npub fn through_index() -> u8 {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)].d\n}\n\npub fn element() -> D {\n  var xs: [2]D = [D(d: 1), D(d: 2)]\n  xs[one(mut xs)]\n}\n\nfn reset(mut s: S) -> usize {\n  s.xs[0].d = 99\n  0\n}\n\npub fn through_field() -> u8 {\n  var s = S(xs: [D(d: 1), D(d: 2)])\n  s.xs[reset(mut s)].d\n}\n\npub fn rd(xs: [2]O, i: usize, j: usize, k: usize) -> u8 = xs[i].ys[j / k].d", extra);
+        let m = mente_sema::check_program(&src).unwrap();
+        let o = "O(ys: [D(d: 1), D(d: 2)])";
+        for (call, want) in [
+            ("argument()".to_string(), Ok("1")),
+            ("arrays()".to_string(), Ok("1")),
+            ("through_index()".to_string(), Ok("2")),
+            ("element()".to_string(), Ok("D(d: 2)")),
+            ("through_field()".to_string(), Ok("1")),
+            (format!("rd([{}, {}], 1, 1, 1)", o, o), Ok("2")),
+            (
+                format!("rd([{}, {}], 5, 1, 0)", o, o),
+                Err("trap[index-out-of-bounds]"),
+            ),
+            (
+                format!("rd([{}, {}], 1, 1, 0)", o, o),
+                Err("trap[division-by-zero]"),
+            ),
+        ] {
+            let (name, args) = mente_interp::parse_call_modes(&call).unwrap();
+            match (run(&m, &name, args), want) {
+                (Ok(lines), Ok(w)) => assert_eq!(lines, vec![w.to_string()], "{}", call),
+                (Err(text), Err(w)) => assert!(text.starts_with(w), "{}: {}", call, text),
+                (got, w) => panic!("{}: {:?}, expected {:?}", call, got, w),
+            }
+        }
+    }
+
     #[test]
     fn test_mir_runs_refuse_arguments_of_another_shape() {
         let text = "module m\npub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]\n";

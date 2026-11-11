@@ -657,11 +657,11 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0220",
         FailureClass::ForeignIdiom,
         "spec/core-calculus.md",
-        "A binding named like a function or a struct of its module",
+        "A binding named like a function or a type of its module",
         "A name means one thing in a function and its module: a parameter, a `val` or a `var` \
-         never takes the name of a function or a struct of the module, as Rust lets a local hide \
-         one, so that `a.b` always reads as one thing. Renaming the binding and its uses is \
-         suggested.",
+         never takes the name of a function or a type of the module, a struct with or without \
+         `@layout`, a bitstruct or an enum, as Rust lets a local hide one, so that `a.b` \
+         always reads as one thing. Renaming the binding and its uses is suggested.",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) -> u8 {\n  val id = a\n  id\n}\n",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f(a: u8) -> u8 {\n  val b = a\n  b\n}\n",
     ),
@@ -704,8 +704,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "An array or a struct is a value kept in one piece, copied whole and held in one stack \
          slot, whose size native code holds in 32 bits. So it may hold at most 4,294,967,295 \
          bytes: an array its length times its element's size, a struct its fields as its layout \
-         places them. Keep fewer elements, split the data, or wait for `List<T>`, later in M2, \
-         which keeps its elements apart from the value.",
+         places them. An array holds at most 4,294,967,295 elements too, whatever their size, \
+         since native code counts them in 32 bits as well. Keep fewer elements, split the data, \
+         or wait for `List<T>`, later in M2, which keeps its elements apart from the value.",
         "module m\npub fn f(x: [4294967296]u8) -> u8 = 0\n",
         "module m\npub fn f(x: [4096]u8) -> u8 = 0\n",
     ),
@@ -728,8 +729,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A type that contains itself",
         "A struct holds each field's value in place, so a struct that holds itself, directly or \
          through other structs and arrays, would have no end. The diagnostic names the fields \
-         that close the cycle. A `List<T>`, which comes later in M2, keeps its elements apart, \
-         so a struct may hold a list of itself.",
+         of the cycle, and each field that closes one is reported, so two cycles through one \
+         struct are two errors. A `List<T>`, which comes later in M2, keeps its elements \
+         apart, so a struct may hold a list of itself.",
         "module m\npub struct Node {\n  value: u8\n  next: Node\n}\n",
         "module m\npub struct Node {\n  value: u8\n  next: u8\n}\n",
     ),
@@ -763,7 +765,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "spec/core-calculus.md",
         "A name declared twice in a module or a struct",
         "A module declares a name once, whatever it names, a function or a struct, so a call and \
-         a struct being built never mean two things; and a struct names each field once.",
+         a struct being built never mean two things; and a struct names each field once. The \
+         language declares its own types, so no struct or bitstruct takes the name of an integer \
+         type, `bool`, or a type a later milestone brings, such as `String` or `Pool`.",
         "module m\npub struct Pair {\n  i: u8\n  i: u16\n}\n",
         "module m\npub struct Pair {\n  i: u8\n  j: u16\n}\n",
     ),
