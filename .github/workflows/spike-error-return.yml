@@ -1,0 +1,48 @@
+# The spike before M2 on returning `T ! E` in registers through Cranelift's multi-value returns
+# (spikes/error-return-registers/README.md): the spike's tests, which compile for all three
+# targets, then on each target the round trips through native code, an independent
+# disassembly, and Rust's code for the same shapes.
+name: Error-return spike
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "spikes/error-return-registers/**"
+      - ".github/workflows/spike-error-return.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike-error-return-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Error return (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64 Linux
+            os: ubuntu-24.04
+          - name: x86-64 Windows
+            os: windows-2025
+          - name: AArch64 Linux
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: spikes/error-return-registers
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Tests
+        run: cargo test --locked
+      - name: Round trips and disassembly
+        run: bash check.sh

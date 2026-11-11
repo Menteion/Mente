@@ -10,8 +10,8 @@ members = [
     "compiler/mente-interp",
     "spikes/tier1-latency",
 ]
-# A workspace of its own, with the external crates Norman approved for it (its README.md).
-exclude = ["spikes/cranelift-debug-info"]
+# Workspaces of their own, with the external crates Norman approved for them (their README.md).
+exclude = ["spikes/cranelift-debug-info", "spikes/error-return-registers"]
 
 [workspace.package]
 version = "0.1.0"
