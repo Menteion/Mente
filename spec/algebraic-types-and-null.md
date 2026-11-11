@@ -12,21 +12,21 @@ date: 2026-11-04
 ## 1. Specification
 
 1. **Product types (`struct`) with embedded invariants**:
-   - `Specified`: `struct` declarations have named fields, default field values, and optional `invariant { ... }` blocks.
+   - `Specified`: `struct` declarations have named fields, built by `Name(field: e, ...)` in the order of declaration (`core-calculus.md`, item 13). Field defaults and `invariant { ... }` blocks relating several fields are constructs of a later milestone: M2 has field refinements only ([`struct-invariants-m2`](../docs/design-review.md#struct-invariants-m2)).
    - `Implemented`: `parse_struct` parses a struct's fields, their defaults and the lines of its `invariant` block, keeping types and expressions as raw strings.
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_struct_fields_defaults_and_invariants_are_parsed" min="1" reason="parse_struct keeps each field, default and invariant line" -->
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_field_default_starts_at_a_top_level_equals" min="1" reason="A default starts at the first = outside brackets" -->
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_invariant_block_may_hold_braces" min="1" reason="An invariant block may hold braces" -->
-   - `Specified`: invariants are verified at construction and at the end of every `mut` projection.
-2. `Specified` **Sum types (`enum`) and ad-hoc type unions (`A | B`)**:
-   - Nominal tagged unions are declared via `enum`. Ad-hoc unions of existing types are written `A | B`.
-   - `match` expressions MUST be exhaustive at compile time.
-   - **Flow-sensitive type narrowing (`is`)**: Inside `if x is Packet.Data { ... }` or after `guard x is Packet.Data else { return }`, the static type of `x` narrows automatically to `Packet.Data` without requiring destructuring bindings.
+   - `Specified` (after M2): an invariant is proven at construction and at the end of every `mut` projection.
+2. `Specified` **Sum types (`enum`)**:
+   - Nominal tagged unions are declared via `enum`, whose variants hold nothing or a payload of named fields, and are always named with their enum (`core-calculus.md`, item 14).
+   - `match` expressions MUST be exhaustive at compile time, and M2's patterns are its minimal set: variants with named bindings, integer and `bool` literals, `none` and a name for a `?T`, and `_` on integers only ([`match-patterns`](../docs/design-review.md#match-patterns)).
+   - Ad-hoc unions of existing types (`A | B`) and narrowing a binding's type with `is` wait past M2 ([`optional-semantics`](../docs/design-review.md#optional-semantics)); a pattern binds a payload to a name of its own instead.
    - `Implemented`: `parse_enum` parses an enum's variant list, keeping each variant as raw text.
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_enum_variants_are_parsed" min="1" reason="parse_enum keeps each variant of the list" -->
 3. `Specified` **First-class optional types `?T` and elimination of `.unwrap()`**:
-   - Nullable values are typed `?T` (equivalent to `T | none`) with automatic niche bit-packing (e.g., `?NonNullPtr` and `?u16[1..=65535]` occupy zero extra tag bytes).
-   - **Prohibition of unchecked `.unwrap()`**: Neither the language nor the standard library provides a panicking `.unwrap()` method on `?T`. Accessing `T` from `?T` MUST proceed via compile-time flow narrowing (`guard val v = opt else { ... }`, `if opt != none`), safe navigation (`opt?.field`), or default coalescing (`opt ?? fallback`).
+   - Nullable values are typed `?T`, a tagged type of its own that does not flatten: `??T` is a type apart ([`optional-semantics`](../docs/design-review.md#optional-semantics)). It takes no tag byte where `T` has a niche the spec names, such as `?u16[1..=65535]` and `?bool` (`core-calculus.md`, item 21).
+   - **Prohibition of unchecked `.unwrap()`**: Neither the language nor the standard library provides a panicking `.unwrap()` method on `?T`. A present value is reached by binding it to a name of its own, with `guard val v = opt else { ... }`, `if val v = opt { ... }` or `match`, or read through `opt?.field`, which only reads (`core-calculus.md`, item 15).
    - The lexer has `NoneLit`, `Question`, `QuestionDot` and `QuestionQuestion` tokens, which nothing parses yet; `examples/` is checked for `.unwrap()` by the directive below.
 
 ## 2. Decision rationale and rejected alternatives
@@ -34,7 +34,8 @@ date: 2026-11-04
 | Alternative considered | Reason for rejection |
 | :--- | :--- |
 | **`Option<T>::unwrap()` / `.expect()` (Rust)** | In production codebases and AI-generated Rust code, `.unwrap()` is the single largest source of unexpected runtime panics, turning compile-time optionality back into unchecked `NullPointerException` crashes. Flow narrowing via `guard` is just as concise and never panics. |
-| **Nominal-only enums without flow narrowing (Rust / Haskell)** | Forces repetitive `if let Some(x) = x` shadowing or single-arm `match` boilerplate even after an explicit check. Flow-sensitive narrowing (`if x != none`, `if x is Variant`) combines TypeScript ergonomics with static native layout. |
+| **Flow-sensitive narrowing of a binding (`if x != none`, `if x is Variant`, as in TypeScript and Kotlin)** | One name would have two types in two regions of its block, against one name, one binding (`core-calculus.md`, item 6). `guard val v = x` and a pattern give the narrowed value a name of its own, at the cost of one more name. |
+| **A flattened `?T`, the union of `T` and `none`** | `??T` would collapse into `?T`, so a list of optional values could not tell an empty list from a stored `none`, which is unsound for generic code. |
 
 ## 3. Verification assertions
 

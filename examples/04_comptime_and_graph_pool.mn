@@ -9,8 +9,8 @@ module examples.comptime_and_graph_pool
 // Scene nodes live in the pool for a long time, so a node owns its name as a String, not a str view.
 pub struct SceneNode {
   pub name: String
-  pub parent: ?Handle<SceneNode> = none
-  pub children: List<Handle<SceneNode>> = []
+  pub parent: ?Handle<SceneNode>
+  pub children: List<Handle<SceneNode>>
 }
 
 pub fn link_parent_child(
@@ -18,7 +18,8 @@ pub fn link_parent_child(
   parent_h: Handle<SceneNode>,
   child_h: Handle<SceneNode>,
 ) {
-  // pool[mut h] is a mutable ?SceneNode projection: none when the handle is stale, and ?. then does nothing
+  // pool[mut h] is a mutable ?SceneNode projection, none when the handle is stale. ?. only reads
+  // since M2's design closure, so how a write reaches the node is M3's to settle (pool-mut-write)
   pool[mut parent_h]?.children.push(child_h)
   pool[mut child_h]?.parent = parent_h
 }
@@ -50,14 +51,14 @@ pub struct TelemetryEvent {
 
 @example("a two-way scene tree without unsafe code") {
   var scene = Pool<SceneNode>.new()
-  val root  = scene.insert(SceneNode { name: String.from("Root") })
-  val cam   = scene.insert(SceneNode { name: String.from("Camera") })
+  val root  = mut scene.insert(SceneNode(name: String.from("Root"), parent: none, children: List.new()))
+  val cam   = mut scene.insert(SceneNode(name: String.from("Camera"), parent: none, children: List.new()))
 
   link_parent_child(mut scene, root, cam)
 
   // scene[h] is a ?SceneNode: narrow it with guard before reading a field
-  guard val root_node = scene[root] else panic("root is live")
-  guard val cam_node  = scene[cam] else panic("camera is live")
-  assert(root_node.children.len == 1)
-  assert(cam_node.parent == root)
+  guard val root_node = scene[root] else { unreachable("root is live") }
+  guard val cam_node  = scene[cam] else { unreachable("camera is live") }
+  guard val cam_parent = cam_node.parent else { unreachable("camera has a parent") }
+  assert(root_node.children.len == 1 and cam_parent == root)
 }

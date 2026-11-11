@@ -52,5 +52,5 @@ date: 2026-11-04
 
 <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="Unit," min="1" reason="Lexer defines first-class Unit keyword" -->
 <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="ItemDecl::Unit" min="1" reason="AST represents top-level unit declarations" -->
-<!-- @assert-count target="examples/01_refinement_and_units.mn" symbol="unit newton = kg * meter / (sec * sec)" min="1" reason="Example 01 declares composite physical units" -->
-<!-- @assert-count target="examples/01_refinement_and_units.mn" symbol="500.0_ms.to<sec>()" min="1" reason="Example 01 converts milliseconds to seconds explicitly before adding them" -->
+<!-- @assert-count target="examples/05_units_and_generics.mn" symbol="unit newton = kg * meter / (sec * sec)" min="1" reason="Example 05 declares composite physical units" -->
+<!-- @assert-count target="examples/05_units_and_generics.mn" symbol="500.0_ms.to<sec>()" min="1" reason="Example 05 converts milliseconds to seconds explicitly before adding them" -->

@@ -6,9 +6,9 @@
 module examples.colorless_concurrency_and_effects
 
 pub enum GatewayError {
-  InvalidToken,
-  Timeout,
-  UpstreamFailure(code: u16),
+  InvalidToken
+  Timeout
+  UpstreamFailure(code: u16)
 }
 
 // The struct holds zero-copy str views directly; used inside an arena, it needs no <'a> lifetime.
@@ -19,7 +19,7 @@ pub struct OrderSummary {
 }
 
 pub fn verify_token(token: str) -> str ! GatewayError {
-  guard token.starts_with("Bearer ") and token.len > 10 else raise GatewayError.InvalidToken
+  guard token.starts_with("Bearer ") and token.len > 10 else { raise GatewayError.InvalidToken }
   token[7..token.len] // the signature decides what the view borrows: by default any view parameter, here only token
 }
 
@@ -45,11 +45,11 @@ pub fn handle_checkout_request(raw_token: str) -> u64 ! GatewayError with Net, C
       fetch_recent_items(uid, in arena)!,
     )
 
-    val summary = OrderSummary {
+    val summary = OrderSummary(
       user_name: name,
       items_slice: items,
       timestamp_ms: Clock.now_ms(),
-    }
+    )
 
     summary.items_slice.len.to_u64() * 100 + summary.timestamp_ms
   }

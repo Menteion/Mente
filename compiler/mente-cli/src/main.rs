@@ -1304,7 +1304,7 @@ mod tests {
     fn test_examples_pass_their_declaration_checks_and_report_what_they_expect() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
         let files = collect_mn_files(&root);
-        assert_eq!(files.len(), 4, "Expected 4 .mn showcase files in examples/");
+        assert_eq!(files.len(), 5, "Expected 5 .mn showcase files in examples/");
 
         for file in files {
             let src = fs::read_to_string(&file).expect("read .mn file");

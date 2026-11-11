@@ -1,0 +1,44 @@
+// ============================================================================
+// Example 05: zero-cost physical units, floating-point refinements, and a generic struct with an
+// invariant. These were example 01's until M2's design closure split them off, so that example
+// 01's binary search runs as M2 builds it (docs/design-review.md, example-01-m2).
+// Specs: spec/dimensional-units.md, spec/refinement-and-fixed-point.md, spec/algebraic-types-and-null.md
+// ============================================================================
+module examples.units_and_generics
+
+// 1. Zero-cost physical units. The compiler derives each quantity's dimension and scale, and erases
+//    both from the machine code, leaving plain floating-point registers. ms and sec share a dimension
+//    but not a scale, so converting between them is always written as .to<U>().
+unit sec, ms = 0.001 * sec
+unit meter, kg
+unit newton = kg * meter / (sec * sec)
+unit joule  = newton * meter
+
+/// Kinetic energy: the compiler checks that the input units multiply out to exactly <joule>.
+@branchless
+pub fn kinetic_energy(mass: f64[0.0..=1e12]<kg>, vel: f64<meter / sec>) -> f64<joule>
+  ensures result >= 0.0_joule
+= 0.5 * mass * vel * vel
+
+// 2. A generic ring buffer whose invariant relates its fields: every index into buf is proven in
+//    bounds at compile time.
+pub struct RingWindow<T, comptime CAP: usize = 64> {
+  pub buf:  [CAP]T
+  pub head: usize[0..CAP] = 0
+  pub len:  usize[0..=CAP] = 0
+
+  invariant {
+    CAP > 0
+    head < CAP
+    len <= CAP
+  }
+}
+
+// 3. @example: specified to run under mn test; mn test does not execute @example bodies yet.
+@example("unit conversion") {
+  val d: f64<meter> = 200.0_meter
+  val t: f64<sec>   = 9.5_sec + 500.0_ms.to<sec>()   // units of different scale never add directly: 0.5_sec
+  val v = d / t                            // inferred as f64<meter / sec> (20.0)
+  val e = kinetic_energy(2.0_kg, v)
+  assert(e == 400.0_joule)
+}

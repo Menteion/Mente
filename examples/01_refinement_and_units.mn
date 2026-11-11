@@ -1,39 +1,21 @@
 // ============================================================================
-// Example 01: refinement intervals, zero-cost physical units, and two-tier ghost contracts
-// Specs: spec/refinement-and-fixed-point.md, spec/dimensional-units.md, spec/ghost-contracts-and-totality.md
+// Example 01: refinement intervals, a contract used modularly, and a binary search that keeps no
+// bounds check at run time
+// Specs: spec/core-calculus.md, spec/refinement-and-fixed-point.md, spec/ghost-contracts-and-totality.md
+// It runs in full at the end of M2. Its units and generics, which later milestones bring, are in
+// example 05 (docs/design-review.md, example-01-m2).
 // ============================================================================
 module examples.refinement_and_units
 
-// 1. Zero-cost physical units. The compiler derives each quantity's dimension and scale, and erases
-//    both from the machine code, leaving plain floating-point registers. ms and sec share a dimension
-//    but not a scale, so converting between them is always written as .to<U>().
-unit sec, ms = 0.001 * sec
-unit meter, kg
-unit newton = kg * meter / (sec * sec)
-unit joule  = newton * meter
-
-/// Kinetic energy: the compiler checks that the input units multiply out to exactly <joule>.
-@branchless
-pub fn kinetic_energy(mass: f64[0.0..=1e12]<kg>, vel: f64<meter / sec>) -> f64<joule>
-  ensures result >= 0.0_joule
-= 0.5 * mass * vel * vel
-
-// 2. Refinement intervals and dependent slice indexing: every index below is proven in bounds at
-//    compile time, so no runtime bounds check is emitted.
-pub struct RingWindow<T, comptime CAP: usize = 64> {
-  pub buf:  [CAP]T
-  pub head: usize[0..CAP] = 0
-  pub len:  usize[0..=CAP] = 0
-
-  invariant {
-    CAP > 0
-    head < CAP
-    len <= CAP
-  }
-}
+/// The midpoint of two indices, strictly below `hi`. Tier 1 proves the contract from the body
+/// once; every caller then uses the contract alone, never the body.
+pub fn midpoint(lo: usize, hi: usize) -> usize
+  requires lo < hi
+  ensures lo <= result and result < hi
+= lo + (hi - lo) / 2
 
 /// Constructive termination (@total + decreases): the compiler proves the loop ends and that
-/// every index stays in bounds.
+/// every index stays in bounds, so no bounds check is left at run time.
 @total
 pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   requires items.len > 0
@@ -42,10 +24,7 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   var hi: usize[0..=items.len] = items.len
 
   while lo < hi decreases hi - lo {
-    // midpoint's contract (requires lo < hi, ensures lo <= result and result < hi) lets Tier 1
-    // prove mid in [0..items.len) with octagons alone, so items[mid] below needs no bounds check.
-    // Writing lo + (hi - lo) / 2 directly would fail: dividing by 2 is outside what octagons hold.
-    // Until `mn prove` runs, midpoint's own body is a trusted axiom: its contract is assumed, not proven.
+    // midpoint's ensures puts mid in [lo, hi), so items[mid] below is proven in bounds.
     val mid: usize[0..items.len] = midpoint(lo, hi)
     val current = items[mid]
 
@@ -55,16 +34,16 @@ pub fn binary_search_exact(items: []i64, target: i64) -> ?usize[0..items.len]
   none
 }
 
-// 3. @example: specified to run under mn test; mn test does not execute @example bodies yet.
-@example("unit conversion and an in-bounds binary search") {
-  val d: f64<meter> = 200.0_meter
-  val t: f64<sec>   = 9.5_sec + 500.0_ms.to<sec>()   // units of different scale never add directly: 0.5_sec
-  val v = d / t                            // inferred as f64<meter / sec> (20.0)
-  val e = kinetic_energy(2.0_kg, v)
-  assert(e == 400.0_joule)
+/// Searches a sorted array, viewed whole with sorted[..]: `mn run` prints 3.
+pub fn main() -> ?usize {
+  val sorted: [6]i64 = [10, 20, 35, 50, 80, 130]
+  binary_search_exact(sorted[..], 50)
+}
 
-  val sorted = [10, 20, 35, 50, 80, 130]
-  val idx = binary_search_exact(sorted, 50)
-  guard val found = idx else panic("expected index")
+// @example: specified to run under mn test; mn test does not execute @example bodies yet. main
+// above runs the same search under mn run.
+@example("an in-bounds binary search") {
+  val sorted: [6]i64 = [10, 20, 35, 50, 80, 130]
+  guard val found = binary_search_exact(sorted[..], 50) else { unreachable("50 is in the array") }
   assert(found == 3 and sorted[found] == 50)
 }
