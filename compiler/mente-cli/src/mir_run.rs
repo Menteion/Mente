@@ -642,6 +642,11 @@ pub fn below(n: i8) -> i8 {
         "fn one() -> u8 = 1\npub fn empty() -> u8 {\n  var xs: [0]u8 = [0; 0]\n  val k: u8 = one()\n  xs = xs\n  k\n}",
         &["empty()"],
     ),
+    // Empty array literals, whose elements have no type, alone and nested.
+    (
+        "pub fn no_elements() -> [0]u8 = []\npub fn rows_of_none() -> [2][0]u8 {\n  val xs: [2][0]u8 = [[], []]\n  xs\n}",
+        &["no_elements()", "rows_of_none()"],
+    ),
 ];
 
 #[cfg(test)]

@@ -1,0 +1,48 @@
+// expect: E0502
+module conformance
+// A binding whose field paths do not fit within the 128-variable cap is not followed: `S7`
+// has 256 of them, and a store to one says nothing of the read that follows it.
+pub struct S0 {
+  a: u8
+  b: u8
+}
+
+pub struct S1 {
+  l: S0
+  r: S0
+}
+
+pub struct S2 {
+  l: S1
+  r: S1
+}
+
+pub struct S3 {
+  l: S2
+  r: S2
+}
+
+pub struct S4 {
+  l: S3
+  r: S3
+}
+
+pub struct S5 {
+  l: S4
+  r: S4
+}
+
+pub struct S6 {
+  l: S5
+  r: S5
+}
+
+pub struct S7 {
+  l: S6
+  r: S6
+}
+
+pub fn f(mut s: S7) -> u8[0..1] {
+  s.l.l.l.l.l.l.l.a = 0
+  s.l.l.l.l.l.l.l.a
+}

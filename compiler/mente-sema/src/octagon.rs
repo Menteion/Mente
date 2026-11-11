@@ -603,27 +603,48 @@ impl Octagon {
         out
     }
 
-    /// A point of the octagon: each of `vars` in turn takes the value within its bounds that
-    /// is closest to zero, which is then fixed, so the result satisfies every constraint.
-    pub fn pick(&self, vars: &[usize]) -> Option<Vec<i128>> {
+    /// The bounds of `var`, exactly, with those each relation of the matrix gives it from
+    /// another variable's: the matrix keeps no bound beyond its reach, so it cannot carry one
+    /// along a relation itself. `None` for none.
+    fn related_bounds(&self, var: usize) -> (Option<Exact>, Option<Exact>) {
+        let (mut lo, mut hi) = self.exact_bounds(var);
+        for w in 0..self.n {
+            let (wlo, whi) = self.exact_bounds(w);
+            for tv in [Term::pos(var), Term::pos(var).negated()] {
+                for tw in [Term::pos(w), Term::pos(w).negated()] {
+                    // `tv + tw <= c` bounds `tv` by `c` less the least value of `tw`.
+                    let c = self.upper(&[tv, tw]);
+                    let least = if tw.neg { whi.map(Exact::negated) } else { wlo };
+                    let Some(b) = least.filter(|_| c < INF).and_then(|l| l.negated().plus(c))
+                    else {
+                        continue;
+                    };
+                    if tv.neg {
+                        lo = Some(lo.map_or(b.negated(), |l| l.max(b.negated())));
+                    } else {
+                        hi = Some(hi.map_or(b, |h| h.min(b)));
+                    }
+                }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// A point of the octagon: each of `vars` in turn takes the value within its bounds, in the
+    /// matrix, beyond it and through its relations, that is closest to zero, which is then
+    /// fixed, so the result satisfies every constraint.
+    pub fn pick(&self, vars: &[usize]) -> Option<Vec<Exact>> {
         if self.empty {
             return None;
         }
+        let zero = Exact::from_i128(0);
         let mut s = self.clone();
         let mut out = Vec::new();
         for &v in vars {
-            let (mut lo, mut hi) = s.bounds(v);
-            // A bound beyond the matrix that an `i128` holds narrows the choice too.
-            let (far_lo, far_hi) = s.far_of(v);
-            if let Some(l) = far_lo.and_then(Exact::to_i128) {
-                lo = lo.max(l);
-            }
-            if let Some(u) = far_hi.and_then(Exact::to_i128) {
-                hi = hi.min(u);
-            }
-            let value = 0.clamp(lo, hi.max(lo));
-            s.add_lin(&[Term::pos(v)], value);
-            s.add_lin(&[Term::pos(v).negated()], -value);
+            let (lo, hi) = s.related_bounds(v);
+            let value = lo.map_or(zero, |l| l.max(zero));
+            let value = hi.map_or(value, |h| h.min(value));
+            s.add_exact(v, Some(value), Some(value));
             if s.empty {
                 return None;
             }
@@ -713,7 +734,7 @@ mod tests {
         // A valuation respects a far bound an i128 holds.
         let mut low = Octagon::new(1);
         low.add_exact(0, Some(Exact::from_i128(BIG + 5)), None);
-        assert_eq!(low.pick(&[0]), Some(vec![BIG + 5]));
+        assert_eq!(low.pick(&[0]), Some(vec![Exact::from_i128(BIG + 5)]));
         // Within reach, a bound is the matrix's.
         let mut near = Octagon::new(1);
         near.add_exact(0, Some(Exact::from_i128(-3)), Some(Exact::from_i128(7)));
@@ -950,7 +971,12 @@ mod tests {
                 assert_eq!(hi, points.iter().map(|p| p[v]).max().unwrap(), "{cs:?}");
             }
             assert!(closed(&o), "the incremental closure is not closed: {cs:?}");
-            let picked = o.pick(&[0, 1, 2]).unwrap();
+            let picked: Vec<i128> = o
+                .pick(&[0, 1, 2])
+                .unwrap()
+                .into_iter()
+                .map(|v| v.to_i128().unwrap())
+                .collect();
             assert!(
                 cs.iter().all(|(t, k)| satisfies(&picked, t, *k)),
                 "{picked:?} {cs:?}"
@@ -1021,13 +1047,58 @@ mod tests {
         assert!(o.constraints().contains(&(vec![x(0), x(0)], 14)));
     }
 
+    /// A valuation takes a bound beyond the matrix's reach exactly, above `i128::MAX` and below
+    /// `-BIG` too, never at the matrix's sentinels, and keeps each relation the matrix holds
+    /// with a variable so bounded, of a difference or of a sum.
+    #[test]
+    fn test_pick_respects_far_bounds_and_their_relations() {
+        let big = Exact::new(false, 3 * 10u128.pow(38));
+        let max = Exact::new(false, u128::MAX);
+        let at = |e: Exact, d: i128| e.plus(d).unwrap();
+        let mut o = Octagon::new(5);
+        o.add_exact(0, Some(big), Some(max));
+        // `x1 < x0` with `x1 >= big + 10`, `x2 > x0`, and `x3` related to nothing in `0..=5`.
+        o.add_lin(&[x(1), nx(0)], -1);
+        o.add_exact(1, Some(at(big, 10)), Some(max));
+        o.add_lin(&[x(0), nx(2)], -1);
+        o.add_exact(2, Some(Exact::from_i128(0)), Some(max));
+        o.add_lin(&[nx(3)], 0);
+        o.add_lin(&[x(3)], 5);
+        // `x4 = -x0`, as two sums.
+        o.add_lin(&[x(4), x(0)], 0);
+        o.add_lin(&[nx(4), nx(0)], 0);
+        assert_eq!(
+            o.pick(&[0, 1, 2, 3, 4]),
+            Some(vec![
+                at(big, 11),
+                at(big, 10),
+                at(big, 12),
+                Exact::from_i128(0),
+                at(big, 11).negated()
+            ])
+        );
+        // The other way round: the sum's variable first.
+        assert_eq!(
+            o.pick(&[4, 0]),
+            Some(vec![at(big, 11).negated(), at(big, 11)])
+        );
+        // Below `-BIG`, whose lower bound is the matrix's sentinel.
+        let mut low = Octagon::new(1);
+        let neg = Exact::new(true, 10u128.pow(38));
+        low.add_exact(0, Some(Exact::new(true, 1 << 127)), Some(neg));
+        assert_eq!(low.pick(&[0]), Some(vec![neg]));
+    }
+
     #[test]
     fn test_pick_prefers_zero_then_the_nearer_bound() {
         let mut o = Octagon::new(3);
         o.add_lin(&[nx(0)], -3); // a >= 3
         o.add_lin(&[x(1)], -2); // b <= -2
         o.add_lin(&[x(2), nx(0)], 0); // c <= a
-        assert_eq!(o.pick(&[0, 1, 2]), Some(vec![3, -2, 0]));
+        assert_eq!(
+            o.pick(&[0, 1, 2]),
+            Some(vec![3, -2, 0].into_iter().map(Exact::from_i128).collect())
+        );
         assert_eq!(o.pick(&[]), Some(vec![]));
     }
 

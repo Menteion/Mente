@@ -1,0 +1,26 @@
+// expect: E0502
+module conformance
+// A struct literal reads its fields in order: `p` is 0, though a call inside a later field's
+// own literal sets `x` to 9.
+pub struct Q {
+  a: u8
+}
+
+pub struct O {
+  p: u8
+  r: Q
+}
+
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+pub fn f() -> u8[9..=9] {
+  var x: u8 = 0
+  val o = O(p: x, r: Q(a: bump(mut x)))
+  o.p
+}

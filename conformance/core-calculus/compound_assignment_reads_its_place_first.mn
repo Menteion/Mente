@@ -1,0 +1,16 @@
+// expect: E0502
+module conformance
+// `x += v` reads `x` before `v` runs: 0 + 0, though the call sets `x` to 9 on the way.
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+pub fn f() -> u8[9..=9] {
+  var x: u8 = 0
+  x += bump(mut x)
+  x
+}

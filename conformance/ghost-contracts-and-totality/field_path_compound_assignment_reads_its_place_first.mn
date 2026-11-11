@@ -1,0 +1,21 @@
+// expect: E0502
+module conformance
+// `p.a += v` reads `p.a` before `v` runs: 0 + 0, though the call sets `p.a` to 9.
+pub struct P {
+  a: u8
+}
+
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+pub fn f(q: P) -> u8[9..=9] {
+  var p = q
+  p.a = 0
+  p.a += bump(mut p.a)
+  p.a
+}

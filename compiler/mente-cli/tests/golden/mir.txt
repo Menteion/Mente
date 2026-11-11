@@ -640,6 +640,10 @@ t0: unreachable @3:8 ["unreachable reached: control left the code the checker al
 == conformance/core-calculus/bit_operation_on_two_types.mn == (exit 2)
 == conformance/core-calculus/break_outside_a_loop.mn == (exit 2)
 == conformance/core-calculus/call_without_body.mn == (exit 2)
+== conformance/core-calculus/comparison_read_before_a_later_operand_changes_it.mn == (exit 2)
+== conformance/core-calculus/compound_assignment_reads_its_place_first.mn == (exit 2)
+== conformance/core-calculus/condition_left_operand_read_before_the_right_one_changes_it.mn == (exit 2)
+== conformance/core-calculus/condition_right_operand_changes_a_binding.mn == (exit 2)
 == conformance/core-calculus/contracts_used_modularly.mn ==
 mente-dump 2 mir
 f0: fn midpoint(u64, u64) -> u64 {
@@ -1418,6 +1422,7 @@ block0(v0: u8):
   return v1
 t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/operand_read_before_a_later_operand_changes_it.mn == (exit 2)
 == conformance/core-calculus/operands_beyond_128_bits.mn == (exit 2)
 == conformance/core-calculus/refined_field_not_proven.mn == (exit 2)
 == conformance/core-calculus/refined_field_proven_by_a_guard.mn ==
@@ -1571,6 +1576,60 @@ block0(v0: i128):
   v1: i128 = call f5 v0 @14:8
   return v1
 t0: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/refinement_at_the_i128_limits_inclusive.mn ==
+mente-dump 2 mir
+f0: fn all(i128) -> i128 {
+block0(v0: i128):
+  return v0
+block1():
+  trap t0
+t0: unreachable @4:115 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn take(i128) -> i128 {
+block0(v0: i128):
+  return v0
+block1():
+  trap t0
+t0: unreachable @6:116 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn any(i128) -> i128 {
+block0(v0: i128):
+  v1: i128 = call f1 v0 @8:31
+  return v1
+block1():
+  trap t0
+t0: unreachable @8:31 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter all(i128) -> i128 {
+block0(v0: i128):
+  v1: i128 = call f0 v0 @4:8
+  return v1
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter take(i128) -> i128 {
+block0(v0: i128):
+  v1: i128 = int -170141183460469231731687303715884105728 @0:0
+  v2: i128 = int 170141183460469231731687303715884105727 @0:0
+  v3: bool = ge v0, v1 @0:0
+  v4: bool = le v0, v2 @0:0
+  v5: bool = and v3, v4 @0:0
+  v6: unit = check t0 v5, v0, v1, v2 @6:8
+  v7: i128 = call f1 v0 @6:8
+  return v7
+t0: refinement @6:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter any(i128) -> i128 {
+block0(v0: i128):
+  v1: i128 = call f2 v0 @8:8
+  return v1
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/refinement_at_the_i128_limits_not_proven.mn == (exit 2)
 == conformance/core-calculus/refinement_at_the_u128_limit.mn ==
@@ -1748,6 +1807,178 @@ block0(v0: u128):
   v1: u128 = call f6 v0 @17:8
   return v1
 t0: unreachable @17:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/refinement_at_the_u128_limit_inclusive.mn ==
+mente-dump 2 mir
+f0: fn take(u128) -> u128 {
+block0(v0: u128):
+  return v0
+block1():
+  trap t0
+t0: unreachable @9:77 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn any(u128) -> u128 {
+block0(v0: u128):
+  v1: u128 = call f0 v0 @11:31
+  return v1
+block1():
+  trap t0
+t0: unreachable @11:31 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn from_one(u128) -> u128 {
+block0(v0: u128):
+  return v0
+block1():
+  trap t0
+t0: unreachable @13:126 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn top(u128) -> u128 {
+block0(v0: u128):
+  return v0
+block1():
+  trap t0
+t0: unreachable @15:197 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn wide(addr, u128) {
+block0(v0: addr, v1: u128):
+  v2: addr = slot 16 @17:77
+  v3: unit = store v2, v1 @17:85
+  v4: unit = copy 16 v0, v2 @17:77
+  return
+block1():
+  trap t0
+t0: unreachable @17:77 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn read(addr) -> u128 {
+block0(v0: addr):
+  v1: u128 = load v0 @19:77
+  return v1
+block1():
+  trap t0
+t0: unreachable @19:77 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter take(u128) -> u128 {
+block0(v0: u128):
+  v1: i64 = int 0 @0:0
+  v2: u128 = int 340282366920938463463374607431768211455 @0:0
+  v3: i64 = int 0 @0:0
+  v4: bool = lt v1, v3 @0:0
+  branch v4, block1(), block2()
+block1():
+  v6: bool = bool true @0:0
+  jump block3(v6)
+block2():
+  v7: u128 = cast v1 @0:0
+  v8: bool = ge v0, v7 @0:0
+  jump block3(v8)
+block3(v5: bool):
+  v9: bool = le v0, v2 @0:0
+  v10: bool = and v5, v9 @0:0
+  v11: unit = check t0 v10, v0, v1, v2 @9:8
+  v12: u128 = call f0 v0 @9:8
+  return v12
+t0: refinement @9:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter any(u128) -> u128 {
+block0(v0: u128):
+  v1: u128 = call f1 v0 @11:8
+  return v1
+t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter from_one(u128) -> u128 {
+block0(v0: u128):
+  v1: i64 = int 1 @0:0
+  v2: u128 = int 340282366920938463463374607431768211455 @0:0
+  v3: i64 = int 0 @0:0
+  v4: bool = lt v1, v3 @0:0
+  branch v4, block1(), block2()
+block1():
+  v6: bool = bool true @0:0
+  jump block3(v6)
+block2():
+  v7: u128 = cast v1 @0:0
+  v8: bool = ge v0, v7 @0:0
+  jump block3(v8)
+block3(v5: bool):
+  v9: bool = le v0, v2 @0:0
+  v10: bool = and v5, v9 @0:0
+  v11: unit = check t0 v10, v0, v1, v2 @13:8
+  v12: u128 = call f2 v0 @13:8
+  return v12
+t0: refinement @13:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter top(u128) -> u128 {
+block0(v0: u128):
+  v1: u128 = int 340282366920938463463374607431768211455 @0:0
+  v2: u128 = int 340282366920938463463374607431768211455 @0:0
+  v3: bool = ge v0, v1 @0:0
+  v4: bool = le v0, v2 @0:0
+  v5: bool = and v3, v4 @0:0
+  v6: unit = check t0 v5, v0, v1, v2 @15:8
+  v7: u128 = call f3 v0 @15:8
+  return v7
+t0: refinement @15:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @15:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn enter wide(addr, u128) {
+block0(v0: addr, v1: u128):
+  v2: i64 = int 1 @0:0
+  v3: u128 = int 340282366920938463463374607431768211455 @0:0
+  v4: i64 = int 0 @0:0
+  v5: bool = lt v2, v4 @0:0
+  branch v5, block1(), block2()
+block1():
+  v7: bool = bool true @0:0
+  jump block3(v7)
+block2():
+  v8: u128 = cast v2 @0:0
+  v9: bool = ge v1, v8 @0:0
+  jump block3(v9)
+block3(v6: bool):
+  v10: bool = le v1, v3 @0:0
+  v11: bool = and v6, v10 @0:0
+  v12: unit = check t0 v11, v1, v2, v3 @17:8
+  v13: unit = call f4 v0, v1 @17:8
+  return
+t0: refinement @17:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @17:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn enter read(addr) -> u128 {
+block0(v0: addr):
+  v1: u128 = load v0 @0:0
+  v2: i64 = int 1 @0:0
+  v3: u128 = int 340282366920938463463374607431768211455 @0:0
+  v4: i64 = int 0 @0:0
+  v5: bool = lt v2, v4 @0:0
+  branch v5, block1(), block2()
+block1():
+  v7: bool = bool true @0:0
+  jump block3(v7)
+block2():
+  v8: u128 = cast v2 @0:0
+  v9: bool = ge v1, v8 @0:0
+  jump block3(v9)
+block3(v6: bool):
+  v10: bool = le v1, v3 @0:0
+  v11: bool = and v6, v10 @0:0
+  v12: unit = check t0 v11, v1, v2, v3 @19:8
+  v13: u128 = call f5 v0 @19:8
+  return v13
+t0: refinement @19:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @19:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/refinement_at_the_u128_limit_literal_outside.mn == (exit 2)
 == conformance/core-calculus/refinement_at_the_u128_limit_not_proven.mn == (exit 2)
@@ -2084,6 +2315,7 @@ block0(v0: addr):
 t0: unreachable @27:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/struct_in_two_cycles.mn == (exit 2)
+== conformance/core-calculus/struct_literal_reads_before_a_nested_mut_call.mn == (exit 2)
 == conformance/core-calculus/struct_mut_field_arguments.mn ==
 mente-dump 2 mir
 f0: fn bump(addr) {
@@ -3680,6 +3912,7 @@ t0: decreases @43:13 ["`decreases n` is negative or did not decrease"]
 t1: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/ghost-contracts-and-totality/field_path_array_element_unfollowed.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/field_path_binding_past_the_cap.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/field_path_clauses.mn ==
 mente-dump 2 mir
 f0: fn needs(addr) -> u8 {
@@ -3776,6 +4009,8 @@ block0(v0: addr, v1: u8):
   return
 t0: unreachable @25:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/ghost-contracts-and-totality/field_path_compound_assignment_reads_its_place_first.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/field_path_loop_changes_it_inside_a_struct_literal.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/field_path_loop_measure.mn ==
 mente-dump 2 mir
 f0: fn run(addr) -> u32 {
@@ -3848,6 +4083,7 @@ block0(v0: addr):
 t0: refinement @9:8 ["", " lies outside the refinement `[", "..", "]`"]
 t1: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/ghost-contracts-and-totality/field_path_loop_resets_it_at_the_head.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/field_path_measure_from_a_call.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/field_path_measure_negative.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/field_path_mut_call_havocs.mn == (exit 2)
@@ -3961,6 +4197,7 @@ t0: unreachable @14:8 ["unreachable reached: control left the code the checker a
 }
 == conformance/ghost-contracts-and-totality/field_path_whole_assignment_resets.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/invariant_not_preserved.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_changes_a_binding_inside_a_struct_literal.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
 mente-dump 2 mir
 f0: fn count(u8) -> u8 {

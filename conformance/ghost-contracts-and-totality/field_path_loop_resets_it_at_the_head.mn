@@ -1,0 +1,17 @@
+// expect: E0502
+module conformance
+// A loop that stores to a field path gives it its type alone at the loop's head: after the loop
+// it may be 5.
+pub struct P {
+  a: u8
+}
+
+pub fn f(mut p: P) -> u8[0..1] {
+  p.a = 0
+  var i: u8 = 0
+  while i < 3 {
+    p.a = 5
+    i += 1
+  }
+  p.a
+}

@@ -27,7 +27,7 @@ use mente_syntax::{Attr, Span};
 
 use crate::check::Typing;
 use crate::names::{BindingKind, Resolution};
-use crate::octagon::{Exact, Octagon, Term, BIG, INF};
+use crate::octagon::{Exact, Octagon, Term, BIG, INF, RELATIONAL_LIMIT};
 use crate::types::{Int, IntTy, Ty};
 
 pub mod smt;
@@ -823,7 +823,7 @@ fn lex_less(a: &[Val], b: &[Val]) -> Cond {
 }
 
 /// The values of a measure as a message writes them: `3`, or `(3, 0)` for several.
-fn tuple(values: &[i128]) -> String {
+fn tuple(values: &[Exact]) -> String {
     let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
     match parts.as_slice() {
         [one] => one.clone(),
@@ -878,6 +878,17 @@ fn mentions(v: &Val, var: usize) -> bool {
     }
 }
 
+/// Whether condition `c` reads `var`.
+fn cond_mentions(c: &Cond, var: usize) -> bool {
+    match c {
+        Cond::Cmp(_, l, r) => mentions(l, var) || mentions(r, var),
+        Cond::Far(_, far) => mentions(&far.0, var),
+        Cond::Not(a) => cond_mentions(a, var),
+        Cond::And(a, b) | Cond::Or(a, b) => cond_mentions(a, var) || cond_mentions(b, var),
+        Cond::Const(_) | Cond::Unknown => false,
+    }
+}
+
 /// After `var = terms + c`: the bounds beyond the octagon's reach that a single term carries,
 /// shifted by `c` and negated with the term. A sum of more terms carries none, which is sound.
 fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
@@ -917,45 +928,36 @@ fn exact_range(st: &Octagon, v: &Val) -> (Option<Exact>, Option<Exact>) {
     )
 }
 
-/// Narrows `st` to the points where `v op c` holds, `c` a constant beyond the octagon's reach:
-/// for a single term, as an exact bound of its variable; for any other value, to nothing
-/// where its bounds already rule the comparison out.
-fn constrain_far(st: &mut Octagon, op: BinaryOp, v: &Val, c: Exact) {
-    if let Val::Lin(terms, k) = v {
-        if let [t] = terms.as_slice() {
-            // `±x + k op c` is `±x op c - k`, and `-x op b` is `x op' -b`.
-            let Some(b) = c.plus(k.checked_neg().unwrap_or(i128::MAX)) else {
-                return;
-            };
-            let (op, b) = if t.neg {
-                (mirror(op), b.negated())
-            } else {
-                (op, b)
-            };
-            let (lower, upper) = match op {
-                BinaryOp::Lt => (None, b.plus(-1)),
-                BinaryOp::Le => (None, Some(b)),
-                BinaryOp::Gt => (b.plus(1), None),
-                BinaryOp::Ge => (Some(b), None),
-                BinaryOp::Eq => (Some(b), Some(b)),
-                _ => (None, None),
-            };
-            st.add_exact(t.var, lower, upper);
-            return;
-        }
-    }
-    let (lo, hi) = exact_range(st, v);
-    let impossible = match op {
-        BinaryOp::Lt => lo.is_some_and(|l| l >= c),
-        BinaryOp::Le => lo.is_some_and(|l| l > c),
-        BinaryOp::Gt => hi.is_some_and(|h| h <= c),
-        BinaryOp::Ge => hi.is_some_and(|h| h < c),
-        BinaryOp::Eq => lo.is_some_and(|l| l > c) || hi.is_some_and(|h| h < c),
-        _ => false,
+/// Narrows `st` to the points where `t + k op c` holds, `c` a constant beyond the octagon's
+/// reach, as an exact bound of `t`'s variable.
+fn constrain_far(st: &mut Octagon, op: BinaryOp, t: Term, k: i128, c: Exact) {
+    // `±x + k op c` is `±x op c - k`, and `-x op b` is `x op' -b`.
+    let Some(b) = c.plus(k.checked_neg().unwrap_or(i128::MAX)) else {
+        return;
     };
-    if impossible {
+    let (op, b) = if t.neg {
+        (mirror(op), b.negated())
+    } else {
+        (op, b)
+    };
+    let bound = match op {
+        BinaryOp::Lt => b.plus(-1),
+        BinaryOp::Gt => b.plus(1),
+        _ => Some(b),
+    };
+    // No value lies beyond the exact integers, which hold every value of a 128-bit type: a
+    // strict comparison past them holds nowhere.
+    let Some(bound) = bound else {
         st.set_empty();
-    }
+        return;
+    };
+    let (lower, upper) = match op {
+        BinaryOp::Lt | BinaryOp::Le => (None, Some(bound)),
+        BinaryOp::Gt | BinaryOp::Ge => (Some(bound), None),
+        BinaryOp::Eq => (Some(bound), Some(bound)),
+        _ => (None, None),
+    };
+    st.add_exact(t.var, lower, upper);
 }
 
 /// `x - (terms + c)` lies in `[lo, hi]`: exactly when `terms` has at most one term, else as the
@@ -1125,22 +1127,40 @@ struct FieldPath {
     shape: Shape,
 }
 
+/// The variables of a function, counted as they are given out.
+struct Counter(usize);
+
+impl Counter {
+    /// A new variable, when one is wanted.
+    fn alloc(&mut self, wanted: bool) -> Option<usize> {
+        self.0 += usize::from(wanted);
+        wanted.then(|| self.0 - 1)
+    }
+}
+
 /// A scalar field path, as its field names, and a value of it.
 type PathVal = (Vec<String>, Val);
 
 /// The scalar field paths of a value of struct `name`, not through an array, each with its
 /// declared shape: an integer field, and each scalar path of a struct field, in the order of
-/// the declaration.
-fn scalar_paths(structs: &crate::structs::Structs, name: &str) -> Vec<(Vec<String>, Shape)> {
-    let Some(def) = structs.get(name) else {
-        return Vec::new();
-    };
+/// the declaration. `None` when there are more than `room`, which each one listed takes one of:
+/// structs nested level by level can have a number of them that doubles with each level, and
+/// none is listed past the room.
+fn scalar_paths(
+    structs: &crate::structs::Structs,
+    name: &str,
+    room: &mut usize,
+) -> Option<Vec<(Vec<String>, Shape)>> {
+    let def = structs.get(name)?;
     let mut out = Vec::new();
     for f in &def.fields {
         match Fx::declared_shape(def.tree(), f.decl) {
-            shape @ Shape::Int { .. } => out.push((vec![f.name.clone()], shape)),
+            shape @ Shape::Int { .. } => {
+                *room = room.checked_sub(1)?;
+                out.push((vec![f.name.clone()], shape));
+            }
             Shape::Struct(inner) => {
-                for (mut names, shape) in scalar_paths(structs, &inner) {
+                for (mut names, shape) in scalar_paths(structs, &inner, room)? {
                     names.insert(0, f.name.clone());
                     out.push((names, shape));
                 }
@@ -1148,7 +1168,19 @@ fn scalar_paths(structs: &crate::structs::Structs, name: &str) -> Vec<(Vec<Strin
             _ => {}
         }
     }
-    out
+    Some(out)
+}
+
+/// The declared shape of scalar field path `names` of a value of struct `name`.
+fn path_shape(structs: &crate::structs::Structs, name: &str, names: &[String]) -> Option<Shape> {
+    let (first, rest) = names.split_first()?;
+    let def = structs.get(name)?;
+    let f = def.fields.iter().find(|f| f.name == *first)?;
+    match (Fx::declared_shape(def.tree(), f.decl), rest) {
+        (shape @ Shape::Int { .. }, []) => Some(shape),
+        (Shape::Struct(inner), _) => path_shape(structs, &inner, rest),
+        _ => None,
+    }
 }
 
 /// The binding and field names of `e` when it is a chain of fields of a binding, not through
@@ -1165,6 +1197,36 @@ fn field_chain(tree: &Tree, resolution: &Resolution, e: ExprId) -> Option<(usize
     }
 }
 
+/// The name a chain of fields `e` starts from, and its fields: `s.a.b` is `s` and `["a", "b"]`,
+/// and `s` alone is `s` and none.
+fn chain_of(tree: &Tree, e: ExprId) -> Option<(String, Vec<String>)> {
+    match &tree.expr(e).kind {
+        ExprKind::Field { base, name } => {
+            let (root, mut names) = chain_of(tree, *base)?;
+            names.push(name.clone());
+            Some((root, names))
+        }
+        ExprKind::Name(n) => Some((n.clone(), Vec::new())),
+        _ => None,
+    }
+}
+
+/// Whether Tier 1 follows every value `e`, a clause in the Tier-1 fragment, reads: `read`
+/// tells it for a name, or a chain of fields of one, and a literal reads nothing.
+fn fragment_followed(tree: &Tree, e: ExprId, read: &dyn Fn(ExprId) -> Option<bool>) -> bool {
+    if let Some(followed) = read(e) {
+        return followed;
+    }
+    match &tree.expr(e).kind {
+        ExprKind::Unary { operand, .. } => fragment_followed(tree, *operand, read),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            fragment_followed(tree, *lhs, read) && fragment_followed(tree, *rhs, read)
+        }
+        ExprKind::Int { .. } | ExprKind::Bool(_) => true,
+        _ => false,
+    }
+}
+
 /// The field paths of parameter `param` that `e`, a clause of its function, reads.
 fn clause_paths(tree: &Tree, e: ExprId, param: &str, out: &mut Vec<Vec<String>>) {
     let mut names = Vec::new();
@@ -1174,25 +1236,17 @@ fn clause_paths(tree: &Tree, e: ExprId, param: &str, out: &mut Vec<Vec<String>>)
         at = *base;
     }
     if !names.is_empty() {
-        if matches!(&tree.expr(at).kind, ExprKind::Name(n) if n == param) && !out.contains(&names) {
+        if matches!(&tree.expr(at).kind, ExprKind::Name(n) if n == param) {
             out.push(names);
         }
         return;
     }
+    // A clause Tier 1 reads lies in the fragment: comparisons, `and`, `not`, sums and negations.
     match &tree.expr(e).kind {
         ExprKind::Unary { operand, .. } => clause_paths(tree, *operand, param, out),
         ExprKind::Binary { lhs, rhs, .. } => {
             clause_paths(tree, *lhs, param, out);
             clause_paths(tree, *rhs, param, out);
-        }
-        ExprKind::Index { base, index } => {
-            clause_paths(tree, *base, param, out);
-            clause_paths(tree, *index, param, out);
-        }
-        ExprKind::Call { args, .. } => {
-            for a in args {
-                clause_paths(tree, a.value, param, out);
-            }
         }
         _ => {}
     }
@@ -1477,12 +1531,8 @@ fn is_int_type(tree: &Tree, t: TypeId) -> bool {
 impl<'a> Fx<'a> {
     fn new(f: &Function<'a>, callees: &'a [Option<Callee<'a>>], src: &'a str) -> Fx<'a> {
         let tree = &f.syntax.tree;
-        let mut count = 0;
-        let mut alloc = |wanted: bool| {
-            count += usize::from(wanted);
-            wanted.then(|| count - 1)
-        };
-        let result = alloc(f.syntax.result.is_some_and(|t| is_int_type(tree, t)));
+        let mut n = Counter(0);
+        let result = n.alloc(f.syntax.result.is_some_and(|t| is_int_type(tree, t)));
         let vars = f
             .resolution
             .bindings
@@ -1490,23 +1540,29 @@ impl<'a> Fx<'a> {
             .zip(&f.typing.bindings)
             .map(|(b, t)| match b.kind {
                 BindingKind::Result => result,
-                _ => alloc(matches!(t, Ty::Int(_))),
+                _ => n.alloc(matches!(t, Ty::Int(_))),
             })
             .collect();
-        // Each binding of a struct type: a variable for each scalar field path.
+        // Each binding of a struct type: a variable for each scalar field path, while the
+        // function's variables stay within the cap. Past it, a binding's paths are not
+        // followed, and its fields read as their types and refinements, as elements do.
         let paths: Vec<Vec<FieldPath>> = f
             .typing
             .bindings
             .iter()
             .map(|t| match t {
-                Ty::Struct(s) => scalar_paths(f.structs, s)
-                    .into_iter()
-                    .map(|(names, shape)| FieldPath {
-                        names,
-                        var: alloc(true).unwrap_or(0),
-                        shape,
-                    })
-                    .collect(),
+                Ty::Struct(s) => {
+                    let mut room = RELATIONAL_LIMIT.saturating_sub(n.0);
+                    scalar_paths(f.structs, s, &mut room)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(names, shape)| FieldPath {
+                            names,
+                            var: n.alloc(true).unwrap_or(0),
+                            shape,
+                        })
+                        .collect()
+                }
                 _ => Vec::new(),
             })
             .collect();
@@ -1536,15 +1592,14 @@ impl<'a> Fx<'a> {
                                     callee: callee.unwrap_or(0),
                                     ins: params
                                         .iter()
-                                        .map(|p| alloc(is_int_type(ct, p.ty)))
+                                        .map(|p| n.alloc(is_int_type(ct, p.ty)))
                                         .collect(),
                                     outs: params
                                         .iter()
-                                        .map(|p| alloc(p.is_mut && is_int_type(ct, p.ty)))
+                                        .map(|p| n.alloc(p.is_mut && is_int_type(ct, p.ty)))
                                         .collect(),
-                                    result: alloc(
-                                        c.syntax.result.is_some_and(|t| is_int_type(ct, t)),
-                                    ),
+                                    result: n
+                                        .alloc(c.syntax.result.is_some_and(|t| is_int_type(ct, t))),
                                     paths: params
                                         .iter()
                                         .map(|p| {
@@ -1555,13 +1610,16 @@ impl<'a> Fx<'a> {
                                             for clause in &c.syntax.contracts {
                                                 clause_paths(ct, clause.expr, &p.name, &mut read);
                                             }
-                                            scalar_paths(f.structs, &s)
-                                                .into_iter()
-                                                .filter(|(names, _)| read.contains(names))
-                                                .map(|(names, shape)| FieldPath {
-                                                    names,
-                                                    var: alloc(true).unwrap_or(0),
-                                                    shape,
+                                            read.sort();
+                                            read.dedup();
+                                            read.into_iter()
+                                                .filter_map(|names| {
+                                                    let shape = path_shape(f.structs, &s, &names)?;
+                                                    Some(FieldPath {
+                                                        names,
+                                                        var: n.alloc(true).unwrap_or(0),
+                                                        shape,
+                                                    })
                                                 })
                                                 .collect()
                                         })
@@ -1576,26 +1634,26 @@ impl<'a> Fx<'a> {
                     | ExprKind::Field { .. }
                     | ExprKind::Binary {
                         op: BinaryOp::Rem, ..
-                    } if int => Site::Value(alloc(true).unwrap_or(0)),
+                    } if int => Site::Value(n.alloc(true).unwrap_or(0)),
                     // A literal beyond the octagon's reach is a variable whose exact bounds
                     // hold its value.
                     ExprKind::Int { value, .. } if Exact::new(false, *value).is_far() => {
-                        Site::Value(alloc(true).unwrap_or(0))
+                        Site::Value(n.alloc(true).unwrap_or(0))
                     }
                     _ => Site::None,
                 }
             })
             .collect();
-        let temps = [alloc(true).unwrap_or(0), alloc(true).unwrap_or(0)];
-        let scratch = alloc(true).unwrap_or(0);
-        let probe = alloc(true).unwrap_or(0);
+        let temps = [n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)];
+        let scratch = n.alloc(true).unwrap_or(0);
+        let probe = n.alloc(true).unwrap_or(0);
         let measures = tree
             .stmts
             .iter()
             .map(|s| match &s.kind {
                 StmtKind::While { decreases, .. } => decreases
                     .iter()
-                    .map(|_| (alloc(true).unwrap_or(0), alloc(true).unwrap_or(0)))
+                    .map(|_| (n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)))
                     .collect(),
                 _ => Vec::new(),
             })
@@ -1605,7 +1663,7 @@ impl<'a> Fx<'a> {
             .contracts
             .iter()
             .filter(|c| c.kind == ContractKind::Decreases)
-            .map(|_| (alloc(true).unwrap_or(0), alloc(true).unwrap_or(0)))
+            .map(|_| (n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)))
             .collect();
         let mut fx = Fx {
             syntax: f.syntax,
@@ -1625,7 +1683,7 @@ impl<'a> Fx<'a> {
             temps,
             scratch,
             probe,
-            count,
+            count: n.0,
             report: Report::default(),
             recording: true,
             loops: Vec::new(),
@@ -1839,21 +1897,17 @@ impl<'a> Fx<'a> {
         self.arg_reading(callee, args, e).map(|(text, _)| text)
     }
 
-    /// Whether Tier 1 follows every value `e`, a clause of `callee`, reads at a call with
-    /// `args`, so that a `guard` written in the caller's terms narrows what the clause reads.
+    /// Whether Tier 1 follows every value `e`, a clause of `callee` in the Tier-1 fragment,
+    /// reads at a call with `args`, so that a `guard` written in the caller's terms narrows
+    /// what the clause reads.
     fn clause_followed(&self, callee: &FnSyntax, args: &[Arg], e: ExprId) -> bool {
-        if let Some((_, followed)) = self.arg_reading(callee, args, e) {
-            return followed;
-        }
-        let sub = |x: ExprId| self.clause_followed(callee, args, x);
-        match &callee.tree.expr(e).kind {
-            ExprKind::Unary { operand, .. } => sub(*operand),
-            ExprKind::Binary { lhs, rhs, .. } => sub(*lhs) && sub(*rhs),
-            ExprKind::Index { base, index } => sub(*base) && sub(*index),
-            ExprKind::Field { base, .. } => sub(*base),
-            ExprKind::Call { args: inner, .. } => inner.iter().all(|a| sub(a.value)),
-            _ => true,
-        }
+        let tree = &callee.tree;
+        let read = |e: ExprId| {
+            let (root, names) = chain_of(tree, e)?;
+            let k = callee.params.iter().position(|p| p.name == *root)?;
+            Some(self.reading(args.get(k)?.value, &names).1)
+        };
+        fragment_followed(tree, e, &read)
     }
 
     /// [`Self::arg_text`], and whether Tier 1 follows the value that text reads.
@@ -1863,18 +1917,15 @@ impl<'a> Fx<'a> {
         args: &[Arg],
         e: ExprId,
     ) -> Option<((String, u8), bool)> {
-        let tree = &callee.tree;
-        let mut names = Vec::new();
-        let mut root = e;
-        while let ExprKind::Field { base, name } = &tree.expr(root).kind {
-            names.insert(0, name.clone());
-            root = *base;
-        }
-        let ExprKind::Name(n) = &tree.expr(root).kind else {
-            return None;
-        };
-        let k = callee.params.iter().position(|p| p.name == *n)?;
-        let mut at = args.get(k)?.value;
+        let (root, names) = chain_of(&callee.tree, e)?;
+        let k = callee.params.iter().position(|p| p.name == *root)?;
+        Some(self.reading(args.get(k)?.value, &names))
+    }
+
+    /// The text, in this function, of field path `names` of `at`, an expression of it, and
+    /// whether Tier 1 follows the value that text reads: a struct literal's field is its value,
+    /// and the rest of the path is read from `at` as it is.
+    fn reading(&self, mut at: ExprId, names: &[String]) -> ((String, u8), bool) {
         for (i, name) in names.iter().enumerate() {
             if let ExprKind::Construct { fields, .. } = &self.tree.expr(at).kind {
                 if let Some(f) = fields.iter().find(|f| f.name == *name) {
@@ -1882,16 +1933,25 @@ impl<'a> Fx<'a> {
                     continue;
                 }
             }
-            // The rest of the path, read from the argument as it is.
-            let text = format!("{}.{}", paren(self.own_text(at), 12), names[i..].join("."));
+            let rest = &names[i..];
+            let text = format!("{}.{}", paren(self.own_text(at), 12), rest.join("."));
+            // A path Tier 1 follows, or an array's only field, `.len`, which is a constant.
             let followed = field_chain(self.tree, self.resolution, at).is_some_and(|(r, pre)| {
                 let mut full = pre;
-                full.extend(names[i..].iter().cloned());
+                full.extend(rest.iter().cloned());
                 self.paths[r].iter().any(|p| p.names == full)
-            });
-            return Some(((text, 12), followed));
+            }) || matches!(self.typing.exprs[at.0 as usize], Ty::Array(..));
+            return ((text, 12), followed);
         }
-        Some((self.own_text(at), self.followed(at)))
+        (self.own_text(at), self.followed(at))
+    }
+
+    /// For a field path of `result` in this function's clause, or `result` itself: its text
+    /// for a returned `value`, and whether Tier 1 follows what that text reads.
+    fn result_reading(&self, e: ExprId, value: ExprId) -> Option<((String, u8), bool)> {
+        let (b, names) = field_chain(self.tree, self.resolution, e)?;
+        (self.resolution.bindings[b].kind == BindingKind::Result)
+            .then(|| self.reading(value, &names))
     }
 
     /// The variable of `e` when it is a scalar field path Tier 1 follows.
@@ -1924,39 +1984,27 @@ impl<'a> Fx<'a> {
     }
 
     /// The scalar field paths of `e`, a value of a struct type already evaluated, with their
-    /// values: a struct literal's as it built them, a followed place's variables, and any
-    /// other value's declared bounds.
-    fn struct_vals(&self, st: &Octagon, e: ExprId) -> Vec<(Vec<String>, Val)> {
+    /// values: a struct literal's as it built them, and a followed place's variables.
+    fn struct_vals(&self, e: ExprId) -> Vec<(Vec<String>, Val)> {
         if let (ExprKind::Construct { .. }, Some(built)) =
             (&self.tree.expr(e).kind, &self.built[e.0 as usize])
         {
             return built.clone();
         }
-        if let Some((root, prefix)) = field_chain(self.tree, self.resolution, e) {
-            let under = self.paths_under(root, &prefix);
-            if !under.is_empty() {
-                return under
-                    .into_iter()
-                    .map(|(rel, p)| (rel, var_val(p.var)))
-                    .collect();
-            }
-        }
-        let Ty::Struct(name) = &self.typing.exprs[e.0 as usize] else {
-            return Vec::new();
-        };
-        scalar_paths(self.structs, name)
-            .into_iter()
-            .map(|(names, shape)| {
-                let v = self.summary(st, &shape);
-                (names, v)
-            })
-            .collect()
+        // Any other value's paths are left out: where they land, each takes its declared
+        // bounds.
+        field_chain(self.tree, self.resolution, e).map_or(Vec::new(), |(root, prefix)| {
+            self.paths_under(root, &prefix)
+                .into_iter()
+                .map(|(rel, p)| (rel, var_val(p.var)))
+                .collect()
+        })
     }
 
     /// Binding `b`'s paths under `prefix` take the value of `e`, a struct already evaluated,
     /// all at once: a value that reads another of them reads it as it was.
     fn land(&mut self, st: &mut Octagon, b: usize, prefix: &[String], e: ExprId) {
-        let vals = self.struct_vals(st, e);
+        let vals = self.struct_vals(e);
         let mut dests: Vec<(FieldPath, Val)> = self
             .paths_under(b, prefix)
             .into_iter()
@@ -2156,7 +2204,7 @@ impl<'a> Fx<'a> {
         st: &Octagon,
         named: &[(String, usize)],
         extra: &[usize],
-    ) -> (String, Vec<i128>) {
+    ) -> (String, Vec<Exact>) {
         let mut names = Vec::new();
         let mut vars = Vec::new();
         for &b in &self.scope {
@@ -2183,6 +2231,24 @@ impl<'a> Fx<'a> {
             .collect();
         let values = picked.iter().skip(names.len()).copied().collect();
         (text.join(", "), values)
+    }
+
+    /// A `guard` stating clause `cond` where Tier 1 follows every value it reads, so that the
+    /// guard narrows what the clause reads; otherwise none, and the message says why.
+    fn usable_guard(
+        cond: String,
+        followed: bool,
+        at: &str,
+        message: String,
+    ) -> (Option<String>, String) {
+        if followed {
+            return (Some(cond), message);
+        }
+        let why = format!(
+            "{}; {} the clause is `{}`, which reads a value Tier 1 does not follow, so no `guard` it can use states it",
+            message, at, cond
+        );
+        (None, why)
     }
 
     /// `Tier 1 cannot rule out ...`: `with` follows a valuation, `without` stands for one.
@@ -2528,7 +2594,17 @@ impl<'a> Fx<'a> {
             }
             Cond::Far(op, far) => {
                 let op = if polarity { *op } else { flip(*op) };
-                constrain_far(st, op, &far.0, far.1);
+                // A value of one term is compared through its variable, any other through the
+                // scratch variable, which takes the bounds the octagon gives it.
+                let (t, k) = match &far.0 {
+                    Val::Lin(terms, k) if terms.len() == 1 => (terms[0], *k),
+                    v => {
+                        self.assign(st, self.scratch, v);
+                        (Term::pos(self.scratch), 0)
+                    }
+                };
+                constrain_far(st, op, t, k, far.1);
+                st.forget(self.scratch);
             }
             Cond::Unknown => {}
         }
@@ -2562,11 +2638,11 @@ impl<'a> Fx<'a> {
                     BinaryOp::Lt
                 };
                 match far(r.lo_lit) {
-                    Some(c) => constrain_far(st, BinaryOp::Ge, &v, c),
+                    Some(c) => constrain_far(st, BinaryOp::Ge, Term::pos(var), 0, c),
                     None => self.constrain(st, BinaryOp::Ge, &v, &r.lo),
                 }
                 match far(r.hi_lit) {
-                    Some(c) => constrain_far(st, op, &v, c),
+                    Some(c) => constrain_far(st, op, Term::pos(var), 0, c),
                     None => self.constrain(st, op, &v, &r.hi),
                 }
             }
@@ -2778,7 +2854,12 @@ impl<'a> Fx<'a> {
             self.assume(&mut s, &cmp(op, probe, bound.clone()), false);
             let (valuation, values) = self.valuation(&s, &[], &[self.probe]);
             let value = values.first().copied();
-            let core = format!("{} is {}, {}", shown, value.unwrap_or(0), outside);
+            let core = format!(
+                "{} is {}, {}",
+                shown,
+                value.unwrap_or(Exact::from_i128(0)),
+                outside
+            );
             // The valuation determines the value only when the value is linear in the bindings in
             // scope; otherwise Tier 1 knows only an interval for it, and names a point of that alone.
             match v {
@@ -2890,15 +2971,15 @@ impl<'a> Fx<'a> {
                 continue;
             };
             let clause = print(self.tree, c.expr, &no_subst).0;
-            let value_text = value.map(|e| self.own_text(e));
-            let resolution = self.resolution;
-            let subst = |id: ExprId, _: &str| {
-                let b = resolution.names[id.0 as usize]?;
-                (resolution.bindings[b.0 as usize].kind == BindingKind::Result)
-                    .then(|| value_text.clone())
-                    .flatten()
-            };
-            let guard = print(self.tree, c.expr, &subst).0;
+            // `result`, and a field path of it, read the returned value.
+            let read = |id: ExprId| value.and_then(|v| self.result_reading(id, v));
+            let subst = |id: ExprId, _: &str| read(id).map(|r| r.0);
+            let here = print(self.tree, c.expr, &subst).0;
+            let followed = fragment_followed(self.tree, c.expr, &|id| {
+                read(id)
+                    .map(|r| r.1)
+                    .or_else(|| chain_of(self.tree, id).map(|_| self.followed(id)))
+            });
             let (valuation, _) = self.valuation(&failing, &extra, &[]);
             let what = format!("`ensures {}` of `{}` {}", clause, name, at);
             let message = Fx::cannot_rule_out(
@@ -2906,7 +2987,8 @@ impl<'a> Fx<'a> {
                 &format!("which violates {}", what),
                 &format!("{} fails", what),
             );
-            self.emit("E0505", span, message, Some(guard), anchor);
+            let (guard, message) = Fx::usable_guard(here, followed, at, message);
+            self.emit("E0505", span, message, guard, anchor);
         }
     }
 
@@ -3102,7 +3184,9 @@ impl<'a> Fx<'a> {
         let v = match op {
             AssignOp::Set => self.eval_into(st, value, &shape, &place_name),
             AssignOp::Compound(bop) => {
-                let current = scalar.map_or_else(|| self.summary(st, &shape), var_val);
+                // The place is read first, as the reference interpreter reads it.
+                let mut current = scalar.map_or_else(|| self.summary(st, &shape), var_val);
+                self.read_before(st, value, [&mut current]);
                 let r = self.eval(st, value);
                 let v = self.binary(st, value, bop, (place, &current), (value, &r));
                 let p = prec(&ExprKind::Binary {
@@ -3212,21 +3296,14 @@ impl<'a> Fx<'a> {
         for f in fields {
             // A later field that changes a binding an earlier value reads leaves that
             // value as its bounds were.
-            let mut changed = Vec::new();
-            self.changed_expr(f.value, &mut changed);
-            let touched: Vec<usize> = changed.iter().flat_map(|&b| self.vars_of(b)).collect();
-            for (_, v) in built.iter_mut() {
-                if touched.iter().any(|&x| mentions(v, x)) {
-                    *v = summary_of(st, v);
-                }
-            }
+            self.read_before(st, f.value, built.iter_mut().map(|(_, v)| v));
             let shape = self.field_shape(name, &f.name);
             let place = format!("field `{}` of `{}`", f.name, name);
             let v = self.eval_into(st, f.value, &shape, &place);
             match &shape {
                 Shape::Int { .. } => built.push((vec![f.name.clone()], v)),
                 Shape::Struct(_) => {
-                    for (mut names, v) in self.struct_vals(st, f.value) {
+                    for (mut names, v) in self.struct_vals(f.value) {
                         names.insert(0, f.name.clone());
                         built.push((names, v));
                     }
@@ -3290,7 +3367,8 @@ impl<'a> Fx<'a> {
                     Val::Other
                 }
                 _ => {
-                    let l = self.eval(st, *lhs);
+                    let mut l = self.eval(st, *lhs);
+                    self.read_before(st, *rhs, [&mut l]);
                     let r = self.eval(st, *rhs);
                     self.binary(st, e, *op, (*lhs, &l), (*rhs, &r))
                 }
@@ -3521,6 +3599,21 @@ impl<'a> Fx<'a> {
                 let mut s2 = st.clone();
                 self.assume(&mut s2, &l, and);
                 let r = self.cond(&mut s2, *rhs);
+                let mut changed = Vec::new();
+                self.changed_expr(*rhs, &mut changed);
+                let mut l = l;
+                if !changed.is_empty() {
+                    // A right operand that changes bindings where it runs leaves them changed:
+                    // the state is then where the left operand decided, or where the right one
+                    // ended, and a left operand that reads what it changes is not known in it.
+                    self.assume(st, &l, !and);
+                    *st = st.join(&s2);
+                    let touched: Vec<usize> =
+                        changed.iter().flat_map(|&b| self.vars_of(b)).collect();
+                    if touched.iter().any(|&x| cond_mentions(&l, x)) {
+                        l = Cond::Unknown;
+                    }
+                }
                 if and {
                     Cond::And(Box::new(l), Box::new(r))
                 } else {
@@ -3538,7 +3631,8 @@ impl<'a> Fx<'a> {
                 lhs,
                 rhs,
             } => {
-                let l = self.eval(st, *lhs);
+                let mut l = self.eval(st, *lhs);
+                self.read_before(st, *rhs, [&mut l]);
                 let r = self.eval(st, *rhs);
                 match (far(self.literal(*lhs)), far(self.literal(*rhs))) {
                     (_, Some(c)) => Cond::Far(*op, Box::new((l, c))),
@@ -3682,7 +3776,7 @@ impl<'a> Fx<'a> {
         let Some(paths) = site.paths.get(k).filter(|ps| !ps.is_empty()) else {
             return;
         };
-        let given = self.struct_vals(st, arg);
+        let given = self.struct_vals(arg);
         for p in paths {
             let v = match given.iter().find(|(n, _)| *n == p.names) {
                 Some((_, v)) => v.clone(),
@@ -3813,15 +3907,17 @@ impl<'a> Fx<'a> {
             let (valuation, _) = self.valuation(&failing, &extra, &[]);
             let text = print(&callee.tree, clause.expr, &no_subst).0;
             let subst = |id: ExprId, _: &str| self.arg_text(callee, args, id);
-            let guard = print(&callee.tree, clause.expr, &subst).0;
+            let at_call = print(&callee.tree, clause.expr, &subst).0;
             let what = format!("`requires {}` of `{}`", text, callee.name);
             let message = Fx::cannot_rule_out(
                 &valuation,
                 &format!("which violates {} at this call", what),
                 &format!("this call violates {}", what),
             );
+            let followed = self.clause_followed(callee, args, clause.expr);
+            let (guard, message) = Fx::usable_guard(at_call, followed, "at this call", message);
             let anchor = self.anchor();
-            self.emit("E0504", span, message, Some(guard), anchor);
+            self.emit("E0504", span, message, guard, anchor);
         }
         self.call_measures(st, &c, &site, args, span);
         // After the call: the result and the `mut` parameters' final values, then `ensures`.
@@ -3991,10 +4087,40 @@ impl<'a> Fx<'a> {
                     self.changed_expr(i, out);
                 }
             }
+            ExprKind::Construct { fields, .. } => {
+                for f in fields {
+                    self.changed_expr(f.value, out);
+                }
+            }
             ExprKind::Field { base, .. } | ExprKind::Repeat { value: base, .. } => {
                 self.changed_expr(*base, out)
             }
-            _ => {}
+            // Every other kind is named, so that a new one must say what it changes.
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Error => {}
+        }
+    }
+
+    /// Values read before `later` runs, kept as they are then: one that reads a binding
+    /// `later` changes keeps the bounds it has now, as the reference interpreter has read it
+    /// already.
+    fn read_before<'v>(
+        &self,
+        st: &Octagon,
+        later: ExprId,
+        vals: impl IntoIterator<Item = &'v mut Val>,
+    ) {
+        let mut changed = Vec::new();
+        self.changed_expr(later, &mut changed);
+        let touched: Vec<usize> = changed.iter().flat_map(|&b| self.vars_of(b)).collect();
+        for v in vals {
+            if touched.iter().any(|&x| mentions(v, x)) {
+                *v = summary_of(st, v);
+            }
         }
     }
 
@@ -5035,6 +5161,11 @@ mod tests {
             codes("pub fn take(x: i128[-170141183460469231731687303715884105727..=0]) -> i128 = x\npub fn f(y: i128) -> i128 {\n  guard y >= -170141183460469231731687303715884105727 and y <= 0 else {\n    return 0\n  }\n  take(y)\n}"),
             NONE
         );
+        // So is a negated term compared with one.
+        assert_eq!(
+            codes("pub fn take(x: i128[-170141183460469231731687303715884105727..=0]) -> i128 = x\npub fn f(y: i128) -> i128 {\n  guard -y <= 170141183460469231731687303715884105727 and y <= 0 else {\n    return 0\n  }\n  take(y)\n}"),
+            NONE
+        );
         // A guard's equality with a far constant bounds its binding both ways, and a guard on
         // two terms that no value passes leaves what follows unreachable.
         let upper = format!("pub fn take(x: u128[0..{}]) -> u128 = x\n", u);
@@ -5083,6 +5214,40 @@ mod tests {
         assert_eq!(
             messages(&format!("{}pub fn f(y: i128) -> i128 = take(y)", take)),
             ["Tier 1 cannot rule out that `y` is -170141183460469231731687303715884105728, outside `i128[-170141183460469231731687303715884105727..=0]`, the type of parameter `x` of `take`"]
+        );
+        // An inclusive bound at a 128-bit type's end holds every value of the type: a value
+        // nothing narrows is proven, at either end of a refinement, a sum of two too.
+        let full = format!("pub fn take(x: u128[0..={}]) -> u128 = x\n", u);
+        for f in [
+            "pub fn f(y: u128) -> u128 = take(y)".to_string(),
+            format!("pub fn f(y: u128[1..={}]) -> u128[1..={}] = y", u, u),
+            format!("pub fn f(y: u128[{}..={}]) -> u128[{}..={}] = y", u, u, u, u),
+            format!("pub fn f(y: u128, z: u128) -> u128[0..={}] = y + z", u),
+            format!(
+                "pub fn f(y: u128) -> u128 {{\n  guard y <= {} else {{\n    return 0\n  }}\n  take(y)\n}}",
+                u
+            ),
+            format!("pub fn f(y: i128) -> i128[{}..=170141183460469231731687303715884105727] = y", lo),
+        ] {
+            assert_eq!(codes(&format!("{}{}", full, f)), NONE, "{}", f);
+        }
+        // A valuation names a value beyond the octagon's reach exactly, within every bound Tier 1
+        // holds: above `i128::MAX`, below `-BIG`, and from a guard.
+        assert_eq!(
+            messages(&format!("pub fn f(x: u128[300000000000000000000000000000000000000..{}], y: u8) -> u8[0..1] = y", u)),
+            ["Tier 1 cannot rule out `x = 300000000000000000000000000000000000000, y = 1`, outside `u8[0..1]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages(&format!("pub fn f(x: i128[{}..=-100000000000000000000000000000000000000], y: u8) -> u8[0..1] = y", lo)),
+            ["Tier 1 cannot rule out `x = -100000000000000000000000000000000000000, y = 1`, outside `u8[0..1]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: u128, y: u8) -> u8[0..1] {\n  guard x > 300000000000000000000000000000000000000 else {\n    return 0\n  }\n  y\n}"),
+            ["Tier 1 cannot rule out `x = 300000000000000000000000000000000000001, y = 1`, outside `u8[0..1]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: u8) -> u8[1..2] = x / 42535295865117307932921825928971026432"),
+            ["Tier 1 cannot rule out that `x / 42535295865117307932921825928971026432` is 0, outside `u8[1..2]`, the type of the result of `f`"]
         );
     }
 
@@ -5985,6 +6150,44 @@ mod tests {
         assert_eq!(codes(array), NONE);
         let read_only = "pub fn keep(x: u8) -> u8\n  ensures result == x\n= x\npub fn f(y: u8[0..5]) -> u8[0..5] = keep(y)";
         assert_eq!(codes(read_only), NONE);
+    }
+
+    /// A value is read when the reference interpreter reads it: an operator's left operand, a
+    /// compound assignment's place and a struct literal's earlier field before what follows
+    /// runs, and what the right operand of `and` or `or` changes stays changed after it.
+    #[test]
+    fn test_values_are_read_in_the_order_the_interpreter_reads_them() {
+        let bump = "fn bump(mut x: u8) -> u8\n  ensures x == 9\n  ensures result == 0\n{\n  x = 9\n  0\n}\n";
+        let with = |f: &str| format!("{}{}", bump, f);
+        for f in [
+            "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  val y = x * 1 + bump(mut x)\n  y\n}",
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x == bump(mut x) {\n    return 1\n  }\n  0\n}",
+            "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  x += bump(mut x)\n  x\n}",
+            "pub struct P {\n  a: u8\n}\npub fn f(q: P) -> u8[9..=9] {\n  var p = q\n  p.a = 0\n  p.a += bump(mut p.a)\n  p.a\n}",
+            "pub struct Q {\n  a: u8\n}\npub struct O {\n  p: u8\n  r: Q\n}\npub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  val o = O(p: x, r: Q(a: bump(mut x)))\n  o.p\n}",
+            // What the right operand changes stays changed ...
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x == 0 and bump(mut x) == 0 {\n    return 0\n  }\n  x\n}",
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x != 0 or bump(mut x) != 0 {\n    return 0\n  }\n  x\n}",
+            // ... and a left operand that reads it held before it ran, wherever it reads it.
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x == 0 and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if 0 == x and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if not (x != 0) and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
+            "pub fn f(y: u8) -> u8[0..=0] {\n  var x: u8 = 0\n  if (x == 0 and y == 0) and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
+            "pub fn f(y: u8) -> u8[0..=0] {\n  var x: u8 = 0\n  if (y == 0 and x == 0) and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
+        ] {
+            assert_eq!(codes(&with(f)), ["E0502"], "{}", f);
+        }
+        // What the later operand leaves alone keeps its relations.
+        for f in [
+            "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  val y = bump(mut x) + x\n  y\n}",
+            "pub fn f(a: u8[0..100]) -> u8[0..=0] {\n  var z: u8 = 0\n  val y = a + bump(mut z)\n  y - a\n}",
+            "pub fn f(a: u8[0..100]) -> u8[0..=0] {\n  var x: u8 = a\n  var z: u8 = 0\n  x += bump(mut z)\n  x - a\n}",
+            "pub fn f(i: u8) -> u8[0..4] {\n  var z: u8 = 0\n  if i < 4 and bump(mut z) == 0 {\n    return i\n  }\n  0\n}",
+            // Where the left operand decides alone, it holds; here it never does.
+            "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  if x == 0 and bump(mut x) == 0 {\n    return x\n  }\n  x\n}",
+        ] {
+            assert_eq!(codes(&with(f)), NONE, "{}", f);
+        }
     }
 
     #[test]
@@ -6907,6 +7110,8 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
             // an `ensures` over a read-only one's reads it after.
             "fn need(mut q: P)\n  requires q.a > 2\n{\n  q.a = 0\n}\npub fn f(x: u8[3..9]) {\n  var q = P(a: x, b: 0)\n  need(mut q)\n}",
             "fn get(q: P) -> u8\n  ensures result == q.a\n= q.a\npub fn f(x: u8[3..4]) -> u8[3..4] = get(P(a: x, b: 0))",
+            // A clause over a nested path reads the argument's.
+            "fn deep(o: O) -> u8\n  requires o.p.a > 2\n= o.p.a\npub fn f(x: u8[3..9]) -> u8 = deep(O(p: P(a: x, b: 0), w: 0))",
             // An array field's `.len` is a constant in a clause.
             "pub struct B {\n  xs: [3]u8\n}\npub fn f(b: B) -> u8\n  requires b.xs.len == 3\n= b.xs[2]",
             // A literal's earlier value that a later one changes reads as it was.
@@ -6920,6 +7125,10 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
             // A call that takes the struct `mut` leaves its type alone.
             "pub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  touch(mut p)\n  p.a\n}",
             "pub fn f(mut o: O) -> u8[0..1] {\n  o.p.a = 0\n  touch(mut o.p)\n  o.p.a\n}",
+            // A loop that changes it leaves it its type at the loop's head, a call inside a struct
+            // literal included.
+            "pub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  var i: u8 = 0\n  while i < 3 {\n    p.a = 5\n    i += 1\n  }\n  p.a\n}",
+            "pub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  var i: u8 = 0\n  while i < 3 {\n    _ = O(p: P(a: 0, b: bump(mut p)), w: 0)\n    i += 1\n  }\n  p.a\n}\nfn bump(mut p: P) -> u8 {\n  p.a = 9\n  0\n}",
             // An element of an array of structs is not followed.
             "pub fn f(mut ps: [2]P) -> u8[0..1] {\n  ps[0].a = 0\n  ps[0].a\n}",
         ] {
@@ -6939,20 +7148,62 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
             messages(&with("pub fn f(mut ps: [2]P, q: P) -> u8[0..1] {\n  ps[0].a = 0\n  ps[0].a\n}")),
             ["Tier 1 cannot rule out that `ps[0].a` is 1, outside `u8[0..1]`, the type of the result of `f`"]
         );
-        // A path counts toward the variable cap: a struct of 130 fields puts a function past
-        // it, where a proof that needs a relation fails.
-        let fields: String = (0..130).map(|k| format!("  f{}: u8\n", k)).collect();
-        let wide = format!("pub struct W {{\n{}}}\n", fields);
+        // A binding's paths are followed while the function's variables stay within the cap:
+        // with the result's variable, 127 fields fit and 128 do not, and a binding past it is
+        // not followed, as an element is.
+        let wide = |n: usize| {
+            let fields: String = (0..n).map(|k| format!("  f{}: u8\n", k)).collect();
+            format!("pub struct W {{\n{}}}\n", fields)
+        };
+        let store = "pub fn f(mut w: W) -> u8[0..1] {\n  w.f0 = 0\n  w.f0\n}";
+        assert_eq!(codes(&format!("{}{}", wide(127), store)), NONE);
+        assert_eq!(codes(&format!("{}{}", wide(128), store)), ["E0502"]);
+        // One past it takes no variables, and the function's other bindings keep their
+        // relations.
         let relation =
-            "(x: u8, y: u8) -> u8[1..=255] {\n  guard x < y else {\n    return 1\n  }\n  y - x\n}";
-        assert_eq!(codes(&format!("{}pub fn f{}", wide, relation)), NONE);
+            "(w: W, x: u8, y: u8) -> u8[1..=255] {\n  guard x < y else {\n    return 1\n  }\n  y - x\n}";
+        assert_eq!(codes(&format!("{}pub fn f{}", wide(200), relation)), NONE);
+    }
+
+    /// The field paths of a struct are listed no further than the room they may take: structs
+    /// nested level by level, whose paths double with each level, are given up on once the room
+    /// is used, so a struct of 2^41 paths costs as much as one of 128.
+    #[test]
+    fn test_field_paths_are_listed_no_further_than_the_cap() {
+        let mut src = String::from("module t\npub struct S0 {\n  a: u8\n  b: u8\n}\n");
+        for k in 1..=40 {
+            src.push_str(&format!(
+                "pub struct S{} {{\n  l: S{}\n  r: S{}\n}}\n",
+                k,
+                k - 1,
+                k - 1
+            ));
+        }
+        let m = mente_syntax::parse_module(&src).unwrap();
+        let parsed = mente_syntax::parse_structs(&src, &m);
+        let (structs, _) = crate::structs::declare(&m, &parsed);
+        let mut room = RELATIONAL_LIMIT;
+        let paths = scalar_paths(&structs, "S5", &mut room).unwrap();
+        assert_eq!((paths.len(), room), (64, RELATIONAL_LIMIT - 64));
+        assert_eq!(paths[1].0, ["l", "l", "l", "l", "l", "b"]);
+        let mut room = RELATIONAL_LIMIT;
+        assert!(scalar_paths(&structs, "S40", &mut room).is_none());
+        assert_eq!(room, 0);
+        // A function of such bindings, of 2^21 paths each within the size a value may have,
+        // follows none of them, and checks.
+        let upto = src.find("pub struct S21").unwrap();
+        let path = format!("u{}.a", ".l".repeat(20));
+        let deep = format!(
+            "{}pub fn f(s: S20, t: S20) -> u8[0..1] {{\n  var u = s\n  u = t\n  {}\n}}\n",
+            &src["module t\n".len()..upto],
+            path
+        );
         assert_eq!(
-            codes(&format!(
-                "{}pub fn f{}",
-                wide,
-                relation.replace("(x: u8", "(w: W, x: u8")
-            )),
-            ["E0502"]
+            messages(&deep),
+            [format!(
+                "Tier 1 cannot rule out that `{}` is 1, outside `u8[0..1]`, the type of the result of `f`",
+                path
+            )]
         );
     }
 
@@ -7006,6 +7257,101 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
         let d = diagnostics(&element);
         assert!(d.iter().all(|d| d.code == "E0507"), "{:?}", d);
         assert!(d.iter().all(|d| d.fixes.is_empty()), "{:?}", d);
+    }
+
+    /// A failed `requires` or `ensures` offers a `guard` in the terms of the call or the return
+    /// only where Tier 1 follows every value it reads there, a struct literal's field value, a
+    /// followed path or an array's `.len`, and that guard, applied, proves it; otherwise the
+    /// message says what the clause reads there.
+    #[test]
+    fn test_clauses_offer_only_guards_tier1_can_use() {
+        let decls = "pub struct O {\n  w: u8\n}\nfn mk(x: u8) -> O = O(w: x)\nfn needs(i: O) -> u8\n  requires i.w > 2\n= i.w\nfn below(i: O) -> u8\n  requires -i.w < -2\n= i.w\nfn lens(xs: [3]u8) -> u8\n  requires xs.len > 3\n= 0\n";
+        let with = |f: &str| format!("{}{}", decls, f);
+        // What Tier 1 follows proves the clause where it holds.
+        assert_eq!(
+            codes(&with("pub fn f(x: u8[3..9]) -> u8 = below(O(w: x))")),
+            NONE
+        );
+        for (f, guard) in [
+            (
+                "pub fn f(x: u8, y: u8) -> O\n  ensures result.w == x\n= O(w: y)",
+                "y == x",
+            ),
+            (
+                "pub fn f(i: O) -> O\n  ensures result.w > 2\n= i",
+                "i.w > 2",
+            ),
+            ("pub fn f(x: u8) -> u8 = needs(O(w: x))", "x > 2"),
+            (
+                "pub fn f(x: u8[0..9]) -> u8 = needs(O(w: x + 1))",
+                "x + 1 > 2",
+            ),
+            ("pub fn f(i: O) -> u8 = needs(i)", "i.w > 2"),
+            ("pub fn f(x: u8) -> u8 = below(O(w: x))", "-x < -2"),
+            ("pub fn f(ys: [3]u8) -> u8 = lens(ys)", "ys.len > 3"),
+            (
+                "pub fn f(xs: [3]u8) -> u8\n  ensures result == xs.len\n= 0",
+                "0 == xs.len",
+            ),
+        ] {
+            let src = with(f);
+            let d = diagnostics(&src);
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            assert!(
+                d[0].fixes[0]
+                    .message
+                    .contains(&format!("guard {} else", guard)),
+                "{}: {}",
+                f,
+                d[0].fixes[0].message
+            );
+            let fixed =
+                mente_syntax::diagnostics::apply_fix(&module(&src), &d[0].fixes[0]).unwrap();
+            assert!(crate::check_source(&fixed).is_ok(), "{}", fixed);
+        }
+        for (f, there) in [
+            (
+                "pub fn f(x: u8) -> u8 = needs(mk(x))",
+                "at this call the clause is `mk(x).w > 2`",
+            ),
+            (
+                "pub fn f(xs: [2]O) -> u8 = needs(xs[0])",
+                "at this call the clause is `xs[0].w > 2`",
+            ),
+            (
+                "pub fn f(x: u8) -> u8 = needs(O(w: x * 2))",
+                "at this call the clause is `x * 2 > 2`",
+            ),
+            (
+                "pub fn f(x: u8) -> O\n  ensures result.w == x\n= mk(x)",
+                "at its end the clause is `mk(x).w == x`",
+            ),
+            (
+                "pub fn f(x: u8) -> u8\n  ensures result == x\n= mk(x).w",
+                "at its end the clause is `mk(x).w == x`",
+            ),
+            (
+                "pub fn f(x: u8[0..9]) -> u8 = needs(O(w: x + mk(x).w))",
+                "at this call the clause is `x + mk(x).w > 2`",
+            ),
+            (
+                "pub struct L {\n  len: u8\n}\npub fn f(ls: [1]L) -> u8 = needs(O(w: ls[0].len))",
+                "at this call the clause is `ls[0].len > 2`",
+            ),
+        ] {
+            let d = diagnostics(&with(f));
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
+            assert!(
+                d[0].message.ends_with(&format!(
+                    "; {}, which reads a value Tier 1 does not follow, so no `guard` it can use states it",
+                    there
+                )),
+                "{}: {}",
+                f,
+                d[0].message
+            );
+        }
     }
 
     /// A value entering a refined field is proven where the struct is built and where the field

@@ -206,11 +206,11 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::LaterMilestone,
         "spec/core-calculus.md",
         "A construct of a later milestone",
-        "The compiler implements M1, a thin slice of the language: integers, `bool`, \
-         fixed-size arrays, functions with read-only and `mut` parameters, `val` and `var`, \
-         `if`, `while` with `break` and `continue`, `guard`, `return`, contracts, refined \
-         integer types and `todo`; and of M2 so far, structs of those types. A construct of a \
-         later milestone, such as a string, a float, `match`, a method call, an error type, a \
+        "The compiler is building {milestone}, and has a thin slice of the language: integers, \
+         `bool`, fixed-size arrays, functions with read-only and `mut` parameters, `val` and \
+         `var`, `if`, `while` with `break` and `continue`, `guard`, `return`, contracts, \
+         refined integer types, `todo`, and structs of those types. A construct of a later \
+         milestone, such as a string, a float, `match`, a method call, an error type, a \
          `@layout` struct as a value, a struct's type parameters or invariant, or an effect \
          clause, is reported with the milestone that brings it. A few, such as `for` loops, \
          the pipe `|>` and a field's default value, are in no milestone yet.",
@@ -1145,12 +1145,16 @@ pub fn explain(e: &CodeEntry) -> String {
         CodeStatus::Reserved => " (reserved: specified, not reported yet)",
         CodeStatus::Retired => " (retired)",
     };
+    // The milestone the compiler is building is named in one place.
+    let text = e
+        .explain
+        .replace("{milestone}", mente_syntax::diagnostics::MILESTONE);
     let mut out = format!(
         "{}: {}{}\n\n{}\n\nGoverned by {}. Failure class: {}.\n",
         e.code,
         e.title,
         status,
-        e.explain,
+        text,
         e.spec,
         e.class.name()
     );
@@ -1383,6 +1387,16 @@ mod tests {
             text
         );
         assert!(text.contains("This passes:\n\n    module m\n"), "{}", text);
+        // E0109 names the milestone the compiler is building from its one constant.
+        let later = explain(lookup("E0109").unwrap());
+        assert!(
+            later.contains(&format!(
+                "The compiler is building {},",
+                mente_syntax::diagnostics::MILESTONE
+            )) && !later.contains("{milestone}"),
+            "{}",
+            later
+        );
         let reserved = explain(lookup("E0601").unwrap());
         assert!(
             reserved.contains("(reserved: specified, not reported yet)")

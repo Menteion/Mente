@@ -1,0 +1,26 @@
+// expect: E0502
+module conformance
+// A loop that changes a field path through a call inside a struct literal changes it.
+pub struct Q {
+  a: u8
+}
+
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+fn eat(q: Q) -> u8 = q.a
+
+pub fn f(mut p: Q) -> u8[0..=0] {
+  p.a = 0
+  var i: u8 = 0
+  while i < 3 {
+    _ = eat(Q(a: bump(mut p.a)))
+    i += 1
+  }
+  p.a
+}
