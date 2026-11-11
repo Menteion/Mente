@@ -15,6 +15,7 @@ import {
   fenceMask,
   inlineHtml,
   insertAfterTitle,
+  LOGO_FILES,
   labelMeanings,
   mapOutsideCode,
   markClaims,
@@ -24,6 +25,7 @@ import {
   rewriteLinks,
   splitFrontMatter,
   splitRow,
+  withLogo,
 } from './markdown.mjs';
 
 const MEANINGS = {
@@ -196,6 +198,41 @@ test('links are rewritten outside code only, reference definitions included', ()
 test('the header goes after the first level-one heading', () => {
   assert.equal(insertAfterTitle('```\n# not a title\n```\n# Title\ntext', 'HEADER'), '```\n# not a title\n```\n# Title\n\nHEADER\ntext');
   assert.equal(insertAfterTitle('no title', 'HEADER'), 'HEADER\n\nno title');
+});
+
+test('the logo goes above the first page, in its light version and its dark one', () => {
+  const page = withLogo('# Mente\n\ntext\n');
+  const [block, rest] = page.split('\n\n# ');
+  assert.equal(rest, 'Mente\n\ntext\n');
+  assert.match(block, /^<p class="site-logo">.*<\/p>$/);
+  assert.match(block, /<img class="site-logo-light" src="mente-logo\.svg" alt="Mente"/);
+  assert.match(block, /<img class="site-logo-dark" src="mente-logo-dark\.svg" alt="Mente"/);
+  assert.deepEqual(LOGO_FILES, ['mente-logo.svg', 'mente-logo-dark.svg']);
+});
+
+test('the dark logo and the favicon are the light logo\'s mark, and the CSS picks one by theme', () => {
+  const asset = (f) => fs.readFileSync(new URL(`assets/${f}`, import.meta.url));
+  // Each file from its root element on: the comment before it names the version.
+  const svg = (f) => {
+    const text = asset(f).toString('utf8').replace(/\r\n/g, '\n');
+    return text.slice(text.indexOf('<svg '));
+  };
+  const [light, dark] = LOGO_FILES.map(svg);
+  // The same path, the ink alone changed: dark navy on light themes, near white on dark ones.
+  assert.match(light, /fill="#0F172A"/);
+  assert.equal(dark, light.split('fill="#0F172A"').join('fill="#F8FAFC"'));
+  const stamp = (s) => /\sd="([^"]*)"/.exec(s)[1].replace(/\s+/g, ' ').trim();
+  assert.equal(stamp(svg('favicon.svg')), stamp(light));
+  // A PNG's width and height are the first two fields of its IHDR chunk.
+  const png = asset('favicon.png');
+  assert.equal(png.toString('latin1', 1, 4), 'PNG');
+  assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [32, 32]);
+  const css = fs.readFileSync(new URL('logo.css', import.meta.url), 'utf8');
+  assert.match(css, /^\.site-logo-dark \{ display: none; \}$/m);
+  for (const theme of ['coal', 'navy', 'ayu']) {
+    assert.match(css, new RegExp(`\\.${theme} \\.site-logo-light[^{]*\\{ display: none; \\}`));
+    assert.match(css, new RegExp(`\\.${theme} \\.site-logo-dark[^{]*\\{ display: inline; \\}`));
+  }
 });
 
 test('the list mn explain prints is read code by code', () => {

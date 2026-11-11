@@ -1,0 +1,16 @@
+/* Mente's logo above the site's first page (site/build.mjs): the light version on mdBook's light
+   themes, the dark version on its dark ones. */
+
+.site-logo {
+  margin: 1.5em 0 0;
+  text-align: center;
+}
+
+.site-logo img {
+  width: 128px;
+  height: 128px;
+}
+
+.site-logo-dark { display: none; }
+.coal .site-logo-light, .navy .site-logo-light, .ayu .site-logo-light { display: none; }
+.coal .site-logo-dark, .navy .site-logo-dark, .ayu .site-logo-dark { display: inline; }

@@ -20,6 +20,7 @@ Mente's documentation site, as the register entry [`docs-site`](../docs/design-r
 - **A pre-release banner** on every page, naming the milestone tag the site was built from, or the commit of an unreleased build.
 - **Front matter** becomes one line under the title: version, status, date and a link to the source on GitHub.
 - **Links.** A link to a page of the book stays as it is; a link to any other file of the repository goes to that file on GitHub, at the tag or commit being built; a link to nothing fails the build. Register entries get an anchor named by their key, so `design-review.md#key` resolves.
+- **Mente's logo** above the introduction's title, and the favicon, from [`assets/`](assets): [`logo.css`](logo.css) shows the logo's light version on mdBook's light themes and its dark version, the same path in a light ink, on the dark ones. mdBook takes the favicon from the book's `theme/` folder, which holds nothing else.
 - **Directives stay hidden.** `<!-- @assert-* -->` and `<!-- @spec-item -->` comments pass through as HTML comments, which a browser does not show.
 
 [`check.mjs`](check.mjs) then reads the built HTML and fails on a relative link to a missing page, a fragment the target page does not have, a link outside the site's address, or a directive rendered as text.

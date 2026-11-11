@@ -24,6 +24,7 @@ import {
   firstTitle,
   inlineHtml,
   insertAfterTitle,
+  LOGO_FILES,
   labelMeanings,
   markClaims,
   maturityBadge,
@@ -32,6 +33,7 @@ import {
   rewriteLinks,
   splitFrontMatter,
   statusBadge,
+  withLogo,
 } from './markdown.mjs';
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -276,7 +278,8 @@ function main() {
       summary && `<div class="maturity-summary">\n\n${summary}\n\n</div>`,
     ].filter(Boolean).join('\n\n');
     const withHeader = insertAfterTitle(transformedBody, header);
-    const rewritten = rewriteLinks(withHeader, {
+    const page = rel === 'README.md' ? withLogo(withHeader) : withHeader;
+    const rewritten = rewriteLinks(page, {
       page: rel, inBook: (p) => book.has(p), kindOf, repoUrl, ref,
     });
     broken.push(...rewritten.broken.map((u) => `${rel}: ${u}`));
@@ -374,7 +377,7 @@ function main() {
     '[output.html]',
     `site-url = ${toml(siteUrl)}`,
     `git-repository-url = ${toml(repoUrl)}`,
-    'additional-css = ["maturity.css"]',
+    'additional-css = ["maturity.css", "logo.css"]',
     'no-section-label = true',
     '',
     '[output.html.playground]',
@@ -386,6 +389,14 @@ function main() {
     '',
   ].join('\n'));
   fs.copyFileSync(path.join(ROOT, 'site', 'maturity.css'), path.join(out, 'maturity.css'));
+  fs.copyFileSync(path.join(ROOT, 'site', 'logo.css'), path.join(out, 'logo.css'));
+  // The logo beside the first page, and the favicon, which mdBook takes from its theme folder.
+  const assets = path.join(ROOT, 'site', 'assets');
+  for (const f of LOGO_FILES) fs.copyFileSync(path.join(assets, f), path.join(src, f));
+  fs.mkdirSync(path.join(out, 'theme'), { recursive: true });
+  for (const f of ['favicon.svg', 'favicon.png']) {
+    fs.copyFileSync(path.join(assets, f), path.join(out, 'theme', f));
+  }
 
   const claimTotals = LABELS.map((l) => `${specFiles.reduce((n, f) => n + specCounts.get(f)[l], 0)} ${l}`);
   console.log(`site sources: ${book.size} pages in ${path.relative(ROOT, src)}`);

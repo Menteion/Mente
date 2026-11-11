@@ -334,6 +334,17 @@ export function rewriteLinks(body, context) {
   return { body: lines.join('\n'), broken };
 }
 
+/** Mente's logo, its light version and its dark one, in `site/assets` and at the book's root. */
+export const LOGO_FILES = ['mente-logo.svg', 'mente-logo-dark.svg'];
+
+/** Puts Mente's logo at the top of a page at the book's root, both versions, of which the site's
+ *  CSS (`logo.css`) shows the one that suits mdBook's theme. */
+export function withLogo(body) {
+  const [light, dark] = LOGO_FILES;
+  const img = (file, cls) => `<img class="${cls}" src="${file}" alt="Mente" width="128" height="128">`;
+  return `<p class="site-logo">${img(light, 'site-logo-light')}${img(dark, 'site-logo-dark')}</p>\n\n${body}`;
+}
+
 /** Inserts `block` after the page's first level-one heading, or at its top if it has none. */
 export function insertAfterTitle(body, block) {
   const lines = body.split('\n');
