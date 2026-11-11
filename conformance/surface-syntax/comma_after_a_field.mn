@@ -1,0 +1,6 @@
+// expect: E0128
+module conformance
+pub struct Pair {
+  i: u8,
+  j: u8
+}

@@ -1,0 +1,12 @@
+// expect: pass
+module conformance
+pub struct Digit {
+  d: u8[0..10]
+}
+
+pub fn digit(x: u8) -> Digit {
+  guard x < 10 else {
+    return Digit(d: 0)
+  }
+  Digit(d: x)
+}

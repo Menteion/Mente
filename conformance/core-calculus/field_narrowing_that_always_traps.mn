@@ -1,0 +1,7 @@
+// expect: E0508
+module conformance
+pub struct Byte {
+  b: u8
+}
+
+pub fn big() -> Byte = Byte(b: 300)

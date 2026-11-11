@@ -1,0 +1,10 @@
+// expect: E0205
+module conformance
+pub struct Pair {
+  i: u8
+}
+
+pub fn set(p: Pair) -> u8 {
+  p.i = 1
+  p.i
+}

@@ -1,0 +1,6 @@
+// expect: E0223
+module conformance
+pub struct Huge {
+  bytes: [4294967295]u8
+  more: u8
+}

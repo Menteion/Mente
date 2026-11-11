@@ -1,0 +1,9 @@
+// expect: E0502
+module conformance
+pub struct Digit {
+  d: u8[0..10]
+}
+
+pub fn set(mut g: Digit, x: u8) {
+  g.d = x
+}

@@ -1,0 +1,5 @@
+// expect: E0109
+module conformance
+pub struct Count {
+  n: u8 = 0
+}

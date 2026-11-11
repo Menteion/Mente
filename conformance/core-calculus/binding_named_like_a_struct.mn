@@ -1,0 +1,10 @@
+// expect: E0220
+module conformance
+pub struct Pair {
+  i: u8
+}
+
+pub fn first(p: Pair) -> u8 {
+  val Pair = p.i
+  Pair
+}

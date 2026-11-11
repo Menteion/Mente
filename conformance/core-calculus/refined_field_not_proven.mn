@@ -1,0 +1,7 @@
+// expect: E0502
+module conformance
+pub struct Digit {
+  d: u8[0..10]
+}
+
+pub fn digit(x: u8) -> Digit = Digit(d: x)

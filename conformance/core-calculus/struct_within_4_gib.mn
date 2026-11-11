@@ -1,0 +1,8 @@
+// expect: pass
+module conformance
+pub struct Big {
+  bytes: [65536]u8
+  tag: u8
+}
+
+pub fn tag(b: Big) -> u8 = b.tag

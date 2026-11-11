@@ -1,0 +1,7 @@
+// expect: E0228
+module conformance
+pub struct Pair {
+  i: u8
+}
+
+pub fn Pair() -> u8 = 0

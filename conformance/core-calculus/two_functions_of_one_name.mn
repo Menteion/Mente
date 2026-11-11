@@ -1,0 +1,5 @@
+// expect: E0228
+module conformance
+pub fn f() -> u8 = 1
+
+pub fn f() -> u8 = 2

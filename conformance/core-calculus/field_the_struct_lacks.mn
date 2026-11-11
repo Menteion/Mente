@@ -1,0 +1,8 @@
+// expect: E0215
+module conformance
+pub struct Pair {
+  first: u8
+  second: u8
+}
+
+pub fn get(p: Pair) -> u8 = p.frist
