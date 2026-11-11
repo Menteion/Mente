@@ -3169,6 +3169,20 @@ pub struct CallPlan {
 /// their parameters' types and refinements, every combination where few exist, and otherwise
 /// random ones, the types' extremes first.
 pub fn calls(src: &str, module: &CheckedModule, seed: u64, plan: CallPlan) -> Vec<CallArgs> {
+    // The reference interpreter cannot build a literal of more elements.
+    let most = mente_interp::Limits::default().max_array;
+    calls_within(src, module, seed, plan, most)
+}
+
+/// [`calls`], leaving out a function whose arguments hold more than `most` values, each
+/// element and field counted.
+pub fn calls_within(
+    src: &str,
+    module: &CheckedModule,
+    seed: u64,
+    plan: CallPlan,
+    most: u128,
+) -> Vec<CallArgs> {
     let Ok(decls) = mente_syntax::parse_module(src) else {
         return Vec::new();
     };
@@ -3201,9 +3215,7 @@ pub fn calls(src: &str, module: &CheckedModule, seed: u64, plan: CallPlan) -> Ve
             })
             .collect();
         let Some(params) = params else { continue };
-        // A function whose arguments the reference interpreter could not hold, as it could
-        // not build a literal of more elements, is not called.
-        let most = mente_interp::Limits::default().max_array;
+        // A function whose arguments the reference interpreter could not hold is not called.
         if params.iter().any(|(_, _, d)| d.values() > most) {
             continue;
         }
