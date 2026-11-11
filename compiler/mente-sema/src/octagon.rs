@@ -142,15 +142,11 @@ impl Octagon {
                 }
             }
             [s, t] => {
-                // `s + t <= c` and `-t <= u` give `s <= c + u`.
+                // `s + t <= c` and `-t <= u` give `s <= c + u`; with no `u`, the sum saturates
+                // at `INF`, no bound, which `bound_box` passes over.
                 for (a, b) in [(*s, *t), (*t, *s)] {
-                    let other = self.upper(&[b.negated()]);
-                    if other < INF {
-                        let v = add(c, other);
-                        if v < INF {
-                            self.bound_box(a.node(), 2 * v);
-                        }
-                    }
+                    let v = add(c, self.upper(&[b.negated()]));
+                    self.bound_box(a.node(), 2 * v);
                 }
             }
             _ => {}
@@ -461,6 +457,12 @@ mod tests {
         assert_eq!((h.upper(&[x(2), x(2)]), h.upper(&[x(2), nx(2)])), (8, 0));
         h.add_lin(&[x(2), nx(2)], -1);
         assert!(h.is_empty());
+        // A weaker bound leaves the stronger one, and true constants change nothing.
+        let mut w = b.clone();
+        w.add_lin(&[x(0)], 9);
+        w.add_lin(&[], 0);
+        w.add_lin(&[x(1), nx(1)], 0);
+        assert_eq!((w.bounds(0), w.is_empty()), ((0, 5), false));
         // Bounds that cross, or a false constant, empty a box.
         let mut e = b.clone();
         e.add_lin(&[nx(0)], -6);
