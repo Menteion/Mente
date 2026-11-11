@@ -1121,13 +1121,15 @@ pub fn parse_module(src: &str) -> Result<ModuleFile, Diagnostic> {
 /// alone, read the same items: no scan of one item runs into the next.
 fn item_ends(src: &str, tokens: &[Token]) -> Vec<usize> {
     let eof = tokens.len().saturating_sub(1);
-    // Both lists ascend, so one pass over the tokens finds every item's first token.
+    // Both lists ascend, so one pass over the tokens finds every item's first token. `Eof`
+    // starts at the text's length, past every item's start, so the pass stops there at the
+    // latest.
     let mut at = 0;
     let mut ends: Vec<usize> = split_items(src)
         .iter()
         .skip(1)
         .map(|s| {
-            while at < eof && tokens[at].span.start < s.offset {
+            while tokens[at].span.start < s.offset {
                 at += 1;
             }
             at
