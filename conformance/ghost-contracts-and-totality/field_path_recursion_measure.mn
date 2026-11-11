@@ -1,0 +1,15 @@
+// expect: pass
+module conformance
+// A recursion measure over a refined u32 field, smaller at the call.
+pub struct Count {
+  n: u32[0..1000]
+}
+
+pub fn down(c: Count) -> u32
+  decreases c.n
+{
+  if c.n == 0 {
+    return 0
+  }
+  down(Count(n: c.n - 1))
+}

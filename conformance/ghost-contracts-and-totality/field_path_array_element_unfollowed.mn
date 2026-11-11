@@ -1,0 +1,12 @@
+// expect: E0502
+module conformance
+// An element of an array of structs is not followed, as an array's element is not.
+pub struct Pair {
+  a: u8
+  b: u8
+}
+
+pub fn f(mut ps: [2]Pair) -> u8[0..1] {
+  ps[0].a = 0
+  ps[0].a
+}

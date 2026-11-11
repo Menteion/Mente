@@ -1,0 +1,15 @@
+// expect: E0507
+module conformance
+// A signed field measure may be negative at the call: E0507 with a guard Tier 1 can use.
+pub struct Count {
+  n: i32
+}
+
+pub fn down(c: Count) -> u32
+  decreases c.n
+{
+  if c.n == 0 {
+    return 0
+  }
+  down(Count(n: c.n - 1))
+}

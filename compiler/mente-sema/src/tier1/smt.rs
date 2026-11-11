@@ -343,22 +343,34 @@ impl<'f, 'a> Writer<'f, 'a> {
         let mut declared = BTreeSet::new();
         let mut ranges = Vec::new();
         for &b in &fx.scope {
-            let Some(v) = fx.vars[b] else {
-                continue;
+            // The binding's variable, then each field path of it Tier 1 follows.
+            let int = match fx.typing.bindings[b] {
+                Ty::Int(Int::One(t)) => Some(t),
+                _ => None,
             };
-            if !declared.insert(v) {
-                continue;
-            }
-            let (name, comment) = &self.names[v];
-            let _ = writeln!(out, "(declare-const {} Int) ; {}", name, comment);
-            if let Ty::Int(Int::One(t)) = fx.typing.bindings[b] {
-                let (lo, hi) = range(t);
-                ranges.push(format!(
-                    "(assert (and (<= {lo} {x}) (<= {x} {hi})))",
-                    lo = lo,
-                    x = name,
-                    hi = hi
-                ));
+            let own = fx.vars[b].map(|v| (v, int));
+            let paths = fx.paths[b].iter().map(|p| {
+                let t = match &p.shape {
+                    super::Shape::Int { int, .. } => *int,
+                    _ => None,
+                };
+                (p.var, t)
+            });
+            for (v, t) in own.into_iter().chain(paths) {
+                if !declared.insert(v) {
+                    continue;
+                }
+                let (name, comment) = &self.names[v];
+                let _ = writeln!(out, "(declare-const {} Int) ; {}", name, comment);
+                if let Some(t) = t {
+                    let (lo, hi) = range(t);
+                    ranges.push(format!(
+                        "(assert (and (<= {lo} {x}) (<= {x} {hi})))",
+                        lo = lo,
+                        x = name,
+                        hi = hi
+                    ));
+                }
             }
         }
         let bindings: BTreeSet<usize> = fx.vars.iter().flatten().copied().collect();
@@ -523,6 +535,19 @@ fn names(fx: &Fx) -> Vec<(String, String)> {
         }
     }
     let mut taken: BTreeSet<String> = BTreeSet::new();
+    // Each field path Tier 1 follows of a binding of a struct type, as it is written.
+    for (b, binding) in fx.resolution.bindings.iter().enumerate() {
+        for p in &fx.paths[b] {
+            let text = format!("{}.{}", binding.name, p.names.join("."));
+            let mut symbol = format!("|{}|", text);
+            if !taken.insert(symbol.clone()) {
+                symbol = format!("|{}.{}|", text, p.var);
+            }
+            if let Some(slot) = out.get_mut(p.var) {
+                *slot = (symbol, format!("`{}`, a field of `{}`", text, binding.name));
+            }
+        }
+    }
     for (b, binding) in fx.resolution.bindings.iter().enumerate() {
         let Some(v) = fx.vars[b] else {
             continue;
@@ -1037,6 +1062,31 @@ mod tests {
             unguarded[0].1.iter().all(|q| q.0 != ObligationKind::Range),
             "{:?}",
             unguarded
+        );
+    }
+
+    /// A field path Tier 1 follows is a variable of the query, named as written and bounded by
+    /// its type when its binding is in scope.
+    #[test]
+    fn test_field_paths_are_named_and_bounded() {
+        let q = only(
+            "pub struct P {\n  a: u8\n  b: i8\n}\npub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  p.a\n}",
+            ObligationKind::Refinement,
+        );
+        assert!(
+            q.contains("(declare-const |p.a| Int) ; `p.a`, a field of `p`"),
+            "{}",
+            q
+        );
+        assert!(
+            q.contains("(assert (and (<= 0 |p.a|) (<= |p.a| 255)))"),
+            "{}",
+            q
+        );
+        assert!(
+            q.contains("(assert (and (<= (- 128) |p.b|) (<= |p.b| 127)))"),
+            "{}",
+            q
         );
     }
 

@@ -3679,6 +3679,287 @@ block0(v0: u8):
 t0: decreases @43:13 ["`decreases n` is negative or did not decrease"]
 t1: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/ghost-contracts-and-totality/field_path_array_element_unfollowed.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/field_path_clauses.mn ==
+mente-dump 2 mir
+f0: fn needs(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @16:3
+  v2: i64 = int 3 @16:15
+  v3: i64 = cast v1 @16:3
+  v4: i64 = sub v3, v2 @16:3
+  v5: u8 = cast v4 @16:3
+  return v5
+block1():
+  trap t0
+t0: unreachable @16:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn calls(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 2 @19:13
+  v2: i64 = cast v0 @19:13
+  v3: bool = gt v2, v1 @19:13
+  branch v3, block1(), block2()
+block1():
+  v6: addr = slot 2 @22:9
+  v7: addr = slot 1 @22:22
+  v8: unit = store v7, v0 @22:31
+  v9: unit = copy 1 v6, v7 @22:31
+  v10: i64 = int 0 @22:38
+  v11: u8 = cast v10 @22:38
+  v12: u64 = int 1 @22:38
+  v13: addr = elem 1 v6, v12 @22:38
+  v14: unit = store v13, v11 @22:38
+  v15: u8 = load v6 @15:12
+  v16: i64 = int 2 @15:24
+  v17: i64 = cast v15 @15:24
+  v18: bool = gt v17, v16 @15:24
+  v19: u8 = call f0 v6 @22:3
+  return v19
+block2():
+  v4: i64 = int 0 @20:12
+  v5: u8 = cast v4 @20:12
+  return v5
+block3():
+  trap t0
+block4():
+  trap t0
+t0: unreachable @22:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn made(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: addr = slot 2 @27:3
+  v3: addr = slot 1 @27:16
+  v4: i64 = int 0 @27:25
+  v5: u8 = cast v4 @27:25
+  v6: unit = store v3, v5 @27:25
+  v7: unit = copy 1 v2, v3 @27:25
+  v8: u64 = int 1 @27:32
+  v9: addr = elem 1 v2, v8 @27:32
+  v10: unit = store v9, v1 @27:32
+  v11: u64 = int 1 @26:11
+  v12: addr = elem 1 v2, v11 @26:11
+  v13: u8 = load v12 @26:11
+  v14: bool = eq v13, v1 @26:23
+  v15: unit = copy 2 v0, v2 @27:3
+  return
+block1():
+  trap t0
+t0: unreachable @27:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter needs(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @15:12
+  v2: i64 = int 2 @15:24
+  v3: i64 = cast v1 @15:24
+  v4: bool = gt v3, v2 @15:24
+  v5: unit = check t0 v4 @14:8
+  v6: u8 = call f0 v0 @14:8
+  return v6
+t0: requires @14:8 ["`requires (> (. (. o inner) v) 2)` is false at this call"]
+t1: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter calls(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f1 v0 @18:8
+  return v1
+t0: unreachable @18:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter made(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: unit = call f2 v0, v1 @25:8
+  return
+t0: unreachable @25:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/field_path_loop_measure.mn ==
+mente-dump 2 mir
+f0: fn run(addr) -> u32 {
+block0(v0: addr):
+  v1: addr = slot 8 @10:11
+  v2: unit = copy 8 v1, v0 @10:11
+  v3: addr = slot 1 @11:3
+  v4: bool = bool false @11:3
+  v5: unit = store v3, v4 @11:3
+  v6: addr = slot 16 @11:3
+  jump block1()
+block1():
+  v7: u32 = load v1 @11:9
+  v8: i64 = int 0 @11:15
+  v9: i64 = cast v7 @11:15
+  v10: bool = gt v9, v8 @11:15
+  branch v10, block2(), block3()
+block2():
+  v11: u32 = load v1 @12:15
+  v12: u128 = load v6 @12:15
+  v13: bool = bool false @12:15
+  v14: u128 = cast v11 @12:15
+  v15: bool = lt v14, v12 @12:15
+  v16: u128 = cast v11 @12:15
+  v17: bool = eq v16, v12 @12:15
+  v18: bool = and v17, v13 @12:15
+  v19: bool = or v15, v18 @12:15
+  v20: bool = load v3 @12:15
+  v21: bool = not v20 @12:15
+  v22: bool = or v21, v19 @12:15
+  v23: bool = bool true @12:15
+  v24: unit = store v3, v23 @12:15
+  v25: u128 = cast v11 @12:15
+  v26: unit = store v6, v25 @12:15
+  v27: u32 = load v1 @14:5
+  v28: i64 = int 1 @14:12
+  v29: i64 = cast v27 @14:12
+  v30: i64 = sub v29, v28 @14:12
+  v31: u32 = cast v30 @14:12
+  v32: unit = store v1, v31 @14:12
+  v33: i64 = int 0 @15:15
+  v34: u32 = cast v33 @15:15
+  v35: u64 = int 4 @15:15
+  v36: addr = elem 1 v1, v35 @15:15
+  v37: unit = store v36, v34 @15:15
+  jump block1()
+block3():
+  v38: u64 = int 4 @17:3
+  v39: addr = elem 1 v1, v38 @17:3
+  v40: u32 = load v39 @17:3
+  return v40
+block4():
+  trap t0
+t0: unreachable @17:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter run(addr) -> u32 {
+block0(v0: addr):
+  v1: u32 = load v0 @0:0
+  v2: i64 = int 0 @0:0
+  v3: i64 = int 1000 @0:0
+  v4: i64 = cast v1 @0:0
+  v5: bool = ge v4, v2 @0:0
+  v6: i64 = cast v1 @0:0
+  v7: bool = lt v6, v3 @0:0
+  v8: bool = and v5, v7 @0:0
+  v9: unit = check t0 v8, v1, v2, v3 @9:8
+  v10: u32 = call f0 v0 @9:8
+  return v10
+t0: refinement @9:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/field_path_measure_from_a_call.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/field_path_measure_negative.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/field_path_mut_call_havocs.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/field_path_recursion_measure.mn ==
+mente-dump 2 mir
+f0: fn down(addr) -> u32 {
+block0(v0: addr):
+  v1: u32 = load v0 @9:13
+  v2: u32 = load v0 @11:6
+  v3: i64 = int 0 @11:13
+  v4: i64 = cast v2 @11:13
+  v5: bool = eq v4, v3 @11:13
+  branch v5, block1(), block2()
+block1():
+  v6: i64 = int 0 @12:12
+  v7: u32 = cast v6 @12:12
+  return v7
+block2():
+  jump block3()
+block3():
+  v8: addr = slot 4 @14:8
+  v9: u32 = load v0 @14:17
+  v10: i64 = int 1 @14:23
+  v11: i64 = cast v9 @14:17
+  v12: i64 = sub v11, v10 @14:17
+  v13: u32 = cast v12 @14:17
+  v14: unit = store v8, v13 @14:17
+  v15: u32 = load v8 @9:13
+  v16: u32 = call f0 v8 @14:3
+  return v16
+block4():
+  trap t0
+block5():
+  trap t0
+t0: unreachable @14:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter down(addr) -> u32 {
+block0(v0: addr):
+  v1: u32 = load v0 @0:0
+  v2: i64 = int 0 @0:0
+  v3: i64 = int 1000 @0:0
+  v4: i64 = cast v1 @0:0
+  v5: bool = ge v4, v2 @0:0
+  v6: i64 = cast v1 @0:0
+  v7: bool = lt v6, v3 @0:0
+  v8: bool = and v5, v7 @0:0
+  v9: unit = check t0 v8, v1, v2, v3 @8:8
+  v10: u32 = load v0 @9:13
+  v11: u32 = int 0 @9:13
+  v12: bool = ge v10, v11 @9:13
+  v13: unit = check t1 v12 @9:13
+  v14: u32 = call f0 v0 @8:8
+  return v14
+t0: refinement @8:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: decreases @9:13 ["`decreases (. c n)` is negative or did not decrease"]
+t2: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/field_path_store_then_read.mn ==
+mente-dump 2 mir
+f0: fn first(addr) -> u8 {
+block0(v0: addr):
+  v1: i64 = int 0 @10:9
+  v2: u8 = cast v1 @10:9
+  v3: unit = store v0, v2 @10:9
+  v4: u8 = load v0 @11:3
+  return v4
+block1():
+  trap t0
+t0: unreachable @11:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn local() -> u8 {
+block0():
+  v0: addr = slot 2 @15:11
+  v1: i64 = int 5 @15:19
+  v2: u8 = cast v1 @15:19
+  v3: unit = store v0, v2 @15:19
+  v4: i64 = int 9 @15:25
+  v5: u8 = cast v4 @15:25
+  v6: u64 = int 1 @15:25
+  v7: addr = elem 1 v0, v6 @15:25
+  v8: unit = store v7, v5 @15:25
+  v9: addr = slot 2 @15:25
+  v10: unit = copy 2 v9, v0 @15:25
+  v11: u8 = load v9 @16:9
+  v12: u64 = int 1 @16:9
+  v13: addr = elem 1 v9, v12 @16:9
+  v14: unit = store v13, v11 @16:9
+  v15: u64 = int 1 @17:3
+  v16: addr = elem 1 v9, v15 @17:3
+  v17: u8 = load v16 @17:3
+  return v17
+block1():
+  trap t0
+t0: unreachable @17:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter first(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = call f0 v0 @9:8
+  return v1
+t0: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter local() -> u8 {
+block0():
+  v0: u8 = call f1 @14:8
+  return v0
+t0: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/ghost-contracts-and-totality/field_path_whole_assignment_resets.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/invariant_not_preserved.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
 mente-dump 2 mir

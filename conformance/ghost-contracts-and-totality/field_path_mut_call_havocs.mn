@@ -1,0 +1,17 @@
+// expect: E0502
+module conformance
+// A call that takes the struct `mut` may change every field.
+pub struct Pair {
+  a: u8
+  b: u8
+}
+
+fn touch(mut p: Pair) {
+  p.a = 7
+}
+
+pub fn f(mut p: Pair) -> u8[0..1] {
+  p.a = 0
+  touch(mut p)
+  p.a
+}
