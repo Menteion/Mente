@@ -285,6 +285,81 @@ test("a job that holds a secret runs agent code only in its proven sandbox", () 
   assert.ok(guarded >= 2, "the benchmark and the preliminary runs hold the key beside mn");
 });
 
+test("the Documentation job lints every workflow with actionlint and shellcheck, both pinned by checksum", () => {
+  const job = workflows().find((w) => w.file === "ci.yml").doc.jobs.docs;
+  const env = Object.assign({}, ...steps(job).map((s) => s.env ?? {}));
+  for (const tool of ["ACTIONLINT", "SHELLCHECK"]) {
+    assert.match(String(env[`${tool}_VERSION`] ?? ""), /^\d+\.\d+\.\d+$/, `${tool} is not pinned to a version`);
+    assert.match(String(env[`${tool}_SHA256`] ?? ""), /^[0-9a-f]{64}$/, `${tool}'s download has no checksum`);
+  }
+  const runs = steps(job).map((s) => String(s.run ?? "")).join("\n");
+  assert.equal((runs.match(/sha256sum -c -/g) ?? []).length, 2, "both downloads are checked against their checksums");
+  assert.match(runs, /"\$RUNNER_TEMP\/lint\/actionlint" -color -shellcheck "\$RUNNER_TEMP\/lint\/shellcheck"/, "actionlint runs with the pinned shellcheck");
+});
+
+/// The owner of the gate files, and the gate files, as the patterns of .github/CODEOWNERS: what
+/// decides whether a change may merge, which a pull request could otherwise weaken unseen.
+const OWNER = "@Dancraft3746";
+const GATE_FILES = [
+  "/.github/",
+  "/.cargo/",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/rust-toolchain.toml",
+  "/rust-toolchain",
+  "/.config/",
+  "/clippy.toml",
+  "/package.json",
+  "/package-lock.json",
+  "/.spec-guard.json",
+  "/.spec-graph.json",
+  "/.spec-brief.json",
+  "/perf/run.mjs",
+  "/perf/lib.mjs",
+  "/benchmark/check.mjs",
+  "/benchmark/corpus.lock",
+  "/benchmark/harness/sandbox.sh",
+  "/benchmark/harness/sandbox-check.ts",
+  "/benchmark/harness/build.ts",
+];
+
+/// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
+/// it, `/file` that file.
+const owns = (pattern, file) => (pattern.endsWith("/") ? `/${file}`.startsWith(pattern) : `/${file}` === pattern);
+
+test("CODEOWNERS gives the gate files, and only them, to their owner", () => {
+  const entries = read(".github/CODEOWNERS")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"))
+    .map((l) => l.split(/\s+/));
+  for (const [pattern, ...owners] of entries) assert.deepEqual(owners, [OWNER], `${pattern} is owned by ${owners.join(" ") || "nobody"}`);
+  assert.deepEqual(entries.map(([p]) => p).sort(), [...GATE_FILES].sort(), ".github/CODEOWNERS and GATE_FILES differ");
+  // Every file the policy reads as a gate input has an owner: the workflows and their scripts,
+  // the lists, the manifests, the lock and its approvals, the CLIs the required jobs run.
+  const inputs = [
+    ...filesUnder(".github"),
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".config/approved-crates.txt",
+    ".config/nextest.toml",
+    ".cargo/mutants.toml",
+    "package.json",
+    "package-lock.json",
+    "perf/run.mjs",
+    "perf/lib.mjs",
+    "benchmark/check.mjs",
+    "benchmark/harness/sandbox.sh",
+    "benchmark/harness/sandbox-check.ts",
+  ];
+  for (const f of inputs) {
+    assert.ok(tracked().has(f), `${f}, a gate input, is not in the repository`);
+    assert.ok(GATE_FILES.some((p) => owns(p, f)), `${f} is a gate input without an owner in .github/CODEOWNERS`);
+  }
+  assert.ok(owns("/.github/", ".github/workflows/ci.yml") && !owns("/perf/run.mjs", "perf/run.test.mjs") && owns("/Cargo.toml", "Cargo.toml"));
+});
+
 // ------------------------------------------------------------------------- the required checks
 
 test("the required checks are listed once each", () => {

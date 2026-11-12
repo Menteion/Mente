@@ -243,6 +243,31 @@ jobs:
           # finishes (milestone-tags): the tag is set on the merge that closes a milestone.
           POLICY_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: npm run test:ci
+      - name: Install actionlint and shellcheck, pinned and checksummed
+        # From their releases, as the SMT job installs Z3; neither is a build dependency.
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/lint"
+          mkdir -p "$bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$bin" actionlint
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          install "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" "$bin/shellcheck"
+          "$bin/actionlint" -version
+          "$bin/shellcheck" --version
+      - name: actionlint over every workflow, with shellcheck on every run script
+        run: |
+          "$RUNNER_TEMP/lint/actionlint" -color -shellcheck "$RUNNER_TEMP/lint/shellcheck" -pyflakes ""
       - run: npm run check:benchmark
       - run: npm run test:benchmark
       - run: npm run test:harness
