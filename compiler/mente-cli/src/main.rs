@@ -1483,10 +1483,10 @@ mod tests {
         );
     }
 
-    /// Every text file in the repository is English: no CJK characters in code, comments, docs or
-    /// examples (CLAUDE.md). Build output and dependencies are skipped.
-    #[test]
-    fn test_repository_text_is_english() {
+    /// The lines under `root` that hold a CJK character, as `path:line`. Build output, dependencies
+    /// and nested checkouts are skipped: a directory holding `.git`, such as a worktree under `.wt`
+    /// or `.claude/worktrees`, is another branch's files, which this tree does not own.
+    fn non_english_lines(root: &Path) -> Vec<String> {
         fn is_cjk(c: char) -> bool {
             matches!(c as u32,
                 0x3000..=0x30FF     // CJK punctuation, Hiragana, Katakana
@@ -1500,7 +1500,8 @@ mod tests {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 if path.is_dir() {
-                    if !matches!(name.as_str(), ".git" | "target" | "node_modules") {
+                    let skipped = matches!(name.as_str(), ".git" | "target" | "node_modules");
+                    if !skipped && !path.join(".git").exists() {
                         walk(&path, found);
                     }
                 } else if let Ok(text) = fs::read_to_string(&path) {
@@ -1512,9 +1513,39 @@ mod tests {
                 }
             }
         }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut found = Vec::new();
-        walk(&root, &mut found);
+        walk(root, &mut found);
+        found
+    }
+
+    /// The check reads every directory of the tree but a nested checkout, whose files belong to
+    /// another branch (`guard-audit` in `docs/design-review.md`).
+    #[test]
+    fn test_the_english_check_skips_nested_checkouts_only() {
+        let root = std::env::temp_dir().join(format!("mente-english-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // Written at run time, so this file itself stays English.
+        let cjk: String = [char::from_u32(0x4E2D).unwrap()].iter().collect();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::create_dir_all(root.join(".wt/other")).unwrap();
+        fs::write(root.join("docs/a.md"), format!("text {cjk}\n")).unwrap();
+        fs::write(root.join(".wt/other/.git"), "gitdir: elsewhere\n").unwrap();
+        fs::write(root.join(".wt/other/b.md"), format!("text {cjk}\n")).unwrap();
+        let found = non_english_lines(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].ends_with(":1") && found[0].contains("a.md"),
+            "{found:?}"
+        );
+    }
+
+    /// Every text file in the repository is English: no CJK characters in code, comments, docs or
+    /// examples (CLAUDE.md). Build output, dependencies and nested checkouts are skipped.
+    #[test]
+    fn test_repository_text_is_english() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let found = non_english_lines(&root);
         assert!(
             found.is_empty(),
             "non-English text at:\n{}",
