@@ -109,10 +109,12 @@ jobs:
           # other: cargo names the directory it compiles mente-cli from. A base measured twice
           # (commit "Build the base compiler apart from the change in the Performance job") now
           # fails here instead of passing the comparison.
+          # CARGO_TERM_COLOR colours the log, so the codes go before the line is read.
+          compiled() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -F "Compiling mente-cli v" | grep -qF "($2/compiler/mente-cli)"; }
           base_dir=$(cd ../base && pwd)
-          grep -F "Compiling mente-cli v" "$RUNNER_TEMP/build-base.txt" | grep -qF "($base_dir/compiler/mente-cli)" \
+          compiled "$RUNNER_TEMP/build-base.txt" "$base_dir" \
             || { echo "::error::the base's mn was not compiled from $base_dir"; exit 1; }
-          grep -F "Compiling mente-cli v" "$RUNNER_TEMP/build-change.txt" | grep -qF "($GITHUB_WORKSPACE/compiler/mente-cli)" \
+          compiled "$RUNNER_TEMP/build-change.txt" "$GITHUB_WORKSPACE" \
             || { echo "::error::this change's mn was not compiled from $GITHUB_WORKSPACE"; exit 1; }
           # Two trees still compile to one binary when the change leaves the compiler's code as
           # it was (tests, comments, documents); every kernel is then the same executable.
