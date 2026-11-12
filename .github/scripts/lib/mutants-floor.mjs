@@ -92,6 +92,12 @@ function checkMutant(m, k) {
   if (typeof m?.file !== "string" || typeof m?.name !== "string" || !Number.isInteger(start) || !Number.isInteger(end)) {
     throw new Error(`mutant ${k} has no file, name and span this script reads: ${JSON.stringify(m).slice(0, 200)}`);
   }
+  // A function named without its span means cargo-mutants' output changed, not a mutant outside
+  // any function, which has no function at all.
+  const f = m.function;
+  if (f !== null && f !== undefined && (!Number.isInteger(f.span?.start?.line) || !Number.isInteger(f.span?.end?.line))) {
+    throw new Error(`mutant ${JSON.stringify(m.name)} names a function without its span: cargo-mutants' output changed`);
+  }
 }
 
 const holds = (span, lines) => [...lines].some((l) => l >= span.start.line && l <= span.end.line);

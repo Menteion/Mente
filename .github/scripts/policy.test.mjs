@@ -376,6 +376,7 @@ const GATE_FILES = [
   "/benchmark/harness/toolchains.json",
   "/compiler/mente-cli/tests/gates.rs",
   "/compiler/*/src/overflow_traps.rs",
+  "/compiler/*/Cargo.toml",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
@@ -417,6 +418,7 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
     "benchmark/harness/toolchains.json",
     "compiler/mente-cli/tests/gates.rs",
     ...[...tracked()].filter((f) => /^compiler\/[^/]+\/src\/overflow_traps\.rs$/.test(f)),
+    ...[...tracked()].filter((f) => /^compiler\/[^/]+\/Cargo\.toml$/.test(f)),
   ];
   for (const f of inputs) {
     assert.ok(tracked().has(f), `${f}, a gate input, is not in the repository`);
@@ -1165,6 +1167,9 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   assert.deepEqual(missing(loose, diff, loose.filter((m) => m.name !== "const at 41"), []), ["const at 41"]);
   assert.deepEqual(readList(""), []);
   assert.throws(() => readList("{}"), /not a JSON array/);
+  const spanless = { ...mutant("f at 12", 12, 12, fnf), function: { function_name: "f" } };
+  assert.throws(() => readList(JSON.stringify([spanless])), /names a function without its span/);
+  assert.equal(readList(JSON.stringify([mutant("const", 3, 3, null)])).length, 1, "no function at all is a mutant outside any");
 });
 
 // --------------------------------------------------------------------- milestones and their gates

@@ -56,6 +56,10 @@ jobs:
         run: cargo clippy --all-targets --workspace --locked -- -D warnings
       - name: cargo test
         run: cargo test --locked
+      - name: The gate tests, by name
+        # By name, so that a manifest that drops the target (autotests = false) fails here instead
+        # of leaving the gates untested (compiler/mente-cli/tests/gates.rs).
+        run: cargo test --locked -p mente-cli --test gates
       - name: mn spec
         run: cargo run --locked --bin mn -- spec
       - name: mn test --mutate

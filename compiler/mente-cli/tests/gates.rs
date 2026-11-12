@@ -397,6 +397,234 @@ fn test_the_english_check_finds_every_cjk_block() {
     );
 }
 
+/// A JSON value as the guard reads package.json: every key of an object in order, duplicates kept,
+/// so that a second `"scripts"` key cannot hide behind the first (npm's `JSON.parse` keeps the
+/// last), and every escape decoded as `JSON.parse` decodes it, so an escaped key still names `scripts`.
+#[derive(Debug, PartialEq)]
+enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    Str(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+/// Reads a whole JSON text, refusing anything after its value.
+fn parse_json(text: &str) -> Result<Json, String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = 0;
+    let value = json_value(&chars, &mut at)?;
+    json_space(&chars, &mut at);
+    if at != chars.len() {
+        return Err(format!("text after the value at {at}"));
+    }
+    Ok(value)
+}
+
+fn json_space(chars: &[char], at: &mut usize) {
+    while chars
+        .get(*at)
+        .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+    {
+        *at += 1;
+    }
+}
+
+fn json_value(chars: &[char], at: &mut usize) -> Result<Json, String> {
+    json_space(chars, at);
+    match chars.get(*at) {
+        Some('{') => {
+            *at += 1;
+            let mut entries = Vec::new();
+            json_space(chars, at);
+            if chars.get(*at) == Some(&'}') {
+                *at += 1;
+                return Ok(Json::Object(entries));
+            }
+            loop {
+                json_space(chars, at);
+                let key = json_string(chars, at)?;
+                json_space(chars, at);
+                if chars.get(*at) != Some(&':') {
+                    return Err(format!("no `:` after a key at {at}"));
+                }
+                *at += 1;
+                entries.push((key, json_value(chars, at)?));
+                json_space(chars, at);
+                match chars.get(*at) {
+                    Some(',') => *at += 1,
+                    Some('}') => {
+                        *at += 1;
+                        return Ok(Json::Object(entries));
+                    }
+                    _ => return Err(format!("no `,` or `}}` at {at}")),
+                }
+            }
+        }
+        Some('[') => {
+            *at += 1;
+            let mut items = Vec::new();
+            json_space(chars, at);
+            if chars.get(*at) == Some(&']') {
+                *at += 1;
+                return Ok(Json::Array(items));
+            }
+            loop {
+                items.push(json_value(chars, at)?);
+                json_space(chars, at);
+                match chars.get(*at) {
+                    Some(',') => *at += 1,
+                    Some(']') => {
+                        *at += 1;
+                        return Ok(Json::Array(items));
+                    }
+                    _ => return Err(format!("no `,` or `]` at {at}")),
+                }
+            }
+        }
+        Some('"') => Ok(Json::Str(json_string(chars, at)?)),
+        Some(_) => {
+            let start = *at;
+            while chars
+                .get(*at)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '.'))
+            {
+                *at += 1;
+            }
+            let word: String = chars[start..*at].iter().collect();
+            match word.as_str() {
+                "null" => Ok(Json::Null),
+                "true" => Ok(Json::Bool(true)),
+                "false" => Ok(Json::Bool(false)),
+                _ if word.parse::<f64>().is_ok() => Ok(Json::Number(word)),
+                _ => Err(format!("not a JSON value at {start}: {word:?}")),
+            }
+        }
+        None => Err("the text ends before a value".to_string()),
+    }
+}
+
+fn json_string(chars: &[char], at: &mut usize) -> Result<String, String> {
+    if chars.get(*at) != Some(&'"') {
+        return Err(format!("no string at {at}"));
+    }
+    *at += 1;
+    let mut out = String::new();
+    let hex = |at: usize| -> Result<u32, String> {
+        let digits: String = chars
+            .get(at..at + 4)
+            .ok_or("a short \\u escape")?
+            .iter()
+            .collect();
+        u32::from_str_radix(&digits, 16).map_err(|_| format!("a bad \\u escape at {at}"))
+    };
+    loop {
+        match chars.get(*at) {
+            None => return Err("a string that does not end".to_string()),
+            Some('"') => {
+                *at += 1;
+                return Ok(out);
+            }
+            Some('\\') => {
+                let escaped = chars.get(*at + 1).ok_or("an escape at the end")?;
+                *at += 2;
+                match escaped {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    '/' => out.push('/'),
+                    'b' => out.push('\u{8}'),
+                    'f' => out.push('\u{c}'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let mut code = hex(*at)?;
+                        *at += 4;
+                        // A high surrogate and its low one make one character.
+                        if (0xD800..0xDC00).contains(&code)
+                            && chars.get(*at) == Some(&'\\')
+                            && chars.get(*at + 1) == Some(&'u')
+                        {
+                            let low = hex(*at + 2)?;
+                            if (0xDC00..0xE000).contains(&low) {
+                                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                *at += 6;
+                            }
+                        }
+                        out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                    }
+                    c => return Err(format!("an unknown escape \\{c}")),
+                }
+            }
+            Some(c) => {
+                out.push(*c);
+                *at += 1;
+            }
+        }
+    }
+}
+
+#[test]
+fn test_the_guard_reads_json_as_npm_does() {
+    let text = "{\"scr\\u0069pts\": {\"a\": \"x \\\"y\\\"\"}, \"n\": [1, -2.5e3, true, null], \"scripts\": {}}";
+    let Ok(Json::Object(top)) = parse_json(text) else {
+        panic!("not an object")
+    };
+    let keys: Vec<&str> = top.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec!["scripts", "n", "scripts"],
+        "an escaped key reads as npm reads it, and a duplicate stays"
+    );
+    assert_eq!(
+        top[0].1,
+        Json::Object(vec![("a".to_string(), Json::Str("x \"y\"".to_string()))])
+    );
+    assert_eq!(
+        top[1].1,
+        Json::Array(vec![
+            Json::Number("1".to_string()),
+            Json::Number("-2.5e3".to_string()),
+            Json::Bool(true),
+            Json::Null
+        ])
+    );
+    assert_eq!(
+        parse_json("\"\\ud83e\\udd16\""),
+        Ok(Json::Str("\u{1F916}".to_string()))
+    );
+    for bad in ["{", "{\"a\" 1}", "[1,]", "\"open", "{} x", "nope"] {
+        assert!(parse_json(bad).is_err(), "{bad}");
+    }
+}
+
+/// The scripts of package.json the guard reads: its one `scripts` object, as (name, command)
+/// pairs, or why there is not exactly one.
+fn package_scripts(text: &str) -> Result<Vec<(String, String)>, String> {
+    let Json::Object(top) = parse_json(text)? else {
+        return Err("package.json is not an object".to_string());
+    };
+    let found: Vec<&Json> = top
+        .iter()
+        .filter(|(k, _)| k == "scripts")
+        .map(|(_, v)| v)
+        .collect();
+    let [Json::Object(entries)] = found.as_slice() else {
+        return Err(format!(
+            "package.json holds {} scripts objects, not one",
+            found.len()
+        ));
+    };
+    entries
+        .iter()
+        .map(|(k, v)| match v {
+            Json::Str(command) => Ok((k.clone(), command.clone())),
+            _ => Err(format!("the script {k} is not a string")),
+        })
+        .collect()
+}
+
 /// The step of ci.yml's Documentation job that runs the workflow policy, exactly: a name and a
 /// command, with no shell, environment, directory or condition of its own, run through node itself.
 const POLICY_STEP: [&str; 2] = [
@@ -412,20 +640,31 @@ const BEFORE_POLICY: [&str; 2] = [
 
 /// The npm scripts, exactly: no `pre`, `post` or lifecycle script can run before or around one of
 /// them, and `test:ci` runs the policy's suites with no option that could skip a test.
-const SCRIPTS: [&str; 13] = [
-    r#""spec-guard": "spec-guard \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md","#,
-    r#""spec-guard:prove": "spec-guard prove \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md","#,
-    r#""spec-guard:claims": "spec-guard claims","#,
-    r#""spec-graph": "spec-graph check","#,
-    r#""spec-brief": "spec-brief lint --strict","#,
-    r#""check:benchmark": "node benchmark/check.mjs","#,
-    r#""test:benchmark": "node --test benchmark/check.test.mjs","#,
-    r#""test:harness": "node --test benchmark/harness/harness.test.ts","#,
-    r#""site": "node site/build.mjs","#,
-    r#""test:site": "node --test site/site.test.mjs","#,
-    r#""test:ci": "node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs","#,
-    r#""verify:docs": "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief""#,
-    "},",
+const SCRIPTS: [(&str, &str); 12] = [
+    (
+        "spec-guard",
+        r#"spec-guard "spec/*.md" "docs/*.md" README.md ROADMAP.md CLAUDE.md"#,
+    ),
+    (
+        "spec-guard:prove",
+        r#"spec-guard prove "spec/*.md" "docs/*.md" README.md ROADMAP.md CLAUDE.md"#,
+    ),
+    ("spec-guard:claims", "spec-guard claims"),
+    ("spec-graph", "spec-graph check"),
+    ("spec-brief", "spec-brief lint --strict"),
+    ("check:benchmark", "node benchmark/check.mjs"),
+    ("test:benchmark", "node --test benchmark/check.test.mjs"),
+    ("test:harness", "node --test benchmark/harness/harness.test.ts"),
+    ("site", "node site/build.mjs"),
+    ("test:site", "node --test site/site.test.mjs"),
+    (
+        "test:ci",
+        "node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs",
+    ),
+    (
+        "verify:docs",
+        "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief",
+    ),
 ];
 
 /// The workflow policy runs where it blocks a merge, as written. ci.yml's Documentation job, a
@@ -533,16 +772,23 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
     );
     let required = fs::read_to_string(root.join(".github/required-checks.txt")).unwrap();
     assert!(required.lines().any(|l| l == "Documentation"));
-    // The npm scripts, exactly, and no project .npmrc.
+    // The npm scripts, exactly, read as npm reads them: one scripts object, these pairs in this
+    // order; and no project .npmrc.
     let package = fs::read_to_string(root.join("package.json")).unwrap();
-    let scripts: Vec<&str> = package
-        .lines()
-        .map(str::trim)
-        .skip_while(|l| *l != "\"scripts\": {")
-        .skip(1)
-        .take(SCRIPTS.len())
+    let scripts = package_scripts(&package).unwrap_or_else(|e| panic!("{e}"));
+    let expected: Vec<(String, String)> = SCRIPTS
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    assert_eq!(scripts, SCRIPTS, "package.json's scripts changed");
+    assert_eq!(scripts, expected, "package.json's scripts changed");
+    // A second scripts object, which npm would read instead, is refused.
+    let doubled = package.replacen(
+        "\"devDependencies\"",
+        "\"scripts\": {}, \"devDependencies\"",
+        1,
+    );
+    assert_ne!(doubled, package);
+    assert!(package_scripts(&doubled).is_err());
     assert!(
         !root.join(".npmrc").exists(),
         "a .npmrc changes what npm runs"

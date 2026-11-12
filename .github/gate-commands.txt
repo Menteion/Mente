@@ -7,6 +7,7 @@
 # required check is named in .github/required-checks.txt, and every required job is named here.
 
 ci.yml#rust: cargo test --locked
+ci.yml#rust: cargo test --locked -p mente-cli --test gates
 ci.yml#rust: cargo run --locked --bin mn -- spec
 ci.yml#rust: cargo run --locked --bin mn -- test --mutate
 ci.yml#rust: cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn

@@ -49,3 +49,6 @@
 # text and the workflow policy's place in the Documentation job; and each crate's overflow test.
 /compiler/mente-cli/tests/gates.rs @Dancraft3746
 /compiler/*/src/overflow_traps.rs @Dancraft3746
+
+# Each crate's manifest, which decides what its tests are: one could drop the gate tests' target.
+/compiler/*/Cargo.toml @Dancraft3746
