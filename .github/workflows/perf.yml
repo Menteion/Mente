@@ -135,7 +135,9 @@ jobs:
         env:
           COUNTERS: ${{ matrix.counters }}
         run: |
-          node perf/run.mjs --mn "$RUNNER_TEMP/mn" --base-mn "$RUNNER_TEMP/mn-base" --base-tree ../base $COUNTERS \
+          counters=()
+          if [ -n "$COUNTERS" ]; then counters=("$COUNTERS"); fi
+          node perf/run.mjs --mn "$RUNNER_TEMP/mn" --base-mn "$RUNNER_TEMP/mn-base" --base-tree ../base "${counters[@]}" \
             --out "$RUNNER_TEMP/perf-results.json" --work "$RUNNER_TEMP/perf-work"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.watch.outputs.run != 'false'
