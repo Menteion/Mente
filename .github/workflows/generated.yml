@@ -5,33 +5,23 @@
 # print the same: a difference where the reference interpreter traps and the MIR without proven
 # checks does not is a wrong proof. The comparison is compiler/mente-cli/src/mir_run/differential.rs.
 #
-# A pull request runs a fixed range of seeds that fits a few minutes; the nightly run takes a new
-# range each day. Every run prints its range, and a failure names its seed, which replays with
+# A pull request runs a fixed range of seeds that fits a few minutes. A failure names its seed,
+# which replays with
 #   MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1 cargo test --release -p mente-cli -- --ignored --nocapture generated_programs_run_alike
-# These runs never belong on a laptop.
+# These runs never belong on a laptop. The nightly and dispatched runs, with ranges of their own,
+# are generated-nightly.yml, whose jobs are named apart: no run with chosen inputs can report a
+# check of this job's name.
 #
 # A required check of `main`: it runs on every pull request and again in the merge queue, and its
 # first step after the checkout ends the job at once when no path .github/instrument-paths.txt
-# lists for it changed. A pull request's run that accepts fewer programs than its platform's
-# floor has checked too little, and fails.
+# lists for it changed. A run that accepts fewer programs than its platform's floor has checked
+# too little, and fails.
 # Every action is pinned to a full commit SHA; Dependabot proposes updates.
 name: Generated programs
 
 on:
   pull_request:
   merge_group:
-  schedule:
-    - cron: "41 2 * * *"
-  workflow_dispatch:
-    inputs:
-      first_seed:
-        description: "First seed"
-        required: true
-        default: "0"
-      programs:
-        description: "Programs to generate on each platform"
-        required: true
-        default: "1000"
 
 permissions:
   contents: read
@@ -56,24 +46,21 @@ jobs:
           # both slower on Windows, which therefore takes fewer programs.
           - name: x86-64 Linux
             os: ubuntu-24.04
-            pr_programs: 400
-            nightly_programs: 6000
-            nightly_exhaustive: 65536
+            programs: 400
           - name: x86-64 Windows
             os: windows-2025
-            pr_programs: 150
-            nightly_programs: 1500
-            nightly_exhaustive: 16384
+            programs: 150
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
-            pr_programs: 400
-            nightly_programs: 6000
-            nightly_exhaustive: 65536
+            programs: 400
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     defaults:
       run:
         shell: bash
+    env:
+      MENTE_GEN_FIRST_SEED: "0"
+      MENTE_GEN_PROGRAMS: ${{ matrix.programs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,58 +74,29 @@ jobs:
         run: |
           rustup toolchain install
           rustc --version
-      - name: Choose the seeds
+      - name: Build the comparison in release
         if: steps.watch.outputs.run != 'false'
-        env:
-          EVENT: ${{ github.event_name }}
-          INPUT_FIRST: ${{ github.event.inputs.first_seed }}
-          INPUT_PROGRAMS: ${{ github.event.inputs.programs }}
-          PR_PROGRAMS: ${{ matrix.pr_programs }}
-          NIGHTLY_PROGRAMS: ${{ matrix.nightly_programs }}
-          NIGHTLY_EXHAUSTIVE: ${{ matrix.nightly_exhaustive }}
+        run: cargo test --release --locked -p mente-cli --no-run
+      - name: Overflow checks in this job's release build
+        if: steps.watch.outputs.run != 'false'
+        run: bash .github/scripts/overflow-proof.sh
+      - name: Generated programs on the three paths
+        if: steps.watch.outputs.run != 'false'
         run: |
-          case "$EVENT" in
-            schedule)
-              # A new range each day: the day's number since 1970 times the programs a night.
-              day=$(( $(date -u +%s) / 86400 ))
-              first=$(( day * NIGHTLY_PROGRAMS ))
-              programs=$NIGHTLY_PROGRAMS
-              exhaustive=$NIGHTLY_EXHAUSTIVE ;;
-            workflow_dispatch)
-              first=$INPUT_FIRST
-              programs=$INPUT_PROGRAMS
-              exhaustive=$NIGHTLY_EXHAUSTIVE ;;
-            *)
-              first=0
-              programs=$PR_PROGRAMS
-              exhaustive=4096 ;;
-          esac
-          case "$first$programs" in *[!0-9]*) echo "seeds must be numbers"; exit 1 ;; esac
+          echo "Seeds $MENTE_GEN_FIRST_SEED ..= $(( MENTE_GEN_FIRST_SEED + MENTE_GEN_PROGRAMS - 1 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
+            mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths \
+            2>&1 | tee "$RUNNER_TEMP/generated.txt"
           # The floor of work done: three in four of the programs asked for pass every check,
           # Tier 1 included, and so run on the three paths. About 88% did on 2026-11-12 (354 of
           # 400 on Linux, 133 of 150 on Windows); fewer means the generator, the checker or the
           # count went wrong, and the run compared too little to mean anything.
-          {
-            echo "MENTE_GEN_FIRST_SEED=$first"
-            echo "MENTE_GEN_PROGRAMS=$programs"
-            echo "CONFORMANCE_EXHAUSTIVE=$exhaustive"
-            echo "MIN_ACCEPTED=$(( programs * 3 / 4 ))"
-          } >> "$GITHUB_ENV"
-          echo "Seeds $first ..= $(( first + programs - 1 ))" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Build the comparison in release
-        if: steps.watch.outputs.run != 'false'
-        run: cargo test --release --locked -p mente-cli --no-run
-      - name: Generated programs on the three paths
-        if: steps.watch.outputs.run != 'false'
-        run: |
-          cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
-            mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths \
-            2>&1 | tee "$RUNNER_TEMP/generated.txt"
+          floor=$(( MENTE_GEN_PROGRAMS * 3 / 4 ))
           accepted=$(sed -n -E 's/^[0-9]+ programs, ([0-9]+) pass every check.*/\1/p' "$RUNNER_TEMP/generated.txt")
           calls=$(sed -n -E 's/^([0-9]+) calls compared .*/\1/p' "$RUNNER_TEMP/generated.txt")
-          echo "Programs that pass every check: ${accepted:-none}, floor $MIN_ACCEPTED; calls compared: ${calls:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ -z "$accepted" ] || [ -z "$calls" ] || [ "$accepted" -lt "$MIN_ACCEPTED" ] || [ "$calls" -eq 0 ]; then
-            echo "::error::${accepted:-no} programs passed every check and ${calls:-no} calls were compared, below the floor of $MIN_ACCEPTED programs"
+          echo "Programs that pass every check: ${accepted:-none}, floor $floor; calls compared: ${calls:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -z "$accepted" ] || [ -z "$calls" ] || [ "$accepted" -lt "$floor" ] || [ "$calls" -eq 0 ]; then
+            echo "::error::${accepted:-no} programs passed every check and ${calls:-no} calls were compared, below the floor of $floor programs"
             exit 1
           fi
       - name: The conformance suite on the three paths
@@ -146,8 +104,8 @@ jobs:
         if: ${{ !cancelled() && steps.watch.outputs.run != 'false' }}
         env:
           MENTE_GEN_CALLS: "64"
+          MENTE_GEN_EXHAUSTIVE: "4096"
         run: |
-          export MENTE_GEN_EXHAUSTIVE="$CONFORMANCE_EXHAUSTIVE"
           cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
             mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/conformance.txt"

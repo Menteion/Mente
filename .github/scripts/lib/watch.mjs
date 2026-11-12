@@ -30,6 +30,8 @@ export const ALWAYS = [
   PATHS_FILE,
   ".github/scripts/watch.mjs",
   ".github/scripts/lib/watch.mjs",
+  // Every job that builds in release runs it, so a change to it runs them all.
+  ".github/scripts/overflow-proof.sh",
   ".cargo/**",
   "rust-toolchain",
   "rust-toolchain.toml",

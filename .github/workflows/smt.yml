@@ -22,7 +22,6 @@ on:
   merge_group:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -57,6 +56,9 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         if: steps.watch.outputs.run != 'false'
         run: rustup toolchain install
+      - name: Overflow checks in this job's release build
+        if: steps.watch.outputs.run != 'false'
+        run: bash .github/scripts/overflow-proof.sh
       - name: Install Z3 ${{ env.Z3_VERSION }}, checksummed
         if: steps.watch.outputs.run != 'false'
         run: |

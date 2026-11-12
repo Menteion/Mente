@@ -6,12 +6,15 @@
 //   "[Draft]", "fixup" in any form, "squash!", "squash:" or "[squash]", "amend!".
 // - No commit message, and not the pull request's title or body, holds CJK text: the repository's
 //   text is English (CLAUDE.md, invariant 3). CJK_RANGES are `is_cjk`'s in
-//   compiler/mente-cli/src/gates.rs, and a test keeps the two equal.
+//   compiler/mente-cli/tests/gates.rs, and a test keeps the two equal.
 // - A pull request whose base changed after its head was pushed fails, on every event, until a new
 //   commit is pushed: retargeting fires only `pull_request: edited`, which no instrument runs on,
 //   so their results are for the old base, and a later edit of the title or a re-run of an earlier
-//   run must not hide that. The base changes come from the pull request's timeline, the push from
-//   the first workflow run of its head commit, both through the API with the job's read-only token.
+//   run must not hide that. The base changes come from three sources, any of which fails it: the
+//   event's own `changes.base` (the retarget's run, before the API may show it), the issue events
+//   API, which documents `base_ref_changed`, and the timeline, which also returns it (seen on
+//   2026-11-13). The push is the first workflow run of the head commit. The API is read with the
+//   job's read-only token.
 //
 // The commits come from the event payload (GITHUB_EVENT_PATH); the title and body come from the
 // environment (PR_TITLE, PR_BODY), set from the payload by the workflow, so that no text of the
@@ -125,13 +128,25 @@ async function apiList(env, path, key) {
   throw new Error(`${path}: more than 50 pages`);
 }
 
-/// The pull request and its head commit the event is about: a pull request's own, or the one a
-/// merge group's branch (`gh-readonly-queue/<base>/pr-<number>-<head sha>`) names.
+/// The pull request the event is about, and its head where the event names it: a pull request's
+/// own, or the number a merge group's branch names (`gh-readonly-queue/<base>/pr-<number>-<sha>`,
+/// whose sha is the group's base, not the pull request's head, which the API gives instead).
 export function pullRequestOf(eventName, payload) {
   if (eventName === "pull_request") return { number: payload.pull_request?.number, head: payload.pull_request?.head?.sha };
-  const m = /\/pr-(\d+)-([0-9a-f]{40})$/.exec(payload.merge_group?.head_ref ?? "");
+  const m = /\/pr-(\d+)-[0-9a-f]{40}$/.exec(payload.merge_group?.head_ref ?? "");
   if (!m) throw new Error(`the merge group's branch names no pull request: ${JSON.stringify(payload.merge_group?.head_ref)}`);
-  return { number: Number(m[1]), head: m[2] };
+  return { number: Number(m[1]), head: null };
+}
+
+/// One object of the GitHub API, read with the job's token.
+async function apiGet(env, path) {
+  const api = env.GITHUB_API_URL || "https://api.github.com";
+  if (!env.GITHUB_TOKEN) throw new Error("GITHUB_TOKEN is not set, so the pull request cannot be read");
+  const response = await fetch(`${api}${path}`, {
+    headers: { authorization: `Bearer ${env.GITHUB_TOKEN}`, accept: "application/vnd.github+json" },
+  });
+  if (!response.ok) throw new Error(`${path}: the API answered ${response.status}`);
+  return response.json();
 }
 
 /// The CLI: checks the event's commits in the repository at `cwd` and returns the exit code.
@@ -155,10 +170,16 @@ export async function main(env, cwd) {
   }
   if (!base || !head) throw new Error(`the ${eventName} event names no base and head commits`);
   const pr = pullRequestOf(eventName, payload);
-  if (!Number.isInteger(pr.number) || !pr.head) throw new Error(`the ${eventName} event names no pull request`);
-  const timeline = await apiList(env, `/repos/${env.GITHUB_REPOSITORY}/issues/${pr.number}/timeline`);
-  const headRuns = await apiList(env, `/repos/${env.GITHUB_REPOSITORY}/actions/runs?event=pull_request&head_sha=${pr.head}`, "workflow_runs");
-  const baseChanged = baseChangedSincePush(timeline, headRuns);
+  if (!Number.isInteger(pr.number)) throw new Error(`the ${eventName} event names no pull request`);
+  const repo = env.GITHUB_REPOSITORY;
+  if (!pr.head) pr.head = (await apiGet(env, `/repos/${repo}/pulls/${pr.number}`)).head?.sha;
+  if (!pr.head) throw new Error(`pull request ${pr.number} names no head commit`);
+  // The retarget's own run knows from its event, whatever the API shows yet.
+  const retargeted = eventName === "pull_request" && payload.action === "edited" && payload.changes?.base !== undefined;
+  const events = await apiList(env, `/repos/${repo}/issues/${pr.number}/events`);
+  const timeline = await apiList(env, `/repos/${repo}/issues/${pr.number}/timeline`);
+  const headRuns = await apiList(env, `/repos/${repo}/actions/runs?event=pull_request&head_sha=${pr.head}`, "workflow_runs");
+  const baseChanged = retargeted || baseChangedSincePush([...events, ...timeline], headRuns);
   const commits = commitsBetween(base, head, cwd);
   if (commits.length === 0) throw new Error(`no commits in ${base}..${head}`);
   const found = problems(commits, pullRequest, baseChanged);

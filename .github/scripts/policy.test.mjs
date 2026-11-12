@@ -40,7 +40,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 35;
+const FLOOR = 37;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -285,12 +285,11 @@ check("every compiler crate proves its overflow checks in a release build", () =
     const has = filesUnder(`${dir}/src`).some((f) => f.endsWith(".rs") && read(f).includes("fn test_arithmetic_overflow_panics_in_this_crate"));
     assert.ok(has, `${dir} has no test_arithmetic_overflow_panics_in_this_crate (src/overflow_traps.rs)`);
   }
-  const job = workflows().find((w) => w.file === "ci.yml").doc.jobs["tier1-latency"];
-  assert.ok(
-    steps(job).some((s) => /cargo test --release .*--workspace/.test(String(s.run)) && String(s.run).includes("test_arithmetic_overflow_panics_in_this_crate") && !("if" in s)),
-    "ci.yml's Tier-1 latency job does not run every crate's overflow test in a release build",
-  );
-  assert.ok(requiredChecks().includes("Tier-1 latency"));
+  // The proof every release-building required job runs: every crate's test in release, counted.
+  const proof = read(".github/scripts/overflow-proof.sh");
+  assert.match(proof, /cargo test --release --locked --workspace --lib --bins -- --exact "\$test"/);
+  assert.match(proof, /test=overflow_traps::test_arithmetic_overflow_panics_in_this_crate/);
+  assert.match(proof, /if \[ "\$expected" -eq 0 \] \|\| \[ "\$passed" -ne "\$expected" \]; then/);
 });
 
 check("every measured benchmark run proves its sandbox first", () => {
@@ -375,7 +374,7 @@ const GATE_FILES = [
   "/benchmark/harness/probe.ts",
   "/benchmark/harness/fixtures.ts",
   "/benchmark/harness/toolchains.json",
-  "/compiler/mente-cli/src/gates.rs",
+  "/compiler/mente-cli/tests/gates.rs",
   "/compiler/*/src/overflow_traps.rs",
 ];
 
@@ -416,7 +415,7 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
     "benchmark/harness/prelim.ts",
     "benchmark/harness/probe.ts",
     "benchmark/harness/toolchains.json",
-    "compiler/mente-cli/src/gates.rs",
+    "compiler/mente-cli/tests/gates.rs",
     ...[...tracked()].filter((f) => /^compiler\/[^/]+\/src\/overflow_traps\.rs$/.test(f)),
   ];
   for (const f of inputs) {
@@ -454,14 +453,70 @@ check("the required checks are listed once each", () => {
   assert.deepEqual(twice, [], `${REQUIRED_FILE} lists these twice`);
 });
 
-check("no two jobs that run on pull requests report a check of the same name", () => {
+check("no two jobs of any workflow report a check of the same name", () => {
+  // Whatever triggers it: a scheduled or dispatched job of a required check's name could land a
+  // green check of that name on the commit.
   const seen = new Map();
-  for (const { file, doc, id, names } of allJobs()) {
-    const on = triggers(doc);
-    if (!("pull_request" in on) && !("merge_group" in on)) continue;
+  for (const { file, id, names } of allJobs()) {
     for (const name of names) {
       assert.ok(!seen.has(name), `the check "${name}" is reported by ${seen.get(name)} and by ${file}#${id}: a required check of that name would be ambiguous`);
       seen.set(name, `${file}#${id}`);
+    }
+  }
+});
+
+/// The events a workflow holding a required job may run on: a pull request, the merge queue and a
+/// push to main. A dispatched or scheduled run, or one with inputs, could report the job's check
+/// on a pull request's head with the work it chose.
+const REQUIRED_EVENTS = new Set(["pull_request", "merge_group", "push"]);
+
+check("a workflow that holds a required job runs only on pull requests, the queue and main", () => {
+  for (const file of new Set(requiredJobs().map((j) => j.file))) {
+    const on = triggers(workflows().find((w) => w.file === file).doc);
+    for (const event of Object.keys(on)) assert.ok(REQUIRED_EVENTS.has(event), `${file} runs on ${event}, beside a required job`);
+    if ("push" in on) assert.deepEqual(on.push, { branches: ["main"] }, `${file} runs on pushes other than to main`);
+    assert.doesNotMatch(read(`${WORKFLOWS}/${file}`), /\binputs\.|github\.event\.inputs/, `${file} reads inputs`);
+  }
+});
+
+/// The commands each required job exists to run (.github/gate-commands.txt), by workflow and job.
+function gateCommands() {
+  const out = new Map();
+  for (const [n, raw] of read(".github/gate-commands.txt").split(/\r?\n/).entries()) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const m = /^([\w.-]+\.yml)#([\w-]+): (.+)$/.exec(line);
+    assert.ok(m, `.github/gate-commands.txt:${n + 1}: not <workflow>#<job>: <command>`);
+    const key = `${m[1]}#${m[2]}`;
+    if (!out.has(key)) out.set(key, []);
+    assert.ok(!out.get(key).includes(m[3]), `.github/gate-commands.txt:${n + 1}: twice`);
+    out.get(key).push(m[3]);
+  }
+  return out;
+}
+
+check("every required job runs the commands it exists for, in steps that cannot be skipped", () => {
+  const declared = gateCommands();
+  const required = requiredJobs();
+  for (const key of declared.keys()) {
+    assert.ok(required.some(({ file, id }) => `${file}#${id}` === key), `.github/gate-commands.txt names ${key}, which is no required job`);
+  }
+  for (const { file, doc, id, job } of required) {
+    const key = `${file}#${id}`;
+    const commands = declared.get(key) ?? [];
+    assert.ok(commands.length > 0, `${key} is a required job with no command in .github/gate-commands.txt`);
+    const releases = scriptTexts(doc, job).some((t) => /\bcargo\s+(build|test|run)\b[^\n]*--release/.test(t));
+    if (releases) assert.ok(commands.includes("bash .github/scripts/overflow-proof.sh"), `${key} builds in release without proving its overflow checks`);
+    for (const command of commands) {
+      const runs = steps(job).filter((s) => typeof s.run === "string" && s.run.includes(command));
+      assert.ok(runs.length > 0, `${key}: no step runs ${command}`);
+      for (const s of runs) {
+        const where = `${stepKey(file, id, s)}, which runs ${command}`;
+        assert.ok(!("continue-on-error" in s), `${where}, may fail quietly`);
+        const condition = normalize(s.if ?? "");
+        const allowed = hasWatch(job) ? WATCH_FORMS.includes(condition) : !("if" in s);
+        assert.ok(allowed, `${where}, runs only if ${s.if}`);
+      }
     }
   }
 });
@@ -940,13 +995,15 @@ check("the Commits check refuses unfinished subjects, CJK text and a changed bas
 
 check("the Commits check fails on every event while a base change is newer than the head's push", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-commits-"));
-  // A stand-in for the GitHub API at GITHUB_API_URL, as the runner sets it: the pull request's
-  // timeline and its head commits' workflow runs.
-  const api = { timeline: [], runs: new Map() };
+  // A stand-in for the GitHub API at GITHUB_API_URL, as the runner sets it: the pull request, its
+  // issue events and timeline, and its head commits' workflow runs.
+  const api = { events: [], timeline: [], runs: new Map(), head: null };
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
     let body;
-    if (url.pathname === "/repos/o/r/issues/7/timeline") body = api.timeline;
+    if (url.pathname === "/repos/o/r/issues/7/events") body = api.events;
+    else if (url.pathname === "/repos/o/r/issues/7/timeline") body = api.timeline;
+    else if (url.pathname === "/repos/o/r/pulls/7") body = { number: 7, head: { sha: api.head } };
     else if (url.pathname === "/repos/o/r/actions/runs") body = { workflow_runs: api.runs.get(url.searchParams.get("head_sha")) ?? [] };
     res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
     res.end(JSON.stringify(body ?? {}));
@@ -966,15 +1023,15 @@ check("the Commits check fails on every event while a base change is newer than 
       return sh("rev-parse", "HEAD");
     };
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
-    const run = (head, action, changes) =>
+    const spawnWith = (eventName, payload) =>
       new Promise((done) => {
         const event = path.join(dir, "event.json");
-        fs.writeFileSync(event, JSON.stringify({ action, changes, pull_request: { number: 7, base: { sha: base }, head: { sha: head } } }));
+        fs.writeFileSync(event, JSON.stringify(payload));
         const child = spawn(process.execPath, [path.join(HERE, "commits.mjs")], {
           cwd: dir,
           env: {
             ...env,
-            GITHUB_EVENT_NAME: "pull_request",
+            GITHUB_EVENT_NAME: eventName,
             GITHUB_EVENT_PATH: event,
             GITHUB_REPOSITORY: "o/r",
             GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
@@ -987,24 +1044,38 @@ check("the Commits check fails on every event while a base change is newer than 
         child.stdout.on("data", (d) => (stdout += d));
         child.on("close", (status) => done({ status, stdout }));
       });
+    const run = (head, action, changes) =>
+      spawnWith("pull_request", { action, changes, pull_request: { number: 7, base: { sha: base }, head: { sha: head } } });
+    const change = (at) => ({ event: "base_ref_changed", created_at: at });
     const first = push("b\n");
     api.runs.set(first, [{ created_at: "2026-11-12T10:00:00Z" }, { created_at: "2026-11-12T12:00:00Z" }]);
     assert.equal((await run(first, "synchronize")).status, 0);
-    api.timeline = [{ event: "base_ref_changed", created_at: "2026-11-12T09:00:00Z" }];
+    api.events = [change("2026-11-12T09:00:00Z")];
     assert.equal((await run(first, "edited", { body: { from: "Old" } })).status, 0, "a base change before the push is answered");
-    api.timeline.push({ event: "base_ref_changed", created_at: "2026-11-12T11:00:00Z" });
+    // The retarget's own run fails from its event, though the API does not show the change yet.
     const retargeted = await run(first, "edited", { base: { ref: { from: "feature" } } });
     assert.equal(retargeted.status, 1);
     assert.match(retargeted.stdout, /base changed: push a commit to re-run the instruments/);
-    // A later edit of the text, or a re-run of the push's run, still fails: a newer passing
-    // Commits on the same head would otherwise hide the base change.
+    // Once the issue events show it, every later event fails too: an edit, a re-run of the push.
+    api.events.push(change("2026-11-12T11:00:00Z"));
     assert.equal((await run(first, "edited", { title: { from: "Old" } })).status, 1);
+    assert.equal((await run(first, "synchronize")).status, 1);
+    // The timeline alone shows it as well.
+    api.events = [];
+    api.timeline = [change("2026-11-12T11:00:00Z")];
     assert.equal((await run(first, "synchronize")).status, 1);
     // A new commit answers it.
     const second = push("c\n");
     api.runs.set(second, [{ created_at: "2026-11-12T13:00:00Z" }]);
     assert.equal((await run(second, "synchronize")).status, 0);
-    // Without the timeline it fails rather than pass unseen.
+    // In the merge queue, the pull request's head comes from the API: the group's branch names the
+    // base, and the group's commit merges the head into it.
+    api.head = second;
+    const group = (sha) => ({ merge_group: { base_sha: base, head_sha: second, head_ref: `refs/heads/gh-readonly-queue/main/pr-7-${sha}` } });
+    assert.equal((await spawnWith("merge_group", group(base))).status, 0);
+    api.head = first;
+    assert.equal((await spawnWith("merge_group", group(base))).status, 1, "the queued head's push is older than the base change");
+    // Without the head's runs it fails rather than pass unseen.
     api.runs.delete(second);
     assert.equal((await run(second, "synchronize")).status, 1);
   } finally {
@@ -1013,21 +1084,23 @@ check("the Commits check fails on every event while a base change is newer than 
   }
 });
 
-check("the base-change rule reads the timeline and the head's first run", () => {
+check("the base-change rule reads every source and the head's first run", () => {
   const at = (h) => ({ created_at: `2026-11-12T${h}:00:00Z` });
   const change = (h) => ({ event: "base_ref_changed", ...at(h) });
   assert.equal(baseChangedSincePush([], [at("10")]), false);
   assert.equal(baseChangedSincePush([change("09"), { event: "labeled", ...at("11") }], [at("10")]), false);
   assert.equal(baseChangedSincePush([change("09"), change("11")], [at("12"), at("10")]), true, "the first run is the push");
   assert.throws(() => baseChangedSincePush([change("09")], []), /push time is unknown/);
-  assert.deepEqual(pullRequestOf("merge_group", { merge_group: { head_ref: `refs/heads/gh-readonly-queue/main/pr-124-${"a".repeat(40)}` } }), { number: 124, head: "a".repeat(40) });
+  // A merge group's branch names the pull request and the group's base, never the head.
+  assert.deepEqual(pullRequestOf("merge_group", { merge_group: { head_ref: `refs/heads/gh-readonly-queue/main/pr-124-${"a".repeat(40)}` } }), { number: 124, head: null });
+  assert.deepEqual(pullRequestOf("pull_request", { pull_request: { number: 9, head: { sha: "h" } } }), { number: 9, head: "h" });
   assert.throws(() => pullRequestOf("merge_group", { merge_group: { head_ref: "refs/heads/x" } }), /names no pull request/);
 });
 
 check("the Commits check rejects the code points test_repository_text_is_english rejects", () => {
-  const main = read("compiler/mente-cli/src/gates.rs");
+  const main = read("compiler/mente-cli/tests/gates.rs");
   const body = /fn is_cjk\(c: char\) -> bool \{([\s\S]*?)\n\s*\}/.exec(main)?.[1];
-  assert.ok(body, "is_cjk not found in compiler/mente-cli/src/gates.rs");
+  assert.ok(body, "is_cjk not found in compiler/mente-cli/tests/gates.rs");
   const ranges = [...body.matchAll(/0x([0-9A-Fa-f_]+)\.\.=0x([0-9A-Fa-f_]+)/g)].map((m) => [parseInt(m[1].replace(/_/g, ""), 16), parseInt(m[2].replace(/_/g, ""), 16)]);
   assert.deepEqual(CJK_RANGES, ranges);
 });
@@ -1084,6 +1157,9 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   assert.deepEqual(missing(mutants, diff, named("f body", "f at 12", "f at 15", "g at 39"), []), ["g at 48"], "one left out is enough");
   assert.equal(exactRegex("a.rs:1:2: replace <impl X for Y>::f -> bool with true (x|y)"), "^a\\.rs:1:2: replace <impl X for Y>::f \\-> bool with true \\(x\\|y\\)$");
   assert.throws(() => touched([{ file: "x", span: {} }], added), /no file, name and span/);
+  // A mutant with no function in a file that loses lines fails the floor instead of dropping out;
+  // one in a file the diff leaves alone ("elsewhere") does not matter.
+  assert.throws(() => expected([...mutants, mutant("orphan", 30, 30, null)], diff), /"orphan" has no function and span/);
   assert.deepEqual(readList(""), []);
   assert.throws(() => readList("{}"), /not a JSON array/);
 });

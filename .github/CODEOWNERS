@@ -47,5 +47,5 @@
 
 # The gate tests of the compiler's own suite: the dependency policy, the lock's allowlist, English
 # text and the workflow policy's place in the Documentation job; and each crate's overflow test.
-/compiler/mente-cli/src/gates.rs @Dancraft3746
+/compiler/mente-cli/tests/gates.rs @Dancraft3746
 /compiler/*/src/overflow_traps.rs @Dancraft3746

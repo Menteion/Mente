@@ -1,7 +1,8 @@
 //! The tests that hold the repository's gates: the dependency policy and the crates `Cargo.lock`
 //! may hold, English-only text, and the workflow policy's place in the required Documentation job.
-//! They live apart from main.rs, which changes with every feature, so that `.github/CODEOWNERS`
-//! can give them to their owner (`docs/design-review.md`, `guard-per-problem`).
+//! They are an integration test of their own, apart from main.rs, which changes with every feature:
+//! nothing there can unhook them, and `.github/CODEOWNERS` gives them to their owner
+//! (`docs/design-review.md`, `guard-per-problem`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -323,7 +324,8 @@ fn non_english_lines(root: &Path) -> Vec<String> {
             | 0x20000..=0x3FFFF) // the supplementary ideographic planes
     }
     fn walk(dir: &Path, found: &mut Vec<String>) {
-        for entry in fs::read_dir(dir).unwrap().flatten() {
+        let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
@@ -396,25 +398,46 @@ fn test_the_english_check_finds_every_cjk_block() {
 }
 
 /// The step of ci.yml's Documentation job that runs the workflow policy, exactly: a name and a
-/// command, with no shell, environment, directory or condition of its own.
+/// command, with no shell, environment, directory or condition of its own, run through node itself.
 const POLICY_STEP: [&str; 2] = [
     "      - name: The workflow policy, its required checks, path lists, pins and milestone tags",
-    "        run: npm run test:ci",
+    "        run: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs",
 ];
 
-/// The command `npm run test:ci` runs, exactly: both suites of the policy, with no option that
-/// could skip a test.
-const TEST_CI: &str =
-    "\"test:ci\": \"node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs\",";
+/// The steps before it, exactly: the checkout and node. Nothing has run when the policy does.
+const BEFORE_POLICY: [&str; 2] = [
+    "      - uses: actions/checkout@",
+    "      - uses: actions/setup-node@",
+];
+
+/// The npm scripts, exactly: no `pre`, `post` or lifecycle script can run before or around one of
+/// them, and `test:ci` runs the policy's suites with no option that could skip a test.
+const SCRIPTS: [&str; 13] = [
+    r#""spec-guard": "spec-guard \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md","#,
+    r#""spec-guard:prove": "spec-guard prove \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md","#,
+    r#""spec-guard:claims": "spec-guard claims","#,
+    r#""spec-graph": "spec-graph check","#,
+    r#""spec-brief": "spec-brief lint --strict","#,
+    r#""check:benchmark": "node benchmark/check.mjs","#,
+    r#""test:benchmark": "node --test benchmark/check.test.mjs","#,
+    r#""test:harness": "node --test benchmark/harness/harness.test.ts","#,
+    r#""site": "node site/build.mjs","#,
+    r#""test:site": "node --test site/site.test.mjs","#,
+    r#""test:ci": "node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs","#,
+    r#""verify:docs": "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief""#,
+    "},",
+];
 
 /// The workflow policy runs where it blocks a merge, as written. ci.yml's Documentation job, a
-/// required check, runs `npm run test:ci` in a step of a name and a command alone; the job sets
+/// required check, runs it first, after only the checkout and node, through node itself, in a step
+/// of a name and a command alone; `npm ci` runs after it with no install script; the job sets
 /// nothing but its name, runner and steps, and none of its scripts writes the environment or the
-/// path of a later step; the workflow sets no shell and no environment but cargo's colours.
-/// `test:ci` is exactly the command that runs the policy's suites, and the policy declares a floor
-/// equal to its number of checks, which a run that skips any fails. Without this, a step deleted,
-/// a skip pattern, an option in `NODE_OPTIONS` or a shell that runs nothing would turn every check
-/// of the policy off unseen.
+/// path of a later step; the workflow sets no shell and no environment but cargo's colours. The npm
+/// scripts are exactly SCRIPTS, with no hook, and no `.npmrc` changes npm. The policy's suites mark
+/// no test skipped, todo or only, and the policy declares a floor equal to its number of checks,
+/// which a run that skips any fails. Without this, a step deleted, a hook or an install script, a
+/// skip pattern, an option in `NODE_OPTIONS` or a shell that runs nothing would turn every check of
+/// the policy off unseen.
 #[test]
 fn test_the_documentation_job_runs_the_workflow_policy() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -456,14 +479,34 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         "the Documentation job sets more than its name, runner and steps"
     );
     assert!(job.contains(&"    name: Documentation"));
-    let at = job
+    // The steps, by the lines that open them.
+    let steps: Vec<&str> = job
+        .iter()
+        .filter(|l| l.starts_with("      - "))
+        .copied()
+        .collect();
+    let at = steps
         .iter()
         .position(|l| *l == POLICY_STEP[0])
         .expect("the Documentation job has no workflow policy step");
-    assert_eq!(job[at + 1], POLICY_STEP[1], "the policy step changed");
+    assert_eq!(at, BEFORE_POLICY.len(), "the policy step is not third");
+    for (step, start) in steps.iter().zip(BEFORE_POLICY) {
+        assert!(step.starts_with(start), "a step before the policy: {step}");
+    }
+    let line = job.iter().position(|l| *l == POLICY_STEP[0]).unwrap();
+    assert_eq!(job[line + 1], POLICY_STEP[1], "the policy step changed");
     assert!(
-        job.get(at + 2).is_some_and(|l| l.starts_with("      - ")),
+        job.get(line + 2)
+            .is_some_and(|l| l.starts_with("      - ") || l.trim().starts_with('#')),
         "the policy step carries more than its name and command"
+    );
+    assert!(
+        job[..line].iter().all(|l| !l.contains("run:")),
+        "something runs before the policy"
+    );
+    assert!(
+        steps.contains(&"      - run: npm ci --ignore-scripts"),
+        "npm ci runs install scripts"
     );
     for word in [
         "GITHUB_ENV",
@@ -471,6 +514,7 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         "NODE_OPTIONS",
         "continue-on-error",
         "shell:",
+        "npm install",
     ] {
         assert!(
             !job.iter().any(|l| l.contains(word)),
@@ -478,16 +522,44 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         );
     }
     assert!(
+        job.iter()
+            .filter(|l| !l.trim().starts_with('#') && l.contains("npm ci"))
+            .all(|l| *l == "      - run: npm ci --ignore-scripts"),
+        "npm ci runs in another form"
+    );
+    assert!(
         !job.iter().any(|l| l.trim().starts_with("if:")),
         "a step of the Documentation job is conditional"
     );
     let required = fs::read_to_string(root.join(".github/required-checks.txt")).unwrap();
     assert!(required.lines().any(|l| l == "Documentation"));
+    // The npm scripts, exactly, and no project .npmrc.
     let package = fs::read_to_string(root.join("package.json")).unwrap();
+    let scripts: Vec<&str> = package
+        .lines()
+        .map(str::trim)
+        .skip_while(|l| *l != "\"scripts\": {")
+        .skip(1)
+        .take(SCRIPTS.len())
+        .collect();
+    assert_eq!(scripts, SCRIPTS, "package.json's scripts changed");
     assert!(
-        package.lines().any(|l| l.trim() == TEST_CI),
-        "test:ci is not exactly {TEST_CI}"
+        !root.join(".npmrc").exists(),
+        "a .npmrc changes what npm runs"
     );
+    // No test of the policy's suites is skipped, left to do or singled out.
+    for suite in [
+        ".github/scripts/policy.test.mjs",
+        ".github/scripts/yaml.test.mjs",
+    ] {
+        let text = fs::read_to_string(root.join(suite)).unwrap();
+        for marker in [".skip(", ".todo(", ".only(", "skip:", "todo:", "only:"] {
+            assert!(
+                !text.contains(marker),
+                "{suite} holds `{marker}`: a test it would not run"
+            );
+        }
+    }
     // The policy's floor of checks equals the checks it declares.
     let policy = fs::read_to_string(root.join(".github/scripts/policy.test.mjs")).unwrap();
     let checks = policy.lines().filter(|l| l.starts_with("check(\"")).count();

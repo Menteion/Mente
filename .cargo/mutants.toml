@@ -1,5 +1,5 @@
-# cargo-mutants settings, read by .github/workflows/mutants.yml. Mutation runs happen on
-# GitHub's runners, not on a developer's machine (ROADMAP.md, M0a).
+# cargo-mutants settings, read by .github/workflows/mutants.yml and mutants-full.yml. Mutation
+# runs happen on GitHub's runners, not on a developer's machine (ROADMAP.md, M0a).
 
 # A parser function is often tested from a crate downstream of it, so every mutant runs
 # against the whole workspace's tests.

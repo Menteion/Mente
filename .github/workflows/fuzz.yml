@@ -4,7 +4,8 @@
 # with debug assertions, and with the overflow checks every release build has (Cargo.toml), so an
 # arithmetic overflow panics as in a debug build.
 # A pull request touching the compiler gets a two-minute smoke run with a fixed seed; the nightly
-# run takes its seed from the run number and fuzzes for 45 minutes on every core of the runner.
+# and dispatched runs, longer and with seeds of their own, are fuzz-nightly.yml, whose job is named
+# apart, so that no run with chosen inputs can report this job's check.
 # Each failure, minimized, is uploaded as the artifact `fuzz-failures` and fails the job.
 # Heavy runs belong here, never on a developer's machine.
 #
@@ -17,16 +18,6 @@ name: Fuzz
 on:
   pull_request:
   merge_group:
-  schedule:
-    - cron: "0 19 * * *" # 03:00 in Taipei
-  workflow_dispatch:
-    inputs:
-      seed:
-        description: Seed (empty for the run number)
-        default: ""
-      seconds:
-        description: Seconds of fuzzing
-        default: "2700"
 
 permissions:
   contents: read
@@ -44,7 +35,7 @@ jobs:
     name: Fuzz
     runs-on: ubuntu-24.04
     # The fuzzing budget, then up to 90 s of minimizing for each new failure.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 120 }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,18 +50,14 @@ jobs:
       - name: Build mn
         if: steps.watch.outputs.run != 'false'
         run: cargo build --locked --release --bin mn
+      - name: Overflow checks in this job's release build
+        if: steps.watch.outputs.run != 'false'
+        run: bash .github/scripts/overflow-proof.sh
       - name: Fuzz
         if: steps.watch.outputs.run != 'false'
-        env:
-          EVENT: ${{ github.event_name }}
-          INPUT_SEED: ${{ inputs.seed }}
-          INPUT_SECONDS: ${{ inputs.seconds }}
         run: |
-          case "$EVENT" in
-            pull_request) seed=1; seconds=120 ;;
-            workflow_dispatch) seed="${INPUT_SEED:-$GITHUB_RUN_NUMBER}"; seconds="${INPUT_SECONDS:-2700}" ;;
-            *) seed="$GITHUB_RUN_NUMBER"; seconds=2700 ;;
-          esac
+          seed=1
+          seconds=120
           status=0
           target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out || status=$?
           {

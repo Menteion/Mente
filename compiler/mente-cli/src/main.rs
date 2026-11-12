@@ -41,8 +41,6 @@ const CARD: &str = include_str!("../../../docs/language-card.md");
 #[cfg(test)]
 const CARD_WORD_BUDGET: usize = 2_000;
 #[cfg(test)]
-mod gates;
-#[cfg(test)]
 mod latency;
 mod mir_mutants;
 mod mir_run;

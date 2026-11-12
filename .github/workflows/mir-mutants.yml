@@ -13,7 +13,6 @@ name: MIR mutants
 on:
   pull_request:
   merge_group:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -40,6 +39,9 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         if: steps.watch.outputs.run != 'false'
         run: rustup toolchain install
+      - name: Overflow checks in this job's release build
+        if: steps.watch.outputs.run != 'false'
+        run: bash .github/scripts/overflow-proof.sh
       - name: Build mn
         if: steps.watch.outputs.run != 'false'
         run: cargo build --release --locked --bin mn

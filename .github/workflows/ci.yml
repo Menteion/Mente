@@ -9,7 +9,6 @@ on:
   merge_group:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -112,6 +111,8 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
+      - name: Overflow checks in this job's release build
+        run: bash .github/scripts/overflow-proof.sh
       - name: Measure the base branch
         env:
           GROUP_BASE: ${{ github.event.merge_group.base_sha }}
@@ -158,6 +159,8 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
+      - name: Overflow checks in this job's release build
+        run: bash .github/scripts/overflow-proof.sh
       - name: Compare
         run: cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 
@@ -207,21 +210,8 @@ jobs:
         run: rustup toolchain install
       - name: Measure
         run: MENTE_BENCH_ENFORCE=1 cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
-      - name: Overflow checks in a release build of every crate
-        # Each compiler crate holds overflow_traps::test_arithmetic_overflow_panics_in_this_crate.
-        # Run in release, it fails where a profile, a package override or a flag builds that crate
-        # without the checks Cargo.toml's [profile.release] turns on; the count proves each ran.
-        run: |
-          set -o pipefail
-          test=overflow_traps::test_arithmetic_overflow_panics_in_this_crate
-          expected=$(grep -rl "fn test_arithmetic_overflow_panics_in_this_crate" compiler/*/src | wc -l)
-          cargo test --release --locked --workspace --lib --bins -- --exact "$test" 2>&1 | tee "$RUNNER_TEMP/overflow.txt"
-          passed=$(grep -c "^test $test \.\.\. ok$" "$RUNNER_TEMP/overflow.txt" || true)
-          echo "Crates whose release build traps on an overflow: $passed of $expected" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ "$expected" -eq 0 ] || [ "$passed" -ne "$expected" ]; then
-            echo "::error::$passed of $expected crates showed overflow checks in a release build"
-            exit 1
-          fi
+      - name: Overflow checks in this job's release build
+        run: bash .github/scripts/overflow-proof.sh
 
   docs:
     name: Documentation
@@ -235,12 +225,15 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - run: npm ci
-      - run: npm run verify:docs
-      # Exactly a name and a command: test_the_documentation_job_runs_the_workflow_policy, in the
-      # Rust jobs, fails on any other key, which could change what the step runs.
+      # Exactly a name and a command, first, and through node itself: before npm ci, so that no
+      # install script or npm hook can change what it runs. The Rust jobs' test
+      # test_the_documentation_job_runs_the_workflow_policy fails on any other key or order.
       - name: The workflow policy, its required checks, path lists, pins and milestone tags
-        run: npm run test:ci
+        run: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
+      # No package's install script runs: none is needed, and one could write the environment of
+      # the steps after it.
+      - run: npm ci --ignore-scripts
+      - run: npm run verify:docs
       - name: Install actionlint and shellcheck, pinned and checksummed
         # From their releases, as the SMT job installs Z3; neither is a build dependency.
         env:
