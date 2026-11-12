@@ -418,6 +418,23 @@ pub fn verify_module_with(
         match item {
             ItemDecl::Struct(s) => {
                 if let Some((size, align, _)) = extract_layout_attr(s) {
+                    // An enum has a layout (`core-calculus.md`, item 21), but a field of a
+                    // `@layout` struct that holds one is a construct no milestone brings yet.
+                    if let Some(f) = s
+                        .fields
+                        .iter()
+                        .find(|f| structs.is_enum(element_type(&f.ty)))
+                    {
+                        errors.push(Diagnostic::error(
+                            "E0109",
+                            f.ty_span,
+                            mente_syntax::diagnostics::later_message(
+                                "an enum as a field of a `@layout` struct",
+                                None,
+                            ),
+                        ));
+                        continue;
+                    }
                     match verify_explicit_struct_layout(s, size, align, &named_sizes, &named_aligns)
                     {
                         Ok(proof) => layout_proofs.push(proof),
@@ -729,6 +746,18 @@ pub fn verify_explicit_struct_layout(
 ///
 /// Target-dependent types (`usize`, `isize`) have no size here: a `@layout` struct must
 /// mean the same bytes on every target.
+/// The type a field's type `ty` holds through its arrays: `E` for `[2][3]E`.
+fn element_type(ty: &str) -> &str {
+    let mut t = ty.trim();
+    while let Some(rest) = t.strip_prefix('[') {
+        match rest.find(']') {
+            Some(close) => t = rest[close + 1..].trim(),
+            None => break,
+        }
+    }
+    t
+}
+
 fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usize> {
     let t = ty.trim();
     if let Some(inner) = t.strip_prefix("sat<").and_then(|s| s.strip_suffix('>')) {
@@ -1528,6 +1557,33 @@ pub struct Rec {
         // Without the plain structs' layouts, as `verify_module` alone reads a module, the
         // size is unknown.
         assert!(first_error(code).to_string().contains("E0417"));
+    }
+
+    /// An enum has a layout (`core-calculus.md`, item 21), but a field of a `@layout` struct
+    /// that holds one, directly or in an array, is a construct no milestone brings yet
+    /// (`E0109`), not a field whose size is unknown (`E0417`).
+    #[test]
+    fn test_an_enum_field_of_a_layout_struct_is_a_later_construct() {
+        for (layout, field) in [
+            ("@layout(size: 1, align: 1)", "@bytes(0..1) pub e: E"),
+            ("@layout(size: 2, align: 1)", "@bytes(0..2) pub es: [2]E"),
+        ] {
+            let src = format!(
+                "module m\npub enum E {{\n  A\n  B\n}}\n{}\npub struct Stamp {{\n  {}\n}}\n",
+                layout, field
+            );
+            let d = check_source(&src).unwrap_err();
+            assert_eq!(
+                d.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0109"],
+                "{}",
+                src
+            );
+            assert_eq!(
+                d[0].message,
+                "an enum as a field of a `@layout` struct is in no milestone yet; M2 does not have it"
+            );
+        }
     }
 
     #[test]

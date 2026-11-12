@@ -1,0 +1,8 @@
+// expect: E0221
+module conformance
+// A pattern's literal takes the type of what the `match` reads, so it has no suffix, even one
+// that names that type.
+pub fn f(x: u8) -> u8 = match x {
+  0_u8 => 1
+  _ => 2
+}

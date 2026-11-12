@@ -1,0 +1,64 @@
+// expect: pass
+module conformance
+// A scrutinee that is no place, such as an `if` or a `match` that gives one of two places, a
+// field of one or an element of one, is a value: an arm that changes the place it was read
+// from leaves the arm's bindings as they were matched, and the checker freezes nothing.
+pub enum Cell {
+  Big(v: u8)
+  Small(n: u8[0..10])
+}
+
+pub struct Box {
+  cell: Cell
+}
+
+pub fn through_an_if(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5))
+  val t = Box(cell: Cell.Small(n: 3))
+  val table: [10]u8 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  match (if c { s.cell } else { t.cell }) {
+    Cell.Small(n: n) => {
+      s.cell = Cell.Big(v: 200)
+      table[n]
+    }
+    Cell.Big(v: _) => 0
+  }
+}
+
+pub fn through_a_match(c: bool) -> u8[0..10] {
+  var s = Box(cell: Cell.Small(n: 5))
+  match (match c {
+    true => s.cell
+    false => Cell.Big(v: 1)
+  }) {
+    Cell.Small(n: n) => {
+      s.cell = Cell.Big(v: 200)
+      n
+    }
+    Cell.Big(v: _) => 0
+  }
+}
+
+pub fn a_field_of_an_if(c: bool) -> u8[0..10] {
+  var s = Box(cell: Cell.Small(n: 5))
+  val t = Box(cell: Cell.Small(n: 3))
+  match (if c { s } else { t }).cell {
+    Cell.Small(n: n) => {
+      s = Box(cell: Cell.Big(v: 200))
+      n
+    }
+    Cell.Big(v: _) => 0
+  }
+}
+
+pub fn an_element_of_an_if(c: bool) -> u8[0..10] {
+  var xs = [Cell.Small(n: 5), Cell.Small(n: 6)]
+  val ys = [Cell.Small(n: 1), Cell.Small(n: 2)]
+  match (if c { xs } else { ys })[0] {
+    Cell.Small(n: n) => {
+      xs[0] = Cell.Big(v: 200)
+      n
+    }
+    Cell.Big(v: _) => 0
+  }
+}

@@ -391,17 +391,13 @@ struct GEnum {
     variants: Vec<(String, Vec<GField>)>,
 }
 
-/// The integers an integer scrutinee's literal patterns take: their range, and the type that
-/// suffixes a literal now and then.
-type Literals = (R, Option<IntT>);
-
 /// A pattern of a `match` arm, before its bindings are known to be read: a variant, each field
-/// with its type and refinement and whether the arm binds it to a name, an integer literal
-/// with its suffix, a `bool`, or `_`.
+/// with its type and refinement and whether the arm binds it to a name, an integer literal,
+/// which has no suffix (`E0221`), a `bool`, or `_`.
 #[derive(Clone, Debug)]
 enum Pat {
     Variant(String, String, Vec<(GField, bool)>),
-    Int(Num, Option<IntT>),
+    Int(Num),
     Bool(bool),
     Wild,
 }
@@ -1142,7 +1138,7 @@ impl Gen {
     /// variant of an enum once, in some order, binding some of its payload's fields; `true` and
     /// `false`; or distinct literals of an integer's `range`, its type's or its refinement's,
     /// then `_` unless they cover it. `None` for a type a `match` does not read.
-    fn patterns(&mut self, ty: &Ty, range: Option<Literals>) -> Option<Vec<Pat>> {
+    fn patterns(&mut self, ty: &Ty, range: Option<R>) -> Option<Vec<Pat>> {
         match ty {
             Ty::Enum(name) => {
                 let mut variants = self.variants_of(name);
@@ -1167,14 +1163,14 @@ impl Gen {
                 Some(vec![Pat::Bool(first), Pat::Bool(!first)])
             }
             Ty::Int(_) => {
-                let (r, suffix) = range?;
+                let r = range?;
                 let span = r.hi.sub(r.lo).map_or(u128::MAX, |s| s.mag);
                 // A small range covered by its literals alone, now and then.
                 if span < 4 && self.rng.chance(60) {
                     let mut out = Vec::new();
                     let mut n = r.lo;
                     while n <= r.hi {
-                        out.push(Pat::Int(n, None));
+                        out.push(Pat::Int(n));
                         n = n.add(Num::small(1))?;
                     }
                     if self.rng.chance(30) {
@@ -1193,10 +1189,7 @@ impl Gen {
                         seen.push(n);
                     }
                 }
-                let mut out: Vec<Pat> = seen
-                    .into_iter()
-                    .map(|n| Pat::Int(n, suffix.filter(|_| self.rng.chance(20))))
-                    .collect();
+                let mut out: Vec<Pat> = seen.into_iter().map(Pat::Int).collect();
                 out.push(Pat::Wild);
                 Some(out)
             }
@@ -1207,7 +1200,7 @@ impl Gen {
     /// A scrutinee of type `ty` and the range of integers its patterns take: a value of an enum
     /// or of `bool`, or an integer of one type, a refined binding's name now and then, whose
     /// refinement bounds the literals.
-    fn scrutinee(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<Literals>)> {
+    fn scrutinee(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
         match ty {
             Ty::Enum(name) => Some((self.enum_value(name, depth + 1), None)),
             Ty::Bool => Some((self.bool_expr(depth + 1), None)),
@@ -1222,11 +1215,8 @@ impl Gen {
                     .collect();
                 if !refined.is_empty() && self.rng.chance(50) {
                     let id = *self.rng.pick(&refined);
-                    let Ty::Int(u) = self.binds[id].ty else {
-                        return None;
-                    };
                     let r = self.binds[id].range?;
-                    return Some((self.read(id), Some((r, Some(u)))));
+                    return Some((self.read(id), Some(r)));
                 }
                 let g = self.int_expr(Want::Exact(*t), depth + 1);
                 let u = match g.cls {
@@ -1234,7 +1224,7 @@ impl Gen {
                     Cls::Lit => I64,
                     Cls::Mixed => return None,
                 };
-                Some((g.e, Some((u.range(), Some(u)))))
+                Some((g.e, Some(u.range())))
             }
             Ty::Array(..) | Ty::Struct(_) => None,
         }
@@ -1308,12 +1298,11 @@ impl Gen {
                     .collect();
                 format!("{}.{}({})", e, v, parts.join(", "))
             }
-            Pat::Int(n, suffix) => {
-                let s = suffix.map_or(String::new(), |t| format!("_{}", t.name));
+            Pat::Int(n) => {
                 if n.neg {
-                    format!("-{}{}", n.mag, s)
+                    format!("-{}", n.mag)
                 } else {
-                    format!("{}{}", n.mag, s)
+                    format!("{}", n.mag)
                 }
             }
             Pat::Bool(b) => b.to_string(),
@@ -1425,7 +1414,7 @@ impl Gen {
         let scrutinee = match refined {
             Some((bind, id, r)) => {
                 first.push(bind);
-                Some((self.read(id), Some((r, Some(U8)))))
+                Some((self.read(id), Some(r)))
             }
             None => self.scrutinee(&read, depth),
         };

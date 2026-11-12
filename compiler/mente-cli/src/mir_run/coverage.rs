@@ -245,6 +245,10 @@ const NOT_GENERATED: &[(&str, &str)] = &[
         "binding by position",
         "a pattern names each field it binds (E0226)",
     ),
+    (
+        "suffixed literal pattern",
+        "a pattern's literal takes the type of what the `match` reads, so it has no suffix (E0221)",
+    ),
 ];
 
 /// The constructs `f` holds.

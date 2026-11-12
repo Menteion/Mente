@@ -1130,6 +1130,7 @@ t2: unreachable @9:8 ["unreachable reached: control left the code the checker al
 == conformance/core-calculus/enum_containing_itself.mn == (exit 2)
 == conformance/core-calculus/enum_containing_itself_through_a_struct.mn == (exit 2)
 == conformance/core-calculus/enum_field_of_a_later_type.mn == (exit 2)
+== conformance/core-calculus/enum_field_of_a_layout_struct.mn == (exit 2)
 == conformance/core-calculus/enum_in_struct_in_enum.mn ==
 mente-dump 2 mir
 f0: fn fill(addr, u8) {
@@ -5640,6 +5641,415 @@ t0: unreachable @42:8 ["unreachable reached: control left the code the checker a
 == conformance/core-calculus/function_as_value.mn == (exit 2)
 == conformance/core-calculus/guard_that_falls_through.mn == (exit 2)
 == conformance/core-calculus/if_beyond_128_bits.mn == (exit 2)
+== conformance/core-calculus/if_values_kept_beside_mut_arguments.mn ==
+mente-dump 2 mir
+f0: fn first(addr) -> u64 {
+block0(v0: addr):
+  v1: i64 = int 0 @17:6
+  v2: i64 = int 99 @17:11
+  v3: u8 = cast v2 @17:11
+  v4: u64 = cast v1 @17:3
+  v5: addr = elem 1 v0, v4 @17:3
+  v6: unit = store v5, v3 @17:3
+  v7: i64 = int 0 @18:3
+  v8: u64 = cast v7 @18:3
+  return v8
+block1():
+  trap t0
+t0: unreachable @18:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn bump(addr) -> u8 {
+block0(v0: addr):
+  v1: i64 = int 9 @22:9
+  v2: u8 = cast v1 @22:9
+  v3: u64 = int 2 @22:9
+  v4: addr = elem 1 v0, v3 @22:9
+  v5: unit = store v4, v2 @22:9
+  v6: i64 = int 0 @23:3
+  v7: u8 = cast v6 @23:3
+  return v7
+block1():
+  trap t0
+t0: unreachable @23:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn get(addr, u8) -> u8 {
+block0(v0: addr, v1: u8):
+  v2: u8 = load v0 @26:38
+  v4: u8 = int 1 @26:38
+  v5: bool = eq v2, v4 @26:38
+  branch v5, block2(), block3()
+block1(v3: i64):
+  v16: i64 = int 0 @28:21
+  v17: bool = ge v3, v16 @28:21
+  v18: i64 = int 255 @28:21
+  v19: bool = le v3, v18 @28:21
+  v20: bool = and v17, v19 @28:21
+  v21: unit = check t0 v20, v3 @26:32
+  v22: u8 = cast v3 @26:32
+  return v22
+block2():
+  v6: u64 = int 1 @26:38
+  v7: addr = elem 1 v0, v6 @26:38
+  v8: u8 = load v7 @27:23
+  v9: i64 = cast v8 @27:23
+  v10: i64 = cast v1 @27:23
+  v11: i64 = add v9, v10 @27:23
+  jump block1(v11)
+block3():
+  v12: u64 = int 1 @27:23
+  v13: addr = elem 1 v0, v12 @27:23
+  v14: u8 = load v13 @28:21
+  v15: i64 = cast v14 @28:21
+  jump block1(v15)
+block4():
+  trap t1
+t0: narrowing @26:32 ["", " does not fit in `u8`"]
+t1: unreachable @26:32 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn index_beside(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 16 @32:19
+  v2: i64 = int 1 @32:20
+  v3: u64 = int 0 @32:20
+  v4: addr = elem 8 v1, v3 @32:20
+  v5: unit = store v4, v2 @32:20
+  v6: i64 = int 2 @32:23
+  v7: u64 = int 1 @32:23
+  v8: addr = elem 8 v1, v7 @32:23
+  v9: unit = store v8, v6 @32:23
+  v10: addr = slot 2 @32:23
+  v12: u64 = int 0 @32:23
+  jump block1(v12)
+block1(v11: u64):
+  v13: u64 = int 2 @32:23
+  v14: bool = lt v11, v13 @32:23
+  branch v14, block2(), block3()
+block2():
+  v15: addr = elem 8 v1, v11 @32:23
+  v16: addr = elem 1 v10, v11 @32:23
+  v17: i64 = load v15 @32:23
+  v18: i64 = int 0 @32:23
+  v19: bool = ge v17, v18 @32:23
+  v20: i64 = int 255 @32:23
+  v21: bool = le v17, v20 @32:23
+  v22: bool = and v19, v21 @32:23
+  v23: unit = check t0 v22, v17 @32:19
+  v24: u8 = cast v17 @32:19
+  v25: unit = store v16, v24 @32:19
+  v26: u64 = int 1 @32:19
+  v27: u64 = add v11, v26 @32:19
+  jump block1(v27)
+block3():
+  v28: addr = slot 2 @32:19
+  v29: unit = copy 2 v28, v10 @32:19
+  v30: addr = slot 16 @33:19
+  v31: i64 = int 3 @33:20
+  v32: u64 = int 0 @33:20
+  v33: addr = elem 8 v30, v32 @33:20
+  v34: unit = store v33, v31 @33:20
+  v35: i64 = int 4 @33:23
+  v36: u64 = int 1 @33:23
+  v37: addr = elem 8 v30, v36 @33:23
+  v38: unit = store v37, v35 @33:23
+  v39: addr = slot 2 @33:23
+  v41: u64 = int 0 @33:23
+  jump block4(v41)
+block4(v40: u64):
+  v42: u64 = int 2 @33:23
+  v43: bool = lt v40, v42 @33:23
+  branch v43, block5(), block6()
+block5():
+  v44: addr = elem 8 v30, v40 @33:23
+  v45: addr = elem 1 v39, v40 @33:23
+  v46: i64 = load v44 @33:23
+  v47: i64 = int 0 @33:23
+  v48: bool = ge v46, v47 @33:23
+  v49: i64 = int 255 @33:23
+  v50: bool = le v46, v49 @33:23
+  v51: bool = and v48, v50 @33:23
+  v52: unit = check t1 v51, v46 @33:19
+  v53: u8 = cast v46 @33:19
+  v54: unit = store v45, v53 @33:19
+  v55: u64 = int 1 @33:19
+  v56: u64 = add v40, v55 @33:19
+  jump block4(v56)
+block6():
+  v57: addr = slot 2 @33:19
+  v58: unit = copy 2 v57, v39 @33:19
+  branch v0, block7(), block8()
+block7():
+  jump block9(v28)
+block8():
+  jump block9(v57)
+block9(v59: addr):
+  v60: addr = slot 2 @34:23
+  v61: unit = copy 2 v60, v59 @34:23
+  v62: u64 = call f0 v28 @34:29
+  v63: u64 = int 0 @34:3
+  v64: bool = ge v62, v63 @34:3
+  v65: u64 = int 2 @34:3
+  v66: bool = lt v62, v65 @34:3
+  v67: bool = and v64, v66 @34:3
+  v68: unit = check t2 v67, v62 @34:3
+  v69: addr = elem 1 v60, v62 @34:3
+  v70: u8 = load v69 @34:3
+  return v70
+block10():
+  trap t3
+t0: narrowing @32:19 ["", " does not fit in `u8`"]
+t1: narrowing @33:19 ["", " does not fit in `u8`"]
+t2: index-out-of-bounds @34:3 ["index ", " is outside an array of length 2"]
+t3: unreachable @34:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn field_beside(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 3 @38:11
+  v2: addr = slot 2 @38:21
+  v3: u8 = int 1 @38:21
+  v4: unit = store v2, v3 @38:21
+  v5: i64 = int 5 @38:35
+  v6: u8 = cast v5 @38:35
+  v7: u64 = int 1 @38:35
+  v8: addr = elem 1 v2, v7 @38:35
+  v9: unit = store v8, v6 @38:35
+  v10: unit = copy 2 v1, v2 @38:35
+  v11: i64 = int 1 @38:42
+  v12: u8 = cast v11 @38:42
+  v13: u64 = int 2 @38:42
+  v14: addr = elem 1 v1, v13 @38:42
+  v15: unit = store v14, v12 @38:42
+  v16: addr = slot 3 @38:42
+  v17: unit = copy 3 v16, v1 @38:42
+  v18: addr = slot 3 @39:11
+  v19: addr = slot 2 @39:21
+  v20: u8 = int 1 @39:21
+  v21: unit = store v19, v20 @39:21
+  v22: i64 = int 3 @39:35
+  v23: u8 = cast v22 @39:35
+  v24: u64 = int 1 @39:35
+  v25: addr = elem 1 v19, v24 @39:35
+  v26: unit = store v25, v23 @39:35
+  v27: unit = copy 2 v18, v19 @39:35
+  v28: i64 = int 2 @39:42
+  v29: u8 = cast v28 @39:42
+  v30: u64 = int 2 @39:42
+  v31: addr = elem 1 v18, v30 @39:42
+  v32: unit = store v31, v29 @39:42
+  v33: addr = slot 3 @39:42
+  v34: unit = copy 3 v33, v18 @39:42
+  branch v0, block1(), block2()
+block1():
+  jump block3(v16)
+block2():
+  jump block3(v33)
+block3(v35: addr):
+  v36: addr = slot 2 @40:26
+  v37: unit = copy 2 v36, v35 @40:26
+  v38: u8 = call f1 v16 @40:37
+  v39: u8 = call f2 v36, v38 @40:3
+  return v39
+block4():
+  trap t0
+t0: unreachable @40:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn assigned(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 3 @44:11
+  v2: addr = slot 2 @44:21
+  v3: u8 = int 1 @44:21
+  v4: unit = store v2, v3 @44:21
+  v5: i64 = int 5 @44:35
+  v6: u8 = cast v5 @44:35
+  v7: u64 = int 1 @44:35
+  v8: addr = elem 1 v2, v7 @44:35
+  v9: unit = store v8, v6 @44:35
+  v10: unit = copy 2 v1, v2 @44:35
+  v11: i64 = int 1 @44:42
+  v12: u8 = cast v11 @44:42
+  v13: u64 = int 2 @44:42
+  v14: addr = elem 1 v1, v13 @44:42
+  v15: unit = store v14, v12 @44:42
+  v16: addr = slot 3 @44:42
+  v17: unit = copy 3 v16, v1 @44:42
+  v18: addr = slot 3 @45:11
+  v19: addr = slot 2 @45:21
+  v20: u8 = int 1 @45:21
+  v21: unit = store v19, v20 @45:21
+  v22: i64 = int 3 @45:35
+  v23: u8 = cast v22 @45:35
+  v24: u64 = int 1 @45:35
+  v25: addr = elem 1 v19, v24 @45:35
+  v26: unit = store v25, v23 @45:35
+  v27: unit = copy 2 v18, v19 @45:35
+  v28: i64 = int 2 @45:42
+  v29: u8 = cast v28 @45:42
+  v30: u64 = int 2 @45:42
+  v31: addr = elem 1 v18, v30 @45:42
+  v32: unit = store v31, v29 @45:42
+  v33: addr = slot 3 @45:42
+  v34: unit = copy 3 v33, v18 @45:42
+  branch v0, block1(), block2()
+block1():
+  jump block3(v33)
+block2():
+  jump block3(v16)
+block3(v35: addr):
+  v36: unit = copy 3 v16, v35 @46:25
+  v37: u64 = int 2 @47:3
+  v38: addr = elem 1 v16, v37 @47:3
+  v39: u8 = load v38 @47:3
+  return v39
+block4():
+  trap t0
+t0: unreachable @47:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn match_value_beside(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 3 @51:11
+  v2: addr = slot 2 @51:21
+  v3: u8 = int 1 @51:21
+  v4: unit = store v2, v3 @51:21
+  v5: i64 = int 5 @51:35
+  v6: u8 = cast v5 @51:35
+  v7: u64 = int 1 @51:35
+  v8: addr = elem 1 v2, v7 @51:35
+  v9: unit = store v8, v6 @51:35
+  v10: unit = copy 2 v1, v2 @51:35
+  v11: i64 = int 1 @51:42
+  v12: u8 = cast v11 @51:42
+  v13: u64 = int 2 @51:42
+  v14: addr = elem 1 v1, v13 @51:42
+  v15: unit = store v14, v12 @51:42
+  v16: addr = slot 3 @51:42
+  v17: unit = copy 3 v16, v1 @51:42
+  branch v0, block2(), block3()
+block1(v18: addr):
+  v27: addr = slot 2 @54:26
+  v28: unit = copy 2 v27, v18 @54:26
+  v29: u8 = call f1 v16 @55:6
+  v30: u8 = call f2 v27, v29 @52:3
+  return v30
+block2():
+  jump block1(v16)
+block3():
+  v19: addr = slot 2 @54:14
+  v20: u8 = int 0 @54:14
+  v21: unit = store v19, v20 @54:14
+  v22: i64 = int 7 @54:26
+  v23: u8 = cast v22 @54:26
+  v24: u64 = int 1 @54:26
+  v25: addr = elem 1 v19, v24 @54:26
+  v26: unit = store v25, v23 @54:26
+  jump block1(v19)
+block4():
+  trap t0
+t0: unreachable @52:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter first(addr) -> u64 {
+block0(v0: addr):
+  v1: u64 = call f0 v0 @16:4
+  return v1
+t0: unreachable @16:4 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter bump(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @0:0
+  v2: u8 = int 1 @0:0
+  v3: bool = eq v1, v2 @0:0
+  branch v3, block1(), block2()
+block1():
+  v4: u64 = int 1 @0:0
+  v5: addr = elem 1 v0, v4 @0:0
+  v6: u8 = load v5 @0:0
+  v7: i64 = int 0 @0:0
+  v8: i64 = int 10 @0:0
+  v9: i64 = cast v6 @0:0
+  v10: bool = ge v9, v7 @0:0
+  v11: i64 = cast v6 @0:0
+  v12: bool = lt v11, v8 @0:0
+  v13: bool = and v10, v12 @0:0
+  v14: unit = check t0 v13, v6, v7, v8 @21:4
+  jump block2()
+block2():
+  v15: u64 = int 2 @21:4
+  v16: addr = elem 1 v0, v15 @21:4
+  v17: u8 = load v16 @21:4
+  v18: i64 = int 0 @21:4
+  v19: i64 = int 10 @21:4
+  v20: i64 = cast v17 @21:4
+  v21: bool = ge v20, v18 @21:4
+  v22: i64 = cast v17 @21:4
+  v23: bool = lt v22, v19 @21:4
+  v24: bool = and v21, v23 @21:4
+  v25: unit = check t1 v24, v17, v18, v19 @21:4
+  v26: u8 = call f1 v0 @21:4
+  return v26
+t0: refinement @21:4 ["", " lies outside the refinement `[", "..", "]`"]
+t1: refinement @21:4 ["", " lies outside the refinement `[", "..", "]`"]
+t2: unreachable @21:4 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter get(addr, u8) -> u8 {
+block0(v0: addr, v1: u8):
+  v2: u8 = load v0 @0:0
+  v3: u8 = int 1 @0:0
+  v4: bool = eq v2, v3 @0:0
+  branch v4, block1(), block2()
+block1():
+  v5: u64 = int 1 @0:0
+  v6: addr = elem 1 v0, v5 @0:0
+  v7: u8 = load v6 @0:0
+  v8: i64 = int 0 @0:0
+  v9: i64 = int 10 @0:0
+  v10: i64 = cast v7 @0:0
+  v11: bool = ge v10, v8 @0:0
+  v12: i64 = cast v7 @0:0
+  v13: bool = lt v12, v9 @0:0
+  v14: bool = and v11, v13 @0:0
+  v15: unit = check t0 v14, v7, v8, v9 @26:4
+  jump block2()
+block2():
+  v16: u8 = call f2 v0, v1 @26:4
+  return v16
+t0: refinement @26:4 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @26:4 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn enter index_beside(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f3 v0 @31:8
+  return v1
+t0: unreachable @31:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn enter field_beside(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f4 v0 @37:8
+  return v1
+t0: unreachable @37:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f12: fn enter assigned(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f5 v0 @43:8
+  return v1
+t0: unreachable @43:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f13: fn enter match_value_beside(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f6 v0 @50:8
+  return v1
+t0: unreachable @50:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/if_within_128_bits.mn ==
 mente-dump 2 mir
 f0: fn pick(bool, i64, u64) -> i64 {
@@ -5682,6 +6092,7 @@ t0: unreachable @3:8 ["unreachable reached: control left the code the checker al
 == conformance/core-calculus/layout_struct_called.mn == (exit 2)
 == conformance/core-calculus/len_of_a_non_array.mn == (exit 2)
 == conformance/core-calculus/literal_outside_its_suffix.mn == (exit 2)
+== conformance/core-calculus/loop_changes_what_a_payload_passes_mut.mn == (exit 2)
 == conformance/core-calculus/m1_slice.mn ==
 mente-dump 2 mir
 f0: fn sum_to(u32) -> u64 {
@@ -6313,6 +6724,8 @@ t0: unreachable @14:8 ["unreachable reached: control left the code the checker a
 == conformance/core-calculus/match_binding_refinement_not_proven.mn == (exit 2)
 == conformance/core-calculus/match_duplicate_arm.mn == (exit 2)
 == conformance/core-calculus/match_duplicate_literal.mn == (exit 2)
+== conformance/core-calculus/match_freezes_against_a_mut_argument_in_a_payload.mn == (exit 2)
+== conformance/core-calculus/match_freezes_against_a_mut_call_in_a_nested_scrutinee.mn == (exit 2)
 == conformance/core-calculus/match_freezes_its_scrutinee_against_a_mut_argument.mn == (exit 2)
 == conformance/core-calculus/match_freezes_its_scrutinee_against_a_store.mn == (exit 2)
 == conformance/core-calculus/match_leaves_the_rest_of_its_scrutinees_binding_free.mn ==
@@ -6670,83 +7083,48 @@ block10():
 t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f1: fn suffixed(i16) -> u8 {
-block0(v0: i16):
-  v2: i64 = int -5 @11:39
-  v3: i64 = cast v0 @11:39
-  v4: bool = eq v3, v2 @11:39
-  branch v4, block2(), block3()
-block1(v1: i64):
-  v11: u8 = cast v1 @14:8
-  return v11
-block2():
-  v5: i64 = int 1 @12:13
-  jump block1(v5)
-block3():
-  v6: i64 = int 5 @12:13
-  v7: i64 = cast v0 @12:13
-  v8: bool = eq v7, v6 @12:13
-  branch v8, block4(), block5()
-block4():
-  v9: i64 = int 2 @13:12
-  jump block1(v9)
-block5():
-  v10: i64 = int 3 @14:8
-  jump block1(v10)
-block6():
-  trap t0
-t0: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
-}
-
-f2: fn main() -> i8 {
+f1: fn main() -> i8 {
 block0():
-  v0: i64 = int -128 @17:28
-  v1: i8 = cast v0 @17:28
-  v2: i8 = call f0 v1 @17:23
-  v3: i64 = int -1 @17:41
-  v4: i8 = cast v3 @17:41
-  v5: i8 = call f0 v4 @17:36
-  v6: i64 = cast v2 @17:23
-  v7: i64 = cast v5 @17:23
-  v8: i64 = add v6, v7 @17:23
-  v9: i64 = int 100 @17:52
-  v10: i8 = cast v9 @17:52
-  v11: i8 = call f0 v10 @17:47
-  v12: i64 = cast v11 @17:23
-  v13: i64 = add v8, v12 @17:23
-  v14: i64 = int -128 @17:23
-  v15: bool = ge v13, v14 @17:23
-  v16: i64 = int 127 @17:23
-  v17: bool = le v13, v16 @17:23
-  v18: bool = and v15, v17 @17:23
-  v19: unit = check t0 v18, v13 @17:23
-  v20: i8 = cast v13 @17:23
+  v0: i64 = int -128 @11:28
+  v1: i8 = cast v0 @11:28
+  v2: i8 = call f0 v1 @11:23
+  v3: i64 = int -1 @11:41
+  v4: i8 = cast v3 @11:41
+  v5: i8 = call f0 v4 @11:36
+  v6: i64 = cast v2 @11:23
+  v7: i64 = cast v5 @11:23
+  v8: i64 = add v6, v7 @11:23
+  v9: i64 = int 100 @11:52
+  v10: i8 = cast v9 @11:52
+  v11: i8 = call f0 v10 @11:47
+  v12: i64 = cast v11 @11:23
+  v13: i64 = add v8, v12 @11:23
+  v14: i64 = int -128 @11:23
+  v15: bool = ge v13, v14 @11:23
+  v16: i64 = int 127 @11:23
+  v17: bool = le v13, v16 @11:23
+  v18: bool = and v15, v17 @11:23
+  v19: unit = check t0 v18, v13 @11:23
+  v20: i8 = cast v13 @11:23
   return v20
 block1():
   trap t1
-t0: narrowing @17:23 ["", " does not fit in `i8`"]
-t1: unreachable @17:23 ["unreachable reached: control left the code the checker allows"]
+t0: narrowing @11:23 ["", " does not fit in `i8`"]
+t1: unreachable @11:23 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn enter sign(i8) -> i8 {
+f2: fn enter sign(i8) -> i8 {
 block0(v0: i8):
   v1: i8 = call f0 v0 @3:8
   return v1
 t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f4: fn enter suffixed(i16) -> u8 {
-block0(v0: i16):
-  v1: u8 = call f1 v0 @11:8
-  return v1
-t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
-}
-
-f5: fn enter main() -> i8 {
+f3: fn enter main() -> i8 {
 block0():
-  v0: i8 = call f2 @17:8
+  v0: i8 = call f1 @11:8
   return v0
-t0: unreachable @17:8 ["unreachable reached: control left the code the checker allows"]
+t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/match_nested_in_an_arm.mn ==
 mente-dump 2 mir
@@ -6878,6 +7256,391 @@ block0():
 t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/match_on_a_bool_missing_a_value.mn == (exit 2)
+== conformance/core-calculus/match_on_a_value_an_if_gives.mn ==
+mente-dump 2 mir
+f0: fn through_an_if(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 2 @16:11
+  v2: addr = slot 2 @16:21
+  v3: u8 = int 1 @16:21
+  v4: unit = store v2, v3 @16:21
+  v5: i64 = int 5 @16:35
+  v6: u8 = cast v5 @16:35
+  v7: u64 = int 1 @16:35
+  v8: addr = elem 1 v2, v7 @16:35
+  v9: unit = store v8, v6 @16:35
+  v10: unit = copy 2 v1, v2 @16:35
+  v11: addr = slot 2 @16:35
+  v12: unit = copy 2 v11, v1 @16:35
+  v13: addr = slot 2 @17:11
+  v14: addr = slot 2 @17:21
+  v15: u8 = int 1 @17:21
+  v16: unit = store v14, v15 @17:21
+  v17: i64 = int 3 @17:35
+  v18: u8 = cast v17 @17:35
+  v19: u64 = int 1 @17:35
+  v20: addr = elem 1 v14, v19 @17:35
+  v21: unit = store v20, v18 @17:35
+  v22: unit = copy 2 v13, v14 @17:35
+  v23: addr = slot 2 @17:35
+  v24: unit = copy 2 v23, v13 @17:35
+  v25: addr = slot 80 @18:23
+  v26: i64 = int 0 @18:24
+  v27: u64 = int 0 @18:24
+  v28: addr = elem 8 v25, v27 @18:24
+  v29: unit = store v28, v26 @18:24
+  v30: i64 = int 1 @18:27
+  v31: u64 = int 1 @18:27
+  v32: addr = elem 8 v25, v31 @18:27
+  v33: unit = store v32, v30 @18:27
+  v34: i64 = int 2 @18:30
+  v35: u64 = int 2 @18:30
+  v36: addr = elem 8 v25, v35 @18:30
+  v37: unit = store v36, v34 @18:30
+  v38: i64 = int 3 @18:33
+  v39: u64 = int 3 @18:33
+  v40: addr = elem 8 v25, v39 @18:33
+  v41: unit = store v40, v38 @18:33
+  v42: i64 = int 4 @18:36
+  v43: u64 = int 4 @18:36
+  v44: addr = elem 8 v25, v43 @18:36
+  v45: unit = store v44, v42 @18:36
+  v46: i64 = int 5 @18:39
+  v47: u64 = int 5 @18:39
+  v48: addr = elem 8 v25, v47 @18:39
+  v49: unit = store v48, v46 @18:39
+  v50: i64 = int 6 @18:42
+  v51: u64 = int 6 @18:42
+  v52: addr = elem 8 v25, v51 @18:42
+  v53: unit = store v52, v50 @18:42
+  v54: i64 = int 7 @18:45
+  v55: u64 = int 7 @18:45
+  v56: addr = elem 8 v25, v55 @18:45
+  v57: unit = store v56, v54 @18:45
+  v58: i64 = int 8 @18:48
+  v59: u64 = int 8 @18:48
+  v60: addr = elem 8 v25, v59 @18:48
+  v61: unit = store v60, v58 @18:48
+  v62: i64 = int 9 @18:51
+  v63: u64 = int 9 @18:51
+  v64: addr = elem 8 v25, v63 @18:51
+  v65: unit = store v64, v62 @18:51
+  v66: addr = slot 10 @18:51
+  v68: u64 = int 0 @18:51
+  jump block1(v68)
+block1(v67: u64):
+  v69: u64 = int 10 @18:51
+  v70: bool = lt v67, v69 @18:51
+  branch v70, block2(), block3()
+block2():
+  v71: addr = elem 8 v25, v67 @18:51
+  v72: addr = elem 1 v66, v67 @18:51
+  v73: i64 = load v71 @18:51
+  v74: i64 = int 0 @18:51
+  v75: bool = ge v73, v74 @18:51
+  v76: i64 = int 255 @18:51
+  v77: bool = le v73, v76 @18:51
+  v78: bool = and v75, v77 @18:51
+  v79: unit = check t0 v78, v73 @18:23
+  v80: u8 = cast v73 @18:23
+  v81: unit = store v72, v80 @18:23
+  v82: u64 = int 1 @18:23
+  v83: u64 = add v67, v82 @18:23
+  jump block1(v83)
+block3():
+  v84: addr = slot 10 @18:23
+  v85: unit = copy 10 v84, v66 @18:23
+  branch v0, block4(), block5()
+block4():
+  jump block6(v11)
+block5():
+  jump block6(v23)
+block6(v86: addr):
+  v87: addr = slot 2 @19:33
+  v88: unit = copy 2 v87, v86 @19:33
+  v89: u8 = load v87 @19:33
+  v91: u8 = int 1 @19:33
+  v92: bool = eq v89, v91 @19:33
+  branch v92, block8(), block9()
+block7(v90: i64):
+  v110: u8 = cast v90 @24:23
+  return v110
+block8():
+  v93: u64 = int 1 @19:33
+  v94: addr = elem 1 v87, v93 @19:33
+  v95: addr = slot 2 @21:16
+  v96: u8 = int 0 @21:16
+  v97: unit = store v95, v96 @21:16
+  v98: i64 = int 200 @21:28
+  v99: u8 = cast v98 @21:28
+  v100: u64 = int 1 @21:28
+  v101: addr = elem 1 v95, v100 @21:28
+  v102: unit = store v101, v99 @21:28
+  v103: unit = copy 2 v11, v95 @21:28
+  v104: u8 = load v94 @22:13
+  v105: u64 = cast v104 @22:7
+  v106: addr = elem 1 v84, v105 @22:7
+  v107: u8 = load v106 @22:7
+  v108: i64 = cast v107 @22:7
+  jump block7(v108)
+block9():
+  v109: i64 = int 0 @24:23
+  jump block7(v109)
+block10():
+  trap t1
+t0: narrowing @18:23 ["", " does not fit in `u8`"]
+t1: unreachable @24:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn through_a_match(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 2 @29:11
+  v2: addr = slot 2 @29:21
+  v3: u8 = int 1 @29:21
+  v4: unit = store v2, v3 @29:21
+  v5: i64 = int 5 @29:35
+  v6: u8 = cast v5 @29:35
+  v7: u64 = int 1 @29:35
+  v8: addr = elem 1 v2, v7 @29:35
+  v9: unit = store v8, v6 @29:35
+  v10: unit = copy 2 v1, v2 @29:35
+  v11: addr = slot 2 @29:35
+  v12: unit = copy 2 v11, v1 @29:35
+  branch v0, block2(), block3()
+block1(v13: addr):
+  v22: addr = slot 2 @32:26
+  v23: unit = copy 2 v22, v13 @32:26
+  v24: u8 = load v22 @32:26
+  v26: u8 = int 1 @32:26
+  v27: bool = eq v24, v26 @32:26
+  branch v27, block5(), block6()
+block2():
+  jump block1(v11)
+block3():
+  v14: addr = slot 2 @32:14
+  v15: u8 = int 0 @32:14
+  v16: unit = store v14, v15 @32:14
+  v17: i64 = int 1 @32:26
+  v18: u8 = cast v17 @32:26
+  v19: u64 = int 1 @32:26
+  v20: addr = elem 1 v14, v19 @32:26
+  v21: unit = store v20, v18 @32:26
+  jump block1(v14)
+block4(v25: i64):
+  v42: u8 = cast v25 @38:23
+  return v42
+block5():
+  v28: u64 = int 1 @32:26
+  v29: addr = elem 1 v22, v28 @32:26
+  v30: addr = slot 2 @35:16
+  v31: u8 = int 0 @35:16
+  v32: unit = store v30, v31 @35:16
+  v33: i64 = int 200 @35:28
+  v34: u8 = cast v33 @35:28
+  v35: u64 = int 1 @35:28
+  v36: addr = elem 1 v30, v35 @35:28
+  v37: unit = store v36, v34 @35:28
+  v38: unit = copy 2 v11, v30 @35:28
+  v39: u8 = load v29 @36:7
+  v40: i64 = cast v39 @36:7
+  jump block4(v40)
+block6():
+  v41: i64 = int 0 @38:23
+  jump block4(v41)
+block7():
+  trap t0
+t0: unreachable @38:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn a_field_of_an_if(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 2 @43:11
+  v2: addr = slot 2 @43:21
+  v3: u8 = int 1 @43:21
+  v4: unit = store v2, v3 @43:21
+  v5: i64 = int 5 @43:35
+  v6: u8 = cast v5 @43:35
+  v7: u64 = int 1 @43:35
+  v8: addr = elem 1 v2, v7 @43:35
+  v9: unit = store v8, v6 @43:35
+  v10: unit = copy 2 v1, v2 @43:35
+  v11: addr = slot 2 @43:35
+  v12: unit = copy 2 v11, v1 @43:35
+  v13: addr = slot 2 @44:11
+  v14: addr = slot 2 @44:21
+  v15: u8 = int 1 @44:21
+  v16: unit = store v14, v15 @44:21
+  v17: i64 = int 3 @44:35
+  v18: u8 = cast v17 @44:35
+  v19: u64 = int 1 @44:35
+  v20: addr = elem 1 v14, v19 @44:35
+  v21: unit = store v20, v18 @44:35
+  v22: unit = copy 2 v13, v14 @44:35
+  v23: addr = slot 2 @44:35
+  v24: unit = copy 2 v23, v13 @44:35
+  branch v0, block1(), block2()
+block1():
+  jump block3(v11)
+block2():
+  jump block3(v23)
+block3(v25: addr):
+  v26: addr = slot 2 @45:28
+  v27: unit = copy 2 v26, v25 @45:28
+  v28: u8 = load v26 @45:28
+  v30: u8 = int 1 @45:28
+  v31: bool = eq v28, v30 @45:28
+  branch v31, block5(), block6()
+block4(v29: i64):
+  v48: u8 = cast v29 @50:23
+  return v48
+block5():
+  v32: u64 = int 1 @45:28
+  v33: addr = elem 1 v26, v32 @45:28
+  v34: addr = slot 2 @47:11
+  v35: addr = slot 2 @47:21
+  v36: u8 = int 0 @47:21
+  v37: unit = store v35, v36 @47:21
+  v38: i64 = int 200 @47:33
+  v39: u8 = cast v38 @47:33
+  v40: u64 = int 1 @47:33
+  v41: addr = elem 1 v35, v40 @47:33
+  v42: unit = store v41, v39 @47:33
+  v43: unit = copy 2 v34, v35 @47:33
+  v44: unit = copy 2 v11, v34 @47:33
+  v45: u8 = load v33 @48:7
+  v46: i64 = cast v45 @48:7
+  jump block4(v46)
+block6():
+  v47: i64 = int 0 @50:23
+  jump block4(v47)
+block7():
+  trap t0
+t0: unreachable @50:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn an_element_of_an_if(bool) -> u8 {
+block0(v0: bool):
+  v1: addr = slot 4 @55:12
+  v2: addr = slot 2 @55:13
+  v3: u8 = int 1 @55:13
+  v4: unit = store v2, v3 @55:13
+  v5: i64 = int 5 @55:27
+  v6: u8 = cast v5 @55:27
+  v7: u64 = int 1 @55:27
+  v8: addr = elem 1 v2, v7 @55:27
+  v9: unit = store v8, v6 @55:27
+  v10: u64 = int 0 @55:27
+  v11: addr = elem 2 v1, v10 @55:27
+  v12: unit = copy 2 v11, v2 @55:27
+  v13: addr = slot 2 @55:31
+  v14: u8 = int 1 @55:31
+  v15: unit = store v13, v14 @55:31
+  v16: i64 = int 6 @55:45
+  v17: u8 = cast v16 @55:45
+  v18: u64 = int 1 @55:45
+  v19: addr = elem 1 v13, v18 @55:45
+  v20: unit = store v19, v17 @55:45
+  v21: u64 = int 1 @55:45
+  v22: addr = elem 2 v1, v21 @55:45
+  v23: unit = copy 2 v22, v13 @55:45
+  v24: addr = slot 4 @55:45
+  v25: unit = copy 4 v24, v1 @55:45
+  v26: addr = slot 4 @56:12
+  v27: addr = slot 2 @56:13
+  v28: u8 = int 1 @56:13
+  v29: unit = store v27, v28 @56:13
+  v30: i64 = int 1 @56:27
+  v31: u8 = cast v30 @56:27
+  v32: u64 = int 1 @56:27
+  v33: addr = elem 1 v27, v32 @56:27
+  v34: unit = store v33, v31 @56:27
+  v35: u64 = int 0 @56:27
+  v36: addr = elem 2 v26, v35 @56:27
+  v37: unit = copy 2 v36, v27 @56:27
+  v38: addr = slot 2 @56:31
+  v39: u8 = int 1 @56:31
+  v40: unit = store v38, v39 @56:31
+  v41: i64 = int 2 @56:45
+  v42: u8 = cast v41 @56:45
+  v43: u64 = int 1 @56:45
+  v44: addr = elem 1 v38, v43 @56:45
+  v45: unit = store v44, v42 @56:45
+  v46: u64 = int 1 @56:45
+  v47: addr = elem 2 v26, v46 @56:45
+  v48: unit = copy 2 v47, v38 @56:45
+  v49: addr = slot 4 @56:45
+  v50: unit = copy 4 v49, v26 @56:45
+  branch v0, block1(), block2()
+block1():
+  jump block3(v24)
+block2():
+  jump block3(v49)
+block3(v51: addr):
+  v52: i64 = int 0 @57:35
+  v53: u64 = cast v52 @57:9
+  v54: addr = elem 2 v51, v53 @57:9
+  v55: addr = slot 2 @57:9
+  v56: unit = copy 2 v55, v54 @57:9
+  v57: u8 = load v55 @57:9
+  v59: u8 = int 1 @57:9
+  v60: bool = eq v57, v59 @57:9
+  branch v60, block5(), block6()
+block4(v58: i64):
+  v78: u8 = cast v58 @62:23
+  return v78
+block5():
+  v61: u64 = int 1 @57:9
+  v62: addr = elem 1 v55, v61 @57:9
+  v63: i64 = int 0 @59:10
+  v64: addr = slot 2 @59:15
+  v65: u8 = int 0 @59:15
+  v66: unit = store v64, v65 @59:15
+  v67: i64 = int 200 @59:27
+  v68: u8 = cast v67 @59:27
+  v69: u64 = int 1 @59:27
+  v70: addr = elem 1 v64, v69 @59:27
+  v71: unit = store v70, v68 @59:27
+  v72: u64 = cast v63 @59:7
+  v73: addr = elem 2 v24, v72 @59:7
+  v74: unit = copy 2 v73, v64 @59:7
+  v75: u8 = load v62 @60:7
+  v76: i64 = cast v75 @60:7
+  jump block4(v76)
+block6():
+  v77: i64 = int 0 @62:23
+  jump block4(v77)
+block7():
+  trap t0
+t0: unreachable @62:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter through_an_if(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f0 v0 @15:8
+  return v1
+t0: unreachable @15:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter through_a_match(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f1 v0 @28:8
+  return v1
+t0: unreachable @28:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter a_field_of_an_if(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f2 v0 @42:8
+  return v1
+t0: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter an_element_of_an_if(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f3 v0 @54:8
+  return v1
+t0: unreachable @54:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/match_on_an_array.mn == (exit 2)
 == conformance/core-calculus/match_over_a_full_u8.mn ==
 mente-dump 2 mir
@@ -7062,6 +7825,7 @@ t0: unreachable @16:8 ["unreachable reached: control left the code the checker a
 }
 == conformance/core-calculus/match_pattern_of_another_enum.mn == (exit 2)
 == conformance/core-calculus/match_pattern_of_another_kind.mn == (exit 2)
+== conformance/core-calculus/match_pattern_with_a_suffix.mn == (exit 2)
 == conformance/core-calculus/match_payload_narrowing_that_always_traps.mn == (exit 2)
 == conformance/core-calculus/match_variant_payload_into_a_refined_field.mn == (exit 2)
 == conformance/core-calculus/match_variant_payload_proven_by_a_guard.mn ==

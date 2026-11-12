@@ -2401,6 +2401,26 @@ impl<'a> Lower<'a> {
     fn match_expr(&mut self, e: ExprId, scrutinee: ExprId, arms: &[Arm]) -> Result<V, String> {
         let s = self.expr(scrutinee)?;
         let read = self.shape(scrutinee)?;
+        // The checker freezes a scrutinee that is a place in every arm that binds a part of
+        // it. One that is no place, such as an `if` that gives one of two places, a field or
+        // an element of one, is a value: an arm that changes the place it was read from must
+        // not reach the arm's bindings, so it is copied first when an arm may.
+        let s = match s {
+            V::Mem(a) if !self.is_place(scrutinee) => {
+                let mut roots = Vec::new();
+                self.aliases(scrutinee, &mut roots);
+                let changed = arms.iter().any(|arm| match arm.body {
+                    ArmBody::Expr(x) => self.may_change_expr(x, &roots),
+                    ArmBody::Block(b) => self.may_change_block(b, &roots),
+                });
+                if !roots.is_empty() && changed {
+                    V::Mem(self.copy(a, &read))
+                } else {
+                    s
+                }
+            }
+            s => s,
+        };
         // What the patterns test: an enum's tag, a `bool`, or an integer.
         let tested = match (s, &read) {
             (V::Never, _) => return Ok(V::Never),
@@ -2507,6 +2527,28 @@ impl<'a> Lower<'a> {
             (Some(Ty::Addr), Some(&p)) => V::Mem(p),
             _ => V::Unit,
         })
+    }
+
+    /// Whether `e` is a place: a name, followed by fields and indexes.
+    fn is_place(&self, e: ExprId) -> bool {
+        match &self.tree().expr(e).kind {
+            ExprKind::Name(_) => true,
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.is_place(*base),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::Error => false,
+        }
     }
 
     /// Jumps from a branch of an `if` to `join` with its value.

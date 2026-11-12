@@ -711,10 +711,11 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0221",
         FailureClass::Type,
         "spec/core-calculus.md",
-        "A literal outside its suffix type",
+        "A literal outside its suffix type, or a suffix on a pattern's literal",
         "A literal with a suffix has the suffix type, so its value lies in that type: `255_u8` \
          is a `u8`, and `300_u8` is an error. A literal right after a unary `-` may reach the \
-         type's smallest value, as in `-128_i8`.",
+         type's smallest value, as in `-128_i8`. A literal in a `match` pattern takes the type \
+         of what the `match` reads, so it has no suffix at all, and the fix removes it.",
         "module m\npub fn f() -> u8 = 300_u8\n",
         "module m\npub fn f() -> u8 = 255_u8\n",
     ),
@@ -826,8 +827,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
          of a `bool`, and every integer of the scrutinee's type, or of its refinement when it \
          has one with literal bounds, so `u8[0..3]` is covered by `0`, `1` and `2`; `_` after \
          the literals covers the integers left. So a variant added to an enum makes every \
-         `match` on it an error until it names the variant. The fix adds an arm for each value \
-         left, whose body is a `todo`.",
+         `match` on it an error until it names the variant. The fix adds, after the last arm, \
+         an arm for each variant or `bool` value left, or one `_` arm for the integers left, \
+         each with a `todo` as its body.",
         "module m\npub enum Light {\n  Red\n  Green\n}\npub fn f(l: Light) -> u8 = match l {\n  Light.Red => 1\n}\n",
         "module m\npub enum Light {\n  Red\n  Green\n}\npub fn f(l: Light) -> u8 = match l {\n  Light.Red => 1\n  Light.Green => 2\n}\n",
     ),

@@ -434,7 +434,7 @@ impl Parser {
         let mut fields = Vec::new();
         if !self.recovering && self.at(&TokenKind::Lt) {
             let span = self.span();
-            self.later(span, "a struct's type parameters", Some("M4"));
+            self.later(span, "a struct with type parameters", Some("M4"));
             while !matches!(self.peek(), TokenKind::LBrace | TokenKind::Eof) {
                 self.bump();
             }
@@ -585,7 +585,7 @@ impl Parser {
         let mut variants = Vec::new();
         if !self.recovering && self.at(&TokenKind::Lt) {
             let span = self.span();
-            self.later(span, "an enum's type parameters", Some("M4"));
+            self.later(span, "an enum with type parameters", Some("M4"));
             while !matches!(self.peek(), TokenKind::LBrace | TokenKind::Eof) {
                 self.bump();
             }
@@ -2776,7 +2776,7 @@ mod tests {
         for (src, message) in [
             (
                 "struct B<T> {\n  v: u8\n}",
-                "a struct's type parameters comes in M4; M2 does not have it",
+                "a struct with type parameters comes in M4; M2 does not have it",
             ),
             (
                 "struct R {\n  lo: u8\n  invariant {\n    lo < 3\n  }\n}",
@@ -3931,6 +3931,11 @@ _ == b"
         assert_eq!(enum_codes("enum E {\n}"), ["E0111"]);
         assert_eq!(enum_codes("enum E {\n  A B\n}"), ["E0112"]);
         assert_eq!(enum_codes("enum E<T> {\n  A\n}"), ["E0109"]);
+        let (_, errors) = parse_enum_src("enum E<T> {\n  A\n}");
+        assert_eq!(
+            errors[0].message,
+            "an enum with type parameters comes in M4; M2 does not have it"
+        );
         assert_eq!(enum_codes("enum E {\n  A = 1\n}"), ["E0109"]);
         assert_eq!(enum_codes("enum E {\n  A(n u8)\n}"), ["E0111"]);
         // A comma after a variant, removed by its fix.

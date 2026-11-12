@@ -1,0 +1,21 @@
+// expect: E0502
+module conformance
+// A loop changes at its head what a `mut` call inside a variant's payload in its body passes: `x`
+// leaves `u8[0..10]` after a round, so the result is not proven.
+pub enum E {
+  A
+  B(n: u8)
+}
+fn big(mut i: u8) -> u8 {
+  i = 200
+  0
+}
+pub fn t() -> u8[0..10] {
+  var x: u8 = 1
+  var r: u8 = 0
+  while r < 3 and x < 10 {
+    _ = E.B(n: big(mut x))
+    r += 1
+  }
+  x
+}

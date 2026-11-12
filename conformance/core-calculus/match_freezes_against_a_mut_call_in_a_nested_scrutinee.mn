@@ -1,0 +1,26 @@
+// expect: E0232
+module conformance
+// A `mut` argument in the scrutinee of a `match` nested in an arm that binds a part of the
+// outer scrutinee changes the frozen place too.
+pub enum Cell {
+  Big(v: u8)
+  Small(n: u8[0..10])
+}
+
+fn spoil(mut c: Cell) -> bool {
+  c = Cell.Big(v: 200)
+  true
+}
+
+pub fn t(mut c: Cell) -> u8[0..10] = match c {
+  Cell.Small(n: n) => match spoil(mut c) {
+    true => n
+    false => 0
+  }
+  Cell.Big(v: _) => 0
+}
+
+pub fn main() -> u8[0..10] {
+  var c = Cell.Small(n: 5)
+  t(mut c)
+}

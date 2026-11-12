@@ -1,0 +1,36 @@
+// expect: E0232
+module conformance
+// A `mut` argument inside a variant's payload, built in an arm that binds a part of the
+// scrutinee, changes the frozen place too.
+pub enum Cell {
+  Big(v: u8)
+  Small(n: u8[0..10])
+}
+
+pub enum W {
+  Of(k: u8)
+}
+
+pub struct Box {
+  cell: Cell
+}
+
+fn spoil(mut c: Cell) -> u8 {
+  c = Cell.Big(v: 200)
+  0
+}
+
+pub fn t(mut b: Box) -> u8[0..10] = match b.cell {
+  Cell.Small(n: n) => {
+    val w = W.Of(k: spoil(mut b.cell))
+    match w {
+      W.Of(k: _) => n
+    }
+  }
+  Cell.Big(v: _) => 0
+}
+
+pub fn main() -> u8[0..10] {
+  var b = Box(cell: Cell.Small(n: 5))
+  t(mut b)
+}

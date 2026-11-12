@@ -647,15 +647,20 @@ impl Wide<'_> {
         let mut d = Diagnostic::error("E0222", at, message);
         let name = self.fresh(bind);
         let line = format!("val {}: {} = {}", name, machine, text(operand));
-        let edits = match self.insertion(place, &line) {
-            Some(insert) => Some(vec![
-                insert,
-                Edit {
-                    span: operand,
-                    replacement: name.clone(),
-                },
-            ]),
-            None => self.block_body(at, operand, &line, &name).map(|e| vec![e]),
+        // An arm of a `match` alone computes what it holds, so a binding for it goes into
+        // the arm, made a block, as a branch of an `if` keeps it in its block.
+        let edits = match self.arm_around(place) {
+            Some(body) => self.arm_block(body, operand, &line, &name).map(|e| vec![e]),
+            None => match self.insertion(place, &line) {
+                Some(insert) => Some(vec![
+                    insert,
+                    Edit {
+                        span: operand,
+                        replacement: name.clone(),
+                    },
+                ]),
+                None => self.block_body(at, operand, &line, &name).map(|e| vec![e]),
+            },
         };
         if let Some(edits) = edits {
             d.fixes.push(Fix {
@@ -726,6 +731,59 @@ impl Wide<'_> {
 
     /// The edit that inserts `line` before the statement that holds `at`: none for a loop's
     /// condition, which runs every round, and outside the body.
+    /// The body of the innermost arm of a `match` that holds `at` and is an expression, not a
+    /// block, when no statement inside it holds `at`: a binding `at` needs goes into it.
+    fn arm_around(&self, at: Span) -> Option<Span> {
+        let inside = |s: Span| s.start <= at.start && at.end <= s.end;
+        let body = self
+            .tree
+            .exprs
+            .iter()
+            .filter_map(|x| match &x.kind {
+                ExprKind::Match { arms, .. } => Some(arms),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|a| match a.body {
+                ArmBody::Expr(x) => Some(self.tree.expr(x).span),
+                ArmBody::Block(_) => None,
+            })
+            .filter(|s| inside(*s))
+            .max_by_key(|s| s.start)?;
+        let within = |s: Span| body.start <= s.start && s.end <= body.end;
+        let held = self
+            .tree
+            .stmts
+            .iter()
+            .any(|s| inside(s.span) && within(s.span));
+        (!held).then_some(body)
+    }
+
+    /// The edit that makes the arm `body` a block declaring `line`, then giving the arm's
+    /// value with `operand` replaced by `name`.
+    fn arm_block(&self, body: Span, operand: Span, line: &str, name: &str) -> Option<Edit> {
+        let text = self.src.get(body.start..body.end)?;
+        let from = operand.start.checked_sub(body.start)?;
+        let to = operand.end.checked_sub(body.start)?;
+        let value = format!("{}{}{}", text.get(..from)?, name, text.get(to..)?);
+        let line_start = self.src.get(..body.start)?.rfind('\n').map_or(0, |i| i + 1);
+        let indent: String = self
+            .src
+            .get(line_start..)?
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        Some(Edit {
+            span: body,
+            replacement: format!(
+                "{{\n{ind}  {line}\n{ind}  {value}\n{ind}}}",
+                ind = indent,
+                line = line,
+                value = value
+            ),
+        })
+    }
+
     fn insertion(&self, at: Span, line: &str) -> Option<Edit> {
         let stmt = self
             .tree
@@ -905,6 +963,29 @@ mod tests {
         assert_eq!(check_source(&text).err(), None, "{}", text);
         let block = "pub fn f(c: bool, a: i64, b: u128) -> i64 = match c {\n  true => a\n  false => {\n    b\n  }\n}";
         let text = fixed(block, "bind `b` to `wide: i128` first");
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // An operation in an arm that is an expression is bound in that arm, made a block,
+        // where the pattern's names are visible and the arm alone computes it; the fixed module
+        // checks.
+        let arm = "pub enum E {\n  A\n  B(n: u64)\n}\npub fn f(e: E) -> u128 = match e {\n  E.B(n: n) => n * n * n\n  E.A => 0\n}";
+        let text = fixed(arm, "bind `n * n` to `product: u128` first");
+        assert!(
+            text.contains("  E.B(n: n) => {\n    val product: u128 = n * n\n    product * n\n  }"),
+            "{}",
+            text
+        );
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // So in a statement's arm, where the element it reads, bound before the `match`, would
+        // be read though the arm never runs.
+        let stmt = "pub fn f(c: bool, xs: [2]u64, i: usize) -> u128 {\n  val r: u128 = match c {\n    true => xs[i] * xs[i] * xs[i]\n    false => 0\n  }\n  r\n}";
+        let text = fixed(stmt, "bind `xs[i] * xs[i]` to `product: u128` first");
+        assert!(
+            text.contains(
+                "    true => {\n      val product: u128 = xs[i] * xs[i]\n      product * xs[i]\n    }"
+            ),
+            "{}",
+            text
+        );
         assert_eq!(check_source(&text).err(), None, "{}", text);
         // Arms that fit one type together are none.
         for src in [

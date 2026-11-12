@@ -123,7 +123,7 @@ pub fn check(
                 let place = c.as_result();
                 c.expect(e, &want, &place);
             }
-            None => c.discarded(e),
+            None => c.discarded(e, false),
         },
         Some(Body::Block(b)) => c.body(b),
         None => {}
@@ -373,30 +373,41 @@ impl Checker<'_> {
     }
 
     /// An expression statement whose value nobody uses: an error unless it has no value
-    /// (`E0217`), so that a result is never dropped by mistake.
-    fn discarded(&mut self, e: ExprId) {
+    /// (`E0217`), so that a result is never dropped by mistake. In an arm of a `match` that
+    /// stands as a statement, `in_arm`, the discard its fix writes is a statement, so the fix
+    /// makes the arm a block that holds it.
+    fn discarded(&mut self, e: ExprId, in_arm: bool) {
         self.effect(e);
         let ty = self.typing.exprs[e.0 as usize].clone();
         if matches!(ty, Ty::Unit | Ty::Any) {
             return;
         }
         let span = self.span(e);
-        self.errors.push(
-            Diagnostic::error(
-                "E0217",
-                span,
-                format!(
-                    "this value, {}, is never used; use it, or discard it on purpose with `_ = ...`",
-                    ty.describe()
-                ),
-            )
-            .with_fix(
+        let d = Diagnostic::error(
+            "E0217",
+            span,
+            format!(
+                "this value, {}, is never used; use it, or discard it on purpose with `_ = ...`",
+                ty.describe()
+            ),
+        );
+        let message = "discard it on purpose";
+        let d = match (in_arm, self.src.get(span.start..span.end)) {
+            (true, Some(text)) => d.with_fix(
                 Applicability::Suggestion,
-                "discard it on purpose",
+                message,
+                span,
+                format!("{{ _ = {} }}", text),
+            ),
+            (true, None) => d,
+            (false, _) => d.with_fix(
+                Applicability::Suggestion,
+                message,
                 insertion_point(span),
                 "_ = ",
             ),
-        );
+        };
+        self.errors.push(d);
     }
 
     fn unary(&mut self, op: UnaryOp, operand: ExprId) -> Ty {
@@ -1225,7 +1236,7 @@ impl Checker<'_> {
     fn stmt(&mut self, s: StmtId, used: bool) -> Ty {
         match &self.tree.stmt(s).kind {
             StmtKind::Expr(e) if used => return self.value(*e),
-            StmtKind::Expr(e) => self.discarded(*e),
+            StmtKind::Expr(e) => self.discarded(*e, false),
             StmtKind::Discard(e) => {
                 if self.value(*e) == Ty::Unit {
                     let hint = self.no_value_hint(*e);
@@ -1674,7 +1685,7 @@ impl<'a> Checker<'a> {
             let t = match (arm.body, used) {
                 (ArmBody::Expr(x), true) => self.value(x),
                 (ArmBody::Expr(x), false) => {
-                    self.discarded(x);
+                    self.discarded(x, true);
                     Ty::Unit
                 }
                 (ArmBody::Block(b), used) => self.block(b, used),
@@ -1882,26 +1893,35 @@ impl<'a> Checker<'a> {
                 },
                 read,
             ) => {
-                if let Some(t) = suffix.as_deref().and_then(IntTy::named) {
-                    let limit = if *negative {
-                        t.min_magnitude().max(t.max())
-                    } else {
-                        t.max()
-                    };
-                    if *value > limit {
-                        self.errors.push(Diagnostic::error(
-                            "E0221",
-                            p.span,
-                            format!(
-                                "the literal {}_{} lies outside `{}`, which holds {}",
-                                value,
-                                t.name,
-                                t.name,
-                                t.range_text()
-                            ),
-                        ));
-                        return None;
+                // A pattern's literal takes the type of what the `match` reads, so it has no
+                // suffix (`core-calculus.md`, item 14); the fix removes it.
+                if let Some(suffix) = suffix {
+                    let text = self.src.get(p.span.start..p.span.end).unwrap_or("");
+                    let cut = text
+                        .strip_suffix(suffix.as_str())
+                        .map(|t| t.strip_suffix('_').unwrap_or(t).len());
+                    let mut d = Diagnostic::error(
+                        "E0221",
+                        p.span,
+                        format!(
+                            "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `{}`",
+                            text.get(..cut.unwrap_or(text.len())).unwrap_or(text)
+                        ),
+                    );
+                    if let Some(cut) = cut {
+                        d = d.with_fix(
+                            Applicability::MachineApplicable,
+                            format!("remove the suffix `{}`", text.get(cut..).unwrap_or("")),
+                            Span {
+                                start: p.span.start + cut,
+                                end: p.span.end,
+                                ..p.span
+                            },
+                            "",
+                        );
                     }
+                    self.errors.push(d);
+                    return None;
                 }
                 match read {
                     Read::Int(..) => Some(Some(Value::Int(Exact::new(*negative, *value)))),
@@ -3857,10 +3877,19 @@ pub enum Light {
             ("pub fn f(l: Light) -> u8 = match l {\n  Shape.Dot => 1\n  Light.Red => 2\n}", "this pattern is a variant of `Shape`, but the `match` reads `Light`"),
             ("pub fn f(x: u8) -> u8 = match x {\n  Light.Red => 1\n  _ => 2\n}", "this pattern is a variant of `Light`, but the `match` reads an integer, `u8`"),
             ("pub fn f(c: bool) -> u8 = match c {\n  true => 1\n  false => false\n}", "the arms of this `match` produce its value, so they have one type, but this one is `bool` after an integer"),
-            ("pub fn f(x: u8) -> u8 = match x {\n  300_u8 => 1\n  _ => 2\n}", "the literal 300_u8 lies outside `u8`, which holds 0 to 255"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  300_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `300`"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  0_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `0`"),
+            ("pub fn f(x: i8) -> u8 = match x {\n  -1_i64 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `-1`"),
         ] {
             assert_eq!(messages(&with(src)), [message], "{}", src);
         }
+        // The fix removes the suffix, and the module then checks.
+        let src = module(&with(
+            "pub fn f(x: u8) -> u8 = match x {\n  0x1F_u8 => 1\n  _ => 2\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(fixed.contains("  0x1F => 1"), "{}", fixed);
+        assert!(left.is_empty(), "{:?}", left);
         // An arm that leaves gives no value, and a `match` statement's arms none.
         assert_eq!(
             codes(&with(
@@ -3902,6 +3931,15 @@ pub enum Light {
         ));
         let (fixed, codes) = fixed_and_checked(&src);
         assert!(fixed.contains("Shape.Rect(w: _, h: _) => 1"), "{}", fixed);
+        assert!(codes.is_empty(), "{:?}", codes);
+        // An arm of a `match` statement whose value nobody uses is `E0217`, whose fix discards
+        // it in a block, since an arm holds an expression or a block and a discard is a
+        // statement; the fixed module checks.
+        let src = module(
+            "fn g(x: u8) -> u8 = x\npub fn f(c: bool, x: u8) -> u8 {\n  match c {\n    true => g(x)\n    false => {}\n  }\n  x\n}",
+        );
+        let (fixed, codes) = fixed_and_checked(&src);
+        assert!(fixed.contains("    true => { _ = g(x) }"), "{}", fixed);
         assert!(codes.is_empty(), "{:?}", codes);
     }
 
