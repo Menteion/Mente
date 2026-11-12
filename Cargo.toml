@@ -21,6 +21,12 @@ repository = "https://github.com/Menteion/Mente"
 
 # Lints every crate inherits with `[lints] workspace = true` (ROADMAP.md, M0a: Rust hygiene).
 # They keep the compiler inside a subset of Rust that translates to Mente.
+# An integer overflow inside the compiler traps in every build, release ones included: Tier 1's
+# octagon once wrapped silently in a release build where a debug one panicked
+# ([`guard-audit`](docs/design-review.md#guard-audit)). Safety comes before the compiler's speed.
+[profile.release]
+overflow-checks = true
+
 [workspace.lints.rust]
 # No runtime or FFI code exists yet, so no crate may use `unsafe`.
 unsafe_code = "forbid"

@@ -105,6 +105,10 @@ Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter mode
   - A caller learns a callee's `ensures` over a field of its result (`result.w`). Today it does not.
   - A struct-valued `if` gives a binding's paths the join of its branches. Today they get only their declared ranges.
   - Only the paths a function reads or writes take places under Tier 1's cap of 128 variables, in the order the body first names them ([`tier1-path-cap`](docs/design-review.md#tier1-path-cap)). Today whole bindings take them in the order of declaration.
+- [ ] The guards of the audit of every problem class ([`guard-audit`](docs/design-review.md#guard-audit)), before the next construct after enums:
+  - Every instrument reports on every pull request and is a required check of `main`, Mutants included, behind a merge queue; a Commits job, a `Cargo.lock` allowlist and a workflow policy test. Today only the three Rust jobs, Documentation and CodeQL block a merge.
+  - Every construct in every expression position, read from one table; no `_` arm in a walker over expression or statement kinds; a fix oracle, a valuation oracle and a write-set oracle; recovery locality; `spec_hash` invariance; scaling tests of Tier 1's work and of native code's size; and the narrowing points of `core-calculus.md` item 4 as one table every path matches.
+  - Native stack exhaustion traps on every path, against one budget the spec states. Today native code crashes where the interpreter and MIR trap.
 
 Runs in full at the end: example 01's binary search. The benchmark's M2 tasks declare positional payloads (`Deposit(i64)`), so the harness names each payload's field when it maps a task to Mente, whose variants have only named fields.
 
