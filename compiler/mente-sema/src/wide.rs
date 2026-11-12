@@ -195,6 +195,7 @@ pub fn check(f: &FnSyntax, resolution: &Resolution, typing: &Typing, src: &str) 
             _ => None,
         },
         ranges: vec![None; tree.exprs.len()],
+        unfit: vec![false; tree.exprs.len()],
         errors: Vec::new(),
     };
     for i in 0..tree.exprs.len() {
@@ -253,6 +254,7 @@ pub fn intervals(f: &FnSyntax, resolution: &Resolution, typing: &Typing) -> Vec<
         src: "",
         body: None,
         ranges: vec![None; tree.exprs.len()],
+        unfit: vec![false; tree.exprs.len()],
         errors: Vec::new(),
     };
     (0..tree.exprs.len())
@@ -277,6 +279,8 @@ struct Wide<'a> {
     body: Option<ExprId>,
     /// Each expression's range once computed; `Some(None)` when it has none.
     ranges: Vec<Option<Option<Range>>>,
+    /// Each array literal reported `E0222`, so that one that holds it is not reported too.
+    unfit: Vec<bool>,
     errors: Vec<Diagnostic>,
 }
 
@@ -434,19 +438,20 @@ impl Wide<'_> {
             return;
         };
         // Elements of one type are narrowed into it; only those of no standard type together
-        // are kept exact, and the literals alone are points that fit.
-        if !matches!(**elem, Ty::Int(Int::Mixed(None))) {
+        // are kept exact, and the literals alone are points that fit. So are the integers of
+        // the array literals nested in it, which are kept in the same machine type.
+        let mut leaf = &**elem;
+        while let Ty::Array(_, inner) = leaf {
+            leaf = inner;
+        }
+        if !matches!(leaf, Ty::Int(Int::Mixed(None))) {
             return;
         }
-        let mut hull: Option<Range> = None;
         let mut ranges = Vec::new();
-        for &i in items {
-            let Some(r) = self.range(i) else {
-                return;
-            };
-            hull = Some(hull.map_or(r, |h| h.hull(r)));
-            ranges.push((i, r));
+        if !self.leaves(items, &mut ranges) {
+            return;
         }
+        let hull = ranges.iter().map(|(_, r)| *r).reduce(|h, r| h.hull(r));
         let top = Num::new(false, i128::MAX.unsigned_abs());
         let above = ranges.iter().find(|(_, r)| r.hi > top).map(|(i, _)| *i);
         if let (Some(h), Some(item)) = (hull, above) {
@@ -455,8 +460,51 @@ impl Wide<'_> {
                                `i128` and `u128` holds together, and they are kept in one of them"
                     .to_string();
                 self.report_with(at, at, item, "i128", message);
+                self.unfit[e.0 as usize] = true;
             }
         }
+    }
+
+    /// Collects into `ranges` the range of each integer the array literal elements `items`
+    /// give, through the array literals nested in them; an array of another kind gives its
+    /// element type's. False where one has no range, or where a nested literal is reported
+    /// `E0222` itself, so that the values are reported once, not twice.
+    fn leaves(&mut self, items: &[ExprId], ranges: &mut Vec<(ExprId, Range)>) -> bool {
+        for &i in items {
+            // The element's own range first, which checks a nested literal on its own.
+            let r = self.range(i);
+            if self.unfit[i.0 as usize] {
+                return false;
+            }
+            match &self.tree.expr(i).kind {
+                ExprKind::Array(inner) => {
+                    if !self.leaves(&inner.clone(), ranges) {
+                        return false;
+                    }
+                }
+                ExprKind::Repeat { value, .. } => {
+                    if !self.leaves(&[*value], ranges) {
+                        return false;
+                    }
+                }
+                _ => {
+                    let mut t = &self.typing.exprs[i.0 as usize];
+                    while let Ty::Array(_, inner) = t {
+                        t = inner;
+                    }
+                    let r = if matches!(self.typing.exprs[i.0 as usize], Ty::Array(..)) {
+                        int_ty(t).map(Range::of)
+                    } else {
+                        r
+                    };
+                    let Some(r) = r else {
+                        return false;
+                    };
+                    ranges.push((i, r));
+                }
+            }
+        }
+        true
     }
 
     /// A name's declared refinement, when both its bounds are literals.
@@ -943,10 +991,26 @@ mod tests {
         let top = "pub fn r(a: i128, b: u128) -> [2]i128 {\n  val xs: [2]i128 = [a, b]\n  xs\n}";
         let after = fixed(top, "bind `b` to `wide: i128` first");
         assert!(check_source(&after).is_ok(), "{}", after);
+        // So does an array literal of array literals, for the integers of every one nested in
+        // it: those that fit no one type together are `E0222` once, at the literal that holds
+        // them all, and the fix applies.
+        let nested =
+            "pub fn r(a: i32, b: u128) -> [2][1]i128 {\n  val xs: [2][1]i128 = [[a], [b]]\n  xs\n}";
+        assert_eq!(codes(nested), ["E0222"]);
+        let after = fixed(nested, "bind `b` to `wide: i128` first");
+        assert!(check_source(&after).is_ok(), "{}", after);
+        let inner =
+            "pub fn r(a: i32, b: u128) -> [1][2]i128 {\n  val xs: [1][2]i128 = [[a, b]]\n  xs\n}";
+        assert_eq!(codes(inner), ["E0222"]);
+        let repeated =
+            "pub fn r(a: i32, b: u128) -> [2][2]i128 {\n  val xs: [2][2]i128 = [[a, 0], [b; 2]]\n  xs\n}";
+        assert_eq!(codes(repeated), ["E0222"]);
         for ok in [
             "pub fn r(a: i32, b: u64) -> [2]i128 = [a, b]",
             "pub fn r(a: u64, b: u128) -> [2]u128 = [a, b]",
             "pub fn r(a: i8, b: i8) -> [2]i8 = [a, b]",
+            "pub fn r(a: i32, b: u64) -> [2][1]i128 = [[a], [b]]",
+            "pub fn r(a: u64, b: u128) -> [2][1]u128 = [[a], [b]]",
         ] {
             assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
         }

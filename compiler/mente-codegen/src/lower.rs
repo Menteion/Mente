@@ -324,6 +324,18 @@ pub fn mir(t: SemaIntTy) -> IntTy {
 }
 
 /// The narrowest of `i64`, `u64`, `i128` and `u128` that holds every value from `lo` to `hi`.
+/// The shape of the array type `t`, its integers at every depth of type `leaf`.
+fn with_leaf(t: &SemaTy, leaf: SemaIntTy) -> Result<Shape, String> {
+    match t {
+        SemaTy::Array(n, elem) => {
+            let n = u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?;
+            Ok(Shape::Array(n, Box::new(with_leaf(elem, leaf)?)))
+        }
+        SemaTy::Int(_) => Ok(Shape::Int(leaf)),
+        _ => Err("an array literal whose elements are no integers".into()),
+    }
+}
+
 fn machine(lo: Num, hi: Num) -> Option<IntTy> {
     [
         IntTy::new(64, true),
@@ -1671,43 +1683,192 @@ impl<'a> Lower<'a> {
         let shapes = self.shapes;
         match &self.s.f.typing.exprs[e.0 as usize] {
             SemaTy::Any => Ok(Shape::Unit),
-            SemaTy::Array(n, elem) if self.mixed(elem) => {
+            t @ SemaTy::Array(_, elem) if self.mixed_leaf(elem) => {
                 // An array literal of integers of no one type keeps its elements exact until it
-                // lands, in the machine type that holds them all (`wide.rs`).
+                // lands, in the machine type that holds them all (`wide.rs`); so do the elements
+                // of an array literal of such array literals, at every depth.
                 let tree = self.tree();
-                let items: Vec<ExprId> = match &tree.expr(e).kind {
-                    ExprKind::Array(items) => items.clone(),
-                    ExprKind::Repeat { value, .. } => vec![*value],
-                    _ => return Shape::of(&self.s.f.typing.exprs[e.0 as usize], shapes),
-                };
-                let mut lo: Option<Num> = None;
-                let mut hi: Option<Num> = None;
-                for &i in &items {
-                    let r = self
-                        .interval(i)
-                        .ok_or("an element without a static range")?;
-                    let (l, h) = (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1));
-                    lo = Some(lo.map_or(l, |x| x.min(l)));
-                    hi = Some(hi.map_or(h, |x| x.max(h)));
+                if !matches!(
+                    tree.expr(e).kind,
+                    ExprKind::Array(_) | ExprKind::Repeat { .. }
+                ) {
+                    return Shape::of(t, shapes);
                 }
-                let m = match (lo, hi) {
-                    (Some(lo), Some(hi)) => machine(lo, hi),
-                    _ => Some(IntTy::new(64, true)),
+                let mut hull: Option<(Num, Num)> = None;
+                self.leaf_hull(e, &mut hull)?;
+                let m = match hull {
+                    Some((lo, hi)) => machine(lo, hi),
+                    None => Some(IntTy::new(64, true)),
                 }
                 .ok_or("an array literal beyond 128 bits")?;
                 let name = format!("{}{}", if m.signed { "i" } else { "u" }, m.bits);
-                let t = SemaIntTy::named(&name).ok_or("a machine type without a name")?;
-                let n = u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?;
-                Ok(Shape::Array(n, Box::new(Shape::Int(t))))
+                let leaf = SemaIntTy::named(&name).ok_or("a machine type without a name")?;
+                with_leaf(t, leaf)
             }
             t => Shape::of(t, shapes),
         }
+    }
+
+    /// Widens `hull` to hold every integer the array literal `e` holds, through the array
+    /// literals nested in it: an element's static range, or an array element's type's.
+    fn leaf_hull(&self, e: ExprId, hull: &mut Option<(Num, Num)>) -> Result<(), String> {
+        let tree = self.tree();
+        let (lo, hi) = match &tree.expr(e).kind {
+            ExprKind::Array(items) => {
+                for &i in items {
+                    self.leaf_hull(i, hull)?;
+                }
+                return Ok(());
+            }
+            ExprKind::Repeat { value, .. } => return self.leaf_hull(*value, hull),
+            _ if matches!(self.s.f.typing.exprs[e.0 as usize], SemaTy::Array(..)) => {
+                let mut shape = self.shape(e)?;
+                while let Shape::Array(_, elem) = shape {
+                    shape = *elem;
+                }
+                let r = Self::place_interval(&shape).ok_or("an array of no integers")?;
+                (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1))
+            }
+            _ => {
+                let r = self
+                    .interval(e)
+                    .ok_or("an element without a static range")?;
+                (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1))
+            }
+        };
+        *hull = Some(match *hull {
+            Some((l, h)) => (l.min(lo), h.max(hi)),
+            None => (lo, hi),
+        });
+        Ok(())
     }
 
     /// Whether `t` is an integer of no one type, the element of an array literal whose elements
     /// have different integer types.
     fn mixed(&self, t: &SemaTy) -> bool {
         matches!(t, SemaTy::Int(i) if int_ty(i).is_none())
+    }
+
+    /// Whether `t` is such an integer, or an array whose elements are, at any depth.
+    fn mixed_leaf(&self, t: &SemaTy) -> bool {
+        match t {
+            SemaTy::Array(_, elem) => self.mixed_leaf(elem),
+            t => self.mixed(t),
+        }
+    }
+
+    /// Whether the array literal `e` keeps its integers exact: they are of no one type, and
+    /// its shape is the machine type that holds them all (`shape`).
+    fn exact(&self, e: ExprId) -> bool {
+        matches!(
+            &self.s.f.typing.exprs[e.0 as usize],
+            SemaTy::Array(_, t) if self.mixed_leaf(t)
+        )
+    }
+
+    /// The array literal of `items`, built in `shape`; `span` names the outermost literal.
+    fn array_literal(
+        &mut self,
+        items: &[ExprId],
+        shape: &Shape,
+        exact: bool,
+        span: Span,
+    ) -> Result<V, String> {
+        let Shape::Array(_, elem) = shape else {
+            return Err("an array literal that is not an array".into());
+        };
+        let slot = self.inst(
+            Op::Slot {
+                bytes: shape.size(),
+            },
+            Ty::Addr,
+            &[],
+        );
+        for (k, &item) in items.iter().enumerate() {
+            let v = self.literal_element(item, elem, exact, span)?;
+            if matches!(v, V::Never) {
+                return Ok(V::Never);
+            }
+            let idx = self.int(USIZE, Num::new(false, k as u128));
+            let at = self.inst(
+                Op::Elem {
+                    stride: elem.size(),
+                },
+                Ty::Addr,
+                &[slot, idx],
+            );
+            self.store_shaped(at, v, elem);
+        }
+        Ok(V::Mem(slot))
+    }
+
+    /// The array literal `[value; n]`, built in `shape`.
+    fn repeat_literal(
+        &mut self,
+        value: ExprId,
+        shape: &Shape,
+        exact: bool,
+        span: Span,
+    ) -> Result<V, String> {
+        let Shape::Array(len, elem) = shape else {
+            return Err("an array literal that is not an array".into());
+        };
+        let v = self.literal_element(value, elem, exact, span)?;
+        if matches!(v, V::Never) {
+            return Ok(V::Never);
+        }
+        let slot = self.inst(
+            Op::Slot {
+                bytes: shape.size(),
+            },
+            Ty::Addr,
+            &[],
+        );
+        let (elem, len) = ((**elem).clone(), *len);
+        self.each(len, &mut |l, i| {
+            let at = l.inst(
+                Op::Elem {
+                    stride: elem.size(),
+                },
+                Ty::Addr,
+                &[slot, i],
+            );
+            l.store_shaped(at, v, &elem);
+            Ok(())
+        })?;
+        Ok(V::Mem(slot))
+    }
+
+    /// An element of an array literal, in the literal's element shape `elem`. Where the
+    /// literal keeps its integers exact, an integer is cast into `elem`, which holds it, and an
+    /// array literal nested in it is built in `elem` itself, so that its integers are never
+    /// narrowed on the way; any other element is narrowed into `elem`.
+    fn literal_element(
+        &mut self,
+        item: ExprId,
+        elem: &Shape,
+        exact: bool,
+        span: Span,
+    ) -> Result<V, String> {
+        let tree = self.tree();
+        if exact && matches!(elem, Shape::Array(..)) {
+            if let ExprKind::Array(items) = &tree.expr(item).kind {
+                return self.array_literal(items, elem, true, span);
+            }
+            if let ExprKind::Repeat { value, .. } = &tree.expr(item).kind {
+                return self.repeat_literal(*value, elem, true, span);
+            }
+        }
+        let v = self.expr(item)?;
+        let from = self.shape(item)?;
+        let key = Some(tree.expr(item).span);
+        Ok(match (exact, v, elem) {
+            (true, V::Int(n, t), Shape::Int(to)) => {
+                let into = mir(*to);
+                V::Int(self.cast(n, t, into), into)
+            }
+            (_, v, _) => self.narrow(v, &from, elem, span, key)?,
+        })
     }
 
     fn interval(&self, e: ExprId) -> Option<Interval> {
@@ -1953,80 +2114,13 @@ impl<'a> Lower<'a> {
             }
             ExprKind::Array(items) => {
                 let shape = self.shape(e)?;
-                let Shape::Array(_, elem) = &shape else {
-                    return Err("an array literal that is not an array".into());
-                };
-                let slot = self.inst(
-                    Op::Slot {
-                        bytes: shape.size(),
-                    },
-                    Ty::Addr,
-                    &[],
-                );
-                // Elements of no one type are kept exact, each within the machine type of the
-                // array, which holds them all; elements of one type are narrowed into it.
-                let mixed = matches!(
-                    &self.s.f.typing.exprs[e.0 as usize],
-                    SemaTy::Array(_, t) if self.mixed(t)
-                );
-                for (k, &item) in items.iter().enumerate() {
-                    let v = self.expr(item)?;
-                    let from = self.shape(item)?;
-                    let key = Some(tree.expr(item).span);
-                    let v = match (mixed, v, elem.as_ref()) {
-                        (true, V::Int(n, t), Shape::Int(to)) => {
-                            let into = mir(*to);
-                            V::Int(self.cast(n, t, into), into)
-                        }
-                        (_, v, _) => self.narrow(v, &from, elem, span, key)?,
-                    };
-                    if matches!(v, V::Never) {
-                        return Ok(V::Never);
-                    }
-                    let idx = self.int(USIZE, Num::new(false, k as u128));
-                    let at = self.inst(
-                        Op::Elem {
-                            stride: elem.size(),
-                        },
-                        Ty::Addr,
-                        &[slot, idx],
-                    );
-                    self.store_shaped(at, v, elem);
-                }
-                V::Mem(slot)
+                let exact = self.exact(e);
+                self.array_literal(items, &shape, exact, span)?
             }
             ExprKind::Repeat { value, .. } => {
                 let shape = self.shape(e)?;
-                let Shape::Array(len, elem) = &shape else {
-                    return Err("an array literal that is not an array".into());
-                };
-                let v = self.expr(*value)?;
-                let from = self.shape(*value)?;
-                let key = Some(tree.expr(*value).span);
-                let v = self.narrow(v, &from, elem, span, key)?;
-                if matches!(v, V::Never) {
-                    return Ok(V::Never);
-                }
-                let slot = self.inst(
-                    Op::Slot {
-                        bytes: shape.size(),
-                    },
-                    Ty::Addr,
-                    &[],
-                );
-                let (elem, len) = ((**elem).clone(), *len);
-                self.each(len, &mut |l, i| {
-                    let at = l.inst(
-                        Op::Elem {
-                            stride: elem.size(),
-                        },
-                        Ty::Addr,
-                        &[slot, i],
-                    );
-                    l.store_shaped(at, v, &elem);
-                    Ok(())
-                })?;
-                V::Mem(slot)
+                let exact = self.exact(e);
+                self.repeat_literal(*value, &shape, exact, span)?
             }
             ExprKind::If {
                 cond,
@@ -2797,6 +2891,18 @@ pub fn m(a: u128, b: i8[0..10]) -> [2]u128 = [a, b]
         assert_eq!(checks(&lowered, "m"), Vec::<String>::new());
         let text = lowered.module.to_string();
         assert!(text.contains("slot 32"), "{}", text);
+        // An array literal of array literals keeps its integers exact at every depth, in the
+        // type that holds them all, here `u64`: nothing narrows them into `i64` on the way.
+        let src = "module m
+pub fn take(p: [2][1]usize) -> u8 = 0
+pub fn arg() -> u8 = take([[0x0], [12960978670946228878]])
+pub fn nested() -> [2][1]u64 = [[1], [12960978670946228878]]
+pub fn repeated() -> [2][2]u64 = [[0, 12960978670946228878]; 2]
+";
+        let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        for f in ["arg", "nested", "repeated"] {
+            assert_eq!(checks(&lowered, f), Vec::<String>::new(), "{}", f);
+        }
     }
 
     /// An expression of no type gives no value: a `todo` body, and an `if` whose branches all

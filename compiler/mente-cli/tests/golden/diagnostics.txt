@@ -6,6 +6,10 @@
 {"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an array of type `[4294967296]u8` holds 4294967296 bytes, more than the 4294967295 an array, a value kept in one piece, may hold","primary":{"file":"array_beyond_4_gib.mn","start":53,"end":67,"line":3,"column":18},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/array_literal_beyond_128_bits.mn ==
 {"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the elements of this array literal give values that no one of `i128` and `u128` holds together, and they are kept in one of them","primary":{"file":"array_literal_beyond_128_bits.mn","start":98,"end":104,"line":4,"column":21},"related":[],"fixes":[{"message":"bind `b` to `wide: i128` first","applicability":"suggestion","edits":[{"span":{"file":"array_literal_beyond_128_bits.mn","start":78,"end":78,"line":4,"column":1},"replacement":"  val wide: i128 = b\n"},{"span":{"file":"array_literal_beyond_128_bits.mn","start":102,"end":103,"line":4,"column":25},"replacement":"wide"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/array_literal_of_array_literals.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/array_literal_of_array_literals_beyond_128_bits.mn ==
+{"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the elements of this array literal give values that no one of `i128` and `u128` holds together, and they are kept in one of them","primary":{"file":"array_literal_of_array_literals_beyond_128_bits.mn","start":273,"end":283,"line":6,"column":24},"related":[],"fixes":[{"message":"bind `b` to `wide: i128` first","applicability":"suggestion","edits":[{"span":{"file":"array_literal_of_array_literals_beyond_128_bits.mn","start":250,"end":250,"line":6,"column":1},"replacement":"  val wide: i128 = b\n"},{"span":{"file":"array_literal_of_array_literals_beyond_128_bits.mn","start":280,"end":281,"line":6,"column":31},"replacement":"wide"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/array_literal_of_mixed_integers.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/array_of_the_most_elements.mn ==

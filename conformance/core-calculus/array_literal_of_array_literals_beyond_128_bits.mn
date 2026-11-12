@@ -1,0 +1,8 @@
+// expect: E0222
+module conformance
+// The integers of array literals nested in one are kept in one machine type with its own, so
+// an `i32` and a `u128` in two of them fit no one 128-bit type together.
+pub fn pairs(a: i32, b: u128) -> [2][1]i128 {
+  val xs: [2][1]i128 = [[a], [b]]
+  xs
+}

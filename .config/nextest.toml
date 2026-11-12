@@ -11,11 +11,13 @@ slow-timeout = { period = "20s", terminate-after = 2 }
 fail-fast = true
 
 # The tests that run a whole corpus: every module of the repository item by item, the
-# conformance suite on three paths, and every agent program on two. Each takes 35 to 55 s.
+# conformance suite on three paths, every agent program on two, and the generated programs
+# whose constructs the coverage test counts, each checked with Tier 1. Each takes 35 to 55 s.
 [[profile.mutants.overrides]]
 filter = """
 test(test_a_session_reports_what_the_whole_module_check_does)
 | test(test_three_paths_agree_on_the_conformance_suite)
 | test(test_mir_runs_every_agent_program_as_the_reference_interpreter_does)
+| test(test_generated_programs_reach_every_construct_of_the_grammar)
 """
 slow-timeout = { period = "60s", terminate-after = 3 }
