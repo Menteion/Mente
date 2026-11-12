@@ -54,3 +54,26 @@ pub fn match_value_beside(c: bool) -> u8 {
     false => Cell.Big(v: 7)
   }, bump(mut s))
 }
+
+fn spoil(mut b: Box) -> u8 {
+  b.cell = Cell.Big(v: 200)
+  0
+}
+
+pub fn block_arm_beside(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5), x: 1)
+  get(match c {
+    true => {
+      s.cell
+    }
+    false => Cell.Big(v: 7)
+  }, spoil(mut s))
+}
+
+pub fn arm_changes_after(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5), x: 1)
+  get(s.cell, match c {
+    true => spoil(mut s)
+    false => 0
+  })
+}

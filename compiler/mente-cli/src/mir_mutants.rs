@@ -1204,6 +1204,36 @@ mod tests {
         assert!(write(&mut memory, at, shape, &value(&["a", "b"])).is_some());
         assert!(write(&mut memory, at, shape, &value(&["a"])).is_none());
         assert!(write(&mut memory, at, shape, &value(&["a", "b", "c"])).is_none());
+        // An enum's argument is written with its tag and each field of its variant where the
+        // layout places it, and reads back as written; a variant given another number of
+        // fields is not written.
+        let text = "module m\npub enum E {\n  A\n  B(n: u8, m: u16)\n}\npub fn h(e: E) -> u8 = 0\n";
+        let lowered = lower::lower(&mente_sema::check_program(text).unwrap()).unwrap();
+        let shape = &lowered.entries[0].params[0].1;
+        let int = |v: u128| Value::Int(mente_interp::Int::from_u128(v));
+        let variant = |fields: Vec<(&str, Value)>| {
+            Value::Enum(
+                "E".into(),
+                "B".into(),
+                fields
+                    .into_iter()
+                    .map(|(n, v)| (n.to_string(), v))
+                    .collect(),
+            )
+        };
+        let mut memory = Memory::filled(POISON);
+        memory.alloc(8);
+        let at = memory.alloc(shape.size());
+        let b = variant(vec![("n", int(7)), ("m", int(300))]);
+        assert!(write(&mut memory, at, shape, &b).is_some());
+        assert_eq!(
+            read(&memory, at, shape),
+            Ok("E.B(n: 7, m: 300)".to_string())
+        );
+        assert!(write(&mut memory, at, shape, &variant(vec![("n", int(7))])).is_none());
+        let a = Value::Enum("E".into(), "A".into(), Vec::new());
+        assert!(write(&mut memory, at, shape, &a).is_some());
+        assert_eq!(read(&memory, at, shape), Ok("E.A".to_string()));
     }
 
     /// A program MIR runs differently from the reference interpreter, or one that does not

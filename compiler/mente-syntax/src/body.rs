@@ -615,11 +615,8 @@ impl Parser {
                 self.error(d);
             }
         }
-        if !self.errors.iter().any(|e| e.code == "E0127") {
-            if let Some(span) = self.tree.too_deep(NESTING_LIMIT) {
-                self.errors.push(too_deep(span));
-            }
-        }
+        // A variant's types nest only through the parser's recursion, whose depth limit reports
+        // `E0127` first, so the tree is never deeper than the limit.
         EnumSyntax {
             name,
             name_span,
@@ -688,8 +685,7 @@ impl Parser {
         } else {
             TokenKind::RParen
         };
-        self.nest += 1;
-        // Each field written without its name, by the span of its type.
+        // Each field written without its name, by where its type starts.
         let mut unnamed: Vec<Span> = Vec::new();
         while !self.at(&close) && !self.recovering && !self.at(&TokenKind::Eof) {
             let before = self.pos;
@@ -712,11 +708,7 @@ impl Parser {
             } else {
                 let at = self.span();
                 let ty = self.ty();
-                let span = self.tree.ty(ty).span;
-                unnamed.push(Span {
-                    end: span.end.max(at.end),
-                    ..at
-                });
+                unnamed.push(at);
                 let generated = format!("value{}", unnamed.len() - 1);
                 fields.push(FieldSyntax {
                     is_pub: false,
@@ -732,7 +724,6 @@ impl Parser {
                 self.expected("`,` or the end of the payload's fields");
             }
         }
-        self.nest -= 1;
         if self.recovering {
             return false;
         }
@@ -2489,7 +2480,8 @@ impl Parser {
             Arguments::Named(fields) => Payload::Named(fields),
             Arguments::Positional(args) => Payload::Positional(args),
         };
-        if self.recovering && close > self.pos {
+        // Recovery leaves the parser at or before the `)`, or at the end of the file.
+        if self.recovering {
             self.pos = (close + 1).min(self.tokens.len() - 1);
         }
         ExprKind::Variant {
@@ -4048,11 +4040,32 @@ _ == b"
         let (e, errors) = parse_enum_src("enum E {\n  @deprecated\n  A\n  @since(2) B(n: u8)\n}");
         assert!(errors.is_empty(), "{:?}", errors);
         assert_eq!(Tree::render_enum(&e), "(enum E A (B (n u8)))");
-        // A payload holds a field at least: empty parentheses are `E0111`, whose fix removes
-        // them.
+        // A payload in braces whose types are unnamed is told to name its fields.
+        let (_, errors) = parse_enum_src("enum E {\n  Rect { u8, u16 }\n}");
+        assert!(
+            errors[0]
+                .message
+                .starts_with("a variant's payload names its fields"),
+            "{}",
+            errors[0].message
+        );
+        // A payload's type nested too deep is `E0127`, once.
+        let deep = format!("{}u8", "[1]".repeat(300));
+        let codes_of = |src: String| {
+            let mut c = enum_codes(&src);
+            c.sort_unstable();
+            c
+        };
+        assert_eq!(
+            codes_of(format!("enum E {{\n  A(x: {})\n  B(y: {})\n}}", deep, deep)),
+            ["E0127"]
+        );
+        // A payload holds a field at least: empty parentheses are `E0111`, at the parentheses,
+        // whose fix removes them.
         let src = "enum E {\n  A()\n  B\n}";
         let (_, errors) = parse_enum_src(src);
         assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0111"]);
+        assert_eq!(&src[errors[0].primary.start..errors[0].primary.end], "()");
         assert_eq!(
             apply_fix(src, &errors[0].fixes[0]).unwrap(),
             "enum E {\n  A\n  B\n}"
@@ -4129,6 +4142,21 @@ _ == b"
         // written; and an error inside a call's arguments resumes after its `)`, so what
         // follows the call is still read.
         assert_eq!(codes("val xs = List.new()"), ["E0109"]);
+        // A `match` the file ends inside is reported as one without its `}`.
+        let (_, errors) = parse("fn f() = match c {\n  true => 1");
+        assert_eq!(
+            errors
+                .iter()
+                .map(|d| (d.code, d.message.as_str()))
+                .collect::<Vec<_>>(),
+            [("E0111", "this `match` has no closing `}`")]
+        );
+        // A call whose arguments the file ends inside, after an error among them, stops at the
+        // end of the file.
+        let (_, errors) = parse("fn f() = s.f(\"t\" +");
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0109"]);
+        // A name followed by one `:` in a pattern is no path written with `::`.
+        assert_eq!(codes("_ = match x {\n  v: u8 => 1\n}"), ["E0109"]);
         // After an arm holding an assignment, read whole, the next line is the next arm's, so
         // each arm reports its own error.
         assert_eq!(

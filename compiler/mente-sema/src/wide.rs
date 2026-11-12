@@ -750,12 +750,12 @@ impl Wide<'_> {
             })
             .filter(|s| inside(*s))
             .max_by_key(|s| s.start)?;
-        let within = |s: Span| body.start <= s.start && s.end <= body.end;
+        // A statement that holds `at` either holds the whole `match` or starts inside the arm.
         let held = self
             .tree
             .stmts
             .iter()
-            .any(|s| inside(s.span) && within(s.span));
+            .any(|s| inside(s.span) && body.start <= s.span.start);
         (!held).then_some(body)
     }
 
@@ -987,6 +987,20 @@ mod tests {
             text
         );
         assert_eq!(check_source(&text).err(), None, "{}", text);
+        // A statement inside the arm that holds the operation takes the binding, as anywhere.
+        let held = "pub enum E {\n  A\n  B(n: u64)\n}\npub fn f(e: E, c: bool) -> u128 = match e {\n  E.B(n: n) => if c {\n    val k: u128 = n * n * n\n    k\n  } else {\n    0\n  }\n  E.A => 0\n}";
+        let text = fixed(held, "bind `n * n` to `product: u128` first");
+        assert!(
+            text.contains("{\n    val product: u128 = n * n\n    val k: u128 = product * n\n"),
+            "{}",
+            text
+        );
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // The arm bound is the one above `i128`, never one whose top is `i128`'s.
+        let top =
+            "pub fn f(c: bool, a: i128, b: u128) -> i128 = match c {\n  true => a\n  false => b\n}";
+        let text = fixed(top, "bind `b` to `wide: i128` in its arm");
+        assert_eq!(check_source(&text).err(), None, "{}", text);
         // Arms that fit one type together are none.
         for src in [
             "pub fn f(c: bool, a: i64, b: u64) -> i64 = match c {\n  true => a\n  false => b\n}",
@@ -1092,6 +1106,8 @@ mod tests {
             "pub fn r(a: i8, b: i8) -> [2]i8 = [a, b]",
             "pub fn r(a: i32, b: u64) -> [2][1]i128 = [[a], [b]]",
             "pub fn r(a: u64, b: u128) -> [2][1]u128 = [[a], [b]]",
+            // A repeated value's range, not its type's: `a` lies within 0 to 3.
+            "pub fn r(a: i32[0..4], b: u128) -> [2][1]u128 = [[b], [a; 1]]",
         ] {
             assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
         }

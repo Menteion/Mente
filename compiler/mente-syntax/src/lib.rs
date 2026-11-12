@@ -812,7 +812,7 @@ pub fn parse_enums(src: &str, module: &ModuleFile) -> Vec<ParsedEnum> {
         .items
         .iter()
         .filter_map(|item| match item {
-            ItemDecl::Enum(e) if !e.tokens.is_empty() => {
+            ItemDecl::Enum(e) => {
                 let (syntax, errors) = body::parse_enum(src, &e.tokens);
                 Some(ParsedEnum {
                     name: e.name.clone(),
@@ -3124,6 +3124,36 @@ pub struct Window<T> {
             parsed[0].errors.iter().map(|d| d.code).collect::<Vec<_>>(),
             ["E0130"]
         );
+        // A doc comment above a variant is no part of it; an attribute with arguments on a line
+        // of its own belongs to the variant below it, and a variant keeps every attribute; the
+        // tokens of a variant on one line stay together.
+        assert_eq!(
+            variants("module m\npub enum E {\n  /// Nothing.\n  Dot\n}\n"),
+            ["Dot"]
+        );
+        assert_eq!(
+            variants("module m\npub enum E {\n  @since(2)\n  B(n: u8)\n  @a(1) @b(2) X\n}\n"),
+            ["@since(2) B(n: u8)", "@a(1) @b(2) X"]
+        );
+        assert_eq!(variants("module m\npub enum E {\n  A = 1\n}\n"), ["A = 1"]);
+        // A comma inside a type's brackets, `<` and `>>` included, stays in its field; a type
+        // written without a name is kept as its tokens.
+        assert_eq!(
+            variants("module m\npub enum E {\n  A(m: Map<u8, u16>, k: u8)\n  B(m: List<List<u8>>, k: u8)\n  C([2]u8, List<u8>)\n}\n"),
+            ["A(m: Map<u8,u16>, k: u8)", "B(m: List<List<u8>>, k: u8)", "C([2]u8, List<u8>)"]
+        );
+        // An attribute with no name after it, or whose arguments never close, is kept as it
+        // stands, which the body parser reports.
+        assert_eq!(
+            variants("module m\npub enum E {\n  A\n  @\n}\n"),
+            ["A", "@ "]
+        );
+        let src = "@since(2 A";
+        let tokens: Vec<Token> = tokenize(src)
+            .into_iter()
+            .filter(|t| t.kind != TokenKind::Eof)
+            .collect();
+        assert_eq!(canonical_variant(src, &tokens), "@since(2A ");
     }
 
     #[test]

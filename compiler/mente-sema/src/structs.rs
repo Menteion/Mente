@@ -1598,6 +1598,17 @@ struct {} {{
             codes("module m\nenum E {\n  A\n  B(xs: [4294967288]u8)\n}\n"),
             NONE
         );
+        // An enum of exactly 4,294,967,295 bytes, its tag and its payload, is a value.
+        assert_eq!(
+            codes("module m\nenum E {\n  A\n  B(xs: [4294967294]u8)\n}\n"),
+            NONE
+        );
+        // A payload's array too large, reported once: the enum that holds it is not reported
+        // again, though it is too large too.
+        assert_eq!(
+            codes("module m\nenum E {\n  A\n  B(xs: [4294967295]u16)\n  C(k: u8)\n}\n"),
+            ["E0223"]
+        );
         // A tree names an enum as such once qualified.
         let module = mente_syntax::parse_module("module m\nenum E {\n  A\n}\n").unwrap();
         let names = enum_names(&module);

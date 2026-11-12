@@ -555,8 +555,8 @@ impl Resolver<'_> {
             Payload::None => false,
             Payload::Named(_) | Payload::Positional(_) => true,
         };
+        // A call on a type of the language, such as `List.new()`, is the parser's to report.
         let receiver = self.lookup(enum_name).is_some()
-            || mente_syntax::body::language_type(enum_name)
             || self.structs.is_type(enum_name)
             || self.structs.later.contains_key(enum_name);
         if receiver && call {
@@ -1233,11 +1233,22 @@ mod tests {
             )),
             ["E0202"]
         );
-        // An enum the pattern names is the module's.
+        // An enum the pattern names is the module's; the error points at its name alone.
+        let src = arm("Shpe.Rect(w: a, h: _)", "a");
         assert_eq!(
-            messages(&arm("Shpe.Rect(w: a, h: _)", "a")),
+            messages(&src),
             ["there is no enum named `Shpe` here; did you mean `Shape`?"]
         );
+        let text = module(&src);
+        let d = &diagnostics(&src)[0];
+        assert_eq!(&text[d.primary.start..d.primary.end], "Shpe");
+        // A call on a struct's or a bitstruct's name, as on a receiver, comes later.
+        for f in [
+            "pub struct Pq {\n  a: u8\n}\npub fn f() -> u8 = Pq.make(1)",
+            "pub bitstruct Bq : u8 {\n  @bits(0..8) pub raw: u8\n}\npub fn f() -> u8 = Bq.make(1)",
+        ] {
+            assert_eq!(codes(&with(f)), ["E0109"], "{}", f);
+        }
         // A binding nobody reads is `_`, and the fix binds its field to `_`.
         let src = module(&arm("Shape.Rect(w: a, h: b)", "a"));
         let d: Vec<Diagnostic> = check_source(&src).err().unwrap_or_default();

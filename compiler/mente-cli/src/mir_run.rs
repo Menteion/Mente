@@ -1111,6 +1111,16 @@ pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
         assert!(call("h(E.B(n: 256, f: true))")
             .unwrap_err()
             .starts_with("trap[narrowing]"));
+        // Writing one into memory refuses a variant given another number of fields itself.
+        let shape = &lowered.entries[0].params[0].1;
+        let one = Value::Enum(
+            "E".into(),
+            "B".into(),
+            vec![("n".into(), Value::Int(mente_interp::Int::from_u128(1)))],
+        );
+        let mut memory = Memory::default();
+        let at = memory.alloc(shape.size());
+        assert!(write(&mut memory, at, shape, &one).is_err());
     }
 
     /// Each construct the lowering handles, run on calls that reach every path of it, prints

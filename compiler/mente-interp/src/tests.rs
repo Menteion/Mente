@@ -960,6 +960,8 @@ fn test_an_enum_value_prints_and_reads_back_in_one_form() {
         "id(E.B(p: P(a: 1)))",
         "id(E.B)",
         "id(P(a: 1))",
+        // Fields named as declared, a value of another shape in one.
+        "id(E.B(p: 5, xs: [0, 0]))",
     ] {
         assert!(
             run(src, wrong).contains("does not have its parameter's shape"),
@@ -969,4 +971,21 @@ fn test_an_enum_value_prints_and_reads_back_in_one_form() {
     }
     assert_eq!(kind(src, "id(E.B(p: P(a: 256), xs: [0, 0]))"), "narrowing");
     assert_eq!(kind(src, "id(E.B(p: P(a: 1), xs: [0, 2]))"), "refinement");
+    // A variant written with empty parentheses is found in a call's text, after spaces too,
+    // so a refused call can name it; a call of a function, or parentheses after no variant,
+    // are none.
+    for (text, found) in [
+        ("id(M.Z())", Some("M.Z")),
+        ("id(Mx.Z( ))", Some("Mx.Z")),
+        ("id(M.Z ())", Some("M.Z")),
+        ("M.Z()", Some("M.Z")),
+        ("id(M.Z(a: 1), N_2.Y_3())", Some("N_2.Y_3")),
+        ("Z()", None),
+        (" ()", None),
+        ("id(M.())", None),
+        ("id(g())", None),
+        ("id(.Z())", None),
+    ] {
+        assert_eq!(empty_payload(text).as_deref(), found, "{}", text);
+    }
 }

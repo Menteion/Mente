@@ -1780,6 +1780,26 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         ] {
             assert!(build(wrong).is_err());
         }
+        // An enum's argument is one of its variants, with each field of that variant.
+        let source =
+            "module m\npub enum E {\n  A\n  B(n: u8, m: u16)\n}\npub fn h(e: E) -> u8 = 0\n";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let h = lowered.entries.iter().position(|e| e.name == "h").unwrap();
+        let build = |args: Vec<Arg>| {
+            let mut w = writer(Target::X86_64Linux);
+            program(&lowered, &[Call { entry: h, args }], "", &mut w)
+        };
+        assert!(build(vec![Arg::Enum("B".into(), vec![int(1), int(2)])]).is_ok());
+        assert!(build(vec![Arg::Enum("A".into(), vec![])]).is_ok());
+        for wrong in [
+            vec![Arg::Enum("B".into(), vec![int(1)])],
+            vec![Arg::Enum("B".into(), vec![int(1), int(2), int(3)])],
+            vec![Arg::Enum("A".into(), vec![int(1)])],
+            vec![Arg::Enum("C".into(), vec![])],
+        ] {
+            assert!(build(wrong).is_err());
+        }
     }
 
     /// A result is printed in a loop over each array, so that `main`'s code does not grow with

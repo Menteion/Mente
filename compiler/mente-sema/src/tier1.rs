@@ -777,11 +777,19 @@ fn bound_text(b: &Bound) -> String {
     }
 }
 
+/// Whether the interval Tier 1 gives `v` in `st` lies within the integer type `t`, both its
+/// ends bounded.
+fn within(st: &Octagon, v: &Val, t: IntTy) -> bool {
+    let (lo, hi) = interval(st, v);
+    let (tlo, thi) = int_range(t);
+    tlo <= lo && hi <= thi && -INF < lo && hi < INF
+}
+
 /// The range of the integer type `t` as a refinement, both bounds literals: what a `match`
 /// narrows its scrutinee into.
 fn type_refine(t: IntTy) -> Refine {
     let lo = Bound::Int {
-        negative: t.min_magnitude() > 0,
+        negative: t.signed,
         value: t.min_magnitude(),
     };
     let hi = Bound::Int {
@@ -789,7 +797,7 @@ fn type_refine(t: IntTy) -> Refine {
         value: t.max(),
     };
     Refine {
-        lo: bound_int(t.min_magnitude() > 0, t.min_magnitude()),
+        lo: bound_int(t.signed, t.min_magnitude()),
         hi: bound_int(false, t.max()),
         inclusive: true,
         lo_text: bound_text(&lo),
@@ -2839,8 +2847,7 @@ impl<'a> Fx<'a> {
     fn fits(&mut self, st: &Octagon, v: &Val, t: Option<IntTy>, span: Span) -> Option<String> {
         let (lo, hi) = interval(st, v);
         let range = t.map(int_range);
-        let proven =
-            range.is_some_and(|(tlo, thi)| tlo <= lo && hi <= thi && -INF < lo && hi < INF);
+        let proven = t.is_some_and(|t| within(st, v, t));
         let detail = t.map_or("into its type".to_string(), |t| {
             format!("into `{}`", t.name)
         });
@@ -3868,9 +3875,7 @@ impl<'a> Fx<'a> {
                 | ExprKind::Index { .. }
                 | ExprKind::Call { .. }
         );
-        let (lo, hi) = interval(st, value);
-        let (tlo, thi) = int_range(t);
-        let proven = st.is_empty() || stored || (tlo <= lo && hi <= thi && -INF < lo && hi < INF);
+        let proven = st.is_empty() || stored || within(st, value, t);
         let what = self.own_text(scrutinee);
         if let Some(side) = self.fits(st, value, Some(t), span) {
             self.always_traps(&side, t, span, &format!("`{}`", what.0));
@@ -3888,20 +3893,18 @@ impl<'a> Fx<'a> {
             );
             self.unfollowed = was;
         }
-        // Past the narrowing, the value lies within the type.
-        if -INF < tlo {
-            self.assume(
-                st,
-                &cmp(BinaryOp::Ge, value.clone(), lin(Vec::new(), tlo)),
-                true,
-            );
-        }
-        if thi < INF {
-            self.assume(
-                st,
-                &cmp(BinaryOp::Le, value.clone(), lin(Vec::new(), thi)),
-                true,
-            );
+        // Past the narrowing, the value lies within the type: a bound beyond the octagon's
+        // reach, a 128-bit type's, is compared exactly.
+        let r = type_refine(t);
+        for (op, bound, lit) in [
+            (BinaryOp::Ge, r.lo, r.lo_lit),
+            (BinaryOp::Le, r.hi, r.hi_lit),
+        ] {
+            let c = match far(lit) {
+                Some(c) => Cond::Far(op, Box::new((value.clone(), c))),
+                None => cmp(op, value.clone(), bound),
+            };
+            self.assume(st, &c, true);
         }
     }
 
@@ -3945,31 +3948,31 @@ impl<'a> Fx<'a> {
                 PatternKind::Wildcard => {
                     // The values the literals before it take at either end of the scrutinee's
                     // range are left out of `_`'s.
+                    // Each end a literal takes moves inward past the literals that follow it,
+                    // whether or not the other end is bounded.
                     let (lo, hi) = interval(&a, &value);
-                    if lo > -INF && hi < INF && lo <= hi {
-                        let has = |x: i128| literals.contains(&Exact::from_i128(x));
+                    let has = |x: i128| literals.contains(&Exact::from_i128(x));
+                    if has(lo) {
                         let mut l = lo;
-                        while l <= hi && has(l) {
+                        while has(l) {
                             l += 1;
                         }
+                        self.assume(
+                            &mut a,
+                            &cmp(BinaryOp::Ge, value.clone(), lin(Vec::new(), l)),
+                            true,
+                        );
+                    }
+                    if has(hi) {
                         let mut h = hi;
-                        while h >= l && has(h) {
+                        while has(h) {
                             h -= 1;
                         }
-                        if l > lo {
-                            self.assume(
-                                &mut a,
-                                &cmp(BinaryOp::Ge, value.clone(), lin(Vec::new(), l)),
-                                true,
-                            );
-                        }
-                        if h < hi {
-                            self.assume(
-                                &mut a,
-                                &cmp(BinaryOp::Le, value.clone(), lin(Vec::new(), h)),
-                                true,
-                            );
-                        }
+                        self.assume(
+                            &mut a,
+                            &cmp(BinaryOp::Le, value.clone(), lin(Vec::new(), h)),
+                            true,
+                        );
                     }
                 }
                 PatternKind::Variant { bindings, .. } => {
@@ -5612,6 +5615,47 @@ mod tests {
         ] {
             assert!(codes(src).is_empty(), "{}: {:?}", src, messages(src));
         }
+        // A signed type's lower bound is negative, and an unsigned type's guard reads 0.
+        let low = "pub fn f(a: i8) -> u8 = match a - 1 {\n  0 => 1\n  _ => 2\n}";
+        assert_eq!(
+            messages(low),
+            ["Tier 1 cannot rule out `a = -128`, where `a - 1` is -129, outside `i8`, the type of what the `match` reads"]
+        );
+        repairs(low);
+        assert!(
+            diagnostics(neg)[0].fixes[0]
+                .message
+                .contains("guard -x >= 0 else"),
+            "{:?}",
+            diagnostics(neg)[0].fixes
+        );
+        // A literal alone is an `i64`: one beyond it never fits.
+        assert_eq!(
+            codes("pub fn f() -> u8 = match 9223372036854775808 {\n  _ => 1\n}"),
+            ["E0508"]
+        );
+        // A scrutinee Tier 1 proves fits, or a place, records no refinement to prove.
+        for src in [
+            "pub fn f(x: u8) -> u8 = match x / 2 {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(x: u128) -> u8 = match x {\n  0 => 1\n  _ => 2\n}",
+        ] {
+            assert!(
+                !obligations(src)
+                    .iter()
+                    .any(|o| o.0 == ObligationKind::Refinement),
+                "{}: {:?}",
+                src,
+                obligations(src)
+            );
+        }
+        // Past the narrowing, an arm reads the value within the type, at either end, so only the
+        // scrutinee is reported.
+        for src in [
+            "pub fn f(x: u8) -> u8[1..=255] = match x + 1 {\n  0 => 1\n  _ => x + 1\n}",
+            "pub fn f(x: u8) -> u8[0..=254] = match x - 1 {\n  _ => x - 1\n}",
+        ] {
+            assert_eq!(codes(src), ["E0502"], "{}: {:?}", src, messages(src));
+        }
         // Past the narrowing the value lies within the type: here `x + 1` is 1 to 255, so the
         // arm `_` gives a value of `u8[1..=255]`.
         let within = "pub fn f(x: u8) -> u8[1..=255] {\n  guard x < 255 else {\n    return 1\n  }\n  match x + 1 {\n    0 => 1\n    _ => x + 1\n  }\n}";
@@ -5624,6 +5668,23 @@ mod tests {
     #[test]
     fn test_match_arms_narrow_the_state() {
         let with = |f: &str| format!("{}{}", READING, f);
+        // `_` leaves out the literals before it at each end of the range on its own, an end
+        // beyond the octagon's reach included; and an arm no value reaches proves anything.
+        for src in [
+            "pub fn f(x: u128) -> u128[1..=340282366920938463463374607431768211455] = match x {\n  0 => 1\n  _ => x\n}",
+            "fn take(x: i128) -> i128\n  requires x < 5\n= x\npub fn f(a: i128) -> i128 {\n  guard a <= 5 else {\n    return 0\n  }\n  match a {\n    5 => 0\n    _ => take(a)\n  }\n}",
+            "pub fn f(x: u8) -> u8[0..5] {\n  guard x == 5 else {\n    return 0\n  }\n  match x {\n    5 => 1\n    _ => x\n  }\n}",
+        ] {
+            assert!(codes(src).is_empty(), "{}: {:?}", src, messages(src));
+        }
+        // An integer `match`'s value keeps its relation to each arm's; any other value is the
+        // join of the arms' values.
+        for src in [
+            "pub fn f(x: u8, c: bool) -> u8[0..1] {\n  val k: u8 = match c {\n    true => x\n    false => x\n  }\n  x - k\n}",
+            "pub fn f(c: bool) -> [2]u8[0..10] = match c {\n  true => [1, 2]\n  false => [3, 4]\n}",
+        ] {
+            assert!(codes(src).is_empty(), "{}: {:?}", src, messages(src));
+        }
         for src in [
             "pub fn f(x: u8) -> u8[0..1] = match x {\n  0 => x\n  _ => 0\n}",
             "pub fn f(n: u8) -> u8[1..=255] = match n {\n  0 => 1\n  _ => n\n}",

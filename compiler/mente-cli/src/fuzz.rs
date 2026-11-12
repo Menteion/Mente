@@ -3279,6 +3279,33 @@ mod tests {
             ["f", "g", "h"],
             "a function of more values than the fuzzer takes is left out, in a struct too"
         );
+        // An enum's edges are each variant, its fields at the edges of each rank in turn, a
+        // field of fewer edges starting over; one whose largest variant holds more values than
+        // the fuzzer takes is left out.
+        let enums = mente_sema::check_program(
+            "module m\npub enum E {\n  A\n  B(n: i8, f: bool)\n}\npub fn e(x: E) -> u8 = 0\npub enum Big {\n  A\n  B(xs: [300]u8)\n}\npub fn big(x: Big) -> u8 = 0\n",
+        )
+        .unwrap();
+        let taken = scalar_functions(&enums);
+        assert_eq!(
+            taken.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["e"]
+        );
+        let variants = edges(&taken[0].params[0]);
+        let b = |n: Scalar, f: bool| {
+            Scalar::Enum(
+                "E".into(),
+                "B".into(),
+                vec![("n".into(), n), ("f".into(), Scalar::Bool(f))],
+            )
+        };
+        assert_eq!(variants.len(), 6);
+        assert_eq!(
+            variants[0],
+            Scalar::Enum("E".into(), "A".into(), Vec::new())
+        );
+        assert_eq!(variants[2], b(Scalar::Int(false, 127), true));
+        assert_eq!(variants[3], b(Scalar::Int(true, 128), false));
         let array = edges(&functions[1].params[0]);
         assert_eq!(array.len(), 3);
         assert_eq!(

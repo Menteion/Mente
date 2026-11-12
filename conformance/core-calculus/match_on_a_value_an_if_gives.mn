@@ -62,3 +62,13 @@ pub fn an_element_of_an_if(c: bool) -> u8[0..10] {
     Cell.Big(v: _) => 0
   }
 }
+
+// A scrutinee that is no place, which no arm changes the source of, is read where it lies.
+pub fn unchanged(c: bool) -> u8[0..10] {
+  val s = Box(cell: Cell.Small(n: 5))
+  val t = Box(cell: Cell.Small(n: 3))
+  match (if c { s.cell } else { t.cell }) {
+    Cell.Small(n: n) => n
+    Cell.Big(v: _) => 0
+  }
+}

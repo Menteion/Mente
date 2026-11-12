@@ -1914,7 +1914,6 @@ impl<'a> Checker<'a> {
                             format!("remove the suffix `{}`", text.get(cut..).unwrap_or("")),
                             Span {
                                 start: p.span.start + cut,
-                                end: p.span.end,
                                 ..p.span
                             },
                             "",
@@ -1958,7 +1957,6 @@ impl<'a> Checker<'a> {
             .join(", ");
         let after_name = Span {
             start: name_span.end,
-            end: name_span.end,
             ..name_span
         };
         let Some(bs) = bindings else {
@@ -2364,7 +2362,7 @@ impl<'a> Checker<'a> {
         let transition = if used {
             None
         } else {
-            self.transition(m, scrutinee, arms, &found, &text)
+            self.transition(m, arms, &found, &text)
         };
         for place in found.into_iter().flatten() {
             let mut d = Diagnostic::error(
@@ -2391,14 +2389,11 @@ impl<'a> Checker<'a> {
     fn transition(
         &self,
         m: ExprId,
-        scrutinee: ExprId,
         arms: &[Arm],
         found: &[Vec<ExprId>],
         text: &str,
     ) -> Option<Fix> {
         let at = self.span(m);
-        let frozen = self.path(scrutinee);
-        let root = self.root(scrutinee)?;
         let mut edits = vec![Edit {
             span: Span {
                 end: at.start,
@@ -2447,10 +2442,9 @@ impl<'a> Checker<'a> {
             else {
                 return None;
             };
-            if changed.as_slice() != [*place]
-                || self.root(*place) != Some(root)
-                || self.path(*place) != frozen
-            {
+            // The place written as the scrutinee is, so an index names the same element.
+            let place_text = self.src.get(self.span(*place).start..self.span(*place).end);
+            if changed.as_slice() != [*place] || place_text != Some(text) {
                 return None;
             }
             let value = self.span(*value);
@@ -2521,7 +2515,6 @@ fn variant_pattern(e: &str, v: &crate::structs::VariantDef) -> String {
 fn insertion_after(span: Span) -> Span {
     Span {
         start: span.end,
-        end: span.end,
         ..span
     }
 }
@@ -3934,6 +3927,35 @@ pub enum Light {
             assert_eq!(codes(&with(src)), [code], "{}", src);
             assert_eq!(messages(&with(src)), [message], "{}", src);
         }
+        // `==` with a struct or an enum on either side comes later.
+        assert_eq!(
+            codes(&with("pub fn f(s: Shape) -> bool = s == 1")),
+            ["E0109"]
+        );
+        assert_eq!(
+            codes(&with("pub fn f(s: Shape) -> bool = 1 == s")),
+            ["E0109"]
+        );
+        // A payload given by position, of the right number, still checks each value's type;
+        // the fix names the fields only for the right number, without `mut` arguments.
+        assert_eq!(
+            codes(&with("pub fn f() -> Shape = Shape.Rect(true, 2)")),
+            ["E0226", "E0203"]
+        );
+        for src in [
+            "pub fn f() -> Shape = Shape.Rect(1)",
+            "fn g(mut x: u8) -> u8 = x\npub fn f(mut x: u8) -> Shape = Shape.Rect(mut x, 2)",
+        ] {
+            let d = diagnostics(&with(src));
+            assert!(d.iter().all(|d| d.fixes.is_empty()), "{}: {:?}", src, d);
+        }
+        // A variant the enum lacks is reported at its name, line and column included.
+        let src = with("pub fn f() -> Shape = Shape.Dto");
+        let text = module(&src);
+        let d = &diagnostics(&src)[0];
+        assert_eq!(&text[d.primary.start..d.primary.end], "Dto");
+        let (_, col) = mente_syntax::diagnostics::line_col(&text, d.primary.start);
+        assert_eq!(d.primary.col as usize, col);
         // A call on a binding is a construct of a later milestone, and an unknown enum a name
         // nobody declared.
         assert_eq!(codes(&with("pub fn f(x: u8) -> u8 = x.max(1)")), ["E0109"]);
@@ -3982,6 +4004,57 @@ pub enum Light {
         ] {
             assert_eq!(messages(&with(src)), [message], "{}", src);
         }
+        // Bindings by position take their fields' types, which an arm's value shows; one
+        // beyond the payload takes none.
+        for (arm, ty) in [
+            ("Shape.Rect(a, b, c) => a", "u8"),
+            ("Shape.Rect(a, b) => b", "u16"),
+        ] {
+            let src = with(&format!(
+                "pub fn f(s: Shape) -> bool = match s {{\n  {}\n  Shape.Dot => false\n}}",
+                arm
+            ));
+            let want = format!(
+                "the arms of this `match` produce its value, so they have one type, but this one is `bool` after `{}`",
+                ty
+            );
+            assert!(
+                messages(&src).contains(&want),
+                "{}: {:?}",
+                arm,
+                messages(&src)
+            );
+        }
+        // The fix names the fields only for the right number of bindings, all by position.
+        for arm in ["Shape.Rect(a)", "Shape.Rect(w: a, b)"] {
+            let src = with(&format!(
+                "pub fn f(s: Shape) -> u8 = match s {{\n  {} => a\n  Shape.Dot => 0\n}}",
+                arm
+            ));
+            let d = diagnostics(&src);
+            assert!(
+                d.iter()
+                    .filter(|d| d.code == "E0226")
+                    .all(|d| d.fixes.is_empty()),
+                "{}: {:?}",
+                arm,
+                d
+            );
+        }
+        // A pattern of a `match` whose scrutinee has no type is not reported again.
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8 = match nope {\n  0 => 1\n  _ => 2\n}"
+            )),
+            ["E0201"]
+        );
+        // An enum whose declaration is in error is matched without coverage being reported.
+        assert_eq!(
+            codes(&with(
+                "pub enum Bad {\n  A(p: Nope)\n  B\n}\npub fn f(b: Bad) -> u8 = match b {\n  Bad.B => 1\n}"
+            )),
+            ["E0116"]
+        );
         // The fix removes the suffix, and the module then checks.
         let src = module(&with(
             "pub fn f(x: u8) -> u8 = match x {\n  0x1F_u8 => 1\n  _ => 2\n}",
@@ -4047,6 +4120,38 @@ pub enum Light {
     /// value reaches; and `_` stands on an integer only. Each fix applies and checks.
     #[test]
     fn test_a_match_covers_every_value_once() {
+        // A refined field's range is what its arms cover.
+        assert!(codes(
+            "pub struct Sk {\n  k: u8[0..3]\n}\npub fn f(s: Sk) -> u8 = match s.k {\n  0 => 1\n  1 => 2\n  2 => 3\n}"
+        )
+        .is_empty());
+        // The arms of a scrutinee of no one 128-bit type, which `wide.rs` reports, are read
+        // over both `i128`'s and `u128`'s values, a negative literal included.
+        assert_eq!(
+            codes("pub fn f(a: i128, b: u128) -> u8 = match a + b {\n  -1 => 1\n  _ => 2\n}"),
+            NONE
+        );
+        // E0230's fix removes the line of an arm that stands alone on it, spaces after the arm
+        // included, and only the arm where the line holds more; the module then checks.
+        for (src, kept) in [
+            (
+                "pub fn f(x: u8) -> u8 = match x {\n  1 => 0\n  1 => 2   \n  _ => 1\n}",
+                "match x {\n  1 => 0\n  _ => 1\n}",
+            ),
+            (
+                "pub fn f(x: u8) -> u8 = match x {\n  _ => 0\n  1 => 1 }",
+                "match x {\n  _ => 0\n   }",
+            ),
+        ] {
+            let (fixed, left) = fixed_and_checked(&module(src));
+            assert!(fixed.contains(kept), "{}", fixed);
+            assert!(left.is_empty(), "{:?}", left);
+        }
+        // A `match` whose arms all leave ends nothing after it.
+        assert!(codes(
+            "pub fn f(c: bool) -> u8 {\n  match c {\n    true => {\n      return 1\n    }\n    false => {\n      return 2\n    }\n  }\n}"
+        )
+        .is_empty());
         let with = |f: &str| format!("{}{}", SHAPES, f);
         for src in [
             "pub fn f(l: Light) -> u8 = match l {\n  Light.Green => 0\n  Light.Red => 1\n  Light.Amber => 2\n}",
@@ -4189,8 +4294,66 @@ pub enum Light {
             fixed
         );
         assert!(left.is_empty(), "{:?}", left);
+        // An arm whose block is on one line, or holds statements and leaves the place as it
+        // is, gives the place's value at the end of its block, at the block's indentation.
+        let src = module(&with(
+            "pub fn f(mut s: Shape, mut k: u8) {\n  match s {\n    Shape.Rect(w: _, h: _) => { s = Shape.Dot }\n    Shape.Dot => {\n      k = 2\n    }\n  }\n  k += 1\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("    Shape.Rect(w: _, h: _) => { Shape.Dot }\n    Shape.Dot => {\n      k = 2\n      s\n    }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        let src = module(&with(
+            "pub fn f(mut s: Shape, mut k: u8) {\n  match s {\n    Shape.Rect(w: _, h: _) => {\n      s = Shape.Dot\n    }\n    Shape.Dot => { k = 2 }\n  }\n  k += 1\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("    Shape.Dot => { k = 2\n    s }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        // Only an element written as the scrutinee is, or a field of it, takes part.
+        let field = with(
+            "pub fn f(mut b: Box2, mut xs: [2]Shape, i: usize) -> u8 = match xs[i] {\n  Shape.Rect(w: w, h: _) => {\n    b.n = w\n    w\n  }\n  Shape.Dot => 0\n}",
+        );
+        assert_eq!(codes(&field), NONE);
+        let field = with(
+            "pub fn f(mut b: Box3, i: usize) -> u8 = match b.xs[i] {\n  Shape.Rect(w: w, h: _) => {\n    b.n = w\n    w\n  }\n  Shape.Dot => 0\n}",
+        );
+        assert_eq!(
+            codes(&format!(
+                "pub struct Box3 {{\n  xs: [2]Shape\n  n: u8\n}}\n{}",
+                field
+            )),
+            NONE
+        );
         // An assignment that is not the arm's last statement, or a `mut` argument, has no
-        // transition to offer.
+        // transition to offer; nor has an arm that assigns twice, assigns what holds the
+        // place, or another element than the scrutinee's.
+        for (scrutinee, arm) in [
+            (
+                "s",
+                "{\n      s = Shape.Dot\n      s = Shape.Rect(w: 1, h: 2)\n    }",
+            ),
+            ("b.s", "{\n      b = Box2(s: Shape.Dot, n: 0)\n    }"),
+            ("xs[i]", "{\n      xs[j] = Shape.Dot\n    }"),
+        ] {
+            let src = with(&format!(
+                "pub fn f(mut s: Shape, mut b: Box2, mut xs: [2]Shape, i: usize, j: usize) {{\n  match {} {{\n    Shape.Rect(w: _, h: _) => {}\n    Shape.Dot => {{}}\n  }}\n}}",
+                scrutinee, arm
+            ));
+            let d = diagnostics(&src);
+            assert!(
+                !d.is_empty() && d.iter().all(|d| d.fixes.is_empty()),
+                "{}: {:?}",
+                src,
+                d
+            );
+        }
         for arm in [
             "{\n      s = Shape.Dot\n      k = 1\n    }",
             "{\n      clear(mut s)\n    }",

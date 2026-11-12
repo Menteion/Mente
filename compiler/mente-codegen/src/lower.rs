@@ -1710,7 +1710,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Widens `hull` to hold every integer the array literal `e` holds, through the array
-    /// literals nested in it: an element's static range, or an array element's type's.
+    /// literals nested in it: each element's static range.
     fn leaf_hull(&self, e: ExprId, hull: &mut Option<(Num, Num)>) -> Result<(), String> {
         let tree = self.tree();
         let (lo, hi) = match &tree.expr(e).kind {
@@ -1721,14 +1721,8 @@ impl<'a> Lower<'a> {
                 return Ok(());
             }
             ExprKind::Repeat { value, .. } => return self.leaf_hull(*value, hull),
-            _ if matches!(self.s.f.typing.exprs[e.0 as usize], SemaTy::Array(..)) => {
-                let mut shape = self.shape(e)?;
-                while let Shape::Array(_, elem) = shape {
-                    shape = *elem;
-                }
-                let r = Self::place_interval(&shape).ok_or("an array of no integers")?;
-                (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1))
-            }
+            // An array of another kind among them has a type of its own, which joins the
+            // others' in a standard type or makes the literal `E0222` (`wide.rs`): never here.
             _ => {
                 let r = self
                     .interval(e)
@@ -2226,10 +2220,9 @@ impl<'a> Lower<'a> {
             ExprKind::Variant { payload, .. } => match payload {
                 Payload::None => false,
                 Payload::Named(fields) => fields.iter().any(|f| sub(f.value)),
-                Payload::Positional(args) => args.iter().any(|a| {
-                    (a.is_mut && self.root_of(a.value).is_some_and(|r| roots.contains(&r)))
-                        || sub(a.value)
-                }),
+                // A payload given by position is `E0226`, never lowered; read as one given by
+                // name, its values.
+                Payload::Positional(args) => args.iter().any(|a| sub(a.value)),
             },
             ExprKind::Match { scrutinee, arms } => {
                 sub(*scrutinee)
@@ -2457,8 +2450,8 @@ impl<'a> Lower<'a> {
         for (k, arm) in arms.iter().enumerate() {
             let last = k + 1 == arms.len();
             let test = match (&arm.pattern.kind, tested) {
+                // `_` is the last arm, since an arm after it is `E0230`.
                 (_, _) if last => None,
-                (PatternKind::Wildcard, _) => None,
                 (PatternKind::Bool(b), V::Bool(c)) => Some(if *b {
                     c
                 } else {
