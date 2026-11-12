@@ -4,7 +4,13 @@
 // with no repairs and no compiler feedback; `mn check` then reads every program, and the
 // diagnostics show which constructs agents get wrong. Nothing is scored.
 //
-//   node benchmark/harness/probe.ts --mn target/release/mn [--runs 3] [--budget 5] [--out probe-out]
+//   node benchmark/harness/probe.ts [--runs 3] [--budget 5] [--out probe-out]
+//   node benchmark/harness/probe.ts --check probe-out --mn target/release/mn
+//
+// It runs in two jobs (.github/workflows/probe.yml): the first, which holds the API key, has the
+// agents write the programs and runs none of them; the second, which holds no secret, runs
+// `mn check` on each and records its diagnostics in results.json. Agent-written code never runs
+// where the key is.
 //
 // It calls the Claude Messages API over HTTP with the key in ANTHROPIC_API_KEY, records the
 // model, its parameters, every prompt and reply and the tokens used, and stops before a call
@@ -92,8 +98,20 @@ function check(mn: string, file: string): string[] {
   );
 }
 
+/** The second job: `mn check` on every program the first wrote, with no key in reach. */
+function checkPrograms(dir: string, mn: string): void {
+  if (process.env.ANTHROPIC_API_KEY) throw new Error("--check runs agent-written programs: run it without ANTHROPIC_API_KEY");
+  const record = JSON.parse(readFileSync(join(dir, "results.json"), "utf8"));
+  for (const p of record.programs) {
+    p.diagnostics = p.stop_reason === "refusal" ? [] : check(mn, join(dir, p.file));
+    console.log(`${p.file}: ${p.diagnostics.length} diagnostics`);
+  }
+  writeFileSync(join(dir, "results.json"), JSON.stringify(record, null, 2));
+}
+
 async function main(): Promise<void> {
-  const mn = option("mn", "target/release/mn");
+  const checkDir = option("check", "");
+  if (checkDir !== "") return checkPrograms(checkDir, option("mn", "target/release/mn"));
   const runs = Number(option("runs", "3"));
   const budget = Number(option("budget", "5"));
   const out = option("out", "probe-out");
@@ -136,7 +154,6 @@ async function main(): Promise<void> {
       const module = `module probe\n\n${extractProgram(reply.text)}`;
       writeFileSync(join(out, `${name}.mn`), module);
       writeFileSync(join(out, `${name}.reply.md`), reply.text);
-      const diagnostics = reply.stop_reason === "refusal" ? [] : check(mn, join(out, `${name}.mn`));
       record.programs.push({
         task: task.id,
         run,
@@ -145,9 +162,9 @@ async function main(): Promise<void> {
         usage: reply.usage,
         cost,
         file: `${name}.mn`,
-        diagnostics,
+        diagnostics: null,
       });
-      console.log(`${name}: ${diagnostics.length} diagnostics, $${cost.toFixed(4)}`);
+      console.log(`${name}: written, ${cost.toFixed(4)}`);
     }
     if (record.stopped_early) break;
   }

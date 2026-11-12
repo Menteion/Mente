@@ -646,3 +646,6 @@ fn private_helper(x: u32) -> u32 = x
         assert!(report.spec_tokens < report.total_tokens && report.savings_percent > 0.0);
     }
 }
+
+#[cfg(test)]
+mod overflow_traps;

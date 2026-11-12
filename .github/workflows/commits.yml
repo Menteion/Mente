@@ -1,0 +1,44 @@
+# Commit and pull request text, before it reaches `main`'s history, and the base the instruments
+# ran against (.github/scripts/commits.mjs): no "WIP", "Draft:", "fixup", "squash!" or "amend!"
+# subject, English in every commit message and in the pull request's title and body
+# (CLAUDE.md, invariant 3), and no base changed since the head was pushed, which would leave every
+# instrument's result for the old base. It runs again when the title, the body or the base is
+# edited, and fails on every event while a base change is unanswered by a new commit. A required
+# check of `main`.
+# Every action is pinned to a full commit SHA; Dependabot proposes updates.
+name: Commits
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+
+permissions:
+  contents: read
+  # The pull request's timeline, for its base changes, and its head's workflow runs, for when the
+  # head was pushed.
+  pull-requests: read
+  issues: read
+  actions: read
+
+concurrency:
+  group: commits-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commits:
+    name: Commits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the subjects, the text and the base
+        env:
+          # The pull request's text reaches the script only through the environment.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/commits.mjs

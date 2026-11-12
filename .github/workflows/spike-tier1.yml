@@ -52,6 +52,8 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p spike-tier1-latency
       - name: Run the protocol
+        env:
+          PLATFORM: ${{ matrix.name }}
         run: |
           cargo run --release --locked -p spike-tier1-latency -- measure | tee result.txt
-          { echo "### ${{ matrix.name }}"; echo '```'; cat result.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### $PLATFORM"; echo '```'; cat result.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

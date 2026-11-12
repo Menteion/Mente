@@ -1,0 +1,56 @@
+# The checks the ruleset of `main` requires, one a line, exactly as GitHub names them: the name of
+# the job, with its matrix values filled in. Norman sets the ruleset from this list; the workflow
+# policy test (.github/scripts/policy.test.mjs) checks that each name belongs to exactly one job,
+# that the job's workflow runs on every pull request and in the merge queue with no `paths:`
+# filter, and that every instrument docs/design-brief.md section 7.7 schedules for a finished
+# milestone has its checks here (docs/design-review.md, guard-per-problem).
+
+# The verification commands of CLAUDE.md (ci.yml).
+Rust (x86-64 Linux)
+Rust (x86-64 Windows)
+Rust (AArch64 Linux)
+Documentation
+
+# Commit and pull request text (commits.yml).
+Commits
+
+# cargo-mutants on the lines a pull request changes (mutants.yml).
+Mutants in the diff (shard 0 of 4)
+Mutants in the diff (shard 1 of 4)
+Mutants in the diff (shard 2 of 4)
+Mutants in the diff (shard 3 of 4)
+
+# Generated and conformance programs on the three execution paths (generated.yml).
+Generated programs (x86-64 Linux)
+Generated programs (x86-64 Windows)
+Generated programs (AArch64 Linux)
+
+# Every obligation Tier 1 discharges, cross-checked by Z3 (smt.yml).
+Tier 1 against Z3
+
+# The compiler's fuzzer, a two-minute run with a fixed seed (fuzz.yml).
+Fuzz
+
+# The MIR mutation gate on lowered code, with the agent programs (mir-mutants.yml).
+MIR mutation gate with the agent programs
+
+# The agent programs on the three execution paths, and native code under the debuggers (ci.yml).
+Execution paths (x86-64 Linux)
+Execution paths (x86-64 Windows)
+Execution paths (AArch64 Linux)
+Debuggers (x86-64 Linux)
+Debuggers (x86-64 Windows)
+Debuggers (AArch64 Linux)
+
+# The latency protocols of ROADMAP.md against the base branch (ci.yml).
+Tier-1 latency
+Projection benchmark
+
+# The tight-loop kernels against the base branch's compiler (perf.yml): checksums everywhere, and
+# the instruction-count gate where the runner counts instructions (AArch64); wall time is
+# reported, not enforced.
+Tight-loop kernels (x86-64 Linux)
+Tight-loop kernels (AArch64 Linux)
+
+# The agent-benchmark harness and its sandbox (harness.yml).
+Fixtures in Rust and Odin

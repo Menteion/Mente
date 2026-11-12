@@ -1,0 +1,114 @@
+# The paths each instrument watches: the one list per instrument workflow, read by the workflow's
+# first step after its checkout (.github/scripts/watch.mjs) and by the workflow policy test
+# (.github/scripts/policy.test.mjs). The workflows themselves carry no `paths:` filter, since a
+# workflow that a filter skips never reports, and so cannot be a required check of `main`
+# (docs/design-review.md, guard-per-problem).
+#
+# Each section is `[<file in .github/workflows>]`, then one glob a line, as GitHub's `paths:`
+# filters read them: `**` crosses directories, `*` does not. `merge_group: skip` marks a heavy
+# instrument that ran on the pull request's head and does not run again in the merge queue.
+#
+# A list names everything its jobs build or read: Cargo.toml, Cargo.lock, rust-toolchain.toml and
+# every file of every crate the job builds (the policy test computes them from the manifests), its
+# own workflow, every repository path its scripts name with what those scripts import, and the
+# corpora the compiler reads for it. A change to this file, to the watch, to a `.cargo` directory or
+# to a toolchain file runs every instrument (ALWAYS in .github/scripts/lib/watch.mjs).
+
+[mutants.yml]
+merge_group: skip
+compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
+# A workspace member: the baseline runs its tests, though .cargo/mutants.toml mutates none of it.
+spikes/tier1-latency/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.config/nextest.toml
+# The floor of work the job checks.
+.github/scripts/mutants-floor.mjs
+.github/scripts/lib/mutants-floor.mjs
+.github/workflows/mutants.yml
+
+[generated.yml]
+compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
+conformance/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/generated.yml
+
+[fuzz.yml]
+merge_group: skip
+compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
+# The seed corpus of `mn fuzz` (compiler/mente-cli/src/fuzz.rs): every .mn program of these.
+examples/**
+conformance/**
+benchmark/probe/**
+benchmark/prelim/**
+perf/kernels/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/fuzz.yml
+
+[smt.yml]
+compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
+# Every module Tier 1 runs on, whose obligations become queries.
+conformance/**
+examples/**
+benchmark/probe/**
+benchmark/prelim/**
+perf/kernels/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/smt.yml
+
+[mir-mutants.yml]
+compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
+# The reported corpus: the examples, and the agent programs with their tasks' calls.
+examples/**
+benchmark/probe/**
+benchmark/prelim/**
+benchmark/tasks/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/mir-mutants.yml
+
+[perf.yml]
+compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
+perf/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/perf.yml
+
+[harness.yml]
+benchmark/**
+compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
+package.json
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/harness.yml

@@ -1,0 +1,126 @@
+# The full mutation run of the compiler with cargo-mutants, weekly and on demand, split across
+# sixteen runners; a dispatch may take only the mutants a regex names, or only some shards. Its jobs
+# are named apart from mutants.yml's required checks, so that no run with chosen inputs can report a
+# check of their names (.github/scripts/policy.test.mjs). On GitHub's runners, never on a
+# developer's machine. Settings: .cargo/mutants.toml and .config/nextest.toml.
+name: Mutants, full run
+
+on:
+  schedule:
+    - cron: "0 18 * * 0" # Mondays, 02:00 in Taipei
+  workflow_dispatch:
+    inputs:
+      examine:
+        description: "Only the mutants whose names match this regex, as cargo-mutants --re reads it; empty for all"
+        required: false
+        default: ""
+      shards:
+        description: "Only these of the sixteen shards, as a JSON list such as [11, 12]; empty for all"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-full-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_MUTANTS_VERSION: "27.1.0"
+  CARGO_NEXTEST_VERSION: "0.9.149"
+  # The nextest profile that stops a test running too long (.config/nextest.toml).
+  NEXTEST_PROFILE: mutants
+
+jobs:
+  full:
+    # Every mutant of the compiler, some thousands at a minute or so each: sixteen shards keep
+    # each within a runner's six hours.
+    name: Full run (shard ${{ matrix.shard }} of 16)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.shards || '[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}
+      - name: Install cargo-mutants
+        run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-nextest
+          key: cargo-nextest-${{ runner.os }}-${{ env.CARGO_NEXTEST_VERSION }}
+      - name: Install cargo-nextest
+        run: command -v cargo-nextest || cargo install cargo-nextest --locked --version "$CARGO_NEXTEST_VERSION"
+      - name: Run the tests once without a mutant
+        # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
+        # runs the whole workspace's tests, so the timeout it set from that baseline was often
+        # its 20 s minimum, and cut a mutant's tests short before any had failed. This baseline
+        # runs what every mutant runs, and cargo-mutants skips its own.
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace 2>&1 | tee baseline.log
+          { echo "## Slowest tests without a mutant"; echo '```text'
+            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Mutate this shard of the compiler
+        env:
+          EXAMINE: ${{ inputs.examine }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # A mutant that allocates or writes without end would take the runner down with it, as
+          # it took two shards of the first full run: each process may reserve at most 8 GB and
+          # write a file of at most 2 GB, so that such a test fails instead and the mutant is
+          # caught.
+          ulimit -v 8388608 -f 2097152
+          # A guard on the runner's memory. Shards 11 and 12 of the full runs lost their runners
+          # when a mutant made several tests at once take all 16 GB within a minute, each under
+          # the limit above: once a second, below 2 GB available, the process taking the most
+          # memory, the runaway test, is stopped, so that its test fails and the mutant is caught.
+          # Memory and disk go to the job's log once a minute.
+          (tick=0; while sleep 1; do
+            avail=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)
+            if [ "$avail" -lt 2048 ]; then
+              pid=$(ps -eo pid,rss --sort=-rss --no-headers | awk 'NR == 1 {print $1}')
+              echo "memory guard: $avail MB available, stopping $(ps -o comm= -p "$pid") ($pid)"
+              kill -9 "$pid"
+            fi
+            tick=$((tick + 1))
+            if [ $((tick % 60)) -eq 0 ]; then
+              echo "resources: $(free -m | awk '/^Mem:/ {print $3 " of " $2 " MB used"}'), $(df -h / | awk 'NR == 2 {print $4 " of disk free"}')"
+            fi
+          done) &
+          status=0
+          only=()
+          if [ -n "$EXAMINE" ]; then only=(--re "$EXAMINE"); fi
+          cargo mutants "${only[@]}" --shard "$SHARD/16" --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
+          # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
+          # missed and 3 when one timed out. A mutant that loops without end fails the test
+          # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
+          # minutes against the baseline's one or two, is not known to be caught, and fails the
+          # job as a missed one does.
+          case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
+          failed=0
+          for outcome in missed timeout; do
+            if [ -s "mutants.out/$outcome.txt" ]; then
+              { echo "## Mutants $outcome"; echo '```text'; cat "mutants.out/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              failed=2
+            fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore
