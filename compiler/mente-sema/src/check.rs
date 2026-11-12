@@ -3656,7 +3656,15 @@ pub fn f(mut p: Pair) {
             codes("pub fn f(c: bool) {\n  guard c else {\n    guard c else {\n      return\n    }\n  }\n}"),
             ["E0211"]
         );
+        // A `match` reaches its end through any arm that does (`core-calculus.md`, item 6).
+        assert_eq!(
+            codes("pub fn f(c: bool) {\n  guard c else {\n    match c {\n      true => {\n        return\n      }\n      false => {\n        nothing()\n      }\n    }\n  }\n}"),
+            ["E0211"]
+        );
         for ok in [
+            // A `match` whose every arm leaves does not reach its end.
+            "pub fn f(c: bool) {\n  guard c else {\n    match c {\n      true => {\n        return\n      }\n      false => {\n        todo(\"x\")\n      }\n    }\n  }\n}",
+            "pub fn f(n: u8) {\n  guard n > 0 else {\n    match n {\n      0 => {\n        return\n      }\n      _ => {\n        unreachable(\"n\")\n      }\n    }\n  }\n}",
             "pub fn f(c: bool) {\n  guard c else {\n    return\n  }\n}",
             "pub fn f(c: bool) {\n  guard c else {\n    todo(\"c\")\n  }\n}",
             "pub fn f(c: bool) {\n  guard c else {\n    val x: u8 = unreachable(\"c\")\n  }\n}",

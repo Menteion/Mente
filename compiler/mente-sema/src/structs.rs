@@ -1609,6 +1609,22 @@ struct {} {{
             codes("module m\nenum E {\n  A\n  B(xs: [4294967295]u16)\n  C(k: u8)\n}\n"),
             ["E0223"]
         );
+        // A payload's array of more than 4,294,967,295 elements of no bytes is reported at the
+        // array, and the enum that holds it has no layout, though its size is within the limit
+        // (`core-calculus.md`, items 3 and 21); so does one whose other variant has nothing to
+        // report.
+        let z = "module m\nstruct Z {\n  a: [0]u8\n}\n";
+        for variants in [
+            "  B(zs: [4294967296]Z)\n",
+            "  B(zs: [4294967296]Z)\n  C(k: u8)\n",
+        ] {
+            let (s, d) = declared(&format!("{}enum E {{\n  A\n{}}}\n", z, variants));
+            assert_eq!(d.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0223"]);
+            assert_eq!(d[0].primary.line, 7);
+            let e = s.get_enum("E").unwrap();
+            assert!(!e.ok && e.layout.is_none(), "{}", variants);
+            assert_eq!(s.layout_of(&Ty::Enum("E".into())), None);
+        }
         // A tree names an enum as such once qualified.
         let module = mente_syntax::parse_module("module m\nenum E {\n  A\n}\n").unwrap();
         let names = enum_names(&module);

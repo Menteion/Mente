@@ -740,6 +740,12 @@ pub fn below(n: i8) -> i8 {
             "f(255)", "f(254)", "f(0)", "g(-128)", "g(-127)", "g(127)", "h(0)", "h(1)", "h(9)",
         ],
     ),
+    // An integer `match` with an arm that leaves by `todo` has no static range, so its arms
+    // meet in its type (`core-calculus.md`, item 14): here `u8` and `i16`.
+    (
+        "pub fn pick(x: u8) -> u8 = match x {\n  0 => todo(\"zero\")\n  _ => x\n}\npub fn sign(c: bool) -> i16 {\n  val r: i16 = match c {\n    true => -300\n    false => todo(\"later\")\n  }\n  r + 1\n}",
+        &["pick(0)", "pick(7)", "pick(255)", "sign(true)", "sign(false)"],
+    ),
 ];
 
 #[cfg(test)]

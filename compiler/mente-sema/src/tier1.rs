@@ -5679,6 +5679,31 @@ mod tests {
                 obligations(src)
             );
         }
+        // A name, an element or a call's result already lies within its type, where it was
+        // stored or returned (`core-calculus.md`, item 4): nothing is proven at the `match`, so
+        // no check is recorded there, and `mn view --checks` lists none. The element's index is
+        // checked, as anywhere.
+        for (src, kinds) in [
+            (
+                "pub fn f(x: u8) -> bool = match x {\n  0 => true\n  _ => false\n}",
+                vec![],
+            ),
+            (
+                "fn g() -> u8 = 7\npub fn f() -> bool = match g() {\n  7 => true\n  _ => false\n}",
+                vec![],
+            ),
+            (
+                "pub fn f(xs: [2]u8, i: u8[0..2]) -> bool = match xs[i] {\n  7 => true\n  _ => false\n}",
+                vec![ObligationKind::Index],
+            ),
+        ] {
+            assert_eq!(
+                obligations(src).iter().map(|o| o.0).collect::<Vec<_>>(),
+                kinds,
+                "{}",
+                src
+            );
+        }
         // Past the narrowing, an arm reads the value within the type, at either end, so only the
         // scrutinee is reported.
         for src in [
