@@ -1,0 +1,88 @@
+# The nightly and dispatched runs of the compiler's own fuzzer, `mn fuzz` (fuzz.yml has the required
+# pull-request run): seeded from the run number, or as a dispatch names, for 45 minutes on every
+# core of the runner, in release with debug assertions and the overflow checks every release build
+# has. Its job is named apart from fuzz.yml's required check, so that no run with chosen inputs can
+# report a check of that name (.github/scripts/policy.test.mjs). Each failure, minimized, is
+# uploaded as the artifact `fuzz-nightly-failures` and fails the job. Heavy runs belong here, never
+# on a developer's machine.
+name: Fuzz, nightly
+
+on:
+  schedule:
+    - cron: "0 19 * * *" # 03:00 in Taipei
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed (empty for the run number)
+        default: ""
+      seconds:
+        description: Seconds of fuzzing
+        default: "2700"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
+
+jobs:
+  fuzz:
+    name: Fuzz, nightly
+    runs-on: ubuntu-24.04
+    # The fuzzing budget, then up to 90 s of minimizing for each new failure.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - name: Build mn
+        run: cargo build --locked --release --bin mn
+      - name: Fuzz
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_SEED: ${{ inputs.seed }}
+          INPUT_SECONDS: ${{ inputs.seconds }}
+        run: |
+          case "$EVENT" in
+            workflow_dispatch) seed="${INPUT_SEED:-$GITHUB_RUN_NUMBER}"; seconds="${INPUT_SECONDS:-2700}" ;;
+            *) seed="$GITHUB_RUN_NUMBER"; seconds=2700 ;;
+          esac
+          status=0
+          target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out || status=$?
+          {
+            echo "## mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)"
+            echo '```text'
+            cat fuzz-out/summary.txt 2>/dev/null || echo "no summary: mn fuzz exited with $status"
+            echo '```'
+            for about in fuzz-out/*.txt; do
+              case "$about" in */summary.txt) continue ;; esac
+              [ -f "$about" ] || continue
+              echo "### ${about#fuzz-out/}"
+              echo '```text'
+              cat "$about"
+              echo '--- minimized input (first 40 lines):'
+              head -n 40 "${about%.txt}.mn"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          # The floor of work done: a campaign that ran no case found nothing because it looked
+          # at nothing.
+          runs=$(sed -n -E 's/^runs: ([0-9]+)$/\1/p' fuzz-out/summary.txt 2>/dev/null || true)
+          if [ "$status" -eq 0 ] && { [ -z "$runs" ] || [ "$runs" -eq 0 ]; }; then
+            echo "::error::mn fuzz ran ${runs:-no} cases"
+            exit 1
+          fi
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: fuzz-nightly-failures
+          path: fuzz-out
+          if-no-files-found: ignore

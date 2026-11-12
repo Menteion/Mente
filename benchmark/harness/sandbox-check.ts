@@ -16,8 +16,9 @@
 //   node benchmark/harness/sandbox-check.ts --sandbox benchmark/harness/sandbox.sh [--rustc rustc]
 //     [--rust-toolchain <toolchain>] [--odin odin] [--out sandbox-out]
 //
-// It needs --sandbox; without it there is nothing to prove, so it is skipped, since a developer's
-// machine has no sandbox. --out must lie outside the repository, which the sandbox hides; the
+// It needs --sandbox; without it there is nothing to prove, so it is skipped on a developer's
+// machine, which has no sandbox, and fails in CI (CI set), where a measured run stands on it.
+// --out must lie outside the repository, which the sandbox hides; the
 // held-out stand-in and the write probe go beside it. It runs in the workflow "Harness". The
 // marker stands in for the API key; the canary never prints what it read, only whether it could.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -57,6 +58,9 @@ interface Run {
 async function main(): Promise<void> {
   const sandbox = option("sandbox", "");
   if (!sandbox) {
+    // In CI the check is the proof a measured run stands on: without a sandbox it fails, so that an
+    // empty SANDBOX can never read as a sandbox proven.
+    if (process.env.CI) throw new Error("no --sandbox: in CI the sandbox must be proven, not skipped");
     console.log("sandbox-check skipped: pass --sandbox to run it");
     return;
   }

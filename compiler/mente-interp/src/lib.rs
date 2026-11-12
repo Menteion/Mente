@@ -519,3 +519,6 @@ impl Reader {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod overflow_traps;

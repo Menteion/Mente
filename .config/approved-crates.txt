@@ -1,0 +1,55 @@
+# Every crate Cargo.lock holds outside the workspace, each with the direct dependency that brings it
+# in: the dependency approved by name in CLAUDE.md (invariant 2), whose approval covers the crates
+# it brings (docs/design-review.md, dependency-approval). test_the_lock_holds_only_approved_crates
+# in compiler/mente-cli fails, naming the crate, when the lock gains a crate this list lacks, when
+# the list names a crate the lock no longer holds, or when the dependency named does not bring the
+# crate. A pull request that adds a line here lists it for Norman, who approves it before merging.
+#
+# <crate>: <direct dependency of a workspace crate that brings it>
+allocator-api2: cranelift-codegen
+anyhow: cranelift-module
+arbitrary: cranelift-codegen
+bumpalo: cranelift-codegen
+cfg-if: object
+cranelift-assembler-x64: cranelift-codegen
+cranelift-assembler-x64-meta: cranelift-codegen
+cranelift-bforest: cranelift-codegen
+cranelift-bitset: cranelift-codegen
+cranelift-codegen: cranelift-codegen
+cranelift-codegen-meta: cranelift-codegen
+cranelift-codegen-shared: cranelift-codegen
+cranelift-control: cranelift-codegen
+cranelift-entity: cranelift-codegen
+cranelift-frontend: cranelift-frontend
+cranelift-isle: cranelift-codegen
+cranelift-module: cranelift-module
+cranelift-native: cranelift-native
+cranelift-object: cranelift-object
+cranelift-srcgen: cranelift-codegen
+crc32fast: object
+equivalent: gimli
+fnv: gimli
+foldhash: gimli
+gimli: gimli
+hashbrown: gimli
+heck: cranelift-codegen
+indexmap: gimli
+libc: cranelift-native
+libm: cranelift-codegen
+log: cranelift-codegen
+mach2: cranelift-native
+memchr: object
+object: object
+proc-macro2: cranelift-codegen
+quote: cranelift-codegen
+regalloc2: cranelift-codegen
+rustc-hash: cranelift-codegen
+serde: cranelift-codegen
+serde_core: cranelift-codegen
+serde_derive: cranelift-codegen
+smallvec: cranelift-codegen
+stable_deref_trait: gimli
+syn: cranelift-codegen
+target-lexicon: cranelift-codegen
+unicode-ident: cranelift-codegen
+wasmtime-internal-core: cranelift-codegen

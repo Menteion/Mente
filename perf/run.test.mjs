@@ -12,9 +12,29 @@ import {
   gap,
   gate,
   median,
+  missingBase,
   parsePerfCsv,
   summarize,
-} from "./run.mjs";
+} from "./lib.mjs";
+
+test("a kernel the base built nothing for fails the instruction gate, unless it is new", () => {
+  const failed = missingBase({ error: "E0109 at 3:5" }, { requireInstructions: true });
+  assert.equal(failed.pass, false);
+  assert.match(failed.reasons[0], /built no executable \(E0109/);
+  assert.equal(missingBase(undefined, { requireInstructions: true }).pass, false);
+  const fresh = missingBase({ error: "no such file" }, { requireInstructions: true, isNew: true });
+  assert.equal(fresh.pass, true);
+  assert.match(fresh.warnings[0], /new kernel/);
+  const advisory = missingBase({ error: "x" }, { requireInstructions: false });
+  assert.equal(advisory.pass, true);
+  assert.equal(advisory.warnings.length, 1);
+});
+
+test("the CLI runs main whatever path starts it", () => {
+  const cli = fs.readFileSync(path.join(HERE, "run.mjs"), "utf8");
+  assert.doesNotMatch(cli, /process\.argv\[1\]|import\.meta\.url/);
+  assert.match(cli, /^\s*main\(process\.argv\.slice\(2\)\);/m);
+});
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -66,10 +86,25 @@ test("the gate passes a change within the tolerances", () => {
   assert.equal(v.identical, false);
 });
 
-test("the gate fails a change slower than the base beyond the time tolerance", () => {
+test("the gate reports a change slower than the base beyond the time tolerance, and passes it", () => {
   const v = gate(measured(100e6, 1e9, "a"), measured(100e6 * (1 + TIME_TOLERANCE * 1.5), 1e9, "b"));
-  assert.equal(v.pass, false);
-  assert.match(v.reasons[0], /median time/);
+  assert.equal(v.pass, true);
+  assert.deepEqual(v.reasons, []);
+  assert.match(v.warnings[0], /median time .* reported only/);
+  const within = gate(measured(100e6, 1e9, "a"), measured(100e6 * (1 + TIME_TOLERANCE / 2), 1e9, "b"));
+  assert.deepEqual(within.warnings, []);
+});
+
+test("the gate fails a run that must count instructions and counted none", () => {
+  const uncounted = gate(measured(100e6, undefined, "a"), measured(100e6, undefined, "b"), {}, { requireInstructions: true });
+  assert.equal(uncounted.pass, false);
+  assert.match(uncounted.reasons[0], /counted no instructions/);
+  const identical = gate(measured(100e6, undefined, "same"), measured(100e6, undefined, "same"), {}, { requireInstructions: true });
+  assert.equal(identical.pass, false);
+  const counted = gate(measured(100e6, 1e9, "a"), measured(100e6, 1e9, "b"), {}, { requireInstructions: true });
+  assert.equal(counted.pass, true);
+  const halfCounted = gate(measured(100e6, 1e9, "a"), measured(100e6, undefined, "b"), {}, { requireInstructions: true });
+  assert.equal(halfCounted.pass, false);
 });
 
 test("the gate fails a change that executes more instructions beyond their tolerance", () => {

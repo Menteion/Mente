@@ -3678,3 +3678,6 @@ pub struct S {
         );
     }
 }
+
+#[cfg(test)]
+mod overflow_traps;

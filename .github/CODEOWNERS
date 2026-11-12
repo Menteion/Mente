@@ -1,0 +1,54 @@
+# The gate files: what decides whether a change may merge into `main`, which a pull request could
+# otherwise weaken unseen (docs/design-review.md, guard-per-problem). A change to any of them needs
+# its owner's review once the ruleset requires review from Code Owners. The workflow policy test
+# (.github/scripts/policy.test.mjs, GATE_FILES) keeps this list equal to its own and checks that
+# every gate input it reads has an owner.
+
+# The workflows, the required checks, the instruments' path lists, the scripts that decide, and
+# this file.
+/.github/ @Dancraft3746
+
+# How cargo builds and tests: its configuration, the manifests, the lock, the toolchain.
+/.cargo/ @Dancraft3746
+/Cargo.toml @Dancraft3746
+/Cargo.lock @Dancraft3746
+/rust-toolchain.toml @Dancraft3746
+/rust-toolchain @Dancraft3746
+
+# The approved crates and the test limits.
+/.config/ @Dancraft3746
+
+# The lints.
+/clippy.toml @Dancraft3746
+
+# The pinned documentation tools and their configuration.
+/package.json @Dancraft3746
+/package-lock.json @Dancraft3746
+/.spec-guard.json @Dancraft3746
+/.spec-graph.json @Dancraft3746
+/.spec-brief.json @Dancraft3746
+
+# The performance gate.
+/perf/run.mjs @Dancraft3746
+/perf/lib.mjs @Dancraft3746
+
+# The benchmark corpus's lock and its checker, the sandbox agent-written code runs in and its
+# proof, the scripts that run agent code beside the API key, and the toolchains they pin.
+/benchmark/check.mjs @Dancraft3746
+/benchmark/corpus.lock @Dancraft3746
+/benchmark/harness/sandbox.sh @Dancraft3746
+/benchmark/harness/sandbox-check.ts @Dancraft3746
+/benchmark/harness/build.ts @Dancraft3746
+/benchmark/harness/bench.ts @Dancraft3746
+/benchmark/harness/prelim.ts @Dancraft3746
+/benchmark/harness/probe.ts @Dancraft3746
+/benchmark/harness/fixtures.ts @Dancraft3746
+/benchmark/harness/toolchains.json @Dancraft3746
+
+# The gate tests of the compiler's own suite: the dependency policy, the lock's allowlist, English
+# text and the workflow policy's place in the Documentation job; and each crate's overflow test.
+/compiler/mente-cli/tests/gates.rs @Dancraft3746
+/compiler/*/src/overflow_traps.rs @Dancraft3746
+
+# Each crate's manifest, which decides what its tests are: one could drop the gate tests' target.
+/compiler/*/Cargo.toml @Dancraft3746

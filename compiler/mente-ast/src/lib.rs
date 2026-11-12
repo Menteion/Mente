@@ -678,3 +678,6 @@ fn private_helper(x: u32) -> u32 = x
         assert!(parsed[0].errors.is_empty(), "{:?}", parsed[0].errors);
     }
 }
+
+#[cfg(test)]
+mod overflow_traps;

@@ -1,0 +1,55 @@
+# The commands each required job exists to run, by workflow and job, one a line as
+# `<workflow file>#<job id>: <text of the command>`. The workflow policy test
+# (.github/scripts/policy.test.mjs) requires each in a run: step of its job that runs whenever the
+# job does, with no condition in a job without a watch and with the watch's own in an instrument
+# job, and that may not fail quietly: deleting the step, skipping it or letting it continue on error
+# fails the policy. Every job that builds in release proves its overflow checks. A job's every
+# required check is named in .github/required-checks.txt, and every required job is named here.
+
+ci.yml#rust: cargo test --locked
+ci.yml#rust: cargo test --locked -p mente-cli --test gates
+ci.yml#rust: cargo run --locked --bin mn -- spec
+ci.yml#rust: cargo run --locked --bin mn -- test --mutate
+ci.yml#rust: cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+ci.yml#bench: bash .github/scripts/overflow-proof.sh
+ci.yml#bench: MENTE_BENCH_ENFORCE=1
+ci.yml#execution-paths: bash .github/scripts/overflow-proof.sh
+ci.yml#execution-paths: cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
+ci.yml#debuggers: bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn
+ci.yml#tier1-latency: MENTE_BENCH_ENFORCE=1 cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
+ci.yml#tier1-latency: bash .github/scripts/overflow-proof.sh
+ci.yml#docs: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
+ci.yml#docs: npm run verify:docs
+ci.yml#docs: "$RUNNER_TEMP/lint/actionlint" -color -shellcheck
+ci.yml#docs: npm run check:benchmark
+ci.yml#docs: npm run test:benchmark
+ci.yml#docs: npm run test:harness
+
+commits.yml#commits: node .github/scripts/commits.mjs
+
+mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place
+mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing
+
+generated.yml#paths: bash .github/scripts/overflow-proof.sh
+generated.yml#paths: generated_programs_run_alike_on_the_three_paths
+generated.yml#paths: conformance_programs_run_alike_on_the_three_paths
+
+smt.yml#z3: bash .github/scripts/overflow-proof.sh
+smt.yml#z3: ./target/release/mn smt examples
+smt.yml#z3: bash -c 'check "$1"'
+
+fuzz.yml#fuzz: bash .github/scripts/overflow-proof.sh
+fuzz.yml#fuzz: target/release/mn fuzz --seed
+
+mir-mutants.yml#gate: bash .github/scripts/overflow-proof.sh
+mir-mutants.yml#gate: ./target/release/mn test --mutate --reported examples
+
+perf.yml#kernels: bash .github/scripts/overflow-proof.sh
+perf.yml#kernels: node --test perf/run.test.mjs
+perf.yml#kernels: node perf/run.mjs --mn
+
+harness.yml#fixtures: bash .github/scripts/overflow-proof.sh
+harness.yml#fixtures: node benchmark/harness/fixtures.ts --languages mente,rust,odin
+harness.yml#fixtures: node benchmark/harness/fixtures.ts --check document
+harness.yml#fixtures: node benchmark/harness/sandbox-check.ts
+harness.yml#fixtures: npm run test:harness

@@ -1361,38 +1361,6 @@ mod tests {
         assert!(directives >= files_count);
     }
 
-    /// The dependency policy of CLAUDE.md, applied to one manifest: a compiler crate depends
-    /// only on the workspace's own crates, by path; `mente-mir` depends on nothing; only
-    /// `mente-codegen` may add Cranelift, and `gimli` and `object` for its object files and
-    /// debug information (Norman, 2026-11-10). Returns each dependency line outside the policy.
-    fn dependency_policy_violations(krate: &str, manifest: &str) -> Vec<String> {
-        let mut section = String::new();
-        let mut found = Vec::new();
-        for line in manifest.lines().map(str::trim) {
-            if line.starts_with('[') {
-                section = line.trim_matches(|c| c == '[' || c == ']').to_string();
-                continue;
-            }
-            if !section.ends_with("dependencies") || line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let name = line.split(['=', '.']).next().unwrap_or("").trim();
-            let allowed = if name.starts_with("mente-") {
-                krate != "mente-mir"
-                    && !(krate == "mente-interp" && matches!(name, "mente-mir" | "mente-codegen"))
-                    && line.contains("path =")
-            } else {
-                (name.starts_with("cranelift") || matches!(name, "gimli" | "object"))
-                    && krate == "mente-codegen"
-            };
-            if !allowed {
-                found.push(format!("{}: [{}] {}", krate, section, line));
-            }
-        }
-        found
-    }
-
-    /// A new external dependency needs Norman's approval and a change to this policy.
     #[test]
     fn test_watch_checks_first_and_then_only_on_a_change() {
         let session = mente_sema::incremental::Session::new(
@@ -1414,150 +1382,6 @@ mod tests {
             "module n
 "
         ));
-    }
-
-    #[test]
-    fn test_crates_depend_only_on_allowed_crates() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut found = dependency_policy_violations(
-            "workspace",
-            &fs::read_to_string(root.join("Cargo.toml")).unwrap(),
-        );
-        let mut crates = 0;
-        for entry in fs::read_dir(root.join("compiler")).unwrap().flatten() {
-            if let Ok(manifest) = fs::read_to_string(entry.path().join("Cargo.toml")) {
-                crates += 1;
-                found.extend(dependency_policy_violations(
-                    &entry.file_name().to_string_lossy(),
-                    &manifest,
-                ));
-            }
-        }
-        assert!(
-            crates >= 7,
-            "expected the seven compiler crates, read {}",
-            crates
-        );
-        assert!(
-            found.is_empty(),
-            "dependencies outside the policy:\n{}",
-            found.join("\n")
-        );
-
-        // The policy itself: what it lets through and what it stops.
-        let manifest = "[package]\nname = \"x\"\n\n[dependencies]\nmente-ast = { path = \"../mente-ast\" }\ncranelift-codegen = \"0.135\"\n\n[dev-dependencies]\nproptest = \"1\"\n";
-        assert_eq!(
-            dependency_policy_violations("mente-sema", manifest),
-            vec![
-                "mente-sema: [dependencies] cranelift-codegen = \"0.135\"".to_string(),
-                "mente-sema: [dev-dependencies] proptest = \"1\"".to_string(),
-            ]
-        );
-        assert_eq!(
-            dependency_policy_violations("mente-codegen", manifest).len(),
-            1
-        );
-        assert_eq!(dependency_policy_violations("mente-mir", manifest).len(), 3);
-        // The reference interpreter shares no code with the paths it checks.
-        let interp = "[dependencies]\nmente-sema = { path = \"../mente-sema\" }\nmente-mir = { path = \"../mente-mir\" }\nmente-codegen = { path = \"../mente-codegen\" }\n";
-        assert_eq!(
-            dependency_policy_violations("mente-interp", interp),
-            vec![
-                "mente-interp: [dependencies] mente-mir = { path = \"../mente-mir\" }".to_string(),
-                "mente-interp: [dependencies] mente-codegen = { path = \"../mente-codegen\" }"
-                    .to_string(),
-            ]
-        );
-        assert!(dependency_policy_violations("mente-cli", interp).is_empty());
-        assert_eq!(
-            dependency_policy_violations("mente-cli", "[dependencies]\nmente-ast = \"0.1\"\n")
-                .len(),
-            1
-        );
-        // The object and DWARF writers are mente-codegen's alone, and only those two.
-        let objects = "[dependencies]\ngimli = { version = \"0.33\" }\nobject = \"0.40\"\nobject-pool = \"1\"\n";
-        assert_eq!(
-            dependency_policy_violations("mente-codegen", objects),
-            vec!["mente-codegen: [dependencies] object-pool = \"1\"".to_string()]
-        );
-        assert_eq!(
-            dependency_policy_violations("mente-sema", objects),
-            vec![
-                "mente-sema: [dependencies] gimli = { version = \"0.33\" }".to_string(),
-                "mente-sema: [dependencies] object = \"0.40\"".to_string(),
-                "mente-sema: [dependencies] object-pool = \"1\"".to_string(),
-            ]
-        );
-    }
-
-    /// The lines under `root` that hold a CJK character, as `path:line`. Build output, dependencies
-    /// and nested checkouts are skipped: a directory holding `.git`, such as a worktree under `.wt`
-    /// or `.claude/worktrees`, is another branch's files, which this tree does not own.
-    fn non_english_lines(root: &Path) -> Vec<String> {
-        fn is_cjk(c: char) -> bool {
-            matches!(c as u32,
-                0x3000..=0x30FF     // CJK punctuation, Hiragana, Katakana
-                | 0x3400..=0x9FFF   // CJK ideographs
-                | 0xAC00..=0xD7AF   // Hangul
-                | 0xF900..=0xFAFF   // CJK compatibility ideographs
-                | 0xFF00..=0xFFEF) // full-width forms
-        }
-        fn walk(dir: &Path, found: &mut Vec<String>) {
-            for entry in fs::read_dir(dir).unwrap().flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if path.is_dir() {
-                    let skipped = matches!(name.as_str(), ".git" | "target" | "node_modules");
-                    if !skipped && !path.join(".git").exists() {
-                        walk(&path, found);
-                    }
-                } else if let Ok(text) = fs::read_to_string(&path) {
-                    for (i, line) in text.lines().enumerate() {
-                        if line.chars().any(is_cjk) {
-                            found.push(format!("{}:{}", path.display(), i + 1));
-                        }
-                    }
-                }
-            }
-        }
-        let mut found = Vec::new();
-        walk(root, &mut found);
-        found
-    }
-
-    /// The check reads every directory of the tree but a nested checkout, whose files belong to
-    /// another branch (`guard-audit` in `docs/design-review.md`).
-    #[test]
-    fn test_the_english_check_skips_nested_checkouts_only() {
-        let root = std::env::temp_dir().join(format!("mente-english-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        // Written at run time, so this file itself stays English.
-        let cjk: String = [char::from_u32(0x4E2D).unwrap()].iter().collect();
-        fs::create_dir_all(root.join("docs")).unwrap();
-        fs::create_dir_all(root.join(".wt/other")).unwrap();
-        fs::write(root.join("docs/a.md"), format!("text {cjk}\n")).unwrap();
-        fs::write(root.join(".wt/other/.git"), "gitdir: elsewhere\n").unwrap();
-        fs::write(root.join(".wt/other/b.md"), format!("text {cjk}\n")).unwrap();
-        let found = non_english_lines(&root);
-        let _ = fs::remove_dir_all(&root);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(
-            found[0].ends_with(":1") && found[0].contains("a.md"),
-            "{found:?}"
-        );
-    }
-
-    /// Every text file in the repository is English: no CJK characters in code, comments, docs or
-    /// examples (CLAUDE.md). Build output, dependencies and nested checkouts are skipped.
-    #[test]
-    fn test_repository_text_is_english() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let found = non_english_lines(&root);
-        assert!(
-            found.is_empty(),
-            "non-English text at:\n{}",
-            found.join("\n")
-        );
     }
 
     /// How far a median may rise above the base branch's, measured on the same runner in the same
@@ -1722,3 +1546,6 @@ mod tests {
         assert!(errs[1].contains("holds no `.mn` file"));
     }
 }
+
+#[cfg(test)]
+mod overflow_traps;

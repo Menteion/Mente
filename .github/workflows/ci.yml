@@ -1,12 +1,14 @@
-# The verification commands of CLAUDE.md, on every pull request and on main (ROADMAP.md, M0a).
+# The verification commands of CLAUDE.md, on every pull request, in the merge queue and on main
+# (ROADMAP.md, M0a). Every job but Coverage is a required check of `main`
+# (.github/required-checks.txt).
 # Every action is pinned to a full commit SHA; Dependabot proposes updates.
 name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,6 +56,10 @@ jobs:
         run: cargo clippy --all-targets --workspace --locked -- -D warnings
       - name: cargo test
         run: cargo test --locked
+      - name: The gate tests, by name
+        # By name, so that a manifest that drops the target (autotests = false) fails here instead
+        # of leaving the gates untested (compiler/mente-cli/tests/gates.rs).
+        run: cargo test --locked -p mente-cli --test gates
       - name: mn spec
         run: cargo run --locked --bin mn -- spec
       - name: mn test --mutate
@@ -99,7 +105,7 @@ jobs:
     # The projection protocol of ROADMAP.md, in release, on the base branch and then on this
     # change, on one runner: shared runners differ by up to a factor of two from run to run, so
     # only a comparison on one machine means anything. A median more than PROJECTION_TOLERANCE
-    # above the base's fails the job. Not a required check.
+    # above the base's fails the job.
     name: Projection benchmark
     runs-on: ubuntu-24.04
     steps:
@@ -109,10 +115,22 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
+      - name: Overflow checks in this job's release build
+        run: bash .github/scripts/overflow-proof.sh
       - name: Measure the base branch
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          # A pull request compares with its base; a push to main, with the commit before it.
-          if [ -n "$GITHUB_BASE_REF" ]; then base="origin/$GITHUB_BASE_REF"; else base="HEAD~1"; fi
+          # The base each event names: a pull request's branch, a merge group's base commit, the
+          # commit before a push; a dispatched run compares with the commit before its own.
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base="origin/$GITHUB_BASE_REF" ;;
+            merge_group) base="$GROUP_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *) base="HEAD~1" ;;
+          esac
+          if [ -z "$base" ]; then echo "::error::the $GITHUB_EVENT_NAME event names no base"; exit 1; fi
           git worktree add ../base "$base"
           (cd ../base && cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol) \
             | sed -n -E 's/^([^ :]+): median ([0-9.]+) .*/\1 \2/p' > "$RUNNER_TEMP/base-medians.txt"
@@ -145,6 +163,8 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
+      - name: Overflow checks in this job's release build
+        run: bash .github/scripts/overflow-proof.sh
       - name: Compare
         run: cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 
@@ -184,7 +204,6 @@ jobs:
     # The Tier-1 re-check protocol of ROADMAP.md, in release: 1,000 timed single-token edits to
     # the generated module and to each module in examples/, applied to the session
     # `mn check --watch` runs. A 99th percentile of 5 ms or more, in any module, fails the job.
-    # Not a required check.
     name: Tier-1 latency
     runs-on: ubuntu-24.04
     steps:
@@ -195,6 +214,8 @@ jobs:
         run: rustup toolchain install
       - name: Measure
         run: MENTE_BENCH_ENFORCE=1 cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
+      - name: Overflow checks in this job's release build
+        run: bash .github/scripts/overflow-proof.sh
 
   docs:
     name: Documentation
@@ -208,8 +229,40 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - run: npm ci
+      # Exactly a name and a command, first, and through node itself: before npm ci, so that no
+      # install script or npm hook can change what it runs. The Rust jobs' test
+      # test_the_documentation_job_runs_the_workflow_policy fails on any other key or order.
+      - name: The workflow policy, its required checks, path lists, pins and milestone tags
+        run: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
+      # No package's install script runs: none is needed, and one could write the environment of
+      # the steps after it.
+      - run: npm ci --ignore-scripts
       - run: npm run verify:docs
+      - name: Install actionlint and shellcheck, pinned and checksummed
+        # From their releases, as the SMT job installs Z3; neither is a build dependency.
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/lint"
+          mkdir -p "$bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$bin" actionlint
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          install "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" "$bin/shellcheck"
+          "$bin/actionlint" -version
+          "$bin/shellcheck" --version
+      - name: actionlint over every workflow, with shellcheck on every run script
+        run: |
+          "$RUNNER_TEMP/lint/actionlint" -color -shellcheck "$RUNNER_TEMP/lint/shellcheck" -pyflakes ""
       - run: npm run check:benchmark
       - run: npm run test:benchmark
       - run: npm run test:harness
