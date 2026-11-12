@@ -20,8 +20,9 @@ use std::collections::BTreeSet;
 
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
-    Arg, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind, FnSyntax,
-    Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId,
+    ExprKind, FnSyntax, PatternKind, Payload, Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind,
+    UnaryOp,
 };
 use mente_syntax::{Attr, Span};
 
@@ -971,7 +972,7 @@ fn constrain_offset(st: &mut Octagon, x: usize, terms: &[Term], c: i128, lo: i12
 /// its place is put in parentheses.
 fn prec(kind: &ExprKind) -> u8 {
     match kind {
-        ExprKind::If { .. } => 0,
+        ExprKind::If { .. } | ExprKind::Match { .. } => 0,
         ExprKind::Binary { op, .. } => match op {
             BinaryOp::Or => 1,
             BinaryOp::And => 2,
@@ -1062,6 +1063,29 @@ fn print(tree: &Tree, e: ExprId, subst: Subst) -> (String, u8) {
         ExprKind::Todo(r) => format!("todo({:?})", r),
         ExprKind::Unreachable(r) => format!("unreachable({:?})", r),
         ExprKind::If { cond, .. } => format!("if {} {{ ... }}", at(*cond, 0)),
+        ExprKind::Match { scrutinee, .. } => format!("match {} {{ ... }}", at(*scrutinee, 0)),
+        ExprKind::Variant {
+            enum_name,
+            name,
+            payload,
+            ..
+        } => match payload {
+            Payload::None => format!("{}.{}", enum_name, name),
+            Payload::Named(fields) => {
+                let fields: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, at(f.value, 0)))
+                    .collect();
+                format!("{}.{}({})", enum_name, name, fields.join(", "))
+            }
+            Payload::Positional(args) => {
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|a| format!("{}{}", if a.is_mut { "mut " } else { "" }, at(a.value, 0)))
+                    .collect();
+                format!("{}.{}({})", enum_name, name, args.join(", "))
+            }
+        },
         ExprKind::Error => "_".to_string(),
     };
     (text, p)
@@ -1271,6 +1295,8 @@ enum Anchor {
     After(BlockId),
     /// At the start of an expression body, turned into a block.
     Body(ExprId),
+    /// At the start of a `match` arm written as an expression, turned into a block.
+    Arm(ExprId),
     Nowhere,
 }
 
@@ -1339,6 +1365,14 @@ struct Fx<'a> {
     loop_memo: Vec<(StmtId, Octagon, Octagon)>,
     /// The passes over a loop's body, for the test that keeps them linear in nesting.
     passes: usize,
+    /// The `match` arm written as an expression being checked, before which a `guard` goes
+    /// once the arm is made a block, when no statement inside it is the innermost.
+    arm: Option<ExprId>,
+    /// Whether the value being narrowed is an `if`'s or a `match`'s, which a `guard` that repeats it
+    /// would give a variable of its own and tell Tier 1 nothing of.
+    unfollowed: bool,
+    /// The declared shape of each pattern binding: its payload field's, in its enum's tree.
+    pattern_shapes: Vec<Option<Shape>>,
 }
 
 /// An `E0502` that declaring a `var` refined might fix: the diagnostic's index in the report,
@@ -1516,6 +1550,47 @@ fn named(tree: &Tree, resolution: &Resolution, e: ExprId) -> Vec<usize> {
     out
 }
 
+/// The declared shape of each binding a `match` pattern makes, by binding: its payload field's,
+/// in its enum's tree, refinements included; none for every other binding.
+fn pattern_shapes(f: &Function) -> Vec<Option<Shape>> {
+    let mut out = vec![None; f.resolution.bindings.len()];
+    for (m, e) in f.syntax.tree.exprs.iter().enumerate() {
+        let ExprKind::Match { arms, .. } = &e.kind else {
+            continue;
+        };
+        for (k, arm) in arms.iter().enumerate() {
+            let PatternKind::Variant {
+                enum_name,
+                name,
+                bindings: Some(bs),
+                ..
+            } = &arm.pattern.kind
+            else {
+                continue;
+            };
+            let Some(def) = f.structs.get_enum(enum_name) else {
+                continue;
+            };
+            let Some((_, v)) = def.variant(name) else {
+                continue;
+            };
+            for (i, b) in bs.iter().enumerate() {
+                let field = match &b.field {
+                    Some((n, _)) => v.field(n).map(|(_, fd)| fd),
+                    None => v.fields.get(i),
+                };
+                let (Some(fd), Some(id)) =
+                    (field, f.resolution.patterns.get(&(ExprId(m as u32), k, i)))
+                else {
+                    continue;
+                };
+                out[id.0 as usize] = Some(Fx::declared_shape(def.tree(), fd.decl));
+            }
+        }
+    }
+    out
+}
+
 fn is_int_type(tree: &Tree, t: TypeId) -> bool {
     matches!(tree.ty(t).kind, TypeKind::Int { .. })
 }
@@ -1604,6 +1679,9 @@ impl<'a> Fx<'a> {
             head_of: None,
             loop_memo: Vec::new(),
             passes: 0,
+            arm: None,
+            unfollowed: false,
+            pattern_shapes: pattern_shapes(f),
         };
         let shape = f.syntax.result.map(|t| fx.own_shape(t));
         fx.result_shape = shape;
@@ -1670,6 +1748,7 @@ impl<'a> Fx<'a> {
                         }
                     }
                     ExprKind::If { .. }
+                    | ExprKind::Match { .. }
                     | ExprKind::Index { .. }
                     | ExprKind::Field { .. }
                     | ExprKind::Binary {
@@ -1765,6 +1844,9 @@ impl<'a> Fx<'a> {
     }
 
     fn binding_shape(&self, b: usize) -> Shape {
+        if let Some(shape) = self.pattern_shapes.get(b).cloned().flatten() {
+            return shape;
+        }
         match self.resolution.bindings[b].ty {
             Some(t) => self.own_shape(t),
             None => Shape::plain(&self.typing.bindings[b]),
@@ -2204,6 +2286,7 @@ impl<'a> Fx<'a> {
     fn anchor(&self) -> Anchor {
         match (self.stmt, self.syntax.body) {
             (Some(s), _) => Anchor::Before(s),
+            (None, _) if self.arm.is_some() => self.arm.map_or(Anchor::Nowhere, Anchor::Arm),
             (None, Some(Body::Expr(e))) => Anchor::Body(e),
             _ => Anchor::Nowhere,
         }
@@ -2354,6 +2437,20 @@ impl<'a> Fx<'a> {
                         end: span.end,
                         ..self.point(eq)
                     },
+                    replacement: format!(
+                        "{{\n{ind}  {line}\n{ind}  {value}\n{ind}}}",
+                        ind = ind,
+                        line = line,
+                        value = value
+                    ),
+                })
+            }
+            Anchor::Arm(x) => {
+                let span = self.span(x);
+                let ind = self.indent(self.line_start(span.start));
+                let value = self.src.get(span.start..span.end)?;
+                Some(Edit {
+                    span,
                     replacement: format!(
                         "{{\n{ind}  {line}\n{ind}  {value}\n{ind}}}",
                         ind = ind,
@@ -2941,6 +3038,13 @@ impl<'a> Fx<'a> {
             parts.join(" and ")
         });
         let (guard, message) = match guard {
+            Some(_) if self.unfollowed => (
+                None,
+                format!(
+                    "{}; a `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one, so none is offered: bind its value to a `val`, and `guard` that",
+                    message
+                ),
+            ),
             Some(_) if repeats => (
                 None,
                 format!(
@@ -3321,7 +3425,15 @@ impl<'a> Fx<'a> {
             _ => {
                 let v = self.eval(st, e);
                 let what = self.own_text(e);
+                // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one's
+                // value, whose variable is given anew where it is evaluated.
+                let control = matches!(
+                    self.tree.expr(e).kind,
+                    ExprKind::If { .. } | ExprKind::Match { .. }
+                );
+                let was = std::mem::replace(&mut self.unfollowed, control);
                 self.narrow(st, &v, shape, (self.span(e), Tag::None), place, Some(what));
+                self.unfollowed = was;
                 v
             }
         }
@@ -3481,6 +3593,13 @@ impl<'a> Fx<'a> {
             }
             ExprKind::Call { args, .. } => self.call(st, e, args),
             ExprKind::Construct { name, fields } => self.construct(st, e, name, fields),
+            ExprKind::Variant {
+                enum_name,
+                name,
+                payload,
+                ..
+            } => self.variant(st, enum_name, name, payload),
+            ExprKind::Match { scrutinee, arms } => self.match_expr(st, e, *scrutinee, arms),
             ExprKind::Array(items) => {
                 let mut each: Option<Val> = None;
                 for &i in items {
@@ -3614,6 +3733,197 @@ impl<'a> Fx<'a> {
             self.le(st, l, &v, 0);
         }
         v
+    }
+
+    /// A variant built: each value of its payload enters its field's type, in the order
+    /// written, which is the declaration's, as a struct's do; an enum's value is not followed.
+    fn variant(&mut self, st: &mut Octagon, enum_name: &str, name: &str, payload: &Payload) -> Val {
+        let fields: Vec<(ExprId, Option<String>)> = match payload {
+            Payload::None => Vec::new(),
+            Payload::Named(fields) => fields
+                .iter()
+                .map(|f| (f.value, Some(f.name.clone())))
+                .collect(),
+            // A payload built by position is an error, which the type checker reports first.
+            Payload::Positional(args) => args.iter().map(|a| (a.value, None)).collect(),
+        };
+        let mut built: Vec<Val> = Vec::new();
+        for (value, field) in fields {
+            self.read_before(st, value, built.iter_mut());
+            let decl = field.and_then(|f| {
+                let def = self.structs.get_enum(enum_name)?;
+                let (_, v) = def.variant(name)?;
+                let (_, fd) = v.field(&f)?;
+                Some((def, fd.decl, f))
+            });
+            let v = match decl {
+                Some((def, t, f)) => {
+                    let shape = Self::declared_shape(def.tree(), t);
+                    let place = format!("field `{}` of `{}.{}`", f, enum_name, name);
+                    self.eval_into(st, value, &shape, &place)
+                }
+                None => self.eval(st, value),
+            };
+            built.push(v);
+        }
+        Val::Other
+    }
+
+    /// A `match` (`core-calculus.md`, item 14): its scrutinee evaluated once, then each arm on
+    /// the states its pattern selects, joined as an `if`'s branches are.
+    fn match_expr(&mut self, st: &mut Octagon, e: ExprId, scrutinee: ExprId, arms: &[Arm]) -> Val {
+        let ends = self.match_arms(st.clone(), e, scrutinee, arms);
+        let v = match self.sites[e.0 as usize] {
+            Site::Value(var) => {
+                let mut out: Option<Octagon> = None;
+                for (mut s, v) in ends {
+                    self.assign(&mut s, var, &v);
+                    out = Some(match out {
+                        Some(o) => o.join(&s),
+                        None => s,
+                    });
+                }
+                *st = out.unwrap_or_else(|| {
+                    let mut s = st.clone();
+                    s.set_empty();
+                    s
+                });
+                return var_val(var);
+            }
+            _ => {
+                let vals: Vec<Val> = ends
+                    .iter()
+                    .filter(|(s, _)| !s.is_empty())
+                    .map(|(s, v)| summary_of(s, v))
+                    .collect();
+                let joined = vals
+                    .iter()
+                    .skip(1)
+                    .fold(vals.first().cloned(), |a, b| a.map(|a| join_summary(&a, b)));
+                joined.unwrap_or(Val::Other)
+            }
+        };
+        let mut out: Option<Octagon> = None;
+        for (s, _) in ends {
+            out = Some(match out {
+                Some(o) => o.join(&s),
+                None => s,
+            });
+        }
+        *st = out.unwrap_or_else(|| {
+            let mut s = st.clone();
+            s.set_empty();
+            s
+        });
+        v
+    }
+
+    /// The state each arm of a `match` ends in, and its value: the scrutinee is evaluated once,
+    /// in `st`; an arm's pattern then selects its states. A literal gives a scrutinee Tier 1
+    /// follows its value, `true` and `false` decide a condition, `_` on an integer takes the
+    /// range left past the literals before it at either end, and a variant's bindings take their
+    /// fields' types and refinements.
+    fn match_arms(
+        &mut self,
+        mut st: Octagon,
+        e: ExprId,
+        scrutinee: ExprId,
+        arms: &[Arm],
+    ) -> Vec<(Octagon, Val)> {
+        let is_bool = matches!(self.typing.exprs[scrutinee.0 as usize], Ty::Bool);
+        let (value, cond) = if is_bool {
+            (Val::Other, Some(self.cond(&mut st, scrutinee)))
+        } else {
+            (self.eval(&mut st, scrutinee), None)
+        };
+        let mut literals: Vec<Exact> = Vec::new();
+        let mut ends = Vec::new();
+        for (k, arm) in arms.iter().enumerate() {
+            let mut a = st.clone();
+            let mark = self.scope.len();
+            match &arm.pattern.kind {
+                PatternKind::Bool(b) => {
+                    if let Some(c) = &cond {
+                        self.assume(&mut a, c, *b);
+                    }
+                }
+                PatternKind::Int {
+                    negative, value: n, ..
+                } => {
+                    let lit = Exact::new(*negative, *n);
+                    literals.push(lit);
+                    let c = if lit.is_far() {
+                        Cond::Far(BinaryOp::Eq, Box::new((value.clone(), lit)))
+                    } else {
+                        cmp(BinaryOp::Eq, value.clone(), bound_int(*negative, *n))
+                    };
+                    self.assume(&mut a, &c, true);
+                }
+                PatternKind::Wildcard => {
+                    // The values the literals before it take at either end of the scrutinee's
+                    // range are left out of `_`'s.
+                    let (lo, hi) = interval(&a, &value);
+                    if lo > -INF && hi < INF && lo <= hi {
+                        let has = |x: i128| literals.contains(&Exact::from_i128(x));
+                        let mut l = lo;
+                        while l <= hi && has(l) {
+                            l += 1;
+                        }
+                        let mut h = hi;
+                        while h >= l && has(h) {
+                            h -= 1;
+                        }
+                        if l > lo {
+                            self.assume(
+                                &mut a,
+                                &cmp(BinaryOp::Ge, value.clone(), lin(Vec::new(), l)),
+                                true,
+                            );
+                        }
+                        if h < hi {
+                            self.assume(
+                                &mut a,
+                                &cmp(BinaryOp::Le, value.clone(), lin(Vec::new(), h)),
+                                true,
+                            );
+                        }
+                    }
+                }
+                PatternKind::Variant { bindings, .. } => {
+                    for i in 0..bindings.as_ref().map_or(0, Vec::len) {
+                        let Some(&id) = self.resolution.patterns.get(&(e, k, i)) else {
+                            continue;
+                        };
+                        let b = id.0 as usize;
+                        if let Some(var) = self.vars[b] {
+                            let shape = self.binding_shape(b);
+                            self.track(&mut a, var, &TOP);
+                            a.forget(var);
+                            self.facts(&mut a, var, &shape);
+                        }
+                        self.havoc_paths(&mut a, b, &[]);
+                        self.scope.push(b);
+                    }
+                }
+            }
+            let v = if a.is_empty() {
+                Val::Other
+            } else {
+                match arm.body {
+                    ArmBody::Block(b) => self.block(&mut a, b, None),
+                    ArmBody::Expr(x) => {
+                        let (stmt, arm) = (self.stmt.take(), self.arm.replace(x));
+                        let v = self.eval(&mut a, x);
+                        self.stmt = stmt;
+                        self.arm = arm;
+                        v
+                    }
+                }
+            };
+            self.scope.truncate(mark);
+            ends.push((a, v));
+        }
+        ends
     }
 
     fn if_expr(
@@ -4080,22 +4390,56 @@ impl<'a> Fx<'a> {
                     self.guards(*otherwise, out);
                 }
                 StmtKind::Expr(e) => self.guards_in_if(*e, out),
-                _ => {}
+                // A guard of an inner loop holds in its rounds only, and the other statements
+                // hold none.
+                StmtKind::Binding { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Discard(_) => {}
             }
         }
     }
 
+    /// The conditions of the `guard`s in the blocks of an `if` or a `match` statement.
     fn guards_in_if(&self, e: ExprId, out: &mut Vec<Cand>) {
-        if let ExprKind::If {
-            then, otherwise, ..
-        } = &self.tree.expr(e).kind
-        {
-            self.guards(*then, out);
-            match otherwise {
-                Some(Else::Block(b)) => self.guards(*b, out),
-                Some(Else::If(i)) => self.guards_in_if(*i, out),
-                None => {}
+        match &self.tree.expr(e).kind {
+            ExprKind::If {
+                then, otherwise, ..
+            } => {
+                self.guards(*then, out);
+                match otherwise {
+                    Some(Else::Block(b)) => self.guards(*b, out),
+                    Some(Else::If(i)) => self.guards_in_if(*i, out),
+                    None => {}
+                }
             }
+            ExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    match arm.body {
+                        ArmBody::Block(b) => self.guards(b, out),
+                        ArmBody::Expr(x) => self.guards_in_if(x, out),
+                    }
+                }
+            }
+            // No other expression holds a statement.
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::Error => {}
         }
     }
 
@@ -4182,6 +4526,46 @@ impl<'a> Fx<'a> {
             ExprKind::Construct { fields, .. } => {
                 for f in fields {
                     self.changed_expr(f.value, out);
+                }
+            }
+            ExprKind::Variant { payload, .. } => match payload {
+                Payload::None => {}
+                Payload::Named(fields) => {
+                    for f in fields {
+                        self.changed_expr(f.value, out);
+                    }
+                }
+                Payload::Positional(args) => {
+                    for a in args {
+                        if a.is_mut {
+                            out.extend(self.place_parts(a.value, &mut Vec::new()));
+                        }
+                        self.changed_expr(a.value, out);
+                    }
+                }
+            },
+            // A `match` declares its patterns' bindings in its arms, as a block its bindings.
+            ExprKind::Match { scrutinee, arms } => {
+                self.changed_expr(*scrutinee, out);
+                for (k, arm) in arms.iter().enumerate() {
+                    let declared = match &arm.pattern.kind {
+                        PatternKind::Variant {
+                            bindings: Some(bs), ..
+                        } => bs.len(),
+                        PatternKind::Variant { bindings: None, .. }
+                        | PatternKind::Int { .. }
+                        | PatternKind::Bool(_)
+                        | PatternKind::Wildcard => 0,
+                    };
+                    for i in 0..declared {
+                        if let Some(id) = self.resolution.patterns.get(&(e, k, i)) {
+                            out.push(id.0 as usize);
+                        }
+                    }
+                    match arm.body {
+                        ArmBody::Expr(x) => self.changed_expr(x, out),
+                        ArmBody::Block(b) => self.changed_block(b, out),
+                    }
                 }
             }
             ExprKind::Field { base, .. } | ExprKind::Repeat { value: base, .. } => {
@@ -4470,6 +4854,14 @@ impl<'a> Fx<'a> {
 
     /// The states an `if` statement's branches end in, one for each branch.
     fn if_ends(&mut self, mut st: Octagon, e: ExprId) -> Vec<Octagon> {
+        // A `match` statement's arms end apart, as an `if`'s branches do.
+        if let ExprKind::Match { scrutinee, arms } = &self.tree.expr(e).kind {
+            return self
+                .match_arms(st, e, *scrutinee, arms)
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect();
+        }
         let ExprKind::If {
             cond,
             then,
@@ -4911,9 +5303,10 @@ mod tests {
             Ok(m) => m,
             Err(d) => panic!("{:?}", d),
         };
-        let parsed = mente_syntax::parse_bodies(&text, &m);
+        let parsed = crate::parse_qualified(&text, &m);
         let parsed_structs = mente_syntax::parse_structs(&text, &m);
-        let (structs, _) = crate::structs::declare(&m, &parsed_structs);
+        let parsed_enums = mente_syntax::parse_enums(&text, &m);
+        let (structs, _) = crate::structs::declare(&m, &parsed_structs, &parsed_enums);
         let routings: Vec<Routing> = m
             .items
             .iter()
@@ -4939,7 +5332,8 @@ mod tests {
             assert!(p.errors.is_empty(), "{:?}", p.errors);
             let (resolution, errors) = crate::names::resolve(syntax, &names, &structs);
             assert!(errors.is_empty(), "{:?}", errors);
-            let (typing, errors) = crate::check::check(syntax, &resolution, &signatures, &structs);
+            let (typing, errors) =
+                crate::check::check(syntax, &resolution, &signatures, &structs, &text);
             assert!(errors.is_empty(), "{:?}", errors);
             let f = Function {
                 syntax,
@@ -4970,7 +5364,7 @@ mod tests {
         let syntax = parsed.last().and_then(|p| p.syntax.as_ref()).unwrap();
         let structs = crate::structs::Structs::default();
         let (resolution, _) = crate::names::resolve(syntax, &names, &structs);
-        let (typing, _) = crate::check::check(syntax, &resolution, &signatures, &structs);
+        let (typing, _) = crate::check::check(syntax, &resolution, &signatures, &structs, &text);
         let f = Function {
             syntax,
             resolution: &resolution,
@@ -5096,6 +5490,98 @@ mod tests {
         let text = fixed(src);
         assert_eq!(check_source(&text).err(), None, "{}", text);
         text
+    }
+
+    /// The enum of the tests of `match`: a payload of a refined field.
+    const READING: &str =
+        "pub enum Reading {\n  Missing\n  Level(n: u8[0..10], m: u16)\n}\nfn next(mut i: u8) -> u8 {\n  i = i / 2 + 1\n  i\n}\n";
+
+    /// A `match` is control flow, its arms joined: a literal arm gives a scrutinee Tier 1
+    /// follows its value; `_` the range the literals before it leave at either end; `true` and
+    /// `false` decide a condition; and a payload's binding takes its field's refinement.
+    #[test]
+    fn test_match_arms_narrow_the_state() {
+        let with = |f: &str| format!("{}{}", READING, f);
+        for src in [
+            "pub fn f(x: u8) -> u8[0..1] = match x {\n  0 => x\n  _ => 0\n}",
+            "pub fn f(n: u8) -> u8[1..=255] = match n {\n  0 => 1\n  _ => n\n}",
+            "pub fn f(n: i8) -> i8[-126..=125] = match n {\n  -128 => 0\n  -127 => 0\n  127 => 0\n  126 => 0\n  _ => n\n}",
+            "pub fn f(x: u8) -> u8[0..10] = match x < 10 {\n  true => x\n  false => 0\n}",
+            "pub fn f(r: Reading) -> u8[0..10] = match r {\n  Reading.Level(n: n, m: _) => n\n  Reading.Missing => 0\n}",
+            "pub fn f(p: Reading, x: u8) -> u8[0..20] {\n  var y: u8 = 0\n  match p {\n    Reading.Level(n: n, m: _) => {\n      y = n + n\n    }\n    Reading.Missing => {}\n  }\n  y\n}",
+            "pub fn f(x: u128) -> u128[0..=1] = match x {\n  340282366920938463463374607431768211455 => 0\n  _ => if x < 2 { x } else { 1 }\n}",
+        ] {
+            assert_eq!(codes(&with(src)), NONE, "{}", src);
+        }
+        // Without the fact the arm needs, each is an error.
+        for src in [
+            "pub fn f(x: u8) -> u8[0..1] = match x {\n  1 => x\n  _ => 0\n}",
+            "pub fn f(n: u8) -> u8[1..=255] = match n {\n  1 => 1\n  _ => n\n}",
+            "pub fn f(x: u8) -> u8[0..10] = match x < 11 {\n  true => x\n  false => 0\n}",
+            "pub fn f(r: Reading) -> u8[0..5] = match r {\n  Reading.Level(n: n, m: _) => n\n  Reading.Missing => 0\n}",
+            "pub fn f(x: u8) -> Reading = Reading.Level(n: x, m: 0)",
+        ] {
+            assert_eq!(codes(&with(src)), ["E0502"], "{}", src);
+        }
+        // A narrowing into a payload's field that always traps is an error too.
+        assert_eq!(
+            codes(&with("pub fn f() -> Reading = Reading.Level(n: 300, m: 0)")),
+            ["E0508"]
+        );
+        // A `match` is a value as an `if` is: one that flows into a refined type is proven as a
+        // whole, and offers no guard, since Tier 1 does not follow it.
+        let src = with(
+            "pub fn f(r: Reading) -> u8[0..5] = match r {\n  Reading.Level(n: n, m: _) => n\n  Reading.Missing => 0\n}",
+        );
+        assert!(diagnostics(&src)[0].fixes.is_empty());
+        // An obligation inside an arm names the arm's binding in its valuation; its guard goes
+        // inside the arm, made a block where it was an expression, and the module then checks.
+        let src = with(
+            "fn take(k: u8) -> u8\n  requires k < 5\n= k\npub fn f(r: Reading) -> u8 = match r {\n  Reading.Level(n: n, m: _) => take(n)\n  Reading.Missing => 0\n}",
+        );
+        assert_eq!(codes(&src), ["E0504"]);
+        assert!(messages(&src)[0].contains("n = 5"), "{:?}", messages(&src));
+        let repaired = repairs(&src);
+        assert!(
+            repaired.contains("Reading.Level(n: n, m: _) => {\n    guard n < 5 else { todo(\"n < 5 is false here\") }\n    take(n)\n  }"),
+            "{}",
+            repaired
+        );
+        let repaired = repairs(&with(
+            "pub fn f(x: u8) -> Reading = match x {\n  0 => Reading.Missing\n  _ => Reading.Level(n: x, m: 1)\n}",
+        ));
+        assert!(repaired.contains("guard x < 10"), "{}", repaired);
+        let repaired = repairs(&with(
+            "pub fn f(r: Reading) -> u8[0..5] {\n  match r {\n    Reading.Level(n: n, m: _) => {\n      val k: u8[0..5] = n\n      k\n    }\n    Reading.Missing => 0\n  }\n}",
+        ));
+        assert!(repaired.contains("      guard n < 5"), "{}", repaired);
+    }
+
+    /// A `mut` call in a scrutinee, in an arm, and in a `match` inside a loop's condition
+    /// changes the binding it is passed: what Tier 1 knew of it before holds no longer, and a
+    /// loop forgets at its head what any of them changes.
+    #[test]
+    fn test_a_match_changes_what_its_mut_calls_pass() {
+        let with = |f: &str| format!("{}{}", READING, f);
+        for src in [
+            // The scrutinee changes `j` before any arm runs.
+            "pub fn f() -> u8[0..1] {\n  var j: u8 = 0\n  val k = match next(mut j) {\n    0 => 0\n    _ => j\n  }\n  k\n}",
+            // An arm changes `j`, and the join keeps both states.
+            "pub fn f(c: bool) -> u8[0..1] {\n  var j: u8 = 0\n  val k = match c {\n    true => next(mut j)\n    false => 0\n  }\n  j + k * 0\n}",
+            // A `match` in a loop's condition changes `i` at every round's head.
+            "pub fn f() -> u8[0..1] {\n  var i: u8 = 0\n  var r: u8 = 0\n  while (match next(mut i) {\n    1 => r < 3\n    _ => false\n  }) {\n    r += 1\n  }\n  i\n}",
+            // A `match` statement in a loop's body binds afresh at every round.
+            "pub fn f(rs: [3]Reading) -> u8[0..1] {\n  var i: usize = 0\n  var last: u8 = 0\n  while i < 3 {\n    match rs[i] {\n      Reading.Level(n: n, m: _) => {\n        last = n\n      }\n      Reading.Missing => {}\n    }\n    i += 1\n  }\n  last\n}",
+        ] {
+            assert_eq!(codes(&with(src)), ["E0502"], "{}", src);
+        }
+        // What the arms give is joined, whatever the call changed.
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8[1..=2] {\n  var j: u8 = 0\n  val k = match next(mut j) {\n    0 => 1\n    _ => 2\n  }\n  k\n}"
+            )),
+            NONE
+        );
     }
 
     use ObligationKind::*;
@@ -5411,11 +5897,21 @@ mod tests {
             diagnostics("pub fn f(x: i8) -> i8[-5..5] = x")[0].fixes[0].message,
             "insert `guard x >= -5 and x < 5 else { todo(\"x >= -5 and x < 5 is false here\") }`"
         );
-        // A value of looser binding than a comparison gets parentheses.
-        assert!(
-            diagnostics("pub fn f(x: u8, c: bool) -> u8[0..5] = if c { x } else { 4 }")[0].fixes[0]
-                .message
-                .contains("guard (if c { x } else { 4 }) < 5 else")
+        // A `guard` that repeats an `if` would give its value a variable of its own, and tell
+        // Tier 1 nothing of the one it checks, so none is offered; the message says how to write
+        // one that works, and that one checks.
+        let d = &diagnostics("pub fn f(x: u8, c: bool) -> u8[0..5] = if c { x } else { 4 }")[0];
+        assert!(d.fixes.is_empty(), "{:?}", d.fixes);
+        assert!(d
+            .message
+            .ends_with("so none is offered: bind its value to a `val`, and `guard` that"));
+        assert_eq!(
+            codes("pub fn f(x: u8, c: bool) -> u8[0..5] {\n  val v = if c { x } else { 4 }\n  guard v < 5 else { todo(\"v\") }\n  v\n}"),
+            NONE
+        );
+        assert_eq!(
+            codes("pub fn f(x: u8, c: bool) -> u8[0..5] {\n  guard (if c { x } else { 4 }) < 5 else { todo(\"v\") }\n  if c { x } else { 4 }\n}"),
+            ["E0502"]
         );
         assert!(
             diagnostics("pub fn f(x: u8, y: u8) -> u8[0..5] = x & y")[0].fixes[0]
@@ -7425,7 +7921,7 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         }
         let m = mente_syntax::parse_module(&src).unwrap();
         let parsed = mente_syntax::parse_structs(&src, &m);
-        let (structs, _) = crate::structs::declare(&m, &parsed);
+        let (structs, _) = crate::structs::declare(&m, &parsed, &[]);
         let mut room = RELATIONAL_LIMIT;
         let paths = scalar_paths(&structs, "S5", &mut room).unwrap();
         assert_eq!((paths.len(), room), (64, RELATIONAL_LIMIT - 64));
@@ -7772,7 +8268,7 @@ mod timing {
         let syntax = parsed[1].syntax.as_ref().unwrap();
         let structs = crate::structs::Structs::default();
         let (resolution, _) = crate::names::resolve(syntax, &names, &structs);
-        let (typing, _) = crate::check::check(syntax, &resolution, &signatures, &structs);
+        let (typing, _) = crate::check::check(syntax, &resolution, &signatures, &structs, text);
         let f = Function {
             syntax,
             resolution: &resolution,

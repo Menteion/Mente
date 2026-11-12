@@ -1,0 +1,16 @@
+// expect: E0132
+module conformance
+pub enum Inner {
+  A
+  B
+}
+
+pub enum Outer {
+  Wrap(inner: Inner)
+  Empty
+}
+
+pub fn pick(o: Outer) -> u8 = match o {
+  Outer.Wrap(inner: Inner.A) => 1
+  Outer.Empty => 2
+}

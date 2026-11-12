@@ -1,0 +1,13 @@
+// expect: pass
+module conformance
+// A newline after `=>` does not end an arm, and an arm's block spans lines.
+pub fn f(b: bool, x: u8) -> u8 = match b {
+  true =>
+    x / 2
+  false => {
+    val y = x / 3
+    y + 1
+  }
+}
+
+pub fn main() -> u8 = f(true, 9) + f(false, 9)

@@ -1,4 +1,4 @@
-// expect: E0203
+// expect: E0109
 module conformance
 pub struct Pair {
   i: u8

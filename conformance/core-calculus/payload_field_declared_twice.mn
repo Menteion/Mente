@@ -1,0 +1,5 @@
+// expect: E0228
+module conformance
+pub enum Shape {
+  Rect(w: u8, w: u8)
+}

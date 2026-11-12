@@ -9,8 +9,8 @@ use mente_sema::structs::Structs;
 use mente_sema::types::{Int as IntType, IntTy, Ty, I64};
 use mente_sema::{CheckedFn, CheckedModule};
 use mente_syntax::tree::{
-    AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind, Refinement,
-    StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind,
+    PatternKind, Payload, Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
 
@@ -46,8 +46,8 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
 
 /// Whether `v` has the shape of a value of type `ty`: an integer, a `bool`, an array of its
 /// length whose elements have its element's shape, or a struct of its name whose fields are
-/// named as its declaration names them, in order, each of its field's shape. Its range is not
-/// checked here.
+/// named as its declaration names them, in order, each of its field's shape, or a variant of an
+/// enum of its name whose payload is so. Its range is not checked here.
 fn shaped(v: &Value, ty: &Ty, structs: &Structs) -> bool {
     match (v, ty) {
         (Value::Int(_), Ty::Int(_)) | (Value::Bool(_), Ty::Bool) => true,
@@ -64,6 +64,16 @@ fn shaped(v: &Value, ty: &Ty, structs: &Structs) -> bool {
                         .all(|(d, (n, v))| d.name == *n && shaped(v, &d.ty, structs))
             })
         }
+        (Value::Enum(name, variant, fields), Ty::Enum(e)) if name == e => structs
+            .get_enum(e)
+            .and_then(|def| def.variant(variant))
+            .is_some_and(|(_, v)| {
+                v.fields.len() == fields.len()
+                    && v.fields
+                        .iter()
+                        .zip(fields)
+                        .all(|(d, (n, x))| d.name == *n && shaped(x, &d.ty, structs))
+            }),
         _ => false,
     }
 }
@@ -634,6 +644,46 @@ impl<'m> Machine<'m> {
                 }
                 Value::Struct(name.clone(), values)
             }
+            // A variant's payload is built as a struct is (`core-calculus.md`, item 14).
+            ExprKind::Variant {
+                enum_name,
+                name,
+                payload,
+                ..
+            } => {
+                let def = self.module.structs.get_enum(enum_name);
+                let variant = def.and_then(|d| d.variant(name)).map(|(_, v)| v);
+                let mut values = Vec::new();
+                if let Payload::Named(fields) = payload {
+                    for fi in fields {
+                        let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
+                        let fty = field.map_or(Ty::Any, |f| f.ty.clone());
+                        let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
+                        let v = self.eval(frame, fi.value, int_ty(&fty))?;
+                        let at = tree.expr(fi.value).span;
+                        let v = self.narrow(frame, v, declared, &fty, at)?;
+                        values.push((fi.name.clone(), v));
+                    }
+                }
+                Value::Enum(enum_name.clone(), name.clone(), values)
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                let v = self.eval(frame, *scrutinee, None)?;
+                for (k, arm) in arms.iter().enumerate() {
+                    if !self.matches(frame, e, k, &arm.pattern.kind, &v) {
+                        continue;
+                    }
+                    return match arm.body {
+                        ArmBody::Expr(x) => self.eval(frame, x, ctx),
+                        ArmBody::Block(b) => self.block(frame, b),
+                    };
+                }
+                // A `match` the checker passes is exhaustive.
+                return trap(
+                    TrapKind::Unreachable("no arm of this `match` matches".into()),
+                    span,
+                );
+            }
             ExprKind::Call { args, .. } => {
                 let Some(index) = f.resolution.calls[e.0 as usize] else {
                     return Ok(Value::Unit);
@@ -712,6 +762,48 @@ impl<'m> Machine<'m> {
             }
             ExprKind::Error => Value::Unit,
         })
+    }
+
+    /// Whether pattern `p`, of arm `k` of the `match` at `m`, matches `v`; when it does, its
+    /// bindings take the payload's fields, which the arm only reads.
+    fn matches(
+        &self,
+        frame: &mut Frame<'m>,
+        m: ExprId,
+        k: usize,
+        p: &PatternKind,
+        v: &Value,
+    ) -> bool {
+        match (p, v) {
+            (PatternKind::Wildcard, _) => true,
+            (PatternKind::Bool(b), Value::Bool(x)) => b == x,
+            (
+                PatternKind::Int {
+                    negative, value, ..
+                },
+                Value::Int(x),
+            ) => {
+                let lit = Int::from_u128(*value);
+                *x == if *negative { lit.negate() } else { lit }
+            }
+            (PatternKind::Variant { name, bindings, .. }, Value::Enum(_, variant, fields)) => {
+                if name != variant {
+                    return false;
+                }
+                for (i, b) in bindings.iter().flatten().enumerate() {
+                    let Some(id) = frame.f.resolution.patterns.get(&(m, k, i)) else {
+                        continue;
+                    };
+                    let field = match &b.field {
+                        Some((f, _)) => fields.iter().find(|(n, _)| n == f),
+                        None => fields.get(i),
+                    };
+                    frame.slots[id.0 as usize] = field.map(|(_, x)| x.clone());
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// An arithmetic, bit or shift operation on two evaluated operands with their static types.
@@ -837,6 +929,22 @@ impl<'m> Machine<'m> {
                 }
                 Ok(Value::Struct(name, out))
             }
+            // A variant's payload, each field into its type, likewise.
+            (Value::Enum(name, variant, fields), Ty::Enum(e)) => {
+                let Some((_, def)) = self
+                    .module
+                    .structs
+                    .get_enum(e)
+                    .and_then(|d| d.variant(&variant))
+                else {
+                    return Ok(Value::Enum(name, variant, fields));
+                };
+                let mut out = Vec::new();
+                for ((n, v), d) in fields.into_iter().zip(&def.fields) {
+                    out.push((n, self.narrow_plain(v, &d.ty, span)?));
+                }
+                Ok(Value::Enum(name, variant, out))
+            }
             (v, _) => Ok(v),
         }
     }
@@ -873,6 +981,18 @@ impl<'m> Machine<'m> {
                 };
                 for ((_, v), d) in fields.iter().zip(&def.fields) {
                     self.refined(frame, v, Some((def.tree(), d.decl)), span)?;
+                }
+                Ok(())
+            }
+            (Value::Enum(_, variant, fields), TypeKind::Enum(e)) => {
+                let Some(def) = self.module.structs.get_enum(e) else {
+                    return Ok(());
+                };
+                let Some((_, v)) = def.variant(variant) else {
+                    return Ok(());
+                };
+                for ((_, x), d) in fields.iter().zip(&v.fields) {
+                    self.refined(frame, x, Some((def.tree(), d.decl)), span)?;
                 }
                 Ok(())
             }

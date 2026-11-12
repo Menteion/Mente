@@ -1,0 +1,17 @@
+// expect: pass
+module conformance
+pub fn sign(x: i8) -> i8 = match x {
+  -128 => -2
+  -1 => -1
+  0 => 0
+  1 => 1
+  _ => 2
+}
+
+pub fn suffixed(x: i16) -> u8 = match x {
+  -5_i16 => 1
+  5_i16 => 2
+  _ => 3
+}
+
+pub fn main() -> i8 = sign(-128) + sign(-1) + sign(100)

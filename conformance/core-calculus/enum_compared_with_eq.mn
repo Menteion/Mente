@@ -1,0 +1,8 @@
+// expect: E0109
+module conformance
+pub enum Light {
+  Red
+  Green
+}
+
+pub fn same(a: Light, b: Light) -> bool = a == b

@@ -22,7 +22,8 @@ use mente_syntax::Span;
 
 pub use int::Int;
 
-/// A value of M2's slice: an integer, a `bool`, an array, a struct, or no value.
+/// A value of M2's slice: an integer, a `bool`, an array, a struct, a variant of an enum, or no
+/// value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
     Int(Int),
@@ -30,11 +31,14 @@ pub enum Value {
     Array(Vec<Value>),
     /// A struct by its name, with its fields' names and values in the order of its declaration.
     Struct(String, Vec<(String, Value)>),
+    /// A variant by its enum's name and its own, with its payload's fields' names and values in
+    /// the order of its declaration, none for a variant that holds nothing.
+    Enum(String, String, Vec<(String, Value)>),
     Unit,
 }
 
 /// The canonical form of a value, Mente's own syntax for it (`core-calculus.md`, item 23):
-/// `42`, `-1`, `true`, `[1, 2, 3]`, `Pair(i: 0, j: 1)`, `()`.
+/// `42`, `-1`, `true`, `[1, 2, 3]`, `Pair(i: 0, j: 1)`, `Shape.Dot`, `Shape.Rect(w: 3, h: 4)`, `()`.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -52,6 +56,20 @@ impl fmt::Display for Value {
             }
             Value::Struct(name, fields) => {
                 write!(f, "{}(", name)?;
+                for (i, (n, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", n, v)?;
+                }
+                write!(f, ")")
+            }
+            Value::Enum(name, variant, fields) => {
+                write!(f, "{}.{}", name, variant)?;
+                if fields.is_empty() {
+                    return Ok(());
+                }
+                write!(f, "(")?;
                 for (i, (n, v)) in fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -373,14 +391,9 @@ impl Reader {
                     "false" => return Some(Value::Bool(false)),
                     _ => {}
                 }
-                // A struct: `Name(field: value, ...)`, every field named.
-                self.skip_space();
-                if self.next()? != '(' {
-                    return None;
-                }
-                let mut fields = Vec::new();
-                loop {
-                    self.skip_space();
+                // A variant: `Name.A`, or `Name.B(field: value, ...)`, every field named.
+                if self.chars.get(self.pos) == Some(&'.') {
+                    self.pos += 1;
                     let start = self.pos;
                     while self
                         .chars
@@ -389,22 +402,23 @@ impl Reader {
                     {
                         self.pos += 1;
                     }
-                    let field: String = self.chars[start..self.pos].iter().collect();
-                    if field.is_empty() || field.starts_with(|c: char| c.is_ascii_digit()) {
+                    let variant: String = self.chars[start..self.pos].iter().collect();
+                    if variant.is_empty() || variant.starts_with(|c: char| c.is_ascii_digit()) {
                         return None;
                     }
-                    self.skip_space();
-                    if self.next()? != ':' {
-                        return None;
+                    if self.chars.get(self.pos) != Some(&'(') {
+                        return Some(Value::Enum(word, variant, Vec::new()));
                     }
-                    fields.push((field, self.value()?));
-                    self.skip_space();
-                    match self.next()? {
-                        ',' => continue,
-                        ')' => return Some(Value::Struct(word, fields)),
-                        _ => return None,
-                    }
+                    self.pos += 1;
+                    let fields = self.fields()?;
+                    return Some(Value::Enum(word, variant, fields));
                 }
+                // A struct: `Name(field: value, ...)`, every field named.
+                self.skip_space();
+                if self.next()? != '(' {
+                    return None;
+                }
+                self.fields().map(|fields| Value::Struct(word, fields))
             }
             _ => {
                 let negative = self.chars.get(self.pos) == Some(&'-');
@@ -426,6 +440,37 @@ impl Reader {
                 let mag: u128 = digits.parse().ok()?;
                 let v = Int::from_u128(mag);
                 Some(Value::Int(if negative { v.negate() } else { v }))
+            }
+        }
+    }
+
+    /// Named fields after their `(`, to the `)` that closes them: `field: value, ...`.
+    fn fields(&mut self) -> Option<Vec<(String, Value)>> {
+        let mut fields = Vec::new();
+        loop {
+            self.skip_space();
+            let start = self.pos;
+            while self
+                .chars
+                .get(self.pos)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+            {
+                self.pos += 1;
+            }
+            let field: String = self.chars[start..self.pos].iter().collect();
+            if field.is_empty() || field.starts_with(|c: char| c.is_ascii_digit()) {
+                return None;
+            }
+            self.skip_space();
+            if self.next()? != ':' {
+                return None;
+            }
+            fields.push((field, self.value()?));
+            self.skip_space();
+            match self.next()? {
+                ',' => continue,
+                ')' => return Some(fields),
+                _ => return None,
             }
         }
     }

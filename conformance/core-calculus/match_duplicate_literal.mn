@@ -1,0 +1,7 @@
+// expect: E0230
+module conformance
+pub fn twice(x: u8) -> u8 = match x {
+  1 => 10
+  1 => 20
+  _ => 30
+}

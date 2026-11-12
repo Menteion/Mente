@@ -256,11 +256,12 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                 out.push_str("}\n\n");
             }
             ItemDecl::Enum(e) if e.is_pub => {
-                out.push_str(&format!(
-                    "pub enum {} {{ {} }}\n\n",
-                    e.name,
-                    e.variants.join(", ")
-                ));
+                // One variant per line, as the grammar writes them (`grammar.md`, item 10).
+                out.push_str(&format!("pub enum {} {{\n", e.name));
+                for v in &e.variants {
+                    out.push_str(&format!("  {}\n", v));
+                }
+                out.push_str("}\n\n");
             }
             ItemDecl::Trait(t) if t.is_pub => {
                 out.push_str(&format!("pub trait {} {{\n", t.name));
@@ -480,8 +481,14 @@ pub bitstruct Flags : u8 {
 bitstruct Hidden : u8 {
   @bits(0..8) pub raw: u8
 }
-pub enum Side { Left, Right }
-enum Inner { A, B }
+pub enum Side {
+  Left
+  Right
+}
+enum Inner {
+  A
+  B
+}
 pub trait Probe {
   fn hit(self) -> bool
 }
@@ -501,10 +508,7 @@ struct Scratch {
                 "pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8",
                 "pub bitstruct Flags : u8 {\n  @bits(0..8) pub bits: u8",
             ),
-            (
-                "pub enum Side { Left, Right }",
-                "pub enum Side { Left, Right, Up }",
-            ),
+            ("  Left\n  Right\n}", "  Left\n  Right\n  Up\n}"),
             ("  fn hit(self) -> bool", "  fn hit(self) -> u8"),
         ] {
             assert_ne!(
@@ -599,7 +603,10 @@ pub struct Cell {
     x < 4096
   }
 }
-pub enum Side { Left, Right }
+pub enum Side {
+  Left
+  Right
+}
 pub trait Probe {
   fn hit(self, x: u32) -> bool
 }
@@ -622,7 +629,7 @@ fn private_helper(x: u32) -> u32 = x
             "@layout(size: 8, align: 4)",
             "  @bytes(0..4) pub x: u32",
             "    x < 4096",
-            "pub enum Side { Left, Right }",
+            "pub enum Side {\n  Left\n  Right\n}",
             "  fn hit(self, x: u32) -> bool",
             "@total",
             "pub fn find(cells: []Cell, key: []u8, lo: usize, hi: usize) -> []Cell ! SearchError from cells with Clock",

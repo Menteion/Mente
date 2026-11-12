@@ -1,0 +1,6 @@
+// expect: E0203
+module conformance
+pub fn odd(b: bool) -> u8 = match b {
+  true => 1
+  0 => 2
+}

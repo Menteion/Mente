@@ -1,0 +1,16 @@
+// expect: pass
+module conformance
+// `u8[0..3]` holds 0, 1 and 2, so those three literals cover it, without `_`.
+pub fn name(x: u8[0..3]) -> u8 = match x {
+  0 => 10
+  1 => 20
+  2 => 30
+}
+
+pub fn inclusive(x: i8[-1..=1]) -> i8 = match x {
+  -1 => 1
+  0 => 0
+  1 => -1
+}
+
+pub fn main() -> u8 = name(2)

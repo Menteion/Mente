@@ -343,6 +343,13 @@ fn native_arg(value: &Value) -> Result<native::Arg, String> {
                 .map(|(_, v)| native_arg(v))
                 .collect::<Result<Vec<_>, String>>()?,
         ),
+        Value::Enum(_, variant, fields) => native::Arg::Enum(
+            variant.clone(),
+            fields
+                .iter()
+                .map(|(_, v)| native_arg(v))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
         v => native::Arg::Int(num(v)?),
     })
 }
@@ -378,6 +385,16 @@ fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
                         .iter()
                         .zip(fields)
                         .all(|(f, (n, v))| f.name == *n && shaped(v, &f.shape))
+            }
+            (Value::Enum(name, variant, fields), Shape::Enum(en)) => {
+                *name == en.name
+                    && en.variant(variant).is_some_and(|(_, v)| {
+                        fields.len() == v.fields.len()
+                            && v.fields
+                                .iter()
+                                .zip(fields)
+                                .all(|(f, (n, x))| f.name == *n && shaped(x, &f.shape))
+                    })
             }
             _ => false,
         }
@@ -423,6 +440,23 @@ pub(crate) fn write(
             }
             Ok(())
         }
+        (Shape::Enum(en), Value::Enum(_, variant, fields))
+            if en
+                .variant(variant)
+                .is_some_and(|(_, v)| v.fields.len() == fields.len()) =>
+        {
+            let (tag, v) = en
+                .variant(variant)
+                .ok_or_else(|| format!("`{}` has no variant `{}`", en.name, variant))?;
+            let t = lower::mir(en.tag);
+            memory
+                .store(at, Val::Int(Num::new(false, tag as u128)), Ty::Int(t))
+                .map_err(|s| s.to_string())?;
+            for (f, (_, item)) in v.fields.iter().zip(fields) {
+                write(memory, at + u64::from(f.offset), &f.shape, item)?;
+            }
+            Ok(())
+        }
         _ => Err(format!("`{}` does not have its parameter's shape", value)),
     }
 }
@@ -457,6 +491,31 @@ fn read(memory: &Memory, at: u64, shape: &Shape) -> Result<String, String> {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(format!("{}({})", st.name, fields.join(", ")))
+        }
+        Shape::Enum(en) => {
+            let tag = match memory
+                .load(at, Ty::Int(lower::mir(en.tag)))
+                .map_err(|s| s.to_string())?
+            {
+                Val::Int(n) => n.mag,
+                _ => return Err("a tag that is not an integer".into()),
+            };
+            let v = usize::try_from(tag)
+                .ok()
+                .and_then(|k| en.variants.get(k))
+                .ok_or_else(|| format!("a tag {} no variant of `{}` has", tag, en.name))?;
+            if v.fields.is_empty() {
+                return Ok(format!("{}.{}", en.name, v.name));
+            }
+            let fields = v
+                .fields
+                .iter()
+                .map(|f| {
+                    let x = read(memory, at + u64::from(f.offset), &f.shape)?;
+                    Ok(format!("{}: {}", f.name, x))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{}.{}({})", en.name, v.name, fields.join(", ")))
         }
         Shape::Unit => Ok("()".into()),
     }
@@ -646,6 +705,31 @@ pub fn below(n: i8) -> i8 {
     (
         "pub fn no_elements() -> [0]u8 = []\npub fn rows_of_none() -> [2][0]u8 {\n  val xs: [2][0]u8 = [[], []]\n  xs\n}",
         &["no_elements()", "rows_of_none()"],
+    ),
+    // Enums: variants built, passed, returned and printed, a payload's refinement checked where
+    // it lands and on the way in, and `match` on an enum, a `bool` and an integer, its
+    // scrutinee evaluated once, a statement and in an arm.
+    (
+        "pub struct P {\n  a: u8\n  b: i8\n}\npub enum E {\n  A\n  B(p: P, n: u8[0..10])\n  C(wide: i128, flag: bool)\n}\npub fn id(e: E) -> E = e\npub fn make(n: u8) -> E = E.B(p: P(a: n, b: -1), n: n)\npub fn wide(x: i128) -> E = E.C(wide: x, flag: x < 0)\npub fn tag(e: E) -> i128 = match e {\n  E.A => 0\n  E.B(p: p, n: n) => p.a + n\n  E.C(wide: w, flag: f) => if f { w } else { 1 }\n}\npub fn sign(x: i8) -> i8 = match x {\n  -128 => -2\n  0 => 0\n  127 => 2\n  _ => 1\n}\nfn count(mut k: u8) -> u8 {\n  k += 1\n  k\n}\npub fn once(c: bool) -> u8 {\n  var k: u8 = 0\n  var r: u8 = 0\n  match count(mut k) {\n    1 => {\n      r = match c {\n        true => 10\n        false => 20\n      }\n    }\n    _ => {}\n  }\n  r + k\n}\npub fn all() -> [3]E = [E.A, make(3), wide(-170141183460469231731687303715884105728)]",
+        &[
+            "id(E.A)",
+            "id(E.B(p: P(a: 255, b: -128), n: 9))",
+            "id(E.B(p: P(a: 1, b: 0), n: 10))",
+            "id(E.C(wide: 170141183460469231731687303715884105727, flag: true))",
+            "make(5)",
+            "make(10)",
+            "tag(E.A)",
+            "tag(E.B(p: P(a: 7, b: 0), n: 2))",
+            "tag(E.C(wide: -5, flag: true))",
+            "tag(E.C(wide: -5, flag: false))",
+            "sign(-128)",
+            "sign(127)",
+            "sign(0)",
+            "sign(-3)",
+            "once(true)",
+            "once(false)",
+            "all()",
+        ],
     ),
 ];
 
@@ -982,6 +1066,42 @@ pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
         let at = memory.alloc(shape.size());
         assert!(write(&mut memory, at, shape, &value(&["a"])).is_err());
         assert!(write(&mut memory, at, shape, &value(&["a", "b", "c"])).is_err());
+        // An enum's argument is one of its variants, named with it, with the payload its
+        // declaration gives the variant, each field once in order, of its type.
+        let text = "module m\npub enum E {\n  A\n  B(n: u8[0..10], f: bool)\n}\npub enum F {\n  A\n}\npub fn h(e: E) -> E = e\n";
+        let lowered = lower::lower(&mente_sema::check_program(text).unwrap()).unwrap();
+        let call = |c: &str| {
+            let (f, args) = mente_interp::parse_call_modes(c).expect("a call");
+            run_lowered(&lowered, &f, args)
+        };
+        assert_eq!(call("h(E.A)"), Ok(vec!["E.A".to_string()]));
+        assert_eq!(
+            call("h(E.B(n: 9, f: true))"),
+            Ok(vec!["E.B(n: 9, f: true)".to_string()])
+        );
+        for wrong in [
+            "F.A",
+            "E.C",
+            "E.A(n: 1, f: true)",
+            "E.B",
+            "E.B(n: 1)",
+            "E.B(f: true, n: 1)",
+            "E.B(n: 1, g: true)",
+            "E.B(n: true, f: true)",
+            "P(a: 1, b: [2, 3])",
+            "1",
+        ] {
+            assert_eq!(
+                call(&format!("h({})", wrong)),
+                Err(format!("`{}` does not have its parameter's shape", wrong))
+            );
+        }
+        assert!(call("h(E.B(n: 10, f: true))")
+            .unwrap_err()
+            .starts_with("trap["));
+        assert!(call("h(E.B(n: 256, f: true))")
+            .unwrap_err()
+            .starts_with("trap[narrowing]"));
     }
 
     /// Each construct the lowering handles, run on calls that reach every path of it, prints

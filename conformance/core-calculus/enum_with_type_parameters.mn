@@ -1,0 +1,6 @@
+// expect: E0109
+module conformance
+pub enum Maybe<T> {
+  Nothing
+  Just(v: T)
+}

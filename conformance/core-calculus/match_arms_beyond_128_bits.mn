@@ -1,0 +1,9 @@
+// expect: E0222
+module conformance
+pub fn wide(c: bool, a: i64, b: u128) -> i128 {
+  val v: i128 = match c {
+    true => a
+    false => b
+  }
+  v
+}

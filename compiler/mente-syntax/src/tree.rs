@@ -110,6 +110,70 @@ pub struct FieldInit {
     pub value: ExprId,
 }
 
+/// What follows a variant's name where it is built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Payload {
+    /// `Name.A`, without parentheses.
+    None,
+    /// `Name.B(field: value, ...)`.
+    Named(Vec<FieldInit>),
+    /// `a.b(value, ...)`: a call on a receiver, or a variant built by position, which name
+    /// resolution tells apart.
+    Positional(Vec<Arg>),
+}
+
+/// One arm of a `match`: a pattern, and the expression or block it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Arm {
+    pub pattern: Pattern,
+    pub body: ArmBody,
+    /// From the pattern to the end of the arm.
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmBody {
+    Expr(ExprId),
+    Block(BlockId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+/// A pattern of M2 (`grammar.md`, item 12), none nested in another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternKind {
+    /// `Name.A`, or `Name.B(field: x, other: _)`, whose bindings are `None` without parentheses.
+    Variant {
+        enum_name: String,
+        name: String,
+        name_span: Span,
+        bindings: Option<Vec<PatBinding>>,
+    },
+    /// An integer literal, with `-` before it or not, and its suffix when it has one.
+    Int {
+        negative: bool,
+        value: u128,
+        suffix: Option<String>,
+    },
+    Bool(bool),
+    /// `_`.
+    Wildcard,
+}
+
+/// One binding of a variant pattern: `field: name` or `field: _`; a binding written without
+/// its field's name, by position, has none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatBinding {
+    pub field: Option<(String, Span)>,
+    /// The name it binds, or `None` for `_`.
+    pub name: Option<String>,
+    pub name_span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExprKind {
     /// An integer literal: its value, and its suffix when it has one (`u8` for `255_u8`).
@@ -150,6 +214,21 @@ pub enum ExprKind {
     Construct {
         name: String,
         fields: Vec<FieldInit>,
+    },
+    /// `Name.A` or `Name.B(field: value, ...)`: a variant of an enum being built. The parser
+    /// writes `a.b(...)`, `a` a name, so; name resolution writes `a.b` so where it finds `a` an
+    /// enum (`grammar.md`, item 12), and reports a call on any other receiver.
+    Variant {
+        enum_name: String,
+        enum_span: Span,
+        name: String,
+        name_span: Span,
+        payload: Payload,
+    },
+    /// `match scrutinee { pattern => arm ... }`.
+    Match {
+        scrutinee: ExprId,
+        arms: Vec<Arm>,
     },
     Array(Vec<ExprId>),
     /// `[value; count]`, with `count` an integer literal.
@@ -252,8 +331,11 @@ pub enum TypeKind {
         len: u128,
         elem: TypeId,
     },
-    /// A type named by a declaration of the module: a struct.
+    /// A type named by a declaration of the module: a struct, or an enum until name resolution
+    /// finds it one.
     Named(String),
+    /// An enum of the module, as name resolution finds a named type to be.
+    Enum(String),
     /// What a diagnostic replaced.
     Error,
 }
@@ -323,6 +405,25 @@ pub struct StructSyntax {
     pub tree: Tree,
 }
 
+/// One variant of an enum declaration: its name, and its payload's fields in the order written,
+/// none for a variant that holds nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantSyntax {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<FieldSyntax>,
+}
+
+/// One enum declaration (`grammar.md`, item 10): its variants in the order written, their
+/// payloads' types in its own tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumSyntax {
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<VariantSyntax>,
+    pub tree: Tree,
+}
+
 impl Tree {
     pub fn expr(&self, id: ExprId) -> &Expr {
         &self.exprs[id.0 as usize]
@@ -382,6 +483,22 @@ impl Tree {
                     ExprKind::Construct { fields, .. } => {
                         out.extend(fields.iter().map(|f| Node::E(f.value.0)));
                     }
+                    ExprKind::Variant { payload, .. } => match payload {
+                        Payload::None => {}
+                        Payload::Named(fields) => {
+                            out.extend(fields.iter().map(|f| Node::E(f.value.0)));
+                        }
+                        Payload::Positional(args) => {
+                            out.extend(args.iter().map(|a| Node::E(a.value.0)));
+                        }
+                    },
+                    ExprKind::Match { scrutinee, arms } => {
+                        out.push(Node::E(scrutinee.0));
+                        out.extend(arms.iter().map(|a| match a.body {
+                            ArmBody::Expr(e) => Node::E(e.0),
+                            ArmBody::Block(b) => Node::B(b.0),
+                        }));
+                    }
                     ExprKind::Array(items) => out.extend(items.iter().map(|e| Node::E(e.0))),
                     ExprKind::Repeat { value, .. } => out.push(Node::E(value.0)),
                     ExprKind::If {
@@ -396,7 +513,12 @@ impl Tree {
                             None => {}
                         }
                     }
-                    _ => {}
+                    ExprKind::Int { .. }
+                    | ExprKind::Bool(_)
+                    | ExprKind::Name(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Error => {}
                 },
                 Node::S(i) => match &self.stmts[i as usize].kind {
                     StmtKind::Binding { ty, init, .. } => {
@@ -604,6 +726,46 @@ impl Tree {
                 out.push(')');
                 out
             }
+            ExprKind::Variant {
+                enum_name,
+                name,
+                payload,
+                ..
+            } => match payload {
+                Payload::None => format!("{}.{}", enum_name, name),
+                Payload::Named(fields) => {
+                    let mut out = format!("(new {}.{}", enum_name, name);
+                    for f in fields {
+                        out.push_str(&format!(" ({} {})", f.name, self.render_expr(f.value)));
+                    }
+                    out.push(')');
+                    out
+                }
+                Payload::Positional(args) => {
+                    let mut out = format!("(call {}.{}", enum_name, name);
+                    for a in args {
+                        out.push(' ');
+                        if a.is_mut {
+                            out.push_str("mut ");
+                        }
+                        out.push_str(&self.render_expr(a.value));
+                    }
+                    out.push(')');
+                    out
+                }
+            },
+            ExprKind::Match { scrutinee, arms } => {
+                let mut out = format!("(match {}", self.render_expr(*scrutinee));
+                for a in arms {
+                    let body = match a.body {
+                        ArmBody::Expr(e) => self.render_expr(e),
+                        ArmBody::Block(b) => self.render_block(b),
+                    };
+                    out.push_str(&format!(" (=> {} {})", render_pattern(&a.pattern), body));
+                }
+                out.push(')');
+                out
+            }
             ExprKind::Array(items) => {
                 let inner: Vec<String> = items.iter().map(|e| self.render_expr(*e)).collect();
                 format!("[{}]", inner.join(" "))
@@ -729,9 +891,29 @@ impl Tree {
             },
             TypeKind::Bool => String::from("bool"),
             TypeKind::Array { len, elem } => format!("[{}]{}", len, self.render_type(*elem)),
-            TypeKind::Named(name) => name.clone(),
+            TypeKind::Named(name) | TypeKind::Enum(name) => name.clone(),
             TypeKind::Error => String::from("<error>"),
         }
+    }
+
+    /// An enum declaration in its canonical form: `(enum Name A (B (field type) ...) ...)`.
+    pub fn render_enum(e: &EnumSyntax) -> String {
+        let variants: Vec<String> = e
+            .variants
+            .iter()
+            .map(|v| {
+                if v.fields.is_empty() {
+                    return v.name.clone();
+                }
+                let fields: Vec<String> = v
+                    .fields
+                    .iter()
+                    .map(|f| format!("({} {})", f.name, e.tree.render_type(f.ty)))
+                    .collect();
+                format!("({} {})", v.name, fields.join(" "))
+            })
+            .collect();
+        format!("(enum {} {})", e.name, variants.join(" "))
     }
 
     /// A struct declaration in its canonical form: `(struct Name (field type) ...)`, a public
@@ -746,6 +928,44 @@ impl Tree {
             })
             .collect();
         format!("(struct {} {})", s.name, fields.join(" "))
+    }
+}
+
+/// A pattern in canonical form: `Name.A`, `(Name.B (field x) (other _))`, `-1`, `true`, `_`.
+pub fn render_pattern(p: &Pattern) -> String {
+    match &p.kind {
+        PatternKind::Variant {
+            enum_name,
+            name,
+            bindings,
+            ..
+        } => match bindings {
+            None => format!("{}.{}", enum_name, name),
+            Some(bs) => {
+                let mut out = format!("({}.{}", enum_name, name);
+                for b in bs {
+                    let bound = b.name.as_deref().unwrap_or("_");
+                    match &b.field {
+                        Some((f, _)) => out.push_str(&format!(" ({} {})", f, bound)),
+                        None => out.push_str(&format!(" {}", bound)),
+                    }
+                }
+                out.push(')');
+                out
+            }
+        },
+        PatternKind::Int {
+            negative,
+            value,
+            suffix,
+        } => format!(
+            "{}{}{}",
+            if *negative { "-" } else { "" },
+            value,
+            suffix.as_ref().map_or(String::new(), |s| format!("_{}", s))
+        ),
+        PatternKind::Bool(b) => b.to_string(),
+        PatternKind::Wildcard => String::from("_"),
     }
 }
 

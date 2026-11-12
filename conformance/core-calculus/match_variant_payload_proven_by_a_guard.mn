@@ -1,0 +1,15 @@
+// expect: pass
+module conformance
+pub enum Reading {
+  Missing
+  Level(n: u8[0..10])
+}
+
+pub fn read(x: u8) -> Reading {
+  guard x < 10 else {
+    return Reading.Missing
+  }
+  Reading.Level(n: x)
+}
+
+pub fn main() -> Reading = read(4)

@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use mente_syntax::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
-    BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind, FnSyntax, StmtKind, Tree, TypeId,
-    TypeKind,
+    ArmBody, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind, FnSyntax, Pattern,
+    PatternKind, Payload, StmtKind, Tree, TypeId, TypeKind,
 };
 use mente_syntax::Span;
 
@@ -31,6 +31,9 @@ pub enum BindingKind {
     Var,
     /// `result` in an `ensures` clause.
     Result,
+    /// A name a `match` pattern binds to a field of a variant's payload: a read-only projection
+    /// of the value matched (`core-calculus.md`, item 14).
+    Pattern,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +59,9 @@ pub struct Resolution {
     pub stmts: Vec<Option<BindingId>>,
     /// Each refinement bound that names a binding, for the type checker to check its type.
     pub bounds: Vec<NamedBound>,
+    /// The binding each name of a `match` pattern declares, by the `match`, the arm and the
+    /// binding's position in the pattern.
+    pub patterns: HashMap<(ExprId, usize, usize), BindingId>,
 }
 
 /// A refinement's bound that names a binding: `name`, or `name.len`.
@@ -88,6 +94,7 @@ pub fn resolve(
             calls: vec![None; count],
             stmts: vec![None; f.tree.stmts.len()],
             bounds: Vec::new(),
+            patterns: HashMap::new(),
         },
         scopes: vec![Vec::new()],
         declared: HashMap::new(),
@@ -110,6 +117,8 @@ impl Resolver<'_> {
     fn type_kind(&self, name: &str) -> Option<&'static str> {
         if self.structs.contains(name) {
             Some("a struct")
+        } else if self.structs.is_enum(name) {
+            Some("an enum")
         } else {
             self.structs.later.get(name).map(|l| l.kind)
         }
@@ -374,6 +383,8 @@ impl Resolver<'_> {
                     self.resolution.calls[e.0 as usize] = Some(index);
                 } else if self.structs.contains(callee) {
                     // A struct built with positional arguments, which the type checker reports.
+                } else if self.structs.is_enum(callee) {
+                    self.enum_called(callee, span);
                 } else if let Some(later) = self.structs.later.get(callee) {
                     let name_span = Span {
                         end: span.start + callee.len(),
@@ -415,6 +426,8 @@ impl Resolver<'_> {
                         ..span
                     };
                     self.errors.push(later.diagnostic(name, name_span));
+                } else if self.structs.is_enum(name) {
+                    self.enum_called(name, span);
                 } else if !self.structs.contains(name) {
                     let mut candidates = self.structs.names();
                     candidates.sort();
@@ -427,6 +440,45 @@ impl Resolver<'_> {
                 }
                 for f in fields {
                     self.expr(tree, f.value);
+                }
+            }
+            ExprKind::Variant {
+                enum_name,
+                enum_span,
+                name,
+                name_span,
+                payload,
+            } => {
+                self.variant(enum_name, *enum_span, name, *name_span, payload);
+                match payload {
+                    Payload::None => {}
+                    Payload::Named(fields) => {
+                        for f in fields {
+                            self.expr(tree, f.value);
+                        }
+                    }
+                    Payload::Positional(args) => {
+                        for a in args {
+                            if a.is_mut {
+                                self.place(tree, a.value, true);
+                            } else {
+                                self.expr(tree, a.value);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.expr(tree, *scrutinee);
+                for (k, arm) in arms.iter().enumerate() {
+                    // The names an arm's pattern binds are visible in that arm only.
+                    self.scopes.push(Vec::new());
+                    self.pattern(e, k, &arm.pattern);
+                    match arm.body {
+                        ArmBody::Expr(x) => self.expr(tree, x),
+                        ArmBody::Block(b) => self.block(tree, b),
+                    }
+                    self.scopes.pop();
                 }
             }
             ExprKind::Unary { operand, .. } => self.expr(tree, *operand),
@@ -466,6 +518,92 @@ impl Resolver<'_> {
         }
     }
 
+    /// `E0204` for an enum called or built as a struct is, at `span`: a value of an enum is one
+    /// of its variants, named with it.
+    fn enum_called(&mut self, name: &str, span: Span) {
+        let first = self
+            .structs
+            .get_enum(name)
+            .and_then(|d| d.variants.first())
+            .map_or("A", |v| v.name.as_str());
+        self.errors.push(Diagnostic::error(
+            "E0204",
+            span,
+            format!(
+                "`{}` is an enum, so a value of it is one of its variants, named with it, as in `{}.{}`",
+                name, name, first
+            ),
+        ));
+    }
+
+    /// `a.b(...)` or `a.b`, `a` at `at`: a variant when `a` is an enum of the module, which the
+    /// type checker reads further; a call on a receiver, a construct a later milestone brings,
+    /// when `a` is a binding or a type of the language (`E0109`); else an unknown name
+    /// (`E0201`), with the closest enum or binding suggested.
+    fn variant(
+        &mut self,
+        enum_name: &str,
+        at: Span,
+        name: &str,
+        name_span: Span,
+        payload: &Payload,
+    ) {
+        if self.structs.is_enum(enum_name) {
+            return;
+        }
+        let call = match payload {
+            Payload::None => false,
+            Payload::Named(_) | Payload::Positional(_) => true,
+        };
+        let receiver = self.lookup(enum_name).is_some()
+            || mente_syntax::body::language_type(enum_name)
+            || self.structs.is_type(enum_name)
+            || self.structs.later.contains_key(enum_name);
+        if receiver && call {
+            let what = format!("a method call (`.{}(...)`)", name);
+            let milestone = mente_syntax::body::later_type(enum_name).map_or("M2", |(m, _)| m);
+            self.errors.push(Diagnostic::error(
+                "E0109",
+                name_span,
+                mente_syntax::diagnostics::later_message(&what, Some(milestone)),
+            ));
+            return;
+        }
+        let mut candidates = self.visible();
+        candidates.extend(self.structs.enums.iter().map(|e| e.name.clone()));
+        self.unknown(enum_name, at, "enum or binding", candidates);
+    }
+
+    /// The names a pattern of arm `k` of the `match` at `e` binds, each declared in the arm's
+    /// scope as a read-only projection; an enum the pattern names that is none of the module's
+    /// is `E0201`.
+    fn pattern(&mut self, e: ExprId, k: usize, pattern: &Pattern) {
+        let PatternKind::Variant {
+            enum_name,
+            bindings,
+            ..
+        } = &pattern.kind
+        else {
+            return;
+        };
+        if !self.structs.is_enum(enum_name) {
+            let span = Span {
+                end: pattern.span.start + enum_name.len(),
+                ..pattern.span
+            };
+            let candidates: Vec<String> =
+                self.structs.enums.iter().map(|e| e.name.clone()).collect();
+            self.unknown(enum_name, span, "enum", candidates);
+        }
+        for (i, b) in bindings.iter().flatten().enumerate() {
+            let Some(name) = &b.name else {
+                continue;
+            };
+            let id = self.declare(name, b.name_span, BindingKind::Pattern, None);
+            self.resolution.patterns.insert((e, k, i), id);
+        }
+    }
+
     /// The binding `n`, at expression `e`, refers to: `E0204` when it names a function, and
     /// `E0201` when it names nothing.
     fn name(&mut self, e: ExprId, n: &str, span: Span) -> Option<BindingId> {
@@ -491,6 +629,16 @@ impl Resolver<'_> {
                 format!(
                     "`{}` is a struct, not a value: build one with its fields, as in `{}(field: value)`",
                     n, n
+                ),
+            ));
+        } else if let Some(def) = self.structs.get_enum(n) {
+            let first = def.variants.first().map_or("A", |v| v.name.as_str());
+            self.errors.push(Diagnostic::error(
+                "E0204",
+                span,
+                format!(
+                    "`{}` is an enum, not a value: a value of it is one of its variants, named with it, as in `{}.{}`",
+                    n, n, first
                 ),
             ));
         } else if let Some(later) = self.structs.later.get(n) {
@@ -578,6 +726,30 @@ impl Resolver<'_> {
             };
             self.errors.push(d);
         }
+        // A pattern's binding nobody reads is `_`.
+        let mut bound: Vec<BindingId> = self.resolution.patterns.values().copied().collect();
+        bound.sort_by_key(|b| b.0);
+        for id in bound {
+            let b = self.binding(id);
+            if self.reads[id.0 as usize] > 0 || self.clashing.contains(&b.name) {
+                continue;
+            }
+            let d = Diagnostic::error(
+                "E0218",
+                b.span,
+                format!(
+                    "`{}` is never read; a field the arm does not need is bound to `_`",
+                    b.name
+                ),
+            )
+            .with_fix(
+                Applicability::MachineApplicable,
+                format!("bind `{}`'s field to `_`", b.name),
+                b.span,
+                "_",
+            );
+            self.errors.push(d);
+        }
     }
 
     /// A refinement's bound names a binding that cannot change, or `name.len` (`E0209`).
@@ -626,7 +798,7 @@ impl Resolver<'_> {
                 }
             }
             TypeKind::Array { elem, .. } => self.ty(tree, *elem),
-            TypeKind::Named(n) => {
+            TypeKind::Named(n) | TypeKind::Enum(n) => {
                 if let Some(d) = unknown_type(self.structs, n, span) {
                     self.errors.push(d);
                 }
@@ -1028,6 +1200,64 @@ mod tests {
         );
     }
 
+    /// A pattern's bindings are names of the function as every binding is: each declared once,
+    /// none named like a type of its module, each read, or bound to `_`, which the fix writes;
+    /// each visible in its arm only; and a name in a pattern is an enum of the module.
+    #[test]
+    fn test_pattern_bindings_are_named_once_and_read() {
+        let with = |f: &str| format!("pub enum Shape {{\n  Dot\n  Rect(w: u8, h: u8)\n}}\n{}", f);
+        let arm = |pattern: &str, body: &str| {
+            with(&format!(
+                "pub fn f(s: Shape, k: u8) -> u8 = match s {{\n  {} => {}\n  Shape.Dot => 0\n}}",
+                pattern, body
+            ))
+        };
+        assert_eq!(codes(&arm("Shape.Rect(w: a, h: b)", "a + b")), NONE);
+        assert_eq!(codes(&arm("Shape.Rect(w: k, h: _)", "k")), ["E0202"]);
+        assert_eq!(
+            codes(&arm("Shape.Rect(w: Shape, h: _)", "Shape")),
+            ["E0220"]
+        );
+        assert_eq!(codes(&arm("Shape.Rect(w: id, h: _)", "id")), ["E0220"]);
+        // A binding is visible in its arm alone.
+        assert_eq!(
+            codes(&with(
+                "pub fn f(s: Shape) -> u8 = match s {\n  Shape.Rect(w: a, h: _) => a\n  Shape.Dot => a\n}"
+            )),
+            ["E0201"]
+        );
+        // Two arms do not share a name, as two branches of an `if` do not.
+        assert_eq!(
+            codes(&with(
+                "pub fn f(s: Shape, t: Shape) -> u8 = match s {\n  Shape.Rect(w: a, h: _) => a\n  Shape.Dot => match t {\n    Shape.Rect(w: a, h: _) => a\n    Shape.Dot => 0\n  }\n}"
+            )),
+            ["E0202"]
+        );
+        // An enum the pattern names is the module's.
+        assert_eq!(
+            messages(&arm("Shpe.Rect(w: a, h: _)", "a")),
+            ["there is no enum named `Shpe` here; did you mean `Shape`?"]
+        );
+        // A binding nobody reads is `_`, and the fix binds its field to `_`.
+        let src = module(&arm("Shape.Rect(w: a, h: b)", "a"));
+        let d: Vec<Diagnostic> = check_source(&src).err().unwrap_or_default();
+        assert_eq!(d.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0218"]);
+        assert_eq!(
+            d[0].message,
+            "`b` is never read; a field the arm does not need is bound to `_`"
+        );
+        let fixed = mente_syntax::diagnostics::apply_fix(&src, &d[0].fixes[0]).unwrap();
+        assert!(fixed.contains("Shape.Rect(w: a, h: _) => a"), "{}", fixed);
+        assert_eq!(check_source(&fixed).err(), None);
+        // An enum is no value, and is called or built as a struct is not.
+        assert_eq!(
+            codes(&with("pub fn f() -> u8 {\n  val s = Shape\n  0\n}")),
+            ["E0204"]
+        );
+        assert_eq!(codes(&with("pub fn f() -> Shape = Shape(1)")), ["E0204"]);
+        assert_eq!(codes(&with("pub fn f() -> Shape = Shape(w: 1)")), ["E0204"]);
+    }
+
     /// A name means one thing in a module: no binding takes the name of a struct (`E0220`), a
     /// struct's name is no value (`E0204`), a struct built of a name that is none is `E0201`
     /// with the closest struct suggested, and a type that names nothing is `E0116`.
@@ -1143,7 +1373,7 @@ pub enum Mode {
   0
 }"
             )),
-            ["`Mode` is an enum of this module, a type, not a value; an enum comes in M2"]
+            ["`Mode` is an enum, not a value: a value of it is one of its variants, named with it, as in `Mode.On`"]
         );
     }
 

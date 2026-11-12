@@ -1,0 +1,6 @@
+// expect: E0203
+module conformance
+pub fn mixed(c: bool) -> u8 = match c {
+  true => 1
+  false => false
+}

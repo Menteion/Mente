@@ -1,8 +1,0 @@
-// expect: E0109
-module conformance
-pub fn f(x: i32) -> i32 {
-  val y = match x {
-    0 => 1
-  }
-  y
-}

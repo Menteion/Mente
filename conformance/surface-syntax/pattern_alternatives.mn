@@ -1,0 +1,6 @@
+// expect: E0132
+module conformance
+pub fn small(x: u8) -> bool = match x {
+  0 | 1 => true
+  _ => false
+}

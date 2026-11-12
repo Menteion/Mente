@@ -434,6 +434,13 @@ fn native_arg(value: &Value) -> Option<native::Arg> {
                 .map(|(_, v)| native_arg(v))
                 .collect::<Option<Vec<_>>>()?,
         ),
+        Value::Enum(_, variant, fields) => native::Arg::Enum(
+            variant.clone(),
+            fields
+                .iter()
+                .map(|(_, v)| native_arg(v))
+                .collect::<Option<Vec<_>>>()?,
+        ),
         Value::Unit => return None,
     })
 }
@@ -471,6 +478,21 @@ fn write(memory: &mut Memory, at: u64, shape: &Shape, value: &Value) -> Option<(
             }
             Some(())
         }
+        (Shape::Enum(en), Value::Enum(_, variant, fields))
+            if en
+                .variant(variant)
+                .is_some_and(|(_, v)| v.fields.len() == fields.len()) =>
+        {
+            let (tag, v) = en.variant(variant)?;
+            let t = lower::mir(en.tag);
+            memory
+                .store(at, Val::Int(Num::new(false, tag as u128)), Ty::Int(t))
+                .ok()?;
+            for (f, (_, item)) in v.fields.iter().zip(fields) {
+                write(memory, at + u64::from(f.offset), &f.shape, item)?;
+            }
+            Some(())
+        }
         _ => None,
     }
 }
@@ -502,6 +524,31 @@ fn read(memory: &Memory, at: u64, shape: &Shape) -> Result<String, String> {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(format!("{}({})", st.name, fields.join(", ")))
+        }
+        Shape::Enum(en) => {
+            let tag = match memory
+                .load(at, Ty::Int(lower::mir(en.tag)))
+                .map_err(|s| s.to_string())?
+            {
+                Val::Int(n) => n.mag,
+                _ => return Err("a tag that is not an integer".into()),
+            };
+            let v = usize::try_from(tag)
+                .ok()
+                .and_then(|k| en.variants.get(k))
+                .ok_or_else(|| format!("a tag {} no variant of `{}` has", tag, en.name))?;
+            if v.fields.is_empty() {
+                return Ok(format!("{}.{}", en.name, v.name));
+            }
+            let fields = v
+                .fields
+                .iter()
+                .map(|f| {
+                    let x = read(memory, at + u64::from(f.offset), &f.shape)?;
+                    Ok(format!("{}: {}", f.name, x))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{}.{}({})", en.name, v.name, fields.join(", ")))
         }
         Shape::Unit => Ok("()".into()),
     }

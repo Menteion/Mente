@@ -1302,14 +1302,16 @@ fn standalone(
 // Running functions on edge values
 // -------------------------------------------------------------------------------------------
 
-/// An argument: an integer by sign and magnitude, a `bool`, or an array or a struct of them,
-/// its fields in the order of the declaration.
+/// An argument: an integer by sign and magnitude, a `bool`, or an array, a struct or a variant
+/// of an enum of them, the fields in the order of the declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Scalar {
     Int(bool, u128),
     Bool(bool),
     Array(Vec<Scalar>),
     Struct(String, Vec<(String, Scalar)>),
+    /// An enum's name, the variant's, and its payload's fields.
+    Enum(String, String, Vec<(String, Scalar)>),
 }
 
 impl Scalar {
@@ -1329,15 +1331,44 @@ fn values_of(shape: &Shape) -> usize {
             .fields
             .iter()
             .fold(1, |sum: usize, f| sum.saturating_add(values_of(&f.shape))),
+        // The variant with the most values, its tag counted.
+        Shape::Enum(en) => en
+            .variants
+            .iter()
+            .map(|v| {
+                v.fields
+                    .iter()
+                    .fold(1, |sum: usize, f| sum.saturating_add(values_of(&f.shape)))
+            })
+            .max()
+            .unwrap_or(1),
         _ => 1,
     }
 }
 
 /// The values worth calling a parameter of `shape` with: 0, 1, its maximum, and for a signed
 /// type -1 and its minimum; `false` and `true`; an array with every element at one edge of
-/// its type, and a struct with each field at its own edge of that rank.
+/// its type, a struct with each field at its own edge of that rank, and each variant of an
+/// enum, its payload's fields at the edges of each rank in turn.
 fn edges(shape: &Shape) -> Vec<Scalar> {
     match shape {
+        Shape::Enum(en) => {
+            let mut out = Vec::new();
+            for v in &en.variants {
+                let each: Vec<Vec<Scalar>> = v.fields.iter().map(|f| edges(&f.shape)).collect();
+                let rounds = each.iter().map(Vec::len).max().unwrap_or(1);
+                for k in 0..rounds {
+                    let fields = v
+                        .fields
+                        .iter()
+                        .zip(&each)
+                        .map(|(f, e)| (f.name.clone(), e[k % e.len()].clone()))
+                        .collect();
+                    out.push(Scalar::Enum(en.name.clone(), v.name.clone(), fields));
+                }
+            }
+            out
+        }
         Shape::Array(n, elem) => edges(elem)
             .into_iter()
             .map(|e| Scalar::Array(vec![e; *n as usize]))
@@ -1401,7 +1432,7 @@ fn edge_calls(params: &[Shape]) -> Vec<Vec<Scalar>> {
         .collect()
 }
 
-/// A function the fuzzer runs: its parameters integers, `bool`s, arrays and structs.
+/// A function the fuzzer runs: its parameters integers, `bool`s, arrays, structs and enums.
 struct Function {
     name: String,
     params: Vec<Shape>,
@@ -1447,6 +1478,11 @@ fn value(s: &Scalar) -> Value {
             name.clone(),
             fields.iter().map(|(n, v)| (n.clone(), value(v))).collect(),
         ),
+        Scalar::Enum(name, variant, fields) => Value::Enum(
+            name.clone(),
+            variant.clone(),
+            fields.iter().map(|(n, v)| (n.clone(), value(v))).collect(),
+        ),
     }
 }
 
@@ -1458,6 +1494,10 @@ fn arg(s: &Scalar) -> native::Arg {
         Scalar::Struct(_, fields) => {
             native::Arg::Struct(fields.iter().map(|(_, v)| arg(v)).collect())
         }
+        Scalar::Enum(_, variant, fields) => native::Arg::Enum(
+            variant.clone(),
+            fields.iter().map(|(_, v)| arg(v)).collect(),
+        ),
     }
 }
 

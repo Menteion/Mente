@@ -1,0 +1,7 @@
+// expect: E0508
+module conformance
+pub enum Small {
+  One(n: u8)
+}
+
+pub fn big() -> Small = Small.One(n: 300)

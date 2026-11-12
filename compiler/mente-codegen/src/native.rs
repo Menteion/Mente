@@ -50,6 +50,9 @@ pub enum Arg {
     Array(Vec<Arg>),
     /// A struct's fields, in the order of its declaration.
     Struct(Vec<Arg>),
+    /// A variant of an enum, by its name, and its payload's fields, in the order of the
+    /// declaration.
+    Enum(String, Vec<Arg>),
 }
 
 fn err(message: impl Into<String>) -> CodegenError {
@@ -110,6 +113,13 @@ pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
             }
             (Shape::Array(_, elem), Arg::Array(items)) => items.iter().find_map(|a| first(elem, a)),
             (Shape::Struct(st), Arg::Struct(fields)) => st
+                .fields
+                .iter()
+                .zip(fields)
+                .find_map(|(f, a)| first(&f.shape, a)),
+            (Shape::Enum(en), Arg::Enum(name, fields)) => en
+                .variant(name)?
+                .1
                 .fields
                 .iter()
                 .zip(fields)
@@ -1459,6 +1469,25 @@ fn store_arg(e: &mut Emit, at: Value, shape: &Shape, arg: &Arg) -> Result<(), Co
                 store_arg(e, a, &f.shape, item)?;
             }
         }
+        // The tag first, then the payload's fields where the layout places them.
+        (Shape::Enum(en), Arg::Enum(name, fields))
+            if en
+                .variant(name)
+                .is_some_and(|(_, v)| v.fields.len() == fields.len()) =>
+        {
+            let (tag, variant) = en
+                .variant(name)
+                .ok_or_else(|| err("a variant the enum lacks"))?;
+            let t = crate::lower::mir(en.tag);
+            let v = e.int(int_type(t), Num::new(false, tag as u128), t);
+            let fl = trusted(e.b);
+            e.b.ins().store(fl, v, at, 0);
+            for (f, item) in variant.fields.iter().zip(fields) {
+                let off = e.iconst(e.ptr, i64::from(f.offset));
+                let a = e.b.ins().iadd(at, off);
+                store_arg(e, a, &f.shape, item)?;
+            }
+        }
         _ => return Err(err("an argument of another shape than its parameter")),
     }
     Ok(())
@@ -1554,6 +1583,39 @@ fn print_at(
                 print_at(writer, rt, e, a, &f.shape)?;
             }
             emit_text(writer, rt, e, 1, ")")?;
+        }
+        // `Name.A` or `Name.B(field: v, ...)`: the variant its tag names, chosen at run time.
+        Shape::Enum(en) => {
+            let t = crate::lower::mir(en.tag);
+            let tag = {
+                let fl = trusted(e.b);
+                e.b.ins().load(int_type(t), fl, at, 0)
+            };
+            let after = e.b.create_block();
+            for (k, v) in en.variants.iter().enumerate() {
+                let this = e.b.create_block();
+                let next = e.b.create_block();
+                let is = e.b.ins().icmp_imm_u(IntCC::Equal, tag, k as i64);
+                e.b.ins().brif(is, this, &[], next, &[]);
+                e.b.switch_to_block(this);
+                emit_text(writer, rt, e, 1, &format!("{}.{}", en.name, v.name))?;
+                if !v.fields.is_empty() {
+                    emit_text(writer, rt, e, 1, "(")?;
+                    for (j, f) in v.fields.iter().enumerate() {
+                        let sep = if j > 0 { ", " } else { "" };
+                        emit_text(writer, rt, e, 1, &format!("{}{}: ", sep, f.name))?;
+                        let off = e.iconst(e.ptr, i64::from(f.offset));
+                        let a = e.b.ins().iadd(at, off);
+                        print_at(writer, rt, e, a, &f.shape)?;
+                    }
+                    emit_text(writer, rt, e, 1, ")")?;
+                }
+                e.b.ins().jump(after, &[]);
+                e.b.switch_to_block(next);
+            }
+            // A tag no variant has is never stored.
+            e.b.ins().jump(after, &[]);
+            e.b.switch_to_block(after);
         }
         Shape::Unit => emit_text(writer, rt, e, 1, "()")?,
     }

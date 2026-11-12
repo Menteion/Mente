@@ -1,0 +1,14 @@
+// expect: pass
+module conformance
+// A payload binding takes its field's type and refinement, which Tier 1 holds as a fact.
+pub enum Reading {
+  Missing
+  Level(n: u8[0..10])
+}
+
+pub fn level(r: Reading) -> u8[0..10] = match r {
+  Reading.Level(n: n) => n
+  Reading.Missing => 0
+}
+
+pub fn main() -> u8 = level(Reading.Level(n: 9))

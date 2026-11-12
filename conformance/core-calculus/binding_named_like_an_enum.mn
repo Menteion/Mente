@@ -1,0 +1,11 @@
+// expect: E0220
+module conformance
+pub enum Light {
+  Red
+  Green
+}
+
+pub fn first(x: u8) -> u8 {
+  val Light = x
+  Light
+}

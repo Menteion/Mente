@@ -250,14 +250,16 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
     // The structs first: every function reads their fields and layouts. The module's
     // diagnostics are put in the order of the source where they are combined.
     let parsed_structs = mente_syntax::parse_structs(src, module);
+    let parsed_enums = mente_syntax::parse_enums(src, module);
     let mut errors: Vec<Diagnostic> = parsed_structs
         .iter()
         .flat_map(|p| p.errors.iter().cloned())
+        .chain(parsed_enums.iter().flat_map(|p| p.errors.iter().cloned()))
         .collect();
-    let (structs, declared) = structs::declare(module, &parsed_structs);
+    let (structs, declared) = structs::declare(module, &parsed_structs, &parsed_enums);
     errors.extend(declared);
     errors.sort_by_key(|d| d.primary.start);
-    let parsed = mente_syntax::parse_bodies(src, module);
+    let parsed = parse_qualified(src, module);
     let mut todos: Vec<(Span, String)> = parsed
         .iter()
         .filter_map(|p| p.syntax.as_ref())
@@ -293,7 +295,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         let done = match (&p.syntax, p.errors.is_empty()) {
             (Some(syntax), true) => {
                 let (resolution, mut found) = names::resolve(syntax, &names, &structs);
-                let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs);
+                let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs, src);
                 found.extend(typed);
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
@@ -344,6 +346,20 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         todos,
         structs,
     }
+}
+
+/// Every function of `module` as [`mente_syntax::parse_bodies`] reads it, each tree qualified by
+/// what name resolution finds of the module's enums ([`structs::qualify`]): the trees every check
+/// after the parser reads.
+pub fn parse_qualified(src: &str, module: &ModuleFile) -> Vec<mente_syntax::ParsedFn> {
+    let enums = structs::enum_names(module);
+    let mut parsed = mente_syntax::parse_bodies(src, module);
+    for p in &mut parsed {
+        if let Some(syntax) = &mut p.syntax {
+            structs::qualify(&mut syntax.tree, &enums);
+        }
+    }
+    parsed
 }
 
 /// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`, without

@@ -1,0 +1,12 @@
+// expect: E0231
+module conformance
+pub enum Light {
+  Red
+  Amber
+  Green
+}
+
+pub fn stop(l: Light) -> bool = match l {
+  Light.Red => true
+  _ => false
+}

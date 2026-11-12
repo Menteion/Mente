@@ -635,6 +635,7 @@ t0: unreachable @3:8 ["unreachable reached: control left the code the checker al
 == conformance/core-calculus/binding_named_like_a_function.mn == (exit 2)
 == conformance/core-calculus/binding_named_like_a_layout_struct.mn == (exit 2)
 == conformance/core-calculus/binding_named_like_a_struct.mn == (exit 2)
+== conformance/core-calculus/binding_named_like_an_enum.mn == (exit 2)
 == conformance/core-calculus/binding_never_read.mn == (exit 2)
 == conformance/core-calculus/binding_of_mixed_integers.mn == (exit 2)
 == conformance/core-calculus/bit_operation_on_two_types.mn == (exit 2)
@@ -843,6 +844,4298 @@ t1: refinement @9:8 ["", " lies outside the refinement `[", "..=", "]`"]
 t2: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/ensures_not_proven_at_a_return.mn == (exit 2)
+== conformance/core-calculus/enum_and_struct_of_one_name.mn == (exit 2)
+== conformance/core-calculus/enum_beyond_4_gib.mn == (exit 2)
+== conformance/core-calculus/enum_compared_with_eq.mn == (exit 2)
+== conformance/core-calculus/enum_containing_itself.mn == (exit 2)
+== conformance/core-calculus/enum_containing_itself_through_a_struct.mn == (exit 2)
+== conformance/core-calculus/enum_field_of_a_later_type.mn == (exit 2)
+== conformance/core-calculus/enum_in_struct_in_enum.mn ==
+mente-dump 2 mir
+f0: fn fill(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: addr = slot 32 @19:30
+  v3: u8 = int 1 @19:30
+  v4: unit = store v2, v3 @19:30
+  v5: addr = slot 24 @19:46
+  v6: addr = slot 16 @19:57
+  v7: u8 = int 0 @19:57
+  v8: unit = store v6, v7 @19:57
+  v9: u64 = int 8 @19:71
+  v10: addr = elem 1 v6, v9 @19:71
+  v11: unit = store v10, v1 @19:71
+  v12: unit = copy 16 v5, v6 @19:71
+  v13: i64 = int 1 @19:82
+  v14: u16 = cast v13 @19:82
+  v15: u64 = int 16 @19:82
+  v16: addr = elem 1 v5, v15 @19:82
+  v17: unit = store v16, v14 @19:82
+  v18: u64 = int 8 @19:82
+  v19: addr = elem 1 v2, v18 @19:82
+  v20: unit = copy 24 v19, v5 @19:82
+  v21: unit = copy 32 v0, v2 @19:30
+  return
+block1():
+  trap t0
+t0: unreachable @19:30 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn grow(addr, addr) {
+block0(v0: addr, v1: addr):
+  v2: u8 = load v1 @21:38
+  v4: u8 = int 0 @21:38
+  v5: bool = eq v2, v4 @21:38
+  branch v5, block2(), block3()
+block1(v3: addr):
+  v44: unit = copy 32 v0, v3 @21:32
+  return
+block2():
+  v6: addr = slot 32 @22:17
+  v7: u8 = int 0 @22:17
+  v8: unit = store v6, v7 @22:17
+  jump block1(v6)
+block3():
+  v9: u64 = int 8 @22:17
+  v10: addr = elem 1 v1, v9 @22:17
+  v11: addr = slot 24 @24:13
+  v12: unit = copy 24 v11, v10 @24:13
+  v13: addr = slot 16 @25:14
+  v14: u8 = int 1 @25:14
+  v15: unit = store v13, v14 @25:14
+  v16: i64 = int 1000 @25:28
+  v17: u64 = cast v16 @25:28
+  v18: u64 = int 8 @25:28
+  v19: addr = elem 1 v13, v18 @25:28
+  v20: unit = store v19, v17 @25:28
+  v21: unit = copy 16 v11, v13 @25:28
+  v22: u64 = int 16 @26:15
+  v23: addr = elem 1 v10, v22 @26:15
+  v24: u16 = load v23 @26:15
+  v25: i64 = int 1 @26:25
+  v26: i64 = cast v24 @26:15
+  v27: i64 = add v26, v25 @26:15
+  v28: i64 = int 0 @26:15
+  v29: bool = ge v27, v28 @26:15
+  v30: i64 = int 65535 @26:15
+  v31: bool = le v27, v30 @26:15
+  v32: bool = and v29, v31 @26:15
+  v33: unit = check t0 v32, v27 @26:15
+  v34: u16 = cast v27 @26:15
+  v35: u64 = int 16 @26:15
+  v36: addr = elem 1 v11, v35 @26:15
+  v37: unit = store v36, v34 @26:15
+  v38: addr = slot 32 @27:5
+  v39: u8 = int 1 @27:5
+  v40: unit = store v38, v39 @27:5
+  v41: u64 = int 8 @27:21
+  v42: addr = elem 1 v38, v41 @27:21
+  v43: unit = copy 24 v42, v11 @27:21
+  jump block1(v38)
+block4():
+  trap t1
+t0: narrowing @26:15 ["", " does not fit in `u16`"]
+t1: unreachable @21:32 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn size(addr) -> u64 {
+block0(v0: addr):
+  v1: u8 = load v0 @31:37
+  v3: u8 = int 0 @31:37
+  v4: bool = eq v1, v3 @31:37
+  branch v4, block2(), block3()
+block1(v2: u64):
+  return v2
+block2():
+  v5: i64 = int 0 @32:17
+  v6: u64 = cast v5 @32:17
+  jump block1(v6)
+block3():
+  v7: u64 = int 8 @32:17
+  v8: addr = elem 1 v0, v7 @32:17
+  v9: u8 = load v8 @33:31
+  v11: u8 = int 0 @33:31
+  v12: bool = eq v9, v11 @33:31
+  branch v12, block5(), block6()
+block4(v10: u64):
+  jump block1(v10)
+block5():
+  v13: u64 = int 8 @33:31
+  v14: addr = elem 1 v8, v13 @33:31
+  v15: u8 = load v14 @34:29
+  v16: u64 = cast v15 @34:29
+  jump block4(v16)
+block6():
+  v17: u64 = int 8 @34:29
+  v18: addr = elem 1 v8, v17 @34:29
+  v19: u64 = load v18 @35:29
+  jump block4(v19)
+block7():
+  trap t0
+t0: unreachable @35:29 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn main() -> u64 {
+block0():
+  v0: i64 = int 3 @39:39
+  v1: addr = slot 32 @39:39
+  v2: u8 = cast v0 @39:39
+  v3: unit = call f0 v1, v2 @39:34
+  v4: addr = slot 32 @39:34
+  v5: unit = call f1 v4, v1 @39:29
+  v6: u64 = call f2 v4 @39:24
+  v7: i64 = int 4 @39:56
+  v8: addr = slot 32 @39:56
+  v9: u8 = cast v7 @39:56
+  v10: unit = call f0 v8, v9 @39:51
+  v11: u64 = call f2 v8 @39:46
+  v12: i128 = cast v6 @39:24
+  v13: i128 = cast v11 @39:24
+  v14: i128 = add v12, v13 @39:24
+  v15: i128 = int 0 @39:24
+  v16: bool = ge v14, v15 @39:24
+  v17: i128 = int 18446744073709551615 @39:24
+  v18: bool = le v14, v17 @39:24
+  v19: bool = and v16, v18 @39:24
+  v20: unit = check t0 v19, v14 @39:24
+  v21: u64 = cast v14 @39:24
+  return v21
+block1():
+  trap t1
+t0: narrowing @39:24 ["", " does not fit in `u64`"]
+t1: unreachable @39:24 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter fill(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: unit = call f0 v0, v1 @19:8
+  return
+t0: unreachable @19:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter grow(addr, addr) {
+block0(v0: addr, v1: addr):
+  v2: unit = call f1 v0, v1 @21:8
+  return
+t0: unreachable @21:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter size(addr) -> u64 {
+block0(v0: addr):
+  v1: u64 = call f2 v0 @31:8
+  return v1
+t0: unreachable @31:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter main() -> u64 {
+block0():
+  v0: u64 = call f3 @39:8
+  return v0
+t0: unreachable @39:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/enum_named_like_a_language_type.mn == (exit 2)
+== conformance/core-calculus/enum_named_like_a_later_type.mn == (exit 2)
+== conformance/core-calculus/enum_of_256_variants.mn ==
+mente-dump 2 mir
+f0: fn last(addr) {
+block0(v0: addr):
+  v1: addr = slot 1 @263:25
+  v2: u8 = int 255 @263:25
+  v3: unit = store v1, v2 @263:25
+  v4: unit = copy 1 v0, v1 @263:25
+  return
+block1():
+  trap t0
+t0: unreachable @263:25 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn index(addr) -> u16 {
+block0(v0: addr):
+  v1: u8 = load v0 @265:38
+  v3: u8 = int 0 @265:38
+  v4: bool = eq v1, v3 @265:38
+  branch v4, block2(), block3()
+block1(v2: i64):
+  v769: u16 = cast v2 @521:16
+  return v769
+block2():
+  v5: i64 = int 0 @266:14
+  jump block1(v5)
+block3():
+  v6: u8 = int 1 @266:14
+  v7: bool = eq v1, v6 @266:14
+  branch v7, block4(), block5()
+block4():
+  v8: i64 = int 1 @267:14
+  jump block1(v8)
+block5():
+  v9: u8 = int 2 @267:14
+  v10: bool = eq v1, v9 @267:14
+  branch v10, block6(), block7()
+block6():
+  v11: i64 = int 2 @268:14
+  jump block1(v11)
+block7():
+  v12: u8 = int 3 @268:14
+  v13: bool = eq v1, v12 @268:14
+  branch v13, block8(), block9()
+block8():
+  v14: i64 = int 3 @269:14
+  jump block1(v14)
+block9():
+  v15: u8 = int 4 @269:14
+  v16: bool = eq v1, v15 @269:14
+  branch v16, block10(), block11()
+block10():
+  v17: i64 = int 4 @270:14
+  jump block1(v17)
+block11():
+  v18: u8 = int 5 @270:14
+  v19: bool = eq v1, v18 @270:14
+  branch v19, block12(), block13()
+block12():
+  v20: i64 = int 5 @271:14
+  jump block1(v20)
+block13():
+  v21: u8 = int 6 @271:14
+  v22: bool = eq v1, v21 @271:14
+  branch v22, block14(), block15()
+block14():
+  v23: i64 = int 6 @272:14
+  jump block1(v23)
+block15():
+  v24: u8 = int 7 @272:14
+  v25: bool = eq v1, v24 @272:14
+  branch v25, block16(), block17()
+block16():
+  v26: i64 = int 7 @273:14
+  jump block1(v26)
+block17():
+  v27: u8 = int 8 @273:14
+  v28: bool = eq v1, v27 @273:14
+  branch v28, block18(), block19()
+block18():
+  v29: i64 = int 8 @274:14
+  jump block1(v29)
+block19():
+  v30: u8 = int 9 @274:14
+  v31: bool = eq v1, v30 @274:14
+  branch v31, block20(), block21()
+block20():
+  v32: i64 = int 9 @275:14
+  jump block1(v32)
+block21():
+  v33: u8 = int 10 @275:14
+  v34: bool = eq v1, v33 @275:14
+  branch v34, block22(), block23()
+block22():
+  v35: i64 = int 10 @276:15
+  jump block1(v35)
+block23():
+  v36: u8 = int 11 @276:15
+  v37: bool = eq v1, v36 @276:15
+  branch v37, block24(), block25()
+block24():
+  v38: i64 = int 11 @277:15
+  jump block1(v38)
+block25():
+  v39: u8 = int 12 @277:15
+  v40: bool = eq v1, v39 @277:15
+  branch v40, block26(), block27()
+block26():
+  v41: i64 = int 12 @278:15
+  jump block1(v41)
+block27():
+  v42: u8 = int 13 @278:15
+  v43: bool = eq v1, v42 @278:15
+  branch v43, block28(), block29()
+block28():
+  v44: i64 = int 13 @279:15
+  jump block1(v44)
+block29():
+  v45: u8 = int 14 @279:15
+  v46: bool = eq v1, v45 @279:15
+  branch v46, block30(), block31()
+block30():
+  v47: i64 = int 14 @280:15
+  jump block1(v47)
+block31():
+  v48: u8 = int 15 @280:15
+  v49: bool = eq v1, v48 @280:15
+  branch v49, block32(), block33()
+block32():
+  v50: i64 = int 15 @281:15
+  jump block1(v50)
+block33():
+  v51: u8 = int 16 @281:15
+  v52: bool = eq v1, v51 @281:15
+  branch v52, block34(), block35()
+block34():
+  v53: i64 = int 16 @282:15
+  jump block1(v53)
+block35():
+  v54: u8 = int 17 @282:15
+  v55: bool = eq v1, v54 @282:15
+  branch v55, block36(), block37()
+block36():
+  v56: i64 = int 17 @283:15
+  jump block1(v56)
+block37():
+  v57: u8 = int 18 @283:15
+  v58: bool = eq v1, v57 @283:15
+  branch v58, block38(), block39()
+block38():
+  v59: i64 = int 18 @284:15
+  jump block1(v59)
+block39():
+  v60: u8 = int 19 @284:15
+  v61: bool = eq v1, v60 @284:15
+  branch v61, block40(), block41()
+block40():
+  v62: i64 = int 19 @285:15
+  jump block1(v62)
+block41():
+  v63: u8 = int 20 @285:15
+  v64: bool = eq v1, v63 @285:15
+  branch v64, block42(), block43()
+block42():
+  v65: i64 = int 20 @286:15
+  jump block1(v65)
+block43():
+  v66: u8 = int 21 @286:15
+  v67: bool = eq v1, v66 @286:15
+  branch v67, block44(), block45()
+block44():
+  v68: i64 = int 21 @287:15
+  jump block1(v68)
+block45():
+  v69: u8 = int 22 @287:15
+  v70: bool = eq v1, v69 @287:15
+  branch v70, block46(), block47()
+block46():
+  v71: i64 = int 22 @288:15
+  jump block1(v71)
+block47():
+  v72: u8 = int 23 @288:15
+  v73: bool = eq v1, v72 @288:15
+  branch v73, block48(), block49()
+block48():
+  v74: i64 = int 23 @289:15
+  jump block1(v74)
+block49():
+  v75: u8 = int 24 @289:15
+  v76: bool = eq v1, v75 @289:15
+  branch v76, block50(), block51()
+block50():
+  v77: i64 = int 24 @290:15
+  jump block1(v77)
+block51():
+  v78: u8 = int 25 @290:15
+  v79: bool = eq v1, v78 @290:15
+  branch v79, block52(), block53()
+block52():
+  v80: i64 = int 25 @291:15
+  jump block1(v80)
+block53():
+  v81: u8 = int 26 @291:15
+  v82: bool = eq v1, v81 @291:15
+  branch v82, block54(), block55()
+block54():
+  v83: i64 = int 26 @292:15
+  jump block1(v83)
+block55():
+  v84: u8 = int 27 @292:15
+  v85: bool = eq v1, v84 @292:15
+  branch v85, block56(), block57()
+block56():
+  v86: i64 = int 27 @293:15
+  jump block1(v86)
+block57():
+  v87: u8 = int 28 @293:15
+  v88: bool = eq v1, v87 @293:15
+  branch v88, block58(), block59()
+block58():
+  v89: i64 = int 28 @294:15
+  jump block1(v89)
+block59():
+  v90: u8 = int 29 @294:15
+  v91: bool = eq v1, v90 @294:15
+  branch v91, block60(), block61()
+block60():
+  v92: i64 = int 29 @295:15
+  jump block1(v92)
+block61():
+  v93: u8 = int 30 @295:15
+  v94: bool = eq v1, v93 @295:15
+  branch v94, block62(), block63()
+block62():
+  v95: i64 = int 30 @296:15
+  jump block1(v95)
+block63():
+  v96: u8 = int 31 @296:15
+  v97: bool = eq v1, v96 @296:15
+  branch v97, block64(), block65()
+block64():
+  v98: i64 = int 31 @297:15
+  jump block1(v98)
+block65():
+  v99: u8 = int 32 @297:15
+  v100: bool = eq v1, v99 @297:15
+  branch v100, block66(), block67()
+block66():
+  v101: i64 = int 32 @298:15
+  jump block1(v101)
+block67():
+  v102: u8 = int 33 @298:15
+  v103: bool = eq v1, v102 @298:15
+  branch v103, block68(), block69()
+block68():
+  v104: i64 = int 33 @299:15
+  jump block1(v104)
+block69():
+  v105: u8 = int 34 @299:15
+  v106: bool = eq v1, v105 @299:15
+  branch v106, block70(), block71()
+block70():
+  v107: i64 = int 34 @300:15
+  jump block1(v107)
+block71():
+  v108: u8 = int 35 @300:15
+  v109: bool = eq v1, v108 @300:15
+  branch v109, block72(), block73()
+block72():
+  v110: i64 = int 35 @301:15
+  jump block1(v110)
+block73():
+  v111: u8 = int 36 @301:15
+  v112: bool = eq v1, v111 @301:15
+  branch v112, block74(), block75()
+block74():
+  v113: i64 = int 36 @302:15
+  jump block1(v113)
+block75():
+  v114: u8 = int 37 @302:15
+  v115: bool = eq v1, v114 @302:15
+  branch v115, block76(), block77()
+block76():
+  v116: i64 = int 37 @303:15
+  jump block1(v116)
+block77():
+  v117: u8 = int 38 @303:15
+  v118: bool = eq v1, v117 @303:15
+  branch v118, block78(), block79()
+block78():
+  v119: i64 = int 38 @304:15
+  jump block1(v119)
+block79():
+  v120: u8 = int 39 @304:15
+  v121: bool = eq v1, v120 @304:15
+  branch v121, block80(), block81()
+block80():
+  v122: i64 = int 39 @305:15
+  jump block1(v122)
+block81():
+  v123: u8 = int 40 @305:15
+  v124: bool = eq v1, v123 @305:15
+  branch v124, block82(), block83()
+block82():
+  v125: i64 = int 40 @306:15
+  jump block1(v125)
+block83():
+  v126: u8 = int 41 @306:15
+  v127: bool = eq v1, v126 @306:15
+  branch v127, block84(), block85()
+block84():
+  v128: i64 = int 41 @307:15
+  jump block1(v128)
+block85():
+  v129: u8 = int 42 @307:15
+  v130: bool = eq v1, v129 @307:15
+  branch v130, block86(), block87()
+block86():
+  v131: i64 = int 42 @308:15
+  jump block1(v131)
+block87():
+  v132: u8 = int 43 @308:15
+  v133: bool = eq v1, v132 @308:15
+  branch v133, block88(), block89()
+block88():
+  v134: i64 = int 43 @309:15
+  jump block1(v134)
+block89():
+  v135: u8 = int 44 @309:15
+  v136: bool = eq v1, v135 @309:15
+  branch v136, block90(), block91()
+block90():
+  v137: i64 = int 44 @310:15
+  jump block1(v137)
+block91():
+  v138: u8 = int 45 @310:15
+  v139: bool = eq v1, v138 @310:15
+  branch v139, block92(), block93()
+block92():
+  v140: i64 = int 45 @311:15
+  jump block1(v140)
+block93():
+  v141: u8 = int 46 @311:15
+  v142: bool = eq v1, v141 @311:15
+  branch v142, block94(), block95()
+block94():
+  v143: i64 = int 46 @312:15
+  jump block1(v143)
+block95():
+  v144: u8 = int 47 @312:15
+  v145: bool = eq v1, v144 @312:15
+  branch v145, block96(), block97()
+block96():
+  v146: i64 = int 47 @313:15
+  jump block1(v146)
+block97():
+  v147: u8 = int 48 @313:15
+  v148: bool = eq v1, v147 @313:15
+  branch v148, block98(), block99()
+block98():
+  v149: i64 = int 48 @314:15
+  jump block1(v149)
+block99():
+  v150: u8 = int 49 @314:15
+  v151: bool = eq v1, v150 @314:15
+  branch v151, block100(), block101()
+block100():
+  v152: i64 = int 49 @315:15
+  jump block1(v152)
+block101():
+  v153: u8 = int 50 @315:15
+  v154: bool = eq v1, v153 @315:15
+  branch v154, block102(), block103()
+block102():
+  v155: i64 = int 50 @316:15
+  jump block1(v155)
+block103():
+  v156: u8 = int 51 @316:15
+  v157: bool = eq v1, v156 @316:15
+  branch v157, block104(), block105()
+block104():
+  v158: i64 = int 51 @317:15
+  jump block1(v158)
+block105():
+  v159: u8 = int 52 @317:15
+  v160: bool = eq v1, v159 @317:15
+  branch v160, block106(), block107()
+block106():
+  v161: i64 = int 52 @318:15
+  jump block1(v161)
+block107():
+  v162: u8 = int 53 @318:15
+  v163: bool = eq v1, v162 @318:15
+  branch v163, block108(), block109()
+block108():
+  v164: i64 = int 53 @319:15
+  jump block1(v164)
+block109():
+  v165: u8 = int 54 @319:15
+  v166: bool = eq v1, v165 @319:15
+  branch v166, block110(), block111()
+block110():
+  v167: i64 = int 54 @320:15
+  jump block1(v167)
+block111():
+  v168: u8 = int 55 @320:15
+  v169: bool = eq v1, v168 @320:15
+  branch v169, block112(), block113()
+block112():
+  v170: i64 = int 55 @321:15
+  jump block1(v170)
+block113():
+  v171: u8 = int 56 @321:15
+  v172: bool = eq v1, v171 @321:15
+  branch v172, block114(), block115()
+block114():
+  v173: i64 = int 56 @322:15
+  jump block1(v173)
+block115():
+  v174: u8 = int 57 @322:15
+  v175: bool = eq v1, v174 @322:15
+  branch v175, block116(), block117()
+block116():
+  v176: i64 = int 57 @323:15
+  jump block1(v176)
+block117():
+  v177: u8 = int 58 @323:15
+  v178: bool = eq v1, v177 @323:15
+  branch v178, block118(), block119()
+block118():
+  v179: i64 = int 58 @324:15
+  jump block1(v179)
+block119():
+  v180: u8 = int 59 @324:15
+  v181: bool = eq v1, v180 @324:15
+  branch v181, block120(), block121()
+block120():
+  v182: i64 = int 59 @325:15
+  jump block1(v182)
+block121():
+  v183: u8 = int 60 @325:15
+  v184: bool = eq v1, v183 @325:15
+  branch v184, block122(), block123()
+block122():
+  v185: i64 = int 60 @326:15
+  jump block1(v185)
+block123():
+  v186: u8 = int 61 @326:15
+  v187: bool = eq v1, v186 @326:15
+  branch v187, block124(), block125()
+block124():
+  v188: i64 = int 61 @327:15
+  jump block1(v188)
+block125():
+  v189: u8 = int 62 @327:15
+  v190: bool = eq v1, v189 @327:15
+  branch v190, block126(), block127()
+block126():
+  v191: i64 = int 62 @328:15
+  jump block1(v191)
+block127():
+  v192: u8 = int 63 @328:15
+  v193: bool = eq v1, v192 @328:15
+  branch v193, block128(), block129()
+block128():
+  v194: i64 = int 63 @329:15
+  jump block1(v194)
+block129():
+  v195: u8 = int 64 @329:15
+  v196: bool = eq v1, v195 @329:15
+  branch v196, block130(), block131()
+block130():
+  v197: i64 = int 64 @330:15
+  jump block1(v197)
+block131():
+  v198: u8 = int 65 @330:15
+  v199: bool = eq v1, v198 @330:15
+  branch v199, block132(), block133()
+block132():
+  v200: i64 = int 65 @331:15
+  jump block1(v200)
+block133():
+  v201: u8 = int 66 @331:15
+  v202: bool = eq v1, v201 @331:15
+  branch v202, block134(), block135()
+block134():
+  v203: i64 = int 66 @332:15
+  jump block1(v203)
+block135():
+  v204: u8 = int 67 @332:15
+  v205: bool = eq v1, v204 @332:15
+  branch v205, block136(), block137()
+block136():
+  v206: i64 = int 67 @333:15
+  jump block1(v206)
+block137():
+  v207: u8 = int 68 @333:15
+  v208: bool = eq v1, v207 @333:15
+  branch v208, block138(), block139()
+block138():
+  v209: i64 = int 68 @334:15
+  jump block1(v209)
+block139():
+  v210: u8 = int 69 @334:15
+  v211: bool = eq v1, v210 @334:15
+  branch v211, block140(), block141()
+block140():
+  v212: i64 = int 69 @335:15
+  jump block1(v212)
+block141():
+  v213: u8 = int 70 @335:15
+  v214: bool = eq v1, v213 @335:15
+  branch v214, block142(), block143()
+block142():
+  v215: i64 = int 70 @336:15
+  jump block1(v215)
+block143():
+  v216: u8 = int 71 @336:15
+  v217: bool = eq v1, v216 @336:15
+  branch v217, block144(), block145()
+block144():
+  v218: i64 = int 71 @337:15
+  jump block1(v218)
+block145():
+  v219: u8 = int 72 @337:15
+  v220: bool = eq v1, v219 @337:15
+  branch v220, block146(), block147()
+block146():
+  v221: i64 = int 72 @338:15
+  jump block1(v221)
+block147():
+  v222: u8 = int 73 @338:15
+  v223: bool = eq v1, v222 @338:15
+  branch v223, block148(), block149()
+block148():
+  v224: i64 = int 73 @339:15
+  jump block1(v224)
+block149():
+  v225: u8 = int 74 @339:15
+  v226: bool = eq v1, v225 @339:15
+  branch v226, block150(), block151()
+block150():
+  v227: i64 = int 74 @340:15
+  jump block1(v227)
+block151():
+  v228: u8 = int 75 @340:15
+  v229: bool = eq v1, v228 @340:15
+  branch v229, block152(), block153()
+block152():
+  v230: i64 = int 75 @341:15
+  jump block1(v230)
+block153():
+  v231: u8 = int 76 @341:15
+  v232: bool = eq v1, v231 @341:15
+  branch v232, block154(), block155()
+block154():
+  v233: i64 = int 76 @342:15
+  jump block1(v233)
+block155():
+  v234: u8 = int 77 @342:15
+  v235: bool = eq v1, v234 @342:15
+  branch v235, block156(), block157()
+block156():
+  v236: i64 = int 77 @343:15
+  jump block1(v236)
+block157():
+  v237: u8 = int 78 @343:15
+  v238: bool = eq v1, v237 @343:15
+  branch v238, block158(), block159()
+block158():
+  v239: i64 = int 78 @344:15
+  jump block1(v239)
+block159():
+  v240: u8 = int 79 @344:15
+  v241: bool = eq v1, v240 @344:15
+  branch v241, block160(), block161()
+block160():
+  v242: i64 = int 79 @345:15
+  jump block1(v242)
+block161():
+  v243: u8 = int 80 @345:15
+  v244: bool = eq v1, v243 @345:15
+  branch v244, block162(), block163()
+block162():
+  v245: i64 = int 80 @346:15
+  jump block1(v245)
+block163():
+  v246: u8 = int 81 @346:15
+  v247: bool = eq v1, v246 @346:15
+  branch v247, block164(), block165()
+block164():
+  v248: i64 = int 81 @347:15
+  jump block1(v248)
+block165():
+  v249: u8 = int 82 @347:15
+  v250: bool = eq v1, v249 @347:15
+  branch v250, block166(), block167()
+block166():
+  v251: i64 = int 82 @348:15
+  jump block1(v251)
+block167():
+  v252: u8 = int 83 @348:15
+  v253: bool = eq v1, v252 @348:15
+  branch v253, block168(), block169()
+block168():
+  v254: i64 = int 83 @349:15
+  jump block1(v254)
+block169():
+  v255: u8 = int 84 @349:15
+  v256: bool = eq v1, v255 @349:15
+  branch v256, block170(), block171()
+block170():
+  v257: i64 = int 84 @350:15
+  jump block1(v257)
+block171():
+  v258: u8 = int 85 @350:15
+  v259: bool = eq v1, v258 @350:15
+  branch v259, block172(), block173()
+block172():
+  v260: i64 = int 85 @351:15
+  jump block1(v260)
+block173():
+  v261: u8 = int 86 @351:15
+  v262: bool = eq v1, v261 @351:15
+  branch v262, block174(), block175()
+block174():
+  v263: i64 = int 86 @352:15
+  jump block1(v263)
+block175():
+  v264: u8 = int 87 @352:15
+  v265: bool = eq v1, v264 @352:15
+  branch v265, block176(), block177()
+block176():
+  v266: i64 = int 87 @353:15
+  jump block1(v266)
+block177():
+  v267: u8 = int 88 @353:15
+  v268: bool = eq v1, v267 @353:15
+  branch v268, block178(), block179()
+block178():
+  v269: i64 = int 88 @354:15
+  jump block1(v269)
+block179():
+  v270: u8 = int 89 @354:15
+  v271: bool = eq v1, v270 @354:15
+  branch v271, block180(), block181()
+block180():
+  v272: i64 = int 89 @355:15
+  jump block1(v272)
+block181():
+  v273: u8 = int 90 @355:15
+  v274: bool = eq v1, v273 @355:15
+  branch v274, block182(), block183()
+block182():
+  v275: i64 = int 90 @356:15
+  jump block1(v275)
+block183():
+  v276: u8 = int 91 @356:15
+  v277: bool = eq v1, v276 @356:15
+  branch v277, block184(), block185()
+block184():
+  v278: i64 = int 91 @357:15
+  jump block1(v278)
+block185():
+  v279: u8 = int 92 @357:15
+  v280: bool = eq v1, v279 @357:15
+  branch v280, block186(), block187()
+block186():
+  v281: i64 = int 92 @358:15
+  jump block1(v281)
+block187():
+  v282: u8 = int 93 @358:15
+  v283: bool = eq v1, v282 @358:15
+  branch v283, block188(), block189()
+block188():
+  v284: i64 = int 93 @359:15
+  jump block1(v284)
+block189():
+  v285: u8 = int 94 @359:15
+  v286: bool = eq v1, v285 @359:15
+  branch v286, block190(), block191()
+block190():
+  v287: i64 = int 94 @360:15
+  jump block1(v287)
+block191():
+  v288: u8 = int 95 @360:15
+  v289: bool = eq v1, v288 @360:15
+  branch v289, block192(), block193()
+block192():
+  v290: i64 = int 95 @361:15
+  jump block1(v290)
+block193():
+  v291: u8 = int 96 @361:15
+  v292: bool = eq v1, v291 @361:15
+  branch v292, block194(), block195()
+block194():
+  v293: i64 = int 96 @362:15
+  jump block1(v293)
+block195():
+  v294: u8 = int 97 @362:15
+  v295: bool = eq v1, v294 @362:15
+  branch v295, block196(), block197()
+block196():
+  v296: i64 = int 97 @363:15
+  jump block1(v296)
+block197():
+  v297: u8 = int 98 @363:15
+  v298: bool = eq v1, v297 @363:15
+  branch v298, block198(), block199()
+block198():
+  v299: i64 = int 98 @364:15
+  jump block1(v299)
+block199():
+  v300: u8 = int 99 @364:15
+  v301: bool = eq v1, v300 @364:15
+  branch v301, block200(), block201()
+block200():
+  v302: i64 = int 99 @365:15
+  jump block1(v302)
+block201():
+  v303: u8 = int 100 @365:15
+  v304: bool = eq v1, v303 @365:15
+  branch v304, block202(), block203()
+block202():
+  v305: i64 = int 100 @366:16
+  jump block1(v305)
+block203():
+  v306: u8 = int 101 @366:16
+  v307: bool = eq v1, v306 @366:16
+  branch v307, block204(), block205()
+block204():
+  v308: i64 = int 101 @367:16
+  jump block1(v308)
+block205():
+  v309: u8 = int 102 @367:16
+  v310: bool = eq v1, v309 @367:16
+  branch v310, block206(), block207()
+block206():
+  v311: i64 = int 102 @368:16
+  jump block1(v311)
+block207():
+  v312: u8 = int 103 @368:16
+  v313: bool = eq v1, v312 @368:16
+  branch v313, block208(), block209()
+block208():
+  v314: i64 = int 103 @369:16
+  jump block1(v314)
+block209():
+  v315: u8 = int 104 @369:16
+  v316: bool = eq v1, v315 @369:16
+  branch v316, block210(), block211()
+block210():
+  v317: i64 = int 104 @370:16
+  jump block1(v317)
+block211():
+  v318: u8 = int 105 @370:16
+  v319: bool = eq v1, v318 @370:16
+  branch v319, block212(), block213()
+block212():
+  v320: i64 = int 105 @371:16
+  jump block1(v320)
+block213():
+  v321: u8 = int 106 @371:16
+  v322: bool = eq v1, v321 @371:16
+  branch v322, block214(), block215()
+block214():
+  v323: i64 = int 106 @372:16
+  jump block1(v323)
+block215():
+  v324: u8 = int 107 @372:16
+  v325: bool = eq v1, v324 @372:16
+  branch v325, block216(), block217()
+block216():
+  v326: i64 = int 107 @373:16
+  jump block1(v326)
+block217():
+  v327: u8 = int 108 @373:16
+  v328: bool = eq v1, v327 @373:16
+  branch v328, block218(), block219()
+block218():
+  v329: i64 = int 108 @374:16
+  jump block1(v329)
+block219():
+  v330: u8 = int 109 @374:16
+  v331: bool = eq v1, v330 @374:16
+  branch v331, block220(), block221()
+block220():
+  v332: i64 = int 109 @375:16
+  jump block1(v332)
+block221():
+  v333: u8 = int 110 @375:16
+  v334: bool = eq v1, v333 @375:16
+  branch v334, block222(), block223()
+block222():
+  v335: i64 = int 110 @376:16
+  jump block1(v335)
+block223():
+  v336: u8 = int 111 @376:16
+  v337: bool = eq v1, v336 @376:16
+  branch v337, block224(), block225()
+block224():
+  v338: i64 = int 111 @377:16
+  jump block1(v338)
+block225():
+  v339: u8 = int 112 @377:16
+  v340: bool = eq v1, v339 @377:16
+  branch v340, block226(), block227()
+block226():
+  v341: i64 = int 112 @378:16
+  jump block1(v341)
+block227():
+  v342: u8 = int 113 @378:16
+  v343: bool = eq v1, v342 @378:16
+  branch v343, block228(), block229()
+block228():
+  v344: i64 = int 113 @379:16
+  jump block1(v344)
+block229():
+  v345: u8 = int 114 @379:16
+  v346: bool = eq v1, v345 @379:16
+  branch v346, block230(), block231()
+block230():
+  v347: i64 = int 114 @380:16
+  jump block1(v347)
+block231():
+  v348: u8 = int 115 @380:16
+  v349: bool = eq v1, v348 @380:16
+  branch v349, block232(), block233()
+block232():
+  v350: i64 = int 115 @381:16
+  jump block1(v350)
+block233():
+  v351: u8 = int 116 @381:16
+  v352: bool = eq v1, v351 @381:16
+  branch v352, block234(), block235()
+block234():
+  v353: i64 = int 116 @382:16
+  jump block1(v353)
+block235():
+  v354: u8 = int 117 @382:16
+  v355: bool = eq v1, v354 @382:16
+  branch v355, block236(), block237()
+block236():
+  v356: i64 = int 117 @383:16
+  jump block1(v356)
+block237():
+  v357: u8 = int 118 @383:16
+  v358: bool = eq v1, v357 @383:16
+  branch v358, block238(), block239()
+block238():
+  v359: i64 = int 118 @384:16
+  jump block1(v359)
+block239():
+  v360: u8 = int 119 @384:16
+  v361: bool = eq v1, v360 @384:16
+  branch v361, block240(), block241()
+block240():
+  v362: i64 = int 119 @385:16
+  jump block1(v362)
+block241():
+  v363: u8 = int 120 @385:16
+  v364: bool = eq v1, v363 @385:16
+  branch v364, block242(), block243()
+block242():
+  v365: i64 = int 120 @386:16
+  jump block1(v365)
+block243():
+  v366: u8 = int 121 @386:16
+  v367: bool = eq v1, v366 @386:16
+  branch v367, block244(), block245()
+block244():
+  v368: i64 = int 121 @387:16
+  jump block1(v368)
+block245():
+  v369: u8 = int 122 @387:16
+  v370: bool = eq v1, v369 @387:16
+  branch v370, block246(), block247()
+block246():
+  v371: i64 = int 122 @388:16
+  jump block1(v371)
+block247():
+  v372: u8 = int 123 @388:16
+  v373: bool = eq v1, v372 @388:16
+  branch v373, block248(), block249()
+block248():
+  v374: i64 = int 123 @389:16
+  jump block1(v374)
+block249():
+  v375: u8 = int 124 @389:16
+  v376: bool = eq v1, v375 @389:16
+  branch v376, block250(), block251()
+block250():
+  v377: i64 = int 124 @390:16
+  jump block1(v377)
+block251():
+  v378: u8 = int 125 @390:16
+  v379: bool = eq v1, v378 @390:16
+  branch v379, block252(), block253()
+block252():
+  v380: i64 = int 125 @391:16
+  jump block1(v380)
+block253():
+  v381: u8 = int 126 @391:16
+  v382: bool = eq v1, v381 @391:16
+  branch v382, block254(), block255()
+block254():
+  v383: i64 = int 126 @392:16
+  jump block1(v383)
+block255():
+  v384: u8 = int 127 @392:16
+  v385: bool = eq v1, v384 @392:16
+  branch v385, block256(), block257()
+block256():
+  v386: i64 = int 127 @393:16
+  jump block1(v386)
+block257():
+  v387: u8 = int 128 @393:16
+  v388: bool = eq v1, v387 @393:16
+  branch v388, block258(), block259()
+block258():
+  v389: i64 = int 128 @394:16
+  jump block1(v389)
+block259():
+  v390: u8 = int 129 @394:16
+  v391: bool = eq v1, v390 @394:16
+  branch v391, block260(), block261()
+block260():
+  v392: i64 = int 129 @395:16
+  jump block1(v392)
+block261():
+  v393: u8 = int 130 @395:16
+  v394: bool = eq v1, v393 @395:16
+  branch v394, block262(), block263()
+block262():
+  v395: i64 = int 130 @396:16
+  jump block1(v395)
+block263():
+  v396: u8 = int 131 @396:16
+  v397: bool = eq v1, v396 @396:16
+  branch v397, block264(), block265()
+block264():
+  v398: i64 = int 131 @397:16
+  jump block1(v398)
+block265():
+  v399: u8 = int 132 @397:16
+  v400: bool = eq v1, v399 @397:16
+  branch v400, block266(), block267()
+block266():
+  v401: i64 = int 132 @398:16
+  jump block1(v401)
+block267():
+  v402: u8 = int 133 @398:16
+  v403: bool = eq v1, v402 @398:16
+  branch v403, block268(), block269()
+block268():
+  v404: i64 = int 133 @399:16
+  jump block1(v404)
+block269():
+  v405: u8 = int 134 @399:16
+  v406: bool = eq v1, v405 @399:16
+  branch v406, block270(), block271()
+block270():
+  v407: i64 = int 134 @400:16
+  jump block1(v407)
+block271():
+  v408: u8 = int 135 @400:16
+  v409: bool = eq v1, v408 @400:16
+  branch v409, block272(), block273()
+block272():
+  v410: i64 = int 135 @401:16
+  jump block1(v410)
+block273():
+  v411: u8 = int 136 @401:16
+  v412: bool = eq v1, v411 @401:16
+  branch v412, block274(), block275()
+block274():
+  v413: i64 = int 136 @402:16
+  jump block1(v413)
+block275():
+  v414: u8 = int 137 @402:16
+  v415: bool = eq v1, v414 @402:16
+  branch v415, block276(), block277()
+block276():
+  v416: i64 = int 137 @403:16
+  jump block1(v416)
+block277():
+  v417: u8 = int 138 @403:16
+  v418: bool = eq v1, v417 @403:16
+  branch v418, block278(), block279()
+block278():
+  v419: i64 = int 138 @404:16
+  jump block1(v419)
+block279():
+  v420: u8 = int 139 @404:16
+  v421: bool = eq v1, v420 @404:16
+  branch v421, block280(), block281()
+block280():
+  v422: i64 = int 139 @405:16
+  jump block1(v422)
+block281():
+  v423: u8 = int 140 @405:16
+  v424: bool = eq v1, v423 @405:16
+  branch v424, block282(), block283()
+block282():
+  v425: i64 = int 140 @406:16
+  jump block1(v425)
+block283():
+  v426: u8 = int 141 @406:16
+  v427: bool = eq v1, v426 @406:16
+  branch v427, block284(), block285()
+block284():
+  v428: i64 = int 141 @407:16
+  jump block1(v428)
+block285():
+  v429: u8 = int 142 @407:16
+  v430: bool = eq v1, v429 @407:16
+  branch v430, block286(), block287()
+block286():
+  v431: i64 = int 142 @408:16
+  jump block1(v431)
+block287():
+  v432: u8 = int 143 @408:16
+  v433: bool = eq v1, v432 @408:16
+  branch v433, block288(), block289()
+block288():
+  v434: i64 = int 143 @409:16
+  jump block1(v434)
+block289():
+  v435: u8 = int 144 @409:16
+  v436: bool = eq v1, v435 @409:16
+  branch v436, block290(), block291()
+block290():
+  v437: i64 = int 144 @410:16
+  jump block1(v437)
+block291():
+  v438: u8 = int 145 @410:16
+  v439: bool = eq v1, v438 @410:16
+  branch v439, block292(), block293()
+block292():
+  v440: i64 = int 145 @411:16
+  jump block1(v440)
+block293():
+  v441: u8 = int 146 @411:16
+  v442: bool = eq v1, v441 @411:16
+  branch v442, block294(), block295()
+block294():
+  v443: i64 = int 146 @412:16
+  jump block1(v443)
+block295():
+  v444: u8 = int 147 @412:16
+  v445: bool = eq v1, v444 @412:16
+  branch v445, block296(), block297()
+block296():
+  v446: i64 = int 147 @413:16
+  jump block1(v446)
+block297():
+  v447: u8 = int 148 @413:16
+  v448: bool = eq v1, v447 @413:16
+  branch v448, block298(), block299()
+block298():
+  v449: i64 = int 148 @414:16
+  jump block1(v449)
+block299():
+  v450: u8 = int 149 @414:16
+  v451: bool = eq v1, v450 @414:16
+  branch v451, block300(), block301()
+block300():
+  v452: i64 = int 149 @415:16
+  jump block1(v452)
+block301():
+  v453: u8 = int 150 @415:16
+  v454: bool = eq v1, v453 @415:16
+  branch v454, block302(), block303()
+block302():
+  v455: i64 = int 150 @416:16
+  jump block1(v455)
+block303():
+  v456: u8 = int 151 @416:16
+  v457: bool = eq v1, v456 @416:16
+  branch v457, block304(), block305()
+block304():
+  v458: i64 = int 151 @417:16
+  jump block1(v458)
+block305():
+  v459: u8 = int 152 @417:16
+  v460: bool = eq v1, v459 @417:16
+  branch v460, block306(), block307()
+block306():
+  v461: i64 = int 152 @418:16
+  jump block1(v461)
+block307():
+  v462: u8 = int 153 @418:16
+  v463: bool = eq v1, v462 @418:16
+  branch v463, block308(), block309()
+block308():
+  v464: i64 = int 153 @419:16
+  jump block1(v464)
+block309():
+  v465: u8 = int 154 @419:16
+  v466: bool = eq v1, v465 @419:16
+  branch v466, block310(), block311()
+block310():
+  v467: i64 = int 154 @420:16
+  jump block1(v467)
+block311():
+  v468: u8 = int 155 @420:16
+  v469: bool = eq v1, v468 @420:16
+  branch v469, block312(), block313()
+block312():
+  v470: i64 = int 155 @421:16
+  jump block1(v470)
+block313():
+  v471: u8 = int 156 @421:16
+  v472: bool = eq v1, v471 @421:16
+  branch v472, block314(), block315()
+block314():
+  v473: i64 = int 156 @422:16
+  jump block1(v473)
+block315():
+  v474: u8 = int 157 @422:16
+  v475: bool = eq v1, v474 @422:16
+  branch v475, block316(), block317()
+block316():
+  v476: i64 = int 157 @423:16
+  jump block1(v476)
+block317():
+  v477: u8 = int 158 @423:16
+  v478: bool = eq v1, v477 @423:16
+  branch v478, block318(), block319()
+block318():
+  v479: i64 = int 158 @424:16
+  jump block1(v479)
+block319():
+  v480: u8 = int 159 @424:16
+  v481: bool = eq v1, v480 @424:16
+  branch v481, block320(), block321()
+block320():
+  v482: i64 = int 159 @425:16
+  jump block1(v482)
+block321():
+  v483: u8 = int 160 @425:16
+  v484: bool = eq v1, v483 @425:16
+  branch v484, block322(), block323()
+block322():
+  v485: i64 = int 160 @426:16
+  jump block1(v485)
+block323():
+  v486: u8 = int 161 @426:16
+  v487: bool = eq v1, v486 @426:16
+  branch v487, block324(), block325()
+block324():
+  v488: i64 = int 161 @427:16
+  jump block1(v488)
+block325():
+  v489: u8 = int 162 @427:16
+  v490: bool = eq v1, v489 @427:16
+  branch v490, block326(), block327()
+block326():
+  v491: i64 = int 162 @428:16
+  jump block1(v491)
+block327():
+  v492: u8 = int 163 @428:16
+  v493: bool = eq v1, v492 @428:16
+  branch v493, block328(), block329()
+block328():
+  v494: i64 = int 163 @429:16
+  jump block1(v494)
+block329():
+  v495: u8 = int 164 @429:16
+  v496: bool = eq v1, v495 @429:16
+  branch v496, block330(), block331()
+block330():
+  v497: i64 = int 164 @430:16
+  jump block1(v497)
+block331():
+  v498: u8 = int 165 @430:16
+  v499: bool = eq v1, v498 @430:16
+  branch v499, block332(), block333()
+block332():
+  v500: i64 = int 165 @431:16
+  jump block1(v500)
+block333():
+  v501: u8 = int 166 @431:16
+  v502: bool = eq v1, v501 @431:16
+  branch v502, block334(), block335()
+block334():
+  v503: i64 = int 166 @432:16
+  jump block1(v503)
+block335():
+  v504: u8 = int 167 @432:16
+  v505: bool = eq v1, v504 @432:16
+  branch v505, block336(), block337()
+block336():
+  v506: i64 = int 167 @433:16
+  jump block1(v506)
+block337():
+  v507: u8 = int 168 @433:16
+  v508: bool = eq v1, v507 @433:16
+  branch v508, block338(), block339()
+block338():
+  v509: i64 = int 168 @434:16
+  jump block1(v509)
+block339():
+  v510: u8 = int 169 @434:16
+  v511: bool = eq v1, v510 @434:16
+  branch v511, block340(), block341()
+block340():
+  v512: i64 = int 169 @435:16
+  jump block1(v512)
+block341():
+  v513: u8 = int 170 @435:16
+  v514: bool = eq v1, v513 @435:16
+  branch v514, block342(), block343()
+block342():
+  v515: i64 = int 170 @436:16
+  jump block1(v515)
+block343():
+  v516: u8 = int 171 @436:16
+  v517: bool = eq v1, v516 @436:16
+  branch v517, block344(), block345()
+block344():
+  v518: i64 = int 171 @437:16
+  jump block1(v518)
+block345():
+  v519: u8 = int 172 @437:16
+  v520: bool = eq v1, v519 @437:16
+  branch v520, block346(), block347()
+block346():
+  v521: i64 = int 172 @438:16
+  jump block1(v521)
+block347():
+  v522: u8 = int 173 @438:16
+  v523: bool = eq v1, v522 @438:16
+  branch v523, block348(), block349()
+block348():
+  v524: i64 = int 173 @439:16
+  jump block1(v524)
+block349():
+  v525: u8 = int 174 @439:16
+  v526: bool = eq v1, v525 @439:16
+  branch v526, block350(), block351()
+block350():
+  v527: i64 = int 174 @440:16
+  jump block1(v527)
+block351():
+  v528: u8 = int 175 @440:16
+  v529: bool = eq v1, v528 @440:16
+  branch v529, block352(), block353()
+block352():
+  v530: i64 = int 175 @441:16
+  jump block1(v530)
+block353():
+  v531: u8 = int 176 @441:16
+  v532: bool = eq v1, v531 @441:16
+  branch v532, block354(), block355()
+block354():
+  v533: i64 = int 176 @442:16
+  jump block1(v533)
+block355():
+  v534: u8 = int 177 @442:16
+  v535: bool = eq v1, v534 @442:16
+  branch v535, block356(), block357()
+block356():
+  v536: i64 = int 177 @443:16
+  jump block1(v536)
+block357():
+  v537: u8 = int 178 @443:16
+  v538: bool = eq v1, v537 @443:16
+  branch v538, block358(), block359()
+block358():
+  v539: i64 = int 178 @444:16
+  jump block1(v539)
+block359():
+  v540: u8 = int 179 @444:16
+  v541: bool = eq v1, v540 @444:16
+  branch v541, block360(), block361()
+block360():
+  v542: i64 = int 179 @445:16
+  jump block1(v542)
+block361():
+  v543: u8 = int 180 @445:16
+  v544: bool = eq v1, v543 @445:16
+  branch v544, block362(), block363()
+block362():
+  v545: i64 = int 180 @446:16
+  jump block1(v545)
+block363():
+  v546: u8 = int 181 @446:16
+  v547: bool = eq v1, v546 @446:16
+  branch v547, block364(), block365()
+block364():
+  v548: i64 = int 181 @447:16
+  jump block1(v548)
+block365():
+  v549: u8 = int 182 @447:16
+  v550: bool = eq v1, v549 @447:16
+  branch v550, block366(), block367()
+block366():
+  v551: i64 = int 182 @448:16
+  jump block1(v551)
+block367():
+  v552: u8 = int 183 @448:16
+  v553: bool = eq v1, v552 @448:16
+  branch v553, block368(), block369()
+block368():
+  v554: i64 = int 183 @449:16
+  jump block1(v554)
+block369():
+  v555: u8 = int 184 @449:16
+  v556: bool = eq v1, v555 @449:16
+  branch v556, block370(), block371()
+block370():
+  v557: i64 = int 184 @450:16
+  jump block1(v557)
+block371():
+  v558: u8 = int 185 @450:16
+  v559: bool = eq v1, v558 @450:16
+  branch v559, block372(), block373()
+block372():
+  v560: i64 = int 185 @451:16
+  jump block1(v560)
+block373():
+  v561: u8 = int 186 @451:16
+  v562: bool = eq v1, v561 @451:16
+  branch v562, block374(), block375()
+block374():
+  v563: i64 = int 186 @452:16
+  jump block1(v563)
+block375():
+  v564: u8 = int 187 @452:16
+  v565: bool = eq v1, v564 @452:16
+  branch v565, block376(), block377()
+block376():
+  v566: i64 = int 187 @453:16
+  jump block1(v566)
+block377():
+  v567: u8 = int 188 @453:16
+  v568: bool = eq v1, v567 @453:16
+  branch v568, block378(), block379()
+block378():
+  v569: i64 = int 188 @454:16
+  jump block1(v569)
+block379():
+  v570: u8 = int 189 @454:16
+  v571: bool = eq v1, v570 @454:16
+  branch v571, block380(), block381()
+block380():
+  v572: i64 = int 189 @455:16
+  jump block1(v572)
+block381():
+  v573: u8 = int 190 @455:16
+  v574: bool = eq v1, v573 @455:16
+  branch v574, block382(), block383()
+block382():
+  v575: i64 = int 190 @456:16
+  jump block1(v575)
+block383():
+  v576: u8 = int 191 @456:16
+  v577: bool = eq v1, v576 @456:16
+  branch v577, block384(), block385()
+block384():
+  v578: i64 = int 191 @457:16
+  jump block1(v578)
+block385():
+  v579: u8 = int 192 @457:16
+  v580: bool = eq v1, v579 @457:16
+  branch v580, block386(), block387()
+block386():
+  v581: i64 = int 192 @458:16
+  jump block1(v581)
+block387():
+  v582: u8 = int 193 @458:16
+  v583: bool = eq v1, v582 @458:16
+  branch v583, block388(), block389()
+block388():
+  v584: i64 = int 193 @459:16
+  jump block1(v584)
+block389():
+  v585: u8 = int 194 @459:16
+  v586: bool = eq v1, v585 @459:16
+  branch v586, block390(), block391()
+block390():
+  v587: i64 = int 194 @460:16
+  jump block1(v587)
+block391():
+  v588: u8 = int 195 @460:16
+  v589: bool = eq v1, v588 @460:16
+  branch v589, block392(), block393()
+block392():
+  v590: i64 = int 195 @461:16
+  jump block1(v590)
+block393():
+  v591: u8 = int 196 @461:16
+  v592: bool = eq v1, v591 @461:16
+  branch v592, block394(), block395()
+block394():
+  v593: i64 = int 196 @462:16
+  jump block1(v593)
+block395():
+  v594: u8 = int 197 @462:16
+  v595: bool = eq v1, v594 @462:16
+  branch v595, block396(), block397()
+block396():
+  v596: i64 = int 197 @463:16
+  jump block1(v596)
+block397():
+  v597: u8 = int 198 @463:16
+  v598: bool = eq v1, v597 @463:16
+  branch v598, block398(), block399()
+block398():
+  v599: i64 = int 198 @464:16
+  jump block1(v599)
+block399():
+  v600: u8 = int 199 @464:16
+  v601: bool = eq v1, v600 @464:16
+  branch v601, block400(), block401()
+block400():
+  v602: i64 = int 199 @465:16
+  jump block1(v602)
+block401():
+  v603: u8 = int 200 @465:16
+  v604: bool = eq v1, v603 @465:16
+  branch v604, block402(), block403()
+block402():
+  v605: i64 = int 200 @466:16
+  jump block1(v605)
+block403():
+  v606: u8 = int 201 @466:16
+  v607: bool = eq v1, v606 @466:16
+  branch v607, block404(), block405()
+block404():
+  v608: i64 = int 201 @467:16
+  jump block1(v608)
+block405():
+  v609: u8 = int 202 @467:16
+  v610: bool = eq v1, v609 @467:16
+  branch v610, block406(), block407()
+block406():
+  v611: i64 = int 202 @468:16
+  jump block1(v611)
+block407():
+  v612: u8 = int 203 @468:16
+  v613: bool = eq v1, v612 @468:16
+  branch v613, block408(), block409()
+block408():
+  v614: i64 = int 203 @469:16
+  jump block1(v614)
+block409():
+  v615: u8 = int 204 @469:16
+  v616: bool = eq v1, v615 @469:16
+  branch v616, block410(), block411()
+block410():
+  v617: i64 = int 204 @470:16
+  jump block1(v617)
+block411():
+  v618: u8 = int 205 @470:16
+  v619: bool = eq v1, v618 @470:16
+  branch v619, block412(), block413()
+block412():
+  v620: i64 = int 205 @471:16
+  jump block1(v620)
+block413():
+  v621: u8 = int 206 @471:16
+  v622: bool = eq v1, v621 @471:16
+  branch v622, block414(), block415()
+block414():
+  v623: i64 = int 206 @472:16
+  jump block1(v623)
+block415():
+  v624: u8 = int 207 @472:16
+  v625: bool = eq v1, v624 @472:16
+  branch v625, block416(), block417()
+block416():
+  v626: i64 = int 207 @473:16
+  jump block1(v626)
+block417():
+  v627: u8 = int 208 @473:16
+  v628: bool = eq v1, v627 @473:16
+  branch v628, block418(), block419()
+block418():
+  v629: i64 = int 208 @474:16
+  jump block1(v629)
+block419():
+  v630: u8 = int 209 @474:16
+  v631: bool = eq v1, v630 @474:16
+  branch v631, block420(), block421()
+block420():
+  v632: i64 = int 209 @475:16
+  jump block1(v632)
+block421():
+  v633: u8 = int 210 @475:16
+  v634: bool = eq v1, v633 @475:16
+  branch v634, block422(), block423()
+block422():
+  v635: i64 = int 210 @476:16
+  jump block1(v635)
+block423():
+  v636: u8 = int 211 @476:16
+  v637: bool = eq v1, v636 @476:16
+  branch v637, block424(), block425()
+block424():
+  v638: i64 = int 211 @477:16
+  jump block1(v638)
+block425():
+  v639: u8 = int 212 @477:16
+  v640: bool = eq v1, v639 @477:16
+  branch v640, block426(), block427()
+block426():
+  v641: i64 = int 212 @478:16
+  jump block1(v641)
+block427():
+  v642: u8 = int 213 @478:16
+  v643: bool = eq v1, v642 @478:16
+  branch v643, block428(), block429()
+block428():
+  v644: i64 = int 213 @479:16
+  jump block1(v644)
+block429():
+  v645: u8 = int 214 @479:16
+  v646: bool = eq v1, v645 @479:16
+  branch v646, block430(), block431()
+block430():
+  v647: i64 = int 214 @480:16
+  jump block1(v647)
+block431():
+  v648: u8 = int 215 @480:16
+  v649: bool = eq v1, v648 @480:16
+  branch v649, block432(), block433()
+block432():
+  v650: i64 = int 215 @481:16
+  jump block1(v650)
+block433():
+  v651: u8 = int 216 @481:16
+  v652: bool = eq v1, v651 @481:16
+  branch v652, block434(), block435()
+block434():
+  v653: i64 = int 216 @482:16
+  jump block1(v653)
+block435():
+  v654: u8 = int 217 @482:16
+  v655: bool = eq v1, v654 @482:16
+  branch v655, block436(), block437()
+block436():
+  v656: i64 = int 217 @483:16
+  jump block1(v656)
+block437():
+  v657: u8 = int 218 @483:16
+  v658: bool = eq v1, v657 @483:16
+  branch v658, block438(), block439()
+block438():
+  v659: i64 = int 218 @484:16
+  jump block1(v659)
+block439():
+  v660: u8 = int 219 @484:16
+  v661: bool = eq v1, v660 @484:16
+  branch v661, block440(), block441()
+block440():
+  v662: i64 = int 219 @485:16
+  jump block1(v662)
+block441():
+  v663: u8 = int 220 @485:16
+  v664: bool = eq v1, v663 @485:16
+  branch v664, block442(), block443()
+block442():
+  v665: i64 = int 220 @486:16
+  jump block1(v665)
+block443():
+  v666: u8 = int 221 @486:16
+  v667: bool = eq v1, v666 @486:16
+  branch v667, block444(), block445()
+block444():
+  v668: i64 = int 221 @487:16
+  jump block1(v668)
+block445():
+  v669: u8 = int 222 @487:16
+  v670: bool = eq v1, v669 @487:16
+  branch v670, block446(), block447()
+block446():
+  v671: i64 = int 222 @488:16
+  jump block1(v671)
+block447():
+  v672: u8 = int 223 @488:16
+  v673: bool = eq v1, v672 @488:16
+  branch v673, block448(), block449()
+block448():
+  v674: i64 = int 223 @489:16
+  jump block1(v674)
+block449():
+  v675: u8 = int 224 @489:16
+  v676: bool = eq v1, v675 @489:16
+  branch v676, block450(), block451()
+block450():
+  v677: i64 = int 224 @490:16
+  jump block1(v677)
+block451():
+  v678: u8 = int 225 @490:16
+  v679: bool = eq v1, v678 @490:16
+  branch v679, block452(), block453()
+block452():
+  v680: i64 = int 225 @491:16
+  jump block1(v680)
+block453():
+  v681: u8 = int 226 @491:16
+  v682: bool = eq v1, v681 @491:16
+  branch v682, block454(), block455()
+block454():
+  v683: i64 = int 226 @492:16
+  jump block1(v683)
+block455():
+  v684: u8 = int 227 @492:16
+  v685: bool = eq v1, v684 @492:16
+  branch v685, block456(), block457()
+block456():
+  v686: i64 = int 227 @493:16
+  jump block1(v686)
+block457():
+  v687: u8 = int 228 @493:16
+  v688: bool = eq v1, v687 @493:16
+  branch v688, block458(), block459()
+block458():
+  v689: i64 = int 228 @494:16
+  jump block1(v689)
+block459():
+  v690: u8 = int 229 @494:16
+  v691: bool = eq v1, v690 @494:16
+  branch v691, block460(), block461()
+block460():
+  v692: i64 = int 229 @495:16
+  jump block1(v692)
+block461():
+  v693: u8 = int 230 @495:16
+  v694: bool = eq v1, v693 @495:16
+  branch v694, block462(), block463()
+block462():
+  v695: i64 = int 230 @496:16
+  jump block1(v695)
+block463():
+  v696: u8 = int 231 @496:16
+  v697: bool = eq v1, v696 @496:16
+  branch v697, block464(), block465()
+block464():
+  v698: i64 = int 231 @497:16
+  jump block1(v698)
+block465():
+  v699: u8 = int 232 @497:16
+  v700: bool = eq v1, v699 @497:16
+  branch v700, block466(), block467()
+block466():
+  v701: i64 = int 232 @498:16
+  jump block1(v701)
+block467():
+  v702: u8 = int 233 @498:16
+  v703: bool = eq v1, v702 @498:16
+  branch v703, block468(), block469()
+block468():
+  v704: i64 = int 233 @499:16
+  jump block1(v704)
+block469():
+  v705: u8 = int 234 @499:16
+  v706: bool = eq v1, v705 @499:16
+  branch v706, block470(), block471()
+block470():
+  v707: i64 = int 234 @500:16
+  jump block1(v707)
+block471():
+  v708: u8 = int 235 @500:16
+  v709: bool = eq v1, v708 @500:16
+  branch v709, block472(), block473()
+block472():
+  v710: i64 = int 235 @501:16
+  jump block1(v710)
+block473():
+  v711: u8 = int 236 @501:16
+  v712: bool = eq v1, v711 @501:16
+  branch v712, block474(), block475()
+block474():
+  v713: i64 = int 236 @502:16
+  jump block1(v713)
+block475():
+  v714: u8 = int 237 @502:16
+  v715: bool = eq v1, v714 @502:16
+  branch v715, block476(), block477()
+block476():
+  v716: i64 = int 237 @503:16
+  jump block1(v716)
+block477():
+  v717: u8 = int 238 @503:16
+  v718: bool = eq v1, v717 @503:16
+  branch v718, block478(), block479()
+block478():
+  v719: i64 = int 238 @504:16
+  jump block1(v719)
+block479():
+  v720: u8 = int 239 @504:16
+  v721: bool = eq v1, v720 @504:16
+  branch v721, block480(), block481()
+block480():
+  v722: i64 = int 239 @505:16
+  jump block1(v722)
+block481():
+  v723: u8 = int 240 @505:16
+  v724: bool = eq v1, v723 @505:16
+  branch v724, block482(), block483()
+block482():
+  v725: i64 = int 240 @506:16
+  jump block1(v725)
+block483():
+  v726: u8 = int 241 @506:16
+  v727: bool = eq v1, v726 @506:16
+  branch v727, block484(), block485()
+block484():
+  v728: i64 = int 241 @507:16
+  jump block1(v728)
+block485():
+  v729: u8 = int 242 @507:16
+  v730: bool = eq v1, v729 @507:16
+  branch v730, block486(), block487()
+block486():
+  v731: i64 = int 242 @508:16
+  jump block1(v731)
+block487():
+  v732: u8 = int 243 @508:16
+  v733: bool = eq v1, v732 @508:16
+  branch v733, block488(), block489()
+block488():
+  v734: i64 = int 243 @509:16
+  jump block1(v734)
+block489():
+  v735: u8 = int 244 @509:16
+  v736: bool = eq v1, v735 @509:16
+  branch v736, block490(), block491()
+block490():
+  v737: i64 = int 244 @510:16
+  jump block1(v737)
+block491():
+  v738: u8 = int 245 @510:16
+  v739: bool = eq v1, v738 @510:16
+  branch v739, block492(), block493()
+block492():
+  v740: i64 = int 245 @511:16
+  jump block1(v740)
+block493():
+  v741: u8 = int 246 @511:16
+  v742: bool = eq v1, v741 @511:16
+  branch v742, block494(), block495()
+block494():
+  v743: i64 = int 246 @512:16
+  jump block1(v743)
+block495():
+  v744: u8 = int 247 @512:16
+  v745: bool = eq v1, v744 @512:16
+  branch v745, block496(), block497()
+block496():
+  v746: i64 = int 247 @513:16
+  jump block1(v746)
+block497():
+  v747: u8 = int 248 @513:16
+  v748: bool = eq v1, v747 @513:16
+  branch v748, block498(), block499()
+block498():
+  v749: i64 = int 248 @514:16
+  jump block1(v749)
+block499():
+  v750: u8 = int 249 @514:16
+  v751: bool = eq v1, v750 @514:16
+  branch v751, block500(), block501()
+block500():
+  v752: i64 = int 249 @515:16
+  jump block1(v752)
+block501():
+  v753: u8 = int 250 @515:16
+  v754: bool = eq v1, v753 @515:16
+  branch v754, block502(), block503()
+block502():
+  v755: i64 = int 250 @516:16
+  jump block1(v755)
+block503():
+  v756: u8 = int 251 @516:16
+  v757: bool = eq v1, v756 @516:16
+  branch v757, block504(), block505()
+block504():
+  v758: i64 = int 251 @517:16
+  jump block1(v758)
+block505():
+  v759: u8 = int 252 @517:16
+  v760: bool = eq v1, v759 @517:16
+  branch v760, block506(), block507()
+block506():
+  v761: i64 = int 252 @518:16
+  jump block1(v761)
+block507():
+  v762: u8 = int 253 @518:16
+  v763: bool = eq v1, v762 @518:16
+  branch v763, block508(), block509()
+block508():
+  v764: i64 = int 253 @519:16
+  jump block1(v764)
+block509():
+  v765: u8 = int 254 @519:16
+  v766: bool = eq v1, v765 @519:16
+  branch v766, block510(), block511()
+block510():
+  v767: i64 = int 254 @520:16
+  jump block1(v767)
+block511():
+  v768: i64 = int 255 @521:16
+  jump block1(v768)
+block512():
+  trap t0
+t0: unreachable @521:16 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn main() -> u16 {
+block0():
+  v0: addr = slot 1 @524:30
+  v1: unit = call f0 v0 @524:30
+  v2: u16 = call f1 v0 @524:24
+  return v2
+block1():
+  trap t0
+t0: unreachable @524:24 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter last(addr) {
+block0(v0: addr):
+  v1: unit = call f0 v0 @263:8
+  return
+t0: unreachable @263:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter index(addr) -> u16 {
+block0(v0: addr):
+  v1: u16 = call f1 v0 @265:8
+  return v1
+t0: unreachable @265:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter main() -> u16 {
+block0():
+  v0: u16 = call f2 @524:8
+  return v0
+t0: unreachable @524:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/enum_of_257_variants.mn ==
+mente-dump 2 mir
+f0: fn last(addr) {
+block0(v0: addr):
+  v1: addr = slot 2 @264:25
+  v2: u16 = int 256 @264:25
+  v3: unit = store v1, v2 @264:25
+  v4: unit = copy 2 v0, v1 @264:25
+  return
+block1():
+  trap t0
+t0: unreachable @264:25 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn index(addr) -> u16 {
+block0(v0: addr):
+  v1: u16 = load v0 @266:38
+  v3: u16 = int 0 @266:38
+  v4: bool = eq v1, v3 @266:38
+  branch v4, block2(), block3()
+block1(v2: i64):
+  v772: u16 = cast v2 @523:16
+  return v772
+block2():
+  v5: i64 = int 0 @267:14
+  jump block1(v5)
+block3():
+  v6: u16 = int 1 @267:14
+  v7: bool = eq v1, v6 @267:14
+  branch v7, block4(), block5()
+block4():
+  v8: i64 = int 1 @268:14
+  jump block1(v8)
+block5():
+  v9: u16 = int 2 @268:14
+  v10: bool = eq v1, v9 @268:14
+  branch v10, block6(), block7()
+block6():
+  v11: i64 = int 2 @269:14
+  jump block1(v11)
+block7():
+  v12: u16 = int 3 @269:14
+  v13: bool = eq v1, v12 @269:14
+  branch v13, block8(), block9()
+block8():
+  v14: i64 = int 3 @270:14
+  jump block1(v14)
+block9():
+  v15: u16 = int 4 @270:14
+  v16: bool = eq v1, v15 @270:14
+  branch v16, block10(), block11()
+block10():
+  v17: i64 = int 4 @271:14
+  jump block1(v17)
+block11():
+  v18: u16 = int 5 @271:14
+  v19: bool = eq v1, v18 @271:14
+  branch v19, block12(), block13()
+block12():
+  v20: i64 = int 5 @272:14
+  jump block1(v20)
+block13():
+  v21: u16 = int 6 @272:14
+  v22: bool = eq v1, v21 @272:14
+  branch v22, block14(), block15()
+block14():
+  v23: i64 = int 6 @273:14
+  jump block1(v23)
+block15():
+  v24: u16 = int 7 @273:14
+  v25: bool = eq v1, v24 @273:14
+  branch v25, block16(), block17()
+block16():
+  v26: i64 = int 7 @274:14
+  jump block1(v26)
+block17():
+  v27: u16 = int 8 @274:14
+  v28: bool = eq v1, v27 @274:14
+  branch v28, block18(), block19()
+block18():
+  v29: i64 = int 8 @275:14
+  jump block1(v29)
+block19():
+  v30: u16 = int 9 @275:14
+  v31: bool = eq v1, v30 @275:14
+  branch v31, block20(), block21()
+block20():
+  v32: i64 = int 9 @276:14
+  jump block1(v32)
+block21():
+  v33: u16 = int 10 @276:14
+  v34: bool = eq v1, v33 @276:14
+  branch v34, block22(), block23()
+block22():
+  v35: i64 = int 10 @277:15
+  jump block1(v35)
+block23():
+  v36: u16 = int 11 @277:15
+  v37: bool = eq v1, v36 @277:15
+  branch v37, block24(), block25()
+block24():
+  v38: i64 = int 11 @278:15
+  jump block1(v38)
+block25():
+  v39: u16 = int 12 @278:15
+  v40: bool = eq v1, v39 @278:15
+  branch v40, block26(), block27()
+block26():
+  v41: i64 = int 12 @279:15
+  jump block1(v41)
+block27():
+  v42: u16 = int 13 @279:15
+  v43: bool = eq v1, v42 @279:15
+  branch v43, block28(), block29()
+block28():
+  v44: i64 = int 13 @280:15
+  jump block1(v44)
+block29():
+  v45: u16 = int 14 @280:15
+  v46: bool = eq v1, v45 @280:15
+  branch v46, block30(), block31()
+block30():
+  v47: i64 = int 14 @281:15
+  jump block1(v47)
+block31():
+  v48: u16 = int 15 @281:15
+  v49: bool = eq v1, v48 @281:15
+  branch v49, block32(), block33()
+block32():
+  v50: i64 = int 15 @282:15
+  jump block1(v50)
+block33():
+  v51: u16 = int 16 @282:15
+  v52: bool = eq v1, v51 @282:15
+  branch v52, block34(), block35()
+block34():
+  v53: i64 = int 16 @283:15
+  jump block1(v53)
+block35():
+  v54: u16 = int 17 @283:15
+  v55: bool = eq v1, v54 @283:15
+  branch v55, block36(), block37()
+block36():
+  v56: i64 = int 17 @284:15
+  jump block1(v56)
+block37():
+  v57: u16 = int 18 @284:15
+  v58: bool = eq v1, v57 @284:15
+  branch v58, block38(), block39()
+block38():
+  v59: i64 = int 18 @285:15
+  jump block1(v59)
+block39():
+  v60: u16 = int 19 @285:15
+  v61: bool = eq v1, v60 @285:15
+  branch v61, block40(), block41()
+block40():
+  v62: i64 = int 19 @286:15
+  jump block1(v62)
+block41():
+  v63: u16 = int 20 @286:15
+  v64: bool = eq v1, v63 @286:15
+  branch v64, block42(), block43()
+block42():
+  v65: i64 = int 20 @287:15
+  jump block1(v65)
+block43():
+  v66: u16 = int 21 @287:15
+  v67: bool = eq v1, v66 @287:15
+  branch v67, block44(), block45()
+block44():
+  v68: i64 = int 21 @288:15
+  jump block1(v68)
+block45():
+  v69: u16 = int 22 @288:15
+  v70: bool = eq v1, v69 @288:15
+  branch v70, block46(), block47()
+block46():
+  v71: i64 = int 22 @289:15
+  jump block1(v71)
+block47():
+  v72: u16 = int 23 @289:15
+  v73: bool = eq v1, v72 @289:15
+  branch v73, block48(), block49()
+block48():
+  v74: i64 = int 23 @290:15
+  jump block1(v74)
+block49():
+  v75: u16 = int 24 @290:15
+  v76: bool = eq v1, v75 @290:15
+  branch v76, block50(), block51()
+block50():
+  v77: i64 = int 24 @291:15
+  jump block1(v77)
+block51():
+  v78: u16 = int 25 @291:15
+  v79: bool = eq v1, v78 @291:15
+  branch v79, block52(), block53()
+block52():
+  v80: i64 = int 25 @292:15
+  jump block1(v80)
+block53():
+  v81: u16 = int 26 @292:15
+  v82: bool = eq v1, v81 @292:15
+  branch v82, block54(), block55()
+block54():
+  v83: i64 = int 26 @293:15
+  jump block1(v83)
+block55():
+  v84: u16 = int 27 @293:15
+  v85: bool = eq v1, v84 @293:15
+  branch v85, block56(), block57()
+block56():
+  v86: i64 = int 27 @294:15
+  jump block1(v86)
+block57():
+  v87: u16 = int 28 @294:15
+  v88: bool = eq v1, v87 @294:15
+  branch v88, block58(), block59()
+block58():
+  v89: i64 = int 28 @295:15
+  jump block1(v89)
+block59():
+  v90: u16 = int 29 @295:15
+  v91: bool = eq v1, v90 @295:15
+  branch v91, block60(), block61()
+block60():
+  v92: i64 = int 29 @296:15
+  jump block1(v92)
+block61():
+  v93: u16 = int 30 @296:15
+  v94: bool = eq v1, v93 @296:15
+  branch v94, block62(), block63()
+block62():
+  v95: i64 = int 30 @297:15
+  jump block1(v95)
+block63():
+  v96: u16 = int 31 @297:15
+  v97: bool = eq v1, v96 @297:15
+  branch v97, block64(), block65()
+block64():
+  v98: i64 = int 31 @298:15
+  jump block1(v98)
+block65():
+  v99: u16 = int 32 @298:15
+  v100: bool = eq v1, v99 @298:15
+  branch v100, block66(), block67()
+block66():
+  v101: i64 = int 32 @299:15
+  jump block1(v101)
+block67():
+  v102: u16 = int 33 @299:15
+  v103: bool = eq v1, v102 @299:15
+  branch v103, block68(), block69()
+block68():
+  v104: i64 = int 33 @300:15
+  jump block1(v104)
+block69():
+  v105: u16 = int 34 @300:15
+  v106: bool = eq v1, v105 @300:15
+  branch v106, block70(), block71()
+block70():
+  v107: i64 = int 34 @301:15
+  jump block1(v107)
+block71():
+  v108: u16 = int 35 @301:15
+  v109: bool = eq v1, v108 @301:15
+  branch v109, block72(), block73()
+block72():
+  v110: i64 = int 35 @302:15
+  jump block1(v110)
+block73():
+  v111: u16 = int 36 @302:15
+  v112: bool = eq v1, v111 @302:15
+  branch v112, block74(), block75()
+block74():
+  v113: i64 = int 36 @303:15
+  jump block1(v113)
+block75():
+  v114: u16 = int 37 @303:15
+  v115: bool = eq v1, v114 @303:15
+  branch v115, block76(), block77()
+block76():
+  v116: i64 = int 37 @304:15
+  jump block1(v116)
+block77():
+  v117: u16 = int 38 @304:15
+  v118: bool = eq v1, v117 @304:15
+  branch v118, block78(), block79()
+block78():
+  v119: i64 = int 38 @305:15
+  jump block1(v119)
+block79():
+  v120: u16 = int 39 @305:15
+  v121: bool = eq v1, v120 @305:15
+  branch v121, block80(), block81()
+block80():
+  v122: i64 = int 39 @306:15
+  jump block1(v122)
+block81():
+  v123: u16 = int 40 @306:15
+  v124: bool = eq v1, v123 @306:15
+  branch v124, block82(), block83()
+block82():
+  v125: i64 = int 40 @307:15
+  jump block1(v125)
+block83():
+  v126: u16 = int 41 @307:15
+  v127: bool = eq v1, v126 @307:15
+  branch v127, block84(), block85()
+block84():
+  v128: i64 = int 41 @308:15
+  jump block1(v128)
+block85():
+  v129: u16 = int 42 @308:15
+  v130: bool = eq v1, v129 @308:15
+  branch v130, block86(), block87()
+block86():
+  v131: i64 = int 42 @309:15
+  jump block1(v131)
+block87():
+  v132: u16 = int 43 @309:15
+  v133: bool = eq v1, v132 @309:15
+  branch v133, block88(), block89()
+block88():
+  v134: i64 = int 43 @310:15
+  jump block1(v134)
+block89():
+  v135: u16 = int 44 @310:15
+  v136: bool = eq v1, v135 @310:15
+  branch v136, block90(), block91()
+block90():
+  v137: i64 = int 44 @311:15
+  jump block1(v137)
+block91():
+  v138: u16 = int 45 @311:15
+  v139: bool = eq v1, v138 @311:15
+  branch v139, block92(), block93()
+block92():
+  v140: i64 = int 45 @312:15
+  jump block1(v140)
+block93():
+  v141: u16 = int 46 @312:15
+  v142: bool = eq v1, v141 @312:15
+  branch v142, block94(), block95()
+block94():
+  v143: i64 = int 46 @313:15
+  jump block1(v143)
+block95():
+  v144: u16 = int 47 @313:15
+  v145: bool = eq v1, v144 @313:15
+  branch v145, block96(), block97()
+block96():
+  v146: i64 = int 47 @314:15
+  jump block1(v146)
+block97():
+  v147: u16 = int 48 @314:15
+  v148: bool = eq v1, v147 @314:15
+  branch v148, block98(), block99()
+block98():
+  v149: i64 = int 48 @315:15
+  jump block1(v149)
+block99():
+  v150: u16 = int 49 @315:15
+  v151: bool = eq v1, v150 @315:15
+  branch v151, block100(), block101()
+block100():
+  v152: i64 = int 49 @316:15
+  jump block1(v152)
+block101():
+  v153: u16 = int 50 @316:15
+  v154: bool = eq v1, v153 @316:15
+  branch v154, block102(), block103()
+block102():
+  v155: i64 = int 50 @317:15
+  jump block1(v155)
+block103():
+  v156: u16 = int 51 @317:15
+  v157: bool = eq v1, v156 @317:15
+  branch v157, block104(), block105()
+block104():
+  v158: i64 = int 51 @318:15
+  jump block1(v158)
+block105():
+  v159: u16 = int 52 @318:15
+  v160: bool = eq v1, v159 @318:15
+  branch v160, block106(), block107()
+block106():
+  v161: i64 = int 52 @319:15
+  jump block1(v161)
+block107():
+  v162: u16 = int 53 @319:15
+  v163: bool = eq v1, v162 @319:15
+  branch v163, block108(), block109()
+block108():
+  v164: i64 = int 53 @320:15
+  jump block1(v164)
+block109():
+  v165: u16 = int 54 @320:15
+  v166: bool = eq v1, v165 @320:15
+  branch v166, block110(), block111()
+block110():
+  v167: i64 = int 54 @321:15
+  jump block1(v167)
+block111():
+  v168: u16 = int 55 @321:15
+  v169: bool = eq v1, v168 @321:15
+  branch v169, block112(), block113()
+block112():
+  v170: i64 = int 55 @322:15
+  jump block1(v170)
+block113():
+  v171: u16 = int 56 @322:15
+  v172: bool = eq v1, v171 @322:15
+  branch v172, block114(), block115()
+block114():
+  v173: i64 = int 56 @323:15
+  jump block1(v173)
+block115():
+  v174: u16 = int 57 @323:15
+  v175: bool = eq v1, v174 @323:15
+  branch v175, block116(), block117()
+block116():
+  v176: i64 = int 57 @324:15
+  jump block1(v176)
+block117():
+  v177: u16 = int 58 @324:15
+  v178: bool = eq v1, v177 @324:15
+  branch v178, block118(), block119()
+block118():
+  v179: i64 = int 58 @325:15
+  jump block1(v179)
+block119():
+  v180: u16 = int 59 @325:15
+  v181: bool = eq v1, v180 @325:15
+  branch v181, block120(), block121()
+block120():
+  v182: i64 = int 59 @326:15
+  jump block1(v182)
+block121():
+  v183: u16 = int 60 @326:15
+  v184: bool = eq v1, v183 @326:15
+  branch v184, block122(), block123()
+block122():
+  v185: i64 = int 60 @327:15
+  jump block1(v185)
+block123():
+  v186: u16 = int 61 @327:15
+  v187: bool = eq v1, v186 @327:15
+  branch v187, block124(), block125()
+block124():
+  v188: i64 = int 61 @328:15
+  jump block1(v188)
+block125():
+  v189: u16 = int 62 @328:15
+  v190: bool = eq v1, v189 @328:15
+  branch v190, block126(), block127()
+block126():
+  v191: i64 = int 62 @329:15
+  jump block1(v191)
+block127():
+  v192: u16 = int 63 @329:15
+  v193: bool = eq v1, v192 @329:15
+  branch v193, block128(), block129()
+block128():
+  v194: i64 = int 63 @330:15
+  jump block1(v194)
+block129():
+  v195: u16 = int 64 @330:15
+  v196: bool = eq v1, v195 @330:15
+  branch v196, block130(), block131()
+block130():
+  v197: i64 = int 64 @331:15
+  jump block1(v197)
+block131():
+  v198: u16 = int 65 @331:15
+  v199: bool = eq v1, v198 @331:15
+  branch v199, block132(), block133()
+block132():
+  v200: i64 = int 65 @332:15
+  jump block1(v200)
+block133():
+  v201: u16 = int 66 @332:15
+  v202: bool = eq v1, v201 @332:15
+  branch v202, block134(), block135()
+block134():
+  v203: i64 = int 66 @333:15
+  jump block1(v203)
+block135():
+  v204: u16 = int 67 @333:15
+  v205: bool = eq v1, v204 @333:15
+  branch v205, block136(), block137()
+block136():
+  v206: i64 = int 67 @334:15
+  jump block1(v206)
+block137():
+  v207: u16 = int 68 @334:15
+  v208: bool = eq v1, v207 @334:15
+  branch v208, block138(), block139()
+block138():
+  v209: i64 = int 68 @335:15
+  jump block1(v209)
+block139():
+  v210: u16 = int 69 @335:15
+  v211: bool = eq v1, v210 @335:15
+  branch v211, block140(), block141()
+block140():
+  v212: i64 = int 69 @336:15
+  jump block1(v212)
+block141():
+  v213: u16 = int 70 @336:15
+  v214: bool = eq v1, v213 @336:15
+  branch v214, block142(), block143()
+block142():
+  v215: i64 = int 70 @337:15
+  jump block1(v215)
+block143():
+  v216: u16 = int 71 @337:15
+  v217: bool = eq v1, v216 @337:15
+  branch v217, block144(), block145()
+block144():
+  v218: i64 = int 71 @338:15
+  jump block1(v218)
+block145():
+  v219: u16 = int 72 @338:15
+  v220: bool = eq v1, v219 @338:15
+  branch v220, block146(), block147()
+block146():
+  v221: i64 = int 72 @339:15
+  jump block1(v221)
+block147():
+  v222: u16 = int 73 @339:15
+  v223: bool = eq v1, v222 @339:15
+  branch v223, block148(), block149()
+block148():
+  v224: i64 = int 73 @340:15
+  jump block1(v224)
+block149():
+  v225: u16 = int 74 @340:15
+  v226: bool = eq v1, v225 @340:15
+  branch v226, block150(), block151()
+block150():
+  v227: i64 = int 74 @341:15
+  jump block1(v227)
+block151():
+  v228: u16 = int 75 @341:15
+  v229: bool = eq v1, v228 @341:15
+  branch v229, block152(), block153()
+block152():
+  v230: i64 = int 75 @342:15
+  jump block1(v230)
+block153():
+  v231: u16 = int 76 @342:15
+  v232: bool = eq v1, v231 @342:15
+  branch v232, block154(), block155()
+block154():
+  v233: i64 = int 76 @343:15
+  jump block1(v233)
+block155():
+  v234: u16 = int 77 @343:15
+  v235: bool = eq v1, v234 @343:15
+  branch v235, block156(), block157()
+block156():
+  v236: i64 = int 77 @344:15
+  jump block1(v236)
+block157():
+  v237: u16 = int 78 @344:15
+  v238: bool = eq v1, v237 @344:15
+  branch v238, block158(), block159()
+block158():
+  v239: i64 = int 78 @345:15
+  jump block1(v239)
+block159():
+  v240: u16 = int 79 @345:15
+  v241: bool = eq v1, v240 @345:15
+  branch v241, block160(), block161()
+block160():
+  v242: i64 = int 79 @346:15
+  jump block1(v242)
+block161():
+  v243: u16 = int 80 @346:15
+  v244: bool = eq v1, v243 @346:15
+  branch v244, block162(), block163()
+block162():
+  v245: i64 = int 80 @347:15
+  jump block1(v245)
+block163():
+  v246: u16 = int 81 @347:15
+  v247: bool = eq v1, v246 @347:15
+  branch v247, block164(), block165()
+block164():
+  v248: i64 = int 81 @348:15
+  jump block1(v248)
+block165():
+  v249: u16 = int 82 @348:15
+  v250: bool = eq v1, v249 @348:15
+  branch v250, block166(), block167()
+block166():
+  v251: i64 = int 82 @349:15
+  jump block1(v251)
+block167():
+  v252: u16 = int 83 @349:15
+  v253: bool = eq v1, v252 @349:15
+  branch v253, block168(), block169()
+block168():
+  v254: i64 = int 83 @350:15
+  jump block1(v254)
+block169():
+  v255: u16 = int 84 @350:15
+  v256: bool = eq v1, v255 @350:15
+  branch v256, block170(), block171()
+block170():
+  v257: i64 = int 84 @351:15
+  jump block1(v257)
+block171():
+  v258: u16 = int 85 @351:15
+  v259: bool = eq v1, v258 @351:15
+  branch v259, block172(), block173()
+block172():
+  v260: i64 = int 85 @352:15
+  jump block1(v260)
+block173():
+  v261: u16 = int 86 @352:15
+  v262: bool = eq v1, v261 @352:15
+  branch v262, block174(), block175()
+block174():
+  v263: i64 = int 86 @353:15
+  jump block1(v263)
+block175():
+  v264: u16 = int 87 @353:15
+  v265: bool = eq v1, v264 @353:15
+  branch v265, block176(), block177()
+block176():
+  v266: i64 = int 87 @354:15
+  jump block1(v266)
+block177():
+  v267: u16 = int 88 @354:15
+  v268: bool = eq v1, v267 @354:15
+  branch v268, block178(), block179()
+block178():
+  v269: i64 = int 88 @355:15
+  jump block1(v269)
+block179():
+  v270: u16 = int 89 @355:15
+  v271: bool = eq v1, v270 @355:15
+  branch v271, block180(), block181()
+block180():
+  v272: i64 = int 89 @356:15
+  jump block1(v272)
+block181():
+  v273: u16 = int 90 @356:15
+  v274: bool = eq v1, v273 @356:15
+  branch v274, block182(), block183()
+block182():
+  v275: i64 = int 90 @357:15
+  jump block1(v275)
+block183():
+  v276: u16 = int 91 @357:15
+  v277: bool = eq v1, v276 @357:15
+  branch v277, block184(), block185()
+block184():
+  v278: i64 = int 91 @358:15
+  jump block1(v278)
+block185():
+  v279: u16 = int 92 @358:15
+  v280: bool = eq v1, v279 @358:15
+  branch v280, block186(), block187()
+block186():
+  v281: i64 = int 92 @359:15
+  jump block1(v281)
+block187():
+  v282: u16 = int 93 @359:15
+  v283: bool = eq v1, v282 @359:15
+  branch v283, block188(), block189()
+block188():
+  v284: i64 = int 93 @360:15
+  jump block1(v284)
+block189():
+  v285: u16 = int 94 @360:15
+  v286: bool = eq v1, v285 @360:15
+  branch v286, block190(), block191()
+block190():
+  v287: i64 = int 94 @361:15
+  jump block1(v287)
+block191():
+  v288: u16 = int 95 @361:15
+  v289: bool = eq v1, v288 @361:15
+  branch v289, block192(), block193()
+block192():
+  v290: i64 = int 95 @362:15
+  jump block1(v290)
+block193():
+  v291: u16 = int 96 @362:15
+  v292: bool = eq v1, v291 @362:15
+  branch v292, block194(), block195()
+block194():
+  v293: i64 = int 96 @363:15
+  jump block1(v293)
+block195():
+  v294: u16 = int 97 @363:15
+  v295: bool = eq v1, v294 @363:15
+  branch v295, block196(), block197()
+block196():
+  v296: i64 = int 97 @364:15
+  jump block1(v296)
+block197():
+  v297: u16 = int 98 @364:15
+  v298: bool = eq v1, v297 @364:15
+  branch v298, block198(), block199()
+block198():
+  v299: i64 = int 98 @365:15
+  jump block1(v299)
+block199():
+  v300: u16 = int 99 @365:15
+  v301: bool = eq v1, v300 @365:15
+  branch v301, block200(), block201()
+block200():
+  v302: i64 = int 99 @366:15
+  jump block1(v302)
+block201():
+  v303: u16 = int 100 @366:15
+  v304: bool = eq v1, v303 @366:15
+  branch v304, block202(), block203()
+block202():
+  v305: i64 = int 100 @367:16
+  jump block1(v305)
+block203():
+  v306: u16 = int 101 @367:16
+  v307: bool = eq v1, v306 @367:16
+  branch v307, block204(), block205()
+block204():
+  v308: i64 = int 101 @368:16
+  jump block1(v308)
+block205():
+  v309: u16 = int 102 @368:16
+  v310: bool = eq v1, v309 @368:16
+  branch v310, block206(), block207()
+block206():
+  v311: i64 = int 102 @369:16
+  jump block1(v311)
+block207():
+  v312: u16 = int 103 @369:16
+  v313: bool = eq v1, v312 @369:16
+  branch v313, block208(), block209()
+block208():
+  v314: i64 = int 103 @370:16
+  jump block1(v314)
+block209():
+  v315: u16 = int 104 @370:16
+  v316: bool = eq v1, v315 @370:16
+  branch v316, block210(), block211()
+block210():
+  v317: i64 = int 104 @371:16
+  jump block1(v317)
+block211():
+  v318: u16 = int 105 @371:16
+  v319: bool = eq v1, v318 @371:16
+  branch v319, block212(), block213()
+block212():
+  v320: i64 = int 105 @372:16
+  jump block1(v320)
+block213():
+  v321: u16 = int 106 @372:16
+  v322: bool = eq v1, v321 @372:16
+  branch v322, block214(), block215()
+block214():
+  v323: i64 = int 106 @373:16
+  jump block1(v323)
+block215():
+  v324: u16 = int 107 @373:16
+  v325: bool = eq v1, v324 @373:16
+  branch v325, block216(), block217()
+block216():
+  v326: i64 = int 107 @374:16
+  jump block1(v326)
+block217():
+  v327: u16 = int 108 @374:16
+  v328: bool = eq v1, v327 @374:16
+  branch v328, block218(), block219()
+block218():
+  v329: i64 = int 108 @375:16
+  jump block1(v329)
+block219():
+  v330: u16 = int 109 @375:16
+  v331: bool = eq v1, v330 @375:16
+  branch v331, block220(), block221()
+block220():
+  v332: i64 = int 109 @376:16
+  jump block1(v332)
+block221():
+  v333: u16 = int 110 @376:16
+  v334: bool = eq v1, v333 @376:16
+  branch v334, block222(), block223()
+block222():
+  v335: i64 = int 110 @377:16
+  jump block1(v335)
+block223():
+  v336: u16 = int 111 @377:16
+  v337: bool = eq v1, v336 @377:16
+  branch v337, block224(), block225()
+block224():
+  v338: i64 = int 111 @378:16
+  jump block1(v338)
+block225():
+  v339: u16 = int 112 @378:16
+  v340: bool = eq v1, v339 @378:16
+  branch v340, block226(), block227()
+block226():
+  v341: i64 = int 112 @379:16
+  jump block1(v341)
+block227():
+  v342: u16 = int 113 @379:16
+  v343: bool = eq v1, v342 @379:16
+  branch v343, block228(), block229()
+block228():
+  v344: i64 = int 113 @380:16
+  jump block1(v344)
+block229():
+  v345: u16 = int 114 @380:16
+  v346: bool = eq v1, v345 @380:16
+  branch v346, block230(), block231()
+block230():
+  v347: i64 = int 114 @381:16
+  jump block1(v347)
+block231():
+  v348: u16 = int 115 @381:16
+  v349: bool = eq v1, v348 @381:16
+  branch v349, block232(), block233()
+block232():
+  v350: i64 = int 115 @382:16
+  jump block1(v350)
+block233():
+  v351: u16 = int 116 @382:16
+  v352: bool = eq v1, v351 @382:16
+  branch v352, block234(), block235()
+block234():
+  v353: i64 = int 116 @383:16
+  jump block1(v353)
+block235():
+  v354: u16 = int 117 @383:16
+  v355: bool = eq v1, v354 @383:16
+  branch v355, block236(), block237()
+block236():
+  v356: i64 = int 117 @384:16
+  jump block1(v356)
+block237():
+  v357: u16 = int 118 @384:16
+  v358: bool = eq v1, v357 @384:16
+  branch v358, block238(), block239()
+block238():
+  v359: i64 = int 118 @385:16
+  jump block1(v359)
+block239():
+  v360: u16 = int 119 @385:16
+  v361: bool = eq v1, v360 @385:16
+  branch v361, block240(), block241()
+block240():
+  v362: i64 = int 119 @386:16
+  jump block1(v362)
+block241():
+  v363: u16 = int 120 @386:16
+  v364: bool = eq v1, v363 @386:16
+  branch v364, block242(), block243()
+block242():
+  v365: i64 = int 120 @387:16
+  jump block1(v365)
+block243():
+  v366: u16 = int 121 @387:16
+  v367: bool = eq v1, v366 @387:16
+  branch v367, block244(), block245()
+block244():
+  v368: i64 = int 121 @388:16
+  jump block1(v368)
+block245():
+  v369: u16 = int 122 @388:16
+  v370: bool = eq v1, v369 @388:16
+  branch v370, block246(), block247()
+block246():
+  v371: i64 = int 122 @389:16
+  jump block1(v371)
+block247():
+  v372: u16 = int 123 @389:16
+  v373: bool = eq v1, v372 @389:16
+  branch v373, block248(), block249()
+block248():
+  v374: i64 = int 123 @390:16
+  jump block1(v374)
+block249():
+  v375: u16 = int 124 @390:16
+  v376: bool = eq v1, v375 @390:16
+  branch v376, block250(), block251()
+block250():
+  v377: i64 = int 124 @391:16
+  jump block1(v377)
+block251():
+  v378: u16 = int 125 @391:16
+  v379: bool = eq v1, v378 @391:16
+  branch v379, block252(), block253()
+block252():
+  v380: i64 = int 125 @392:16
+  jump block1(v380)
+block253():
+  v381: u16 = int 126 @392:16
+  v382: bool = eq v1, v381 @392:16
+  branch v382, block254(), block255()
+block254():
+  v383: i64 = int 126 @393:16
+  jump block1(v383)
+block255():
+  v384: u16 = int 127 @393:16
+  v385: bool = eq v1, v384 @393:16
+  branch v385, block256(), block257()
+block256():
+  v386: i64 = int 127 @394:16
+  jump block1(v386)
+block257():
+  v387: u16 = int 128 @394:16
+  v388: bool = eq v1, v387 @394:16
+  branch v388, block258(), block259()
+block258():
+  v389: i64 = int 128 @395:16
+  jump block1(v389)
+block259():
+  v390: u16 = int 129 @395:16
+  v391: bool = eq v1, v390 @395:16
+  branch v391, block260(), block261()
+block260():
+  v392: i64 = int 129 @396:16
+  jump block1(v392)
+block261():
+  v393: u16 = int 130 @396:16
+  v394: bool = eq v1, v393 @396:16
+  branch v394, block262(), block263()
+block262():
+  v395: i64 = int 130 @397:16
+  jump block1(v395)
+block263():
+  v396: u16 = int 131 @397:16
+  v397: bool = eq v1, v396 @397:16
+  branch v397, block264(), block265()
+block264():
+  v398: i64 = int 131 @398:16
+  jump block1(v398)
+block265():
+  v399: u16 = int 132 @398:16
+  v400: bool = eq v1, v399 @398:16
+  branch v400, block266(), block267()
+block266():
+  v401: i64 = int 132 @399:16
+  jump block1(v401)
+block267():
+  v402: u16 = int 133 @399:16
+  v403: bool = eq v1, v402 @399:16
+  branch v403, block268(), block269()
+block268():
+  v404: i64 = int 133 @400:16
+  jump block1(v404)
+block269():
+  v405: u16 = int 134 @400:16
+  v406: bool = eq v1, v405 @400:16
+  branch v406, block270(), block271()
+block270():
+  v407: i64 = int 134 @401:16
+  jump block1(v407)
+block271():
+  v408: u16 = int 135 @401:16
+  v409: bool = eq v1, v408 @401:16
+  branch v409, block272(), block273()
+block272():
+  v410: i64 = int 135 @402:16
+  jump block1(v410)
+block273():
+  v411: u16 = int 136 @402:16
+  v412: bool = eq v1, v411 @402:16
+  branch v412, block274(), block275()
+block274():
+  v413: i64 = int 136 @403:16
+  jump block1(v413)
+block275():
+  v414: u16 = int 137 @403:16
+  v415: bool = eq v1, v414 @403:16
+  branch v415, block276(), block277()
+block276():
+  v416: i64 = int 137 @404:16
+  jump block1(v416)
+block277():
+  v417: u16 = int 138 @404:16
+  v418: bool = eq v1, v417 @404:16
+  branch v418, block278(), block279()
+block278():
+  v419: i64 = int 138 @405:16
+  jump block1(v419)
+block279():
+  v420: u16 = int 139 @405:16
+  v421: bool = eq v1, v420 @405:16
+  branch v421, block280(), block281()
+block280():
+  v422: i64 = int 139 @406:16
+  jump block1(v422)
+block281():
+  v423: u16 = int 140 @406:16
+  v424: bool = eq v1, v423 @406:16
+  branch v424, block282(), block283()
+block282():
+  v425: i64 = int 140 @407:16
+  jump block1(v425)
+block283():
+  v426: u16 = int 141 @407:16
+  v427: bool = eq v1, v426 @407:16
+  branch v427, block284(), block285()
+block284():
+  v428: i64 = int 141 @408:16
+  jump block1(v428)
+block285():
+  v429: u16 = int 142 @408:16
+  v430: bool = eq v1, v429 @408:16
+  branch v430, block286(), block287()
+block286():
+  v431: i64 = int 142 @409:16
+  jump block1(v431)
+block287():
+  v432: u16 = int 143 @409:16
+  v433: bool = eq v1, v432 @409:16
+  branch v433, block288(), block289()
+block288():
+  v434: i64 = int 143 @410:16
+  jump block1(v434)
+block289():
+  v435: u16 = int 144 @410:16
+  v436: bool = eq v1, v435 @410:16
+  branch v436, block290(), block291()
+block290():
+  v437: i64 = int 144 @411:16
+  jump block1(v437)
+block291():
+  v438: u16 = int 145 @411:16
+  v439: bool = eq v1, v438 @411:16
+  branch v439, block292(), block293()
+block292():
+  v440: i64 = int 145 @412:16
+  jump block1(v440)
+block293():
+  v441: u16 = int 146 @412:16
+  v442: bool = eq v1, v441 @412:16
+  branch v442, block294(), block295()
+block294():
+  v443: i64 = int 146 @413:16
+  jump block1(v443)
+block295():
+  v444: u16 = int 147 @413:16
+  v445: bool = eq v1, v444 @413:16
+  branch v445, block296(), block297()
+block296():
+  v446: i64 = int 147 @414:16
+  jump block1(v446)
+block297():
+  v447: u16 = int 148 @414:16
+  v448: bool = eq v1, v447 @414:16
+  branch v448, block298(), block299()
+block298():
+  v449: i64 = int 148 @415:16
+  jump block1(v449)
+block299():
+  v450: u16 = int 149 @415:16
+  v451: bool = eq v1, v450 @415:16
+  branch v451, block300(), block301()
+block300():
+  v452: i64 = int 149 @416:16
+  jump block1(v452)
+block301():
+  v453: u16 = int 150 @416:16
+  v454: bool = eq v1, v453 @416:16
+  branch v454, block302(), block303()
+block302():
+  v455: i64 = int 150 @417:16
+  jump block1(v455)
+block303():
+  v456: u16 = int 151 @417:16
+  v457: bool = eq v1, v456 @417:16
+  branch v457, block304(), block305()
+block304():
+  v458: i64 = int 151 @418:16
+  jump block1(v458)
+block305():
+  v459: u16 = int 152 @418:16
+  v460: bool = eq v1, v459 @418:16
+  branch v460, block306(), block307()
+block306():
+  v461: i64 = int 152 @419:16
+  jump block1(v461)
+block307():
+  v462: u16 = int 153 @419:16
+  v463: bool = eq v1, v462 @419:16
+  branch v463, block308(), block309()
+block308():
+  v464: i64 = int 153 @420:16
+  jump block1(v464)
+block309():
+  v465: u16 = int 154 @420:16
+  v466: bool = eq v1, v465 @420:16
+  branch v466, block310(), block311()
+block310():
+  v467: i64 = int 154 @421:16
+  jump block1(v467)
+block311():
+  v468: u16 = int 155 @421:16
+  v469: bool = eq v1, v468 @421:16
+  branch v469, block312(), block313()
+block312():
+  v470: i64 = int 155 @422:16
+  jump block1(v470)
+block313():
+  v471: u16 = int 156 @422:16
+  v472: bool = eq v1, v471 @422:16
+  branch v472, block314(), block315()
+block314():
+  v473: i64 = int 156 @423:16
+  jump block1(v473)
+block315():
+  v474: u16 = int 157 @423:16
+  v475: bool = eq v1, v474 @423:16
+  branch v475, block316(), block317()
+block316():
+  v476: i64 = int 157 @424:16
+  jump block1(v476)
+block317():
+  v477: u16 = int 158 @424:16
+  v478: bool = eq v1, v477 @424:16
+  branch v478, block318(), block319()
+block318():
+  v479: i64 = int 158 @425:16
+  jump block1(v479)
+block319():
+  v480: u16 = int 159 @425:16
+  v481: bool = eq v1, v480 @425:16
+  branch v481, block320(), block321()
+block320():
+  v482: i64 = int 159 @426:16
+  jump block1(v482)
+block321():
+  v483: u16 = int 160 @426:16
+  v484: bool = eq v1, v483 @426:16
+  branch v484, block322(), block323()
+block322():
+  v485: i64 = int 160 @427:16
+  jump block1(v485)
+block323():
+  v486: u16 = int 161 @427:16
+  v487: bool = eq v1, v486 @427:16
+  branch v487, block324(), block325()
+block324():
+  v488: i64 = int 161 @428:16
+  jump block1(v488)
+block325():
+  v489: u16 = int 162 @428:16
+  v490: bool = eq v1, v489 @428:16
+  branch v490, block326(), block327()
+block326():
+  v491: i64 = int 162 @429:16
+  jump block1(v491)
+block327():
+  v492: u16 = int 163 @429:16
+  v493: bool = eq v1, v492 @429:16
+  branch v493, block328(), block329()
+block328():
+  v494: i64 = int 163 @430:16
+  jump block1(v494)
+block329():
+  v495: u16 = int 164 @430:16
+  v496: bool = eq v1, v495 @430:16
+  branch v496, block330(), block331()
+block330():
+  v497: i64 = int 164 @431:16
+  jump block1(v497)
+block331():
+  v498: u16 = int 165 @431:16
+  v499: bool = eq v1, v498 @431:16
+  branch v499, block332(), block333()
+block332():
+  v500: i64 = int 165 @432:16
+  jump block1(v500)
+block333():
+  v501: u16 = int 166 @432:16
+  v502: bool = eq v1, v501 @432:16
+  branch v502, block334(), block335()
+block334():
+  v503: i64 = int 166 @433:16
+  jump block1(v503)
+block335():
+  v504: u16 = int 167 @433:16
+  v505: bool = eq v1, v504 @433:16
+  branch v505, block336(), block337()
+block336():
+  v506: i64 = int 167 @434:16
+  jump block1(v506)
+block337():
+  v507: u16 = int 168 @434:16
+  v508: bool = eq v1, v507 @434:16
+  branch v508, block338(), block339()
+block338():
+  v509: i64 = int 168 @435:16
+  jump block1(v509)
+block339():
+  v510: u16 = int 169 @435:16
+  v511: bool = eq v1, v510 @435:16
+  branch v511, block340(), block341()
+block340():
+  v512: i64 = int 169 @436:16
+  jump block1(v512)
+block341():
+  v513: u16 = int 170 @436:16
+  v514: bool = eq v1, v513 @436:16
+  branch v514, block342(), block343()
+block342():
+  v515: i64 = int 170 @437:16
+  jump block1(v515)
+block343():
+  v516: u16 = int 171 @437:16
+  v517: bool = eq v1, v516 @437:16
+  branch v517, block344(), block345()
+block344():
+  v518: i64 = int 171 @438:16
+  jump block1(v518)
+block345():
+  v519: u16 = int 172 @438:16
+  v520: bool = eq v1, v519 @438:16
+  branch v520, block346(), block347()
+block346():
+  v521: i64 = int 172 @439:16
+  jump block1(v521)
+block347():
+  v522: u16 = int 173 @439:16
+  v523: bool = eq v1, v522 @439:16
+  branch v523, block348(), block349()
+block348():
+  v524: i64 = int 173 @440:16
+  jump block1(v524)
+block349():
+  v525: u16 = int 174 @440:16
+  v526: bool = eq v1, v525 @440:16
+  branch v526, block350(), block351()
+block350():
+  v527: i64 = int 174 @441:16
+  jump block1(v527)
+block351():
+  v528: u16 = int 175 @441:16
+  v529: bool = eq v1, v528 @441:16
+  branch v529, block352(), block353()
+block352():
+  v530: i64 = int 175 @442:16
+  jump block1(v530)
+block353():
+  v531: u16 = int 176 @442:16
+  v532: bool = eq v1, v531 @442:16
+  branch v532, block354(), block355()
+block354():
+  v533: i64 = int 176 @443:16
+  jump block1(v533)
+block355():
+  v534: u16 = int 177 @443:16
+  v535: bool = eq v1, v534 @443:16
+  branch v535, block356(), block357()
+block356():
+  v536: i64 = int 177 @444:16
+  jump block1(v536)
+block357():
+  v537: u16 = int 178 @444:16
+  v538: bool = eq v1, v537 @444:16
+  branch v538, block358(), block359()
+block358():
+  v539: i64 = int 178 @445:16
+  jump block1(v539)
+block359():
+  v540: u16 = int 179 @445:16
+  v541: bool = eq v1, v540 @445:16
+  branch v541, block360(), block361()
+block360():
+  v542: i64 = int 179 @446:16
+  jump block1(v542)
+block361():
+  v543: u16 = int 180 @446:16
+  v544: bool = eq v1, v543 @446:16
+  branch v544, block362(), block363()
+block362():
+  v545: i64 = int 180 @447:16
+  jump block1(v545)
+block363():
+  v546: u16 = int 181 @447:16
+  v547: bool = eq v1, v546 @447:16
+  branch v547, block364(), block365()
+block364():
+  v548: i64 = int 181 @448:16
+  jump block1(v548)
+block365():
+  v549: u16 = int 182 @448:16
+  v550: bool = eq v1, v549 @448:16
+  branch v550, block366(), block367()
+block366():
+  v551: i64 = int 182 @449:16
+  jump block1(v551)
+block367():
+  v552: u16 = int 183 @449:16
+  v553: bool = eq v1, v552 @449:16
+  branch v553, block368(), block369()
+block368():
+  v554: i64 = int 183 @450:16
+  jump block1(v554)
+block369():
+  v555: u16 = int 184 @450:16
+  v556: bool = eq v1, v555 @450:16
+  branch v556, block370(), block371()
+block370():
+  v557: i64 = int 184 @451:16
+  jump block1(v557)
+block371():
+  v558: u16 = int 185 @451:16
+  v559: bool = eq v1, v558 @451:16
+  branch v559, block372(), block373()
+block372():
+  v560: i64 = int 185 @452:16
+  jump block1(v560)
+block373():
+  v561: u16 = int 186 @452:16
+  v562: bool = eq v1, v561 @452:16
+  branch v562, block374(), block375()
+block374():
+  v563: i64 = int 186 @453:16
+  jump block1(v563)
+block375():
+  v564: u16 = int 187 @453:16
+  v565: bool = eq v1, v564 @453:16
+  branch v565, block376(), block377()
+block376():
+  v566: i64 = int 187 @454:16
+  jump block1(v566)
+block377():
+  v567: u16 = int 188 @454:16
+  v568: bool = eq v1, v567 @454:16
+  branch v568, block378(), block379()
+block378():
+  v569: i64 = int 188 @455:16
+  jump block1(v569)
+block379():
+  v570: u16 = int 189 @455:16
+  v571: bool = eq v1, v570 @455:16
+  branch v571, block380(), block381()
+block380():
+  v572: i64 = int 189 @456:16
+  jump block1(v572)
+block381():
+  v573: u16 = int 190 @456:16
+  v574: bool = eq v1, v573 @456:16
+  branch v574, block382(), block383()
+block382():
+  v575: i64 = int 190 @457:16
+  jump block1(v575)
+block383():
+  v576: u16 = int 191 @457:16
+  v577: bool = eq v1, v576 @457:16
+  branch v577, block384(), block385()
+block384():
+  v578: i64 = int 191 @458:16
+  jump block1(v578)
+block385():
+  v579: u16 = int 192 @458:16
+  v580: bool = eq v1, v579 @458:16
+  branch v580, block386(), block387()
+block386():
+  v581: i64 = int 192 @459:16
+  jump block1(v581)
+block387():
+  v582: u16 = int 193 @459:16
+  v583: bool = eq v1, v582 @459:16
+  branch v583, block388(), block389()
+block388():
+  v584: i64 = int 193 @460:16
+  jump block1(v584)
+block389():
+  v585: u16 = int 194 @460:16
+  v586: bool = eq v1, v585 @460:16
+  branch v586, block390(), block391()
+block390():
+  v587: i64 = int 194 @461:16
+  jump block1(v587)
+block391():
+  v588: u16 = int 195 @461:16
+  v589: bool = eq v1, v588 @461:16
+  branch v589, block392(), block393()
+block392():
+  v590: i64 = int 195 @462:16
+  jump block1(v590)
+block393():
+  v591: u16 = int 196 @462:16
+  v592: bool = eq v1, v591 @462:16
+  branch v592, block394(), block395()
+block394():
+  v593: i64 = int 196 @463:16
+  jump block1(v593)
+block395():
+  v594: u16 = int 197 @463:16
+  v595: bool = eq v1, v594 @463:16
+  branch v595, block396(), block397()
+block396():
+  v596: i64 = int 197 @464:16
+  jump block1(v596)
+block397():
+  v597: u16 = int 198 @464:16
+  v598: bool = eq v1, v597 @464:16
+  branch v598, block398(), block399()
+block398():
+  v599: i64 = int 198 @465:16
+  jump block1(v599)
+block399():
+  v600: u16 = int 199 @465:16
+  v601: bool = eq v1, v600 @465:16
+  branch v601, block400(), block401()
+block400():
+  v602: i64 = int 199 @466:16
+  jump block1(v602)
+block401():
+  v603: u16 = int 200 @466:16
+  v604: bool = eq v1, v603 @466:16
+  branch v604, block402(), block403()
+block402():
+  v605: i64 = int 200 @467:16
+  jump block1(v605)
+block403():
+  v606: u16 = int 201 @467:16
+  v607: bool = eq v1, v606 @467:16
+  branch v607, block404(), block405()
+block404():
+  v608: i64 = int 201 @468:16
+  jump block1(v608)
+block405():
+  v609: u16 = int 202 @468:16
+  v610: bool = eq v1, v609 @468:16
+  branch v610, block406(), block407()
+block406():
+  v611: i64 = int 202 @469:16
+  jump block1(v611)
+block407():
+  v612: u16 = int 203 @469:16
+  v613: bool = eq v1, v612 @469:16
+  branch v613, block408(), block409()
+block408():
+  v614: i64 = int 203 @470:16
+  jump block1(v614)
+block409():
+  v615: u16 = int 204 @470:16
+  v616: bool = eq v1, v615 @470:16
+  branch v616, block410(), block411()
+block410():
+  v617: i64 = int 204 @471:16
+  jump block1(v617)
+block411():
+  v618: u16 = int 205 @471:16
+  v619: bool = eq v1, v618 @471:16
+  branch v619, block412(), block413()
+block412():
+  v620: i64 = int 205 @472:16
+  jump block1(v620)
+block413():
+  v621: u16 = int 206 @472:16
+  v622: bool = eq v1, v621 @472:16
+  branch v622, block414(), block415()
+block414():
+  v623: i64 = int 206 @473:16
+  jump block1(v623)
+block415():
+  v624: u16 = int 207 @473:16
+  v625: bool = eq v1, v624 @473:16
+  branch v625, block416(), block417()
+block416():
+  v626: i64 = int 207 @474:16
+  jump block1(v626)
+block417():
+  v627: u16 = int 208 @474:16
+  v628: bool = eq v1, v627 @474:16
+  branch v628, block418(), block419()
+block418():
+  v629: i64 = int 208 @475:16
+  jump block1(v629)
+block419():
+  v630: u16 = int 209 @475:16
+  v631: bool = eq v1, v630 @475:16
+  branch v631, block420(), block421()
+block420():
+  v632: i64 = int 209 @476:16
+  jump block1(v632)
+block421():
+  v633: u16 = int 210 @476:16
+  v634: bool = eq v1, v633 @476:16
+  branch v634, block422(), block423()
+block422():
+  v635: i64 = int 210 @477:16
+  jump block1(v635)
+block423():
+  v636: u16 = int 211 @477:16
+  v637: bool = eq v1, v636 @477:16
+  branch v637, block424(), block425()
+block424():
+  v638: i64 = int 211 @478:16
+  jump block1(v638)
+block425():
+  v639: u16 = int 212 @478:16
+  v640: bool = eq v1, v639 @478:16
+  branch v640, block426(), block427()
+block426():
+  v641: i64 = int 212 @479:16
+  jump block1(v641)
+block427():
+  v642: u16 = int 213 @479:16
+  v643: bool = eq v1, v642 @479:16
+  branch v643, block428(), block429()
+block428():
+  v644: i64 = int 213 @480:16
+  jump block1(v644)
+block429():
+  v645: u16 = int 214 @480:16
+  v646: bool = eq v1, v645 @480:16
+  branch v646, block430(), block431()
+block430():
+  v647: i64 = int 214 @481:16
+  jump block1(v647)
+block431():
+  v648: u16 = int 215 @481:16
+  v649: bool = eq v1, v648 @481:16
+  branch v649, block432(), block433()
+block432():
+  v650: i64 = int 215 @482:16
+  jump block1(v650)
+block433():
+  v651: u16 = int 216 @482:16
+  v652: bool = eq v1, v651 @482:16
+  branch v652, block434(), block435()
+block434():
+  v653: i64 = int 216 @483:16
+  jump block1(v653)
+block435():
+  v654: u16 = int 217 @483:16
+  v655: bool = eq v1, v654 @483:16
+  branch v655, block436(), block437()
+block436():
+  v656: i64 = int 217 @484:16
+  jump block1(v656)
+block437():
+  v657: u16 = int 218 @484:16
+  v658: bool = eq v1, v657 @484:16
+  branch v658, block438(), block439()
+block438():
+  v659: i64 = int 218 @485:16
+  jump block1(v659)
+block439():
+  v660: u16 = int 219 @485:16
+  v661: bool = eq v1, v660 @485:16
+  branch v661, block440(), block441()
+block440():
+  v662: i64 = int 219 @486:16
+  jump block1(v662)
+block441():
+  v663: u16 = int 220 @486:16
+  v664: bool = eq v1, v663 @486:16
+  branch v664, block442(), block443()
+block442():
+  v665: i64 = int 220 @487:16
+  jump block1(v665)
+block443():
+  v666: u16 = int 221 @487:16
+  v667: bool = eq v1, v666 @487:16
+  branch v667, block444(), block445()
+block444():
+  v668: i64 = int 221 @488:16
+  jump block1(v668)
+block445():
+  v669: u16 = int 222 @488:16
+  v670: bool = eq v1, v669 @488:16
+  branch v670, block446(), block447()
+block446():
+  v671: i64 = int 222 @489:16
+  jump block1(v671)
+block447():
+  v672: u16 = int 223 @489:16
+  v673: bool = eq v1, v672 @489:16
+  branch v673, block448(), block449()
+block448():
+  v674: i64 = int 223 @490:16
+  jump block1(v674)
+block449():
+  v675: u16 = int 224 @490:16
+  v676: bool = eq v1, v675 @490:16
+  branch v676, block450(), block451()
+block450():
+  v677: i64 = int 224 @491:16
+  jump block1(v677)
+block451():
+  v678: u16 = int 225 @491:16
+  v679: bool = eq v1, v678 @491:16
+  branch v679, block452(), block453()
+block452():
+  v680: i64 = int 225 @492:16
+  jump block1(v680)
+block453():
+  v681: u16 = int 226 @492:16
+  v682: bool = eq v1, v681 @492:16
+  branch v682, block454(), block455()
+block454():
+  v683: i64 = int 226 @493:16
+  jump block1(v683)
+block455():
+  v684: u16 = int 227 @493:16
+  v685: bool = eq v1, v684 @493:16
+  branch v685, block456(), block457()
+block456():
+  v686: i64 = int 227 @494:16
+  jump block1(v686)
+block457():
+  v687: u16 = int 228 @494:16
+  v688: bool = eq v1, v687 @494:16
+  branch v688, block458(), block459()
+block458():
+  v689: i64 = int 228 @495:16
+  jump block1(v689)
+block459():
+  v690: u16 = int 229 @495:16
+  v691: bool = eq v1, v690 @495:16
+  branch v691, block460(), block461()
+block460():
+  v692: i64 = int 229 @496:16
+  jump block1(v692)
+block461():
+  v693: u16 = int 230 @496:16
+  v694: bool = eq v1, v693 @496:16
+  branch v694, block462(), block463()
+block462():
+  v695: i64 = int 230 @497:16
+  jump block1(v695)
+block463():
+  v696: u16 = int 231 @497:16
+  v697: bool = eq v1, v696 @497:16
+  branch v697, block464(), block465()
+block464():
+  v698: i64 = int 231 @498:16
+  jump block1(v698)
+block465():
+  v699: u16 = int 232 @498:16
+  v700: bool = eq v1, v699 @498:16
+  branch v700, block466(), block467()
+block466():
+  v701: i64 = int 232 @499:16
+  jump block1(v701)
+block467():
+  v702: u16 = int 233 @499:16
+  v703: bool = eq v1, v702 @499:16
+  branch v703, block468(), block469()
+block468():
+  v704: i64 = int 233 @500:16
+  jump block1(v704)
+block469():
+  v705: u16 = int 234 @500:16
+  v706: bool = eq v1, v705 @500:16
+  branch v706, block470(), block471()
+block470():
+  v707: i64 = int 234 @501:16
+  jump block1(v707)
+block471():
+  v708: u16 = int 235 @501:16
+  v709: bool = eq v1, v708 @501:16
+  branch v709, block472(), block473()
+block472():
+  v710: i64 = int 235 @502:16
+  jump block1(v710)
+block473():
+  v711: u16 = int 236 @502:16
+  v712: bool = eq v1, v711 @502:16
+  branch v712, block474(), block475()
+block474():
+  v713: i64 = int 236 @503:16
+  jump block1(v713)
+block475():
+  v714: u16 = int 237 @503:16
+  v715: bool = eq v1, v714 @503:16
+  branch v715, block476(), block477()
+block476():
+  v716: i64 = int 237 @504:16
+  jump block1(v716)
+block477():
+  v717: u16 = int 238 @504:16
+  v718: bool = eq v1, v717 @504:16
+  branch v718, block478(), block479()
+block478():
+  v719: i64 = int 238 @505:16
+  jump block1(v719)
+block479():
+  v720: u16 = int 239 @505:16
+  v721: bool = eq v1, v720 @505:16
+  branch v721, block480(), block481()
+block480():
+  v722: i64 = int 239 @506:16
+  jump block1(v722)
+block481():
+  v723: u16 = int 240 @506:16
+  v724: bool = eq v1, v723 @506:16
+  branch v724, block482(), block483()
+block482():
+  v725: i64 = int 240 @507:16
+  jump block1(v725)
+block483():
+  v726: u16 = int 241 @507:16
+  v727: bool = eq v1, v726 @507:16
+  branch v727, block484(), block485()
+block484():
+  v728: i64 = int 241 @508:16
+  jump block1(v728)
+block485():
+  v729: u16 = int 242 @508:16
+  v730: bool = eq v1, v729 @508:16
+  branch v730, block486(), block487()
+block486():
+  v731: i64 = int 242 @509:16
+  jump block1(v731)
+block487():
+  v732: u16 = int 243 @509:16
+  v733: bool = eq v1, v732 @509:16
+  branch v733, block488(), block489()
+block488():
+  v734: i64 = int 243 @510:16
+  jump block1(v734)
+block489():
+  v735: u16 = int 244 @510:16
+  v736: bool = eq v1, v735 @510:16
+  branch v736, block490(), block491()
+block490():
+  v737: i64 = int 244 @511:16
+  jump block1(v737)
+block491():
+  v738: u16 = int 245 @511:16
+  v739: bool = eq v1, v738 @511:16
+  branch v739, block492(), block493()
+block492():
+  v740: i64 = int 245 @512:16
+  jump block1(v740)
+block493():
+  v741: u16 = int 246 @512:16
+  v742: bool = eq v1, v741 @512:16
+  branch v742, block494(), block495()
+block494():
+  v743: i64 = int 246 @513:16
+  jump block1(v743)
+block495():
+  v744: u16 = int 247 @513:16
+  v745: bool = eq v1, v744 @513:16
+  branch v745, block496(), block497()
+block496():
+  v746: i64 = int 247 @514:16
+  jump block1(v746)
+block497():
+  v747: u16 = int 248 @514:16
+  v748: bool = eq v1, v747 @514:16
+  branch v748, block498(), block499()
+block498():
+  v749: i64 = int 248 @515:16
+  jump block1(v749)
+block499():
+  v750: u16 = int 249 @515:16
+  v751: bool = eq v1, v750 @515:16
+  branch v751, block500(), block501()
+block500():
+  v752: i64 = int 249 @516:16
+  jump block1(v752)
+block501():
+  v753: u16 = int 250 @516:16
+  v754: bool = eq v1, v753 @516:16
+  branch v754, block502(), block503()
+block502():
+  v755: i64 = int 250 @517:16
+  jump block1(v755)
+block503():
+  v756: u16 = int 251 @517:16
+  v757: bool = eq v1, v756 @517:16
+  branch v757, block504(), block505()
+block504():
+  v758: i64 = int 251 @518:16
+  jump block1(v758)
+block505():
+  v759: u16 = int 252 @518:16
+  v760: bool = eq v1, v759 @518:16
+  branch v760, block506(), block507()
+block506():
+  v761: i64 = int 252 @519:16
+  jump block1(v761)
+block507():
+  v762: u16 = int 253 @519:16
+  v763: bool = eq v1, v762 @519:16
+  branch v763, block508(), block509()
+block508():
+  v764: i64 = int 253 @520:16
+  jump block1(v764)
+block509():
+  v765: u16 = int 254 @520:16
+  v766: bool = eq v1, v765 @520:16
+  branch v766, block510(), block511()
+block510():
+  v767: i64 = int 254 @521:16
+  jump block1(v767)
+block511():
+  v768: u16 = int 255 @521:16
+  v769: bool = eq v1, v768 @521:16
+  branch v769, block512(), block513()
+block512():
+  v770: i64 = int 255 @522:16
+  jump block1(v770)
+block513():
+  v771: i64 = int 256 @523:16
+  jump block1(v771)
+block514():
+  trap t0
+t0: unreachable @523:16 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn main() -> u16 {
+block0():
+  v0: addr = slot 2 @526:30
+  v1: unit = call f0 v0 @526:30
+  v2: u16 = call f1 v0 @526:24
+  return v2
+block1():
+  trap t0
+t0: unreachable @526:24 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter last(addr) {
+block0(v0: addr):
+  v1: unit = call f0 v0 @264:8
+  return
+t0: unreachable @264:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter index(addr) -> u16 {
+block0(v0: addr):
+  v1: u16 = call f1 v0 @266:8
+  return v1
+t0: unreachable @266:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter main() -> u16 {
+block0():
+  v0: u16 = call f2 @526:8
+  return v0
+t0: unreachable @526:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/enum_payloads_of_arrays_structs_enums.mn ==
+mente-dump 2 mir
+f0: fn line(addr, i32) {
+block0(v0: addr, v1: i32):
+  v2: addr = slot 64 @21:32
+  v3: u8 = int 1 @21:32
+  v4: unit = store v2, v3 @21:32
+  v5: addr = slot 8 @21:49
+  v6: i64 = int 0 @21:58
+  v7: i32 = cast v6 @21:58
+  v8: unit = store v5, v7 @21:58
+  v9: i64 = int 0 @21:64
+  v10: i32 = cast v9 @21:64
+  v11: u64 = int 4 @21:64
+  v12: addr = elem 1 v5, v11 @21:64
+  v13: unit = store v12, v10 @21:64
+  v14: u64 = int 16 @21:64
+  v15: addr = elem 1 v2, v14 @21:64
+  v16: unit = copy 8 v15, v5 @21:64
+  v17: addr = slot 8 @21:72
+  v18: unit = store v17, v1 @21:81
+  v19: u64 = int 4 @21:87
+  v20: addr = elem 1 v17, v19 @21:87
+  v21: unit = store v20, v1 @21:87
+  v22: u64 = int 24 @21:87
+  v23: addr = elem 1 v2, v22 @21:87
+  v24: unit = copy 8 v23, v17 @21:87
+  v25: addr = slot 1 @21:97
+  v26: u8 = int 1 @21:97
+  v27: unit = store v25, v26 @21:97
+  v28: u64 = int 32 @21:97
+  v29: addr = elem 1 v2, v28 @21:97
+  v30: unit = copy 1 v29, v25 @21:97
+  v31: unit = copy 64 v0, v2 @21:32
+  return
+block1():
+  trap t0
+t0: unreachable @21:32 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn extremes(addr) {
+block0(v0: addr):
+  v1: addr = slot 64 @23:30
+  v2: u8 = int 3 @23:30
+  v3: unit = store v1, v2 @23:30
+  v4: u128 = int 340282366920938463463374607431768211455 @23:44
+  v5: u64 = int 16 @23:44
+  v6: addr = elem 1 v1, v5 @23:44
+  v7: unit = store v6, v4 @23:44
+  v8: i128 = int -170141183460469231731687303715884105728 @23:88
+  v9: u64 = int 32 @23:88
+  v10: addr = elem 1 v1, v9 @23:88
+  v11: unit = store v10, v8 @23:88
+  v12: i64 = int 255 @23:133
+  v13: u8 = cast v12 @23:133
+  v14: u64 = int 48 @23:133
+  v15: addr = elem 1 v1, v14 @23:133
+  v16: unit = store v15, v13 @23:133
+  v17: unit = copy 64 v0, v1 @23:30
+  return
+block1():
+  trap t0
+t0: unreachable @23:30 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn width(addr) -> i64 {
+block0(v0: addr):
+  v1: u8 = load v0 @25:39
+  v3: u8 = int 0 @25:39
+  v4: bool = eq v1, v3 @25:39
+  branch v4, block2(), block3()
+block1(v2: i64):
+  return v2
+block2():
+  v5: i64 = int 0 @26:23
+  jump block1(v5)
+block3():
+  v6: u8 = int 1 @26:23
+  v7: bool = eq v1, v6 @26:23
+  branch v7, block4(), block5()
+block4():
+  v8: u64 = int 16 @26:23
+  v9: addr = elem 1 v0, v8 @26:23
+  v10: u64 = int 24 @26:23
+  v11: addr = elem 1 v0, v10 @26:23
+  v12: i32 = load v11 @27:42
+  v13: i32 = load v9 @27:48
+  v14: i64 = cast v12 @27:42
+  v15: i64 = cast v13 @27:42
+  v16: i64 = sub v14, v15 @27:42
+  jump block1(v16)
+block5():
+  v17: u8 = int 2 @27:42
+  v18: bool = eq v1, v17 @27:42
+  branch v18, block6(), block7()
+block6():
+  v19: u64 = int 16 @27:42
+  v20: addr = elem 1 v0, v19 @27:42
+  v21: u64 = int 40 @27:42
+  v22: addr = elem 1 v0, v21 @27:42
+  v23: bool = load v22 @28:43
+  branch v23, block8(), block9()
+block7():
+  v37: u64 = int 48 @28:74
+  v38: addr = elem 1 v0, v37 @28:74
+  v39: u8 = load v38 @29:37
+  v40: i64 = cast v39 @29:37
+  jump block1(v40)
+block8():
+  v25: i64 = int 2 @28:50
+  v26: u64 = cast v25 @28:47
+  v27: addr = elem 8 v20, v26 @28:47
+  v28: i32 = load v27 @28:47
+  v29: i64 = int 0 @28:60
+  v30: u64 = cast v29 @28:57
+  v31: addr = elem 8 v20, v30 @28:57
+  v32: i32 = load v31 @28:57
+  v33: i64 = cast v28 @28:47
+  v34: i64 = cast v32 @28:47
+  v35: i64 = sub v33, v34 @28:47
+  jump block10(v35)
+block9():
+  v36: i64 = int 0 @28:74
+  jump block10(v36)
+block10(v24: i64):
+  jump block1(v24)
+block11():
+  trap t0
+t0: unreachable @29:37 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn side(addr) -> bool {
+block0(v0: addr):
+  v1: u8 = load v0 @32:39
+  v3: u8 = int 1 @32:39
+  v4: bool = eq v1, v3 @32:39
+  branch v4, block2(), block3()
+block1(v2: bool):
+  return v2
+block2():
+  v5: u64 = int 32 @32:39
+  v6: addr = elem 1 v0, v5 @32:39
+  v7: u8 = load v6 @33:48
+  v9: u8 = int 0 @33:48
+  v10: bool = eq v7, v9 @33:48
+  branch v10, block5(), block6()
+block3():
+  v13: u8 = int 0 @35:19
+  v14: bool = eq v1, v13 @35:19
+  branch v14, block7(), block8()
+block4(v8: bool):
+  jump block1(v8)
+block5():
+  v11: bool = bool true @34:18
+  jump block4(v11)
+block6():
+  v12: bool = bool false @35:19
+  jump block4(v12)
+block7():
+  v15: bool = bool false @37:23
+  jump block1(v15)
+block8():
+  v16: u8 = int 2 @37:23
+  v17: bool = eq v1, v16 @37:23
+  branch v17, block9(), block10()
+block9():
+  v18: bool = bool false @38:39
+  jump block1(v18)
+block10():
+  v19: bool = bool false @39:35
+  jump block1(v19)
+block11():
+  trap t0
+t0: unreachable @39:35 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn path(addr, i32) {
+block0(v0: addr, v1: i32):
+  v2: addr = slot 64 @42:32
+  v3: u8 = int 2 @42:32
+  v4: unit = store v2, v3 @42:32
+  v5: addr = slot 24 @42:51
+  v6: addr = slot 8 @42:52
+  v7: i64 = int 0 @42:61
+  v8: i32 = cast v7 @42:61
+  v9: unit = store v6, v8 @42:61
+  v10: i64 = int 0 @42:67
+  v11: i32 = cast v10 @42:67
+  v12: u64 = int 4 @42:67
+  v13: addr = elem 1 v6, v12 @42:67
+  v14: unit = store v13, v11 @42:67
+  v15: u64 = int 0 @42:67
+  v16: addr = elem 8 v5, v15 @42:67
+  v17: unit = copy 8 v16, v6 @42:67
+  v18: addr = slot 8 @42:71
+  v19: unit = store v18, v1 @42:80
+  v20: i64 = int 1 @42:86
+  v21: i32 = cast v20 @42:86
+  v22: u64 = int 4 @42:86
+  v23: addr = elem 1 v18, v22 @42:86
+  v24: unit = store v23, v21 @42:86
+  v25: u64 = int 1 @42:86
+  v26: addr = elem 8 v5, v25 @42:86
+  v27: unit = copy 8 v26, v18 @42:86
+  v28: addr = slot 8 @42:90
+  v29: unit = store v28, v1 @42:99
+  v30: i64 = int 2 @42:105
+  v31: i32 = cast v30 @42:105
+  v32: u64 = int 4 @42:105
+  v33: addr = elem 1 v28, v32 @42:105
+  v34: unit = store v33, v31 @42:105
+  v35: u64 = int 2 @42:105
+  v36: addr = elem 8 v5, v35 @42:105
+  v37: unit = copy 8 v36, v28 @42:105
+  v38: u64 = int 16 @42:105
+  v39: addr = elem 1 v2, v38 @42:105
+  v40: unit = copy 24 v39, v5 @42:105
+  v41: bool = bool true @42:118
+  v42: u64 = int 40 @42:118
+  v43: addr = elem 1 v2, v42 @42:118
+  v44: unit = store v43, v41 @42:118
+  v45: unit = copy 64 v0, v2 @42:32
+  return
+block1():
+  trap t0
+t0: unreachable @42:32 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn main() -> i64 {
+block0():
+  v0: i64 = int 5 @44:35
+  v1: addr = slot 64 @44:35
+  v2: i32 = cast v0 @44:35
+  v3: unit = call f0 v1, v2 @44:30
+  v4: i64 = call f2 v1 @44:24
+  v5: i64 = int 7 @44:52
+  v6: addr = slot 64 @44:52
+  v7: i32 = cast v5 @44:52
+  v8: unit = call f4 v6, v7 @44:47
+  v9: i64 = call f2 v6 @44:41
+  v10: i128 = cast v4 @44:24
+  v11: i128 = cast v9 @44:24
+  v12: i128 = add v10, v11 @44:24
+  v13: i128 = int -9223372036854775808 @44:24
+  v14: bool = ge v12, v13 @44:24
+  v15: i128 = int 9223372036854775807 @44:24
+  v16: bool = le v12, v15 @44:24
+  v17: bool = and v14, v16 @44:24
+  v18: unit = check t0 v17, v12 @44:24
+  v19: i64 = cast v12 @44:24
+  return v19
+block1():
+  trap t1
+t0: narrowing @44:24 ["", " does not fit in `i64`"]
+t1: unreachable @44:24 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter line(addr, i32) {
+block0(v0: addr, v1: i32):
+  v2: unit = call f0 v0, v1 @21:8
+  return
+t0: unreachable @21:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter extremes(addr) {
+block0(v0: addr):
+  v1: unit = call f1 v0 @23:8
+  return
+t0: unreachable @23:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter width(addr) -> i64 {
+block0(v0: addr):
+  v1: i64 = call f2 v0 @25:8
+  return v1
+t0: unreachable @25:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter side(addr) -> bool {
+block0(v0: addr):
+  v1: bool = call f3 v0 @32:8
+  return v1
+t0: unreachable @32:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn enter path(addr, i32) {
+block0(v0: addr, v1: i32):
+  v2: unit = call f4 v0, v1 @42:8
+  return
+t0: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn enter main() -> i64 {
+block0():
+  v0: i64 = call f5 @44:8
+  return v0
+t0: unreachable @44:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/enum_with_type_parameters.mn == (exit 2)
+== conformance/core-calculus/enum_within_4_gib.mn ==
+mente-dump 2 mir
+== conformance/core-calculus/enum_without_payloads.mn ==
+mente-dump 2 mir
+f0: fn next(addr, addr) {
+block0(v0: addr, v1: addr):
+  v2: u8 = load v1 @10:40
+  v4: u8 = int 0 @10:40
+  v5: bool = eq v2, v4 @10:40
+  branch v5, block2(), block3()
+block1(v3: addr):
+  v17: unit = copy 1 v0, v3 @10:34
+  return
+block2():
+  v6: addr = slot 1 @11:16
+  v7: u8 = int 2 @11:16
+  v8: unit = store v6, v7 @11:16
+  jump block1(v6)
+block3():
+  v9: u8 = int 1 @11:16
+  v10: bool = eq v2, v9 @11:16
+  branch v10, block4(), block5()
+block4():
+  v11: addr = slot 1 @12:18
+  v12: u8 = int 0 @12:18
+  v13: unit = store v11, v12 @12:18
+  jump block1(v11)
+block5():
+  v14: addr = slot 1 @13:18
+  v15: u8 = int 1 @13:18
+  v16: unit = store v14, v15 @13:18
+  jump block1(v14)
+block6():
+  trap t0
+t0: unreachable @10:34 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn wait(addr) -> u8 {
+block0(v0: addr):
+  v1: i64 = int 0 @17:21
+  v2: u8 = cast v1 @17:21
+  v3: addr = slot 1 @17:21
+  v4: unit = store v3, v2 @17:21
+  v5: u8 = load v0 @18:9
+  v6: u8 = int 0 @18:9
+  v7: bool = eq v5, v6 @18:9
+  branch v7, block2(), block3()
+block1():
+  v19: u8 = load v3 @25:3
+  return v19
+block2():
+  v8: i64 = int 30 @19:30
+  v9: u8 = cast v8 @19:30
+  v10: unit = store v3, v9 @19:30
+  jump block1()
+block3():
+  v11: u8 = int 1 @19:30
+  v12: bool = eq v5, v11 @19:30
+  branch v12, block4(), block5()
+block4():
+  v13: i64 = int 3 @20:32
+  v14: u8 = cast v13 @20:32
+  v15: unit = store v3, v14 @20:32
+  jump block1()
+block5():
+  v16: i64 = int 20 @22:17
+  v17: u8 = cast v16 @22:17
+  v18: unit = store v3, v17 @22:17
+  jump block1()
+block6():
+  trap t0
+t0: unreachable @25:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn main(addr) {
+block0(v0: addr):
+  v1: addr = slot 1 @28:36
+  v2: u8 = int 0 @28:36
+  v3: unit = store v1, v2 @28:36
+  v4: addr = slot 1 @28:36
+  v5: unit = call f0 v4, v1 @28:31
+  v6: addr = slot 1 @28:31
+  v7: unit = call f0 v6, v4 @28:26
+  v8: unit = copy 1 v0, v6 @28:26
+  return
+block1():
+  trap t0
+t0: unreachable @28:26 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter next(addr, addr) {
+block0(v0: addr, v1: addr):
+  v2: unit = call f0 v0, v1 @10:8
+  return
+t0: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter wait(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = call f1 v0 @16:8
+  return v1
+t0: unreachable @16:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter main(addr) {
+block0(v0: addr):
+  v1: unit = call f2 v0 @28:8
+  return
+t0: unreachable @28:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/field_declared_twice.mn == (exit 2)
 == conformance/core-calculus/field_narrowing_that_always_traps.mn == (exit 2)
 == conformance/core-calculus/field_read_keeps_its_value.mn ==
@@ -1102,7 +5395,7 @@ t0: unreachable @3:8 ["unreachable reached: control left the code the checker al
 == conformance/core-calculus/intermediate_beyond_128_bits.mn == (exit 2)
 == conformance/core-calculus/later_error_type.mn == (exit 2)
 == conformance/core-calculus/later_for_loop.mn == (exit 2)
-== conformance/core-calculus/later_match.mn == (exit 2)
+== conformance/core-calculus/later_optional_pattern.mn == (exit 2)
 == conformance/core-calculus/later_string_value.mn == (exit 2)
 == conformance/core-calculus/layout_struct_as_a_value.mn == (exit 2)
 == conformance/core-calculus/layout_struct_built.mn == (exit 2)
@@ -1474,6 +5767,1272 @@ block0(v0: addr):
   return
 t0: unreachable @38:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/match_arm_outside_the_range.mn == (exit 2)
+== conformance/core-calculus/match_arm_outside_the_type.mn == (exit 2)
+== conformance/core-calculus/match_arms_beyond_128_bits.mn == (exit 2)
+== conformance/core-calculus/match_arms_of_different_types.mn == (exit 2)
+== conformance/core-calculus/match_as_a_statement.mn ==
+mente-dump 2 mir
+f0: fn apply(addr, addr) {
+block0(v0: addr, v1: addr):
+  v2: u8 = load v1 @9:9
+  v3: u8 = int 0 @9:9
+  v4: bool = eq v2, v3 @9:9
+  branch v4, block2(), block3()
+block1():
+  return
+block2():
+  v5: u64 = int 1 @9:9
+  v6: addr = elem 1 v1, v5 @9:9
+  v7: u16 = load v0 @10:23
+  v8: u8 = load v6 @10:32
+  v9: i64 = cast v7 @10:32
+  v10: i64 = cast v8 @10:32
+  v11: i64 = add v9, v10 @10:32
+  v12: i64 = int 0 @10:32
+  v13: bool = ge v11, v12 @10:32
+  v14: i64 = int 65535 @10:32
+  v15: bool = le v11, v14 @10:32
+  v16: bool = and v13, v15 @10:32
+  v17: unit = check t0 v16, v11 @10:32
+  v18: u16 = cast v11 @10:32
+  v19: unit = store v0, v18 @10:32
+  jump block1()
+block3():
+  v20: i64 = int 0 @12:15
+  v21: u16 = cast v20 @12:15
+  v22: unit = store v0, v21 @12:15
+  jump block1()
+block4():
+  trap t1
+t0: narrowing @10:32 ["", " does not fit in `u16`"]
+t1: unreachable @12:15 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn main() -> u16 {
+block0():
+  v0: i64 = int 5 @18:16
+  v1: u16 = cast v0 @18:16
+  v2: addr = slot 2 @18:16
+  v3: unit = store v2, v1 @18:16
+  v4: addr = slot 2 @19:16
+  v5: u8 = int 0 @19:16
+  v6: unit = store v4, v5 @19:16
+  v7: i64 = int 3 @19:26
+  v8: u8 = cast v7 @19:26
+  v9: u64 = int 1 @19:26
+  v10: addr = elem 1 v4, v9 @19:26
+  v11: unit = store v10, v8 @19:26
+  v12: u16 = load v2 @19:26
+  v13: unit = call f0 v2, v4 @19:3
+  v14: u16 = load v2 @19:3
+  v15: addr = slot 2 @20:16
+  v16: u8 = int 0 @20:16
+  v17: unit = store v15, v16 @20:16
+  v18: i64 = int 4 @20:26
+  v19: u8 = cast v18 @20:26
+  v20: u64 = int 1 @20:26
+  v21: addr = elem 1 v15, v20 @20:26
+  v22: unit = store v21, v19 @20:26
+  v23: u16 = load v2 @20:26
+  v24: unit = call f0 v2, v15 @20:3
+  v25: u16 = load v2 @20:3
+  v26: u16 = load v2 @21:3
+  return v26
+block1():
+  trap t0
+t0: unreachable @21:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter apply(addr, addr) {
+block0(v0: addr, v1: addr):
+  v2: u16 = load v0 @0:0
+  v3: unit = call f0 v0, v1 @8:8
+  v4: u16 = load v0 @8:8
+  return
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter main() -> u16 {
+block0():
+  v0: u16 = call f1 @17:8
+  return v0
+t0: unreachable @17:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_at_the_i128_limits.mn ==
+mente-dump 2 mir
+f0: fn edge(i128) -> i8 {
+block0(v0: i128):
+  v2: i128 = int -170141183460469231731687303715884105728 @4:36
+  v3: bool = eq v0, v2 @4:36
+  branch v3, block2(), block3()
+block1(v1: i64):
+  v13: i8 = cast v1 @8:8
+  return v13
+block2():
+  v4: i64 = int -1 @5:47
+  jump block1(v4)
+block3():
+  v5: i128 = int 170141183460469231731687303715884105727 @5:47
+  v6: bool = eq v0, v5 @5:47
+  branch v6, block4(), block5()
+block4():
+  v7: i64 = int 1 @6:46
+  jump block1(v7)
+block5():
+  v8: i64 = int 0 @6:46
+  v9: i128 = cast v8 @6:46
+  v10: bool = eq v0, v9 @6:46
+  branch v10, block6(), block7()
+block6():
+  v11: i64 = int 0 @7:8
+  jump block1(v11)
+block7():
+  v12: i64 = int 2 @8:8
+  jump block1(v12)
+block8():
+  trap t0
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn top(u128) -> bool {
+block0(v0: u128):
+  v2: u128 = int 340282366920938463463374607431768211455 @11:37
+  v3: bool = eq v0, v2 @11:37
+  branch v3, block2(), block3()
+block1(v1: bool):
+  return v1
+block2():
+  v4: bool = bool true @12:46
+  jump block1(v4)
+block3():
+  v5: bool = bool false @13:8
+  jump block1(v5)
+block4():
+  trap t0
+t0: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn main() -> i8 {
+block0():
+  v0: i128 = int -170141183460469231731687303715884105728 @16:28
+  v1: i8 = call f0 v0 @16:23
+  v2: i128 = int 170141183460469231731687303715884105727 @16:77
+  v3: i8 = call f0 v2 @16:72
+  v4: i64 = cast v1 @16:23
+  v5: i64 = cast v3 @16:23
+  v6: i64 = add v4, v5 @16:23
+  v7: i64 = int -128 @16:23
+  v8: bool = ge v6, v7 @16:23
+  v9: i64 = int 127 @16:23
+  v10: bool = le v6, v9 @16:23
+  v11: bool = and v8, v10 @16:23
+  v12: unit = check t0 v11, v6 @16:23
+  v13: i8 = cast v6 @16:23
+  return v13
+block1():
+  trap t1
+t0: narrowing @16:23 ["", " does not fit in `i8`"]
+t1: unreachable @16:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter edge(i128) -> i8 {
+block0(v0: i128):
+  v1: i8 = call f0 v0 @4:8
+  return v1
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter top(u128) -> bool {
+block0(v0: u128):
+  v1: bool = call f1 v0 @11:8
+  return v1
+t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter main() -> i8 {
+block0():
+  v0: i8 = call f2 @16:8
+  return v0
+t0: unreachable @16:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_binding_has_its_fields_refinement.mn ==
+mente-dump 2 mir
+f0: fn level(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @9:47
+  v3: u8 = int 1 @9:47
+  v4: bool = eq v1, v3 @9:47
+  branch v4, block2(), block3()
+block1(v2: i64):
+  v10: u8 = cast v2 @11:22
+  return v10
+block2():
+  v5: u64 = int 1 @9:47
+  v6: addr = elem 1 v0, v5 @9:47
+  v7: u8 = load v6 @10:26
+  v8: i64 = cast v7 @10:26
+  jump block1(v8)
+block3():
+  v9: i64 = int 0 @11:22
+  jump block1(v9)
+block4():
+  trap t0
+t0: unreachable @11:22 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn main() -> u8 {
+block0():
+  v0: addr = slot 2 @14:29
+  v1: u8 = int 1 @14:29
+  v2: unit = store v0, v1 @14:29
+  v3: i64 = int 9 @14:46
+  v4: u8 = cast v3 @14:46
+  v5: u64 = int 1 @14:46
+  v6: addr = elem 1 v0, v5 @14:46
+  v7: unit = store v6, v4 @14:46
+  v8: u8 = call f0 v0 @14:23
+  return v8
+block1():
+  trap t0
+t0: unreachable @14:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter level(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @0:0
+  v2: u8 = int 1 @0:0
+  v3: bool = eq v1, v2 @0:0
+  branch v3, block1(), block2()
+block1():
+  v4: u64 = int 1 @0:0
+  v5: addr = elem 1 v0, v4 @0:0
+  v6: u8 = load v5 @0:0
+  v7: i64 = int 0 @0:0
+  v8: i64 = int 10 @0:0
+  v9: i64 = cast v6 @0:0
+  v10: bool = ge v9, v7 @0:0
+  v11: i64 = cast v6 @0:0
+  v12: bool = lt v11, v8 @0:0
+  v13: bool = and v10, v12 @0:0
+  v14: unit = check t0 v13, v6, v7, v8 @9:8
+  jump block2()
+block2():
+  v15: u8 = call f0 v0 @9:8
+  return v15
+t0: refinement @9:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f1 @14:8
+  return v0
+t0: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_binding_refinement_not_proven.mn == (exit 2)
+== conformance/core-calculus/match_duplicate_arm.mn == (exit 2)
+== conformance/core-calculus/match_duplicate_literal.mn == (exit 2)
+== conformance/core-calculus/match_freezes_its_scrutinee_against_a_mut_argument.mn == (exit 2)
+== conformance/core-calculus/match_freezes_its_scrutinee_against_a_store.mn == (exit 2)
+== conformance/core-calculus/match_leaves_the_rest_of_its_scrutinees_binding_free.mn ==
+mente-dump 2 mir
+f0: fn bump(addr) {
+block0(v0: addr):
+  v1: u8 = load v0 @16:7
+  v2: i64 = int 2 @16:11
+  v3: i64 = cast v1 @16:7
+  v4: i64 = div v3, v2 @16:7
+  v5: i64 = int 1 @16:15
+  v6: i64 = add v4, v5 @16:7
+  v7: u8 = cast v6 @16:7
+  v8: unit = store v0, v7 @16:7
+  return
+block1():
+  trap t0
+t0: unreachable @16:7 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn take(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @19:39
+  v3: u8 = int 1 @19:39
+  v4: bool = eq v1, v3 @19:39
+  branch v4, block2(), block3()
+block1(v2: i64):
+  v28: u8 = cast v2 @27:5
+  return v28
+block2():
+  v5: u64 = int 1 @19:39
+  v6: addr = elem 1 v0, v5 @19:39
+  v7: u8 = load v6 @21:15
+  v8: u64 = int 2 @21:15
+  v9: addr = elem 1 v0, v8 @21:15
+  v10: unit = store v9, v7 @21:15
+  v11: u64 = int 2 @22:5
+  v12: addr = elem 1 v0, v11 @22:5
+  v13: u8 = load v12 @22:5
+  v14: unit = call f0 v12 @22:5
+  v15: u8 = load v12 @22:5
+  v16: u8 = load v6 @23:5
+  v17: i64 = cast v16 @23:5
+  jump block1(v17)
+block3():
+  v18: addr = slot 2 @26:14
+  v19: u8 = int 1 @26:14
+  v20: unit = store v18, v19 @26:14
+  v21: i64 = int 1 @26:27
+  v22: u8 = cast v21 @26:27
+  v23: u64 = int 1 @26:27
+  v24: addr = elem 1 v18, v23 @26:27
+  v25: unit = store v24, v22 @26:27
+  v26: unit = copy 2 v0, v18 @26:27
+  v27: i64 = int 0 @27:5
+  jump block1(v27)
+block4():
+  trap t0
+t0: unreachable @27:5 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn step(addr) {
+block0(v0: addr):
+  v1: u8 = load v0 @32:9
+  v2: i64 = int 0 @32:9
+  v3: i64 = cast v1 @32:9
+  v4: bool = eq v3, v2 @32:9
+  branch v4, block2(), block3()
+block1():
+  return
+block2():
+  v5: i64 = int 1 @33:20
+  v6: u8 = cast v5 @33:20
+  v7: unit = store v0, v6 @33:20
+  jump block1()
+block3():
+  v8: i64 = int 1 @33:20
+  v9: i64 = cast v1 @33:20
+  v10: bool = eq v9, v8 @33:20
+  branch v10, block4(), block5()
+block4():
+  v11: i64 = int 2 @34:20
+  v12: u8 = cast v11 @34:20
+  v13: unit = store v0, v12 @34:20
+  jump block1()
+block5():
+  v14: i64 = int 0 @35:20
+  v15: u8 = cast v14 @35:20
+  v16: unit = store v0, v15 @35:20
+  jump block1()
+block6():
+  trap t0
+t0: unreachable @35:20 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn main() -> u8 {
+block0():
+  v0: addr = slot 3 @40:11
+  v1: addr = slot 2 @40:21
+  v2: u8 = int 0 @40:21
+  v3: unit = store v1, v2 @40:21
+  v4: unit = copy 2 v0, v1 @40:21
+  v5: i64 = int 0 @40:40
+  v6: u8 = cast v5 @40:40
+  v7: u64 = int 2 @40:40
+  v8: addr = elem 1 v0, v7 @40:40
+  v9: unit = store v8, v6 @40:40
+  v10: addr = slot 3 @40:40
+  v11: unit = copy 3 v10, v0 @40:40
+  v12: u8 = call f1 v10 @41:15
+  v13: u8 = call f1 v10 @42:16
+  v14: i64 = cast v12 @43:3
+  v15: i64 = cast v13 @43:3
+  v16: i64 = add v14, v15 @43:3
+  v17: u64 = int 2 @43:20
+  v18: addr = elem 1 v10, v17 @43:20
+  v19: u8 = load v18 @43:20
+  v20: i64 = cast v19 @43:3
+  v21: i64 = add v16, v20 @43:3
+  v22: i64 = int 0 @43:3
+  v23: bool = ge v21, v22 @43:3
+  v24: i64 = int 255 @43:3
+  v25: bool = le v21, v24 @43:3
+  v26: bool = and v23, v25 @43:3
+  v27: unit = check t0 v26, v21 @43:3
+  v28: u8 = cast v21 @43:3
+  return v28
+block1():
+  trap t1
+t0: narrowing @43:3 ["", " does not fit in `u8`"]
+t1: unreachable @43:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter bump(addr) {
+block0(v0: addr):
+  v1: u8 = load v0 @0:0
+  v2: unit = call f0 v0 @15:4
+  v3: u8 = load v0 @15:4
+  return
+t0: unreachable @15:4 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter take(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = call f1 v0 @19:8
+  return v1
+t0: unreachable @19:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter step(addr) {
+block0(v0: addr):
+  v1: u8 = load v0 @0:0
+  v2: unit = call f2 v0 @31:8
+  v3: u8 = load v0 @31:8
+  return
+t0: unreachable @31:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f3 @39:8
+  return v0
+t0: unreachable @39:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_literal_arm_gives_its_value.mn ==
+mente-dump 2 mir
+f0: fn zero(u8) -> u8 {
+block0(v0: u8):
+  v2: i64 = int 0 @4:40
+  v3: i64 = cast v0 @4:40
+  v4: bool = eq v3, v2 @4:40
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v7: u8 = cast v1 @6:8
+  return v7
+block2():
+  v5: i64 = cast v0 @5:8
+  jump block1(v5)
+block3():
+  v6: i64 = int 0 @6:8
+  jump block1(v6)
+block4():
+  trap t0
+t0: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn positive(u8) -> u8 {
+block0(v0: u8):
+  v2: i64 = int 0 @9:47
+  v3: i64 = cast v0 @9:47
+  v4: bool = eq v3, v2 @9:47
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v7: u8 = cast v1 @11:8
+  return v7
+block2():
+  v5: i64 = int 1 @10:8
+  jump block1(v5)
+block3():
+  v6: i64 = cast v0 @11:8
+  jump block1(v6)
+block4():
+  trap t0
+t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn above_two(i8) -> i8 {
+block0(v0: i8):
+  v2: i64 = int 0 @14:48
+  v3: i64 = cast v0 @14:48
+  v4: bool = eq v3, v2 @14:48
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v20: i8 = cast v1 @18:30
+  return v20
+block2():
+  v5: i64 = int 3 @15:8
+  jump block1(v5)
+block3():
+  v6: i64 = int 1 @15:8
+  v7: i64 = cast v0 @15:8
+  v8: bool = eq v7, v6 @15:8
+  branch v8, block4(), block5()
+block4():
+  v9: i64 = int 3 @16:8
+  jump block1(v9)
+block5():
+  v10: i64 = int 2 @16:8
+  v11: i64 = cast v0 @16:8
+  v12: bool = eq v11, v10 @16:8
+  branch v12, block6(), block7()
+block6():
+  v13: i64 = int 3 @17:8
+  jump block1(v13)
+block7():
+  v14: i64 = int 3 @18:15
+  v15: i64 = cast v0 @18:15
+  v16: bool = lt v15, v14 @18:15
+  branch v16, block8(), block9()
+block8():
+  v18: i64 = int 3 @18:19
+  jump block10(v18)
+block9():
+  v19: i64 = cast v0 @18:30
+  jump block10(v19)
+block10(v17: i64):
+  jump block1(v17)
+block11():
+  trap t0
+t0: unreachable @18:30 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn main() -> u8 {
+block0():
+  v0: i64 = int 0 @21:28
+  v1: u8 = cast v0 @21:28
+  v2: u8 = call f0 v1 @21:23
+  v3: i64 = int 0 @21:42
+  v4: u8 = cast v3 @21:42
+  v5: u8 = call f1 v4 @21:33
+  v6: i64 = cast v2 @21:23
+  v7: i64 = cast v5 @21:23
+  v8: i64 = add v6, v7 @21:23
+  v9: i64 = int 9 @21:56
+  v10: u8 = cast v9 @21:56
+  v11: u8 = call f1 v10 @21:47
+  v12: i64 = cast v11 @21:23
+  v13: i64 = add v8, v12 @21:23
+  v14: i64 = int 0 @21:23
+  v15: bool = ge v13, v14 @21:23
+  v16: i64 = int 255 @21:23
+  v17: bool = le v13, v16 @21:23
+  v18: bool = and v15, v17 @21:23
+  v19: unit = check t0 v18, v13 @21:23
+  v20: u8 = cast v13 @21:23
+  return v20
+block1():
+  trap t1
+t0: narrowing @21:23 ["", " does not fit in `u8`"]
+t1: unreachable @21:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter zero(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f0 v0 @4:8
+  return v1
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter positive(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f1 v0 @9:8
+  return v1
+t0: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter above_two(i8) -> i8 {
+block0(v0: i8):
+  v1: i8 = call f2 v0 @14:8
+  return v1
+t0: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f3 @21:8
+  return v0
+t0: unreachable @21:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_missing_a_variant.mn == (exit 2)
+== conformance/core-calculus/match_name_pattern.mn == (exit 2)
+== conformance/core-calculus/match_negative_literals.mn ==
+mente-dump 2 mir
+f0: fn sign(i8) -> i8 {
+block0(v0: i8):
+  v2: i64 = int -128 @3:34
+  v3: i64 = cast v0 @3:34
+  v4: bool = eq v3, v2 @3:34
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v19: i8 = cast v1 @8:8
+  return v19
+block2():
+  v5: i64 = int -2 @4:11
+  jump block1(v5)
+block3():
+  v6: i64 = int -1 @4:11
+  v7: i64 = cast v0 @4:11
+  v8: bool = eq v7, v6 @4:11
+  branch v8, block4(), block5()
+block4():
+  v9: i64 = int -1 @5:9
+  jump block1(v9)
+block5():
+  v10: i64 = int 0 @5:9
+  v11: i64 = cast v0 @5:9
+  v12: bool = eq v11, v10 @5:9
+  branch v12, block6(), block7()
+block6():
+  v13: i64 = int 0 @6:8
+  jump block1(v13)
+block7():
+  v14: i64 = int 1 @6:8
+  v15: i64 = cast v0 @6:8
+  v16: bool = eq v15, v14 @6:8
+  branch v16, block8(), block9()
+block8():
+  v17: i64 = int 1 @7:8
+  jump block1(v17)
+block9():
+  v18: i64 = int 2 @8:8
+  jump block1(v18)
+block10():
+  trap t0
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn suffixed(i16) -> u8 {
+block0(v0: i16):
+  v2: i64 = int -5 @11:39
+  v3: i64 = cast v0 @11:39
+  v4: bool = eq v3, v2 @11:39
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v11: u8 = cast v1 @14:8
+  return v11
+block2():
+  v5: i64 = int 1 @12:13
+  jump block1(v5)
+block3():
+  v6: i64 = int 5 @12:13
+  v7: i64 = cast v0 @12:13
+  v8: bool = eq v7, v6 @12:13
+  branch v8, block4(), block5()
+block4():
+  v9: i64 = int 2 @13:12
+  jump block1(v9)
+block5():
+  v10: i64 = int 3 @14:8
+  jump block1(v10)
+block6():
+  trap t0
+t0: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn main() -> i8 {
+block0():
+  v0: i64 = int -128 @17:28
+  v1: i8 = cast v0 @17:28
+  v2: i8 = call f0 v1 @17:23
+  v3: i64 = int -1 @17:41
+  v4: i8 = cast v3 @17:41
+  v5: i8 = call f0 v4 @17:36
+  v6: i64 = cast v2 @17:23
+  v7: i64 = cast v5 @17:23
+  v8: i64 = add v6, v7 @17:23
+  v9: i64 = int 100 @17:52
+  v10: i8 = cast v9 @17:52
+  v11: i8 = call f0 v10 @17:47
+  v12: i64 = cast v11 @17:23
+  v13: i64 = add v8, v12 @17:23
+  v14: i64 = int -128 @17:23
+  v15: bool = ge v13, v14 @17:23
+  v16: i64 = int 127 @17:23
+  v17: bool = le v13, v16 @17:23
+  v18: bool = and v15, v17 @17:23
+  v19: unit = check t0 v18, v13 @17:23
+  v20: i8 = cast v13 @17:23
+  return v20
+block1():
+  trap t1
+t0: narrowing @17:23 ["", " does not fit in `i8`"]
+t1: unreachable @17:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter sign(i8) -> i8 {
+block0(v0: i8):
+  v1: i8 = call f0 v0 @3:8
+  return v1
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter suffixed(i16) -> u8 {
+block0(v0: i16):
+  v1: u8 = call f1 v0 @11:8
+  return v1
+t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter main() -> i8 {
+block0():
+  v0: i8 = call f2 @17:8
+  return v0
+t0: unreachable @17:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_nested_in_an_arm.mn ==
+mente-dump 2 mir
+f0: fn both(addr, addr) -> u8 {
+block0(v0: addr, v1: addr):
+  v2: u8 = load v0 @8:45
+  v4: u8 = int 0 @8:45
+  v5: bool = eq v2, v4 @8:45
+  branch v5, block2(), block3()
+block1(v3: i64):
+  v18: u8 = cast v3 @18:5
+  return v18
+block2():
+  v6: u8 = load v1 @9:23
+  v8: u8 = int 0 @9:23
+  v9: bool = eq v6, v8 @9:23
+  branch v9, block5(), block6()
+block3():
+  v12: u8 = load v1 @14:23
+  v14: u8 = int 0 @14:23
+  v15: bool = eq v12, v14 @14:23
+  branch v15, block8(), block9()
+block4(v7: i64):
+  jump block1(v7)
+block5():
+  v10: i64 = int 2 @10:19
+  jump block4(v10)
+block6():
+  v11: i64 = int 1 @11:19
+  jump block4(v11)
+block7(v13: i64):
+  jump block1(v13)
+block8():
+  v16: i64 = int 1 @15:21
+  jump block7(v16)
+block9():
+  v17: i64 = int 0 @16:21
+  jump block7(v17)
+block10():
+  trap t0
+t0: unreachable @18:5 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn main() -> u8 {
+block0():
+  v0: addr = slot 1 @22:28
+  v1: u8 = int 0 @22:28
+  v2: unit = store v0, v1 @22:28
+  v3: addr = slot 1 @22:40
+  v4: u8 = int 1 @22:40
+  v5: unit = store v3, v4 @22:40
+  v6: u8 = call f0 v0, v3 @22:23
+  v7: addr = slot 1 @22:59
+  v8: u8 = int 1 @22:59
+  v9: unit = store v7, v8 @22:59
+  v10: addr = slot 1 @22:71
+  v11: u8 = int 1 @22:71
+  v12: unit = store v10, v11 @22:71
+  v13: u8 = call f0 v7, v10 @22:54
+  v14: i64 = cast v6 @22:23
+  v15: i64 = cast v13 @22:23
+  v16: i64 = add v14, v15 @22:23
+  v17: i64 = int 0 @22:23
+  v18: bool = ge v16, v17 @22:23
+  v19: i64 = int 255 @22:23
+  v20: bool = le v16, v19 @22:23
+  v21: bool = and v18, v20 @22:23
+  v22: unit = check t0 v21, v16 @22:23
+  v23: u8 = cast v16 @22:23
+  return v23
+block1():
+  trap t1
+t0: narrowing @22:23 ["", " does not fit in `u8`"]
+t1: unreachable @22:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter both(addr, addr) -> u8 {
+block0(v0: addr, v1: addr):
+  v2: u8 = call f0 v0, v1 @8:8
+  return v2
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f1 @22:8
+  return v0
+t0: unreachable @22:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_on_a_bool.mn ==
+mente-dump 2 mir
+f0: fn flip(bool) -> bool {
+block0(v0: bool):
+  branch v0, block2(), block3()
+block1(v1: bool):
+  return v1
+block2():
+  v2: bool = bool false @4:11
+  jump block1(v2)
+block3():
+  v3: bool = bool true @5:12
+  jump block1(v3)
+block4():
+  trap t0
+t0: unreachable @5:12 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn main() -> bool {
+block0():
+  v0: bool = bool false @8:30
+  v1: bool = call f0 v0 @8:25
+  return v1
+block1():
+  trap t0
+t0: unreachable @8:25 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter flip(bool) -> bool {
+block0(v0: bool):
+  v1: bool = call f0 v0 @3:8
+  return v1
+t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter main() -> bool {
+block0():
+  v0: bool = call f1 @8:8
+  return v0
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_on_a_bool_missing_a_value.mn == (exit 2)
+== conformance/core-calculus/match_on_an_array.mn == (exit 2)
+== conformance/core-calculus/match_over_a_full_u8.mn ==
+mente-dump 2 mir
+f0: fn class(u8) -> u8 {
+block0(v0: u8):
+  v2: i64 = int 0 @4:35
+  v3: i64 = cast v0 @4:35
+  v4: bool = eq v3, v2 @4:35
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v11: u8 = cast v1 @7:8
+  return v11
+block2():
+  v5: i64 = int 10 @5:8
+  jump block1(v5)
+block3():
+  v6: i64 = int 255 @5:8
+  v7: i64 = cast v0 @5:8
+  v8: bool = eq v7, v6 @5:8
+  branch v8, block4(), block5()
+block4():
+  v9: i64 = int 20 @6:10
+  jump block1(v9)
+block5():
+  v10: i64 = int 30 @7:8
+  jump block1(v10)
+block6():
+  trap t0
+t0: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn main() -> u8 {
+block0():
+  v0: i64 = int 0 @10:29
+  v1: u8 = cast v0 @10:29
+  v2: u8 = call f0 v1 @10:23
+  v3: i64 = int 255 @10:40
+  v4: u8 = cast v3 @10:40
+  v5: u8 = call f0 v4 @10:34
+  v6: i64 = cast v2 @10:23
+  v7: i64 = cast v5 @10:23
+  v8: i64 = add v6, v7 @10:23
+  v9: i64 = int 7 @10:53
+  v10: u8 = cast v9 @10:53
+  v11: u8 = call f0 v10 @10:47
+  v12: i64 = cast v11 @10:23
+  v13: i64 = add v8, v12 @10:23
+  v14: i64 = int 0 @10:23
+  v15: bool = ge v13, v14 @10:23
+  v16: i64 = int 255 @10:23
+  v17: bool = le v13, v16 @10:23
+  v18: bool = and v15, v17 @10:23
+  v19: unit = check t0 v18, v13 @10:23
+  v20: u8 = cast v13 @10:23
+  return v20
+block1():
+  trap t1
+t0: narrowing @10:23 ["", " does not fit in `u8`"]
+t1: unreachable @10:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter class(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f0 v0 @4:8
+  return v1
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f1 @10:8
+  return v0
+t0: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_over_a_full_u8_without_wildcard.mn == (exit 2)
+== conformance/core-calculus/match_over_a_refined_u8.mn ==
+mente-dump 2 mir
+f0: fn name(u8) -> u8 {
+block0(v0: u8):
+  v2: i64 = int 0 @4:40
+  v3: i64 = cast v0 @4:40
+  v4: bool = eq v3, v2 @4:40
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v11: u8 = cast v1 @7:8
+  return v11
+block2():
+  v5: i64 = int 10 @5:8
+  jump block1(v5)
+block3():
+  v6: i64 = int 1 @5:8
+  v7: i64 = cast v0 @5:8
+  v8: bool = eq v7, v6 @5:8
+  branch v8, block4(), block5()
+block4():
+  v9: i64 = int 20 @6:8
+  jump block1(v9)
+block5():
+  v10: i64 = int 30 @7:8
+  jump block1(v10)
+block6():
+  trap t0
+t0: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn inclusive(i8) -> i8 {
+block0(v0: i8):
+  v2: i64 = int -1 @10:47
+  v3: i64 = cast v0 @10:47
+  v4: bool = eq v3, v2 @10:47
+  branch v4, block2(), block3()
+block1(v1: i64):
+  v11: i8 = cast v1 @13:8
+  return v11
+block2():
+  v5: i64 = int 1 @11:9
+  jump block1(v5)
+block3():
+  v6: i64 = int 0 @11:9
+  v7: i64 = cast v0 @11:9
+  v8: bool = eq v7, v6 @11:9
+  branch v8, block4(), block5()
+block4():
+  v9: i64 = int 0 @12:8
+  jump block1(v9)
+block5():
+  v10: i64 = int -1 @13:8
+  jump block1(v10)
+block6():
+  trap t0
+t0: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn main() -> u8 {
+block0():
+  v0: i64 = int 2 @16:28
+  v1: u8 = cast v0 @16:28
+  v2: u8 = call f0 v1 @16:23
+  return v2
+block1():
+  trap t0
+t0: unreachable @16:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter name(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @0:0
+  v2: i64 = int 3 @0:0
+  v3: i64 = cast v0 @0:0
+  v4: bool = ge v3, v1 @0:0
+  v5: i64 = cast v0 @0:0
+  v6: bool = lt v5, v2 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v0, v1, v2 @4:8
+  v9: u8 = call f0 v0 @4:8
+  return v9
+t0: refinement @4:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter inclusive(i8) -> i8 {
+block0(v0: i8):
+  v1: i64 = int -1 @0:0
+  v2: i64 = int 1 @0:0
+  v3: i64 = cast v0 @0:0
+  v4: bool = ge v3, v1 @0:0
+  v5: i64 = cast v0 @0:0
+  v6: bool = le v5, v2 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v0, v1, v2 @10:8
+  v9: i8 = call f1 v0 @10:8
+  return v9
+t0: refinement @10:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f2 @16:8
+  return v0
+t0: unreachable @16:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_pattern_of_another_enum.mn == (exit 2)
+== conformance/core-calculus/match_pattern_of_another_kind.mn == (exit 2)
+== conformance/core-calculus/match_payload_narrowing_that_always_traps.mn == (exit 2)
+== conformance/core-calculus/match_variant_payload_into_a_refined_field.mn == (exit 2)
+== conformance/core-calculus/match_variant_payload_proven_by_a_guard.mn ==
+mente-dump 2 mir
+f0: fn read(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: i64 = int 10 @9:13
+  v3: i64 = cast v1 @9:13
+  v4: bool = lt v3, v2 @9:13
+  branch v4, block1(), block2()
+block1():
+  v9: addr = slot 2 @12:3
+  v10: u8 = int 1 @12:3
+  v11: unit = store v9, v10 @12:3
+  v12: u64 = int 1 @12:20
+  v13: addr = elem 1 v9, v12 @12:20
+  v14: unit = store v13, v1 @12:20
+  v15: unit = copy 2 v0, v9 @12:3
+  return
+block2():
+  v5: addr = slot 2 @10:12
+  v6: u8 = int 0 @10:12
+  v7: unit = store v5, v6 @10:12
+  v8: unit = copy 2 v0, v5 @10:12
+  return
+block3():
+  trap t0
+block4():
+  trap t0
+t0: unreachable @12:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn main(addr) {
+block0(v0: addr):
+  v1: i64 = int 4 @15:33
+  v2: addr = slot 2 @15:33
+  v3: u8 = cast v1 @15:33
+  v4: unit = call f0 v2, v3 @15:28
+  v5: unit = copy 2 v0, v2 @15:28
+  return
+block1():
+  trap t0
+t0: unreachable @15:28 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter read(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: unit = call f0 v0, v1 @8:8
+  return
+t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter main(addr) {
+block0(v0: addr):
+  v1: unit = call f1 v0 @15:8
+  return
+t0: unreachable @15:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/match_wildcard_on_a_bool.mn == (exit 2)
+== conformance/core-calculus/match_wildcard_on_an_enum.mn == (exit 2)
+== conformance/core-calculus/match_with_mut_calls.mn ==
+mente-dump 2 mir
+f0: fn next(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @6:7
+  v2: i64 = int 2 @6:11
+  v3: i64 = cast v1 @6:7
+  v4: i64 = div v3, v2 @6:7
+  v5: i64 = int 1 @6:15
+  v6: i64 = add v4, v5 @6:7
+  v7: u8 = cast v6 @6:7
+  v8: unit = store v0, v7 @6:7
+  v9: u8 = load v0 @7:3
+  return v9
+block1():
+  trap t0
+t0: unreachable @7:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn in_the_scrutinee(u8) -> u8 {
+block0(v0: u8):
+  v1: addr = slot 1 @11:11
+  v2: unit = store v1, v0 @11:11
+  v3: u8 = load v1 @12:17
+  v4: u8 = call f0 v1 @12:17
+  v6: i64 = int 0 @12:17
+  v7: i64 = cast v4 @12:17
+  v8: bool = eq v7, v6 @12:17
+  branch v8, block2(), block3()
+block1(v5: i64):
+  v13: u8 = cast v5 @14:10
+  return v13
+block2():
+  v9: u8 = load v1 @13:10
+  v10: i64 = cast v9 @13:10
+  jump block1(v10)
+block3():
+  v11: u8 = load v1 @14:10
+  v12: i64 = cast v11 @14:10
+  jump block1(v12)
+block4():
+  trap t0
+t0: unreachable @16:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn in_an_arm(u8) -> u8 {
+block0(v0: u8):
+  v1: addr = slot 1 @20:11
+  v2: unit = store v1, v0 @20:11
+  v4: i64 = int 0 @21:17
+  v5: i64 = cast v0 @21:17
+  v6: bool = eq v5, v4 @21:17
+  branch v6, block2(), block3()
+block1(v3: i64):
+  v12: u8 = cast v3 @23:10
+  v13: i64 = int 0 @25:7
+  v14: i64 = cast v12 @25:3
+  v15: i64 = add v14, v13 @25:3
+  v16: u8 = cast v15 @25:3
+  return v16
+block2():
+  v7: u8 = load v1 @22:10
+  v8: u8 = call f0 v1 @22:10
+  v9: i64 = cast v8 @22:10
+  jump block1(v9)
+block3():
+  v10: u8 = load v1 @23:10
+  v11: i64 = cast v10 @23:10
+  jump block1(v11)
+block4():
+  trap t0
+t0: unreachable @25:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn in_a_loop_condition(u8) -> u8 {
+block0(v0: u8):
+  v1: addr = slot 1 @29:15
+  v2: unit = store v1, v0 @29:15
+  v3: i64 = int 0 @30:20
+  v4: u8 = cast v3 @30:20
+  v5: addr = slot 1 @30:20
+  v6: unit = store v5, v4 @30:20
+  jump block1()
+block1():
+  v7: u8 = load v1 @31:16
+  v8: u8 = call f0 v1 @31:16
+  v9: u8 = load v1 @31:16
+  v11: i64 = int 1 @31:16
+  v12: i64 = cast v8 @31:16
+  v13: bool = eq v12, v11 @31:16
+  branch v13, block5(), block6()
+block2():
+  v19: u8 = load v5 @35:5
+  v20: i64 = int 1 @35:15
+  v21: i64 = cast v19 @35:15
+  v22: i64 = add v21, v20 @35:15
+  v23: i64 = int 0 @35:15
+  v24: bool = ge v22, v23 @35:15
+  v25: i64 = int 255 @35:15
+  v26: bool = le v22, v25 @35:15
+  v27: bool = and v24, v26 @35:15
+  v28: unit = check t0 v27, v22 @35:15
+  v29: u8 = cast v22 @35:15
+  v30: unit = store v5, v29 @35:15
+  jump block1()
+block3():
+  v31: u8 = load v5 @37:3
+  return v31
+block4(v10: bool):
+  branch v10, block2(), block3()
+block5():
+  v14: bool = bool false @32:10
+  jump block4(v14)
+block6():
+  v15: u8 = load v5 @33:10
+  v16: i64 = int 10 @33:19
+  v17: i64 = cast v15 @33:19
+  v18: bool = lt v17, v16 @33:19
+  jump block4(v18)
+block7():
+  trap t1
+t0: narrowing @35:15 ["", " does not fit in `u8`"]
+t1: unreachable @37:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn main() -> u8 {
+block0():
+  v0: i64 = int 9 @40:40
+  v1: u8 = cast v0 @40:40
+  v2: u8 = call f1 v1 @40:23
+  v3: i64 = int 0 @40:55
+  v4: u8 = cast v3 @40:55
+  v5: u8 = call f2 v4 @40:45
+  v6: i64 = cast v2 @40:23
+  v7: i64 = cast v5 @40:23
+  v8: i64 = add v6, v7 @40:23
+  v9: i64 = int 200 @40:80
+  v10: u8 = cast v9 @40:80
+  v11: u8 = call f3 v10 @40:60
+  v12: i64 = cast v11 @40:23
+  v13: i64 = add v8, v12 @40:23
+  v14: i64 = int 0 @40:23
+  v15: bool = ge v13, v14 @40:23
+  v16: i64 = int 255 @40:23
+  v17: bool = le v13, v16 @40:23
+  v18: bool = and v15, v17 @40:23
+  v19: unit = check t0 v18, v13 @40:23
+  v20: u8 = cast v13 @40:23
+  return v20
+block1():
+  trap t1
+t0: narrowing @40:23 ["", " does not fit in `u8`"]
+t1: unreachable @40:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter next(addr) -> u8 {
+block0(v0: addr):
+  v1: u8 = load v0 @0:0
+  v2: u8 = call f0 v0 @5:4
+  v3: u8 = load v0 @5:4
+  return v2
+t0: unreachable @5:4 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter in_the_scrutinee(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f1 v0 @10:8
+  return v1
+t0: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter in_an_arm(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f2 v0 @19:8
+  return v1
+t0: unreachable @19:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter in_a_loop_condition(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f3 v0 @28:8
+  return v1
+t0: unreachable @28:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f4 @40:8
+  return v0
+t0: unreachable @40:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/missing_mut_mark.mn == (exit 2)
 == conformance/core-calculus/missing_result.mn == (exit 2)
 == conformance/core-calculus/mut_argument_named_twice.mn == (exit 2)
@@ -1510,6 +7069,15 @@ t0: unreachable @3:8 ["unreachable reached: control left the code the checker al
 }
 == conformance/core-calculus/operand_read_before_a_later_operand_changes_it.mn == (exit 2)
 == conformance/core-calculus/operands_beyond_128_bits.mn == (exit 2)
+== conformance/core-calculus/pattern_binding_assigned.mn == (exit 2)
+== conformance/core-calculus/pattern_binding_named_like_an_enum.mn == (exit 2)
+== conformance/core-calculus/pattern_binding_named_twice.mn == (exit 2)
+== conformance/core-calculus/pattern_binding_never_read.mn == (exit 2)
+== conformance/core-calculus/pattern_bindings_named_alike_in_two_arms.mn == (exit 2)
+== conformance/core-calculus/pattern_field_misspelled.mn == (exit 2)
+== conformance/core-calculus/pattern_fields_out_of_order.mn == (exit 2)
+== conformance/core-calculus/pattern_variant_the_enum_lacks.mn == (exit 2)
+== conformance/core-calculus/payload_field_declared_twice.mn == (exit 2)
 == conformance/core-calculus/refined_field_not_proven.mn == (exit 2)
 == conformance/core-calculus/refined_field_proven_by_a_guard.mn ==
 mente-dump 2 mir
@@ -3547,6 +9115,13 @@ t0: unreachable @8:8 ["unreachable reached: control left the code the checker al
 == conformance/core-calculus/unknown_name.mn == (exit 2)
 == conformance/core-calculus/unused_value.mn == (exit 2)
 == conformance/core-calculus/var_never_assigned.mn == (exit 2)
+== conformance/core-calculus/variant_built_by_position.mn == (exit 2)
+== conformance/core-calculus/variant_built_out_of_order.mn == (exit 2)
+== conformance/core-calculus/variant_built_without_a_field.mn == (exit 2)
+== conformance/core-calculus/variant_built_without_its_payload.mn == (exit 2)
+== conformance/core-calculus/variant_declared_twice.mn == (exit 2)
+== conformance/core-calculus/variant_the_enum_lacks.mn == (exit 2)
+== conformance/core-calculus/variant_without_payload_given_one.mn == (exit 2)
 == conformance/core-calculus/wrong_number_of_arguments.mn == (exit 2)
 == conformance/core-calculus/wrong_type.mn == (exit 2)
 == conformance/diagnostics/function_before_struct.mn == (exit 2)
@@ -4482,11 +10057,13 @@ block0(v0: u32):
   return v1
 t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/grammar/arm_holding_an_assignment.mn == (exit 2)
 == conformance/grammar/assignment_to_a_sum.mn == (exit 2)
 == conformance/grammar/binary_digit_out_of_base.mn == (exit 2)
 == conformance/grammar/binding_without_value.mn == (exit 2)
 == conformance/grammar/chained_comparison.mn == (exit 2)
 == conformance/grammar/char_literal.mn == (exit 2)
+== conformance/grammar/enum_without_variants.mn == (exit 2)
 == conformance/grammar/expression_expected.mn == (exit 2)
 == conformance/grammar/if_as_an_operand.mn == (exit 2)
 == conformance/grammar/integer_beyond_u128.mn == (exit 2)
@@ -4594,6 +10171,76 @@ block0(v0: u8):
   return v1
 t0: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/grammar/match_arms_across_lines.mn ==
+mente-dump 2 mir
+f0: fn f(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  branch v0, block2(), block3()
+block1(v2: i64):
+  v13: u8 = cast v2 @9:5
+  return v13
+block2():
+  v3: i64 = int 2 @6:9
+  v4: i64 = cast v1 @6:5
+  v5: i64 = div v4, v3 @6:5
+  jump block1(v5)
+block3():
+  v6: i64 = int 3 @8:17
+  v7: i64 = cast v1 @8:13
+  v8: i64 = div v7, v6 @8:13
+  v9: u8 = cast v8 @8:13
+  v10: i64 = int 1 @9:9
+  v11: i64 = cast v9 @9:5
+  v12: i64 = add v11, v10 @9:5
+  jump block1(v12)
+block4():
+  trap t0
+t0: unreachable @9:5 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn main() -> u8 {
+block0():
+  v0: bool = bool true @13:25
+  v1: i64 = int 9 @13:31
+  v2: u8 = cast v1 @13:31
+  v3: u8 = call f0 v0, v2 @13:23
+  v4: bool = bool false @13:38
+  v5: i64 = int 9 @13:45
+  v6: u8 = cast v5 @13:45
+  v7: u8 = call f0 v4, v6 @13:36
+  v8: i64 = cast v3 @13:23
+  v9: i64 = cast v7 @13:23
+  v10: i64 = add v8, v9 @13:23
+  v11: i64 = int 0 @13:23
+  v12: bool = ge v10, v11 @13:23
+  v13: i64 = int 255 @13:23
+  v14: bool = le v10, v13 @13:23
+  v15: bool = and v12, v14 @13:23
+  v16: unit = check t0 v15, v10 @13:23
+  v17: u8 = cast v10 @13:23
+  return v17
+block1():
+  trap t1
+t0: narrowing @13:23 ["", " does not fit in `u8`"]
+t1: unreachable @13:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter f(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  v2: u8 = call f0 v0, v1 @4:8
+  return v2
+t0: unreachable @4:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter main() -> u8 {
+block0():
+  v0: u8 = call f1 @13:8
+  return v0
+t0: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/grammar/match_as_a_condition.mn == (exit 2)
+== conformance/grammar/match_as_an_operand.mn == (exit 2)
+== conformance/grammar/match_without_arms.mn == (exit 2)
 == conformance/grammar/nesting_beyond_256_levels.mn == (exit 2)
 == conformance/grammar/nesting_within_the_limit.mn ==
 mente-dump 2 mir
@@ -4742,8 +10389,10 @@ t0: unreachable @28:8 ["unreachable reached: control left the code the checker a
 == conformance/grammar/semicolon_at_line_end.mn == (exit 2)
 == conformance/grammar/struct_without_fields.mn == (exit 2)
 == conformance/grammar/suffix_without_underscore.mn == (exit 2)
+== conformance/grammar/two_arms_on_a_line.mn == (exit 2)
 == conformance/grammar/two_fields_on_a_line.mn == (exit 2)
 == conformance/grammar/two_statements_on_a_line.mn == (exit 2)
+== conformance/grammar/two_variants_on_a_line.mn == (exit 2)
 == conformance/grammar/type_m1_lacks.mn == (exit 2)
 == conformance/grammar/unclosed_string.mn == (exit 2)
 == conformance/grammar/unknown_character.mn == (exit 2)
@@ -4812,12 +10461,15 @@ mente-dump 2 mir
 == conformance/regions-and-pools/from_names_nothing.mn == (exit 2)
 == conformance/regions-and-pools/from_names_two_parameters.mn ==
 mente-dump 2 mir
+== conformance/surface-syntax/arm_with_a_guard.mn == (exit 2)
 == conformance/surface-syntax/async_function.mn == (exit 2)
 == conformance/surface-syntax/await_postfix.mn == (exit 2)
 == conformance/surface-syntax/c_logical_operators.mn == (exit 2)
 == conformance/surface-syntax/c_not.mn == (exit 2)
 == conformance/surface-syntax/cast.mn == (exit 2)
 == conformance/surface-syntax/comma_after_a_field.mn == (exit 2)
+== conformance/surface-syntax/comma_after_a_variant.mn == (exit 2)
+== conformance/surface-syntax/comma_after_an_arm.mn == (exit 2)
 == conformance/surface-syntax/conditional_operator.mn == (exit 2)
 == conformance/surface-syntax/example_without_its_brace.mn == (exit 2)
 == conformance/surface-syntax/expression_body.mn ==
@@ -4974,8 +10626,10 @@ block0(v0: i32):
   return v1
 t0: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/surface-syntax/nested_pattern.mn == (exit 2)
 == conformance/surface-syntax/number_as_a_name.mn == (exit 2)
 == conformance/surface-syntax/path_separator.mn == (exit 2)
+== conformance/surface-syntax/pattern_alternatives.mn == (exit 2)
 == conformance/surface-syntax/reference_at_a_call.mn == (exit 2)
 == conformance/surface-syntax/struct_literal_with_braces.mn == (exit 2)
 == conformance/surface-syntax/struct_without_its_brace.mn == (exit 2)
@@ -4983,6 +10637,8 @@ t0: unreachable @6:8 ["unreachable reached: control left the code the checker al
 == conformance/surface-syntax/unclosed_struct.mn == (exit 2)
 == conformance/surface-syntax/unclosed_trait.mn == (exit 2)
 == conformance/surface-syntax/unwrap.mn == (exit 2)
+== conformance/surface-syntax/variant_path_with_colons.mn == (exit 2)
+== conformance/surface-syntax/variant_with_a_positional_payload.mn == (exit 2)
 == perf/kernels/bsearch.mn ==
 mente-dump 2 mir
 f0: fn bsearch(u32) -> u64 {

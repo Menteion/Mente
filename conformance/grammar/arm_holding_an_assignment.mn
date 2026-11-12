@@ -1,0 +1,10 @@
+// expect: E0111
+module conformance
+pub fn f(b: bool) -> u8 {
+  var n: u8 = 0
+  match b {
+    true => n = 1
+    false => {}
+  }
+  n
+}

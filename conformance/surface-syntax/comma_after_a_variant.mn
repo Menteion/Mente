@@ -1,0 +1,6 @@
+// expect: E0128
+module conformance
+pub enum Light {
+  Red,
+  Green
+}

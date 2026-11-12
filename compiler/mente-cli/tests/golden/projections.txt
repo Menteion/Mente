@@ -75,15 +75,17 @@ pub fn step_particles(mut batch: Tiled<Particle, lanes: 16>, dt: f32[0.0..=1.0])
 
 == examples/03_colorless_concurrency_and_effects.mn ==
 // [Mente Holographic Spec Projection] module examples.colorless_concurrency_and_effects
-// spec_hash: 9fab0c23a704e8817282eca7360be6fb
+// spec_hash: 6dea73e55a7b3317ac30716f9429dc13
 // body_hash: 088ed8460ec289f62db1a048a2f168b3
 // instance_hash: 86b7d2b0c17d6a6b188aa99b596e066e
 
 module examples.colorless_concurrency_and_effects
 
-pub enum GatewayError { InvalidToken
+pub enum GatewayError {
+  InvalidToken
   Timeout
-  UpstreamFailure(code: u16) }
+  UpstreamFailure(code: u16)
+}
 
 pub struct OrderSummary {
   pub user_name: str

@@ -797,6 +797,34 @@ pub fn parse_structs(src: &str, module: &ModuleFile) -> Vec<ParsedStruct> {
         .collect()
 }
 
+/// One enum of a module, as [`parse_enums`] reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedEnum {
+    pub name: String,
+    pub syntax: tree::EnumSyntax,
+    /// What the body parser reported in it.
+    pub errors: Vec<Diagnostic>,
+}
+
+/// Every enum of `module`, in order, parsed under M2's grammar (`grammar.md`, item 10).
+pub fn parse_enums(src: &str, module: &ModuleFile) -> Vec<ParsedEnum> {
+    module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ItemDecl::Enum(e) if !e.tokens.is_empty() => {
+                let (syntax, errors) = body::parse_enum(src, &e.tokens);
+                Some(ParsedEnum {
+                    name: e.name.clone(),
+                    syntax,
+                    errors,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Every function of `module`, in order, with the syntax tree of each one that has a body.
 pub fn parse_bodies(src: &str, module: &ModuleFile) -> Vec<ParsedFn> {
     let mut functions = Vec::new();
@@ -947,7 +975,12 @@ pub struct UnitDecl {
 pub struct EnumDecl {
     pub is_pub: bool,
     pub name: String,
+    pub name_span: Span,
+    /// Each variant's text as written, its payload included.
     pub variants: Vec<String>,
+    /// Every token of the enum, from `enum` to its closing `}`, which the body parser reads
+    /// under M2's grammar ([`parse_enums`]).
+    pub tokens: Vec<Token>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1031,6 +1064,11 @@ pub fn dump_tree(src: &str) -> String {
             for parsed in parse_structs(src, &module) {
                 let line = too_deep(&parsed.errors)
                     .unwrap_or_else(|| tree::Tree::render_struct(&parsed.syntax));
+                lines.push((parsed.syntax.name_span.start, line));
+            }
+            for parsed in parse_enums(src, &module) {
+                let line = too_deep(&parsed.errors)
+                    .unwrap_or_else(|| tree::Tree::render_enum(&parsed.syntax));
                 lines.push((parsed.syntax.name_span.start, line));
             }
             for parsed in parse_bodies(src, &module) {
@@ -1789,30 +1827,60 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_enum(&mut self, is_pub: bool) -> Result<EnumDecl, Diagnostic> {
+        let enum_index = self.pos;
         self.next(); // consume 'enum'
         let (name, name_span) = self.expect_name()?;
+        // Type parameters, which the body parser reports with their milestone.
+        if *self.peek() == TokenKind::Lt {
+            self.consume_balanced_angles_str()?;
+        }
         let mut variants = Vec::new();
         if *self.peek() == TokenKind::LBrace {
-            let open = self.next();
-            let start_b = open.span.end;
-            while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
-                self.next();
-            }
-            let end_b = self
-                .expect_closing_brace("enum", &name, name_span)?
-                .span
-                .start;
-            for v in self.src[start_b..end_b].split(',') {
-                let t = v.trim();
-                if !t.is_empty() {
-                    variants.push(t.to_string());
+            self.next();
+            // Each variant's text: a variant ends at a `,` or at the end of its line, outside
+            // its payload's parentheses (`grammar.md`, item 10).
+            let mut depth = 0i32;
+            let mut current: Option<(usize, usize, u32)> = None;
+            let mut flush = |current: &mut Option<(usize, usize, u32)>, src: &str| {
+                if let Some((start, end, _)) = current.take() {
+                    let t = src[start..end].trim();
+                    if !t.is_empty() {
+                        variants.push(t.to_string());
+                    }
                 }
+            };
+            while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
+                let t = self.next();
+                match t.kind {
+                    TokenKind::DocComment(_) => continue,
+                    TokenKind::Comma if depth == 0 => {
+                        flush(&mut current, self.src);
+                        continue;
+                    }
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+                    _ => {}
+                }
+                if depth <= 0 && current.is_some_and(|(_, _, line)| line < t.span.line) {
+                    // A token that closes a payload stays with its variant.
+                    if !matches!(t.kind, TokenKind::RParen | TokenKind::RBracket) {
+                        flush(&mut current, self.src);
+                    }
+                }
+                current = Some(match current {
+                    Some((start, _, line)) => (start, t.span.end, line.max(t.span.line)),
+                    None => (t.span.start, t.span.end, t.span.line),
+                });
             }
+            flush(&mut current, self.src);
+            self.expect_closing_brace("enum", &name, name_span)?;
         }
         Ok(EnumDecl {
             is_pub,
             name,
+            name_span,
             variants,
+            tokens: self.tokens[enum_index..self.pos].to_vec(),
         })
     }
 

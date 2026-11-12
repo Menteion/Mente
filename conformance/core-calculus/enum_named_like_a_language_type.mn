@@ -1,0 +1,6 @@
+// expect: E0228
+module conformance
+pub enum u8 {
+  Small
+  Large
+}

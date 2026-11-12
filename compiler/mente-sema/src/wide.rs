@@ -18,8 +18,8 @@ use std::cmp::Ordering;
 
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
-    AssignOp, BinaryOp, BlockId, Body, Bound, Else, ExprId, ExprKind, FnSyntax, StmtKind, Tree,
-    TypeKind, UnaryOp,
+    ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, Else, ExprId, ExprKind, FnSyntax, StmtKind,
+    Tree, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
 
@@ -345,8 +345,85 @@ impl Wide<'_> {
                     _ => hull.or(typed),
                 }
             }
-            _ => typed,
+            // A `match`'s arms meet in one machine type, as an `if`'s branches do.
+            ExprKind::Match { arms, .. } => {
+                let tails: Vec<(Option<ExprId>, ArmBody)> = arms
+                    .iter()
+                    .map(|a| match a.body {
+                        ArmBody::Expr(x) => (Some(x), a.body),
+                        ArmBody::Block(b) => (self.tail(b), a.body),
+                    })
+                    .collect();
+                let mut hull: Option<Range> = None;
+                let mut ranges = Vec::new();
+                for (t, body) in tails {
+                    let Some(t) = t else {
+                        continue;
+                    };
+                    let r = self.range(t)?;
+                    hull = Some(hull.map_or(r, |h| h.hull(r)));
+                    ranges.push((t, body, r));
+                }
+                let top = Num::new(false, i128::MAX.unsigned_abs());
+                let above = ranges.iter().find(|(_, _, r)| r.hi > top);
+                match (hull, above) {
+                    (Some(h), Some(&(tail, body, _))) if !h.fits() => {
+                        self.report_match(span, tail, body);
+                        None
+                    }
+                    _ => hull.or(typed),
+                }
+            }
+            ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Repeat { .. }
+            | ExprKind::Error => typed,
         }
+    }
+
+    /// `E0222` for the `match` at `at`, whose arms' values fit no one 128-bit type together;
+    /// the fix binds `tail`, the value of the arm that reaches highest, to an `i128` inside that
+    /// arm, a block made of it when it is an expression, so that it is computed only when the
+    /// arm runs.
+    fn report_match(&mut self, at: Span, tail: ExprId, body: ArmBody) {
+        let message = "the arms of this `match` give values that no one of `i128` and `u128` \
+                       holds together, and they meet in one of them"
+            .to_string();
+        let place = self.tree.expr(tail).span;
+        if let ArmBody::Block(_) = body {
+            self.report_with(at, place, tail, "i128", message);
+            return;
+        }
+        let mut d = Diagnostic::error("E0222", at, message);
+        let name = self.fresh(tail);
+        if let Some(value) = self.src.get(place.start..place.end) {
+            let line_start = self.src[..place.start].rfind('\n').map_or(0, |i| i + 1);
+            let indent: String = self.src[line_start..]
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect();
+            d.fixes.push(Fix {
+                message: format!("bind `{}` to `{}: i128` in its arm", value, name),
+                applicability: Applicability::Suggestion,
+                edits: vec![Edit {
+                    span: place,
+                    replacement: format!(
+                        "{{\n{ind}  val {n}: i128 = {v}\n{ind}  {n}\n{ind}}}",
+                        ind = indent,
+                        n = name,
+                        v = value
+                    ),
+                }],
+            });
+        }
+        self.errors.push(d);
     }
 
     /// `E0222` for an array literal at `at` whose elements, integers of no one type, kept exact
@@ -760,6 +837,34 @@ mod tests {
             "bind `a * b` to `product: i128` first",
         );
         assert!(check_source(&diff).is_ok(), "{}", diff);
+    }
+
+    /// A `match`'s arms meet in one machine type as an `if`'s branches do: arms whose values no
+    /// one 128-bit type holds together are `E0222`, whose fix binds the value of the arm that
+    /// reaches highest to an `i128` inside that arm, a block made of it where it was an
+    /// expression; and the module then checks.
+    #[test]
+    fn test_a_match_whose_arms_leave_128_bits_together_is_e0222() {
+        let mixed =
+            "pub fn f(c: bool, a: i64, b: u128) -> i64 = match c {\n  true => a\n  false => b\n}";
+        assert_eq!(codes(mixed), ["E0222"]);
+        let text = fixed(mixed, "bind `b` to `wide: i128` in its arm");
+        assert!(
+            text.contains("  false => {\n    val wide: i128 = b\n    wide\n  }"),
+            "{}",
+            text
+        );
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        let block = "pub fn f(c: bool, a: i64, b: u128) -> i64 = match c {\n  true => a\n  false => {\n    b\n  }\n}";
+        let text = fixed(block, "bind `b` to `wide: i128` first");
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // Arms that fit one type together are none.
+        for src in [
+            "pub fn f(c: bool, a: i64, b: u64) -> i64 = match c {\n  true => a\n  false => b\n}",
+            "pub fn f(c: bool, a: u8, b: u128) -> u8 = match c {\n  true => a\n  false => b\n}",
+        ] {
+            assert!(codes(src).is_empty(), "{}", src);
+        }
     }
 
     #[test]

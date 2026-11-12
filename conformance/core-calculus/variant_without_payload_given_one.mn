@@ -1,0 +1,8 @@
+// expect: E0226
+module conformance
+pub enum Shape {
+  Rect(w: u8, h: u8)
+  Dot
+}
+
+pub fn dot() -> Shape = Shape.Dot(w: 1)

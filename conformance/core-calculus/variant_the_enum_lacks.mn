@@ -1,0 +1,8 @@
+// expect: E0215
+module conformance
+pub enum Light {
+  Red
+  Green
+}
+
+pub fn go() -> Light = Light.Gren

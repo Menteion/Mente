@@ -1,0 +1,22 @@
+// expect: pass
+module conformance
+pub enum Coin {
+  Heads
+  Tails
+}
+
+pub fn both(a: Coin, b: Coin) -> u8 = match a {
+  Coin.Heads => match b {
+    Coin.Heads => 2
+    Coin.Tails => 1
+  }
+  Coin.Tails => {
+    val inner = match b {
+      Coin.Heads => 1
+      Coin.Tails => 0
+    }
+    inner
+  }
+}
+
+pub fn main() -> u8 = both(Coin.Heads, Coin.Tails) + both(Coin.Tails, Coin.Tails)

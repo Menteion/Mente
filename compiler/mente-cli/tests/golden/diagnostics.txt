@@ -28,6 +28,8 @@
 {"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Stamp` is the name of a struct of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_layout_struct.mn","start":228,"end":233,"line":10,"column":7},"related":[],"fixes":[{"message":"rename this `Stamp` and its uses to `Stamp2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_layout_struct.mn","start":228,"end":233,"line":10,"column":7},"replacement":"Stamp2"},{"span":{"file":"binding_named_like_a_layout_struct.mn","start":240,"end":245,"line":11,"column":3},"replacement":"Stamp2"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/binding_named_like_a_struct.mn ==
 {"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Pair` is the name of a struct of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_a_struct.mn","start":101,"end":105,"line":8,"column":7},"related":[],"fixes":[{"message":"rename this `Pair` and its uses to `Pair2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_a_struct.mn","start":101,"end":105,"line":8,"column":7},"replacement":"Pair2"},{"span":{"file":"binding_named_like_a_struct.mn","start":114,"end":118,"line":9,"column":3},"replacement":"Pair2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/binding_named_like_an_enum.mn ==
+{"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Light` is the name of an enum of this module; a name means one thing, so give this binding another","primary":{"file":"binding_named_like_an_enum.mn","start":104,"end":109,"line":9,"column":7},"related":[],"fixes":[{"message":"rename this `Light` and its uses to `Light2`","applicability":"suggestion","edits":[{"span":{"file":"binding_named_like_an_enum.mn","start":104,"end":109,"line":9,"column":7},"replacement":"Light2"},{"span":{"file":"binding_named_like_an_enum.mn","start":116,"end":121,"line":10,"column":3},"replacement":"Light2"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/binding_never_read.mn ==
 {"version":1,"diagnostics":[{"code":"E0218","severity":"error","message":"`clamped` is never read; use it where it was meant to be used, or remove it","primary":{"file":"binding_never_read.mn","start":66,"end":73,"line":4,"column":7},"related":[],"fixes":[{"message":"remove `clamped`","applicability":"suggestion","edits":[{"span":{"file":"binding_never_read.mn","start":62,"end":77,"line":4,"column":3},"replacement":""}]}]}],"todos":[],"trusted":[]}
 == core-calculus/binding_of_mixed_integers.mn ==
@@ -52,6 +54,36 @@
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/ensures_not_proven_at_a_return.mn ==
 {"version":1,"diagnostics":[{"code":"E0505","severity":"error","message":"Tier 1 cannot rule out `x = 255, result = 255`, which violates `ensures result > x` of `inc` at this return","primary":{"file":"ensures_not_proven_at_a_return.mn","start":110,"end":111,"line":7,"column":12},"related":[],"fixes":[{"message":"insert `guard x > x else { todo(\"x > x is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"ensures_not_proven_at_a_return.mn","start":99,"end":99,"line":7,"column":1},"replacement":"    guard x > x else { todo(\"x > x is false here\") }\n"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/enum_and_struct_of_one_name.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`Shape` is already declared in this module, as a struct; a name means one thing in a module, so give this enum another","primary":{"file":"enum_and_struct_of_one_name.mn","start":75,"end":80,"line":7,"column":10},"related":[{"message":"first declared here","span":{"file":"enum_and_struct_of_one_name.mn","start":47,"end":52,"line":3,"column":12}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_beyond_4_gib.mn ==
+{"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"an enum of type `Big` holds 4294967296 bytes, its tag and its largest payload, more than the 4294967295 a value, kept in one piece, may hold","primary":{"file":"enum_beyond_4_gib.mn","start":45,"end":48,"line":3,"column":10},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_compared_with_eq.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"comparing structs and enums with `==` comes later in M2; the compiler does not have it yet","primary":{"file":"enum_compared_with_eq.mn","start":112,"end":118,"line":8,"column":43},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_containing_itself.mn ==
+{"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`Chain` contains itself through the field `tail` of its variant `Cons`, so a value of it would have no end; a `List<Chain>`, which comes later in M2, may hold it, since a list keeps its elements apart","primary":{"file":"enum_containing_itself.mn","start":45,"end":50,"line":3,"column":10},"related":[{"message":"this field holds it","span":{"file":"enum_containing_itself.mn","start":78,"end":82,"line":5,"column":18}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_containing_itself_through_a_struct.mn ==
+{"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`Node` contains itself: its field `next` holds `Next`, whose variant `More` holds `Node` in its field `node`, so a value of it would have no end","primary":{"file":"enum_containing_itself_through_a_struct.mn","start":47,"end":51,"line":3,"column":12},"related":[{"message":"this field holds it","span":{"file":"enum_containing_itself_through_a_struct.mn","start":68,"end":72,"line":5,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_field_of_a_later_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string or list type (`String`) comes later in M2; the compiler does not have it yet","primary":{"file":"enum_field_of_a_later_type.mn","start":78,"end":84,"line":5,"column":15},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_in_struct_in_enum.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/enum_named_like_a_language_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`u8` is a type of the language; a name means one thing, so give this enum another","primary":{"file":"enum_named_like_a_language_type.mn","start":45,"end":47,"line":3,"column":10},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_named_like_a_later_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`String` is a type of the language; a name means one thing, so give this enum another","primary":{"file":"enum_named_like_a_later_type.mn","start":45,"end":51,"line":3,"column":10},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_of_256_variants.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/enum_of_257_variants.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/enum_payloads_of_arrays_structs_enums.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/enum_with_type_parameters.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an enum's type parameters comes in M4; M2 does not have it","primary":{"file":"enum_with_type_parameters.mn","start":50,"end":51,"line":3,"column":15},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/enum_within_4_gib.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/enum_without_payloads.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/field_declared_twice.mn ==
 {"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`i` is already a field of `Pair`; a struct names each field once","primary":{"file":"field_declared_twice.mn","start":64,"end":65,"line":5,"column":3},"related":[{"message":"first declared here","span":{"file":"field_declared_twice.mn","start":56,"end":57,"line":4,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/field_narrowing_that_always_traps.mn ==
@@ -74,8 +106,8 @@
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"an error type `T ! E` comes later in M2; the compiler does not have it yet","primary":{"file":"later_error_type.mn","start":60,"end":61,"line":3,"column":25},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/later_for_loop.mn ==
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a `for` loop is in no milestone yet; M2 does not have it","primary":{"file":"later_for_loop.mn","start":70,"end":73,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
-== core-calculus/later_match.mn ==
-{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"`match` comes later in M2; the compiler does not have it yet","primary":{"file":"later_match.mn","start":72,"end":77,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/later_optional_pattern.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"`none`, the pattern of an absent `?T` value, comes later in M2; the compiler does not have it yet","primary":{"file":"later_optional_pattern.mn","start":72,"end":76,"line":4,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/later_string_value.mn ==
 {"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a string value comes later in M2; the compiler does not have it yet","primary":{"file":"later_string_value.mn","start":66,"end":72,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/layout_struct_as_a_value.mn ==
@@ -89,6 +121,70 @@
 == core-calculus/literal_outside_its_suffix.mn ==
 {"version":1,"diagnostics":[{"code":"E0221","severity":"error","message":"the literal 300_u8 lies outside `u8`, which holds 0 to 255","primary":{"file":"literal_outside_its_suffix.mn","start":55,"end":61,"line":3,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/m1_slice.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_arm_outside_the_range.mn ==
+{"version":1,"diagnostics":[{"code":"E0230","severity":"error","message":"no value reaches this arm: 3 lies outside `u8[0..3]`, the values of what the `match` reads; remove it","primary":{"file":"match_arm_outside_the_range.mn","start":111,"end":112,"line":7,"column":3},"related":[],"fixes":[{"message":"remove the arm","applicability":"machine-applicable","edits":[{"span":{"file":"match_arm_outside_the_range.mn","start":109,"end":119,"line":7,"column":1},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_arm_outside_the_type.mn ==
+{"version":1,"diagnostics":[{"code":"E0230","severity":"error","message":"no value reaches this arm: -1 lies outside `u8`, the values of what the `match` reads; remove it","primary":{"file":"match_arm_outside_the_type.mn","start":75,"end":77,"line":4,"column":3},"related":[],"fixes":[{"message":"remove the arm","applicability":"machine-applicable","edits":[{"span":{"file":"match_arm_outside_the_type.mn","start":73,"end":84,"line":4,"column":1},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_arms_beyond_128_bits.mn ==
+{"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the arms of this `match` give values that no one of `i128` and `u128` holds together, and they meet in one of them","primary":{"file":"match_arms_beyond_128_bits.mn","start":100,"end":142,"line":4,"column":17},"related":[],"fixes":[{"message":"bind `b` to `wide: i128` in its arm","applicability":"suggestion","edits":[{"span":{"file":"match_arms_beyond_128_bits.mn","start":137,"end":138,"line":6,"column":14},"replacement":"{\n      val wide: i128 = b\n      wide\n    }"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_arms_of_different_types.mn ==
+{"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"the arms of this `match` produce its value, so they have one type, but this one is `bool` after an integer","primary":{"file":"match_arms_of_different_types.mn","start":90,"end":104,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_as_a_statement.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_at_the_i128_limits.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_binding_has_its_fields_refinement.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_binding_refinement_not_proven.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out that `match r {\n  Reading.Level(n: n) => n\n  Reading.Missing => 0\n}` is 5, outside `u8[0..5]`, the type of the result of `level`; a `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one, so none is offered: bind its value to a `val`, and `guard` that","primary":{"file":"match_binding_refinement_not_proven.mn","start":129,"end":190,"line":8,"column":40},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_duplicate_arm.mn ==
+{"version":1,"diagnostics":[{"code":"E0230","severity":"error","message":"no value reaches this arm: an arm before it matches the same value; remove it","primary":{"file":"match_duplicate_arm.mn","start":150,"end":159,"line":11,"column":3},"related":[{"message":"matched first here","span":{"file":"match_duplicate_arm.mn","start":112,"end":121,"line":9,"column":3}}],"fixes":[{"message":"remove the arm","applicability":"machine-applicable","edits":[{"span":{"file":"match_duplicate_arm.mn","start":148,"end":166,"line":11,"column":1},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_duplicate_literal.mn ==
+{"version":1,"diagnostics":[{"code":"E0230","severity":"error","message":"no value reaches this arm: an arm before it matches the same value; remove it","primary":{"file":"match_duplicate_literal.mn","start":86,"end":87,"line":5,"column":3},"related":[{"message":"matched first here","span":{"file":"match_duplicate_literal.mn","start":76,"end":77,"line":4,"column":3}}],"fixes":[{"message":"remove the arm","applicability":"machine-applicable","edits":[{"span":{"file":"match_duplicate_literal.mn","start":84,"end":94,"line":5,"column":1},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_freezes_its_scrutinee_against_a_mut_argument.mn ==
+{"version":1,"diagnostics":[{"code":"E0232","severity":"error","message":"this arm's pattern binds a part of `b.cell`, which it reads where it lies, so nothing in the arm changes `b.cell`; change it after the `match`, or copy what the arm needs into a `val` before it","primary":{"file":"match_freezes_its_scrutinee_against_a_mut_argument.mn","start":250,"end":256,"line":19,"column":15},"related":[{"message":"matched here","span":{"file":"match_freezes_its_scrutinee_against_a_mut_argument.mn","start":204,"end":210,"line":17,"column":39}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_freezes_its_scrutinee_against_a_store.mn ==
+{"version":1,"diagnostics":[{"code":"E0232","severity":"error","message":"this arm's pattern binds a part of `c`, which it reads where it lies, so nothing in the arm changes `c`; change it after the `match`, or copy what the arm needs into a `val` before it","primary":{"file":"match_freezes_its_scrutinee_against_a_store.mn","start":147,"end":148,"line":10,"column":5},"related":[{"message":"matched here","span":{"file":"match_freezes_its_scrutinee_against_a_store.mn","start":116,"end":117,"line":8,"column":40}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_leaves_the_rest_of_its_scrutinees_binding_free.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_literal_arm_gives_its_value.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_missing_a_variant.mn ==
+{"version":1,"diagnostics":[{"code":"E0229","severity":"error","message":"this `match` does not match `Light.Amber`; it has an arm for every variant of `Light`","primary":{"file":"match_missing_a_variant.mn","start":108,"end":157,"line":9,"column":31},"related":[],"fixes":[{"message":"add an arm for each value left","applicability":"suggestion","edits":[{"span":{"file":"match_missing_a_variant.mn","start":155,"end":155,"line":11,"column":20},"replacement":"\n  Light.Amber => todo(\"Light.Amber\")"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_name_pattern.mn ==
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"a name pattern (`other`), which binds the present value of a `?T`, comes later in M2; the compiler does not have it yet","primary":{"file":"match_name_pattern.mn","start":81,"end":86,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_negative_literals.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_nested_in_an_arm.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_on_a_bool.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_on_a_bool_missing_a_value.mn ==
+{"version":1,"diagnostics":[{"code":"E0229","severity":"error","message":"this `match` does not match `false`; it has an arm for both values of `bool`","primary":{"file":"match_on_a_bool_missing_a_value.mn","start":65,"end":88,"line":3,"column":30},"related":[],"fixes":[{"message":"add an arm for each value left","applicability":"suggestion","edits":[{"span":{"file":"match_on_a_bool_missing_a_value.mn","start":86,"end":86,"line":4,"column":12},"replacement":"\n  false => todo(\"false\")"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_on_an_array.mn ==
+{"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"`match` reads an enum, a `bool` or an integer, but this is `[2]u8`","primary":{"file":"match_on_an_array.mn","start":74,"end":76,"line":3,"column":39},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_over_a_full_u8.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_over_a_full_u8_without_wildcard.mn ==
+{"version":1,"diagnostics":[{"code":"E0229","severity":"error","message":"this `match` does not match 3, among others, a value of `u8`; add an arm for each value, or `_` after the arms for every value left","primary":{"file":"match_over_a_full_u8_without_wildcard.mn","start":64,"end":105,"line":3,"column":29},"related":[],"fixes":[{"message":"add an arm for each value left","applicability":"suggestion","edits":[{"span":{"file":"match_over_a_full_u8_without_wildcard.mn","start":103,"end":103,"line":6,"column":10},"replacement":"\n  _ => todo(\"_\")"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_over_a_refined_u8.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_pattern_of_another_enum.mn ==
+{"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"this pattern is a variant of `Coin`, but the `match` reads `Light`","primary":{"file":"match_pattern_of_another_enum.mn","start":163,"end":173,"line":15,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_pattern_of_another_kind.mn ==
+{"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"this pattern is an integer, but the `match` reads a `bool`","primary":{"file":"match_pattern_of_another_kind.mn","start":88,"end":89,"line":5,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_payload_narrowing_that_always_traps.mn ==
+{"version":1,"diagnostics":[{"code":"E0508","severity":"error","message":"Tier 1 proves `300` is at least 300 here, outside `u8` (0 to 255), so this narrowing always traps","primary":{"file":"match_payload_narrowing_that_always_traps.mn","start":106,"end":109,"line":7,"column":38},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/match_variant_payload_into_a_refined_field.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 10`, outside `u8[0..10]`, the type of field `n` of `Reading.Level`","primary":{"file":"match_variant_payload_into_a_refined_field.mn","start":139,"end":140,"line":8,"column":50},"related":[],"fixes":[{"message":"insert `guard x < 10 else { todo(\"x < 10 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"match_variant_payload_into_a_refined_field.mn","start":120,"end":141,"line":8,"column":31},"replacement":"{\n  guard x < 10 else { todo(\"x < 10 is false here\") }\n  Reading.Level(n: x)\n}"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_variant_payload_proven_by_a_guard.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/match_wildcard_on_a_bool.mn ==
+{"version":1,"diagnostics":[{"code":"E0231","severity":"error","message":"`_` stands only on an integer, but this `match` reads a `bool`: name both values, `true` and `false`","primary":{"file":"match_wildcard_on_a_bool.mn","start":95,"end":96,"line":5,"column":3},"related":[],"fixes":[{"message":"write an arm for each value left","applicability":"suggestion","edits":[{"span":{"file":"match_wildcard_on_a_bool.mn","start":95,"end":104,"line":5,"column":3},"replacement":"false => true"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_wildcard_on_an_enum.mn ==
+{"version":1,"diagnostics":[{"code":"E0231","severity":"error","message":"`_` stands only on an integer, but this `match` reads an enum, `Light`: name each variant, so that one added later must be named too","primary":{"file":"match_wildcard_on_an_enum.mn","start":142,"end":143,"line":11,"column":3},"related":[],"fixes":[{"message":"write an arm for each value left","applicability":"suggestion","edits":[{"span":{"file":"match_wildcard_on_an_enum.mn","start":142,"end":152,"line":11,"column":3},"replacement":"Light.Amber => false\n  Light.Green => false"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/match_with_mut_calls.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/missing_mut_mark.mn ==
 {"version":1,"diagnostics":[{"code":"E0214","severity":"error","message":"parameter `x` of `bump` is `mut`, so the call marks its argument `mut`, as in `bump(mut x)`","primary":{"file":"missing_mut_mark.mn","start":122,"end":123,"line":9,"column":8},"related":[],"fixes":[{"message":"mark the argument `mut`","applicability":"machine-applicable","edits":[{"span":{"file":"missing_mut_mark.mn","start":122,"end":122,"line":9,"column":8},"replacement":"mut "}]}]}],"todos":[],"trusted":[]}
@@ -110,6 +206,24 @@
 {"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 9, y = 0`, outside `u8[9..=9]`, the type of the result of `f`","primary":{"file":"operand_read_before_a_later_operand_changes_it.mn","start":309,"end":310,"line":16,"column":3},"related":[],"fixes":[{"message":"insert `guard y >= 9 else { todo(\"y >= 9 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"operand_read_before_a_later_operand_changes_it.mn","start":307,"end":307,"line":16,"column":1},"replacement":"  guard y >= 9 else { todo(\"y >= 9 is false here\") }\n"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/operands_beyond_128_bits.mn ==
 {"version":1,"diagnostics":[{"code":"E0222","severity":"error","message":"the operands of `b + (a + 170141183460469231731687303715884105727)` fit no one of `i128` and `u128` together with its value, and an operation computes in one of them","primary":{"file":"operands_beyond_128_bits.mn","start":89,"end":138,"line":4,"column":17},"related":[],"fixes":[{"message":"bind `a + 170141183460469231731687303715884105727` to `sum: u128` first","applicability":"suggestion","edits":[{"span":{"file":"operands_beyond_128_bits.mn","start":73,"end":73,"line":4,"column":1},"replacement":"  val sum: u128 = a + 170141183460469231731687303715884105727\n"},{"span":{"file":"operands_beyond_128_bits.mn","start":94,"end":137,"line":4,"column":22},"replacement":"sum"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_binding_assigned.mn ==
+{"version":1,"diagnostics":[{"code":"E0205","severity":"error","message":"cannot assign to `w`: a pattern binds it to a part of the value matched, which it only reads; copy it into a `var` first","primary":{"file":"pattern_binding_assigned.mn","start":152,"end":153,"line":9,"column":5},"related":[{"message":"bound here","span":{"file":"pattern_binding_assigned.mn","start":134,"end":135,"line":8,"column":17}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_binding_named_like_an_enum.mn ==
+{"version":1,"diagnostics":[{"code":"E0220","severity":"error","message":"`Light` is the name of an enum of this module; a name means one thing, so give this binding another","primary":{"file":"pattern_binding_named_like_an_enum.mn","start":141,"end":146,"line":9,"column":20},"related":[],"fixes":[{"message":"rename this `Light` and its uses to `Light2`","applicability":"suggestion","edits":[{"span":{"file":"pattern_binding_named_like_an_enum.mn","start":141,"end":146,"line":9,"column":20},"replacement":"Light2"},{"span":{"file":"pattern_binding_named_like_an_enum.mn","start":151,"end":156,"line":9,"column":30},"replacement":"Light2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_binding_named_twice.mn ==
+{"version":1,"diagnostics":[{"code":"E0202","severity":"error","message":"`w` is already declared in this function; Mente has no shadowing, so give this one a new name","primary":{"file":"pattern_binding_named_twice.mn","start":140,"end":141,"line":8,"column":17},"related":[{"message":"first declared here","span":{"file":"pattern_binding_named_twice.mn","start":99,"end":100,"line":7,"column":23}}],"fixes":[{"message":"rename this `w` and its uses to `w2`","applicability":"suggestion","edits":[{"span":{"file":"pattern_binding_named_twice.mn","start":140,"end":141,"line":8,"column":17},"replacement":"w2"},{"span":{"file":"pattern_binding_named_twice.mn","start":152,"end":153,"line":8,"column":29},"replacement":"w2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_binding_never_read.mn ==
+{"version":1,"diagnostics":[{"code":"E0218","severity":"error","message":"`h` is never read; a field the arm does not need is bound to `_`","primary":{"file":"pattern_binding_never_read.mn","start":140,"end":141,"line":8,"column":23},"related":[],"fixes":[{"message":"bind `h`'s field to `_`","applicability":"machine-applicable","edits":[{"span":{"file":"pattern_binding_never_read.mn","start":140,"end":141,"line":8,"column":23},"replacement":"_"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_bindings_named_alike_in_two_arms.mn ==
+{"version":1,"diagnostics":[{"code":"E0202","severity":"error","message":"`n` is already declared in this function; Mente has no shadowing, so give this one a new name","primary":{"file":"pattern_bindings_named_alike_in_two_arms.mn","start":264,"end":265,"line":11,"column":17},"related":[{"message":"first declared here","span":{"file":"pattern_bindings_named_alike_in_two_arms.mn","start":240,"end":241,"line":10,"column":17}}],"fixes":[{"message":"rename this `n` and its uses to `n2`","applicability":"suggestion","edits":[{"span":{"file":"pattern_bindings_named_alike_in_two_arms.mn","start":264,"end":265,"line":11,"column":17},"replacement":"n2"},{"span":{"file":"pattern_bindings_named_alike_in_two_arms.mn","start":270,"end":271,"line":11,"column":23},"replacement":"n2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_field_misspelled.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"`Shape.Rect` has no field `hh`; did you mean `h`?","primary":{"file":"pattern_field_misspelled.mn","start":137,"end":139,"line":8,"column":20},"related":[],"fixes":[{"message":"write `h`","applicability":"suggestion","edits":[{"span":{"file":"pattern_field_misspelled.mn","start":137,"end":139,"line":8,"column":20},"replacement":"h"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_fields_out_of_order.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"a pattern names the fields of `Shape.Rect` in the order of its declaration: `w`, `h`","primary":{"file":"pattern_fields_out_of_order.mn","start":120,"end":142,"line":8,"column":3},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/pattern_variant_the_enum_lacks.mn ==
+{"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`Light` has no variant `Gren`; did you mean `Green`?","primary":{"file":"pattern_variant_the_enum_lacks.mn","start":140,"end":144,"line":10,"column":9},"related":[],"fixes":[{"message":"write `Green`","applicability":"suggestion","edits":[{"span":{"file":"pattern_variant_the_enum_lacks.mn","start":140,"end":144,"line":10,"column":9},"replacement":"Green"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/payload_field_declared_twice.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`w` is already a field of `Shape.Rect`; a payload names each field once","primary":{"file":"payload_field_declared_twice.mn","start":67,"end":68,"line":4,"column":15},"related":[{"message":"first declared here","span":{"file":"payload_field_declared_twice.mn","start":60,"end":61,"line":4,"column":8}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/refined_field_not_proven.mn ==
 {"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 10`, outside `u8[0..10]`, the type of field `d` of `Digit`","primary":{"file":"refined_field_not_proven.mn","start":113,"end":114,"line":7,"column":41},"related":[],"fixes":[{"message":"insert `guard x < 10 else { todo(\"x < 10 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"refined_field_not_proven.mn","start":102,"end":115,"line":7,"column":30},"replacement":"{\n  guard x < 10 else { todo(\"x < 10 is false here\") }\n  Digit(d: x)\n}"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/refined_field_proven_by_a_guard.mn ==
@@ -151,7 +265,7 @@
 == core-calculus/struct_built_without_a_field.mn ==
 {"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"this `Pair` leaves out `j`; a field has no default, so a struct is built with every field, in the order of its declaration: `i`, `j`","primary":{"file":"struct_built_without_a_field.mn","start":97,"end":107,"line":8,"column":25},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_compared_with_eq.mn ==
-{"version":1,"diagnostics":[{"code":"E0203","severity":"error","message":"`==` compares two integers or two bools, not `Pair` and `Pair`","primary":{"file":"struct_compared_with_eq.mn","start":105,"end":111,"line":7,"column":41},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0109","severity":"error","message":"comparing structs and enums with `==` comes later in M2; the compiler does not have it yet","primary":{"file":"struct_compared_with_eq.mn","start":105,"end":111,"line":7,"column":41},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_containing_itself.mn ==
 {"version":1,"diagnostics":[{"code":"E0225","severity":"error","message":"`Node` contains itself through its field `next`, so a value of it would have no end; a `List<Node>`, which comes later in M2, may hold it, since a list keeps its elements apart","primary":{"file":"struct_containing_itself.mn","start":47,"end":51,"line":3,"column":12},"related":[{"message":"this field holds it","span":{"file":"struct_containing_itself.mn","start":68,"end":72,"line":5,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_containing_itself_through_others.mn ==
@@ -202,6 +316,20 @@
 {"version":1,"diagnostics":[{"code":"E0217","severity":"error","message":"this value, `u8`, is never used; use it, or discard it on purpose with `_ = ...`","primary":{"file":"unused_value.mn","start":83,"end":88,"line":5,"column":3},"related":[],"fixes":[{"message":"discard it on purpose","applicability":"suggestion","edits":[{"span":{"file":"unused_value.mn","start":83,"end":83,"line":5,"column":3},"replacement":"_ = "}]}]}],"todos":[],"trusted":[]}
 == core-calculus/var_never_assigned.mn ==
 {"version":1,"diagnostics":[{"code":"E0219","severity":"error","message":"`b` is never assigned, so it is a `val`; a `var` says the value changes","primary":{"file":"var_never_assigned.mn","start":66,"end":67,"line":4,"column":7},"related":[],"fixes":[{"message":"declare it with `val`","applicability":"machine-applicable","edits":[{"span":{"file":"var_never_assigned.mn","start":62,"end":65,"line":4,"column":3},"replacement":"val"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/variant_built_by_position.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"a variant's payload is built with its fields named, in the order of its declaration, as in `Shape.Rect(w: ...)`: `w`, `h`","primary":{"file":"variant_built_by_position.mn","start":104,"end":120,"line":7,"column":28},"related":[],"fixes":[{"message":"name each field","applicability":"machine-applicable","edits":[{"span":{"file":"variant_built_by_position.mn","start":115,"end":115,"line":7,"column":39},"replacement":"w: "},{"span":{"file":"variant_built_by_position.mn","start":118,"end":118,"line":7,"column":42},"replacement":"h: "}]}]}],"todos":[],"trusted":[]}
+== core-calculus/variant_built_out_of_order.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"the fields of `Shape.Rect` are named in the order of its declaration, which is the order their values are evaluated in: `w`, `h`","primary":{"file":"variant_built_out_of_order.mn","start":115,"end":125,"line":7,"column":39},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/variant_built_without_a_field.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"this `Shape.Rect` leaves out `h`; a field has no default, so a variant's payload is built with every field, in the order of its declaration: `w`, `h`","primary":{"file":"variant_built_without_a_field.mn","start":104,"end":120,"line":7,"column":28},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/variant_built_without_its_payload.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"`Shape.Rect` holds a payload, built with each field named, in the order of its declaration: `Shape.Rect(w: ..., h: ...)`","primary":{"file":"variant_built_without_its_payload.mn","start":110,"end":120,"line":8,"column":28},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/variant_declared_twice.mn ==
+{"version":1,"diagnostics":[{"code":"E0228","severity":"error","message":"`Red` is already a variant of `Light`; an enum names each variant once","primary":{"file":"variant_declared_twice.mn","start":69,"end":72,"line":6,"column":3},"related":[{"message":"first declared here","span":{"file":"variant_declared_twice.mn","start":55,"end":58,"line":4,"column":3}}],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/variant_the_enum_lacks.mn ==
+{"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`Light` has no variant `Gren`; did you mean `Green`?","primary":{"file":"variant_the_enum_lacks.mn","start":99,"end":103,"line":8,"column":30},"related":[],"fixes":[{"message":"write `Green`","applicability":"suggestion","edits":[{"span":{"file":"variant_the_enum_lacks.mn","start":99,"end":103,"line":8,"column":30},"replacement":"Green"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/variant_without_payload_given_one.mn ==
+{"version":1,"diagnostics":[{"code":"E0226","severity":"error","message":"`Shape.Dot` holds nothing, so it is written without parentheses: `Shape.Dot`","primary":{"file":"variant_without_payload_given_one.mn","start":107,"end":122,"line":8,"column":25},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/wrong_number_of_arguments.mn ==
 {"version":1,"diagnostics":[{"code":"E0213","severity":"error","message":"`id` takes 1 argument, but this call passes 2","primary":{"file":"wrong_number_of_arguments.mn","start":82,"end":90,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/wrong_type.mn ==
@@ -266,6 +394,8 @@
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/total_without_a_loop.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== grammar/arm_holding_an_assignment.mn ==
+{"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"an arm is an expression or a block, and an assignment is a statement, so it stands in a block","primary":{"file":"arm_holding_an_assignment.mn","start":102,"end":107,"line":6,"column":13},"related":[],"fixes":[{"message":"put the assignment in a block","applicability":"machine-applicable","edits":[{"span":{"file":"arm_holding_an_assignment.mn","start":102,"end":107,"line":6,"column":13},"replacement":"{ n = 1 }"}]}]}],"todos":[],"trusted":[]}
 == grammar/assignment_to_a_sum.mn ==
 {"version":1,"diagnostics":[{"code":"E0114","severity":"error","message":"`b + 1` is not a place to assign to; a place is a name, or an element or a field of one such as `a[i]` or `s.f`","primary":{"file":"assignment_to_a_sum.mn","start":76,"end":81,"line":5,"column":3},"related":[{"message":"assigned here","span":{"file":"assignment_to_a_sum.mn","start":82,"end":83,"line":5,"column":9}}],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/binary_digit_out_of_base.mn ==
@@ -276,6 +406,8 @@
 {"version":1,"diagnostics":[{"code":"E0113","severity":"error","message":"comparisons do not chain; write `... b and b ...`","primary":{"file":"chained_comparison.mn","start":85,"end":86,"line":3,"column":50},"related":[],"fixes":[{"message":"compare `b` twice, joined by `and`","applicability":"suggestion","edits":[{"span":{"file":"chained_comparison.mn","start":84,"end":84,"line":3,"column":49},"replacement":" and b"}]}]}],"todos":[],"trusted":[]}
 == grammar/char_literal.mn ==
 {"version":1,"diagnostics":[{"code":"E0105","severity":"error","message":"`'` is not a character Mente uses; Mente has no character literals: write the character's code, such as `0x41` for `A`","primary":{"file":"char_literal.mn","start":66,"end":67,"line":4,"column":11},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== grammar/enum_without_variants.mn ==
+{"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"`enum Never` has no variant; an enum has at least one, as in `Empty` on a line of its own","primary":{"file":"enum_without_variants.mn","start":45,"end":50,"line":3,"column":10},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/expression_expected.mn ==
 {"version":1,"diagnostics":[{"code":"E0110","severity":"error","message":"expected an expression, found `)`","primary":{"file":"expression_expected.mn","start":56,"end":57,"line":3,"column":21},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/if_as_an_operand.mn ==
@@ -284,6 +416,14 @@
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"this integer is too large for any integer type; the widest, `u128`, holds up to 2^128 - 1","primary":{"file":"integer_beyond_u128.mn","start":57,"end":96,"line":3,"column":22},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/m1_literals_and_operators.mn ==
 {"version":1,"diagnostics":[],"todos":[{"reason":"a \\\"quoted\\\" tab\\t and line\\n and \\\\","span":{"file":"m1_literals_and_operators.mn","start":227,"end":271,"line":8,"column":3}}],"trusted":[]}
+== grammar/match_arms_across_lines.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== grammar/match_as_a_condition.mn ==
+{"version":1,"diagnostics":[{"code":"E0115","severity":"error","message":"a `match` expression used as an operand needs parentheses","primary":{"file":"match_as_a_condition.mn","start":86,"end":136,"line":5,"column":9},"related":[],"fixes":[{"message":"put the `match` expression in parentheses","applicability":"machine-applicable","edits":[{"span":{"file":"match_as_a_condition.mn","start":86,"end":136,"line":5,"column":9},"replacement":"(match b {\n    true => n < 3\n    false => false\n  })"}]}]}],"todos":[],"trusted":[]}
+== grammar/match_as_an_operand.mn ==
+{"version":1,"diagnostics":[{"code":"E0115","severity":"error","message":"a `match` expression used as an operand needs parentheses","primary":{"file":"match_as_an_operand.mn","start":66,"end":102,"line":3,"column":31},"related":[],"fixes":[{"message":"put the `match` expression in parentheses","applicability":"machine-applicable","edits":[{"span":{"file":"match_as_an_operand.mn","start":66,"end":102,"line":3,"column":31},"replacement":"(match b {\n  true => 1\n  false => 0\n})"}]}]}],"todos":[],"trusted":[]}
+== grammar/match_without_arms.mn ==
+{"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"this `match` has no arm; a `match` has one for each value of what it reads, as in `0 => a` on a line of its own","primary":{"file":"match_without_arms.mn","start":62,"end":67,"line":3,"column":27},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/nesting_beyond_256_levels.mn ==
 {"version":1,"diagnostics":[{"code":"E0127","severity":"error","message":"this code nests deeper than 256 levels of expressions, blocks and types; give a nested part a name with `val`, or a function of its own","primary":{"file":"nesting_beyond_256_levels.mn","start":319,"end":320,"line":3,"column":284},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/nesting_within_the_limit.mn ==
@@ -298,12 +438,16 @@
 {"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"`struct Empty` has no field; a struct has at least one, as in `x: i32` on a line of its own","primary":{"file":"struct_without_fields.mn","start":47,"end":52,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/suffix_without_underscore.mn ==
 {"version":1,"diagnostics":[{"code":"E0108","severity":"error","message":"a literal's suffix starts with `_`: write `5_ms`","primary":{"file":"suffix_without_underscore.mn","start":56,"end":59,"line":3,"column":21},"related":[],"fixes":[{"message":"insert `_` before `ms`","applicability":"machine-applicable","edits":[{"span":{"file":"suffix_without_underscore.mn","start":57,"end":57,"line":3,"column":22},"replacement":"_"}]}]}],"todos":[],"trusted":[]}
+== grammar/two_arms_on_a_line.mn ==
+{"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"an arm ends at the end of its line, and `false` starts another on the same line","primary":{"file":"two_arms_on_a_line.mn","start":84,"end":89,"line":4,"column":13},"related":[],"fixes":[{"message":"start it on a new line","applicability":"machine-applicable","edits":[{"span":{"file":"two_arms_on_a_line.mn","start":83,"end":84,"line":4,"column":12},"replacement":"\n"}]}]}],"todos":[],"trusted":[]}
 == grammar/two_fields_on_a_line.mn ==
 {"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"a field ends at the end of its line, and `j` starts another on the same line","primary":{"file":"two_fields_on_a_line.mn","start":62,"end":63,"line":4,"column":9},"related":[],"fixes":[{"message":"start it on a new line","applicability":"machine-applicable","edits":[{"span":{"file":"two_fields_on_a_line.mn","start":61,"end":62,"line":4,"column":8},"replacement":"\n"}]}]}],"todos":[],"trusted":[]}
 == grammar/two_statements_on_a_line.mn ==
 {"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"a statement ends at the end of its line, and `x` starts another on the same line","primary":{"file":"two_statements_on_a_line.mn","start":68,"end":69,"line":4,"column":13},"related":[],"fixes":[{"message":"start it on a new line","applicability":"machine-applicable","edits":[{"span":{"file":"two_statements_on_a_line.mn","start":67,"end":68,"line":4,"column":12},"replacement":"\n"}]}]}],"todos":[],"trusted":[]}
+== grammar/two_variants_on_a_line.mn ==
+{"version":1,"diagnostics":[{"code":"E0112","severity":"error","message":"a variant ends at the end of its line, and `Green` starts another on the same line","primary":{"file":"two_variants_on_a_line.mn","start":59,"end":64,"line":4,"column":7},"related":[],"fixes":[{"message":"start it on a new line","applicability":"machine-applicable","edits":[{"span":{"file":"two_variants_on_a_line.mn","start":58,"end":59,"line":4,"column":6},"replacement":"\n"}]}]}],"todos":[],"trusted":[]}
 == grammar/type_m1_lacks.mn ==
-{"version":1,"diagnostics":[{"code":"E0116","severity":"error","message":"`int` is not a type: the types are the integer types, `bool`, arrays `[N]T` and the structs of the module","primary":{"file":"type_m1_lacks.mn","start":48,"end":51,"line":3,"column":13},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+{"version":1,"diagnostics":[{"code":"E0116","severity":"error","message":"`int` is not a type: the types are the integer types, `bool`, arrays `[N]T` and the structs and enums of the module","primary":{"file":"type_m1_lacks.mn","start":48,"end":51,"line":3,"column":13},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/unclosed_string.mn ==
 {"version":1,"diagnostics":[{"code":"E0106","severity":"error","message":"this string literal is not closed on its line; close it with `\"`, and write a line break inside it as `\\n`","primary":{"file":"unclosed_string.mn","start":63,"end":75,"line":4,"column":8},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/unknown_character.mn ==
@@ -382,6 +526,8 @@
 {"version":1,"diagnostics":[{"code":"E0104","severity":"error","message":"`from` in the signature of `first` names no parameter; found the end of the file","primary":{"file":"from_names_nothing.mn","start":69,"end":73,"line":3,"column":34},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == regions-and-pools/from_names_two_parameters.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== surface-syntax/arm_with_a_guard.mn ==
+{"version":1,"diagnostics":[{"code":"E0131","severity":"error","message":"an arm has no guard: its pattern alone decides whether it runs; test the condition with `if` inside the arm, whose other branch does what a later arm would","primary":{"file":"arm_with_a_guard.mn","start":87,"end":89,"line":5,"column":5},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == surface-syntax/async_function.mn ==
 {"version":1,"diagnostics":[{"code":"E0121","severity":"error","message":"Mente has no `async`: a function declares its effects with `with`, and runs tasks at once with `parallel (...)`","primary":{"file":"async_function.mn","start":40,"end":45,"line":3,"column":5},"related":[],"fixes":[{"message":"remove `async`","applicability":"suggestion","edits":[{"span":{"file":"async_function.mn","start":40,"end":46,"line":3,"column":5},"replacement":""}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/await_postfix.mn ==
@@ -394,6 +540,10 @@
 {"version":1,"diagnostics":[{"code":"E0126","severity":"error","message":"Mente has no casts: an integer converts where it lands, checked there, so bind it with the type it needs, as in `val y: u8 = x`","primary":{"file":"cast.mn","start":63,"end":65,"line":3,"column":28},"related":[],"fixes":[{"message":"remove the cast","applicability":"suggestion","edits":[{"span":{"file":"cast.mn","start":62,"end":68,"line":3,"column":27},"replacement":""}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/comma_after_a_field.mn ==
 {"version":1,"diagnostics":[{"code":"E0128","severity":"error","message":"a field ends at the end of its line, so Mente writes no `,` after one","primary":{"file":"comma_after_a_field.mn","start":61,"end":62,"line":4,"column":8},"related":[],"fixes":[{"message":"remove the `,`","applicability":"machine-applicable","edits":[{"span":{"file":"comma_after_a_field.mn","start":61,"end":62,"line":4,"column":8},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== surface-syntax/comma_after_a_variant.mn ==
+{"version":1,"diagnostics":[{"code":"E0128","severity":"error","message":"a variant ends at the end of its line, so Mente writes no `,` after one","primary":{"file":"comma_after_a_variant.mn","start":58,"end":59,"line":4,"column":6},"related":[],"fixes":[{"message":"remove the `,`","applicability":"machine-applicable","edits":[{"span":{"file":"comma_after_a_variant.mn","start":58,"end":59,"line":4,"column":6},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== surface-syntax/comma_after_an_arm.mn ==
+{"version":1,"diagnostics":[{"code":"E0128","severity":"error","message":"an arm ends at the end of its line, so Mente writes no `,` after one","primary":{"file":"comma_after_an_arm.mn","start":130,"end":131,"line":9,"column":21},"related":[],"fixes":[{"message":"remove the `,`","applicability":"machine-applicable","edits":[{"span":{"file":"comma_after_an_arm.mn","start":130,"end":131,"line":9,"column":21},"replacement":""}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/conditional_operator.mn ==
 {"version":1,"diagnostics":[{"code":"E0125","severity":"error","message":"Mente has no `? :`; write `if c { a } else { b }`","primary":{"file":"conditional_operator.mn","start":65,"end":66,"line":3,"column":30},"related":[],"fixes":[{"message":"write it as an `if` expression","applicability":"machine-applicable","edits":[{"span":{"file":"conditional_operator.mn","start":63,"end":72,"line":3,"column":28},"replacement":"if c { 1 } else { 2 }"}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/example_without_its_brace.mn ==
@@ -414,10 +564,14 @@
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == surface-syntax/nested_braces_in_a_body.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== surface-syntax/nested_pattern.mn ==
+{"version":1,"diagnostics":[{"code":"E0132","severity":"error","message":"a payload's field binds a name or `_`, never a pattern of its own: bind it to a name, and `match` that name in the arm","primary":{"file":"nested_pattern.mn","start":173,"end":178,"line":14,"column":21},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == surface-syntax/number_as_a_name.mn ==
 {"version":1,"diagnostics":[{"code":"E0101","severity":"error","message":"expected a name, found `42`","primary":{"file":"number_as_a_name.mn","start":47,"end":49,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == surface-syntax/path_separator.mn ==
 {"version":1,"diagnostics":[{"code":"E0123","severity":"error","message":"Mente separates the parts of a path with `.`, not `::`","primary":{"file":"path_separator.mn","start":73,"end":75,"line":3,"column":38},"related":[],"fixes":[{"message":"write `.`","applicability":"suggestion","edits":[{"span":{"file":"path_separator.mn","start":73,"end":75,"line":3,"column":38},"replacement":"."}]}]}],"todos":[],"trusted":[]}
+== surface-syntax/pattern_alternatives.mn ==
+{"version":1,"diagnostics":[{"code":"E0132","severity":"error","message":"a pattern matches one variant or one value, so it has no alternatives; write an arm for each, or `_` after them on an integer","primary":{"file":"pattern_alternatives.mn","start":80,"end":81,"line":4,"column":5},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == surface-syntax/reference_at_a_call.mn ==
 {"version":1,"diagnostics":[{"code":"E0119","severity":"error","message":"a call passes a place to change as `mut x`, not `&mut x`","primary":{"file":"reference_at_a_call.mn","start":112,"end":116,"line":8,"column":8},"related":[],"fixes":[{"message":"write `mut`","applicability":"machine-applicable","edits":[{"span":{"file":"reference_at_a_call.mn","start":112,"end":116,"line":8,"column":8},"replacement":"mut"}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/struct_literal_with_braces.mn ==
@@ -432,3 +586,7 @@
 {"version":1,"diagnostics":[{"code":"E0103","severity":"error","message":"`trait Probe` has no closing `}`; found the end of the file","primary":{"file":"unclosed_trait.mn","start":77,"end":77,"line":5,"column":1},"related":[{"message":"`trait Probe` opens here","span":{"file":"unclosed_trait.mn","start":46,"end":51,"line":3,"column":11}}],"fixes":[{"message":"close `trait Probe` here","applicability":"suggestion","edits":[{"span":{"file":"unclosed_trait.mn","start":77,"end":77,"line":5,"column":1},"replacement":"}\n"}]}]}],"todos":[],"trusted":[]}
 == surface-syntax/unwrap.mn ==
 {"version":1,"diagnostics":[{"code":"E0122","severity":"error","message":"Mente has no `.unwrap()`: test the value with `guard`, or give a default with `??` (M2)","primary":{"file":"unwrap.mn","start":63,"end":70,"line":3,"column":28},"related":[],"fixes":[{"message":"remove `.unwrap(...)`","applicability":"suggestion","edits":[{"span":{"file":"unwrap.mn","start":63,"end":72,"line":3,"column":28},"replacement":""}]}]}],"todos":[],"trusted":[]}
+== surface-syntax/variant_path_with_colons.mn ==
+{"version":1,"diagnostics":[{"code":"E0123","severity":"error","message":"Mente separates the parts of a path with `.`, not `::`","primary":{"file":"variant_path_with_colons.mn","start":98,"end":100,"line":8,"column":29},"related":[],"fixes":[{"message":"write `.`","applicability":"suggestion","edits":[{"span":{"file":"variant_path_with_colons.mn","start":98,"end":100,"line":8,"column":29},"replacement":"."}]}]}],"todos":[],"trusted":[]}
+== surface-syntax/variant_with_a_positional_payload.mn ==
+{"version":1,"diagnostics":[{"code":"E0130","severity":"error","message":"a variant's payload names its fields, as in `Deposit(amount: i64)`, so a value is built and matched by name","primary":{"file":"variant_with_a_positional_payload.mn","start":62,"end":67,"line":4,"column":10},"related":[],"fixes":[{"message":"name the fields","applicability":"suggestion","edits":[{"span":{"file":"variant_with_a_positional_payload.mn","start":63,"end":63,"line":4,"column":11},"replacement":"value: "}]}]}],"todos":[],"trusted":[]}

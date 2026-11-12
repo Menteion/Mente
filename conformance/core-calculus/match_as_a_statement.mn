@@ -1,0 +1,22 @@
+// expect: pass
+module conformance
+pub enum Op {
+  Add(n: u8)
+  Reset
+}
+
+pub fn apply(mut total: u16, op: Op) {
+  match op {
+    Op.Add(n: n) => { total += n }
+    Op.Reset => {
+      total = 0
+    }
+  }
+}
+
+pub fn main() -> u16 {
+  var t: u16 = 5
+  apply(mut t, Op.Add(n: 3))
+  apply(mut t, Op.Add(n: 4))
+  t
+}

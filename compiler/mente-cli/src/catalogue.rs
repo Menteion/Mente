@@ -143,8 +143,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A `struct`, `bitstruct`, `enum` or `trait` opened with `{`, or a function's body, is not \
          closed before the file ends. The diagnostic points at where the parser stopped, names \
          the declaration in a related span, and suggests a `}`; the right place may be earlier.",
-        "module m\npub enum Side { Left, Right\n",
-        "module m\npub enum Side { Left, Right }\n",
+        "module m\npub enum Side {\n  Left\n  Right\n",
+        "module m\npub enum Side {\n  Left\n  Right\n}\n",
     ),
     emitted(
         "E0104",
@@ -209,10 +209,11 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "The compiler is building {milestone}, and has a thin slice of the language: integers, \
          `bool`, fixed-size arrays, functions with read-only and `mut` parameters, `val` and \
          `var`, `if`, `while` with `break` and `continue`, `guard`, `return`, contracts, \
-         refined integer types, `todo`, and structs of those types. A construct of a later \
-         milestone, such as a string, a float, `match`, a method call, an error type, a \
-         `@layout` struct as a value, a struct's type parameters or invariant, or an effect \
-         clause, is reported with the milestone that brings it. A few, such as `for` loops, \
+         refined integer types, `todo`, and structs, enums and `match` of those types. A \
+         construct of a later milestone, such as a string, a float, a method call, an error \
+         type, a `@layout` struct as a value, a struct's or an enum's type parameters, `==` on \
+         a struct or an enum, a pattern of `?T`, or an effect clause, is reported with the \
+         milestone that brings it. A few, such as `for` loops, \
          the pipe `|>` and a field's default value, are in no milestone yet.",
         "module m\npub fn f() -> i32 {\n  val s = \"text\"\n  0\n}\n",
         "module m\npub fn f() -> i32 {\n  val n = 1\n  n\n}\n",
@@ -277,10 +278,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0115",
         FailureClass::Syntax,
         "spec/grammar.md",
-        "An if expression used as an operand needs parentheses",
-        "An `if` expression stands alone as an initializer, an argument or a returned value. \
-         Inside an operator's operand, or followed by an operator, it needs parentheses, which \
-         the fix adds.",
+        "An if or a match used as an operand needs parentheses",
+        "An `if` or a `match` expression stands alone as an initializer, an argument or a \
+         returned value. Inside an operator's operand, followed by an operator, or as the \
+         condition of a `while` or a `guard`, it needs parentheses, which the fix adds.",
         "module m\npub fn f(c: bool) -> i32 = 1 + if c { 2 } else { 3 }\n",
         "module m\npub fn f(c: bool) -> i32 = 1 + (if c { 2 } else { 3 })\n",
     ),
@@ -423,9 +424,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0128",
         FailureClass::ForeignIdiom,
         "spec/surface-syntax.md",
-        "A comma after a field",
-        "A struct's fields are written one per line, and a field ends at the end of its line as \
-         a statement does, so Mente writes no `,` after one as Rust does. The fix removes it.",
+        "A comma after a field, a variant or an arm",
+        "A struct's fields, an enum's variants and a `match`'s arms are written one per line, \
+         and each ends at the end of its line as a statement does, so Mente writes no `,` after \
+         one as Rust does. The fix removes it.",
         "module m\npub struct Pair {\n  i: u8,\n  j: u8\n}\n",
         "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\n",
     ),
@@ -439,6 +441,42 @@ pub const CATALOGUE: &[CodeEntry] = &[
          1 }` is read as that after its diagnostic, and the fix writes the parentheses.",
         "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair { i: 0, j: 1 }\n",
         "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair(i: 0, j: 1)\n",
+    ),
+    emitted(
+        "E0130",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "A variant's payload of unnamed types, or in braces",
+        "A variant's payload names its fields, `Deposit(amount: i64)`, so that a value of it is \
+         built and matched by name, as a struct is, and one form serves both; Rust's tuple \
+         variant `Deposit(i64)` and struct variant `Rect { w: u8 }` are errors. For braces the \
+         fix writes parentheses; for unnamed types it suggests the names `value`, or `value0`, \
+         `value1` and on, which a better name may replace.",
+        "module m\npub enum Event {\n  Deposit(i64)\n}\n",
+        "module m\npub enum Event {\n  Deposit(amount: i64)\n}\n",
+    ),
+    emitted(
+        "E0131",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "An arm guard",
+        "An arm of a `match` has no guard, as `x if x > 9 =>` would be in Rust: its pattern alone \
+         decides whether it runs, so that the arms say which values each one takes and \
+         exhaustiveness is decided from them. Test the condition with `if` inside the arm.",
+        "module m\npub fn f(x: u8) -> u8 = match x {\n  0 => 1\n  _ if x > 9 => 2\n  _ => 3\n}\n",
+        "module m\npub fn f(x: u8) -> u8 = match x {\n  0 => 1\n  _ => if x > 9 { 2 } else { 3 }\n}\n",
+    ),
+    emitted(
+        "E0132",
+        FailureClass::ForeignIdiom,
+        "spec/surface-syntax.md",
+        "A pattern of a form M2 does not have",
+        "A pattern is a variant with its fields bound to names or `_`, an integer literal, \
+         `true`, `false`, or `_`: none nests inside another. A payload's field bound to a \
+         pattern of its own, alternatives `0 | 1`, a range `0..3` and a tuple are errors; bind \
+         the field to a name and `match` it in the arm, and write an arm for each value.",
+        "module m\npub enum Inner {\n  A\n  B\n}\npub enum Outer {\n  Wrap(inner: Inner)\n}\npub fn f(o: Outer) -> u8 = match o {\n  Outer.Wrap(inner: Inner.A) => 1\n}\n",
+        "module m\npub enum Inner {\n  A\n  B\n}\npub enum Outer {\n  Wrap(inner: Inner)\n}\npub fn f(o: Outer) -> u8 = match o {\n  Outer.Wrap(inner: i) => match i {\n    Inner.A => 1\n    Inner.B => 2\n  }\n}\n",
     ),
     emitted(
         "E0201",
@@ -485,7 +523,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A function used as a value, or a value called",
         "Mente has no function values: the name of a function is only called, as in `f(x)`, \
          and the name of a binding is never called. The name of a struct is not a value either: \
-         a struct is built with its fields, as in `Pair(i: 0, j: 1)`.",
+         a struct is built with its fields, as in `Pair(i: 0, j: 1)`; nor is an enum's, whose \
+         value is one of its variants, named with it, as in `Shape.Dot`.",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id\n",
         "module m\npub fn id(x: u8) -> u8 = x\npub fn f() -> u8 = id(1)\n",
     ),
@@ -601,10 +640,12 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0215",
         FailureClass::Type,
         "spec/core-calculus.md",
-        "A field the value does not have",
+        "A field the value does not have, or a variant the enum does not have",
         "`a.name` reads a field: `.len` is the length of an array, which has no other field, and \
          a struct has the fields its declaration names. A field a struct lacks is an error, and \
-         the closest field's name is suggested.",
+         the closest field's name is suggested. `Name.A` names a variant of the enum `Name`, in \
+         a value or a pattern, and a variant the enum lacks is an error too, with the closest \
+         variant suggested.",
         "module m\npub struct Pair {\n  first: u8\n}\npub fn f(p: Pair) -> u8 = p.frist\n",
         "module m\npub struct Pair {\n  first: u8\n}\npub fn f(p: Pair) -> u8 = p.first\n",
     ),
@@ -639,7 +680,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "Every `val` and `var` is read somewhere: a binding nobody reads is often a value \
          computed and then forgotten, such as a clamped value with the unclamped one returned. \
          Assigning a binding does not read it. Parameters are exempt, since a signature is an \
-         interface its callers fix. Removing the binding is suggested.",
+         interface its callers fix. Removing the binding is suggested; a name a `match` \
+         pattern binds and nobody reads is bound to `_` instead, which the fix writes.",
         "module m\npub fn f(a: u8) -> u8 {\n  val clamped = a\n  a\n}\n",
         "module m\npub fn f(a: u8) -> u8 {\n  val clamped = a\n  clamped\n}\n",
     ),
@@ -727,10 +769,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::Type,
         "spec/core-calculus.md",
         "A type that contains itself",
-        "A struct holds each field's value in place, so a struct that holds itself, directly or \
-         through other structs and arrays, would have no end. The diagnostic names the fields \
-         of the cycle, and each field that closes one is reported, so two cycles through one \
-         struct are two errors. A `List<T>`, which comes later in M2, keeps its elements \
+        "A struct holds each field's value in place, and an enum its payload's, so a type that \
+         holds itself, directly or through other structs, enums and arrays, would have no end. \
+         The diagnostic names the fields of the cycle, and each field that closes one is \
+         reported, so two cycles through one type are two errors. A `List<T>`, which comes later in M2, keeps its elements \
          apart, so a struct may hold a list of itself.",
         "module m\npub struct Node {\n  value: u8\n  next: Node\n}\n",
         "module m\npub struct Node {\n  value: u8\n  next: u8\n}\n",
@@ -739,12 +781,15 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0226",
         FailureClass::Type,
         "spec/core-calculus.md",
-        "A struct built without each field once, in order",
+        "A struct, a variant or a pattern without each field once, in order",
         "A struct is built with its fields named, `Pair(i: 0, j: 1)`, every field once and in \
          the order of its declaration, which is the order the values are evaluated in. No field \
          has a default, so one left out is an error that names it; a field the struct lacks, \
          one named twice, fields out of order and positional arguments are errors too. For \
-         positional arguments of the right number, the fix names them.",
+         positional arguments of the right number, the fix names them. A variant's payload is \
+         built the same way, `Shape.Rect(w: 3, h: 4)`, and a variant that holds nothing is \
+         written without parentheses, `Shape.Dot`. A pattern names every field of its payload \
+         in order too, binding each to a name or to `_`: `Shape.Rect(w: w, h: _)`.",
         "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair(i: 0)\n",
         "module m\npub struct Pair {\n  i: u8\n  j: u8\n}\npub fn f() -> Pair = Pair(i: 0, j: 1)\n",
     ),
@@ -763,13 +808,66 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0228",
         FailureClass::Type,
         "spec/core-calculus.md",
-        "A name declared twice in a module or a struct",
-        "A module declares a name once, whatever it names, a function or a struct, so a call and \
-         a struct being built never mean two things; and a struct names each field once. The \
-         language declares its own types, so no struct or bitstruct takes the name of an integer \
-         type, `bool`, or a type a later milestone brings, such as `String` or `Pool`.",
+        "A name declared twice in a module, a struct or an enum",
+        "A module declares a name once, whatever it names, a function, a struct or an enum, so a \
+         call and a value being built never mean two things; a struct names each field once, \
+         and an enum each variant once and each field of a variant's payload once. The \
+         language declares its own types, so no struct, bitstruct or enum takes the name of an \
+         integer type, `bool`, or a type a later milestone brings, such as `String` or `Pool`.",
         "module m\npub struct Pair {\n  i: u8\n  i: u16\n}\n",
         "module m\npub struct Pair {\n  i: u8\n  j: u16\n}\n",
+    ),
+    emitted(
+        "E0229",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A match that misses a value",
+        "A `match` is exhaustive: an arm matches every variant of the enum it reads, both values \
+         of a `bool`, and every integer of the scrutinee's type, or of its refinement when it \
+         has one with literal bounds, so `u8[0..3]` is covered by `0`, `1` and `2`; `_` after \
+         the literals covers the integers left. So a variant added to an enum makes every \
+         `match` on it an error until it names the variant. The fix adds an arm for each value \
+         left, whose body is a `todo`.",
+        "module m\npub enum Light {\n  Red\n  Green\n}\npub fn f(l: Light) -> u8 = match l {\n  Light.Red => 1\n}\n",
+        "module m\npub enum Light {\n  Red\n  Green\n}\npub fn f(l: Light) -> u8 = match l {\n  Light.Red => 1\n  Light.Green => 2\n}\n",
+    ),
+    emitted(
+        "E0230",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "An arm no value reaches",
+        "A `match` runs the first arm whose pattern matches, so an arm whose value an earlier arm \
+         matches, an arm after `_`, `_` after arms that match every value, and a literal \
+         outside the scrutinee's type or refinement are never run: each is an error, whose fix \
+         removes the arm.",
+        "module m\npub fn f(x: u8[0..2]) -> u8 = match x {\n  0 => 1\n  1 => 2\n  2 => 3\n}\n",
+        "module m\npub fn f(x: u8[0..2]) -> u8 = match x {\n  0 => 1\n  1 => 2\n}\n",
+    ),
+    emitted(
+        "E0231",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "`_` on an enum or a bool",
+        "`_` matches the integers no earlier arm matched, and stands only on an integer: on an \
+         enum it would cover a variant added later without a word, so every variant is named, \
+         and a `bool`'s two values are named too. The fix writes an arm for each value left, \
+         with `_`'s body.",
+        "module m\npub enum Light {\n  Red\n  Green\n}\npub fn f(l: Light) -> u8 = match l {\n  Light.Red => 1\n  _ => 2\n}\n",
+        "module m\npub enum Light {\n  Red\n  Green\n}\npub fn f(l: Light) -> u8 = match l {\n  Light.Red => 1\n  Light.Green => 2\n}\n",
+    ),
+    emitted(
+        "E0232",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A matched place changed in an arm that binds a part of it",
+        "A pattern's binding is a read-only view of the value matched: nothing is copied. So in \
+         an arm whose pattern binds a name, the scrutinee's place is frozen, as a view's source \
+         is: no assignment and no `mut` argument reaches it or a part of it, any element of an \
+         array counting. Another field of the same binding changes freely, and so does the \
+         scrutinee in an arm that binds nothing. Change the place after the `match`, or copy \
+         what the arm needs into a `val` before it.",
+        "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 = match c {\n  Cell.Held(n: n) => {\n    c = Cell.Empty\n    n\n  }\n  Cell.Empty => 0\n}\n",
+        "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 {\n  val k = match c {\n    Cell.Held(n: n) => n\n    Cell.Empty => 0\n  }\n  c = Cell.Empty\n  k\n}\n",
     ),
     reserved(
         "E0310",
@@ -1338,7 +1436,7 @@ mod tests {
                 _ if e.code == "E0109" => FailureClass::LaterMilestone,
                 _ if e.code == "E0116" => FailureClass::Type,
                 _ if ("E0118"..="E0126").contains(&e.code) => FailureClass::ForeignIdiom,
-                _ if e.code == "E0128" || e.code == "E0129" => FailureClass::ForeignIdiom,
+                _ if ("E0128"..="E0132").contains(&e.code) => FailureClass::ForeignIdiom,
                 _ if e.code == "E0201" => FailureClass::UnknownName,
                 _ if e.code == "E0202" || e.code == "E0220" => FailureClass::ForeignIdiom,
                 _ if e.code == "E0208" => FailureClass::Syntax,
