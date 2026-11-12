@@ -1117,7 +1117,7 @@ impl Counter {
     }
 }
 
-/// The variables of a function after its bindings' and their paths' (`Fx::rest`).
+/// The variables of a function besides its bindings' and their paths' (`Fx::rest`).
 struct Rest {
     sites: Vec<Site>,
     temps: [usize; 2],
@@ -1535,13 +1535,19 @@ impl<'a> Fx<'a> {
                 _ => n.alloc(matches!(t, Ty::Int(_))),
             })
             .collect();
-        // What the rest of the function takes at most: a variable for every field read, as
-        // where no path is followed. A binding's paths are followed only where they fit in
-        // what is left of the cap, so that with them the function stays within it; past it,
-        // they are not, and its fields read as their types and refinements, as elements do.
-        let mut most = Counter(n.0);
-        Fx::rest(f, callees, &mut most, &|_| false);
-        let mut room = RELATIONAL_LIMIT.saturating_sub(most.0);
+        // The rest of the function's variables, a field read's included, come first. A
+        // binding's paths are followed only where they fit in what is left of the cap, so that
+        // with them the function stays within it; past it, they are not, and its fields read
+        // as their types and refinements, as elements do.
+        let Rest {
+            sites,
+            temps,
+            scratch,
+            probe,
+            measures,
+            entry_measures,
+        } = Fx::rest(f, callees, &mut n);
+        let mut room = RELATIONAL_LIMIT.saturating_sub(n.0);
         let paths: Vec<Vec<FieldPath>> = f
             .typing
             .bindings
@@ -1565,21 +1571,6 @@ impl<'a> Fx<'a> {
                     .collect()
             })
             .collect();
-        let followed = |e: ExprId| {
-            field_chain(tree, f.resolution, e).is_some_and(|(root, names)| {
-                paths
-                    .get(root)
-                    .is_some_and(|ps: &Vec<FieldPath>| ps.iter().any(|p| p.names == names))
-            })
-        };
-        let Rest {
-            sites,
-            temps,
-            scratch,
-            probe,
-            measures,
-            entry_measures,
-        } = Fx::rest(f, callees, &mut n, &followed);
         let mut fx = Fx {
             syntax: f.syntax,
             tree,
@@ -1619,15 +1610,10 @@ impl<'a> Fx<'a> {
         fx
     }
 
-    /// The variables of a function after its bindings' and their paths': each call site's,
-    /// each value site's, the temporaries, the scratch and the probe, and each measure's.
-    /// `followed` tells which field reads have a path's variable already.
-    fn rest(
-        f: &Function<'a>,
-        callees: &'a [Option<Callee<'a>>],
-        n: &mut Counter,
-        followed: &dyn Fn(ExprId) -> bool,
-    ) -> Rest {
+    /// The variables of a function besides its bindings' and their paths': each call site's,
+    /// each value site's, a field read's included, which a path it follows leaves unused,
+    /// the temporaries, the scratch and the probe, and each measure's.
+    fn rest(f: &Function<'a>, callees: &'a [Option<Callee<'a>>], n: &mut Counter) -> Rest {
         let tree = &f.syntax.tree;
         let sites = tree
             .exprs
@@ -1636,8 +1622,6 @@ impl<'a> Fx<'a> {
             .map(|(i, e)| {
                 let int = matches!(f.typing.exprs[i], Ty::Int(_));
                 match &e.kind {
-                    // A field path Tier 1 follows has its variable already.
-                    ExprKind::Field { .. } if followed(ExprId(i as u32)) => Site::None,
                     ExprKind::Call { .. } => {
                         let callee = f.resolution.calls[i];
                         match callee.and_then(|c| callees.get(c).copied().flatten()) {
