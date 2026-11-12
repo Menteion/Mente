@@ -19,7 +19,9 @@ concurrency:
 
 jobs:
   check:
-    name: Debuggers (${{ matrix.name }})
+    # Named apart from ci.yml's required "Debuggers" checks, so that a required check of that name
+    # is never answered by this job (.github/scripts/policy.test.mjs).
+    name: Spike debuggers (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:

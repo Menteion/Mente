@@ -3,17 +3,15 @@
 # the full run is split across runners, weekly and on demand, when it may take only the mutants a
 # regex names, or only some of its shards. Tests run through nextest. Settings:
 # .cargo/mutants.toml and .config/nextest.toml.
+#
+# "Mutants in the diff" is a required check of `main`: it runs on every pull request, and its first
+# step after the checkout ends the job at once when no path .github/instrument-paths.txt lists for
+# it changed. In the merge queue it does not run again, since it ran on the pull request's head.
 name: Mutants
 
 on:
   pull_request:
-    paths:
-      - "compiler/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/mutants.toml"
-      - ".config/nextest.toml"
-      - ".github/workflows/mutants.yml"
+  merge_group:
   schedule:
     - cron: "0 18 * * 0" # Mondays, 02:00 in Taipei
   workflow_dispatch:
@@ -46,7 +44,7 @@ jobs:
     # Each mutant rebuilds and runs the whole workspace's tests, one after another, so a large
     # pull request takes hours on one runner; four shards share its mutants.
     name: Mutants in the diff (shard ${{ matrix.shard }} of 4)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -57,21 +55,30 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Whether this change touches what the instrument watches
+        id: watch
+        run: node .github/scripts/watch.mjs mutants.yml
       - name: Install the toolchain rust-toolchain.toml pins
+        if: steps.watch.outputs.run == 'true'
         run: rustup toolchain install
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.watch.outputs.run == 'true'
         with:
           path: ~/.cargo/bin/cargo-mutants
           key: cargo-mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}
       - name: Install cargo-mutants
+        if: steps.watch.outputs.run == 'true'
         run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.watch.outputs.run == 'true'
         with:
           path: ~/.cargo/bin/cargo-nextest
           key: cargo-nextest-${{ runner.os }}-${{ env.CARGO_NEXTEST_VERSION }}
       - name: Install cargo-nextest
+        if: steps.watch.outputs.run == 'true'
         run: command -v cargo-nextest || cargo install cargo-nextest --locked --version "$CARGO_NEXTEST_VERSION"
       - name: Run the tests once without a mutant
+        if: steps.watch.outputs.run == 'true'
         # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
         # runs the whole workspace's tests, so the timeout it set from that baseline was often
         # its 20 s minimum, and cut a mutant's tests short before any had failed. This baseline
@@ -83,6 +90,7 @@ jobs:
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Mutate the lines this pull request changes
+        if: steps.watch.outputs.run == 'true'
         run: |
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           # A mutant that allocates or writes without end would take the runner down with it, as
@@ -122,9 +130,33 @@ jobs:
               failed=2
             fi
           done
+          # The floor of work done. Every mutant cargo-mutants lists for this shard has an outcome;
+          # and when the diff adds a line where the whole tree has a mutant, counted apart from
+          # cargo-mutants' own diff filter (.github/scripts/mutants-floor.mjs), its list for the
+          # diff is not empty. A diff of tests, comments or files outside the compiler holds no
+          # such line, so its floor is 0.
+          tested=$(cat mutants.out/caught.txt mutants.out/missed.txt mutants.out/timeout.txt mutants.out/unviable.txt 2>/dev/null | grep -c . || true)
+          cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/4 --list --json > shard-mutants.json
+          listed=$(node .github/scripts/mutants-floor.mjs count shard-mutants.json)
+          echo "Mutants listed for this shard: $listed; tested: $tested" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$tested" -ne "$listed" ]; then
+            echo "::error::cargo-mutants listed $listed mutants for this shard and reported an outcome for $tested"
+            failed=1
+          fi
+          if [ "${{ matrix.shard }}" = 0 ]; then
+            cargo mutants --list --json > all-mutants.json
+            expected=$(node .github/scripts/mutants-floor.mjs touched pr.diff all-mutants.json)
+            cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
+            in_diff=$(node .github/scripts/mutants-floor.mjs count diff-mutants.json)
+            echo "Mutants whose span holds a line the diff adds: $expected; in cargo-mutants' list for the diff: $in_diff" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$expected" -gt 0 ] && [ "$in_diff" -eq 0 ]; then
+              echo "::error::the diff adds lines where $expected mutants lie, and cargo-mutants listed none for it: the run checked nothing"
+              failed=1
+            fi
+          fi
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.watch.outputs.run == 'true'
         with:
           name: mutants-in-diff-${{ matrix.shard }}
           path: mutants.out
@@ -134,7 +166,7 @@ jobs:
     # Every mutant of the compiler, some thousands at a minute or so each: sixteen shards keep
     # each within a runner's six hours.
     name: Full run (shard ${{ matrix.shard }} of 16)
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:

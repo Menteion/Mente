@@ -1,0 +1,90 @@
+# The paths each instrument watches: the one list per instrument workflow, read by the workflow's
+# first step after its checkout (.github/scripts/watch.mjs) and by the workflow policy test
+# (.github/scripts/policy.test.mjs). The workflows themselves carry no `paths:` filter, since a
+# workflow that a filter skips never reports, and so cannot be a required check of `main`
+# (docs/design-review.md, guard-per-problem).
+#
+# Each section is `[<file in .github/workflows>]`, then one glob a line, as GitHub's `paths:`
+# filters read them: `**` crosses directories, `*` does not. `merge_group: skip` marks a heavy
+# instrument that ran on the pull request's head and does not run again in the merge queue.
+#
+# A list names everything its jobs build or read: Cargo.toml, Cargo.lock, rust-toolchain.toml and
+# every crate the job builds (the policy test computes them from the manifests), its own workflow,
+# and the corpora it reads. A change to this file or to watch.mjs runs every instrument.
+
+[mutants.yml]
+merge_group: skip
+compiler/**
+# A workspace member: the baseline runs its tests, though .cargo/mutants.toml mutates none of it.
+spikes/tier1-latency/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.cargo/mutants.toml
+.config/nextest.toml
+.github/workflows/mutants.yml
+
+[generated.yml]
+compiler/**
+conformance/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/generated.yml
+
+[fuzz.yml]
+merge_group: skip
+compiler/**
+# The seed corpus of `mn fuzz` (compiler/mente-cli/src/fuzz.rs): every .mn program of these.
+examples/**
+conformance/**
+benchmark/probe/**
+benchmark/prelim/**
+perf/kernels/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/fuzz.yml
+
+[smt.yml]
+compiler/**
+# Every module Tier 1 runs on, whose obligations become queries.
+conformance/**
+examples/**
+benchmark/probe/**
+benchmark/prelim/**
+perf/kernels/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/smt.yml
+
+[mir-mutants.yml]
+compiler/**
+# The reported corpus: the examples, and the agent programs with their tasks' calls.
+examples/**
+benchmark/probe/**
+benchmark/prelim/**
+benchmark/tasks/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/mir-mutants.yml
+
+[perf.yml]
+compiler/**
+perf/**
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/perf.yml
+
+[harness.yml]
+benchmark/**
+compiler/**
+docs/language-card.md
+package.json
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.github/workflows/harness.yml

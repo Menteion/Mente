@@ -4,17 +4,15 @@
 # alone on every pull request. The agent programs' calls are their tasks' fixed examples and
 # hidden tests, so their survivors are reported, in the run summary and the uploaded log, and
 # never fail the job; a survivor of the gated corpus without a written reason does.
+#
+# A required check of `main`: it runs on every pull request and again in the merge queue, and its
+# first step after the checkout ends the job at once when no path .github/instrument-paths.txt
+# lists for it changed: every crate `mn` is built from, and the corpora the gate reads.
 name: MIR mutants
 
 on:
   pull_request:
-    paths:
-      - "compiler/mente-mir/**"
-      - "compiler/mente-codegen/**"
-      - "compiler/mente-sema/**"
-      - "compiler/mente-cli/src/mir_mutants.rs"
-      - "compiler/mente-cli/tests/mutants/**"
-      - ".github/workflows/mir-mutants.yml"
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -34,12 +32,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Whether this change touches what the instrument watches
+        id: watch
+        run: node .github/scripts/watch.mjs mir-mutants.yml
       - name: Install the toolchain rust-toolchain.toml pins
+        if: steps.watch.outputs.run == 'true'
         run: rustup toolchain install
       - name: Build mn
+        if: steps.watch.outputs.run == 'true'
         run: cargo build --release --locked --bin mn
       - name: Run the gate
+        if: steps.watch.outputs.run == 'true'
         run: |
           status=0
           ./target/release/mn test --mutate --reported examples > gate.txt || status=$?
@@ -52,7 +57,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.watch.outputs.run == 'true'
         with:
           name: mir-mutants
           path: gate.txt

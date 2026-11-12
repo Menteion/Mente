@@ -66,10 +66,25 @@ test("the gate passes a change within the tolerances", () => {
   assert.equal(v.identical, false);
 });
 
-test("the gate fails a change slower than the base beyond the time tolerance", () => {
+test("the gate reports a change slower than the base beyond the time tolerance, and passes it", () => {
   const v = gate(measured(100e6, 1e9, "a"), measured(100e6 * (1 + TIME_TOLERANCE * 1.5), 1e9, "b"));
-  assert.equal(v.pass, false);
-  assert.match(v.reasons[0], /median time/);
+  assert.equal(v.pass, true);
+  assert.deepEqual(v.reasons, []);
+  assert.match(v.warnings[0], /median time .* reported only/);
+  const within = gate(measured(100e6, 1e9, "a"), measured(100e6 * (1 + TIME_TOLERANCE / 2), 1e9, "b"));
+  assert.deepEqual(within.warnings, []);
+});
+
+test("the gate fails a run that must count instructions and counted none", () => {
+  const uncounted = gate(measured(100e6, undefined, "a"), measured(100e6, undefined, "b"), {}, { requireInstructions: true });
+  assert.equal(uncounted.pass, false);
+  assert.match(uncounted.reasons[0], /counted no instructions/);
+  const identical = gate(measured(100e6, undefined, "same"), measured(100e6, undefined, "same"), {}, { requireInstructions: true });
+  assert.equal(identical.pass, false);
+  const counted = gate(measured(100e6, 1e9, "a"), measured(100e6, 1e9, "b"), {}, { requireInstructions: true });
+  assert.equal(counted.pass, true);
+  const halfCounted = gate(measured(100e6, 1e9, "a"), measured(100e6, undefined, "b"), {}, { requireInstructions: true });
+  assert.equal(halfCounted.pass, false);
 });
 
 test("the gate fails a change that executes more instructions beyond their tolerance", () => {

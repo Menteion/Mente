@@ -11,34 +11,17 @@
 #
 # Z3 is installed here from its release, pinned and checksummed; it is never a build dependency.
 # Solving runs on GitHub Actions only, never on a laptop.
+#
+# A required check of `main`: it runs on every pull request, in the merge queue and on `main`, and
+# its first step after the checkout ends the job at once when no path .github/instrument-paths.txt
+# lists for it changed. The export builds `mn`, so every crate it is built from is watched.
 name: SMT cross-check
 
 on:
   pull_request:
-    paths:
-      - "compiler/mente-sema/**"
-      - "compiler/mente-syntax/**"
-      - "compiler/mente-cli/tests/smt.rs"
-      - "compiler/mente-cli/src/mir_run.rs"
-      - "conformance/**"
-      - "examples/**"
-      - "benchmark/probe/**"
-      - "benchmark/prelim/**"
-      - "perf/kernels/**"
-      - ".github/workflows/smt.yml"
+  merge_group:
   push:
     branches: [main]
-    paths:
-      - "compiler/mente-sema/**"
-      - "compiler/mente-syntax/**"
-      - "compiler/mente-cli/tests/smt.rs"
-      - "compiler/mente-cli/src/mir_run.rs"
-      - "conformance/**"
-      - "examples/**"
-      - "benchmark/probe/**"
-      - "benchmark/prelim/**"
-      - "perf/kernels/**"
-      - ".github/workflows/smt.yml"
   workflow_dispatch:
 
 permissions:
@@ -66,10 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Whether this change touches what the instrument watches
+        id: watch
+        run: node .github/scripts/watch.mjs smt.yml
       - name: Install the toolchain rust-toolchain.toml pins
+        if: steps.watch.outputs.run == 'true'
         run: rustup toolchain install
       - name: Install Z3 ${{ env.Z3_VERSION }}, checksummed
+        if: steps.watch.outputs.run == 'true'
         run: |
           set -euo pipefail
           zip="$RUNNER_TEMP/z3.zip"
@@ -87,11 +76,13 @@ jobs:
             *) echo "::error::expected Z3 ${Z3_VERSION}"; exit 1 ;;
           esac
       - name: Write the construct programs of mir_run.rs, and build mn
+        if: steps.watch.outputs.run == 'true'
         run: |
           MENTE_SMT_CONSTRUCTS="$RUNNER_TEMP/constructs" \
             cargo test --release --locked -p mente-cli --test smt -- --ignored --exact write_construct_programs --nocapture
           cargo build --release --locked --bin mn
       - name: Export a query for each obligation Tier 1 discharges
+        if: steps.watch.outputs.run == 'true'
         run: |
           set -euo pipefail
           # The examples, the conformance programs that must pass, the agent programs, the
@@ -106,6 +97,7 @@ jobs:
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           printf 'EXPORT_SECONDS=%d.%03d\n' $((ms / 1000)) $((ms % 1000)) >> "$GITHUB_ENV"
       - name: Ask Z3 for each query
+        if: steps.watch.outputs.run == 'true'
         run: |
           set -euo pipefail
           find "$RUNNER_TEMP/smt" -name '*.smt2' | sort > "$RUNNER_TEMP/queries.txt"
@@ -158,7 +150,7 @@ jobs:
             exit 1
           fi
       - name: Keep the queries of a failed run
-        if: failure()
+        if: failure() && steps.watch.outputs.run == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: smt-queries

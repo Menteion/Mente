@@ -1,12 +1,15 @@
 // Builds and measures the tight-loop kernels of perf/kernels: each kernel in Mente, C, C++ and
 // Rust, the checksums compared, wall time over several rounds, and hardware counters through
 // `perf stat` where the platform gives them. With a base compiler it also measures the base's
-// Mente code beside the change's and fails when the change regresses beyond the tolerances
-// below (perf/README.md, and "Measurement protocols" in ROADMAP.md).
+// Mente code beside the change's and fails when the change executes more instructions than the
+// base beyond the tolerance below; a slower wall time is reported, never failed (perf/README.md,
+// and "Measurement protocols" in ROADMAP.md). With --require-instructions, a kernel whose
+// instructions perf did not count fails, so that a gate without counters cannot pass by measuring
+// nothing.
 //
 // Usage:
-//   node perf/run.mjs --mn <mn> [--base-mn <mn>] [--out <results.json>] [--work <dir>]
-//                     [--rounds <n>] [--only <kernel,...>] [--scale <factor>]
+//   node perf/run.mjs --mn <mn> [--base-mn <mn>] [--require-instructions] [--out <results.json>]
+//                     [--work <dir>] [--rounds <n>] [--only <kernel,...>] [--scale <factor>]
 //
 // Runs on Linux. The compilers are clang-18, clang++-18 and the rustc on PATH, unless PERF_CC,
 // PERF_CXX or PERF_RUSTC name others. Benchmarks run on GitHub Actions only, never on a laptop.
@@ -35,9 +38,11 @@ export const KERNELS = [
   { name: "collatz", n: 1200000 },
 ];
 
-/// The regression gate: a median wall time of the change's Mente code more than TIME_TOLERANCE
-/// above the base's, or a median instruction count more than INSTRUCTION_TOLERANCE above it,
-/// fails. perf/README.md gives the measurements behind both figures.
+/// The regression gate: a median instruction count of the change's Mente code more than
+/// INSTRUCTION_TOLERANCE above the base's fails; a median wall time more than TIME_TOLERANCE above
+/// it is reported and does not fail, since shared runners' times vary from run to run (wall time
+/// is advisory; docs/design-review.md, guard-per-problem). perf/README.md gives the measurements
+/// behind both figures.
 export const TIME_TOLERANCE = 0.05;
 export const INSTRUCTION_TOLERANCE = 0.01;
 
@@ -106,19 +111,25 @@ export function parsePerfCsv(text) {
   return counters;
 }
 
-/// The gate's verdict on one kernel, from the base's and the change's measurements. Identical
-/// executables cannot regress, so they always pass; their ratios still show the noise.
-export function gate(base, change, tolerances = {}) {
+/// The gate's verdict on one kernel, from the base's and the change's measurements: `reasons` fail
+/// it, `warnings` are reported. Identical executables cannot regress, so they always pass; their
+/// ratios still show the noise. With `requireInstructions`, uncounted instructions fail even them.
+export function gate(base, change, tolerances = {}, { requireInstructions = false } = {}) {
   const time = tolerances.time ?? TIME_TOLERANCE;
   const instructions = tolerances.instructions ?? INSTRUCTION_TOLERANCE;
   const timeRatio = change.time.median / base.time.median;
   const bi = base.counters?.instructions;
   const ci = change.counters?.instructions;
   const instructionRatio = bi && ci ? ci / bi : null;
+  const identical = Boolean(change.sha256 && change.sha256 === base.sha256);
   const reasons = [];
-  if (!(change.sha256 && change.sha256 === base.sha256)) {
+  const warnings = [];
+  if (requireInstructions && instructionRatio === null) {
+    reasons.push("perf counted no instructions, which this gate requires");
+  }
+  if (!identical) {
     if (timeRatio > 1 + time) {
-      reasons.push(`median time ${pct(timeRatio - 1)} above the base's (tolerance ${pct(time)})`);
+      warnings.push(`median time ${pct(timeRatio - 1)} above the base's (tolerance ${pct(time)}, reported only)`);
     }
     if (instructionRatio !== null && instructionRatio > 1 + instructions) {
       reasons.push(
@@ -126,13 +137,7 @@ export function gate(base, change, tolerances = {}) {
       );
     }
   }
-  return {
-    identical: Boolean(change.sha256 && change.sha256 === base.sha256),
-    timeRatio,
-    instructionRatio,
-    pass: reasons.length === 0,
-    reasons,
-  };
+  return { identical, timeRatio, instructionRatio, pass: reasons.length === 0, reasons, warnings };
 }
 
 /// Mente's median time over the fastest of C, C++ and Rust.
@@ -398,7 +403,7 @@ export function report(results) {
       row.push(
         cell(r["mente-base"]),
         v
-          ? `${v.timeRatio.toFixed(3)}${v.instructionRatio ? `, instr. ${v.instructionRatio.toFixed(4)}` : ""}${v.identical ? " (identical code)" : ""}${v.pass ? "" : " **FAIL**"}`
+          ? `${v.timeRatio.toFixed(3)}${v.instructionRatio ? `, instr. ${v.instructionRatio.toFixed(4)}` : ""}${v.identical ? " (identical code)" : ""}${v.pass ? "" : " **FAIL**"}${v.warnings?.length ? " (slower, reported)" : ""}`
           : "",
       );
     }
@@ -433,11 +438,16 @@ export function report(results) {
   if (hasBase) {
     lines.push("");
     const failed = results.kernels.filter((k) => k.gate && !k.gate.pass);
+    const slower = results.kernels.filter((k) => k.gate?.warnings?.length);
     lines.push(
       failed.length === 0
-        ? `Gate: no kernel regressed beyond ${pct(TIME_TOLERANCE)} in time or ${pct(INSTRUCTION_TOLERANCE)} in instructions.`
+        ? `Gate: no kernel executed more than ${pct(INSTRUCTION_TOLERANCE)} more instructions than the base${results.requireInstructions ? "" : " where they were counted"}.`
         : `Gate: FAILED. ${failed.map((k) => `${k.name}: ${k.gate.reasons.join("; ")}`).join(". ")}.`,
     );
+    if (slower.length > 0) {
+      lines.push("");
+      lines.push(`Wall time, reported only: ${slower.map((k) => `${k.name}: ${k.gate.warnings.join("; ")}`).join(". ")}.`);
+    }
   }
   return lines.join("\n") + "\n";
 }
@@ -456,9 +466,11 @@ function parseArgs(argv) {
     else if (a === "--rounds") args.rounds = Number(next());
     else if (a === "--only") args.only = next().split(",");
     else if (a === "--scale") args.scale = Number(next());
+    else if (a === "--require-instructions") args.requireInstructions = true;
     else throw new Error(`unknown argument ${a}`);
   }
   if (!args.mn) throw new Error("usage: node perf/run.mjs --mn <mn> [--base-mn <mn>] [--out <json>]");
+  if (args.requireInstructions && !args.baseMn) throw new Error("--require-instructions needs --base-mn");
   return args;
 }
 
@@ -487,6 +499,7 @@ function main() {
     perf,
     rounds: args.rounds,
     tolerances: { time: TIME_TOLERANCE, instructions: INSTRUCTION_TOLERANCE },
+    requireInstructions: Boolean(args.requireInstructions),
     kernels: [],
   };
   for (const k of KERNELS) {
@@ -497,7 +510,9 @@ function main() {
     process.stderr.write(`${k.name}(${n}): measuring ${args.rounds} rounds\n`);
     const m = measure(k.name, built, perf, args.rounds);
     const entry = { name: k.name, n, checksum: m.checksum, results: m.results, gap: gap(m.results) };
-    if (m.results["mente-base"]?.time) entry.gate = gate(m.results["mente-base"], m.results.mente);
+    if (m.results["mente-base"]?.time) {
+      entry.gate = gate(m.results["mente-base"], m.results.mente, {}, { requireInstructions: args.requireInstructions });
+    }
     results.kernels.push(entry);
   }
   const text = report(results);

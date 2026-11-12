@@ -6,15 +6,16 @@
 # run takes its seed from the run number and fuzzes for 45 minutes on every core of the runner.
 # Each failure, minimized, is uploaded as the artifact `fuzz-failures` and fails the job.
 # Heavy runs belong here, never on a developer's machine.
+#
+# A required check of `main`: it runs on every pull request, and its first step after the checkout
+# ends the job at once when no path .github/instrument-paths.txt lists for it changed, the seed
+# corpus included. In the merge queue it does not run again, since it ran on the pull request's
+# head.
 name: Fuzz
 
 on:
   pull_request:
-    paths:
-      - "compiler/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/fuzz.yml"
+  merge_group:
   schedule:
     - cron: "0 19 * * *" # 03:00 in Taipei
   workflow_dispatch:
@@ -47,12 +48,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Whether this change touches what the instrument watches
+        id: watch
+        run: node .github/scripts/watch.mjs fuzz.yml
       - name: Install the toolchain rust-toolchain.toml pins
+        if: steps.watch.outputs.run == 'true'
         run: rustup toolchain install
       - name: Build mn
+        if: steps.watch.outputs.run == 'true'
         run: cargo build --locked --release --bin mn
       - name: Fuzz
+        if: steps.watch.outputs.run == 'true'
         env:
           EVENT: ${{ github.event_name }}
           INPUT_SEED: ${{ inputs.seed }}
@@ -81,9 +89,16 @@ jobs:
               echo '```'
             done
           } >> "$GITHUB_STEP_SUMMARY"
+          # The floor of work done: a campaign that ran no case found nothing because it looked
+          # at nothing.
+          runs=$(sed -n -E 's/^runs: ([0-9]+)$/\1/p' fuzz-out/summary.txt 2>/dev/null || true)
+          if [ "$status" -eq 0 ] && { [ -z "$runs" ] || [ "$runs" -eq 0 ]; }; then
+            echo "::error::mn fuzz ran ${runs:-no} cases"
+            exit 1
+          fi
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.watch.outputs.run == 'true'
         with:
           name: fuzz-failures
           path: fuzz-out

@@ -1,9 +1,12 @@
-# The verification commands of CLAUDE.md, on every pull request and on main (ROADMAP.md, M0a).
+# The verification commands of CLAUDE.md, on every pull request, in the merge queue and on main
+# (ROADMAP.md, M0a). Every job but Coverage is a required check of `main`
+# (.github/required-checks.txt).
 # Every action is pinned to a full commit SHA; Dependabot proposes updates.
 name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
   workflow_dispatch:
@@ -99,7 +102,7 @@ jobs:
     # The projection protocol of ROADMAP.md, in release, on the base branch and then on this
     # change, on one runner: shared runners differ by up to a factor of two from run to run, so
     # only a comparison on one machine means anything. A median more than PROJECTION_TOLERANCE
-    # above the base's fails the job. Not a required check.
+    # above the base's fails the job.
     name: Projection benchmark
     runs-on: ubuntu-24.04
     steps:
@@ -184,7 +187,6 @@ jobs:
     # The Tier-1 re-check protocol of ROADMAP.md, in release: 1,000 timed single-token edits to
     # the generated module and to each module in examples/, applied to the session
     # `mn check --watch` runs. A 99th percentile of 5 ms or more, in any module, fails the job.
-    # Not a required check.
     name: Tier-1 latency
     runs-on: ubuntu-24.04
     steps:
@@ -210,6 +212,8 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run verify:docs
+      # The workflow policy: required checks, path lists, pins, milestone tags.
+      - run: npm run test:ci
       - run: npm run check:benchmark
       - run: npm run test:benchmark
       - run: npm run test:harness

@@ -78,6 +78,12 @@ jobs:
       - name: Install the benchmark's Rust and Odin
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
+      - name: Prove the sandbox denies the key, the network and the held-out set, before measuring
+        # On this runner, before the held-out set or the API key is anywhere near it: a failure
+        # stops the run (benchmark/harness/sandbox-check.ts).
+        env:
+          ODIN: ${{ steps.toolchains.outputs.odin }}
+        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
       - name: Find the held-out commit corpus.lock names
         id: lock
         if: env.HAS_HELD_OUT == 'true'
