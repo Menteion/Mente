@@ -1230,6 +1230,7 @@ fn cmd_spec(_args: &[String]) {
 mod tests {
     use super::*;
     use mente_sema::verify_module;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// Every `mente` block of the language card passes `mn check`, so the card cannot drift
     /// from the compiler (`docs/design-review.md`, `language-card`).
@@ -1481,6 +1482,144 @@ mod tests {
                 "mente-sema: [dependencies] object-pool = \"1\"".to_string(),
             ]
         );
+    }
+
+    /// The packages of a `Cargo.lock`: each name, whether it is the workspace's own (no
+    /// `source`), and the names it depends on. Versions are left out: a name the lock holds twice
+    /// is one crate here.
+    fn lock_packages(lock: &str) -> BTreeMap<String, (bool, BTreeSet<String>)> {
+        let mut packages: BTreeMap<String, (bool, BTreeSet<String>)> = BTreeMap::new();
+        for block in lock.split("[[package]]").skip(1) {
+            let mut name = String::new();
+            let mut local = true;
+            let mut deps = BTreeSet::new();
+            let mut in_deps = false;
+            for line in block.lines().map(str::trim) {
+                if in_deps {
+                    if line == "]" {
+                        in_deps = false;
+                    } else {
+                        let dep = line.trim_matches(|c| c == '"' || c == ',');
+                        deps.insert(dep.split(' ').next().unwrap_or(dep).to_string());
+                    }
+                } else if let Some(value) = line.strip_prefix("name = ") {
+                    name = value.trim_matches('"').to_string();
+                } else if line.starts_with("source = ") {
+                    local = false;
+                } else if line == "dependencies = [" {
+                    in_deps = true;
+                }
+            }
+            let entry = packages.entry(name).or_insert((local, BTreeSet::new()));
+            entry.1.extend(deps);
+        }
+        packages
+    }
+
+    /// What keeps a lock from matching the approved list (`<crate>: <direct dependency>` lines):
+    /// a crate outside the workspace that the list lacks, a listed crate the lock does not hold,
+    /// and a listed dependency that is not a direct dependency of a workspace crate or does not
+    /// bring the crate.
+    fn lock_approval_problems(lock: &str, approved: &str) -> Vec<String> {
+        let packages = lock_packages(lock);
+        let direct: BTreeSet<&str> = packages
+            .values()
+            .filter(|(local, _)| *local)
+            .flat_map(|(_, deps)| deps)
+            .filter(|d| packages.get(*d).is_some_and(|(local, _)| !local))
+            .map(String::as_str)
+            .collect();
+        let brings = |from: &str, to: &str| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![from.to_string()];
+            while let Some(n) = stack.pop() {
+                if n == to {
+                    return true;
+                }
+                if seen.insert(n.clone()) {
+                    stack.extend(packages.get(&n).map(|p| p.1.clone()).unwrap_or_default());
+                }
+            }
+            false
+        };
+        let mut listed = BTreeMap::new();
+        let mut problems = Vec::new();
+        for line in approved.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            match line.split_once(':') {
+                Some((krate, via)) => {
+                    if listed.insert(krate.trim(), via.trim()).is_some() {
+                        problems.push(format!("{} is listed twice", krate.trim()));
+                    }
+                }
+                None => problems.push(format!("\"{}\" is not \"<crate>: <dependency>\"", line)),
+            }
+        }
+        for (name, (local, _)) in &packages {
+            if !local && !listed.contains_key(name.as_str()) {
+                problems.push(format!(
+                    "Cargo.lock holds {}, which .config/approved-crates.txt does not list: Norman \
+                     approves every crate a dependency brings (dependency-approval)",
+                    name
+                ));
+            }
+        }
+        for (krate, via) in &listed {
+            match packages.get(*krate) {
+                None => problems.push(format!(
+                    "{} is listed, but Cargo.lock no longer holds it",
+                    krate
+                )),
+                Some((true, _)) => problems.push(format!("{} is a workspace crate", krate)),
+                Some(_) if !direct.contains(via) => problems.push(format!(
+                    "{}: {} is not a direct dependency of a workspace crate",
+                    krate, via
+                )),
+                Some(_) if !brings(via, krate) => {
+                    problems.push(format!("{}: {} does not bring it", krate, via))
+                }
+                Some(_) => {}
+            }
+        }
+        problems
+    }
+
+    /// Every crate the lock holds was approved: a dependency that brings a crate the list lacks,
+    /// as a Dependabot update may, fails by the crate's name until the pull request lists it for
+    /// Norman (`docs/design-review.md`, `dependency-approval`).
+    #[test]
+    fn test_the_lock_holds_only_approved_crates() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let problems = lock_approval_problems(
+            &fs::read_to_string(root.join("Cargo.lock")).unwrap(),
+            &fs::read_to_string(root.join(".config/approved-crates.txt")).unwrap(),
+        );
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+
+        // The check itself, on a lock of two workspace crates and three outside.
+        let lock = "version = 4\n\n[[package]]\nname = \"mente-a\"\nversion = \"0.1.0\"\ndependencies = [\n \"mente-b\",\n \"top\",\n]\n\n[[package]]\nname = \"mente-b\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"top\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\ndependencies = [\n \"leaf 2.0.0\",\n]\n\n[[package]]\nname = \"leaf\"\nversion = \"2.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"other\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+        let wrong_dependency = "# comment\ntop: top\nleaf: top\nother: top\n";
+        assert_eq!(
+            lock_approval_problems(lock, wrong_dependency),
+            vec!["other: top does not bring it".to_string()]
+        );
+        let gained = lock_approval_problems(lock, "top: top\nother: top\n");
+        assert_eq!(gained.len(), 2, "{:?}", gained);
+        assert!(gained[0].starts_with("Cargo.lock holds leaf, which"));
+        let stale = lock_approval_problems(lock, "top: top\nleaf: top\ngone: top\n");
+        assert!(stale.contains(&"gone is listed, but Cargo.lock no longer holds it".to_string()));
+        assert!(stale
+            .iter()
+            .any(|p| p.starts_with("Cargo.lock holds other")));
+        let indirect = lock_approval_problems(lock, "top: top\nleaf: leaf\nother: top\n");
+        assert!(indirect
+            .contains(&"leaf: leaf is not a direct dependency of a workspace crate".to_string()));
+        let shapes = lock_approval_problems(lock, "top: top\ntop: top\nleaf top\nmente-b: top\n");
+        assert!(shapes.contains(&"top is listed twice".to_string()));
+        assert!(shapes.contains(&"\"leaf top\" is not \"<crate>: <dependency>\"".to_string()));
+        assert!(shapes.contains(&"mente-b is a workspace crate".to_string()));
     }
 
     /// Every text file in the repository is English: no CJK characters in code, comments, docs or
