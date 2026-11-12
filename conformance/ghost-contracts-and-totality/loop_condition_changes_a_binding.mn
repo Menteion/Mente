@@ -1,0 +1,25 @@
+// expect: E0504
+module conformance
+// A loop's condition runs at the head of every round: a binding it passes `mut` changes there,
+// so `take0(x)` may see 9 in the second round.
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+{
+  x = 9
+  0
+}
+
+fn take0(x: u8) -> u8[0..=0]
+  requires x == 0
+= x
+
+pub fn f() -> u8 {
+  var x: u8 = 0
+  var i: u8 = 0
+  while i < 2 and take0(x) == 0 and bump(mut x) == 0
+    decreases 2 - i
+  {
+    i += 1
+  }
+  i
+}

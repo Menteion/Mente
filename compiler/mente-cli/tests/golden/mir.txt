@@ -756,6 +756,92 @@ block0(v0: addr, v1: i32):
   return v2
 t0: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/division_below_every_divisor.mn ==
+mente-dump 2 mir
+f0: fn quotient(u8) -> i128 {
+block0(v0: u8):
+  v1: i128 = int 42535295865117307932921825928971026432 @5:46
+  v2: i128 = cast v0 @5:42
+  v3: i128 = int 0 @5:42
+  v4: bool = ne v1, v3 @5:42
+  v5: unit = check t0 v4 @5:42
+  v6: i128 = div v2, v1 @5:42
+  return v6
+block1():
+  trap t1
+t0: division-by-zero @5:42 ["division by zero"]
+t1: unreachable @5:42 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn remainder(u8) -> i128 {
+block0(v0: u8):
+  v1: i128 = int 42535295865117307932921825928971026432 @7:46
+  v2: i128 = cast v0 @7:42
+  v3: i128 = int 0 @7:42
+  v4: bool = ne v1, v3 @7:42
+  v5: unit = check t0 v4 @7:42
+  v6: i128 = rem v2, v1 @7:42
+  v7: i64 = cast v6 @7:42
+  v8: i64 = cast v0 @7:42
+  v9: i64 = sub v7, v8 @7:42
+  v10: i128 = cast v9 @7:42
+  return v10
+block1():
+  trap t1
+t0: division-by-zero @7:42 ["division by zero"]
+t1: unreachable @7:42 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn below(u16, u16) -> u16 {
+block0(v0: u16, v1: u16):
+  v2: i64 = cast v0 @9:66
+  v3: i64 = cast v1 @9:66
+  v4: i64 = div v2, v3 @9:66
+  v5: u16 = cast v4 @9:66
+  return v5
+block1():
+  trap t0
+t0: unreachable @9:66 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter quotient(u8) -> i128 {
+block0(v0: u8):
+  v1: i128 = call f0 v0 @5:8
+  return v1
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter remainder(u8) -> i128 {
+block0(v0: u8):
+  v1: i128 = call f1 v0 @7:8
+  return v1
+t0: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter below(u16, u16) -> u16 {
+block0(v0: u16, v1: u16):
+  v2: i64 = int 0 @0:0
+  v3: i64 = int 255 @0:0
+  v4: i64 = cast v0 @0:0
+  v5: bool = ge v4, v2 @0:0
+  v6: i64 = cast v0 @0:0
+  v7: bool = le v6, v3 @0:0
+  v8: bool = and v5, v7 @0:0
+  v9: unit = check t0 v8, v0, v2, v3 @9:8
+  v10: i64 = int 256 @9:8
+  v11: i64 = int 400 @9:8
+  v12: i64 = cast v1 @9:8
+  v13: bool = ge v12, v10 @9:8
+  v14: i64 = cast v1 @9:8
+  v15: bool = le v14, v11 @9:8
+  v16: bool = and v13, v15 @9:8
+  v17: unit = check t1 v16, v1, v10, v11 @9:8
+  v18: u16 = call f2 v0, v1 @9:8
+  return v18
+t0: refinement @9:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t1: refinement @9:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/ensures_not_proven_at_a_return.mn == (exit 2)
 == conformance/core-calculus/field_declared_twice.mn == (exit 2)
 == conformance/core-calculus/field_narrowing_that_always_traps.mn == (exit 2)
@@ -4011,6 +4097,7 @@ t0: unreachable @25:8 ["unreachable reached: control left the code the checker a
 }
 == conformance/ghost-contracts-and-totality/field_path_compound_assignment_reads_its_place_first.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/field_path_loop_changes_it_inside_a_struct_literal.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/field_path_loop_condition_changes_it.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/field_path_loop_measure.mn ==
 mente-dump 2 mir
 f0: fn run(addr) -> u32 {
@@ -4198,6 +4285,7 @@ t0: unreachable @14:8 ["unreachable reached: control left the code the checker a
 == conformance/ghost-contracts-and-totality/field_path_whole_assignment_resets.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/invariant_not_preserved.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_changes_a_binding_inside_a_struct_literal.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_condition_changes_a_binding.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
 mente-dump 2 mir
 f0: fn count(u8) -> u8 {

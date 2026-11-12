@@ -1117,6 +1117,16 @@ impl Counter {
     }
 }
 
+/// The variables of a function after its bindings' and their paths' (`Fx::rest`).
+struct Rest {
+    sites: Vec<Site>,
+    temps: [usize; 2],
+    scratch: usize,
+    probe: usize,
+    measures: Vec<Vec<(usize, usize)>>,
+    entry_measures: Vec<(usize, usize)>,
+}
+
 /// A scalar field path, as its field names, and a value of it.
 type PathVal = (Vec<String>, Val);
 
@@ -1522,27 +1532,34 @@ impl<'a> Fx<'a> {
                 _ => n.alloc(matches!(t, Ty::Int(_))),
             })
             .collect();
-        // Each binding of a struct type: a variable for each scalar field path, while the
-        // function's variables stay within the cap. Past it, a binding's paths are not
-        // followed, and its fields read as their types and refinements, as elements do.
+        // What the rest of the function takes at most: a variable for every field read, as
+        // where no path is followed. A binding's paths are followed only where they fit in
+        // what is left of the cap, so that with them the function stays within it; past it,
+        // they are not, and its fields read as their types and refinements, as elements do.
+        let mut most = Counter(n.0);
+        Fx::rest(f, callees, &mut most, &|_| false);
+        let mut room = RELATIONAL_LIMIT.saturating_sub(most.0);
         let paths: Vec<Vec<FieldPath>> = f
             .typing
             .bindings
             .iter()
-            .map(|t| match t {
-                Ty::Struct(s) => {
-                    let mut room = RELATIONAL_LIMIT.saturating_sub(n.0);
-                    scalar_paths(f.structs, s, &mut room)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|(names, shape)| FieldPath {
-                            names,
-                            var: n.alloc(true).unwrap_or(0),
-                            shape,
-                        })
-                        .collect()
-                }
-                _ => Vec::new(),
+            .map(|t| {
+                let Ty::Struct(s) = t else {
+                    return Vec::new();
+                };
+                let mut left = room;
+                let Some(listed) = scalar_paths(f.structs, s, &mut left) else {
+                    return Vec::new();
+                };
+                room = left;
+                listed
+                    .into_iter()
+                    .map(|(names, shape)| FieldPath {
+                        names,
+                        var: n.alloc(true).unwrap_or(0),
+                        shape,
+                    })
+                    .collect()
             })
             .collect();
         let followed = |e: ExprId| {
@@ -1552,6 +1569,62 @@ impl<'a> Fx<'a> {
                     .is_some_and(|ps: &Vec<FieldPath>| ps.iter().any(|p| p.names == names))
             })
         };
+        let Rest {
+            sites,
+            temps,
+            scratch,
+            probe,
+            measures,
+            entry_measures,
+        } = Fx::rest(f, callees, &mut n, &followed);
+        let mut fx = Fx {
+            syntax: f.syntax,
+            tree,
+            resolution: f.resolution,
+            typing: f.typing,
+            routing: f.routing,
+            structs: f.structs,
+            callees,
+            src,
+            vars,
+            paths,
+            built: vec![None; tree.exprs.len()],
+            sites,
+            result,
+            result_shape: None,
+            temps,
+            scratch,
+            probe,
+            count: n.0,
+            report: Report::default(),
+            recording: true,
+            loops: Vec::new(),
+            scope: Vec::new(),
+            stmt: None,
+            heads: Vec::new(),
+            measures,
+            entry_measures,
+            tracks: Vec::new(),
+            retries: Vec::new(),
+            queries: None,
+            loop_memo: Vec::new(),
+            passes: 0,
+        };
+        let shape = f.syntax.result.map(|t| fx.own_shape(t));
+        fx.result_shape = shape;
+        fx
+    }
+
+    /// The variables of a function after its bindings' and their paths': each call site's,
+    /// each value site's, the temporaries, the scratch and the probe, and each measure's.
+    /// `followed` tells which field reads have a path's variable already.
+    fn rest(
+        f: &Function<'a>,
+        callees: &'a [Option<Callee<'a>>],
+        n: &mut Counter,
+        followed: &dyn Fn(ExprId) -> bool,
+    ) -> Rest {
+        let tree = &f.syntax.tree;
         let sites = tree
             .exprs
             .iter()
@@ -1644,42 +1717,14 @@ impl<'a> Fx<'a> {
             .filter(|c| c.kind == ContractKind::Decreases)
             .map(|_| (n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)))
             .collect();
-        let mut fx = Fx {
-            syntax: f.syntax,
-            tree,
-            resolution: f.resolution,
-            typing: f.typing,
-            routing: f.routing,
-            structs: f.structs,
-            callees,
-            src,
-            vars,
-            paths,
-            built: vec![None; tree.exprs.len()],
+        Rest {
             sites,
-            result,
-            result_shape: None,
             temps,
             scratch,
             probe,
-            count: n.0,
-            report: Report::default(),
-            recording: true,
-            loops: Vec::new(),
-            scope: Vec::new(),
-            stmt: None,
-            heads: Vec::new(),
             measures,
             entry_measures,
-            tracks: Vec::new(),
-            retries: Vec::new(),
-            queries: None,
-            loop_memo: Vec::new(),
-            passes: 0,
-        };
-        let shape = f.syntax.result.map(|t| fx.own_shape(t));
-        fx.result_shape = shape;
-        fx
+        }
     }
 
     // -- names, types and texts --------------------------------------------------------------
@@ -2866,6 +2911,13 @@ impl<'a> Fx<'a> {
                 .copied()
                 .find(|b| self.resolution.bindings[*b].name == w.0)
         });
+        // A value that passes a binding `mut` would change it again in a `guard` that repeats
+        // it, so none is offered, and the message says why.
+        let repeats = what.as_ref().is_some_and(|w| {
+            mente_syntax::tokenize(&w.0)
+                .iter()
+                .any(|t| t.kind == mente_syntax::TokenKind::Mut)
+        });
         let guard = what.map(|w| {
             let x = paren(w, OPERAND);
             let mut parts = Vec::new();
@@ -2877,6 +2929,16 @@ impl<'a> Fx<'a> {
             }
             parts.join(" and ")
         });
+        let (guard, message) = match guard {
+            Some(_) if repeats => (
+                None,
+                format!(
+                    "{}; it passes a binding `mut`, which a `guard` repeating it would change again, so none is offered",
+                    message
+                ),
+            ),
+            _ => (guard, message),
+        };
         let anchor = self.anchor();
         self.emit("E0502", span, message, guard, anchor);
         if let Some(declared) = r.declared.clone() {
@@ -3475,10 +3537,13 @@ impl<'a> Fx<'a> {
                     Tag::None,
                     |_| vec![(st.clone(), Goal::NonZero(r.clone()))],
                 );
-                if op == BinaryOp::Div {
-                    div_vals(st, l, r)
-                } else {
-                    self.rem(st, e, l, r)
+                // A dividend smaller in magnitude than every divisor, one beyond the octagon's
+                // reach included, has a quotient of 0 and is its own remainder.
+                match (op, self.below_divisor(st, l, r)) {
+                    (BinaryOp::Div, true) => lin(Vec::new(), 0),
+                    (_, true) => l.clone(),
+                    (BinaryOp::Div, false) => div_vals(st, l, r),
+                    (_, false) => self.rem(st, e, l, r),
                 }
             }
             BinaryOp::Sub => add_vals(st, l, &negate(r)),
@@ -3493,6 +3558,22 @@ impl<'a> Fx<'a> {
                 v
             }
             None => v,
+        }
+    }
+
+    /// Whether every value of `l` is smaller in magnitude than every value of the divisor `r`,
+    /// their bounds beyond the octagon's reach included.
+    fn below_divisor(&self, st: &Octagon, l: &Val, r: &Val) -> bool {
+        let zero = Exact::from_i128(0);
+        let (rlo, rhi) = self.exact_range(st, r);
+        // The divisor's least magnitude: 0 where it may be 0, or of either sign.
+        let least = [rlo, rhi.map(Exact::negated)]
+            .into_iter()
+            .flatten()
+            .fold(zero, Exact::max);
+        match self.exact_range(st, l) {
+            (Some(lo), Some(hi)) => hi < least && lo.negated() < least,
+            _ => false,
         }
     }
 
@@ -4009,31 +4090,44 @@ impl<'a> Fx<'a> {
 
     /// The bindings a block declares, assigns or passes as `mut`.
     fn changed_block(&self, b: BlockId, out: &mut Vec<usize>) {
-        let tree = self.tree;
-        for &s in &tree.block(b).stmts {
-            match &tree.stmt(s).kind {
-                StmtKind::Binding { init, .. } => {
-                    out.extend(self.resolution.stmts[s.0 as usize].map(|b| b.0 as usize));
-                    self.changed_expr(*init, out);
-                }
-                StmtKind::Assign { place, value, .. } => {
-                    out.extend(self.place_parts(*place, &mut Vec::new()));
-                    self.changed_expr(*place, out);
-                    self.changed_expr(*value, out);
-                }
-                StmtKind::While { cond, body, .. } => {
-                    self.changed_expr(*cond, out);
-                    self.changed_block(*body, out);
-                }
-                StmtKind::Guard { cond, otherwise } => {
-                    self.changed_expr(*cond, out);
-                    self.changed_block(*otherwise, out);
-                }
-                StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
-                    self.changed_expr(*e, out)
-                }
-                _ => {}
+        for &s in &self.tree.block(b).stmts {
+            self.changed_stmt(s, out);
+        }
+    }
+
+    /// The bindings a statement declares, assigns or passes as `mut`: a loop's in its header,
+    /// its condition, invariants and measures, which run at every round, as in its body.
+    fn changed_stmt(&self, s: StmtId, out: &mut Vec<usize>) {
+        match &self.tree.stmt(s).kind {
+            StmtKind::Binding { init, .. } => {
+                out.extend(self.resolution.stmts[s.0 as usize].map(|b| b.0 as usize));
+                self.changed_expr(*init, out);
             }
+            StmtKind::Assign { place, value, .. } => {
+                out.extend(self.place_parts(*place, &mut Vec::new()));
+                self.changed_expr(*place, out);
+                self.changed_expr(*value, out);
+            }
+            StmtKind::While {
+                cond,
+                invariants,
+                decreases,
+                body,
+            } => {
+                for &e in std::iter::once(cond).chain(invariants).chain(decreases) {
+                    self.changed_expr(e, out);
+                }
+                self.changed_block(*body, out);
+            }
+            StmtKind::Guard { cond, otherwise } => {
+                self.changed_expr(*cond, out);
+                self.changed_block(*otherwise, out);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
+                self.changed_expr(*e, out)
+            }
+            // Every other kind is named, so that a new one must say what it changes.
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
         }
     }
 
@@ -4181,12 +4275,17 @@ impl<'a> Fx<'a> {
             }
             self.havoc_paths(&mut h, b, &[]);
         }
+        // A candidate is the loop's own text, which reports what it must where it runs, in the
+        // round: here it only narrows the head.
+        let was = self.recording;
+        self.recording = false;
         for (c, ok) in cands.iter().zip(alive) {
             if *ok {
                 let k = self.cand(&mut h, *c);
                 self.assume(&mut h, &k, true);
             }
         }
+        self.recording = was;
         for &a in axioms {
             let k = self.cond(&mut h, a);
             self.assume(&mut h, &k, true);
@@ -4632,7 +4731,7 @@ impl<'a> Fx<'a> {
         }
         let entry = (!self.recording).then(|| st.clone());
         let mut changed = Vec::new();
-        self.changed_block(body, &mut changed);
+        self.changed_stmt(s, &mut changed);
         // Candidates come only from the loop's text: the written invariants first, then the
         // condition's conjuncts with the non-strict form of each strict one, then the guards.
         let mut cands = Vec::new();
@@ -6179,6 +6278,31 @@ mod tests {
         ] {
             assert_eq!(codes(&with(f)), ["E0502"], "{}", f);
         }
+        // A value that passes a binding `mut` is offered no `guard`, which would repeat the call
+        // and change the binding again; one that does not is.
+        for f in [
+            "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  x * 1 + bump(mut x)\n}",
+            "fn set9(mut xs: [2]u8) -> usize {\n  xs[0] = 9\n  0\n}\npub fn f() -> u8[0..=0] {\n  var xs: [2]u8 = [0, 0]\n  xs[set9(mut xs)]\n}",
+        ] {
+            let d = diagnostics(&with(f));
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
+            assert!(
+                d[0].message.ends_with("; it passes a binding `mut`, which a `guard` repeating it would change again, so none is offered"),
+                "{}",
+                d[0].message
+            );
+        }
+        let pure = diagnostics(&with(
+            "fn same(x: u8) -> u8 = x\npub fn f(y: u8) -> u8[9..=9] {\n  y * 1 + same(y)\n}",
+        ));
+        assert!(
+            pure[0].fixes[0]
+                .message
+                .contains("guard y * 1 + same(y) >= 9"),
+            "{:?}",
+            pure[0].fixes
+        );
         // What the later operand leaves alone keeps its relations.
         for f in [
             "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  val y = bump(mut x) + x\n  y\n}",
@@ -6190,6 +6314,58 @@ mod tests {
         ] {
             assert_eq!(codes(&with(f)), NONE, "{}", f);
         }
+    }
+
+    /// A dividend smaller in magnitude than every divisor has a quotient of 0 and is its own
+    /// remainder, a divisor beyond the octagon's reach and a negative one included; one that
+    /// reaches the divisor's least magnitude, on either side, does not.
+    #[test]
+    fn test_a_dividend_below_every_divisor_has_a_quotient_of_0() {
+        let far = "42535295865117307932921825928971026432";
+        for f in [
+            format!("pub fn f(x: u8) -> i128[-1..=1] = x / {}", far),
+            format!("pub fn f(x: u8) -> i128[0..=0] = x / -{}", far),
+            format!("pub fn f(x: u8) -> i128[0..=0] = x % {} - x", far),
+            "pub fn f(x: i16[-254..=0], y: i16[255..=400]) -> i16[0..=0] = x / y".to_string(),
+            "pub fn f(x: i16[0..=255], y: i16[-400..=-256]) -> i16[0..=0] = x / y".to_string(),
+            "pub fn f(x: u16[0..=255], y: u16[256..=400]) -> u16[0..=0] = x % y - x".to_string(),
+        ] {
+            assert_eq!(codes(&f), NONE, "{}", f);
+        }
+        assert_eq!(
+            messages("pub fn f(x: u16[0..=255], y: u16[255..=400]) -> u16[0..=0] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is 1, outside `u16[0..=0]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: i16[-255..=0], y: i16[255..=400]) -> i16[0..=0] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is -1, outside `i16[0..=0]`, the type of the result of `f`"]
+        );
+        // A dividend of no bound may reach any divisor.
+        assert_eq!(
+            codes(&format!("pub fn f(x: i128) -> i128[0..=0] = x / {}", far)),
+            ["E0502"]
+        );
+    }
+
+    /// A loop's condition runs at the head of every round, so a binding or a struct it passes
+    /// `mut` keeps only its type and refinement there; and a call in the condition, which the
+    /// head reads as a candidate fact too, reports a failure once.
+    #[test]
+    fn test_a_loops_condition_changes_what_it_passes_mut() {
+        let decls = "pub struct P {\n  a: u8\n}\nfn bump(mut x: u8) -> u8\n  ensures x == 9\n{\n  x = 9\n  0\n}\nfn touch(mut p: P) -> u8 {\n  p.a = 9\n  0\n}\nfn take0(x: u8) -> u8[0..=0]\n  requires x == 0\n= x\n";
+        let with = |f: &str| format!("{}{}", decls, f);
+        for f in [
+            "pub fn f() -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0 and bump(mut x) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
+            "pub fn f(q: P) -> u8 {\n  var p = q\n  p.a = 0\n  var i: u8 = 0\n  while i < 2 and take0(p.a) == 0 and touch(mut p) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
+            "pub fn f() -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0\n    decreases 2 - i\n  {\n    x = 1\n    i += 1\n  }\n  i\n}",
+        ] {
+            assert_eq!(codes(&with(f)), ["E0504"], "{}", f);
+        }
+        // A condition that changes nothing keeps what holds before the loop.
+        assert_eq!(
+            codes(&with("pub fn f() -> u8 {\n  val x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}")),
+            NONE
+        );
     }
 
     #[test]
@@ -7150,21 +7326,48 @@ pub fn k(x: i8) -> u8 = take(x, P(a: x))";
             messages(&with("pub fn f(mut ps: [2]P, q: P) -> u8[0..1] {\n  ps[0].a = 0\n  ps[0].a\n}")),
             ["Tier 1 cannot rule out that `ps[0].a` is 1, outside `u8[0..1]`, the type of the result of `f`"]
         );
-        // A binding's paths are followed while the function's variables stay within the cap:
-        // with the result's variable, 127 fields fit and 128 do not, and a binding past it is
-        // not followed, as an element is.
+        // A binding's paths are followed only where, with them, the function stays within the
+        // cap: here the result, `x`, `y`, the two field reads, the temporaries, the scratch and
+        // the probe take 9 variables, so 119 fields fit, the function staying relational, and
+        // 120 do not, and a binding past it is not followed, as an element is.
         let wide = |n: usize| {
-            let fields: String = (0..n).map(|k| format!("  f{}: u8\n", k)).collect();
-            format!("pub struct W {{\n{}}}\n", fields)
+            let fields: String = (0..n)
+                .map(|k| {
+                    format!(
+                        "  f{}: u8
+",
+                        k
+                    )
+                })
+                .collect();
+            format!(
+                "pub struct W {{
+{}}}
+",
+                fields
+            )
         };
-        let store = "pub fn f(mut w: W) -> u8[0..1] {\n  w.f0 = 0\n  w.f0\n}";
-        assert_eq!(codes(&format!("{}{}", wide(127), store)), NONE);
-        assert_eq!(codes(&format!("{}{}", wide(128), store)), ["E0502"]);
-        // One past it takes no variables, and the function's other bindings keep their
-        // relations.
-        let relation =
-            "(w: W, x: u8, y: u8) -> u8[1..=255] {\n  guard x < y else {\n    return 1\n  }\n  y - x\n}";
-        assert_eq!(codes(&format!("{}pub fn f{}", wide(200), relation)), NONE);
+        let edge = "pub fn f(mut w: W, x: u8, y: u8) -> u8[1..=255] {
+  w.f0 = 0
+  guard x < y else {
+    return 1
+  }
+  y - x + w.f0
+}";
+        assert_eq!(codes(&format!("{}{}", wide(119), edge)), NONE);
+        assert_eq!(codes(&format!("{}{}", wide(120), edge)), ["E0502"]);
+        // Bindings share what is left, 120 here: after a struct of 2 fields, one of 119 does not
+        // fit, though it would alone.
+        let two = "pub struct V {
+  a: u8
+  b: u8
+}
+pub fn f(mut p: V, mut q: W) -> u8[0..1] {
+  p.a = 0
+  q.f0 = 0
+  q.f0
+}";
+        assert_eq!(codes(&format!("{}{}", wide(119), two)), ["E0502"]);
     }
 
     /// The field paths of a struct are listed no further than the room they may take: structs

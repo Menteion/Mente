@@ -1,0 +1,9 @@
+// expect: pass
+module conformance
+// A dividend smaller in magnitude than every value of its divisor has a quotient of 0 and is
+// its own remainder, a divisor beyond the octagon's reach included.
+pub fn quotient(x: u8) -> i128[-1..=1] = x / 42535295865117307932921825928971026432
+
+pub fn remainder(x: u8) -> i128[0..=0] = x % 42535295865117307932921825928971026432 - x
+
+pub fn below(x: u16[0..=255], y: u16[256..=400]) -> u16[0..=0] = x / y

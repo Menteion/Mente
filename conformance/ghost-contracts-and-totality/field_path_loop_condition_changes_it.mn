@@ -1,0 +1,27 @@
+// expect: E0504
+module conformance
+// A loop's condition that passes a struct `mut` changes its fields at the head of every round.
+pub struct P {
+  a: u8
+}
+
+fn touch(mut p: P) -> u8 {
+  p.a = 9
+  0
+}
+
+fn needs0(p: P) -> u8
+  requires p.a == 0
+= p.a
+
+pub fn f(q: P) -> u8 {
+  var p = q
+  p.a = 0
+  var i: u8 = 0
+  while i < 2 and needs0(p) == 0 and touch(mut p) == 0
+    decreases 2 - i
+  {
+    i += 1
+  }
+  i
+}
