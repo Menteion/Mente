@@ -3857,7 +3857,8 @@ impl<'a> Fx<'a> {
     /// A `match`'s integer scrutinee is narrowed into its type, which its arms cover
     /// ([`match-scrutinee-narrowing`]): Tier 1 proves the value fits, or reports `E0502` with a
     /// `guard`, or `E0508` where it never fits; the arms then read it within the type. A place
-    /// or a call's result already lies within its type, where it was stored or returned.
+    /// or a call's result already lies within its type, where it was stored or returned, and
+    /// so does a value of one 128-bit type, checked at its operator.
     ///
     /// [`match-scrutinee-narrowing`]: ../../docs/design-review.md#match-scrutinee-narrowing
     fn scrutinee_fits(&mut self, st: &mut Octagon, scrutinee: ExprId, value: &Val) {
@@ -3875,11 +3876,20 @@ impl<'a> Fx<'a> {
                 | ExprKind::Index { .. }
                 | ExprKind::Call { .. }
         );
-        let proven = st.is_empty() || stored || within(st, value, t);
+        // An operation on operands of one 128-bit type is checked at its operator against that
+        // type (`core-calculus.md`, item 4), so its value, and an `if`'s or a `match`'s of that
+        // type, already lies within it.
+        let checked = matches!(
+            &self.typing.exprs[scrutinee.0 as usize],
+            Ty::Int(Int::One(t)) if t.bits == 128
+        );
+        let settled = st.is_empty() || stored || checked;
         let what = self.own_text(scrutinee);
-        if let Some(side) = self.fits(st, value, Some(t), span) {
+        if settled {
+            // Nothing to prove.
+        } else if let Some(side) = self.fits(st, value, Some(t), span) {
             self.always_traps(&side, t, span, &format!("`{}`", what.0));
-        } else if !proven {
+        } else if !within(st, value, t) {
             // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one.
             let control = matches!(kind, ExprKind::If { .. } | ExprKind::Match { .. });
             let was = std::mem::replace(&mut self.unfollowed, control);
@@ -5628,6 +5638,27 @@ mod tests {
                 .contains("guard -x >= 0 else"),
             "{:?}",
             diagnostics(neg)[0].fixes
+        );
+        // A value of one 128-bit type is checked at its operator (`core-calculus.md`, item 4),
+        // so it lies within its type already: nothing to prove, nothing recorded. A mixed one
+        // of narrower operands is not checked there, and may leave the type that joins them.
+        for src in [
+            "pub fn f(x: i128, c: bool) -> u8 = match (if c { x } else { 0 }) {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(x: i128) -> u8 = match x / 3 {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(x: i128) -> u8 = match x - 1 {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(x: u128) -> u8 = match x + 1 {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(x: u128) -> u8 = match -x {\n  0 => 1\n  _ => 2\n}",
+        ] {
+            assert!(codes(src).is_empty(), "{}: {:?}", src, messages(src));
+            assert!(
+                obligations(src).iter().all(|o| o.0 != ObligationKind::Refinement),
+                "{}",
+                src
+            );
+        }
+        assert_eq!(
+            codes("pub fn f(b: u64, a: i8[0..5]) -> u8 = match b * b + a {\n  0 => 1\n  _ => 2\n}"),
+            ["E0502"]
         );
         // A literal alone is an `i64`: one beyond it never fits.
         assert_eq!(

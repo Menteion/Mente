@@ -205,6 +205,7 @@ const PLACES: &[&str] = &[
     "match covering an arithmetic scrutinee's type without _",
     "match in an arm",
     "match with a mut call in its scrutinee",
+    "match reading an if",
     "return in an arm or a branch of an expression body",
 ];
 
@@ -311,6 +312,9 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
             ExprKind::Match { scrutinee, arms } => {
                 if calls_with_mut(tree, *scrutinee) {
                     mark("match with a mut call in its scrutinee");
+                }
+                if matches!(tree.expr(*scrutinee).kind, ExprKind::If { .. }) {
+                    mark("match reading an if");
                 }
                 let mut wildcard = false;
                 for arm in arms {

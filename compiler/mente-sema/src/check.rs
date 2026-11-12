@@ -2362,7 +2362,7 @@ impl<'a> Checker<'a> {
         let transition = if used {
             None
         } else {
-            self.transition(m, arms, &found, &text)
+            self.transition(m, scrutinee, arms, &found, &text)
         };
         for place in found.into_iter().flatten() {
             let mut d = Diagnostic::error(
@@ -2389,10 +2389,40 @@ impl<'a> Checker<'a> {
     fn transition(
         &self,
         m: ExprId,
+        scrutinee: ExprId,
         arms: &[Arm],
         found: &[Vec<ExprId>],
         text: &str,
     ) -> Option<Fix> {
+        // The fix writes the scrutinee's place left of `=`, whose indexes are evaluated before
+        // any arm runs, and as the value of an arm that leaves the place alone, read after the
+        // arm: so each index is a literal, or a name no arm changes, or there is no fix.
+        let mut changed = Vec::new();
+        for arm in arms {
+            let mut places = Vec::new();
+            match arm.body {
+                ArmBody::Expr(x) => changed_places(self.tree, x, &mut places),
+                ArmBody::Block(b) => changed_places_block(self.tree, b, &mut places),
+            }
+            changed.extend(places.into_iter().filter_map(|p| self.root(p)));
+        }
+        let mut step = scrutinee;
+        while let ExprKind::Index { base, .. } | ExprKind::Field { base, .. } =
+            &self.tree.expr(step).kind
+        {
+            if let ExprKind::Index { index, .. } = &self.tree.expr(step).kind {
+                let fixed = match &self.tree.expr(*index).kind {
+                    ExprKind::Int { .. } => true,
+                    ExprKind::Name(_) => self.resolution.names[index.0 as usize]
+                        .is_some_and(|b| !changed.contains(&b)),
+                    _ => false,
+                };
+                if !fixed {
+                    return None;
+                }
+            }
+            step = *base;
+        }
         let at = self.span(m);
         let mut edits = vec![Edit {
             span: Span {
@@ -4331,6 +4361,39 @@ pub enum Light {
             )),
             NONE
         );
+        // An element whose index is a literal, or a name no arm changes, is offered as a
+        // transition; one whose index an arm changes, or whose index calls, is not, since the
+        // index is read before the arms and the place again after them.
+        for scrutinee in ["xs[0]", "xs[i]"] {
+            let src = module(&with(&format!(
+                "pub fn f(mut xs: [2]Shape, i: usize) {{\n  match {} {{\n    Shape.Rect(w: _, h: _) => {{\n      {} = Shape.Dot\n    }}\n    Shape.Dot => {{}}\n  }}\n}}",
+                scrutinee, scrutinee
+            )));
+            let (fixed, left) = fixed_and_checked(&src);
+            assert!(
+                fixed.contains(&format!("  {} = match {} {{", scrutinee, scrutinee)),
+                "{}",
+                fixed
+            );
+            assert!(left.is_empty(), "{:?}", left);
+        }
+        for (scrutinee, rect, dot) in [
+            ("xs[i]", "xs[i] = Shape.Dot", "i = 1"),
+            ("xs[i]", "i = 1\n      xs[i] = Shape.Dot", "k = 1"),
+            ("xs[next(mut k)]", "xs[0] = Shape.Dot", "k = 1"),
+        ] {
+            let src = with(&format!(
+                "fn next(mut k: usize) -> usize {{\n  k = k + 1\n  0\n}}\npub fn f(mut xs: [2]Shape, mut i: usize, mut k: usize) {{\n  match {} {{\n    Shape.Rect(w: _, h: _) => {{\n      {}\n    }}\n    Shape.Dot => {{\n      {}\n    }}\n  }}\n}}",
+                scrutinee, rect, dot
+            ));
+            let d = diagnostics(&src);
+            assert!(
+                d.iter().any(|d| d.code == "E0232") && d.iter().all(|d| d.fixes.is_empty()),
+                "{}: {:?}",
+                src,
+                d
+            );
+        }
         // An assignment that is not the arm's last statement, or a `mut` argument, has no
         // transition to offer; nor has an arm that assigns twice, assigns what holds the
         // place, or another element than the scrutinee's.

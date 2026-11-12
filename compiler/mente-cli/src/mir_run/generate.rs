@@ -1181,7 +1181,7 @@ impl Gen {
                 let span = r.hi.sub(r.lo).map_or(u128::MAX, |s| s.mag);
                 // A small range covered by its literals alone, now and then, and an 8-bit type
                 // too, which a scrutinee is narrowed into ([`match-scrutinee-narrowing`]).
-                if (span < 4 && self.rng.chance(60)) || (span == 255 && self.rng.chance(25)) {
+                if (span < 4 && self.rng.chance(60)) || (span == 255 && self.rng.chance(40)) {
                     let mut out = Vec::new();
                     let mut n = r.lo;
                     while n <= r.hi {
@@ -1235,23 +1235,24 @@ impl Gen {
                 }
                 // An arithmetic scrutinee is narrowed into its type, which Tier 1 must prove
                 // ([`match-scrutinee-narrowing`]): one whose static range lies within the type,
-                // tried a few times, or a binding of the type read.
-                for _ in 0..6 {
+                // or of a 128-bit type, checked at its operator; now and then an `if` of two
+                // such; tried a few times, or a binding of the type read.
+                if self.rng.chance(20) {
                     let m = self.mark();
-                    let g = self.int_expr(Want::Exact(*t), depth + 1);
-                    let u = match g.cls {
-                        Cls::One(u) => u,
-                        Cls::Lit => I64,
-                        Cls::Mixed => {
-                            self.restore(m);
-                            continue;
+                    let c = self.bool_expr(depth + 1);
+                    match (
+                        self.int_scrutinee(*t, depth + 1),
+                        self.int_scrutinee(*t, depth + 1),
+                    ) {
+                        (Some((a, ua)), Some((b, ub))) if ua == ub => {
+                            let e = E::If(Box::new(c), Box::new(a), Box::new(b));
+                            return Some((e, Some(ua.range())));
                         }
-                    };
-                    let range = u.range();
-                    if range.lo <= g.r.lo && g.r.hi <= range.hi {
-                        return Some((g.e, Some(range)));
+                        _ => self.restore(m),
                     }
-                    self.restore(m);
+                }
+                if let Some((e, u)) = self.int_scrutinee(*t, depth + 1) {
+                    return Some((e, Some(u.range())));
                 }
                 let names: Vec<usize> = self
                     .visible()
@@ -1266,6 +1267,30 @@ impl Gen {
             }
             Ty::Array(..) | Ty::Struct(_) => None,
         }
+    }
+
+    /// An integer expression of type `t`, or of literals alone, that a `match` can read: one
+    /// whose static range lies within its type, or of a 128-bit type, which its operators check
+    /// (`core-calculus.md`, item 4); and its type. Tried a few times.
+    fn int_scrutinee(&mut self, t: IntT, depth: u32) -> Option<(E, IntT)> {
+        for _ in 0..6 {
+            let m = self.mark();
+            let g = self.int_expr(Want::Exact(t), depth);
+            let u = match g.cls {
+                Cls::One(u) => u,
+                Cls::Lit => I64,
+                Cls::Mixed => {
+                    self.restore(m);
+                    continue;
+                }
+            };
+            let range = u.range();
+            if u.bits == 128 || (range.lo <= g.r.lo && g.r.hi <= range.hi) {
+                return Some((g.e, u));
+            }
+            self.restore(m);
+        }
+        None
     }
 
     /// The type a `match` reads: an enum when the program declares one, else a `bool` or an
