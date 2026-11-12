@@ -70,6 +70,9 @@ npm run verify:docs
 npm run check:benchmark
 npm run test:benchmark
 
+# 8. Check the workflow policy: the required checks of .github/required-checks.txt, the instruments' path lists, pinned actions, milestone tags
+npm run test:ci
+
 # 6. Check the format and the lints (rustfmt, then clippy with warnings as errors)
 cargo fmt --all --check
 cargo clippy --all-targets --workspace -- -D warnings

@@ -142,6 +142,17 @@ test("no run script interpolates text an event, a dispatch or a secret supplies"
   }
 });
 
+test("no workflow overrides the overflow checks Cargo.toml gives every build", () => {
+  for (const { file } of workflows()) {
+    assert.doesNotMatch(
+      read(`${WORKFLOWS}/${file}`),
+      /CARGO_PROFILE_\w+_OVERFLOW_CHECKS|-C\s*overflow-checks|overflow-checks\s*=/,
+      `${file} sets overflow checks itself: [profile.release] in Cargo.toml is their one source`,
+    );
+  }
+  assert.match(read("Cargo.toml"), /\[profile\.release\][^[]*overflow-checks\s*=\s*true/, "Cargo.toml's release profile lost its overflow checks");
+});
+
 test("every measured benchmark run proves its sandbox first", () => {
   let measured = 0;
   for (const { file, id, job } of allJobs()) {

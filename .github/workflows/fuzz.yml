@@ -1,7 +1,8 @@
 # The compiler's own fuzzer, `mn fuzz` (compiler/mente-cli/src/fuzz.rs; docs/design-brief.md, M1's
 # exit criterion 6, "fuzzing finds no crash"): mutants of the repository's .mn programs through
 # every phase, each in a worker process on the 256 MiB stack `mn` runs its work on. Built in release
-# with overflow checks and debug assertions, so an arithmetic overflow panics as in a debug build.
+# with debug assertions, and with the overflow checks every release build has (Cargo.toml), so an
+# arithmetic overflow panics as in a debug build.
 # A pull request touching the compiler gets a two-minute smoke run with a fixed seed; the nightly
 # run takes its seed from the run number and fuzzes for 45 minutes on every core of the runner.
 # Each failure, minimized, is uploaded as the artifact `fuzz-failures` and fails the job.
@@ -36,7 +37,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
   CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
 
 jobs:
