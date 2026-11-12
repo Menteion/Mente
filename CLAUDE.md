@@ -5,7 +5,7 @@ This file is the switchboard, not the rulebook.
 1. **Live implementation status**: Read [`docs/STATUS.md`](docs/STATUS.md) first. It is the single source of truth for what is `Implemented` vs. `Specified` across all 6 compiler crates and names the immediate next step. Open design problems, and what is proposed for each, are in [`docs/design-review.md`](docs/design-review.md); a design change starts from its entry there.
 2. **Language and compiler specification**: Read [`spec/README.md`](spec/README.md). Each file in `spec/*.md` defines exactly **one orthogonal mechanism and design decision** (Specification + Decision Rationale & Rejected Alternatives + Executable `<!-- @assert-* -->` assertions). Load only the specific `spec/<topic>.md` file governing the crate you are editing.
 3. **Engineering roadmap**: Read [`ROADMAP.md`](ROADMAP.md) for the four stages of the work and stage 1's milestones, M0a, M0b and M1 to M9. [`docs/design-brief.md`](docs/design-brief.md) holds the design, the working rules and the long-term plan in full.
-4. **Agent benchmark**: [`benchmark/README.md`](benchmark/README.md) defines the corpus. Its held-out set lives in the private repository `Menteion/mente-bench-heldout`, cloned beside this one as `..\mente-bench-heldout`. Never read it, or held-out results task by task, while working on the language card or on anything a benchmark agent is shown; only `npm run check:benchmark -- --held-out` opens it.
+4. **Agent benchmark**: [`benchmark/README.md`](benchmark/README.md) defines the corpus. Its held-out set lives in the private repository `Menteion/mente-bench-heldout`, cloned beside this one as `..\mente-bench-heldout`. Never read it, or held-out results task by task, while working on the language card or on anything a benchmark agent is shown; only `npm run check:benchmark -- --held-out` opens it. Run no shell command on `..mente-bench-heldout` either (`cat`, `rg`, `git -C`, `node`): a deny rule on the file tools does not cover the shell.
 
 ---
 
@@ -38,11 +38,12 @@ This file is the switchboard, not the rulebook.
    - **Guardrail #3 (Provenance Escape Diagnostics — [`regions-and-pools.md`](spec/regions-and-pools.md))**: Never expose internal region IDs in errors; `E0310` MUST prescribe either `in arena: Arena` or `Pool<T>` / `Handle<T>`.
    - **Guardrail #4 (Ecosystem Absorption — [`comptime-and-ffi.md`](spec/comptime-and-ffi.md))**: `mn bind` auto-synthesizes quarantined `extern "C"` + `with FFI` + `@layout` bindings from C headers, and from Rust libraries through their `cbindgen` headers (stage 4).
 6. **Every change carries its checks** ([`quality-per-change`](docs/design-review.md#quality-per-change); `docs/design-brief.md` section 5):
-   - Write a rule's edge cases as conformance programs before its code: type limits and 0, negative values entering unsigned types, mixed signedness, `i128` beside `u128`, nested `if`, and out-of-type or misshapen arguments. Settle a case the spec leaves open in the spec first.
+   - Write a rule's edge cases as conformance programs before its code: type limits and 0, negative values entering unsigned types, mixed signedness, `i128` beside `u128`, nested `if`, and out-of-type or misshapen arguments. Settle a case the spec leaves open in the spec first: when two execution paths, or a path and the spec, can give different results for a case, write the case into the governing spec item before changing any path, with Norman when it is a design choice, and cite that item in the fix.
    - Define each fact about the language once, and read it everywhere. Test every special case the code makes.
    - A fix comes with a test seen to fail without it.
    - Every problem found, a bug, a slow path or a slip in the process, is weighed for a guard against its whole class, strongest first: a required check of `main`, then a test or a lint, then a written rule. Memory alone is never the guard.
    - A bug that escaped the author's own checks (found by a review, by CI on a later change or by a user) comes with the change to the instrument that should have caught it, and the pull request names that instrument and what it lacked ([`guard-per-problem`](docs/design-review.md#guard-per-problem)).
+   - Instrument work for a feature (generator rules, coverage tables, oracles) is briefed to a session other than the feature's author where it can be, and a reviewer's reproduction becomes a conformance program and a rule of the program generator in the fix's pull request.
    - New syntax or a new rule extends the program generator in the same pull request; `test_generated_programs_reach_every_construct_of_the_grammar` fails on syntax no generated program reaches. A checkpoint closes only when the instruments scheduled for it run in CI and pass.
 
 ---
@@ -73,6 +74,10 @@ npm run test:benchmark
 cargo fmt --all --check
 cargo clippy --all-targets --workspace -- -D warnings
 ```
+
+- **Heavy jobs run on GitHub Actions.** Locally run only the commands above. `cargo-mutants`, `mn fuzz` beyond a smoke run, generated-program comparisons at scale, benchmarks and the latency protocols run on GitHub Actions through `workflow_dispatch` on the working branch.
+- **Merging.** A pull request merges with the merge method and its head SHA, only once every check of its final head has finished green, Mutants, Generated programs and the SMT cross-check included, even where the ruleset does not yet require them; a run cancelled by a later push counts as not run. Never enable auto-merge.
+- **Worktrees.** A session's worktree and branch are removed (`git worktree remove`, then the branch) when its pull request merges or the session is archived; nothing stays under `.claude/worktrees` or `.wt`.
 
 ---
 
