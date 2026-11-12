@@ -337,6 +337,43 @@ pub fn parse_call_modes(text: &str) -> Option<(String, Vec<(bool, Value)>)> {
     Some((name.to_string(), args))
 }
 
+/// A variant written with empty parentheses in a call's text, as `M.Z()`, which reads as no
+/// value: a variant that holds nothing is written without them, `M.Z`. The first one, if any,
+/// so that a refused call can say so.
+pub fn empty_payload(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let word = |c: &char| c.is_ascii_alphanumeric() || *c == '_';
+    for (k, _) in chars.iter().enumerate().filter(|(_, c)| **c == '(') {
+        let mut end = k + 1;
+        while chars.get(end).is_some_and(|c| c.is_whitespace()) {
+            end += 1;
+        }
+        if chars.get(end) != Some(&')') {
+            continue;
+        }
+        let mut name_end = k;
+        while name_end > 0 && chars[name_end - 1].is_whitespace() {
+            name_end -= 1;
+        }
+        let mut start = name_end;
+        while start > 0 && word(&chars[start - 1]) {
+            start -= 1;
+        }
+        if start == name_end || start == 0 || chars[start - 1] != '.' {
+            continue;
+        }
+        let mut enum_start = start - 1;
+        while enum_start > 0 && word(&chars[enum_start - 1]) {
+            enum_start -= 1;
+        }
+        if enum_start == start - 1 {
+            continue;
+        }
+        return Some(chars[enum_start..name_end].iter().collect());
+    }
+    None
+}
+
 struct Reader {
     chars: Vec<char>,
     pos: usize,
@@ -406,7 +443,11 @@ impl Reader {
                     if variant.is_empty() || variant.starts_with(|c: char| c.is_ascii_digit()) {
                         return None;
                     }
+                    // A space may stand before the payload's `(`, as before a struct's.
+                    let after = self.pos;
+                    self.skip_space();
                     if self.chars.get(self.pos) != Some(&'(') {
+                        self.pos = after;
                         return Some(Value::Enum(word, variant, Vec::new()));
                     }
                     self.pos += 1;

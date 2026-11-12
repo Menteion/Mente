@@ -1678,7 +1678,7 @@ impl<'a> Checker<'a> {
         if clean {
             self.coverage(at, arms, &read, &values);
         }
-        self.freeze(at, scrutinee, arms);
+        self.freeze(at, scrutinee, arms, used);
         // The arms, each checked once its pattern's bindings have their types.
         let mut types = Vec::new();
         for arm in arms {
@@ -2192,10 +2192,21 @@ impl<'a> Checker<'a> {
                 Some(v) => {
                     if let (Value::Int(x), Read::Int(lo, hi, text)) = (v, read) {
                         if x < lo || x > hi {
-                            self.errors.push(unreached(format!(
-                                "{} lies outside `{}`, the values of what the `match` reads",
-                                x, text
-                            )));
+                            // A refinement holds what the `match` reads; a plain type holds it
+                            // since the `match` narrows its scrutinee into the type
+                            // ([`match-scrutinee-narrowing`]).
+                            let why = if text.contains('[') {
+                                format!(
+                                    "{} lies outside `{}`, the values of what the `match` reads",
+                                    x, text
+                                )
+                            } else {
+                                format!(
+                                    "the `match` narrows what it reads into `{}`, and {} lies outside it",
+                                    text, x
+                                )
+                            };
+                            self.errors.push(unreached(why));
                             continue;
                         }
                     }
@@ -2316,7 +2327,7 @@ impl<'a> Checker<'a> {
     /// A store or a `mut` argument that reaches the scrutinee's place in an arm whose pattern
     /// binds a part of it (`E0232`): the binding reads the place where it lies, which the arm
     /// keeps as it is (`core-calculus.md`, item 14).
-    fn freeze(&mut self, m: ExprId, scrutinee: ExprId, arms: &[Arm]) {
+    fn freeze(&mut self, m: ExprId, scrutinee: ExprId, arms: &[Arm], used: bool) {
         if !is_place(self.tree, scrutinee) {
             return;
         }
@@ -2334,35 +2345,128 @@ impl<'a> Checker<'a> {
             .get(self.span(scrutinee).start..self.span(scrutinee).end)
             .unwrap_or("the scrutinee")
             .to_string();
-        for (k, arm) in arms.iter().enumerate() {
-            let binds = (0..)
-                .take_while(|i| arm_binding(&arm.pattern.kind, *i))
-                .any(|i| self.resolution.patterns.contains_key(&(m, k, i)));
-            if !binds {
-                continue;
-            }
+        // The places each arm changes that the scrutinee's place holds or is part of.
+        let mut found: Vec<Vec<ExprId>> = Vec::new();
+        for arm in arms {
             let mut changed = Vec::new();
             match arm.body {
                 ArmBody::Expr(x) => changed_places(self.tree, x, &mut changed),
                 ArmBody::Block(b) => changed_places_block(self.tree, b, &mut changed),
             }
-            for place in changed {
-                if self.root(place) != Some(root) || !overlaps(&frozen, &self.path(place)) {
-                    continue;
-                }
-                self.errors.push(
-                    Diagnostic::error(
-                        "E0232",
-                        self.span(place),
-                        format!(
-                            "this arm's pattern binds a part of `{}`, which it reads where it lies, so nothing in the arm changes `{}`; change it after the `match`, or copy what the arm needs into a `val` before it",
-                            text, text
-                        ),
-                    )
-                    .with_related(self.span(scrutinee), "matched here"),
-                );
-            }
+            changed.retain(|&place| {
+                self.root(place) == Some(root) && overlaps(&frozen, &self.path(place))
+            });
+            found.push(changed);
         }
+        if found.iter().all(Vec::is_empty) {
+            return;
+        }
+        let transition = if used {
+            None
+        } else {
+            self.transition(m, scrutinee, arms, &found, &text)
+        };
+        for place in found.into_iter().flatten() {
+            let mut d = Diagnostic::error(
+                "E0232",
+                self.span(place),
+                format!(
+                    "the `match` reads `{}` before an arm runs, and its place stays frozen in every arm, so nothing in an arm changes `{}`; to give it a new value, write `{} = match {} {{ ... }}`, each arm giving the new value",
+                    text, text, text, text
+                ),
+            )
+            .with_related(self.span(scrutinee), "matched here");
+            if let Some(fix) = &transition {
+                d.fixes.push(fix.clone());
+            }
+            self.errors.push(d);
+        }
+    }
+
+    /// The fix that writes a `match` statement whose arms change its scrutinee as a
+    /// transition, `state = match state { ... }`: each arm a block that ends by assigning the
+    /// whole place, which then gives the value instead, or that changes nothing of it, which
+    /// then gives the place's value as it is. `None` for any other shape, whose message names
+    /// the form.
+    fn transition(
+        &self,
+        m: ExprId,
+        scrutinee: ExprId,
+        arms: &[Arm],
+        found: &[Vec<ExprId>],
+        text: &str,
+    ) -> Option<Fix> {
+        let at = self.span(m);
+        let frozen = self.path(scrutinee);
+        let root = self.root(scrutinee)?;
+        let mut edits = vec![Edit {
+            span: Span {
+                end: at.start,
+                ..at
+            },
+            replacement: format!("{} = ", text),
+        }];
+        for (arm, changed) in arms.iter().zip(found) {
+            let ArmBody::Block(b) = arm.body else {
+                return None;
+            };
+            let block = self.tree.block(b);
+            if changed.is_empty() {
+                // The arm gives the place's value as it is, on a line of its own.
+                let edit = match block.stmts.last() {
+                    Some(&last) => {
+                        let s = self.tree.stmt(last).span;
+                        let line_start = self.src.get(..s.start)?.rfind('\n').map_or(0, |i| i + 1);
+                        let indent: String = self
+                            .src
+                            .get(line_start..s.start)?
+                            .chars()
+                            .take_while(|c| *c == ' ' || *c == '\t')
+                            .collect();
+                        Edit {
+                            span: Span { start: s.end, ..s },
+                            replacement: format!("\n{}{}", indent, text),
+                        }
+                    }
+                    None => Edit {
+                        span: block.span,
+                        replacement: format!("{{ {} }}", text),
+                    },
+                };
+                edits.push(edit);
+                continue;
+            }
+            // Else the arm's last statement assigns the whole place, and nothing before it
+            // changes any of it.
+            let &last = block.stmts.last()?;
+            let StmtKind::Assign {
+                place,
+                op: AssignOp::Set,
+                value,
+            } = &self.tree.stmt(last).kind
+            else {
+                return None;
+            };
+            if changed.as_slice() != [*place]
+                || self.root(*place) != Some(root)
+                || self.path(*place) != frozen
+            {
+                return None;
+            }
+            let value = self.span(*value);
+            edits.push(Edit {
+                span: self.tree.stmt(last).span,
+                replacement: self.src.get(value.start..value.end)?.to_string(),
+            });
+        }
+        Some(Fix {
+            message: format!(
+                "write it as a transition, `{} = match {} {{ ... }}`",
+                text, text
+            ),
+            applicability: Applicability::Suggestion,
+            edits,
+        })
     }
 
     /// A place's steps from its root: each field by its name, each index as any element.
@@ -2381,11 +2485,6 @@ impl<'a> Checker<'a> {
             _ => Vec::new(),
         }
     }
-}
-
-/// Whether arm pattern `p` has a binding at position `i`.
-fn arm_binding(p: &PatternKind, i: usize) -> bool {
-    matches!(p, PatternKind::Variant { bindings: Some(bs), .. } if i < bs.len())
 }
 
 /// Whether two places of one root binding may overlap: one is a part of the other, an index
@@ -3967,7 +4066,8 @@ pub enum Light {
             ("pub fn f(x: u8[0..3]) -> u8 = match x {\n  0 => 0\n  2 => 1\n}", "E0229", "this `match` does not match 1, among others, a value of `u8[0..3]`; add an arm for each value, or `_` after the arms for every value left"),
             ("pub fn f(l: Light) -> u8 = match l {\n  Light.Green => 0\n  Light.Red => 1\n  Light.Amber => 2\n  Light.Red => 3\n}", "E0230", "no value reaches this arm: an arm before it matches the same value; remove it"),
             ("pub fn f(x: u8[0..3]) -> u8 = match x {\n  0 => 0\n  1 => 1\n  2 => 2\n  3 => 3\n}", "E0230", "no value reaches this arm: 3 lies outside `u8[0..3]`, the values of what the `match` reads; remove it"),
-            ("pub fn f(x: u8) -> u8 = match x {\n  -1 => 0\n  _ => 1\n}", "E0230", "no value reaches this arm: -1 lies outside `u8`, the values of what the `match` reads; remove it"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  -1 => 0\n  _ => 1\n}", "E0230", "no value reaches this arm: the `match` narrows what it reads into `u8`, and -1 lies outside it; remove it"),
+            ("pub fn f(x: u8) -> u8 = match x - 1 {\n  -1 => 100\n  _ => 0\n}", "E0230", "no value reaches this arm: the `match` narrows what it reads into `u8`, and -1 lies outside it; remove it"),
             ("pub fn f(x: u8) -> u8 = match x {\n  _ => 0\n  1 => 1\n}", "E0230", "no value reaches this arm: `_` before it matches every value left; remove it"),
             ("pub fn f(x: u8[0..2]) -> u8 = match x {\n  0 => 0\n  1 => 1\n  _ => 2\n}", "E0230", "no value reaches this arm: the arms before it match every value; remove it"),
             ("pub fn f(l: Light) -> u8 = match l {\n  Light.Red => 0\n  _ => 1\n}", "E0231", "`_` stands only on an integer, but this `match` reads an enum, `Light`: name each variant, so that one added later must be named too"),
@@ -4016,11 +4116,12 @@ pub enum Light {
         assert!(codes.is_empty(), "{:?}", codes);
     }
 
-    /// In an arm whose pattern binds a part of the scrutinee, a store or a `mut` argument that
-    /// reaches the scrutinee's place is `E0232`; another field of its binding, an arm that binds
-    /// nothing, and a place that cannot change (`E0205`) are not.
+    /// In every arm, whether its pattern binds a name or not, a store or a `mut` argument that
+    /// reaches the scrutinee's place is `E0232`, whose fix writes a `match` statement that
+    /// gives the place a new value as a transition, `s = match s { ... }`, where its arms allow;
+    /// another field of the same binding and a place that cannot change (`E0205`) are not.
     #[test]
-    fn test_a_matched_place_stays_frozen_in_an_arm_that_binds() {
+    fn test_a_matched_place_stays_frozen_in_every_arm() {
         let base = format!(
             "{}pub struct Box2 {{\n  s: Shape\n  n: u8\n}}\nfn clear(mut s: Shape) {{\n  s = Shape.Dot\n}}\nfn bump(mut n: u8) {{\n  n = 1\n}}\n",
             SHAPES
@@ -4049,13 +4150,64 @@ pub enum Light {
         assert_eq!(codes(&src), ["E0232"]);
         let d = &diagnostics(&src)[0];
         assert_eq!(d.related[0].message, "matched here");
-        // An arm that binds nothing changes its scrutinee freely.
-        assert_eq!(
-            codes(&with(
-                "pub fn f(mut s: Shape) -> u8 = match s {\n  Shape.Rect(w: _, h: _) => {\n    s = Shape.Dot\n    0\n  }\n  Shape.Dot => 1\n}"
-            )),
-            NONE
+        // An arm that binds nothing keeps it frozen too ([`match-arm-freeze`]).
+        let src = with(
+            "pub fn f(mut s: Shape) -> u8 = match s {\n  Shape.Rect(w: _, h: _) => {\n    s = Shape.Dot\n    0\n  }\n  Shape.Dot => 1\n}",
         );
+        assert_eq!(codes(&src), ["E0232"]);
+        let d = &diagnostics(&src)[0];
+        assert_eq!(
+            d.message,
+            "the `match` reads `s` before an arm runs, and its place stays frozen in every arm, so nothing in an arm changes `s`; to give it a new value, write `s = match s { ... }`, each arm giving the new value"
+        );
+        // A `match` that gives a value has no transition to offer, its message naming one.
+        assert!(d.fixes.is_empty());
+        // A `match` statement whose arms end by assigning the place, or leave it as it is, is
+        // offered as a transition, and the fixed module checks.
+        let src = module(&with(
+            "pub fn f(mut s: Shape, mut k: u8) {\n  match s {\n    Shape.Rect(w: _, h: _) => {\n      k = 1\n      s = Shape.Dot\n    }\n    Shape.Dot => {}\n  }\n  k += 1\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("  s = match s {\n    Shape.Rect(w: _, h: _) => {\n      k = 1\n      Shape.Dot\n    }\n    Shape.Dot => { s }\n  }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        let src = module(&with(
+            "pub fn f(mut s: Shape) {\n  match s {\n    Shape.Rect(w: _, h: _) => {\n      s = Shape.Dot\n    }\n    Shape.Dot => {\n      s = Shape.Rect(w: 1, h: 2)\n    }\n  }\n}",
+        ));
+        let d = &check_source(&src).unwrap_err();
+        assert_eq!(
+            d.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["E0232", "E0232"]
+        );
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("  s = match s {\n    Shape.Rect(w: _, h: _) => {\n      Shape.Dot\n    }\n    Shape.Dot => {\n      Shape.Rect(w: 1, h: 2)\n    }\n  }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        // An assignment that is not the arm's last statement, or a `mut` argument, has no
+        // transition to offer.
+        for arm in [
+            "{\n      s = Shape.Dot\n      k = 1\n    }",
+            "{\n      clear(mut s)\n    }",
+        ] {
+            let src = with(&format!(
+                "pub fn f(mut s: Shape, mut k: u8) {{\n  match s {{\n    Shape.Rect(w: _, h: _) => {}\n    Shape.Dot => {{}}\n  }}\n  k += 1\n}}",
+                arm
+            ));
+            let d = diagnostics(&src);
+            assert_eq!(
+                d.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0232"],
+                "{}",
+                src
+            );
+            assert!(d[0].fixes.is_empty(), "{}", src);
+        }
         // A read-only parameter is reported as one, once.
         assert_eq!(
             codes(&with(

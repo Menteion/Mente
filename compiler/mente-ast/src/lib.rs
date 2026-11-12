@@ -652,4 +652,29 @@ fn private_helper(x: u32) -> u32 = x
         assert!(out.contains(&format!("// instance_hash: {}", hashes.instance_hash)));
         assert!(report.spec_tokens < report.total_tokens && report.savings_percent > 0.0);
     }
+
+    /// A variant is hashed and projected in one form, as a struct's fields are: its spacing,
+    /// line breaks, comments and trailing commas change neither, and the projection of an
+    /// enum, an attribute on a variant included, is a declaration the body parser reads.
+    #[test]
+    fn test_a_variant_is_hashed_and_projected_in_one_form() {
+        let spec = |code: &str| compute_dual_hashes(&parse_module(code).unwrap()).spec_hash;
+        let one = "module m\npub enum E {\n  C(w: i128, f: bool)\n}\n";
+        for other in [
+            "module m\npub enum E {\n  C(w:i128,f:bool)\n}\n",
+            "module m\npub enum E {\n  C(\n    w: i128, // wide\n    f: bool,\n  )\n}\n",
+        ] {
+            assert_eq!(spec(one), spec(other), "{}", other);
+        }
+        let code = "module m\npub enum E {\n  @deprecated\n  A\n  B(n: u8) // the count\n}\n";
+        let out = project_spec_blueprint(&parse_module(code).unwrap()).projected_source;
+        assert!(
+            out.contains("pub enum E {\n  @deprecated A\n  B(n: u8)\n}"),
+            "{}",
+            out
+        );
+        let module = parse_module(&out).unwrap();
+        let parsed = mente_syntax::parse_enums(&out, &module);
+        assert!(parsed[0].errors.is_empty(), "{:?}", parsed[0].errors);
+    }
 }

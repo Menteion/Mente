@@ -1837,42 +1837,43 @@ impl<'a> Parser<'a> {
         let mut variants = Vec::new();
         if *self.peek() == TokenKind::LBrace {
             self.next();
-            // Each variant's text: a variant ends at a `,` or at the end of its line, outside
-            // its payload's parentheses (`grammar.md`, item 10).
+            // Each variant's tokens: a variant ends at a `,` or at the end of its line, outside
+            // its payload's brackets, braces included (`grammar.md`, item 10); an attribute on a
+            // line of its own belongs to the variant below it.
             let mut depth = 0i32;
-            let mut current: Option<(usize, usize, u32)> = None;
-            let mut flush = |current: &mut Option<(usize, usize, u32)>, src: &str| {
-                if let Some((start, end, _)) = current.take() {
-                    let t = src[start..end].trim();
-                    if !t.is_empty() {
-                        variants.push(t.to_string());
-                    }
-                }
-            };
-            while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
+            let mut group: Vec<Token> = Vec::new();
+            let mut groups: Vec<Vec<Token>> = Vec::new();
+            while !(depth <= 0 && *self.peek() == TokenKind::RBrace)
+                && *self.peek() != TokenKind::Eof
+            {
                 let t = self.next();
                 match t.kind {
                     TokenKind::DocComment(_) => continue,
-                    TokenKind::Comma if depth == 0 => {
-                        flush(&mut current, self.src);
+                    TokenKind::Comma if depth <= 0 => {
+                        groups.push(std::mem::take(&mut group));
                         continue;
                     }
                     TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
                     TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
                     _ => {}
                 }
-                if depth <= 0 && current.is_some_and(|(_, _, line)| line < t.span.line) {
-                    // A token that closes a payload stays with its variant.
-                    if !matches!(t.kind, TokenKind::RParen | TokenKind::RBracket) {
-                        flush(&mut current, self.src);
-                    }
+                let new_line = group.last().is_some_and(|l| l.span.line < t.span.line);
+                // A token that closes a payload stays with its variant.
+                let closes = matches!(
+                    t.kind,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                );
+                if depth <= 0 && new_line && !closes && !attributes_only(&group) {
+                    groups.push(std::mem::take(&mut group));
                 }
-                current = Some(match current {
-                    Some((start, _, line)) => (start, t.span.end, line.max(t.span.line)),
-                    None => (t.span.start, t.span.end, t.span.line),
-                });
+                group.push(t);
             }
-            flush(&mut current, self.src);
+            groups.push(group);
+            variants = groups
+                .iter()
+                .filter(|g| !g.is_empty())
+                .map(|g| canonical_variant(self.src, g))
+                .collect();
             self.expect_closing_brace("enum", &name, name_span)?;
         }
         Ok(EnumDecl {
@@ -2220,6 +2221,116 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(self.src[start..end].trim().to_string())
+    }
+}
+
+/// Whether `tokens` hold attributes alone, `@name` or `@name(...)`, and at least one.
+fn attributes_only(tokens: &[Token]) -> bool {
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].kind != TokenKind::At {
+            return false;
+        }
+        i += 2;
+        if tokens.get(i).map(|t| &t.kind) == Some(&TokenKind::LParen) {
+            match closing(tokens, i) {
+                Some(end) => i = end + 1,
+                None => return true,
+            }
+        }
+    }
+    !tokens.is_empty()
+}
+
+/// The index of the token that closes the bracket at `open`, if `tokens` hold it.
+fn closing(tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (k, t) in tokens.iter().enumerate().skip(open) {
+        match t.kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A variant in one form, whatever its spacing, line breaks, comments and trailing commas,
+/// as a struct's fields are read: its attributes, its name, and its payload's fields
+/// `name: type` joined by `, ` in parentheses. Any other form, which the body parser
+/// reports, is kept as its tokens, each after a space.
+fn canonical_variant(src: &str, tokens: &[Token]) -> String {
+    let text = |t: &Token| src.get(t.span.start..t.span.end).unwrap_or("");
+    let joined = |ts: &[Token]| ts.iter().map(text).collect::<String>();
+    let mut out = String::new();
+    let mut i = 0;
+    while tokens.get(i).map(|t| &t.kind) == Some(&TokenKind::At) {
+        let end = match tokens.get(i + 2).map(|t| &t.kind) {
+            Some(TokenKind::LParen) => closing(tokens, i + 2).unwrap_or(tokens.len() - 1),
+            _ => (i + 1).min(tokens.len() - 1),
+        };
+        out.push_str(&joined(&tokens[i..=end]));
+        out.push(' ');
+        i = end + 1;
+    }
+    if let Some(name) = tokens.get(i) {
+        out.push_str(text(name));
+        i += 1;
+    }
+    if tokens.get(i).map(|t| &t.kind) == Some(&TokenKind::LParen) {
+        if let Some(end) = closing(tokens, i) {
+            let mut fields: Vec<String> = Vec::new();
+            let mut depth = 0i32;
+            let mut field: Vec<Token> = Vec::new();
+            for t in &tokens[i + 1..end] {
+                match t.kind {
+                    TokenKind::Comma if depth == 0 => {
+                        fields.push(canonical_field(&joined, &field));
+                        field.clear();
+                        continue;
+                    }
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace | TokenKind::Lt => {
+                        depth += 1
+                    }
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace | TokenKind::Gt => {
+                        depth -= 1
+                    }
+                    TokenKind::Shr => depth -= 2,
+                    _ => {}
+                }
+                field.push(t.clone());
+            }
+            fields.push(canonical_field(&joined, &field));
+            fields.retain(|f| !f.is_empty());
+            out.push('(');
+            out.push_str(&fields.join(", "));
+            out.push(')');
+            i = end + 1;
+        }
+    }
+    for t in &tokens[i.min(tokens.len())..] {
+        out.push(' ');
+        out.push_str(text(t));
+    }
+    out
+}
+
+/// A payload's field, `name: type`, its type's tokens joined; any other form as its tokens.
+fn canonical_field(joined: &dyn Fn(&[Token]) -> String, field: &[Token]) -> String {
+    match field {
+        [name, colon, ty @ ..]
+            if matches!(name.kind, TokenKind::Ident(_))
+                && colon.kind == TokenKind::Colon
+                && !ty.is_empty() =>
+        {
+            format!("{}: {}", joined(std::slice::from_ref(name)), joined(ty))
+        }
+        other => joined(other),
     }
 }
 
@@ -2982,6 +3093,37 @@ pub struct Window<T> {
         };
         assert_eq!((e.name.as_str(), e.is_pub), ("Packet", true));
         assert_eq!(e.variants, vec!["Ack", "Data(bytes: []u8)", "Close"]);
+        let variants = |code: &str| {
+            let m = parse_module(code).unwrap();
+            let ItemDecl::Enum(e) = &m.items[0] else {
+                panic!("expected an enum")
+            };
+            e.variants.clone()
+        };
+        // A variant is read in one form, whatever its spacing, line breaks, comments and
+        // trailing commas, as a struct's fields are; an attribute above it is its own.
+        for code in [
+            "module m\npub enum E {\n  C(w: i128, f: bool)\n}\n",
+            "module m\npub enum E {\n  C(w:i128,f:bool)\n}\n",
+            "module m\npub enum E {\n  C(\n    w: i128, // wide\n    f: bool,\n  )\n}\n",
+        ] {
+            assert_eq!(variants(code), ["C(w: i128, f: bool)"], "{}", code);
+        }
+        assert_eq!(
+            variants("module m\npub enum E {\n  @deprecated\n  A\n  @since(2) B(n: [2]u8)\n}\n"),
+            ["@deprecated A", "@since(2) B(n: [2]u8)"]
+        );
+        // Another language's payload in braces stays in its variant, and the enum ends at its
+        // own `}`, so the body parser reports it (`E0130`) and the items after it are read.
+        let code = "module m\npub enum Shape {\n  Rect { w: u8 }\n  Dot\n}\npub fn f() -> u8 = 0\n";
+        let m = parse_module(code).unwrap();
+        assert_eq!(m.items.len(), 2);
+        assert_eq!(variants(code), ["Rect { w : u8 }", "Dot"]);
+        let parsed = parse_enums(code, &m);
+        assert_eq!(
+            parsed[0].errors.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["E0130"]
+        );
     }
 
     #[test]

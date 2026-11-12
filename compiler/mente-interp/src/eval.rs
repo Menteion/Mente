@@ -258,11 +258,16 @@ impl<'m> Machine<'m> {
         let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
         let declared = f.syntax.result.map(|t| (tree, t));
         let (result, ret_span) = match f.syntax.body {
-            Some(Body::Expr(e)) => {
-                let v = self.eval(frame, e, int_ty(&result_ty))?;
-                let span = tree.expr(e).span;
-                (self.narrow(frame, v, declared, &result_ty, span)?, span)
-            }
+            // An expression body leaves by `return` too, from a branch of an `if` or an arm of
+            // a `match` in it, which ends this call alone.
+            Some(Body::Expr(e)) => match self.eval(frame, e, int_ty(&result_ty)) {
+                Ok(v) => {
+                    let span = tree.expr(e).span;
+                    (self.narrow(frame, v, declared, &result_ty, span)?, span)
+                }
+                Err(Exit::Return(v, span)) => (v, span),
+                Err(e) => return Err(e),
+            },
             Some(Body::Block(b)) => match self.block(frame, b) {
                 Ok(v) => {
                     let span = tree
@@ -669,6 +674,13 @@ impl<'m> Machine<'m> {
             }
             ExprKind::Match { scrutinee, arms } => {
                 let v = self.eval(frame, *scrutinee, None)?;
+                // An integer scrutinee is narrowed into its type, which the arms cover
+                // ([`match-scrutinee-narrowing`]); literals alone are an `i64`.
+                let read = match &f.typing.exprs[scrutinee.0 as usize] {
+                    Ty::Int(IntType::Literal) => Ty::Int(IntType::One(I64)),
+                    t => t.clone(),
+                };
+                let v = self.narrow_plain(v, &read, tree.expr(*scrutinee).span)?;
                 for (k, arm) in arms.iter().enumerate() {
                     if !self.matches(frame, e, k, &arm.pattern.kind, &v) {
                         continue;

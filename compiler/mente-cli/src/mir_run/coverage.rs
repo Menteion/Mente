@@ -202,8 +202,10 @@ const PLACES: &[&str] = &[
     "match on a bool",
     "match on an integer",
     "match covering a refinement without _",
+    "match covering an arithmetic scrutinee's type without _",
     "match in an arm",
     "match with a mut call in its scrutinee",
+    "return in an arm or a branch of an expression body",
 ];
 
 constructs!(contract_kind, CONTRACTS: Contract {
@@ -273,6 +275,14 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
     };
     mark(result_kind(result));
     mark(body_kind(body));
+    // An expression body holds statements only in the blocks of its arms and branches.
+    if matches!(body, Some(Body::Expr(_)))
+        && stmts
+            .iter()
+            .any(|s| matches!(s.kind, StmtKind::Return(Some(_))))
+    {
+        mark("return in an arm or a branch of an expression body");
+    }
     params.iter().for_each(|p| mark(param_kind(p)));
     contracts.iter().for_each(|c| mark(contract_kind(c)));
     for e in exprs {
@@ -332,7 +342,17 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
                     .iter()
                     .any(|a| matches!(a.pattern.kind, PatternKind::Int { .. }));
                 if ints && !wildcard {
-                    mark("match covering a refinement without _");
+                    // An arithmetic scrutinee is narrowed into its type, which its arms then
+                    // cover whole; a refined name's arms cover its refinement.
+                    let arithmetic = matches!(
+                        tree.expr(*scrutinee).kind,
+                        ExprKind::Binary { .. } | ExprKind::Unary { .. }
+                    );
+                    mark(if arithmetic {
+                        "match covering an arithmetic scrutinee's type without _"
+                    } else {
+                        "match covering a refinement without _"
+                    });
                 }
             }
             _ => {}

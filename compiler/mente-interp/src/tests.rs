@@ -900,6 +900,17 @@ fn test_enums_are_built_and_matched() {
     // The scrutinee is evaluated once.
     assert_eq!(run(src, "once()"), "11");
     assert_eq!(run(src, "flip(false)"), "true");
+    // A `return` in an arm or a branch of a function whose body is an expression ends that
+    // call alone: its caller goes on with the value returned.
+    // An integer scrutinee is narrowed into its type: a value outside it traps as a narrowing
+    // does, before any arm, whatever the arms cover.
+    let src = "pub fn f(x: u8) -> u8 = match x + 1 {\n  0 => 1\n  255 => 3\n  _ => 2\n}\npub fn g(x: i8) -> i8 = match -x {\n  -128 => 0\n  _ => 1\n}";
+    assert_eq!(trapped(src, "f(255)"), ("narrowing".to_string(), 2, 31));
+    assert_eq!(run(src, "f(254)"), "3");
+    assert_eq!(kind(src, "g(-128)"), "narrowing");
+    assert_eq!(run(src, "g(-127)"), "1");
+    let src = "pub enum E {\n  A\n  B\n}\npub fn ifr(c: bool) -> u8 = if c {\n  return 1\n} else {\n  return 2\n}\npub fn arm(e: E) -> u8 = match e {\n  E.A => {\n    return 7\n  }\n  E.B => 3\n}\npub fn operand(x: u8) -> u8 = 5 + (match x {\n  0 => {\n    return 9\n  }\n  _ => 1\n})\npub fn caller() -> u8 = ifr(true) + arm(E.A) + arm(E.B) + operand(0) + operand(1)";
+    assert_eq!(run(src, "caller()"), "26");
 }
 
 /// A variant prints as Mente writes it, `Name.A` or `Name.B(field: v, ...)`, and reads back so as

@@ -777,6 +777,30 @@ fn bound_text(b: &Bound) -> String {
     }
 }
 
+/// The range of the integer type `t` as a refinement, both bounds literals: what a `match`
+/// narrows its scrutinee into.
+fn type_refine(t: IntTy) -> Refine {
+    let lo = Bound::Int {
+        negative: t.min_magnitude() > 0,
+        value: t.min_magnitude(),
+    };
+    let hi = Bound::Int {
+        negative: false,
+        value: t.max(),
+    };
+    Refine {
+        lo: bound_int(t.min_magnitude() > 0, t.min_magnitude()),
+        hi: bound_int(false, t.max()),
+        inclusive: true,
+        lo_text: bound_text(&lo),
+        hi_text: bound_text(&hi),
+        text: t.name.to_string(),
+        declared: None,
+        lo_lit: bound_exact(&lo),
+        hi_lit: bound_exact(&hi),
+    }
+}
+
 fn bound_int(negative: bool, value: u128) -> Val {
     let v = int_literal(value);
     if negative {
@@ -3823,6 +3847,64 @@ impl<'a> Fx<'a> {
     /// follows its value, `true` and `false` decide a condition, `_` on an integer takes the
     /// range left past the literals before it at either end, and a variant's bindings take their
     /// fields' types and refinements.
+    /// A `match`'s integer scrutinee is narrowed into its type, which its arms cover
+    /// ([`match-scrutinee-narrowing`]): Tier 1 proves the value fits, or reports `E0502` with a
+    /// `guard`, or `E0508` where it never fits; the arms then read it within the type. A place
+    /// or a call's result already lies within its type, where it was stored or returned.
+    ///
+    /// [`match-scrutinee-narrowing`]: ../../docs/design-review.md#match-scrutinee-narrowing
+    fn scrutinee_fits(&mut self, st: &mut Octagon, scrutinee: ExprId, value: &Val) {
+        let t = match &self.typing.exprs[scrutinee.0 as usize] {
+            Ty::Int(Int::One(t)) | Ty::Int(Int::Mixed(Some(t))) => *t,
+            Ty::Int(Int::Literal) => crate::types::I64,
+            _ => return,
+        };
+        let span = self.span(scrutinee);
+        let kind = &self.tree.expr(scrutinee).kind;
+        let stored = matches!(
+            kind,
+            ExprKind::Name(_)
+                | ExprKind::Field { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Call { .. }
+        );
+        let (lo, hi) = interval(st, value);
+        let (tlo, thi) = int_range(t);
+        let proven = st.is_empty() || stored || (tlo <= lo && hi <= thi && -INF < lo && hi < INF);
+        let what = self.own_text(scrutinee);
+        if let Some(side) = self.fits(st, value, Some(t), span) {
+            self.always_traps(&side, t, span, &format!("`{}`", what.0));
+        } else if !proven {
+            // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one.
+            let control = matches!(kind, ExprKind::If { .. } | ExprKind::Match { .. });
+            let was = std::mem::replace(&mut self.unfollowed, control);
+            self.refinement(
+                st,
+                value,
+                &type_refine(t),
+                (span, Tag::Into(t.name)),
+                "what the `match` reads",
+                Some(what),
+            );
+            self.unfollowed = was;
+        }
+        // Past the narrowing, the value lies within the type.
+        if -INF < tlo {
+            self.assume(
+                st,
+                &cmp(BinaryOp::Ge, value.clone(), lin(Vec::new(), tlo)),
+                true,
+            );
+        }
+        if thi < INF {
+            self.assume(
+                st,
+                &cmp(BinaryOp::Le, value.clone(), lin(Vec::new(), thi)),
+                true,
+            );
+        }
+    }
+
     fn match_arms(
         &mut self,
         mut st: Octagon,
@@ -3836,6 +3918,7 @@ impl<'a> Fx<'a> {
         } else {
             (self.eval(&mut st, scrutinee), None)
         };
+        self.scrutinee_fits(&mut st, scrutinee, &value);
         let mut literals: Vec<Exact> = Vec::new();
         let mut ends = Vec::new();
         for (k, arm) in arms.iter().enumerate() {
@@ -5495,6 +5578,45 @@ mod tests {
     /// The enum of the tests of `match`: a payload of a refined field.
     const READING: &str =
         "pub enum Reading {\n  Missing\n  Level(n: u8[0..10], m: u16)\n}\nfn next(mut i: u8) -> u8 {\n  i = i / 2 + 1\n  i\n}\n";
+
+    /// A `match`'s integer scrutinee is narrowed into its type ([`match-scrutinee-narrowing`]):
+    /// Tier 1 proves it fits, or reports `E0502` with a true valuation and a `guard` that makes
+    /// the module check once applied, or `E0508` where it never fits; a place or a call's
+    /// result fits by its type, and the arms read the value within the type.
+    ///
+    /// [`match-scrutinee-narrowing`]: ../../docs/design-review.md#match-scrutinee-narrowing
+    #[test]
+    fn test_a_scrutinee_is_narrowed_into_its_type() {
+        let sum = "pub fn f(x: u8) -> u8 = match x + 1 {\n  0 => 1\n  _ => 2\n}";
+        assert_eq!(
+            messages(sum),
+            ["Tier 1 cannot rule out `x = 255`, where `x + 1` is 256, outside `u8`, the type of what the `match` reads"]
+        );
+        repairs(sum);
+        let neg = "pub fn f(x: u8) -> u8 {\n  val r: u8 = match -x {\n    0 => 1\n    _ => 2\n  }\n  r\n}";
+        assert_eq!(
+            messages(neg),
+            ["Tier 1 cannot rule out `x = 1`, where `-x` is -1, outside `u8`, the type of what the `match` reads"]
+        );
+        repairs(neg);
+        assert_eq!(
+            codes("pub fn f(x: u8[1..=255]) -> u8 = match -x {\n  0 => 1\n  _ => 2\n}"),
+            ["E0508"]
+        );
+        for src in [
+            "pub fn f(x: u8) -> u8 = match x / 2 {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(x: u8[0..10]) -> u8 = match x + 1 {\n  1 => 1\n  _ => 2\n}",
+            "pub fn f(x: u8) -> u8 {\n  guard x < 255 else {\n    return 0\n  }\n  match x + 1 {\n    0 => 1\n    _ => 2\n  }\n}",
+            "pub fn f(x: u128, y: i128) -> u8 = match x {\n  0 => match y {\n    0 => 1\n    _ => 2\n  }\n  _ => 3\n}",
+            "fn g() -> u8 = 7\npub fn f() -> u8 = match g() {\n  7 => 1\n  _ => 2\n}",
+        ] {
+            assert!(codes(src).is_empty(), "{}: {:?}", src, messages(src));
+        }
+        // Past the narrowing the value lies within the type: here `x + 1` is 1 to 255, so the
+        // arm `_` gives a value of `u8[1..=255]`.
+        let within = "pub fn f(x: u8) -> u8[1..=255] {\n  guard x < 255 else {\n    return 1\n  }\n  match x + 1 {\n    0 => 1\n    _ => x + 1\n  }\n}";
+        assert!(codes(within).is_empty(), "{:?}", messages(within));
+    }
 
     /// A `match` is control flow, its arms joined: a literal arm gives a scrutinee Tier 1
     /// follows its value; `_` the range the literals before it leave at either end; `true` and

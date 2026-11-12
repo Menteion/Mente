@@ -517,16 +517,7 @@ impl Parser {
         }
         // An attribute of a field is a layout's (`morphic-layouts.md`), which a struct without
         // `@layout` does not read.
-        while self.at(&TokenKind::At) && !self.recovering {
-            self.bump();
-            self.name("an attribute's name");
-            if self.at(&TokenKind::LParen) {
-                let close = self.closing_paren();
-                while self.pos <= close && !self.at(&TokenKind::Eof) {
-                    self.bump();
-                }
-            }
-        }
+        self.skip_attributes();
         if self.recovering {
             return;
         }
@@ -641,6 +632,12 @@ impl Parser {
     /// unnamed types, as in Rust's `Deposit(i64)`, or in braces, as in `Rect { w: u8 }`, is
     /// `E0130`, whose fix names the fields.
     fn variant(&mut self, variants: &mut Vec<VariantSyntax>) {
+        // An attribute above a variant, or before it on its line, is read and left aside, as a
+        // field's is (`grammar.md`, item 10).
+        self.skip_attributes();
+        if self.recovering {
+            return;
+        }
         let (name, name_span) = self.name("a variant's name");
         if self.recovering {
             return;
@@ -664,6 +661,21 @@ impl Parser {
             return;
         }
         self.comma_after("a variant");
+    }
+
+    /// Reads the attributes before a field or a variant, `@name` or `@name(...)`, above it or
+    /// before it on its line, and leaves them aside.
+    fn skip_attributes(&mut self) {
+        while self.at(&TokenKind::At) && !self.recovering {
+            self.bump();
+            self.name("an attribute's name");
+            if self.at(&TokenKind::LParen) {
+                let close = self.closing_paren();
+                while self.pos <= close && !self.at(&TokenKind::Eof) {
+                    self.bump();
+                }
+            }
+        }
     }
 
     /// A variant's payload, `(` to `)`, or another language's `{` to `}`: its fields, each
@@ -727,6 +739,32 @@ impl Parser {
         let end = self.span();
         if !self.expect(&close, "the end of the payload's fields") {
             return false;
+        }
+        // A payload has a field at least: a variant that holds nothing has no parentheses.
+        if fields.is_empty() && !braced {
+            let d = Diagnostic::error(
+                "E0111",
+                Span {
+                    end: end.end,
+                    ..open
+                },
+                format!(
+                    "a variant's payload has at least one field, and a variant that holds nothing is written without parentheses: `{}`",
+                    variant
+                ),
+            )
+            .with_fix(
+                Applicability::MachineApplicable,
+                "remove the empty parentheses",
+                Span {
+                    end: end.end,
+                    ..open
+                },
+                "",
+            );
+            self.error(d);
+            self.recovering = false;
+            return true;
         }
         if unnamed.is_empty() && !braced {
             return true;
@@ -795,7 +833,10 @@ impl Parser {
             edits,
         });
         self.error(d);
-        false
+        // The payload is read whole, to its closing bracket, so the variant goes on as one
+        // whose fields are named, and the next line is the next variant's.
+        self.recovering = false;
+        true
     }
 
     /// After an error in the header, skips to its next clause or to the body.
@@ -1467,6 +1508,9 @@ impl Parser {
                     text,
                 );
                 self.error(d);
+                // The assignment is read whole, so the arm's line ends here and the next
+                // line is the next arm's.
+                self.recovering = false;
                 return None;
             }
         }
@@ -2013,6 +2057,8 @@ impl Parser {
                     }
                 } else if self.dotted_call_follows() {
                     self.dotted_call(n, start)
+                } else if self.dotted_braced_follows() {
+                    self.dotted_braced(n, start)
                 } else if self.struct_literal_follows() {
                     self.struct_literal(n, start)
                 } else {
@@ -2307,6 +2353,65 @@ impl Parser {
     /// Rust's struct literal `Name { f: e }` (`E0129`), read as `Name(f: e)` after its
     /// diagnostic, whose fix writes it so.
     fn struct_literal(&mut self, name: String, start: Span) -> ExprKind {
+        let what = format!(
+            "a struct with its fields in parentheses, as in `{}(field: value)`",
+            name
+        );
+        match self.braced_fields(&what, start, start.end) {
+            Some(fields) => ExprKind::Construct { name, fields },
+            None => ExprKind::Error,
+        }
+    }
+
+    /// Whether the next tokens, after a name, are `.name {` on one line holding `field:`: a
+    /// variant built as another language's struct literal, `Name.B { f: e }`.
+    fn dotted_braced_follows(&self) -> bool {
+        let at = |k: usize| self.tokens.get(self.pos + k);
+        let (Some(dot), Some(name), Some(open), Some(field), Some(colon)) =
+            (at(0), at(1), at(2), at(3), at(4))
+        else {
+            return false;
+        };
+        dot.kind == TokenKind::Dot
+            && !self.ends_here()
+            && matches!(name.kind, TokenKind::Ident(_))
+            && open.kind == TokenKind::LBrace
+            && open.span.line == name.span.line
+            && matches!(field.kind, TokenKind::Ident(_))
+            && colon.kind == TokenKind::Colon
+            && self.cond_nest != Some(self.nest)
+    }
+
+    /// A variant built in braces, `Name.B { f: e }` (`E0129`), read as `Name.B(f: e)` after
+    /// its diagnostic, whose fix writes it so, as a struct literal in braces is.
+    fn dotted_braced(&mut self, enum_name: String, start: Span) -> ExprKind {
+        self.bump(); // `.`
+        let (name, name_span) = self.name("a variant's name");
+        let what = format!(
+            "a variant's payload with its fields in parentheses, as in `{}.{}(field: value)`",
+            enum_name, name
+        );
+        match self.braced_fields(&what, start, name_span.end) {
+            Some(fields) => ExprKind::Variant {
+                enum_name,
+                enum_span: start,
+                name,
+                name_span,
+                payload: Payload::Named(fields),
+            },
+            None => ExprKind::Error,
+        }
+    }
+
+    /// The fields of another language's literal in braces, from `{` to `}`, after a name that
+    /// starts at `start` and ends at byte `name_end`: `E0129`, which says Mente builds `what`,
+    /// with the fix that writes the fields in parentheses. `None` after an error among them.
+    fn braced_fields(
+        &mut self,
+        what: &str,
+        start: Span,
+        name_end: usize,
+    ) -> Option<Vec<FieldInit>> {
         self.bump();
         // The first field's name, where the `(` that replaces `{` ends.
         let first = self.span().start;
@@ -2315,28 +2420,24 @@ impl Parser {
         self.nest -= 1;
         // The fields end at `}`, or at an error `field_inits` reported.
         if self.recovering {
-            return ExprKind::Error;
+            return None;
         }
         let close = self.bump().span;
-        let d = Diagnostic::error(
+        let mut d = Diagnostic::error(
             "E0129",
             Span {
                 end: close.end,
                 ..start
             },
-            format!(
-                "Mente builds a struct with its fields in parentheses, as in `{}(field: value)`, not in braces",
-                name
-            ),
+            format!("Mente builds {}, not in braces", what),
         );
-        let mut d = d;
         d.fixes.push(crate::diagnostics::Fix {
             message: "write the fields in parentheses".into(),
             applicability: Applicability::MachineApplicable,
             edits: vec![
                 crate::diagnostics::Edit {
                     span: Span {
-                        start: start.end,
+                        start: name_end,
                         end: first,
                         ..start
                     },
@@ -2352,7 +2453,7 @@ impl Parser {
             ],
         });
         self.note(d);
-        ExprKind::Construct { name, fields }
+        Some(fields)
     }
 
     /// Whether the next tokens, after a name, are `.name(` on one line: a variant built, or a
@@ -3937,6 +4038,25 @@ _ == b"
             "an enum with type parameters comes in M4; M2 does not have it"
         );
         assert_eq!(enum_codes("enum E {\n  A = 1\n}"), ["E0109"]);
+        // After a payload of unnamed types, read to its `)`, the next line is the next
+        // variant's, so each line reports its own error.
+        assert_eq!(
+            enum_codes("enum E {\n  A(u8)\n  B(u16)\n  C(u32)\n  D,\n  F,\n}"),
+            ["E0130", "E0130", "E0130", "E0128", "E0128"]
+        );
+        // An attribute above a variant, or before it on its line, is read and left aside.
+        let (e, errors) = parse_enum_src("enum E {\n  @deprecated\n  A\n  @since(2) B(n: u8)\n}");
+        assert!(errors.is_empty(), "{:?}", errors);
+        assert_eq!(Tree::render_enum(&e), "(enum E A (B (n u8)))");
+        // A payload holds a field at least: empty parentheses are `E0111`, whose fix removes
+        // them.
+        let src = "enum E {\n  A()\n  B\n}";
+        let (_, errors) = parse_enum_src(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0111"]);
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "enum E {\n  A\n  B\n}"
+        );
         assert_eq!(enum_codes("enum E {\n  A(n u8)\n}"), ["E0111"]);
         // A comma after a variant, removed by its fix.
         let src = "enum E {\n  A,\n  B(n: u8),\n}";
@@ -4009,6 +4129,25 @@ _ == b"
         // written; and an error inside a call's arguments resumes after its `)`, so what
         // follows the call is still read.
         assert_eq!(codes("val xs = List.new()"), ["E0109"]);
+        // After an arm holding an assignment, read whole, the next line is the next arm's, so
+        // each arm reports its own error.
+        assert_eq!(
+            codes("match x {\n  0 => y = 1\n  _ => y = 2\n  1 => y = 3\n}"),
+            ["E0111", "E0111", "E0111"]
+        );
+        // A variant built in braces, as another language's struct literal, is `E0129`, read as
+        // its payload in parentheses, which its fix writes.
+        let src = "fn f() {\n  val c = E.B { n: 1, m: 2 }\n  _ = c\n}";
+        let (_, errors) = parse(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0129"]);
+        assert_eq!(
+            errors[0].message,
+            "Mente builds a variant's payload with its fields in parentheses, as in `E.B(field: value)`, not in braces"
+        );
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "fn f() {\n  val c = E.B(n: 1, m: 2)\n  _ = c\n}"
+        );
         assert_eq!(
             codes("guard s.f(\"t\") else { return }\nval r = 0..1"),
             ["E0109", "E0109"]

@@ -33,6 +33,8 @@ date: 2026-11-04
      <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_instantiable_bodies_go_into_instance_hash" min="1" reason="Generic and @inline bodies are tracked by instance_hash, not spec_hash" -->
      <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_from_clause_is_part_of_spec_hash" min="1" reason="Widening a from clause changes spec_hash" -->
      <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_inline_bodies_go_into_instance_hash" min="1" reason="An @inline body is tracked by instance_hash" -->
+   - `Implemented`: a `pub enum`'s variant enters `spec_hash` and the projection in one form, its attributes, its name and its payload's `field: type`s joined by `, `, so its spacing, line breaks, comments and trailing commas change neither; the projection writes one variant per line, an attribute before it on its line, and parses again.
+     <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_a_variant_is_hashed_and_projected_in_one_form" min="1" reason="A variant's spellings hash alike, and its projection parses again" -->
    - `Specified` **Zero-cascade incremental compilation**: a build system that recompiles a dependent only when a dependency's `spec_hash` changes, or its `instance_hash` changes and the dependent instantiates or inlines from it. No build system exists yet.
 4. `Implemented` **Blueprint projection** (`project_spec_blueprint`, `mn view --spec`):
    <!-- @assert-count target="compiler/mente-ast/src/lib.rs" symbol="fn test_projection_keeps_signatures_and_drops_bodies" min="1" reason="The projection keeps pub declarations, contracts and digests, and drops bodies and private items" -->

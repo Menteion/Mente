@@ -861,13 +861,15 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "E0232",
         FailureClass::Type,
         "spec/core-calculus.md",
-        "A matched place changed in an arm that binds a part of it",
-        "A pattern's binding is a read-only view of the value matched: nothing is copied. So in \
-         an arm whose pattern binds a name, the scrutinee's place is frozen, as a view's source \
-         is: no assignment and no `mut` argument reaches it or a part of it, any element of an \
-         array counting. Another field of the same binding changes freely, and so does the \
-         scrutinee in an arm that binds nothing. Change the place after the `match`, or copy \
-         what the arm needs into a `val` before it.",
+        "A matched place changed in an arm",
+        "A `match` reads its scrutinee before an arm runs, and a pattern's binding is a \
+         read-only view of the value matched: nothing is copied. So in every arm, whether its \
+         pattern binds a name or not, the scrutinee's place is frozen, as a view's source is: no \
+         assignment and no `mut` argument reaches it or a part of it, any element of an array \
+         counting. Another field of the same binding changes freely. A new value for the place \
+         is written as a transition, `state = match state { ... }`, each arm giving the new \
+         value, which the fix writes for a `match` statement whose arms end by assigning the \
+         place or leave it as it is.",
         "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 = match c {\n  Cell.Held(n: n) => {\n    c = Cell.Empty\n    n\n  }\n  Cell.Empty => 0\n}\n",
         "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 {\n  val k = match c {\n    Cell.Held(n: n) => n\n    Cell.Empty => 0\n  }\n  c = Cell.Empty\n  k\n}\n",
     ),

@@ -2419,6 +2419,17 @@ impl<'a> Lower<'a> {
                     s
                 }
             }
+            // An integer scrutinee is narrowed into its type, which the arms cover, unless
+            // Tier 1 proves it fits ([`match-scrutinee-narrowing`]); literals alone are an
+            // `i64`. So no value the arms leave out reaches the last arm, which has no test.
+            V::Int(x, t) => {
+                let to = match self.int_of(scrutinee) {
+                    Some(to) => to,
+                    None => SemaIntTy::named("i64").ok_or("no `i64`")?,
+                };
+                let at = self.tree().expr(scrutinee).span;
+                V::Int(self.narrow_int(x, t, to, at, Some(at)), mir(to))
+            }
             s => s,
         };
         // What the patterns test: an enum's tag, a `bool`, or an integer.

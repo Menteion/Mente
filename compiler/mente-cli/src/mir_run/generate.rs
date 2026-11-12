@@ -501,6 +501,9 @@ enum E {
     Array(Vec<E>),
     Repeat(Box<E>, u32),
     Builtin(&'static str, String),
+    /// `return` with a value, as a branch of an `if` or an arm of a `match` in a function's
+    /// expression body: the branch leaves the function.
+    Return(Box<E>),
 }
 
 impl E {
@@ -523,7 +526,7 @@ impl E {
 
     fn level(&self) -> u8 {
         match self {
-            E::If(..) | E::Match(..) => 0,
+            E::If(..) | E::Match(..) | E::Return(_) => 0,
             E::Bin(op, ..) => op.level(),
             E::Not(_) => NOT,
             E::Neg(_) | E::BitNot(_) => UNARY,
@@ -595,7 +598,14 @@ impl E {
                     out.push_str("\n  ");
                     out.push_str(p);
                     out.push_str(" => ");
-                    v.print(0, out);
+                    // An arm holds an expression or a block, and `return` is a statement.
+                    if let E::Return(_) = v {
+                        out.push_str("{ ");
+                        v.print(0, out);
+                        out.push_str(" }");
+                    } else {
+                        v.print(0, out);
+                    }
                 }
                 out.push_str("\n}");
             }
@@ -664,6 +674,10 @@ impl E {
                 out.push_str(&format!("; {}]", n));
             }
             E::Builtin(f, reason) => out.push_str(&format!("{}(\"{}\")", f, reason)),
+            E::Return(v) => {
+                out.push_str("return ");
+                v.print(0, out);
+            }
         }
     }
 
@@ -884,8 +898,8 @@ struct Gen {
     structs: Vec<GStruct>,
     /// The enums declared so far.
     enums: Vec<GEnum>,
-    /// The roots of the places a `match` reads in an arm that binds a part of it, which nothing
-    /// in the arm changes (`core-calculus.md`, item 14).
+    /// The roots of the places a `match` reads, which nothing in any of its arms changes
+    /// (`core-calculus.md`, item 14).
     frozen: Vec<usize>,
     sigs: Vec<Sig>,
     /// The function being generated, which may call itself once when it has a measure.
@@ -1165,8 +1179,9 @@ impl Gen {
             Ty::Int(_) => {
                 let r = range?;
                 let span = r.hi.sub(r.lo).map_or(u128::MAX, |s| s.mag);
-                // A small range covered by its literals alone, now and then.
-                if span < 4 && self.rng.chance(60) {
+                // A small range covered by its literals alone, now and then, and an 8-bit type
+                // too, which a scrutinee is narrowed into ([`match-scrutinee-narrowing`]).
+                if (span < 4 && self.rng.chance(60)) || (span == 255 && self.rng.chance(25)) {
                     let mut out = Vec::new();
                     let mut n = r.lo;
                     while n <= r.hi {
@@ -1218,13 +1233,36 @@ impl Gen {
                     let r = self.binds[id].range?;
                     return Some((self.read(id), Some(r)));
                 }
-                let g = self.int_expr(Want::Exact(*t), depth + 1);
-                let u = match g.cls {
-                    Cls::One(u) => u,
-                    Cls::Lit => I64,
-                    Cls::Mixed => return None,
-                };
-                Some((g.e, Some(u.range())))
+                // An arithmetic scrutinee is narrowed into its type, which Tier 1 must prove
+                // ([`match-scrutinee-narrowing`]): one whose static range lies within the type,
+                // tried a few times, or a binding of the type read.
+                for _ in 0..6 {
+                    let m = self.mark();
+                    let g = self.int_expr(Want::Exact(*t), depth + 1);
+                    let u = match g.cls {
+                        Cls::One(u) => u,
+                        Cls::Lit => I64,
+                        Cls::Mixed => {
+                            self.restore(m);
+                            continue;
+                        }
+                    };
+                    let range = u.range();
+                    if range.lo <= g.r.lo && g.r.hi <= range.hi {
+                        return Some((g.e, Some(range)));
+                    }
+                    self.restore(m);
+                }
+                let names: Vec<usize> = self
+                    .visible()
+                    .into_iter()
+                    .filter(|&id| self.binds[id].ty == Ty::Int(*t))
+                    .collect();
+                if names.is_empty() {
+                    return None;
+                }
+                let id = *self.rng.pick(&names);
+                Some((self.read(id), Some(t.range())))
             }
             Ty::Array(..) | Ty::Struct(_) => None,
         }
@@ -1327,6 +1365,66 @@ impl Gen {
             E::If(c, a, b) => sub(c) || sub(a) || sub(b),
             E::Array(items) => items.iter().any(sub),
             E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
+            E::Return(x) => sub(x),
+        }
+    }
+
+    /// Makes, now and then, one branch of an `if` or one arm of a `match` in the expression
+    /// body `e` leave the function by `return`, with a value of its result type `t`: an arm
+    /// that binds no name, and another branch or arm still gives a value.
+    fn returns_in(&mut self, e: &mut E, t: &Ty) {
+        match e {
+            E::If(c, a, b) => {
+                self.returns_in(c, t);
+                if self.rng.chance(25) {
+                    let v = E::Return(Box::new(self.value(t, 1)));
+                    if self.rng.chance(50) {
+                        **a = v;
+                    } else {
+                        **b = v;
+                    }
+                    return;
+                }
+                self.returns_in(a, t);
+                self.returns_in(b, t);
+            }
+            E::Match(s, arms) => {
+                self.returns_in(s, t);
+                let free: Vec<usize> = (0..arms.len())
+                    .filter(|&k| binds_nothing(&arms[k].0))
+                    .collect();
+                if arms.len() > 1 && !free.is_empty() && self.rng.chance(25) {
+                    let k = *self.rng.pick(&free);
+                    arms[k].1 = E::Return(Box::new(self.value(t, 1)));
+                    return;
+                }
+                for (_, x) in arms.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Index(a, b) | E::Bin(_, a, b) => {
+                self.returns_in(a, t);
+                self.returns_in(b, t);
+            }
+            E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
+                self.returns_in(x, t)
+            }
+            E::Construct(_, fields) | E::Variant(_, _, fields) => {
+                for (_, x) in fields.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Call(_, args) => {
+                for (_, x) in args.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Array(items) => {
+                for x in items.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Lit(_) | E::Name(_) | E::Builtin(..) | E::Return(_) => {}
         }
     }
 
@@ -1344,9 +1442,8 @@ impl Gen {
         for p in &pats {
             self.scopes.push(Vec::new());
             let ids = self.bind_pattern(p);
-            let binds = ids.iter().any(Option::is_some);
             let frozen = self.frozen.len();
-            if let (true, Some(r)) = (binds, root) {
+            if let Some(r) = root {
                 self.frozen.push(r);
             }
             let names: Vec<String> = ids
@@ -1432,7 +1529,7 @@ impl Gen {
             self.scopes.push(Vec::new());
             let ids = self.bind_pattern(p);
             let frozen = self.frozen.len();
-            if let (true, Some(r)) = (ids.iter().any(Option::is_some), root) {
+            if let Some(r) = root {
                 self.frozen.push(r);
             }
             let body = self.block(depth + 1, None, Vec::new(), None);
@@ -3331,7 +3428,8 @@ impl Gen {
         let expression = first.is_empty() && ret_range.is_none() && self.rng.chance(20);
         let body = match (&ret, expression) {
             (Some(t), true) => {
-                let e = self.full(t, 0);
+                let mut e = self.full(t, 0);
+                self.returns_in(&mut e, t);
                 if self.pending.is_empty() {
                     Body::Expr(e)
                 } else {
@@ -4013,4 +4111,9 @@ fn resolve(b: &Bound, params: &[(String, bool, Domain)], values: &[Option<Value>
             }
         }
     }
+}
+
+/// Whether the pattern text `p` binds no name: every field it names is bound to `_`.
+fn binds_nothing(p: &str) -> bool {
+    p.split(": ").skip(1).all(|rest| rest.starts_with('_'))
 }

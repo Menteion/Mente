@@ -731,6 +731,15 @@ pub fn below(n: i8) -> i8 {
             "all()",
         ],
     ),
+    // An integer scrutinee is narrowed into its type before any arm: a value outside it
+    // traps as a narrowing does, though the arms cover the type, and never reaches the last
+    // arm, which has no test.
+    (
+        "pub fn f(x: u8) -> u8 = match x + 1 {\n  0 => 1\n  255 => 3\n  _ => 2\n}\npub fn g(x: i8) -> i8 = match -x {\n  -128 => 0\n  _ => 1\n}\npub fn h(x: u8) -> u8 = match x - 1 {\n  0 => 7\n  _ => 8\n}",
+        &[
+            "f(255)", "f(254)", "f(0)", "g(-128)", "g(-127)", "g(127)", "h(0)", "h(1)", "h(9)",
+        ],
+    ),
 ];
 
 #[cfg(test)]

@@ -445,6 +445,23 @@ fn test_mn_run_prints_a_result_or_a_trap() {
     let garbled = mn(&dir, &["run", "prog.mn", "--call", "half(4"]);
     assert_eq!(garbled.status.code(), Some(2));
     assert!(text(&garbled.stderr).contains("`--call` takes a call"));
+    // A variant reads with a space before its payload, as a struct does; one that holds
+    // nothing, given empty parentheses, is refused with what to write instead.
+    fs::write(
+        dir.join("enum.mn"),
+        "module t\npub enum M {\n  Z\n  One(a: u8)\n}\npub fn id(m: M) -> M = m\n",
+    )
+    .unwrap();
+    let spaced = mn(&dir, &["run", "enum.mn", "--call", "id(M.One (a: 1))"]);
+    assert_eq!(text(&spaced.stdout), "M.One(a: 1)\n");
+    let empty = mn(&dir, &["run", "enum.mn", "--call", "id(M.Z())"]);
+    assert_eq!(empty.status.code(), Some(2));
+    assert!(
+        text(&empty.stderr)
+            .contains("a variant that holds nothing is written without parentheses, `M.Z`"),
+        "{}",
+        text(&empty.stderr)
+    );
     let bad = mn(&dir, &["run", "bad.mn"]);
     assert_eq!(bad.status.code(), Some(2));
     assert!(text(&bad.stderr).contains("E0201"));
