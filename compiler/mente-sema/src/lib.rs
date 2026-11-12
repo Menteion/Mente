@@ -1744,4 +1744,4 @@ pub struct Rec {
 }
 
 #[cfg(test)]
-mod overflow_checks;
+mod overflow_traps;

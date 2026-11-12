@@ -16,9 +16,9 @@
 //     [--held-out <dir>] [--concurrency 8] [--mn target/release/mn] [--native] [--rustc rustc]
 //     [--odin odin] [--sandbox benchmark/harness/sandbox.sh] [--out bench-out]
 //
-// Agent programs can read files and open sockets, so in CI it is given --sandbox, which runs every
+// Agent programs can read files and open sockets, so it runs only with --sandbox, which runs every
 // agent build and agent program with least privilege (benchmark/harness/sandbox.sh): no network,
-// and the API key out of reach.
+// and the API key out of reach. It refuses to run without it.
 //
 // It calls the Claude Messages API with the key in ANTHROPIC_API_KEY, and stops before any call
 // that could take its spending past the budget, in US dollars: each call reserves the most it can
@@ -281,6 +281,9 @@ async function main(): Promise<void> {
   checkOutside(out, tools);
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
+  // Agent programs run while this process holds the key, so never outside the sandbox: an empty
+  // --sandbox once meant every build ran unconfined.
+  if (!tools.sandbox) throw new Error("pass --sandbox: the agents' programs run while this process holds the API key");
 
   // The toolchains, checked against their pins and recorded.
   const versions: Partial<Record<Lang, string>> = {};

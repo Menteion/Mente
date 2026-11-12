@@ -32,9 +32,20 @@
 /perf/run.mjs @Dancraft3746
 /perf/lib.mjs @Dancraft3746
 
-# The benchmark corpus's lock and its checker, and the sandbox agent-written code runs in.
+# The benchmark corpus's lock and its checker, the sandbox agent-written code runs in and its
+# proof, the scripts that run agent code beside the API key, and the toolchains they pin.
 /benchmark/check.mjs @Dancraft3746
 /benchmark/corpus.lock @Dancraft3746
 /benchmark/harness/sandbox.sh @Dancraft3746
 /benchmark/harness/sandbox-check.ts @Dancraft3746
 /benchmark/harness/build.ts @Dancraft3746
+/benchmark/harness/bench.ts @Dancraft3746
+/benchmark/harness/prelim.ts @Dancraft3746
+/benchmark/harness/probe.ts @Dancraft3746
+/benchmark/harness/fixtures.ts @Dancraft3746
+/benchmark/harness/toolchains.json @Dancraft3746
+
+# The gate tests of the compiler's own suite: the dependency policy, the lock's allowlist, English
+# text and the workflow policy's place in the Documentation job; and each crate's overflow test.
+/compiler/mente-cli/src/gates.rs @Dancraft3746
+/compiler/*/src/overflow_traps.rs @Dancraft3746

@@ -21,28 +21,55 @@
 // - Every milestone ROADMAP.md marks done on the base has its tag, and every instrument
 //   docs/design-brief.md section 7.7 schedules for a finished milestone has its checks required.
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
-import { CJK_RANGES, badSubject, cjkLines, problems } from "./lib/commits.mjs";
-import { deletedRegexes, exactRegex, expected, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
+import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
+import { deletedRegexes, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/// Every check of the policy counts itself when it runs, and the suite fails when fewer ran than
+/// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
+/// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
+/// FLOOR equal to the checks this file declares.
+const FLOOR = 35;
+let ran = 0;
+function check(name, fn) {
+  test(name, (...args) => {
+    ran++;
+    return fn(...args);
+  });
+}
+after(() => {
+  assert.ok(ran >= FLOOR, `${ran} of the policy's ${FLOOR} checks ran: a skip or a filter left the rest out`);
+});
 const ROOT = path.resolve(HERE, "../..");
 const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
 const git = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 const WORKFLOWS = ".github/workflows";
 const REQUIRED_FILE = ".github/required-checks.txt";
 const WATCH = "steps.watch.outputs.run != 'false'";
-/// The conditions a step after the watch may carry: the watch's decision, alone or after one of the
-/// status functions that still run it when an earlier step failed.
-const WATCH_FORMS = [WATCH, `always() && ${WATCH}`, `!cancelled() && ${WATCH}`, `failure() && ${WATCH}`];
+/// The conditions a step after the watch may carry: the watch's decision, alone or after
+/// `!cancelled()`, which still runs a check when an earlier one failed.
+const WATCH_FORMS = [WATCH, `!cancelled() && ${WATCH}`];
+/// The conditions that run a step only when another failed, or even when the run was cancelled:
+/// for a step that keeps or reports what the others found, never for a check, which they would
+/// skip whenever the job is passing.
+const REPORT_FORMS = [`always() && ${WATCH}`, `failure() && ${WATCH}`];
+/// The steps of watch jobs, beside the uploads of artifacts, that only report: workflow, job, step.
+const REPORT_STEPS = new Set(["generated.yml#paths#Summary"]);
+const isReport = (file, id, s) => String(s.uses ?? "").startsWith("actions/upload-artifact@") || REPORT_STEPS.has(stepKey(file, id, s));
+/// The shells a step may run in, named bare: a shell given as a template (`true {0}`) could run
+/// nothing and pass.
+const SHELLS = new Set(["bash", "sh", "pwsh"]);
 /// The one job-level condition a required job may carry: it holds on both events a required check
 /// reports on, so the job is never skipped there.
 const REQUIRED_JOB_IF = "github.event_name == 'pull_request' || github.event_name == 'merge_group'";
@@ -139,7 +166,7 @@ const hasWatch = (job) => steps(job).some((s) => s.id === "watch" || /watch\.mjs
 
 // ------------------------------------------------------------------- safety of every workflow
 
-test("no workflow runs on pull_request_target or workflow_run", () => {
+check("no workflow runs on pull_request_target or workflow_run", () => {
   for (const { file, doc } of workflows()) {
     for (const event of ["pull_request_target", "workflow_run"]) {
       assert.ok(!(event in triggers(doc)), `${file} runs on ${event}, which runs with the base's secrets and a write token`);
@@ -151,7 +178,7 @@ const readOnly = (permissions) =>
   permissions === "read-all" ||
   (permissions !== null && typeof permissions === "object" && Object.values(permissions).every((v) => v === "read" || v === "none"));
 
-test("every workflow sets its permissions at the top, read-only wherever a required job runs", () => {
+check("every workflow sets its permissions at the top, read-only wherever a required job runs", () => {
   for (const { file, doc } of workflows()) {
     assert.ok(doc.permissions !== undefined && doc.permissions !== null, `${file} has no top-level permissions:`);
     assert.notEqual(doc.permissions, "write-all", `${file} gives every permission`);
@@ -164,7 +191,7 @@ test("every workflow sets its permissions at the top, read-only wherever a requi
   }
 });
 
-test("every action is pinned to a full commit SHA", () => {
+check("every action is pinned to a full commit SHA", () => {
   for (const { file, id, job } of allJobs()) {
     const uses = [job.uses, ...steps(job).map((s) => s.uses)].filter((u) => u !== undefined);
     for (const u of uses) {
@@ -173,7 +200,7 @@ test("every action is pinned to a full commit SHA", () => {
   }
 });
 
-test("every checkout drops its credentials", () => {
+check("every checkout drops its credentials", () => {
   for (const { file, id, job } of allJobs()) {
     for (const s of steps(job)) {
       if (String(s.uses ?? "").startsWith("actions/checkout@")) {
@@ -183,7 +210,7 @@ test("every checkout drops its credentials", () => {
   }
 });
 
-test("no script holds an expression: values reach scripts through env", () => {
+check("no script holds an expression: values reach scripts through env", () => {
   for (const { file, id, job } of allJobs()) {
     for (const s of steps(job)) {
       const where = `${file}, job ${id}, step "${s.name ?? s.uses ?? String(s.run).split("\n")[0]}"`;
@@ -196,32 +223,54 @@ test("no script holds an expression: values reach scripts through env", () => {
   }
 });
 
-test("overflow checks stay on in every build", () => {
-  for (const { file } of workflows()) {
-    assert.doesNotMatch(
-      read(`${WORKFLOWS}/${file}`),
-      /CARGO_PROFILE_\w+_OVERFLOW_CHECKS|overflow-checks/,
-      `${file} sets overflow checks itself: [profile.release] in Cargo.toml is their one source`,
-    );
+/// Any spelling of the overflow-checks flag rustc and cargo accept: a hyphen or an underscore, in
+/// any case (`-C overflow_checks=off` works as well as `overflow-checks`).
+const OVERFLOW = /overflow[-_]checks/i;
+/// The cargo profile variables a workflow may set, each with its reason.
+const CARGO_PROFILE_ENV = new Map([
+  // The fuzzer's release build also asserts what a debug build asserts (fuzz.yml).
+  ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", "the fuzzer's debug assertions"],
+]);
+
+check("overflow checks stay on in every build", () => {
+  for (const { file, doc } of workflows()) {
+    assert.doesNotMatch(read(`${WORKFLOWS}/${file}`), OVERFLOW, `${file} names overflow checks: [profile.release] in Cargo.toml is their one source`);
+    const envs = [doc.env, ...Object.values(doc.jobs ?? {}).flatMap((j) => [j.env, ...steps(j).map((s) => s.env)])].filter(Boolean);
+    for (const env of envs) {
+      for (const [name, value] of Object.entries(env)) {
+        if (/^CARGO_PROFILE_/.test(name)) assert.ok(CARGO_PROFILE_ENV.has(name), `${file} sets ${name}, a profile Cargo.toml does not show`);
+        if (/RUSTFLAGS$|^CARGO_/.test(name)) assert.doesNotMatch(String(value), /overflow/i, `${file}: ${name} touches overflow checks`);
+      }
+    }
+  }
+  for (const f of [...tracked()].filter((f) => /(^|\/)\.cargo\//.test(f))) {
+    assert.doesNotMatch(read(f), OVERFLOW, `${f} names overflow checks`);
   }
   const manifests = new Map([...tracked()].filter((f) => f === "Cargo.toml" || f.endsWith("/Cargo.toml")).map((f) => [f, read(f)]));
   assert.deepEqual(overflowProblems(manifests, [...tracked()]), []);
-  // What the check stops: a package's own profile, a release profile without the checks, a
-  // .cargo/config anywhere.
+  // What the check stops: a package's own profile, in either spelling and quoted, a release profile
+  // without the checks, a .cargo/config anywhere.
   const root = "[profile.release]\noverflow-checks = true\n";
-  assert.deepEqual(overflowProblems(new Map([["Cargo.toml", root]]), []), []);
-  assert.equal(overflowProblems(new Map([["Cargo.toml", `${root}\n[profile.release.package.mente-mir]\noverflow-checks = false\n`]]), []).length, 1);
-  assert.equal(overflowProblems(new Map([["Cargo.toml", "[profile.release]\nopt-level = 3\n"]]), []).length, 1);
-  assert.equal(overflowProblems(new Map([["Cargo.toml", root]]), ["compiler/x/.cargo/config.toml"]).length, 1);
+  const one = (text, files = []) => overflowProblems(new Map([["Cargo.toml", text]]), files).length;
+  assert.equal(one(root), 0);
+  assert.equal(one(`${root}\n[profile.release.package.mente-mir]\noverflow-checks = false\n`), 1);
+  assert.equal(one(`${root}\n[profile.release.package.mente-sema]\n"overflow-checks" = false\n`), 1);
+  assert.equal(one(`${root}\n[profile.dev]\n'Overflow_Checks' = false\n`), 1);
+  assert.equal(one(`${root}\n[profile.release.package]\nmente-mir = { overflow-checks = false }\n`), 1);
+  assert.equal(one("[profile.release]\nopt-level = 3\n"), 1);
+  assert.equal(one(root, ["compiler/x/.cargo/config.toml"]), 1);
+  assert.equal(one(root, ["compiler/x/.cargo/config"]), 1);
 });
 
-/// Why some build could run without overflow checks: a profile of any manifest that turns them off,
-/// a root [profile.release] that does not turn them on, or a .cargo/config anywhere in the tree,
-/// which can change a profile where Cargo.toml does not show it.
+/// Why some build could run without overflow checks: any setting of the flag in any manifest but
+/// `true`, in any spelling or quoting, a root [profile.release] that does not turn it on, or a
+/// .cargo/config anywhere in the tree, which can change a profile where Cargo.toml does not show it.
 export function overflowProblems(manifests, files) {
   const found = [];
   for (const [file, text] of manifests) {
-    if (/overflow-checks\s*=\s*false/.test(text)) found.push(`${file} turns overflow checks off in a profile`);
+    for (const m of text.matchAll(/["']?overflow[-_]checks["']?\s*=\s*([^\s,}#]+)/gi)) {
+      if (m[1] !== "true") found.push(`${file} sets overflow checks to ${m[1]}`);
+    }
   }
   const release = /^\[profile\.release\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(manifests.get("Cargo.toml") ?? "");
   if (!/^overflow-checks\s*=\s*true\s*$/m.test(release?.[1] ?? "")) found.push("Cargo.toml's [profile.release] does not set overflow-checks = true");
@@ -229,12 +278,12 @@ export function overflowProblems(manifests, files) {
   return found;
 }
 
-test("every compiler crate proves its overflow checks in a release build", () => {
+check("every compiler crate proves its overflow checks in a release build", () => {
   const crates = [...tracked()].filter((f) => /^compiler\/[^/]+\/Cargo\.toml$/.test(f)).map((f) => path.posix.dirname(f));
   assert.ok(crates.length > 0);
   for (const dir of crates) {
     const has = filesUnder(`${dir}/src`).some((f) => f.endsWith(".rs") && read(f).includes("fn test_arithmetic_overflow_panics_in_this_crate"));
-    assert.ok(has, `${dir} has no test_arithmetic_overflow_panics_in_this_crate (src/overflow_checks.rs)`);
+    assert.ok(has, `${dir} has no test_arithmetic_overflow_panics_in_this_crate (src/overflow_traps.rs)`);
   }
   const job = workflows().find((w) => w.file === "ci.yml").doc.jobs["tier1-latency"];
   assert.ok(
@@ -244,7 +293,7 @@ test("every compiler crate proves its overflow checks in a release build", () =>
   assert.ok(requiredChecks().includes("Tier-1 latency"));
 });
 
-test("every measured benchmark run proves its sandbox first", () => {
+check("every measured benchmark run proves its sandbox first", () => {
   let measured = 0;
   for (const { file, id, job } of allJobs()) {
     const all = steps(job);
@@ -265,7 +314,7 @@ test("every measured benchmark run proves its sandbox first", () => {
 const holdsSecret = (value) =>
   [...String(value).matchAll(/\$\{\{([\s\S]*?)\}\}/g)].some(([, e]) => /\bsecrets\./.test(e) && !/^\s*secrets\.\w+\s*[!=]=\s*''\s*$/.test(e));
 
-test("a job that holds a secret runs agent code only in its proven sandbox", () => {
+check("a job that holds a secret runs agent code only in its proven sandbox", () => {
   const crates = workspace();
   let guarded = 0;
   for (const { file, doc, id, job } of allJobs()) {
@@ -285,7 +334,7 @@ test("a job that holds a secret runs agent code only in its proven sandbox", () 
   assert.ok(guarded >= 2, "the benchmark and the preliminary runs hold the key beside mn");
 });
 
-test("the Documentation job lints every workflow with actionlint and shellcheck, both pinned by checksum", () => {
+check("the Documentation job lints every workflow with actionlint and shellcheck, both pinned by checksum", () => {
   const job = workflows().find((w) => w.file === "ci.yml").doc.jobs.docs;
   const env = Object.assign({}, ...steps(job).map((s) => s.env ?? {}));
   for (const tool of ["ACTIONLINT", "SHELLCHECK"]) {
@@ -321,13 +370,23 @@ const GATE_FILES = [
   "/benchmark/harness/sandbox.sh",
   "/benchmark/harness/sandbox-check.ts",
   "/benchmark/harness/build.ts",
+  "/benchmark/harness/bench.ts",
+  "/benchmark/harness/prelim.ts",
+  "/benchmark/harness/probe.ts",
+  "/benchmark/harness/fixtures.ts",
+  "/benchmark/harness/toolchains.json",
+  "/compiler/mente-cli/src/gates.rs",
+  "/compiler/*/src/overflow_traps.rs",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
-/// it, `/file` that file.
-const owns = (pattern, file) => (pattern.endsWith("/") ? `/${file}`.startsWith(pattern) : `/${file}` === pattern);
+/// it, `/file` that file, and `*` any name within one directory.
+const owns = (pattern, file) => {
+  const body = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
+  return new RegExp(`^${body}${pattern.endsWith("/") ? ".*" : ""}$`).test(`/${file}`);
+};
 
-test("CODEOWNERS gives the gate files, and only them, to their owner", () => {
+check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
   const entries = read(".github/CODEOWNERS")
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -352,6 +411,13 @@ test("CODEOWNERS gives the gate files, and only them, to their owner", () => {
     "benchmark/check.mjs",
     "benchmark/harness/sandbox.sh",
     "benchmark/harness/sandbox-check.ts",
+    "benchmark/harness/build.ts",
+    "benchmark/harness/bench.ts",
+    "benchmark/harness/prelim.ts",
+    "benchmark/harness/probe.ts",
+    "benchmark/harness/toolchains.json",
+    "compiler/mente-cli/src/gates.rs",
+    ...[...tracked()].filter((f) => /^compiler\/[^/]+\/src\/overflow_traps\.rs$/.test(f)),
   ];
   for (const f of inputs) {
     assert.ok(tracked().has(f), `${f}, a gate input, is not in the repository`);
@@ -360,16 +426,35 @@ test("CODEOWNERS gives the gate files, and only them, to their owner", () => {
   assert.ok(owns("/.github/", ".github/workflows/ci.yml") && !owns("/perf/run.mjs", "perf/run.test.mjs") && owns("/Cargo.toml", "Cargo.toml"));
 });
 
+/// The sandbox every job that confines agent code names, and nothing else may change.
+const SANDBOX = "benchmark/harness/sandbox.sh";
+
+check("every job that confines agent code names the one sandbox", () => {
+  let confining = 0;
+  for (const { file, doc, id, job } of allJobs()) {
+    if (!steps(job).some((s) => /--sandbox "\$SANDBOX"/.test(String(s.run ?? "")))) continue;
+    confining++;
+    const where = `${file}, job ${id}`;
+    assert.equal(job.env?.SANDBOX, SANDBOX, `${where}: SANDBOX is not ${SANDBOX}: an empty one runs agent code unconfined`);
+    assert.ok(!(doc.env && "SANDBOX" in doc.env), `${file} sets SANDBOX for every job`);
+    for (const s of steps(job)) {
+      assert.ok(!(s.env && "SANDBOX" in s.env), `${stepKey(file, id, s)} sets its own SANDBOX`);
+      assert.doesNotMatch(String(s.run ?? ""), /\bSANDBOX=/, `${stepKey(file, id, s)} writes SANDBOX for the steps after it`);
+    }
+  }
+  assert.ok(confining >= 3, "the benchmark, the preliminary runs and the harness confine agent code");
+});
+
 // ------------------------------------------------------------------------- the required checks
 
-test("the required checks are listed once each", () => {
+check("the required checks are listed once each", () => {
   const names = requiredChecks();
   assert.ok(names.length > 0);
   const twice = names.filter((n, k) => names.indexOf(n) !== k);
   assert.deepEqual(twice, [], `${REQUIRED_FILE} lists these twice`);
 });
 
-test("no two jobs that run on pull requests report a check of the same name", () => {
+check("no two jobs that run on pull requests report a check of the same name", () => {
   const seen = new Map();
   for (const { file, doc, id, names } of allJobs()) {
     const on = triggers(doc);
@@ -381,7 +466,7 @@ test("no two jobs that run on pull requests report a check of the same name", ()
   }
 });
 
-test("every required check is one job that runs on every pull request and in the merge queue", () => {
+check("every required check is one job that runs on every pull request and in the merge queue", () => {
   const jobs = allJobs();
   for (const name of requiredChecks()) {
     const producers = jobs.filter((j) => j.names.includes(name));
@@ -406,15 +491,20 @@ test("every required check is one job that runs on every pull request and in the
   }
 });
 
-test("no step of a required job can let it pass without checking", () => {
+check("no step of a required job can let it pass without checking", () => {
   for (const { file, id, job } of requiredJobs()) {
     const watched = hasWatch(job);
     for (const [k, s] of steps(job).entries()) {
       const key = stepKey(file, id, s);
       if ("continue-on-error" in s) assert.ok(CONTINUE_ON_ERROR.has(key), `${key}: continue-on-error on a step of a required job`);
+      if (String(s.uses ?? "").startsWith("./") || String(s.uses ?? "").startsWith("docker://")) {
+        assert.fail(`${key}: a required job runs ${s.uses}, whose steps the policy cannot read`);
+      }
       if (watched && k <= 1) continue;
       if (watched) {
-        assert.ok(WATCH_FORMS.includes(normalize(s.if ?? "")), `${key}: if: ${s.if ?? "(none)"} is not one of ${WATCH_FORMS.join(" | ")}`);
+        const condition = normalize(s.if ?? "");
+        const allowed = WATCH_FORMS.includes(condition) || (REPORT_FORMS.includes(condition) && isReport(file, id, s));
+        assert.ok(allowed, `${key}: if: ${s.if ?? "(none)"} is not ${WATCH_FORMS.join(" or ")}${isReport(file, id, s) ? ` or ${REPORT_FORMS.join(" or ")}` : ""}`);
       } else if ("if" in s) {
         assert.equal(normalize(s.if), STEP_CONDITIONS.get(key), `${key}: if: ${s.if} could skip a step of a required job`);
       }
@@ -422,7 +512,21 @@ test("no step of a required job can let it pass without checking", () => {
   }
 });
 
-test("the matrix names a check as GitHub does", () => {
+check("every step runs in a shell named bare", () => {
+  for (const { file, doc } of workflows()) {
+    const shell = doc.defaults?.run?.shell;
+    if (shell !== undefined) assert.ok(SHELLS.has(shell), `${file}: defaults.run.shell: ${shell}`);
+    for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+      const jobShell = job.defaults?.run?.shell;
+      if (jobShell !== undefined) assert.ok(SHELLS.has(jobShell), `${file}, job ${id}: defaults.run.shell: ${jobShell}`);
+      for (const s of steps(job)) {
+        if ("shell" in s) assert.ok(SHELLS.has(s.shell), `${stepKey(file, id, s)}: shell: ${s.shell}`);
+      }
+    }
+  }
+});
+
+check("the matrix names a check as GitHub does", () => {
   assert.deepEqual(checkNames("a", { name: "Fuzz", strategy: { matrix: { include: [{ name: "x86-64 Linux" }] } } }), ["Fuzz (x86-64 Linux)"]);
   assert.deepEqual(checkNames("a", { name: "R (${{ matrix.name }})", strategy: { matrix: { include: [{ name: "L", os: "u" }] } } }), ["R (L)"]);
   assert.deepEqual(checkNames("job", { strategy: { matrix: { shard: [0, 1] } } }), ["job (0)", "job (1)"]);
@@ -431,7 +535,7 @@ test("the matrix names a check as GitHub does", () => {
 
 // ------------------------------------------------------------------ the watch and its path lists
 
-test("every instrument workflow decides at its first step, and every later step obeys", () => {
+check("every instrument workflow decides at its first step, and every later step obeys", () => {
   const sections = parsePaths(read(PATHS_FILE));
   const required = new Set(requiredChecks());
   for (const { file, id, job, names } of allJobs()) {
@@ -447,9 +551,13 @@ test("every instrument workflow decides at its first step, and every later step 
     const watch = all[1];
     assert.equal(watch?.id, "watch", `${where}: the step after the checkout is not the watch`);
     assert.equal(String(watch.run).trim(), `node .github/scripts/watch.mjs ${file}`, `${where}: the watch step reads another list`);
-    for (const key of ["if", "continue-on-error", "env"]) assert.ok(!(key in watch), `${where}: the watch step carries ${key}:`);
+    assert.deepEqual(Object.keys(watch).sort(), ["id", "name", "run"], `${where}: the watch step carries more than its name, id and command`);
     for (const s of all.slice(2)) {
-      assert.ok(WATCH_FORMS.includes(normalize(s.if ?? "")), `${where}, step "${s.name ?? s.uses ?? s.run}": its if: is not one of the watch's forms`);
+      const condition = normalize(s.if ?? "");
+      assert.ok(
+        WATCH_FORMS.includes(condition) || (REPORT_FORMS.includes(condition) && isReport(file, id, s)),
+        `${where}, step "${s.name ?? s.uses ?? s.run}": its if: is not one of the watch's forms`,
+      );
     }
   }
   for (const file of sections.keys()) {
@@ -566,6 +674,22 @@ export function repoPaths(texts) {
   return out;
 }
 
+/// The files the crates in these directories compile in with `include_str!` or `include_bytes!`,
+/// wherever they lie: the language card is part of `mn`.
+export function includedFiles(dirs) {
+  const out = new Set();
+  for (const dir of dirs) {
+    for (const f of filesUnder(dir).filter((f) => f.endsWith(".rs"))) {
+      for (const m of read(f).matchAll(/include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)/g)) {
+        const target = path.posix.normalize(path.posix.join(path.posix.dirname(f), m[1]));
+        assert.ok(tracked().has(target), `${f} includes ${m[1]}, which is not in the repository`);
+        out.add(target);
+      }
+    }
+  }
+  return out;
+}
+
 /// The corpora the compiler reads for an instrument, each from the item of the source that names
 /// it: their string literals that are directories of the repository, as written, below `../..`,
 /// or below `benchmark/`, the most specific of them.
@@ -605,7 +729,7 @@ export function codeCorpus(file, marker) {
   return [...dirs].filter((d) => ![...dirs].some((e) => e !== d && e.startsWith(`${d}/`)));
 }
 
-test("the path lists read as the watch reads them", () => {
+check("the path lists read as the watch reads them", () => {
   const sections = parsePaths(read(PATHS_FILE));
   assert.ok(sections.size > 0);
   for (const [file, section] of sections) {
@@ -616,7 +740,7 @@ test("the path lists read as the watch reads them", () => {
   }
 });
 
-test("every path list names everything its jobs build, run and read", () => {
+check("every path list names everything its jobs build, run and read", () => {
   const sections = parsePaths(read(PATHS_FILE));
   const crates = workspace();
   for (const [file, section] of sections) {
@@ -626,7 +750,9 @@ test("every path list names everything its jobs build, run and read", () => {
       const { cargo, names } = cratesBuilt(texts, crates);
       if (cargo) {
         for (const f of ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]) needed.add(f);
-        for (const dir of closure(crates, names)) filesUnder(dir).forEach((f) => needed.add(f));
+        const dirs = closure(crates, names);
+        for (const dir of dirs) filesUnder(dir).forEach((f) => needed.add(f));
+        includedFiles(dirs).forEach((f) => needed.add(f));
       }
       repoPaths(texts).forEach((f) => needed.add(f));
     }
@@ -640,7 +766,7 @@ test("every path list names everything its jobs build, run and read", () => {
   }
 });
 
-test("every instrument's corpus is read from the source that defines it", () => {
+check("every instrument's corpus is read from the source that defines it", () => {
   assert.deepEqual(codeCorpus("compiler/mente-cli/src/fuzz.rs", "const SEED_DIRS").sort(), [
     "benchmark/prelim",
     "benchmark/probe",
@@ -654,7 +780,7 @@ test("every instrument's corpus is read from the source that defines it", () => 
   assert.ok(agents.includes("benchmark/tasks") && agents.some((d) => d.startsWith("benchmark/probe/")), agents.join(", "));
 });
 
-test("the crates and paths a job uses are read from its scripts", () => {
+check("the crates and paths a job uses are read from its scripts", () => {
   const crates = workspace();
   const built = (run) => cratesBuilt([run], crates);
   assert.deepEqual([...built("cargo build --release --locked --bin mn").names], ["mente-cli"]);
@@ -670,7 +796,7 @@ test("the crates and paths a job uses are read from its scripts", () => {
   assert.ok(![...named].some((f) => f.startsWith("perf/")), "a comment names nothing");
 });
 
-test("no script a required job runs can skip its own main", () => {
+check("no script a required job runs can skip its own main", () => {
   const guard = /process\.argv\[1\][^\n]*import\.meta\.url|import\.meta\.url[^\n]*process\.argv\[1\]/;
   const scripts = new Set([".github/scripts/watch.mjs", ".github/scripts/commits.mjs", ".github/scripts/mutants-floor.mjs"]);
   for (const { doc, job } of requiredJobs()) {
@@ -683,7 +809,7 @@ test("no script a required job runs can skip its own main", () => {
   assert.ok(scripts.has("benchmark/check.mjs") && scripts.has("perf/lib.mjs"), "the scripts of the required jobs are read");
 });
 
-test("the watch reads globs as GitHub's paths filters do", () => {
+check("the watch reads globs as GitHub's paths filters do", () => {
   assert.ok(matches(["compiler/**"], "compiler/mente-cli/src/main.rs"));
   assert.ok(!matches(["compiler/*"], "compiler/mente-cli/src/main.rs"));
   assert.ok(matches(["compiler/*/Cargo.toml"], "compiler/mente-mir/Cargo.toml"));
@@ -695,7 +821,7 @@ test("the watch reads globs as GitHub's paths filters do", () => {
   for (const f of [".cargo/config.toml", ".cargo/mutants.toml", "rust-toolchain", "rust-toolchain.toml", PATHS_FILE]) assert.ok(matches(ALWAYS, f), f);
 });
 
-test("the path lists' format is enforced", () => {
+check("the path lists' format is enforced", () => {
   const ok = parsePaths("# c\n[a.yml]\nmerge_group: skip\nx/**\n\n[b.yml]\ny # why\n");
   assert.deepEqual(ok.get("a.yml"), { mergeGroup: "skip", patterns: ["x/**"] });
   assert.deepEqual(ok.get("b.yml"), { mergeGroup: "run", patterns: ["y"] });
@@ -704,7 +830,7 @@ test("the path lists' format is enforced", () => {
   }
 });
 
-test("the watch runs an instrument exactly when a path it watches changed", () => {
+check("the watch runs an instrument exactly when a path it watches changed", () => {
   const section = { mergeGroup: "run", patterns: ["compiler/**", "Cargo.lock"] };
   const heavy = { mergeGroup: "skip", patterns: ["compiler/**"] };
   const pr = { pull_request: { base: { sha: "b" }, head: { sha: "h" } } };
@@ -731,7 +857,7 @@ test("the watch runs an instrument exactly when a path it watches changed", () =
   assert.throws(() => decide(section, "pull_request", {}, diff([])), /no base and head/);
 });
 
-test("the watch CLI decides on a real history, through any path, and fails rather than say nothing", () => {
+check("the watch CLI decides on a real history, through any path, and fails rather than say nothing", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-watch-"));
   try {
     const sh = (...args) =>
@@ -781,7 +907,7 @@ test("the watch CLI decides on a real history, through any path, and fails rathe
 
 // ------------------------------------------------------------------------------ the Commits job
 
-test("the Commits check refuses unfinished subjects, CJK text and a changed base", () => {
+check("the Commits check refuses unfinished subjects, CJK text and a changed base", () => {
   for (const s of ["WIP: parse enums", "wip", "Wip parse", "[WIP] parse", "(wip) x", "Draft: enums", "[Draft] enums", "fixup! Parse", "fixup parse", "Fixup: parse", "squash! x", "squash: x", "[squash] x", "squash", "amend! y"]) {
     assert.ok(badSubject(s), s);
   }
@@ -812,8 +938,20 @@ test("the Commits check refuses unfinished subjects, CJK text and a changed base
   assert.match(problems([{ sha: "1234567", subject: "wip\n::error::x", message: "" }], null)[0], /"wip\\n::error::x"/);
 });
 
-test("the Commits check fails a pull request whose base was changed", () => {
+check("the Commits check fails on every event while a base change is newer than the head's push", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-commits-"));
+  // A stand-in for the GitHub API at GITHUB_API_URL, as the runner sets it: the pull request's
+  // timeline and its head commits' workflow runs.
+  const api = { timeline: [], runs: new Map() };
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    let body;
+    if (url.pathname === "/repos/o/r/issues/7/timeline") body = api.timeline;
+    else if (url.pathname === "/repos/o/r/actions/runs") body = { workflow_runs: api.runs.get(url.searchParams.get("head_sha")) ?? [] };
+    res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
+    res.end(JSON.stringify(body ?? {}));
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
   try {
     const sh = (...args) =>
       execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
@@ -822,40 +960,81 @@ test("the Commits check fails a pull request whose base was changed", () => {
     sh("add", "-A");
     sh("commit", "-q", "-m", "Base");
     const base = sh("rev-parse", "HEAD");
-    fs.writeFileSync(path.join(dir, "a"), "b\n");
-    sh("commit", "-q", "-am", "Change a");
-    const head = sh("rev-parse", "HEAD");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
-    const run = (payload) => {
-      const event = path.join(dir, "event.json");
-      fs.writeFileSync(event, JSON.stringify({ pull_request: { base: { sha: base }, head: { sha: head } }, ...payload }));
-      return spawnSync(process.execPath, [path.join(HERE, "commits.mjs")], {
-        cwd: dir,
-        encoding: "utf8",
-        env: { ...env, GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: event, PR_TITLE: "Title", PR_BODY: "Body" },
-      });
+    const push = (text) => {
+      fs.writeFileSync(path.join(dir, "a"), text);
+      sh("commit", "-q", "-am", "Change a");
+      return sh("rev-parse", "HEAD");
     };
-    assert.equal(run({ action: "synchronize" }).status, 0);
-    assert.equal(run({ action: "edited", changes: { body: { from: "Old" } } }).status, 0);
-    const retargeted = run({ action: "edited", changes: { base: { ref: { from: "feature" }, sha: { from: base } } } });
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
+    const run = (head, action, changes) =>
+      new Promise((done) => {
+        const event = path.join(dir, "event.json");
+        fs.writeFileSync(event, JSON.stringify({ action, changes, pull_request: { number: 7, base: { sha: base }, head: { sha: head } } }));
+        const child = spawn(process.execPath, [path.join(HERE, "commits.mjs")], {
+          cwd: dir,
+          env: {
+            ...env,
+            GITHUB_EVENT_NAME: "pull_request",
+            GITHUB_EVENT_PATH: event,
+            GITHUB_REPOSITORY: "o/r",
+            GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
+            GITHUB_TOKEN: "t",
+            PR_TITLE: "Title",
+            PR_BODY: "Body",
+          },
+        });
+        let stdout = "";
+        child.stdout.on("data", (d) => (stdout += d));
+        child.on("close", (status) => done({ status, stdout }));
+      });
+    const first = push("b\n");
+    api.runs.set(first, [{ created_at: "2026-11-12T10:00:00Z" }, { created_at: "2026-11-12T12:00:00Z" }]);
+    assert.equal((await run(first, "synchronize")).status, 0);
+    api.timeline = [{ event: "base_ref_changed", created_at: "2026-11-12T09:00:00Z" }];
+    assert.equal((await run(first, "edited", { body: { from: "Old" } })).status, 0, "a base change before the push is answered");
+    api.timeline.push({ event: "base_ref_changed", created_at: "2026-11-12T11:00:00Z" });
+    const retargeted = await run(first, "edited", { base: { ref: { from: "feature" } } });
     assert.equal(retargeted.status, 1);
     assert.match(retargeted.stdout, /base changed: push a commit to re-run the instruments/);
+    // A later edit of the text, or a re-run of the push's run, still fails: a newer passing
+    // Commits on the same head would otherwise hide the base change.
+    assert.equal((await run(first, "edited", { title: { from: "Old" } })).status, 1);
+    assert.equal((await run(first, "synchronize")).status, 1);
+    // A new commit answers it.
+    const second = push("c\n");
+    api.runs.set(second, [{ created_at: "2026-11-12T13:00:00Z" }]);
+    assert.equal((await run(second, "synchronize")).status, 0);
+    // Without the timeline it fails rather than pass unseen.
+    api.runs.delete(second);
+    assert.equal((await run(second, "synchronize")).status, 1);
   } finally {
+    server.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("the Commits check rejects the code points test_repository_text_is_english rejects", () => {
-  const main = read("compiler/mente-cli/src/main.rs");
+check("the base-change rule reads the timeline and the head's first run", () => {
+  const at = (h) => ({ created_at: `2026-11-12T${h}:00:00Z` });
+  const change = (h) => ({ event: "base_ref_changed", ...at(h) });
+  assert.equal(baseChangedSincePush([], [at("10")]), false);
+  assert.equal(baseChangedSincePush([change("09"), { event: "labeled", ...at("11") }], [at("10")]), false);
+  assert.equal(baseChangedSincePush([change("09"), change("11")], [at("12"), at("10")]), true, "the first run is the push");
+  assert.throws(() => baseChangedSincePush([change("09")], []), /push time is unknown/);
+  assert.deepEqual(pullRequestOf("merge_group", { merge_group: { head_ref: `refs/heads/gh-readonly-queue/main/pr-124-${"a".repeat(40)}` } }), { number: 124, head: "a".repeat(40) });
+  assert.throws(() => pullRequestOf("merge_group", { merge_group: { head_ref: "refs/heads/x" } }), /names no pull request/);
+});
+
+check("the Commits check rejects the code points test_repository_text_is_english rejects", () => {
+  const main = read("compiler/mente-cli/src/gates.rs");
   const body = /fn is_cjk\(c: char\) -> bool \{([\s\S]*?)\n\s*\}/.exec(main)?.[1];
-  assert.ok(body, "is_cjk not found in compiler/mente-cli/src/main.rs");
+  assert.ok(body, "is_cjk not found in compiler/mente-cli/src/gates.rs");
   const ranges = [...body.matchAll(/0x([0-9A-Fa-f_]+)\.\.=0x([0-9A-Fa-f_]+)/g)].map((m) => [parseInt(m[1].replace(/_/g, ""), 16), parseInt(m[2].replace(/_/g, ""), 16)]);
   assert.deepEqual(CJK_RANGES, ranges);
 });
 
 // ------------------------------------------------------------------------------ floors of work
 
-test("the Mutants floor counts what the diff changes, as cargo-mutants marks it", () => {
+check("the Mutants floor counts what the diff changes, as cargo-mutants marks it", () => {
   const diff = [
     "diff --git a/compiler/a/src/lib.rs b/compiler/a/src/lib.rs",
     "index 1..2 100644",
@@ -881,7 +1060,7 @@ test("the Mutants floor counts what the diff changes, as cargo-mutants marks it"
   const { added, deletions } = parseDiff(diff);
   assert.deepEqual([...added.keys()], ["compiler/a/src/lib.rs"]);
   assert.deepEqual([...added.get("compiler/a/src/lib.rs")], [11, 12]);
-  assert.deepEqual([...deletions.get("compiler/a/src/lib.rs")], [41, 42]);
+  assert.deepEqual([...deletions.get("compiler/a/src/lib.rs")], [10, 11, 41, 42], "every hunk that deletes a line, the mixed one too");
   const fnf = { function_name: "f", span: { start: { line: 5 }, end: { line: 20 } } };
   const fng = { function_name: "g", span: { start: { line: 38 }, end: { line: 50 } } };
   const mutant = (name, start, end, fn, file = "compiler/a/src/lib.rs") => ({ name, file, function: fn, span: { start: { line: start, column: 1 }, end: { line: end, column: 9 } } });
@@ -894,8 +1073,15 @@ test("the Mutants floor counts what the diff changes, as cargo-mutants marks it"
     mutant("elsewhere", 1, 99, null, "compiler/b/src/lib.rs"),
   ];
   assert.deepEqual(touched(mutants, added).map((m) => m.name), ["f body", "f at 12"]);
-  assert.equal(expected(mutants, diff), 4, "the added lines' two, and both of g's around its deletion-only hunk");
-  assert.deepEqual(deletedRegexes(mutants, diff, [mutants[0], mutants[1], mutants[3]]), ["^g at 48$"]);
+  assert.equal(expected(mutants, diff), 5, "every mutant of f and g, each of which loses a line");
+  assert.deepEqual(deletedRegexes(mutants, diff, [mutants[0], mutants[1], mutants[3]]), ["^f at 15$", "^g at 48$"]);
+  // Every expected name must be in the run's lists. A pull request that changes f and g and
+  // excludes f in its own .cargo/mutants.toml lists none of f's, under the base's settings
+  // expected all the same, and fails.
+  const named = (...names) => mutants.filter((m) => names.includes(m.name));
+  assert.deepEqual(missing(mutants, diff, named("f body", "f at 12", "g at 39"), named("f at 15", "g at 48")), []);
+  assert.deepEqual(missing(mutants, diff, named("g at 39"), named("g at 48")), ["f at 12", "f at 15", "f body"]);
+  assert.deepEqual(missing(mutants, diff, named("f body", "f at 12", "f at 15", "g at 39"), []), ["g at 48"], "one left out is enough");
   assert.equal(exactRegex("a.rs:1:2: replace <impl X for Y>::f -> bool with true (x|y)"), "^a\\.rs:1:2: replace <impl X for Y>::f \\-> bool with true \\(x\\|y\\)$");
   assert.throws(() => touched([{ file: "x", span: {} }], added), /no file, name and span/);
   assert.deepEqual(readList(""), []);
@@ -932,10 +1118,17 @@ export function untagged(baseRoadmap, tags) {
   return [...milestones(baseRoadmap).values()].filter(finished).map((m) => m.id).filter((id) => !tags.has(id.toLowerCase()));
 }
 
-/// The base the pull request or merge group is checked against: POLICY_BASE, which the
-/// Documentation job sets from the event, or the merge base with origin/main.
+/// The base the pull request or merge group is checked against: the event's, or the merge base
+/// with origin/main.
 function policyBase() {
-  if (process.env.POLICY_BASE) return process.env.POLICY_BASE;
+  // The event the runner describes: the step sets no environment of its own (the Rust guard), so
+  // nothing in a pull request can point this elsewhere.
+  const name = process.env.GITHUB_EVENT_NAME;
+  if (name && process.env.GITHUB_EVENT_PATH) {
+    const payload = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+    const base = { pull_request: payload.pull_request?.base?.sha, merge_group: payload.merge_group?.base_sha, push: payload.before }[name];
+    if (base && !/^0+$/.test(base)) return base;
+  }
   try {
     return git(["merge-base", "HEAD", "origin/main"]).trim();
   } catch {
@@ -943,7 +1136,7 @@ function policyBase() {
   }
 }
 
-test("every milestone done on the base has its tag", () => {
+check("every milestone done on the base has its tag", () => {
   assert.ok(milestones(read("ROADMAP.md")).size >= 10, "ROADMAP.md lists fewer milestones than stage 1 has");
   const tags = new Set(git(["tag", "-l"]).split(/\r?\n/).filter(Boolean));
   const base = policyBase();
@@ -971,7 +1164,7 @@ export const INSTRUMENT_CHECKS = [
   ["Rust hygiene", RUST],
 ];
 
-test("every instrument scheduled for a finished milestone is a required check", () => {
+check("every instrument scheduled for a finished milestone is a required check", () => {
   const brief = read("docs/design-brief.md");
   const start = brief.indexOf("| Instrument | What it catches | Active from |");
   assert.ok(start >= 0, "the quality table of docs/design-brief.md section 7.7 is gone");

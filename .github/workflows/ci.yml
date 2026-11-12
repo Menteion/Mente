@@ -208,12 +208,12 @@ jobs:
       - name: Measure
         run: MENTE_BENCH_ENFORCE=1 cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
       - name: Overflow checks in a release build of every crate
-        # Each compiler crate holds overflow_checks::test_arithmetic_overflow_panics_in_this_crate.
+        # Each compiler crate holds overflow_traps::test_arithmetic_overflow_panics_in_this_crate.
         # Run in release, it fails where a profile, a package override or a flag builds that crate
         # without the checks Cargo.toml's [profile.release] turns on; the count proves each ran.
         run: |
           set -o pipefail
-          test=overflow_checks::test_arithmetic_overflow_panics_in_this_crate
+          test=overflow_traps::test_arithmetic_overflow_panics_in_this_crate
           expected=$(grep -rl "fn test_arithmetic_overflow_panics_in_this_crate" compiler/*/src | wc -l)
           cargo test --release --locked --workspace --lib --bins -- --exact "$test" 2>&1 | tee "$RUNNER_TEMP/overflow.txt"
           passed=$(grep -c "^test $test \.\.\. ok$" "$RUNNER_TEMP/overflow.txt" || true)
@@ -237,11 +237,9 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run verify:docs
+      # Exactly a name and a command: test_the_documentation_job_runs_the_workflow_policy, in the
+      # Rust jobs, fails on any other key, which could change what the step runs.
       - name: The workflow policy, its required checks, path lists, pins and milestone tags
-        env:
-          # Milestone tags are required for what the base has finished, not for what this change
-          # finishes (milestone-tags): the tag is set on the merge that closes a milestone.
-          POLICY_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: npm run test:ci
       - name: Install actionlint and shellcheck, pinned and checksummed
         # From their releases, as the SMT job installs Z3; neither is a build dependency.

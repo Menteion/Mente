@@ -3,7 +3,7 @@
 import { main } from "./lib/commits.mjs";
 
 try {
-  process.exitCode = main(process.env, process.cwd());
+  process.exitCode = await main(process.env, process.cwd());
 } catch (e) {
   console.error(`error: ${e.message}`);
   process.exit(1);

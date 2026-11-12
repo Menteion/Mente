@@ -3440,4 +3440,4 @@ pub struct S {
 }
 
 #[cfg(test)]
-mod overflow_checks;
+mod overflow_traps;

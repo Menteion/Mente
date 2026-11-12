@@ -648,4 +648,4 @@ fn private_helper(x: u32) -> u32 = x
 }
 
 #[cfg(test)]
-mod overflow_checks;
+mod overflow_traps;

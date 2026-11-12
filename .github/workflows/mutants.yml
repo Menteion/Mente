@@ -127,8 +127,8 @@ jobs:
           status=0
           cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
-          # cargo-mutants' diff filter marks only the lines next to a hunk that deletes and adds
-          # nothing; every mutant of the function enclosing such a hunk runs too.
+          # cargo-mutants' diff filter marks only the lines next to a deleted line; every mutant of
+          # the function enclosing one runs too.
           cargo mutants --list --json > all-mutants.json
           cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
           node .github/scripts/mutants-floor.mjs deleted pr.diff all-mutants.json diff-mutants.json > deleted-re.txt
@@ -180,12 +180,20 @@ jobs:
             cargo mutants --list --json "${config[@]}" > base-all-mutants.json
             expected=$(node .github/scripts/mutants-floor.mjs expected pr.diff base-all-mutants.json)
             count "$expected" "the mutants the diff changes"
+            : > deleted-mutants.json
+            if [ "${#deleted[@]}" -gt 0 ]; then cargo mutants "${deleted[@]}" --list --json > deleted-mutants.json; fi
             in_diff=$(node .github/scripts/mutants-floor.mjs count diff-mutants.json)
             count "$in_diff" "the mutants cargo-mutants lists for the diff"
-            ran=$((in_diff + ${#deleted[@]} / 2))
-            echo "Mutants the diff changes, under the base's settings: $expected; run for it: $ran" | tee -a "$GITHUB_STEP_SUMMARY"
-            if [ "$expected" -gt 0 ] && [ "$ran" -eq 0 ]; then
-              echo "::error::the diff changes code where $expected mutants lie, and none was run: the run checked nothing"
+            around=$(node .github/scripts/mutants-floor.mjs count deleted-mutants.json)
+            count "$around" "the mutants around deleted lines"
+            # Every mutant the base's settings expect must be in the run's lists, by name.
+            node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
+            lost=$(grep -c . missing.txt || true)
+            count "$lost" "the expected mutants the run leaves out"
+            echo "Mutants the diff changes, under the base's settings: $expected; listed for the run: $((in_diff + around)); left out: $lost" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$lost" -gt 0 ]; then
+              { echo "## Mutants the run leaves out"; echo '```text'; cat missing.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::$lost of the $expected mutants the diff changes are not in the run's lists: an exclusion lands apart from the change to what it excludes"
               failed=1
             fi
           fi

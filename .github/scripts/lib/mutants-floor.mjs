@@ -1,28 +1,33 @@
 // The floor of work for "Mutants in the diff" (.github/workflows/mutants.yml; X6 of the guard
 // audit): when a pull request changes code where cargo-mutants finds mutants, the run must test
-// them. The count here is independent of cargo-mutants' own diff filter: it takes every mutant
-// cargo-mutants lists for the whole tree, under the BASE's .cargo/mutants.toml so that a pull
-// request cannot exclude the function it changes, and keeps those whose span holds a line the diff
-// adds. A hunk that only deletes lines adds none, so for it the floor takes every mutant of the
-// function enclosing the deletion, which the job then runs too (`deleted`). A diff that changes
-// only tests, comments or files outside the compiler holds no such mutant, and the floor is 0.
+// them, every one. The expected set here is independent of cargo-mutants' own diff filter: it takes
+// every mutant cargo-mutants lists for the whole tree, under the BASE's .cargo/mutants.toml so that
+// a pull request cannot exclude what it changes, and keeps those whose span holds a line the diff
+// adds, and every mutant of each function that encloses a deleted line, which the job runs too
+// (`deleted`). Each name of that set must be in the run's lists, or the floor fails (`missing`). A
+// diff that changes only tests, comments or files outside the compiler holds no such mutant. An
+// exclusion added to .cargo/mutants.toml therefore lands in a pull request of its own, before the
+// change to the function it excludes.
 //
-//   node .github/scripts/mutants-floor.mjs expected <pr.diff> <all-mutants.json>
-//   node .github/scripts/mutants-floor.mjs deleted <pr.diff> <all-mutants.json> <diff-mutants.json>
-//   node .github/scripts/mutants-floor.mjs count <mutants.json>
+//   node .github/scripts/mutants-floor.mjs expected <pr.diff> <base-all.json>
+//   node .github/scripts/mutants-floor.mjs deleted <pr.diff> <all.json> <diff.json>
+//   node .github/scripts/mutants-floor.mjs missing <pr.diff> <base-all.json> <diff.json> <deleted.json>
+//   node .github/scripts/mutants-floor.mjs count <list.json>
 //
-// <all-mutants.json> is `cargo mutants --list --json` over the whole tree. `expected` prints how
-// many mutants the diff must have tested. `deleted` prints, one a line, an anchored regex for each
-// mutant of a function enclosing a deletion-only hunk that <diff-mutants.json>, cargo-mutants' own
-// list for the diff, leaves out, for `cargo mutants --re`. `count` prints how many mutants a list
-// holds: cargo-mutants prints nothing at all when a diff matches no mutant, which counts as 0. A
-// list it cannot read fails, so that a change in cargo-mutants' output never reads as "no mutant".
+// <all.json> is `cargo mutants --list --json` over the whole tree, <base-all.json> the same under
+// the base's settings, <diff.json> cargo-mutants' list for the diff, <deleted.json> its list for
+// the `deleted` regexes. `expected` prints how many mutants the diff must have tested; `deleted`
+// prints, one a line, an anchored regex for each mutant around a deletion that <diff.json> leaves
+// out, for `cargo mutants --re`; `missing` prints, one a line, each expected name neither list
+// holds; `count` prints how many mutants a list holds: cargo-mutants prints nothing at all when a
+// diff matches no mutant, which counts as 0. A list it cannot read fails, so that a change in
+// cargo-mutants' output never reads as "no mutant".
 
 import fs from "node:fs";
 
 /// What a unified diff changes, by the new file's line numbers: the lines each file gains, and the
-/// lines next to a deletion in a hunk that adds nothing (`deletions`), where cargo-mutants'
-/// `affected_lines` marks the line before and the line after.
+/// lines next to each deleted line (`deletions`), where cargo-mutants' `affected_lines` marks the line
+/// before and the line after.
 export function parseDiff(diff) {
   const added = new Map();
   const deletions = new Map();
@@ -33,7 +38,7 @@ export function parseDiff(diff) {
   let file = null;
   let hunk = null;
   const closeHunk = () => {
-    if (hunk && file && hunk.inserts === 0 && hunk.points.length > 0) {
+    if (hunk && file && hunk.points.length > 0) {
       for (const p of hunk.points) add(deletions, file, p);
     }
     hunk = null;
@@ -108,7 +113,7 @@ export function touched(mutants, added) {
   });
 }
 
-/// The mutants of every function that encloses a deletion-only hunk.
+/// The mutants of every function that encloses a deleted line.
 export function enclosingDeleted(mutants, deletions) {
   if (!Array.isArray(mutants)) throw new Error("the mutants list is not a JSON array");
   const keys = new Set();
@@ -122,7 +127,7 @@ export function enclosingDeleted(mutants, deletions) {
 }
 
 /// How many mutants a pull request's run must test: those whose span holds an added line, and
-/// those of a function that encloses a deletion-only hunk.
+/// those of a function that encloses a deleted line.
 export function expected(mutants, diff) {
   const { added, deletions } = parseDiff(diff);
   const names = new Set([...touched(mutants, added), ...enclosingDeleted(mutants, deletions)].map((m) => m.name));
@@ -134,7 +139,15 @@ export function exactRegex(name) {
   return `^${name.replace(/[\\.+*?()|[\]{}^$#&\-~]/g, "\\$&")}$`;
 }
 
-/// The mutants of functions enclosing a deletion-only hunk that cargo-mutants' list for the diff
+/// Each name the base's settings expect that neither of the run's lists holds.
+export function missing(baseMutants, diff, inDiff, deleted) {
+  const ran = new Set([...inDiff, ...deleted].map((m) => m.name));
+  const { added, deletions } = parseDiff(diff);
+  const want = new Set([...touched(baseMutants, added), ...enclosingDeleted(baseMutants, deletions)].map((m) => m.name));
+  return [...want].filter((n) => !ran.has(n)).sort();
+}
+
+/// The mutants of functions enclosing a deleted line that cargo-mutants' list for the diff
 /// leaves out, as regexes for `--re`.
 export function deletedRegexes(mutants, diff, inDiff) {
   const listed = new Set(inDiff.map((m) => m.name));
@@ -165,6 +178,11 @@ export function main(args) {
     if (mutants.length === 0) throw new Error("cargo-mutants lists no mutant in the whole tree");
     return deletedRegexes(mutants, read(files[0]), readList(read(files[2]))).join("\n");
   }
+  if (command === "missing" && files.length === 4) {
+    const base = readList(read(files[1]));
+    if (base.length === 0) throw new Error("cargo-mutants lists no mutant in the whole tree");
+    return missing(base, read(files[0]), readList(read(files[2])), readList(read(files[3]))).join("\n");
+  }
   if (command === "count" && files.length === 1) return String(readList(read(files[0])).length);
-  throw new Error("usage: mutants-floor.mjs expected <pr.diff> <all.json> | deleted <pr.diff> <all.json> <diff.json> | count <list.json>");
+  throw new Error("usage: mutants-floor.mjs expected <pr.diff> <base-all.json> | deleted <pr.diff> <all.json> <diff.json> | missing <pr.diff> <base-all.json> <diff.json> <deleted.json> | count <list.json>");
 }

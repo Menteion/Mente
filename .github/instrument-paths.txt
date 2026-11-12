@@ -17,6 +17,9 @@
 [mutants.yml]
 merge_group: skip
 compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
 # A workspace member: the baseline runs its tests, though .cargo/mutants.toml mutates none of it.
 spikes/tier1-latency/**
 Cargo.toml
@@ -30,6 +33,9 @@ rust-toolchain.toml
 
 [generated.yml]
 compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
 conformance/**
 Cargo.toml
 Cargo.lock
@@ -39,6 +45,9 @@ rust-toolchain.toml
 [fuzz.yml]
 merge_group: skip
 compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
 # The seed corpus of `mn fuzz` (compiler/mente-cli/src/fuzz.rs): every .mn program of these.
 examples/**
 conformance/**
@@ -52,6 +61,9 @@ rust-toolchain.toml
 
 [smt.yml]
 compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
 # Every module Tier 1 runs on, whose obligations become queries.
 conformance/**
 examples/**
@@ -65,6 +77,9 @@ rust-toolchain.toml
 
 [mir-mutants.yml]
 compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
 # The reported corpus: the examples, and the agent programs with their tasks' calls.
 examples/**
 benchmark/probe/**
@@ -77,6 +92,9 @@ rust-toolchain.toml
 
 [perf.yml]
 compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
+docs/language-card.md
+docs/platform-layer.md
 perf/**
 Cargo.toml
 Cargo.lock
@@ -86,7 +104,9 @@ rust-toolchain.toml
 [harness.yml]
 benchmark/**
 compiler/**
+# Compiled into the crates by include_str!: the language card is part of mn.
 docs/language-card.md
+docs/platform-layer.md
 package.json
 Cargo.toml
 Cargo.lock

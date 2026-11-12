@@ -6,15 +6,17 @@
 //   "[Draft]", "fixup" in any form, "squash!", "squash:" or "[squash]", "amend!".
 // - No commit message, and not the pull request's title or body, holds CJK text: the repository's
 //   text is English (CLAUDE.md, invariant 3). CJK_RANGES are `is_cjk`'s in
-//   compiler/mente-cli/src/main.rs, and a test keeps the two equal.
-// - A pull request whose base was changed fails: retargeting fires only `pull_request: edited`,
-//   which no instrument runs on, so their results were for the old base. A new commit runs them
-//   again.
+//   compiler/mente-cli/src/gates.rs, and a test keeps the two equal.
+// - A pull request whose base changed after its head was pushed fails, on every event, until a new
+//   commit is pushed: retargeting fires only `pull_request: edited`, which no instrument runs on,
+//   so their results are for the old base, and a later edit of the title or a re-run of an earlier
+//   run must not hide that. The base changes come from the pull request's timeline, the push from
+//   the first workflow run of its head commit, both through the API with the job's read-only token.
 //
-// The commits and the base change come from the event payload (GITHUB_EVENT_PATH); the title and
-// body come from the environment (PR_TITLE, PR_BODY), set from the payload by the workflow, so
-// that no text of the pull request is ever written into a script. Commit subjects are printed
-// JSON-escaped, so that none can form a workflow command.
+// The commits come from the event payload (GITHUB_EVENT_PATH); the title and body come from the
+// environment (PR_TITLE, PR_BODY), set from the payload by the workflow, so that no text of the
+// pull request is ever written into a script. Commit subjects are printed JSON-escaped, so that
+// none can form a workflow command.
 
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -94,20 +96,57 @@ export function commitsBetween(base, head, cwd) {
     });
 }
 
+/// Whether the pull request's base changed after its head was pushed: the newest
+/// `base_ref_changed` of its timeline against the first run of its head commit.
+export function baseChangedSincePush(timeline, headRuns) {
+  const changes = timeline.filter((e) => e.event === "base_ref_changed").map((e) => Date.parse(e.created_at));
+  if (changes.length === 0) return false;
+  const runs = headRuns.map((r) => Date.parse(r.created_at)).filter(Number.isFinite);
+  if (runs.length === 0) throw new Error("the head commit has no workflow run, so its push time is unknown");
+  return Math.max(...changes) > Math.min(...runs);
+}
+
+/// Every item of a paginated list of the GitHub API, read with the job's token.
+async function apiList(env, path, key) {
+  const api = env.GITHUB_API_URL || "https://api.github.com";
+  if (!env.GITHUB_TOKEN) throw new Error("GITHUB_TOKEN is not set, so the pull request's timeline cannot be read");
+  const out = [];
+  for (let page = 1; page <= 50; page++) {
+    const response = await fetch(`${api}${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`, {
+      headers: { authorization: `Bearer ${env.GITHUB_TOKEN}`, accept: "application/vnd.github+json" },
+    });
+    if (!response.ok) throw new Error(`${path}: the API answered ${response.status}`);
+    const body = await response.json();
+    const items = key ? body[key] : body;
+    if (!Array.isArray(items)) throw new Error(`${path}: the API answered no list`);
+    out.push(...items);
+    if (items.length < 100) return out;
+  }
+  throw new Error(`${path}: more than 50 pages`);
+}
+
+/// The pull request and its head commit the event is about: a pull request's own, or the one a
+/// merge group's branch (`gh-readonly-queue/<base>/pr-<number>-<head sha>`) names.
+export function pullRequestOf(eventName, payload) {
+  if (eventName === "pull_request") return { number: payload.pull_request?.number, head: payload.pull_request?.head?.sha };
+  const m = /\/pr-(\d+)-([0-9a-f]{40})$/.exec(payload.merge_group?.head_ref ?? "");
+  if (!m) throw new Error(`the merge group's branch names no pull request: ${JSON.stringify(payload.merge_group?.head_ref)}`);
+  return { number: Number(m[1]), head: m[2] };
+}
+
 /// The CLI: checks the event's commits in the repository at `cwd` and returns the exit code.
-export function main(env, cwd) {
+export async function main(env, cwd) {
   const eventName = env.GITHUB_EVENT_NAME ?? "";
   if (!env.GITHUB_EVENT_PATH) throw new Error("GITHUB_EVENT_PATH is not set");
+  if (!env.GITHUB_REPOSITORY) throw new Error("GITHUB_REPOSITORY is not set");
   const payload = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, "utf8"));
   let base;
   let head;
   let pullRequest = null;
-  let baseChanged = false;
   if (eventName === "pull_request") {
     base = payload.pull_request?.base?.sha;
     head = payload.pull_request?.head?.sha;
     pullRequest = { title: env.PR_TITLE ?? "", body: env.PR_BODY ?? "" };
-    baseChanged = payload.action === "edited" && payload.changes?.base !== undefined;
   } else if (eventName === "merge_group") {
     base = payload.merge_group?.base_sha;
     head = payload.merge_group?.head_sha;
@@ -115,6 +154,11 @@ export function main(env, cwd) {
     throw new Error(`the Commits check runs on pull_request and merge_group, not ${JSON.stringify(eventName)}`);
   }
   if (!base || !head) throw new Error(`the ${eventName} event names no base and head commits`);
+  const pr = pullRequestOf(eventName, payload);
+  if (!Number.isInteger(pr.number) || !pr.head) throw new Error(`the ${eventName} event names no pull request`);
+  const timeline = await apiList(env, `/repos/${env.GITHUB_REPOSITORY}/issues/${pr.number}/timeline`);
+  const headRuns = await apiList(env, `/repos/${env.GITHUB_REPOSITORY}/actions/runs?event=pull_request&head_sha=${pr.head}`, "workflow_runs");
+  const baseChanged = baseChangedSincePush(timeline, headRuns);
   const commits = commitsBetween(base, head, cwd);
   if (commits.length === 0) throw new Error(`no commits in ${base}..${head}`);
   const found = problems(commits, pullRequest, baseChanged);
