@@ -91,7 +91,7 @@ Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter mode
 - [ ] Slices and `str` as views with provenance, `from` checked in bodies, and **Engineering Guardrail #3**'s `E0310`, in the same milestone, so that no view is ever unchecked.
 - [ ] The `mut` and `own` parameter modes beside the read-only one, with the Law of Exclusivity, `own` invalidation and copy-in/copy-out; `List<T>` and `String`. The `in` mode comes with arenas in M3.
 - [ ] The cost report begins: type layouts, and the runtime checks Tier 1 left in place.
-- [ ] What the review of plain structs (pull request 116) left, each fix with a test seen to fail without it:
+- [x] What the review of plain structs (pull request 116) left, done on 2026-11-12 in pull request 118 (commit "Follow scalar field paths in Tier 1"). Its own review found six wrong proofs of the same class on the way, among them a `mut` call that changes a binding inside a construction, a compound assignment's value or a loop's condition, and the pull request fixed them too:
   - Tier 1 follows a field path, which its fragment names (`ghost-contracts-and-totality.md`), as it follows a local. A `decreases` over a field is now always `E0507`, with a `guard` Tier 1 cannot use and no valuation, short of **Engineering Guardrail #1**.
   - A refinement bounded at a 128-bit type's limit is proven. Now every value entering one, `0` included, draws `E0502` with a valuation that is false: for a parameter since M1, and for a field.
   - Diagnostics in module order. A struct's now come before every function's.
@@ -99,6 +99,12 @@ Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter mode
   - Native printing of a large result in a loop. It is now unrolled leaf by leaf, as M1's arrays are: over 3 minutes to compile a 64 KB result.
   - `mn fuzz` runs functions with struct and array parameters, and the program generator reaches refined array elements in a field and exclusive field ranges.
   - `E0109` names the compiler's milestone; it still says "M1 does not have it".
+- [ ] What the review of pull request 118 left, each fix with a test seen to fail without it:
+  - No guard on an element read. Today `guard a[0] <= 0` and `guard ps[0].a < 1` are offered, though they say nothing of the next read, since Tier 1 does not follow an element; that falls short of **Engineering Guardrail #1**.
+  - A far bound passes through a sum or a quotient. Today `guard y + 1 < MAX` does not narrow `y`.
+  - A caller learns a callee's `ensures` over a field of its result (`result.w`). Today it does not.
+  - A struct-valued `if` gives a binding's paths the join of its branches. Today they get only their declared ranges.
+  - Only the paths a function reads or writes take places under Tier 1's cap of 128 variables, in the order the body first names them ([`tier1-path-cap`](docs/design-review.md#tier1-path-cap)). Today whole bindings take them in the order of declaration.
 
 Runs in full at the end: example 01's binary search. The benchmark's M2 tasks declare positional payloads (`Deposit(i64)`), so the harness names each payload's field when it maps a task to Mente, whose variants have only named fields.
 
