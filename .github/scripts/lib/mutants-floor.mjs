@@ -96,15 +96,14 @@ function checkMutant(m, k) {
 
 const holds = (span, lines) => [...lines].some((l) => l >= span.start.line && l <= span.end.line);
 
-/// The function a mutant sits in, as a key, or null for a mutant outside any function.
-/// The function a mutant sits in, as a key. A mutant with no function and span, in a file the diff
-/// deletes from, fails: the floor could not tell whether a deletion touched it, and would pass it
-/// unseen.
-function functionKey(m) {
+const inFunction = (m) => Number.isInteger(m.function?.span?.start?.line) && Number.isInteger(m.function?.span?.end?.line);
+
+/// What a deleted line takes in with a mutant: its whole function, by a key for it, or, for a
+/// mutant outside any function (a constant's initializer, say), the mutant alone, by its span. None
+/// is dropped: each is weighed by one span or the other.
+function deletionKey(m) {
+  if (!inFunction(m)) return `mutant\n${m.name}`;
   const f = m.function;
-  if (!Number.isInteger(f?.span?.start?.line) || !Number.isInteger(f?.span?.end?.line)) {
-    throw new Error(`mutant ${JSON.stringify(m.name)} has no function and span, though its file loses lines`);
-  }
   return `${m.file}\n${f.function_name}\n${f.span.start.line}\n${f.span.end.line}`;
 }
 
@@ -126,10 +125,9 @@ export function enclosingDeleted(mutants, deletions) {
     checkMutant(m, k);
     const points = deletions.get(m.file.replace(/\\/g, "/"));
     if (!points) continue;
-    const key = functionKey(m);
-    if (holds(m.function.span, points)) keys.add(key);
+    if (holds(inFunction(m) ? m.function.span : m.span, points)) keys.add(deletionKey(m));
   }
-  return mutants.filter((m) => deletions.has(m.file.replace(/\\/g, "/")) && keys.has(functionKey(m)));
+  return mutants.filter((m) => deletions.has(m.file.replace(/\\/g, "/")) && keys.has(deletionKey(m)));
 }
 
 /// How many mutants a pull request's run must test: those whose span holds an added line, and

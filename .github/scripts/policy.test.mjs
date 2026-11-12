@@ -1157,9 +1157,12 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   assert.deepEqual(missing(mutants, diff, named("f body", "f at 12", "f at 15", "g at 39"), []), ["g at 48"], "one left out is enough");
   assert.equal(exactRegex("a.rs:1:2: replace <impl X for Y>::f -> bool with true (x|y)"), "^a\\.rs:1:2: replace <impl X for Y>::f \\-> bool with true \\(x\\|y\\)$");
   assert.throws(() => touched([{ file: "x", span: {} }], added), /no file, name and span/);
-  // A mutant with no function in a file that loses lines fails the floor instead of dropping out;
-  // one in a file the diff leaves alone ("elsewhere") does not matter.
-  assert.throws(() => expected([...mutants, mutant("orphan", 30, 30, null)], diff), /"orphan" has no function and span/);
+  // A mutant outside any function, in a file that loses lines, is weighed by its own span: taken
+  // when a deleted line touches it, as main.rs's constant `1 << ...` was on this pull request, and
+  // left when none does. One in a file the diff leaves alone ("elsewhere") does not matter.
+  const loose = [...mutants, mutant("const at 41", 41, 41, null), mutant("const at 30", 30, 30, null)];
+  assert.equal(expected(loose, diff), 6, "g's and f's five, and the constant a deleted line touches");
+  assert.deepEqual(missing(loose, diff, loose.filter((m) => m.name !== "const at 41"), []), ["const at 41"]);
   assert.deepEqual(readList(""), []);
   assert.throws(() => readList("{}"), /not a JSON array/);
 });
