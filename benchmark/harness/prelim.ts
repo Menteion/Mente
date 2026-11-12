@@ -8,15 +8,21 @@
 // every example, or after 10 repairs. The hidden tests then score the last program. It is a
 // preliminary run, not a benchmark result, and it never opens the held-out set.
 //
-//   node benchmark/harness/prelim.ts --mn target/release/mn [--tasks core|non-core|<id>,<id>] [--runs 5]
-//     [--budget 5] [--out prelim-out]
+//   node benchmark/harness/prelim.ts --sandbox benchmark/harness/sandbox.sh --mn <mn> --out <dir>
+//     [--tasks core|non-core|<id>,<id>] [--runs 5] [--budget 5]
+//
+// The repairs need the key and the agents' programs in one process, so every `mn` call runs through
+// the sandbox (benchmark/harness/sandbox.sh), with no secret in its environment: agent-written code
+// never runs where the key is. The job proves the sandbox with sandbox-check.ts first
+// (.github/workflows/prelim.yml). The sandbox hides the repository, so --mn and --out lie outside it.
 //
 // It calls the Claude Messages API over HTTP with the key in ANTHROPIC_API_KEY. Each turn sends
 // the conversation so far as it was, the model's earlier replies unchanged, and the run stops
 // before a call that could take its spending past the budget, in US dollars.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { REPOSITORY, childEnv, insideAny, sandboxed } from "./build.ts";
 import {
   costOf,
   extractProgram,
@@ -100,9 +106,19 @@ interface Reported {
   line: string;
 }
 
+/** The sandbox and the directory every `mn` call runs in, set once by main(). */
+const confined = { sandbox: "", workdir: "" };
+
+/** Runs `mn` on an agent's program: through the sandbox, with no secret in its environment. */
+function mnSync(mn: string, args: string[], timeout?: number) {
+  if (!confined.sandbox) throw new Error("an agent's program would run outside the sandbox");
+  const [cmd, argv] = sandboxed(confined.sandbox, confined.workdir, mn, args);
+  return spawnSync(cmd, argv, { encoding: "utf8", cwd: confined.workdir, env: childEnv(), ...(timeout ? { timeout } : {}) });
+}
+
 /** What `mn check --json` reports for a module: each diagnostic's code, and its line with its fixes. */
 function check(mn: string, file: string): Reported[] {
-  const run = spawnSync(mn, ["check", "--json", file], { encoding: "utf8" });
+  const run = mnSync(mn, ["check", "--json", file]);
   const doc = JSON.parse(run.stdout);
   return doc.diagnostics.map(
     (d: {
@@ -122,7 +138,7 @@ function check(mn: string, file: string): Reported[] {
 /** Runs each case on the reference interpreter. */
 function runCases(mn: string, file: string, cases: Case[]): CaseResult[] {
   return cases.map((c) => {
-    const run = spawnSync(mn, ["run", file, "--call", c.call], { encoding: "utf8", timeout: 60_000 });
+    const run = mnSync(mn, ["run", file, "--call", c.call], 60_000);
     const got = outcome(c, run.status, run.stdout ?? "", run.stderr ?? "");
     return { ...c, got, pass: got === c.expected };
   });
@@ -132,20 +148,27 @@ function runCases(mn: string, file: string, cases: Case[]): CaseResult[] {
 const classes = new Map<string, string>();
 function failureClass(mn: string, code: string): string {
   if (!classes.has(code)) {
-    const text = spawnSync(mn, ["explain", code], { encoding: "utf8" }).stdout ?? "";
+    const text = mnSync(mn, ["explain", code]).stdout ?? "";
     classes.set(code, /Failure class: ([^.]+)\./.exec(text)?.[1] ?? "unknown");
   }
   return classes.get(code) ?? "unknown";
 }
 
 async function main(): Promise<void> {
-  const mn = option("mn", "target/release/mn");
+  const mn = resolve(option("mn", "target/release/mn"));
   const which = option("tasks", "core");
   const runs = Number(option("runs", "5"));
   const budget = Number(option("budget", "5"));
-  const out = option("out", "prelim-out");
+  const out = resolve(option("out", "prelim-out"));
+  const sandbox = option("sandbox", "");
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
+  if (!sandbox) throw new Error("pass --sandbox: the agents' programs run while this process holds the API key");
+  for (const [what, path] of [["--mn", mn], ["--out", out]]) {
+    if (insideAny(path, [REPOSITORY])) throw new Error(`${what} must lie outside ${REPOSITORY}, which the sandbox hides`);
+  }
+  confined.sandbox = sandbox;
+  confined.workdir = out;
   const card = readFileSync("docs/language-card.md", "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");
   const system = systemPrompt(card);
   const tasks = preliminaryTasks(readTasks("benchmark/tasks"), which);

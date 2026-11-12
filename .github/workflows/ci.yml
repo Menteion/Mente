@@ -113,9 +113,19 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
       - name: Measure the base branch
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          # A pull request compares with its base; a push to main, with the commit before it.
-          if [ -n "$GITHUB_BASE_REF" ]; then base="origin/$GITHUB_BASE_REF"; else base="HEAD~1"; fi
+          # The base each event names: a pull request's branch, a merge group's base commit, the
+          # commit before a push; a dispatched run compares with the commit before its own.
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base="origin/$GITHUB_BASE_REF" ;;
+            merge_group) base="$GROUP_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *) base="HEAD~1" ;;
+          esac
+          if [ -z "$base" ]; then echo "::error::the $GITHUB_EVENT_NAME event names no base"; exit 1; fi
           git worktree add ../base "$base"
           (cd ../base && cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol) \
             | sed -n -E 's/^([^ :]+): median ([0-9.]+) .*/\1 \2/p' > "$RUNNER_TEMP/base-medians.txt"
@@ -197,6 +207,21 @@ jobs:
         run: rustup toolchain install
       - name: Measure
         run: MENTE_BENCH_ENFORCE=1 cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
+      - name: Overflow checks in a release build of every crate
+        # Each compiler crate holds overflow_checks::test_arithmetic_overflow_panics_in_this_crate.
+        # Run in release, it fails where a profile, a package override or a flag builds that crate
+        # without the checks Cargo.toml's [profile.release] turns on; the count proves each ran.
+        run: |
+          set -o pipefail
+          test=overflow_checks::test_arithmetic_overflow_panics_in_this_crate
+          expected=$(grep -rl "fn test_arithmetic_overflow_panics_in_this_crate" compiler/*/src | wc -l)
+          cargo test --release --locked --workspace --lib --bins -- --exact "$test" 2>&1 | tee "$RUNNER_TEMP/overflow.txt"
+          passed=$(grep -c "^test $test \.\.\. ok$" "$RUNNER_TEMP/overflow.txt" || true)
+          echo "Crates whose release build traps on an overflow: $passed of $expected" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$expected" -eq 0 ] || [ "$passed" -ne "$expected" ]; then
+            echo "::error::$passed of $expected crates showed overflow checks in a release build"
+            exit 1
+          fi
 
   docs:
     name: Documentation
@@ -212,8 +237,12 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run verify:docs
-      # The workflow policy: required checks, path lists, pins, milestone tags.
-      - run: npm run test:ci
+      - name: The workflow policy, its required checks, path lists, pins and milestone tags
+        env:
+          # Milestone tags are required for what the base has finished, not for what this change
+          # finishes (milestone-tags): the tag is set on the merge that closes a milestone.
+          POLICY_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: npm run test:ci
       - run: npm run check:benchmark
       - run: npm run test:benchmark
       - run: npm run test:harness

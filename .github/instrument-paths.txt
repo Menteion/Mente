@@ -9,8 +9,10 @@
 # instrument that ran on the pull request's head and does not run again in the merge queue.
 #
 # A list names everything its jobs build or read: Cargo.toml, Cargo.lock, rust-toolchain.toml and
-# every crate the job builds (the policy test computes them from the manifests), its own workflow,
-# and the corpora it reads. A change to this file or to watch.mjs runs every instrument.
+# every file of every crate the job builds (the policy test computes them from the manifests), its
+# own workflow, every repository path its scripts name with what those scripts import, and the
+# corpora the compiler reads for it. A change to this file, to the watch, to a `.cargo` directory or
+# to a toolchain file runs every instrument (ALWAYS in .github/scripts/lib/watch.mjs).
 
 [mutants.yml]
 merge_group: skip
@@ -20,8 +22,10 @@ spikes/tier1-latency/**
 Cargo.toml
 Cargo.lock
 rust-toolchain.toml
-.cargo/mutants.toml
 .config/nextest.toml
+# The floor of work the job checks.
+.github/scripts/mutants-floor.mjs
+.github/scripts/lib/mutants-floor.mjs
 .github/workflows/mutants.yml
 
 [generated.yml]

@@ -1,8 +1,8 @@
-// The YAML reader the workflow policy test reads the workflows with (yaml.mjs): `npm run test:ci`.
+// The YAML reader the workflow policy test reads the workflows with (lib/yaml.mjs): `npm run test:ci`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseYaml } from "./yaml.mjs";
+import { parseYaml } from "./lib/yaml.mjs";
 
 test("mappings, sequences and scalars read as YAML reads them", () => {
   const doc = parseYaml(`# a comment

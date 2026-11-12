@@ -42,45 +42,45 @@ jobs:
         id: watch
         run: node .github/scripts/watch.mjs harness.yml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         with:
           node-version: 24
       - name: Put the pinned Rust outside the home
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         # So the sandbox, which gives the build HOME in its working directory, still finds the
         # toolchain through RUSTUP_HOME. The runner context is not available in a job-level env, so
         # this is set from a step, where $RUNNER_TEMP is.
         run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
       - name: Install the toolchain rust-toolchain.toml pins
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: rustup toolchain install
       - name: Build mn and put it outside the workspace
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         # The sandbox hides the workspace from agent code, so mn runs from the runner's temp.
         run: |
           cargo build --locked --release --bin mn
           install -D target/release/mn "$RUNNER_TEMP/bin/mn"
       - name: Install the benchmark's Rust and Odin
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
       - name: Build and run the fixtures through the sandbox
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
         run: >-
           node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN"
           --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
       - name: Check the Odin document's code blocks
-        if: always() && steps.watch.outputs.run == 'true' && steps.toolchains.outcome == 'success'
+        if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
         run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/document-out"
       - name: Prove the sandbox denies the key and the network
-        if: always() && steps.watch.outputs.run == 'true' && steps.toolchains.outcome == 'success'
+        if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
         run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
       - name: Test the harness
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: npm run test:harness

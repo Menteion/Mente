@@ -780,6 +780,7 @@ async function main() {
   console.log(`benchmark: ${pub.tasks.length} public tasks${heldOutDir ? " and the held-out set" : ""} checked; ${pub.tests + heldTests} tests agree with their references`);
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  main().catch((e) => { console.error(`check:benchmark: ${e.message}`); process.exit(1); });
-}
+// Unconditionally, however the file is started: a guard comparing the path it was started by with
+// the module's own skips main() when the two spell one file differently, and the check passes.
+// Nothing imports this file; its tests run it as a process.
+main().catch((e) => { console.error(`check:benchmark: ${e.message}`); process.exit(1); });

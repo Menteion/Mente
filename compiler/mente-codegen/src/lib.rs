@@ -959,3 +959,6 @@ mod tests {
         assert_eq!(position_of("x * x"), pos(5, 12));
     }
 }
+
+#[cfg(test)]
+mod overflow_checks;

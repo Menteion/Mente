@@ -1484,19 +1484,31 @@ mod tests {
         );
     }
 
-    /// The packages of a `Cargo.lock`: each name, whether it is the workspace's own (no
-    /// `source`), and the names it depends on. Versions are left out: a name the lock holds twice
-    /// is one crate here.
-    fn lock_packages(lock: &str) -> BTreeMap<String, (bool, BTreeSet<String>)> {
-        let mut packages: BTreeMap<String, (bool, BTreeSet<String>)> = BTreeMap::new();
-        for block in lock.split("[[package]]").skip(1) {
+    /// The one source a crate of the lock may come from outside the workspace.
+    const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+    /// The packages of a `Cargo.lock`: each name, the sources its versions come from (none for
+    /// the workspace's own crates), and the names it depends on. Versions are left out: a name
+    /// the lock holds twice is one crate here. Only `[[package]]` sections are read, so that a
+    /// `[[patch.unused]]` or `[metadata]` section never adds to the package before it.
+    fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> {
+        let mut sections: Vec<(bool, Vec<&str>)> = Vec::new();
+        for line in lock.lines().map(str::trim) {
+            if line.starts_with('[') && line.ends_with(']') && line.len() > 2 {
+                sections.push((line == "[[package]]", Vec::new()));
+            } else if let Some((_, lines)) = sections.last_mut() {
+                lines.push(line);
+            }
+        }
+        let mut packages: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+        for (_, lines) in sections.iter().filter(|(package, _)| *package) {
             let mut name = String::new();
-            let mut local = true;
+            let mut sources = BTreeSet::new();
             let mut deps = BTreeSet::new();
             let mut in_deps = false;
-            for line in block.lines().map(str::trim) {
+            for line in lines {
                 if in_deps {
-                    if line == "]" {
+                    if *line == "]" {
                         in_deps = false;
                     } else {
                         let dep = line.trim_matches(|c| c == '"' || c == ',');
@@ -1504,13 +1516,14 @@ mod tests {
                     }
                 } else if let Some(value) = line.strip_prefix("name = ") {
                     name = value.trim_matches('"').to_string();
-                } else if line.starts_with("source = ") {
-                    local = false;
-                } else if line == "dependencies = [" {
+                } else if let Some(value) = line.strip_prefix("source = ") {
+                    sources.insert(value.trim_matches('"').to_string());
+                } else if *line == "dependencies = [" {
                     in_deps = true;
                 }
             }
-            let entry = packages.entry(name).or_insert((local, BTreeSet::new()));
+            let entry = packages.entry(name).or_default();
+            entry.0.extend(sources);
             entry.1.extend(deps);
         }
         packages
@@ -1522,11 +1535,16 @@ mod tests {
     /// bring the crate.
     fn lock_approval_problems(lock: &str, approved: &str) -> Vec<String> {
         let packages = lock_packages(lock);
+        let local = |name: &str| {
+            packages
+                .get(name)
+                .is_some_and(|(sources, _)| sources.is_empty())
+        };
         let direct: BTreeSet<&str> = packages
-            .values()
-            .filter(|(local, _)| *local)
-            .flat_map(|(_, deps)| deps)
-            .filter(|d| packages.get(*d).is_some_and(|(local, _)| !local))
+            .iter()
+            .filter(|(name, _)| local(name))
+            .flat_map(|(_, (_, deps))| deps)
+            .filter(|d| packages.contains_key(*d) && !local(d))
             .map(String::as_str)
             .collect();
         let brings = |from: &str, to: &str| {
@@ -1557,8 +1575,14 @@ mod tests {
                 None => problems.push(format!("\"{}\" is not \"<crate>: <dependency>\"", line)),
             }
         }
-        for (name, (local, _)) in &packages {
-            if !local && !listed.contains_key(name.as_str()) {
+        for (name, (sources, _)) in &packages {
+            for source in sources.iter().filter(|s| s.as_str() != CRATES_IO) {
+                problems.push(format!(
+                    "{} comes from {}, not crates.io: only a crate of crates.io can be approved",
+                    name, source
+                ));
+            }
+            if !sources.is_empty() && !listed.contains_key(name.as_str()) {
                 problems.push(format!(
                     "Cargo.lock holds {}, which .config/approved-crates.txt does not list: Norman \
                      approves every crate a dependency brings (dependency-approval)",
@@ -1572,7 +1596,9 @@ mod tests {
                     "{} is listed, but Cargo.lock no longer holds it",
                     krate
                 )),
-                Some((true, _)) => problems.push(format!("{} is a workspace crate", krate)),
+                Some((sources, _)) if sources.is_empty() => {
+                    problems.push(format!("{} is a workspace crate", krate))
+                }
                 Some(_) if !direct.contains(via) => problems.push(format!(
                     "{}: {} is not a direct dependency of a workspace crate",
                     krate, via
@@ -1620,19 +1646,52 @@ mod tests {
         assert!(shapes.contains(&"top is listed twice".to_string()));
         assert!(shapes.contains(&"\"leaf top\" is not \"<crate>: <dependency>\"".to_string()));
         assert!(shapes.contains(&"mente-b is a workspace crate".to_string()));
+        // A crate from anywhere but crates.io is refused, listed or not.
+        let git = lock.replace(
+            "name = \"leaf\"\nversion = \"2.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"",
+            "name = \"leaf\"\nversion = \"2.0.0\"\nsource = \"git+https://example.invalid/leaf#0123\"",
+        );
+        assert_ne!(git, lock);
+        assert_eq!(
+            lock_approval_problems(&git, "top: top\nleaf: top\nother: other\n"),
+            vec![
+                "leaf comes from git+https://example.invalid/leaf#0123, not crates.io: only a crate of crates.io can be approved".to_string(),
+                "other: other is not a direct dependency of a workspace crate".to_string(),
+            ]
+        );
+        // A [[patch.unused]] section adds nothing to the package before it.
+        let patched = format!(
+            "{lock}\n[[patch.unused]]\nname = \"evil\"\nversion = \"1.0.0\"\nsource = \"git+https://example.invalid/evil\"\n"
+        );
+        assert_eq!(
+            lock_packages(&patched).keys().collect::<Vec<_>>(),
+            vec!["leaf", "mente-a", "mente-b", "other", "top"]
+        );
+        assert_eq!(
+            lock_packages(&patched)["other"].0,
+            BTreeSet::from([CRATES_IO.to_string()])
+        );
     }
 
     /// The lines under `root` that hold a CJK character, as `path:line`. Build output, dependencies
     /// and nested checkouts are skipped: a directory holding `.git`, such as a worktree under `.wt`
     /// or `.claude/worktrees`, is another branch's files, which this tree does not own.
     fn non_english_lines(root: &Path) -> Vec<String> {
+        // The same ranges as CJK_RANGES in .github/scripts/lib/commits.mjs, which checks commit
+        // messages and pull requests; a test of the workflow policy keeps the two equal.
         fn is_cjk(c: char) -> bool {
             matches!(c as u32,
-                0x3000..=0x30FF     // CJK punctuation, Hiragana, Katakana
-                | 0x3400..=0x9FFF   // CJK ideographs
-                | 0xAC00..=0xD7AF   // Hangul
+                0x1100..=0x11FF     // Hangul Jamo
+                | 0x2E80..=0x2FDF   // CJK and Kangxi radicals
+                | 0x2FF0..=0x9FFF   // description characters, punctuation, kana, Bopomofo, Hangul
+                                    // compatibility Jamo, Kanbun, strokes, enclosed and
+                                    // compatibility forms, and the unified ideographs
+                | 0xA960..=0xA97F   // Hangul Jamo extended A
+                | 0xAC00..=0xD7FF   // Hangul syllables, Hangul Jamo extended B
                 | 0xF900..=0xFAFF   // CJK compatibility ideographs
-                | 0xFF00..=0xFFEF) // full-width forms
+                | 0xFE30..=0xFE4F   // CJK compatibility forms
+                | 0xFF00..=0xFFEF   // full-width forms
+                | 0x20000..=0x3FFFF) // the supplementary ideographic planes
         }
         fn walk(dir: &Path, found: &mut Vec<String>) {
             for entry in fs::read_dir(dir).unwrap().flatten() {
@@ -1676,6 +1735,73 @@ mod tests {
         assert!(
             found[0].ends_with(":1") && found[0].contains("a.md"),
             "{found:?}"
+        );
+    }
+
+    /// The check finds a character of every CJK block, at either end of each range, and passes
+    /// Latin text with accents, dashes and emoji.
+    #[test]
+    fn test_the_english_check_finds_every_cjk_block() {
+        let root = std::env::temp_dir().join(format!("mente-cjk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // Written at run time, so this file itself stays English.
+        let blocks = [
+            0x1100, 0x11FF, 0x2E80, 0x2FDF, 0x2FF0, 0x3000, 0x3105, 0x3131, 0x31A0, 0x3200, 0x33FF,
+            0x4E2D, 0x9FFF, 0xA960, 0xAC00, 0xD7FF, 0xF900, 0xFE30, 0xFF01, 0x20000, 0x3FFFF,
+        ];
+        let mut text = String::from("caf\u{e9}, \u{2014} \u{1F916}\n");
+        for code in blocks {
+            text.push(char::from_u32(code).unwrap());
+            text.push('\n');
+        }
+        fs::write(root.join("a.md"), text).unwrap();
+        let found = non_english_lines(&root);
+        let _ = fs::remove_dir_all(&root);
+        let lines: Vec<String> = (2..=blocks.len() + 1).map(|l| format!(":{l}")).collect();
+        assert_eq!(found.len(), blocks.len(), "{found:?}");
+        assert!(
+            found.iter().zip(&lines).all(|(f, l)| f.ends_with(l)),
+            "{found:?}"
+        );
+    }
+
+    /// The workflow policy runs where it blocks a merge: ci.yml's Documentation job, a required
+    /// check, runs `npm run test:ci` unconditionally, and that script runs the policy test. Without
+    /// this, deleting the step or the script would turn every check of the policy off unseen.
+    #[test]
+    fn test_the_documentation_job_runs_the_workflow_policy() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+        let job: Vec<&str> = ci
+            .split("\n  docs:\n")
+            .nth(1)
+            .expect("ci.yml has a docs job")
+            .lines()
+            .take_while(|l| l.is_empty() || l.starts_with("    "))
+            .collect();
+        assert!(job.iter().any(|l| l.trim() == "name: Documentation"));
+        assert!(
+            job.iter()
+                .any(|l| l.trim().trim_start_matches("- ") == "run: npm run test:ci"),
+            "the Documentation job does not run npm run test:ci"
+        );
+        assert!(
+            !job.iter()
+                .any(|l| l.trim().starts_with("if:") || l.contains("continue-on-error")),
+            "a step of the Documentation job is conditional or may fail"
+        );
+        let required = fs::read_to_string(root.join(".github/required-checks.txt")).unwrap();
+        assert!(required.lines().any(|l| l == "Documentation"));
+        let package = fs::read_to_string(root.join("package.json")).unwrap();
+        let script = package
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("\"test:ci\": \""))
+            .expect("package.json has a test:ci script");
+        assert!(
+            script.starts_with("node --test ")
+                && script.contains(".github/scripts/policy.test.mjs"),
+            "test:ci does not run the policy test: {script}"
         );
     }
 
@@ -1854,3 +1980,6 @@ mod tests {
         assert!(errs[1].contains("holds no `.mn` file"));
     }
 }
+
+#[cfg(test)]
+mod overflow_checks;

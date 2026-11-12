@@ -672,3 +672,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod overflow_checks;

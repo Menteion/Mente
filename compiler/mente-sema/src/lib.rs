@@ -1742,3 +1742,6 @@ pub struct Rec {
         }
     }
 }
+
+#[cfg(test)]
+mod overflow_checks;

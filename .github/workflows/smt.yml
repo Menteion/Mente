@@ -55,10 +55,10 @@ jobs:
         id: watch
         run: node .github/scripts/watch.mjs smt.yml
       - name: Install the toolchain rust-toolchain.toml pins
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: rustup toolchain install
       - name: Install Z3 ${{ env.Z3_VERSION }}, checksummed
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: |
           set -euo pipefail
           zip="$RUNNER_TEMP/z3.zip"
@@ -76,13 +76,13 @@ jobs:
             *) echo "::error::expected Z3 ${Z3_VERSION}"; exit 1 ;;
           esac
       - name: Write the construct programs of mir_run.rs, and build mn
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: |
           MENTE_SMT_CONSTRUCTS="$RUNNER_TEMP/constructs" \
             cargo test --release --locked -p mente-cli --test smt -- --ignored --exact write_construct_programs --nocapture
           cargo build --release --locked --bin mn
       - name: Export a query for each obligation Tier 1 discharges
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: |
           set -euo pipefail
           # The examples, the conformance programs that must pass, the agent programs, the
@@ -97,7 +97,7 @@ jobs:
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           printf 'EXPORT_SECONDS=%d.%03d\n' $((ms / 1000)) $((ms % 1000)) >> "$GITHUB_ENV"
       - name: Ask Z3 for each query
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: |
           set -euo pipefail
           find "$RUNNER_TEMP/smt" -name '*.smt2' | sort > "$RUNNER_TEMP/queries.txt"
@@ -150,7 +150,7 @@ jobs:
             exit 1
           fi
       - name: Keep the queries of a failed run
-        if: failure() && steps.watch.outputs.run == 'true'
+        if: failure() && steps.watch.outputs.run != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: smt-queries

@@ -83,12 +83,12 @@ jobs:
         id: watch
         run: node .github/scripts/watch.mjs generated.yml
       - name: Install the toolchain rust-toolchain.toml pins
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: |
           rustup toolchain install
           rustc --version
       - name: Choose the seeds
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         env:
           EVENT: ${{ github.event_name }}
           INPUT_FIRST: ${{ github.event.inputs.first_seed }}
@@ -126,10 +126,10 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Seeds $first ..= $(( first + programs - 1 ))" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Build the comparison in release
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: cargo test --release --locked -p mente-cli --no-run
       - name: Generated programs on the three paths
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: |
           cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
             mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths \
@@ -143,7 +143,7 @@ jobs:
           fi
       - name: The conformance suite on the three paths
         # Its result stands on its own, whatever the generated programs found.
-        if: ${{ !cancelled() && steps.watch.outputs.run == 'true' }}
+        if: ${{ !cancelled() && steps.watch.outputs.run != 'false' }}
         env:
           MENTE_GEN_CALLS: "64"
         run: |
@@ -152,7 +152,7 @@ jobs:
             mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/conformance.txt"
       - name: Summary
-        if: always() && steps.watch.outputs.run == 'true'
+        if: always() && steps.watch.outputs.run != 'false'
         run: |
           for f in generated conformance; do
             [ -f "$RUNNER_TEMP/$f.txt" ] || continue

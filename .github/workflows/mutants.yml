@@ -59,26 +59,26 @@ jobs:
         id: watch
         run: node .github/scripts/watch.mjs mutants.yml
       - name: Install the toolchain rust-toolchain.toml pins
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: rustup toolchain install
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         with:
           path: ~/.cargo/bin/cargo-mutants
           key: cargo-mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}
       - name: Install cargo-mutants
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         with:
           path: ~/.cargo/bin/cargo-nextest
           key: cargo-nextest-${{ runner.os }}-${{ env.CARGO_NEXTEST_VERSION }}
       - name: Install cargo-nextest
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         run: command -v cargo-nextest || cargo install cargo-nextest --locked --version "$CARGO_NEXTEST_VERSION"
       - name: Run the tests once without a mutant
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
         # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
         # runs the whole workspace's tests, so the timeout it set from that baseline was often
         # its 20 s minimum, and cut a mutant's tests short before any had failed. This baseline
@@ -90,7 +90,9 @@ jobs:
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Mutate the lines this pull request changes
-        if: steps.watch.outputs.run == 'true'
+        if: steps.watch.outputs.run != 'false'
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           # A mutant that allocates or writes without end would take the runner down with it, as
@@ -115,51 +117,86 @@ jobs:
               echo "resources: $(free -m | awk '/^Mem:/ {print $3 " of " $2 " MB used"}'), $(df -h / | awk 'NR == 2 {print $4 " of disk free"}')"
             fi
           done) &
-          status=0
-          cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/4 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
+          # Every count the floor reads must be a number: an empty one fails, never compares.
+          count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
           # missed and 3 when one timed out. A mutant that loops without end fails the test
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
           # minutes against the baseline's one or two, is not known to be caught, and fails the
           # job as a missed one does.
+          status=0
+          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
+          # cargo-mutants' diff filter marks only the lines next to a hunk that deletes and adds
+          # nothing; every mutant of the function enclosing such a hunk runs too.
+          cargo mutants --list --json > all-mutants.json
+          cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
+          node .github/scripts/mutants-floor.mjs deleted pr.diff all-mutants.json diff-mutants.json > deleted-re.txt
+          deleted=()
+          while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
+          if [ "${#deleted[@]}" -gt 0 ]; then
+            status=0
+            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output deleted || status=$?
+            case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
+          fi
           failed=0
-          for outcome in missed timeout; do
-            if [ -s "mutants.out/$outcome.txt" ]; then
-              { echo "## Mutants $outcome"; echo '```text'; cat "mutants.out/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-              failed=2
-            fi
+          for out in mutants.out deleted/mutants.out; do
+            for outcome in missed timeout; do
+              if [ -s "$out/$outcome.txt" ]; then
+                { echo "## Mutants $outcome"; echo '```text'; cat "$out/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+                failed=2
+              fi
+            done
           done
           # The floor of work done. Every mutant cargo-mutants lists for this shard has an outcome;
-          # and when the diff adds a line where the whole tree has a mutant, counted apart from
-          # cargo-mutants' own diff filter (.github/scripts/mutants-floor.mjs), its list for the
-          # diff is not empty. A diff of tests, comments or files outside the compiler holds no
-          # such line, so its floor is 0.
-          tested=$(cat mutants.out/caught.txt mutants.out/missed.txt mutants.out/timeout.txt mutants.out/unviable.txt 2>/dev/null | grep -c . || true)
-          cargo mutants --in-diff pr.diff --shard ${{ matrix.shard }}/4 --list --json > shard-mutants.json
+          # and when the diff changes code where mutants lie, counted apart from cargo-mutants' own
+          # diff filter and under the base's .cargo/mutants.toml, so that a pull request cannot
+          # exclude what it changes (.github/scripts/mutants-floor.mjs), the run tested some. A
+          # diff of tests, comments or files outside the compiler holds no such mutant: floor 0.
+          tested=$(cat mutants.out/caught.txt mutants.out/missed.txt mutants.out/timeout.txt mutants.out/unviable.txt \
+            deleted/mutants.out/caught.txt deleted/mutants.out/missed.txt deleted/mutants.out/timeout.txt \
+            deleted/mutants.out/unviable.txt 2>/dev/null | grep -c . || true)
+          count "$tested" "the mutants tested"
+          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --list --json > shard-mutants.json
           listed=$(node .github/scripts/mutants-floor.mjs count shard-mutants.json)
+          count "$listed" "the mutants listed for this shard"
+          if [ "${#deleted[@]}" -gt 0 ]; then
+            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --list --json > shard-deleted.json
+            more=$(node .github/scripts/mutants-floor.mjs count shard-deleted.json)
+            count "$more" "the mutants of deleting hunks listed for this shard"
+            listed=$((listed + more))
+          fi
           echo "Mutants listed for this shard: $listed; tested: $tested" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$tested" -ne "$listed" ]; then
             echo "::error::cargo-mutants listed $listed mutants for this shard and reported an outcome for $tested"
             failed=1
           fi
-          if [ "${{ matrix.shard }}" = 0 ]; then
-            cargo mutants --list --json > all-mutants.json
-            expected=$(node .github/scripts/mutants-floor.mjs touched pr.diff all-mutants.json)
-            cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
+          if [ "$SHARD" = 0 ]; then
+            if git show "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
+              config=(--config base-mutants.toml)
+            else
+              config=(--no-config)
+            fi
+            cargo mutants --list --json "${config[@]}" > base-all-mutants.json
+            expected=$(node .github/scripts/mutants-floor.mjs expected pr.diff base-all-mutants.json)
+            count "$expected" "the mutants the diff changes"
             in_diff=$(node .github/scripts/mutants-floor.mjs count diff-mutants.json)
-            echo "Mutants whose span holds a line the diff adds: $expected; in cargo-mutants' list for the diff: $in_diff" | tee -a "$GITHUB_STEP_SUMMARY"
-            if [ "$expected" -gt 0 ] && [ "$in_diff" -eq 0 ]; then
-              echo "::error::the diff adds lines where $expected mutants lie, and cargo-mutants listed none for it: the run checked nothing"
+            count "$in_diff" "the mutants cargo-mutants lists for the diff"
+            ran=$((in_diff + ${#deleted[@]} / 2))
+            echo "Mutants the diff changes, under the base's settings: $expected; run for it: $ran" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$expected" -gt 0 ] && [ "$ran" -eq 0 ]; then
+              echo "::error::the diff changes code where $expected mutants lie, and none was run: the run checked nothing"
               failed=1
             fi
           fi
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always() && steps.watch.outputs.run == 'true'
+        if: always() && steps.watch.outputs.run != 'false'
         with:
           name: mutants-in-diff-${{ matrix.shard }}
-          path: mutants.out
+          path: |
+            mutants.out
+            deleted/mutants.out
           if-no-files-found: ignore
 
   full:
@@ -205,6 +242,7 @@ jobs:
       - name: Mutate this shard of the compiler
         env:
           EXAMINE: ${{ inputs.examine }}
+          SHARD: ${{ matrix.shard }}
         run: |
           # A mutant that allocates or writes without end would take the runner down with it, as
           # it took two shards of the first full run: each process may reserve at most 8 GB and
@@ -231,7 +269,7 @@ jobs:
           status=0
           only=()
           if [ -n "$EXAMINE" ]; then only=(--re "$EXAMINE"); fi
-          cargo mutants "${only[@]}" --shard ${{ matrix.shard }}/16 --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
+          cargo mutants "${only[@]}" --shard "$SHARD/16" --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
           # missed and 3 when one timed out. A mutant that loops without end fails the test
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten

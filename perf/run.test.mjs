@@ -12,9 +12,29 @@ import {
   gap,
   gate,
   median,
+  missingBase,
   parsePerfCsv,
   summarize,
-} from "./run.mjs";
+} from "./lib.mjs";
+
+test("a kernel the base built nothing for fails the instruction gate, unless it is new", () => {
+  const failed = missingBase({ error: "E0109 at 3:5" }, { requireInstructions: true });
+  assert.equal(failed.pass, false);
+  assert.match(failed.reasons[0], /built no executable \(E0109/);
+  assert.equal(missingBase(undefined, { requireInstructions: true }).pass, false);
+  const fresh = missingBase({ error: "no such file" }, { requireInstructions: true, isNew: true });
+  assert.equal(fresh.pass, true);
+  assert.match(fresh.warnings[0], /new kernel/);
+  const advisory = missingBase({ error: "x" }, { requireInstructions: false });
+  assert.equal(advisory.pass, true);
+  assert.equal(advisory.warnings.length, 1);
+});
+
+test("the CLI runs main whatever path starts it", () => {
+  const cli = fs.readFileSync(path.join(HERE, "run.mjs"), "utf8");
+  assert.doesNotMatch(cli, /process\.argv\[1\]|import\.meta\.url/);
+  assert.match(cli, /^\s*main\(process\.argv\.slice\(2\)\);/m);
+});
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
