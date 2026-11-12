@@ -1333,6 +1333,9 @@ struct Fx<'a> {
     /// Each loop analysed outside the recording pass, with its entry state and its exit state,
     /// which depends on nothing else there: without it a loop would be analysed again for every
     /// round of every loop around it, in time exponential in their nesting.
+    /// The loop whose header, its condition and measures at the head of a round, is being
+    /// read.
+    head_of: Option<StmtId>,
     loop_memo: Vec<(StmtId, Octagon, Octagon)>,
     /// The passes over a loop's body, for the test that keeps them linear in nesting.
     passes: usize,
@@ -1607,6 +1610,7 @@ impl<'a> Fx<'a> {
             tracks: Vec::new(),
             retries: Vec::new(),
             queries: None,
+            head_of: None,
             loop_memo: Vec::new(),
             passes: 0,
         };
@@ -2389,6 +2393,19 @@ impl<'a> Fx<'a> {
         if !self.recording {
             return;
         }
+        // A `guard` before a loop narrows only the state the loop is entered with: for what its
+        // header reads at the head of a round, one that reads a binding the loop changes says
+        // nothing of a later round, so none is offered.
+        let (guard, message) = match (guard, anchor) {
+            (Some(g), Anchor::Before(s)) if self.head_of == Some(s) && self.names_changed(s, &g) => (
+                None,
+                format!(
+                    "{}; this loop changes what it reads, so a `guard` before the loop would not hold at a later round, and none is offered",
+                    message
+                ),
+            ),
+            (g, _) => (g, message),
+        };
         let mut d = Diagnostic::error(code, span, message);
         if let Some(h) = self.heads.last() {
             let list = |v: &[String]| {
@@ -2426,6 +2443,16 @@ impl<'a> Fx<'a> {
             }
         }
         self.report.diagnostics.push(d);
+    }
+
+    /// Whether `text`, a condition in this function's terms, names a binding loop `s` changes.
+    fn names_changed(&self, s: StmtId, text: &str) -> bool {
+        let mut changed = Vec::new();
+        self.changed_stmt(s, &mut changed);
+        mente_syntax::tokenize(text).iter().any(|t| {
+            matches!(&t.kind, mente_syntax::TokenKind::Ident(n)
+                if self.named(n).is_some_and(|b| changed.contains(&b)))
+        })
     }
 
     /// `E0503` for each clause outside the Tier-1 fragment, unless the function routes them;
@@ -4302,6 +4329,7 @@ impl<'a> Fx<'a> {
         entry: &Octagon,
     ) -> (Octagon, Octagon) {
         self.passes += 1;
+        let header = self.head_of.replace(s);
         let mut at = head.clone();
         let c = self.cond(&mut at, cond);
         let mut b = at.clone();
@@ -4332,6 +4360,7 @@ impl<'a> Fx<'a> {
                 None => self.assign(&mut b, start, &v),
             }
         }
+        self.head_of = header;
         self.loops.push(Frame::default());
         let mut ends = self.body_ends(b, body);
         self.tracks.truncate(outer);
@@ -6361,6 +6390,26 @@ mod tests {
         ] {
             assert_eq!(codes(&with(f)), ["E0504"], "{}", f);
         }
+        // There a `guard` before the loop would not hold at a later round: none is offered.
+        for f in [
+            "pub fn f() -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0 and bump(mut x) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
+            "pub fn f(q: P) -> u8 {\n  var p = q\n  p.a = 0\n  var i: u8 = 0\n  while i < 2 and take0(p.a) == 0 and touch(mut p) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
+        ] {
+            let d = diagnostics(&with(f));
+            assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
+            assert!(
+                d[0].message.ends_with("; this loop changes what it reads, so a `guard` before the loop would not hold at a later round, and none is offered"),
+                "{}",
+                d[0].message
+            );
+        }
+        // Over what the loop leaves alone, the guard before it holds at every round, and
+        // proves the clause once applied.
+        let alone = with("pub fn f(x: u8) -> u8 {\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}");
+        assert!(diagnostics(&alone)[0].fixes[0]
+            .message
+            .contains("guard x == 0 else"));
+        repairs(&alone);
         // A condition that changes nothing keeps what holds before the loop.
         assert_eq!(
             codes(&with("pub fn f() -> u8 {\n  val x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}")),
@@ -6901,21 +6950,21 @@ mod tests {
         let neg = "pub fn f(n: i8) -> i8 {\n  var i: i8 = n\n  while i != 0 decreases i {\n    i -= 1\n  }\n  i\n}";
         let d = &diagnostics(neg)[0];
         assert_eq!(d.code, "E0507");
+        // The first round can break it, and a guard before the loop says nothing of a later
+        // round, where the loop has changed `i`: none is offered, and the message says why.
         assert_eq!(
             d.message,
-            "Tier 1 cannot rule out `n = 0, i = -1`, at the head of a round of this loop, where its measure `i` is negative: a `decreases` measure is never negative"
+            "Tier 1 cannot rule out `n = 0, i = -1`, at the head of a round of this loop, where its measure `i` is negative: a `decreases` measure is never negative; this loop changes what it reads, so a `guard` before the loop would not hold at a later round, and none is offered"
         );
+        assert!(d.fixes.is_empty(), "{:?}", d.fixes);
+        // Only a later round can: the guard ends the body, where the loop reads it as a fact
+        // at its head, and proves the measure once applied.
+        let later = "pub fn f() -> i8 {\n  var i: i8 = 5\n  while i != 0 decreases i {\n    i -= 2\n  }\n  i\n}";
         assert_eq!(
-            d.fixes[0].message,
+            diagnostics(later)[0].fixes[0].message,
             "insert `guard i >= 0 else { todo(\"i >= 0 is false here\") }`"
         );
-        // The first round can break it: the guard goes before the loop.
-        assert!(fixed(neg).contains(
-            "  var i: i8 = n\n  guard i >= 0 else { todo(\"i >= 0 is false here\") }\n  while"
-        ));
-        // Only a later round can: the guard ends the body.
-        let later = "pub fn f() -> i8 {\n  var i: i8 = 5\n  while i != 0 decreases i {\n    i -= 2\n  }\n  i\n}";
-        assert!(fixed(later)
+        assert!(repairs(later)
             .contains("    i -= 2\n    guard i >= 0 else { todo(\"i >= 0 is false here\") }\n  }"));
         let none = "pub fn f(c: bool) {\n  while c decreases -1 {\n  }\n}";
         assert_eq!(
@@ -6925,10 +6974,16 @@ mod tests {
                 "Tier 1 cannot rule out that a round of this loop changes its measure `-1` by 0: a `decreases` measure gets smaller at every round"
             ]
         );
-        let shifted = "pub fn f(n: i8) -> i8 {\n  var i: i8 = n\n  while i != 0 decreases i + 1 - 1 {\n    i -= 1\n  }\n  i\n}";
+        let shifted = "pub fn f() -> i8 {\n  var i: i8 = 5\n  while i != 0 decreases i + 1 - 1 {\n    i -= 2\n  }\n  i\n}";
         assert!(diagnostics(shifted)[0].fixes[0]
             .message
             .contains("guard i + 1 - 1 >= 0 else"));
+        // A measure over what the loop leaves alone keeps the guard before it, which narrows
+        // the head too.
+        let kept = "pub fn f(n: i8) -> i8 {\n  var i: i8 = 0\n  while i < 3 decreases n {\n    i += 1\n  }\n  i\n}";
+        assert!(diagnostics(kept)[0].fixes[0]
+            .message
+            .contains("guard n >= 0 else"));
     }
 
     #[test]
