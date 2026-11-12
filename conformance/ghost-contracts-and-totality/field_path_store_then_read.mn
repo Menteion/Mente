@@ -1,0 +1,18 @@
+// expect: pass
+module conformance
+// A store into a field path, then a read of it, of a parameter and of a local.
+pub struct Pair {
+  a: u8
+  b: u8
+}
+
+pub fn first(mut p: Pair) -> u8[0..1] {
+  p.a = 0
+  p.a
+}
+
+pub fn local() -> u8[5..6] {
+  var p = Pair(a: 5, b: 9)
+  p.b = p.a
+  p.b
+}

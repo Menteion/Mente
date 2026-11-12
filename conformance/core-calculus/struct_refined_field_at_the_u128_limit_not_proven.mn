@@ -1,0 +1,7 @@
+// expect: E0502
+module conformance
+pub struct Limits {
+  big: u128[0..340282366920938463463374607431768211455]
+}
+
+pub fn any(y: u128) -> Limits = Limits(big: y)

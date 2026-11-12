@@ -159,7 +159,11 @@ impl Shape {
             SemaTy::Bool => Shape::Bool,
             SemaTy::Array(n, e) => Shape::Array(
                 u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?,
-                Box::new(Shape::of(e, shapes)?),
+                // An empty literal's elements have no type, and need none: it holds none.
+                Box::new(match (n, &**e) {
+                    (0, SemaTy::Any) => Shape::Unit,
+                    _ => Shape::of(e, shapes)?,
+                }),
             ),
             SemaTy::Struct(n) => Shape::Struct(
                 shapes

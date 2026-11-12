@@ -756,16 +756,25 @@ mod tests {
     /// the limit inside a struct; one at the limit is.
     #[test]
     fn test_calls_leave_out_arguments_too_large_to_hold() {
-        let most = mente_interp::Limits::default().max_array;
-        let src = format!(
-            "module m\npub struct S {{\n  xs: [{}]u8\n}}\npub fn empty(xs: [4294967295][0]u8) -> u8 = 0\npub fn held(s: S) -> u8 = 0\npub fn at(xs: [{}]u8) -> u8 = 0\npub fn small(x: u8) -> u8 = x\n",
-            most,
-            most - 1
-        );
-        let module = mente_sema::check_program(&src).unwrap();
-        let calls = generate::calls(&src, &module, 7, FEW);
-        let called: std::collections::BTreeSet<&str> = calls.iter().map(|c| c.0.as_str()).collect();
-        assert_eq!(called, ["at", "small"].into_iter().collect());
+        let called = |src: &str, most: Option<u128>| {
+            let module = mente_sema::check_program(src).unwrap();
+            let calls = match most {
+                Some(m) => generate::calls_within(src, &module, 7, FEW, m),
+                None => generate::calls(src, &module, 7, FEW),
+            };
+            calls
+                .into_iter()
+                .map(|c| c.0)
+                .collect::<std::collections::BTreeSet<String>>()
+        };
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect();
+        // Within a limit of 64 values: an array of 63 and the array itself are 64, a struct
+        // holding an array of 64 more.
+        let src = "module m\npub struct S {\n  xs: [64]u8\n}\npub fn held(s: S) -> u8 = 0\npub fn at(xs: [63]u8) -> u8 = 0\npub fn small(x: u8) -> u8 = x\n";
+        assert_eq!(called(src, Some(64)), names(&["at", "small"]));
+        // The reference interpreter's own limit leaves out 2^32 empty arrays.
+        let src = "module m\npub fn empty(xs: [4294967295][0]u8) -> u8 = 0\npub fn small(x: u8) -> u8 = x\n";
+        assert_eq!(called(src, None), names(&["small"]));
     }
 
     /// Generated programs of every mode, each call on the four paths: the reference

@@ -391,7 +391,12 @@ fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
 }
 
 /// Writes `value` of `shape` at `at`; an integer outside its type is refused.
-fn write(memory: &mut Memory, at: u64, shape: &Shape, value: &Value) -> Result<(), String> {
+pub(crate) fn write(
+    memory: &mut Memory,
+    at: u64,
+    shape: &Shape,
+    value: &Value,
+) -> Result<(), String> {
     match (shape, value) {
         (Shape::Int(t), v) => {
             let n = num(v)?;
@@ -636,6 +641,11 @@ pub fn below(n: i8) -> i8 {
     (
         "fn one() -> u8 = 1\npub fn empty() -> u8 {\n  var xs: [0]u8 = [0; 0]\n  val k: u8 = one()\n  xs = xs\n  k\n}",
         &["empty()"],
+    ),
+    // Empty array literals, whose elements have no type, alone and nested.
+    (
+        "pub fn no_elements() -> [0]u8 = []\npub fn rows_of_none() -> [2][0]u8 {\n  val xs: [2][0]u8 = [[], []]\n  xs\n}",
+        &["no_elements()", "rows_of_none()"],
     ),
 ];
 

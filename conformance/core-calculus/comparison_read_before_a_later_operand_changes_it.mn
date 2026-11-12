@@ -1,0 +1,19 @@
+// expect: E0502
+module conformance
+// A comparison reads its left operand before its right one runs: `x` is 0 there, and the call
+// returns 0, so the `return 1` is reached.
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+pub fn f() -> u8[0..=0] {
+  var x: u8 = 0
+  if x == bump(mut x) {
+    return 1
+  }
+  0
+}

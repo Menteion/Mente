@@ -18,7 +18,7 @@ pub mod wide;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
+use mente_syntax::diagnostics::{in_source_order, insertion_point, Applicability, Diagnostic};
 use mente_syntax::{
     parse_module, Attr, BitStructDecl, FnDecl, ItemDecl, ModuleFile, ParamMode, Span, StructDecl,
     StructFieldDecl, TokenKind,
@@ -57,7 +57,7 @@ pub fn check_source(src: &str) -> Result<ModuleVerificationReport, Vec<Diagnosti
 
 /// Checks a parsed module: the declaration checks of [`verify_module`], then every function
 /// with a body, under M1's grammar (`spec/grammar.md`), its names and types and Tier 1
-/// (`spec/core-calculus.md`). The declaration checks' diagnostics come first.
+/// (`spec/core-calculus.md`). The diagnostics come in the order of the source.
 pub fn check_module(
     src: &str,
     module: &ModuleFile,
@@ -66,26 +66,21 @@ pub fn check_module(
     combine(verify_module_with(module, &b.structs), b.errors)
 }
 
-/// The declaration checks' verdict, then the bodies' diagnostics.
+/// The declaration checks' verdict and the bodies' diagnostics, in the order of the source.
 fn combine<T>(
     verified: Result<T, Vec<Diagnostic>>,
     body_errors: Vec<Diagnostic>,
 ) -> Result<T, Vec<Diagnostic>> {
-    match verified {
-        Ok(report) if body_errors.is_empty() => Ok(report),
-        Ok(_) => Err(body_errors),
+    let mut errors = match verified {
+        Ok(report) if body_errors.is_empty() => return Ok(report),
+        Ok(_) => body_errors,
         Err(mut errors) => {
             errors.extend(body_errors);
-            Err(errors)
+            errors
         }
-    }
-}
-
-/// Parses each function with a body, then resolves the names and checks the types of each one
-/// the body parser reports nothing in, then runs Tier 1 on each one those report nothing in,
-/// function by function in source order.
-pub fn check_bodies(src: &str, module: &ModuleFile) -> Vec<Diagnostic> {
-    bodies(src, module, true).errors
+    };
+    in_source_order(&mut errors);
+    Err(errors)
 }
 
 /// For each function whose names and types check, in source order, its name and what Tier 1
@@ -252,8 +247,8 @@ fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
 
 /// [`bodies`], with Tier 1 writing the query of each obligation it discharges when `queries`.
 fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bodies {
-    // The structs first: every function reads their fields and layouts. Their diagnostics come
-    // before the functions'.
+    // The structs first: every function reads their fields and layouts. The module's
+    // diagnostics are put in the order of the source where they are combined.
     let parsed_structs = mente_syntax::parse_structs(src, module);
     let mut errors: Vec<Diagnostic> = parsed_structs
         .iter()
@@ -1444,6 +1439,34 @@ pub struct Event {
         assert!(verify_module(&parse_module(&misplaced).unwrap()).is_ok());
         let unpacked = misplaced.replace("@packed\n", "");
         assert!(first_error(&unpacked).to_string().contains("E0418"));
+    }
+
+    /// A module's diagnostics come in the order of its source, by the start of their primary
+    /// spans, whichever check found them: a declaration's after a function before it, a
+    /// struct's after a function, and a function's type error before its unknown name. The
+    /// incremental session lists them alike.
+    #[test]
+    fn test_diagnostics_are_listed_in_source_order() {
+        let codes = |src: &str| {
+            check_source(src)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>()
+        };
+        let layout = "module m\npub fn f() -> u8 = 300_u8\n@layout(size: 4, align: 4)\npub struct R {\n  @bytes(0..2) pub a: u16\n}\n";
+        assert_eq!(codes(layout), ["E0221", "E0416"]);
+        let plain = "module m\npub fn f() -> u8 = 300_u8\npub struct S {\n  a: u8,\n}\n";
+        assert_eq!(codes(plain), ["E0221", "E0128"]);
+        let body = "module m\npub fn g(x: u8) -> u8 {\n  val a: bool = 1\n  _ = a\n  nope + x\n}\npub fn h() -> u8 = 300_u8\n";
+        assert_eq!(codes(body), ["E0203", "E0201", "E0221"]);
+        for src in [layout, plain, body] {
+            let whole = check_source(src).err().unwrap_or_default();
+            let starts: Vec<usize> = whole.iter().map(|d| d.primary.start).collect();
+            assert!(starts.windows(2).all(|w| w[0] <= w[1]), "{:?}", starts);
+            assert_eq!(incremental::Session::new(src).diagnostics(), &whole[..]);
+        }
     }
 
     /// A `@layout` struct's field of a plain struct is sized and aligned by the plain struct's

@@ -1,0 +1,17 @@
+// expect: E0507
+module conformance
+// The measure at the call reads a field of a call's result, which Tier 1 does not follow.
+pub struct Count {
+  n: u32
+}
+
+fn next(c: Count) -> Count = c
+
+pub fn down(c: Count) -> u32
+  decreases c.n
+{
+  if c.n == 0 {
+    return 0
+  }
+  down(next(c))
+}

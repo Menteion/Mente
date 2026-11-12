@@ -1,0 +1,19 @@
+// expect: pass
+module conformance
+// A refinement of i128 from its smallest value to one below its largest.
+pub fn take(x: i128[-170141183460469231731687303715884105728..=170141183460469231731687303715884105726]) -> i128 = x
+
+pub fn zero() -> i128 = take(0)
+
+pub fn lowest() -> i128 = take(-170141183460469231731687303715884105728)
+
+pub fn highest() -> i128 = take(170141183460469231731687303715884105726)
+
+pub fn small(y: i64) -> i128 = take(y)
+
+pub fn guarded(y: i128) -> i128 {
+  guard y <= 170141183460469231731687303715884105726 else {
+    return 0
+  }
+  take(y)
+}

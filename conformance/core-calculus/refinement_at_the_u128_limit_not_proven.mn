@@ -1,0 +1,6 @@
+// expect: E0502
+module conformance
+// A u128 Tier 1 knows nothing of may be the largest, which the refinement leaves out.
+pub fn take(x: u128[0..340282366920938463463374607431768211455]) -> u128 = x
+
+pub fn any(y: u128) -> u128 = take(y)

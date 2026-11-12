@@ -1484,7 +1484,9 @@ fn print_bool(
     Ok(())
 }
 
-/// Writes the value of `shape` at `at` to standard output, as the reference interpreter does.
+/// Writes the value of `shape` at `at` to standard output, as the reference interpreter does:
+/// an array element by element in a loop, so that the code grows with the shape of the type
+/// and not with its length; a struct field by field.
 fn print_at(
     writer: &mut ObjectWriter,
     rt: &mut Runtime,
@@ -1510,14 +1512,35 @@ fn print_at(
         }
         Shape::Array(len, elem) => {
             emit_text(writer, rt, e, 1, "[")?;
-            for k in 0..*len {
-                if k > 0 {
-                    emit_text(writer, rt, e, 1, ", ")?;
-                }
-                let off = e.iconst(e.ptr, i64::from(elem.size()) * i64::from(k));
-                let a = e.b.ins().iadd(at, off);
-                print_at(writer, rt, e, a, elem)?;
-            }
+            // for i in 0..len, an empty array included: a separator before every element but
+            // the first, then it.
+            let head = e.b.create_block();
+            let body = e.b.create_block();
+            let sep = e.b.create_block();
+            let item = e.b.create_block();
+            let after = e.b.create_block();
+            e.b.append_block_param(head, e.ptr);
+            let zero = e.iconst(e.ptr, 0);
+            e.b.ins().jump(head, &[zero.into()]);
+            e.b.switch_to_block(head);
+            let i = e.b.block_params(head)[0];
+            let more =
+                e.b.ins()
+                    .icmp_imm_u(IntCC::UnsignedLessThan, i, i64::from(*len));
+            e.b.ins().brif(more, body, &[], after, &[]);
+            e.b.switch_to_block(body);
+            let first = e.b.ins().icmp_imm_u(IntCC::Equal, i, 0);
+            e.b.ins().brif(first, item, &[], sep, &[]);
+            e.b.switch_to_block(sep);
+            emit_text(writer, rt, e, 1, ", ")?;
+            e.b.ins().jump(item, &[]);
+            e.b.switch_to_block(item);
+            let off = e.b.ins().imul_imm_u(i, i64::from(elem.size()));
+            let a = e.b.ins().iadd(at, off);
+            print_at(writer, rt, e, a, elem)?;
+            let next = e.b.ins().iadd_imm_u(i, 1);
+            e.b.ins().jump(head, &[next.into()]);
+            e.b.switch_to_block(after);
             emit_text(writer, rt, e, 1, "]")?;
         }
         // `Name(field: v, ...)`, the fields in the order of the declaration.
@@ -1695,6 +1718,38 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         ] {
             assert!(build(wrong).is_err());
         }
+    }
+
+    /// A result is printed in a loop over each array, so that `main`'s code does not grow with
+    /// an array's length, in a struct too: a 32768-element array takes less than twice the
+    /// code of a 4-element one, where printing each element took code of its own.
+    #[test]
+    fn test_a_large_result_is_printed_in_a_loop() {
+        let size_of_main = |source: &str| {
+            let module = mente_sema::check_program_without_proofs(source).unwrap();
+            let lowered = crate::lower::lower(&module).unwrap();
+            let calls = vec![Call {
+                entry: 0,
+                args: Vec::new(),
+            }];
+            let mut w = writer(Target::X86_64Linux);
+            program(&lowered, &calls, "", &mut w).unwrap();
+            let Some(FuncOrDataId::Func(id)) = w.module().get_name("main") else {
+                panic!("no `main`");
+            };
+            w.functions.iter().find(|c| c.id == id).unwrap().size
+        };
+        let array = |n: u32| format!("module m\npub fn f() -> [{}]u16 = [7; {}]\n", n, n);
+        // The frame's setup and the immediates grow a little with the size; the code that
+        // prints does not.
+        assert!(size_of_main(&array(32768)) < 2 * size_of_main(&array(4)));
+        let record = |n: u32| {
+            format!(
+                "module m\npub struct R {{\n  xs: [{}]u8\n  tag: bool\n}}\npub fn f() -> R = R(xs: [1; {}], tag: true)\n",
+                n, n
+            )
+        };
+        assert!(size_of_main(&record(32768)) < 2 * size_of_main(&record(4)));
     }
 
     /// Every call in `main` keeps its arguments in the same stack space, since only one runs:

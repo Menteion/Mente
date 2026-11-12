@@ -1,0 +1,27 @@
+// expect: pass
+module conformance
+// Clauses over field paths: a `requires` proven at the call by a guard, an `ensures` of the
+// result's field, and a nested path.
+pub struct Inner {
+  v: u8
+}
+
+pub struct Outer {
+  inner: Inner
+  w: u8
+}
+
+pub fn needs(o: Outer) -> u8
+  requires o.inner.v > 2
+= o.inner.v - 3
+
+pub fn calls(x: u8) -> u8 {
+  guard x > 2 else {
+    return 0
+  }
+  needs(Outer(inner: Inner(v: x), w: 0))
+}
+
+pub fn made(x: u8) -> Outer
+  ensures result.w == x
+= Outer(inner: Inner(v: 0), w: x)

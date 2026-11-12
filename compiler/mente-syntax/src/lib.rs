@@ -1290,8 +1290,10 @@ impl<'a> Parser<'a> {
                 docs.push(d);
                 self.next();
             }
+            // A doc comment at the end of an item documents nothing, as it does when the item
+            // is parsed alone; the items after it are parsed still.
             if *self.peek() == TokenKind::Eof {
-                break;
+                continue;
             }
             let attrs = self.parse_attrs()?;
             if attrs.len() == 1 && attrs[0].name == "example" {
@@ -1371,7 +1373,7 @@ impl<'a> Parser<'a> {
             Some((what, milestone)) => Diagnostic::error(
                 "E0109",
                 self.span(),
-                format!("{} comes in {}; M1 does not have it", what, milestone),
+                crate::diagnostics::later_message(what, Some(milestone)),
             ),
             None => Diagnostic::error(
                 "E0111",
@@ -2561,17 +2563,17 @@ mod tests {
             (
                 "module m\nimport net\n",
                 "E0109",
-                "an `import` comes in M6; M1 does not have it",
+                "an `import` comes in M6; M2 does not have it",
             ),
             (
                 "module m\nextern \"C\" {\n}\n",
                 "E0109",
-                "an `extern` block comes in M4; M1 does not have it",
+                "an `extern` block comes in M4; M2 does not have it",
             ),
             (
                 "module m\nactor A {\n}\n",
                 "E0109",
-                "an `actor` comes in M7; M1 does not have it",
+                "an `actor` comes in M7; M2 does not have it",
             ),
         ];
         for (src, code, message) in cases {
@@ -2789,6 +2791,29 @@ mod tests {
             kinds.contains(&TokenKind::Val)
                 && !kinds.iter().any(|k| matches!(k, TokenKind::DocComment(_)))
         );
+    }
+
+    /// A doc comment that ends an item, after its signature on the same line, documents
+    /// nothing, and the items after it are parsed as they are when each is parsed alone.
+    #[test]
+    fn test_a_doc_comment_ending_an_item_leaves_the_items_after_it() {
+        let m =
+            parse_module("module m\npub fn take(x: u8) /// doc\n\npub fn f() -> u8 = 1\n").unwrap();
+        let names: Vec<&str> = m
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ItemDecl::Fn(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["take", "f"]);
+        assert!(m.items.iter().all(|i| match i {
+            ItemDecl::Fn(f) => f.docs.is_empty(),
+            _ => true,
+        }));
+        let err = parse_module("module m\nfn e()///\nfn").unwrap_err();
+        assert_eq!(err.code, "E0101");
     }
 
     #[test]

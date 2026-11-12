@@ -1,0 +1,9 @@
+// expect: E0221 E0416
+module conformance
+// A declaration's check comes where the declaration stands, after the function before it.
+pub fn f() -> u8 = 300_u8
+
+@layout(size: 4, align: 4)
+pub struct R {
+  @bytes(0..2) pub a: u16
+}

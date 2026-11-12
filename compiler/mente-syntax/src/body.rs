@@ -284,10 +284,7 @@ impl Parser {
 
     /// Reports a construct of a later milestone (`E0109`).
     fn later(&mut self, span: Span, what: &str, milestone: Milestone) {
-        let message = match milestone {
-            Some(m) => format!("{} comes in {}; M1 does not have it", what, m),
-            None => format!("{} is in no milestone yet; M1 does not have it", what),
-        };
+        let message = crate::diagnostics::later_message(what, milestone);
         self.error(Diagnostic::error("E0109", span, message));
     }
 
@@ -2155,31 +2152,31 @@ mod tests {
         for (src, message) in [
             (
                 "struct B<T> {\n  v: u8\n}",
-                "a struct's type parameters comes in M4; M1 does not have it",
+                "a struct's type parameters comes in M4; M2 does not have it",
             ),
             (
                 "struct R {\n  lo: u8\n  invariant {\n    lo < 3\n  }\n}",
-                "an invariant relating a struct's fields comes in a later milestone; M1 does not have it",
+                "an invariant relating a struct's fields comes in a later milestone; M2 does not have it",
             ),
             (
                 "struct C {\n  n: u8 = 0\n}",
-                "a field's default value is in no milestone yet; M1 does not have it",
+                "a field's default value is in no milestone yet; M2 does not have it",
             ),
             (
                 "struct N {\n  name: String\n}",
-                "a string or list type (`String`) comes in M2; M1 does not have it",
+                "a string or list type (`String`) comes later in M2; the compiler does not have it yet",
             ),
             (
                 "struct F {\n  level: q16.16\n}",
-                "a fixed-point type (`q16.`) comes in M5; M1 does not have it",
+                "a fixed-point type (`q16.`) comes in M5; M2 does not have it",
             ),
             (
                 "struct H {\n  h: Handle<F>\n}",
-                "an arena, pool or layout type (`Handle`) comes in M3; M1 does not have it",
+                "an arena, pool or layout type (`Handle`) comes in M3; M2 does not have it",
             ),
             (
                 "struct G {\n  g: Box<u8>\n}",
-                "a type argument list comes in M4; M1 does not have it",
+                "a type argument list comes in M4; M2 does not have it",
             ),
         ] {
             let errors: Vec<(&str, String)> = parse_struct_src(src)
@@ -2765,100 +2762,100 @@ _ == b"
         let in_body = [
             (
                 "val s = \"text\"",
-                "a string value comes in M2; M1 does not have it",
+                "a string value comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val x = 1.5",
-                "a floating-point or fixed-point value comes in M5; M1 does not have it",
+                "a floating-point or fixed-point value comes in M5; M2 does not have it",
             ),
             (
                 "val m = match x {\n  1 => 2\n}",
-                "`match` comes in M2; M1 does not have it",
+                "`match` comes later in M2; the compiler does not have it yet",
             ),
-            ("raise E.Bad", "`raise` comes in M2; M1 does not have it"),
-            ("val n = none", "`none` comes in M2; M1 does not have it"),
-            ("val c = catch", "`catch` comes in M2; M1 does not have it"),
+            ("raise E.Bad", "`raise` comes later in M2; the compiler does not have it yet"),
+            ("val n = none", "`none` comes later in M2; the compiler does not have it yet"),
+            ("val c = catch", "`catch` comes later in M2; the compiler does not have it yet"),
             (
                 "val k = comptime f()",
-                "`comptime` comes in M4; M1 does not have it",
+                "`comptime` comes in M4; M2 does not have it",
             ),
             (
                 "with Arena.scoped() {\n}",
-                "`with` comes in M4; M1 does not have it",
+                "`with` comes in M4; M2 does not have it",
             ),
             (
                 "val g = |x| x",
-                "a closure comes in M4; M1 does not have it",
+                "a closure comes in M4; M2 does not have it",
             ),
             (
                 "parallel (a(), b())",
-                "`parallel` comes in M7; M1 does not have it",
+                "`parallel` comes in M7; M2 does not have it",
             ),
             (
                 "parallel_for x in xs {\n}",
-                "`parallel_for` comes in M7; M1 does not have it",
+                "`parallel_for` comes in M7; M2 does not have it",
             ),
             (
                 "for i in 0..4 {\n}",
-                "a `for` loop is in no milestone yet; M1 does not have it",
+                "a `for` loop is in no milestone yet; M2 does not have it",
             ),
             (
                 "val l = xs.count()",
-                "a method call comes in M2; M1 does not have it",
+                "a method call comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val v = xs[..]",
-                "a view `x[..]` comes in M2; M1 does not have it",
+                "a view `x[..]` comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val v = xs[1..3]",
-                "a range `x[a..b]` comes in M2; M1 does not have it",
+                "a range `x[a..b]` comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val v = xs[1..=3]",
-                "a range `x[a..b]` comes in M2; M1 does not have it",
+                "a range `x[a..b]` comes later in M2; the compiler does not have it yet",
             ),
             // A range inside a call inside an index is an expression's range, not a view's.
             (
                 "val v = xs[f(1..3)]",
-                "a range in an expression is in no milestone yet; M1 does not have it",
+                "a range in an expression is in no milestone yet; M2 does not have it",
             ),
             // An index's brackets end with it: a range later at the same depth is an expression's.
             (
                 "val v = f(g(xs[0]), h(k(1..3)))",
-                "a range in an expression is in no milestone yet; M1 does not have it",
+                "a range in an expression is in no milestone yet; M2 does not have it",
             ),
             (
                 "val r = f()?",
-                "error propagation (`?` and `!`) comes in M2; M1 does not have it",
+                "error propagation (`?` and `!`) comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val r = f()!",
-                "error propagation (`?` and `!`) comes in M2; M1 does not have it",
+                "error propagation (`?` and `!`) comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val o = a ?? b",
-                "an optional value's operator (`??` or `?.`) comes in M2; M1 does not have it",
+                "an optional value's operator (`??` or `?.`) comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val o = a?.b",
-                "an optional value's operator (`??` or `?.`) comes in M2; M1 does not have it",
+                "an optional value's operator (`??` or `?.`) comes later in M2; the compiler does not have it yet",
             ),
             (
                 "val y = x |> f()",
-                "the pipe `|>` is in no milestone yet; M1 does not have it",
+                "the pipe `|>` is in no milestone yet; M2 does not have it",
             ),
             (
                 "val r = 0..4",
-                "a range in an expression is in no milestone yet; M1 does not have it",
+                "a range in an expression is in no milestone yet; M2 does not have it",
             ),
             (
                 "val r = 0..=4",
-                "a range in an expression is in no milestone yet; M1 does not have it",
+                "a range in an expression is in no milestone yet; M2 does not have it",
             ),
             (
                 "pool[mut h] = 1",
-                "a `mut` projection `p[mut h]` comes in M3; M1 does not have it",
+                "a `mut` projection `p[mut h]` comes in M3; M2 does not have it",
             ),
         ];
         for (src, message) in in_body {
@@ -2872,47 +2869,47 @@ _ == b"
         let in_header = [
             (
                 "fn f<T>(x: T) = x",
-                "a type parameter list comes in M4; M1 does not have it",
+                "a type parameter list comes in M4; M2 does not have it",
             ),
             (
                 "fn f(own x: u8) = x",
-                "an `own` parameter comes in M2; M1 does not have it",
+                "an `own` parameter comes later in M2; the compiler does not have it yet",
             ),
             (
                 "fn f(in a: u8) = a",
-                "an `in` parameter comes in M2; M1 does not have it",
+                "an `in` parameter comes later in M2; the compiler does not have it yet",
             ),
             (
                 "fn f() -> u8 ! E = 1",
-                "an error type `T ! E` comes in M2; M1 does not have it",
+                "an error type `T ! E` comes later in M2; the compiler does not have it yet",
             ),
             (
                 "fn f(d: [4]u8) -> u8 from d = 1",
-                "a `from` clause comes in M2; M1 does not have it",
+                "a `from` clause comes later in M2; the compiler does not have it yet",
             ),
             (
                 "fn f() -> u8 with IO = 1",
-                "an effect clause `with` comes in M4; M1 does not have it",
+                "an effect clause `with` comes in M4; M2 does not have it",
             ),
             (
                 "fn f(x: []u8) = 1",
-                "a slice type `[]T` comes in M2; M1 does not have it",
+                "a slice type `[]T` comes later in M2; the compiler does not have it yet",
             ),
             (
                 "fn f(x: ?u8) = 1",
-                "an optional type `?T` comes in M2; M1 does not have it",
+                "an optional type `?T` comes later in M2; the compiler does not have it yet",
             ),
             (
                 "fn f(x: str) = 1",
-                "a string or list type (`str`) comes in M2; M1 does not have it",
+                "a string or list type (`str`) comes later in M2; the compiler does not have it yet",
             ),
             (
                 "fn f(x: f64) = 1",
-                "a floating-point, decimal or saturating type (`f64`) comes in M5; M1 does not have it",
+                "a floating-point, decimal or saturating type (`f64`) comes in M5; M2 does not have it",
             ),
             (
                 "fn f(x: Pool) = 1",
-                "an arena, pool or layout type (`Pool`) comes in M3; M1 does not have it",
+                "an arena, pool or layout type (`Pool`) comes in M3; M2 does not have it",
             ),
         ];
         for (src, message) in in_header {

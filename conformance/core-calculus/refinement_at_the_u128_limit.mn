@@ -1,0 +1,22 @@
+// expect: pass
+module conformance
+// A refinement of u128 that ends one below its largest value: every value Tier 1 can bound is
+// proven, as are a literal at the bound and a value that carries the same refinement.
+pub fn take(x: u128[0..340282366920938463463374607431768211455]) -> u128 = x
+
+pub fn zero() -> u128 = take(0)
+
+pub fn small(y: u64) -> u128 = take(y)
+
+pub fn largest() -> u128 = take(340282366920938463463374607431768211454)
+
+pub fn passed_on(y: u128[0..340282366920938463463374607431768211455]) -> u128 = take(y)
+
+pub fn kept(y: u128[0..340282366920938463463374607431768211455]) -> u128[0..340282366920938463463374607431768211455] = y
+
+pub fn guarded(y: u128) -> u128 {
+  guard y < 340282366920938463463374607431768211455 else {
+    return 0
+  }
+  take(y)
+}

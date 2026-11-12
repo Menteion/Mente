@@ -1,0 +1,18 @@
+// expect: pass
+module conformance
+// A loop's measure over a field path, which each round makes smaller.
+pub struct Counter {
+  n: u32[0..1000]
+  steps: u32
+}
+
+pub fn run(c: Counter) -> u32 {
+  var k = c
+  while k.n > 0
+    decreases k.n
+  {
+    k.n -= 1
+    k.steps = 0
+  }
+  k.steps
+}

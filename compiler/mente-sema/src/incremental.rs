@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use mente_syntax::diagnostics::Diagnostic;
+use mente_syntax::diagnostics::{in_source_order, Diagnostic};
 use mente_syntax::tree::FnSyntax;
 use mente_syntax::{
     lex, parse_bodies, parse_module, split_items, ItemDecl, ItemStart, Span, TokenKind,
@@ -261,7 +261,7 @@ impl Session {
             }
         }
         let mut declarations = Vec::new();
-        // A name declared twice, which the whole module's check reports before every function.
+        // A name declared twice, which the whole module's check reports at the second name.
         let named: Vec<(String, Span)> = self
             .items
             .iter()
@@ -286,6 +286,7 @@ impl Session {
             }
         }
         declarations.extend(bodies);
+        in_source_order(&mut declarations);
         declarations
     }
 }
@@ -528,10 +529,13 @@ mod tests {
         assert_eq!(s.diagnostics()[0].code, "E0111");
         edited(&mut s, "(x\n", "x\n");
         assert!(s.diagnostics().is_empty());
-        // Declaration errors come before body errors, and fixes move with their item.
+        // Declaration errors and body errors come in the order of the source, and fixes move
+        // with their item.
         edited(&mut s, "pub fn main() -> u16 = twice(id(3))", "@total\npub fn main() -> u16 {\n  var i: u8 = 0\n  while i < 3 {\n    i += 1\n  }\n  twice(id(i))\n}");
         edited(&mut s, "y + y", "zz");
-        assert_eq!(s.diagnostics()[0].code, "E0501");
+        assert!(s.diagnostics().iter().any(|d| d.code == "E0501"));
+        let starts: Vec<usize> = s.diagnostics().iter().map(|d| d.primary.start).collect();
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]), "{:?}", starts);
         let fix = s
             .diagnostics()
             .iter()

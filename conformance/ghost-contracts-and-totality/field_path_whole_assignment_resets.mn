@@ -1,0 +1,13 @@
+// expect: E0502
+module conformance
+// Assigning a whole struct replaces what Tier 1 knew of its fields.
+pub struct Pair {
+  a: u8
+  b: u8
+}
+
+pub fn f(mut p: Pair, q: Pair) -> u8[0..1] {
+  p.a = 0
+  p = q
+  p.a
+}

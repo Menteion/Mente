@@ -12,6 +12,34 @@ use crate::Span;
 /// field leaves it unchanged.
 pub const JSON_VERSION: u32 = 1;
 
+/// The milestone the compiler is building (`ROADMAP.md`). Every message that says what the
+/// compiler has reads it, so that the next milestone changes this line alone.
+pub const MILESTONE: &str = "M2";
+
+/// Puts a module's diagnostics in the order of its source (`spec/diagnostics.md`, item 10): by
+/// the start of each primary span, those that start at one place in the order the checks found
+/// them.
+pub fn in_source_order(diagnostics: &mut [Diagnostic]) {
+    diagnostics.sort_by_key(|d| d.primary.start);
+}
+
+/// The message of `E0109`, for `what`, a construct the compiler does not have, and the
+/// milestone that brings it, if any: one still to come in the current milestone, one of a
+/// later milestone, or one in no milestone yet.
+pub fn later_message(what: &str, milestone: Option<&str>) -> String {
+    match milestone {
+        Some(m) if m == MILESTONE => format!(
+            "{} comes later in {}; the compiler does not have it yet",
+            what, m
+        ),
+        Some(m) => format!("{} comes in {}; {} does not have it", what, m, MILESTONE),
+        None => format!(
+            "{} is in no milestone yet; {} does not have it",
+            what, MILESTONE
+        ),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
     Error,
@@ -349,6 +377,49 @@ mod tests {
             line: 0,
             col: 0,
         }
+    }
+
+    /// A construct the compiler lacks is reported against the milestone it is building, read
+    /// from one constant: one still to come in that milestone, one of a later milestone, and one
+    /// in none. The parser, a module's items and a struct's declaration all say it so.
+    #[test]
+    fn test_later_constructs_name_the_milestone_from_one_constant() {
+        assert_eq!(MILESTONE, "M2");
+        assert_eq!(
+            later_message("`match`", Some("M2")),
+            "`match` comes later in M2; the compiler does not have it yet"
+        );
+        assert_eq!(
+            later_message("a closure", Some("M4")),
+            "a closure comes in M4; M2 does not have it"
+        );
+        assert_eq!(
+            later_message("the pipe `|>`", None),
+            "the pipe `|>` is in no milestone yet; M2 does not have it"
+        );
+        let first = |src: &str| {
+            let m = crate::parse_module(src).unwrap();
+            let mut errors: Vec<Diagnostic> = crate::parse_bodies(src, &m)
+                .into_iter()
+                .flat_map(|p| p.errors)
+                .collect();
+            errors.extend(
+                crate::parse_structs(src, &m)
+                    .into_iter()
+                    .flat_map(|p| p.errors),
+            );
+            errors.remove(0).message
+        };
+        assert_eq!(
+            first("module m\npub fn f() -> u8 = match x {}\n"),
+            later_message("`match`", Some("M2"))
+        );
+        assert_eq!(
+            first("module m\nstruct S {\n  t: Handle<u8>\n}\n"),
+            later_message("an arena, pool or layout type (`Handle`)", Some("M3"))
+        );
+        let module = crate::parse_module("module m\nimport a.b\n").unwrap_err();
+        assert_eq!(module.message, later_message("an `import`", Some("M6")));
     }
 
     #[test]

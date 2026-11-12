@@ -77,7 +77,6 @@ pub fn resolve(
     let count = f.tree.exprs.len();
     let mut r = Resolver {
         structs,
-        struct_names: structs.defs.iter().map(|d| d.name.clone()).collect(),
         functions: functions
             .iter()
             .enumerate()
@@ -109,7 +108,7 @@ impl Resolver<'_> {
     /// What type of the module `name` names, if it names one: a struct, or a type whose values
     /// come later.
     fn type_kind(&self, name: &str) -> Option<&'static str> {
-        if self.struct_names.contains(name) {
+        if self.structs.contains(name) {
             Some("a struct")
         } else {
             self.structs.later.get(name).map(|l| l.kind)
@@ -119,8 +118,6 @@ impl Resolver<'_> {
 
 struct Resolver<'a> {
     structs: &'a Structs,
-    /// The names of the module's structs.
-    struct_names: HashSet<String>,
     functions: HashMap<String, usize>,
     resolution: Resolution,
     /// The bindings visible at each open block, innermost last.
@@ -375,7 +372,7 @@ impl Resolver<'_> {
             ExprKind::Call { callee, args } => {
                 if let Some(&index) = self.functions.get(callee) {
                     self.resolution.calls[e.0 as usize] = Some(index);
-                } else if self.struct_names.contains(callee) {
+                } else if self.structs.contains(callee) {
                     // A struct built with positional arguments, which the type checker reports.
                 } else if let Some(later) = self.structs.later.get(callee) {
                     let name_span = Span {
@@ -418,9 +415,10 @@ impl Resolver<'_> {
                         ..span
                     };
                     self.errors.push(later.diagnostic(name, name_span));
-                } else if !self.struct_names.contains(name) {
-                    let mut candidates: Vec<String> = self.struct_names.iter().cloned().collect();
+                } else if !self.structs.contains(name) {
+                    let mut candidates = self.structs.names();
                     candidates.sort();
+                    candidates.dedup();
                     let name_span = Span {
                         end: span.start + name.len(),
                         ..span
@@ -480,11 +478,13 @@ impl Resolver<'_> {
                 "E0204",
                 span,
                 format!(
-                    "`{}` is a function, which M1 only calls: write `{}(...)`",
-                    n, n
+                    "`{}` is a function, which {} only calls: write `{}(...)`",
+                    n,
+                    mente_syntax::diagnostics::MILESTONE,
+                    n
                 ),
             ));
-        } else if self.struct_names.contains(n) {
+        } else if self.structs.contains(n) {
             self.errors.push(Diagnostic::error(
                 "E0204",
                 span,
@@ -627,7 +627,7 @@ impl Resolver<'_> {
             }
             TypeKind::Array { elem, .. } => self.ty(tree, *elem),
             TypeKind::Named(n) => {
-                if let Some(d) = unknown_type(self.structs, n, span, &self.struct_names) {
+                if let Some(d) = unknown_type(self.structs, n, span) {
                     self.errors.push(d);
                 }
             }
@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(codes("pub fn f() = id"), ["E0204"]);
         assert_eq!(
             messages("pub fn f() = id"),
-            ["`id` is a function, which M1 only calls: write `id(...)`"]
+            ["`id` is a function, which M2 only calls: write `id(...)`"]
         );
         assert_eq!(codes("pub fn f(x: u8) = x(1)"), ["E0204"]);
         assert_eq!(
@@ -1122,7 +1122,7 @@ pub enum Mode {
 }}",
                     build
                 ))),
-                ["a `@layout` struct as a value (`Stamp`) comes in M3; M1 does not have it"],
+                ["a `@layout` struct as a value (`Stamp`) comes in M3; M2 does not have it"],
                 "{}",
                 build
             );
@@ -1134,7 +1134,7 @@ pub enum Mode {
   0
 }"
             )),
-            ["a bitstruct as a value (`Tag`) comes in M3; M1 does not have it"]
+            ["a bitstruct as a value (`Tag`) comes in M3; M2 does not have it"]
         );
         assert_eq!(
             messages(&with(

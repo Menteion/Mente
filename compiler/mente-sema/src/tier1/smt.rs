@@ -43,7 +43,7 @@ use mente_syntax::Span;
 
 use super::{Cond, Fx, Obligation, Site, Tag, Val};
 use crate::names::BindingKind;
-use crate::octagon::{Octagon, Term, INF};
+use crate::octagon::{Exact, Octagon, Term, INF};
 use crate::types::{Int, IntTy, Ty};
 
 /// What an obligation states, for its query to deny.
@@ -90,7 +90,17 @@ pub(super) fn query(fx: &Fx, o: &Obligation, paths: Vec<Path>) -> Option<String>
         if st.is_empty() && !contradiction {
             continue;
         }
-        let facts: Vec<String> = constraints.iter().map(|(t, c)| w.le(t, *c)).collect();
+        let mut facts: Vec<String> = constraints.iter().map(|(t, c)| w.le(t, *c)).collect();
+        // The bounds the state keeps beyond the octagon's reach, exactly.
+        for (v, lower, upper) in st.far_constraints() {
+            let x = w.var(&Term::pos(v));
+            if let Some(l) = lower {
+                facts.push(format!("(<= {} {})", exact_num(l), x));
+            }
+            if let Some(u) = upper {
+                facts.push(format!("(<= {} {})", x, exact_num(u)));
+            }
+        }
         let mut denial = Vec::new();
         let denied = w.deny(goal, &mut denial);
         denial.push(denied);
@@ -108,6 +118,15 @@ fn num(v: i128) -> String {
         format!("(- {})", v.unsigned_abs())
     } else {
         v.to_string()
+    }
+}
+
+/// An exact integer as an SMT-LIB numeral, negative ones as `(- n)`.
+fn exact_num(v: Exact) -> String {
+    let text = v.to_string();
+    match text.strip_prefix('-') {
+        Some(m) => format!("(- {})", m),
+        None => text,
     }
 }
 
@@ -256,6 +275,14 @@ impl<'f, 'a> Writer<'f, 'a> {
                 let (l, r) = (self.term(l, side), self.term(r, side));
                 format!("({} {} {})", symbol, l, r)
             }
+            Cond::Far(op, far) => {
+                let (v, c) = (&far.0, &far.1);
+                let Some(symbol) = relation(*op) else {
+                    return self.fresh("Bool", "a condition Tier 1 does not follow".to_string());
+                };
+                let v = self.term(v, side);
+                format!("({} {} {})", symbol, v, exact_num(*c))
+            }
             Cond::And(a, b) => {
                 let (a, b) = (self.cond(a, side), self.cond(b, side));
                 format!("(and {} {})", a, b)
@@ -316,22 +343,34 @@ impl<'f, 'a> Writer<'f, 'a> {
         let mut declared = BTreeSet::new();
         let mut ranges = Vec::new();
         for &b in &fx.scope {
-            let Some(v) = fx.vars[b] else {
-                continue;
+            // The binding's variable, then each field path of it Tier 1 follows.
+            let int = match fx.typing.bindings[b] {
+                Ty::Int(Int::One(t)) => Some(t),
+                _ => None,
             };
-            if !declared.insert(v) {
-                continue;
-            }
-            let (name, comment) = &self.names[v];
-            let _ = writeln!(out, "(declare-const {} Int) ; {}", name, comment);
-            if let Ty::Int(Int::One(t)) = fx.typing.bindings[b] {
-                let (lo, hi) = range(t);
-                ranges.push(format!(
-                    "(assert (and (<= {lo} {x}) (<= {x} {hi})))",
-                    lo = lo,
-                    x = name,
-                    hi = hi
-                ));
+            let own = fx.vars[b].map(|v| (v, int));
+            let paths = fx.paths[b].iter().map(|p| {
+                let t = match &p.shape {
+                    super::Shape::Int { int, .. } => *int,
+                    _ => None,
+                };
+                (p.var, t)
+            });
+            for (v, t) in own.into_iter().chain(paths) {
+                if !declared.insert(v) {
+                    continue;
+                }
+                let (name, comment) = &self.names[v];
+                let _ = writeln!(out, "(declare-const {} Int) ; {}", name, comment);
+                if let Some(t) = t {
+                    let (lo, hi) = range(t);
+                    ranges.push(format!(
+                        "(assert (and (<= {lo} {x}) (<= {x} {hi})))",
+                        lo = lo,
+                        x = name,
+                        hi = hi
+                    ));
+                }
             }
         }
         let bindings: BTreeSet<usize> = fx.vars.iter().flatten().copied().collect();
@@ -496,6 +535,19 @@ fn names(fx: &Fx) -> Vec<(String, String)> {
         }
     }
     let mut taken: BTreeSet<String> = BTreeSet::new();
+    // Each field path Tier 1 follows of a binding of a struct type, as it is written.
+    for (b, binding) in fx.resolution.bindings.iter().enumerate() {
+        for p in &fx.paths[b] {
+            let text = format!("{}.{}", binding.name, p.names.join("."));
+            let mut symbol = format!("|{}|", text);
+            if !taken.insert(symbol.clone()) {
+                symbol = format!("|{}.{}|", text, p.var);
+            }
+            if let Some(slot) = out.get_mut(p.var) {
+                *slot = (symbol, format!("`{}`, a field of `{}`", text, binding.name));
+            }
+        }
+    }
     for (b, binding) in fx.resolution.bindings.iter().enumerate() {
         let Some(v) = fx.vars[b] else {
             continue;
@@ -1010,6 +1062,61 @@ mod tests {
             unguarded[0].1.iter().all(|q| q.0 != ObligationKind::Range),
             "{:?}",
             unguarded
+        );
+    }
+
+    /// A field path Tier 1 follows is a variable of the query, named as written and bounded by
+    /// its type when its binding is in scope.
+    #[test]
+    fn test_field_paths_are_named_and_bounded() {
+        let q = only(
+            "pub struct P {\n  a: u8\n  b: i8\n}\npub fn f(mut p: P) -> u8[0..1] {\n  p.a = 0\n  p.a\n}",
+            ObligationKind::Refinement,
+        );
+        assert!(
+            q.contains("(declare-const |p.a| Int) ; `p.a`, a field of `p`"),
+            "{}",
+            q
+        );
+        assert!(
+            q.contains("(assert (and (<= 0 |p.a|) (<= |p.a| 255)))"),
+            "{}",
+            q
+        );
+        assert!(
+            q.contains("(assert (and (<= (- 128) |p.b|) (<= |p.b| 127)))"),
+            "{}",
+            q
+        );
+    }
+
+    /// A refinement at a 128-bit type's limit is denied against its exact bound, and the
+    /// bounds the state keeps beyond the octagon's reach are among the query's facts.
+    #[test]
+    fn test_bounds_beyond_the_octagon_are_written_exactly() {
+        let q = only(
+            "pub fn take(x: u128[0..340282366920938463463374607431768211455]) -> u128 = x\npub fn f(y: u128[0..340282366920938463463374607431768211455]) -> u128 = take(y)",
+            ObligationKind::Refinement,
+        );
+        assert!(
+            q.contains("340282366920938463463374607431768211454)"),
+            "the bound kept beyond the octagon: {}",
+            q
+        );
+        assert!(
+            q.contains("(< |x| 340282366920938463463374607431768211455)")
+                || q.contains("340282366920938463463374607431768211455)))"),
+            "the refinement denied exactly: {}",
+            q
+        );
+        let i = only(
+            "pub fn take(x: i128[-170141183460469231731687303715884105728..=0]) -> i128 = x\npub fn f() -> i128 = take(-170141183460469231731687303715884105728)",
+            ObligationKind::Refinement,
+        );
+        assert!(
+            i.contains("(- 170141183460469231731687303715884105728)"),
+            "a negative bound as a numeral: {}",
+            i
         );
     }
 
