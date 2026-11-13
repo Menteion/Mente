@@ -1763,7 +1763,9 @@ impl<'a> Checker<'a> {
                 let (lo, hi, text) = self.int_read(scrutinee, *i);
                 Read::Int(lo, hi, text)
             }
-            Ty::Any => Read::Other,
+            // A scrutinee of no type is read as its first pattern of a kind reads it, so that
+            // its patterns agree with one another (`core-calculus.md`, item 14).
+            Ty::Any => self.first_read(arms),
             other @ (Ty::Array(..) | Ty::Struct(_) | Ty::Unit) => {
                 self.mismatch(
                     scrutinee,
@@ -1775,10 +1777,12 @@ impl<'a> Checker<'a> {
                 Read::Other
             }
         };
-        let mut clean = !matches!(read, Read::Other);
+        // Arms that never run cover nothing.
+        let no_type = found == Ty::Any;
+        let mut clean = !matches!(read, Read::Other) && !no_type;
         let mut values: Vec<Option<Value>> = Vec::new();
         for (k, arm) in arms.iter().enumerate() {
-            let v = self.pattern(at, k, arm, &read);
+            let v = self.pattern(at, k, arm, &read, no_type);
             clean &= v.is_some();
             values.push(v.flatten());
         }
@@ -1826,6 +1830,27 @@ impl<'a> Checker<'a> {
             }
         }
         joined
+    }
+
+    /// What the first pattern of `arms` that is not `_` reads: a variant of an enum whose
+    /// declaration checks, a `bool` or an integer of any type; nothing when there is none.
+    fn first_read(&self, arms: &[Arm]) -> Read<'a> {
+        for arm in arms {
+            return match &arm.pattern.kind {
+                PatternKind::Wildcard => continue,
+                PatternKind::Variant { enum_name, .. } => match self.structs.get_enum(enum_name) {
+                    Some(def) if def.ok => Read::Enum(def),
+                    _ => Read::Other,
+                },
+                PatternKind::Bool(_) => Read::Bool,
+                PatternKind::Int { .. } => Read::Int(
+                    Exact::new(true, 1 << 127),
+                    Exact::new(false, u128::MAX),
+                    String::from("integer"),
+                ),
+            };
+        }
+        Read::Other
     }
 
     /// The range of integers an integer scrutinee takes: its declared refinement's when both
@@ -1924,20 +1949,31 @@ impl<'a> Checker<'a> {
 
     /// Checks the pattern of arm `k` of the `match` at `m` against what the `match` reads, and
     /// gives its bindings their fields' types: `None` after reporting a pattern of another kind
-    /// or a variant the enum lacks; otherwise the value it matches, `None` for `_`.
+    /// or a variant the enum lacks; otherwise the value it matches, `None` for `_`. `no_type`
+    /// tells that the scrutinee has no type, and `read` is what its first pattern reads.
     fn pattern(
         &mut self,
         m: ExprId,
         k: usize,
         arm: &Arm,
         read: &Read<'a>,
+        no_type: bool,
     ) -> Option<Option<Value>> {
         let p = &arm.pattern;
         let kind = match read {
             Read::Enum(def) => format!("`{}`", def.name),
             Read::Bool => String::from("a `bool`"),
+            Read::Int(..) if no_type => String::from("an integer"),
             Read::Int(_, _, text) => format!("an integer, `{}`", text),
             Read::Other => String::from("a value of no type it reads"),
+        };
+        let kind = if no_type {
+            format!(
+                "a value of no type, which its first pattern reads as {}",
+                kind
+            )
+        } else {
+            kind
         };
         let wrong = |what: &str| {
             Diagnostic::error(
@@ -4469,6 +4505,12 @@ pub enum Light {
             ("pub fn f(x: u8) -> u8 = match x {\n  300_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `300`"),
             ("pub fn f(x: u8) -> u8 = match x {\n  0_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `0`"),
             ("pub fn f(x: i8) -> u8 = match x {\n  -1_i64 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `-1`"),
+            // A scrutinee of no type is matched as its first pattern reads it.
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  300 => 1\n  true => 4\n}", "this pattern is a `bool`, but the `match` reads a value of no type, which its first pattern reads as an integer"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  Light.Red => 2\n  -1 => 3\n}", "this pattern is an integer, but the `match` reads a value of no type, which its first pattern reads as `Light`"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  _ => 1\n  -1 => 2\n  Light.Red => 3\n}", "this pattern is a variant of `Light`, but the `match` reads a value of no type, which its first pattern reads as an integer"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  true => 1\n  Light.Red => 2\n}", "this pattern is a variant of `Light`, but the `match` reads a value of no type, which its first pattern reads as a `bool`"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  Light.Red => 1\n  Shape.Dot => 2\n}", "this pattern is a variant of `Shape`, but the `match` reads a value of no type, which its first pattern reads as `Light`"),
         ] {
             assert_eq!(messages(&with(src)), [message], "{}", src);
         }
@@ -4515,6 +4557,28 @@ pub enum Light {
                 "pub fn f() -> u8 = match nope {\n  0 => 1\n  _ => 2\n}"
             )),
             ["E0201"]
+        );
+        // Patterns of one kind on a scrutinee of no type check, whatever their values: the arms
+        // never run, so there is nothing to cover. A variant's pattern still names its fields,
+        // and its bindings take their types.
+        for src in [
+            "pub fn f() -> u8 = match todo(\"q\") {\n  300 => 1\n  -1 => 2\n}",
+            "pub fn f() -> u8 = match todo(\"q\") {\n  true => 1\n}",
+            "pub fn f() -> u8 = match todo(\"q\") {\n  Light.Red => 1\n}",
+        ] {
+            assert_eq!(codes(&with(src)), NONE, "{}", src);
+        }
+        assert_eq!(
+            binding_types(&with(
+                "pub fn f() -> u16 = match todo(\"q\") {\n  Shape.Rect(w: a, h: b) => a + b\n  Shape.Dot => 0\n}"
+            )),
+            [("a", "u8"), ("b", "u16")].map(|(n, t)| (n.to_string(), t.to_string()))
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8 = match todo(\"q\") {\n  Shape.Rect(h: b) => 1\n  Shape.Dot => 0\n}"
+            )),
+            ["E0226"]
         );
         // An enum whose declaration is in error is matched without coverage being reported.
         assert_eq!(

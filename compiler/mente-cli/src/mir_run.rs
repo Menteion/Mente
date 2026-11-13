@@ -37,14 +37,6 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
         .iter()
         .find(|e| e.name == name)
         .ok_or_else(|| format!("no function `{}` with a body to run", name))?;
-    if args.len() != entry.params.len() {
-        return Err(format!(
-            "`{}` takes {} arguments, but {} were given",
-            name,
-            entry.params.len(),
-            args.len()
-        ));
-    }
     if let Some(why) = misshapen(entry, &args) {
         return Err(why);
     }
@@ -368,9 +360,18 @@ fn scalar(value: &Value) -> Result<Val, String> {
     }
 }
 
-/// The refusal of a call from outside the program whose argument does not have its parameter's
-/// shape, in the reference interpreter's words: such a call is no call of the function.
+/// The refusal of a call from outside the program with more or fewer arguments than the
+/// function's parameters, or an argument that does not have its parameter's shape, in the
+/// reference interpreter's words: such a call is no call of the function, on any path.
 fn misshapen(entry: &lower::Entry, args: &[(bool, Value)]) -> Option<String> {
+    if args.len() != entry.params.len() {
+        return Some(format!(
+            "`{}` takes {} arguments, but {} were given",
+            entry.name,
+            entry.params.len(),
+            args.len()
+        ));
+    }
     fn shaped(v: &Value, shape: &Shape) -> bool {
         match (v, shape) {
             (Value::Int(_), Shape::Int(_)) | (Value::Bool(_), Shape::Bool) => true,
@@ -1011,6 +1012,40 @@ pub fn get(xs: [3]u8, i: usize) -> u8 = xs[i]
                 (Err(text), Err(w)) => assert!(text.starts_with(w), "{}: {}", call, text),
                 (got, w) => panic!("{}: {:?}, expected {:?}", call, got, w),
             }
+        }
+    }
+
+    /// Native code refuses a call with more or fewer arguments than its function's parameters,
+    /// as MIR and the reference interpreter do, before it builds anything; `main` with a
+    /// parameter, which `mn run` calls with none, is refused so too.
+    #[test]
+    fn test_native_runs_refuse_a_call_of_another_count_of_arguments() {
+        let text = "module m\npub fn z() -> u8 = 4\npub fn main(n: u8) -> u8 = n\n";
+        let module = mente_sema::check_program(text).unwrap();
+        let lowered = lower::lower(&module).unwrap();
+        let dir = std::env::temp_dir().join(format!("mn-count-{}", std::process::id()));
+        let calls: Vec<CallArgs> = ["z(1)", "main()"]
+            .map(|c| mente_interp::parse_call_modes(c).expect("a call"))
+            .to_vec();
+        let got = native(&lowered, &calls, &dir, "count");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            got,
+            Ok(vec![
+                Err("`z` takes 0 arguments, but 1 were given".to_string()),
+                Err("`main` takes 1 arguments, but 0 were given".to_string()),
+            ])
+        );
+        for (f, args) in calls {
+            assert_eq!(
+                run_lowered(&lowered, &f, args.clone()),
+                Err(format!(
+                    "`{}` takes {} arguments, but {} were given",
+                    f,
+                    1 - args.len(),
+                    args.len()
+                ))
+            );
         }
     }
 

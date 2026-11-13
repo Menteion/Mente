@@ -223,7 +223,7 @@ fn is_char_literal(b: &[char], i: usize) -> bool {
 }
 
 /// The enums the exhaustive crates match: every enum declared in them or in `mente-syntax`,
-/// and the names `use ... as` gives one of them.
+/// and the names `use ... as` or `type ... =` gives one of them, or one of those names.
 fn enum_names(files: &[(String, String)]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for (_, text) in files {
@@ -237,14 +237,105 @@ fn enum_names(files: &[(String, String)]) -> BTreeSet<String> {
             }
         }
     }
-    for (_, text) in files {
-        for (original, alias) in aliases(&code_only(text)) {
-            if names.contains(&original) {
-                names.insert(alias);
+    let pairs: Vec<(String, String)> = files
+        .iter()
+        .flat_map(|(_, text)| {
+            let code = code_only(text);
+            let mut pairs = aliases(&code);
+            pairs.extend(type_aliases(&code));
+            pairs
+        })
+        .collect();
+    loop {
+        let before = names.len();
+        for (original, alias) in &pairs {
+            if names.contains(original) {
+                names.insert(alias.clone());
             }
         }
+        if names.len() == before {
+            return names;
+        }
     }
-    names
+}
+
+/// Each `type Y = path::X;` of `code`, as `(X, Y)`: the last segment of the path, without its
+/// generic arguments. A `type` without `=`, as a trait declares one, gives none.
+fn type_aliases(code: &str) -> Vec<(String, String)> {
+    let b: Vec<char> = code.chars().collect();
+    let mut out = Vec::new();
+    for i in 0..b.len() {
+        if !word_at(&b, i, "type") {
+            continue;
+        }
+        let end = (i..b.len()).find(|&k| b[k] == ';').unwrap_or(b.len());
+        let declaration: String = b[i + 4..end].iter().collect();
+        let Some((left, right)) = declaration.split_once('=') else {
+            continue;
+        };
+        let alias: String = left
+            .trim()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let path = right.trim().split('<').next().unwrap_or("");
+        let original = path.rsplit("::").next().unwrap_or("").trim().to_string();
+        if !alias.is_empty() && !original.is_empty() {
+            out.push((original, alias));
+        }
+    }
+    out
+}
+
+/// The bodies of the `impl` blocks of `code` whose type is one of `names`, a trait's included,
+/// as ranges of `code`: in them `Self` is that enum.
+fn enum_impls(code: &[char], names: &BTreeSet<String>) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for i in 0..code.len() {
+        if !word_at(code, i, "impl") {
+            continue;
+        }
+        let Some(open) = (i..code.len()).find(|&k| code[k] == '{' || code[k] == ';') else {
+            break;
+        };
+        if code[open] == ';' {
+            continue;
+        }
+        let header: String = code[i + 4..open].iter().collect();
+        // `impl<T> Trait for Type<T>` or `impl<T> Type<T>`: the type follows `for`, or the
+        // generic parameters of the `impl`.
+        let words: Vec<&str> = header.split_whitespace().collect();
+        let ty = match words.iter().rposition(|w| *w == "for") {
+            Some(k) => words[k + 1..].join(" "),
+            None => {
+                let rest = header.trim_start();
+                match rest.strip_prefix('<') {
+                    Some(r) => {
+                        let mut depth = 1;
+                        let at = r
+                            .char_indices()
+                            .find(|&(_, c)| {
+                                match c {
+                                    '<' => depth += 1,
+                                    '>' => depth -= 1,
+                                    _ => {}
+                                }
+                                depth == 0
+                            })
+                            .map_or(r.len(), |(k, _)| k + 1);
+                        r[at..].to_string()
+                    }
+                    None => rest.to_string(),
+                }
+            }
+        };
+        let path = ty.trim().split(['<', ' ']).next().unwrap_or("");
+        let name = path.rsplit("::").next().unwrap_or("");
+        if names.contains(name) {
+            out.push((open, close(code, open)));
+        }
+    }
+    out
 }
 
 /// Each `X as Y` of the `use` declarations of `code`, a group's included and one over several
@@ -492,6 +583,17 @@ fn blind_spots(file: &str, text: &str, names: &BTreeSet<String>) -> Vec<Site> {
         text,
         line: line_of(at),
     };
+    // Inside an `impl` of an enum, `Self::A` names its variant `A`.
+    let impls = enum_impls(&code, names);
+    let mut with_self = names.clone();
+    with_self.insert("Self".to_string());
+    let names_at = |at: usize| {
+        if impls.iter().any(|&(a, b)| a <= at && at < b) {
+            &with_self
+        } else {
+            names
+        }
+    };
     let mut out = Vec::new();
     let mut i = 0;
     while i < code.len() {
@@ -500,7 +602,7 @@ fn blind_spots(file: &str, text: &str, names: &BTreeSet<String>) -> Vec<Site> {
             let end = close(&code, open);
             let inner: String = code[open + 1..end.saturating_sub(1)].iter().collect();
             let parts = split_top(&inner, ',');
-            if parts.len() > 1 && names_a_variant(&parts[1..].join(","), names) {
+            if parts.len() > 1 && names_a_variant(&parts[1..].join(","), names_at(i)) {
                 out.push(site("matches!", i, one_line(&code[i..end])));
             }
             i = open;
@@ -509,7 +611,7 @@ fn blind_spots(file: &str, text: &str, names: &BTreeSet<String>) -> Vec<Site> {
                 i += 3;
                 continue;
             };
-            let named = names_a_variant(&code[i + 3..eq].iter().collect::<String>(), names);
+            let named = names_a_variant(&code[i + 3..eq].iter().collect::<String>(), names_at(i));
             match condition_keyword(&code, i) {
                 // `if let PATTERN = VALUE { ... }` or `while let`: the value ends at the block,
                 // which no struct literal comes before in a condition.
@@ -601,7 +703,7 @@ fn blind_spots(file: &str, text: &str, names: &BTreeSet<String>) -> Vec<Site> {
                 }
                 arms.push((start, pattern));
             }
-            if arms.iter().any(|(_, p)| names_a_variant(p, names)) {
+            if arms.iter().any(|(_, p)| names_a_variant(p, names_at(i))) {
                 for (at, p) in &arms {
                     if wildcard_pattern(p) {
                         let text = format!("match {} {{ {} }}", scrutinee, p);
@@ -1466,13 +1568,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-sema/src/tier1.rs",
-        "named",
-        "if let",
-        "if let ExprKind::Binary { lhs, rhs, .. } = &tree.expr(e).kind",
-        "only an operation has operands to search for a name; every other expression is searched as it is",
-    ),
-    (
-        "mente-sema/src/tier1.rs",
         "names_changed",
         "matches!",
         "matches!(&t.kind, mente_syntax::TokenKind::Ident(n) if self.named(n).is_some_and(|b| changed.contains(&b)))",
@@ -1804,8 +1899,9 @@ fn condition_keyword(code: &[char], i: usize) -> Option<&'static str> {
 }
 
 /// The scan itself: each kind of site is found, in the function it lies in and by its text, an
-/// enum's name a grouped `use ... as` gives included; and what is not one, a partial tuple
-/// wildcard, a comment, a string and a test, is not.
+/// enum's name a grouped `use ... as` or a `type` gives included, and `Self` in an `impl` of an
+/// enum, a trait's included; and what is not one, a partial tuple wildcard, `Self` in an `impl`
+/// of a struct, a comment, a string and a test, is not.
 #[test]
 fn test_the_scan_finds_each_place_the_lint_does_not_see() {
     let src = r#"
@@ -1846,6 +1942,36 @@ fn quiet(v: V) -> u8 {
         V::Never => 0,
     }
 }
+type Kind = crate::k::V;
+fn aliased(k: Kind) -> bool {
+    matches!(k, Kind::Never)
+}
+impl V {
+    fn is_never(&self) -> bool {
+        matches!(self, Self::Never)
+    }
+    fn number(&self) -> u8 {
+        if let Self::Int(n) = self {
+            return *n;
+        }
+        0
+    }
+}
+impl std::fmt::Display for V {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Int(n) => write!(f, "{}", n),
+            _ => write!(f, "never"),
+        }
+    }
+}
+struct W(u8);
+impl W {
+    fn new() -> Self {
+        let Self(n) = Self(0) else { unreachable!() };
+        Self(n)
+    }
+}
 #[cfg(test)]
 mod tests {
     fn t(v: V) -> bool {
@@ -1856,6 +1982,7 @@ mod tests {
     let files = vec![("k/src/a.rs".to_string(), src.to_string())];
     let names = enum_names(&files);
     assert!(names.contains("SemaTy") && names.contains("Ty") && !names.contains("SemaInt"));
+    assert!(names.contains("Kind") && !names.contains("W"));
     let found: Vec<(String, &str, String)> = blind_spots("k/src/a.rs", src, &names)
         .into_iter()
         .map(|s| (s.function, s.kind, s.text))
@@ -1866,6 +1993,10 @@ mod tests {
         ("pair", "wildcard arm", "match (a, b) { (x, _) }"),
         ("conditions", "while let", "while let V::Never = v"),
         ("conditions", "if let", "if let V::Int(n) = v"),
+        ("aliased", "matches!", "matches!(k, Kind::Never)"),
+        ("is_never", "matches!", "matches!(self, Self::Never)"),
+        ("number", "if let", "if let Self::Int(n) = self"),
+        ("fmt", "wildcard arm", "match self { _ }"),
     ];
     assert_eq!(
         found,

@@ -213,6 +213,12 @@ const PLACES: &[&str] = &[
     "value whose every branch leaves, as an argument",
     "value whose every branch leaves, as an operand",
     "value whose every branch leaves, as an expression body",
+    "array of no type, as a returned value",
+    "array of no type, as an assigned value",
+    "array of no type, as a struct field",
+    "array of no type, as a variant field",
+    "array of no type, as an element",
+    "repeat of no copies of a value of no type",
     "branch that leaves by an operand",
 ];
 
@@ -261,8 +267,40 @@ const NOT_GENERATED: &[(&str, &str)] = &[
     ),
 ];
 
+/// The positions the rows of a value whose every branch leaves count.
+const LEAVING_POSITIONS: &[&str] = &[
+    "a binding's initializer",
+    "an element",
+    "an argument",
+    "an operand",
+    "an expression body",
+];
+
+/// The positions the rows of an array of no type count.
+const AGGREGATE_POSITIONS: &[&str] = &[
+    "a returned value",
+    "an assigned value",
+    "a struct field",
+    "a variant field",
+    "an element",
+];
+
+/// Whether `e` gives no value, by its syntax: `todo`, `unreachable`, an `if` or a `match` whose
+/// every branch leaves, or an array of at least one element of which each gives none
+/// (`core-calculus.md`, item 6).
+fn gives_nothing(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Array(items) => {
+            !items.is_empty() && items.iter().all(|&i| gives_nothing(tree, i))
+        }
+        ExprKind::Repeat { value, count } => *count > 0 && gives_nothing(tree, *value),
+        _ => check::value_leaves(tree, e),
+    }
+}
+
 /// Where each expression of a function stands, by what holds it: a binding's initializer, an
-/// element, an argument, an operand or the expression body, or none of these.
+/// element, an argument, an operand, the expression body, a returned value, an assigned value,
+/// a struct's or a variant's field, or none of these.
 fn positions(tree: &Tree, body: &Option<Body>) -> Vec<Option<&'static str>> {
     let mut at: Vec<Option<&'static str>> = vec![None; tree.exprs.len()];
     let mut put = |e: &ExprId, p: &'static str| at[e.0 as usize] = Some(p);
@@ -276,15 +314,24 @@ fn positions(tree: &Tree, body: &Option<Body>) -> Vec<Option<&'static str>> {
             ExprKind::Call { args, .. } => args.iter().for_each(|a| put(&a.value, "an argument")),
             ExprKind::Array(items) => items.iter().for_each(|i| put(i, "an element")),
             ExprKind::Repeat { value, .. } => put(value, "an element"),
-            ExprKind::Int { .. }
+            ExprKind::Construct { fields, .. } => {
+                fields.iter().for_each(|f| put(&f.value, "a struct field"))
+            }
+            ExprKind::Variant {
+                payload: Payload::Named(fields),
+                ..
+            } => fields.iter().for_each(|f| put(&f.value, "a variant field")),
+            ExprKind::Variant {
+                payload: Payload::None | Payload::Positional(_),
+                ..
+            }
+            | ExprKind::Int { .. }
             | ExprKind::Bool(_)
             | ExprKind::Name(_)
             | ExprKind::Todo(_)
             | ExprKind::Unreachable(_)
             | ExprKind::Index { .. }
             | ExprKind::Field { .. }
-            | ExprKind::Construct { .. }
-            | ExprKind::Variant { .. }
             | ExprKind::Match { .. }
             | ExprKind::If { .. }
             | ExprKind::Error => {}
@@ -293,10 +340,11 @@ fn positions(tree: &Tree, body: &Option<Body>) -> Vec<Option<&'static str>> {
     for s in &tree.stmts {
         match &s.kind {
             StmtKind::Binding { init, .. } => put(init, "a binding's initializer"),
-            StmtKind::Assign { .. }
-            | StmtKind::While { .. }
+            StmtKind::Assign { value, .. } => put(value, "an assigned value"),
+            StmtKind::Return(Some(e)) => put(e, "a returned value"),
+            StmtKind::While { .. }
             | StmtKind::Guard { .. }
-            | StmtKind::Return(_)
+            | StmtKind::Return(None)
             | StmtKind::Break
             | StmtKind::Continue
             | StmtKind::Discard(_)
@@ -361,7 +409,7 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
             _ => Vec::new(),
         };
         if !branches.is_empty() && check::value_leaves(tree, ExprId(k as u32)) {
-            if let Some(p) = at[k] {
+            if let Some(p) = at[k].filter(|p| LEAVING_POSITIONS.contains(p)) {
                 mark(&format!("value whose every branch leaves, as {}", p));
             }
         }
@@ -370,6 +418,16 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
             .any(|&b| !check::arm_ends(tree, b) && !check::arm_leaves(tree, b))
         {
             mark("branch that leaves by an operand");
+        }
+        if e.kind.is_array_literal() && gives_nothing(tree, ExprId(k as u32)) {
+            if let Some(p) = at[k].filter(|p| AGGREGATE_POSITIONS.contains(p)) {
+                mark(&format!("array of no type, as {}", p));
+            }
+        }
+        if let ExprKind::Repeat { value, count: 0 } = &e.kind {
+            if gives_nothing(tree, *value) {
+                mark("repeat of no copies of a value of no type");
+            }
         }
     }
     for e in exprs {

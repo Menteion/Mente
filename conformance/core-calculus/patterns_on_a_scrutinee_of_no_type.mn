@@ -1,0 +1,25 @@
+// expect: E0203 E0203 E0203
+module conformance
+// A scrutinee of no type is read as its first pattern other than `_` reads it, so that its
+// patterns are of one kind: an integer beside a `bool` or a variant, a `bool` beside a variant,
+// and variants of two enums are each an error (core-calculus.md, item 14).
+enum E {
+  V(a: u8)
+  W
+}
+
+enum F {
+  X
+}
+
+pub fn integers_then_others() -> u8 = match todo("q") {
+  300 => 1
+  -1 => 2
+  true => 4
+  E.V(a: z) => z
+}
+
+pub fn two_enums() -> u8 = match todo("q") {
+  E.W => 1
+  F.X => 2
+}

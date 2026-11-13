@@ -618,9 +618,11 @@ fn reaches_never(steps: &[Step]) -> bool {
         .is_some_and(|s| matches!(s, Step::Index(V::Never, _, _)))
 }
 
-/// Whether a value of type `t` never exists: no type, which a value that leaves has, or an
-/// array of at least one such element, which a literal of only such elements has
-/// (`core-calculus.md`, item 6). An empty literal holds no element, and is a value.
+/// Whether no value of type `t` exists: no type, which a value that leaves has, or an array of
+/// at least one element of such a type (`core-calculus.md`, item 6). An array type of no
+/// element has one value, `[]`, whatever its element type; an expression of that type may
+/// still leave, as a repeat of no copies of a value that leaves does when it evaluates that
+/// value, which `V::Never` tells where it happens.
 fn no_value(t: &SemaTy) -> bool {
     match t {
         SemaTy::Any => true,
@@ -1844,12 +1846,13 @@ impl<'a> Lower<'a> {
     // -- expressions -----------------------------------------------------------------------
 
     /// The shape of `e`'s value. An expression of no type, such as a `todo` or an `if` whose
-    /// branches all leave, gives no value, `V::Never`, and its shape is never used: it is
-    /// given as `Unit`.
+    /// branches all leave, gives no value, `V::Never`, and so does an array of such: its shape
+    /// is never used, and is given as `Unit`.
     fn shape(&self, e: ExprId) -> Result<Shape, String> {
         let shapes = self.shapes;
         match &self.s.f.typing.exprs[e.0 as usize] {
             SemaTy::Any => Ok(Shape::Unit),
+            t @ SemaTy::Array(..) if no_value(t) => Ok(Shape::Unit),
             t @ SemaTy::Array(_, elem) if self.mixed_leaf(elem) => {
                 // An array literal of integers of no one type keeps its elements exact until it
                 // lands, in the machine type that holds them all (`wide.rs`); so do the elements
@@ -2212,7 +2215,10 @@ impl<'a> Lower<'a> {
             }
             ExprKind::Field { base, name } => match self.shape(*base)? {
                 Shape::Array(len, _) => {
-                    self.expr(*base)?;
+                    // The base is evaluated for what it does, and may leave.
+                    if self.expr(*base)?.never() {
+                        return Ok(V::Never);
+                    }
                     let n = Num::new(false, u128::from(len));
                     V::Int(self.int(USIZE, n), USIZE)
                 }
@@ -2364,9 +2370,6 @@ impl<'a> Lower<'a> {
         })
     }
 
-    /// The value `v` of `e`, kept as it is now while `after` is evaluated: an array or struct
-    /// read from a place is that place's memory, which `after` may change through a `mut`
-    /// argument or an assignment, so it is then copied first. Any other value is its own.
     /// Evaluates `items`, each of no value, in order, until one leaves, as each of them does.
     fn leaves_first(&mut self, items: &[ExprId]) -> Result<V, String> {
         for &x in items {
@@ -2377,6 +2380,9 @@ impl<'a> Lower<'a> {
         Err("a value of no type that gave one".into())
     }
 
+    /// The value `v` of `e`, kept as it is now while `after` is evaluated: an array or struct
+    /// read from a place is that place's memory, which `after` may change through a `mut`
+    /// argument or an assignment, so it is then copied first. Any other value is its own.
     fn kept(&mut self, v: V, e: ExprId, after: &[ExprId]) -> Result<V, String> {
         let a = match v {
             V::Mem(a) => a,
@@ -3303,6 +3309,88 @@ pub fn g(c: bool) -> i32 {
             .filter(|b| matches!(b.term, Term::Return(_)))
             .count();
         assert_eq!(returns, 2, "{}", g);
+    }
+
+    /// An array of no type gives no value wherever it stands, and needs no shape there: as a
+    /// returned value, an expression body or a block's tail, an assigned value, an element store,
+    /// a struct's or a variant's field, an element of an array that has a type, and the value of
+    /// a repeat of no copies, which still evaluates it (`core-calculus.md`, item 6).
+    #[test]
+    fn test_an_array_of_no_type_lowers_to_no_value_in_every_position() {
+        let source = "module m
+struct Q {
+  a: [1]u8
+  b: u8
+}
+enum E {
+  V(a: [1]u8)
+  W
+}
+pub fn body(c: bool) -> [1]u8 = [if c { return [1] } else { return [2] }]
+pub fn tail(c: bool) -> [1]u8 {
+  [if c { return [1] } else { return [2] }]
+}
+pub fn returned() -> [1]u8 {
+  return [todo(\"x\")]
+}
+pub fn assigned(c: bool) -> u8 {
+  var xs: [1]u8 = [0]
+  xs = [if c { return 1 } else { return 2 }]
+  xs[0]
+}
+pub fn stored() -> u8 {
+  var x: [2][1]u8 = [[0], [0]]
+  x[0] = [todo(\"x\")]
+  x[0][0]
+}
+pub fn field() -> u8 {
+  val q = Q(a: [todo(\"q\")], b: 1)
+  q.b
+}
+pub fn payload() -> u8 {
+  val e = E.V(a: [todo(\"v\")])
+  match e {
+    E.V(a: a) => a[0]
+    E.W => 1
+  }
+}
+pub fn nested(x: u8) -> u8 {
+  val a: [2][1]u8 = [[x], [todo(\"a\")]]
+  a[0][0]
+}
+pub fn no_copies(c: bool) -> usize {
+  val a = [[if c { return 1 } else { return 2 }]; 0]
+  a.len
+}
+pub fn no_copies_read() -> usize = [[todo(\"a\")]; 0].len
+";
+        let module = mente_sema::check_program(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let returns = |f: &str| {
+            let func = lowered
+                .module
+                .functions
+                .iter()
+                .find(|g| g.name == f)
+                .unwrap();
+            func.blocks
+                .iter()
+                .filter(|b| matches!(b.term, Term::Return(_)))
+                .count()
+        };
+        for f in [
+            "returned",
+            "stored",
+            "field",
+            "payload",
+            "nested",
+            "no_copies_read",
+        ] {
+            assert_eq!(returns(f), 0, "{}: every path traps", f);
+        }
+        for f in ["body", "tail", "assigned", "no_copies"] {
+            assert_eq!(returns(f), 2, "{}: the two branches return", f);
+        }
     }
 
     /// An array literal or a repeat whose elements have no type gives no value, and neither does

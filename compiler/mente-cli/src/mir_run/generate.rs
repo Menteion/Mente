@@ -2945,13 +2945,19 @@ impl Gen {
                 out
             }
             89..=94 if depth > 0 => {
-                let leave = self.leave();
+                // A function that returns an array is rarer than the other places of an array
+                // of no type, so its return takes a share of its own.
+                let leave = match self.leaving_return() {
+                    Some(s) => s,
+                    None => self.leave(),
+                };
                 let mut out = self.flush();
                 out.push(leave);
                 out
             }
             95..=96 if depth > 0 => self.leaving_binding(),
             97..=98 if depth > 0 => self.leaving_value(),
+            99 if depth > 0 => self.leaving_aggregate(),
             _ => self.binding(depth),
         };
         if out.is_empty() {
@@ -3020,6 +3026,213 @@ impl Gen {
         let mut out = self.flush();
         out.push(s);
         out
+    }
+
+    /// An array of `n` elements of type `elem` of which each gives no value: `[leave]`,
+    /// `[leave; n]`, or such an array of such arrays (`core-calculus.md`, item 6). None for no
+    /// elements, whose array is the value `[]`, or in a function without a result type.
+    fn no_type_array(&mut self, n: u32, elem: &Ty) -> Option<E> {
+        if n == 0 {
+            return None;
+        }
+        let x = match elem {
+            Ty::Array(m, inner) if *m > 0 && self.rng.chance(30) => {
+                self.no_type_array(*m, inner)?
+            }
+            _ => self.leaving_if()?,
+        };
+        Some(if n <= 3 && self.rng.chance(60) {
+            E::Array(vec![x; n as usize])
+        } else {
+            E::Repeat(Box::new(x), n)
+        })
+    }
+
+    /// Now and then, in a function that returns an array, `return [leave]`: an array of no type
+    /// as a returned value (`core-calculus.md`, item 6).
+    fn leaving_return(&mut self) -> Option<S> {
+        let Some(Ty::Array(n, elem)) = self.current.as_ref().and_then(|s| s.ret.clone()) else {
+            return None;
+        };
+        if n == 0 || !self.rng.chance(20) {
+            return None;
+        }
+        Some(S::Return(Some(self.no_type_array(n, &elem)?)))
+    }
+
+    /// A statement that holds an array of no type where a value stands: as a returned value, an
+    /// assigned value, a struct's or a variant's field, an element beside a value, or the value
+    /// of a repeat of no copies, so that it leaves where it stands (`core-calculus.md`, item 6).
+    fn leaving_aggregate(&mut self) -> Vec<S> {
+        let Some(s) = self.aggregate_statement() else {
+            return Vec::new();
+        };
+        let mut out = self.flush();
+        out.push(s);
+        out
+    }
+
+    /// The array types of at least one element that `t` holds, itself included, through arrays
+    /// and struct fields, as deep as a place reaches.
+    fn array_types(&self, t: &Ty, depth: usize, out: &mut Vec<Ty>) {
+        if depth >= 4 {
+            return;
+        }
+        match t {
+            Ty::Array(n, inner) if *n > 0 => {
+                out.push(t.clone());
+                self.array_types(inner, depth + 1, out);
+            }
+            Ty::Struct(name) => {
+                for f in self.fields_of(name) {
+                    if f.refine.is_none() {
+                        self.array_types(&f.ty, depth + 1, out);
+                    }
+                }
+            }
+            Ty::Array(..) | Ty::Int(_) | Ty::Bool | Ty::Enum(_) => {}
+        }
+    }
+
+    /// The statement [`Gen::leaving_aggregate`] adds, at a position the function and its scope
+    /// have: none in a function without a result type.
+    fn aggregate_statement(&mut self) -> Option<S> {
+        let array_field = |fields: &[GField]| -> Vec<usize> {
+            (0..fields.len())
+                .filter(|&k| matches!(fields[k].ty, Ty::Array(n, _) if n > 0))
+                .collect()
+        };
+        self.current.as_ref().and_then(|s| s.ret.as_ref())?;
+        let ret = self.current.as_ref().and_then(|s| s.ret.clone());
+        // The array types of the places a statement may assign.
+        let mut places = Vec::new();
+        for id in self.visible() {
+            if matches!(self.binds[id].kind, Kind::Var | Kind::MutParam)
+                && !self.frozen.contains(&id)
+            {
+                self.array_types(&self.binds[id].ty.clone(), 0, &mut places);
+            }
+        }
+        let has_field = self
+            .structs
+            .iter()
+            .any(|s| !array_field(&s.fields).is_empty());
+        let has_payload = self
+            .enums
+            .iter()
+            .any(|e| e.variants.iter().any(|(_, f)| !array_field(f).is_empty()));
+        let kinds: Vec<u32> = [
+            matches!(ret, Some(Ty::Array(n, _)) if n > 0),
+            !places.is_empty(),
+            has_field,
+            has_payload,
+            true,
+            true,
+        ]
+        .iter()
+        .enumerate()
+        .filter(|(_, &on)| on)
+        .map(|(k, _)| k as u32)
+        .collect();
+        match *self.rng.pick(&kinds) {
+            0 => {
+                let Some(Ty::Array(n, elem)) = ret else {
+                    return None;
+                };
+                Some(S::Return(Some(self.no_type_array(n, &elem)?)))
+            }
+            1 => {
+                let t = self.rng.pick(&places).clone();
+                let (id, place) = self.place(Some(&t))?;
+                let Ty::Array(n, elem) = t else {
+                    return None;
+                };
+                let value = self.no_type_array(n, &elem)?;
+                self.binds[id].assigned = true;
+                Some(S::Assign(place, "=", value))
+            }
+            2 => {
+                let names: Vec<String> = self
+                    .structs
+                    .iter()
+                    .filter(|s| !array_field(&s.fields).is_empty())
+                    .map(|s| s.name.clone())
+                    .collect();
+                if names.is_empty() {
+                    return None;
+                }
+                let name = self.rng.pick(&names).clone();
+                let fields = self.fields_of(&name);
+                let k = *self.rng.pick(&array_field(&fields));
+                let Ty::Array(n, elem) = &fields[k].ty else {
+                    return None;
+                };
+                let leave = self.no_type_array(*n, elem)?;
+                let E::Construct(_, mut values) = self.construct(&name, 1) else {
+                    return None;
+                };
+                values[k].1 = leave;
+                Some(S::Discard(E::Construct(name, values)))
+            }
+            3 => {
+                let variants: Vec<(String, String, Vec<GField>)> = self
+                    .enums
+                    .iter()
+                    .flat_map(|e| {
+                        e.variants
+                            .iter()
+                            .filter(|(_, fields)| !array_field(fields).is_empty())
+                            .map(|(v, fields)| (e.name.clone(), v.clone(), fields.clone()))
+                    })
+                    .collect();
+                if variants.is_empty() {
+                    return None;
+                }
+                let (name, v, fields) = self.rng.pick(&variants).clone();
+                let k = *self.rng.pick(&array_field(&fields));
+                let mut values = Vec::new();
+                for (j, f) in fields.iter().enumerate() {
+                    let x = match (&f.ty, f.refine) {
+                        (Ty::Array(n, elem), _) if j == k => self.no_type_array(*n, elem)?,
+                        (Ty::Int(_), Some(r)) => self.refined_value(r),
+                        (Ty::Array(n, _), Some(r)) => self.refined_array(*n, r),
+                        (ty, _) => self.value(ty, 1),
+                    };
+                    values.push((f.name.clone(), x));
+                }
+                Some(S::Discard(E::Variant(name, v, values)))
+            }
+            4 => {
+                // An array of no type beside arrays of a type: `[[x], [leave]]`.
+                let n = 1 + self.rng.below(2) as u32;
+                let inner = Ty::Array(n, Box::new(Ty::Int(U8)));
+                let len = 1 + self.rng.below(3) as usize;
+                let k = self.rng.below(len as u64) as usize;
+                let mut items = Vec::new();
+                for j in 0..len {
+                    items.push(if j == k {
+                        self.no_type_array(n, &Ty::Int(U8))?
+                    } else {
+                        self.value(&inner, 1)
+                    });
+                }
+                Some(S::Discard(E::Array(items)))
+            }
+            _ => {
+                // A repeat of no copies evaluates its value once, and leaves where it does.
+                let value = if self.rng.chance(50) {
+                    self.leaving_if()?
+                } else {
+                    self.no_type_array(1, &Ty::Int(U8))?
+                };
+                let repeat = E::Repeat(Box::new(value), 0);
+                Some(S::Discard(if self.rng.chance(50) {
+                    E::Len(Box::new(repeat))
+                } else {
+                    repeat
+                }))
+            }
+        }
     }
 
     /// `val v: T = if c { return a } else { return b }`, then a read of `v` that never runs: a

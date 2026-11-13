@@ -1746,9 +1746,30 @@ fn named(tree: &Tree, resolution: &Resolution, e: ExprId) -> Vec<usize> {
         .iter()
         .map(|id| id.0 as usize)
         .collect();
-    if let ExprKind::Binary { lhs, rhs, .. } = &tree.expr(e).kind {
-        out.extend(named(tree, resolution, *lhs));
-        out.extend(named(tree, resolution, *rhs));
+    match &tree.expr(e).kind {
+        ExprKind::Binary { lhs, rhs, .. } => {
+            out.extend(named(tree, resolution, *lhs));
+            out.extend(named(tree, resolution, *rhs));
+        }
+        ExprKind::Unary { operand, .. } => out.extend(named(tree, resolution, *operand)),
+        // A name is itself; arithmetic does not reach inside the others: an index or a field
+        // reads an element, and a call, an aggregate, an `if` or a `match` gives a value of its
+        // own.
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Call { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Error => {}
     }
     out
 }
@@ -8351,13 +8372,19 @@ mod tests {
     #[test]
     fn test_the_refined_var_may_be_one_the_value_does_not_read() {
         // `lo`, which the result reads, is tried first and fails at `lo = mid + 1`; `hi`, named
-        // with it in the loop's condition, directly or through arithmetic, bounds it.
+        // with it in the loop's condition, directly or through arithmetic, a negation included,
+        // bounds it.
         let search = |cond: &str| {
             format!("pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {{\n  var lo: usize = 0\n  var hi: usize = 16\n  while {} {{\n    val mid = lo + (hi - lo) / 2\n    if a[mid] < x {{\n      lo = mid + 1\n    }} else {{\n      hi = mid\n    }}\n  }}\n  lo\n}}", cond)
         };
         // A parameter is bounded by a `var` a `guard` compares it with.
         let param = "pub fn f(a: [16]i32, n: usize) -> usize[0..=16] {\n  var hi: usize = 16\n  while hi > 0 and a[hi - 1] > 0 {\n    hi -= 1\n  }\n  guard n <= hi else {\n    return 0\n  }\n  n\n}";
-        for src in [search("lo < hi"), search("hi - lo > 0"), param.to_string()] {
+        for src in [
+            search("lo < hi"),
+            search("hi - lo > 0"),
+            search("-hi < -lo"),
+            param.to_string(),
+        ] {
             assert_eq!(
                 fix_messages(&src)[0],
                 "declare `hi` as `usize[0..=16]`",

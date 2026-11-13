@@ -1,0 +1,68 @@
+// expect: pass
+module conformance
+// An array of at least one element of no type gives no value wherever it stands: as an
+// expression body, a block's tail, a returned or an assigned value, a struct's or a variant's
+// field, an element beside values, or the value of a repeat of no copies, which is evaluated
+// once. It leaves where its first element does, after what is evaluated before it
+// (core-calculus.md, item 6).
+// generator: leaving_aggregate
+struct Q {
+  a: u8
+  b: [1]u8
+}
+
+enum E {
+  V(a: [1]u8)
+  W
+}
+
+fn first(a: u8, b: [1]u8) -> u8 = a
+
+pub fn body(c: bool) -> [1]u8 = [if c { return [1] } else { return [2] }]
+
+pub fn tail(c: bool) -> [1]u8 {
+  [if c { return [1] } else { return [2] }]
+}
+
+pub fn returned(c: bool) -> [2]u8 {
+  return [if c { return [1, 2] } else { return [3, 4] }; 2]
+}
+
+pub fn assigned(c: bool) -> u8 {
+  var xs: [1]u8 = [0]
+  xs = [if c { return 1 } else { return 2 }]
+  xs[0]
+}
+
+pub fn assigned_element(c: bool) -> u8 {
+  var x: [2][1]u8 = [[0], [0]]
+  x[1] = [if c { return 3 } else { return 4 }]
+  x[0][0]
+}
+
+pub fn field(x: u8) -> u8 {
+  val q = Q(a: x + 250, b: [todo("q")])
+  q.a
+}
+
+pub fn payload(c: bool) -> u8 {
+  val e = E.V(a: [if c { return 5 } else { return 6 }])
+  match e {
+    E.V(a: a) => a[0]
+    E.W => 1
+  }
+}
+
+pub fn nested(x: u8) -> u8 {
+  val a: [2][1]u8 = [[x + 250], [todo("a")]]
+  a[0][0]
+}
+
+pub fn argument(x: u8) -> u8 = first(x + 250, [todo("t")])
+
+pub fn no_copies(c: bool) -> usize {
+  val a = [[if c { return 7 } else { return 8 }]; 0]
+  a.len
+}
+
+pub fn no_copies_read(c: bool) -> usize = [[if c { return 9 } else { return 10 }]; 0].len
