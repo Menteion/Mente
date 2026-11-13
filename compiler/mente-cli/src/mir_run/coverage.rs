@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 
+use mente_sema::check;
 use mente_sema::types::INT_TYPES;
 use mente_syntax::tree::{
     Arg, ArmBody, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, EnumSyntax,
@@ -207,6 +208,8 @@ const PLACES: &[&str] = &[
     "match with a mut call in its scrutinee",
     "match reading an if",
     "return in an arm or a branch of an expression body",
+    "value whose every branch leaves",
+    "branch that leaves by an operand",
 ];
 
 constructs!(contract_kind, CONTRACTS: Contract {
@@ -286,6 +289,33 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
     }
     params.iter().for_each(|p| mark(param_kind(p)));
     contracts.iter().for_each(|c| mark(contract_kind(c)));
+    // An `if` or a `match` whose every branch leaves gives no value; a branch that leaves only
+    // through an operand keeps its type (`core-calculus.md`, item 6).
+    for (k, e) in exprs.iter().enumerate() {
+        let branches: Vec<ArmBody> = match &e.kind {
+            ExprKind::If {
+                then,
+                otherwise: Some(Else::Block(b)),
+                ..
+            } => vec![ArmBody::Block(*then), ArmBody::Block(*b)],
+            ExprKind::If {
+                then,
+                otherwise: Some(Else::If(i)),
+                ..
+            } => vec![ArmBody::Block(*then), ArmBody::Expr(*i)],
+            ExprKind::Match { arms, .. } => arms.iter().map(|a| a.body).collect(),
+            _ => Vec::new(),
+        };
+        if !branches.is_empty() && check::value_leaves(tree, ExprId(k as u32)) {
+            mark("value whose every branch leaves");
+        }
+        if branches
+            .iter()
+            .any(|&b| !check::arm_ends(tree, b) && !check::arm_leaves(tree, b))
+        {
+            mark("branch that leaves by an operand");
+        }
+    }
     for e in exprs {
         mark(expr_kind(&e.kind));
         match &e.kind {

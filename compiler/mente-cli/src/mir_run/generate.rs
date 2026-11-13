@@ -1396,14 +1396,19 @@ impl Gen {
 
     /// Makes, now and then, one branch of an `if` or one arm of a `match` in the expression
     /// body `e` leave the function by `return`, with a value of its result type `t`: an arm
-    /// that binds no name, and another branch or arm still gives a value.
+    /// that binds no name, and another branch or arm still gives a value. Now and then every
+    /// branch or arm leaves, and the `if` or `match` gives no value, wherever it stands: an
+    /// operand, an argument, an element or the body itself (`core-calculus.md`, item 6).
     fn returns_in(&mut self, e: &mut E, t: &Ty) {
         match e {
             E::If(c, a, b) => {
                 self.returns_in(c, t);
                 if self.rng.chance(25) {
                     let v = E::Return(Box::new(self.value(t, 1)));
-                    if self.rng.chance(50) {
+                    if self.rng.chance(30) {
+                        **a = v;
+                        **b = E::Return(Box::new(self.value(t, 1)));
+                    } else if self.rng.chance(50) {
                         **a = v;
                     } else {
                         **b = v;
@@ -1419,8 +1424,14 @@ impl Gen {
                     .filter(|&k| binds_nothing(&arms[k].0))
                     .collect();
                 if arms.len() > 1 && !free.is_empty() && self.rng.chance(25) {
-                    let k = *self.rng.pick(&free);
-                    arms[k].1 = E::Return(Box::new(self.value(t, 1)));
+                    if free.len() == arms.len() && self.rng.chance(30) {
+                        for arm in arms.iter_mut() {
+                            arm.1 = E::Return(Box::new(self.value(t, 1)));
+                        }
+                    } else {
+                        let k = *self.rng.pick(&free);
+                        arms[k].1 = E::Return(Box::new(self.value(t, 1)));
+                    }
                     return;
                 }
                 for (_, x) in arms.iter_mut() {
