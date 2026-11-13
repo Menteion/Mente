@@ -194,6 +194,11 @@ pub struct Trap {
     pub span: Span,
 }
 
+/// What the message of a broken run, [`Stop::Broken`], starts with: the comparison of the
+/// execution paths reads it to blame the reference interpreter rather than the path it is
+/// compared with.
+pub const BROKEN: &str = "broken interpreter state";
+
 /// Why a run stopped without a value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stop {
@@ -226,7 +231,7 @@ impl fmt::Display for Stop {
             Stop::TooLarge(n) => write!(f, "an array of {} elements is over the limit", n),
             Stop::NoFunction(name) => write!(f, "no function `{}` with a body to run", name),
             Stop::BadArguments(why) => write!(f, "{}", why),
-            Stop::Broken(why) => write!(f, "broken interpreter state: {}", why),
+            Stop::Broken(why) => write!(f, "{}: {}", BROKEN, why),
         }
     }
 }

@@ -48,6 +48,9 @@ const NATIVE_TIME: std::time::Duration = std::time::Duration::from_secs(20);
 /// What a difference between the paths means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
+    /// The reference interpreter reached a state the checks rule out (`Stop::Broken`): the
+    /// interpreter or the checks are wrong, not the paths it is compared with.
+    Reference,
     /// The reference interpreter trapped at a check Tier 1 proved, which the lowering left out.
     WrongProof,
     /// Leaving out the checks Tier 1 proved changed a result without the reference
@@ -232,6 +235,18 @@ fn compare_module(
     let mut traps = 0;
     for (k, ((f, args), expected)) in finished.into_iter().enumerate() {
         let call = show_call(f, args);
+        // A broken reference run is the interpreter's fault, or the checks', whatever MIR prints.
+        if let Err(stop) = &expected {
+            if stop.starts_with(mente_interp::BROKEN) {
+                calls_run += 1;
+                finding(
+                    Kind::Reference,
+                    &call,
+                    format!("the reference interpreter {}", stop),
+                );
+                continue;
+            }
+        }
         let checked = run_lowered(&every, f, args.clone());
         let got = run_lowered(&lowered, f, args.clone());
         calls_run += 1;
@@ -839,6 +854,53 @@ mod tests {
             f.detail.contains("Tier 1 proved Index at 3:"),
             "{}",
             f.detail
+        );
+    }
+
+    /// A reference interpreter that reaches a state the checks rule out is the finding, not
+    /// the lowering that MIR then disagrees with: here a binding's declared refined type is made
+    /// a `bool` by hand, which the lowering reads as no refinement to check, and the
+    /// interpreter as a value of another shape.
+    #[test]
+    fn test_a_broken_reference_run_blames_the_interpreter() {
+        let src = "module m\npub fn f(x: u8[0..5]) -> u8 {\n  val y: u8[0..9] = x\n  y\n}\n";
+        let module = mente_sema::check_program(src).unwrap();
+        let calls = vec![(
+            "f".to_string(),
+            vec![(false, Value::Int(Int::from_u128(3)))],
+        )];
+        let fine = compare_module(&module, &module, &calls, None);
+        assert!(fine.findings.is_empty(), "{:?}", fine.findings);
+        let mut broken = module.clone();
+        for f in broken.functions.iter_mut().flatten() {
+            // The binding's declared type, the last refined one; the parameter's stays.
+            let y = f.syntax.tree.types.iter().rposition(|t| {
+                matches!(
+                    t.kind,
+                    mente_syntax::tree::TypeKind::Int {
+                        refinement: Some(_),
+                        ..
+                    }
+                )
+            });
+            if let Some(y) = y {
+                f.syntax.tree.types[y].kind = mente_syntax::tree::TypeKind::Bool;
+            }
+        }
+        let found = compare_module(&broken, &broken, &calls, None);
+        assert_eq!(found.findings.len(), 1, "{:?}", found.findings);
+        assert_eq!(
+            found.findings[0].kind,
+            Kind::Reference,
+            "{:?}",
+            found.findings
+        );
+        assert!(
+            found.findings[0]
+                .detail
+                .contains("another shape than its declared type"),
+            "{}",
+            found.findings[0].detail
         );
     }
 

@@ -437,7 +437,7 @@ impl<'m> Machine<'m> {
         let tree = &f.syntax.tree;
         let path = self.place(frame, place)?;
         let plain = f.typing.exprs[place.0 as usize].clone();
-        let declared = self.place_type(frame, &path);
+        let declared = self.place_type(frame, &path)?;
         let new = match op {
             AssignOp::Set => self.eval(frame, value, int_ty(&plain))?,
             AssignOp::Compound(op) => {
@@ -480,7 +480,8 @@ impl<'m> Machine<'m> {
                 Some(root) => Ok((root, Vec::new())),
                 None => broken("a place whose name was never resolved"),
             },
-            // The checker passes only a binding, an element or a field as a place (`E0205`).
+            // The checker passes as a place only a binding, an element, or a field of a struct
+            // (`E0205`, `E0206`).
             ExprKind::Int { .. }
             | ExprKind::Bool(_)
             | ExprKind::Todo(_)
@@ -500,38 +501,67 @@ impl<'m> Machine<'m> {
 
     /// The declared type of a place: its root binding's, when it states one, down its indexes;
     /// a field's, in its struct's declaration, whatever its root states.
-    fn place_type(&self, frame: &Frame<'m>, (root, steps): &Place) -> Declared<'m> {
+    fn place_type(&self, frame: &Frame<'m>, (root, steps): &Place) -> Flow<Declared<'m>> {
         let f = frame.f;
-        let mut declared = f
-            .resolution
-            .bindings
-            .get(root.0 as usize)?
-            .ty
-            .map(|t| (&f.syntax.tree, t));
-        let mut ty = f.typing.bindings.get(root.0 as usize)?.clone();
+        let (Some(binding), Some(ty)) = (
+            f.resolution.bindings.get(root.0 as usize),
+            f.typing.bindings.get(root.0 as usize),
+        ) else {
+            return broken("a place whose root binding does not exist");
+        };
+        let mut declared = binding.ty.map(|t| (&f.syntax.tree, t));
+        let mut ty = ty.clone();
         for step in steps {
-            match (step, ty) {
-                (Step::Index(..), Ty::Array(_, elem)) => {
-                    declared = declared.and_then(|(tree, t)| match &tree.ty(t).kind {
-                        TypeKind::Array { elem, .. } => Some((tree, *elem)),
-                        TypeKind::Int { .. }
-                        | TypeKind::Bool
-                        | TypeKind::Named(_)
-                        | TypeKind::Enum(_)
-                        | TypeKind::Error => None,
-                    });
-                    ty = *elem;
+            match step {
+                Step::Index(..) => {
+                    let elem = match ty {
+                        Ty::Array(_, elem) => *elem,
+                        Ty::Int(_)
+                        | Ty::Bool
+                        | Ty::Struct(_)
+                        | Ty::Enum(_)
+                        | Ty::Unit
+                        | Ty::Any => return broken("an element of a place that is not an array"),
+                    };
+                    // A binding declared without a type has none down its elements either.
+                    declared = match declared {
+                        None => None,
+                        Some((tree, t)) => match &tree.ty(t).kind {
+                            TypeKind::Array { elem, .. } => Some((tree, *elem)),
+                            TypeKind::Int { .. }
+                            | TypeKind::Bool
+                            | TypeKind::Named(_)
+                            | TypeKind::Enum(_)
+                            | TypeKind::Error => {
+                                return broken("an array place declared of another type")
+                            }
+                        },
+                    };
+                    ty = elem;
                 }
-                (Step::Field(k), Ty::Struct(s)) => {
-                    let def = self.module.structs.get(&s)?;
-                    let field = def.fields.get(*k)?;
-                    declared = Some((def.tree(), field.decl));
-                    ty = field.ty.clone();
+                Step::Field(k) => {
+                    let s = match ty {
+                        Ty::Struct(s) => s,
+                        Ty::Int(_)
+                        | Ty::Bool
+                        | Ty::Array(..)
+                        | Ty::Enum(_)
+                        | Ty::Unit
+                        | Ty::Any => return broken("a field of a place that is not a struct"),
+                    };
+                    let Some(field) = self.module.structs.get(&s).and_then(|d| {
+                        d.fields
+                            .get(*k)
+                            .map(|field| (d.tree(), field.decl, field.ty.clone()))
+                    }) else {
+                        return broken("a field its struct does not declare");
+                    };
+                    declared = Some((field.0, field.1));
+                    ty = field.2;
                 }
-                _ => return None,
             }
         }
-        declared
+        Ok(declared)
     }
 
     fn read(&self, frame: &Frame<'m>, (root, steps): &Place) -> Flow<Value> {
@@ -560,21 +590,34 @@ impl<'m> Machine<'m> {
     fn write(&self, frame: &mut Frame<'m>, (root, steps): &Place, new: Value) -> Flow<()> {
         let mut v = frame.slots[root.0 as usize].get_or_insert(Value::Unit);
         for step in steps {
-            match (step, v) {
-                (Step::Index(i, span), Value::Array(items)) => {
-                    let len = items.len();
-                    match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
-                        Some(k) if k < len => v = &mut items[k],
-                        _ => {
-                            return trap(TrapKind::IndexOutOfBounds { index: *i, len }, *span);
+            match step {
+                Step::Index(i, span) => match v {
+                    Value::Array(items) => {
+                        let len = items.len();
+                        match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
+                            Some(k) if k < len => v = &mut items[k],
+                            _ => {
+                                return trap(TrapKind::IndexOutOfBounds { index: *i, len }, *span);
+                            }
                         }
                     }
-                }
-                (Step::Field(k), Value::Struct(_, fields)) => match fields.get_mut(*k) {
-                    Some((_, f)) => v = f,
-                    None => return Ok(()),
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Struct(..)
+                    | Value::Enum(..)
+                    | Value::Unit => return broken("a store into an element of a non-array"),
                 },
-                _ => return Ok(()),
+                Step::Field(k) => match v {
+                    Value::Struct(_, fields) => match fields.get_mut(*k) {
+                        Some((_, f)) => v = f,
+                        None => return broken("a store into a field its struct value lacks"),
+                    },
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Enum(..)
+                    | Value::Unit => return broken("a store into a field of a non-struct"),
+                },
             }
         }
         *v = new;
@@ -617,9 +660,14 @@ impl<'m> Machine<'m> {
         Ok(match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => Value::Int(Int::from_u128(*value)),
             ExprKind::Bool(b) => Value::Bool(*b),
-            ExprKind::Name(_) => f.resolution.names[e.0 as usize]
-                .and_then(|id| frame.slots[id.0 as usize].clone())
-                .unwrap_or(Value::Unit),
+            ExprKind::Name(_) => {
+                match f.resolution.names[e.0 as usize]
+                    .and_then(|id| frame.slots[id.0 as usize].clone())
+                {
+                    Some(v) => v,
+                    None => return broken("a name without a value"),
+                }
+            }
             ExprKind::Todo(reason) => return trap(TrapKind::Todo(reason.clone()), span),
             ExprKind::Unreachable(reason) => {
                 return trap(TrapKind::Unreachable(reason.clone()), span)
@@ -762,7 +810,7 @@ impl<'m> Machine<'m> {
             }
             ExprKind::Call { args, .. } => {
                 let Some(index) = f.resolution.calls[e.0 as usize] else {
-                    return Ok(Value::Unit);
+                    return broken("a call that was never resolved");
                 };
                 let callee = self.function(index)?;
                 let mut values = Vec::new();
@@ -785,7 +833,7 @@ impl<'m> Machine<'m> {
                 for (place, v) in places.into_iter().zip(finals) {
                     if let Some(path) = place {
                         // The value a `mut` parameter hands back enters the place's refinement.
-                        let declared = self.place_type(frame, &path);
+                        let declared = self.place_type(frame, &path)?;
                         self.refined(frame, &v, declared, span)?;
                         self.write(frame, &path, v)?;
                     }
@@ -995,45 +1043,93 @@ impl<'m> Machine<'m> {
 
     /// Narrows a value into the integer ranges of a static type, elementwise for an array.
     fn narrow_plain(&self, v: Value, plain: &Ty, span: Span) -> Flow<Value> {
-        match (v, plain) {
-            (Value::Int(x), ty) => match int_ty(ty) {
-                Some(t) => fit(x, t, span).map(Value::Int),
-                None => Ok(Value::Int(x)),
+        let mismatch = || broken("a value of another shape than its static type");
+        match plain {
+            // A literal of no suffix is narrowed where it lands, which gives it its type.
+            Ty::Int(_) => match v {
+                Value::Int(x) => match int_ty(plain) {
+                    Some(t) => fit(x, t, span).map(Value::Int),
+                    None => Ok(Value::Int(x)),
+                },
+                Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
             },
-            (Value::Array(items), Ty::Array(_, elem)) => items
-                .into_iter()
-                .map(|v| self.narrow_plain(v, elem, span))
-                .collect::<Flow<Vec<Value>>>()
-                .map(Value::Array),
+            Ty::Array(_, elem) => match v {
+                Value::Array(items) => items
+                    .into_iter()
+                    .map(|v| self.narrow_plain(v, elem, span))
+                    .collect::<Flow<Vec<Value>>>()
+                    .map(Value::Array),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
             // A struct's fields, each into its type, in the order of the declaration: a value
             // built in the program already lies there, one from outside it may not.
-            (Value::Struct(name, fields), Ty::Struct(s)) => {
-                let Some(def) = self.module.structs.get(s) else {
-                    return Ok(Value::Struct(name, fields));
-                };
-                let mut out = Vec::new();
-                for ((n, v), d) in fields.into_iter().zip(&def.fields) {
-                    out.push((n, self.narrow_plain(v, &d.ty, span)?));
+            Ty::Struct(s) => match v {
+                Value::Struct(name, fields) => {
+                    let Some(def) = self.module.structs.get(s) else {
+                        return broken("a struct the module does not declare");
+                    };
+                    let mut out = Vec::new();
+                    for ((n, v), d) in fields.into_iter().zip(&def.fields) {
+                        out.push((n, self.narrow_plain(v, &d.ty, span)?));
+                    }
+                    Ok(Value::Struct(name, out))
                 }
-                Ok(Value::Struct(name, out))
-            }
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
             // A variant's payload, each field into its type, likewise.
-            (Value::Enum(name, variant, fields), Ty::Enum(e)) => {
-                let Some((_, def)) = self
-                    .module
-                    .structs
-                    .get_enum(e)
-                    .and_then(|d| d.variant(&variant))
-                else {
-                    return Ok(Value::Enum(name, variant, fields));
-                };
-                let mut out = Vec::new();
-                for ((n, v), d) in fields.into_iter().zip(&def.fields) {
-                    out.push((n, self.narrow_plain(v, &d.ty, span)?));
+            Ty::Enum(e) => match v {
+                Value::Enum(name, variant, fields) => {
+                    let Some((_, def)) = self
+                        .module
+                        .structs
+                        .get_enum(e)
+                        .and_then(|d| d.variant(&variant))
+                    else {
+                        return broken("a variant its enum does not declare");
+                    };
+                    let mut out = Vec::new();
+                    for ((n, v), d) in fields.into_iter().zip(&def.fields) {
+                        out.push((n, self.narrow_plain(v, &d.ty, span)?));
+                    }
+                    Ok(Value::Enum(name, variant, out))
                 }
-                Ok(Value::Enum(name, variant, out))
-            }
-            (v, _) => Ok(v),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Unit => mismatch(),
+            },
+            Ty::Bool => match v {
+                Value::Bool(_) => Ok(v),
+                Value::Int(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            Ty::Unit => match v {
+                Value::Unit => Ok(v),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..) => mismatch(),
+            },
+            // `todo`, `unreachable` and a value whose every branch leaves have any type, and
+            // never give a value to narrow.
+            Ty::Any => broken("a value of no type"),
         }
     }
 
@@ -1049,48 +1145,83 @@ impl<'m> Machine<'m> {
         let Some((tree, id)) = declared else {
             return Ok(());
         };
-        match (v, &tree.ty(id).kind) {
-            (
-                Value::Int(x),
-                TypeKind::Int {
-                    refinement: Some(r),
-                    ..
+        let mismatch = || broken("a value of another shape than its declared type");
+        match &tree.ty(id).kind {
+            TypeKind::Int { refinement, .. } => match v {
+                Value::Int(x) => match refinement {
+                    Some(r) => self.in_range(frame, *x, r, span),
+                    None => Ok(()),
                 },
-            ) => self.in_range(frame, *x, r, span),
-            (Value::Array(items), TypeKind::Array { elem, .. }) => {
-                for item in items {
-                    self.refined(frame, item, Some((tree, *elem)), span)?;
+                Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Bool => match v {
+                Value::Bool(_) => Ok(()),
+                Value::Int(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Array { elem, .. } => match v {
+                Value::Array(items) => {
+                    for item in items {
+                        self.refined(frame, item, Some((tree, *elem)), span)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            (Value::Struct(_, fields), TypeKind::Named(s)) => {
-                let Some(def) = self.module.structs.get(s) else {
-                    return Ok(());
-                };
-                for ((_, v), d) in fields.iter().zip(&def.fields) {
-                    self.refined(frame, v, Some((def.tree(), d.decl)), span)?;
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Named(s) => match v {
+                Value::Struct(_, fields) => {
+                    let Some(def) = self.module.structs.get(s) else {
+                        return broken("a struct the module does not declare");
+                    };
+                    for ((_, v), d) in fields.iter().zip(&def.fields) {
+                        self.refined(frame, v, Some((def.tree(), d.decl)), span)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            (Value::Enum(_, variant, fields), TypeKind::Enum(e)) => {
-                let Some(def) = self.module.structs.get_enum(e) else {
-                    return Ok(());
-                };
-                let Some((_, v)) = def.variant(variant) else {
-                    return Ok(());
-                };
-                for ((_, x), d) in fields.iter().zip(&v.fields) {
-                    self.refined(frame, x, Some((def.tree(), d.decl)), span)?;
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Enum(e) => match v {
+                Value::Enum(_, variant, fields) => {
+                    let Some(def) = self.module.structs.get_enum(e) else {
+                        return broken("an enum the module does not declare");
+                    };
+                    let Some((_, v)) = def.variant(variant) else {
+                        return broken("a variant its enum does not declare");
+                    };
+                    for ((_, x), d) in fields.iter().zip(&v.fields) {
+                        self.refined(frame, x, Some((def.tree(), d.decl)), span)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            _ => Ok(()),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Unit => mismatch(),
+            },
+            // A checked module has no type a diagnostic replaced.
+            TypeKind::Error => broken("a value of a type a diagnostic replaced"),
         }
     }
 
     fn in_range(&self, frame: &Frame<'m>, x: Int, r: &Refinement, span: Span) -> Flow<()> {
-        let lo = self.bound(frame, &r.lo);
-        let hi = self.bound(frame, &r.hi);
+        let lo = self.bound(frame, &r.lo)?;
+        let hi = self.bound(frame, &r.hi)?;
         let below = if r.inclusive { x <= hi } else { x < hi };
         if lo <= x && below {
             return Ok(());
@@ -1099,8 +1230,9 @@ impl<'m> Machine<'m> {
         trap(TrapKind::Refinement { value: x, range }, span)
     }
 
-    /// The value of a refinement bound in this frame.
-    fn bound(&self, frame: &Frame<'m>, b: &Bound) -> Int {
+    /// The value of a refinement bound in this frame: a name's an integer binding's, a length's
+    /// an array binding's, as name resolution and the checker require.
+    fn bound(&self, frame: &Frame<'m>, b: &Bound) -> Flow<Int> {
         let slot = |name: &str| {
             frame
                 .f
@@ -1110,7 +1242,7 @@ impl<'m> Machine<'m> {
                 .position(|binding| binding.name == name)
                 .and_then(|i| frame.slots[i].as_ref())
         };
-        match b {
+        Ok(match b {
             Bound::Int { negative, value } => {
                 let v = Int::from_u128(*value);
                 if *negative {
@@ -1121,13 +1253,27 @@ impl<'m> Machine<'m> {
             }
             Bound::Name(n) => match slot(n) {
                 Some(Value::Int(i)) => *i,
-                _ => Int::ZERO,
+                Some(
+                    Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Struct(..)
+                    | Value::Enum(..)
+                    | Value::Unit,
+                )
+                | None => return broken("a refinement bound that names no integer"),
             },
             Bound::Len(n) => match slot(n) {
                 Some(Value::Array(items)) => Int::from_u128(items.len() as u128),
-                _ => Int::ZERO,
+                Some(
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Struct(..)
+                    | Value::Enum(..)
+                    | Value::Unit,
+                )
+                | None => return broken("a refinement bound that names no array"),
             },
-        }
+        })
     }
 }
 
@@ -1148,8 +1294,11 @@ fn fit(x: Int, t: IntTy, span: Span) -> Flow<Int> {
 
 /// The element `i` of an array, or an index trap.
 fn element(v: &Value, i: Int, span: Span) -> Flow<&Value> {
-    let Value::Array(items) = v else {
-        return Ok(v);
+    let items = match v {
+        Value::Array(items) => items,
+        Value::Int(_) | Value::Bool(_) | Value::Struct(..) | Value::Enum(..) | Value::Unit => {
+            return broken("an index into a value that is not an array")
+        }
     };
     match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
         Some(k) if k < items.len() => Ok(&items[k]),

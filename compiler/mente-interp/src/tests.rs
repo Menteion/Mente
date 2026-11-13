@@ -989,3 +989,96 @@ fn test_an_enum_value_prints_and_reads_back_in_one_form() {
         assert_eq!(empty_payload(text).as_deref(), found, "{}", text);
     }
 }
+
+/// The interpreter is Tier 1's independent judge, so a state the checks rule out stops its run
+/// as broken, rather than letting it go on with a value made up for it. Each module here passed
+/// the checks, and then has one fact of its typing, resolution or tree changed by hand.
+#[test]
+fn test_a_state_the_checks_rule_out_stops_the_run() {
+    use mente_sema::types::Ty;
+    use mente_syntax::tree::{ExprKind, TypeKind};
+
+    let broken = |src: &str, call_text: &str, tamper: &dyn Fn(&mut mente_sema::CheckedFn)| {
+        let mut m = module(src);
+        let f = m.functions.last_mut().and_then(Option::as_mut).unwrap();
+        tamper(f);
+        let (name, args) = parse_call(call_text).unwrap();
+        match call(&m, &name, args, Limits::default()) {
+            Err(Stop::Broken(_)) => {}
+            other => panic!("{}: {:?}, not a broken run", src, other),
+        }
+    };
+    let expr = |f: &mente_sema::CheckedFn, kind: fn(&ExprKind) -> bool| {
+        f.syntax
+            .tree
+            .exprs
+            .iter()
+            .position(|e| kind(&e.kind))
+            .unwrap()
+    };
+    // A name that resolves to nothing, which the interpreter read as `()`.
+    broken("pub fn f(x: u8) -> u8 = x", "f(3)", &|f| {
+        let x = expr(f, |k| matches!(k, ExprKind::Name(_)));
+        f.resolution.names[x] = None;
+    });
+    // A call that resolves to no function, likewise.
+    broken(
+        "pub fn g() -> u8 = 1\npub fn f() -> u8 = g()",
+        "f()",
+        &|f| {
+            let c = expr(f, |k| matches!(k, ExprKind::Call { .. }));
+            f.resolution.calls[c] = None;
+        },
+    );
+    // An index into an integer, which gave the integer itself.
+    broken(
+        "pub fn f(n: u8, xs: [2]u8) -> u8 = xs[0]",
+        "f(3, [1, 2])",
+        &|f| {
+            let xs = expr(f, |k| matches!(k, ExprKind::Name(n) if n == "xs"));
+            let n = f.resolution.bindings.iter().position(|b| b.name == "n");
+            f.resolution.names[xs] = n.map(|i| mente_sema::names::BindingId(i as u32));
+        },
+    );
+    // An integer narrowed into an array literal whose element type says `bool`, which went
+    // through unnarrowed.
+    broken(
+        "pub fn f(x: u8) -> u8 {\n  val a: [1]u8 = [x]\n  a[0]\n}",
+        "f(3)",
+        &|f| {
+            let a = expr(f, |k| matches!(k, ExprKind::Array(_)));
+            f.typing.exprs[a] = Ty::Array(1, Box::new(Ty::Bool));
+        },
+    );
+    // A value checked against a declared type of another shape, whose refinement was skipped.
+    broken(
+        "pub fn f(x: u8) -> u8 {\n  val y: u8[0..9] = x\n  y\n}",
+        "f(3)",
+        &|f| {
+            let t = f
+                .syntax
+                .tree
+                .types
+                .iter()
+                .position(|t| {
+                    matches!(
+                        t.kind,
+                        TypeKind::Int {
+                            refinement: Some(_),
+                            ..
+                        }
+                    )
+                })
+                .unwrap();
+            f.syntax.tree.types[t].kind = TypeKind::Bool;
+        },
+    );
+    // A refinement bound that names no binding, which read as 0.
+    broken("pub fn f(n: u8, x: u8[0..=n]) -> u8 = x", "f(5, 3)", &|f| {
+        for b in &mut f.resolution.bindings {
+            if b.name == "n" {
+                b.name = "renamed".to_string();
+            }
+        }
+    });
+}
