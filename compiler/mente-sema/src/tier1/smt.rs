@@ -38,10 +38,10 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use mente_syntax::tree::{BinaryOp, ContractKind, ExprId, StmtKind};
+use mente_syntax::tree::{ContractKind, ExprId, StmtKind};
 use mente_syntax::Span;
 
-use super::{Cond, Fx, Obligation, Site, Tag, Val};
+use super::{Cond, Fx, Obligation, Rel, Site, Tag, Val};
 use crate::names::BindingKind;
 use crate::octagon::{Exact, Octagon, Term, INF};
 use crate::types::{Int, IntTy, Ty};
@@ -139,15 +139,14 @@ fn one_line(text: &str) -> String {
 }
 
 /// The SMT-LIB relation of a comparison; `None` for an operator that compares nothing.
-fn relation(op: BinaryOp) -> Option<&'static str> {
+fn relation(op: Rel) -> &'static str {
     match op {
-        BinaryOp::Lt => Some("<"),
-        BinaryOp::Le => Some("<="),
-        BinaryOp::Gt => Some(">"),
-        BinaryOp::Ge => Some(">="),
-        BinaryOp::Eq => Some("="),
-        BinaryOp::Ne => Some("distinct"),
-        _ => None,
+        Rel::Lt => "<",
+        Rel::Le => "<=",
+        Rel::Gt => ">",
+        Rel::Ge => ">=",
+        Rel::Eq => "=",
+        Rel::Ne => "distinct",
     }
 }
 
@@ -269,17 +268,13 @@ impl<'f, 'a> Writer<'f, 'a> {
         match c {
             Cond::Const(b) => b.to_string(),
             Cond::Cmp(op, l, r) => {
-                let Some(symbol) = relation(*op) else {
-                    return self.fresh("Bool", "a condition Tier 1 does not follow".to_string());
-                };
+                let symbol = relation(*op);
                 let (l, r) = (self.term(l, side), self.term(r, side));
                 format!("({} {} {})", symbol, l, r)
             }
             Cond::Far(op, far) => {
                 let (v, c) = (&far.0, &far.1);
-                let Some(symbol) = relation(*op) else {
-                    return self.fresh("Bool", "a condition Tier 1 does not follow".to_string());
-                };
+                let symbol = relation(*op);
                 let v = self.term(v, side);
                 format!("({} {} {})", symbol, v, exact_num(*c))
             }
@@ -346,13 +341,19 @@ impl<'f, 'a> Writer<'f, 'a> {
             // The binding's variable, then each field path of it Tier 1 follows.
             let int = match fx.typing.bindings[b] {
                 Ty::Int(Int::One(t)) => Some(t),
-                _ => None,
+                Ty::Int(Int::Literal | Int::Mixed(_))
+                | Ty::Bool
+                | Ty::Array(..)
+                | Ty::Struct(_)
+                | Ty::Enum(_)
+                | Ty::Unit
+                | Ty::Any => None,
             };
             let own = fx.vars[b].map(|v| (v, int));
             let paths = fx.paths[b].iter().map(|p| {
                 let t = match &p.shape {
                     super::Shape::Int { int, .. } => *int,
-                    _ => None,
+                    super::Shape::Array(..) | super::Shape::Struct(_) | super::Shape::Other => None,
                 };
                 (p.var, t)
             });
@@ -879,15 +880,14 @@ mod tests {
     }
 
     /// Each comparison has its SMT-LIB relation, `!=` too, though no clause in the Tier-1
-    /// fragment uses it; any other operator has none, and a condition on it is not followed.
+    /// fragment uses it; an operator that compares nothing is no `Rel`, so no condition holds one.
     #[test]
     fn test_each_comparison_has_its_relation() {
-        use mente_syntax::tree::BinaryOp::{Add, And, Eq, Ge, Gt, Le, Lt, Ne};
+        use crate::tier1::Rel::{Eq, Ge, Gt, Le, Lt, Ne};
         assert_eq!(
             [Lt, Le, Gt, Ge, Eq, Ne].map(super::relation),
-            ["<", "<=", ">", ">=", "=", "distinct"].map(Some)
+            ["<", "<=", ">", ">=", "=", "distinct"]
         );
-        assert_eq!([Add, And].map(super::relation), [None, None]);
     }
 
     /// A value Tier 1 knows only by its bounds is a fresh constant between them, with no bound

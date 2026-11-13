@@ -204,7 +204,12 @@ impl Ty {
         match self {
             Ty::Int(Int::Literal) => Ty::int(I64),
             Ty::Array(n, e) => Ty::Array(*n, Box::new(e.settled())),
-            t => t.clone(),
+            t @ (Ty::Int(Int::One(_) | Int::Mixed(_))
+            | Ty::Bool
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Unit
+            | Ty::Any) => t.clone(),
         }
     }
 
@@ -214,7 +219,12 @@ impl Ty {
         match self {
             Ty::Int(Int::Mixed(t)) => Some(*t),
             Ty::Array(_, e) => e.mixed(),
-            _ => None,
+            Ty::Int(Int::Literal | Int::One(_))
+            | Ty::Bool
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Unit
+            | Ty::Any => None,
         }
     }
 
@@ -223,7 +233,7 @@ impl Ty {
         match self {
             Ty::Int(_) => Ty::int(holder),
             Ty::Array(n, e) => Ty::Array(*n, Box::new(e.with_int(holder))),
-            t => t.clone(),
+            t @ (Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any) => t.clone(),
         }
     }
 

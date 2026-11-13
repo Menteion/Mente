@@ -6,6 +6,12 @@
 //! [`Diagnostic`] with its code, its span and, where one is certain or plausible, a fix
 //! (`spec/diagnostics.md`).
 
+// A match over an enum names every variant, so that a variant added later does not compile until
+// each match decides what it does with it; a `_` arm once let walkers skip expression kinds
+// ([`guard-per-problem`](../../docs/design-review.md#guard-per-problem)). A match that is a
+// classifier by nature keeps `#[expect]`, with the reason every variant belongs in its arm.
+#![deny(clippy::wildcard_enum_match_arm)]
+
 pub mod check;
 pub mod incremental;
 pub mod names;
@@ -183,7 +189,12 @@ fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
             .iter()
             .filter_map(|i| match i {
                 ItemDecl::Fn(f) => Some(f.name.clone()),
-                _ => None,
+                ItemDecl::Unit(_)
+                | ItemDecl::Struct(_)
+                | ItemDecl::BitStruct(_)
+                | ItemDecl::Enum(_)
+                | ItemDecl::Trait(_)
+                | ItemDecl::Example(_) => None,
             })
             .collect(),
         functions,
@@ -266,7 +277,22 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .flat_map(|f| &f.tree.exprs)
         .filter_map(|e| match &e.kind {
             mente_syntax::tree::ExprKind::Todo(reason) => Some((e.span, reason.clone())),
-            _ => None,
+            mente_syntax::tree::ExprKind::Int { .. }
+            | mente_syntax::tree::ExprKind::Bool(_)
+            | mente_syntax::tree::ExprKind::Name(_)
+            | mente_syntax::tree::ExprKind::Unreachable(_)
+            | mente_syntax::tree::ExprKind::Unary { .. }
+            | mente_syntax::tree::ExprKind::Binary { .. }
+            | mente_syntax::tree::ExprKind::Index { .. }
+            | mente_syntax::tree::ExprKind::Field { .. }
+            | mente_syntax::tree::ExprKind::Call { .. }
+            | mente_syntax::tree::ExprKind::Construct { .. }
+            | mente_syntax::tree::ExprKind::Variant { .. }
+            | mente_syntax::tree::ExprKind::Match { .. }
+            | mente_syntax::tree::ExprKind::Array(_)
+            | mente_syntax::tree::ExprKind::Repeat { .. }
+            | mente_syntax::tree::ExprKind::If { .. }
+            | mente_syntax::tree::ExprKind::Error => None,
         })
         .collect();
     todos.sort_by_key(|t| t.0.start);
@@ -275,7 +301,12 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .iter()
         .filter_map(|i| match i {
             ItemDecl::Fn(f) => Some(tier1::Routing::of(&f.attrs)),
-            _ => None,
+            ItemDecl::Unit(_)
+            | ItemDecl::Struct(_)
+            | ItemDecl::BitStruct(_)
+            | ItemDecl::Enum(_)
+            | ItemDecl::Trait(_)
+            | ItemDecl::Example(_) => None,
         })
         .collect();
     let names: Vec<String> = parsed.iter().map(|p| p.name.clone()).collect();
@@ -402,7 +433,11 @@ pub fn verify_module_with(
                     named_aligns.insert(s.name.clone(), align);
                 }
             }
-            _ => {}
+            ItemDecl::Unit(_)
+            | ItemDecl::Enum(_)
+            | ItemDecl::Trait(_)
+            | ItemDecl::Fn(_)
+            | ItemDecl::Example(_) => {}
         }
     }
     for d in &structs.defs {
@@ -464,7 +499,7 @@ pub fn verify_module_with(
             ItemDecl::Example(_) => {
                 examples_count += 1;
             }
-            _ => {}
+            ItemDecl::Unit(_) | ItemDecl::Enum(_) | ItemDecl::Trait(_) => {}
         }
     }
 

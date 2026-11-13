@@ -672,7 +672,20 @@ impl Resolver<'_> {
                 self.expr(tree, *index);
             }
             ExprKind::Field { base, .. } => self.place(tree, *base, read),
-            _ => self.expr(tree, e),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => self.expr(tree, e),
         }
     }
 
@@ -803,7 +816,7 @@ impl Resolver<'_> {
                     self.errors.push(d);
                 }
             }
-            _ => {}
+            TypeKind::Int { .. } | TypeKind::Bool | TypeKind::Error => {}
         }
     }
 
