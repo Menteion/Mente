@@ -2950,12 +2950,92 @@ impl Gen {
                 out.push(leave);
                 out
             }
+            95..=96 if depth > 0 => self.leaving_binding(),
+            97..=98 if depth > 0 => self.leaving_value(),
             _ => self.binding(depth),
         };
         if out.is_empty() {
             self.restore(m);
             out = self.binding(depth);
         }
+        out
+    }
+
+    /// `if c { return a } else { return b }`, a value whose every branch leaves, in a function
+    /// with a result type; none in one without.
+    fn leaving_if(&mut self) -> Option<E> {
+        let t = self.current.as_ref().and_then(|s| s.ret.clone())?;
+        let r = self.current.as_ref().and_then(|s| s.ret_range);
+        let cond = self.bool_expr(1);
+        let a = E::Return(Box::new(self.default_of(&t, r)));
+        let b = E::Return(Box::new(self.default_of(&t, r)));
+        Some(E::If(Box::new(cond), Box::new(a), Box::new(b)))
+    }
+
+    /// A statement whose value holds a value whose every branch leaves, as an operand, an
+    /// element or an argument, so that it leaves where it stands (`core-calculus.md`, item 6).
+    fn leaving_value(&mut self) -> Vec<S> {
+        let Some(leave) = self.leaving_if() else {
+            return Vec::new();
+        };
+        let s = match self.rng.below(3) {
+            0 => {
+                let x = self.value(&Ty::Int(U8), 1);
+                S::Discard(E::bin(Op::Add, x, leave))
+            }
+            1 if self.rng.chance(50) => S::Discard(E::Array(vec![leave])),
+            1 => {
+                let x = self.value(&Ty::Int(U8), 1);
+                S::Discard(E::Array(vec![leave, x]))
+            }
+            _ => {
+                let sigs: Vec<Sig> = self
+                    .sigs
+                    .iter()
+                    .filter(|s| {
+                        s.params.iter().any(|p| !p.is_mut)
+                            && self.cost + self.mult * s.cost <= COST_BUDGET
+                    })
+                    .cloned()
+                    .collect();
+                if sigs.is_empty() {
+                    return Vec::new();
+                }
+                let sig = self.rng.pick(&sigs).clone();
+                let Some(E::Call(name, mut args)) = self.arguments(&sig, false, 0) else {
+                    return Vec::new();
+                };
+                let Some(k) = sig.params.iter().position(|p| !p.is_mut) else {
+                    return Vec::new();
+                };
+                args[k].1 = leave;
+                self.cost += self.mult * sig.cost;
+                let call = E::Call(name, args);
+                match sig.ret {
+                    Some(_) => S::Discard(call),
+                    None => S::Expr(call),
+                }
+            }
+        };
+        let mut out = self.flush();
+        out.push(s);
+        out
+    }
+
+    /// `val v: T = if c { return a } else { return b }`, then a read of `v` that never runs: a
+    /// binding whose initializer's every branch leaves, so that it has no value
+    /// (`core-calculus.md`, item 6). None in a function without a result type.
+    fn leaving_binding(&mut self) -> Vec<S> {
+        let Some(init) = self.leaving_if() else {
+            return Vec::new();
+        };
+        let ty = self.ty(1);
+        let mut out = self.flush();
+        let name = self.fresh("v");
+        let id = self.declare(name.clone(), ty.clone(), Kind::Val, None);
+        self.binds[id].read = true;
+        out.push(S::Bind(id, Some(ty.to_string()), init));
+        out.push(S::Discard(E::name(&name)));
         out
     }
 
@@ -3464,7 +3544,16 @@ impl Gen {
         let expression = first.is_empty() && ret_range.is_none() && self.rng.chance(20);
         let body = match (&ret, expression) {
             (Some(t), true) => {
-                let mut e = self.full(t, 0);
+                // Now and then the body is itself a value whose every branch leaves.
+                let leaving = if self.rng.chance(8) {
+                    self.leaving_if()
+                } else {
+                    None
+                };
+                let mut e = match leaving {
+                    Some(e) => e,
+                    None => self.full(t, 0),
+                };
                 self.returns_in(&mut e, t);
                 if self.pending.is_empty() {
                     Body::Expr(e)

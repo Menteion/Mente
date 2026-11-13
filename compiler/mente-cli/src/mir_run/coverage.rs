@@ -208,7 +208,11 @@ const PLACES: &[&str] = &[
     "match with a mut call in its scrutinee",
     "match reading an if",
     "return in an arm or a branch of an expression body",
-    "value whose every branch leaves",
+    "value whose every branch leaves, as a binding's initializer",
+    "value whose every branch leaves, as an element",
+    "value whose every branch leaves, as an argument",
+    "value whose every branch leaves, as an operand",
+    "value whose every branch leaves, as an expression body",
     "branch that leaves by an operand",
 ];
 
@@ -257,6 +261,55 @@ const NOT_GENERATED: &[(&str, &str)] = &[
     ),
 ];
 
+/// Where each expression of a function stands, by what holds it: a binding's initializer, an
+/// element, an argument, an operand or the expression body, or none of these.
+fn positions(tree: &Tree, body: &Option<Body>) -> Vec<Option<&'static str>> {
+    let mut at: Vec<Option<&'static str>> = vec![None; tree.exprs.len()];
+    let mut put = |e: &ExprId, p: &'static str| at[e.0 as usize] = Some(p);
+    for e in &tree.exprs {
+        match &e.kind {
+            ExprKind::Unary { operand, .. } => put(operand, "an operand"),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                put(lhs, "an operand");
+                put(rhs, "an operand");
+            }
+            ExprKind::Call { args, .. } => args.iter().for_each(|a| put(&a.value, "an argument")),
+            ExprKind::Array(items) => items.iter().for_each(|i| put(i, "an element")),
+            ExprKind::Repeat { value, .. } => put(value, "an element"),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => {}
+        }
+    }
+    for s in &tree.stmts {
+        match &s.kind {
+            StmtKind::Binding { init, .. } => put(init, "a binding's initializer"),
+            StmtKind::Assign { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Guard { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Discard(_)
+            | StmtKind::Expr(_) => {}
+        }
+    }
+    match body {
+        Some(Body::Expr(e)) => put(e, "an expression body"),
+        Some(Body::Block(_)) | None => {}
+    }
+    at
+}
+
 /// The constructs `f` holds.
 fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
     let FnSyntax {
@@ -291,6 +344,7 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
     contracts.iter().for_each(|c| mark(contract_kind(c)));
     // An `if` or a `match` whose every branch leaves gives no value; a branch that leaves only
     // through an operand keeps its type (`core-calculus.md`, item 6).
+    let at = positions(tree, body);
     for (k, e) in exprs.iter().enumerate() {
         let branches: Vec<ArmBody> = match &e.kind {
             ExprKind::If {
@@ -307,7 +361,9 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
             _ => Vec::new(),
         };
         if !branches.is_empty() && check::value_leaves(tree, ExprId(k as u32)) {
-            mark("value whose every branch leaves");
+            if let Some(p) = at[k] {
+                mark(&format!("value whose every branch leaves, as {}", p));
+            }
         }
         if branches
             .iter()
