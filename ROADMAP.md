@@ -100,7 +100,7 @@ Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter mode
   - `mn fuzz` runs functions with struct and array parameters, and the program generator reaches refined array elements in a field and exclusive field ranges.
   - `E0109` names the compiler's milestone; it still says "M1 does not have it".
 - [ ] What the review of pull request 118 left, each fix with a test seen to fail without it:
-  - No guard on an element read. Today `guard a[0] <= 0` and `guard ps[0].a < 1` are offered, though they say nothing of the next read, since Tier 1 does not follow an element; that falls short of **Engineering Guardrail #1**.
+  - No guard on an element read; Tier 1 follows an element as [`element-facts`](docs/design-review.md#element-facts) decides. Today `guard a[0] <= 0` and `guard ps[0].a < 1` are offered, though they say nothing of the next read, since Tier 1 does not follow an element; that falls short of **Engineering Guardrail #1**.
   - A far bound passes through a sum or a quotient. Today `guard y + 1 < MAX` does not narrow `y`.
   - A caller learns a callee's `ensures` over a field of its result (`result.w`). Today it does not.
   - A struct-valued `if` gives a binding's paths the join of its branches. Today they get only their declared ranges.
@@ -114,6 +114,10 @@ Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter mode
   - Native compile time linear in an enum's variant count. Today printing a value chains through every variant: 7.6 s at 8,000 variants and 86 s at 32,770, in a debug build.
   - Trap messages print a clause as it is written. Today all three paths print it as an S-expression; Tier 1's printer, which handles variants and `match`, moves into `mente-syntax` for them, changing every trap text and the MIR golden file.
   - The coverage test within a time budget. Today it takes about 41 s in a debug build, up from 32 s, and grows with every construct.
+- [ ] The decisions of 2026-11-13 written into the documents they govern, each before the work it governs:
+  - Before the next construct: [`elaboration-to-core`](docs/design-review.md#elaboration-to-core) sorts `core-calculus.md` into a kernel and elaborations, and each later M2 construct is placed in one or the other; before slices and views, [`view-holder-types`](docs/design-review.md#view-holder-types).
+  - [`evolution-invariants`](docs/design-review.md#evolution-invariants) in `spec/philosophy.md`; [`reversal-conditions`](docs/design-review.md#reversal-conditions) and [`feature-admission`](docs/design-review.md#feature-admission) in the register's rules, with a check that a newly decided entry names the evidence that would reopen it; [`one-language-version`](docs/design-review.md#one-language-version) in place of the edition route of [`language-evolution`](docs/design-review.md#language-evolution).
+  - Before M2's benchmark run: a new held-out set, written and fixed under [`benchmark-refresh`](docs/design-review.md#benchmark-refresh); and the card's topics, [`card-topics`](docs/design-review.md#card-topics), as M2's mechanisms outgrow the card's budget.
 - [ ] The guards of the audit of every problem class ([`guard-audit`](docs/design-review.md#guard-audit)), before the next construct after enums:
   - Every instrument reports on every pull request and is a required check of `main`, Mutants included, behind a merge queue; a Commits job, a `Cargo.lock` allowlist and a workflow policy test. Today only the three Rust jobs, Documentation and CodeQL block a merge.
   - Every construct in every expression position, read from one table; no `_` arm in a walker over expression or statement kinds; a fix oracle, a valuation oracle and a write-set oracle; recovery locality; `spec_hash` invariance; scaling tests of Tier 1's work and of native code's size; and the narrowing points of `core-calculus.md` item 4 as one table every path matches.
@@ -123,7 +127,7 @@ Runs in full at the end: example 01's binary search. The benchmark's M2 tasks de
 
 ### M3: regions and layouts
 
-**Decided first:** [`pool-mut-write`](docs/design-review.md#pool-mut-write). **Spike before it:** copy-in/copy-out of `SoA` and `Tiled` elements, lowered through MIR and Cranelift.
+**Decided first:** [`pool-mut-write`](docs/design-review.md#pool-mut-write), [`handle-liveness`](docs/design-review.md#handle-liveness), [`evolution-loop`](docs/design-review.md#evolution-loop). **Spike before it:** copy-in/copy-out of `SoA` and `Tiled` elements, lowered through MIR and Cranelift.
 
 - [ ] Arenas with a chunk per task and the `in` parameter mode that passes one, `Pool<T>` / `Handle<T>`, and `Local<T>` / `Shared<T>`.
 - [ ] `@layout` structs and `bitstruct`s in native code: alignment, little-endian bytes, `@packed` and `@endian(big)`.
@@ -133,7 +137,7 @@ Runs in full at the end: example 04's pool.
 
 ### M4: abstraction, effects and FFI
 
-**Decided first:** [`trait-coherence`](docs/design-review.md#trait-coherence), [`closure-captures`](docs/design-review.md#closure-captures), [`capability-trust`](docs/design-review.md#capability-trust). **Spike before it:** a tail-resumptive effect handler compiled to a direct call.
+**Decided first:** [`trait-coherence`](docs/design-review.md#trait-coherence), [`closure-captures`](docs/design-review.md#closure-captures), [`capability-trust`](docs/design-review.md#capability-trust), [`comptime-reach`](docs/design-review.md#comptime-reach), [`comptime-specialisation`](docs/design-review.md#comptime-specialisation), [`contracts-as-effects`](docs/design-review.md#contracts-as-effects). **Spike before it:** a tail-resumptive effect handler compiled to a direct call.
 
 - [ ] Monomorphised generics, traits with coherence, `dyn`, and closures with their capture modes.
 - [ ] Capability effects, effect variables, `handle` blocks, no global mutable state, and the per-module effect summary.
@@ -144,7 +148,7 @@ Runs in full at the end: example 04.
 
 ### M5: numerics and hardware contracts
 
-**Decided first:** [`combined-scalar-types`](docs/design-review.md#combined-scalar-types), [`float-square-ensures`](docs/design-review.md#float-square-ensures), [`sat-mixing`](docs/design-review.md#sat-mixing), [`no-alloc-task-stacks`](docs/design-review.md#no-alloc-task-stacks), [`zero-cost-measured`](docs/design-review.md#zero-cost-measured), [`tight-loops`](docs/design-review.md#tight-loops). **Spike before it:** `@branchless` code through Cranelift on x86-64 and AArch64, with the machine-code check.
+**Decided first:** [`combined-scalar-types`](docs/design-review.md#combined-scalar-types), [`float-square-ensures`](docs/design-review.md#float-square-ensures), [`sat-mixing`](docs/design-review.md#sat-mixing), [`no-alloc-task-stacks`](docs/design-review.md#no-alloc-task-stacks), [`zero-cost-measured`](docs/design-review.md#zero-cost-measured), [`tight-loops`](docs/design-review.md#tight-loops), [`scalar-axes`](docs/design-review.md#scalar-axes), [`profile-artefacts`](docs/design-review.md#profile-artefacts), [`layout-from-profiles`](docs/design-review.md#layout-from-profiles). **Spike before it:** `@branchless` code through Cranelift on x86-64 and AArch64, with the machine-code check.
 
 - [ ] IEEE floats in refinements (outward rounding, `NaN`), units with scales and `.to<U>()`, fixed point and `dec`, `sat` and `wrap` with their operators, and combined scalar types, bit-identical across the CI matrix.
 - [ ] **Engineering Guardrail #2**: every Mente-level optimisation completes in `MirRegionSoA` before lowering. `@branchless` with `E0403`, `@simd(lanes: N)` through Cranelift's 128-bit vectors, `@no_alloc`, `@max_stack`, and `@total` measures checked.
@@ -154,7 +158,7 @@ Runs in full at the end: example 01, and example 02's `integrate_cell`.
 
 ### M6: standard library and agent tools
 
-**Decided first:** [`stdlib-scope`](docs/design-review.md#stdlib-scope), [`user-mutation-testing`](docs/design-review.md#user-mutation-testing), [`impact-analysis`](docs/design-review.md#impact-analysis).
+**Decided first:** [`stdlib-scope`](docs/design-review.md#stdlib-scope), [`user-mutation-testing`](docs/design-review.md#user-mutation-testing), [`impact-analysis`](docs/design-review.md#impact-analysis), [`raw-memory`](docs/design-review.md#raw-memory), [`tuned-library-kernels`](docs/design-review.md#tuned-library-kernels), [`layer-profiles`](docs/design-review.md#layer-profiles), [`disjoint-mut-paths`](docs/design-review.md#disjoint-mut-paths).
 
 - [ ] Text, collections chosen for their cache behaviour, files, time, processes, and JSON through `comptime`; packages.
 - [ ] Mutation testing of user code, impact analysis, and the complete language card with `mn guide` and `mn api`.
@@ -182,6 +186,8 @@ Runs in full at the end: example 01, with no trusted axiom left.
 
 ### M9: hardening and the gate
 
+**Decided first:** [`semantic-migration`](docs/design-review.md#semantic-migration).
+
 - [ ] Long fuzzing, generator and soundness campaigns; the stability policy; a tutorial for people, the first stable documentation, and an entry point for language models such as `llms.txt`.
 - [ ] The agent-benchmark target; an independent review of the spec and the core calculus by someone who did not write them; every condition of [`foundation-gate`](docs/design-review.md#foundation-gate).
 
@@ -195,11 +201,11 @@ The compiler's front end, checker, MIR and driver are translated into Mente phas
 
 ## Stage 3: performance
 
-A native backend written in Mente replaces Cranelift for x86-64 and AArch64, becoming the default only when it gives the same results on the whole corpus with no worse generated code, compile latency, or debug and profiler information. Beyond the replacement, each change follows a measurement: 256- and 512-bit vectors, deeper inlining and vectorisation, and the Carry-Flag ABI experiment of `error-handling-abi.md`, run beside the two-register return and kept only if it wins. Proposed in [`performance-stage`](docs/design-review.md#performance-stage).
+A native backend written in Mente replaces Cranelift for x86-64 and AArch64, becoming the default only when it gives the same results on the whole corpus with no worse generated code, compile latency, or debug and profiler information. Beyond the replacement, each change follows a measurement: 256- and 512-bit vectors, deeper inlining and vectorisation, and the Carry-Flag ABI experiment of `error-handling-abi.md`, run beside the two-register return and kept only if it wins. Proposed in [`performance-stage`](docs/design-review.md#performance-stage). Decided first: [`rewrite-rule-synthesis`](docs/design-review.md#rewrite-rule-synthesis) and [`measured-tuning`](docs/design-review.md#measured-tuning).
 
 ## Stage 4: new domains
 
-Each is planned from an entry of its own and starts once what it depends on exists: GPU through an execution model for `@kernel`, then SPIR-V; the browser and WebAssembly, which needs stage 3's emitter; scripting, through the interpreter; interop with machine-learning libraries; and **Engineering Guardrail #4**, `mn bind`, for C headers and for Rust libraries through their `cbindgen` headers, once the accepted C dialect is written down.
+Each is planned from an entry of its own and starts once what it depends on exists: GPU through an execution model for `@kernel`, then SPIR-V; the browser and WebAssembly, which needs stage 3's emitter; scripting, through the interpreter; interop with machine-learning libraries; and **Engineering Guardrail #4**, `mn bind`, for C headers and for Rust libraries through their `cbindgen` headers, once the accepted C dialect is written down. The freestanding target is proposed as one of them ([`freestanding-target`](docs/design-review.md#freestanding-target)).
 
 ---
 
