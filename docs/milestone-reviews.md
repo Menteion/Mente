@@ -13,7 +13,7 @@ The plan is a hypothesis. So after M0, after M1 and after every later milestone,
 - the latency and performance baselines;
 - how long the milestone took.
 
-This comes from [`foundation-milestones`](design-review.md#foundation-milestones). Each review checks two lists in [docs/design-brief.md](design-brief.md) section 7.7: the triggers written down in advance, under "Re-planning points", and the milestone's exit criteria, under "Every milestone ends when". A change that follows from a review enters [docs/design-review.md](design-review.md) as an entry, and the plan changes only with Norman.
+This comes from [`foundation-milestones`](design-review.md#foundation-milestones). Each review checks two lists in [docs/design-brief.md](design-brief.md) section 7.7: the triggers written down in advance, under "Re-planning points", and the milestone's exit criteria, under "Every milestone ends when". From M2's review on, it also checks the reopen condition of each decided entry of [docs/design-review.md](design-review.md) against the milestone's data and lists those that fired ([`reversal-conditions`](design-review.md#reversal-conditions)). A change that follows from a review enters [docs/design-review.md](design-review.md) as an entry, and the plan changes only with Norman.
 
 ## After M0 (2026-11-09)
 
