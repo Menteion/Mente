@@ -1,19 +1,23 @@
-# cargo-nextest settings. Only the mutation runs use nextest (.github/workflows/mutants.yml),
-# for its time limit on each test; every other check runs the tests with `cargo test`.
+# cargo-nextest settings: the limits every test runs under, defined once in the default profile,
+# which every other profile inherits with its overrides (https://nexte.st/docs/configuration/).
+# The required Rust jobs run the tests under the profile `ci` (.github/workflows/ci.yml), and the
+# mutation runs under `mutants` (.github/workflows/mutants.yml and mutants-full.yml), so a test
+# that outgrows its limit fails a required check, not only a mutation run's first pass. The two
+# differ only in whether the first failure stops the run. The workflow policy test
+# (.github/scripts/policy.test.mjs) checks that neither sets a limit of its own, and that every
+# test an override names exists.
 
-[profile.mutants]
-# A mutant that makes a test loop without end is caught when nextest stops the test, which then
-# fails, instead of costing cargo-mutants' timeout for the whole run. Every test but those named
-# below takes at most about 20 s in a debug build on GitHub's runners, half the limit; the
-# baseline step lists the slowest in the job's summary.
+[profile.default]
+# A test that loops without end is stopped and fails, instead of holding the job, or, under a
+# mutant, costing cargo-mutants' timeout for the whole run. Every test but those named below takes
+# at most about 20 s in a debug build on GitHub's runners, half the limit; the Mutants baseline step
+# lists the slowest in its job's summary.
 slow-timeout = { period = "20s", terminate-after = 2 }
-# The first failing test catches the mutant: the rest need not run.
-fail-fast = true
 
 # The tests that run a whole corpus: every module of the repository item by item, the
 # conformance suite on three paths, every agent program on two, and the generated programs
 # whose constructs the coverage test counts, each checked with Tier 1. Each takes 35 to 55 s.
-[[profile.mutants.overrides]]
+[[profile.default.overrides]]
 filter = """
 test(test_a_session_reports_what_the_whole_module_check_does)
 | test(test_three_paths_agree_on_the_conformance_suite)
@@ -21,3 +25,11 @@ test(test_a_session_reports_what_the_whole_module_check_does)
 | test(test_generated_programs_reach_every_construct_of_the_grammar)
 """
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+# Every failure of the run, not only the first.
+fail-fast = false
+
+[profile.mutants]
+# The first failing test catches the mutant: the rest need not run.
+fail-fast = true

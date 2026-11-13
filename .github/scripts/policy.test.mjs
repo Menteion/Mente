@@ -40,7 +40,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 37;
+const FLOOR = 38;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -290,6 +290,72 @@ check("every compiler crate proves its overflow checks in a release build", () =
   assert.match(proof, /cargo test --release --locked --workspace --lib --bins -- --exact "\$test"/);
   assert.match(proof, /test=overflow_traps::test_arithmetic_overflow_panics_in_this_crate/);
   assert.match(proof, /if \[ "\$expected" -eq 0 \] \|\| \[ "\$passed" -ne "\$expected" \]; then/);
+});
+
+/// The sections of .config/nextest.toml, each with the keys it sets, and every override's filter.
+export function nextestConfig(text) {
+  const sections = new Map();
+  const filters = [];
+  let current = null;
+  const lines = text.split(/\r?\n/);
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k].trim();
+    const header = /^\[\[?([^\]]+)\]\]?$/.exec(line);
+    if (header) {
+      current = header[1];
+      if (!sections.has(current)) sections.set(current, []);
+      continue;
+    }
+    const key = /^([\w-]+)\s*=\s*(.*)$/.exec(line);
+    if (!key || current === null) continue;
+    sections.get(current).push(key[1]);
+    if (key[1] !== "filter") continue;
+    let value = key[2];
+    if (value.startsWith('"""')) {
+      value = value.slice(3);
+      while (!value.includes('"""') && k + 1 < lines.length) value += `\n${lines[++k]}`;
+      value = value.slice(0, value.indexOf('"""'));
+    } else value = value.replace(/^["']|["']$/g, "");
+    filters.push(value);
+  }
+  return { sections, filters };
+}
+
+check("the tests run under limits defined once, and every test an override names exists", () => {
+  const { sections, filters } = nextestConfig(read(".config/nextest.toml"));
+  assert.ok(sections.get("profile.default")?.includes("slow-timeout"), "the default profile sets no time limit");
+  for (const profile of ["profile.ci", "profile.mutants"]) {
+    assert.deepEqual(sections.get(profile), ["fail-fast"], `[${profile}] sets more than fail-fast: its limits are the default profile's`);
+  }
+  for (const name of sections.keys()) {
+    assert.match(name, /^profile\.(default|ci|mutants)(\.overrides)?$/, `.config/nextest.toml has [${name}]`);
+    assert.ok(!name.endsWith(".overrides") || name === "profile.default.overrides", `[[${name}]]: overrides belong to the default profile`);
+  }
+  assert.ok(filters.length > 0, "no override names the slow tests");
+  const sources = [...tracked()].filter((f) => f.startsWith("compiler/") && f.endsWith(".rs")).map(read).join("\n");
+  for (const filter of filters) {
+    const names = [...filter.matchAll(/test\(([^)]*)\)/g)].map((m) => m[1].trim());
+    assert.ok(names.length > 0, `an override's filter names no test: ${filter}`);
+    assert.doesNotMatch(filter.replace(/test\([^)]*\)|[|\s]/g, ""), /./, `an override's filter is more than test names joined by |: ${filter}`);
+    for (const name of names) {
+      const bare = name.replace(/^[=~]/, "");
+      assert.match(bare, /^[A-Za-z_][A-Za-z0-9_:]*$/, `test(${name}) is a pattern, not a test's name`);
+      assert.ok(new RegExp(`\\bfn ${bare.split("::").pop()}\\(`).test(sources), `test(${name}), named in .config/nextest.toml, is no test of the compiler`);
+    }
+  }
+  // The required Rust jobs run the tests under the ci profile, Linux's under a memory limit; the
+  // mutation runs under the mutants profile.
+  const rust = steps(workflows().find((w) => w.file === "ci.yml").doc.jobs.rust);
+  const tests = rust.find((s) => /cargo nextest run --locked --workspace --profile ci/.test(String(s.run ?? "")));
+  assert.ok(tests, "the Rust jobs do not run the tests through nextest under the ci profile");
+  assert.match(String(tests.run), /if \[ "\$RUNNER_OS" = Linux \]; then ulimit -v \d+; fi\n/, "the Linux jobs run the tests under no memory limit");
+  for (const file of ["mutants.yml", "mutants-full.yml"]) {
+    assert.equal(workflows().find((w) => w.file === file).doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
+  }
+  // What the check reads.
+  const sample = nextestConfig('[profile.default]\nslow-timeout = 1\n[[profile.default.overrides]]\nfilter = """\ntest(a)\n| test(=b)\n"""\n[profile.ci]\nfail-fast = false\n');
+  assert.deepEqual([...sample.sections.keys()], ["profile.default", "profile.default.overrides", "profile.ci"]);
+  assert.deepEqual(sample.filters, ["\ntest(a)\n| test(=b)\n"]);
 });
 
 check("every measured benchmark run proves its sandbox first", () => {
