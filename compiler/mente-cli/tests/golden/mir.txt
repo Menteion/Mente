@@ -1,3 +1,239 @@
+== conformance/core-calculus/aggregate_of_no_value.mn ==
+mente-dump 2 mir
+f0: fn single(bool) -> u8 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  trap t0
+block2():
+  trap t1
+block3():
+  trap t2
+block4():
+  trap t2
+block5():
+  trap t2
+t0: todo @13:26 ["todo reached: a"]
+t1: todo @13:45 ["todo reached: b"]
+t2: unreachable @13:45 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn bare() -> u8 {
+block0():
+  trap t0
+block1():
+  trap t1
+t0: todo @18:12 ["todo reached: a"]
+t1: unreachable @18:12 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn nested(bool) -> u8 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  trap t0
+block2():
+  trap t1
+block3():
+  trap t2
+block4():
+  trap t2
+block5():
+  trap t2
+t0: todo @23:20 ["todo reached: a"]
+t1: todo @23:39 ["todo reached: b"]
+t2: unreachable @23:39 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn repeated(bool) -> u8 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  trap t0
+block2():
+  trap t1
+block3():
+  trap t2
+block4():
+  trap t2
+block5():
+  trap t2
+t0: todo @28:26 ["todo reached: a"]
+t1: todo @28:45 ["todo reached: b"]
+t2: unreachable @28:45 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn length(bool) -> u64 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  trap t0
+block2():
+  trap t1
+block3():
+  trap t2
+block4():
+  trap t2
+block5():
+  trap t2
+t0: todo @32:43 ["todo reached: a"]
+t1: todo @32:62 ["todo reached: b"]
+t2: unreachable @32:62 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn bare_length() -> u64 {
+block0():
+  trap t0
+block1():
+  trap t1
+t0: todo @34:33 ["todo reached: a"]
+t1: unreachable @34:33 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn field(bool) -> u8 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  trap t0
+block2():
+  trap t1
+block3():
+  trap t2
+block4():
+  trap t2
+block5():
+  trap t2
+t0: todo @36:39 ["todo reached: a"]
+t1: todo @36:58 ["todo reached: b"]
+t2: unreachable @36:58 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn indexed(bool) -> u8 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  trap t0
+block2():
+  trap t1
+block3():
+  v1: i64 = int 0 @38:73
+  trap t2
+block4():
+  trap t2
+block5():
+  trap t2
+t0: todo @38:41 ["todo reached: a"]
+t1: todo @38:60 ["todo reached: b"]
+t2: unreachable @38:73 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn returns_first(bool) -> u8 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  v1: i64 = int 7 @41:26
+  v2: u8 = cast v1 @41:26
+  return v2
+block2():
+  v3: i64 = int 8 @41:44
+  v4: u8 = cast v3 @41:44
+  return v4
+block3():
+  trap t0
+block4():
+  trap t0
+block5():
+  trap t0
+t0: unreachable @41:44 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn no_copies(bool) -> u64 {
+block0(v0: bool):
+  branch v0, block1(), block2()
+block1():
+  trap t0
+block2():
+  trap t1
+block3():
+  trap t2
+block4():
+  trap t2
+block5():
+  trap t2
+t0: todo @46:26 ["todo reached: a"]
+t1: todo @46:45 ["todo reached: b"]
+t2: unreachable @46:45 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn enter single(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f0 v0 @12:8
+  return v1
+t0: unreachable @12:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn enter bare() -> u8 {
+block0():
+  v0: u8 = call f1 @17:8
+  return v0
+t0: unreachable @17:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f12: fn enter nested(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f2 v0 @22:8
+  return v1
+t0: unreachable @22:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f13: fn enter repeated(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f3 v0 @27:8
+  return v1
+t0: unreachable @27:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f14: fn enter length(bool) -> u64 {
+block0(v0: bool):
+  v1: u64 = call f4 v0 @32:8
+  return v1
+t0: unreachable @32:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f15: fn enter bare_length() -> u64 {
+block0():
+  v0: u64 = call f5 @34:8
+  return v0
+t0: unreachable @34:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f16: fn enter field(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f6 v0 @36:8
+  return v1
+t0: unreachable @36:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f17: fn enter indexed(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f7 v0 @38:8
+  return v1
+t0: unreachable @38:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f18: fn enter returns_first(bool) -> u8 {
+block0(v0: bool):
+  v1: u8 = call f8 v0 @40:8
+  return v1
+t0: unreachable @40:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f19: fn enter no_copies(bool) -> u64 {
+block0(v0: bool):
+  v1: u64 = call f9 v0 @45:8
+  return v1
+t0: unreachable @45:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/arguments_keep_their_values.mn ==
 mente-dump 2 mir
 f0: fn first(addr, u8) -> u8 {
@@ -8620,6 +8856,66 @@ t0: unreachable @40:8 ["unreachable reached: control left the code the checker a
 == conformance/core-calculus/mut_argument_named_twice.mn == (exit 2)
 == conformance/core-calculus/mut_argument_of_val.mn == (exit 2)
 == conformance/core-calculus/mut_fields_of_one_binding.mn == (exit 2)
+== conformance/core-calculus/mut_parameter_bounded_by_another.mn ==
+mente-dump 2 mir
+f0: fn reset(u8, addr) {
+block0(v0: u8, v1: addr):
+  v2: i64 = int 0 @7:7
+  v3: u8 = cast v2 @7:7
+  v4: unit = store v1, v3 @7:7
+  return
+block1():
+  trap t0
+t0: unreachable @7:7 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn caller(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 3 @11:15
+  v2: u8 = cast v1 @11:15
+  v3: addr = slot 1 @11:15
+  v4: unit = store v3, v2 @11:15
+  v5: i64 = int 10 @12:9
+  v6: u8 = cast v5 @12:9
+  v7: u8 = load v3 @12:9
+  v8: unit = call f0 v6, v3 @12:3
+  v9: u8 = load v3 @12:3
+  v10: u8 = load v3 @13:3
+  return v10
+block1():
+  trap t0
+t0: unreachable @13:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter reset(u8, addr) {
+block0(v0: u8, v1: addr):
+  v2: u8 = load v1 @0:0
+  v3: i64 = int 0 @0:0
+  v4: i64 = cast v2 @0:0
+  v5: bool = ge v4, v3 @0:0
+  v6: bool = lt v2, v0 @0:0
+  v7: bool = and v5, v6 @0:0
+  v8: unit = check t0 v7, v2, v3, v0 @6:8
+  v9: unit = call f0 v0, v1 @6:8
+  v10: u8 = load v1 @6:8
+  v11: i64 = int 0 @6:8
+  v12: i64 = cast v10 @6:8
+  v13: bool = ge v12, v11 @6:8
+  v14: bool = lt v10, v0 @6:8
+  v15: bool = and v13, v14 @6:8
+  v16: unit = check t1 v15, v10, v11, v0 @6:8
+  return
+t0: refinement @6:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: refinement @6:8 ["", " lies outside the refinement `[", "..", "]`"]
+t2: unreachable @6:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter caller(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f1 v0 @10:8
+  return v1
+t0: unreachable @10:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/named_arguments_to_a_function.mn == (exit 2)
 == conformance/core-calculus/narrowing_that_always_traps.mn == (exit 2)
 == conformance/core-calculus/narrowing_that_may_trap.mn ==

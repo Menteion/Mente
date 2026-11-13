@@ -1,0 +1,14 @@
+// expect: pass
+module conformance
+// A `mut` parameter's refinement may name another parameter, read-only, which bounds the value
+// the place holds when the call starts and when it returns; called from outside the program,
+// the argument is checked against it on the way in (core-calculus.md, items 3 and 7).
+pub fn reset(n: u8, mut a: u8[0..n]) {
+  a = 0
+}
+
+pub fn caller(x: u8) -> u8 {
+  var y: u8 = 3
+  reset(10, mut y)
+  y
+}

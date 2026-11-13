@@ -1,0 +1,48 @@
+// expect: pass
+module conformance
+// A repeat of a value that gives none, and an array literal of elements that each give none,
+// give none either, and so does a field, an element or a `.len` read of a value that gives none:
+// each evaluates what it holds in order, and leaves where the first of them does
+// (core-calculus.md, item 6).
+struct P {
+  a: u8
+  b: u16
+}
+
+pub fn single(c: bool) -> u8 {
+  val a: [1]u8 = [if c { todo("a") } else { todo("b") }]
+  a[0]
+}
+
+pub fn bare() -> u8 {
+  val a = [todo("a")]
+  a[0]
+}
+
+pub fn nested(c: bool) -> u8 {
+  val a = [[if c { todo("a") } else { todo("b") }]]
+  a[0][0]
+}
+
+pub fn repeated(c: bool) -> u8 {
+  val a: [3]u8 = [if c { todo("a") } else { todo("b") }; 3]
+  a[0]
+}
+
+pub fn length(c: bool) -> usize = (if c { todo("a") } else { todo("b") }).len
+
+pub fn bare_length() -> usize = todo("a").len
+
+pub fn field(c: bool) -> u8 = (if c { todo("a") } else { todo("b") }).a
+
+pub fn indexed(c: bool) -> u8 = (if c { todo("a") } else { todo("b") })[0]
+
+pub fn returns_first(c: bool) -> u8 {
+  val a = [if c { return 7 } else { return 8 }, if c { todo("a") } else { todo("b") }]
+  a[0]
+}
+
+pub fn no_copies(c: bool) -> usize {
+  val a: [0]u8 = [if c { todo("a") } else { todo("b") }; 0]
+  a.len
+}

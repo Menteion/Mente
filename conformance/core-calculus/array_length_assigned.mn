@@ -1,7 +1,7 @@
 // expect: E0205 E0205
 module conformance
 // An array's `.len` is a value its type fixes, not a place: assigning it is an error, though
-// the array is a `var` (core-calculus.md, item 6).
+// the array is a `var` (core-calculus.md, item 3).
 pub fn set(xs: [2]u8) -> usize {
   var ys: [2]u8 = xs
   ys.len = 3
