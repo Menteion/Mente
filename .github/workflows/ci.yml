@@ -216,6 +216,8 @@ jobs:
       - name: Overflow checks in this job's release build
         run: bash .github/scripts/overflow-proof.sh
       - name: Compare
+        # In bash on every runner: Windows' own shell finds its timeout.exe, which only waits.
+        shell: bash
         run: timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 
   debuggers:

@@ -1283,12 +1283,17 @@ const IGNORED_TEST_LIMIT = "15m";
 
 check("every ignored test a required job runs has a time limit of its own", () => {
   let found = 0;
-  for (const { file, id, job } of requiredJobs()) {
+  for (const { file, doc, id, job } of requiredJobs()) {
     for (const s of steps(job)) {
       for (const line of logicalLines(s.run ?? "")) {
         if (!/\bcargo\s+test\b.*\s--ignored\b/.test(line)) continue;
         found++;
         assert.match(line, new RegExp(`(^|[\\s(&;])timeout ${IGNORED_TEST_LIMIT} cargo test\\b`), `${stepKey(file, id, s)} runs ignored tests without their limit: timeout ${IGNORED_TEST_LIMIT} cargo test ...`);
+        // GNU timeout is bash's on every runner; Windows' own shell finds timeout.exe, which only
+        // waits. A job's default shell is bash only on a Linux runner named as such.
+        const shell = s.shell ?? job.defaults?.run?.shell ?? doc.defaults?.run?.shell;
+        const linux = /^ubuntu-/.test(String(job["runs-on"]));
+        assert.ok(shell === "bash" || (shell === undefined && linux), `${stepKey(file, id, s)} runs timeout in ${shell ?? "the runner's default shell"}, not bash`);
       }
     }
   }
