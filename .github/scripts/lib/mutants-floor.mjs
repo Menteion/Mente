@@ -175,9 +175,50 @@ export function readList(text) {
 }
 
 /// The CLI: returns what it prints.
+/// What nextest prints for a test that failed, in its output and so in a mutant's log: FAIL, a
+/// timeout, a leak that fails, or a signal or an abort.
+const FAILED_TEST = /^\s+(FAIL|TIMEOUT|LEAK-FAIL|SIG[A-Z]+|ABORT) \[/m;
+
+/// Why a run's outcomes do not show the work they claim, one message a mutant: a mutant counts as
+/// caught only when its tests ran and one failed, nextest exiting 100 with a failing test in the
+/// log, and as unviable only when its build failed with an error of the compiler. A stub in place of
+/// nextest or cargo, which exits at once, would otherwise make every mutant caught or unviable,
+/// and the floor count them all as tested. Times cannot tell: a caught mutant's tests took 0.15 s
+/// in the runs of #120. `readLog` reads a log by the path the outcome names.
+export function evidence(outcomes, readLog) {
+  const found = [];
+  const strip = (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "");
+  for (const o of outcomes.outcomes ?? []) {
+    const name = o.scenario?.Mutant?.name;
+    if (!name || !["CaughtMutant", "Unviable"].includes(o.summary)) continue;
+    const phase = (p) => (o.phase_results ?? []).find((r) => r.phase === p);
+    const log = strip(readLog(o.log_path));
+    if (o.summary === "CaughtMutant") {
+      const test = phase("Test");
+      if (test?.process_status?.Failure !== 100) found.push(`${name}: caught, but its tests did not end as nextest ends a failed run (${JSON.stringify(test?.process_status ?? null)})`);
+      else if (!FAILED_TEST.test(log)) found.push(`${name}: caught, but no test failed in its log`);
+    } else {
+      const build = phase("Build");
+      if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);
+      else if (!/^error(\[E\d+\])?:/m.test(log)) found.push(`${name}: unviable, but no error of the compiler is in its log`);
+    }
+  }
+  return found;
+}
+
 export function main(args) {
   const [command, ...files] = args;
   const read = (f) => fs.readFileSync(f, "utf8");
+  if (command === "evidence" && files.length > 0) {
+    // Each output directory of the run; one cargo-mutants did not write (no deleted lines) holds
+    // nothing to check.
+    const found = [];
+    for (const dir of files) {
+      if (!fs.existsSync(`${dir}/outcomes.json`)) continue;
+      found.push(...evidence(JSON.parse(read(`${dir}/outcomes.json`)), (log) => read(`${dir}/${log}`)));
+    }
+    return found.join("\n");
+  }
   if (command === "expected" && files.length === 2) {
     const mutants = readList(read(files[1]));
     if (mutants.length === 0) throw new Error("cargo-mutants lists no mutant in the whole tree");
@@ -194,5 +235,5 @@ export function main(args) {
     return missing(base, read(files[0]), readList(read(files[2])), readList(read(files[3]))).join("\n");
   }
   if (command === "count" && files.length === 1) return String(readList(read(files[0])).length);
-  throw new Error("usage: mutants-floor.mjs expected <pr.diff> <base-all.json> | deleted <pr.diff> <all.json> <diff.json> | missing <pr.diff> <base-all.json> <diff.json> <deleted.json> | count <list.json>");
+  throw new Error("usage: mutants-floor.mjs evidence <mutants.out>... | expected <pr.diff> <base-all.json> | deleted <pr.diff> <all.json> <diff.json> | missing <pr.diff> <base-all.json> <diff.json> <deleted.json> | count <list.json>");
 }

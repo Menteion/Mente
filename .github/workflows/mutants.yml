@@ -57,6 +57,11 @@ jobs:
       - name: Install cargo-nextest
         if: steps.watch.outputs.run != 'false'
         run: bash .github/scripts/install-nextest.sh
+      - name: Record the tools, before any code of the change runs
+        if: steps.watch.outputs.run != 'false'
+        # The steps after it run the change's tests, which could replace a tool the next step
+        # runs; each checks the tools at its end (.github/scripts/tools.sh).
+        run: bash .github/scripts/tools.sh record
       - name: Run the tests once without a mutant
         if: steps.watch.outputs.run != 'false'
         # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
@@ -65,10 +70,13 @@ jobs:
         # runs what every mutant runs, and cargo-mutants skips its own.
         run: |
           set -o pipefail
+          # The change's tests, under the limits every test runs under.
+          . .github/scripts/limits.sh
           cargo nextest run --workspace 2>&1 | tee baseline.log
           { echo "## Slowest tests without a mutant"; echo '```text'
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          bash .github/scripts/tools.sh verify
       - name: Mutate the lines this pull request changes
         if: steps.watch.outputs.run != 'false'
         env:
@@ -117,6 +125,17 @@ jobs:
             deleted/mutants.out/caught.txt deleted/mutants.out/missed.txt deleted/mutants.out/timeout.txt \
             deleted/mutants.out/unviable.txt 2>/dev/null | grep -c . || true)
           count "$tested" "the mutants tested"
+          # Every mutant counted caught had a test fail under nextest, and every one counted
+          # unviable a build the compiler refused: a stub in place of a tool, which exits at once,
+          # would otherwise make them all caught or unviable (.github/scripts/mutants-floor.mjs).
+          node .github/scripts/mutants-floor.mjs evidence mutants.out deleted/mutants.out > evidence.txt
+          lacking=$(grep -c . evidence.txt || true)
+          count "$lacking" "the mutants whose outcome their logs do not show"
+          if [ "$lacking" -gt 0 ]; then
+            { echo "## Outcomes the logs do not show"; echo '```text'; cat evidence.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$lacking mutants are counted caught or unviable without a failed test or a failed build in their logs"
+            failed=1
+          fi
           cargo mutants --in-diff pr.diff --shard "$SHARD/4" --list --json > shard-mutants.json
           listed=$(node .github/scripts/mutants-floor.mjs count shard-mutants.json)
           count "$listed" "the mutants listed for this shard"
@@ -157,6 +176,7 @@ jobs:
               failed=1
             fi
           fi
+          bash .github/scripts/tools.sh verify
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.watch.outputs.run != 'false'

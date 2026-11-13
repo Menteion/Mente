@@ -59,15 +59,23 @@ jobs:
         run: cargo clippy --all-targets --workspace --locked -- -D warnings
       - name: Install cargo-nextest
         run: bash .github/scripts/install-nextest.sh
+      - name: Record the tools, before any code of the change runs
+        # Every step after it runs code of the change, which could replace a tool the next step
+        # runs or set its path or environment; each checks the tools at its end
+        # (.github/scripts/tools.sh).
+        run: bash .github/scripts/tools.sh record
       - name: Build the tests
-        run: cargo test --locked --workspace --no-run
+        run: |
+          cargo test --locked --workspace --no-run
+          bash .github/scripts/tools.sh verify
       - name: The ignored tests and those given more time, as nextest lists them
         # On each runner: a test ignored in any spelling libtest reads, unless
         # .config/ignored-tests.txt lists it, or a test given a longer limit that is ignored or
         # compiled out here, fails the job (.github/scripts/test-list.mjs).
         run: |
           cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
-          node .github/scripts/test-list.mjs "$RUNNER_TEMP/tests.json"
+          node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"
+          bash .github/scripts/tools.sh verify
       - name: Tests, through nextest under the ci profile's limits
         # Each test runs in a process of its own under the time limits of .config/nextest.toml: a
         # test past its time is stopped and fails, and so does one that leaves a process behind.
@@ -78,22 +86,34 @@ jobs:
         run: |
           . .github/scripts/limits.sh
           cargo-nextest nextest run --locked --workspace --profile ci
-      - name: Doctests
-        # nextest runs no doctests, and the workflow policy refuses a doc example rustdoc would
-        # compile; what this step builds runs under the tests' memory limits all the same.
+          bash .github/scripts/tools.sh verify
+      - name: No doctests
+        # nextest runs no doctests, and `cargo test --doc` has no limit for one: rustdoc lists
+        # every doc example it would compile, in any spelling of a doc comment or attribute, and
+        # each library must list none (.github/scripts/test-list.mjs). Listing compiles nothing.
         run: |
           . .github/scripts/limits.sh
-          cargo test --locked --workspace --doc
+          cargo test --locked --workspace --doc -- --list > "$RUNNER_TEMP/doctests.txt" 2>&1
+          node .github/scripts/test-list.mjs doctests "$RUNNER_TEMP/doctests.txt"
+          bash .github/scripts/tools.sh verify
       - name: The gate tests, by name
         # By name, so that a manifest that drops the target (autotests = false) fails here instead
         # of leaving the gates untested (compiler/mente-cli/tests/gates.rs).
-        run: cargo test --locked -p mente-cli --test gates
+        run: |
+          cargo test --locked -p mente-cli --test gates
+          bash .github/scripts/tools.sh verify
       - name: mn spec
-        run: cargo run --locked --bin mn -- spec
+        run: |
+          cargo run --locked --bin mn -- spec
+          bash .github/scripts/tools.sh verify
       - name: mn test --mutate
-        run: cargo run --locked --bin mn -- test --mutate
+        run: |
+          cargo run --locked --bin mn -- test --mutate
+          bash .github/scripts/tools.sh verify
       - name: mn view --spec
-        run: cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+        run: |
+          cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+          bash .github/scripts/tools.sh verify
 
   coverage:
     # Reported, not required: line coverage of the workspace's tests, in the run summary and as lcov.
@@ -161,13 +181,13 @@ jobs:
           esac
           if [ -z "$base" ]; then echo "::error::the $GITHUB_EVENT_NAME event names no base"; exit 1; fi
           git worktree add ../base "$base"
-          (cd ../base && cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol) \
+          (cd ../base && timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol) \
             | sed -n -E 's/^([^ :]+): median ([0-9.]+) .*/\1 \2/p' > "$RUNNER_TEMP/base-medians.txt"
           cat "$RUNNER_TEMP/base-medians.txt"
       - name: Measure this change against it
         run: |
           export MENTE_BENCH_BASELINE="$RUNNER_TEMP/base-medians.txt" MENTE_BENCH_ENFORCE=1
-          cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol
+          timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol
 
   execution-paths:
     # The three execution paths, the reference interpreter, MIR and native code, on every probe
@@ -196,7 +216,7 @@ jobs:
       - name: Overflow checks in this job's release build
         run: bash .github/scripts/overflow-proof.sh
       - name: Compare
-        run: cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
+        run: timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 
   debuggers:
     # Native code that `mn build` builds from a .mn program, stepped through by a scripted gdb
@@ -245,7 +265,7 @@ jobs:
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
       - name: Measure
-        run: MENTE_BENCH_ENFORCE=1 cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
+        run: MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
       - name: Overflow checks in this job's release build
         run: bash .github/scripts/overflow-proof.sh
 
@@ -267,6 +287,10 @@ jobs:
       # test_the_documentation_job_runs_the_workflow_policy fails on any other key or order.
       - name: The workflow policy, its required checks, path lists, pins and milestone tags
         run: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
+      - name: Every pinned action is the commit its release's tag names
+        # The policy checks a pin's form; this asks each action's repository for the commit its
+        # tag names (.github/scripts/action-pins.mjs).
+        run: node .github/scripts/action-pins.mjs
       # No package's install script runs: none is needed, and one could write the environment of
       # the steps after it.
       - run: npm ci --ignore-scripts

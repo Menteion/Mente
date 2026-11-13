@@ -30,6 +30,7 @@ rust-toolchain.toml
 .github/scripts/install-nextest.sh
 .github/scripts/limits.sh
 .github/scripts/memory-guard.sh
+.github/scripts/tools.sh
 # The floor of work the job checks.
 .github/scripts/mutants-floor.mjs
 .github/scripts/lib/mutants-floor.mjs
