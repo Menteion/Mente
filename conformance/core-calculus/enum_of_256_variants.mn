@@ -1,0 +1,524 @@
+// expect: pass
+module conformance
+// 256 variants are numbered by a u8 tag, the most it holds.
+pub enum Wide {
+  V0
+  V1
+  V2
+  V3
+  V4
+  V5
+  V6
+  V7
+  V8
+  V9
+  V10
+  V11
+  V12
+  V13
+  V14
+  V15
+  V16
+  V17
+  V18
+  V19
+  V20
+  V21
+  V22
+  V23
+  V24
+  V25
+  V26
+  V27
+  V28
+  V29
+  V30
+  V31
+  V32
+  V33
+  V34
+  V35
+  V36
+  V37
+  V38
+  V39
+  V40
+  V41
+  V42
+  V43
+  V44
+  V45
+  V46
+  V47
+  V48
+  V49
+  V50
+  V51
+  V52
+  V53
+  V54
+  V55
+  V56
+  V57
+  V58
+  V59
+  V60
+  V61
+  V62
+  V63
+  V64
+  V65
+  V66
+  V67
+  V68
+  V69
+  V70
+  V71
+  V72
+  V73
+  V74
+  V75
+  V76
+  V77
+  V78
+  V79
+  V80
+  V81
+  V82
+  V83
+  V84
+  V85
+  V86
+  V87
+  V88
+  V89
+  V90
+  V91
+  V92
+  V93
+  V94
+  V95
+  V96
+  V97
+  V98
+  V99
+  V100
+  V101
+  V102
+  V103
+  V104
+  V105
+  V106
+  V107
+  V108
+  V109
+  V110
+  V111
+  V112
+  V113
+  V114
+  V115
+  V116
+  V117
+  V118
+  V119
+  V120
+  V121
+  V122
+  V123
+  V124
+  V125
+  V126
+  V127
+  V128
+  V129
+  V130
+  V131
+  V132
+  V133
+  V134
+  V135
+  V136
+  V137
+  V138
+  V139
+  V140
+  V141
+  V142
+  V143
+  V144
+  V145
+  V146
+  V147
+  V148
+  V149
+  V150
+  V151
+  V152
+  V153
+  V154
+  V155
+  V156
+  V157
+  V158
+  V159
+  V160
+  V161
+  V162
+  V163
+  V164
+  V165
+  V166
+  V167
+  V168
+  V169
+  V170
+  V171
+  V172
+  V173
+  V174
+  V175
+  V176
+  V177
+  V178
+  V179
+  V180
+  V181
+  V182
+  V183
+  V184
+  V185
+  V186
+  V187
+  V188
+  V189
+  V190
+  V191
+  V192
+  V193
+  V194
+  V195
+  V196
+  V197
+  V198
+  V199
+  V200
+  V201
+  V202
+  V203
+  V204
+  V205
+  V206
+  V207
+  V208
+  V209
+  V210
+  V211
+  V212
+  V213
+  V214
+  V215
+  V216
+  V217
+  V218
+  V219
+  V220
+  V221
+  V222
+  V223
+  V224
+  V225
+  V226
+  V227
+  V228
+  V229
+  V230
+  V231
+  V232
+  V233
+  V234
+  V235
+  V236
+  V237
+  V238
+  V239
+  V240
+  V241
+  V242
+  V243
+  V244
+  V245
+  V246
+  V247
+  V248
+  V249
+  V250
+  V251
+  V252
+  V253
+  V254
+  V255
+}
+
+pub fn last() -> Wide = Wide.V255
+
+pub fn index(w: Wide) -> u16 = match w {
+  Wide.V0 => 0
+  Wide.V1 => 1
+  Wide.V2 => 2
+  Wide.V3 => 3
+  Wide.V4 => 4
+  Wide.V5 => 5
+  Wide.V6 => 6
+  Wide.V7 => 7
+  Wide.V8 => 8
+  Wide.V9 => 9
+  Wide.V10 => 10
+  Wide.V11 => 11
+  Wide.V12 => 12
+  Wide.V13 => 13
+  Wide.V14 => 14
+  Wide.V15 => 15
+  Wide.V16 => 16
+  Wide.V17 => 17
+  Wide.V18 => 18
+  Wide.V19 => 19
+  Wide.V20 => 20
+  Wide.V21 => 21
+  Wide.V22 => 22
+  Wide.V23 => 23
+  Wide.V24 => 24
+  Wide.V25 => 25
+  Wide.V26 => 26
+  Wide.V27 => 27
+  Wide.V28 => 28
+  Wide.V29 => 29
+  Wide.V30 => 30
+  Wide.V31 => 31
+  Wide.V32 => 32
+  Wide.V33 => 33
+  Wide.V34 => 34
+  Wide.V35 => 35
+  Wide.V36 => 36
+  Wide.V37 => 37
+  Wide.V38 => 38
+  Wide.V39 => 39
+  Wide.V40 => 40
+  Wide.V41 => 41
+  Wide.V42 => 42
+  Wide.V43 => 43
+  Wide.V44 => 44
+  Wide.V45 => 45
+  Wide.V46 => 46
+  Wide.V47 => 47
+  Wide.V48 => 48
+  Wide.V49 => 49
+  Wide.V50 => 50
+  Wide.V51 => 51
+  Wide.V52 => 52
+  Wide.V53 => 53
+  Wide.V54 => 54
+  Wide.V55 => 55
+  Wide.V56 => 56
+  Wide.V57 => 57
+  Wide.V58 => 58
+  Wide.V59 => 59
+  Wide.V60 => 60
+  Wide.V61 => 61
+  Wide.V62 => 62
+  Wide.V63 => 63
+  Wide.V64 => 64
+  Wide.V65 => 65
+  Wide.V66 => 66
+  Wide.V67 => 67
+  Wide.V68 => 68
+  Wide.V69 => 69
+  Wide.V70 => 70
+  Wide.V71 => 71
+  Wide.V72 => 72
+  Wide.V73 => 73
+  Wide.V74 => 74
+  Wide.V75 => 75
+  Wide.V76 => 76
+  Wide.V77 => 77
+  Wide.V78 => 78
+  Wide.V79 => 79
+  Wide.V80 => 80
+  Wide.V81 => 81
+  Wide.V82 => 82
+  Wide.V83 => 83
+  Wide.V84 => 84
+  Wide.V85 => 85
+  Wide.V86 => 86
+  Wide.V87 => 87
+  Wide.V88 => 88
+  Wide.V89 => 89
+  Wide.V90 => 90
+  Wide.V91 => 91
+  Wide.V92 => 92
+  Wide.V93 => 93
+  Wide.V94 => 94
+  Wide.V95 => 95
+  Wide.V96 => 96
+  Wide.V97 => 97
+  Wide.V98 => 98
+  Wide.V99 => 99
+  Wide.V100 => 100
+  Wide.V101 => 101
+  Wide.V102 => 102
+  Wide.V103 => 103
+  Wide.V104 => 104
+  Wide.V105 => 105
+  Wide.V106 => 106
+  Wide.V107 => 107
+  Wide.V108 => 108
+  Wide.V109 => 109
+  Wide.V110 => 110
+  Wide.V111 => 111
+  Wide.V112 => 112
+  Wide.V113 => 113
+  Wide.V114 => 114
+  Wide.V115 => 115
+  Wide.V116 => 116
+  Wide.V117 => 117
+  Wide.V118 => 118
+  Wide.V119 => 119
+  Wide.V120 => 120
+  Wide.V121 => 121
+  Wide.V122 => 122
+  Wide.V123 => 123
+  Wide.V124 => 124
+  Wide.V125 => 125
+  Wide.V126 => 126
+  Wide.V127 => 127
+  Wide.V128 => 128
+  Wide.V129 => 129
+  Wide.V130 => 130
+  Wide.V131 => 131
+  Wide.V132 => 132
+  Wide.V133 => 133
+  Wide.V134 => 134
+  Wide.V135 => 135
+  Wide.V136 => 136
+  Wide.V137 => 137
+  Wide.V138 => 138
+  Wide.V139 => 139
+  Wide.V140 => 140
+  Wide.V141 => 141
+  Wide.V142 => 142
+  Wide.V143 => 143
+  Wide.V144 => 144
+  Wide.V145 => 145
+  Wide.V146 => 146
+  Wide.V147 => 147
+  Wide.V148 => 148
+  Wide.V149 => 149
+  Wide.V150 => 150
+  Wide.V151 => 151
+  Wide.V152 => 152
+  Wide.V153 => 153
+  Wide.V154 => 154
+  Wide.V155 => 155
+  Wide.V156 => 156
+  Wide.V157 => 157
+  Wide.V158 => 158
+  Wide.V159 => 159
+  Wide.V160 => 160
+  Wide.V161 => 161
+  Wide.V162 => 162
+  Wide.V163 => 163
+  Wide.V164 => 164
+  Wide.V165 => 165
+  Wide.V166 => 166
+  Wide.V167 => 167
+  Wide.V168 => 168
+  Wide.V169 => 169
+  Wide.V170 => 170
+  Wide.V171 => 171
+  Wide.V172 => 172
+  Wide.V173 => 173
+  Wide.V174 => 174
+  Wide.V175 => 175
+  Wide.V176 => 176
+  Wide.V177 => 177
+  Wide.V178 => 178
+  Wide.V179 => 179
+  Wide.V180 => 180
+  Wide.V181 => 181
+  Wide.V182 => 182
+  Wide.V183 => 183
+  Wide.V184 => 184
+  Wide.V185 => 185
+  Wide.V186 => 186
+  Wide.V187 => 187
+  Wide.V188 => 188
+  Wide.V189 => 189
+  Wide.V190 => 190
+  Wide.V191 => 191
+  Wide.V192 => 192
+  Wide.V193 => 193
+  Wide.V194 => 194
+  Wide.V195 => 195
+  Wide.V196 => 196
+  Wide.V197 => 197
+  Wide.V198 => 198
+  Wide.V199 => 199
+  Wide.V200 => 200
+  Wide.V201 => 201
+  Wide.V202 => 202
+  Wide.V203 => 203
+  Wide.V204 => 204
+  Wide.V205 => 205
+  Wide.V206 => 206
+  Wide.V207 => 207
+  Wide.V208 => 208
+  Wide.V209 => 209
+  Wide.V210 => 210
+  Wide.V211 => 211
+  Wide.V212 => 212
+  Wide.V213 => 213
+  Wide.V214 => 214
+  Wide.V215 => 215
+  Wide.V216 => 216
+  Wide.V217 => 217
+  Wide.V218 => 218
+  Wide.V219 => 219
+  Wide.V220 => 220
+  Wide.V221 => 221
+  Wide.V222 => 222
+  Wide.V223 => 223
+  Wide.V224 => 224
+  Wide.V225 => 225
+  Wide.V226 => 226
+  Wide.V227 => 227
+  Wide.V228 => 228
+  Wide.V229 => 229
+  Wide.V230 => 230
+  Wide.V231 => 231
+  Wide.V232 => 232
+  Wide.V233 => 233
+  Wide.V234 => 234
+  Wide.V235 => 235
+  Wide.V236 => 236
+  Wide.V237 => 237
+  Wide.V238 => 238
+  Wide.V239 => 239
+  Wide.V240 => 240
+  Wide.V241 => 241
+  Wide.V242 => 242
+  Wide.V243 => 243
+  Wide.V244 => 244
+  Wide.V245 => 245
+  Wide.V246 => 246
+  Wide.V247 => 247
+  Wide.V248 => 248
+  Wide.V249 => 249
+  Wide.V250 => 250
+  Wide.V251 => 251
+  Wide.V252 => 252
+  Wide.V253 => 253
+  Wide.V254 => 254
+  Wide.V255 => 255
+}
+
+pub fn main() -> u16 = index(last())

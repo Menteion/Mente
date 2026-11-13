@@ -1,0 +1,5 @@
+// expect: E0229
+module conformance
+pub fn only(b: bool) -> u8 = match b {
+  true => 1
+}

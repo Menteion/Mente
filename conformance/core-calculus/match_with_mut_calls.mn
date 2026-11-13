@@ -1,0 +1,40 @@
+// expect: pass
+module conformance
+// A `mut` call in a scrutinee, in an arm and in a `match` inside a loop's condition changes the
+// binding it is passed, and Tier 1 reads what follows in that order.
+fn next(mut i: u8) -> u8 {
+  i = i / 2 + 1
+  i
+}
+
+pub fn in_the_scrutinee(i: u8) -> u8 {
+  var j = i
+  val k = match next(mut j) {
+    0 => j
+    _ => j
+  }
+  k
+}
+
+pub fn in_an_arm(i: u8) -> u8 {
+  var j = i
+  val k = match i {
+    0 => next(mut j)
+    _ => j
+  }
+  k + 0
+}
+
+pub fn in_a_loop_condition(n: u8) -> u8 {
+  var i: u8 = n
+  var rounds: u8 = 0
+  while (match next(mut i) {
+    1 => false
+    _ => rounds < 10
+  }) {
+    rounds += 1
+  }
+  rounds
+}
+
+pub fn main() -> u8 = in_the_scrutinee(9) + in_an_arm(0) + in_a_loop_condition(200)

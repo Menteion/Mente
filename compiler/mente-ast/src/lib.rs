@@ -256,11 +256,12 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                 out.push_str("}\n\n");
             }
             ItemDecl::Enum(e) if e.is_pub => {
-                out.push_str(&format!(
-                    "pub enum {} {{ {} }}\n\n",
-                    e.name,
-                    e.variants.join(", ")
-                ));
+                // One variant per line, as the grammar writes them (`grammar.md`, item 10).
+                out.push_str(&format!("pub enum {} {{\n", e.name));
+                for v in &e.variants {
+                    out.push_str(&format!("  {}\n", v));
+                }
+                out.push_str("}\n\n");
             }
             ItemDecl::Trait(t) if t.is_pub => {
                 out.push_str(&format!("pub trait {} {{\n", t.name));
@@ -480,8 +481,14 @@ pub bitstruct Flags : u8 {
 bitstruct Hidden : u8 {
   @bits(0..8) pub raw: u8
 }
-pub enum Side { Left, Right }
-enum Inner { A, B }
+pub enum Side {
+  Left
+  Right
+}
+enum Inner {
+  A
+  B
+}
 pub trait Probe {
   fn hit(self) -> bool
 }
@@ -501,10 +508,7 @@ struct Scratch {
                 "pub bitstruct Flags : u8 {\n  @bits(0..8) pub raw: u8",
                 "pub bitstruct Flags : u8 {\n  @bits(0..8) pub bits: u8",
             ),
-            (
-                "pub enum Side { Left, Right }",
-                "pub enum Side { Left, Right, Up }",
-            ),
+            ("  Left\n  Right\n}", "  Left\n  Right\n  Up\n}"),
             ("  fn hit(self) -> bool", "  fn hit(self) -> u8"),
         ] {
             assert_ne!(
@@ -599,7 +603,10 @@ pub struct Cell {
     x < 4096
   }
 }
-pub enum Side { Left, Right }
+pub enum Side {
+  Left
+  Right
+}
 pub trait Probe {
   fn hit(self, x: u32) -> bool
 }
@@ -622,7 +629,7 @@ fn private_helper(x: u32) -> u32 = x
             "@layout(size: 8, align: 4)",
             "  @bytes(0..4) pub x: u32",
             "    x < 4096",
-            "pub enum Side { Left, Right }",
+            "pub enum Side {\n  Left\n  Right\n}",
             "  fn hit(self, x: u32) -> bool",
             "@total",
             "pub fn find(cells: []Cell, key: []u8, lo: usize, hi: usize) -> []Cell ! SearchError from cells with Clock",
@@ -644,6 +651,31 @@ fn private_helper(x: u32) -> u32 = x
         assert!(out.contains(&format!("// body_hash: {}", hashes.body_hash)));
         assert!(out.contains(&format!("// instance_hash: {}", hashes.instance_hash)));
         assert!(report.spec_tokens < report.total_tokens && report.savings_percent > 0.0);
+    }
+
+    /// A variant is hashed and projected in one form, as a struct's fields are: its spacing,
+    /// line breaks, comments and trailing commas change neither, and the projection of an
+    /// enum, an attribute on a variant included, is a declaration the body parser reads.
+    #[test]
+    fn test_a_variant_is_hashed_and_projected_in_one_form() {
+        let spec = |code: &str| compute_dual_hashes(&parse_module(code).unwrap()).spec_hash;
+        let one = "module m\npub enum E {\n  C(w: i128, f: bool)\n}\n";
+        for other in [
+            "module m\npub enum E {\n  C(w:i128,f:bool)\n}\n",
+            "module m\npub enum E {\n  C(\n    w: i128, // wide\n    f: bool,\n  )\n}\n",
+        ] {
+            assert_eq!(spec(one), spec(other), "{}", other);
+        }
+        let code = "module m\npub enum E {\n  @deprecated\n  A\n  B(n: u8) // the count\n}\n";
+        let out = project_spec_blueprint(&parse_module(code).unwrap()).projected_source;
+        assert!(
+            out.contains("pub enum E {\n  @deprecated A\n  B(n: u8)\n}"),
+            "{}",
+            out
+        );
+        let module = parse_module(&out).unwrap();
+        let parsed = mente_syntax::parse_enums(&out, &module);
+        assert!(parsed[0].errors.is_empty(), "{:?}", parsed[0].errors);
     }
 }
 

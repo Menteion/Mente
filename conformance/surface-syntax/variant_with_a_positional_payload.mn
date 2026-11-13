@@ -1,0 +1,6 @@
+// expect: E0130
+module conformance
+pub enum Event {
+  Deposit(i64)
+  Close
+}

@@ -1,0 +1,6 @@
+// expect: E0109
+module conformance
+pub fn f(x: u8) -> u8 = match x {
+  none => 1
+  _ => 2
+}

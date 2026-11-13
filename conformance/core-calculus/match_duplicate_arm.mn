@@ -1,0 +1,12 @@
+// expect: E0230
+module conformance
+pub enum Light {
+  Red
+  Green
+}
+
+pub fn wait(l: Light) -> u8 = match l {
+  Light.Red => 30
+  Light.Green => 20
+  Light.Red => 10
+}

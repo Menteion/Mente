@@ -1,0 +1,44 @@
+// expect: pass
+module conformance
+// A payload holds any value: integers at their limits, arrays, structs and other enums.
+pub struct Point {
+  x: i32
+  y: i32
+}
+
+pub enum Side {
+  Left
+  Right
+}
+
+pub enum Shape {
+  Dot(at: Point)
+  Line(from: Point, to: Point, side: Side)
+  Path(points: [3]Point, closed: bool)
+  Wide(a: u128, b: i128, c: u8)
+}
+
+pub fn line(n: i32) -> Shape = Shape.Line(from: Point(x: 0, y: 0), to: Point(x: n, y: n), side: Side.Right)
+
+pub fn extremes() -> Shape = Shape.Wide(a: 340282366920938463463374607431768211455, b: -170141183460469231731687303715884105728, c: 255)
+
+pub fn width(s: Shape) -> i64 = match s {
+  Shape.Dot(at: _) => 0
+  Shape.Line(from: f, to: t, side: _) => t.x - f.x
+  Shape.Path(points: ps, closed: c) => if c { ps[2].x - ps[0].x } else { 0 }
+  Shape.Wide(a: _, b: _, c: low) => low
+}
+
+pub fn side(s: Shape) -> bool = match s {
+  Shape.Line(from: _, to: _, side: d) => match d {
+    Side.Left => true
+    Side.Right => false
+  }
+  Shape.Dot(at: _) => false
+  Shape.Path(points: _, closed: _) => false
+  Shape.Wide(a: _, b: _, c: _) => false
+}
+
+pub fn path(n: i32) -> Shape = Shape.Path(points: [Point(x: 0, y: 0), Point(x: n, y: 1), Point(x: n, y: 2)], closed: true)
+
+pub fn main() -> i64 = width(line(5)) + width(path(7))

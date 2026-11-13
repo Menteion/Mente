@@ -12,17 +12,19 @@
 //! and a `mut` argument's binding appears in no other argument of its call (`E0207`).
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::BinaryOp::{BitAnd, BitOr, BitXor, Shl, Shr};
 use mente_syntax::tree::{
-    Arg, AssignOp, BinaryOp, BlockId, Body, ContractKind, Else, ExprId, ExprKind, FieldInit,
-    FnSyntax, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId,
+    ExprKind, FieldInit, FnSyntax, PatBinding, PatternKind, Payload, StmtId, StmtKind, Tree,
+    TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
 
 use crate::names::{closest, BindingId, BindingKind, Resolution};
+use crate::octagon::Exact;
 use crate::structs::{too_many_elements, Structs, ARRAY_ELEMENTS, VALUE_BYTES};
 use crate::types::{Int, IntTy, Ty, USIZE};
 
@@ -76,6 +78,7 @@ pub fn check(
     resolution: &Resolution,
     signatures: &[Option<Signature>],
     structs: &Structs,
+    src: &str,
 ) -> (Typing, Vec<Diagnostic>) {
     let tree = &f.tree;
     let result = f.result.map(|t| Ty::of(tree, t));
@@ -100,6 +103,8 @@ pub fn check(
             bindings,
         },
         negated: negated_literals(tree),
+        src,
+        pattern_decls: HashMap::new(),
         errors: Vec::new(),
     };
     for contract in &f.contracts {
@@ -118,7 +123,7 @@ pub fn check(
                 let place = c.as_result();
                 c.expect(e, &want, &place);
             }
-            None => c.discarded(e),
+            None => c.discarded(e, false),
         },
         Some(Body::Block(b)) => c.body(b),
         None => {}
@@ -226,6 +231,10 @@ struct Checker<'a> {
     typing: Typing,
     /// The literals that are the operand of a unary `-`, whose range reaches one further.
     negated: HashSet<ExprId>,
+    /// The text the spans point into, for the fixes.
+    src: &'a str,
+    /// The declared type of each pattern binding: its payload field's, in its enum's tree.
+    pattern_decls: HashMap<BindingId, (&'a Tree, TypeId)>,
     errors: Vec<Diagnostic>,
 }
 
@@ -319,6 +328,14 @@ impl Checker<'_> {
             ExprKind::Field { base, name } => self.field(e, *base, name),
             ExprKind::Call { callee, args } => self.call(e, callee, args),
             ExprKind::Construct { name, fields } => self.construct(e, name, fields),
+            ExprKind::Variant {
+                enum_name,
+                name,
+                name_span,
+                payload,
+                ..
+            } => self.variant(e, enum_name, (name, *name_span), payload),
+            ExprKind::Match { scrutinee, arms } => self.match_expr(e, *scrutinee, arms, used),
             ExprKind::Array(items) => self.array(items),
             ExprKind::Repeat { value, count } => {
                 let elem = self.value(*value);
@@ -356,30 +373,41 @@ impl Checker<'_> {
     }
 
     /// An expression statement whose value nobody uses: an error unless it has no value
-    /// (`E0217`), so that a result is never dropped by mistake.
-    fn discarded(&mut self, e: ExprId) {
+    /// (`E0217`), so that a result is never dropped by mistake. In an arm of a `match` that
+    /// stands as a statement, `in_arm`, the discard its fix writes is a statement, so the fix
+    /// makes the arm a block that holds it.
+    fn discarded(&mut self, e: ExprId, in_arm: bool) {
         self.effect(e);
         let ty = self.typing.exprs[e.0 as usize].clone();
         if matches!(ty, Ty::Unit | Ty::Any) {
             return;
         }
         let span = self.span(e);
-        self.errors.push(
-            Diagnostic::error(
-                "E0217",
-                span,
-                format!(
-                    "this value, {}, is never used; use it, or discard it on purpose with `_ = ...`",
-                    ty.describe()
-                ),
-            )
-            .with_fix(
+        let d = Diagnostic::error(
+            "E0217",
+            span,
+            format!(
+                "this value, {}, is never used; use it, or discard it on purpose with `_ = ...`",
+                ty.describe()
+            ),
+        );
+        let message = "discard it on purpose";
+        let d = match (in_arm, self.src.get(span.start..span.end)) {
+            (true, Some(text)) => d.with_fix(
                 Applicability::Suggestion,
-                "discard it on purpose",
+                message,
+                span,
+                format!("{{ _ = {} }}", text),
+            ),
+            (true, None) => d,
+            (false, _) => d.with_fix(
+                Applicability::Suggestion,
+                message,
                 insertion_point(span),
                 "_ = ",
             ),
-        );
+        };
+        self.errors.push(d);
     }
 
     fn unary(&mut self, op: UnaryOp, operand: ExprId) -> Ty {
@@ -430,6 +458,18 @@ impl Checker<'_> {
                 Ty::Bool
             }
             BinaryOp::Eq | BinaryOp::Ne => {
+                // Structs and enums compare field by field and by variant (`core-calculus.md`,
+                // item 22), which comes later in M2.
+                let named = |t: &Ty| matches!(t, Ty::Struct(_) | Ty::Enum(_));
+                if named(lt) || named(rt) {
+                    let what = format!("comparing structs and enums with `{}`", symbol);
+                    self.errors.push(Diagnostic::error(
+                        "E0109",
+                        self.tree.expr(at).span,
+                        mente_syntax::diagnostics::later_message(&what, Some("M2")),
+                    ));
+                    return Ty::Bool;
+                }
                 let comparable = matches!(
                     (lt, rt),
                     (Ty::Int(_), Ty::Int(_)) | (Ty::Bool, Ty::Bool) | (Ty::Any, _) | (_, Ty::Any)
@@ -630,7 +670,7 @@ impl Checker<'_> {
             }
         }
         if ok {
-            if let Some(d) = self.field_order(span, name, fields, &declared) {
+            if let Some(d) = self.field_order(span, (name, "a struct"), fields, &declared) {
                 self.errors.push(d);
             }
         }
@@ -643,7 +683,7 @@ impl Checker<'_> {
     fn field_order(
         &self,
         span: Span,
-        name: &str,
+        (name, noun): (&str, &str),
         fields: &[FieldInit],
         declared: &[(String, Ty)],
     ) -> Option<Diagnostic> {
@@ -684,8 +724,8 @@ impl Checker<'_> {
                     "E0226",
                     f.name_span,
                     format!(
-                        "field `{}` of `{}` is named twice; a struct is built with each field once",
-                        f.name, name
+                        "field `{}` of `{}` is named twice; {} is built with each field once",
+                        f.name, name, noun
                     ),
                 ));
             }
@@ -697,9 +737,10 @@ impl Checker<'_> {
                 "E0226",
                 span,
                 format!(
-                    "this `{}` leaves out {}; a field has no default, so a struct is built with every field, in the order of its declaration: {}",
+                    "this `{}` leaves out {}; a field has no default, so {} is built with every field, in the order of its declaration: {}",
                     name,
                     list(&missing),
+                    noun,
                     order
                 ),
             ));
@@ -978,6 +1019,28 @@ impl Checker<'_> {
                     self.names_in(f.value, out);
                 }
             }
+            ExprKind::Variant { payload, .. } => match payload {
+                Payload::None => {}
+                Payload::Named(fields) => {
+                    for f in fields {
+                        self.names_in(f.value, out);
+                    }
+                }
+                Payload::Positional(args) => {
+                    for a in args {
+                        self.names_in(a.value, out);
+                    }
+                }
+            },
+            ExprKind::Match { scrutinee, arms } => {
+                self.names_in(*scrutinee, out);
+                for arm in arms {
+                    match arm.body {
+                        ArmBody::Expr(x) => self.names_in(x, out),
+                        ArmBody::Block(b) => self.names_in_block(b, out),
+                    }
+                }
+            }
             ExprKind::Array(items) => {
                 for &i in items {
                     self.names_in(i, out);
@@ -997,7 +1060,12 @@ impl Checker<'_> {
                     None => {}
                 }
             }
-            _ => {}
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Error => {}
         }
     }
 
@@ -1073,6 +1141,15 @@ impl Checker<'_> {
                     action
                 ),
             ),
+            BindingKind::Pattern => Diagnostic::error(
+                code,
+                at,
+                format!(
+                    "cannot {} `{}`: a pattern binds it to a part of the value matched, which it only reads; copy it into a `var` first",
+                    action, b.name
+                ),
+            )
+            .with_related(b.span, "bound here"),
             BindingKind::Var | BindingKind::Param { is_mut: true } => return,
         };
         self.errors.push(d);
@@ -1159,7 +1236,7 @@ impl Checker<'_> {
     fn stmt(&mut self, s: StmtId, used: bool) -> Ty {
         match &self.tree.stmt(s).kind {
             StmtKind::Expr(e) if used => return self.value(*e),
-            StmtKind::Expr(e) => self.discarded(*e),
+            StmtKind::Expr(e) => self.discarded(*e, false),
             StmtKind::Discard(e) => {
                 if self.value(*e) == Ty::Unit {
                     let hint = self.no_value_hint(*e);
@@ -1370,6 +1447,1222 @@ impl Checker<'_> {
     }
 }
 
+/// What a `match` reads, for its patterns, its coverage and the arms no value reaches.
+enum Read<'a> {
+    Enum(&'a crate::structs::EnumDef),
+    Bool,
+    /// An integer of the range its type or its refinement gives it, as a message writes it.
+    Int(Exact, Exact, String),
+    /// A value whose type a diagnostic already reported, or none a `match` reads.
+    Other,
+}
+
+/// A value of a pattern, as coverage counts it: a variant by its tag, a `bool`, or an integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Value {
+    Variant(usize),
+    Bool(bool),
+    Int(Exact),
+}
+
+impl<'a> Checker<'a> {
+    /// `Name.A` or `Name.B(field: value, ...)`: a variant of an enum of the module (`E0215` for
+    /// one the enum lacks), its payload built as a struct is, every field once, in order, each
+    /// value flowing into its field's type (`E0226`).
+    fn variant(
+        &mut self,
+        at: ExprId,
+        enum_name: &str,
+        (name, name_span): (&str, Span),
+        payload: &Payload,
+    ) -> Ty {
+        let values: Vec<ExprId> = match payload {
+            Payload::None => Vec::new(),
+            Payload::Named(fields) => fields.iter().map(|f| f.value).collect(),
+            Payload::Positional(args) => args.iter().map(|a| a.value).collect(),
+        };
+        let Some(def) = self.structs.get_enum(enum_name) else {
+            // Name resolution reported it: a call on a receiver, or an unknown name.
+            for v in values {
+                self.value(v);
+            }
+            return Ty::Any;
+        };
+        let ty = Ty::Enum(enum_name.to_string());
+        let Some((_, vdef)) = def.variant(name) else {
+            for v in values {
+                self.value(v);
+            }
+            if def.ok {
+                self.errors.push(self.no_such_variant(def, name, name_span));
+            }
+            return ty;
+        };
+        let declared: Vec<(String, Ty)> = vdef
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.ty.clone()))
+            .collect();
+        let path = format!("{}.{}", enum_name, name);
+        let span = self.span(at);
+        match payload {
+            Payload::None if declared.is_empty() => {}
+            Payload::None => {
+                let order = declared
+                    .iter()
+                    .map(|(n, _)| format!("{}: ...", n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.errors.push(Diagnostic::error(
+                    "E0226",
+                    span,
+                    format!(
+                        "`{}` holds a payload, built with each field named, in the order of its declaration: `{}({})`",
+                        path, path, order
+                    ),
+                ));
+            }
+            Payload::Named(_) | Payload::Positional(_) if declared.is_empty() => {
+                for v in values {
+                    self.value(v);
+                }
+                let parens = Span {
+                    start: name_span.end,
+                    ..span
+                };
+                let mut d = Diagnostic::error(
+                    "E0226",
+                    span,
+                    format!(
+                        "`{}` holds nothing, so it is written without parentheses: `{}`",
+                        path, path
+                    ),
+                );
+                if matches!(payload, Payload::Positional(args) if args.is_empty()) {
+                    d = d.with_fix(
+                        Applicability::MachineApplicable,
+                        "remove the parentheses",
+                        parens,
+                        "",
+                    );
+                }
+                self.errors.push(d);
+            }
+            Payload::Named(fields) => {
+                for f in fields {
+                    match declared.iter().find(|(n, _)| *n == f.name) {
+                        Some((_, t)) => {
+                            let place = format!("for field `{}` of `{}`", f.name, path);
+                            self.expect(f.value, t, &place);
+                        }
+                        None => {
+                            self.value(f.value);
+                        }
+                    }
+                }
+                if def.ok {
+                    let noun = "a variant's payload";
+                    if let Some(d) = self.field_order(span, (&path, noun), fields, &declared) {
+                        self.errors.push(d);
+                    }
+                }
+            }
+            Payload::Positional(args) => {
+                for (k, a) in args.iter().enumerate() {
+                    match declared.get(k).filter(|_| args.len() == declared.len()) {
+                        Some((n, t)) => {
+                            let place = format!("for field `{}` of `{}`", n, path);
+                            self.expect(a.value, t, &place);
+                        }
+                        None => {
+                            self.value(a.value);
+                        }
+                    }
+                }
+                let order = declared
+                    .iter()
+                    .map(|(n, _)| format!("`{}`", n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut d = Diagnostic::error(
+                    "E0226",
+                    span,
+                    format!(
+                        "a variant's payload is built with its fields named, in the order of its declaration, as in `{}({}: ...)`: {}",
+                        path, declared[0].0, order
+                    ),
+                );
+                if args.len() == declared.len() && !args.iter().any(|a| a.is_mut) {
+                    d.fixes.push(Fix {
+                        message: "name each field".into(),
+                        applicability: Applicability::MachineApplicable,
+                        edits: args
+                            .iter()
+                            .zip(&declared)
+                            .map(|(a, (n, _))| Edit {
+                                span: insertion_point(self.span(a.value)),
+                                replacement: format!("{}: ", n),
+                            })
+                            .collect(),
+                    });
+                }
+                self.errors.push(d);
+            }
+        }
+        ty
+    }
+
+    /// `E0215` for a variant `name` that enum `def` lacks, with the closest variant suggested.
+    fn no_such_variant(&self, def: &crate::structs::EnumDef, name: &str, at: Span) -> Diagnostic {
+        let names = def.variant_names();
+        let close = closest(name, &names);
+        let message = match &close {
+            Some(c) => format!(
+                "`{}` has no variant `{}`; did you mean `{}`?",
+                def.name, name, c
+            ),
+            None => format!(
+                "`{}` has no variant `{}`; its variants are {}",
+                def.name,
+                name,
+                names
+                    .iter()
+                    .map(|n| format!("`{}`", n))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        let mut d = Diagnostic::error("E0215", at, message);
+        if let Some(c) = close {
+            d = d.with_fix(Applicability::Suggestion, format!("write `{}`", c), at, c);
+        }
+        d
+    }
+
+    /// `match scrutinee { arm ... }` (`core-calculus.md`, item 14): it reads an enum, a `bool`
+    /// or an integer; each pattern is one of what it reads, its bindings taking their fields'
+    /// types; every value is matched (`E0229`), no arm is one no value reaches (`E0230`), and
+    /// `_` stands only on an integer (`E0231`). Its arms share the type of its value, as an
+    /// `if`'s branches do, when it gives one.
+    fn match_expr(&mut self, at: ExprId, scrutinee: ExprId, arms: &[Arm], used: bool) -> Ty {
+        let found = self.value(scrutinee);
+        let read = match &found {
+            Ty::Enum(n) => match self.structs.get_enum(n) {
+                Some(def) if def.ok => Read::Enum(def),
+                _ => Read::Other,
+            },
+            Ty::Bool => Read::Bool,
+            Ty::Int(i) => {
+                let (lo, hi, text) = self.int_read(scrutinee, *i);
+                Read::Int(lo, hi, text)
+            }
+            Ty::Any => Read::Other,
+            other => {
+                self.mismatch(
+                    scrutinee,
+                    format!(
+                        "`match` reads an enum, a `bool` or an integer, but this is {}",
+                        other.describe()
+                    ),
+                );
+                Read::Other
+            }
+        };
+        let mut clean = !matches!(read, Read::Other);
+        let mut values: Vec<Option<Value>> = Vec::new();
+        for (k, arm) in arms.iter().enumerate() {
+            let v = self.pattern(at, k, arm, &read);
+            clean &= v.is_some();
+            values.push(v.flatten());
+        }
+        if clean {
+            self.coverage(at, arms, &read, &values);
+        }
+        self.freeze(at, scrutinee, arms, used);
+        // The arms, each checked once its pattern's bindings have their types.
+        let mut types = Vec::new();
+        for arm in arms {
+            let t = match (arm.body, used) {
+                (ArmBody::Expr(x), true) => self.value(x),
+                (ArmBody::Expr(x), false) => {
+                    self.discarded(x, true);
+                    Ty::Unit
+                }
+                (ArmBody::Block(b), used) => self.block(b, used),
+            };
+            // An arm that leaves has any type.
+            types.push(if arm_ends(self.tree, arm.body) {
+                t
+            } else {
+                Ty::Any
+            });
+        }
+        if !used {
+            return Ty::Unit;
+        }
+        let mut joined = Ty::Any;
+        for (arm, t) in arms.iter().zip(&types) {
+            match joined.join(t) {
+                Some(j) => joined = j,
+                None => {
+                    self.errors.push(Diagnostic::error(
+                        "E0203",
+                        arm.span,
+                        format!(
+                            "the arms of this `match` produce its value, so they have one type, but this one is {} after {}",
+                            t.describe(),
+                            joined.describe()
+                        ),
+                    ));
+                    return Ty::Any;
+                }
+            }
+        }
+        joined
+    }
+
+    /// The range of integers an integer scrutinee takes: its declared refinement's when both
+    /// bounds are literals, else its type's; with the type as a message writes it.
+    fn int_read(&self, scrutinee: ExprId, i: Int) -> (Exact, Exact, String) {
+        if let Some((tree, t)) = self.declared_type(scrutinee) {
+            if let TypeKind::Int {
+                refinement: Some(r),
+                ..
+            } = &tree.ty(t).kind
+            {
+                if let (
+                    Bound::Int {
+                        negative: ln,
+                        value: lv,
+                    },
+                    Bound::Int {
+                        negative: hn,
+                        value: hv,
+                    },
+                ) = (&r.lo, &r.hi)
+                {
+                    let hi = Exact::new(*hn, *hv);
+                    let hi = if r.inclusive { Some(hi) } else { hi.plus(-1) };
+                    if let Some(hi) = hi {
+                        return (Exact::new(*ln, *lv), hi, tree.render_type(t));
+                    }
+                }
+            }
+        }
+        let t = match i {
+            Int::One(t) | Int::Mixed(Some(t)) => t,
+            Int::Literal => crate::types::I64,
+            Int::Mixed(None) => {
+                return (
+                    Exact::new(true, 1 << 127),
+                    Exact::new(false, u128::MAX),
+                    String::from("integer"),
+                )
+            }
+        };
+        (
+            Exact::new(true, t.min_magnitude()),
+            Exact::new(false, t.max()),
+            t.name.to_string(),
+        )
+    }
+
+    /// The declared type of `e`, where it has one with its refinement: a binding's, a field's, a
+    /// pattern binding's payload field's, and an element's of one of those.
+    fn declared_type(&self, e: ExprId) -> Option<(&Tree, TypeId)> {
+        match &self.tree.expr(e).kind {
+            ExprKind::Name(_) => {
+                let id = self.resolution.names[e.0 as usize]?;
+                if let Some(&decl) = self.pattern_decls.get(&id) {
+                    return Some(decl);
+                }
+                let t = self.resolution.bindings[id.0 as usize].ty?;
+                Some((self.tree, t))
+            }
+            ExprKind::Field { base, name } => match &self.typing.exprs[base.0 as usize] {
+                Ty::Struct(s) => {
+                    let def = self.structs.get(s)?;
+                    let (_, f) = def.field(name)?;
+                    Some((def.tree(), f.decl))
+                }
+                _ => None,
+            },
+            ExprKind::Index { base, .. } => {
+                let (tree, t) = self.declared_type(*base)?;
+                match &tree.ty(t).kind {
+                    TypeKind::Array { elem, .. } => Some((tree, *elem)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Checks the pattern of arm `k` of the `match` at `m` against what the `match` reads, and
+    /// gives its bindings their fields' types: `None` after reporting a pattern of another kind
+    /// or a variant the enum lacks; otherwise the value it matches, `None` for `_`.
+    fn pattern(
+        &mut self,
+        m: ExprId,
+        k: usize,
+        arm: &Arm,
+        read: &Read<'a>,
+    ) -> Option<Option<Value>> {
+        let p = &arm.pattern;
+        let kind = match read {
+            Read::Enum(def) => format!("`{}`", def.name),
+            Read::Bool => String::from("a `bool`"),
+            Read::Int(_, _, text) => format!("an integer, `{}`", text),
+            Read::Other => String::from("a value of no type it reads"),
+        };
+        let wrong = |what: &str| {
+            Diagnostic::error(
+                "E0203",
+                p.span,
+                format!("this pattern is {}, but the `match` reads {}", what, kind),
+            )
+        };
+        match (&p.kind, read) {
+            (
+                PatternKind::Variant {
+                    enum_name,
+                    name,
+                    name_span,
+                    bindings,
+                },
+                read,
+            ) => {
+                let Some(edef) = self.structs.get_enum(enum_name) else {
+                    // Name resolution reported an enum the module lacks.
+                    return None;
+                };
+                let Read::Enum(def) = read else {
+                    if !matches!(read, Read::Other) {
+                        self.errors
+                            .push(wrong(&format!("a variant of `{}`", enum_name)));
+                    }
+                    return None;
+                };
+                if def.name != edef.name {
+                    self.errors
+                        .push(wrong(&format!("a variant of `{}`", enum_name)));
+                    return None;
+                }
+                let Some((tag, vdef)) = def.variant(name) else {
+                    self.errors
+                        .push(self.no_such_variant(def, name, *name_span));
+                    return None;
+                };
+                let tree = def.tree();
+                let decls: Vec<TypeId> = vdef.fields.iter().map(|f| f.decl).collect();
+                let path = format!("{}.{}", def.name, name);
+                // Each binding takes the type of the field it names, or, written by position,
+                // of the field at its place.
+                for (i, b) in bindings.iter().flatten().enumerate() {
+                    let field = match &b.field {
+                        Some((f, _)) => vdef.field(f).map(|(j, _)| j),
+                        None => Some(i).filter(|&j| j < vdef.fields.len()),
+                    };
+                    if let (Some(j), Some(&id)) = (field, self.resolution.patterns.get(&(m, k, i)))
+                    {
+                        self.typing.bindings[id.0 as usize] = vdef.fields[j].ty.clone();
+                        self.pattern_decls.insert(id, (tree, decls[j]));
+                    }
+                }
+                if let Some(d) = self.pattern_fields(p.span, *name_span, &path, vdef, bindings) {
+                    self.errors.push(d);
+                }
+                Some(Some(Value::Variant(tag)))
+            }
+            (PatternKind::Wildcard, Read::Int(..) | Read::Other) => Some(None),
+            (PatternKind::Wildcard, Read::Enum(_) | Read::Bool) => {
+                self.errors.push(self.wildcard(m, k, read));
+                None
+            }
+            (PatternKind::Bool(b), Read::Bool) => Some(Some(Value::Bool(*b))),
+            (PatternKind::Bool(_), Read::Other) => None,
+            (PatternKind::Bool(_), _) => {
+                self.errors.push(wrong("a `bool`"));
+                None
+            }
+            (
+                PatternKind::Int {
+                    negative,
+                    value,
+                    suffix,
+                },
+                read,
+            ) => {
+                // A pattern's literal takes the type of what the `match` reads, so it has no
+                // suffix (`core-calculus.md`, item 14); the fix removes it.
+                if let Some(suffix) = suffix {
+                    let text = self.src.get(p.span.start..p.span.end).unwrap_or("");
+                    let cut = text
+                        .strip_suffix(suffix.as_str())
+                        .map(|t| t.strip_suffix('_').unwrap_or(t).len());
+                    let mut d = Diagnostic::error(
+                        "E0221",
+                        p.span,
+                        format!(
+                            "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `{}`",
+                            text.get(..cut.unwrap_or(text.len())).unwrap_or(text)
+                        ),
+                    );
+                    if let Some(cut) = cut {
+                        d = d.with_fix(
+                            Applicability::MachineApplicable,
+                            format!("remove the suffix `{}`", text.get(cut..).unwrap_or("")),
+                            Span {
+                                start: p.span.start + cut,
+                                ..p.span
+                            },
+                            "",
+                        );
+                    }
+                    self.errors.push(d);
+                    return None;
+                }
+                match read {
+                    Read::Int(..) => Some(Some(Value::Int(Exact::new(*negative, *value)))),
+                    Read::Other => None,
+                    _ => {
+                        self.errors.push(wrong("an integer"));
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// `E0226` for a variant pattern that does not name every field of its payload once, in
+    /// order, each bound to a name or `_`: with the fix that names them where it can.
+    fn pattern_fields(
+        &self,
+        span: Span,
+        name_span: Span,
+        path: &str,
+        vdef: &crate::structs::VariantDef,
+        bindings: &Option<Vec<PatBinding>>,
+    ) -> Option<Diagnostic> {
+        let names: Vec<String> = vdef.fields.iter().map(|f| f.name.clone()).collect();
+        let order = names
+            .iter()
+            .map(|n| format!("`{}`", n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let bound = names
+            .iter()
+            .map(|n| format!("{}: _", n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let after_name = Span {
+            start: name_span.end,
+            ..name_span
+        };
+        let Some(bs) = bindings else {
+            if names.is_empty() {
+                return None;
+            }
+            return Some(
+                Diagnostic::error(
+                    "E0226",
+                    span,
+                    format!(
+                        "`{}` holds a payload, and a pattern names every field of it in order, binding each to a name or to `_`: `{}({})`",
+                        path, path, bound
+                    ),
+                )
+                .with_fix(
+                    Applicability::MachineApplicable,
+                    "bind each field to `_`",
+                    after_name,
+                    format!("({})", bound),
+                ),
+            );
+        };
+        if names.is_empty() {
+            let parens = Span {
+                start: name_span.end,
+                ..span
+            };
+            return Some(
+                Diagnostic::error(
+                    "E0226",
+                    span,
+                    format!(
+                        "`{}` holds nothing, so its pattern has no parentheses: `{}`",
+                        path, path
+                    ),
+                )
+                .with_fix(
+                    Applicability::MachineApplicable,
+                    "remove the parentheses",
+                    parens,
+                    "",
+                ),
+            );
+        }
+        // Bindings written by position: the fix names their fields.
+        if bs.iter().any(|b| b.field.is_none()) {
+            let mut d = Diagnostic::error(
+                "E0226",
+                span,
+                format!(
+                    "a pattern names each field of `{}` it binds, in the order of the declaration: {}",
+                    path, order
+                ),
+            );
+            if bs.len() == names.len() && bs.iter().all(|b| b.field.is_none()) {
+                d.fixes.push(Fix {
+                    message: "name each field".into(),
+                    applicability: Applicability::MachineApplicable,
+                    edits: bs
+                        .iter()
+                        .zip(&names)
+                        .map(|(b, n)| Edit {
+                            span: insertion_point(b.name_span),
+                            replacement: format!("{}: ", n),
+                        })
+                        .collect(),
+                });
+            }
+            return Some(d);
+        }
+        let written: Vec<(&String, Span)> = bs
+            .iter()
+            .filter_map(|b| b.field.as_ref().map(|(f, s)| (f, *s)))
+            .collect();
+        for (k, (f, fspan)) in written.iter().enumerate() {
+            if !names.contains(f) {
+                let close = closest(f, &names);
+                let message = match &close {
+                    Some(c) => format!("`{}` has no field `{}`; did you mean `{}`?", path, f, c),
+                    None => format!("`{}` has no field `{}`; its fields are {}", path, f, order),
+                };
+                let mut d = Diagnostic::error("E0226", *fspan, message);
+                if let Some(c) = close {
+                    d = d.with_fix(
+                        Applicability::Suggestion,
+                        format!("write `{}`", c),
+                        *fspan,
+                        c,
+                    );
+                }
+                return Some(d);
+            }
+            if written[..k].iter().any(|(g, _)| g == f) {
+                return Some(Diagnostic::error(
+                    "E0226",
+                    *fspan,
+                    format!(
+                        "field `{}` of `{}` is named twice; a pattern names each field once",
+                        f, path
+                    ),
+                ));
+            }
+        }
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|n| !written.iter().any(|(w, _)| w == n))
+            .map(|n| format!("`{}`", n))
+            .collect();
+        if !missing.is_empty() {
+            return Some(Diagnostic::error(
+                "E0226",
+                span,
+                format!(
+                    "this pattern leaves out {}; it names every field of `{}`, binding one it does not need to `_`: {}",
+                    missing.join(", "),
+                    path,
+                    order
+                ),
+            ));
+        }
+        if written.iter().zip(&names).all(|((w, _), n)| *w == n) {
+            return None;
+        }
+        Some(Diagnostic::error(
+            "E0226",
+            span,
+            format!(
+                "a pattern names the fields of `{}` in the order of its declaration: {}",
+                path, order
+            ),
+        ))
+    }
+
+    /// `E0231` for `_` in arm `k`, on an enum or a `bool`: `_` never covers a variant, so that
+    /// a variant added to an enum makes every `match` on it name it. The fix writes an arm for
+    /// each value no arm before it matches, with `_`'s body.
+    fn wildcard(&self, m: ExprId, k: usize, read: &Read) -> Diagnostic {
+        let ExprKind::Match { arms, .. } = &self.tree.expr(m).kind else {
+            unreachable!("a pattern of a `match`")
+        };
+        let arm = &arms[k];
+        let before: Vec<&PatternKind> = arms[..k].iter().map(|a| &a.pattern.kind).collect();
+        let left: Vec<String> = match read {
+            Read::Enum(def) => def
+                .variants
+                .iter()
+                .filter(|v| {
+                    !before
+                        .iter()
+                        .any(|p| matches!(p, PatternKind::Variant { name, .. } if *name == v.name))
+                })
+                .map(|v| variant_pattern(&def.name, v))
+                .collect(),
+            _ => [true, false]
+                .iter()
+                .filter(|b| !before.contains(&&PatternKind::Bool(**b)))
+                .map(|b| b.to_string())
+                .collect(),
+        };
+        let message = match read {
+            Read::Enum(def) => format!(
+                "`_` stands only on an integer, but this `match` reads an enum, `{}`: name each variant, so that one added later must be named too",
+                def.name
+            ),
+            _ => String::from(
+                "`_` stands only on an integer, but this `match` reads a `bool`: name both values, `true` and `false`",
+            ),
+        };
+        let mut d = Diagnostic::error("E0231", arm.pattern.span, message);
+        let body_span = match arm.body {
+            ArmBody::Expr(x) => self.span(x),
+            ArmBody::Block(b) => self.tree.block(b).span,
+        };
+        let body = self.src.get(body_span.start..body_span.end);
+        if let (Some(body), false) = (body, left.is_empty()) {
+            let indent = " ".repeat(arm.span.col.saturating_sub(1) as usize);
+            let text = left
+                .iter()
+                .map(|p| format!("{} => {}", p, body))
+                .collect::<Vec<_>>()
+                .join(&format!("\n{}", indent));
+            d = d.with_fix(
+                Applicability::Suggestion,
+                "write an arm for each value left",
+                arm.span,
+                text,
+            );
+        }
+        d
+    }
+
+    /// The arms no value reaches (`E0230`), behind an earlier arm or outside what the `match`
+    /// reads, and the values no arm matches (`E0229`), whose fix adds an arm for each.
+    fn coverage(&mut self, m: ExprId, arms: &[Arm], read: &Read, values: &[Option<Value>]) {
+        let mut seen: BTreeSet<Value> = BTreeSet::new();
+        let mut first: Vec<(Value, Span)> = Vec::new();
+        let mut wild: Option<Span> = None;
+        for (arm, v) in arms.iter().zip(values) {
+            let unreached = |why: String| {
+                Diagnostic::error(
+                    "E0230",
+                    arm.pattern.span,
+                    format!("no value reaches this arm: {}; remove it", why),
+                )
+                .with_fix(
+                    Applicability::MachineApplicable,
+                    "remove the arm",
+                    self.arm_line(arm),
+                    "",
+                )
+            };
+            if let Some(w) = wild {
+                self.errors.push(
+                    unreached("`_` before it matches every value left".into())
+                        .with_related(w, "`_` is here"),
+                );
+                continue;
+            }
+            match v {
+                None => {
+                    if let Read::Int(lo, hi, _) = read {
+                        if covered(&seen, *lo, *hi).is_none() {
+                            self.errors
+                                .push(unreached("the arms before it match every value".into()));
+                            continue;
+                        }
+                    }
+                    wild = Some(arm.pattern.span);
+                }
+                Some(v) => {
+                    if let (Value::Int(x), Read::Int(lo, hi, text)) = (v, read) {
+                        if x < lo || x > hi {
+                            // A refinement holds what the `match` reads; a plain type holds it
+                            // since the `match` narrows its scrutinee into the type
+                            // ([`match-scrutinee-narrowing`]).
+                            let why = if text.contains('[') {
+                                format!(
+                                    "{} lies outside `{}`, the values of what the `match` reads",
+                                    x, text
+                                )
+                            } else {
+                                format!(
+                                    "the `match` narrows what it reads into `{}`, and {} lies outside it",
+                                    text, x
+                                )
+                            };
+                            self.errors.push(unreached(why));
+                            continue;
+                        }
+                    }
+                    if let Some((_, at)) = first.iter().find(|(f, _)| f == v) {
+                        let at = *at;
+                        self.errors.push(
+                            unreached("an arm before it matches the same value".into())
+                                .with_related(at, "matched first here"),
+                        );
+                        continue;
+                    }
+                    seen.insert(*v);
+                    first.push((*v, arm.pattern.span));
+                }
+            }
+        }
+        if wild.is_some() {
+            return;
+        }
+        let missing: Vec<String> = match read {
+            Read::Enum(def) => def
+                .variants
+                .iter()
+                .enumerate()
+                .filter(|(t, _)| !seen.contains(&Value::Variant(*t)))
+                .map(|(_, v)| variant_pattern(&def.name, v))
+                .collect(),
+            Read::Bool => [true, false]
+                .iter()
+                .filter(|b| !seen.contains(&Value::Bool(**b)))
+                .map(|b| b.to_string())
+                .collect(),
+            Read::Int(lo, hi, _) => covered(&seen, *lo, *hi)
+                .map(|x| vec![x.to_string()])
+                .unwrap_or_default(),
+            Read::Other => Vec::new(),
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let span = self.span(m);
+        let message = match read {
+            Read::Enum(def) => format!(
+                "this `match` does not match {}; it has an arm for every variant of `{}`",
+                missing
+                    .iter()
+                    .map(|p| format!("`{}`", p))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                def.name
+            ),
+            Read::Bool => format!(
+                "this `match` does not match `{}`; it has an arm for both values of `bool`",
+                missing[0]
+            ),
+            Read::Int(_, _, text) => format!(
+                "this `match` does not match {}, among others, a value of `{}`; add an arm for each value, or `_` after the arms for every value left",
+                missing[0], text
+            ),
+            Read::Other => String::new(),
+        };
+        let mut d = Diagnostic::error("E0229", span, message);
+        let new_arms: Vec<String> = match read {
+            Read::Int(..) => vec![String::from("_")],
+            _ => missing,
+        };
+        if let Some(last) = arms.last() {
+            let indent = " ".repeat(last.span.col.saturating_sub(1) as usize);
+            let text: String = new_arms
+                .iter()
+                .map(|p| {
+                    format!(
+                        "\n{}{} => todo(\"{}\")",
+                        indent,
+                        p,
+                        p.replace('\\', "\\\\").replace('"', "\\\"")
+                    )
+                })
+                .collect();
+            d = d.with_fix(
+                Applicability::Suggestion,
+                "add an arm for each value left",
+                insertion_after(last.span),
+                text,
+            );
+        }
+        self.errors.push(d);
+    }
+
+    /// An arm's whole line, its newline included, for the fix that removes it; or its span, when
+    /// another arm shares its line.
+    fn arm_line(&self, arm: &Arm) -> Span {
+        let src = self.src;
+        let start = src
+            .get(..arm.span.start)
+            .and_then(|s| s.rfind('\n'))
+            .map(|i| i + 1);
+        let end = src
+            .get(arm.span.end..)
+            .and_then(|s| s.find('\n'))
+            .map(|i| arm.span.end + i + 1);
+        match (start, end) {
+            (Some(s), Some(e))
+                if src[s..arm.span.start].trim().is_empty()
+                    && src[arm.span.end..e].trim().is_empty() =>
+            {
+                Span {
+                    start: s,
+                    end: e,
+                    line: arm.span.line,
+                    col: 1,
+                }
+            }
+            _ => arm.span,
+        }
+    }
+
+    /// A store or a `mut` argument that reaches the scrutinee's place in an arm whose pattern
+    /// binds a part of it (`E0232`): the binding reads the place where it lies, which the arm
+    /// keeps as it is (`core-calculus.md`, item 14).
+    fn freeze(&mut self, m: ExprId, scrutinee: ExprId, arms: &[Arm], used: bool) {
+        if !is_place(self.tree, scrutinee) {
+            return;
+        }
+        let Some(root) = self.root(scrutinee) else {
+            return;
+        };
+        // A place that cannot change is reported where it is changed, by `E0205` or `E0206`.
+        let kind = self.resolution.bindings[root.0 as usize].kind;
+        if !matches!(kind, BindingKind::Var | BindingKind::Param { is_mut: true }) {
+            return;
+        }
+        let frozen = self.path(scrutinee);
+        let text = self
+            .src
+            .get(self.span(scrutinee).start..self.span(scrutinee).end)
+            .unwrap_or("the scrutinee")
+            .to_string();
+        // The places each arm changes that the scrutinee's place holds or is part of.
+        let mut found: Vec<Vec<ExprId>> = Vec::new();
+        for arm in arms {
+            let mut changed = Vec::new();
+            match arm.body {
+                ArmBody::Expr(x) => changed_places(self.tree, x, &mut changed),
+                ArmBody::Block(b) => changed_places_block(self.tree, b, &mut changed),
+            }
+            changed.retain(|&place| {
+                self.root(place) == Some(root) && overlaps(&frozen, &self.path(place))
+            });
+            found.push(changed);
+        }
+        if found.iter().all(Vec::is_empty) {
+            return;
+        }
+        let transition = if used {
+            None
+        } else {
+            self.transition(m, scrutinee, arms, &found, &text)
+        };
+        for place in found.into_iter().flatten() {
+            let mut d = Diagnostic::error(
+                "E0232",
+                self.span(place),
+                format!(
+                    "the `match` reads `{}` before an arm runs, and its place stays frozen in every arm, so nothing in an arm changes `{}`; to give it a new value, write `{} = match {} {{ ... }}`, each arm giving the new value",
+                    text, text, text, text
+                ),
+            )
+            .with_related(self.span(scrutinee), "matched here");
+            if let Some(fix) = &transition {
+                d.fixes.push(fix.clone());
+            }
+            self.errors.push(d);
+        }
+    }
+
+    /// The fix that writes a `match` statement whose arms change its scrutinee as a
+    /// transition, `state = match state { ... }`: each arm a block that ends by assigning the
+    /// whole place, which then gives the value instead, or that changes nothing of it, which
+    /// then gives the place's value as it is. `None` for any other shape, whose message names
+    /// the form.
+    fn transition(
+        &self,
+        m: ExprId,
+        scrutinee: ExprId,
+        arms: &[Arm],
+        found: &[Vec<ExprId>],
+        text: &str,
+    ) -> Option<Fix> {
+        // The fix writes the scrutinee's place left of `=`, whose indexes are evaluated before
+        // any arm runs, and as the value of an arm that leaves the place alone, read after the
+        // arm: so each index is a literal, or a name no arm changes, or there is no fix.
+        let mut changed = Vec::new();
+        for arm in arms {
+            let mut places = Vec::new();
+            match arm.body {
+                ArmBody::Expr(x) => changed_places(self.tree, x, &mut places),
+                ArmBody::Block(b) => changed_places_block(self.tree, b, &mut places),
+            }
+            changed.extend(places.into_iter().filter_map(|p| self.root(p)));
+        }
+        let mut step = scrutinee;
+        while let ExprKind::Index { base, .. } | ExprKind::Field { base, .. } =
+            &self.tree.expr(step).kind
+        {
+            if let ExprKind::Index { index, .. } = &self.tree.expr(step).kind {
+                let fixed = match &self.tree.expr(*index).kind {
+                    ExprKind::Int { .. } => true,
+                    ExprKind::Name(_) => self.resolution.names[index.0 as usize]
+                        .is_some_and(|b| !changed.contains(&b)),
+                    _ => false,
+                };
+                if !fixed {
+                    return None;
+                }
+            }
+            step = *base;
+        }
+        let at = self.span(m);
+        let mut edits = vec![Edit {
+            span: Span {
+                end: at.start,
+                ..at
+            },
+            replacement: format!("{} = ", text),
+        }];
+        for (arm, changed) in arms.iter().zip(found) {
+            let ArmBody::Block(b) = arm.body else {
+                return None;
+            };
+            let block = self.tree.block(b);
+            if changed.is_empty() {
+                // The arm gives the place's value as it is, on a line of its own.
+                let edit = match block.stmts.last() {
+                    Some(&last) => {
+                        let s = self.tree.stmt(last).span;
+                        let line_start = self.src.get(..s.start)?.rfind('\n').map_or(0, |i| i + 1);
+                        let indent: String = self
+                            .src
+                            .get(line_start..s.start)?
+                            .chars()
+                            .take_while(|c| *c == ' ' || *c == '\t')
+                            .collect();
+                        Edit {
+                            span: Span { start: s.end, ..s },
+                            replacement: format!("\n{}{}", indent, text),
+                        }
+                    }
+                    None => Edit {
+                        span: block.span,
+                        replacement: format!("{{ {} }}", text),
+                    },
+                };
+                edits.push(edit);
+                continue;
+            }
+            // Else the arm's last statement assigns the whole place, and nothing before it
+            // changes any of it.
+            let &last = block.stmts.last()?;
+            let StmtKind::Assign {
+                place,
+                op: AssignOp::Set,
+                value,
+            } = &self.tree.stmt(last).kind
+            else {
+                return None;
+            };
+            // The place written as the scrutinee is, so an index names the same element.
+            let place_text = self.src.get(self.span(*place).start..self.span(*place).end);
+            if changed.as_slice() != [*place] || place_text != Some(text) {
+                return None;
+            }
+            let value = self.span(*value);
+            edits.push(Edit {
+                span: self.tree.stmt(last).span,
+                replacement: self.src.get(value.start..value.end)?.to_string(),
+            });
+        }
+        Some(Fix {
+            message: format!(
+                "write it as a transition, `{} = match {} {{ ... }}`",
+                text, text
+            ),
+            applicability: Applicability::Suggestion,
+            edits,
+        })
+    }
+
+    /// A place's steps from its root: each field by its name, each index as any element.
+    fn path(&self, place: ExprId) -> Vec<Option<String>> {
+        match &self.tree.expr(place).kind {
+            ExprKind::Index { base, .. } => {
+                let mut p = self.path(*base);
+                p.push(None);
+                p
+            }
+            ExprKind::Field { base, name } => {
+                let mut p = self.path(*base);
+                p.push(Some(name.clone()));
+                p
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Whether two places of one root binding may overlap: one is a part of the other, an index
+/// counting as any element.
+fn overlaps(a: &[Option<String>], b: &[Option<String>]) -> bool {
+    a.iter().zip(b).all(|(x, y)| match (x, y) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    })
+}
+
+/// The first value of `lo ..= hi` no value of `seen` covers, or `None` when they cover it all.
+fn covered(seen: &BTreeSet<Value>, lo: Exact, hi: Exact) -> Option<Exact> {
+    let mut x = lo;
+    while x <= hi {
+        if !seen.contains(&Value::Int(x)) {
+            return Some(x);
+        }
+        x = x.plus(1)?;
+    }
+    None
+}
+
+/// A pattern for variant `v` of enum `e`, each field bound to `_`.
+fn variant_pattern(e: &str, v: &crate::structs::VariantDef) -> String {
+    if v.fields.is_empty() {
+        return format!("{}.{}", e, v.name);
+    }
+    let fields: Vec<String> = v.fields.iter().map(|f| format!("{}: _", f.name)).collect();
+    format!("{}.{}({})", e, v.name, fields.join(", "))
+}
+
+/// The point right after `span`.
+fn insertion_after(span: Span) -> Span {
+    Span {
+        start: span.end,
+        ..span
+    }
+}
+
+/// Every place an expression changes: the place of each assignment, and of each `mut`
+/// argument, in it and in every block it holds.
+pub fn changed_places(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
+    match &tree.expr(e).kind {
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                if a.is_mut {
+                    out.push(a.value);
+                }
+                changed_places(tree, a.value, out);
+            }
+        }
+        ExprKind::Variant { payload, .. } => match payload {
+            Payload::None => {}
+            Payload::Named(fields) => {
+                for f in fields {
+                    changed_places(tree, f.value, out);
+                }
+            }
+            Payload::Positional(args) => {
+                for a in args {
+                    if a.is_mut {
+                        out.push(a.value);
+                    }
+                    changed_places(tree, a.value, out);
+                }
+            }
+        },
+        ExprKind::Construct { fields, .. } => {
+            for f in fields {
+                changed_places(tree, f.value, out);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            changed_places(tree, *scrutinee, out);
+            for a in arms {
+                match a.body {
+                    ArmBody::Expr(x) => changed_places(tree, x, out),
+                    ArmBody::Block(b) => changed_places_block(tree, b, out),
+                }
+            }
+        }
+        ExprKind::Unary { operand, .. } => changed_places(tree, *operand, out),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            changed_places(tree, *lhs, out);
+            changed_places(tree, *rhs, out);
+        }
+        ExprKind::Index { base, index } => {
+            changed_places(tree, *base, out);
+            changed_places(tree, *index, out);
+        }
+        ExprKind::Field { base, .. } => changed_places(tree, *base, out),
+        ExprKind::Array(items) => {
+            for &i in items {
+                changed_places(tree, i, out);
+            }
+        }
+        ExprKind::Repeat { value, .. } => changed_places(tree, *value, out),
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            changed_places(tree, *cond, out);
+            changed_places_block(tree, *then, out);
+            match otherwise {
+                Some(Else::Block(b)) => changed_places_block(tree, *b, out),
+                Some(Else::If(i)) => changed_places(tree, *i, out),
+                None => {}
+            }
+        }
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Error => {}
+    }
+}
+
+/// [`changed_places`] of every statement of a block.
+pub fn changed_places_block(tree: &Tree, b: BlockId, out: &mut Vec<ExprId>) {
+    for &s in &tree.block(b).stmts {
+        match &tree.stmt(s).kind {
+            StmtKind::Assign { place, value, .. } => {
+                out.push(*place);
+                changed_places(tree, *place, out);
+                changed_places(tree, *value, out);
+            }
+            StmtKind::Binding { init: e, .. }
+            | StmtKind::Discard(e)
+            | StmtKind::Expr(e)
+            | StmtKind::Return(Some(e)) => changed_places(tree, *e, out),
+            StmtKind::While {
+                cond,
+                invariants,
+                decreases,
+                body,
+            } => {
+                changed_places(tree, *cond, out);
+                for &x in invariants.iter().chain(decreases) {
+                    changed_places(tree, x, out);
+                }
+                changed_places_block(tree, *body, out);
+            }
+            StmtKind::Guard { cond, otherwise } => {
+                changed_places(tree, *cond, out);
+                changed_places_block(tree, *otherwise, out);
+            }
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+        }
+    }
+}
+
 /// The literals with a suffix that are the operand of a unary `-`.
 fn negated_literals(tree: &Tree) -> HashSet<ExprId> {
     tree.exprs
@@ -1417,7 +2710,17 @@ fn expr_ends(tree: &Tree, e: ExprId) -> bool {
             otherwise: Some(o),
             ..
         } => block_ends(tree, *then) || else_ends(tree, *o),
+        // A `match` is exhaustive, so its end is reached only through an arm that ends.
+        ExprKind::Match { arms, .. } => arms.iter().any(|a| arm_ends(tree, a.body)),
         _ => true,
+    }
+}
+
+/// Whether control can reach the end of an arm.
+pub fn arm_ends(tree: &Tree, body: ArmBody) -> bool {
+    match body {
+        ArmBody::Expr(x) => expr_ends(tree, x),
+        ArmBody::Block(b) => block_ends(tree, b),
     }
 }
 
@@ -1472,7 +2775,7 @@ mod tests {
         let Ok(module) = mente_syntax::parse_module(&text) else {
             return Vec::new();
         };
-        let parsed = mente_syntax::parse_bodies(&text, &module);
+        let parsed = crate::parse_qualified(&text, &module);
         let names: Vec<String> = parsed.iter().map(|p| p.name.clone()).collect();
         let signatures: Vec<Option<Signature>> = parsed
             .iter()
@@ -1482,9 +2785,10 @@ mod tests {
             return Vec::new();
         };
         let parsed_structs = mente_syntax::parse_structs(&text, &module);
-        let (structs, _) = crate::structs::declare(&module, &parsed_structs);
+        let parsed_enums = mente_syntax::parse_enums(&text, &module);
+        let (structs, _) = crate::structs::declare(&module, &parsed_structs, &parsed_enums);
         let (resolution, _) = crate::names::resolve(&f, &names, &structs);
-        let (typing, errors) = check(&f, &resolution, &signatures, &structs);
+        let (typing, errors) = check(&f, &resolution, &signatures, &structs, &text);
         assert_eq!(errors, Vec::new());
         assert_eq!(typing.exprs.len(), f.tree.exprs.len());
         resolution
@@ -2029,7 +3333,7 @@ pub fn f(mut p: Pair) {
         );
         assert_eq!(
             codes(&with("pub fn f(a: Pair, b: Pair) -> bool = a == b")),
-            ["E0203"]
+            ["E0109"]
         );
     }
 
@@ -2352,7 +3656,15 @@ pub fn f(mut p: Pair) {
             codes("pub fn f(c: bool) {\n  guard c else {\n    guard c else {\n      return\n    }\n  }\n}"),
             ["E0211"]
         );
+        // A `match` reaches its end through any arm that does (`core-calculus.md`, item 6).
+        assert_eq!(
+            codes("pub fn f(c: bool) {\n  guard c else {\n    match c {\n      true => {\n        return\n      }\n      false => {\n        nothing()\n      }\n    }\n  }\n}"),
+            ["E0211"]
+        );
         for ok in [
+            // A `match` whose every arm leaves does not reach its end.
+            "pub fn f(c: bool) {\n  guard c else {\n    match c {\n      true => {\n        return\n      }\n      false => {\n        todo(\"x\")\n      }\n    }\n  }\n}",
+            "pub fn f(n: u8) {\n  guard n > 0 else {\n    match n {\n      0 => {\n        return\n      }\n      _ => {\n        unreachable(\"n\")\n      }\n    }\n  }\n}",
             "pub fn f(c: bool) {\n  guard c else {\n    return\n  }\n}",
             "pub fn f(c: bool) {\n  guard c else {\n    todo(\"c\")\n  }\n}",
             "pub fn f(c: bool) {\n  guard c else {\n    val x: u8 = unreachable(\"c\")\n  }\n}",
@@ -2592,6 +3904,557 @@ pub fn f() {
         assert_eq!(
             all_codes("pub fn f() -> u128 = 340282366920938463463374607431768211455_u128"),
             NONE
+        );
+    }
+
+    /// The enums the tests of variants and `match` read.
+    const SHAPES: &str = "pub enum Shape {
+  Dot
+  Rect(w: u8, h: u16)
+}
+pub enum Light {
+  Red
+  Amber
+  Green
+}
+";
+
+    /// Applies the first fix of the first diagnostic of `src`, a module's text, and returns the
+    /// fixed text with what checking it reports.
+    fn fixed_and_checked(src: &str) -> (String, Vec<&'static str>) {
+        let d = &check_source(src).err().unwrap()[0];
+        let fixed = mente_syntax::diagnostics::apply_fix(src, &d.fixes[0]).unwrap();
+        let codes = check_source(&fixed)
+            .err()
+            .unwrap_or_default()
+            .iter()
+            .map(|d| d.code)
+            .collect();
+        (fixed, codes)
+    }
+
+    /// A variant is named with its enum and built as a struct is: every field of its payload
+    /// once, in order, each value flowing into its field's type, and none for a variant that
+    /// holds nothing; the fixes name fields given by position and remove empty parentheses.
+    #[test]
+    fn test_variants_are_built_with_their_payloads() {
+        let with = |f: &str| format!("{}{}", SHAPES, f);
+        assert_eq!(
+            codes(&with("pub fn f() -> Shape = Shape.Rect(w: 1, h: 2)")),
+            NONE
+        );
+        assert_eq!(codes(&with("pub fn f() -> Shape = Shape.Dot")), NONE);
+        assert_eq!(
+            binding_types(&with(
+                "pub fn f() -> u8 {\n  val s = Shape.Dot\n  val l = Light.Red\n  0\n}"
+            )),
+            [("s", "Shape"), ("l", "Light")].map(|(n, t)| (n.to_string(), t.to_string()))
+        );
+        for (src, code, message) in [
+            ("pub fn f() -> Shape = Shape.Rect(w: 1)", "E0226", "this `Shape.Rect` leaves out `h`; a field has no default, so a variant's payload is built with every field, in the order of its declaration: `w`, `h`"),
+            ("pub fn f() -> Shape = Shape.Rect(h: 1, w: 2)", "E0226", "the fields of `Shape.Rect` are named in the order of its declaration, which is the order their values are evaluated in: `w`, `h`"),
+            ("pub fn f() -> Shape = Shape.Rect(w: 1, hh: 2)", "E0226", "`Shape.Rect` has no field `hh`; did you mean `h`?"),
+            ("pub fn f() -> Shape = Shape.Rect(1, 2)", "E0226", "a variant's payload is built with its fields named, in the order of its declaration, as in `Shape.Rect(w: ...)`: `w`, `h`"),
+            ("pub fn f() -> Shape = Shape.Rect", "E0226", "`Shape.Rect` holds a payload, built with each field named, in the order of its declaration: `Shape.Rect(w: ..., h: ...)`"),
+            ("pub fn f() -> Shape = Shape.Dot()", "E0226", "`Shape.Dot` holds nothing, so it is written without parentheses: `Shape.Dot`"),
+            ("pub fn f() -> Shape = Shape.Dto", "E0215", "`Shape` has no variant `Dto`; did you mean `Dot`?"),
+            ("pub fn f() -> Shape = Shape.Rect(w: true, h: 2)", "E0203", "expected `u8` for field `w` of `Shape.Rect`, found `bool`"),
+            ("pub fn f() -> Light = Shape.Dot", "E0203", "expected `Light` as the result of `f`, found `Shape`"),
+            ("pub fn f(s: Shape) -> bool = s == Shape.Dot", "E0109", "comparing structs and enums with `==` comes later in M2; the compiler does not have it yet"),
+        ] {
+            assert_eq!(codes(&with(src)), [code], "{}", src);
+            assert_eq!(messages(&with(src)), [message], "{}", src);
+        }
+        // `==` with a struct or an enum on either side comes later.
+        assert_eq!(
+            codes(&with("pub fn f(s: Shape) -> bool = s == 1")),
+            ["E0109"]
+        );
+        assert_eq!(
+            codes(&with("pub fn f(s: Shape) -> bool = 1 == s")),
+            ["E0109"]
+        );
+        // A payload given by position, of the right number, still checks each value's type;
+        // the fix names the fields only for the right number, without `mut` arguments.
+        assert_eq!(
+            codes(&with("pub fn f() -> Shape = Shape.Rect(true, 2)")),
+            ["E0226", "E0203"]
+        );
+        for src in [
+            "pub fn f() -> Shape = Shape.Rect(1)",
+            "fn g(mut x: u8) -> u8 = x\npub fn f(mut x: u8) -> Shape = Shape.Rect(mut x, 2)",
+        ] {
+            let d = diagnostics(&with(src));
+            assert!(d.iter().all(|d| d.fixes.is_empty()), "{}: {:?}", src, d);
+        }
+        // A variant the enum lacks is reported at its name, line and column included.
+        let src = with("pub fn f() -> Shape = Shape.Dto");
+        let text = module(&src);
+        let d = &diagnostics(&src)[0];
+        assert_eq!(&text[d.primary.start..d.primary.end], "Dto");
+        let (_, col) = mente_syntax::diagnostics::line_col(&text, d.primary.start);
+        assert_eq!(d.primary.col as usize, col);
+        // A call on a binding is a construct of a later milestone, and an unknown enum a name
+        // nobody declared.
+        assert_eq!(codes(&with("pub fn f(x: u8) -> u8 = x.max(1)")), ["E0109"]);
+        assert_eq!(codes(&with("pub fn f() -> Shape = Shpe.Dot(1)")), ["E0201"]);
+        assert_eq!(codes(&with("pub fn f() -> Shape = Shape(w: 1)")), ["E0204"]);
+        // The fixes apply, and what they write checks.
+        for (src, want) in [
+            (
+                "pub fn f() -> Shape = Shape.Rect(1, 2)",
+                "pub fn f() -> Shape = Shape.Rect(w: 1, h: 2)",
+            ),
+            (
+                "pub fn f() -> Shape = Shape.Dot()",
+                "pub fn f() -> Shape = Shape.Dot",
+            ),
+        ] {
+            let (fixed, codes) = fixed_and_checked(&module(&with(src)));
+            assert!(fixed.contains(want), "{}", fixed);
+            assert!(codes.is_empty(), "{}: {:?}", fixed, codes);
+        }
+    }
+
+    /// A `match` reads an enum, a `bool` or an integer, its patterns of what it reads; its arms
+    /// share its value's type; its bindings take their fields' types; and each pattern names
+    /// every field of its payload once, in order.
+    #[test]
+    fn test_patterns_read_what_the_match_reads() {
+        let with = |f: &str| format!("{}{}", SHAPES, f);
+        assert_eq!(
+            binding_types(&with(
+                "pub fn f(s: Shape) -> u16 = match s {\n  Shape.Rect(w: a, h: b) => a + b\n  Shape.Dot => 0\n}"
+            )),
+            [("s", "Shape"), ("a", "u8"), ("b", "u16")]
+                .map(|(n, t)| (n.to_string(), t.to_string()))
+        );
+        for (src, message) in [
+            ("pub fn f(xs: [2]u8) -> u8 = match xs {\n  _ => 0\n}", "`match` reads an enum, a `bool` or an integer, but this is `[2]u8`"),
+            ("pub fn f(b: bool) -> u8 = match b {\n  true => 1\n  0 => 2\n}", "this pattern is an integer, but the `match` reads a `bool`"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  true => 1\n  _ => 2\n}", "this pattern is a `bool`, but the `match` reads an integer, `u8`"),
+            ("pub fn f(l: Light) -> u8 = match l {\n  Shape.Dot => 1\n  Light.Red => 2\n}", "this pattern is a variant of `Shape`, but the `match` reads `Light`"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  Light.Red => 1\n  _ => 2\n}", "this pattern is a variant of `Light`, but the `match` reads an integer, `u8`"),
+            ("pub fn f(c: bool) -> u8 = match c {\n  true => 1\n  false => false\n}", "the arms of this `match` produce its value, so they have one type, but this one is `bool` after an integer"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  300_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `300`"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  0_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `0`"),
+            ("pub fn f(x: i8) -> u8 = match x {\n  -1_i64 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `-1`"),
+        ] {
+            assert_eq!(messages(&with(src)), [message], "{}", src);
+        }
+        // Bindings by position take their fields' types, which an arm's value shows; one
+        // beyond the payload takes none.
+        for (arm, ty) in [
+            ("Shape.Rect(a, b, c) => a", "u8"),
+            ("Shape.Rect(a, b) => b", "u16"),
+        ] {
+            let src = with(&format!(
+                "pub fn f(s: Shape) -> bool = match s {{\n  {}\n  Shape.Dot => false\n}}",
+                arm
+            ));
+            let want = format!(
+                "the arms of this `match` produce its value, so they have one type, but this one is `bool` after `{}`",
+                ty
+            );
+            assert!(
+                messages(&src).contains(&want),
+                "{}: {:?}",
+                arm,
+                messages(&src)
+            );
+        }
+        // The fix names the fields only for the right number of bindings, all by position.
+        for arm in ["Shape.Rect(a)", "Shape.Rect(w: a, b)"] {
+            let src = with(&format!(
+                "pub fn f(s: Shape) -> u8 = match s {{\n  {} => a\n  Shape.Dot => 0\n}}",
+                arm
+            ));
+            let d = diagnostics(&src);
+            assert!(
+                d.iter()
+                    .filter(|d| d.code == "E0226")
+                    .all(|d| d.fixes.is_empty()),
+                "{}: {:?}",
+                arm,
+                d
+            );
+        }
+        // A pattern of a `match` whose scrutinee has no type is not reported again.
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8 = match nope {\n  0 => 1\n  _ => 2\n}"
+            )),
+            ["E0201"]
+        );
+        // An enum whose declaration is in error is matched without coverage being reported.
+        assert_eq!(
+            codes(&with(
+                "pub enum Bad {\n  A(p: Nope)\n  B\n}\npub fn f(b: Bad) -> u8 = match b {\n  Bad.B => 1\n}"
+            )),
+            ["E0116"]
+        );
+        // The fix removes the suffix, and the module then checks.
+        let src = module(&with(
+            "pub fn f(x: u8) -> u8 = match x {\n  0x1F_u8 => 1\n  _ => 2\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(fixed.contains("  0x1F => 1"), "{}", fixed);
+        assert!(left.is_empty(), "{:?}", left);
+        // An arm that leaves gives no value, and a `match` statement's arms none.
+        assert_eq!(
+            codes(&with(
+                "pub fn f(l: Light) -> u8 {\n  val n: u8 = match l {\n    Light.Red => {\n      return 1\n    }\n    Light.Amber => todo(\"later\")\n    Light.Green => 3\n  }\n  n\n}"
+            )),
+            NONE
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f(c: bool, mut n: u8) {\n  match c {\n    true => {\n      n = 1\n    }\n    false => {}\n  }\n}"
+            )),
+            NONE
+        );
+        for (arm, message) in [
+            ("Shape.Rect(h: _, w: a) => a", "a pattern names the fields of `Shape.Rect` in the order of its declaration: `w`, `h`"),
+            ("Shape.Rect(w: a) => a", "this pattern leaves out `h`; it names every field of `Shape.Rect`, binding one it does not need to `_`: `w`, `h`"),
+            ("Shape.Rect(w: a, hh: _) => a", "`Shape.Rect` has no field `hh`; did you mean `h`?"),
+            ("Shape.Rect(w: a, w: _) => a", "field `w` of `Shape.Rect` is named twice; a pattern names each field once"),
+            ("Shape.Rect(a, _) => a", "a pattern names each field of `Shape.Rect` it binds, in the order of the declaration: `w`, `h`"),
+            ("Shape.Rect => 1", "`Shape.Rect` holds a payload, and a pattern names every field of it in order, binding each to a name or to `_`: `Shape.Rect(w: _, h: _)`"),
+        ] {
+            let src = with(&format!(
+                "pub fn f(s: Shape) -> u8 = match s {{\n  {}\n  Shape.Dot => 0\n}}",
+                arm
+            ));
+            assert_eq!(messages(&src), [message], "{}", src);
+        }
+        let src = module(&with(
+            "pub fn f(s: Shape) -> u8 = match s {\n  Shape.Dot() => 0\n  Shape.Rect(a, _) => a\n}",
+        ));
+        let (fixed, codes) = fixed_and_checked(&src);
+        assert!(fixed.contains("Shape.Dot => 0"), "{}", fixed);
+        assert_eq!(codes, ["E0226"]);
+        let (fixed, codes) = fixed_and_checked(&fixed);
+        assert!(fixed.contains("Shape.Rect(w: a, h: _) => a"), "{}", fixed);
+        assert!(codes.is_empty(), "{:?}", codes);
+        let src = module(&with(
+            "pub fn f(s: Shape) -> u8 = match s {\n  Shape.Rect => 1\n  Shape.Dot => 0\n}",
+        ));
+        let (fixed, codes) = fixed_and_checked(&src);
+        assert!(fixed.contains("Shape.Rect(w: _, h: _) => 1"), "{}", fixed);
+        assert!(codes.is_empty(), "{:?}", codes);
+        // An arm of a `match` statement whose value nobody uses is `E0217`, whose fix discards
+        // it in a block, since an arm holds an expression or a block and a discard is a
+        // statement; the fixed module checks.
+        let src = module(
+            "fn g(x: u8) -> u8 = x\npub fn f(c: bool, x: u8) -> u8 {\n  match c {\n    true => g(x)\n    false => {}\n  }\n  x\n}",
+        );
+        let (fixed, codes) = fixed_and_checked(&src);
+        assert!(fixed.contains("    true => { _ = g(x) }"), "{}", fixed);
+        assert!(codes.is_empty(), "{:?}", codes);
+    }
+
+    /// Every value a `match` reads is matched by an arm: every variant, both `bool`s, and every
+    /// integer of the scrutinee's refinement, or of its type, which `_` covers; no arm is one no
+    /// value reaches; and `_` stands on an integer only. Each fix applies and checks.
+    #[test]
+    fn test_a_match_covers_every_value_once() {
+        // A refined field's range is what its arms cover.
+        assert!(codes(
+            "pub struct Sk {\n  k: u8[0..3]\n}\npub fn f(s: Sk) -> u8 = match s.k {\n  0 => 1\n  1 => 2\n  2 => 3\n}"
+        )
+        .is_empty());
+        // The arms of a scrutinee of no one 128-bit type, which `wide.rs` reports, are read
+        // over both `i128`'s and `u128`'s values, a negative literal included.
+        assert_eq!(
+            codes("pub fn f(a: i128, b: u128) -> u8 = match a + b {\n  -1 => 1\n  _ => 2\n}"),
+            NONE
+        );
+        // E0230's fix removes the line of an arm that stands alone on it, spaces after the arm
+        // included, and only the arm where the line holds more; the module then checks.
+        for (src, kept) in [
+            (
+                "pub fn f(x: u8) -> u8 = match x {\n  1 => 0\n  1 => 2   \n  _ => 1\n}",
+                "match x {\n  1 => 0\n  _ => 1\n}",
+            ),
+            (
+                "pub fn f(x: u8) -> u8 = match x {\n  _ => 0\n  1 => 1 }",
+                "match x {\n  _ => 0\n   }",
+            ),
+        ] {
+            let (fixed, left) = fixed_and_checked(&module(src));
+            assert!(fixed.contains(kept), "{}", fixed);
+            assert!(left.is_empty(), "{:?}", left);
+        }
+        // A `match` whose arms all leave ends nothing after it.
+        assert!(codes(
+            "pub fn f(c: bool) -> u8 {\n  match c {\n    true => {\n      return 1\n    }\n    false => {\n      return 2\n    }\n  }\n}"
+        )
+        .is_empty());
+        let with = |f: &str| format!("{}{}", SHAPES, f);
+        for src in [
+            "pub fn f(l: Light) -> u8 = match l {\n  Light.Green => 0\n  Light.Red => 1\n  Light.Amber => 2\n}",
+            "pub fn f(x: u8[0..3]) -> u8 = match x {\n  2 => 0\n  0 => 1\n  1 => 2\n}",
+            "pub fn f(x: i8[-1..=1]) -> u8 = match x {\n  -1 => 0\n  0 => 1\n  1 => 2\n}",
+            "pub fn f(x: u8) -> u8 = match x {\n  0 => 0\n  255 => 1\n  _ => 2\n}",
+            "pub fn f(x: i128) -> u8 = match x {\n  -170141183460469231731687303715884105728 => 0\n  170141183460469231731687303715884105727 => 1\n  _ => 2\n}",
+            "pub fn f(xs: [2]u8[0..2]) -> u8 = match xs[1] {\n  0 => 0\n  1 => 1\n}",
+            "pub fn f(c: bool) -> u8 = match c {\n  false => 0\n  true => 1\n}",
+        ] {
+            assert_eq!(all_codes(&with(src)), NONE, "{}", src);
+        }
+        for (src, code, message) in [
+            ("pub fn f(l: Light) -> u8 = match l {\n  Light.Green => 0\n  Light.Red => 1\n}", "E0229", "this `match` does not match `Light.Amber`; it has an arm for every variant of `Light`"),
+            ("pub fn f(c: bool) -> u8 = match c {\n  true => 0\n}", "E0229", "this `match` does not match `false`; it has an arm for both values of `bool`"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  0 => 0\n  1 => 1\n}", "E0229", "this `match` does not match 2, among others, a value of `u8`; add an arm for each value, or `_` after the arms for every value left"),
+            ("pub fn f(x: u8[0..3]) -> u8 = match x {\n  0 => 0\n  2 => 1\n}", "E0229", "this `match` does not match 1, among others, a value of `u8[0..3]`; add an arm for each value, or `_` after the arms for every value left"),
+            ("pub fn f(l: Light) -> u8 = match l {\n  Light.Green => 0\n  Light.Red => 1\n  Light.Amber => 2\n  Light.Red => 3\n}", "E0230", "no value reaches this arm: an arm before it matches the same value; remove it"),
+            ("pub fn f(x: u8[0..3]) -> u8 = match x {\n  0 => 0\n  1 => 1\n  2 => 2\n  3 => 3\n}", "E0230", "no value reaches this arm: 3 lies outside `u8[0..3]`, the values of what the `match` reads; remove it"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  -1 => 0\n  _ => 1\n}", "E0230", "no value reaches this arm: the `match` narrows what it reads into `u8`, and -1 lies outside it; remove it"),
+            ("pub fn f(x: u8) -> u8 = match x - 1 {\n  -1 => 100\n  _ => 0\n}", "E0230", "no value reaches this arm: the `match` narrows what it reads into `u8`, and -1 lies outside it; remove it"),
+            ("pub fn f(x: u8) -> u8 = match x {\n  _ => 0\n  1 => 1\n}", "E0230", "no value reaches this arm: `_` before it matches every value left; remove it"),
+            ("pub fn f(x: u8[0..2]) -> u8 = match x {\n  0 => 0\n  1 => 1\n  _ => 2\n}", "E0230", "no value reaches this arm: the arms before it match every value; remove it"),
+            ("pub fn f(l: Light) -> u8 = match l {\n  Light.Red => 0\n  _ => 1\n}", "E0231", "`_` stands only on an integer, but this `match` reads an enum, `Light`: name each variant, so that one added later must be named too"),
+            ("pub fn f(c: bool) -> u8 = match c {\n  true => 0\n  _ => 1\n}", "E0231", "`_` stands only on an integer, but this `match` reads a `bool`: name both values, `true` and `false`"),
+        ] {
+            assert_eq!(codes(&with(src)), [code], "{}", src);
+            assert_eq!(messages(&with(src)), [message], "{}", src);
+        }
+        // E0229's fix adds an arm for each value left, and the module then checks.
+        for (src, added) in [
+            (
+                "pub fn f(l: Light) -> u8 = match l {\n  Light.Green => 0\n}",
+                "  Light.Red => todo(\"Light.Red\")\n  Light.Amber => todo(\"Light.Amber\")",
+            ),
+            (
+                "pub fn f(s: Shape) -> u8 = match s {\n  Shape.Dot => 0\n}",
+                "  Shape.Rect(w: _, h: _) => todo(\"Shape.Rect(w: _, h: _)\")",
+            ),
+            (
+                "pub fn f(x: u8) -> u8 = match x {\n  0 => 0\n}",
+                "  _ => todo(\"_\")",
+            ),
+        ] {
+            let (fixed, codes) = fixed_and_checked(&module(&with(src)));
+            assert!(fixed.contains(added), "{}", fixed);
+            assert!(codes.is_empty(), "{}: {:?}", fixed, codes);
+        }
+        // E0230's fix removes the arm; E0231's writes an arm for each value left.
+        let (fixed, codes) = fixed_and_checked(&module(&with(
+            "pub fn f(x: u8) -> u8 = match x {\n  1 => 0\n  1 => 2\n  _ => 1\n}",
+        )));
+        assert!(
+            fixed.contains("match x {\n  1 => 0\n  _ => 1\n}"),
+            "{}",
+            fixed
+        );
+        assert!(codes.is_empty(), "{:?}", codes);
+        let (fixed, codes) = fixed_and_checked(&module(&with(
+            "pub fn f(l: Light) -> u8 = match l {\n  Light.Red => 0\n  _ => 1\n}",
+        )));
+        assert!(
+            fixed.contains("  Light.Amber => 1\n  Light.Green => 1"),
+            "{}",
+            fixed
+        );
+        assert!(codes.is_empty(), "{:?}", codes);
+    }
+
+    /// In every arm, whether its pattern binds a name or not, a store or a `mut` argument that
+    /// reaches the scrutinee's place is `E0232`, whose fix writes a `match` statement that
+    /// gives the place a new value as a transition, `s = match s { ... }`, where its arms allow;
+    /// another field of the same binding and a place that cannot change (`E0205`) are not.
+    #[test]
+    fn test_a_matched_place_stays_frozen_in_every_arm() {
+        let base = format!(
+            "{}pub struct Box2 {{\n  s: Shape\n  n: u8\n}}\nfn clear(mut s: Shape) {{\n  s = Shape.Dot\n}}\nfn bump(mut n: u8) {{\n  n = 1\n}}\n",
+            SHAPES
+        );
+        let with = |f: &str| format!("{}{}", base, f);
+        let arm = |body: &str| {
+            with(&format!(
+                "pub fn f(mut b: Box2, mut xs: [2]Shape, i: usize) -> u8 {{\n  match b.s {{\n    Shape.Rect(w: w, h: _) => {{\n      {}\n      w\n    }}\n    Shape.Dot => 0\n  }}\n}}",
+                body
+            ))
+        };
+        for body in [
+            "b.s = Shape.Dot",
+            "b = Box2(s: Shape.Dot, n: 0)",
+            "clear(mut b.s)",
+        ] {
+            assert_eq!(codes(&arm(body)), ["E0232"], "{}", body);
+        }
+        for body in ["b.n = 3", "bump(mut b.n)", "xs[0] = Shape.Dot"] {
+            assert_eq!(codes(&arm(body)), NONE, "{}", body);
+        }
+        // Through an index, any element counts.
+        let src = with(
+            "pub fn f(mut xs: [2]Shape, i: usize, j: usize) -> u8 = match xs[i] {\n  Shape.Rect(w: w, h: _) => {\n    xs[j] = Shape.Dot\n    w\n  }\n  Shape.Dot => 0\n}",
+        );
+        assert_eq!(codes(&src), ["E0232"]);
+        let d = &diagnostics(&src)[0];
+        assert_eq!(d.related[0].message, "matched here");
+        // An arm that binds nothing keeps it frozen too ([`match-arm-freeze`]).
+        let src = with(
+            "pub fn f(mut s: Shape) -> u8 = match s {\n  Shape.Rect(w: _, h: _) => {\n    s = Shape.Dot\n    0\n  }\n  Shape.Dot => 1\n}",
+        );
+        assert_eq!(codes(&src), ["E0232"]);
+        let d = &diagnostics(&src)[0];
+        assert_eq!(
+            d.message,
+            "the `match` reads `s` before an arm runs, and its place stays frozen in every arm, so nothing in an arm changes `s`; to give it a new value, write `s = match s { ... }`, each arm giving the new value"
+        );
+        // A `match` that gives a value has no transition to offer, its message naming one.
+        assert!(d.fixes.is_empty());
+        // A `match` statement whose arms end by assigning the place, or leave it as it is, is
+        // offered as a transition, and the fixed module checks.
+        let src = module(&with(
+            "pub fn f(mut s: Shape, mut k: u8) {\n  match s {\n    Shape.Rect(w: _, h: _) => {\n      k = 1\n      s = Shape.Dot\n    }\n    Shape.Dot => {}\n  }\n  k += 1\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("  s = match s {\n    Shape.Rect(w: _, h: _) => {\n      k = 1\n      Shape.Dot\n    }\n    Shape.Dot => { s }\n  }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        let src = module(&with(
+            "pub fn f(mut s: Shape) {\n  match s {\n    Shape.Rect(w: _, h: _) => {\n      s = Shape.Dot\n    }\n    Shape.Dot => {\n      s = Shape.Rect(w: 1, h: 2)\n    }\n  }\n}",
+        ));
+        let d = &check_source(&src).unwrap_err();
+        assert_eq!(
+            d.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["E0232", "E0232"]
+        );
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("  s = match s {\n    Shape.Rect(w: _, h: _) => {\n      Shape.Dot\n    }\n    Shape.Dot => {\n      Shape.Rect(w: 1, h: 2)\n    }\n  }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        // An arm whose block is on one line, or holds statements and leaves the place as it
+        // is, gives the place's value at the end of its block, at the block's indentation.
+        let src = module(&with(
+            "pub fn f(mut s: Shape, mut k: u8) {\n  match s {\n    Shape.Rect(w: _, h: _) => { s = Shape.Dot }\n    Shape.Dot => {\n      k = 2\n    }\n  }\n  k += 1\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("    Shape.Rect(w: _, h: _) => { Shape.Dot }\n    Shape.Dot => {\n      k = 2\n      s\n    }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        let src = module(&with(
+            "pub fn f(mut s: Shape, mut k: u8) {\n  match s {\n    Shape.Rect(w: _, h: _) => {\n      s = Shape.Dot\n    }\n    Shape.Dot => { k = 2 }\n  }\n  k += 1\n}",
+        ));
+        let (fixed, left) = fixed_and_checked(&src);
+        assert!(
+            fixed.contains("    Shape.Dot => { k = 2\n    s }"),
+            "{}",
+            fixed
+        );
+        assert!(left.is_empty(), "{:?}", left);
+        // Only an element written as the scrutinee is, or a field of it, takes part.
+        let field = with(
+            "pub fn f(mut b: Box2, mut xs: [2]Shape, i: usize) -> u8 = match xs[i] {\n  Shape.Rect(w: w, h: _) => {\n    b.n = w\n    w\n  }\n  Shape.Dot => 0\n}",
+        );
+        assert_eq!(codes(&field), NONE);
+        let field = with(
+            "pub fn f(mut b: Box3, i: usize) -> u8 = match b.xs[i] {\n  Shape.Rect(w: w, h: _) => {\n    b.n = w\n    w\n  }\n  Shape.Dot => 0\n}",
+        );
+        assert_eq!(
+            codes(&format!(
+                "pub struct Box3 {{\n  xs: [2]Shape\n  n: u8\n}}\n{}",
+                field
+            )),
+            NONE
+        );
+        // An element whose index is a literal, or a name no arm changes, is offered as a
+        // transition; one whose index an arm changes, or whose index calls, is not, since the
+        // index is read before the arms and the place again after them.
+        for scrutinee in ["xs[0]", "xs[i]"] {
+            let src = module(&with(&format!(
+                "pub fn f(mut xs: [2]Shape, i: usize) {{\n  match {} {{\n    Shape.Rect(w: _, h: _) => {{\n      {} = Shape.Dot\n    }}\n    Shape.Dot => {{}}\n  }}\n}}",
+                scrutinee, scrutinee
+            )));
+            let (fixed, left) = fixed_and_checked(&src);
+            assert!(
+                fixed.contains(&format!("  {} = match {} {{", scrutinee, scrutinee)),
+                "{}",
+                fixed
+            );
+            assert!(left.is_empty(), "{:?}", left);
+        }
+        for (scrutinee, rect, dot) in [
+            ("xs[i]", "xs[i] = Shape.Dot", "i = 1"),
+            ("xs[i]", "i = 1\n      xs[i] = Shape.Dot", "k = 1"),
+            ("xs[next(mut k)]", "xs[0] = Shape.Dot", "k = 1"),
+        ] {
+            let src = with(&format!(
+                "fn next(mut k: usize) -> usize {{\n  k = k + 1\n  0\n}}\npub fn f(mut xs: [2]Shape, mut i: usize, mut k: usize) {{\n  match {} {{\n    Shape.Rect(w: _, h: _) => {{\n      {}\n    }}\n    Shape.Dot => {{\n      {}\n    }}\n  }}\n}}",
+                scrutinee, rect, dot
+            ));
+            let d = diagnostics(&src);
+            assert!(
+                d.iter().any(|d| d.code == "E0232") && d.iter().all(|d| d.fixes.is_empty()),
+                "{}: {:?}",
+                src,
+                d
+            );
+        }
+        // An assignment that is not the arm's last statement, or a `mut` argument, has no
+        // transition to offer; nor has an arm that assigns twice, assigns what holds the
+        // place, or another element than the scrutinee's.
+        for (scrutinee, arm) in [
+            (
+                "s",
+                "{\n      s = Shape.Dot\n      s = Shape.Rect(w: 1, h: 2)\n    }",
+            ),
+            ("b.s", "{\n      b = Box2(s: Shape.Dot, n: 0)\n    }"),
+            ("xs[i]", "{\n      xs[j] = Shape.Dot\n    }"),
+        ] {
+            let src = with(&format!(
+                "pub fn f(mut s: Shape, mut b: Box2, mut xs: [2]Shape, i: usize, j: usize) {{\n  match {} {{\n    Shape.Rect(w: _, h: _) => {}\n    Shape.Dot => {{}}\n  }}\n}}",
+                scrutinee, arm
+            ));
+            let d = diagnostics(&src);
+            assert!(
+                !d.is_empty() && d.iter().all(|d| d.fixes.is_empty()),
+                "{}: {:?}",
+                src,
+                d
+            );
+        }
+        for arm in [
+            "{\n      s = Shape.Dot\n      k = 1\n    }",
+            "{\n      clear(mut s)\n    }",
+        ] {
+            let src = with(&format!(
+                "pub fn f(mut s: Shape, mut k: u8) {{\n  match s {{\n    Shape.Rect(w: _, h: _) => {}\n    Shape.Dot => {{}}\n  }}\n  k += 1\n}}",
+                arm
+            ));
+            let d = diagnostics(&src);
+            assert_eq!(
+                d.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0232"],
+                "{}",
+                src
+            );
+            assert!(d[0].fixes.is_empty(), "{}", src);
+        }
+        // A read-only parameter is reported as one, once.
+        assert_eq!(
+            codes(&with(
+                "pub fn f(s: Shape) -> u8 = match s {\n  Shape.Rect(w: w, h: _) => {\n    s = Shape.Dot\n    w\n  }\n  Shape.Dot => 1\n}"
+            )),
+            ["E0205"]
+        );
+        // A pattern's binding is read-only.
+        assert_eq!(
+            codes(&with(
+                "pub fn f(s: Shape) -> u8 = match s {\n  Shape.Rect(w: w, h: _) => {\n    bump(mut w)\n    w\n  }\n  Shape.Dot => 1\n}"
+            )),
+            ["E0206"]
         );
     }
 }

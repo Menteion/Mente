@@ -1,0 +1,12 @@
+// expect: E0232
+module conformance
+// The scrutinee's place is frozen in every arm, whether or not its pattern binds a name: a
+// transition is written `state = match state { ... }`, which the fix offers.
+pub fn step(mut state: u8) {
+  match state {
+    0 => {
+      state = 1
+    }
+    _ => {}
+  }
+}

@@ -1,0 +1,8 @@
+// expect: E0230
+module conformance
+pub fn name(x: u8[0..3]) -> u8 = match x {
+  0 => 10
+  1 => 20
+  2 => 30
+  3 => 40
+}

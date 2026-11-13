@@ -1,0 +1,28 @@
+// expect: pass
+module conformance
+// An enum whose variants hold nothing is its tag, built and matched by name.
+pub enum Light {
+  Red
+  Amber
+  Green
+}
+
+pub fn next(l: Light) -> Light = match l {
+  Light.Red => Light.Green
+  Light.Amber => Light.Red
+  Light.Green => Light.Amber
+}
+
+pub fn wait(l: Light) -> u8 {
+  var seconds: u8 = 0
+  match l {
+    Light.Red => { seconds = 30 }
+    Light.Amber => { seconds = 3 }
+    Light.Green => {
+      seconds = 20
+    }
+  }
+  seconds
+}
+
+pub fn main() -> Light = next(next(Light.Red))

@@ -1,0 +1,79 @@
+// expect: pass
+module conformance
+// An aggregate that an `if` or a `match` gives keeps the value it had when it was evaluated,
+// though a later operand changes the place it was read from: an index or an argument after it
+// that passes that place `mut`.
+pub enum Cell {
+  Big(v: u8)
+  Small(n: u8[0..10])
+}
+
+pub struct Box {
+  cell: Cell
+  x: u8[0..10]
+}
+
+fn first(mut xs: [2]u8) -> usize {
+  xs[0] = 99
+  0
+}
+
+fn bump(mut b: Box) -> u8 {
+  b.x = 9
+  0
+}
+
+fn get(c: Cell, k: u8) -> u8 = match c {
+  Cell.Small(n: n) => n + k
+  Cell.Big(v: v) => v
+}
+
+pub fn index_beside(c: bool) -> u8 {
+  var xs: [2]u8 = [1, 2]
+  val ys: [2]u8 = [3, 4]
+  (if c { xs } else { ys })[first(mut xs)]
+}
+
+pub fn field_beside(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5), x: 1)
+  val t = Box(cell: Cell.Small(n: 3), x: 2)
+  get((if c { s } else { t }).cell, bump(mut s))
+}
+
+pub fn assigned(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5), x: 1)
+  val t = Box(cell: Cell.Small(n: 3), x: 2)
+  s = if c { t } else { s }
+  s.x
+}
+
+pub fn match_value_beside(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5), x: 1)
+  get(match c {
+    true => s.cell
+    false => Cell.Big(v: 7)
+  }, bump(mut s))
+}
+
+fn spoil(mut b: Box) -> u8 {
+  b.cell = Cell.Big(v: 200)
+  0
+}
+
+pub fn block_arm_beside(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5), x: 1)
+  get(match c {
+    true => {
+      s.cell
+    }
+    false => Cell.Big(v: 7)
+  }, spoil(mut s))
+}
+
+pub fn arm_changes_after(c: bool) -> u8 {
+  var s = Box(cell: Cell.Small(n: 5), x: 1)
+  get(s.cell, match c {
+    true => spoil(mut s)
+    false => 0
+  })
+}

@@ -24,6 +24,8 @@ date: 2026-11-04
    - Ad-hoc unions of existing types (`A | B`) and narrowing a binding's type with `is` wait past M2 ([`optional-semantics`](../docs/design-review.md#optional-semantics)); a pattern binds a payload to a name of its own instead.
    - `Implemented`: `parse_enum` parses an enum's variant list, keeping each variant as raw text.
      <!-- @assert-count target="compiler/mente-syntax/src/lib.rs" symbol="fn test_enum_variants_are_parsed" min="1" reason="parse_enum keeps each variant of the list" -->
+   - `Implemented`: a `match` on an enum, a `bool` or an integer is exhaustive at compile time, every variant named and `_` standing only on an integer, with M2's patterns; the patterns of `?T` come with `?T` itself (`core-calculus.md`, item 14).
+     <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_a_match_covers_every_value_once" min="1" reason="A match misses no value and reaches every arm, and _ stands only on integers" -->
 3. `Specified` **First-class optional types `?T` and elimination of `.unwrap()`**:
    - Nullable values are typed `?T`, a tagged type of its own that does not flatten: `??T` is a type apart ([`optional-semantics`](../docs/design-review.md#optional-semantics)). It takes no tag byte where `T` has a niche the spec names, such as `?u16[1..=65535]` and `?bool` (`core-calculus.md`, item 21).
    - **Prohibition of unchecked `.unwrap()`**: Neither the language nor the standard library provides a panicking `.unwrap()` method on `?T`. A present value is reached by binding it to a name of its own, with `guard val v = opt else { ... }`, `if val v = opt { ... }` or `match`, or read through `opt?.field`, which only reads (`core-calculus.md`, item 15).

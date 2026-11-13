@@ -1,0 +1,13 @@
+// expect: E0109
+module conformance
+// An enum has a layout, but a field of a `@layout` struct that holds one is a construct no
+// milestone brings yet.
+pub enum Tag {
+  A
+  B
+}
+
+@layout(size: 1, align: 1)
+pub struct Stamp {
+  @bytes(0..1) pub tag: Tag
+}

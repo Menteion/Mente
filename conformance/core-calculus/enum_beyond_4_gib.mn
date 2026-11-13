@@ -1,0 +1,6 @@
+// expect: E0223
+module conformance
+pub enum Big {
+  Small
+  Huge(xs: [4294967295]u8)
+}

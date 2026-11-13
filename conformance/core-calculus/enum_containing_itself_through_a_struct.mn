@@ -1,0 +1,11 @@
+// expect: E0225
+module conformance
+pub struct Node {
+  value: u8
+  next: Next
+}
+
+pub enum Next {
+  End
+  More(node: Node)
+}

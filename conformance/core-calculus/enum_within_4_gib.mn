@@ -1,0 +1,7 @@
+// expect: pass
+module conformance
+// The largest payload and its tag together still fit in one piece.
+pub enum Big {
+  Small
+  Large(xs: [4294967288]u8)
+}

@@ -235,7 +235,7 @@ impl Session {
             // A module of functions alone has no structs; one with any is checked whole.
             let structs = Structs::default();
             let (resolution, mut found) = names::resolve(syntax, &names, &structs);
-            let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs);
+            let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs, text);
             found.extend(typed);
             found.extend(wide::check(syntax, &resolution, &typing, text));
             if found.is_empty() {

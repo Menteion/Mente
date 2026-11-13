@@ -1,0 +1,8 @@
+// expect: E0502
+module conformance
+pub enum Reading {
+  Missing
+  Level(n: u8[0..10])
+}
+
+pub fn read(x: u8) -> Reading = Reading.Level(n: x)

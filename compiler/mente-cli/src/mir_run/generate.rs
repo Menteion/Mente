@@ -332,13 +332,14 @@ impl IntT {
     }
 }
 
-/// A type of M1, or a struct the program declares.
+/// A type of M1, or a struct or an enum the program declares.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Int(IntT),
     Bool,
     Array(u32, Box<Ty>),
     Struct(String),
+    Enum(String),
 }
 
 impl fmt::Display for Ty {
@@ -347,7 +348,7 @@ impl fmt::Display for Ty {
             Ty::Int(t) => write!(f, "{}", t.name),
             Ty::Bool => write!(f, "bool"),
             Ty::Array(n, e) => write!(f, "[{}]{}", n, e),
-            Ty::Struct(name) => write!(f, "{}", name),
+            Ty::Struct(name) | Ty::Enum(name) => write!(f, "{}", name),
         }
     }
 }
@@ -358,7 +359,7 @@ fn flows(from: &Ty, into: &Ty) -> bool {
     match (from, into) {
         (Ty::Int(_), Ty::Int(_)) | (Ty::Bool, Ty::Bool) => true,
         (Ty::Array(n, a), Ty::Array(m, b)) => n == m && flows(a, b),
-        (Ty::Struct(a), Ty::Struct(b)) => a == b,
+        (Ty::Struct(a), Ty::Struct(b)) | (Ty::Enum(a), Ty::Enum(b)) => a == b,
         _ => false,
     }
 }
@@ -380,6 +381,25 @@ struct GField {
     /// Whether the refinement is written with an exclusive end, `lo..hi + 1`.
     exclusive: bool,
     is_pub: bool,
+}
+
+/// An enum the program declares: its variants, each with its payload's fields, none for a
+/// variant that holds nothing.
+#[derive(Clone, Debug)]
+struct GEnum {
+    name: String,
+    variants: Vec<(String, Vec<GField>)>,
+}
+
+/// A pattern of a `match` arm, before its bindings are known to be read: a variant, each field
+/// with its type and refinement and whether the arm binds it to a name, an integer literal,
+/// which has no suffix (`E0221`), a `bool`, or `_`.
+#[derive(Clone, Debug)]
+enum Pat {
+    Variant(String, String, Vec<(GField, bool)>),
+    Int(Num),
+    Bool(bool),
+    Wild,
 }
 
 /// A step of a place from its root binding: an index into an array of a length, or a field.
@@ -468,6 +488,10 @@ enum E {
     Field(Box<E>, String),
     /// A struct built with its fields, in the order of its declaration.
     Construct(String, Vec<(String, E)>),
+    /// A variant of an enum built, `Name.A` or `Name.B(field: value, ...)`.
+    Variant(String, String, Vec<(String, E)>),
+    /// A `match` that gives a value: its scrutinee, and each arm's pattern and value.
+    Match(Box<E>, Vec<(String, E)>),
     Call(String, Vec<(bool, E)>),
     Neg(Box<E>),
     BitNot(Box<E>),
@@ -477,6 +501,9 @@ enum E {
     Array(Vec<E>),
     Repeat(Box<E>, u32),
     Builtin(&'static str, String),
+    /// `return` with a value, as a branch of an `if` or an arm of a `match` in a function's
+    /// expression body: the branch leaves the function.
+    Return(Box<E>),
 }
 
 impl E {
@@ -499,7 +526,7 @@ impl E {
 
     fn level(&self) -> u8 {
         match self {
-            E::If(..) => 0,
+            E::If(..) | E::Match(..) | E::Return(_) => 0,
             E::Bin(op, ..) => op.level(),
             E::Not(_) => NOT,
             E::Neg(_) | E::BitNot(_) => UNARY,
@@ -544,6 +571,43 @@ impl E {
                     v.print(0, out);
                 }
                 out.push(')');
+            }
+            E::Variant(name, variant, fields) => {
+                out.push_str(name);
+                out.push('.');
+                out.push_str(variant);
+                if !fields.is_empty() {
+                    out.push('(');
+                    for (k, (f, v)) in fields.iter().enumerate() {
+                        if k > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(f);
+                        out.push_str(": ");
+                        v.print(0, out);
+                    }
+                    out.push(')');
+                }
+            }
+            // One arm per line: inside the braces a newline ends an arm, wherever it stands.
+            E::Match(s, arms) => {
+                out.push_str("match ");
+                s.print(1, out);
+                out.push_str(" {");
+                for (p, v) in arms {
+                    out.push_str("\n  ");
+                    out.push_str(p);
+                    out.push_str(" => ");
+                    // An arm holds an expression or a block, and `return` is a statement.
+                    if let E::Return(_) = v {
+                        out.push_str("{ ");
+                        v.print(0, out);
+                        out.push_str(" }");
+                    } else {
+                        v.print(0, out);
+                    }
+                }
+                out.push_str("\n}");
             }
             E::Call(f, args) => {
                 out.push_str(f);
@@ -610,6 +674,10 @@ impl E {
                 out.push_str(&format!("; {}]", n));
             }
             E::Builtin(f, reason) => out.push_str(&format!("{}(\"{}\")", f, reason)),
+            E::Return(v) => {
+                out.push_str("return ");
+                v.print(0, out);
+            }
         }
     }
 
@@ -710,6 +778,8 @@ enum Kind {
     MutParam,
     /// A loop's counter, which only the loop's first statement changes.
     Counter,
+    /// A name a `match` pattern binds to a field of a variant's payload, which nothing changes.
+    Pattern,
 }
 
 #[derive(Clone, Debug)]
@@ -779,6 +849,8 @@ enum S {
     Discard(E),
     Expr(E),
     If(E, Block, Option<Block>),
+    /// A `match` statement: its scrutinee, and each arm's pattern and block.
+    Match(E, Vec<(String, Block)>),
     While(E, Vec<String>, Block),
     Guard(E, Block),
     Return(Option<E>),
@@ -824,6 +896,11 @@ struct Gen {
     mode: Mode,
     /// The structs declared so far.
     structs: Vec<GStruct>,
+    /// The enums declared so far.
+    enums: Vec<GEnum>,
+    /// The roots of the places a `match` reads, which nothing in any of its arms changes
+    /// (`core-calculus.md`, item 14).
+    frozen: Vec<usize>,
     sigs: Vec<Sig>,
     /// The function being generated, which may call itself once when it has a measure.
     current: Option<Sig>,
@@ -852,6 +929,8 @@ impl Gen {
             rng: Rng::new(seed),
             mode,
             structs: Vec::new(),
+            enums: Vec::new(),
+            frozen: Vec::new(),
             sigs: Vec::new(),
             current: None,
             recursion: None,
@@ -871,10 +950,15 @@ impl Gen {
 
     fn module(&mut self) -> String {
         let mut out = String::from("module generated\n");
-        // Structs first, each holding only those declared before it, so none contains itself.
-        if self.rng.chance(60) {
-            for k in 0..1 + self.rng.below(3) as usize {
-                let text = self.struct_decl(k);
+        // Structs and enums first, each holding only those declared before it, so none contains
+        // itself.
+        if self.rng.chance(70) {
+            for _ in 0..1 + self.rng.below(4) as usize {
+                let text = if self.rng.chance(45) {
+                    self.enum_decl(self.enums.len())
+                } else {
+                    self.struct_decl(self.structs.len())
+                };
                 out.push('\n');
                 out.push_str(&text);
             }
@@ -896,42 +980,8 @@ impl Gen {
         let name = format!("S{}", k);
         let mut fields = Vec::new();
         for j in 0..1 + self.rng.below(4) as usize {
-            let ty = self.field_ty();
-            // An integer field, or the elements of an array of integers, may be refined.
-            let int = match &ty {
-                Ty::Int(t) => Some(*t),
-                Ty::Array(_, e) => match **e {
-                    Ty::Int(t) => Some(t),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let refine = match int {
-                Some(t) if self.mode == Mode::Refined && self.rng.chance(40) => {
-                    let lo = self.value_in(R {
-                        lo: t.min().max(Num::small(-50)),
-                        hi: t.max().min(Num::small(50)),
-                    });
-                    let width = Num::new(false, u128::from(self.rng.below(100)));
-                    Some(R {
-                        lo,
-                        hi: lo.add(width).map_or(t.max(), |h| h.min(t.max())),
-                    })
-                }
-                _ => None,
-            };
-            // An exclusive end where one past the last value fits the type.
-            let exclusive = match (int, refine) {
-                (Some(t), Some(r)) => r.hi < t.max() && self.rng.chance(50),
-                _ => false,
-            };
-            fields.push(GField {
-                name: format!("x{}", j),
-                ty,
-                refine,
-                exclusive,
-                is_pub: self.rng.chance(30),
-            });
+            let f = self.field(format!("x{}", j));
+            fields.push(f);
         }
         let mut out = String::new();
         if self.rng.chance(50) {
@@ -940,32 +990,96 @@ impl Gen {
         out.push_str(&format!("struct {} {{\n", name));
         for f in &fields {
             let p = if f.is_pub { "pub " } else { "" };
-            let range = |r: R| match (f.exclusive, r.hi.add(Num::small(1))) {
-                (true, Some(end)) => format!("[{}..{}]", r.lo, end),
-                _ => format!("[{}..={}]", r.lo, r.hi),
-            };
-            match (&f.ty, f.refine) {
-                (Ty::Int(t), Some(r)) => {
-                    out.push_str(&format!("  {}{}: {}{}\n", p, f.name, t.name, range(r)))
-                }
-                (Ty::Array(n, e), Some(r)) => {
-                    out.push_str(&format!("  {}{}: [{}]{}{}\n", p, f.name, n, e, range(r)))
-                }
-                (ty, _) => out.push_str(&format!("  {}{}: {}\n", p, f.name, ty)),
-            }
+            out.push_str(&format!("  {}{}\n", p, field_text(f)));
         }
         out.push_str("}\n");
         self.structs.push(GStruct { name, fields });
         out
     }
 
-    /// A field's type: an integer, a `bool`, a small array, or a struct declared before.
+    /// An enum of one to five variants, each holding nothing or a payload of one to three
+    /// fields, and its declaration's text.
+    fn enum_decl(&mut self, k: usize) -> String {
+        let name = format!("E{}", k);
+        let mut variants = Vec::new();
+        for j in 0..1 + self.rng.below(5) as usize {
+            let mut fields = Vec::new();
+            if self.rng.chance(55) {
+                for i in 0..1 + self.rng.below(3) as usize {
+                    let mut f = self.field(format!("y{}", i));
+                    f.is_pub = false;
+                    fields.push(f);
+                }
+            }
+            variants.push((format!("V{}", j), fields));
+        }
+        let mut out = String::new();
+        if self.rng.chance(50) {
+            out.push_str("pub ");
+        }
+        out.push_str(&format!("enum {} {{\n", name));
+        for (v, fields) in &variants {
+            if fields.is_empty() {
+                out.push_str(&format!("  {}\n", v));
+            } else {
+                let payload: Vec<String> = fields.iter().map(field_text).collect();
+                out.push_str(&format!("  {}({})\n", v, payload.join(", ")));
+            }
+        }
+        out.push_str("}\n");
+        self.enums.push(GEnum { name, variants });
+        out
+    }
+
+    /// A field of a struct or of a payload: its type, and in a `Refined` program now and then a
+    /// refinement of an integer, or of each element of an array of integers.
+    fn field(&mut self, name: String) -> GField {
+        let ty = self.field_ty();
+        let int = match &ty {
+            Ty::Int(t) => Some(*t),
+            Ty::Array(_, e) => match **e {
+                Ty::Int(t) => Some(t),
+                _ => None,
+            },
+            _ => None,
+        };
+        let refine = match int {
+            Some(t) if self.mode == Mode::Refined && self.rng.chance(40) => {
+                let lo = self.value_in(R {
+                    lo: t.min().max(Num::small(-50)),
+                    hi: t.max().min(Num::small(50)),
+                });
+                let width = Num::new(false, u128::from(self.rng.below(100)));
+                Some(R {
+                    lo,
+                    hi: lo.add(width).map_or(t.max(), |h| h.min(t.max())),
+                })
+            }
+            _ => None,
+        };
+        // An exclusive end where one past the last value fits the type.
+        let exclusive = match (int, refine) {
+            (Some(t), Some(r)) => r.hi < t.max() && self.rng.chance(50),
+            _ => false,
+        };
+        GField {
+            name,
+            ty,
+            refine,
+            exclusive,
+            is_pub: self.rng.chance(30),
+        }
+    }
+
+    /// A field's type: an integer, a `bool`, a small array, or a struct or an enum declared
+    /// before.
     fn field_ty(&mut self) -> Ty {
-        let earlier = self.structs.len() as u64;
+        let structs = self.structs.len() as u64;
+        let enums = self.enums.len() as u64;
         match self.rng.below(100) {
-            0..=59 => Ty::Int(self.int_ty()),
-            60..=71 => Ty::Bool,
-            72..=84 => {
+            0..=54 => Ty::Int(self.int_ty()),
+            55..=66 => Ty::Bool,
+            67..=79 => {
                 let n = 1 + self.rng.below(4) as u32;
                 let elem = if self.rng.chance(70) {
                     Ty::Int(self.int_ty())
@@ -974,17 +1088,482 @@ impl Gen {
                 };
                 Ty::Array(n, Box::new(elem))
             }
-            85..=89 if earlier > 0 => {
-                let k = self.rng.below(earlier) as usize;
+            80..=84 if structs > 0 => {
+                let k = self.rng.below(structs) as usize;
                 let n = 1 + self.rng.below(3) as u32;
                 Ty::Array(n, Box::new(Ty::Struct(self.structs[k].name.clone())))
             }
-            _ if earlier > 0 => {
-                let k = self.rng.below(earlier) as usize;
+            85..=91 if enums > 0 => {
+                let k = self.rng.below(enums) as usize;
+                Ty::Enum(self.enums[k].name.clone())
+            }
+            _ if structs > 0 => {
+                let k = self.rng.below(structs) as usize;
                 Ty::Struct(self.structs[k].name.clone())
             }
             _ => Ty::Int(self.int_ty()),
         }
+    }
+
+    /// The variants of enum `name`, each with its payload's fields.
+    fn variants_of(&self, name: &str) -> Vec<(String, Vec<GField>)> {
+        self.enums
+            .iter()
+            .find(|e| e.name == name)
+            .map_or_else(Vec::new, |e| e.variants.clone())
+    }
+
+    /// A variant of enum `name` built, its payload's values each landing in its field's type, a
+    /// refined field's inside its refinement.
+    fn variant(&mut self, name: &str, depth: u32) -> E {
+        let variants = self.variants_of(name);
+        let (v, fields) = self.rng.pick(&variants).clone();
+        let mut values = Vec::new();
+        for f in fields {
+            let x = match (&f.ty, f.refine) {
+                (Ty::Int(_), Some(r)) => self.refined_value(r),
+                (Ty::Array(n, _), Some(r)) => self.refined_array(*n, r),
+                (ty, _) => self.value(ty, depth + 1),
+            };
+            values.push((f.name, x));
+        }
+        E::Variant(name.to_string(), v, values)
+    }
+
+    /// A value of enum `name`: a binding's, a call's, a part of another value, or a new one.
+    fn enum_value(&mut self, name: &str, depth: u32) -> E {
+        let want = Ty::Enum(name.to_string());
+        match self.rng.below(100) {
+            0..=29 => match self.part(&|t: &Ty| *t == want, false) {
+                Some((e, _)) => e,
+                None => self.variant(name, depth),
+            },
+            30..=44 => match self.call(depth, |t| *t == want) {
+                Some((e, _)) => e,
+                None => self.variant(name, depth),
+            },
+            _ => self.variant(name, depth),
+        }
+    }
+
+    // ---------------------------------------------------------------- `match`
+
+    /// The patterns of a `match` on a value of `ty`, exhaustive and each one reached: every
+    /// variant of an enum once, in some order, binding some of its payload's fields; `true` and
+    /// `false`; or distinct literals of an integer's `range`, its type's or its refinement's,
+    /// then `_` unless they cover it. `None` for a type a `match` does not read.
+    fn patterns(&mut self, ty: &Ty, range: Option<R>) -> Option<Vec<Pat>> {
+        match ty {
+            Ty::Enum(name) => {
+                let mut variants = self.variants_of(name);
+                if self.rng.chance(40) {
+                    variants.reverse();
+                }
+                Some(
+                    variants
+                        .into_iter()
+                        .map(|(v, fields)| {
+                            let fields = fields
+                                .into_iter()
+                                .map(|f| (f, self.rng.chance(70)))
+                                .collect();
+                            Pat::Variant(name.clone(), v, fields)
+                        })
+                        .collect(),
+                )
+            }
+            Ty::Bool => {
+                let first = self.rng.chance(50);
+                Some(vec![Pat::Bool(first), Pat::Bool(!first)])
+            }
+            Ty::Int(_) => {
+                let r = range?;
+                let span = r.hi.sub(r.lo).map_or(u128::MAX, |s| s.mag);
+                // A small range covered by its literals alone, now and then, and an 8-bit type
+                // too, which a scrutinee is narrowed into ([`match-scrutinee-narrowing`]).
+                if (span < 4 && self.rng.chance(60)) || (span == 255 && self.rng.chance(40)) {
+                    let mut out = Vec::new();
+                    let mut n = r.lo;
+                    while n <= r.hi {
+                        out.push(Pat::Int(n));
+                        n = n.add(Num::small(1))?;
+                    }
+                    if self.rng.chance(30) {
+                        out.reverse();
+                    }
+                    return Some(out);
+                }
+                let mut seen: Vec<Num> = Vec::new();
+                for _ in 0..1 + self.rng.below(4) {
+                    let n = match self.rng.below(10) {
+                        0 => r.lo,
+                        1 => r.hi,
+                        _ => self.value_in(r),
+                    };
+                    if !seen.contains(&n) {
+                        seen.push(n);
+                    }
+                }
+                let mut out: Vec<Pat> = seen.into_iter().map(Pat::Int).collect();
+                out.push(Pat::Wild);
+                Some(out)
+            }
+            Ty::Array(..) | Ty::Struct(_) => None,
+        }
+    }
+
+    /// A scrutinee of type `ty` and the range of integers its patterns take: a value of an enum
+    /// or of `bool`, or an integer of one type, a refined binding's name now and then, whose
+    /// refinement bounds the literals.
+    fn scrutinee(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
+        match ty {
+            Ty::Enum(name) => Some((self.enum_value(name, depth + 1), None)),
+            Ty::Bool => Some((self.bool_expr(depth + 1), None)),
+            Ty::Int(t) => {
+                // A binding whose refinement has literal bounds: the literals cover its range.
+                let refined: Vec<usize> = self
+                    .visible()
+                    .into_iter()
+                    .filter(|&id| {
+                        matches!(self.binds[id].ty, Ty::Int(_)) && self.binds[id].range.is_some()
+                    })
+                    .collect();
+                if !refined.is_empty() && self.rng.chance(50) {
+                    let id = *self.rng.pick(&refined);
+                    let r = self.binds[id].range?;
+                    return Some((self.read(id), Some(r)));
+                }
+                // An arithmetic scrutinee is narrowed into its type, which Tier 1 must prove
+                // ([`match-scrutinee-narrowing`]): one whose static range lies within the type,
+                // or of a 128-bit type, checked at its operator; now and then an `if` of two
+                // such; tried a few times, or a binding of the type read.
+                if self.rng.chance(20) {
+                    let m = self.mark();
+                    let c = self.bool_expr(depth + 1);
+                    match (
+                        self.int_scrutinee(*t, depth + 1),
+                        self.int_scrutinee(*t, depth + 1),
+                    ) {
+                        (Some((a, ua)), Some((b, ub))) if ua == ub => {
+                            let e = E::If(Box::new(c), Box::new(a), Box::new(b));
+                            return Some((e, Some(ua.range())));
+                        }
+                        _ => self.restore(m),
+                    }
+                }
+                if let Some((e, u)) = self.int_scrutinee(*t, depth + 1) {
+                    return Some((e, Some(u.range())));
+                }
+                let names: Vec<usize> = self
+                    .visible()
+                    .into_iter()
+                    .filter(|&id| self.binds[id].ty == Ty::Int(*t))
+                    .collect();
+                if names.is_empty() {
+                    return None;
+                }
+                let id = *self.rng.pick(&names);
+                Some((self.read(id), Some(t.range())))
+            }
+            Ty::Array(..) | Ty::Struct(_) => None,
+        }
+    }
+
+    /// An integer expression of type `t`, or of literals alone, that a `match` can read: one
+    /// whose static range lies within its type, or of a 128-bit type, which its operators check
+    /// (`core-calculus.md`, item 4); and its type. Tried a few times.
+    fn int_scrutinee(&mut self, t: IntT, depth: u32) -> Option<(E, IntT)> {
+        for _ in 0..6 {
+            let m = self.mark();
+            let g = self.int_expr(Want::Exact(t), depth);
+            let u = match g.cls {
+                Cls::One(u) => u,
+                Cls::Lit => I64,
+                Cls::Mixed => {
+                    self.restore(m);
+                    continue;
+                }
+            };
+            let range = u.range();
+            if u.bits == 128 || (range.lo <= g.r.lo && g.r.hi <= range.hi) {
+                return Some((g.e, u));
+            }
+            self.restore(m);
+        }
+        None
+    }
+
+    /// The type a `match` reads: an enum when the program declares one, else a `bool` or an
+    /// integer.
+    fn read_ty(&mut self) -> Ty {
+        let roll = self.rng.below(100);
+        if !self.enums.is_empty() && roll < 55 {
+            let k = self.rng.below(self.enums.len() as u64) as usize;
+            return Ty::Enum(self.enums[k].name.clone());
+        }
+        if roll < 75 {
+            Ty::Bool
+        } else {
+            Ty::Int(self.int_ty())
+        }
+    }
+
+    /// The binding at the root of a place `e` names, if it is one.
+    fn root(&self, e: &E) -> Option<usize> {
+        match e {
+            E::Name(n) => self
+                .visible()
+                .into_iter()
+                .rev()
+                .find(|&id| self.binds[id].name == *n),
+            E::Index(b, _) | E::Field(b, _) => self.root(b),
+            _ => None,
+        }
+    }
+
+    /// Declares the names pattern `p` binds, in the arm's scope, which the caller pushed: each
+    /// a read-only binding of its field's type and refinement.
+    fn bind_pattern(&mut self, p: &Pat) -> Vec<Option<usize>> {
+        let Pat::Variant(_, _, fields) = p else {
+            return Vec::new();
+        };
+        fields
+            .iter()
+            .map(|(f, binds)| {
+                binds.then(|| {
+                    let name = self.fresh("q");
+                    let range = match (&f.ty, f.refine) {
+                        (Ty::Int(_), r) => r,
+                        _ => None,
+                    };
+                    self.declare(name, f.ty.clone(), Kind::Pattern, range)
+                })
+            })
+            .collect()
+    }
+
+    /// A pattern's text, once its arm is generated: a field whose binding nobody read is `_`.
+    fn pattern_text(&self, p: &Pat, ids: &[Option<usize>]) -> String {
+        match p {
+            Pat::Variant(e, v, fields) => {
+                if fields.is_empty() {
+                    return format!("{}.{}", e, v);
+                }
+                let parts: Vec<String> = fields
+                    .iter()
+                    .zip(ids)
+                    .map(|((f, _), id)| match id {
+                        Some(id) if self.binds[*id].read => {
+                            format!("{}: {}", f.name, self.binds[*id].name)
+                        }
+                        _ => format!("{}: _", f.name),
+                    })
+                    .collect();
+                format!("{}.{}({})", e, v, parts.join(", "))
+            }
+            Pat::Int(n) => {
+                if n.neg {
+                    format!("-{}", n.mag)
+                } else {
+                    format!("{}", n.mag)
+                }
+            }
+            Pat::Bool(b) => b.to_string(),
+            Pat::Wild => String::from("_"),
+        }
+    }
+
+    /// Whether `e` reads a name of `names`.
+    fn reads_any(e: &E, names: &[String]) -> bool {
+        let sub = |x: &E| Gen::reads_any(x, names);
+        match e {
+            E::Name(n) => names.contains(n),
+            E::Lit(_) | E::Builtin(..) => false,
+            E::Index(a, b) | E::Bin(_, a, b) => sub(a) || sub(b),
+            E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
+                sub(x)
+            }
+            E::Construct(_, fields) | E::Variant(_, _, fields) => {
+                fields.iter().any(|(_, x)| sub(x))
+            }
+            E::Call(_, args) => args.iter().any(|(_, x)| sub(x)),
+            E::If(c, a, b) => sub(c) || sub(a) || sub(b),
+            E::Array(items) => items.iter().any(sub),
+            E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
+            E::Return(x) => sub(x),
+        }
+    }
+
+    /// Makes, now and then, one branch of an `if` or one arm of a `match` in the expression
+    /// body `e` leave the function by `return`, with a value of its result type `t`: an arm
+    /// that binds no name, and another branch or arm still gives a value.
+    fn returns_in(&mut self, e: &mut E, t: &Ty) {
+        match e {
+            E::If(c, a, b) => {
+                self.returns_in(c, t);
+                if self.rng.chance(25) {
+                    let v = E::Return(Box::new(self.value(t, 1)));
+                    if self.rng.chance(50) {
+                        **a = v;
+                    } else {
+                        **b = v;
+                    }
+                    return;
+                }
+                self.returns_in(a, t);
+                self.returns_in(b, t);
+            }
+            E::Match(s, arms) => {
+                self.returns_in(s, t);
+                let free: Vec<usize> = (0..arms.len())
+                    .filter(|&k| binds_nothing(&arms[k].0))
+                    .collect();
+                if arms.len() > 1 && !free.is_empty() && self.rng.chance(25) {
+                    let k = *self.rng.pick(&free);
+                    arms[k].1 = E::Return(Box::new(self.value(t, 1)));
+                    return;
+                }
+                for (_, x) in arms.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Index(a, b) | E::Bin(_, a, b) => {
+                self.returns_in(a, t);
+                self.returns_in(b, t);
+            }
+            E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
+                self.returns_in(x, t)
+            }
+            E::Construct(_, fields) | E::Variant(_, _, fields) => {
+                for (_, x) in fields.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Call(_, args) => {
+                for (_, x) in args.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Array(items) => {
+                for x in items.iter_mut() {
+                    self.returns_in(x, t);
+                }
+            }
+            E::Lit(_) | E::Name(_) | E::Builtin(..) | E::Return(_) => {}
+        }
+    }
+
+    /// A `match` that gives a value of `ty`, its arms expressions; an integer `match` takes the
+    /// hull of its arms' ranges, which must lie within one 128-bit type (`E0222`). An arm whose
+    /// value needs a `guard` on a name its pattern binds, which only a block could hold, gives
+    /// a default value instead. `None` when no such `match` comes of it.
+    fn match_value(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
+        let read = self.read_ty();
+        let (s, range) = self.scrutinee(&read, depth)?;
+        let pats = self.patterns(&read, range)?;
+        let root = self.root(&s);
+        let mut arms = Vec::new();
+        let mut hull: Option<R> = None;
+        for p in &pats {
+            self.scopes.push(Vec::new());
+            let ids = self.bind_pattern(p);
+            let frozen = self.frozen.len();
+            if let Some(r) = root {
+                self.frozen.push(r);
+            }
+            let names: Vec<String> = ids
+                .iter()
+                .flatten()
+                .map(|&id| self.binds[id].name.clone())
+                .collect();
+            let m = self.mark();
+            let (mut v, mut r) = match ty {
+                // An integer arm whose static range the generator knows, for the hull.
+                Ty::Int(t) => {
+                    let (e, r) = self.narrowed_range(*t, depth + 1);
+                    (e, Some(r))
+                }
+                _ => (self.full(ty, depth + 1), None),
+            };
+            if self.pending[m.pending..]
+                .iter()
+                .any(|c| Gen::reads_any(c, &names))
+            {
+                self.restore(m);
+                v = self.default_of(ty, None);
+                r = match ty {
+                    Ty::Int(_) => Some(R::point(Num::ZERO)),
+                    _ => None,
+                };
+            }
+            self.frozen.truncate(frozen);
+            self.scopes.pop();
+            if let Some(r) = r {
+                hull = Some(hull.map_or(r, |h| h.hull(r)));
+            }
+            arms.push((self.pattern_text(p, &ids), v));
+        }
+        if hull.is_some_and(|h| !h.fits()) {
+            return None;
+        }
+        Some((E::Match(Box::new(s), arms), hull))
+    }
+
+    /// A binding of a small refined range, `val q: u8[0..k] = x % k` for a name `x` that is never
+    /// negative, which Tier 1 proves, for a `match` whose literals cover its refinement.
+    fn small_refined(&mut self) -> Option<(S, usize, R)> {
+        let (x, _, _) = self.int_name(None, true)?;
+        let k = 2 + self.rng.below(3) as u128;
+        let name = self.fresh("v");
+        let r = R {
+            lo: Num::ZERO,
+            hi: Num::new(false, k - 1),
+        };
+        let id = self.declare(name, Ty::Int(U8), Kind::Val, Some(r));
+        let init = E::bin(Op::Rem, x, E::Lit(k.to_string()));
+        Some((S::Bind(id, Some(format!("u8[0..{}]", k)), init), id, r))
+    }
+
+    /// A `match` statement, its arms blocks of statements.
+    fn match_statement(&mut self, depth: u32) -> Vec<S> {
+        let read = self.read_ty();
+        let mut first = Vec::new();
+        // In a `Refined` program now and then a refined binding, which literals cover.
+        let refined = match (&read, self.mode) {
+            (Ty::Int(_), Mode::Refined) if self.rng.chance(40) => self.small_refined(),
+            _ => None,
+        };
+        let scrutinee = match refined {
+            Some((bind, id, r)) => {
+                first.push(bind);
+                Some((self.read(id), Some(r)))
+            }
+            None => self.scrutinee(&read, depth),
+        };
+        let Some((s, range)) = scrutinee else {
+            return Vec::new();
+        };
+        let Some(pats) = self.patterns(&read, range) else {
+            return Vec::new();
+        };
+        let mut out = self.flush();
+        out.extend(first);
+        let root = self.root(&s);
+        let mut arms = Vec::new();
+        for p in &pats {
+            self.scopes.push(Vec::new());
+            let ids = self.bind_pattern(p);
+            let frozen = self.frozen.len();
+            if let Some(r) = root {
+                self.frozen.push(r);
+            }
+            let body = self.block(depth + 1, None, Vec::new(), None);
+            self.frozen.truncate(frozen);
+            self.scopes.pop();
+            arms.push((self.pattern_text(p, &ids), body));
+        }
+        out.push(S::Match(s, arms));
+        out
     }
 
     fn fields_of(&self, name: &str) -> Vec<GField> {
@@ -1148,6 +1727,21 @@ impl Gen {
                     })
                     .collect(),
             ),
+            // The first variant, its payload at its defaults.
+            Ty::Enum(name) => {
+                let variants = self.variants_of(name);
+                let Some((v, fields)) = variants.first() else {
+                    return E::Lit("false".into());
+                };
+                E::Variant(
+                    name.clone(),
+                    v.clone(),
+                    fields
+                        .iter()
+                        .map(|f| (f.name.clone(), self.default_of(&f.ty, f.refine)))
+                        .collect(),
+                )
+            }
         }
     }
 
@@ -1165,6 +1759,10 @@ impl Gen {
         if !self.structs.is_empty() && self.rng.chance(15) {
             let k = self.rng.below(self.structs.len() as u64) as usize;
             return Ty::Struct(self.structs[k].name.clone());
+        }
+        if !self.enums.is_empty() && self.rng.chance(15) {
+            let k = self.rng.below(self.enums.len() as u64) as usize;
+            return Ty::Enum(self.enums[k].name.clone());
         }
         match self.rng.below(100) {
             0..=69 => Ty::Int(self.int_ty()),
@@ -1630,7 +2228,7 @@ impl Gen {
                 .collect();
             if !arrays.is_empty() {
                 let (id, n) = *self.rng.pick(&arrays);
-                let base = E::name(&self.binds[id].name);
+                let base = self.read(id);
                 let len = Num::new(false, u128::from(n));
                 return G {
                     e: E::Len(Box::new(base)),
@@ -1822,6 +2420,7 @@ impl Gen {
             Ty::Bool => self.bool_expr(depth),
             Ty::Array(n, elem) => self.array(*n, elem, depth),
             Ty::Struct(name) => self.struct_value(name, depth),
+            Ty::Enum(name) => self.enum_value(name, depth),
         }
     }
 
@@ -1918,6 +2517,14 @@ impl Gen {
     /// An integer `if` takes the hull of its branches' ranges, which must lie within `u128` or
     /// within `i128` (`E0222`), so branches whose hull does not are generated again.
     fn full(&mut self, ty: &Ty, depth: u32) -> E {
+        // Now and then a `match`, its arms meeting as an `if`'s branches do.
+        if !matches!(ty, Ty::Array(..)) && depth < 3 && self.rng.chance(12) {
+            let m = self.mark();
+            if let Some((e, _)) = self.match_value(ty, depth) {
+                return e;
+            }
+            self.restore(m);
+        }
         if !matches!(ty, Ty::Array(..)) && self.rng.chance(10) {
             let m = self.mark();
             let c = self.bool_expr(depth + 1);
@@ -2107,7 +2714,10 @@ impl Gen {
     fn place(&mut self, ty: Option<&Ty>) -> Option<(usize, E)> {
         let mut options: Vec<(usize, Vec<PStep>)> = Vec::new();
         for id in self.visible() {
-            if !matches!(self.binds[id].kind, Kind::Var | Kind::MutParam) {
+            // A place a `match` arm reads, through what its pattern binds, stays as it is.
+            if !matches!(self.binds[id].kind, Kind::Var | Kind::MutParam)
+                || self.frozen.contains(&id)
+            {
                 continue;
             }
             // Each step into the binding gives a place.
@@ -2296,7 +2906,8 @@ impl Gen {
             stmts.len()
         };
         for id in ids.into_iter().rev() {
-            if !self.binds[id].read && self.binds[id].kind != Kind::Param {
+            // A pattern's binding nobody read is written `_` in its pattern instead.
+            if !self.binds[id].read && !matches!(self.binds[id].kind, Kind::Param | Kind::Pattern) {
                 self.binds[id].read = true;
                 stmts.insert(at, S::Discard(E::name(&self.binds[id].name)));
             }
@@ -2310,7 +2921,8 @@ impl Gen {
         let mut out = match roll {
             0..=29 => self.binding(depth),
             30..=49 => self.assignment(),
-            50..=58 if depth < 3 => self.if_statement(depth),
+            50..=53 if depth < 3 => self.if_statement(depth),
+            54..=58 if depth < 3 => self.match_statement(depth),
             59..=68 if depth < 3 && self.loops < 2 => self.loop_statement(depth),
             69..=76 => self.guard_statement(),
             77..=85 => self.call_statement(),
@@ -2841,7 +3453,8 @@ impl Gen {
         let expression = first.is_empty() && ret_range.is_none() && self.rng.chance(20);
         let body = match (&ret, expression) {
             (Some(t), true) => {
-                let e = self.full(t, 0);
+                let mut e = self.full(t, 0);
+                self.returns_in(&mut e, t);
                 if self.pending.is_empty() {
                     Body::Expr(e)
                 } else {
@@ -3055,6 +3668,15 @@ impl Gen {
                 }
                 out.push_str(&format!("{}}}\n", pad));
             }
+            S::Match(s, arms) => {
+                out.push_str(&format!("match {} {{\n", s.text()));
+                for (p, body) in arms {
+                    out.push_str(&format!("{}  {} => {{\n", pad, p));
+                    self.print_block(body, indent + 2, out);
+                    out.push_str(&format!("{}  }}\n", pad));
+                }
+                out.push_str(&format!("{}}}\n", pad));
+            }
             S::While(c, clauses, body) => {
                 out.push_str(&format!("while {}", c.text()));
                 for k in clauses {
@@ -3075,6 +3697,19 @@ impl Gen {
             S::Break => out.push_str("break\n"),
             S::Continue => out.push_str("continue\n"),
         }
+    }
+}
+
+/// A field as its declaration writes it: `name: type`, with its refinement when it has one.
+fn field_text(f: &GField) -> String {
+    let range = |r: R| match (f.exclusive, r.hi.add(Num::small(1))) {
+        (true, Some(end)) => format!("[{}..{}]", r.lo, end),
+        _ => format!("[{}..={}]", r.lo, r.hi),
+    };
+    match (&f.ty, f.refine) {
+        (Ty::Int(t), Some(r)) => format!("{}: {}{}", f.name, t.name, range(r)),
+        (Ty::Array(n, e), Some(r)) => format!("{}: [{}]{}{}", f.name, n, e, range(r)),
+        (ty, _) => format!("{}: {}", f.name, ty),
     }
 }
 
@@ -3113,6 +3748,9 @@ enum Domain {
     Array(u32, Box<Domain>),
     /// A struct by its name, and each field's name and values in the order of its declaration.
     Struct(String, Vec<(String, Domain)>),
+    /// An enum by its name, and each variant's name with its payload's fields' names and
+    /// values in the order of the declaration.
+    Enum(String, Vec<(String, Vec<(String, Domain)>)>),
 }
 
 impl Domain {
@@ -3127,6 +3765,16 @@ impl Domain {
             Domain::Struct(_, fields) => fields
                 .iter()
                 .fold(1, |sum, (_, f)| sum.saturating_add(f.values())),
+            // The variant with the most values, its tag counted.
+            Domain::Enum(_, variants) => variants
+                .iter()
+                .map(|(_, fields)| {
+                    fields
+                        .iter()
+                        .fold(1, |sum: u128, (_, f)| sum.saturating_add(f.values()))
+                })
+                .max()
+                .unwrap_or(1),
         }
     }
 }
@@ -3152,6 +3800,22 @@ fn domain(tree: &Tree, t: TypeId, structs: &Structs) -> Option<Domain> {
                 .map(|f| Some((f.name.clone(), domain(def.tree(), f.decl, structs)?)))
                 .collect::<Option<Vec<_>>>()?;
             Domain::Struct(name.clone(), fields)
+        }
+        TypeKind::Enum(name) => {
+            let def = structs.get_enum(name)?;
+            let variants = def
+                .variants
+                .iter()
+                .map(|v| {
+                    let fields = v
+                        .fields
+                        .iter()
+                        .map(|f| Some((f.name.clone(), domain(def.tree(), f.decl, structs)?)))
+                        .collect::<Option<Vec<_>>>()?;
+                    Some((v.name.clone(), fields))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Domain::Enum(name.clone(), variants)
         }
         TypeKind::Error => return None,
     })
@@ -3283,7 +3947,12 @@ fn every(params: &[(String, bool, Domain)], limit: u128) -> Option<Vec<Vec<Value
                 }
                 v
             }
-            Domain::Array(..) | Domain::Struct(..) => return None,
+            // An enum whose variants hold nothing takes each variant.
+            Domain::Enum(name, variants) if variants.iter().all(|(_, f)| f.is_empty()) => variants
+                .iter()
+                .map(|(v, _)| Value::Enum(name.clone(), v.clone(), Vec::new()))
+                .collect(),
+            Domain::Array(..) | Domain::Struct(..) | Domain::Enum(..) => return None,
         };
         total = total.checked_mul(values.len() as u128)?;
         if total > limit {
@@ -3384,6 +4053,24 @@ fn pick(
             }
             Some(Some(Value::Struct(name.clone(), out)))
         }
+        // The first variant at the lowest, the last at the highest, any one at random; then its
+        // payload, as a struct's fields.
+        Domain::Enum(name, variants) => {
+            let k = match how {
+                Pick::Low => 0,
+                Pick::High => variants.len().saturating_sub(1),
+                Pick::Mixed => rng.below(variants.len().max(1) as u64) as usize,
+            };
+            let (v, fields) = variants.get(k)?;
+            let mut out = Vec::new();
+            for (f, d) in fields {
+                match pick(d, params, values, rng, how)? {
+                    Some(x) => out.push((f.clone(), x)),
+                    None => return Some(None),
+                }
+            }
+            Some(Some(Value::Enum(name.clone(), v.clone(), out)))
+        }
         Domain::Int(t, r) => {
             let (lo, hi) = match r {
                 None => (t.min(), t.max()),
@@ -3449,4 +4136,9 @@ fn resolve(b: &Bound, params: &[(String, bool, Domain)], values: &[Option<Value>
             }
         }
     }
+}
+
+/// Whether the pattern text `p` binds no name: every field it names is bound to `_`.
+fn binds_nothing(p: &str) -> bool {
+    p.split(": ").skip(1).all(|rest| rest.starts_with('_'))
 }

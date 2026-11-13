@@ -1,0 +1,16 @@
+// expect: pass
+module conformance
+// An array literal of array literals keeps its integers exact at every depth until it lands,
+// in the machine type that holds them all: none is narrowed on the way into a type of its own,
+// as `i64` would cut 12960978670946228878.
+pub fn take(p: [2][1]usize) -> usize = p[1][0]
+
+pub fn argument() -> usize = take([[0x0], [12960978670946228878]])
+
+pub fn returned() -> [2][1]u64 = [[1], [12960978670946228878]]
+
+pub fn repeated() -> [2][2]u64 = [[0, 12960978670946228878]; 2]
+
+pub fn signed() -> [2][2]i16 = [[-300, 1], [200, 7]]
+
+pub fn deep() -> [1][2][1]i64 = [[[-5], [6]]]

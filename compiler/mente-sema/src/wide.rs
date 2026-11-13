@@ -18,8 +18,8 @@ use std::cmp::Ordering;
 
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
-    AssignOp, BinaryOp, BlockId, Body, Bound, Else, ExprId, ExprKind, FnSyntax, StmtKind, Tree,
-    TypeKind, UnaryOp,
+    ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, Else, ExprId, ExprKind, FnSyntax, StmtKind,
+    Tree, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
 
@@ -195,6 +195,7 @@ pub fn check(f: &FnSyntax, resolution: &Resolution, typing: &Typing, src: &str) 
             _ => None,
         },
         ranges: vec![None; tree.exprs.len()],
+        unfit: vec![false; tree.exprs.len()],
         errors: Vec::new(),
     };
     for i in 0..tree.exprs.len() {
@@ -253,6 +254,7 @@ pub fn intervals(f: &FnSyntax, resolution: &Resolution, typing: &Typing) -> Vec<
         src: "",
         body: None,
         ranges: vec![None; tree.exprs.len()],
+        unfit: vec![false; tree.exprs.len()],
         errors: Vec::new(),
     };
     (0..tree.exprs.len())
@@ -277,6 +279,8 @@ struct Wide<'a> {
     body: Option<ExprId>,
     /// Each expression's range once computed; `Some(None)` when it has none.
     ranges: Vec<Option<Option<Range>>>,
+    /// Each array literal reported `E0222`, so that one that holds it is not reported too.
+    unfit: Vec<bool>,
     errors: Vec<Diagnostic>,
 }
 
@@ -345,8 +349,85 @@ impl Wide<'_> {
                     _ => hull.or(typed),
                 }
             }
-            _ => typed,
+            // A `match`'s arms meet in one machine type, as an `if`'s branches do.
+            ExprKind::Match { arms, .. } => {
+                let tails: Vec<(Option<ExprId>, ArmBody)> = arms
+                    .iter()
+                    .map(|a| match a.body {
+                        ArmBody::Expr(x) => (Some(x), a.body),
+                        ArmBody::Block(b) => (self.tail(b), a.body),
+                    })
+                    .collect();
+                let mut hull: Option<Range> = None;
+                let mut ranges = Vec::new();
+                for (t, body) in tails {
+                    let Some(t) = t else {
+                        continue;
+                    };
+                    let r = self.range(t)?;
+                    hull = Some(hull.map_or(r, |h| h.hull(r)));
+                    ranges.push((t, body, r));
+                }
+                let top = Num::new(false, i128::MAX.unsigned_abs());
+                let above = ranges.iter().find(|(_, _, r)| r.hi > top);
+                match (hull, above) {
+                    (Some(h), Some(&(tail, body, _))) if !h.fits() => {
+                        self.report_match(span, tail, body);
+                        None
+                    }
+                    _ => hull.or(typed),
+                }
+            }
+            ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Repeat { .. }
+            | ExprKind::Error => typed,
         }
+    }
+
+    /// `E0222` for the `match` at `at`, whose arms' values fit no one 128-bit type together;
+    /// the fix binds `tail`, the value of the arm that reaches highest, to an `i128` inside that
+    /// arm, a block made of it when it is an expression, so that it is computed only when the
+    /// arm runs.
+    fn report_match(&mut self, at: Span, tail: ExprId, body: ArmBody) {
+        let message = "the arms of this `match` give values that no one of `i128` and `u128` \
+                       holds together, and they meet in one of them"
+            .to_string();
+        let place = self.tree.expr(tail).span;
+        if let ArmBody::Block(_) = body {
+            self.report_with(at, place, tail, "i128", message);
+            return;
+        }
+        let mut d = Diagnostic::error("E0222", at, message);
+        let name = self.fresh(tail);
+        if let Some(value) = self.src.get(place.start..place.end) {
+            let line_start = self.src[..place.start].rfind('\n').map_or(0, |i| i + 1);
+            let indent: String = self.src[line_start..]
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect();
+            d.fixes.push(Fix {
+                message: format!("bind `{}` to `{}: i128` in its arm", value, name),
+                applicability: Applicability::Suggestion,
+                edits: vec![Edit {
+                    span: place,
+                    replacement: format!(
+                        "{{\n{ind}  val {n}: i128 = {v}\n{ind}  {n}\n{ind}}}",
+                        ind = indent,
+                        n = name,
+                        v = value
+                    ),
+                }],
+            });
+        }
+        self.errors.push(d);
     }
 
     /// `E0222` for an array literal at `at` whose elements, integers of no one type, kept exact
@@ -357,19 +438,20 @@ impl Wide<'_> {
             return;
         };
         // Elements of one type are narrowed into it; only those of no standard type together
-        // are kept exact, and the literals alone are points that fit.
-        if !matches!(**elem, Ty::Int(Int::Mixed(None))) {
+        // are kept exact, and the literals alone are points that fit. So are the integers of
+        // the array literals nested in it, which are kept in the same machine type.
+        let mut leaf = &**elem;
+        while let Ty::Array(_, inner) = leaf {
+            leaf = inner;
+        }
+        if !matches!(leaf, Ty::Int(Int::Mixed(None))) {
             return;
         }
-        let mut hull: Option<Range> = None;
         let mut ranges = Vec::new();
-        for &i in items {
-            let Some(r) = self.range(i) else {
-                return;
-            };
-            hull = Some(hull.map_or(r, |h| h.hull(r)));
-            ranges.push((i, r));
+        if !self.leaves(items, &mut ranges) {
+            return;
         }
+        let hull = ranges.iter().map(|(_, r)| *r).reduce(|h, r| h.hull(r));
         let top = Num::new(false, i128::MAX.unsigned_abs());
         let above = ranges.iter().find(|(_, r)| r.hi > top).map(|(i, _)| *i);
         if let (Some(h), Some(item)) = (hull, above) {
@@ -378,8 +460,51 @@ impl Wide<'_> {
                                `i128` and `u128` holds together, and they are kept in one of them"
                     .to_string();
                 self.report_with(at, at, item, "i128", message);
+                self.unfit[e.0 as usize] = true;
             }
         }
+    }
+
+    /// Collects into `ranges` the range of each integer the array literal elements `items`
+    /// give, through the array literals nested in them; an array of another kind gives its
+    /// element type's. False where one has no range, or where a nested literal is reported
+    /// `E0222` itself, so that the values are reported once, not twice.
+    fn leaves(&mut self, items: &[ExprId], ranges: &mut Vec<(ExprId, Range)>) -> bool {
+        for &i in items {
+            // The element's own range first, which checks a nested literal on its own.
+            let r = self.range(i);
+            if self.unfit[i.0 as usize] {
+                return false;
+            }
+            match &self.tree.expr(i).kind {
+                ExprKind::Array(inner) => {
+                    if !self.leaves(&inner.clone(), ranges) {
+                        return false;
+                    }
+                }
+                ExprKind::Repeat { value, .. } => {
+                    if !self.leaves(&[*value], ranges) {
+                        return false;
+                    }
+                }
+                _ => {
+                    let mut t = &self.typing.exprs[i.0 as usize];
+                    while let Ty::Array(_, inner) = t {
+                        t = inner;
+                    }
+                    let r = if matches!(self.typing.exprs[i.0 as usize], Ty::Array(..)) {
+                        int_ty(t).map(Range::of)
+                    } else {
+                        r
+                    };
+                    let Some(r) = r else {
+                        return false;
+                    };
+                    ranges.push((i, r));
+                }
+            }
+        }
+        true
     }
 
     /// A name's declared refinement, when both its bounds are literals.
@@ -522,15 +647,20 @@ impl Wide<'_> {
         let mut d = Diagnostic::error("E0222", at, message);
         let name = self.fresh(bind);
         let line = format!("val {}: {} = {}", name, machine, text(operand));
-        let edits = match self.insertion(place, &line) {
-            Some(insert) => Some(vec![
-                insert,
-                Edit {
-                    span: operand,
-                    replacement: name.clone(),
-                },
-            ]),
-            None => self.block_body(at, operand, &line, &name).map(|e| vec![e]),
+        // An arm of a `match` alone computes what it holds, so a binding for it goes into
+        // the arm, made a block, as a branch of an `if` keeps it in its block.
+        let edits = match self.arm_around(place) {
+            Some(body) => self.arm_block(body, operand, &line, &name).map(|e| vec![e]),
+            None => match self.insertion(place, &line) {
+                Some(insert) => Some(vec![
+                    insert,
+                    Edit {
+                        span: operand,
+                        replacement: name.clone(),
+                    },
+                ]),
+                None => self.block_body(at, operand, &line, &name).map(|e| vec![e]),
+            },
         };
         if let Some(edits) = edits {
             d.fixes.push(Fix {
@@ -601,6 +731,59 @@ impl Wide<'_> {
 
     /// The edit that inserts `line` before the statement that holds `at`: none for a loop's
     /// condition, which runs every round, and outside the body.
+    /// The body of the innermost arm of a `match` that holds `at` and is an expression, not a
+    /// block, when no statement inside it holds `at`: a binding `at` needs goes into it.
+    fn arm_around(&self, at: Span) -> Option<Span> {
+        let inside = |s: Span| s.start <= at.start && at.end <= s.end;
+        let body = self
+            .tree
+            .exprs
+            .iter()
+            .filter_map(|x| match &x.kind {
+                ExprKind::Match { arms, .. } => Some(arms),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|a| match a.body {
+                ArmBody::Expr(x) => Some(self.tree.expr(x).span),
+                ArmBody::Block(_) => None,
+            })
+            .filter(|s| inside(*s))
+            .max_by_key(|s| s.start)?;
+        // A statement that holds `at` either holds the whole `match` or starts inside the arm.
+        let held = self
+            .tree
+            .stmts
+            .iter()
+            .any(|s| inside(s.span) && body.start <= s.span.start);
+        (!held).then_some(body)
+    }
+
+    /// The edit that makes the arm `body` a block declaring `line`, then giving the arm's
+    /// value with `operand` replaced by `name`.
+    fn arm_block(&self, body: Span, operand: Span, line: &str, name: &str) -> Option<Edit> {
+        let text = self.src.get(body.start..body.end)?;
+        let from = operand.start.checked_sub(body.start)?;
+        let to = operand.end.checked_sub(body.start)?;
+        let value = format!("{}{}{}", text.get(..from)?, name, text.get(to..)?);
+        let line_start = self.src.get(..body.start)?.rfind('\n').map_or(0, |i| i + 1);
+        let indent: String = self
+            .src
+            .get(line_start..)?
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        Some(Edit {
+            span: body,
+            replacement: format!(
+                "{{\n{ind}  {line}\n{ind}  {value}\n{ind}}}",
+                ind = indent,
+                line = line,
+                value = value
+            ),
+        })
+    }
+
     fn insertion(&self, at: Span, line: &str) -> Option<Edit> {
         let stmt = self
             .tree
@@ -762,6 +945,71 @@ mod tests {
         assert!(check_source(&diff).is_ok(), "{}", diff);
     }
 
+    /// A `match`'s arms meet in one machine type as an `if`'s branches do: arms whose values no
+    /// one 128-bit type holds together are `E0222`, whose fix binds the value of the arm that
+    /// reaches highest to an `i128` inside that arm, a block made of it where it was an
+    /// expression; and the module then checks.
+    #[test]
+    fn test_a_match_whose_arms_leave_128_bits_together_is_e0222() {
+        let mixed =
+            "pub fn f(c: bool, a: i64, b: u128) -> i64 = match c {\n  true => a\n  false => b\n}";
+        assert_eq!(codes(mixed), ["E0222"]);
+        let text = fixed(mixed, "bind `b` to `wide: i128` in its arm");
+        assert!(
+            text.contains("  false => {\n    val wide: i128 = b\n    wide\n  }"),
+            "{}",
+            text
+        );
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        let block = "pub fn f(c: bool, a: i64, b: u128) -> i64 = match c {\n  true => a\n  false => {\n    b\n  }\n}";
+        let text = fixed(block, "bind `b` to `wide: i128` first");
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // An operation in an arm that is an expression is bound in that arm, made a block,
+        // where the pattern's names are visible and the arm alone computes it; the fixed module
+        // checks.
+        let arm = "pub enum E {\n  A\n  B(n: u64)\n}\npub fn f(e: E) -> u128 = match e {\n  E.B(n: n) => n * n * n\n  E.A => 0\n}";
+        let text = fixed(arm, "bind `n * n` to `product: u128` first");
+        assert!(
+            text.contains("  E.B(n: n) => {\n    val product: u128 = n * n\n    product * n\n  }"),
+            "{}",
+            text
+        );
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // So in a statement's arm, where the element it reads, bound before the `match`, would
+        // be read though the arm never runs.
+        let stmt = "pub fn f(c: bool, xs: [2]u64, i: usize) -> u128 {\n  val r: u128 = match c {\n    true => xs[i] * xs[i] * xs[i]\n    false => 0\n  }\n  r\n}";
+        let text = fixed(stmt, "bind `xs[i] * xs[i]` to `product: u128` first");
+        assert!(
+            text.contains(
+                "    true => {\n      val product: u128 = xs[i] * xs[i]\n      product * xs[i]\n    }"
+            ),
+            "{}",
+            text
+        );
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // A statement inside the arm that holds the operation takes the binding, as anywhere.
+        let held = "pub enum E {\n  A\n  B(n: u64)\n}\npub fn f(e: E, c: bool) -> u128 = match e {\n  E.B(n: n) => if c {\n    val k: u128 = n * n * n\n    k\n  } else {\n    0\n  }\n  E.A => 0\n}";
+        let text = fixed(held, "bind `n * n` to `product: u128` first");
+        assert!(
+            text.contains("{\n    val product: u128 = n * n\n    val k: u128 = product * n\n"),
+            "{}",
+            text
+        );
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // The arm bound is the one above `i128`, never one whose top is `i128`'s.
+        let top =
+            "pub fn f(c: bool, a: i128, b: u128) -> i128 = match c {\n  true => a\n  false => b\n}";
+        let text = fixed(top, "bind `b` to `wide: i128` in its arm");
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        // Arms that fit one type together are none.
+        for src in [
+            "pub fn f(c: bool, a: i64, b: u64) -> i64 = match c {\n  true => a\n  false => b\n}",
+            "pub fn f(c: bool, a: u8, b: u128) -> u8 = match c {\n  true => a\n  false => b\n}",
+        ] {
+            assert!(codes(src).is_empty(), "{}", src);
+        }
+    }
+
     #[test]
     fn test_an_if_whose_branches_leave_128_bits_together_is_e0222() {
         // An `i64` and a `u128`: no one 128-bit type holds both, where the branches meet.
@@ -838,10 +1086,28 @@ mod tests {
         let top = "pub fn r(a: i128, b: u128) -> [2]i128 {\n  val xs: [2]i128 = [a, b]\n  xs\n}";
         let after = fixed(top, "bind `b` to `wide: i128` first");
         assert!(check_source(&after).is_ok(), "{}", after);
+        // So does an array literal of array literals, for the integers of every one nested in
+        // it: those that fit no one type together are `E0222` once, at the literal that holds
+        // them all, and the fix applies.
+        let nested =
+            "pub fn r(a: i32, b: u128) -> [2][1]i128 {\n  val xs: [2][1]i128 = [[a], [b]]\n  xs\n}";
+        assert_eq!(codes(nested), ["E0222"]);
+        let after = fixed(nested, "bind `b` to `wide: i128` first");
+        assert!(check_source(&after).is_ok(), "{}", after);
+        let inner =
+            "pub fn r(a: i32, b: u128) -> [1][2]i128 {\n  val xs: [1][2]i128 = [[a, b]]\n  xs\n}";
+        assert_eq!(codes(inner), ["E0222"]);
+        let repeated =
+            "pub fn r(a: i32, b: u128) -> [2][2]i128 {\n  val xs: [2][2]i128 = [[a, 0], [b; 2]]\n  xs\n}";
+        assert_eq!(codes(repeated), ["E0222"]);
         for ok in [
             "pub fn r(a: i32, b: u64) -> [2]i128 = [a, b]",
             "pub fn r(a: u64, b: u128) -> [2]u128 = [a, b]",
             "pub fn r(a: i8, b: i8) -> [2]i8 = [a, b]",
+            "pub fn r(a: i32, b: u64) -> [2][1]i128 = [[a], [b]]",
+            "pub fn r(a: u64, b: u128) -> [2][1]u128 = [[a], [b]]",
+            // A repeated value's range, not its type's: `a` lies within 0 to 3.
+            "pub fn r(a: i32[0..4], b: u128) -> [2][1]u128 = [[b], [a; 1]]",
         ] {
             assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
         }

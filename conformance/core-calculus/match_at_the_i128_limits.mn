@@ -1,0 +1,16 @@
+// expect: pass
+module conformance
+// Literal patterns reach `i128`'s extremes, the smallest one only with its `-`.
+pub fn edge(x: i128) -> i8 = match x {
+  -170141183460469231731687303715884105728 => -1
+  170141183460469231731687303715884105727 => 1
+  0 => 0
+  _ => 2
+}
+
+pub fn top(x: u128) -> bool = match x {
+  340282366920938463463374607431768211455 => true
+  _ => false
+}
+
+pub fn main() -> i8 = edge(-170141183460469231731687303715884105728) + edge(170141183460469231731687303715884105727)

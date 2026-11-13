@@ -1,0 +1,16 @@
+// expect: E0203
+module conformance
+pub enum Light {
+  Red
+  Green
+}
+
+pub enum Coin {
+  Heads
+  Tails
+}
+
+pub fn odd(l: Light) -> u8 = match l {
+  Light.Red => 1
+  Coin.Tails => 2
+}

@@ -1,0 +1,7 @@
+// expect: E0131
+module conformance
+pub fn class(x: u8) -> u8 = match x {
+  0 => 1
+  _ if x > 9 => 2
+  _ => 3
+}

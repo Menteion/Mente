@@ -1,0 +1,5 @@
+// expect: E0203
+module conformance
+pub fn first(xs: [2]u8) -> u8 = match xs {
+  _ => 0
+}

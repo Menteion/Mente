@@ -1,0 +1,10 @@
+// expect: pass
+module conformance
+// A `u8` takes 256 values, so a few literals and `_` cover it.
+pub fn class(x: u8) -> u8 = match x {
+  0 => 10
+  255 => 20
+  _ => 30
+}
+
+pub fn main() -> u8 = class(0) + class(255) + class(7)

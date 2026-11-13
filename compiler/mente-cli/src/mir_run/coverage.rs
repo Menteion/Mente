@@ -1,6 +1,6 @@
 //! What of the grammar the program generator reaches (`docs/design-review.md`,
 //! `quality-per-change`: new syntax extends the generator in the same pull request): M1's, and
-//! M2's structs.
+//! M2's structs, enums and `match`.
 //!
 //! Each table below names the constructs of one part of a function's syntax tree, and its
 //! patterns name every variant and every field, without a wildcard. A construct added to the
@@ -12,9 +12,9 @@ use std::collections::BTreeSet;
 
 use mente_sema::types::INT_TYPES;
 use mente_syntax::tree::{
-    Arg, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, ExprId, ExprKind,
-    FieldSyntax, FnSyntax, Param, Refinement, StmtKind, StructSyntax, Tree, TypeId, TypeKind,
-    UnaryOp,
+    Arg, ArmBody, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, EnumSyntax,
+    ExprId, ExprKind, FieldSyntax, FnSyntax, Param, PatBinding, PatternKind, Payload, Refinement,
+    StmtKind, StructSyntax, Tree, TypeId, TypeKind, UnaryOp,
 };
 
 use super::generate;
@@ -46,6 +46,10 @@ constructs!(expr_kind, EXPRS: ExprKind {
     ExprKind::Field { base: _, name: _ } => "field read",
     ExprKind::Call { callee: _, args: _ } => "call",
     ExprKind::Construct { name: _, fields: _ } => "struct construction",
+    ExprKind::Variant { enum_name: _, enum_span: _, name: _, name_span: _, payload: Payload::None } => "variant",
+    ExprKind::Variant { enum_name: _, enum_span: _, name: _, name_span: _, payload: Payload::Named(_) } => "variant with a payload",
+    ExprKind::Variant { enum_name: _, enum_span: _, name: _, name_span: _, payload: Payload::Positional(_) } => "dotted call",
+    ExprKind::Match { scrutinee: _, arms: _ } => "match",
     ExprKind::Array(_) => "array literal",
     ExprKind::Repeat { value: _, count: _ } => "repeated array",
     ExprKind::If { cond: _, then: _, otherwise: None } => "if without else",
@@ -123,7 +127,35 @@ constructs!(type_kind, TYPES: TypeKind {
     TypeKind::Bool => "bool",
     TypeKind::Array { len: _, elem: _ } => "array type",
     TypeKind::Named(_) => "struct type",
+    TypeKind::Enum(_) => "enum type",
     TypeKind::Error => "type error",
+});
+
+constructs!(pattern_kind, PATTERNS: PatternKind {
+    PatternKind::Variant { enum_name: _, name: _, name_span: _, bindings: None } => "variant pattern",
+    PatternKind::Variant { enum_name: _, name: _, name_span: _, bindings: Some(_) } => "variant pattern with bindings",
+    PatternKind::Int { negative: false, value: _, suffix: None } => "literal pattern",
+    PatternKind::Int { negative: false, value: _, suffix: Some(_) } => "suffixed literal pattern",
+    PatternKind::Int { negative: true, value: _, suffix: _ } => "negative literal pattern",
+    PatternKind::Bool(true) => "true pattern",
+    PatternKind::Bool(false) => "false pattern",
+    PatternKind::Wildcard => "_ pattern",
+});
+
+constructs!(binding_kind, BINDINGS: PatBinding {
+    PatBinding { field: Some(_), name: Some(_), name_span: _ } => "pattern binding",
+    PatBinding { field: Some(_), name: None, name_span: _ } => "field bound to _",
+    PatBinding { field: None, name: _, name_span: _ } => "binding by position",
+});
+
+constructs!(arm_kind, ARMS: ArmBody {
+    ArmBody::Expr(_) => "expression arm",
+    ArmBody::Block(_) => "block arm",
+});
+
+constructs!(variant_kind, VARIANTS: bool {
+    false => "variant declared without a payload",
+    true => "variant declared with a payload",
 });
 
 constructs!(range_kind, RANGES: Refinement {
@@ -161,6 +193,20 @@ const PLACES: &[&str] = &[
     "refined array element in a field",
     "exclusive field range",
     "field read through an index that calls with mut",
+    "struct of enums",
+    "enum of structs",
+    "enum of enums",
+    "array in a payload",
+    "refined payload field",
+    "match on an enum",
+    "match on a bool",
+    "match on an integer",
+    "match covering a refinement without _",
+    "match covering an arithmetic scrutinee's type without _",
+    "match in an arm",
+    "match with a mut call in its scrutinee",
+    "match reading an if",
+    "return in an arm or a branch of an expression body",
 ];
 
 constructs!(contract_kind, CONTRACTS: Contract {
@@ -194,6 +240,18 @@ const NOT_GENERATED: &[(&str, &str)] = &[
         "no body",
         "a function without a body is a declaration, which M1 refuses to call (E0224)",
     ),
+    (
+        "dotted call",
+        "a variant built by position is an error (E0226), and a call on a receiver comes later in M2",
+    ),
+    (
+        "binding by position",
+        "a pattern names each field it binds (E0226)",
+    ),
+    (
+        "suffixed literal pattern",
+        "a pattern's literal takes the type of what the `match` reads, so it has no suffix (E0221)",
+    ),
 ];
 
 /// The constructs `f` holds.
@@ -218,6 +276,14 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
     };
     mark(result_kind(result));
     mark(body_kind(body));
+    // An expression body holds statements only in the blocks of its arms and branches.
+    if matches!(body, Some(Body::Expr(_)))
+        && stmts
+            .iter()
+            .any(|s| matches!(s.kind, StmtKind::Return(Some(_))))
+    {
+        mark("return in an arm or a branch of an expression body");
+    }
     params.iter().for_each(|p| mark(param_kind(p)));
     contracts.iter().for_each(|c| mark(contract_kind(c)));
     for e in exprs {
@@ -241,6 +307,56 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
                 mark("struct field");
                 if indexed_by_a_mut_call(tree, *base) {
                     mark("field read through an index that calls with mut");
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                if calls_with_mut(tree, *scrutinee) {
+                    mark("match with a mut call in its scrutinee");
+                }
+                if matches!(tree.expr(*scrutinee).kind, ExprKind::If { .. }) {
+                    mark("match reading an if");
+                }
+                let mut wildcard = false;
+                for arm in arms {
+                    mark(pattern_kind(&arm.pattern.kind));
+                    mark(arm_kind(&arm.body));
+                    match &arm.pattern.kind {
+                        PatternKind::Variant { bindings, .. } => {
+                            mark("match on an enum");
+                            for b in bindings.iter().flatten() {
+                                mark(binding_kind(b));
+                            }
+                        }
+                        PatternKind::Bool(_) => mark("match on a bool"),
+                        PatternKind::Int { .. } => mark("match on an integer"),
+                        PatternKind::Wildcard => wildcard = true,
+                    }
+                    let nested = match arm.body {
+                        ArmBody::Expr(x) => matches!(tree.expr(x).kind, ExprKind::Match { .. }),
+                        ArmBody::Block(b) => tree.block(b).stmts.iter().any(|&s| {
+                            matches!(&tree.stmt(s).kind, StmtKind::Expr(x)
+                                if matches!(tree.expr(*x).kind, ExprKind::Match { .. }))
+                        }),
+                    };
+                    if nested {
+                        mark("match in an arm");
+                    }
+                }
+                let ints = arms
+                    .iter()
+                    .any(|a| matches!(a.pattern.kind, PatternKind::Int { .. }));
+                if ints && !wildcard {
+                    // An arithmetic scrutinee is narrowed into its type, which its arms then
+                    // cover whole; a refined name's arms cover its refinement.
+                    let arithmetic = matches!(
+                        tree.expr(*scrutinee).kind,
+                        ExprKind::Binary { .. } | ExprKind::Unary { .. }
+                    );
+                    mark(if arithmetic {
+                        "match covering an arithmetic scrutinee's type without _"
+                    } else {
+                        "match covering a refinement without _"
+                    });
                 }
             }
             _ => {}
@@ -338,6 +454,7 @@ fn reached_struct(s: &StructSyntax, seen: &mut BTreeSet<String>) {
         mark(field_kind(f));
         match &tree.ty(f.ty).kind {
             TypeKind::Named(_) => mark("struct of structs"),
+            TypeKind::Enum(_) => mark("struct of enums"),
             TypeKind::Int {
                 refinement: Some(r),
                 ..
@@ -375,12 +492,60 @@ fn reached_struct(s: &StructSyntax, seen: &mut BTreeSet<String>) {
     }
 }
 
-/// The functions of `src`, which must parse.
+/// The constructs an enum declaration holds.
+fn reached_enum(e: &EnumSyntax, seen: &mut BTreeSet<String>) {
+    let EnumSyntax {
+        name: _,
+        name_span: _,
+        variants,
+        tree,
+    } = e;
+    let mut mark = |name: &str| {
+        seen.insert(name.to_string());
+    };
+    for v in variants {
+        mark(variant_kind(&!v.fields.is_empty()));
+        for f in &v.fields {
+            match &tree.ty(f.ty).kind {
+                TypeKind::Named(_) => mark("enum of structs"),
+                TypeKind::Enum(_) => mark("enum of enums"),
+                TypeKind::Array { .. } => mark("array in a payload"),
+                TypeKind::Int {
+                    refinement: Some(_),
+                    ..
+                } => mark("refined payload field"),
+                _ => {}
+            }
+        }
+    }
+    for t in &tree.types {
+        mark(type_kind(&t.kind));
+    }
+}
+
+/// The functions of `src`, which must parse, their trees as name resolution qualifies them:
+/// `a.b`, `a` an enum, is a variant.
 fn functions(src: &str) -> Vec<FnSyntax> {
     let module = mente_syntax::parse_module(src).unwrap_or_else(|d| panic!("{:?}\n{}", d, src));
-    let (fns, diags) = mente_syntax::parse_functions(src, &module);
+    let parsed = mente_sema::parse_qualified(src, &module);
+    let diags: Vec<_> = parsed.iter().flat_map(|p| p.errors.iter()).collect();
     assert!(diags.is_empty(), "{:?}\n{}", diags, src);
-    fns
+    parsed.into_iter().filter_map(|p| p.syntax).collect()
+}
+
+/// The enums of `src`, which must parse.
+fn enums(src: &str) -> Vec<EnumSyntax> {
+    let module = mente_syntax::parse_module(src).unwrap_or_else(|d| panic!("{:?}\n{}", d, src));
+    let names = mente_sema::structs::enum_names(&module);
+    mente_syntax::parse_enums(src, &module)
+        .into_iter()
+        .map(|p| {
+            assert!(p.errors.is_empty(), "{:?}\n{}", p.errors, src);
+            let mut syntax = p.syntax;
+            mente_sema::structs::qualify(&mut syntax.tree, &names);
+            syntax
+        })
+        .collect()
 }
 
 /// The structs of `src`, which must parse.
@@ -392,6 +557,7 @@ fn structs(src: &str) -> Vec<StructSyntax> {
             d, src
         )
     });
+    let names = mente_sema::structs::enum_names(&module);
     mente_syntax::parse_structs(src, &module)
         .into_iter()
         .map(|p| {
@@ -402,7 +568,9 @@ fn structs(src: &str) -> Vec<StructSyntax> {
                 p.errors,
                 src
             );
-            p.syntax
+            let mut syntax = p.syntax;
+            mente_sema::structs::qualify(&mut syntax.tree, &names);
+            syntax
         })
         .collect()
 }
@@ -446,6 +614,10 @@ fn grammar() -> BTreeSet<String> {
         BODIES,
         FIELDS,
         PLACES,
+        PATTERNS,
+        BINDINGS,
+        ARMS,
+        VARIANTS,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -479,6 +651,9 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             structs(&p.text)
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
+            enums(&p.text)
+                .iter()
+                .for_each(|e| reached_enum(e, &mut seen));
         }
     }
     for name in &seen {

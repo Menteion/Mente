@@ -12,9 +12,10 @@
 
 use crate::diagnostics::{Applicability, Diagnostic};
 use crate::tree::{
-    Arg, AssignOp, BinaryOp, Block, BlockId, Body, Bound, Contract, ContractKind, Else, ExprId,
-    ExprKind, FieldInit, FieldSyntax, FnSyntax, Param, Refinement, StmtId, StmtKind, StructSyntax,
-    Tree, TypeId, TypeKind, UnaryOp,
+    Arg, Arm, ArmBody, AssignOp, BinaryOp, Block, BlockId, Body, Bound, Contract, ContractKind,
+    Else, EnumSyntax, ExprId, ExprKind, FieldInit, FieldSyntax, FnSyntax, Param, PatBinding,
+    Pattern, PatternKind, Payload, Refinement, StmtId, StmtKind, StructSyntax, Tree, TypeId,
+    TypeKind, UnaryOp, VariantSyntax,
 };
 use crate::{Span, Token, TokenKind};
 
@@ -67,6 +68,17 @@ pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>
 pub fn parse_struct(src: &str, tokens: &[Token]) -> (StructSyntax, Vec<Diagnostic>) {
     let mut p = Parser::new(src, tokens);
     let syntax = p.struct_decl();
+    (syntax, p.errors)
+}
+
+/// Parses one enum declaration from its tokens, `enum` to its closing `}`, which `src` holds at
+/// the tokens' spans (`grammar.md`, item 10): one variant per line, each a name and, in
+/// parentheses, its payload's named fields. Type parameters are a construct of a later milestone
+/// (`E0109`); a comma after a variant is another language's separator (`E0128`), and a payload of
+/// unnamed types another language's (`E0130`), each with a fix.
+pub fn parse_enum(src: &str, tokens: &[Token]) -> (EnumSyntax, Vec<Diagnostic>) {
+    let mut p = Parser::new(src, tokens);
+    let syntax = p.enum_decl();
     (syntax, p.errors)
 }
 
@@ -422,7 +434,7 @@ impl Parser {
         let mut fields = Vec::new();
         if !self.recovering && self.at(&TokenKind::Lt) {
             let span = self.span();
-            self.later(span, "a struct's type parameters", Some("M4"));
+            self.later(span, "a struct with type parameters", Some("M4"));
             while !matches!(self.peek(), TokenKind::LBrace | TokenKind::Eof) {
                 self.bump();
             }
@@ -505,16 +517,7 @@ impl Parser {
         }
         // An attribute of a field is a layout's (`morphic-layouts.md`), which a struct without
         // `@layout` does not read.
-        while self.at(&TokenKind::At) && !self.recovering {
-            self.bump();
-            self.name("an attribute's name");
-            if self.at(&TokenKind::LParen) {
-                let close = self.closing_paren();
-                while self.pos <= close && !self.at(&TokenKind::Eof) {
-                    self.bump();
-                }
-            }
-        }
+        self.skip_attributes();
         if self.recovering {
             return;
         }
@@ -538,21 +541,293 @@ impl Parser {
             self.later(span, "a field's default value", None);
             return;
         }
-        if self.at(&TokenKind::Comma) && !self.newline_before() {
-            let comma = self.bump().span;
+        self.comma_after("a field");
+    }
+
+    /// A `,` at the end of a field, a variant or an arm, which ends at the end of its line
+    /// (`E0128`), whose fix removes it.
+    fn comma_after(&mut self, what: &str) {
+        if !self.at(&TokenKind::Comma) || self.newline_before() {
+            return;
+        }
+        let comma = self.bump().span;
+        let d = Diagnostic::error(
+            "E0128",
+            comma,
+            format!(
+                "{} ends at the end of its line, so Mente writes no `,` after one",
+                what
+            ),
+        )
+        .with_fix(
+            Applicability::MachineApplicable,
+            "remove the `,`",
+            comma,
+            "",
+        );
+        self.note(d);
+    }
+
+    // ---------------------------------------------------------------- enums
+
+    fn enum_decl(&mut self) -> EnumSyntax {
+        self.bump(); // `enum`
+        let (name, name_span) = self.name("an enum's name");
+        let mut variants = Vec::new();
+        if !self.recovering && self.at(&TokenKind::Lt) {
+            let span = self.span();
+            self.later(span, "an enum with type parameters", Some("M4"));
+            while !matches!(self.peek(), TokenKind::LBrace | TokenKind::Eof) {
+                self.bump();
+            }
+            self.recovering = false;
+        }
+        if !self.recovering && self.expect(&TokenKind::LBrace, "`{` and the enum's variants") {
+            loop {
+                match self.peek() {
+                    TokenKind::RBrace | TokenKind::Eof => break,
+                    TokenKind::DocComment(_) => {
+                        self.bump();
+                        continue;
+                    }
+                    _ => {}
+                }
+                let before = self.pos;
+                self.variant(&mut variants);
+                if self.recovering {
+                    self.skip_statement();
+                } else {
+                    self.statement_end("a variant");
+                }
+                if self.pos == before {
+                    self.bump();
+                }
+            }
+            if variants.is_empty() && self.errors.is_empty() {
+                let d = Diagnostic::error(
+                    "E0111",
+                    name_span,
+                    format!(
+                        "`enum {}` has no variant; an enum has at least one, as in `Empty` on a line of its own",
+                        name
+                    ),
+                );
+                self.error(d);
+            }
+        }
+        // A variant's types nest only through the parser's recursion, whose depth limit reports
+        // `E0127` first, so the tree is never deeper than the limit.
+        EnumSyntax {
+            name,
+            name_span,
+            variants,
+            tree: std::mem::take(&mut self.tree),
+        }
+    }
+
+    /// One variant, `name [ "(" field ":" type { "," field ":" type } ")" ]`. A payload of
+    /// unnamed types, as in Rust's `Deposit(i64)`, or in braces, as in `Rect { w: u8 }`, is
+    /// `E0130`, whose fix names the fields.
+    fn variant(&mut self, variants: &mut Vec<VariantSyntax>) {
+        // An attribute above a variant, or before it on its line, is read and left aside, as a
+        // field's is (`grammar.md`, item 10).
+        self.skip_attributes();
+        if self.recovering {
+            return;
+        }
+        let (name, name_span) = self.name("a variant's name");
+        if self.recovering {
+            return;
+        }
+        let mut fields = Vec::new();
+        let braced = self.at(&TokenKind::LBrace) && !self.newline_before();
+        if (self.at(&TokenKind::LParen) || braced)
+            && !self.newline_before()
+            && !self.payload(&name, braced, &mut fields)
+        {
+            return;
+        }
+        variants.push(VariantSyntax {
+            name,
+            name_span,
+            fields,
+        });
+        if self.at(&TokenKind::Eq) && !self.newline_before() {
+            let span = self.span();
+            self.later(span, "a variant's written tag value", None);
+            return;
+        }
+        self.comma_after("a variant");
+    }
+
+    /// Reads the attributes before a field or a variant, `@name` or `@name(...)`, above it or
+    /// before it on its line, and leaves them aside.
+    fn skip_attributes(&mut self) {
+        while self.at(&TokenKind::At) && !self.recovering {
+            self.bump();
+            self.name("an attribute's name");
+            if self.at(&TokenKind::LParen) {
+                let close = self.closing_paren();
+                while self.pos <= close && !self.at(&TokenKind::Eof) {
+                    self.bump();
+                }
+            }
+        }
+    }
+
+    /// A variant's payload, `(` to `)`, or another language's `{` to `}`: its fields, each
+    /// `name: type`. Reports a payload written otherwise once, with the fix that writes it so.
+    /// False after an error that ends the variant's line.
+    fn payload(&mut self, variant: &str, braced: bool, fields: &mut Vec<FieldSyntax>) -> bool {
+        let open = self.bump().span;
+        let close = if braced {
+            TokenKind::RBrace
+        } else {
+            TokenKind::RParen
+        };
+        // Each field written without its name, by where its type starts.
+        let mut unnamed: Vec<Span> = Vec::new();
+        while !self.at(&close) && !self.recovering && !self.at(&TokenKind::Eof) {
+            let before = self.pos;
+            let named = matches!(self.peek(), TokenKind::Ident(_))
+                && self.peek_second() == &TokenKind::Colon
+                && !matches!(
+                    self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                    Some(TokenKind::Colon)
+                );
+            if named {
+                let (fname, fspan) = self.name("a payload field's name");
+                self.bump(); // `:`
+                let ty = self.ty();
+                fields.push(FieldSyntax {
+                    is_pub: false,
+                    name: fname,
+                    name_span: fspan,
+                    ty,
+                });
+            } else {
+                let at = self.span();
+                let ty = self.ty();
+                unnamed.push(at);
+                let generated = format!("value{}", unnamed.len() - 1);
+                fields.push(FieldSyntax {
+                    is_pub: false,
+                    name: generated,
+                    name_span: at,
+                    ty,
+                });
+            }
+            if self.pos == before {
+                break;
+            }
+            if !self.recovering && !self.eat(&TokenKind::Comma) && !self.at(&close) {
+                self.expected("`,` or the end of the payload's fields");
+            }
+        }
+        if self.recovering {
+            return false;
+        }
+        let end = self.span();
+        if !self.expect(&close, "the end of the payload's fields") {
+            return false;
+        }
+        // A payload has a field at least: a variant that holds nothing has no parentheses.
+        if fields.is_empty() && !braced {
             let d = Diagnostic::error(
-                "E0128",
-                comma,
-                "a field ends at the end of its line, so Mente writes no `,` after one",
+                "E0111",
+                Span {
+                    end: end.end,
+                    ..open
+                },
+                format!(
+                    "a variant's payload has at least one field, and a variant that holds nothing is written without parentheses: `{}`",
+                    variant
+                ),
             )
             .with_fix(
                 Applicability::MachineApplicable,
-                "remove the `,`",
-                comma,
+                "remove the empty parentheses",
+                Span {
+                    end: end.end,
+                    ..open
+                },
                 "",
             );
-            self.note(d);
+            self.error(d);
+            self.recovering = false;
+            return true;
         }
+        if unnamed.is_empty() && !braced {
+            return true;
+        }
+        // The names the fix gives: `value` for one field, `value0`, `value1` and on for several.
+        let names: Vec<String> = if unnamed.len() == 1 {
+            vec![String::from("value")]
+        } else {
+            (0..unnamed.len()).map(|k| format!("value{}", k)).collect()
+        };
+        let mut edits: Vec<crate::diagnostics::Edit> = unnamed
+            .iter()
+            .zip(&names)
+            .map(|(at, n)| crate::diagnostics::Edit {
+                span: Span {
+                    end: at.start,
+                    ..*at
+                },
+                replacement: format!("{}: ", n),
+            })
+            .collect();
+        if braced {
+            edits.insert(
+                0,
+                crate::diagnostics::Edit {
+                    span: open,
+                    replacement: "(".into(),
+                },
+            );
+            edits.push(crate::diagnostics::Edit {
+                span: end,
+                replacement: ")".into(),
+            });
+        }
+        let message = if braced && unnamed.is_empty() {
+            format!(
+                "a variant's payload is written in parentheses, its fields named, as in `{}(field: u8)`, not in braces",
+                variant
+            )
+        } else {
+            format!(
+                "a variant's payload names its fields, as in `{}(amount: i64)`, so a value is built and matched by name",
+                variant
+            )
+        };
+        let d = Diagnostic::error(
+            "E0130",
+            Span {
+                end: end.end,
+                ..open
+            },
+            message,
+        );
+        let mut d = d;
+        d.fixes.push(crate::diagnostics::Fix {
+            message: if unnamed.is_empty() {
+                "write the payload in parentheses".into()
+            } else {
+                "name the fields".into()
+            },
+            applicability: if unnamed.is_empty() {
+                Applicability::MachineApplicable
+            } else {
+                Applicability::Suggestion
+            },
+            edits,
+        });
+        self.error(d);
+        // The payload is read whole, to its closing bracket, so the variant goes on as one
+        // whose fields are named, and the next line is the next variant's.
+        self.recovering = false;
+        true
     }
 
     /// After an error in the header, skips to its next clause or to the body.
@@ -1066,32 +1341,347 @@ impl Parser {
     }
 
     fn expr_within(&mut self) -> ExprId {
-        if !self.at(&TokenKind::If) {
-            return self.binary(0);
-        }
-        let e = self.if_expr();
+        let e = match self.peek() {
+            TokenKind::If => self.if_expr(),
+            TokenKind::Match => self.match_expr(),
+            _ => return self.binary(0),
+        };
         if !self.recovering && !self.ends_here() && infix(self.peek()).is_some() {
             self.if_in_operand(e);
         }
         e
     }
 
-    /// An `if` used as an operand needs parentheses (`E0115`); the fix adds them.
+    /// An `if` or a `match` used as an operand needs parentheses (`E0115`); the fix adds them.
     fn if_in_operand(&mut self, e: ExprId) {
         let span = self.tree.expr(e).span;
+        let word = match self.tree.expr(e).kind {
+            ExprKind::Match { .. } => "match",
+            _ => "if",
+        };
+        let article = if word == "if" { "an" } else { "a" };
         let wrapped = format!("({})", self.text_of(span));
         let d = Diagnostic::error(
             "E0115",
             span,
-            "an `if` expression used as an operand needs parentheses",
+            format!(
+                "{} `{}` expression used as an operand needs parentheses",
+                article, word
+            ),
         )
         .with_fix(
             Applicability::MachineApplicable,
-            "put the `if` expression in parentheses",
+            format!("put the `{}` expression in parentheses", word),
             span,
             wrapped,
         );
         self.error(d);
+    }
+
+    // ---------------------------------------------------------------- match
+
+    /// `match scrutinee { arm ... }`, one arm per line (`grammar.md`, item 12).
+    fn match_expr(&mut self) -> ExprId {
+        let start = self.span();
+        self.bump(); // `match`
+        let scrutinee = self.cond();
+        let mut arms = Vec::new();
+        if self.recovering {
+            return self.tree.push_expr(ExprKind::Error, self.span_from(start));
+        }
+        let open = self.span();
+        if !self.expect(&TokenKind::LBrace, "`{` and the arms of the `match`") {
+            return self.tree.push_expr(ExprKind::Error, self.span_from(start));
+        }
+        // Inside the braces, as in a block, a newline ends an arm.
+        let saved_nest = self.nest;
+        let saved_cond = self.cond_nest.take();
+        let saved_index = self.index_nest.take();
+        self.nest = 0;
+        loop {
+            match self.peek() {
+                TokenKind::RBrace => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => {
+                    let d = Diagnostic::error("E0111", open, "this `match` has no closing `}`");
+                    self.error(d);
+                    break;
+                }
+                _ => {}
+            }
+            let before = self.pos;
+            if let Some(arm) = self.arm() {
+                arms.push(arm);
+            }
+            if self.recovering {
+                self.skip_statement();
+            } else {
+                self.statement_end("an arm");
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        self.nest = saved_nest;
+        self.cond_nest = saved_cond;
+        self.index_nest = saved_index;
+        if arms.is_empty() && self.errors.is_empty() {
+            let d = Diagnostic::error(
+                "E0111",
+                start,
+                "this `match` has no arm; a `match` has one for each value of what it reads, as in `0 => a` on a line of its own",
+            );
+            self.error(d);
+        }
+        let span = self.span_from(start);
+        self.tree
+            .push_expr(ExprKind::Match { scrutinee, arms }, span)
+    }
+
+    /// One arm, `pattern => expression` or `pattern => { ... }`. A newline after `=>` does not
+    /// end it. An arm guard (`E0131`) and alternatives (`E0132`) are other languages' patterns.
+    fn arm(&mut self) -> Option<Arm> {
+        let start = self.span();
+        let pattern = self.pattern()?;
+        if self.at(&TokenKind::If) && !self.newline_before() {
+            let at = self.span();
+            let d = Diagnostic::error(
+                "E0131",
+                at,
+                "an arm has no guard: its pattern alone decides whether it runs; test the condition with `if` inside the arm, whose other branch does what a later arm would",
+            );
+            self.error(d);
+            return None;
+        }
+        if self.at(&TokenKind::Pipe) && !self.newline_before() {
+            let at = self.span();
+            let d = Diagnostic::error(
+                "E0132",
+                at,
+                "a pattern matches one variant or one value, so it has no alternatives; write an arm for each, or `_` after them on an integer",
+            );
+            self.error(d);
+            return None;
+        }
+        if !self.expect(&TokenKind::FatArrow, "`=>` after the arm's pattern") {
+            return None;
+        }
+        let body = if self.at(&TokenKind::LBrace) {
+            ArmBody::Block(self.block())
+        } else {
+            ArmBody::Expr(self.expr())
+        };
+        if self.recovering {
+            return None;
+        }
+        // An assignment is a statement, which an arm holds only in a block.
+        if let (ArmBody::Expr(target), Some(_)) = (body, assign_op(self.peek())) {
+            if !self.ends_here() {
+                let from = self.tree.expr(target).span;
+                self.bump();
+                self.expr();
+                if self.recovering {
+                    return None;
+                }
+                let whole = self.span_from(from);
+                let text = format!("{{ {} }}", self.text_of(whole));
+                let d = Diagnostic::error(
+                    "E0111",
+                    whole,
+                    "an arm is an expression or a block, and an assignment is a statement, so it stands in a block",
+                )
+                .with_fix(
+                    Applicability::MachineApplicable,
+                    "put the assignment in a block",
+                    whole,
+                    text,
+                );
+                self.error(d);
+                // The assignment is read whole, so the arm's line ends here and the next
+                // line is the next arm's.
+                self.recovering = false;
+                return None;
+            }
+        }
+        let span = self.span_from(start);
+        self.comma_after("an arm");
+        Some(Arm {
+            pattern,
+            body,
+            span,
+        })
+    }
+
+    /// A pattern of M2: a variant with its bindings, an integer literal with `-` or not,
+    /// `true`, `false`, or `_`. A pattern of `?T`, `none` or a name, comes later in M2 (`E0109`),
+    /// and one M2 does not have, such as a range or a tuple, is `E0132`.
+    fn pattern(&mut self) -> Option<Pattern> {
+        let start = self.span();
+        let kind = match self.peek().clone() {
+            TokenKind::Ident(n) if n == "_" => {
+                self.bump();
+                PatternKind::Wildcard
+            }
+            TokenKind::Ident(n) => {
+                self.bump();
+                if self.at(&TokenKind::Colon)
+                    && self.peek_second() == &TokenKind::Colon
+                    && self.next_two_touch()
+                {
+                    self.path_idiom();
+                    return None;
+                }
+                if !self.at(&TokenKind::Dot) || self.newline_before() {
+                    let what = format!(
+                        "a name pattern (`{}`), which binds the present value of a `?T`,",
+                        n
+                    );
+                    self.later(start, &what, Some("M2"));
+                    return None;
+                }
+                self.bump(); // `.`
+                let (name, name_span) = self.name("a variant's name after `.`");
+                if self.recovering {
+                    return None;
+                }
+                let bindings = if self.at(&TokenKind::LParen) && !self.newline_before() {
+                    Some(self.pattern_bindings()?)
+                } else {
+                    None
+                };
+                PatternKind::Variant {
+                    enum_name: n,
+                    name,
+                    name_span,
+                    bindings,
+                }
+            }
+            TokenKind::Minus => {
+                self.bump();
+                match self.peek().clone() {
+                    TokenKind::IntLit(value, raw) => {
+                        self.bump();
+                        PatternKind::Int {
+                            negative: true,
+                            value,
+                            suffix: int_suffix(&raw),
+                        }
+                    }
+                    _ => {
+                        self.expected("an integer literal after `-` in a pattern");
+                        return None;
+                    }
+                }
+            }
+            TokenKind::IntLit(value, raw) => {
+                self.bump();
+                PatternKind::Int {
+                    negative: false,
+                    value,
+                    suffix: int_suffix(&raw),
+                }
+            }
+            TokenKind::TrueLit => {
+                self.bump();
+                PatternKind::Bool(true)
+            }
+            TokenKind::FalseLit => {
+                self.bump();
+                PatternKind::Bool(false)
+            }
+            TokenKind::NoneLit => {
+                self.later(
+                    start,
+                    "`none`, the pattern of an absent `?T` value,",
+                    Some("M2"),
+                );
+                return None;
+            }
+            TokenKind::LParen | TokenKind::LBracket => {
+                let d = Diagnostic::error(
+                    "E0132",
+                    start,
+                    "a pattern is a variant, an integer literal, `true`, `false` or `_`, never a tuple or an array of patterns; match the parts with a `match` each",
+                );
+                self.error(d);
+                return None;
+            }
+            _ => {
+                self.expected("a pattern: a variant such as `Shape.Dot`, an integer literal, `true`, `false` or `_`");
+                return None;
+            }
+        };
+        if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) && !self.newline_before()
+        {
+            let at = self.span();
+            let d = Diagnostic::error(
+                "E0132",
+                at,
+                "a pattern matches one value, never a range; write an arm for each value, or test the range with `if` in an arm after `_`",
+            );
+            self.error(d);
+            return None;
+        }
+        Some(Pattern {
+            kind,
+            span: self.span_from(start),
+        })
+    }
+
+    /// A variant pattern's bindings, `(field: name, other: _)`. A binding is a name or `_`: a
+    /// pattern in its place nests, which M2's patterns do not (`E0132`).
+    fn pattern_bindings(&mut self) -> Option<Vec<PatBinding>> {
+        self.bump(); // `(`
+        self.nest += 1;
+        let mut bindings = Vec::new();
+        while !self.at(&TokenKind::RParen) && !self.recovering && !self.at(&TokenKind::Eof) {
+            let field = if self.named_argument_follows() {
+                let (f, fspan) = self.name("a field's name");
+                self.bump(); // `:`
+                Some((f, fspan))
+            } else {
+                None
+            };
+            let at = self.span();
+            let ends = |k: Option<&Token>| {
+                matches!(
+                    k.map(|t| &t.kind),
+                    Some(TokenKind::Comma | TokenKind::RParen)
+                )
+            };
+            match self.peek().clone() {
+                TokenKind::Ident(n) if ends(self.tokens.get(self.pos + 1)) => {
+                    self.bump();
+                    bindings.push(PatBinding {
+                        field,
+                        name: (n != "_").then_some(n),
+                        name_span: at,
+                    });
+                }
+                _ => {
+                    let d = Diagnostic::error(
+                        "E0132",
+                        at,
+                        "a payload's field binds a name or `_`, never a pattern of its own: bind it to a name, and `match` that name in the arm",
+                    );
+                    self.error(d);
+                    break;
+                }
+            }
+            if !self.recovering && !self.eat(&TokenKind::Comma) && !self.at(&TokenKind::RParen) {
+                self.expected("`,` or `)` after a binding");
+            }
+        }
+        self.nest -= 1;
+        if self.recovering {
+            return None;
+        }
+        if !self.expect(&TokenKind::RParen, "`)` to close the bindings") {
+            return None;
+        }
+        Some(bindings)
     }
 
     fn binary(&mut self, min_bp: u8) -> ExprId {
@@ -1456,6 +2046,10 @@ impl Parser {
                     } else {
                         self.call(n)
                     }
+                } else if self.dotted_call_follows() {
+                    self.dotted_call(n, start)
+                } else if self.dotted_braced_follows() {
+                    self.dotted_braced(n, start)
                 } else if self.struct_literal_follows() {
                     self.struct_literal(n, start)
                 } else {
@@ -1481,6 +2075,13 @@ impl Parser {
                 self.if_in_operand(e);
                 return e;
             }
+            TokenKind::Match => {
+                let e = self.match_expr();
+                if !self.recovering {
+                    self.if_in_operand(e);
+                }
+                return e;
+            }
             TokenKind::StrLit(_) => {
                 self.later(start, "a string value", Some("M2"));
                 ExprKind::Error
@@ -1489,7 +2090,7 @@ impl Parser {
                 self.later(start, "a floating-point or fixed-point value", Some("M5"));
                 ExprKind::Error
             }
-            TokenKind::NoneLit | TokenKind::Match | TokenKind::Raise | TokenKind::Catch => {
+            TokenKind::NoneLit | TokenKind::Raise | TokenKind::Catch => {
                 let what = format!("`{}`", self.text_of(start));
                 self.later(start, &what, Some("M2"));
                 ExprKind::Error
@@ -1743,6 +2344,65 @@ impl Parser {
     /// Rust's struct literal `Name { f: e }` (`E0129`), read as `Name(f: e)` after its
     /// diagnostic, whose fix writes it so.
     fn struct_literal(&mut self, name: String, start: Span) -> ExprKind {
+        let what = format!(
+            "a struct with its fields in parentheses, as in `{}(field: value)`",
+            name
+        );
+        match self.braced_fields(&what, start, start.end) {
+            Some(fields) => ExprKind::Construct { name, fields },
+            None => ExprKind::Error,
+        }
+    }
+
+    /// Whether the next tokens, after a name, are `.name {` on one line holding `field:`: a
+    /// variant built as another language's struct literal, `Name.B { f: e }`.
+    fn dotted_braced_follows(&self) -> bool {
+        let at = |k: usize| self.tokens.get(self.pos + k);
+        let (Some(dot), Some(name), Some(open), Some(field), Some(colon)) =
+            (at(0), at(1), at(2), at(3), at(4))
+        else {
+            return false;
+        };
+        dot.kind == TokenKind::Dot
+            && !self.ends_here()
+            && matches!(name.kind, TokenKind::Ident(_))
+            && open.kind == TokenKind::LBrace
+            && open.span.line == name.span.line
+            && matches!(field.kind, TokenKind::Ident(_))
+            && colon.kind == TokenKind::Colon
+            && self.cond_nest != Some(self.nest)
+    }
+
+    /// A variant built in braces, `Name.B { f: e }` (`E0129`), read as `Name.B(f: e)` after
+    /// its diagnostic, whose fix writes it so, as a struct literal in braces is.
+    fn dotted_braced(&mut self, enum_name: String, start: Span) -> ExprKind {
+        self.bump(); // `.`
+        let (name, name_span) = self.name("a variant's name");
+        let what = format!(
+            "a variant's payload with its fields in parentheses, as in `{}.{}(field: value)`",
+            enum_name, name
+        );
+        match self.braced_fields(&what, start, name_span.end) {
+            Some(fields) => ExprKind::Variant {
+                enum_name,
+                enum_span: start,
+                name,
+                name_span,
+                payload: Payload::Named(fields),
+            },
+            None => ExprKind::Error,
+        }
+    }
+
+    /// The fields of another language's literal in braces, from `{` to `}`, after a name that
+    /// starts at `start` and ends at byte `name_end`: `E0129`, which says Mente builds `what`,
+    /// with the fix that writes the fields in parentheses. `None` after an error among them.
+    fn braced_fields(
+        &mut self,
+        what: &str,
+        start: Span,
+        name_end: usize,
+    ) -> Option<Vec<FieldInit>> {
         self.bump();
         // The first field's name, where the `(` that replaces `{` ends.
         let first = self.span().start;
@@ -1751,28 +2411,24 @@ impl Parser {
         self.nest -= 1;
         // The fields end at `}`, or at an error `field_inits` reported.
         if self.recovering {
-            return ExprKind::Error;
+            return None;
         }
         let close = self.bump().span;
-        let d = Diagnostic::error(
+        let mut d = Diagnostic::error(
             "E0129",
             Span {
                 end: close.end,
                 ..start
             },
-            format!(
-                "Mente builds a struct with its fields in parentheses, as in `{}(field: value)`, not in braces",
-                name
-            ),
+            format!("Mente builds {}, not in braces", what),
         );
-        let mut d = d;
         d.fixes.push(crate::diagnostics::Fix {
             message: "write the fields in parentheses".into(),
             applicability: Applicability::MachineApplicable,
             edits: vec![
                 crate::diagnostics::Edit {
                     span: Span {
-                        start: start.end,
+                        start: name_end,
                         end: first,
                         ..start
                     },
@@ -1788,23 +2444,77 @@ impl Parser {
             ],
         });
         self.note(d);
-        ExprKind::Construct { name, fields }
+        Some(fields)
+    }
+
+    /// Whether the next tokens, after a name, are `.name(` on one line: a variant built, or a
+    /// call on a receiver, which name resolution tells apart (`grammar.md`, item 12). `.unwrap()`
+    /// and `.expect()` are another language's, which [`Self::postfix`] reports.
+    fn dotted_call_follows(&self) -> bool {
+        let at = |k: usize| self.tokens.get(self.pos + k);
+        let (Some(dot), Some(name), Some(open)) = (at(0), at(1), at(2)) else {
+            return false;
+        };
+        dot.kind == TokenKind::Dot
+            && !self.ends_here()
+            && matches!(&name.kind, TokenKind::Ident(m) if m != "unwrap" && m != "expect")
+            && open.kind == TokenKind::LParen
+            && open.span.line == name.span.line
+    }
+
+    /// `a.b(...)`, `a` a name: a variant built with its payload, or, as name resolution finds
+    /// `a`, a call on a receiver.
+    fn dotted_call(&mut self, enum_name: String, start: Span) -> ExprKind {
+        self.bump(); // `.`
+        let (name, name_span) = self.name("a variant's name after `.`");
+        // A type of the language is no enum of the module: a call on it, such as
+        // `List.new()`, is a construct of a later milestone, whatever name resolution finds.
+        if language_type(&enum_name) {
+            self.later(name_span, "a method call", Some("M2"));
+            return ExprKind::Error;
+        }
+        // After an error among the arguments, the statement is skipped from their `)`, so that
+        // the brackets after it are counted from where they open.
+        let close = self.closing_paren();
+        let payload = match self.arguments() {
+            Arguments::Named(fields) => Payload::Named(fields),
+            Arguments::Positional(args) => Payload::Positional(args),
+        };
+        // Recovery leaves the parser at or before the `)`, or at the end of the file.
+        if self.recovering {
+            self.pos = (close + 1).min(self.tokens.len() - 1);
+        }
+        ExprKind::Variant {
+            enum_name,
+            enum_span: start,
+            name,
+            name_span,
+            payload,
+        }
     }
 
     fn call(&mut self, callee: String) -> ExprKind {
+        match self.arguments() {
+            // A list whose first argument is named builds a struct.
+            Arguments::Named(fields) => ExprKind::Construct {
+                name: callee,
+                fields,
+            },
+            Arguments::Positional(args) => ExprKind::Call { callee, args },
+        }
+    }
+
+    /// An argument list, `(` to `)`: named, when its first argument is, or positional.
+    fn arguments(&mut self) -> Arguments {
         self.bump(); // `(`
         self.nest += 1;
-        // A list whose first argument is named builds a struct.
         if self.named_argument_follows() {
             let fields = self.field_inits(&TokenKind::RParen);
             if !self.recovering {
                 self.bump(); // `)`
             }
             self.nest -= 1;
-            return ExprKind::Construct {
-                name: callee,
-                fields,
-            };
+            return Arguments::Named(fields);
         }
         let mut args = Vec::new();
         while !self.at(&TokenKind::RParen) && !self.recovering {
@@ -1867,7 +2577,7 @@ impl Parser {
             self.bump(); // `)`
         }
         self.nest -= 1;
-        ExprKind::Call { callee, args }
+        Arguments::Positional(args)
     }
 
     /// `todo("reason")` or `unreachable("reason")`, whose argument is a string literal.
@@ -1947,6 +2657,12 @@ impl Parser {
     }
 }
 
+/// An argument list, as written.
+enum Arguments {
+    Named(Vec<FieldInit>),
+    Positional(Vec<Arg>),
+}
+
 /// The binding power `not` parses its operand at: below the comparisons, above `and`, so
 /// `not a == b` is `not (a == b)` and `not a and b` is `(not a) and b`.
 const NOT_OPERAND_BP: u8 = 3;
@@ -1997,6 +2713,7 @@ fn starts_expression(kind: &TokenKind) -> bool {
             | TokenKind::Not
             | TokenKind::Bang
             | TokenKind::If
+            | TokenKind::Match
     )
 }
 
@@ -2152,7 +2869,7 @@ mod tests {
         for (src, message) in [
             (
                 "struct B<T> {\n  v: u8\n}",
-                "a struct's type parameters comes in M4; M2 does not have it",
+                "a struct with type parameters comes in M4; M2 does not have it",
             ),
             (
                 "struct R {\n  lo: u8\n  invariant {\n    lo < 3\n  }\n}",
@@ -2207,7 +2924,8 @@ mod tests {
         );
         assert_eq!(codes("f().x = 1"), ["E0114"]);
         // A method call is still a later construct; a field may take any name.
-        assert_eq!(codes("val n = s.size()"), ["E0109"]);
+        assert_eq!(codes("val n = s.f.size()"), ["E0109"]);
+        assert_eq!(expr("s.size(1)"), "(call s.size 1)");
         assert_eq!(expr("s.len"), "(. s len)");
     }
 
@@ -2559,7 +3277,7 @@ _ == b"
             .iter()
             .any(|s| matches!(&s.kind, StmtKind::Binding { name, .. } if name == "y")));
         // A construct that spans lines is skipped whole.
-        let (f, errs) = parse("fn f() {\n  val x = match y {\n    1 => 2\n  }\n  val z = 3\n}");
+        let (f, errs) = parse("fn f() {\n  val x = comptime {\n    1 => 2\n  }\n  val z = 3\n}");
         assert_eq!(errs.len(), 1);
         assert!(f
             .tree
@@ -2768,10 +3486,6 @@ _ == b"
                 "val x = 1.5",
                 "a floating-point or fixed-point value comes in M5; M2 does not have it",
             ),
-            (
-                "val m = match x {\n  1 => 2\n}",
-                "`match` comes later in M2; the compiler does not have it yet",
-            ),
             ("raise E.Bad", "`raise` comes later in M2; the compiler does not have it yet"),
             ("val n = none", "`none` comes later in M2; the compiler does not have it yet"),
             ("val c = catch", "`catch` comes later in M2; the compiler does not have it yet"),
@@ -2800,7 +3514,7 @@ _ == b"
                 "a `for` loop is in no milestone yet; M2 does not have it",
             ),
             (
-                "val l = xs.count()",
+                "val l = xs[0].count()",
                 "a method call comes later in M2; the compiler does not have it yet",
             ),
             (
@@ -3277,5 +3991,252 @@ _ == b"
                 got
             );
         }
+    }
+
+    /// An enum declaration, `grammar.md` item 10.
+    fn parse_enum_src(src: &str) -> (EnumSyntax, Vec<Diagnostic>) {
+        let (tokens, errors) = lex(src);
+        assert!(errors.is_empty(), "{:?}", errors);
+        let tokens: Vec<Token> = tokens
+            .into_iter()
+            .filter(|t| t.kind != TokenKind::Eof)
+            .collect();
+        parse_enum(src, &tokens)
+    }
+
+    fn enum_codes(src: &str) -> Vec<&'static str> {
+        parse_enum_src(src).1.iter().map(|d| d.code).collect()
+    }
+
+    /// An enum's variants stand one per line, each a name and its payload's named fields; a
+    /// comma after one, a payload of unnamed types or in braces, and an enum without a variant
+    /// are reported, each with its code, and the fixes apply.
+    #[test]
+    fn test_enum_declarations_take_one_variant_per_line() {
+        let (e, errors) = parse_enum_src(
+            "enum Shape {\n  /// Nothing.\n  Dot\n  Rect(w: u8[1..=9], h: [2]u8)\n  Line(\n    from: Point,\n    to: Point,\n  )\n}",
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
+        assert_eq!(
+            Tree::render_enum(&e),
+            "(enum Shape Dot (Rect (w u8[1..=9]) (h [2]u8)) (Line (from Point) (to Point)))"
+        );
+        assert_eq!(enum_codes("enum E {\n}"), ["E0111"]);
+        assert_eq!(enum_codes("enum E {\n  A B\n}"), ["E0112"]);
+        assert_eq!(enum_codes("enum E<T> {\n  A\n}"), ["E0109"]);
+        let (_, errors) = parse_enum_src("enum E<T> {\n  A\n}");
+        assert_eq!(
+            errors[0].message,
+            "an enum with type parameters comes in M4; M2 does not have it"
+        );
+        assert_eq!(enum_codes("enum E {\n  A = 1\n}"), ["E0109"]);
+        // After a payload of unnamed types, read to its `)`, the next line is the next
+        // variant's, so each line reports its own error.
+        assert_eq!(
+            enum_codes("enum E {\n  A(u8)\n  B(u16)\n  C(u32)\n  D,\n  F,\n}"),
+            ["E0130", "E0130", "E0130", "E0128", "E0128"]
+        );
+        // An attribute above a variant, or before it on its line, is read and left aside.
+        let (e, errors) = parse_enum_src("enum E {\n  @deprecated\n  A\n  @since(2) B(n: u8)\n}");
+        assert!(errors.is_empty(), "{:?}", errors);
+        assert_eq!(Tree::render_enum(&e), "(enum E A (B (n u8)))");
+        // A payload in braces whose types are unnamed is told to name its fields.
+        let (_, errors) = parse_enum_src("enum E {\n  Rect { u8, u16 }\n}");
+        assert!(
+            errors[0]
+                .message
+                .starts_with("a variant's payload names its fields"),
+            "{}",
+            errors[0].message
+        );
+        // A payload's type nested too deep is `E0127`, once.
+        let deep = format!("{}u8", "[1]".repeat(300));
+        let codes_of = |src: String| {
+            let mut c = enum_codes(&src);
+            c.sort_unstable();
+            c
+        };
+        assert_eq!(
+            codes_of(format!("enum E {{\n  A(x: {})\n  B(y: {})\n}}", deep, deep)),
+            ["E0127"]
+        );
+        // A payload holds a field at least: empty parentheses are `E0111`, at the parentheses,
+        // whose fix removes them.
+        let src = "enum E {\n  A()\n  B\n}";
+        let (_, errors) = parse_enum_src(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0111"]);
+        assert_eq!(&src[errors[0].primary.start..errors[0].primary.end], "()");
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "enum E {\n  A\n  B\n}"
+        );
+        assert_eq!(enum_codes("enum E {\n  A(n u8)\n}"), ["E0111"]);
+        // A comma after a variant, removed by its fix.
+        let src = "enum E {\n  A,\n  B(n: u8),\n}";
+        let (_, errors) = parse_enum_src(src);
+        assert_eq!(
+            errors.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["E0128", "E0128"]
+        );
+        let once = apply_fix(src, &errors[0].fixes[0]).unwrap();
+        assert_eq!(once, "enum E {\n  A\n  B(n: u8),\n}");
+        // A payload of unnamed types: one field is `value`, several `value0` and on.
+        for (src, fixed) in [
+            (
+                "enum E {\n  Deposit(i64)\n}",
+                "enum E {\n  Deposit(value: i64)\n}",
+            ),
+            (
+                "enum E {\n  Move(i32, [2]u8)\n}",
+                "enum E {\n  Move(value0: i32, value1: [2]u8)\n}",
+            ),
+            (
+                "enum E {\n  Rect { w: u8, h: u8 }\n}",
+                "enum E {\n  Rect ( w: u8, h: u8 )\n}",
+            ),
+        ] {
+            let (_, errors) = parse_enum_src(src);
+            assert_eq!(
+                errors.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0130"],
+                "{}",
+                src
+            );
+            assert_eq!(apply_fix(src, &errors[0].fixes[0]).unwrap(), fixed);
+            let (_, again) = parse_enum_src(fixed);
+            assert!(again.is_empty(), "{}: {:?}", fixed, again);
+        }
+    }
+
+    /// `match` takes its arms one per line, each a pattern of M2 and an expression or a block;
+    /// a newline after `=>` does not end an arm; `a.b(...)` on a name is a variant built or a
+    /// call on a receiver, which name resolution tells apart.
+    #[test]
+    fn test_match_arms_and_patterns_parse() {
+        assert_eq!(
+            expr("match x {\n  Shape.Dot => 0\n  Shape.Rect(w: a, h: _) =>\n    a\n  -1 => { 2 }\n  7_u8 => 3\n  true => 4\n  _ => 5\n}"),
+            "(match x (=> Shape.Dot 0) (=> (Shape.Rect (w a) (h _)) a) (=> -1 {2}) (=> 7_u8 3) (=> true 4) (=> _ 5))"
+        );
+        assert_eq!(
+            block("match c {\n  true => { x = 1 }\n  false => {\n    x = 2\n  }\n}\ny"),
+            "{(match c (=> true {(= x 1)}) (=> false {(= x 2)})); y}"
+        );
+        // An assignment is a statement, which an arm holds in a block, as its fix writes it.
+        let src = "fn f() {\n  match c {\n    true => x += 1\n    false => {}\n  }\n}";
+        let (_, errors) = parse(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0111"]);
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "fn f() {\n  match c {\n    true => { x += 1 }\n    false => {}\n  }\n}"
+        );
+        assert_eq!(
+            expr("Shape.Rect(w: 1, h: x)"),
+            "(new Shape.Rect (w 1) (h x))"
+        );
+        assert_eq!(expr("Shape.Dot"), "(. Shape Dot)");
+        assert_eq!(
+            expr("f(Shape.Rect(1, 2))"),
+            "(call f (call Shape.Rect 1 2))"
+        );
+        // A method call on a language type is a later milestone's, reported where it is
+        // written; and an error inside a call's arguments resumes after its `)`, so what
+        // follows the call is still read.
+        assert_eq!(codes("val xs = List.new()"), ["E0109"]);
+        // A `match` the file ends inside is reported as one without its `}`.
+        let (_, errors) = parse("fn f() = match c {\n  true => 1");
+        assert_eq!(
+            errors
+                .iter()
+                .map(|d| (d.code, d.message.as_str()))
+                .collect::<Vec<_>>(),
+            [("E0111", "this `match` has no closing `}`")]
+        );
+        // A call whose arguments the file ends inside, after an error among them, stops at the
+        // end of the file.
+        let (_, errors) = parse("fn f() = s.f(\"t\" +");
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0109"]);
+        // A name followed by one `:` in a pattern is no path written with `::`.
+        assert_eq!(codes("_ = match x {\n  v: u8 => 1\n}"), ["E0109"]);
+        // After an arm holding an assignment, read whole, the next line is the next arm's, so
+        // each arm reports its own error.
+        assert_eq!(
+            codes("match x {\n  0 => y = 1\n  _ => y = 2\n  1 => y = 3\n}"),
+            ["E0111", "E0111", "E0111"]
+        );
+        // A variant built in braces, as another language's struct literal, is `E0129`, read as
+        // its payload in parentheses, which its fix writes.
+        let src = "fn f() {\n  val c = E.B { n: 1, m: 2 }\n  _ = c\n}";
+        let (_, errors) = parse(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0129"]);
+        assert_eq!(
+            errors[0].message,
+            "Mente builds a variant's payload with its fields in parentheses, as in `E.B(field: value)`, not in braces"
+        );
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "fn f() {\n  val c = E.B(n: 1, m: 2)\n  _ = c\n}"
+        );
+        assert_eq!(
+            codes("guard s.f(\"t\") else { return }\nval r = 0..1"),
+            ["E0109", "E0109"]
+        );
+        // A positional binding is read, for the checker to name its field.
+        assert_eq!(
+            expr("match s {\n  Shape.Rect(a, _) => a\n}"),
+            "(match s (=> (Shape.Rect a _) a))"
+        );
+        // Inside parentheses, a newline still ends an arm.
+        assert_eq!(
+            expr("(match c {\n  true => 1\n  false => 0\n})"),
+            "(match c (=> true 1) (=> false 0))"
+        );
+        // As an operand, or as a condition, a `match` needs parentheses, which its fix adds.
+        let src = "fn f() = 1 + match c {\n  true => 1\n  false => 0\n}";
+        let (_, errors) = parse(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0115"]);
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "fn f() = 1 + (match c {\n  true => 1\n  false => 0\n})"
+        );
+        assert_eq!(codes("while match c {\n  true => 1\n} {\n}"), ["E0115"]);
+        assert_eq!(codes("_ = match c {\n}"), ["E0111"]);
+        assert_eq!(codes("_ = match c {\n  true => 1"), ["E0111"]);
+        assert_eq!(codes("_ = match c {\n  true 1\n}"), ["E0111"]);
+        assert_eq!(codes("_ = match c {\n  true => 1 false => 0\n}"), ["E0112"]);
+        assert_eq!(codes("_ = match c {\n  - => 1\n}"), ["E0111"]);
+        assert_eq!(codes("_ = match c {\n  + => 1\n}"), ["E0111"]);
+    }
+
+    /// Each pattern another language has and M2 does not, an arm guard, alternatives, a range, a
+    /// nested pattern, a tuple, has its code; a pattern of `?T` is M2's later construct.
+    #[test]
+    fn test_other_languages_patterns_get_their_codes() {
+        for (src, code) in [
+            ("_ = match x {\n  0 => 1\n  _ if x > 1 => 2\n}", "E0131"),
+            ("_ = match x {\n  0 | 1 => 1\n}", "E0132"),
+            ("_ = match x {\n  0..3 => 1\n}", "E0132"),
+            ("_ = match x {\n  (a, b) => 1\n}", "E0132"),
+            ("_ = match x {\n  [a] => 1\n}", "E0132"),
+            ("_ = match x {\n  O.W(inner: I.A) => 1\n}", "E0132"),
+            ("_ = match x {\n  O.W(n: 0) => 1\n}", "E0132"),
+            ("_ = match x {\n  O.W(I.A) => 1\n}", "E0132"),
+            ("_ = match x {\n  none => 1\n}", "E0109"),
+            ("_ = match x {\n  v => 1\n}", "E0109"),
+            ("_ = match x {\n  E::A => 1\n}", "E0123"),
+        ] {
+            assert_eq!(codes(src), [code], "{}", src);
+        }
+        // A comma after an arm, removed by its fix; the arms after it still parse.
+        let src = "fn f() = match c {\n  true => 1,\n  false => 0\n}";
+        let (f, errors) = parse(src);
+        assert_eq!(errors.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0128"]);
+        assert_eq!(
+            apply_fix(src, &errors[0].fixes[0]).unwrap(),
+            "fn f() = match c {\n  true => 1\n  false => 0\n}"
+        );
+        let Some(Body::Expr(e)) = f.body else {
+            panic!("an expression body")
+        };
+        assert!(matches!(&f.tree.expr(e).kind, ExprKind::Match { arms, .. } if arms.len() == 2));
     }
 }

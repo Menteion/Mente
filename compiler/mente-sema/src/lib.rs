@@ -250,14 +250,16 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
     // The structs first: every function reads their fields and layouts. The module's
     // diagnostics are put in the order of the source where they are combined.
     let parsed_structs = mente_syntax::parse_structs(src, module);
+    let parsed_enums = mente_syntax::parse_enums(src, module);
     let mut errors: Vec<Diagnostic> = parsed_structs
         .iter()
         .flat_map(|p| p.errors.iter().cloned())
+        .chain(parsed_enums.iter().flat_map(|p| p.errors.iter().cloned()))
         .collect();
-    let (structs, declared) = structs::declare(module, &parsed_structs);
+    let (structs, declared) = structs::declare(module, &parsed_structs, &parsed_enums);
     errors.extend(declared);
     errors.sort_by_key(|d| d.primary.start);
-    let parsed = mente_syntax::parse_bodies(src, module);
+    let parsed = parse_qualified(src, module);
     let mut todos: Vec<(Span, String)> = parsed
         .iter()
         .filter_map(|p| p.syntax.as_ref())
@@ -293,7 +295,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         let done = match (&p.syntax, p.errors.is_empty()) {
             (Some(syntax), true) => {
                 let (resolution, mut found) = names::resolve(syntax, &names, &structs);
-                let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs);
+                let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs, src);
                 found.extend(typed);
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
@@ -344,6 +346,20 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         todos,
         structs,
     }
+}
+
+/// Every function of `module` as [`mente_syntax::parse_bodies`] reads it, each tree qualified by
+/// what name resolution finds of the module's enums ([`structs::qualify`]): the trees every check
+/// after the parser reads.
+pub fn parse_qualified(src: &str, module: &ModuleFile) -> Vec<mente_syntax::ParsedFn> {
+    let enums = structs::enum_names(module);
+    let mut parsed = mente_syntax::parse_bodies(src, module);
+    for p in &mut parsed {
+        if let Some(syntax) = &mut p.syntax {
+            structs::qualify(&mut syntax.tree, &enums);
+        }
+    }
+    parsed
 }
 
 /// Runs full semantic & hardware layout verification on a parsed `.mn` `ModuleFile`, without
@@ -402,6 +418,23 @@ pub fn verify_module_with(
         match item {
             ItemDecl::Struct(s) => {
                 if let Some((size, align, _)) = extract_layout_attr(s) {
+                    // An enum has a layout (`core-calculus.md`, item 21), but a field of a
+                    // `@layout` struct that holds one is a construct no milestone brings yet.
+                    if let Some(f) = s
+                        .fields
+                        .iter()
+                        .find(|f| structs.is_enum(element_type(&f.ty)))
+                    {
+                        errors.push(Diagnostic::error(
+                            "E0109",
+                            f.ty_span,
+                            mente_syntax::diagnostics::later_message(
+                                "an enum as a field of a `@layout` struct",
+                                None,
+                            ),
+                        ));
+                        continue;
+                    }
                     match verify_explicit_struct_layout(s, size, align, &named_sizes, &named_aligns)
                     {
                         Ok(proof) => layout_proofs.push(proof),
@@ -713,6 +746,18 @@ pub fn verify_explicit_struct_layout(
 ///
 /// Target-dependent types (`usize`, `isize`) have no size here: a `@layout` struct must
 /// mean the same bytes on every target.
+/// The type a field's type `ty` holds through its arrays: `E` for `[2][3]E`.
+fn element_type(ty: &str) -> &str {
+    let mut t = ty.trim();
+    while let Some(rest) = t.strip_prefix('[') {
+        match rest.find(']') {
+            Some(close) => t = rest[close + 1..].trim(),
+            None => break,
+        }
+    }
+    t
+}
+
 fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usize> {
     let t = ty.trim();
     if let Some(inner) = t.strip_prefix("sat<").and_then(|s| s.strip_suffix('>')) {
@@ -1512,6 +1557,33 @@ pub struct Rec {
         // Without the plain structs' layouts, as `verify_module` alone reads a module, the
         // size is unknown.
         assert!(first_error(code).to_string().contains("E0417"));
+    }
+
+    /// An enum has a layout (`core-calculus.md`, item 21), but a field of a `@layout` struct
+    /// that holds one, directly or in an array, is a construct no milestone brings yet
+    /// (`E0109`), not a field whose size is unknown (`E0417`).
+    #[test]
+    fn test_an_enum_field_of_a_layout_struct_is_a_later_construct() {
+        for (layout, field) in [
+            ("@layout(size: 1, align: 1)", "@bytes(0..1) pub e: E"),
+            ("@layout(size: 2, align: 1)", "@bytes(0..2) pub es: [2]E"),
+        ] {
+            let src = format!(
+                "module m\npub enum E {{\n  A\n  B\n}}\n{}\npub struct Stamp {{\n  {}\n}}\n",
+                layout, field
+            );
+            let d = check_source(&src).unwrap_err();
+            assert_eq!(
+                d.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0109"],
+                "{}",
+                src
+            );
+            assert_eq!(
+                d[0].message,
+                "an enum as a field of a `@layout` struct is in no milestone yet; M2 does not have it"
+            );
+        }
     }
 
     #[test]

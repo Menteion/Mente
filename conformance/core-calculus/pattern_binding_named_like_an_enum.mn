@@ -1,0 +1,11 @@
+// expect: E0220
+module conformance
+pub enum Light {
+  Red(level: u8)
+  Green
+}
+
+pub fn level(l: Light) -> u8 = match l {
+  Light.Red(level: Light) => Light
+  Light.Green => 0
+}

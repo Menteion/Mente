@@ -1,0 +1,12 @@
+// expect: E0202
+module conformance
+// A name is declared once in a function, in each arm of a `match` as in each branch of an `if`.
+pub enum Size {
+  Small(n: u8)
+  Large(n: u64)
+}
+
+pub fn value(s: Size) -> u64 = match s {
+  Size.Small(n: n) => n
+  Size.Large(n: n) => n
+}

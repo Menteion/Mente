@@ -1,0 +1,8 @@
+// expect: pass
+module conformance
+pub fn flip(b: bool) -> bool = match b {
+  true => false
+  false => true
+}
+
+pub fn main() -> bool = flip(false)

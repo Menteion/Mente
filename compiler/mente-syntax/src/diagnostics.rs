@@ -411,8 +411,8 @@ mod tests {
             errors.remove(0).message
         };
         assert_eq!(
-            first("module m\npub fn f() -> u8 = match x {}\n"),
-            later_message("`match`", Some("M2"))
+            first("module m\npub fn f() -> u8 = raise x\n"),
+            later_message("`raise`", Some("M2"))
         );
         assert_eq!(
             first("module m\nstruct S {\n  t: Handle<u8>\n}\n"),

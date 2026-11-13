@@ -1,0 +1,30 @@
+// expect: pass
+module conformance
+// A `return` in a branch of an `if` or an arm of a `match` of a function whose body is an
+// expression ends that call alone: its caller goes on with the value returned.
+pub enum E {
+  A
+  B
+}
+
+pub fn branches(c: bool) -> u8 = if c {
+  return 1
+} else {
+  return 2
+}
+
+pub fn arms(e: E) -> u8 = match e {
+  E.A => {
+    return 7
+  }
+  E.B => 3
+}
+
+pub fn operand(x: u8) -> u8 = 5 + (match x {
+  0 => {
+    return 9
+  }
+  _ => 1
+})
+
+pub fn caller(c: bool, x: u8) -> u8 = branches(c) + arms(E.A) + arms(E.B) + operand(x)

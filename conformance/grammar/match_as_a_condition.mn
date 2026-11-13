@@ -1,0 +1,12 @@
+// expect: E0115
+module conformance
+pub fn f(b: bool) -> u8 {
+  var n: u8 = 0
+  while match b {
+    true => n < 3
+    false => false
+  } {
+    n += 1
+  }
+  n
+}

@@ -882,3 +882,110 @@ fn test_a_value_keeps_the_value_it_was_evaluated_to() {
     );
     assert_eq!(run(src, &format!("rd([{}, {}], 1, 1, 1)", o, o)), "2");
 }
+
+/// A variant is built as a struct is, each value narrowed into its field's type and checked
+/// against its refinement in the order written; a `match` evaluates its scrutinee once and runs
+/// the first arm whose pattern matches, its bindings reading the payload.
+#[test]
+fn test_enums_are_built_and_matched() {
+    let src = "pub enum Shape {\n  Dot\n  Rect(w: u8, h: i8[-3..=3])\n}\nfn count(mut n: u8) -> u8 {\n  n += 1\n  n\n}\npub fn area(s: Shape) -> i16 = match s {\n  Shape.Rect(w: w, h: h) => w * h\n  Shape.Dot => 0\n}\npub fn make(w: u16, h: i8) -> Shape = Shape.Rect(w: w, h: h)\npub fn sign(x: i8) -> i8 = match x {\n  -128 => -2\n  0 => 0\n  _ => if x < 0 { -1 } else { 1 }\n}\npub fn once() -> u8 {\n  var n: u8 = 0\n  val k = match count(mut n) {\n    1 => 10\n    _ => 20\n  }\n  n + k\n}\npub fn flip(b: bool) -> bool = match b {\n  true => false\n  false => true\n}";
+    assert_eq!(run(src, "area(Shape.Rect(w: 5, h: -3))"), "-15");
+    assert_eq!(run(src, "area(Shape.Dot)"), "0");
+    assert_eq!(run(src, "make(7, 2)"), "Shape.Rect(w: 7, h: 2)");
+    assert_eq!(kind(src, "make(256, 0)"), "narrowing");
+    assert_eq!(kind(src, "make(1, 4)"), "refinement");
+    assert_eq!(run(src, "sign(-128)"), "-2");
+    assert_eq!(run(src, "sign(-7)"), "-1");
+    assert_eq!(run(src, "sign(0)"), "0");
+    // The scrutinee is evaluated once.
+    assert_eq!(run(src, "once()"), "11");
+    assert_eq!(run(src, "flip(false)"), "true");
+    // A `return` in an arm or a branch of a function whose body is an expression ends that
+    // call alone: its caller goes on with the value returned.
+    // An integer scrutinee is narrowed into its type: a value outside it traps as a narrowing
+    // does, before any arm, whatever the arms cover.
+    let src = "pub fn f(x: u8) -> u8 = match x + 1 {\n  0 => 1\n  255 => 3\n  _ => 2\n}\npub fn g(x: i8) -> i8 = match -x {\n  -128 => 0\n  _ => 1\n}";
+    assert_eq!(trapped(src, "f(255)"), ("narrowing".to_string(), 2, 31));
+    assert_eq!(run(src, "f(254)"), "3");
+    assert_eq!(kind(src, "g(-128)"), "narrowing");
+    assert_eq!(run(src, "g(-127)"), "1");
+    let src = "pub enum E {\n  A\n  B\n}\npub fn ifr(c: bool) -> u8 = if c {\n  return 1\n} else {\n  return 2\n}\npub fn arm(e: E) -> u8 = match e {\n  E.A => {\n    return 7\n  }\n  E.B => 3\n}\npub fn operand(x: u8) -> u8 = 5 + (match x {\n  0 => {\n    return 9\n  }\n  _ => 1\n})\npub fn caller() -> u8 = ifr(true) + arm(E.A) + arm(E.B) + operand(0) + operand(1)";
+    assert_eq!(run(src, "caller()"), "26");
+}
+
+/// A variant prints as Mente writes it, `Name.A` or `Name.B(field: v, ...)`, and reads back so as
+/// an argument; one of another enum, an unknown variant, or a payload not named in order is no
+/// value of its parameter.
+#[test]
+fn test_an_enum_value_prints_and_reads_back_in_one_form() {
+    let src = "pub struct P {\n  a: u8\n}\npub enum E {\n  A\n  B(p: P, xs: [2]i8[-1..=1])\n}\npub fn id(e: E) -> E = e\npub fn all(es: [2]E) -> [2]E = es";
+    for v in ["E.A", "E.B(p: P(a: 255), xs: [-1, 1])"] {
+        assert_eq!(run(src, &format!("id({})", v)), v);
+    }
+    assert_eq!(
+        run(src, "all([E.A, E.B(p: P(a: 1), xs: [0, 0])])"),
+        "[E.A, E.B(p: P(a: 1), xs: [0, 0])]"
+    );
+    assert_eq!(
+        parse_call("f(E.B(p: P(a: 1), xs: [0, 0]), E.A)").map(|(_, a)| a),
+        Some(vec![
+            Value::Enum(
+                "E".into(),
+                "B".into(),
+                vec![
+                    (
+                        "p".into(),
+                        Value::Struct(
+                            "P".into(),
+                            vec![("a".into(), Value::Int(Int::from_u128(1)))]
+                        )
+                    ),
+                    (
+                        "xs".into(),
+                        Value::Array(vec![Value::Int(Int::ZERO), Value::Int(Int::ZERO)])
+                    ),
+                ]
+            ),
+            Value::Enum("E".into(), "A".into(), Vec::new()),
+        ])
+    );
+    assert_eq!(parse_call("f(E.)"), None);
+    assert_eq!(parse_call("f(E.1A)"), None);
+    assert_eq!(parse_call("f(E.B(1))"), None);
+    for wrong in [
+        "id(E.C)",
+        "id(F.A)",
+        "id(E.A(p: P(a: 1)))",
+        "id(E.B(xs: [0, 0], p: P(a: 1)))",
+        "id(E.B(p: P(a: 1)))",
+        "id(E.B)",
+        "id(P(a: 1))",
+        // Fields named as declared, a value of another shape in one.
+        "id(E.B(p: 5, xs: [0, 0]))",
+    ] {
+        assert!(
+            run(src, wrong).contains("does not have its parameter's shape"),
+            "{}",
+            wrong
+        );
+    }
+    assert_eq!(kind(src, "id(E.B(p: P(a: 256), xs: [0, 0]))"), "narrowing");
+    assert_eq!(kind(src, "id(E.B(p: P(a: 1), xs: [0, 2]))"), "refinement");
+    // A variant written with empty parentheses is found in a call's text, after spaces too,
+    // so a refused call can name it; a call of a function, or parentheses after no variant,
+    // are none.
+    for (text, found) in [
+        ("id(M.Z())", Some("M.Z")),
+        ("id(Mx.Z( ))", Some("Mx.Z")),
+        ("id(M.Z ())", Some("M.Z")),
+        ("M.Z()", Some("M.Z")),
+        ("id(M.Z(a: 1), N_2.Y_3())", Some("N_2.Y_3")),
+        ("Z()", None),
+        (" ()", None),
+        ("id(M.())", None),
+        ("id(g())", None),
+        ("id(.Z())", None),
+    ] {
+        assert_eq!(empty_payload(text).as_deref(), found, "{}", text);
+    }
+}

@@ -1,0 +1,14 @@
+// expect: E0232
+module conformance
+pub enum Cell {
+  Empty
+  Held(n: u8)
+}
+
+pub fn take(mut c: Cell) -> u8 = match c {
+  Cell.Held(n: n) => {
+    c = Cell.Empty
+    n
+  }
+  Cell.Empty => 0
+}

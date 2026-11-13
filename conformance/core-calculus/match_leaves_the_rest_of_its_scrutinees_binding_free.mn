@@ -1,0 +1,43 @@
+// expect: pass
+module conformance
+// Only the scrutinee's place is frozen, in every arm: another field of the binding that holds
+// it changes freely, and a transition gives the place its new value as the `match`'s.
+pub enum Cell {
+  Empty
+  Held(n: u8)
+}
+
+pub struct Box {
+  cell: Cell
+  other: u8
+}
+
+fn bump(mut n: u8) {
+  n = n / 2 + 1
+}
+
+pub fn take(mut b: Box) -> u8 = match b.cell {
+  Cell.Held(n: n) => {
+    b.other = n
+    bump(mut b.other)
+    n
+  }
+  Cell.Empty => 0
+}
+
+pub fn step(mut state: u8) {
+  state = match state {
+    0 => 1
+    1 => 2
+    _ => 0
+  }
+}
+
+pub fn main() -> u8 {
+  var b = Box(cell: Cell.Held(n: 4), other: 0)
+  val first = take(mut b)
+  var s: u8 = 0
+  step(mut s)
+  step(mut s)
+  first + b.other + s
+}

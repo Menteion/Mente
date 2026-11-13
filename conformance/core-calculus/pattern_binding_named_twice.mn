@@ -1,0 +1,9 @@
+// expect: E0202
+module conformance
+pub enum Shape {
+  Rect(w: u8, h: u8)
+}
+
+pub fn area(s: Shape, w: u8) -> u8 = match s {
+  Shape.Rect(w: w, h: h) => w + h
+}

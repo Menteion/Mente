@@ -1,0 +1,23 @@
+// expect: E0232
+module conformance
+pub enum Cell {
+  Empty
+  Held(n: u8)
+}
+
+fn clear(mut c: Cell) {
+  c = Cell.Empty
+}
+
+pub struct Box {
+  cell: Cell
+  other: u8
+}
+
+pub fn take(mut b: Box) -> u8 = match b.cell {
+  Cell.Held(n: n) => {
+    clear(mut b.cell)
+    n
+  }
+  Cell.Empty => 0
+}

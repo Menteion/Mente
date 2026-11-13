@@ -1,0 +1,8 @@
+// expect: pass
+module conformance
+// A `match` whose arm computes on an `i128`, an operation checked at its operator with no
+// static range, gives its value in the arms' type.
+pub fn wide(c: bool, a: i128) -> i128 = match c {
+  true => a + 1
+  false => 0
+}

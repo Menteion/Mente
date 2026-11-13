@@ -1,0 +1,39 @@
+// expect: pass
+module conformance
+// An enum inside a struct inside an enum is laid out, built, stored and matched at each level.
+pub enum Kind {
+  Small(n: u8)
+  Large(n: u64)
+}
+
+pub struct Item {
+  kind: Kind
+  count: u16
+}
+
+pub enum Slot {
+  Empty
+  Full(item: Item)
+}
+
+pub fn fill(n: u8) -> Slot = Slot.Full(item: Item(kind: Kind.Small(n: n), count: 1))
+
+pub fn grow(s: Slot) -> Slot = match s {
+  Slot.Empty => Slot.Empty
+  Slot.Full(item: i) => {
+    var j = i
+    j.kind = Kind.Large(n: 1000)
+    j.count = i.count + 1
+    Slot.Full(item: j)
+  }
+}
+
+pub fn size(s: Slot) -> u64 = match s {
+  Slot.Empty => 0
+  Slot.Full(item: i) => match i.kind {
+    Kind.Small(n: small) => small
+    Kind.Large(n: large) => large
+  }
+}
+
+pub fn main() -> u64 = size(grow(fill(3))) + size(fill(4))

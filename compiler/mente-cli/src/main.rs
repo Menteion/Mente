@@ -374,10 +374,17 @@ fn checked_call(
         None => ("main".to_string(), Vec::new()),
         Some(Some(parsed)) => parsed,
         Some(None) => {
-            eprintln!(
-                "error: `--call` takes a call such as \"f(1, true, mut [2, 3])\"; got `{}`",
-                call.unwrap_or_default()
-            );
+            let text = call.unwrap_or_default();
+            match mente_interp::empty_payload(&text) {
+                Some(variant) => eprintln!(
+                    "error: `{}()` holds no payload in `--call`: a variant that holds nothing is written without parentheses, `{}`",
+                    variant, variant
+                ),
+                None => eprintln!(
+                    "error: `--call` takes a call such as \"f(1, true, mut [2, 3])\"; got `{}`",
+                    text
+                ),
+            }
             process::exit(2);
         }
     };
