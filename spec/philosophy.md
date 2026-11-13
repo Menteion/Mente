@@ -2,7 +2,7 @@
 title: First-Principles Design Philosophy and Founding Axioms
 version: 0.2.0
 status: active
-date: 2026-11-09
+date: 2026-11-13
 ---
 
 # First-Principles Design Philosophy and Founding Axioms
@@ -51,12 +51,27 @@ Each is decided in the spec file it names; a new one starts from an entry of the
 - No implicit conversions and no casts (`core-calculus.md`, item 2).
 - No references or lifetimes: parameter modes instead (`mutable-value-semantics.md`).
 
+### What does not change
+
+A language that may change everything has no direction to converge in, and every change is argued from the beginning. So a few invariants hold through every change, before 1.0 and after it, and the rest of the language changes by the rules of the next section (Norman, 2026-11-13; [`evolution-invariants`](../docs/design-review.md#evolution-invariants)).
+
+- `Specified`: the invariants are:
+  1. the order of the axioms' aims (above);
+  2. no undefined behaviour and no silently wrong value;
+  3. a signature states everything a caller and a reviewer may rely on (axiom 3, [`interface-from-signature`](../docs/design-review.md#interface-from-signature));
+  4. every rejection carries its fix (axiom 6);
+  5. the evidence rule for `Implemented`: the compiler does it today, a unit test fails when the behaviour breaks, and a directive in the spec names that test (`CLAUDE.md`, invariant 1).
+- `Specified`: no entry of the register changes an invariant without first changing this list, in an entry of its own. Everything else, the syntax, the standard library, the backend and every mechanism outside the kernel (`core-calculus.md`, item 24), is open to change by the ordinary rules. An entry that proposes a change says which invariants it touches, normally none.
+- `Specified`: once the kernel has stopped changing, its type safety is proven in a mechanised model, which [`mechanised-model`](../docs/design-review.md#mechanised-model) deferred to the foundation gate, and a later change to the kernel carries the changed proof. A model of the whole language is not built: it would have to follow every change to the surface.
+
 ### How the language changes
 
-Agents learn Mente from its language card, not from training data, so a change costs less than in a language models were trained on, as long as the card changes with it (Norman, 2026-11-09; [`language-evolution`](../docs/design-review.md#language-evolution)).
+Agents learn Mente from its language card, not from training data, so a change costs less than in a language models were trained on, as long as the card changes with it (Norman, 2026-11-09; [`language-evolution`](../docs/design-review.md#language-evolution)). There is one language version at a time, never editions (Norman, 2026-11-13; [`one-language-version`](../docs/design-review.md#one-language-version)).
 
 - `Specified`: before 1.0, which is the foundation gate, any change may break existing code. The pull request that makes it updates the language card, the tests of the card's snippets, the conformance suite and the examples, and `mn` offers a machine-applicable migration where the change is mechanical.
-- `Specified`: after 1.0, a breaking change is admitted only with a machine-applicable migration, which `mn migrate` applies to existing code, as axiom 6 asks of every rejection. A change that cannot be migrated mechanically is considered for an edition, through the register.
+- `Specified`: after 1.0, a breaking change is admitted only with a machine-applicable migration, which `mn migrate` applies to existing code, as axiom 6 asks of every rejection. There are no editions, so a change that cannot be migrated mechanically is not admitted.
+- `Specified` **One language version per build**: every module of a program, its dependencies included, is compiled as the version of the compiler at hand, and the compiler implements only that version and the migrations into it. A dependency written for an older version is migrated by `mn migrate` when it is fetched, and the migrated source is what is compiled and cached. Migrations compose, so code any number of versions behind is brought forward a step at a time.
+- `Specified`: a package that cannot be migrated cannot be used until it is. The package index, when there is one, runs each release's migrations over every package and reports the failures before the release. A workspace is migrated as a whole, in one change.
 - `Specified`: the language card names the language version it describes and ships with the compiler. `mn card` prints the card of the installed version, so an agent always reads the card of the compiler it uses; the stable address serves the latest.
 
 ## 3. Goal: the general-purpose language best suited to AI agents
