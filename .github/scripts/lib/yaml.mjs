@@ -47,6 +47,9 @@ export function parseYaml(text) {
       if (content === "-" || content.startsWith("- ")) break;
       const m = KEY.exec(content);
       if (!m) fail("not a key and a value");
+      // GitHub decodes the escapes of a double-quoted key, so `"if"` spelled with one is `if`:
+      // the policy would read another key, and so the reader refuses them.
+      if (m[1].startsWith('"') && m[1].includes("\\")) fail("an escape in a quoted key");
       const key = unquote(m[1]);
       if (Object.hasOwn(out, key)) fail(`the key ${key} twice`);
       const at = i;
@@ -156,7 +159,10 @@ export function parseYaml(text) {
     if (text.startsWith('"')) {
       const m = /^"((?:[^"\\]|\\.)*)"\s*(#.*)?$/.exec(text);
       if (!m) fail("an unterminated double-quoted scalar", at);
-      return m[1].replace(/\\(.)/g, (_, c) => ({ n: "\n", t: "\t", '"': '"', "\\": "\\", "/": "/" })[c] ?? `\\${c}`);
+      // The escapes the reader decodes; any other (`\x41`, `A`, `\e`) is refused, not kept as
+      // written, which would let the policy read text GitHub reads otherwise.
+      const escapes = { n: "\n", t: "\t", '"': '"', "\\": "\\", "/": "/" };
+      return m[1].replace(/\\(.)/g, (_, c) => (Object.hasOwn(escapes, c) ? escapes[c] : fail(`an escape the reader does not decode: \\${c}`, at)));
     }
     if (text.startsWith("'")) {
       const m = /^'((?:[^']|'')*)'\s*(#.*)?$/.exec(text);
@@ -207,6 +213,7 @@ function splitFlow(text) {
 }
 
 function unquote(key) {
-  if (key.startsWith('"') || key.startsWith("'")) return key.slice(1, -1);
+  if (key.startsWith('"')) return key.slice(1, -1);
+  if (key.startsWith("'")) return key.slice(1, -1).replace(/''/g, "'");
   return key;
 }

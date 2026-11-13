@@ -34,6 +34,9 @@ jobs:
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    # Four times the slowest run, 10 minutes with nextest still to build: a hang in a step outside
+    # nextest's limits, the doctests or the gates by name, holds the runner no longer.
+    timeout-minutes: 45
     env:
       # A warning fails the build (ROADMAP.md, M0a: Rust hygiene).
       RUSTFLAGS: -D warnings
@@ -54,8 +57,33 @@ jobs:
       - name: clippy
         if: matrix.os == 'ubuntu-24.04'
         run: cargo clippy --all-targets --workspace --locked -- -D warnings
-      - name: cargo test
-        run: cargo test --locked
+      - name: Install cargo-nextest
+        run: bash .github/scripts/install-nextest.sh
+      - name: Build the tests
+        run: cargo test --locked --workspace --no-run
+      - name: The ignored tests and those given more time, as nextest lists them
+        # On each runner: a test ignored in any spelling libtest reads, unless
+        # .config/ignored-tests.txt lists it, or a test given a longer limit that is ignored or
+        # compiled out here, fails the job (.github/scripts/test-list.mjs).
+        run: |
+          cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
+          node .github/scripts/test-list.mjs "$RUNNER_TEMP/tests.json"
+      - name: Tests, through nextest under the ci profile's limits
+        # Each test runs in a process of its own under the time limits of .config/nextest.toml: a
+        # test past its time is stopped and fails, and so does one that leaves a process behind.
+        # Every process runs under the memory limits of .github/scripts/limits.sh, which the
+        # mutation runs share: a test that allocates without end fails instead of taking the
+        # runner down. The tests were built above, outside the limits. nextest runs as its own
+        # binary, which install-nextest.sh checked, not through cargo, where an alias could stand in.
+        run: |
+          . .github/scripts/limits.sh
+          cargo-nextest nextest run --locked --workspace --profile ci
+      - name: Doctests
+        # nextest runs no doctests, and the workflow policy refuses a doc example rustdoc would
+        # compile; what this step builds runs under the tests' memory limits all the same.
+        run: |
+          . .github/scripts/limits.sh
+          cargo test --locked --workspace --doc
       - name: The gate tests, by name
         # By name, so that a manifest that drops the target (autotests = false) fails here instead
         # of leaving the gates untested (compiler/mente-cli/tests/gates.rs).
@@ -108,6 +136,7 @@ jobs:
     # above the base's fails the job.
     name: Projection benchmark
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,6 +186,7 @@ jobs:
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,6 +213,7 @@ jobs:
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -206,6 +237,7 @@ jobs:
     # `mn check --watch` runs. A 99th percentile of 5 ms or more, in any module, fails the job.
     name: Tier-1 latency
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -220,6 +252,7 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

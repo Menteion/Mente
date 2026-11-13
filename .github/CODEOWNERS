@@ -52,3 +52,4 @@
 
 # Each crate's manifest, which decides what its tests are: one could drop the gate tests' target.
 /compiler/*/Cargo.toml @Dancraft3746
+/spikes/*/Cargo.toml @Dancraft3746
