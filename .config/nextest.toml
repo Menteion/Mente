@@ -4,9 +4,9 @@
 # mutation runs under `mutants` (.github/workflows/mutants.yml and mutants-full.yml), so a test
 # that outgrows its limit fails a required check, not only a mutation run's first pass. The two
 # differ only in whether the first failure stops the run. The workflow policy test
-# (.github/scripts/policy.test.mjs) reads every line of this file: it checks that neither profile
-# sets anything else, that each time limit stops a test within its ceiling, and that every test an
-# override names is a test of the compiler that runs.
+# (.github/scripts/policy.test.mjs) reads every line of this file and holds its own copy of each
+# limit and of the tests the override names, so that a change to a limit, or more time for another
+# test, is a change to the policy too. Every test the override names must be a test that runs.
 
 [profile.default]
 # A test that loops without end is stopped and fails, instead of holding the job, or, under a
@@ -23,15 +23,15 @@ leak-timeout = { period = "100ms", result = "fail" }
 # constructs the coverage test counts, each checked with Tier 1, and the programs Tier 1 proves,
 # each run by the interpreter on a grid of inputs. On the Rust jobs' runners they took 16 to
 # 111 s, the conformance suite on AArch64 the longest, and the last one 34 s on Windows. Each is
-# named by its whole path, so that the override holds for that test alone, not for every test
-# whose name contains it.
+# named by its package and its whole path, so that the override holds for that test alone, not
+# for every test whose name contains it or a test of the same path in another crate.
 [[profile.default.overrides]]
 filter = """
-test(=incremental::tests::test_a_session_reports_what_the_whole_module_check_does)
-| test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite)
-| test(=mir_run::tests::test_mir_runs_every_agent_program_as_the_reference_interpreter_does)
-| test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar)
-| test(=tests::test_a_program_tier1_proves_never_trips_its_checks)
+(package(mente-sema) & test(=incremental::tests::test_a_session_reports_what_the_whole_module_check_does))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite))
+| (package(mente-cli) & test(=mir_run::tests::test_mir_runs_every_agent_program_as_the_reference_interpreter_does))
+| (package(mente-cli) & test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar))
+| (package(mente-interp) & test(=tests::test_a_program_tier1_proves_never_trips_its_checks))
 """
 slow-timeout = { period = "60s", terminate-after = 3 }
 

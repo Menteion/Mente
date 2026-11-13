@@ -1,19 +1,22 @@
 # The commands each required job exists to run, by workflow and job, one a line as
-# `<workflow file>#<job id>: <text of the command>`. The workflow policy test
-# (.github/scripts/policy.test.mjs) requires each in a run: step of its job that runs whenever the
-# job does, with no condition in a job without a watch and with the watch's own in an instrument
-# job, and that may not fail quietly: deleting the step, skipping it or letting it continue on error
-# fails the policy. Every job that builds in release proves its overflow checks. A job's every
-# required check is named in .github/required-checks.txt, and every required job is named here.
+# `<workflow file>#<job id>: <command>`. Each is a whole logical line of a run: script of its job,
+# its continuation lines joined by one space, with nothing added: no argument, no redirection, no
+# `|| true`. The one suffix allowed is ` || status=$?` before an `exit "$status"` later in the script.
+# The workflow policy test (.github/scripts/policy.test.mjs) requires each line in a step of its job
+# that runs whenever the job does, with no condition in a job without a watch and with the watch's
+# own in an instrument job, and that may not fail quietly: deleting the step, skipping it, changing
+# the line or letting it continue on error fails the policy. Every job that builds in release proves
+# its overflow checks. A job's every required check is named in .github/required-checks.txt, and
+# every required job is named here.
 
-ci.yml#rust: cargo nextest run --locked --workspace --profile ci
+ci.yml#rust: cargo-nextest nextest run --locked --workspace --profile ci
 ci.yml#rust: cargo test --locked --workspace --doc
 ci.yml#rust: cargo test --locked -p mente-cli --test gates
 ci.yml#rust: cargo run --locked --bin mn -- spec
 ci.yml#rust: cargo run --locked --bin mn -- test --mutate
 ci.yml#rust: cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
 ci.yml#bench: bash .github/scripts/overflow-proof.sh
-ci.yml#bench: MENTE_BENCH_ENFORCE=1
+ci.yml#bench: export MENTE_BENCH_BASELINE="$RUNNER_TEMP/base-medians.txt" MENTE_BENCH_ENFORCE=1
 ci.yml#execution-paths: bash .github/scripts/overflow-proof.sh
 ci.yml#execution-paths: cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 ci.yml#debuggers: bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn
@@ -21,36 +24,36 @@ ci.yml#tier1-latency: MENTE_BENCH_ENFORCE=1 cargo test --release --locked -p men
 ci.yml#tier1-latency: bash .github/scripts/overflow-proof.sh
 ci.yml#docs: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
 ci.yml#docs: npm run verify:docs
-ci.yml#docs: "$RUNNER_TEMP/lint/actionlint" -color -shellcheck
+ci.yml#docs: "$RUNNER_TEMP/lint/actionlint" -color -shellcheck "$RUNNER_TEMP/lint/shellcheck" -pyflakes ""
 ci.yml#docs: npm run check:benchmark
 ci.yml#docs: npm run test:benchmark
 ci.yml#docs: npm run test:harness
 
 commits.yml#commits: node .github/scripts/commits.mjs
 
-mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place
-mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing
+mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600
+mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
 
 generated.yml#paths: bash .github/scripts/overflow-proof.sh
-generated.yml#paths: generated_programs_run_alike_on_the_three_paths
-generated.yml#paths: conformance_programs_run_alike_on_the_three_paths
+generated.yml#paths: cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/generated.txt"
+generated.yml#paths: cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/conformance.txt"
 
 smt.yml#z3: bash .github/scripts/overflow-proof.sh
-smt.yml#z3: ./target/release/mn smt examples
-smt.yml#z3: bash -c 'check "$1"'
+smt.yml#z3: ./target/release/mn smt examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels --out "$RUNNER_TEMP/smt" | tee "$RUNNER_TEMP/export.txt"
+smt.yml#z3: xargs -a "$RUNNER_TEMP/queries.txt" -d '\n' -P "$(nproc)" -n 1 bash -c 'check "$1"' _ > "$RUNNER_TEMP/answers.txt"
 
 fuzz.yml#fuzz: bash .github/scripts/overflow-proof.sh
-fuzz.yml#fuzz: target/release/mn fuzz --seed
+fuzz.yml#fuzz: target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out
 
 mir-mutants.yml#gate: bash .github/scripts/overflow-proof.sh
-mir-mutants.yml#gate: ./target/release/mn test --mutate --reported examples
+mir-mutants.yml#gate: ./target/release/mn test --mutate --reported examples > gate.txt
 
 perf.yml#kernels: bash .github/scripts/overflow-proof.sh
 perf.yml#kernels: node --test perf/run.test.mjs
-perf.yml#kernels: node perf/run.mjs --mn
+perf.yml#kernels: node perf/run.mjs --mn "$RUNNER_TEMP/mn" --base-mn "$RUNNER_TEMP/mn-base" --base-tree ../base "${counters[@]}" --out "$RUNNER_TEMP/perf-results.json" --work "$RUNNER_TEMP/perf-work"
 
 harness.yml#fixtures: bash .github/scripts/overflow-proof.sh
-harness.yml#fixtures: node benchmark/harness/fixtures.ts --languages mente,rust,odin
-harness.yml#fixtures: node benchmark/harness/fixtures.ts --check document
-harness.yml#fixtures: node benchmark/harness/sandbox-check.ts
+harness.yml#fixtures: node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
+harness.yml#fixtures: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/document-out"
+harness.yml#fixtures: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
 harness.yml#fixtures: npm run test:harness

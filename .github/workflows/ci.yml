@@ -72,10 +72,11 @@ jobs:
         # test past its time is stopped and fails, and so does one that leaves a process behind.
         # Every process runs under the memory limits of .github/scripts/limits.sh, which the
         # mutation runs share: a test that allocates without end fails instead of taking the
-        # runner down. The tests were built above, outside the limits.
+        # runner down. The tests were built above, outside the limits. nextest runs as its own
+        # binary, which install-nextest.sh checked, not through cargo, where an alias could stand in.
         run: |
           . .github/scripts/limits.sh
-          cargo nextest run --locked --workspace --profile ci
+          cargo-nextest nextest run --locked --workspace --profile ci
       - name: Doctests
         # nextest runs no doctests.
         run: cargo test --locked --workspace --doc
