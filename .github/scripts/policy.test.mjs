@@ -1298,6 +1298,12 @@ check("every ignored test a required job runs has a time limit of its own", () =
     }
   }
   assert.ok(found >= 6, "the policy reads the commands that run ignored tests");
+  // The form the rule pins works where the steps run it, in bash: GNU timeout stops the command at
+  // its limit (exit 124) and passes a command within it, where a timeout that only waits, as
+  // Windows' own is, would do neither.
+  const timeout = (cmd) => spawnSync(bashPath(), ["-c", cmd], { cwd: ROOT, encoding: "utf8", timeout: 30000 }).status;
+  assert.equal(timeout(`timeout ${IGNORED_TEST_LIMIT} true`), 0, `timeout ${IGNORED_TEST_LIMIT} does not pass a command within its limit`);
+  assert.equal(timeout("timeout 1s sleep 10"), 124, "timeout does not stop a command at its limit");
 });
 
 check("every required job takes at most the time the policy holds for it", () => {
