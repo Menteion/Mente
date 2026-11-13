@@ -68,6 +68,11 @@ test("what the subset leaves out is refused, not misread", () => {
     "a: 'open\n",
     "a: 1\n---\nb: 2\n",
     "a:\n  - x\n   - y\n",
+    '"continue-on\\u002derror": true\n',
+    '"i\\x66": "false"\n',
+    'a: "\\u0041"\n',
+    'a: "\\x41"\n',
+    "a:\n  - \"i\\u0066\": x\n",
   ]) {
     assert.throws(() => parseYaml(bad), /line \d+/, JSON.stringify(bad));
   }

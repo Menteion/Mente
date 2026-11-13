@@ -1,0 +1,18 @@
+# The tests the compiler's test binaries ignore, one a line as `<package> <test path>`: they run
+# only where a workflow names them (Execution paths, Tier-1 latency, Generated programs, the SMT
+# cross-check, the projection benchmark) or by hand. The required Rust jobs list every test with
+# nextest on each runner and fail when the ignored ones differ from this list
+# (.github/scripts/test-list.mjs), so that a test cannot be ignored, or stop being one, unseen.
+
+mente-cli latency::tier1_recheck_protocol
+mente-cli mir_run::differential::tests::a_file_runs_alike_on_the_three_paths
+mente-cli mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths
+mente-cli mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths
+mente-cli mir_run::differential::tests::print_generated_programs
+mente-cli mir_run::differential::tests::reduce_a_difference
+mente-cli mir_run::tests::mir_matches_the_reference_interpreter_on_every_hidden_test
+mente-cli mir_run::tests::native_matches_the_reference_interpreter_on_every_hidden_test
+mente-cli tests::view_projection_protocol
+mente-cli write_construct_programs
+mente-sema incremental::timing::watch_recheck_sketch
+mente-sema tier1::timing::tier1_cost_sketch

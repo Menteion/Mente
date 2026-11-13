@@ -14,28 +14,41 @@
 # - Windows: a job object holding the step's shell and every process it starts after, each
 #   committing at most 8 GB and all of them together at most 12 GB (job-limits.ps1).
 #
-# First, nothing from outside the repository's configuration may change what the tests run: no
-# alias of a cargo command, in the environment or in a cargo configuration file from here up or in
-# CARGO_HOME, and no nextest setting in the environment but the mutation runs' profile.
+# First, nothing from outside the repository may change what the tests run. No cargo
+# configuration file may exist from here up or in CARGO_HOME: one can hold an alias, a runner for
+# the test binaries or an [env] table, in more spellings than a check could read, and the
+# repository keeps none (the workflow policy refuses a tracked one). No variable may name an alias
+# of a cargo command, a runner, the compiler, a wrapper around it or the target, nor set nextest
+# but the mutation runs' profile.
 limits_home=${CARGO_HOME:-$HOME/.cargo}
-if command -v cygpath > /dev/null; then limits_home=$(cygpath -u "$limits_home"); fi
-limits_configs=(/dev/null)
 limits_dir=$PWD
+# On Windows, as this shell names paths: `C:/a` would walk up to `.`, never to `/`.
+if command -v cygpath > /dev/null; then
+  limits_home=$(cygpath -u "$limits_home")
+  limits_dir=$(cygpath -u "$limits_dir")
+fi
+limits_found=()
 for limits_file in "$limits_home/config" "$limits_home/config.toml"; do
-  if [ -f "$limits_file" ]; then limits_configs+=("$limits_file"); fi
+  if [ -e "$limits_file" ]; then limits_found+=("$limits_file"); fi
 done
 while :; do
-  for limits_file in "$limits_dir/.cargo/config" "$limits_dir/.cargo/config.toml"; do
-    if [ -f "$limits_file" ]; then limits_configs+=("$limits_file"); fi
+  # `${dir%/}`: at the root, `/.cargo`, never `//.cargo`, which Windows' shells read as a network path.
+  for limits_file in "${limits_dir%/}/.cargo/config" "${limits_dir%/}/.cargo/config.toml"; do
+    if [ -e "$limits_file" ]; then limits_found+=("$limits_file"); fi
   done
-  if [ "$limits_dir" = / ]; then break; fi
-  limits_dir=$(dirname "$limits_dir")
+  limits_up=$(dirname "$limits_dir")
+  if [ "$limits_up" = "$limits_dir" ]; then break; fi
+  limits_dir=$limits_up
 done
-if env | grep -E '^(CARGO_ALIAS_|NEXTEST_)' | grep -vx 'NEXTEST_PROFILE=mutants' || grep -E '^[[:space:]]*(\[alias\]|alias\.)' "${limits_configs[@]}"; then
-  echo "::error::an alias or a nextest setting from outside the repository's configuration would change what the tests run"
+if [ "${#limits_found[@]}" -gt 0 ]; then
+  echo "::error::a cargo configuration file outside the repository could change what the tests run: ${limits_found[*]}"
   exit 1
 fi
-unset limits_home limits_configs limits_dir limits_file
+if env | grep -Ei '^(CARGO_ALIAS_|NEXTEST_|CARGO_TARGET_[A-Z0-9_]*_(RUNNER|LINKER)=|CARGO_BUILD_(RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|TARGET)=|RUSTC=|RUSTDOC=|RUSTC_WRAPPER=|RUSTC_WORKSPACE_WRAPPER=)' | grep -vx 'NEXTEST_PROFILE=mutants'; then
+  echo "::error::a variable above would change what the tests run"
+  exit 1
+fi
+unset limits_home limits_found limits_dir limits_file limits_up
 case "$RUNNER_OS" in
   Linux)
     ulimit -v 8388608 -f 2097152

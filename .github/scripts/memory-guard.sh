@@ -7,14 +7,13 @@
 # No command's failure stops the guard: errexit and pipefail are off here, though the step that
 # starts it runs with both, so a process that ends between `ps` and `kill` costs one round, not
 # the guard. When the guard was a subshell of that step, the first such `kill` ended it silently.
-# The workflow policy (.github/scripts/policy.test.mjs) sources it under errexit against a process
-# that is gone and sees it go on; its two arguments, the meminfo file and the seconds between
-# rounds, exist for that test and are never given in a workflow.
+# The workflow policy (.github/scripts/policy.test.mjs) sources it under errexit, with `ps` naming
+# a process that is gone and `sleep` counting the rounds, and requires every round to run; its
+# argument, the meminfo file, exists for that check and is never given in a workflow.
 set +e +o pipefail
 meminfo=${1:-/proc/meminfo}
-interval=${2:-1}
 tick=0
-while sleep "$interval"; do
+while sleep 1; do
   avail=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' "$meminfo")
   if [ "$avail" -lt 2048 ]; then
     pid=$(ps -eo pid,rss --sort=-rss --no-headers | awk 'NR == 1 {print $1}')

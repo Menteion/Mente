@@ -11,18 +11,22 @@
 [profile.default]
 # A test that loops without end is stopped and fails, instead of holding the job, or, under a
 # mutant, costing cargo-mutants' timeout for the whole run. Every test but those named below kept
-# within 25 s in a debug build on each runner of the Rust jobs when these limits were set, under
-# two thirds of the limit. nextest marks a test past 20 s SLOW in the job's log, and the Mutants
-# baseline step lists the slowest in its job's summary.
+# within 26 s in a debug build on each runner of the Rust jobs, in the eight runs that set these
+# limits, under two thirds of the limit: the slowest, building every native program's object for
+# three targets twice, took 18 to 26 s, the next 17 s. nextest marks a test past 20 s SLOW in the
+# job's log, and the Mutants baseline step lists the slowest in its job's summary.
 slow-timeout = { period = "20s", terminate-after = 2 }
 # A test that leaves a process behind, holding its output open 100 ms after it ends, fails.
 leak-timeout = { period = "100ms", result = "fail" }
 
 # The tests that run a whole corpus: every module of the repository item by item, the
 # conformance suite on three paths, every agent program on two, the generated programs whose
-# constructs the coverage test counts, each checked with Tier 1, and the programs Tier 1 proves,
-# each run by the interpreter on a grid of inputs. On the Rust jobs' runners they took 16 to
-# 111 s, the conformance suite on AArch64 the longest, and the last one 34 s on Windows. Each is
+# constructs the coverage test counts, each checked with Tier 1, the programs Tier 1 proves, each
+# run by the interpreter on a grid of inputs, and every construct built to a native executable,
+# each call run in a process of its own. On the Rust jobs' runners they took 16 to 111 s, the
+# conformance suite on AArch64 the longest. The native constructs take 4 to 6 s on Linux and
+# 22 s on Windows, where linking and starting processes cost most, and passed the default stop
+# of 40 s on one Windows runner whose conformance suite also went from 68 to 98 s. Each test is
 # named by its package and its whole path, so that the override holds for that test alone, not
 # for every test whose name contains it or a test of the same path in another crate.
 [[profile.default.overrides]]
@@ -32,6 +36,7 @@ filter = """
 | (package(mente-cli) & test(=mir_run::tests::test_mir_runs_every_agent_program_as_the_reference_interpreter_does))
 | (package(mente-cli) & test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar))
 | (package(mente-interp) & test(=tests::test_a_program_tier1_proves_never_trips_its_checks))
+| (package(mente-cli) & test(=mir_run::tests::test_native_code_runs_each_construct_as_the_reference_interpreter_does))
 """
 slow-timeout = { period = "60s", terminate-after = 3 }
 

@@ -57,16 +57,17 @@ jobs:
       - name: clippy
         if: matrix.os == 'ubuntu-24.04'
         run: cargo clippy --all-targets --workspace --locked -- -D warnings
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/bin/cargo-nextest
-            ~/.cargo/bin/cargo-nextest.exe
-          key: cargo-nextest-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/install-nextest.sh') }}
       - name: Install cargo-nextest
         run: bash .github/scripts/install-nextest.sh
       - name: Build the tests
         run: cargo test --locked --workspace --no-run
+      - name: The ignored tests and those given more time, as nextest lists them
+        # On each runner: a test ignored in any spelling libtest reads, unless
+        # .config/ignored-tests.txt lists it, or a test given a longer limit that is ignored or
+        # compiled out here, fails the job (.github/scripts/test-list.mjs).
+        run: |
+          cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
+          node .github/scripts/test-list.mjs "$RUNNER_TEMP/tests.json"
       - name: Tests, through nextest under the ci profile's limits
         # Each test runs in a process of its own under the time limits of .config/nextest.toml: a
         # test past its time is stopped and fails, and so does one that leaves a process behind.
@@ -78,8 +79,11 @@ jobs:
           . .github/scripts/limits.sh
           cargo-nextest nextest run --locked --workspace --profile ci
       - name: Doctests
-        # nextest runs no doctests.
-        run: cargo test --locked --workspace --doc
+        # nextest runs no doctests, and the workflow policy refuses a doc example rustdoc would
+        # compile; what this step builds runs under the tests' memory limits all the same.
+        run: |
+          . .github/scripts/limits.sh
+          cargo test --locked --workspace --doc
       - name: The gate tests, by name
         # By name, so that a manifest that drops the target (autotests = false) fails here instead
         # of leaving the gates untested (compiler/mente-cli/tests/gates.rs).

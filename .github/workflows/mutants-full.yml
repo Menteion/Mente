@@ -55,10 +55,6 @@ jobs:
           key: cargo-mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}
       - name: Install cargo-mutants
         run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-nextest
-          key: cargo-nextest-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/install-nextest.sh') }}
       - name: Install cargo-nextest
         run: bash .github/scripts/install-nextest.sh
       - name: Run the tests once without a mutant

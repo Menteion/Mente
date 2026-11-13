@@ -9,6 +9,8 @@
 # its overflow checks. A job's every required check is named in .github/required-checks.txt, and
 # every required job is named here.
 
+ci.yml#rust: cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
+ci.yml#rust: node .github/scripts/test-list.mjs "$RUNNER_TEMP/tests.json"
 ci.yml#rust: cargo-nextest nextest run --locked --workspace --profile ci
 ci.yml#rust: cargo test --locked --workspace --doc
 ci.yml#rust: cargo test --locked -p mente-cli --test gates
