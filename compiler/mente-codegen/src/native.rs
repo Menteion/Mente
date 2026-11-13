@@ -1406,7 +1406,10 @@ fn make_call(
                 emit_num(writer, rt, &mut e, 1, v, i);
             }
             (None, Shape::Bool) => print_bool(writer, rt, &mut e, results[0])?,
-            _ => emit_text(writer, rt, &mut e, 1, "()")?,
+            (None, Shape::Unit) => emit_text(writer, rt, &mut e, 1, "()")?,
+            (None, Shape::Array(..) | Shape::Struct(_) | Shape::Enum(_)) => {
+                return Err(err("a result in memory without its slot"))
+            }
         }
         emit_text(writer, rt, &mut e, 1, "\n")?;
         for (at, shape) in leaves {

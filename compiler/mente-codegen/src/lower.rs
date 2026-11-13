@@ -281,9 +281,10 @@ impl Shape {
             SemaTy::Array(n, e) => Shape::Array(
                 u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?,
                 // An empty literal's elements have no type, and need none: it holds none.
-                Box::new(match (n, &**e) {
-                    (0, SemaTy::Any) => Shape::Unit,
-                    _ => Shape::of(e, shapes)?,
+                Box::new(if *n == 0 && no_value(e) {
+                    Shape::Unit
+                } else {
+                    Shape::of(e, shapes)?
                 }),
             ),
             SemaTy::Struct(n) => Shape::Struct(
@@ -617,6 +618,17 @@ fn reaches_never(steps: &[Step]) -> bool {
         .is_some_and(|s| matches!(s, Step::Index(V::Never, _, _)))
 }
 
+/// Whether a value of type `t` never exists: no type, which a value that leaves has, or an
+/// array of at least one such element, which a literal of only such elements has
+/// (`core-calculus.md`, item 6). An empty literal holds no element, and is a value.
+fn no_value(t: &SemaTy) -> bool {
+    match t {
+        SemaTy::Any => true,
+        SemaTy::Array(n, elem) => *n > 0 && no_value(elem),
+        SemaTy::Int(_) | SemaTy::Bool | SemaTy::Struct(_) | SemaTy::Enum(_) | SemaTy::Unit => false,
+    }
+}
+
 /// One function's lowering.
 struct Lower<'a> {
     m: &'a CheckedModule,
@@ -857,6 +869,13 @@ impl<'a> Lower<'a> {
         for (i, (is_mut, shape)) in sig.params.iter().enumerate() {
             let p = params.next().ok_or("too few parameters")?;
             let declared = Some((self.tree(), self.s.f.syntax.params[i].ty));
+            // Each parameter holds its argument here too, as in the body, so that a refinement
+            // bound naming one reads the value passed for it.
+            self.s.locals[i] = Some(match (is_mut, shape) {
+                (false, Shape::Int(t)) => Local::Value(V::Int(p, mir(*t))),
+                (false, Shape::Bool) => Local::Value(V::Bool(p)),
+                (_, shape) => Local::Place(p, shape.clone()),
+            });
             args.push(match (is_mut, shape) {
                 (false, Shape::Int(t)) => Arg::Value(V::Int(p, mir(*t)), span, shape.clone()),
                 (false, Shape::Bool) => Arg::Value(V::Bool(p), span, shape.clone()),
@@ -936,7 +955,7 @@ impl<'a> Lower<'a> {
         span: Span,
         key: Key,
     ) -> Result<(), String> {
-        if let V::Bool(cond) = self.expr(c)? {
+        if let Some(cond) = self.expr(c)?.bool_node("a clause")? {
             if !self.proven(obligation, key) {
                 self.check(cond, kind, &[text], &[], span);
             }
@@ -1004,7 +1023,7 @@ impl<'a> Lower<'a> {
                             Ty::Addr,
                             &[],
                         );
-                        self.store(slot, v);
+                        self.store_shaped(slot, v, &shape);
                         Local::Place(slot, shape)
                     }
                 };
@@ -1123,8 +1142,8 @@ impl<'a> Lower<'a> {
             let yes = self.bool(true);
             self.inst(Op::Store, Ty::Unit, &[seen, yes]);
             for (v, s) in now.iter().zip(&slots) {
-                if let V::Int(n, t) = v {
-                    let w = self.cast(*n, *t, MEASURE);
+                if let Some((n, t)) = v.int_node("a measure")? {
+                    let w = self.cast(n, t, MEASURE);
                     self.inst(Op::Store, Ty::Unit, &[*s, w]);
                 }
             }
@@ -1150,7 +1169,8 @@ impl<'a> Lower<'a> {
             let key = call.map_or(Key::at(tree.expr(e).span, clause), |at| {
                 Key::call(at, clause)
             });
-            if let (V::Int(n, t), false) = (v, self.proven(ObligationKind::Decreases, key)) {
+            let proven = self.proven(ObligationKind::Decreases, key);
+            if let (Some((n, t)), false) = (v.int_node("a measure")?, proven) {
                 let zero = self.int(t, Num::ZERO);
                 let ok = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[n, zero]);
                 let text = format!(
@@ -1420,12 +1440,6 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn store(&mut self, at: NodeId, v: V) {
-        if let V::Int(n, _) | V::Bool(n) = v {
-            self.inst(Op::Store, Ty::Unit, &[at, n]);
-        }
-    }
-
     fn store_shaped(&mut self, at: NodeId, v: V, shape: &Shape) {
         match v {
             V::Mem(a) => {
@@ -1437,7 +1451,11 @@ impl<'a> Lower<'a> {
                     &[at, a],
                 );
             }
-            v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => self.store(at, v),
+            V::Int(n, _) | V::Bool(n) => {
+                self.inst(Op::Store, Ty::Unit, &[at, n]);
+            }
+            // `()` has no bytes, and no value never reaches a store.
+            V::Unit | V::Never => {}
         }
     }
 
@@ -1865,7 +1883,7 @@ impl<'a> Lower<'a> {
     fn leaf_hull(&self, e: ExprId, hull: &mut Option<(Num, Num)>) -> Result<(), String> {
         // An element of no type leaves before the literal holds a value (`core-calculus.md`,
         // item 6), so it widens nothing.
-        if matches!(self.s.f.typing.exprs[e.0 as usize], SemaTy::Any) {
+        if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
             return Ok(());
         }
         let tree = self.tree();
@@ -1910,7 +1928,15 @@ impl<'a> Lower<'a> {
     /// Whether `t` is an integer of no one type, the element of an array literal whose elements
     /// have different integer types.
     fn mixed(&self, t: &SemaTy) -> bool {
-        matches!(t, SemaTy::Int(i) if int_ty(i).is_none())
+        match t {
+            SemaTy::Int(i) => int_ty(i).is_none(),
+            SemaTy::Bool
+            | SemaTy::Array(..)
+            | SemaTy::Struct(_)
+            | SemaTy::Enum(_)
+            | SemaTy::Unit
+            | SemaTy::Any => false,
+        }
     }
 
     /// Whether `t` is such an integer, or an array whose elements are, at any depth.
@@ -1929,10 +1955,15 @@ impl<'a> Lower<'a> {
     /// Whether the array literal `e` keeps its integers exact: they are of no one type, and
     /// its shape is the machine type that holds them all (`shape`).
     fn exact(&self, e: ExprId) -> bool {
-        matches!(
-            &self.s.f.typing.exprs[e.0 as usize],
-            SemaTy::Array(_, t) if self.mixed_leaf(t)
-        )
+        match &self.s.f.typing.exprs[e.0 as usize] {
+            SemaTy::Array(_, t) => self.mixed_leaf(t),
+            SemaTy::Int(_)
+            | SemaTy::Bool
+            | SemaTy::Struct(_)
+            | SemaTy::Enum(_)
+            | SemaTy::Unit
+            | SemaTy::Any => false,
+        }
     }
 
     /// The array literal of `items`, built in `shape`; `span` names the outermost literal.
@@ -2176,6 +2207,9 @@ impl<'a> Lower<'a> {
                 let at = self.element(a, len, elem, i, (span, tree.expr(*index).span))?;
                 self.load(at, elem)
             }
+            ExprKind::Field { base, .. } if no_value(&self.s.f.typing.exprs[base.0 as usize]) => {
+                return self.leaves_first(&[*base]);
+            }
             ExprKind::Field { base, name } => match self.shape(*base)? {
                 Shape::Array(len, _) => {
                     self.expr(*base)?;
@@ -2306,11 +2340,17 @@ impl<'a> Lower<'a> {
                 self.call(index, values, span, sret, recursive)?
             }
             ExprKind::Array(items) => {
+                if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
+                    return self.leaves_first(items);
+                }
                 let shape = self.shape(e)?;
                 let exact = self.exact(e);
                 self.array_literal(items, &shape, exact, span)?
             }
             ExprKind::Repeat { value, .. } => {
+                if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
+                    return self.leaves_first(&[*value]);
+                }
                 let shape = self.shape(e)?;
                 let exact = self.exact(e);
                 self.repeat_literal(*value, &shape, exact, span)?
@@ -2327,6 +2367,16 @@ impl<'a> Lower<'a> {
     /// The value `v` of `e`, kept as it is now while `after` is evaluated: an array or struct
     /// read from a place is that place's memory, which `after` may change through a `mut`
     /// argument or an assignment, so it is then copied first. Any other value is its own.
+    /// Evaluates `items`, each of no value, in order, until one leaves, as each of them does.
+    fn leaves_first(&mut self, items: &[ExprId]) -> Result<V, String> {
+        for &x in items {
+            if self.expr(x)?.never() {
+                return Ok(V::Never);
+            }
+        }
+        Err("a value of no type that gave one".into())
+    }
+
     fn kept(&mut self, v: V, e: ExprId, after: &[ExprId]) -> Result<V, String> {
         let a = match v {
             V::Mem(a) => a,
@@ -2545,7 +2595,7 @@ impl<'a> Lower<'a> {
             otherwise,
         });
         self.b.switch(right);
-        if let V::Bool(r) = self.expr(rhs)? {
+        if let Some(r) = self.expr(rhs)?.bool_node("an operand of `and` or `or`")? {
             self.jump(join, vec![r]);
         }
         self.b.switch(join);
@@ -2595,7 +2645,7 @@ impl<'a> Lower<'a> {
         self.meet(v, join, join_ty);
         self.b.switch(join);
         // An `if` of no type has branches that all leave, so nothing reaches its end.
-        if matches!(self.s.f.typing.exprs[e.0 as usize], SemaTy::Any) {
+        if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
             return Ok(V::Never);
         }
         self.joined(join, join_ty)
@@ -2734,7 +2784,7 @@ impl<'a> Lower<'a> {
         }
         self.b.switch(join);
         // A `match` of no type has arms that all leave, so nothing reaches its end.
-        if matches!(self.s.f.typing.exprs[e.0 as usize], SemaTy::Any) {
+        if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
             return Ok(V::Never);
         }
         self.joined(join, join_ty)
@@ -3253,6 +3303,71 @@ pub fn g(c: bool) -> i32 {
             .filter(|b| matches!(b.term, Term::Return(_)))
             .count();
         assert_eq!(returns, 2, "{}", g);
+    }
+
+    /// An array literal or a repeat whose elements have no type gives no value, and neither does
+    /// a field, a length or an element read of a value of no type (`core-calculus.md`, item 6):
+    /// each evaluates what it holds in order, which leaves at the first that does. A literal
+    /// whose first element returns returns from there.
+    #[test]
+    fn test_an_aggregate_of_no_value_lowers_to_no_value() {
+        let source = "module m
+struct P {
+  a: u8
+  b: u16
+}
+pub fn single(c: bool) -> u8 {
+  val a: [1]u8 = [if c { todo(\"a\") } else { todo(\"b\") }]
+  a[0]
+}
+pub fn bare() -> u8 {
+  val a = [todo(\"a\")]
+  a[0]
+}
+pub fn nested(c: bool) -> u8 {
+  val a = [[if c { todo(\"a\") } else { todo(\"b\") }]]
+  a[0][0]
+}
+pub fn repeated(c: bool) -> u8 {
+  val a: [3]u8 = [if c { todo(\"a\") } else { todo(\"b\") }; 3]
+  a[0]
+}
+pub fn length(c: bool) -> usize = (if c { todo(\"a\") } else { todo(\"b\") }).len
+pub fn bare_length() -> usize = todo(\"a\").len
+pub fn field(c: bool) -> u8 = (if c { todo(\"a\") } else { todo(\"b\") }).a
+pub fn indexed(c: bool) -> u8 = (if c { todo(\"a\") } else { todo(\"b\") })[0]
+pub fn returns(c: bool) -> u8 {
+  val a = [if c { return 7 } else { return 8 }, if c { todo(\"a\") } else { todo(\"b\") }]
+  a[0]
+}
+";
+        let module = mente_sema::check_program(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let returns = |f: &str| {
+            let func = lowered
+                .module
+                .functions
+                .iter()
+                .find(|g| g.name == f)
+                .unwrap();
+            func.blocks
+                .iter()
+                .filter(|b| matches!(b.term, Term::Return(_)))
+                .count()
+        };
+        for f in [
+            "single",
+            "bare",
+            "nested",
+            "repeated",
+            "length",
+            "bare_length",
+            "field",
+            "indexed",
+        ] {
+            assert_eq!(returns(f), 0, "{}: every path traps", f);
+        }
+        assert_eq!(returns("returns"), 2, "the first element returns 7 or 8");
     }
 
     /// An `if` or a `match` whose every branch leaves has no type and gives no value
