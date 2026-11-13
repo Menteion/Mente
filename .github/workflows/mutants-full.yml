@@ -49,14 +49,14 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-mutants
-          key: cargo-mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}
       - name: Install cargo-mutants
-        run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
+        # Built from its crate, which cargo checks, never restored from a cache that another run
+        # on the same branch could have written.
+        run: cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
       - name: Install cargo-nextest
         run: bash .github/scripts/install-nextest.sh
+      - name: Record the tools, before any code of the change runs
+        run: /usr/bin/bash .github/scripts/tools.sh record
       - name: Run the tests once without a mutant
         # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
         # runs the whole workspace's tests, so the timeout it set from that baseline was often
@@ -64,10 +64,13 @@ jobs:
         # runs what every mutant runs, and cargo-mutants skips its own.
         run: |
           set -o pipefail
+          # The tests, under the limits every test runs under.
+          . .github/scripts/limits.sh
           cargo nextest run --workspace 2>&1 | tee baseline.log
           { echo "## Slowest tests without a mutant"; echo '```text'
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: Mutate this shard of the compiler
         env:
           EXAMINE: ${{ inputs.examine }}
@@ -92,6 +95,14 @@ jobs:
               failed=2
             fi
           done
+          # Every mutant counted caught or unviable shows it in its log (.github/scripts/mutants-floor.mjs).
+          node .github/scripts/mutants-floor.mjs evidence mutants.out > evidence.txt
+          if grep -q . evidence.txt; then
+            { echo "## Outcomes the logs do not show"; echo '```text'; cat evidence.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::mutants are counted caught or unviable without a failed test or a failed build in their logs"
+            failed=1
+          fi
+          /usr/bin/bash .github/scripts/tools.sh verify
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

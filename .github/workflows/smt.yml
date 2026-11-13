@@ -81,7 +81,7 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         run: |
           MENTE_SMT_CONSTRUCTS="$RUNNER_TEMP/constructs" \
-            cargo test --release --locked -p mente-cli --test smt -- --ignored --exact write_construct_programs --nocapture
+            timeout 15m cargo test --release --locked -p mente-cli --test smt -- --ignored --exact write_construct_programs --nocapture
           cargo build --release --locked --bin mn
       - name: Export a query for each obligation Tier 1 discharges
         if: steps.watch.outputs.run != 'false'

@@ -44,7 +44,9 @@ if [ "${#limits_found[@]}" -gt 0 ]; then
   echo "::error::a cargo configuration file outside the repository could change what the tests run: ${limits_found[*]}"
   exit 1
 fi
-if env | grep -Ei '^(CARGO_ALIAS_|NEXTEST_|CARGO_TARGET_[A-Z0-9_]*_(RUNNER|LINKER)=|CARGO_BUILD_(RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|TARGET)=|RUSTC=|RUSTDOC=|RUSTC_WRAPPER=|RUSTC_WORKSPACE_WRAPPER=)' | grep -vx 'NEXTEST_PROFILE=mutants'; then
+# Nor may one change how the tests are built: flags beyond the Rust jobs' `-D warnings`, another
+# toolchain, a profile's debug assertions or overflow checks, or a script every bash runs first.
+if env | grep -Ei '^(CARGO_ALIAS_|NEXTEST_|CARGO_TARGET_[A-Z0-9_]*_(RUNNER|LINKER|RUSTFLAGS)=|CARGO_BUILD_(RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|TARGET|RUSTFLAGS|RUSTDOCFLAGS)=|RUSTC=|RUSTDOC=|RUSTC_WRAPPER=|RUSTC_WORKSPACE_WRAPPER=|RUSTFLAGS=|CARGO_ENCODED_RUSTFLAGS=|RUSTDOCFLAGS=|CARGO_ENCODED_RUSTDOCFLAGS=|RUSTUP_TOOLCHAIN=|BASH_ENV=|CARGO_PROFILE_[A-Z0-9_]*_(DEBUG_ASSERTIONS|OVERFLOW_CHECKS)=)' | grep -vx -e 'NEXTEST_PROFILE=mutants' -e 'RUSTFLAGS=-D warnings'; then
   echo "::error::a variable above would change what the tests run"
   exit 1
 fi
@@ -52,7 +54,12 @@ unset limits_home limits_found limits_dir limits_file limits_up
 case "$RUNNER_OS" in
   Linux)
     ulimit -v 8388608 -f 2097152
+    # One guard, this step's: a step before it may have left its own, writing to a log that ended.
+    limits_guard=$RUNNER_TEMP/memory-guard.pid
+    if [ -f "$limits_guard" ]; then kill "$(cat "$limits_guard")" 2> /dev/null || true; fi
     bash .github/scripts/memory-guard.sh &
+    echo "$!" > "$limits_guard"
+    unset limits_guard
     ;;
   Windows)
     pwsh -NoProfile -NonInteractive -File .github/scripts/job-limits.ps1 -ProcessId "$(cat "/proc/$$/winpid")" -ProcessBytes 8589934592 -JobBytes 12884901888

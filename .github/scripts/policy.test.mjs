@@ -33,8 +33,9 @@ import { fileURLToPath } from "node:url";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
-import { deletedRegexes, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
-import { problems as testListProblems, slowTests } from "./lib/test-list.mjs";
+import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
+import { doctestProblems, problems as testListProblems, slowTests } from "./lib/test-list.mjs";
+import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,7 +43,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 49;
+const FLOOR = 52;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -200,6 +201,34 @@ check("every action is pinned to a full commit SHA", () => {
       assert.match(String(u), /^(\.\/.+|[\w.-]+\/[\w.-]+(\/[\w./-]+)?@[0-9a-f]{40})$/, `${file}, job ${id}: ${u} is not pinned to a full commit SHA`);
     }
   }
+});
+
+check("every pinned action names its release, which the Documentation job checks the commit against", () => {
+  // Offline, every pin carries its tag; the Documentation job asks GitHub that the tag names the
+  // commit (.github/scripts/action-pins.mjs).
+  for (const { file } of workflows()) {
+    for (const p of actionPins(`${WORKFLOWS}/${file}`, read(`${WORKFLOWS}/${file}`))) {
+      assert.equal(p.unreadable, undefined, `${p.at}: a uses: line the check of pins cannot read: ${p.unreadable}`);
+      assert.notEqual(p.tag, null, `${p.at}: ${p.repo}@${p.sha} names no release in a comment`);
+    }
+  }
+  const sha = (c) => c.repeat(40);
+  const read2 = actionPins("w.yml", `      - uses: actions/checkout@${sha("a")} # v7.0.1\n        uses: org/repo/sub/path@${sha("b")}\n      - uses: ./local\n`);
+  assert.deepEqual(read2.map((p) => [p.repo, p.tag]), [["actions/checkout", "v7.0.1"], ["org/repo", null]]);
+  for (const line of [`      - "uses": actions/checkout@${sha("a")} # v7`, `      - { uses: actions/checkout@${sha("a")} }`, `      - uses: actions/checkout@${sha("a")} # v7 and more`, "      - uses: actions/checkout@v7", "      - uses: docker://alpine"]) {
+    assert.equal(actionPins("w.yml", line).filter((p) => p.unreadable !== undefined).length, 1, `the check of pins passes over: ${line}`);
+  }
+  assert.equal(taggedCommit(`${sha("c")}\trefs/tags/v1\n${sha("d")}\trefs/tags/v1^{}\n`, "v1"), sha("d"), "an annotated tag is its peeled commit");
+  assert.equal(taggedCommit(`${sha("c")}\trefs/tags/v1\n`, "v1"), sha("c"));
+  assert.equal(taggedCommit("", "v1"), null);
+  const remote = (repo, tag) => (tag === "v7.0.1" ? `${sha("a")}\trefs/tags/v7.0.1\n` : "");
+  assert.deepEqual(actionPinProblems(read2.slice(0, 1), remote), []);
+  const moved = actionPinProblems([{ ...read2[0], sha: sha("e") }], remote);
+  assert.equal(moved.length, 1, "a commit other than its tag's");
+  // A tag that names another commit never suggests following the tag: the pin stays.
+  assert.match(moved[0], /keep the pin/, `the check of pins suggests following the tag: ${moved[0]}`);
+  assert.equal(actionPinProblems([{ ...read2[0], tag: "v9" }], remote).length, 1, "a tag that is not there");
+  assert.equal(actionPinProblems([read2[1]], remote).length, 1, "a pin without its tag");
 });
 
 check("every checkout drops its credentials", () => {
@@ -547,22 +576,23 @@ export function jobDigest(doc, job) {
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
 const PINNED_FILES = new Map([
-  [".github/scripts/limits.sh", "5072c6c165051d2489c6467c59beced232cfa1a839d2b39c84bcc83742f42b17"],
+  [".github/scripts/limits.sh", "ac31047e639bbd2d2777c8bcc44fbce038ed40407dbf45d484ee5018ab7468aa"],
   [".github/scripts/memory-guard.sh", "2803d3fdd012923cd6c276c23db0af506596193b42b332903f5b4127f67fcfc1"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
-  [".github/scripts/lib/test-list.mjs", "1a7e96a01ca03b06c8b0ee73c5f14e0a4015b85793111e5f17c06eff12245339"],
+  [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
+  [".github/scripts/tools.sh", "56b749faa873ee690ebdc2ea0c14223aecbf016af10957f96697e2fe5c4448d0"],
 ]);
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "19e3c6e4a69e851575c8924a3d1b8f8e68cf6f7eb7184ddc069971bfcef63732"],
-  ["mutants.yml#in-diff", "8b0f885a667e7238375abad7be4b342f70d8bc7927f539e164982270da6e2bf8"],
-  ["mutants-full.yml#full", "e110007635fc5d7eb698db539daf96301e59bf51ec972cb89be9f85d14d70ed3"],
+  ["ci.yml#rust", "7be20495b5948c94fc565601cbb78d03c7e101d2a53bf200881b7d9b5c84ec68"],
+  ["mutants.yml#in-diff", "f94088be2f2995f9ba495dba6ff5034d7195da6cf065a52a7a1fa0b1d07e3f61"],
+  ["mutants-full.yml#full", "c797756d65bd634b69a294a75eec9ec4d6b1b4638805decb9878905c02317d32"],
 ]);
 /// The step of the required Rust jobs that runs the tests: the shared limits first, then nextest's
 /// own binary under the ci profile, with nothing after either that could filter, retry or forgive a
 /// failure, and nothing on the step but its name and this script.
-const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n";
+const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/tools.sh verify\n";
 
 /// The shell and PowerShell scripts under .github/scripts a text names by path.
 const namedScripts = (text) => [...String(text).matchAll(/\.github\/scripts\/[\w./-]+\.(?:sh|ps1)\b/g)].map((m) => m[0]);
@@ -596,7 +626,18 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
     seen.add(f);
     assert.ok(PINNED_FILES.has(f), `${from} runs ${f}, which PINNED_FILES does not hold`);
     for (const g of namedScripts(read(f))) pending.push([f, g]);
+    // A pinned module's imports are pinned too.
+    if (f.endsWith(".mjs")) for (const g of repoPaths([`node ${f}`])) if (g !== f) pending.push([f, g]);
   }
+  // A script the policy cannot name, its path made of a variable, could be any script.
+  const variablePath = /\.github\/scripts\/[^\s"'`]*\$/;
+  for (const f of PINNED_FILES.keys()) assert.doesNotMatch(read(f), variablePath, `${f} names a script under .github/scripts by a variable`);
+  for (const key of PINNED_JOBS.keys()) {
+    const [file, id] = key.split("#");
+    const w = workflows().find((x) => x.file === file);
+    for (const t of scriptTexts(w.doc, w.doc.jobs[id])) assert.doesNotMatch(t, variablePath, `${key} names a script under .github/scripts by a variable`);
+  }
+  assert.match('s=.github/scripts/$name.sh; bash "$s"', variablePath);
   // What the pin of a job reads and leaves out.
   const job = { steps: [{ uses: `actions/checkout@${"a".repeat(40)}` }, { run: "x" }] };
   assert.equal(jobDigest({}, job), jobDigest({}, { steps: [{ uses: `actions/checkout@${"b".repeat(40)}` }, { run: "x" }] }), "a moved action pin changes the digest");
@@ -615,6 +656,25 @@ check("the tests run through the pinned nextest under the shared limits, which n
     const installs = all.filter((s) => /nextest/.test(String(s.run ?? "")) && /install/.test(String(s.run ?? "")));
     assert.deepEqual(installs.map((s) => String(s.run).trim()), ["bash .github/scripts/install-nextest.sh"], `${key}: nextest is installed other than by install-nextest.sh`);
     for (const s of all) assert.doesNotMatch(String(s.run ?? ""), /GITHUB_ENV|GITHUB_PATH/, `${stepKey(file, id, s)} sets the environment of the steps after it`);
+    // Every line that runs tests, nextest's or the mutants', comes after the step sources the
+    // shared limits.
+    for (const s of all.filter((x) => typeof x.run === "string")) {
+      const lines = logicalLines(s.run).map((l) => l.trim());
+      const source = lines.indexOf(". .github/scripts/limits.sh");
+      for (const [k, l] of lines.entries()) {
+        if (/^(cargo nextest run|cargo-nextest nextest run|cargo mutants (?!.*--list))\b/.test(l)) assert.ok(source >= 0 && source < k, `${stepKey(file, id, s)} runs tests outside the shared limits: ${l}`);
+      }
+    }
+    // The tools are recorded right after nextest is installed, before any code of the change
+    // runs, and every later step that runs a script checks them at its end, before a final exit.
+    const install = all.findIndex((s) => String(s.run ?? "").trim() === "bash .github/scripts/install-nextest.sh");
+    const record = all.findIndex((s) => String(s.run ?? "").trim() === "/usr/bin/bash .github/scripts/tools.sh record");
+    assert.ok(install >= 0 && record === install + 1, `${key}: the tools are not recorded right after nextest is installed`);
+    for (const s of all.slice(record + 1).filter((x) => typeof x.run === "string")) {
+      const lines = s.run.trimEnd().split("\n");
+      const last = lines.at(-1) === 'exit "$failed"' ? lines.at(-2) : lines.at(-1);
+      assert.equal(last, "/usr/bin/bash .github/scripts/tools.sh verify", `${stepKey(file, id, s)} runs code of the change and does not check the tools at its end`);
+    }
     // limits.sh is a bash script, sourced: the steps that source it run in bash, named, or by
     // default on a Linux runner.
     for (const s of all.filter((x) => /^\. \.github\/scripts\/limits\.sh$/m.test(String(x.run ?? "")))) {
@@ -635,12 +695,12 @@ check("the tests run through the pinned nextest under the shared limits, which n
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
     assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
-    const mutate = steps(w.doc.jobs[id]).filter((s) => /^cargo mutants /m.test(String(s.run ?? "")));
+    const mutate = steps(w.doc.jobs[id]).filter((s) => /^cargo mutants (?!.*--list)/m.test(String(s.run ?? "")));
     assert.ok(mutate.length > 0, `${file}: no step runs cargo mutants`);
     for (const s of mutate) {
       const body = String(s.run).split("\n");
       const source = body.indexOf(". .github/scripts/limits.sh");
-      const first = body.findIndex((l) => /^cargo mutants /.test(l));
+      const first = body.findIndex((l) => /^cargo mutants (?!.*--list)/.test(l));
       assert.ok(source >= 0 && source < first, `${stepKey(file, id, s)}: cargo mutants runs outside the shared limits`);
     }
   }
@@ -663,7 +723,18 @@ check("limits.sh refuses an alias, a runner or a compiler from outside the repos
     };
     assert.match(run({}), /defines no limits for Elsewhere/, "limits.sh refuses a clean environment");
     assert.match(run({ NEXTEST_PROFILE: "mutants" }), /defines no limits for Elsewhere/, "the mutation runs' profile is refused");
+    assert.match(run({ RUSTFLAGS: "-D warnings" }), /defines no limits for Elsewhere/, "the Rust jobs' flags are refused");
     for (const vars of [
+      { RUSTFLAGS: "-C overflow-checks=off" },
+      { rustflags: "--cap-lints allow" },
+      { CARGO_ENCODED_RUSTFLAGS: "x" },
+      { CARGO_BUILD_RUSTFLAGS: "x" },
+      { CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "x" },
+      { RUSTDOCFLAGS: "x" },
+      { RUSTUP_TOOLCHAIN: "nightly" },
+      { BASH_ENV: "/tmp/x" },
+      { CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "false" },
+      { CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "false" },
       { CARGO_ALIAS_NEXTEST: "test --no-run --" },
       { CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: "true" },
       { cargo_target_x86_64_pc_windows_msvc_runner: "true" },
@@ -676,6 +747,38 @@ check("limits.sh refuses an alias, a runner or a compiler from outside the repos
       assert.match(run(vars), /::error::a variable above would change what the tests run/, `limits.sh lets through ${JSON.stringify(vars)}`);
     }
     assert.match(run({}, other), /::error::a cargo configuration file outside the repository/, "limits.sh lets through a cargo configuration file in CARGO_HOME");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("tools.sh finds a tool replaced or added, and a step that sets the next one's path", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tools-"));
+  try {
+    const at = (...p) => path.join(dir, ...p);
+    for (const d of [["home", "bin"], ["rustup", "toolchains", "t", "bin"], ["temp"]]) fs.mkdirSync(at(...d), { recursive: true });
+    fs.writeFileSync(at("home", "bin", "cargo-nextest"), "nextest");
+    fs.writeFileSync(at("rustup", "toolchains", "t", "bin", "cargo"), "cargo");
+    fs.writeFileSync(at("path"), "");
+    const slash = (p) => p.replace(/\\/g, "/");
+    const run = (mode) => {
+      const env = { ...process.env, CARGO_HOME: slash(at("home")), RUSTUP_HOME: slash(at("rustup")), RUNNER_TEMP: slash(at("temp")), GITHUB_PATH: slash(at("path")), GITHUB_ENV: "" };
+      const r = spawnSync(bashPath(), [".github/scripts/tools.sh", mode], { cwd: ROOT, encoding: "utf8", env, timeout: 30000 });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    assert.equal(run("verify").status, 1, "tools.sh verifies without a record");
+    assert.equal(run("record").status, 0, "tools.sh does not record");
+    assert.equal(run("verify").status, 0, `tools.sh refuses unchanged tools: ${run("verify").out}`);
+    fs.writeFileSync(at("home", "bin", "cargo-nextest"), "#!/bin/sh\nexit 1\n");
+    assert.match(run("verify").out, /a tool, a setting or a script changed since it was recorded/, "tools.sh lets a stub in place of nextest through");
+    fs.writeFileSync(at("home", "bin", "cargo-nextest"), "nextest");
+    fs.writeFileSync(at("rustup", "toolchains", "t", "bin", "rustc"), "rustc");
+    assert.match(run("verify").out, /a tool, a setting or a script changed since it was recorded/, "tools.sh lets a tool added to a toolchain through");
+    fs.rmSync(at("rustup", "toolchains", "t", "bin", "rustc"));
+    fs.writeFileSync(at("path"), "/tmp/stubs\n");
+    assert.match(run("verify").out, /set the path or the environment of the steps after it/, "tools.sh lets a step set the path of the next one");
+    fs.writeFileSync(at("path"), "");
+    assert.equal(run("verify").status, 0, "tools.sh does not return to passing once the tools are as recorded");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -696,17 +799,18 @@ check("no required job restores a cache, and no job caches nextest", () => {
 
 /// The variables that change how cargo, rustc, rustup, nextest, the shell, node or npm run what a
 /// job checks, in any case; and those of them a required or pinned job may set, each with the one
-/// value it may take (null: any).
+/// value it may take (null: any) and the jobs that may set it (null: any job).
 const TOOL_ENV = /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|BASH_ENV$|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_OPTIONS$|NODE_PATH$|NPM_CONFIG_|LD_PRELOAD$|LD_LIBRARY_PATH$)/i;
 const TOOL_ENV_ALLOWED = new Map([
-  ["CARGO_TERM_COLOR", "always"],
-  ["CARGO_MUTANTS_VERSION", null],
-  // The fuzzer's release build also asserts what a debug build asserts (fuzz.yml).
-  ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", "true"],
-  // The base branch's build beside this change's (perf.yml).
-  ["CARGO_TARGET_DIR", "${{ github.workspace }}/../target"],
-  ["NEXTEST_PROFILE", "mutants"],
-  ["RUSTFLAGS", "-D warnings"],
+  ["CARGO_TERM_COLOR", { value: "always", jobs: null }],
+  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
+  // The fuzzer's release build also asserts what a debug build asserts.
+  ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", { value: "true", jobs: ["fuzz.yml#fuzz"] }],
+  // The base branch's build beside this change's.
+  ["CARGO_TARGET_DIR", { value: "${{ github.workspace }}/../target", jobs: ["perf.yml#kernels"] }],
+  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
+  // A warning fails the build.
+  ["RUSTFLAGS", { value: "-D warnings", jobs: ["ci.yml#rust"] }],
 ]);
 
 check("no required or pinned job sets a variable that changes how its tools run", () => {
@@ -716,7 +820,8 @@ check("no required or pinned job sets a variable that changes how its tools run"
       for (const [name, value] of Object.entries(env)) {
         if (!TOOL_ENV.test(name)) continue;
         const held = TOOL_ENV_ALLOWED.get(name);
-        assert.ok(TOOL_ENV_ALLOWED.has(name) && (held === null || held === String(value)), `${file}#${id} sets ${name}=${value}, which changes how cargo, rustc, nextest, the shell or node run what the job checks`);
+        const allowed = held !== undefined && (held.value === null || held.value === String(value)) && (held.jobs === null || held.jobs.includes(`${file}#${id}`));
+        assert.ok(allowed, `${file}#${id} sets ${name}=${value}, which changes how cargo, rustc, nextest, the shell or node run what the job checks; TOOL_ENV_ALLOWED names the jobs that may set it, and its value`);
       }
     }
   }
@@ -727,21 +832,32 @@ check("no required or pinned job sets a variable that changes how its tools run"
 /// The workspace members that may run code at build time, a build script or a procedural macro,
 /// each with its reason. That code runs before any limit of the tests, with the job's rights.
 const BUILD_TIME_CODE = new Map([]);
+/// A manifest's `build =` that names a script, the key bare or quoted, and any mention of a
+/// procedural macro, `proc-macro = true` or a `crate-type` of one, comments aside.
+const buildScriptKey = /^\s*["']?build["']?\s*=(?!\s*false\b)/m;
+const procMacro = /proc[-_]macro(?![\w-])/;
+/// A doc attribute in any spelling, plain, spaced or under a cfg_attr.
+const docAttribute = /#!?\[\s*(doc\s*=|cfg_attr\b[^\]]*\bdoc\s*=)/;
 
 check("no workspace member runs code at build time", () => {
   for (const [name, { dir }] of workspace()) {
     const manifest = read(`${dir}/Cargo.toml`);
     const has = [];
     if (tracked().has(`${dir}/build.rs`)) has.push("a build.rs");
-    if (/^\s*build\s*=\s*(?!false\b)/m.test(manifest)) has.push("a build script `build =` names");
-    if (/^\s*proc[-_]macro\s*=\s*true\b/m.test(manifest)) has.push("a procedural macro");
+    if (buildScriptKey.test(manifest)) has.push("a build script `build =` names");
+    if (procMacro.test(manifest.replace(/#.*$/gm, ""))) has.push("a procedural macro");
     if (has.length > 0) assert.ok(BUILD_TIME_CODE.has(name), `${name} has ${has.join(" and ")}, code that runs at build time, before the tests' limits and with the job's rights: BUILD_TIME_CODE in .github/scripts/policy.test.mjs names the members allowed one`);
   }
+  for (const m of ['build = "x.rs"', '"build" = "x.rs"', "'build' = 'x.rs'"]) assert.match(m, buildScriptKey, m);
+  assert.doesNotMatch("build = false", buildScriptKey);
+  for (const m of ["proc-macro = true", 'crate-type = ["proc-macro"]', "proc_macro = true"]) assert.match(m, procMacro, m);
+  for (const m of ['proc-macro2 = "1"', "proc_macro2 = { workspace = true }"]) assert.doesNotMatch(m, procMacro, m);
 });
 
-/// The code blocks of a library's doc comments rustdoc compiles as doctests, as `file:line`: a
-/// fenced block whose info string names no other language than Rust and does not say `ignore`, and
-/// an indented block (four spaces after a blank doc line), which rustdoc reads as Rust.
+/// The code blocks of a library's doc comments rustdoc lists as doctests, as `file:line`: a fenced
+/// block whose info string names no other language than Rust, `ignore` included, which rustdoc
+/// lists though it does not run it, and an indented block (four spaces after a blank doc line),
+/// which rustdoc reads as Rust. A block another language names, `text` say, is no doctest.
 export function doctestBlocks(file, text) {
   const found = [];
   let fence = null;
@@ -764,7 +880,7 @@ export function doctestBlocks(file, text) {
       fence = marker[1];
       const tokens = marker[2].split(/[\s,]+/).filter(Boolean).map((t) => t.replace(/^\{|\}$/g, ""));
       const rust = tokens.includes("rust") || tokens.every((t) => ATTRIBUTE.test(t));
-      if (rust && !tokens.includes("ignore")) found.push(`${file}:${k + 1}`);
+      if (rust) found.push(`${file}:${k + 1}`);
     } else if (blank && /^ {4,}\S/.test(body)) {
       found.push(`${file}:${k + 1}`);
     }
@@ -775,22 +891,30 @@ export function doctestBlocks(file, text) {
 
 check("no library's doc comments hold an example rustdoc would compile", () => {
   // nextest runs no doctests, and `cargo test --doc` has no limit per test: an example belongs in a
-  // test, or in a block marked `text` or `ignore`.
+  // test, or in a block marked `text`.
+  // The required Rust jobs list the doctests rustdoc finds, and fail on any; this reads the
+  // sources first, so that an example fails here too, and names where it is.
   const found = [];
   for (const [, { dir }] of workspace()) {
-    if (!tracked().has(`${dir}/src/lib.rs`)) continue;
-    for (const f of filesUnder(`${dir}/src`).filter((x) => x.endsWith(".rs") && x !== `${dir}/src/main.rs` && !x.startsWith(`${dir}/src/bin/`))) {
+    for (const f of filesUnder(dir).filter((x) => x.endsWith(".rs"))) {
       const text = read(f);
+      if (!tracked().has(`${dir}/src/lib.rs`) || !f.startsWith(`${dir}/src/`) || f === `${dir}/src/main.rs` || f.startsWith(`${dir}/src/bin/`)) continue;
+      // A library's module read from another path could be one these lines never read.
+      if (/^\s*#!?\[\s*path\b/m.test(text)) found.push(`${f}: a #[path] module`);
       found.push(...doctestBlocks(f, text));
-      if (/#!?\[doc\s*=/.test(text)) found.push(`${f}: a #[doc = ...] attribute, whose text the policy does not read`);
+      if (docAttribute.test(text)) found.push(`${f}: a doc attribute, whose text the policy does not read`);
+      if (/^\s*\/\*[*!](?![*/])/m.test(text)) found.push(`${f}: a block doc comment, which the policy does not read`);
     }
   }
-  assert.deepEqual(found, [], "doc comments hold examples rustdoc compiles: mark each `text` or `ignore`, or make it a test");
+  assert.deepEqual(found, [], "doc comments hold examples rustdoc lists as doctests: mark each `text`, or make it a test");
+  for (const a of ['#[doc = "x"]', '#![doc = include_str!("a.md")]', '#[ doc = "x"]', '#[cfg_attr(all(), doc = "x")]']) assert.match(a, docAttribute, a);
+  assert.doesNotMatch("#[doc(hidden)]", docAttribute);
   const blocks = (text) => doctestBlocks("f.rs", text).map((at) => Number(at.split(":")[1]));
   assert.deepEqual(blocks("/// a\n/// ```\n/// x\n/// ```\n"), [2]);
   assert.deepEqual(blocks("//! ```rust,no_run\n//! x\n//! ```\n"), [1]);
   assert.deepEqual(blocks("/// ```should_panic\n/// ```\n/// ```edition2021\n/// ```\n"), [1, 3]);
-  assert.deepEqual(blocks("/// ```text\n/// x\n/// ```\n/// ```ignore\n/// ```\n/// ```mn\n/// ```\n/// ~~~sh\n/// ~~~\n"), []);
+  assert.deepEqual(blocks("/// ```text\n/// x\n/// ```\n/// ```mn\n/// ```\n/// ~~~sh\n/// ~~~\n"), []);
+  assert.deepEqual(blocks("/// ```ignore\n/// x\n/// ```\n"), [1], "rustdoc lists an `ignore` block");
   assert.deepEqual(blocks("/// a\n///\n///     let x = 1;\n"), [3]);
   assert.deepEqual(blocks("/// - a\n///   b\n//// ```\n/// ```text\n///     x\n/// ```\n"), []);
 });
@@ -806,6 +930,14 @@ check("the list of tests is read as nextest writes it", () => {
   assert.equal(testListProblems(list([["a", "a", [["m::later", true]]], ["b", "b::it", [["slow", false]]]]), "a m::later\n", toml).length, 1, "a slow test compiled out");
   assert.equal(testListProblems(list([]), "", "").length, 1, "an empty list");
   assert.deepEqual(slowTests(read(".config/nextest.toml")).sort(), SLOW_TESTS.map(([p, t]) => `${p} ${t}`).sort(), "lib/test-list.mjs reads the override's tests as the policy does");
+  // The doctests' list, as `cargo test --doc -- --list` prints it.
+  const none = "   Doc-tests mente_ast\n0 tests, 0 benchmarks\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n";
+  assert.deepEqual(doctestProblems(none), []);
+  // As the jobs print it, under CARGO_TERM_COLOR=always: the header coloured.
+  assert.deepEqual(doctestProblems("\x1b[1m\x1b[32m   Doc-tests\x1b[0m mente_ast\n0 tests, 0 benchmarks\n"), []);
+  assert.equal(doctestProblems(`${none}   Doc-tests mente_sema\ncompiler/mente-sema/src/lib.rs - f (line 3): test\n1 test, 0 benchmarks\n`).length, 1, "a library with a doctest");
+  assert.equal(doctestProblems("   Doc-tests mente_ast\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n").length, 1, "a library without its count");
+  assert.equal(doctestProblems("   Compiling mente-ast\n").length, 1, "no library at all");
 });
 
 /// The bash the policy runs scripts in: on Windows, Git's, beside the git the policy runs, since a
@@ -1156,6 +1288,43 @@ const TIMEOUTS = new Map([
   ["harness.yml#fixtures", 30],
 ]);
 
+/// The time an ignored test may take where a required job runs it by name, in release: those runs
+/// took at most 2.7 minutes with their build, on any runner, in the runs of #120, #127 and main.
+/// nextest's limits do not reach them, since they run through `cargo test` to show their output.
+const IGNORED_TEST_LIMIT = "15m";
+
+check("every ignored test a required job runs has a time limit of its own", () => {
+  let found = 0;
+  for (const { file, doc, id, job } of requiredJobs()) {
+    for (const s of steps(job)) {
+      for (const line of logicalLines(s.run ?? "")) {
+        // Every timeout runs in bash, GNU's: Windows' own shell finds timeout.exe, which only
+        // waits. A job's default shell is bash only on a Linux runner named as such.
+        const shell = s.shell ?? job.defaults?.run?.shell ?? doc.defaults?.run?.shell;
+        const linux = /^ubuntu-/.test(String(job["runs-on"]));
+        if (/(^|[\s(&;|])timeout\s+\d/.test(line)) {
+          assert.ok(shell === "bash" || (shell === undefined && linux), `${stepKey(file, id, s)} runs timeout in ${shell ?? "the runner's default shell"}, not bash`);
+        }
+        if (!/\bcargo\s+test\b.*\s--ignored\b/.test(line)) continue;
+        found++;
+        assert.match(line, new RegExp(`(^|[\\s(&;])timeout ${IGNORED_TEST_LIMIT} cargo test\\b`), `${stepKey(file, id, s)} runs ignored tests without their limit: timeout ${IGNORED_TEST_LIMIT} cargo test ...`);
+        // Piped, its timeout would fail only the last command of the pipe without pipefail, which
+        // GitHub's bash has only when a step names it.
+        if (/(^|[^|])\|([^|]|$)/.test(line)) {
+          assert.ok(shell === "bash" || /\bset\s+-[a-z]*o\s+pipefail\b/.test(String(s.run)), `${stepKey(file, id, s)} pipes ignored tests under timeout without pipefail`);
+        }
+      }
+    }
+  }
+  assert.ok(found >= 6, "the policy reads the commands that run ignored tests");
+  // The form the rule pins works where the steps run it, in bash: GNU timeout stops the command at
+  // its limit (exit 124) and passes a command within it, where a timeout that only waits, as
+  // Windows' own is, would do neither.
+  const timeout = (cmd) => spawnSync(bashPath(), ["-c", cmd], { cwd: ROOT, encoding: "utf8", timeout: 30000 }).status;
+  assert.equal(timeout(`timeout ${IGNORED_TEST_LIMIT} true`), 0, `timeout ${IGNORED_TEST_LIMIT} does not pass a command within its limit`);
+  assert.equal(timeout("timeout 1s sleep 10"), 124, "timeout does not stop a command at its limit");
+});
+
 check("every required job takes at most the time the policy holds for it", () => {
   const keys = new Set();
   for (const { file, id, job } of requiredJobs()) {
@@ -1269,8 +1438,12 @@ check("every instrument workflow decides at its first step, and every later step
 /// The workspace's members, each with the members it depends on by path.
 function workspace() {
   const root = read("Cargo.toml");
-  const members = [...(/members\s*=\s*\[([\s\S]*?)\]/.exec(root)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  // Every member, in either quote, comments aside; a glob is refused, since cargo would expand it
+  // to members this list never names.
+  const list = (/members\s*=\s*\[([\s\S]*?)\]/.exec(root)?.[1] ?? "").replace(/#.*$/gm, "");
+  const members = [...list.matchAll(/"([^"]+)"|'([^']+)'/g)].map((m) => m[1] ?? m[2]);
   assert.ok(members.length > 0, "Cargo.toml lists no workspace members");
+  for (const m of members) assert.doesNotMatch(m, /[*?[]/, `Cargo.toml's workspace member ${m} is a glob`);
   const crates = new Map();
   for (const dir of members) {
     const manifest = read(`${dir}/Cargo.toml`);
@@ -1504,7 +1677,7 @@ check("no script a required job runs can skip its own main", () => {
     for (const f of repoPaths(scriptTexts(doc, job))) if (/\.(mjs|cjs|js|ts)$/.test(f) && !f.endsWith(".test.mjs")) scripts.add(f);
   }
   for (const f of scripts) assert.doesNotMatch(read(f), guard, `${f} runs main() only when the path it was started by matches its own`);
-  for (const cli of [".github/scripts/watch.mjs", ".github/scripts/commits.mjs", ".github/scripts/mutants-floor.mjs", ".github/scripts/test-list.mjs", "perf/run.mjs"]) {
+  for (const cli of [".github/scripts/watch.mjs", ".github/scripts/commits.mjs", ".github/scripts/mutants-floor.mjs", ".github/scripts/test-list.mjs", ".github/scripts/action-pins.mjs", "perf/run.mjs"]) {
     assert.match(read(cli), /^\s*(?!\/\/).*\bmain\(/m, `${cli} does not call main() at its top level`);
   }
   assert.ok(scripts.has("benchmark/check.mjs") && scripts.has("perf/lib.mjs") && scripts.has(".github/scripts/lib/test-list.mjs"), "the scripts of the required jobs are read");
@@ -1814,6 +1987,31 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const spanless = { ...mutant("f at 12", 12, 12, fnf), function: { function_name: "f" } };
   assert.throws(() => readList(JSON.stringify([spanless])), /names a function without its span/);
   assert.equal(readList(JSON.stringify([mutant("const", 3, 3, null)])).length, 1, "no function at all is a mutant outside any");
+  // The evidence of each outcome, as cargo-mutants 27 writes it (the shapes of #120's run): a
+  // caught mutant's tests ended as nextest ends a failed run, a test failing in its log; an
+  // unviable one's build failed with an error of the compiler. A stub that exits at once shows
+  // neither.
+  const outcome = (name, summary, phases, log) => ({ scenario: { Mutant: { name } }, summary, log_path: `log/${name}.log`, phase_results: phases, log });
+  const build = (status) => ({ phase: "Build", duration: 2.8, process_status: status });
+  const test = (status) => ({ phase: "Test", duration: 0.15, process_status: status });
+  const FAILED = "\x1b[1;31m        FAIL\x1b[0m [   0.004s] mente-syntax tests::x\n";
+  const real = [
+    outcome("caught", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${FAILED}*** result: Failure(100)\n`),
+    outcome("timeout", "CaughtMutant", [build("Success"), test({ Failure: 100 })], "        TIMEOUT [  40.104s] mente-cli::bin/mn x\n"),
+    outcome("unviable", "Unviable", [build({ Failure: 101 })], "\x1b[0m\x1b[1m\x1b[38;5;9merror[E0277]\x1b[0m: the trait bound\n"),
+    outcome("missed", "MissedMutant", [build("Success"), test("Success")], ""),
+    { scenario: "Baseline", summary: "Success", phase_results: [], log_path: "log/baseline.log", log: "" },
+  ];
+  const logs = (list) => (p) => list.find((o) => o.log_path === p)?.log ?? "";
+  assert.deepEqual(evidence({ outcomes: real }, logs(real)), []);
+  const stubbed = [
+    outcome("caught by a stub", "CaughtMutant", [build("Success"), test({ Failure: 1 })], "*** cargo nextest run\n*** result: Failure(1)\n"),
+    outcome("caught, a failing line but not nextest's exit", "CaughtMutant", [build("Success"), test({ Failure: 1 })], FAILED),
+    outcome("caught, no test failed", "CaughtMutant", [build("Success"), test({ Failure: 100 })], "error: no tests to run\n"),
+    outcome("unviable, built", "Unviable", [build("Success")], "error[E0277]: x\n"),
+    outcome("unviable, no error", "Unviable", [build({ Failure: 101 })], "*** result: Failure(101)\n"),
+  ];
+  assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
 });
 
 // --------------------------------------------------------------------- milestones and their gates

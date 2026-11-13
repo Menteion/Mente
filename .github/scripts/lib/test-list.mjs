@@ -47,10 +47,42 @@ export function problems(list, ignoredText, nextestToml) {
 }
 
 export function main(args, read) {
-  const [listFile] = args;
-  if (!listFile) throw new Error("usage: node .github/scripts/test-list.mjs <nextest list --message-format json>");
-  const found = problems(JSON.parse(read(listFile)), read(".config/ignored-tests.txt"), read(".config/nextest.toml"));
+  const [command, listFile] = args;
+  let found;
+  if (command === "nextest" && listFile) {
+    found = problems(JSON.parse(read(listFile)), read(".config/ignored-tests.txt"), read(".config/nextest.toml"));
+    if (found.length === 0) console.log("The ignored tests are those .config/ignored-tests.txt lists, and every test given a longer limit runs.");
+  } else if (command === "doctests" && listFile) {
+    found = doctestProblems(read(listFile));
+    if (found.length === 0) console.log("No library holds a doc example rustdoc would compile.");
+  } else {
+    throw new Error("usage: node .github/scripts/test-list.mjs nextest <nextest list --message-format json> | doctests <cargo test --doc -- --list>");
+  }
   for (const p of found) console.log(`::error::${p}`);
   if (found.length > 0) process.exitCode = 1;
-  else console.log("The ignored tests are those .config/ignored-tests.txt lists, and every test given a longer limit runs.");
+}
+
+/// Why the doctests' list is not empty, from `cargo test --doc -- --list`: each library's header,
+/// `Doc-tests <crate>`, is followed by its count, which must be `0 tests, 0 benchmarks`. nextest
+/// runs no doctests, and `cargo test --doc` gives none a limit of its own, so a library holds no
+/// doc example rustdoc would compile, in whatever spelling of a doc comment or attribute; such an
+/// example belongs in a test. A list with no library, or a header without its count, fails too.
+export function doctestProblems(text) {
+  // Colours aside: the jobs set CARGO_TERM_COLOR=always, and cargo colours the headers.
+  const lines = String(text)
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim());
+  const found = [];
+  let libraries = 0;
+  for (const [k, line] of lines.entries()) {
+    const header = /^Doc-tests (\S+)$/.exec(line);
+    if (!header) continue;
+    libraries++;
+    const count = lines.slice(k + 1).find((l) => /^\d+ tests?, \d+ benchmarks?$/.test(l) || /^Doc-tests /.test(l));
+    if (!count || count.startsWith("Doc-tests ")) found.push(`${header[1]}: rustdoc listed no count of its doctests`);
+    else if (count !== "0 tests, 0 benchmarks") found.push(`${header[1]}: rustdoc lists doctests (${count}): make each a test, or mark its block \`text\`, since rustdoc lists an \`ignore\` block too`);
+  }
+  if (libraries === 0) found.push("rustdoc listed the doctests of no library");
+  return found;
 }

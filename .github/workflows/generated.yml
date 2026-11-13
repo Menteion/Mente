@@ -84,7 +84,7 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         run: |
           echo "Seeds $MENTE_GEN_FIRST_SEED ..= $(( MENTE_GEN_FIRST_SEED + MENTE_GEN_PROGRAMS - 1 ))" | tee -a "$GITHUB_STEP_SUMMARY"
-          cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
+          timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
             mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/generated.txt"
           # The floor of work done: three in four of the programs asked for pass every check,
@@ -106,7 +106,7 @@ jobs:
           MENTE_GEN_CALLS: "64"
           MENTE_GEN_EXHAUSTIVE: "4096"
         run: |
-          cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
+          timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
             mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/conformance.txt"
       - name: Summary
