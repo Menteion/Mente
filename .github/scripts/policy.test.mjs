@@ -40,7 +40,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 38;
+const FLOOR = 40;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -292,70 +292,256 @@ check("every compiler crate proves its overflow checks in a release build", () =
   assert.match(proof, /if \[ "\$expected" -eq 0 \] \|\| \[ "\$passed" -ne "\$expected" \]; then/);
 });
 
-/// The sections of .config/nextest.toml, each with the keys it sets, and every override's filter.
+/// .config/nextest.toml as the policy reads it: its tables in order, each with its keys and their
+/// values as written. nextest only warns about a key it does not know, and TOML has spellings a
+/// narrower reader would pass over (quoted and dotted keys, a key before the first table), so every
+/// line must be a blank, a comment, a table's header, a bare `key = value`, or a line of a `"""`
+/// string, and any other line is an error rather than a line skipped. A table or a key twice is an
+/// error too.
 export function nextestConfig(text) {
-  const sections = new Map();
-  const filters = [];
-  let current = null;
+  const tables = [];
   const lines = text.split(/\r?\n/);
+  let current = null;
+  const fail = (k, why) => {
+    throw new Error(`.config/nextest.toml:${k + 1}: ${why}: ${lines[k]}`);
+  };
   for (let k = 0; k < lines.length; k++) {
-    const line = lines[k].trim();
-    const header = /^\[\[?([^\]]+)\]\]?$/.exec(line);
+    const line = lines[k];
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    const header = /^(\[\[?)([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*)(\]\]?)$/.exec(line);
     if (header) {
-      current = header[1];
-      if (!sections.has(current)) sections.set(current, []);
+      const array = header[1] === "[[";
+      if (array !== (header[3] === "]]")) fail(k, "a header whose brackets do not match");
+      if (tables.some((t) => t.name === header[2] && (!array || !t.array))) fail(k, "a table twice");
+      current = { name: header[2], array, keys: new Map() };
+      tables.push(current);
       continue;
     }
-    const key = /^([\w-]+)\s*=\s*(.*)$/.exec(line);
-    if (!key || current === null) continue;
-    sections.get(current).push(key[1]);
-    if (key[1] !== "filter") continue;
-    let value = key[2];
+    const entry = /^([a-z][a-z0-9-]*) = (.+)$/.exec(line);
+    if (!entry) fail(k, "not a line the policy reads");
+    if (current === null) fail(k, "a key outside any table");
+    if (current.keys.has(entry[1])) fail(k, "a key twice");
+    let value = entry[2];
     if (value.startsWith('"""')) {
-      value = value.slice(3);
-      while (!value.includes('"""') && k + 1 < lines.length) value += `\n${lines[++k]}`;
-      value = value.slice(0, value.indexOf('"""'));
-    } else value = value.replace(/^["']|["']$/g, "");
-    filters.push(value);
+      const start = k;
+      while (value.indexOf('"""', 3) < 0) {
+        if (++k >= lines.length) fail(start, "a string never closed");
+        value += `\n${lines[k]}`;
+      }
+      if (value.indexOf('"""', 3) !== value.length - 3) fail(k, "more after the string's end");
+    }
+    current.keys.set(entry[1], value);
   }
-  return { sections, filters };
+  return tables;
 }
 
-check("the tests run under limits defined once, and every test an override names exists", () => {
-  const { sections, filters } = nextestConfig(read(".config/nextest.toml"));
-  assert.ok(sections.get("profile.default")?.includes("slow-timeout"), "the default profile sets no time limit");
-  for (const profile of ["profile.ci", "profile.mutants"]) {
-    assert.deepEqual(sections.get(profile), ["fail-fast"], `[${profile}] sets more than fail-fast: its limits are the default profile's`);
-  }
-  for (const name of sections.keys()) {
-    assert.match(name, /^profile\.(default|ci|mutants)(\.overrides)?$/, `.config/nextest.toml has [${name}]`);
-    assert.ok(!name.endsWith(".overrides") || name === "profile.default.overrides", `[[${name}]]: overrides belong to the default profile`);
-  }
-  assert.ok(filters.length > 0, "no override names the slow tests");
-  const sources = [...tracked()].filter((f) => f.startsWith("compiler/") && f.endsWith(".rs")).map(read).join("\n");
-  for (const filter of filters) {
-    const names = [...filter.matchAll(/test\(([^)]*)\)/g)].map((m) => m[1].trim());
-    assert.ok(names.length > 0, `an override's filter names no test: ${filter}`);
-    assert.doesNotMatch(filter.replace(/test\([^)]*\)|[|\s]/g, ""), /./, `an override's filter is more than test names joined by |: ${filter}`);
-    for (const name of names) {
-      const bare = name.replace(/^[=~]/, "");
-      assert.match(bare, /^[A-Za-z_][A-Za-z0-9_:]*$/, `test(${name}) is a pattern, not a test's name`);
-      assert.ok(new RegExp(`\\bfn ${bare.split("::").pop()}\\(`).test(sources), `test(${name}), named in .config/nextest.toml, is no test of the compiler`);
+/// The seconds after which a slow-timeout stops a test, in the one form the policy reads: a period
+/// in whole seconds and terminate-after, nothing else. A string marks a test slow and never stops
+/// it, and `on-timeout = "pass"` passes the test it stopped; either, or any other key, gives null.
+export function stopAfter(value) {
+  const m = /^\{ period = "([1-9]\d*)s", terminate-after = ([1-9]\d*) \}$/.exec(String(value));
+  return m ? Number(m[1]) * Number(m[2]) : null;
+}
+
+/// The tests an override's filter names, each by its whole path, `test(=path)` joined by `|`: an
+/// exact name holds the override for that test alone, where `test(name)` would hold it for every
+/// test whose name contains the name. Anything else in the filter is an error.
+export function filterNames(value) {
+  const m = /^"""([\s\S]*)"""$/.exec(value) ?? /^"([^"\\]*)"$/.exec(value);
+  assert.ok(m, `an override's filter is not a plain string: ${value}`);
+  const filter = m[1];
+  const names = [...filter.matchAll(/test\(=([^)]*)\)/g)].map((n) => n[1]);
+  assert.ok(names.length > 0, `an override's filter names no test by its path: ${filter}`);
+  const rest = filter.replace(/test\(=[^)]*\)/g, "").replace(/\s/g, "");
+  assert.equal(rest, "|".repeat(names.length - 1), `an override's filter is more than test(=path) joined by |: ${filter}`);
+  for (const name of names) assert.match(name, /^[A-Za-z_]\w*(::[A-Za-z_]\w*)*$/, `test(=${name}) is not a test's path`);
+  return names;
+}
+
+/// Where a test of a given path is: each function of its name, in a file of a compiler crate whose
+/// module path with the inline modules declared in it is the test's, at the indentation rustfmt
+/// gives that depth, with the attributes above it. A unit test's path is its module path in its
+/// crate; an integration test's, its path within its file under tests/.
+export function testsAt(testPath, files) {
+  const segments = testPath.split("::");
+  const name = segments.pop();
+  const found = [];
+  for (const [file, text] of files) {
+    const m = /^compiler\/[^/]+\/(src|tests)\/(.+)\.rs$/.exec(file);
+    if (!m) continue;
+    const parts = m[2].split("/");
+    let modules;
+    if (m[1] === "tests") {
+      if (parts.length > 1) continue;
+      modules = [];
+    } else if (parts.length === 1 && (parts[0] === "lib" || parts[0] === "main")) {
+      modules = [];
+    } else {
+      if (parts.at(-1) === "mod") parts.pop();
+      modules = parts;
+    }
+    if (modules.length > segments.length || modules.some((s, k) => s !== segments[k])) continue;
+    const inline = segments.slice(modules.length);
+    const lines = text.split(/\r?\n/);
+    const declared = inline.every((mod, depth) => lines.some((l) => l === `${" ".repeat(4 * depth)}mod ${mod} {`));
+    if (!declared) continue;
+    const head = new RegExp(`^${" ".repeat(4 * inline.length)}(pub(\\([^)]*\\))? )?fn ${name}\\(\\)`);
+    for (let k = 0; k < lines.length; k++) {
+      if (!head.test(lines[k])) continue;
+      const attributes = [];
+      for (let j = k - 1; j >= 0 && /^\s*(#\[|\/\/)/.test(lines[j]); j--) if (/^\s*#\[/.test(lines[j])) attributes.push(lines[j].trim());
+      found.push({ at: `${file}:${k + 1}`, test: attributes.includes("#[test]"), ignored: attributes.some((a) => /\bignore\b/.test(a)) });
     }
   }
-  // The required Rust jobs run the tests under the ci profile, Linux's under a memory limit; the
-  // mutation runs under the mutants profile.
-  const rust = steps(workflows().find((w) => w.file === "ci.yml").doc.jobs.rust);
-  const tests = rust.find((s) => /cargo nextest run --locked --workspace --profile ci/.test(String(s.run ?? "")));
-  assert.ok(tests, "the Rust jobs do not run the tests through nextest under the ci profile");
-  assert.match(String(tests.run), /if \[ "\$RUNNER_OS" = Linux \]; then ulimit -v \d+; fi\n/, "the Linux jobs run the tests under no memory limit");
-  for (const file of ["mutants.yml", "mutants-full.yml"]) {
-    assert.equal(workflows().find((w) => w.file === file).doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
+  return found;
+}
+
+/// The most a test may run before nextest stops it, in seconds: a test outside the overrides, and
+/// one an override names. The second stays below cargo-mutants' --timeout of 600 s, so that nextest
+/// stops a looping mutant's test, which then fails and catches the mutant, before cargo-mutants
+/// gives up on the mutant as timed out.
+const STOP_CEILING = { default: 60, override: 300 };
+/// What the default profile holds: its two limits, and a leak that fails its test.
+const LEAK_TIMEOUT = '{ period = "100ms", result = "fail" }';
+
+check("the tests run under limits defined once, which stop every test, and every test an override names runs", () => {
+  const tables = nextestConfig(read(".config/nextest.toml"));
+  for (const t of tables) {
+    const known = t.array ? t.name === "profile.default.overrides" : ["profile.default", "profile.ci", "profile.mutants"].includes(t.name);
+    assert.ok(known, `.config/nextest.toml has ${t.array ? `[[${t.name}]]` : `[${t.name}]`}: only the default profile, its overrides, ci and mutants`);
   }
-  // What the check reads.
-  const sample = nextestConfig('[profile.default]\nslow-timeout = 1\n[[profile.default.overrides]]\nfilter = """\ntest(a)\n| test(=b)\n"""\n[profile.ci]\nfail-fast = false\n');
-  assert.deepEqual([...sample.sections.keys()], ["profile.default", "profile.default.overrides", "profile.ci"]);
-  assert.deepEqual(sample.filters, ["\ntest(a)\n| test(=b)\n"]);
+  const table = (name) => {
+    const found = tables.find((t) => t.name === name && !t.array);
+    assert.ok(found, `.config/nextest.toml has no [${name}]`);
+    return found.keys;
+  };
+  const defaults = table("profile.default");
+  assert.deepEqual([...defaults.keys()].sort(), ["leak-timeout", "slow-timeout"], "[profile.default] sets more or less than its two limits");
+  const stop = stopAfter(defaults.get("slow-timeout"));
+  assert.ok(stop !== null && stop <= STOP_CEILING.default, `[profile.default] slow-timeout = ${defaults.get("slow-timeout")}: not a stop within ${STOP_CEILING.default} s`);
+  assert.equal(defaults.get("leak-timeout"), LEAK_TIMEOUT, "[profile.default]: a test that leaves a process behind does not fail");
+  assert.deepEqual([...table("profile.ci")], [["fail-fast", "false"]], "[profile.ci] sets more than fail-fast = false: its limits are the default profile's");
+  assert.deepEqual([...table("profile.mutants")], [["fail-fast", "true"]], "[profile.mutants] sets more than fail-fast = true: its limits are the default profile's");
+  const overrides = tables.filter((t) => t.array);
+  assert.ok(overrides.length > 0, "no override names the slow tests");
+  const files = new Map([...tracked()].filter((f) => f.startsWith("compiler/") && f.endsWith(".rs")).map((f) => [f, read(f)]));
+  for (const { keys } of overrides) {
+    assert.deepEqual([...keys.keys()].sort(), ["filter", "slow-timeout"], `an override sets more than its tests and their time limit: ${[...keys.keys()].join(", ")}`);
+    const limit = stopAfter(keys.get("slow-timeout"));
+    assert.ok(limit !== null && limit <= STOP_CEILING.override, `an override's slow-timeout = ${keys.get("slow-timeout")}: not a stop within ${STOP_CEILING.override} s`);
+    for (const name of filterNames(keys.get("filter"))) {
+      const found = testsAt(name, files);
+      assert.equal(found.length, 1, `test(=${name}), named in .config/nextest.toml, is ${found.length} functions of the compiler, not one: ${found.map((f) => f.at).join(", ")}`);
+      assert.ok(found[0].test, `test(=${name}) at ${found[0].at} is no #[test]`);
+      assert.ok(!found[0].ignored, `test(=${name}) at ${found[0].at} is ignored, so its limit holds for nothing the jobs run`);
+    }
+  }
+  // What the reader refuses rather than skips, and what the checks read.
+  const refused = [
+    '[profile.ci]\n"slow-timeout" = 1\n',
+    "[profile.ci]\nslow-timeout.period = 1\n",
+    "[profile.ci]\nfail-fast = true\nfail-fast = false\n",
+    "retries = 3\n[profile.ci]\n",
+    "[profile.ci]\n  retries = 3\n",
+    "[profile.ci]\n[profile.ci]\n",
+    "[profile.ci] # a\n",
+    '[[profile.default.overrides]]\nfilter = """\ntest(=a)\n',
+    '[[profile.default.overrides]]\nfilter = """\ntest(=a)\n""" # b\n',
+  ];
+  for (const text of refused) assert.throws(() => nextestConfig(text), /nextest\.toml:\d+/, text);
+  const sample = nextestConfig('# a\n[profile.default]\nslow-timeout = 1\n[[profile.default.overrides]]\nfilter = """\ntest(=a::b)\n| test(=c)\n"""\n[profile.ci]\nfail-fast = false\n');
+  assert.deepEqual(sample.map((t) => t.name), ["profile.default", "profile.default.overrides", "profile.ci"]);
+  assert.deepEqual(filterNames(sample[1].keys.get("filter")), ["a::b", "c"]);
+  assert.equal(stopAfter('{ period = "20s", terminate-after = 2 }'), 40);
+  for (const v of ['"20s"', '{ period = "20s", terminate-after = 2, on-timeout = "pass" }', '{ period = "1m", terminate-after = 2 }']) assert.equal(stopAfter(v), null, v);
+  for (const v of ['"""\ntest(a)\n"""', '"""\ntest(=a) | package(b)\n"""', '"""\ntest(=a) test(=b)\n"""', '"""\ntest(=/a/)\n"""']) assert.throws(() => filterNames(v), assert.AssertionError, v);
+  const unit = new Map([
+    ["compiler/x/src/m.rs", "mod tests {\n    #[test]\n    fn t() {}\n\n    fn helper() {}\n\n    #[test]\n    #[ignore]\n    fn slow() {}\n}\n"],
+    ["compiler/x/src/lib.rs", "/// Doc.\n#[test]\nfn top() {}\n"],
+    ["compiler/x/tests/cli.rs", "#[test]\nfn whole() {}\n"],
+  ]);
+  assert.deepEqual(testsAt("m::tests::t", unit), [{ at: "compiler/x/src/m.rs:3", test: true, ignored: false }]);
+  assert.deepEqual(testsAt("m::tests::helper", unit).map((f) => f.test), [false]);
+  assert.deepEqual(testsAt("m::tests::slow", unit).map((f) => f.ignored), [true]);
+  assert.deepEqual(testsAt("m::t", unit), []);
+  assert.deepEqual(testsAt("top", unit).map((f) => f.at), ["compiler/x/src/lib.rs:3"]);
+  assert.deepEqual(testsAt("whole", unit).map((f) => f.at), ["compiler/x/tests/cli.rs:2"]);
+});
+
+/// The step of the required Rust jobs that runs the tests, as it must read: the shared limits
+/// first, then nextest under the ci profile, alone, with nothing after either that could filter,
+/// retry or forgive a failure. The step carries nothing but its name and this script.
+const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo nextest run --locked --workspace --profile ci\n";
+/// The lines of .github/scripts/limits.sh that set the limits: each must stand there as written,
+/// and nothing else in it may call ulimit or the job object.
+const LIMIT_LINES = [
+  '  Linux)',
+  "    ulimit -v 8388608 -f 2097152",
+  '      if [ "$avail" -lt 2048 ]; then',
+  '        kill -9 "$pid"',
+  "    done) &",
+  "  Windows)",
+  '    pwsh -NoProfile -NonInteractive -File .github/scripts/job-limits.ps1 -ProcessId "$(cat "/proc/$$/winpid")" -ProcessBytes 8589934592 -JobBytes 12884901888',
+  "  *)",
+  "    exit 1",
+];
+/// The workflows that run the compiler's tests, each with the job that does: the step that installs
+/// nextest and the step that runs the tests read the same two scripts in all of them.
+const TESTING_JOBS = [
+  ["ci.yml", "rust"],
+  ["mutants.yml", "in-diff"],
+  ["mutants-full.yml", "full"],
+];
+
+check("the tests run through the pinned nextest under the shared limits, which no setting can lift", () => {
+  const limits = read(".github/scripts/limits.sh");
+  const lines = limits.split(/\r?\n/);
+  for (const line of LIMIT_LINES) assert.ok(lines.includes(line), `.github/scripts/limits.sh lacks the line: ${line}`);
+  assert.equal(lines.filter((l) => /^\s*[^#\s]/.test(l) && /\b(ulimit|job-limits\.ps1)\b/.test(l)).length, 2,".github/scripts/limits.sh sets its limits somewhere else as well");
+  const installer = read(".github/scripts/install-nextest.sh").split(/\r?\n/);
+  assert.equal(installer.filter((l) => /^version=\d+\.\d+\.\d+$/.test(l)).length, 1, "install-nextest.sh pins no single version");
+  assert.equal(installer.filter((l) => l === 'if [ "$(running)" != "$version" ]; then').length, 2, "install-nextest.sh does not check the version cargo runs after installing");
+  assert.ok(installer.includes("set -euo pipefail") && installer.at(-2) === 'echo "cargo-nextest $version"', "install-nextest.sh may go on past a failure");
+  for (const [file, id] of TESTING_JOBS) {
+    const w = workflows().find((x) => x.file === file);
+    assert.ok(w?.doc.jobs?.[id], `${file} has no job ${id}`);
+    const job = w.doc.jobs[id];
+    const where = `${file}, job ${id}`;
+    const all = steps(job);
+    const installs = all.filter((s) => /nextest/.test(String(s.run ?? "")) && /install/.test(String(s.run ?? "")));
+    assert.deepEqual(installs.map((s) => String(s.run).trim()), ["bash .github/scripts/install-nextest.sh"], `${where}: nextest is installed other than by install-nextest.sh`);
+    const cache = all.find((s) => String(s.uses ?? "").startsWith("actions/cache@") && /cargo-nextest/.test(String(s.with?.path ?? "")));
+    assert.match(String(cache?.with?.key ?? ""), /hashFiles\('\.github\/scripts\/install-nextest\.sh'\)/, `${where}: nextest's cache is not keyed on the installer`);
+    // Nothing reaches nextest or cargo from the environment unseen: no variable of theirs but the
+    // mutation runs' profile, and no step writes the environment or the path of the steps after.
+    const envs = [w.doc.env, job.env, ...all.map((s) => s.env)].filter(Boolean);
+    for (const env of envs) {
+      for (const [name, value] of Object.entries(env)) {
+        if (name === "NEXTEST_PROFILE" && value === "mutants" && env === w.doc.env && file !== "ci.yml") continue;
+        assert.doesNotMatch(name, /^(CARGO_)?NEXTEST_|^CARGO_TARGET_|^RUSTC_(WORKSPACE_)?WRAPPER$/, `${where} sets ${name}, which changes what the tests run`);
+      }
+    }
+    for (const s of all) assert.doesNotMatch(String(s.run ?? ""), /GITHUB_ENV|GITHUB_PATH/, `${stepKey(file, id, s)} sets the environment of the steps after it`);
+  }
+  // The required Rust jobs: the one step of the tests, exactly.
+  const rust = steps(workflows().find((w) => w.file === "ci.yml").doc.jobs.rust);
+  const tests = rust.filter((s) => /nextest\s+run/.test(String(s.run ?? "")));
+  assert.equal(tests.length, 1, "the Rust jobs do not run the tests through nextest in one step");
+  assert.equal(tests[0].run, NEXTEST_STEP, "the Rust jobs' tests do not run exactly as the policy reads them: the limits, then nextest under the ci profile");
+  assert.deepEqual(Object.keys(tests[0]).sort(), ["name", "run"], "the Rust jobs' step of the tests carries more than its name and script");
+  // The mutation runs: their tests under the mutants profile, inside the same limits.
+  for (const [file, id] of TESTING_JOBS.slice(1)) {
+    const w = workflows().find((x) => x.file === file);
+    assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
+    const mutate = steps(w.doc.jobs[id]).filter((s) => /^cargo mutants /m.test(String(s.run ?? "")));
+    assert.ok(mutate.length > 0, `${file}: no step runs cargo mutants`);
+    for (const s of mutate) {
+      const body = String(s.run).split("\n");
+      const source = body.indexOf(". .github/scripts/limits.sh");
+      const first = body.findIndex((l) => /^cargo mutants /.test(l));
+      assert.ok(source >= 0 && source < first, `${stepKey(file, id, s)}: cargo mutants runs outside the shared limits`);
+    }
+  }
 });
 
 check("every measured benchmark run proves its sandbox first", () => {
@@ -563,6 +749,41 @@ function gateCommands() {
   return out;
 }
 
+/// The gate commands that run inside a compound command of their step, each with its reason.
+const NESTED_GATES = new Map([
+  ["mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing", "shard 0 alone checks the floor of the whole diff"],
+]);
+
+/// Why a step's script could pass though a gate command in it failed: the step turns off the
+/// shell's errexit or pipefail; or a line holding the command is commented out, negated, nested in
+/// a compound command (rustfmt-like indentation: a top-level command starts its line), or followed
+/// by `||`, `&&`, `;` or `&`, which the shell's errexit forgives; or a pipe follows it in a shell
+/// without pipefail, which GitHub's bash has only when a step names it (`shell: bash`, here or in
+/// the defaults). The one way to keep a command's failure for later is `|| status=$?` ending its
+/// line, with `exit "$status"` on a later line of the script.
+export function gateLineProblems(script, command, pipefail, nested = false) {
+  const found = [];
+  const text = String(script);
+  if (/\bset\s+(\+[a-z]*e|\+o\b)/.test(text)) found.push("the script turns off errexit or pipefail");
+  if (/\bset\s+(-[a-z]*o|-o)\s+pipefail\b/.test(text)) pipefail = true;
+  const lines = text.replace(/\\\n/g, " ").split("\n");
+  for (const [k, line] of lines.entries()) {
+    const at = line.indexOf(command);
+    if (at < 0) continue;
+    let rest = line.slice(at + command.length);
+    if (/\s\|\| status=\$\?\s*$/.test(rest)) {
+      rest = rest.replace(/\s\|\| status=\$\?\s*$/, "");
+      if (!lines.slice(k + 1).some((l) => /\bexit "\$status"/.test(l))) found.push(`keeps the status of ${command} and never exits with it`);
+    }
+    const before = line.slice(0, at);
+    if (!nested && /^\s/.test(line)) found.push(`${command} is nested in a compound command`);
+    if (/^!|#/.test(before) || /(^|\s)!\s/.test(before)) found.push(`${command} is commented out or negated`);
+    if (/\|\||&&|;|&\s*$/.test(before + rest)) found.push(`${command} is in a list whose failure the shell forgives`);
+    if (!pipefail && /(^|[^|])\|([^|]|$)/.test(rest)) found.push(`${command} is piped in a shell without pipefail`);
+  }
+  return found;
+}
+
 check("every required job runs the commands it exists for, in steps that cannot be skipped", () => {
   const declared = gateCommands();
   const required = requiredJobs();
@@ -581,11 +802,45 @@ check("every required job runs the commands it exists for, in steps that cannot 
       for (const s of runs) {
         const where = `${stepKey(file, id, s)}, which runs ${command}`;
         assert.ok(!("continue-on-error" in s), `${where}, may fail quietly`);
+        const pipefail = [s.shell, job.defaults?.run?.shell, doc.defaults?.run?.shell].find((x) => x !== undefined) === "bash";
+        assert.deepEqual(gateLineProblems(s.run, command, pipefail, NESTED_GATES.has(`${key}: ${command}`)), [],`${where}: its failure could pass the step`);
         const condition = normalize(s.if ?? "");
         const allowed = hasWatch(job) ? WATCH_FORMS.includes(condition) : !("if" in s);
         assert.ok(allowed, `${where}, runs only if ${s.if}`);
       }
     }
+  }
+  // What the line rule refuses, and what it lets through.
+  const verdict = (script, pipefail = true) => gateLineProblems(script, "gate --x", pipefail).length > 0;
+  for (const script of [
+    "gate --x || true\n",
+    "gate --x || :\n",
+    "gate --x && echo done\nnext\n",
+    "gate --x; echo done\n",
+    "gate --x &\n",
+    "! gate --x\n",
+    "# gate --x\nnext\n",
+    "echo # gate --x\n",
+    "if false; then\n  gate --x\nfi\n",
+    "set +e\ngate --x\n",
+    "set +o pipefail\ngate --x | tee log\n",
+    "gate --x \\\n  --more || true\n",
+    "status=0\ngate --x || status=$?\necho done\n",
+  ]) {
+    assert.ok(verdict(script), `the line rule lets through: ${script}`);
+  }
+  assert.ok(verdict("gate --x | tee log\n", false), "a pipe in a shell without pipefail");
+  for (const script of ["gate --x\n", "A=1 gate --x --y\n", "gate --x | tee log\n", "status=0\ngate --x || status=$?\nexit \"$status\"\n"]) {
+    assert.ok(!verdict(script), `the line rule refuses: ${script}`);
+  }
+  assert.ok(!verdict("set -o pipefail\ngate --x | tee log\n", false), "pipefail set in the script");
+});
+
+check("every required job states the most time it may take", () => {
+  // A hang in a step without a limit of its own would otherwise hold a runner for GitHub's six hours.
+  for (const { file, id, job } of requiredJobs()) {
+    const minutes = job["timeout-minutes"];
+    assert.ok(Number.isInteger(minutes) && minutes > 0 && minutes <= 360, `${file}, job ${id}: timeout-minutes is ${minutes}, not a number of minutes up to GitHub's 360`);
   }
 });
 

@@ -714,8 +714,8 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         .collect();
     assert_eq!(
         keys,
-        vec!["name", "runs-on", "steps"],
-        "the Documentation job sets more than its name, runner and steps"
+        vec!["name", "runs-on", "timeout-minutes", "steps"],
+        "the Documentation job sets more than its name, runner, time limit and steps"
     );
     assert!(job.contains(&"    name: Documentation"));
     // The steps, by the lines that open them.

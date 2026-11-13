@@ -78,7 +78,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --workspace -- -D warnings
 ```
 
-- In CI the tests run through `cargo nextest run --profile ci`, under the time limits of `.config/nextest.toml` and, on Linux, an 8 GB limit per test process; locally `cargo test` stays the command.
+- In CI the tests run through `cargo nextest run --profile ci`, under the time limits of `.config/nextest.toml` and the memory limits of `.github/scripts/limits.sh`; locally `cargo test` stays the command.
 - **Heavy jobs run on GitHub Actions.** Locally run only the commands above. `cargo-mutants`, `mn fuzz` beyond a smoke run, generated-program comparisons at scale, benchmarks and the latency protocols run on GitHub Actions through `workflow_dispatch` on the working branch.
 - **Merging.** A pull request merges with the merge method and its head SHA, only once every check of its final head has finished green, Mutants, Generated programs and the SMT cross-check included, even where the ruleset does not yet require them; a run cancelled by a later push counts as not run. Never enable auto-merge.
 - **Worktrees.** A session's worktree and branch are removed (`git worktree remove`, then the branch) when its pull request merges or the session is archived; nothing stays under `.claude/worktrees` or `.wt`.

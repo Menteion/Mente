@@ -34,10 +34,12 @@ jobs:
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    # Four times the slowest run, 10 minutes with nextest still to build: a hang in a step outside
+    # nextest's limits, the doctests or the gates by name, holds the runner no longer.
+    timeout-minutes: 45
     env:
       # A warning fails the build (ROADMAP.md, M0a: Rust hygiene).
       RUSTFLAGS: -D warnings
-      CARGO_NEXTEST_VERSION: "0.9.149"
     defaults:
       run:
         shell: bash
@@ -60,21 +62,19 @@ jobs:
           path: |
             ~/.cargo/bin/cargo-nextest
             ~/.cargo/bin/cargo-nextest.exe
-          key: cargo-nextest-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_NEXTEST_VERSION }}
+          key: cargo-nextest-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/install-nextest.sh') }}
       - name: Install cargo-nextest
-        env:
-          # nextest's own crates are not held to the workspace's warnings.
-          RUSTFLAGS: ""
-        run: command -v cargo-nextest || cargo install cargo-nextest --locked --version "$CARGO_NEXTEST_VERSION"
+        run: bash .github/scripts/install-nextest.sh
       - name: Build the tests
         run: cargo test --locked --workspace --no-run
       - name: Tests, through nextest under the ci profile's limits
-        # Each test runs in a process of its own under the limits of .config/nextest.toml: a test
-        # past its time is stopped and fails. On Linux each process may also reserve at most 8 GB,
-        # the limit mutants.yml sets for its mutants, so a test that allocates without end fails
-        # instead of taking the runner down. The tests were built above, outside the limit.
+        # Each test runs in a process of its own under the time limits of .config/nextest.toml: a
+        # test past its time is stopped and fails, and so does one that leaves a process behind.
+        # Every process runs under the memory limits of .github/scripts/limits.sh, which the
+        # mutation runs share: a test that allocates without end fails instead of taking the
+        # runner down. The tests were built above, outside the limits.
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then ulimit -v 8388608; fi
+          . .github/scripts/limits.sh
           cargo nextest run --locked --workspace --profile ci
       - name: Doctests
         # nextest runs no doctests.
@@ -131,6 +131,7 @@ jobs:
     # above the base's fails the job.
     name: Projection benchmark
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -180,6 +181,7 @@ jobs:
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -206,6 +208,7 @@ jobs:
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -229,6 +232,7 @@ jobs:
     # `mn check --watch` runs. A 99th percentile of 5 ms or more, in any module, fails the job.
     name: Tier-1 latency
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -243,6 +247,7 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
