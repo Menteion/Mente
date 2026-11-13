@@ -315,6 +315,12 @@ These are why the design scored 4 rather than 5. Each problem with a key is an e
 - Keep repository text in English (`test_repository_text_is_english`).
 - Do not write counts of files, directives or tests into documents.
 
+**Design decisions** (the rules at the head of `docs/design-review.md`, decided on 2026-11-13)
+
+- **A decision names what would reopen it.** A decided entry ends its resolution with `**Reopen if:**` and an observation the project's own instruments can make, or "None: it follows from an invariant.". It is reopened only when that condition fires at a milestone review or by a new finding of fact, never by a preference stated again ([`reversal-conditions`](design-review.md#reversal-conditions)); a test rejects a newly decided entry without one.
+- **Library first, and admission by evidence.** Syntax is added only for what a library cannot express or check. A new mechanism names the benchmark tasks it should help, by what margin, and its cost in words of the card; one that does not help them is put on trial and then removed ([`feature-admission`](design-review.md#feature-admission)). A mechanism that serves safety or strictness is judged on the adversarial tasks and on repairs per solved run, never on solve rates, since strict rules are expected to raise a first attempt's failures.
+- **Invariants and the kernel.** A change says which invariants of `philosophy.md` it touches, normally none ([`evolution-invariants`](design-review.md#evolution-invariants)). A new construct is an elaboration into the kernel of `core-calculus.md` unless its entry shows that none exists ([`elaboration-to-core`](design-review.md#elaboration-to-core)).
+
 **Ask Norman first** before:
 
 - changing a design decision;
@@ -396,7 +402,7 @@ Self-hosting starts only when all of these hold, each with its evidence (decided
 5. One real program that was not written for the test suite, `mn fmt`, is written in Mente and in use.
 6. [`success-workload`](design-review.md#success-workload) meets a target Norman sets before it is measured for the gate, [`zero-cost-measured`](design-review.md#zero-cost-measured) has dated records, and performance baselines against C and Rust are recorded. The gate sets no speed target for generated code.
 7. An independent review of the spec and the core calculus, by someone who did not write them, has no finding left open.
-8. A stability policy says which language changes are allowed after the gate, and how existing code migrates. The first stable version of the documentation site is published with it ([`docs-site`](design-review.md#docs-site)).
+8. A stability policy says which language changes are allowed after the gate, and how existing code migrates, under one language version per build and no editions ([`one-language-version`](design-review.md#one-language-version), `philosophy.md`). The first stable version of the documentation site is published with it ([`docs-site`](design-review.md#docs-site)).
 9. Every check runs automatically: on every pull request where it fits the CI time, and otherwise on a schedule or at each milestone's end, as the agent benchmark and long fuzzing campaigns do. A check that runs only by hand does not count.
 
 ### 7.4 Self-hosting
