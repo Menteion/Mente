@@ -1501,7 +1501,8 @@ fn arg(s: &Scalar) -> native::Arg {
     }
 }
 
-/// Runs every edge call on the reference interpreter, and says how it panicked, if it did.
+/// Runs every edge call on the reference interpreter, and says how it panicked or broke, if it
+/// did.
 fn interpret(module: &CheckedModule, functions: &[Function]) -> Option<String> {
     let limits = mente_interp::Limits {
         max_depth: MAX_DEPTH,
@@ -1511,16 +1512,27 @@ fn interpret(module: &CheckedModule, functions: &[Function]) -> Option<String> {
     for f in functions {
         for call in edge_calls(&f.params) {
             let args = call.iter().map(value).collect();
-            if let Err(mente_interp::Stop::BadArguments(why)) =
-                mente_interp::call(module, &f.name, args, limits)
-            {
+            match mente_interp::call(module, &f.name, args, limits) {
                 // The interpreter runs on a thread of its own, and reports its panic this way.
-                if why.contains("stopped unexpectedly") {
+                Err(mente_interp::Stop::BadArguments(why))
+                    if why.contains("stopped unexpectedly") =>
+                {
                     return Some(format!(
                         "the reference interpreter panicked: {}",
                         last_panic()
                     ));
                 }
+                Err(mente_interp::Stop::Broken(why)) => {
+                    return Some(format!("the reference interpreter broke: {}", why));
+                }
+                Ok(_)
+                | Err(
+                    mente_interp::Stop::Trap(_)
+                    | mente_interp::Stop::OutOfSteps
+                    | mente_interp::Stop::TooLarge(_)
+                    | mente_interp::Stop::NoFunction(_)
+                    | mente_interp::Stop::BadArguments(_),
+                ) => {}
             }
         }
     }

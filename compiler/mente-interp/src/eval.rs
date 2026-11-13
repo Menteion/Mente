@@ -36,11 +36,22 @@ fn trap<T>(kind: TrapKind, span: Span) -> Flow<T> {
     Err(Exit::Stop(Stop::Trap(Trap { kind, span })))
 }
 
+/// A state the checks rule out, reported rather than run on with a made-up value.
+fn broken<T>(what: &str) -> Flow<T> {
+    Err(Exit::Stop(Stop::Broken(what.to_string())))
+}
+
 /// The integer type a static type names: its one type, or the type that holds a mix.
 fn int_ty(ty: &Ty) -> Option<IntTy> {
     match ty {
         Ty::Int(IntType::One(t)) | Ty::Int(IntType::Mixed(Some(t))) => Some(*t),
-        _ => None,
+        Ty::Int(IntType::Literal | IntType::Mixed(None))
+        | Ty::Bool
+        | Ty::Array(..)
+        | Ty::Struct(_)
+        | Ty::Enum(_)
+        | Ty::Unit
+        | Ty::Any => None,
     }
 }
 
@@ -454,21 +465,36 @@ impl<'m> Machine<'m> {
             ExprKind::Field { base, name } => {
                 let (root, mut steps) = self.place(frame, *base)?;
                 let k = match &f.typing.exprs[base.0 as usize] {
-                    Ty::Struct(s) => self
-                        .module
-                        .structs
-                        .get(s)
-                        .and_then(|d| d.field(name))
-                        .map_or(0, |(k, _)| k),
-                    _ => 0,
+                    Ty::Struct(s) => match self.module.structs.get(s).and_then(|d| d.field(name)) {
+                        Some((k, _)) => k,
+                        None => return broken("a field its struct does not declare"),
+                    },
+                    Ty::Int(_) | Ty::Bool | Ty::Array(..) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        return broken("a field of a place that is not a struct")
+                    }
                 };
                 steps.push(Step::Field(k));
                 Ok((root, steps))
             }
-            _ => Ok((
-                f.resolution.names[e.0 as usize].unwrap_or(BindingId(0)),
-                Vec::new(),
-            )),
+            ExprKind::Name(_) => match f.resolution.names[e.0 as usize] {
+                Some(root) => Ok((root, Vec::new())),
+                None => broken("a place whose name was never resolved"),
+            },
+            // The checker passes only a binding, an element or a field as a place (`E0205`).
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => broken("a place that is not a binding, an element or a field"),
         }
     }
 
@@ -488,7 +514,11 @@ impl<'m> Machine<'m> {
                 (Step::Index(..), Ty::Array(_, elem)) => {
                     declared = declared.and_then(|(tree, t)| match &tree.ty(t).kind {
                         TypeKind::Array { elem, .. } => Some((tree, *elem)),
-                        _ => None,
+                        TypeKind::Int { .. }
+                        | TypeKind::Bool
+                        | TypeKind::Named(_)
+                        | TypeKind::Enum(_)
+                        | TypeKind::Error => None,
                     });
                     ty = *elem;
                 }
@@ -512,8 +542,15 @@ impl<'m> Machine<'m> {
             v = match step {
                 Step::Index(i, span) => element(v, *i, *span)?,
                 Step::Field(k) => match v {
-                    Value::Struct(_, fields) => fields.get(*k).map_or(v, |(_, f)| f),
-                    _ => v,
+                    Value::Struct(_, fields) => match fields.get(*k) {
+                        Some((_, f)) => f,
+                        None => return broken("a field its struct value does not hold"),
+                    },
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Enum(..)
+                    | Value::Unit => return broken("a field read of a value that is not a struct"),
                 },
             };
         }
@@ -548,10 +585,26 @@ impl<'m> Machine<'m> {
         Ok(self.eval(frame, e, None)? == Value::Bool(true))
     }
 
+    /// An order comparison of two integers, the left operand evaluated first.
+    fn compare(
+        &mut self,
+        frame: &mut Frame<'m>,
+        (lhs, rhs): (ExprId, ExprId),
+        holds: fn(&Int, &Int) -> bool,
+    ) -> Flow<Value> {
+        let l = self.int(frame, lhs, None)?;
+        let r = self.int(frame, rhs, None)?;
+        Ok(Value::Bool(holds(&l, &r)))
+    }
+
     fn int(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Int> {
         match self.eval(frame, e, ctx)? {
             Value::Int(i) => Ok(i),
-            _ => Ok(Int::ZERO),
+            Value::Bool(_)
+            | Value::Array(_)
+            | Value::Struct(..)
+            | Value::Enum(..)
+            | Value::Unit => broken("an integer operand that is not an integer"),
         }
     }
 
@@ -598,17 +651,20 @@ impl<'m> Machine<'m> {
                     let r = self.eval(frame, *rhs, None)?;
                     Value::Bool((l == r) == (*op == BinaryOp::Eq))
                 }
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    let l = self.int(frame, *lhs, None)?;
-                    let r = self.int(frame, *rhs, None)?;
-                    Value::Bool(match op {
-                        BinaryOp::Lt => l < r,
-                        BinaryOp::Le => l <= r,
-                        BinaryOp::Gt => l > r,
-                        _ => l >= r,
-                    })
-                }
-                _ => {
+                BinaryOp::Lt => self.compare(frame, (*lhs, *rhs), |l, r| l < r)?,
+                BinaryOp::Le => self.compare(frame, (*lhs, *rhs), |l, r| l <= r)?,
+                BinaryOp::Gt => self.compare(frame, (*lhs, *rhs), |l, r| l > r)?,
+                BinaryOp::Ge => self.compare(frame, (*lhs, *rhs), |l, r| l >= r)?,
+                BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem => {
                     let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
                     let l = self.eval(frame, *lhs, ctx)?;
                     let r = self.eval(frame, *rhs, if shift { None } else { ctx })?;
@@ -627,11 +683,13 @@ impl<'m> Machine<'m> {
             // and each checked, from left to right (`core-calculus.md`, items 10 and 12).
             ExprKind::Field { base, name } => match self.eval(frame, *base, None)? {
                 Value::Array(items) => Value::Int(Int::from_u128(items.len() as u128)),
-                Value::Struct(_, fields) => fields
-                    .into_iter()
-                    .find(|(n, _)| n == name)
-                    .map_or(Value::Unit, |(_, v)| v),
-                _ => Value::Unit,
+                Value::Struct(_, fields) => match fields.into_iter().find(|(n, _)| n == name) {
+                    Some((_, v)) => v,
+                    None => return broken("a field its struct value does not hold"),
+                },
+                Value::Int(_) | Value::Bool(_) | Value::Enum(..) | Value::Unit => {
+                    return broken("a field read of a value that is neither an array nor a struct")
+                }
             },
             // Each value is narrowed into its field's type and refinement where it lands, in the
             // order written, which is the declaration's (`core-calculus.md`, item 13).
@@ -678,7 +736,13 @@ impl<'m> Machine<'m> {
                 // ([`match-scrutinee-narrowing`]); literals alone are an `i64`.
                 let read = match &f.typing.exprs[scrutinee.0 as usize] {
                     Ty::Int(IntType::Literal) => Ty::Int(IntType::One(I64)),
-                    t => t.clone(),
+                    t @ (Ty::Int(_)
+                    | Ty::Bool
+                    | Ty::Array(..)
+                    | Ty::Struct(_)
+                    | Ty::Enum(_)
+                    | Ty::Unit
+                    | Ty::Any) => t.clone(),
                 };
                 let v = self.narrow_plain(v, &read, tree.expr(*scrutinee).span)?;
                 for (k, arm) in arms.iter().enumerate() {
@@ -732,17 +796,16 @@ impl<'m> Machine<'m> {
             // (`core-calculus.md`, item 4).
             ExprKind::Array(items) => {
                 let elem_ty = match &f.typing.exprs[e.0 as usize] {
-                    Ty::Array(_, elem) => Some(elem.as_ref()),
-                    _ => None,
+                    Ty::Array(_, elem) => elem.as_ref(),
+                    Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        return broken("an array literal whose type is not an array")
+                    }
                 };
-                let elem = elem_ty.and_then(int_ty);
+                let elem = int_ty(elem_ty);
                 let mut values = Vec::new();
                 for &i in items {
                     let v = self.eval(frame, i, elem.or(ctx))?;
-                    values.push(match elem_ty {
-                        Some(t) => self.narrow_plain(v, t, span)?,
-                        None => v,
-                    });
+                    values.push(self.narrow_plain(v, elem_ty, span)?);
                 }
                 Value::Array(values)
             }
@@ -753,7 +816,9 @@ impl<'m> Machine<'m> {
                 let v = self.eval(frame, *value, ctx)?;
                 let v = match &f.typing.exprs[e.0 as usize] {
                     Ty::Array(_, elem_ty) => self.narrow_plain(v, elem_ty, span)?,
-                    _ => v,
+                    Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        return broken("an array literal whose type is not an array")
+                    }
                 };
                 Value::Array(vec![v; *count as usize])
             }
@@ -829,7 +894,15 @@ impl<'m> Machine<'m> {
     ) -> Flow<Value> {
         let tree = &frame.f.syntax.tree;
         let (Value::Int(a), Value::Int(b)) = (l, r) else {
-            return Ok(Value::Unit);
+            return broken("an integer operand that is not an integer");
+        };
+        // A bit operation works on the operands' bits in one type: either operand's, or the
+        // place's.
+        let bits = |on: fn(u128, u128) -> u128| -> Flow<Value> {
+            let t = int_ty(lt).or(int_ty(rt)).or(ctx).unwrap_or(I64);
+            let x = fit(a, t, tree.expr(le).span)?.to_bits(t);
+            let y = fit(b, t, tree.expr(re).span)?.to_bits(t);
+            Ok(Value::Int(Int::from_bits(on(x, y), t)))
         };
         let result = match op {
             BinaryOp::Shl | BinaryOp::Shr => {
@@ -862,17 +935,9 @@ impl<'m> Machine<'m> {
                     ),
                 };
             }
-            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                let t = int_ty(lt).or(int_ty(rt)).or(ctx).unwrap_or(I64);
-                let x = fit(a, t, tree.expr(le).span)?.to_bits(t);
-                let y = fit(b, t, tree.expr(re).span)?.to_bits(t);
-                let bits = match op {
-                    BinaryOp::BitAnd => x & y,
-                    BinaryOp::BitOr => x | y,
-                    _ => x ^ y,
-                };
-                return Ok(Value::Int(Int::from_bits(bits, t)));
-            }
+            BinaryOp::BitAnd => return bits(|x, y| x & y),
+            BinaryOp::BitOr => return bits(|x, y| x | y),
+            BinaryOp::BitXor => return bits(|x, y| x ^ y),
             BinaryOp::Div | BinaryOp::Rem if b == Int::ZERO => {
                 return trap(TrapKind::DivisionByZero, span);
             }
@@ -880,7 +945,18 @@ impl<'m> Machine<'m> {
             BinaryOp::Sub => a.checked_sub(b),
             BinaryOp::Mul => a.checked_mul(b),
             BinaryOp::Div => a.checked_div(b),
-            _ => a.checked_rem(b),
+            BinaryOp::Rem => a.checked_rem(b),
+            // `eval` gives these their own arms, which never come here.
+            BinaryOp::Or
+            | BinaryOp::And
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => {
+                return broken("a logical or comparison operator taken as arithmetic")
+            }
         };
         // An operation on 128-bit operands may leave 128 bits, so it is narrowed into their
         // type (`core-calculus.md`, item 4).
