@@ -3591,7 +3591,8 @@ impl<'a> Fx<'a> {
                 root
             }
             ExprKind::Name(_) => self.resolution.names[e.0 as usize].map(|b| b.0 as usize),
-            // The checker passes only a binding, an element or a field as a place (`E0205`).
+            // The checker passes as a place only a binding, an element, or a field of a struct
+            // (`E0205`, `E0206`).
             ExprKind::Int { .. }
             | ExprKind::Bool(_)
             | ExprKind::Todo(_)
@@ -3709,10 +3710,7 @@ impl<'a> Fx<'a> {
                 let what = self.own_text(e);
                 // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one's
                 // value, whose variable is given anew where it is evaluated.
-                let control = matches!(
-                    self.tree.expr(e).kind,
-                    ExprKind::If { .. } | ExprKind::Match { .. }
-                );
+                let control = self.tree.expr(e).kind.is_choice();
                 let was = std::mem::replace(&mut self.unfollowed, control);
                 self.narrow(st, &v, shape, (self.span(e), Tag::None), place, Some(what));
                 self.unfollowed = was;
@@ -4147,20 +4145,39 @@ impl<'a> Fx<'a> {
         };
         let span = self.span(scrutinee);
         let kind = &self.tree.expr(scrutinee).kind;
-        let stored = matches!(
-            kind,
+        // A value read from a place or given by a call already lies in its type.
+        let stored = match kind {
             ExprKind::Name(_)
-                | ExprKind::Field { .. }
-                | ExprKind::Index { .. }
-                | ExprKind::Call { .. }
-        );
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. } => true,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => false,
+        };
         // An operation on operands of one 128-bit type is checked at its operator against that
         // type (`core-calculus.md`, item 4), so its value, and an `if`'s or a `match`'s of that
         // type, already lies within it.
-        let checked = matches!(
-            &self.typing.exprs[scrutinee.0 as usize],
-            Ty::Int(Int::One(t)) if t.bits == 128
-        );
+        let checked = match &self.typing.exprs[scrutinee.0 as usize] {
+            Ty::Int(Int::One(t)) => t.bits == 128,
+            Ty::Int(Int::Literal | Int::Mixed(_))
+            | Ty::Bool
+            | Ty::Array(..)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Unit
+            | Ty::Any => false,
+        };
         let settled = st.is_empty() || stored || checked;
         let what = self.own_text(scrutinee);
         if settled {
@@ -4169,7 +4186,7 @@ impl<'a> Fx<'a> {
             self.always_traps(&side, t, span, &format!("`{}`", what.0));
         } else if !within(st, value, t) {
             // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one.
-            let control = matches!(kind, ExprKind::If { .. } | ExprKind::Match { .. });
+            let control = kind.is_choice();
             let was = std::mem::replace(&mut self.unfollowed, control);
             self.refinement(
                 st,

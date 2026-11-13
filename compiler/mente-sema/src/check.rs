@@ -165,9 +165,7 @@ impl Checker<'_> {
             }
         }
         for (i, e) in self.tree.exprs.iter().enumerate() {
-            if !matches!(e.kind, ExprKind::Array(_) | ExprKind::Repeat { .. })
-                || !reported.is_empty()
-            {
+            if !e.kind.is_array_literal() || !reported.is_empty() {
                 continue;
             }
             let t = self.typing.exprs[i].clone();
@@ -1161,6 +1159,22 @@ impl Checker<'_> {
 
     /// A place that is assigned or passed as `mut` is a `var` or a `mut` parameter.
     fn changeable(&mut self, place: ExprId, code: &'static str, action: &str) {
+        if let Some(len) = self.length_in(place) {
+            let text = self
+                .src
+                .get(self.span(len).start..self.span(len).end)
+                .unwrap_or(".len")
+                .to_string();
+            self.errors.push(Diagnostic::error(
+                code,
+                self.span(place),
+                format!(
+                    "cannot {} `{}`: `.len` is an array's length, which its type fixes",
+                    action, text
+                ),
+            ));
+            return;
+        }
         let Some(id) = self.root(place) else {
             return;
         };
@@ -1212,6 +1226,35 @@ impl Checker<'_> {
         self.errors.push(d);
     }
 
+    /// The `.len` of an array the place `e` goes through, which no assignment or `mut` argument
+    /// may change: a place's fields are its structs', and an array's only field is its length.
+    fn length_in(&self, e: ExprId) -> Option<ExprId> {
+        match &self.tree.expr(e).kind {
+            ExprKind::Field { base, .. } => match &self.typing.exprs[base.0 as usize] {
+                Ty::Array(..) => Some(e),
+                Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                    self.length_in(*base)
+                }
+            },
+            ExprKind::Index { base, .. } => self.length_in(*base),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
+        }
+    }
+
     fn array(&mut self, items: &[ExprId]) -> Ty {
         let mut elem = Ty::Any;
         for &i in items {
@@ -1255,16 +1298,16 @@ impl Checker<'_> {
         if !used {
             return Ty::Unit;
         }
-        // A branch that leaves has any type.
-        let then_ty = if block_ends(self.tree, then) {
+        // A branch that leaves has any type; one whose operand leaves keeps its own.
+        let then_ty = if block_leaves(self.tree, then) {
+            Ty::Any
+        } else {
             then_ty
-        } else {
-            Ty::Any
         };
-        let else_ty = if else_ends(self.tree, otherwise) {
-            else_ty
-        } else {
+        let else_ty = if else_leaves(self.tree, otherwise) {
             Ty::Any
+        } else {
+            else_ty
         };
         then_ty.join(&else_ty).unwrap_or_else(|| {
             self.mismatch(
@@ -1754,11 +1797,11 @@ impl<'a> Checker<'a> {
                 }
                 (ArmBody::Block(b), used) => self.block(b, used),
             };
-            // An arm that leaves has any type.
-            types.push(if arm_ends(self.tree, arm.body) {
-                t
-            } else {
+            // An arm that leaves has any type; one whose operand leaves keeps its own.
+            types.push(if arm_leaves(self.tree, arm.body) {
                 Ty::Any
+            } else {
+                t
             });
         }
         if !used {
@@ -2836,10 +2879,13 @@ pub fn block_ends(tree: &Tree, b: BlockId) -> bool {
         .iter()
         .all(|&s| match &tree.stmt(s).kind {
             StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => false,
-            StmtKind::Expr(e)
-            | StmtKind::Discard(e)
-            | StmtKind::Binding { init: e, .. }
-            | StmtKind::Assign { value: e, .. } => expr_ends(tree, *e),
+            StmtKind::Expr(e) | StmtKind::Discard(e) | StmtKind::Binding { init: e, .. } => {
+                expr_ends(tree, *e)
+            }
+            // The place's indexes are evaluated before the value.
+            StmtKind::Assign { place, value, .. } => {
+                expr_ends(tree, *place) && expr_ends(tree, *value)
+            }
             // A `guard`'s `else` never reaches its end (`E0211`), and a loop's body may not run:
             // either ends where its condition does.
             StmtKind::While { cond, .. } | StmtKind::Guard { cond, .. } => expr_ends(tree, *cond),
@@ -2849,7 +2895,7 @@ pub fn block_ends(tree: &Tree, b: BlockId) -> bool {
 /// Whether control can reach the end of `e`: every operand it always evaluates does, in the
 /// order it evaluates them. The right operand of `and` and `or` may not run, so it never stops
 /// its operation from ending.
-fn expr_ends(tree: &Tree, e: ExprId) -> bool {
+pub fn expr_ends(tree: &Tree, e: ExprId) -> bool {
     let all = |items: Vec<ExprId>| items.into_iter().all(|x| expr_ends(tree, x));
     match &tree.expr(e).kind {
         ExprKind::Todo(_) | ExprKind::Unreachable(_) => false,
@@ -2923,6 +2969,70 @@ fn else_ends(tree: &Tree, o: Else) -> bool {
     match o {
         Else::Block(b) => block_ends(tree, b),
         Else::If(i) => expr_ends(tree, i),
+    }
+}
+
+/// Whether the branch `b` leaves, so that it has any type (`core-calculus.md`, item 6): a
+/// statement of it is `return`, `break` or `continue`, or holds a value that leaves. An operand
+/// that leaves does not: the branch then gives its operation's type, which its `if` or `match`
+/// shares, though control never reaches its end ([`block_ends`]).
+pub fn block_leaves(tree: &Tree, b: BlockId) -> bool {
+    tree.block(b)
+        .stmts
+        .iter()
+        .any(|&s| match &tree.stmt(s).kind {
+            StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => true,
+            StmtKind::Expr(e)
+            | StmtKind::Discard(e)
+            | StmtKind::Binding { init: e, .. }
+            | StmtKind::Assign { value: e, .. } => value_leaves(tree, *e),
+            StmtKind::While { .. } | StmtKind::Guard { .. } => false,
+        })
+}
+
+/// Whether the value `e` is itself one that leaves: `todo`, `unreachable`, or an `if` or a
+/// `match` whose every branch leaves.
+pub fn value_leaves(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Todo(_) | ExprKind::Unreachable(_) => true,
+        ExprKind::If {
+            then,
+            otherwise: Some(o),
+            ..
+        } => block_leaves(tree, *then) && else_leaves(tree, *o),
+        // Without `else`, an `if` gives no value, and runs on when its condition is false.
+        ExprKind::If {
+            otherwise: None, ..
+        } => false,
+        ExprKind::Match { arms, .. } => arms.iter().all(|a| arm_leaves(tree, a.body)),
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Error => false,
+    }
+}
+
+/// Whether an arm leaves, so that it has any type.
+pub fn arm_leaves(tree: &Tree, body: ArmBody) -> bool {
+    match body {
+        ArmBody::Expr(x) => value_leaves(tree, x),
+        ArmBody::Block(b) => block_leaves(tree, b),
+    }
+}
+
+fn else_leaves(tree: &Tree, o: Else) -> bool {
+    match o {
+        Else::Block(b) => block_leaves(tree, b),
+        Else::If(i) => value_leaves(tree, i),
     }
 }
 
@@ -3876,6 +3986,34 @@ pub fn f(mut p: Pair) {
     /// that is `todo`, `unreachable`, or an `if` or `match` whose every branch leaves, leaves
     /// the statement too (`core-calculus.md`, item 6). The right operand of `and` and `or`, the
     /// branch of an `if` without `else` and a loop's body may not run, so they leave nothing.
+    /// A branch has any type only when it leaves by a statement or a value that leaves, not by
+    /// an operand: a branch whose value is `x + todo("r")` gives its operation's type, which the
+    /// other branches share (`core-calculus.md`, item 6).
+    #[test]
+    fn test_a_branch_with_an_operand_that_leaves_keeps_its_type() {
+        // Each branch keeps its type, so these values have one, and the functions check.
+        for ok in [
+            "pub fn f(c: bool, x: u8) -> u8 {\n  val y = match c {\n    true => x + todo(\"a\")\n    false => x - todo(\"b\")\n  }\n  y\n}",
+            "pub fn f(c: bool, x: u8) -> u8 {\n  val y = if c { x + todo(\"a\") } else { x + todo(\"b\") }\n  y\n}",
+        ] {
+            assert_eq!(codes(ok), NONE, "{}", ok);
+            assert_eq!(
+                binding_types(ok).last().map(|(n, t)| (n.as_str(), t.as_str())),
+                Some(("y", "u8")),
+                "{}",
+                ok
+            );
+        }
+        // A branch whose operand leaves still meets the other branches in one type.
+        for (src, why) in [
+            ("pub fn f(c: bool, x: u8) -> bool {\n  val y: bool = if c { x + todo(\"r\") } else { true }\n  y\n}", "u8 beside bool"),
+            ("pub fn f(c: bool, x: u8) -> u8 {\n  val a: [3]u8 = if c { [x, todo(\"r\")] } else { [1, 2, 3] }\n  a[2]\n}", "[2] beside [3]"),
+            ("pub fn f(c: bool, x: u8) -> u8 {\n  val a: u8 = match c {\n    true => [x, todo(\"r\")]\n    false => 7\n  }\n  a\n}", "an array beside u8"),
+        ] {
+            assert!(codes(src).contains(&"E0203"), "{}: {}", why, src);
+        }
+    }
+
     #[test]
     fn test_an_operand_that_leaves_leaves_its_statement() {
         let guarded = |e: &str| {
@@ -3911,6 +4049,10 @@ pub fn f(mut p: Pair) {
             "pub fn f(x: u8) -> u8 {\n  guard todo(\"later\") else {\n    return x\n  }\n}",
             "pub fn f(x: u8) -> u8 {\n  var y: u8 = x\n  y = id(todo(\"later\"))\n}",
             "pub fn f(x: u8) -> u8 {\n  val y: u8 = x + todo(\"later\")\n}",
+            // The indexes of the place an assignment writes are evaluated before its value.
+            "pub fn f(xs: [2]u8, x: u8) -> u8 {\n  var ys: [2]u8 = xs\n  ys[todo(\"later\")] = x\n}",
+            "pub fn f(a: u8) -> u8 {\n  var b: [2]u8 = [a, a]\n  b[todo(\"later\")] += 1\n}",
+            "pub fn f(c: bool, xs: [2]u8, x: u8) -> u8 {\n  var ys: [2]u8 = xs\n  guard c else {\n    ys[todo(\"later\")] = x\n  }\n  ys[0]\n}",
         ] {
             assert_eq!(codes(ok), NONE, "{}", ok);
         }
@@ -4001,6 +4143,36 @@ pub fn f(mut p: Pair) {
         assert_eq!(
             codes("pub fn f(mut n: u8, mut xs: [2]u8) {\n  var m = 1\n  m = 2\n  n = 3\n  xs[1] = 4\n}"),
             NONE
+        );
+    }
+
+    /// An array's `.len` is a value its type fixes, not a place: assigning it is `E0205`, and
+    /// passing it as `mut` is `E0206`, though its root is a `var`.
+    #[test]
+    fn test_an_array_length_is_no_place() {
+        let set = diagnostics(
+            "pub fn f(xs: [2]u8) -> usize {\n  var ys: [2]u8 = xs\n  ys.len = 3\n  ys.len\n}",
+        );
+        assert_eq!(set.len(), 1, "{:?}", set);
+        assert_eq!(set[0].code, "E0205");
+        assert_eq!(
+            set[0].message,
+            "cannot assign to `ys.len`: `.len` is an array's length, which its type fixes"
+        );
+        assert_eq!(
+            codes(
+                "pub fn f(xs: [2]u8) -> usize {\n  var ys: [2]u8 = xs\n  ys.len += 3\n  ys.len\n}"
+            ),
+            ["E0205"]
+        );
+        assert_eq!(
+            codes("pub fn bump(mut z: usize) {\n  z = z + 1\n}\npub fn f(xs: [2]u8) -> usize {\n  var ys: [2]u8 = xs\n  bump(mut ys.len)\n  ys.len\n}"),
+            ["E0206"]
+        );
+        // The length of an inner array is no place either.
+        assert_eq!(
+            codes("pub fn f(xs: [2][3]u8) -> usize {\n  var ys: [2][3]u8 = xs\n  ys[0].len = 1\n  ys[0].len\n}"),
+            ["E0205"]
         );
     }
 
