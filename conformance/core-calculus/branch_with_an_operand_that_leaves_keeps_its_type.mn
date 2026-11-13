@@ -1,0 +1,22 @@
+// expect: E0203 E0203 E0203
+module conformance
+// A branch whose operand leaves still gives its operation's type, which the other branches
+// share: a `u8` beside a `bool`, a `[2]u8` beside a `[3]u8`, an array beside a `u8`
+// (core-calculus.md, item 6).
+pub fn beside_bool(c: bool, x: u8) -> bool {
+  val y: bool = if c { x + todo("r") } else { true }
+  y
+}
+
+pub fn beside_longer(c: bool, x: u8) -> u8 {
+  val a: [3]u8 = if c { [x, todo("r")] } else { [1, 2, 3] }
+  a[2]
+}
+
+pub fn beside_scalar(c: bool, x: u8) -> u8 {
+  val a: u8 = match c {
+    true => [x, todo("r")]
+    false => 7
+  }
+  a
+}

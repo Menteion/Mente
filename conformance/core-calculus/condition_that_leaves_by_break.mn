@@ -1,0 +1,25 @@
+// expect: pass
+module conformance
+// A loop's or a `guard`'s condition that leaves by `break` leaves its statement, and the loop
+// around it ends on that `break` (core-calculus.md, item 6).
+pub fn inner_loop(x: u8) -> u8 {
+  var i: u8 = 0
+  while i < 3 {
+    while (if x > 1 { break } else { break }) {
+      _ = x
+    }
+    i = i + 1
+  }
+  i
+}
+
+pub fn guard_condition(x: u8) -> u8 {
+  var i: u8 = 0
+  while i < 3 {
+    i = i + 1
+    guard (if x > 1 { break } else { break }) else {
+      return 7
+    }
+  }
+  i
+}
