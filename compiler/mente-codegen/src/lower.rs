@@ -236,7 +236,9 @@ impl Shapes {
                 u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?,
                 Box::new(self.shape_of(structs, e)?),
             )),
-            other => Shape::of(other, self),
+            other @ (SemaTy::Int(_) | SemaTy::Bool | SemaTy::Unit | SemaTy::Any) => {
+                Shape::of(other, self)
+            }
         }
     }
 }
@@ -314,7 +316,7 @@ const MEASURE: IntTy = IntTy::new(128, false);
 fn int_ty(i: &SemaInt) -> Option<SemaIntTy> {
     match i {
         SemaInt::One(t) | SemaInt::Mixed(Some(t)) => Some(*t),
-        _ => None,
+        SemaInt::Literal | SemaInt::Mixed(None) => None,
     }
 }
 
@@ -332,7 +334,9 @@ fn with_leaf(t: &SemaTy, leaf: SemaIntTy) -> Result<Shape, String> {
             Ok(Shape::Array(n, Box::new(with_leaf(elem, leaf)?)))
         }
         SemaTy::Int(_) => Ok(Shape::Int(leaf)),
-        _ => Err("an array literal whose elements are no integers".into()),
+        SemaTy::Bool | SemaTy::Struct(_) | SemaTy::Enum(_) | SemaTy::Unit | SemaTy::Any => {
+            Err("an array literal whose elements are no integers".into())
+        }
     }
 }
 
@@ -460,7 +464,7 @@ fn mir_params(sig: &Sig) -> (Vec<Ty>, Option<Ty>) {
     }
     let result = match &sig.result {
         Shape::Int(_) | Shape::Bool => Some(sig.result.ty()),
-        _ => None,
+        Shape::Array(..) | Shape::Struct(_) | Shape::Enum(_) | Shape::Unit => None,
     };
     (params, result)
 }
@@ -794,7 +798,7 @@ impl<'a> Lower<'a> {
         let v = self.call(self.s.index, args, span, sret, false)?;
         let term = match v {
             V::Int(n, _) | V::Bool(n) => Term::Return(Some(n)),
-            _ => Term::Return(None),
+            V::Mem(_) | V::Unit | V::Never => Term::Return(None),
         };
         self.end(term);
         let mut f = self.finish();
@@ -825,7 +829,7 @@ impl<'a> Lower<'a> {
             {
                 self.s.locals[id] = Some(match v {
                     V::Mem(a) => Local::Place(a, result.clone()),
-                    v => Local::Value(v),
+                    v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => Local::Value(v),
                 });
             }
             let text = format!("`ensures {}` is false at this return", tree.render_expr(c));
@@ -846,7 +850,7 @@ impl<'a> Lower<'a> {
                 );
                 self.end(Term::Return(None));
             }
-            _ => self.end(Term::Return(None)),
+            V::Unit | V::Never => self.end(Term::Return(None)),
         }
         self.dead();
         Ok(())
@@ -1167,12 +1171,27 @@ impl<'a> Lower<'a> {
                 steps.push(Step::Field(k));
                 Ok((root, steps))
             }
-            _ => Ok((
+            ExprKind::Name(_) => Ok((
                 self.s.f.resolution.names[e.0 as usize]
                     .map(|b| b.0 as usize)
                     .ok_or("a place without a binding")?,
                 Vec::new(),
             )),
+            // The checker passes only a binding, an element or a field as a place (`E0205`).
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => Err("a place that is not a binding, an element or a field".into()),
         }
     }
 
@@ -1192,7 +1211,11 @@ impl<'a> Lower<'a> {
                 (Step::Index(..), SemaTy::Array(_, elem)) => {
                     declared = declared.and_then(|(tree, t)| match &tree.ty(t).kind {
                         TypeKind::Array { elem, .. } => Some((tree, *elem)),
-                        _ => None,
+                        TypeKind::Int { .. }
+                        | TypeKind::Bool
+                        | TypeKind::Named(_)
+                        | TypeKind::Enum(_)
+                        | TypeKind::Error => None,
                     });
                     ty = *elem;
                 }
@@ -1307,7 +1330,7 @@ impl<'a> Lower<'a> {
                     &[at, a],
                 );
             }
-            v => self.store(at, v),
+            v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => self.store(at, v),
         }
     }
 
@@ -1528,7 +1551,7 @@ impl<'a> Lower<'a> {
                     .iter()
                     .any(|v| v.fields.iter().any(|f| self.refines(d.tree(), f.decl)))
             }),
-            _ => false,
+            TypeKind::Bool | TypeKind::Named(_) | TypeKind::Enum(_) | TypeKind::Error => false,
         }
     }
 
@@ -1705,7 +1728,12 @@ impl<'a> Lower<'a> {
                 let leaf = SemaIntTy::named(&name).ok_or("a machine type without a name")?;
                 with_leaf(t, leaf)
             }
-            t => Shape::of(t, shapes),
+            t @ (SemaTy::Int(_)
+            | SemaTy::Bool
+            | SemaTy::Array(..)
+            | SemaTy::Struct(_)
+            | SemaTy::Enum(_)
+            | SemaTy::Unit) => Shape::of(t, shapes),
         }
     }
 
@@ -1723,7 +1751,21 @@ impl<'a> Lower<'a> {
             ExprKind::Repeat { value, .. } => return self.leaf_hull(*value, hull),
             // An array of another kind among them has a type of its own, which joins the
             // others' in a standard type or makes the literal `E0222` (`wide.rs`): never here.
-            _ => {
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => {
                 let r = self
                     .interval(e)
                     .ok_or("an element without a static range")?;
@@ -1747,7 +1789,12 @@ impl<'a> Lower<'a> {
     fn mixed_leaf(&self, t: &SemaTy) -> bool {
         match t {
             SemaTy::Array(_, elem) => self.mixed_leaf(elem),
-            t => self.mixed(t),
+            t @ (SemaTy::Int(_)
+            | SemaTy::Bool
+            | SemaTy::Struct(_)
+            | SemaTy::Enum(_)
+            | SemaTy::Unit
+            | SemaTy::Any) => self.mixed(t),
         }
     }
 
@@ -1910,7 +1957,10 @@ impl<'a> Lower<'a> {
             ExprKind::Unary { op, operand } => match op {
                 UnaryOp::Not => match self.expr(*operand)? {
                     V::Bool(b) => V::Bool(self.inst(Op::Not, Ty::Bool, &[b])),
-                    v => v,
+                    V::Never => V::Never,
+                    V::Int(..) | V::Mem(_) | V::Unit => {
+                        return Err("`not` of a value that is not a bool".into())
+                    }
                 },
                 UnaryOp::Neg => self.negate(e, *operand, span)?,
                 UnaryOp::BitNot => {
@@ -1939,7 +1989,20 @@ impl<'a> Lower<'a> {
                         BinaryOp::Lt => CmpOp::Lt,
                         BinaryOp::Le => CmpOp::Le,
                         BinaryOp::Gt => CmpOp::Gt,
-                        _ => CmpOp::Ge,
+                        BinaryOp::Ge => CmpOp::Ge,
+                        // The arm holds comparisons only.
+                        BinaryOp::Or
+                        | BinaryOp::And
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                        | BinaryOp::BitAnd
+                        | BinaryOp::Shl
+                        | BinaryOp::Shr
+                        | BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Rem => return Err(format!("a comparison {:?}", op)),
                     };
                     match (l, r) {
                         (V::Int(a, ta), V::Int(b, tb)) => {
@@ -1952,7 +2015,16 @@ impl<'a> Lower<'a> {
                         _ => return Err("a comparison of values that are not alike".into()),
                     }
                 }
-                _ => {
+                BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem => {
                     let l = self.expr(*lhs)?;
                     let r = self.expr(*rhs)?;
                     let ctx = self.interval(e);
@@ -1994,7 +2066,9 @@ impl<'a> Lower<'a> {
                     let at = self.field_addr(a, f.offset);
                     self.load(at, &f.shape)
                 }
-                _ => return Err("a field of a value that is neither an array nor a struct".into()),
+                Shape::Int(_) | Shape::Bool | Shape::Enum(_) | Shape::Unit => {
+                    return Err("a field of a value that is neither an array nor a struct".into())
+                }
             },
             // Each value is narrowed into its field's type and checked against its refinement,
             // in the order written, which is the declaration's, and stored where the layout
@@ -2292,11 +2366,25 @@ impl<'a> Lower<'a> {
             })
     }
 
-    /// The binding at the root of a place.
+    /// The binding at the root of a place, none for a value that is not one.
     fn root_of(&self, e: ExprId) -> Option<usize> {
         match &self.tree().expr(e).kind {
             ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => self.root_of(*base),
-            _ => self.s.f.resolution.names[e.0 as usize].map(|b| b.0 as usize),
+            ExprKind::Name(_) => self.s.f.resolution.names[e.0 as usize].map(|b| b.0 as usize),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         }
     }
 
@@ -2304,7 +2392,12 @@ impl<'a> Lower<'a> {
     fn int_of(&self, e: ExprId) -> Option<SemaIntTy> {
         match &self.s.f.typing.exprs[e.0 as usize] {
             SemaTy::Int(i) => int_ty(i),
-            _ => None,
+            SemaTy::Bool
+            | SemaTy::Array(..)
+            | SemaTy::Struct(_)
+            | SemaTy::Enum(_)
+            | SemaTy::Unit
+            | SemaTy::Any => None,
         }
     }
 
@@ -2423,7 +2516,7 @@ impl<'a> Lower<'a> {
                 let at = self.tree().expr(scrutinee).span;
                 V::Int(self.narrow_int(x, t, to, at, Some(at)), mir(to))
             }
-            s => s,
+            s @ (V::Bool(_) | V::Mem(_) | V::Unit | V::Never) => s,
         };
         // What the patterns test: an enum's tag, a `bool`, or an integer.
         let tested = match (s, &read) {
@@ -2693,7 +2786,23 @@ impl<'a> Lower<'a> {
                 let bit = match op {
                     BinaryOp::BitAnd => BitOp::And,
                     BinaryOp::BitOr => BitOp::Or,
-                    _ => BitOp::Xor,
+                    BinaryOp::BitXor => BitOp::Xor,
+                    // The arm holds bit operations only.
+                    BinaryOp::Or
+                    | BinaryOp::And
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+                    | BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Rem => return Err(format!("a bit operation {:?}", op)),
                 };
                 self.at(span);
                 Ok(V::Int(
@@ -2701,14 +2810,38 @@ impl<'a> Lower<'a> {
                     mir(t),
                 ))
             }
-            _ => {
+            BinaryOp::Or
+            | BinaryOp::And
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem => {
                 let arith = match op {
                     BinaryOp::Add => ArithOp::Add,
                     BinaryOp::Sub => ArithOp::Sub,
                     BinaryOp::Mul => ArithOp::Mul,
                     BinaryOp::Div => ArithOp::Div,
                     BinaryOp::Rem => ArithOp::Rem,
-                    _ => return Err(format!("an operation {:?} on integers", op)),
+                    BinaryOp::Or
+                    | BinaryOp::And
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitAnd
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr => return Err(format!("an operation {:?} on integers", op)),
                 };
                 let wide = [lt, rt].into_iter().flatten().find(|t| t.bits == 128);
                 let m = match wide {
@@ -2782,11 +2915,11 @@ impl<'a> Lower<'a> {
                     }
                     callee.locals[i] = Some(match v {
                         V::Mem(a) => Local::Place(a, shape.clone()),
-                        v => Local::Value(v),
+                        v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => Local::Value(v),
                     });
                     match v {
                         V::Int(n, _) | V::Bool(n) | V::Mem(n) => n,
-                        _ => return Err("an argument without a value".into()),
+                        V::Unit | V::Never => return Err("an argument without a value".into()),
                     }
                 }
                 Arg::Place(a, shape, _, _) => {
@@ -3419,7 +3552,22 @@ pub fn on_u128() -> u128 = -0_u128
                 Op::Arith { trap: Some(_), .. } | Op::Neg { trap: Some(_) } | Op::Shl { .. } => {
                     Some("checked".to_string())
                 }
-                _ => None,
+                Op::Param
+                | Op::Int(_)
+                | Op::Bool(_)
+                | Op::Arith { trap: None, .. }
+                | Op::Neg { trap: None }
+                | Op::Bits(_)
+                | Op::Not
+                | Op::Shr
+                | Op::Cmp(_)
+                | Op::Cast
+                | Op::Slot { .. }
+                | Op::Elem { .. }
+                | Op::Load
+                | Op::Store
+                | Op::Copy { .. }
+                | Op::Call(_) => None,
             })
             .collect();
         kinds.sort();

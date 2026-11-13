@@ -17,6 +17,12 @@
 //! comes next in M1's checkpoint (c) (`ROADMAP.md`). This is the only crate that may depend on
 //! Cranelift, `gimli` and `object` (`CLAUDE.md`, invariant 2).
 
+// A match over an enum names every variant, so that a variant added later does not compile until
+// each match decides what it does with it; a `_` arm once let walkers skip expression kinds
+// ([`guard-per-problem`](../../docs/design-review.md#guard-per-problem)). A match that is a
+// classifier by nature keeps `#[expect]`, with the reason every variant belongs in its arm.
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::HashMap;
 use std::fmt;
 
