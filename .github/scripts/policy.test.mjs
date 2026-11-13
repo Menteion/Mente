@@ -572,7 +572,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
-  [".github/scripts/lib/test-list.mjs", "14f3a7e246200fea849075bd0c3862c32c8aa3a6dbb63a1fd525850c11d35858"],
+  [".github/scripts/lib/test-list.mjs", "340a1b28b3422d2e3ca0fe1b32d5aa74d7f4494c6aef6f1260b5ca89a7d152f8"],
   [".github/scripts/tools.sh", "f0d0bb7e872fb66ee32a8739a3ca5abb5ae2690e1ce72b9c912399057a77b3ad"],
 ]);
 const PINNED_JOBS = new Map([
@@ -921,6 +921,8 @@ check("the list of tests is read as nextest writes it", () => {
   // The doctests' list, as `cargo test --doc -- --list` prints it.
   const none = "   Doc-tests mente_ast\n0 tests, 0 benchmarks\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n";
   assert.deepEqual(doctestProblems(none), []);
+  // As the jobs print it, under CARGO_TERM_COLOR=always: the header coloured.
+  assert.deepEqual(doctestProblems("\x1b[1m\x1b[32m   Doc-tests\x1b[0m mente_ast\n0 tests, 0 benchmarks\n"), []);
   assert.equal(doctestProblems(`${none}   Doc-tests mente_sema\ncompiler/mente-sema/src/lib.rs - f (line 3): test\n1 test, 0 benchmarks\n`).length, 1, "a library with a doctest");
   assert.equal(doctestProblems("   Doc-tests mente_ast\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n").length, 1, "a library without its count");
   assert.equal(doctestProblems("   Compiling mente-ast\n").length, 1, "no library at all");

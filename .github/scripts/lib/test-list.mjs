@@ -68,7 +68,11 @@ export function main(args, read) {
 /// doc example rustdoc would compile, in whatever spelling of a doc comment or attribute; such an
 /// example belongs in a test. A list with no library, or a header without its count, fails too.
 export function doctestProblems(text) {
-  const lines = String(text).split(/\r?\n/).map((l) => l.trim());
+  // Colours aside: the jobs set CARGO_TERM_COLOR=always, and cargo colours the headers.
+  const lines = String(text)
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim());
   const found = [];
   let libraries = 0;
   for (const [k, line] of lines.entries()) {
