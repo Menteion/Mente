@@ -8355,6 +8355,174 @@ block0(v0: u8):
 t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/operand_read_before_a_later_operand_changes_it.mn == (exit 2)
+== conformance/core-calculus/operand_that_leaves.mn ==
+mente-dump 2 mir
+f0: fn stop_in_an_operand(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  branch v0, block1(), block2()
+block1():
+  return v1
+block2():
+  trap t0
+block3():
+  trap t1
+block4():
+  trap t1
+t0: todo @7:13 ["todo reached: later"]
+t1: unreachable @9:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn leave_from_both_branches(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  branch v0, block1(), block2()
+block1():
+  v2: i64 = int 1 @13:26
+  v3: u8 = cast v2 @13:26
+  return v3
+block2():
+  v4: i64 = int 2 @13:44
+  v5: u8 = cast v4 @13:44
+  return v5
+block3():
+  trap t0
+block4():
+  trap t0
+block5():
+  trap t0
+t0: unreachable @13:44 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn leave_from_an_argument(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  branch v0, block1(), block2()
+block1():
+  v7: i64 = int 2 @20:13
+  v8: i64 = cast v1 @20:9
+  v9: i64 = div v8, v7 @20:9
+  v10: u8 = cast v9 @20:9
+  v11: u8 = call f4 v10 @20:3
+  return v11
+block2():
+  v2: i64 = int 9 @18:22
+  v3: i64 = cast v1 @18:22
+  v4: bool = gt v3, v2 @18:22
+  branch v4, block3(), block4()
+block3():
+  v5: i64 = int 9 @18:33
+  v6: u8 = cast v5 @18:33
+  return v6
+block4():
+  trap t0
+block5():
+  trap t1
+block6():
+  trap t1
+block7():
+  trap t1
+block8():
+  trap t1
+t0: unreachable @18:44 ["unreachable reached: x <= 9"]
+t1: unreachable @20:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn leave_from_a_condition(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @24:13
+  v2: i64 = cast v0 @24:13
+  v3: bool = gt v2, v1 @24:13
+  branch v3, block1(), block2()
+block1():
+  jump block4()
+block2():
+  v4: i64 = int 0 @25:12
+  v5: u8 = cast v4 @25:12
+  return v5
+block3():
+  trap t1
+block4():
+  v6: i64 = int 1 @27:17
+  v7: i64 = cast v0 @27:17
+  v8: bool = gt v7, v6 @27:17
+  branch v8, block7(), block8()
+block5():
+  trap t1
+block6():
+  trap t1
+block7():
+  return v0
+block8():
+  v9: i64 = int 1 @27:46
+  v10: i64 = int 0 @27:46
+  v11: bool = ge v9, v10 @27:46
+  v12: i64 = int 255 @27:46
+  v13: bool = le v9, v12 @27:46
+  v14: bool = and v11, v13 @27:46
+  v15: unit = check t0 v14, v9 @27:46
+  v16: u8 = cast v9 @27:46
+  return v16
+block9():
+  trap t1
+block10():
+  trap t1
+block11():
+  trap t1
+t0: narrowing @27:46 ["", " does not fit in `u8`"]
+t1: unreachable @27:46 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn twice(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = cast v0 @32:25
+  v2: i64 = cast v0 @32:25
+  v3: i64 = add v1, v2 @32:25
+  v4: i64 = int 0 @32:25
+  v5: bool = ge v3, v4 @32:25
+  v6: i64 = int 255 @32:25
+  v7: bool = le v3, v6 @32:25
+  v8: bool = and v5, v7 @32:25
+  v9: unit = check t0 v8, v3 @32:25
+  v10: u8 = cast v3 @32:25
+  return v10
+block1():
+  trap t1
+t0: narrowing @32:25 ["", " does not fit in `u8`"]
+t1: unreachable @32:25 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter stop_in_an_operand(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  v2: u8 = call f0 v0, v1 @5:8
+  return v2
+t0: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter leave_from_both_branches(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  v2: u8 = call f1 v0, v1 @12:8
+  return v2
+t0: unreachable @12:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter leave_from_an_argument(bool, u8) -> u8 {
+block0(v0: bool, v1: u8):
+  v2: u8 = call f2 v0, v1 @16:8
+  return v2
+t0: unreachable @16:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter leave_from_a_condition(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f3 v0 @23:8
+  return v1
+t0: unreachable @23:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter twice(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f4 v0 @32:4
+  return v1
+t0: unreachable @32:4 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/operands_beyond_128_bits.mn == (exit 2)
 == conformance/core-calculus/pattern_binding_assigned.mn == (exit 2)
 == conformance/core-calculus/pattern_binding_named_like_an_enum.mn == (exit 2)

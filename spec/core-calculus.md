@@ -87,6 +87,7 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
    - `if c { a } else { b }` evaluates `c`, then one branch, and is an expression whose type both branches share. Without `else`, `if` is a statement.
    - `while c { body }` repeats `body` while `c` holds. `break` leaves the innermost loop, and `continue` starts its next iteration.
    - `guard c else { body }` continues when `c` holds. Its `body` must not reach its end: it leaves by `return`, `break`, `continue`, `todo` or `unreachable`. After a `guard`, `c` is a fact Tier 1 holds.
+   - A statement reaches its end only when every operand it always evaluates does: `_ = x + todo("r")` leaves as `todo("r")` does, and so does a statement with an operand that is an `if` or a `match` whose every branch leaves. The right operand of `and` and `or`, the branch of an `if` without `else` and a loop's body may not run, so what they hold leaves nothing.
    - `and` and `or` evaluate their right operand only when it decides the result; `not` negates.
    - `todo("reason")` has any type and traps when it runs (`surface-syntax.md`, item 7).
    - `unreachable("reason")` has any type and traps when it runs; it states a case its author knows cannot happen, and Tier 1 erases it where it proves the case impossible (`surface-syntax.md`, item 9).
@@ -107,6 +108,7 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_a_body_with_a_result_type_produces_it_on_every_path" min="1" reason="A body that can end without its result is E0210" -->
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_if_branches_that_give_a_value_share_its_type" min="1" reason="The branches of an if that gives a value share its type" -->
      <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_the_else_of_a_guard_leaves" min="1" reason="A guard whose else can end is E0211" -->
+     <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_an_operand_that_leaves_leaves_its_statement" min="1" reason="An operand that leaves leaves its statement, for E0210 and E0211" -->
 7. `Specified` **Functions and parameter modes** (`mutable-value-semantics.md`):
    - A function's parameters are read-only by default. A read-only parameter is a value the function cannot change.
    - A `mut` parameter receives a place, marked at the call site: `f(mut x)` or `f(mut a[i])`. Its value is copied in when the call starts and copied back on every return, so the caller's place holds the parameter's final value. The place has the parameter's type exactly, refinements aside, which Tier 1 proves at each copy, so the copy back never fails and the place can be passed by address ([`mut-argument-type`](../docs/design-review.md#mut-argument-type)).

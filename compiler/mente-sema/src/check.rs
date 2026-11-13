@@ -2840,34 +2840,74 @@ pub fn block_ends(tree: &Tree, b: BlockId) -> bool {
             | StmtKind::Discard(e)
             | StmtKind::Binding { init: e, .. }
             | StmtKind::Assign { value: e, .. } => expr_ends(tree, *e),
-            StmtKind::While { .. } | StmtKind::Guard { .. } => true,
+            // A `guard`'s `else` never reaches its end (`E0211`), and a loop's body may not run:
+            // either ends where its condition does.
+            StmtKind::While { cond, .. } | StmtKind::Guard { cond, .. } => expr_ends(tree, *cond),
         })
 }
 
+/// Whether control can reach the end of `e`: every operand it always evaluates does, in the
+/// order it evaluates them. The right operand of `and` and `or` may not run, so it never stops
+/// its operation from ending.
 fn expr_ends(tree: &Tree, e: ExprId) -> bool {
+    let all = |items: Vec<ExprId>| items.into_iter().all(|x| expr_ends(tree, x));
     match &tree.expr(e).kind {
         ExprKind::Todo(_) | ExprKind::Unreachable(_) => false,
-        ExprKind::If {
-            then,
-            otherwise: Some(o),
+        ExprKind::Int { .. } | ExprKind::Bool(_) | ExprKind::Name(_) | ExprKind::Error => true,
+        ExprKind::Unary { operand, .. } => expr_ends(tree, *operand),
+        ExprKind::Binary {
+            op: BinaryOp::And | BinaryOp::Or,
+            lhs,
             ..
-        } => block_ends(tree, *then) || else_ends(tree, *o),
+        } => expr_ends(tree, *lhs),
+        ExprKind::Binary {
+            op:
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem,
+            lhs,
+            rhs,
+        } => expr_ends(tree, *lhs) && expr_ends(tree, *rhs),
+        ExprKind::Index { base, index } => expr_ends(tree, *base) && expr_ends(tree, *index),
+        ExprKind::Field { base, .. } => expr_ends(tree, *base),
+        ExprKind::Call { args, .. } => all(args.iter().map(|a| a.value).collect()),
+        ExprKind::Construct { fields, .. } => all(fields.iter().map(|f| f.value).collect()),
+        ExprKind::Variant { payload, .. } => match payload {
+            Payload::None => true,
+            Payload::Named(fields) => all(fields.iter().map(|f| f.value).collect()),
+            Payload::Positional(args) => all(args.iter().map(|a| a.value).collect()),
+        },
+        ExprKind::Array(items) => all(items.clone()),
+        ExprKind::Repeat { value, .. } => expr_ends(tree, *value),
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            expr_ends(tree, *cond)
+                && match otherwise {
+                    Some(o) => block_ends(tree, *then) || else_ends(tree, *o),
+                    // Without `else`, the `if` ends whenever its condition is false.
+                    None => true,
+                }
+        }
         // A `match` is exhaustive, so its end is reached only through an arm that ends.
-        ExprKind::Match { arms, .. } => arms.iter().any(|a| arm_ends(tree, a.body)),
-        ExprKind::Int { .. }
-        | ExprKind::Bool(_)
-        | ExprKind::Name(_)
-        | ExprKind::Unary { .. }
-        | ExprKind::Binary { .. }
-        | ExprKind::Index { .. }
-        | ExprKind::Field { .. }
-        | ExprKind::Call { .. }
-        | ExprKind::Construct { .. }
-        | ExprKind::Variant { .. }
-        | ExprKind::Array(_)
-        | ExprKind::Repeat { .. }
-        | ExprKind::If { .. }
-        | ExprKind::Error => true,
+        ExprKind::Match { scrutinee, arms } => {
+            expr_ends(tree, *scrutinee) && arms.iter().any(|a| arm_ends(tree, a.body))
+        }
     }
 }
 
@@ -3830,6 +3870,69 @@ pub fn f(mut p: Pair) {
         ] {
             assert_eq!(codes(ok), NONE, "{}", ok);
         }
+    }
+
+    /// A statement reaches its end only when every operand it always evaluates does: an operand
+    /// that is `todo`, `unreachable`, or an `if` or `match` whose every branch leaves, leaves
+    /// the statement too (`core-calculus.md`, item 6). The right operand of `and` and `or`, the
+    /// branch of an `if` without `else` and a loop's body may not run, so they leave nothing.
+    #[test]
+    fn test_an_operand_that_leaves_leaves_its_statement() {
+        let guarded = |e: &str| {
+            format!(
+                "pub fn f(c: bool, x: u8) -> u8 {{\n  guard c else {{\n    _ = {}\n  }}\n  x\n}}",
+                e
+            )
+        };
+        let leaves = [
+            "x + todo(\"later\")",
+            "-todo(\"later\")",
+            "id(unreachable(\"x\"))",
+            "[x, todo(\"later\")]",
+            "[todo(\"later\"); 2]",
+            "[x; 2][todo(\"later\")]",
+            "todo(\"later\") and c",
+            "1 + (if c { return 1 } else { return 2 })",
+            "if todo(\"later\") { x } else { x }",
+            "match c {\n    true => todo(\"t\")\n    false => unreachable(\"f\")\n  }",
+            "match todo(\"later\") {\n    true => x\n    false => x\n  }",
+        ];
+        for e in leaves {
+            // A body with a result type that ends with such a statement needs no result.
+            let body = format!("pub fn f(c: bool, x: u8) -> u8 {{\n  _ = {}\n}}", e);
+            assert_eq!(codes(&body), NONE, "{}", body);
+            // The `else` of a `guard` that holds one does not reach its end.
+            let guard = guarded(e);
+            assert_eq!(codes(&guard), NONE, "{}", guard);
+        }
+        // A loop or a `guard` whose condition leaves leaves its statement.
+        for ok in [
+            "pub fn f(x: u8) -> u8 {\n  while todo(\"later\") {\n    _ = x\n  }\n}",
+            "pub fn f(x: u8) -> u8 {\n  guard todo(\"later\") else {\n    return x\n  }\n}",
+            "pub fn f(x: u8) -> u8 {\n  var y: u8 = x\n  y = id(todo(\"later\"))\n}",
+            "pub fn f(x: u8) -> u8 {\n  val y: u8 = x + todo(\"later\")\n}",
+        ] {
+            assert_eq!(codes(ok), NONE, "{}", ok);
+        }
+        // What may not run leaves nothing.
+        let ends = [
+            "c and todo(\"later\")",
+            "c or todo(\"later\")",
+            "id(if c { todo(\"later\") } else { x })",
+            "match c {\n    true => todo(\"t\")\n    false => x\n  }",
+        ];
+        for e in ends {
+            let body = format!("pub fn f(c: bool, x: u8) -> u8 {{\n  _ = {}\n}}", e);
+            assert_eq!(codes(&body), ["E0210"], "{}", body);
+            let guard = guarded(e);
+            assert_eq!(codes(&guard), ["E0211"], "{}", guard);
+        }
+        assert_eq!(
+            codes(
+                "pub fn f(c: bool, x: u8) -> u8 {\n  while c {\n    return todo(\"later\")\n  }\n}"
+            ),
+            ["E0210"]
+        );
     }
 
     #[test]
