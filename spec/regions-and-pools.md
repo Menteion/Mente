@@ -2,7 +2,7 @@
 title: Lifetime-Free Provenance, Lexical Arenas, and Generational Pools
 version: 0.1.0
 status: active
-date: 2026-11-04
+date: 2026-11-13
 ---
 
 # Lifetime-Free Provenance, Lexical Arenas, and Generational Pools
@@ -24,9 +24,13 @@ date: 2026-11-04
      <!-- @assert-count target="compiler/mente-sema/src/lib.rs" symbol="fn test_from_clause_must_name_a_kept_parameter" min="1" reason="A from clause must name a parameter the caller keeps, never an own one" -->
    - `Specified`: checking a body against its `from` clause, which needs a body parser.
 2. `Specified` **Views and owned values**:
-   - `str` is a view of UTF-8 text and `[]T` a view of a contiguous run of `T`; both borrow, and follow the provenance rules of item 1. `String` and `List<T>` own their storage, and can be stored, returned and moved with no provenance.
+   - `str` is a view of UTF-8 text and `[]T` a view of a contiguous run of `T`; both borrow, and follow the provenance rules of item 1. `String` and every `List<T>` own their storage. A `String`, and a `List<T>` whose `T` holds no view, are stored, returned and moved with no provenance; a `List` of view holders owns its storage as well, and carries its elements' provenance (below).
    - A string literal is a `str` view of static storage, valid for the whole program, so a value holding only literals carries no provenance constraint.
-   - A struct with a view field holds a view: it follows the same rules, and storing it where it would outlive its source is `E0310` (item 6). A field of type `String` or `List<T>` avoids the question.
+   - `Specified`: holding a view is a property of a type, derived from its fields and type arguments and never written by hand (`core-calculus.md`, item 17; [`view-holder-types`](../docs/design-review.md#view-holder-types)). A struct, an enum, an array, `?T` or `List<T>` holds a view when any part of it does, and a view holder takes a view's provenance, its freeze and the rule on type arguments below, and no other rule of a view: its provenance is the union of its parts' sources, and storing it where it would outlive them is `E0310` (item 6). A field of type `String`, or a `List<T>` of a type that holds no view, avoids the question.
+   - `Specified`: `mn view --spec` prints the property on the declaration, and it is part of `spec_hash` (`holographic-module.md`), so a reader sees from a declaration that its values must not outlive what they view.
+   - `Specified`: a view holder is never a type argument of `Pool<T>` (item 4), `Shared<T>` or `Local<T>` (item 5), or `Channel<T>`. Such a type argument is an error whose fix copies the viewed data into an owned value, since `E0310`'s fix through a `Pool<T>` would be circular here.
+   - `Specified`: from M4, a type parameter is assumed to hold a view unless it is bounded `T: ViewFree`, so a generic container's rules are checked once, at its declaration.
+   - `Specified`: iteration over an array or a view has one form, `for x in xs`, lowered over a view of `xs`; a user's iterator is a view holder whose `next` takes it as `mut`.
    - A `str` becomes a `String` only explicitly (`String.from(s)`), because that allocates and copies.
 3. `Specified` **Lexical scoped arenas (`Arena.scoped`)**:
    - Temporary phase allocations use `Arena.scoped(capacity) { arena => ... }`, with `capacity` optional. This is the only form that opens an arena.
@@ -50,7 +54,7 @@ date: 2026-11-04
    - Whenever `mente-sema` detects that a borrowed slice or view would outlive its source binding or that two unrelated provenances are stored into the same long-lived struct field (`E0310 [Provenance Escape]`), the compiler MUST NOT expose internal region variable names (such as `'region#4`).
    - Instead, `E0310` MUST output a deterministic **two-path architectural fix**:
      1. **Lexical Region Path**: Add `in arena: Arena` to the function signature so the slice is allocated inside the caller's `Arena.scoped()` block.
-     2. **Generational Handle Path**: Store `Handle<T>` (`64-bit Copy` index into `Pool<T>`) instead of a raw view inside long-lived or cyclic structs.
+     2. **Generational Handle Path**: Store `Handle<T>` (`64-bit Copy` index into `Pool<T>`) instead of a raw view inside long-lived or cyclic structs. For a view holder, `T` is an owned copy of the viewed data, never the view holder itself, which item 2 keeps out of a `Pool`.
 
 ## 2. Decision rationale and rejected alternatives
 
