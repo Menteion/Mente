@@ -337,7 +337,7 @@ impl<'m> Machine<'m> {
             }
             StmtKind::Binding { ty, init, .. } => {
                 let Some(id) = f.resolution.stmts[s.0 as usize] else {
-                    return Ok(Value::Unit);
+                    return broken("a binding statement that declares no binding");
                 };
                 let plain = f.typing.bindings[id.0 as usize].clone();
                 let v = self.eval(frame, *init, int_ty(&plain))?;
@@ -565,9 +565,9 @@ impl<'m> Machine<'m> {
     }
 
     fn read(&self, frame: &Frame<'m>, (root, steps): &Place) -> Flow<Value> {
-        let mut v = frame.slots[root.0 as usize]
-            .as_ref()
-            .unwrap_or(&Value::Unit);
+        let Some(mut v) = frame.slots[root.0 as usize].as_ref() else {
+            return broken("a place whose binding holds no value");
+        };
         for step in steps {
             v = match step {
                 Step::Index(i, span) => element(v, *i, *span)?,
@@ -765,16 +765,20 @@ impl<'m> Machine<'m> {
                 let def = self.module.structs.get_enum(enum_name);
                 let variant = def.and_then(|d| d.variant(name)).map(|(_, v)| v);
                 let mut values = Vec::new();
-                if let Payload::Named(fields) = payload {
-                    for fi in fields {
-                        let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
-                        let fty = field.map_or(Ty::Any, |f| f.ty.clone());
-                        let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                        let v = self.eval(frame, fi.value, int_ty(&fty))?;
-                        let at = tree.expr(fi.value).span;
-                        let v = self.narrow(frame, v, declared, &fty, at)?;
-                        values.push((fi.name.clone(), v));
-                    }
+                let fields: &[mente_syntax::tree::FieldInit] = match payload {
+                    Payload::Named(fields) => fields,
+                    Payload::None => &[],
+                    // A variant built by position is `E0226`.
+                    Payload::Positional(_) => return broken("a variant built by position"),
+                };
+                for fi in fields {
+                    let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
+                    let fty = field.map_or(Ty::Any, |f| f.ty.clone());
+                    let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
+                    let v = self.eval(frame, fi.value, int_ty(&fty))?;
+                    let at = tree.expr(fi.value).span;
+                    let v = self.narrow(frame, v, declared, &fty, at)?;
+                    values.push((fi.name.clone(), v));
                 }
                 Value::Enum(enum_name.clone(), name.clone(), values)
             }
@@ -794,7 +798,7 @@ impl<'m> Machine<'m> {
                 };
                 let v = self.narrow_plain(v, &read, tree.expr(*scrutinee).span)?;
                 for (k, arm) in arms.iter().enumerate() {
-                    if !self.matches(frame, e, k, &arm.pattern.kind, &v) {
+                    if !self.matches(frame, e, k, &arm.pattern.kind, &v)? {
                         continue;
                     }
                     return match arm.body {
@@ -898,22 +902,42 @@ impl<'m> Machine<'m> {
         k: usize,
         p: &PatternKind,
         v: &Value,
-    ) -> bool {
-        match (p, v) {
-            (PatternKind::Wildcard, _) => true,
-            (PatternKind::Bool(b), Value::Bool(x)) => b == x,
-            (
-                PatternKind::Int {
-                    negative, value, ..
-                },
-                Value::Int(x),
-            ) => {
-                let lit = Int::from_u128(*value);
-                *x == if *negative { lit.negate() } else { lit }
-            }
-            (PatternKind::Variant { name, bindings, .. }, Value::Enum(_, variant, fields)) => {
+    ) -> Flow<bool> {
+        let mismatch = || broken("a pattern of another kind than the value it matches");
+        match p {
+            PatternKind::Wildcard => Ok(true),
+            PatternKind::Bool(b) => match v {
+                Value::Bool(x) => Ok(b == x),
+                Value::Int(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            PatternKind::Int {
+                negative, value, ..
+            } => match v {
+                Value::Int(x) => {
+                    let lit = Int::from_u128(*value);
+                    Ok(*x == if *negative { lit.negate() } else { lit })
+                }
+                Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            PatternKind::Variant { name, bindings, .. } => {
+                let (variant, fields) = match v {
+                    Value::Enum(_, variant, fields) => (variant, fields),
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Struct(..)
+                    | Value::Unit => return mismatch(),
+                };
                 if name != variant {
-                    return false;
+                    return Ok(false);
                 }
                 for (i, b) in bindings.iter().flatten().enumerate() {
                     let Some(id) = frame.f.resolution.patterns.get(&(m, k, i)) else {
@@ -925,9 +949,8 @@ impl<'m> Machine<'m> {
                     };
                     frame.slots[id.0 as usize] = field.map(|(_, x)| x.clone());
                 }
-                true
+                Ok(true)
             }
-            _ => false,
         }
     }
 

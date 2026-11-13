@@ -998,15 +998,19 @@ fn test_a_state_the_checks_rule_out_stops_the_run() {
     use mente_sema::types::Ty;
     use mente_syntax::tree::{ExprKind, TypeKind};
 
+    let broken_with =
+        |src: &str, call_text: &str, why: &str, tamper: &dyn Fn(&mut mente_sema::CheckedFn)| {
+            let mut m = module(src);
+            let f = m.functions.last_mut().and_then(Option::as_mut).unwrap();
+            tamper(f);
+            let (name, args) = parse_call(call_text).unwrap();
+            match call(&m, &name, args, Limits::default()) {
+                Err(Stop::Broken(found)) if found.contains(why) => {}
+                other => panic!("{}: {:?}, not a run broken by {}", src, other, why),
+            }
+        };
     let broken = |src: &str, call_text: &str, tamper: &dyn Fn(&mut mente_sema::CheckedFn)| {
-        let mut m = module(src);
-        let f = m.functions.last_mut().and_then(Option::as_mut).unwrap();
-        tamper(f);
-        let (name, args) = parse_call(call_text).unwrap();
-        match call(&m, &name, args, Limits::default()) {
-            Err(Stop::Broken(_)) => {}
-            other => panic!("{}: {:?}, not a broken run", src, other),
-        }
+        broken_with(src, call_text, "", tamper)
     };
     let expr = |f: &mente_sema::CheckedFn, kind: fn(&ExprKind) -> bool| {
         f.syntax
@@ -1081,4 +1085,79 @@ fn test_a_state_the_checks_rule_out_stops_the_run() {
             }
         }
     });
+}
+
+/// The states the second review found the interpreter running on through: a binding statement
+/// that declares nothing, a place whose binding holds no value, and a pattern of another kind
+/// than its value, each of which went on with `()` or the next arm.
+#[test]
+fn test_a_pattern_or_a_place_the_checks_rule_out_stops_the_run() {
+    use mente_syntax::tree::{ExprKind, PatternKind, StmtKind};
+
+    let broken_with =
+        |src: &str, call_text: &str, why: &str, tamper: &dyn Fn(&mut mente_sema::CheckedFn)| {
+            let mut m = module(src);
+            let f = m.functions.last_mut().and_then(Option::as_mut).unwrap();
+            tamper(f);
+            let (name, args) = parse_call(call_text).unwrap();
+            match call(&m, &name, args, Limits::default()) {
+                Err(Stop::Broken(found)) if found.contains(why) => {}
+                other => panic!("{}: {:?}, not a run broken by {}", src, other, why),
+            }
+        };
+    // A binding statement that declares no binding, which gave `()`.
+    broken_with(
+        "pub fn f(x: u8) -> u8 {\n  val y: u8 = x\n  y\n}",
+        "f(3)",
+        "declares no binding",
+        &|f| {
+            let s = f
+                .syntax
+                .tree
+                .stmts
+                .iter()
+                .position(|s| matches!(s.kind, StmtKind::Binding { .. }))
+                .unwrap();
+            f.resolution.stmts[s] = None;
+        },
+    );
+    // A `mut` argument whose binding holds no value yet, read as `()`; the callee only writes it.
+    broken_with(
+        "fn set(mut z: u8) {\n  z = 1\n}\npub fn f(x: u8) -> u8 {\n  var y: u8 = x\n  set(mut y)\n  var w: u8 = y\n  w += 1\n  w\n}",
+        "f(3)",
+        "holds no value",
+        &|f| {
+            let call = f
+                .syntax
+                .tree
+                .exprs
+                .iter()
+                .position(|e| matches!(e.kind, ExprKind::Call { .. }))
+                .unwrap();
+            let ExprKind::Call { args, .. } = &f.syntax.tree.exprs[call].kind else {
+                unreachable!("a call")
+            };
+            let y = args[0].value.0 as usize;
+            let w = f.resolution.bindings.iter().position(|b| b.name == "w");
+            f.resolution.names[y] = w.map(|i| mente_sema::names::BindingId(i as u32));
+        },
+    );
+    // A pattern of another kind than its scrutinee's value, which fell to the next arm.
+    broken_with(
+        "pub fn f(x: u8) -> u8 = match x {\n  0 => 1\n  _ => 2\n}",
+        "f(5)",
+        "a pattern of another kind",
+        &|f| {
+            let m = f
+                .syntax
+                .tree
+                .exprs
+                .iter()
+                .position(|e| matches!(e.kind, ExprKind::Match { .. }))
+                .unwrap();
+            if let ExprKind::Match { arms, .. } = &mut f.syntax.tree.exprs[m].kind {
+                arms[0].pattern.kind = PatternKind::Bool(true);
+            }
+        },
+    );
 }
