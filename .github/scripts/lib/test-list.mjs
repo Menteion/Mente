@@ -81,7 +81,7 @@ export function doctestProblems(text) {
     libraries++;
     const count = lines.slice(k + 1).find((l) => /^\d+ tests?, \d+ benchmarks?$/.test(l) || /^Doc-tests /.test(l));
     if (!count || count.startsWith("Doc-tests ")) found.push(`${header[1]}: rustdoc listed no count of its doctests`);
-    else if (count !== "0 tests, 0 benchmarks") found.push(`${header[1]}: rustdoc lists doctests (${count}): make each a test, or mark its block \`text\` or \`ignore\``);
+    else if (count !== "0 tests, 0 benchmarks") found.push(`${header[1]}: rustdoc lists doctests (${count}): make each a test, or mark its block \`text\`, since rustdoc lists an \`ignore\` block too`);
   }
   if (libraries === 0) found.push("rustdoc listed the doctests of no library");
   return found;

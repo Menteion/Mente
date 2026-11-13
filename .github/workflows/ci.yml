@@ -63,19 +63,20 @@ jobs:
         # Every step after it runs code of the change, which could replace a tool the next step
         # runs or set its path or environment; each checks the tools at its end
         # (.github/scripts/tools.sh).
-        run: bash .github/scripts/tools.sh record
+        run: /usr/bin/bash .github/scripts/tools.sh record
       - name: Build the tests
         run: |
           cargo test --locked --workspace --no-run
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: The ignored tests and those given more time, as nextest lists them
         # On each runner: a test ignored in any spelling libtest reads, unless
         # .config/ignored-tests.txt lists it, or a test given a longer limit that is ignored or
         # compiled out here, fails the job (.github/scripts/test-list.mjs).
         run: |
+          . .github/scripts/limits.sh
           cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
           node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: Tests, through nextest under the ci profile's limits
         # Each test runs in a process of its own under the time limits of .config/nextest.toml: a
         # test past its time is stopped and fails, and so does one that leaves a process behind.
@@ -86,7 +87,7 @@ jobs:
         run: |
           . .github/scripts/limits.sh
           cargo-nextest nextest run --locked --workspace --profile ci
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: No doctests
         # nextest runs no doctests, and `cargo test --doc` has no limit for one: rustdoc lists
         # every doc example it would compile, in any spelling of a doc comment or attribute, and
@@ -95,25 +96,29 @@ jobs:
           . .github/scripts/limits.sh
           cargo test --locked --workspace --doc -- --list > "$RUNNER_TEMP/doctests.txt" 2>&1
           node .github/scripts/test-list.mjs doctests "$RUNNER_TEMP/doctests.txt"
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: The gate tests, by name
         # By name, so that a manifest that drops the target (autotests = false) fails here instead
         # of leaving the gates untested (compiler/mente-cli/tests/gates.rs).
         run: |
+          . .github/scripts/limits.sh
           cargo test --locked -p mente-cli --test gates
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn spec
         run: |
+          . .github/scripts/limits.sh
           cargo run --locked --bin mn -- spec
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn test --mutate
         run: |
+          . .github/scripts/limits.sh
           cargo run --locked --bin mn -- test --mutate
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn view --spec
         run: |
+          . .github/scripts/limits.sh
           cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
 
   coverage:
     # Reported, not required: line coverage of the workspace's tests, in the run summary and as lcov.
@@ -181,6 +186,8 @@ jobs:
           esac
           if [ -z "$base" ]; then echo "::error::the $GITHUB_EVENT_NAME event names no base"; exit 1; fi
           git worktree add ../base "$base"
+          # The measurement's failure or its timeout fails the step, not only sed's.
+          set -o pipefail
           (cd ../base && timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol) \
             | sed -n -E 's/^([^ :]+): median ([0-9.]+) .*/\1 \2/p' > "$RUNNER_TEMP/base-medians.txt"
           cat "$RUNNER_TEMP/base-medians.txt"

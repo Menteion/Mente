@@ -14,7 +14,7 @@ ci.yml#rust: node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json
 ci.yml#rust: cargo-nextest nextest run --locked --workspace --profile ci
 ci.yml#rust: cargo test --locked --workspace --doc -- --list > "$RUNNER_TEMP/doctests.txt" 2>&1
 ci.yml#rust: node .github/scripts/test-list.mjs doctests "$RUNNER_TEMP/doctests.txt"
-ci.yml#rust: bash .github/scripts/tools.sh record
+ci.yml#rust: /usr/bin/bash .github/scripts/tools.sh record
 ci.yml#rust: cargo test --locked -p mente-cli --test gates
 ci.yml#rust: cargo run --locked --bin mn -- spec
 ci.yml#rust: cargo run --locked --bin mn -- test --mutate

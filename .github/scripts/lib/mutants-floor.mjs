@@ -22,6 +22,17 @@
 // holds; `count` prints how many mutants a list holds: cargo-mutants prints nothing at all when a
 // diff matches no mutant, which counts as 0. A list it cannot read fails, so that a change in
 // cargo-mutants' output never reads as "no mutant".
+//
+//   node .github/scripts/mutants-floor.mjs evidence <mutants.out>...
+//
+// `evidence` prints each mutant whose outcome its log does not show: caught without nextest's exit
+// for a failed run and a failed test, unviable without a failed build and a compiler's error. What
+// it stops, and what it does not: it catches a test tool that is missing or broken, and a stub
+// left in its place that exits at once. It does not stop code of the change that sets out to
+// defeat it, which runs with the job's rights: a stub that prints a failing test and exits as
+// nextest does, logs or outcomes rewritten after the run, or this script rewritten before it runs.
+// Against that, the guard is the review of the change, until its code runs isolated from the
+// trusted steps (docs/design-review.md, untrusted-test-isolation).
 
 import fs from "node:fs";
 

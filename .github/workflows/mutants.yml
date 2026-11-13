@@ -61,7 +61,38 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         # The steps after it run the change's tests, which could replace a tool the next step
         # runs; each checks the tools at its end (.github/scripts/tools.sh).
-        run: bash .github/scripts/tools.sh record
+        run: /usr/bin/bash .github/scripts/tools.sh record
+      - name: The diff and the lists the floor reads, before any code of the change runs
+        if: steps.watch.outputs.run != 'false'
+        env:
+          SHARD: ${{ matrix.shard }}
+        # Read before the tests run: one of them could move origin's refs, or rewrite the base's
+        # settings, and bring the floor to 0. Listing mutants reads the sources and runs no code of
+        # the change.
+        run: |
+          git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
+          cargo mutants --list --json > all-mutants.json
+          cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
+          # cargo-mutants' diff filter marks only the lines next to a deleted line; every mutant of
+          # the function enclosing one runs too.
+          node .github/scripts/mutants-floor.mjs deleted pr.diff all-mutants.json diff-mutants.json > deleted-re.txt
+          deleted=()
+          while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
+          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --list --json > shard-mutants.json
+          : > shard-deleted.json
+          : > deleted-mutants.json
+          if [ "${#deleted[@]}" -gt 0 ]; then
+            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --list --json > shard-deleted.json
+            cargo mutants "${deleted[@]}" --list --json > deleted-mutants.json
+          fi
+          # The base's settings, so that a pull request cannot exclude what it changes.
+          if git show "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
+            config=(--config base-mutants.toml)
+          else
+            config=(--no-config)
+          fi
+          cargo mutants --list --json "${config[@]}" > base-all-mutants.json
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: Run the tests once without a mutant
         if: steps.watch.outputs.run != 'false'
         # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
@@ -76,13 +107,12 @@ jobs:
           { echo "## Slowest tests without a mutant"; echo '```text'
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: Mutate the lines this pull request changes
         if: steps.watch.outputs.run != 'false'
         env:
           SHARD: ${{ matrix.shard }}
         run: |
-          git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           # The limits every test runs under, as in the required Rust jobs.
           . .github/scripts/limits.sh
           # Every count the floor reads must be a number: an empty one fails, never compares.
@@ -95,11 +125,7 @@ jobs:
           status=0
           cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
-          # cargo-mutants' diff filter marks only the lines next to a deleted line; every mutant of
-          # the function enclosing one runs too.
-          cargo mutants --list --json > all-mutants.json
-          cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
-          node .github/scripts/mutants-floor.mjs deleted pr.diff all-mutants.json diff-mutants.json > deleted-re.txt
+          # The mutants around deleted lines, read before the tests ran.
           deleted=()
           while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
           if [ "${#deleted[@]}" -gt 0 ]; then
@@ -136,31 +162,20 @@ jobs:
             echo "::error::$lacking mutants are counted caught or unviable without a failed test or a failed build in their logs"
             failed=1
           fi
-          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --list --json > shard-mutants.json
+          # The lists were read before the tests ran.
           listed=$(node .github/scripts/mutants-floor.mjs count shard-mutants.json)
           count "$listed" "the mutants listed for this shard"
-          if [ "${#deleted[@]}" -gt 0 ]; then
-            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --list --json > shard-deleted.json
-            more=$(node .github/scripts/mutants-floor.mjs count shard-deleted.json)
-            count "$more" "the mutants of deleting hunks listed for this shard"
-            listed=$((listed + more))
-          fi
+          more=$(node .github/scripts/mutants-floor.mjs count shard-deleted.json)
+          count "$more" "the mutants of deleting hunks listed for this shard"
+          listed=$((listed + more))
           echo "Mutants listed for this shard: $listed; tested: $tested" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$tested" -ne "$listed" ]; then
             echo "::error::cargo-mutants listed $listed mutants for this shard and reported an outcome for $tested"
             failed=1
           fi
           if [ "$SHARD" = 0 ]; then
-            if git show "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
-              config=(--config base-mutants.toml)
-            else
-              config=(--no-config)
-            fi
-            cargo mutants --list --json "${config[@]}" > base-all-mutants.json
             expected=$(node .github/scripts/mutants-floor.mjs expected pr.diff base-all-mutants.json)
             count "$expected" "the mutants the diff changes"
-            : > deleted-mutants.json
-            if [ "${#deleted[@]}" -gt 0 ]; then cargo mutants "${deleted[@]}" --list --json > deleted-mutants.json; fi
             in_diff=$(node .github/scripts/mutants-floor.mjs count diff-mutants.json)
             count "$in_diff" "the mutants cargo-mutants lists for the diff"
             around=$(node .github/scripts/mutants-floor.mjs count deleted-mutants.json)
@@ -176,7 +191,7 @@ jobs:
               failed=1
             fi
           fi
-          bash .github/scripts/tools.sh verify
+          /usr/bin/bash .github/scripts/tools.sh verify
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.watch.outputs.run != 'false'

@@ -207,17 +207,26 @@ check("every pinned action names its release, which the Documentation job checks
   // Offline, every pin carries its tag; the Documentation job asks GitHub that the tag names the
   // commit (.github/scripts/action-pins.mjs).
   for (const { file } of workflows()) {
-    for (const p of actionPins(`${WORKFLOWS}/${file}`, read(`${WORKFLOWS}/${file}`))) assert.notEqual(p.tag, null, `${p.at}: ${p.repo}@${p.sha} names no release in a comment`);
+    for (const p of actionPins(`${WORKFLOWS}/${file}`, read(`${WORKFLOWS}/${file}`))) {
+      assert.equal(p.unreadable, undefined, `${p.at}: a uses: line the check of pins cannot read: ${p.unreadable}`);
+      assert.notEqual(p.tag, null, `${p.at}: ${p.repo}@${p.sha} names no release in a comment`);
+    }
   }
   const sha = (c) => c.repeat(40);
   const read2 = actionPins("w.yml", `      - uses: actions/checkout@${sha("a")} # v7.0.1\n        uses: org/repo/sub/path@${sha("b")}\n      - uses: ./local\n`);
   assert.deepEqual(read2.map((p) => [p.repo, p.tag]), [["actions/checkout", "v7.0.1"], ["org/repo", null]]);
+  for (const line of [`      - "uses": actions/checkout@${sha("a")} # v7`, `      - { uses: actions/checkout@${sha("a")} }`, `      - uses: actions/checkout@${sha("a")} # v7 and more`, "      - uses: actions/checkout@v7", "      - uses: docker://alpine"]) {
+    assert.equal(actionPins("w.yml", line).filter((p) => p.unreadable !== undefined).length, 1, `the check of pins passes over: ${line}`);
+  }
   assert.equal(taggedCommit(`${sha("c")}\trefs/tags/v1\n${sha("d")}\trefs/tags/v1^{}\n`, "v1"), sha("d"), "an annotated tag is its peeled commit");
   assert.equal(taggedCommit(`${sha("c")}\trefs/tags/v1\n`, "v1"), sha("c"));
   assert.equal(taggedCommit("", "v1"), null);
   const remote = (repo, tag) => (tag === "v7.0.1" ? `${sha("a")}\trefs/tags/v7.0.1\n` : "");
   assert.deepEqual(actionPinProblems(read2.slice(0, 1), remote), []);
-  assert.equal(actionPinProblems([{ ...read2[0], sha: sha("e") }], remote).length, 1, "a commit other than its tag's");
+  const moved = actionPinProblems([{ ...read2[0], sha: sha("e") }], remote);
+  assert.equal(moved.length, 1, "a commit other than its tag's");
+  // A tag that names another commit never suggests following the tag: the pin stays.
+  assert.match(moved[0], /keep the pin/, `the check of pins suggests following the tag: ${moved[0]}`);
   assert.equal(actionPinProblems([{ ...read2[0], tag: "v9" }], remote).length, 1, "a tag that is not there");
   assert.equal(actionPinProblems([read2[1]], remote).length, 1, "a pin without its tag");
 });
@@ -567,23 +576,23 @@ export function jobDigest(doc, job) {
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
 const PINNED_FILES = new Map([
-  [".github/scripts/limits.sh", "8e51dda051399943b45b15751806fe171be9a5b6088e7ac581888661cba8a4e8"],
+  [".github/scripts/limits.sh", "ac31047e639bbd2d2777c8bcc44fbce038ed40407dbf45d484ee5018ab7468aa"],
   [".github/scripts/memory-guard.sh", "2803d3fdd012923cd6c276c23db0af506596193b42b332903f5b4127f67fcfc1"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
-  [".github/scripts/lib/test-list.mjs", "340a1b28b3422d2e3ca0fe1b32d5aa74d7f4494c6aef6f1260b5ca89a7d152f8"],
-  [".github/scripts/tools.sh", "f0d0bb7e872fb66ee32a8739a3ca5abb5ae2690e1ce72b9c912399057a77b3ad"],
+  [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
+  [".github/scripts/tools.sh", "56b749faa873ee690ebdc2ea0c14223aecbf016af10957f96697e2fe5c4448d0"],
 ]);
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "cbbdaa48bdc88bb60fcdf6777e2bdb1bf56d590c7278ffd81d49c40e2bf0acc8"],
-  ["mutants.yml#in-diff", "20f57f8e9f73484617c9ee3e8fdf3310ffe28c713c9fa868c98e7e03239b970a"],
-  ["mutants-full.yml#full", "51fa24fb8015464bf0ebfae542f4c390c88b098939fdce57cde88306e87b201c"],
+  ["ci.yml#rust", "7be20495b5948c94fc565601cbb78d03c7e101d2a53bf200881b7d9b5c84ec68"],
+  ["mutants.yml#in-diff", "f94088be2f2995f9ba495dba6ff5034d7195da6cf065a52a7a1fa0b1d07e3f61"],
+  ["mutants-full.yml#full", "c797756d65bd634b69a294a75eec9ec4d6b1b4638805decb9878905c02317d32"],
 ]);
 /// The step of the required Rust jobs that runs the tests: the shared limits first, then nextest's
 /// own binary under the ci profile, with nothing after either that could filter, retry or forgive a
 /// failure, and nothing on the step but its name and this script.
-const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\nbash .github/scripts/tools.sh verify\n";
+const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/tools.sh verify\n";
 
 /// The shell and PowerShell scripts under .github/scripts a text names by path.
 const namedScripts = (text) => [...String(text).matchAll(/\.github\/scripts\/[\w./-]+\.(?:sh|ps1)\b/g)].map((m) => m[0]);
@@ -659,12 +668,12 @@ check("the tests run through the pinned nextest under the shared limits, which n
     // The tools are recorded right after nextest is installed, before any code of the change
     // runs, and every later step that runs a script checks them at its end, before a final exit.
     const install = all.findIndex((s) => String(s.run ?? "").trim() === "bash .github/scripts/install-nextest.sh");
-    const record = all.findIndex((s) => String(s.run ?? "").trim() === "bash .github/scripts/tools.sh record");
+    const record = all.findIndex((s) => String(s.run ?? "").trim() === "/usr/bin/bash .github/scripts/tools.sh record");
     assert.ok(install >= 0 && record === install + 1, `${key}: the tools are not recorded right after nextest is installed`);
     for (const s of all.slice(record + 1).filter((x) => typeof x.run === "string")) {
       const lines = s.run.trimEnd().split("\n");
       const last = lines.at(-1) === 'exit "$failed"' ? lines.at(-2) : lines.at(-1);
-      assert.equal(last, "bash .github/scripts/tools.sh verify", `${stepKey(file, id, s)} runs code of the change and does not check the tools at its end`);
+      assert.equal(last, "/usr/bin/bash .github/scripts/tools.sh verify", `${stepKey(file, id, s)} runs code of the change and does not check the tools at its end`);
     }
     // limits.sh is a bash script, sourced: the steps that source it run in bash, named, or by
     // default on a Linux runner.
@@ -686,12 +695,12 @@ check("the tests run through the pinned nextest under the shared limits, which n
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
     assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
-    const mutate = steps(w.doc.jobs[id]).filter((s) => /^cargo mutants /m.test(String(s.run ?? "")));
+    const mutate = steps(w.doc.jobs[id]).filter((s) => /^cargo mutants (?!.*--list)/m.test(String(s.run ?? "")));
     assert.ok(mutate.length > 0, `${file}: no step runs cargo mutants`);
     for (const s of mutate) {
       const body = String(s.run).split("\n");
       const source = body.indexOf(". .github/scripts/limits.sh");
-      const first = body.findIndex((l) => /^cargo mutants /.test(l));
+      const first = body.findIndex((l) => /^cargo mutants (?!.*--list)/.test(l));
       assert.ok(source >= 0 && source < first, `${stepKey(file, id, s)}: cargo mutants runs outside the shared limits`);
     }
   }
@@ -761,10 +770,10 @@ check("tools.sh finds a tool replaced or added, and a step that sets the next on
     assert.equal(run("record").status, 0, "tools.sh does not record");
     assert.equal(run("verify").status, 0, `tools.sh refuses unchanged tools: ${run("verify").out}`);
     fs.writeFileSync(at("home", "bin", "cargo-nextest"), "#!/bin/sh\nexit 1\n");
-    assert.match(run("verify").out, /a tool changed since it was recorded/, "tools.sh lets a stub in place of nextest through");
+    assert.match(run("verify").out, /a tool, a setting or a script changed since it was recorded/, "tools.sh lets a stub in place of nextest through");
     fs.writeFileSync(at("home", "bin", "cargo-nextest"), "nextest");
     fs.writeFileSync(at("rustup", "toolchains", "t", "bin", "rustc"), "rustc");
-    assert.match(run("verify").out, /a tool changed since it was recorded/, "tools.sh lets a tool added to a toolchain through");
+    assert.match(run("verify").out, /a tool, a setting or a script changed since it was recorded/, "tools.sh lets a tool added to a toolchain through");
     fs.rmSync(at("rustup", "toolchains", "t", "bin", "rustc"));
     fs.writeFileSync(at("path"), "/tmp/stubs\n");
     assert.match(run("verify").out, /set the path or the environment of the steps after it/, "tools.sh lets a step set the path of the next one");
@@ -826,7 +835,7 @@ const BUILD_TIME_CODE = new Map([]);
 /// A manifest's `build =` that names a script, the key bare or quoted, and any mention of a
 /// procedural macro, `proc-macro = true` or a `crate-type` of one, comments aside.
 const buildScriptKey = /^\s*["']?build["']?\s*=(?!\s*false\b)/m;
-const procMacro = /proc[-_]macro/;
+const procMacro = /proc[-_]macro(?![\w-])/;
 /// A doc attribute in any spelling, plain, spaced or under a cfg_attr.
 const docAttribute = /#!?\[\s*(doc\s*=|cfg_attr\b[^\]]*\bdoc\s*=)/;
 
@@ -842,11 +851,13 @@ check("no workspace member runs code at build time", () => {
   for (const m of ['build = "x.rs"', '"build" = "x.rs"', "'build' = 'x.rs'"]) assert.match(m, buildScriptKey, m);
   assert.doesNotMatch("build = false", buildScriptKey);
   for (const m of ["proc-macro = true", 'crate-type = ["proc-macro"]', "proc_macro = true"]) assert.match(m, procMacro, m);
+  for (const m of ['proc-macro2 = "1"', "proc_macro2 = { workspace = true }"]) assert.doesNotMatch(m, procMacro, m);
 });
 
-/// The code blocks of a library's doc comments rustdoc compiles as doctests, as `file:line`: a
-/// fenced block whose info string names no other language than Rust and does not say `ignore`, and
-/// an indented block (four spaces after a blank doc line), which rustdoc reads as Rust.
+/// The code blocks of a library's doc comments rustdoc lists as doctests, as `file:line`: a fenced
+/// block whose info string names no other language than Rust, `ignore` included, which rustdoc
+/// lists though it does not run it, and an indented block (four spaces after a blank doc line),
+/// which rustdoc reads as Rust. A block another language names, `text` say, is no doctest.
 export function doctestBlocks(file, text) {
   const found = [];
   let fence = null;
@@ -869,7 +880,7 @@ export function doctestBlocks(file, text) {
       fence = marker[1];
       const tokens = marker[2].split(/[\s,]+/).filter(Boolean).map((t) => t.replace(/^\{|\}$/g, ""));
       const rust = tokens.includes("rust") || tokens.every((t) => ATTRIBUTE.test(t));
-      if (rust && !tokens.includes("ignore")) found.push(`${file}:${k + 1}`);
+      if (rust) found.push(`${file}:${k + 1}`);
     } else if (blank && /^ {4,}\S/.test(body)) {
       found.push(`${file}:${k + 1}`);
     }
@@ -880,29 +891,30 @@ export function doctestBlocks(file, text) {
 
 check("no library's doc comments hold an example rustdoc would compile", () => {
   // nextest runs no doctests, and `cargo test --doc` has no limit per test: an example belongs in a
-  // test, or in a block marked `text` or `ignore`.
+  // test, or in a block marked `text`.
   // The required Rust jobs list the doctests rustdoc finds, and fail on any; this reads the
   // sources first, so that an example fails here too, and names where it is.
   const found = [];
   for (const [, { dir }] of workspace()) {
     for (const f of filesUnder(dir).filter((x) => x.endsWith(".rs"))) {
       const text = read(f);
-      // A module read from another path could be one these lines never read.
-      if (/#!?\[\s*path\b/.test(text)) found.push(`${f}: a #[path] module`);
       if (!tracked().has(`${dir}/src/lib.rs`) || !f.startsWith(`${dir}/src/`) || f === `${dir}/src/main.rs` || f.startsWith(`${dir}/src/bin/`)) continue;
+      // A library's module read from another path could be one these lines never read.
+      if (/^\s*#!?\[\s*path\b/m.test(text)) found.push(`${f}: a #[path] module`);
       found.push(...doctestBlocks(f, text));
       if (docAttribute.test(text)) found.push(`${f}: a doc attribute, whose text the policy does not read`);
-      if (/\/\*[*!](?![*/])/.test(text)) found.push(`${f}: a block doc comment, which the policy does not read`);
+      if (/^\s*\/\*[*!](?![*/])/m.test(text)) found.push(`${f}: a block doc comment, which the policy does not read`);
     }
   }
-  assert.deepEqual(found, [], "doc comments hold examples rustdoc compiles: mark each `text` or `ignore`, or make it a test");
+  assert.deepEqual(found, [], "doc comments hold examples rustdoc lists as doctests: mark each `text`, or make it a test");
   for (const a of ['#[doc = "x"]', '#![doc = include_str!("a.md")]', '#[ doc = "x"]', '#[cfg_attr(all(), doc = "x")]']) assert.match(a, docAttribute, a);
   assert.doesNotMatch("#[doc(hidden)]", docAttribute);
   const blocks = (text) => doctestBlocks("f.rs", text).map((at) => Number(at.split(":")[1]));
   assert.deepEqual(blocks("/// a\n/// ```\n/// x\n/// ```\n"), [2]);
   assert.deepEqual(blocks("//! ```rust,no_run\n//! x\n//! ```\n"), [1]);
   assert.deepEqual(blocks("/// ```should_panic\n/// ```\n/// ```edition2021\n/// ```\n"), [1, 3]);
-  assert.deepEqual(blocks("/// ```text\n/// x\n/// ```\n/// ```ignore\n/// ```\n/// ```mn\n/// ```\n/// ~~~sh\n/// ~~~\n"), []);
+  assert.deepEqual(blocks("/// ```text\n/// x\n/// ```\n/// ```mn\n/// ```\n/// ~~~sh\n/// ~~~\n"), []);
+  assert.deepEqual(blocks("/// ```ignore\n/// x\n/// ```\n"), [1], "rustdoc lists an `ignore` block");
   assert.deepEqual(blocks("/// a\n///\n///     let x = 1;\n"), [3]);
   assert.deepEqual(blocks("/// - a\n///   b\n//// ```\n/// ```text\n///     x\n/// ```\n"), []);
 });
@@ -1286,14 +1298,21 @@ check("every ignored test a required job runs has a time limit of its own", () =
   for (const { file, doc, id, job } of requiredJobs()) {
     for (const s of steps(job)) {
       for (const line of logicalLines(s.run ?? "")) {
-        if (!/\bcargo\s+test\b.*\s--ignored\b/.test(line)) continue;
-        found++;
-        assert.match(line, new RegExp(`(^|[\\s(&;])timeout ${IGNORED_TEST_LIMIT} cargo test\\b`), `${stepKey(file, id, s)} runs ignored tests without their limit: timeout ${IGNORED_TEST_LIMIT} cargo test ...`);
-        // GNU timeout is bash's on every runner; Windows' own shell finds timeout.exe, which only
+        // Every timeout runs in bash, GNU's: Windows' own shell finds timeout.exe, which only
         // waits. A job's default shell is bash only on a Linux runner named as such.
         const shell = s.shell ?? job.defaults?.run?.shell ?? doc.defaults?.run?.shell;
         const linux = /^ubuntu-/.test(String(job["runs-on"]));
-        assert.ok(shell === "bash" || (shell === undefined && linux), `${stepKey(file, id, s)} runs timeout in ${shell ?? "the runner's default shell"}, not bash`);
+        if (/(^|[\s(&;|])timeout\s+\d/.test(line)) {
+          assert.ok(shell === "bash" || (shell === undefined && linux), `${stepKey(file, id, s)} runs timeout in ${shell ?? "the runner's default shell"}, not bash`);
+        }
+        if (!/\bcargo\s+test\b.*\s--ignored\b/.test(line)) continue;
+        found++;
+        assert.match(line, new RegExp(`(^|[\\s(&;])timeout ${IGNORED_TEST_LIMIT} cargo test\\b`), `${stepKey(file, id, s)} runs ignored tests without their limit: timeout ${IGNORED_TEST_LIMIT} cargo test ...`);
+        // Piped, its timeout would fail only the last command of the pipe without pipefail, which
+        // GitHub's bash has only when a step names it.
+        if (/(^|[^|])\|([^|]|$)/.test(line)) {
+          assert.ok(shell === "bash" || /\bset\s+-[a-z]*o\s+pipefail\b/.test(String(s.run)), `${stepKey(file, id, s)} pipes ignored tests under timeout without pipefail`);
+        }
       }
     }
   }

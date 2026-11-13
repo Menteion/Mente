@@ -54,7 +54,12 @@ unset limits_home limits_found limits_dir limits_file limits_up
 case "$RUNNER_OS" in
   Linux)
     ulimit -v 8388608 -f 2097152
+    # One guard, this step's: a step before it may have left its own, writing to a log that ended.
+    limits_guard=$RUNNER_TEMP/memory-guard.pid
+    if [ -f "$limits_guard" ]; then kill "$(cat "$limits_guard")" 2> /dev/null || true; fi
     bash .github/scripts/memory-guard.sh &
+    echo "$!" > "$limits_guard"
+    unset limits_guard
     ;;
   Windows)
     pwsh -NoProfile -NonInteractive -File .github/scripts/job-limits.ps1 -ProcessId "$(cat "/proc/$$/winpid")" -ProcessBytes 8589934592 -JobBytes 12884901888
