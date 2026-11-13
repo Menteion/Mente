@@ -1564,6 +1564,16 @@ enum Read<'a> {
     Other,
 }
 
+/// The range of every integer a 128-bit type holds, `i128`'s lowest to `u128`'s highest, as a
+/// message writes it: what a `match` reads of an integer of no one type.
+fn every_integer() -> (Exact, Exact, String) {
+    (
+        Exact::new(true, 1 << 127),
+        Exact::new(false, u128::MAX),
+        String::from("integer"),
+    )
+}
+
 /// A value of a pattern, as coverage counts it: a variant by its tag, a `bool`, or an integer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Value {
@@ -1843,11 +1853,10 @@ impl<'a> Checker<'a> {
                     _ => Read::Other,
                 },
                 PatternKind::Bool(_) => Read::Bool,
-                PatternKind::Int { .. } => Read::Int(
-                    Exact::new(true, 1 << 127),
-                    Exact::new(false, u128::MAX),
-                    String::from("integer"),
-                ),
+                PatternKind::Int { .. } => {
+                    let (lo, hi, text) = every_integer();
+                    Read::Int(lo, hi, text)
+                }
             };
         }
         Read::Other
@@ -1884,13 +1893,7 @@ impl<'a> Checker<'a> {
         let t = match i {
             Int::One(t) | Int::Mixed(Some(t)) => t,
             Int::Literal => crate::types::I64,
-            Int::Mixed(None) => {
-                return (
-                    Exact::new(true, 1 << 127),
-                    Exact::new(false, u128::MAX),
-                    String::from("integer"),
-                )
-            }
+            Int::Mixed(None) => return every_integer(),
         };
         (
             Exact::new(true, t.min_magnitude()),
@@ -4045,6 +4048,9 @@ pub fn f(mut p: Pair) {
             ("pub fn f(c: bool, x: u8) -> bool {\n  val y: bool = if c { x + todo(\"r\") } else { true }\n  y\n}", "u8 beside bool"),
             ("pub fn f(c: bool, x: u8) -> u8 {\n  val a: [3]u8 = if c { [x, todo(\"r\")] } else { [1, 2, 3] }\n  a[2]\n}", "[2] beside [3]"),
             ("pub fn f(c: bool, x: u8) -> u8 {\n  val a: u8 = match c {\n    true => [x, todo(\"r\")]\n    false => 7\n  }\n  a\n}", "an array beside u8"),
+            // A branch whose statement holds an `if` of which one branch only leaves runs on.
+            ("pub fn f(c: bool, d: bool) -> bool {\n  val y: bool = if d {\n    _ = if c { return true } else { 2 }\n    3\n  } else {\n    true\n  }\n  y\n}", "a value after an `if` that may run on"),
+            ("pub fn f(c: bool, d: bool) -> bool {\n  val y: bool = if d {\n    _ = if c { 2 } else { return true }\n    3\n  } else {\n    true\n  }\n  y\n}", "a value after an `if` that may run on"),
         ] {
             assert!(codes(src).contains(&"E0203"), "{}: {}", why, src);
         }
@@ -4579,6 +4585,14 @@ pub enum Light {
                 "pub fn f() -> u8 = match todo(\"q\") {\n  Shape.Rect(h: b) => 1\n  Shape.Dot => 0\n}"
             )),
             ["E0226"]
+        );
+        // An enum whose declaration is in error reads nothing, as when the scrutinee has its
+        // type: the patterns after its variant are not reported against it.
+        assert_eq!(
+            codes(&with(
+                "pub enum Bad {\n  A(p: Nope)\n  B\n}\npub fn f() -> u8 = match todo(\"q\") {\n  Bad.B => 1\n  3 => 2\n}"
+            )),
+            ["E0116"]
         );
         // An enum whose declaration is in error is matched without coverage being reported.
         assert_eq!(
