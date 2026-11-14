@@ -1,0 +1,17 @@
+// expect: pass
+module conformance
+// Patterns of one kind on a scrutinee of no type check, whatever values they name: the arms
+// never run, so they cover nothing (core-calculus.md, item 14).
+enum E {
+  V(a: u8)
+  W
+}
+
+pub fn integers(c: bool) -> u8 = match (if c { todo("a") } else { todo("b") }) {
+  300 => 1
+  -1 => 2
+}
+
+pub fn variant() -> u8 = match todo("q") {
+  E.V(a: z) => z
+}

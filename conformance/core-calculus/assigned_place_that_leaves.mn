@@ -1,0 +1,24 @@
+// expect: pass
+module conformance
+// The indexes of the place an assignment writes are evaluated before its value, so an index
+// that leaves leaves the assignment: the body needs no result after it, and a `guard`'s `else`
+// that ends with it does not reach its end (core-calculus.md, item 6).
+pub fn set(xs: [2]u8, x: u8) -> u8 {
+  var ys: [2]u8 = xs
+  _ = ys[0]
+  ys[todo("r")] = x
+}
+
+pub fn add(a: u8) -> u8 {
+  var b: [2]u8 = [a, a]
+  _ = b[1]
+  b[todo("r")] += 1
+}
+
+pub fn guarded(c: bool, xs: [2]u8, x: u8) -> u8 {
+  var ys: [2]u8 = xs
+  guard c else {
+    ys[todo("r")] = x
+  }
+  ys[0]
+}

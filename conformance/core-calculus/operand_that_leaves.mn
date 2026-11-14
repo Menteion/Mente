@@ -1,0 +1,32 @@
+// expect: pass
+module conformance
+// An operand that leaves leaves its statement: a `guard`'s `else` that holds one does not reach
+// its end, and neither does a body that ends with one (core-calculus.md, item 6).
+pub fn stop_in_an_operand(c: bool, x: u8) -> u8 {
+  guard c else {
+    _ = x + todo("later")
+  }
+  x
+}
+
+pub fn leave_from_both_branches(c: bool, x: u8) -> u8 {
+  _ = x + (if c { return 1 } else { return 2 })
+}
+
+pub fn leave_from_an_argument(c: bool, x: u8) -> u8 {
+  guard c else {
+    _ = twice(if x > 9 { return 9 } else { unreachable("x <= 9") })
+  }
+  twice(x / 2)
+}
+
+pub fn leave_from_a_condition(x: u8) -> u8 {
+  guard x > 0 else {
+    return 0
+  }
+  while (if x > 1 { return x } else { return 1 }) {
+    _ = x
+  }
+}
+
+fn twice(x: u8) -> u8 = x + x

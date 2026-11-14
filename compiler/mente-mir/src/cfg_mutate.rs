@@ -195,7 +195,7 @@ impl Mutant {
                     },
                     Change::Always(true) => Term::Jump(then.0, then.1.clone()),
                     Change::Always(false) => Term::Jump(otherwise.0, otherwise.1.clone()),
-                    _ => return out,
+                    Change::Op(_) | Change::Remove | Change::Bypass => return out,
                 };
             }
         }

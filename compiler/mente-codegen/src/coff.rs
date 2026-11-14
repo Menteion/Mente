@@ -269,14 +269,15 @@ mod tests {
                     panic!("{name}: a relocation without a symbol");
                 };
                 let symbol = file.symbol_by_index(index).unwrap();
-                let target = match symbol.kind() {
-                    object::SymbolKind::Section => file
-                        .section_by_index(symbol.section_index().unwrap())
+                // A section symbol is named by its section; every other symbol by its own name.
+                let target = if symbol.kind() == object::SymbolKind::Section {
+                    file.section_by_index(symbol.section_index().unwrap())
                         .unwrap()
                         .name()
                         .unwrap()
-                        .to_string(),
-                    _ => symbol.name().unwrap().to_string(),
+                        .to_string()
+                } else {
+                    symbol.name().unwrap().to_string()
                 };
                 (offset, typ.0, target)
             })

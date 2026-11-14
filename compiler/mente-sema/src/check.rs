@@ -15,7 +15,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic, Edit, Fix};
-use mente_syntax::tree::BinaryOp::{BitAnd, BitOr, BitXor, Shl, Shr};
 use mente_syntax::tree::{
     Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId,
     ExprKind, FieldInit, FnSyntax, PatBinding, PatternKind, Payload, StmtId, StmtKind, Tree,
@@ -166,9 +165,7 @@ impl Checker<'_> {
             }
         }
         for (i, e) in self.tree.exprs.iter().enumerate() {
-            if !matches!(e.kind, ExprKind::Array(_) | ExprKind::Repeat { .. })
-                || !reported.is_empty()
-            {
+            if !e.kind.is_array_literal() || !reported.is_empty() {
                 continue;
             }
             let t = self.typing.exprs[i].clone();
@@ -259,7 +256,22 @@ impl Checker<'_> {
                 otherwise: None, ..
             } => "; an `if` without `else` has no value".to_string(),
             ExprKind::Call { callee, .. } => format!("; `{}` has no result type", callee),
-            _ => String::new(),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => String::new(),
         }
     }
 
@@ -425,7 +437,9 @@ impl Checker<'_> {
                 );
                 match found {
                     Ty::Int(_) => found,
-                    _ => Ty::Any,
+                    Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        Ty::Any
+                    }
                 }
             }
         }
@@ -438,7 +452,7 @@ impl Checker<'_> {
         match found {
             Ty::Int(i) => Some(*i),
             Ty::Any => Some(Int::Literal),
-            _ => None,
+            Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit => None,
         }
     }
 
@@ -492,34 +506,47 @@ impl Checker<'_> {
                 self.int_operand(r, rt, &place);
                 Ty::Bool
             }
-            _ => {
-                let a = self.int_operand(l, lt, &place);
-                let b = self.int_operand(r, rt, &place);
-                let (Some(a), Some(b)) = (a, b) else {
+            BinaryOp::Shl | BinaryOp::Shr => self
+                .int_operands((l, lt), (r, rt), &place)
+                .map_or(Ty::Any, |(a, _)| Ty::Int(a)),
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                let Some((a, b)) = self.int_operands((l, lt), (r, rt), &place) else {
                     return Ty::Any;
                 };
-                match op {
-                    Shl | Shr => Ty::Int(a),
-                    BitAnd | BitOr | BitXor => match a.join(b) {
-                        Int::Mixed(_) => {
-                            self.errors.push(Diagnostic::error(
-                                "E0216",
-                                self.tree.expr(at).span,
-                                format!(
-                                    "`{}` works on the bits of one integer type, but its operands are {} and {}; bind one of them to a `val` of the other's type first",
-                                    symbol,
-                                    lt.describe(),
-                                    rt.describe()
-                                ),
-                            ));
-                            Ty::Any
-                        }
-                        one => Ty::Int(one),
-                    },
-                    _ => Ty::Int(a.join(b)),
+                match a.join(b) {
+                    Int::Mixed(_) => {
+                        self.errors.push(Diagnostic::error(
+                            "E0216",
+                            self.tree.expr(at).span,
+                            format!(
+                                "`{}` works on the bits of one integer type, but its operands are {} and {}; bind one of them to a `val` of the other's type first",
+                                symbol,
+                                lt.describe(),
+                                rt.describe()
+                            ),
+                        ));
+                        Ty::Any
+                    }
+                    one @ (Int::Literal | Int::One(_)) => Ty::Int(one),
                 }
             }
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => self
+                .int_operands((l, lt), (r, rt), &place)
+                .map_or(Ty::Any, |(a, b)| Ty::Int(a.join(b))),
         }
+    }
+
+    /// The integer types of both operands of an arithmetic or bit operator, each checked and
+    /// reported where it is not an integer; `None` when either is not.
+    fn int_operands(
+        &mut self,
+        (l, lt): (ExprId, &Ty),
+        (r, rt): (ExprId, &Ty),
+        place: &str,
+    ) -> Option<(Int, Int)> {
+        let a = self.int_operand(l, lt, place);
+        let b = self.int_operand(r, rt, place);
+        Some((a?, b?))
     }
 
     fn index(&mut self, base: ExprId, index: ExprId) -> Ty {
@@ -528,7 +555,7 @@ impl Checker<'_> {
         match found {
             Ty::Array(_, elem) => *elem,
             Ty::Any => Ty::Any,
-            other => {
+            other @ (Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit) => {
                 self.mismatch(
                     base,
                     format!(
@@ -596,11 +623,11 @@ impl Checker<'_> {
                 self.errors.push(d);
                 return Ty::Any;
             }
-            other if name == "len" => format!(
+            other @ (Ty::Int(_) | Ty::Bool | Ty::Enum(_) | Ty::Unit) if name == "len" => format!(
                 "`.len` is an array's length, but this is {}",
                 other.describe()
             ),
-            other => format!(
+            other @ (Ty::Int(_) | Ty::Bool | Ty::Enum(_) | Ty::Unit) => format!(
                 "`.{}` reads a field of a struct, but this is {}",
                 name,
                 other.describe()
@@ -925,7 +952,22 @@ impl Checker<'_> {
         let binding = match &self.tree.expr(place).kind {
             ExprKind::Name(_) => self.resolution.names[place.0 as usize]
                 .map(|id| &self.resolution.bindings[id.0 as usize]),
-            _ => None,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         };
         if let Some(b) = binding.filter(|b| b.kind == BindingKind::Var && b.ty.is_none()) {
             let width = (b.span.end - b.span.start) as u32;
@@ -958,7 +1000,7 @@ impl Checker<'_> {
                 Ordering::Equal => continue,
                 // Two `mut` arguments that name one binding are reported once, at the second.
                 Ordering::Less if other.is_mut => continue,
-                _ => {}
+                Ordering::Less | Ordering::Greater => {}
             }
             let mut used = Vec::new();
             self.names_in(other.value, &mut used);
@@ -988,7 +1030,20 @@ impl Checker<'_> {
         match &self.tree.expr(place).kind {
             ExprKind::Name(_) => self.resolution.names[place.0 as usize],
             ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => self.root(*base),
-            _ => None,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         }
     }
 
@@ -1104,6 +1159,22 @@ impl Checker<'_> {
 
     /// A place that is assigned or passed as `mut` is a `var` or a `mut` parameter.
     fn changeable(&mut self, place: ExprId, code: &'static str, action: &str) {
+        if let Some(len) = self.length_in(place) {
+            let text = self
+                .src
+                .get(self.span(len).start..self.span(len).end)
+                .unwrap_or(".len")
+                .to_string();
+            self.errors.push(Diagnostic::error(
+                code,
+                self.span(place),
+                format!(
+                    "cannot {} `{}`: `.len` is an array's length, which its type fixes",
+                    action, text
+                ),
+            ));
+            return;
+        }
         let Some(id) = self.root(place) else {
             return;
         };
@@ -1155,6 +1226,35 @@ impl Checker<'_> {
         self.errors.push(d);
     }
 
+    /// The `.len` of an array the place `e` goes through, which no assignment or `mut` argument
+    /// may change: a place's fields are its structs', and an array's only field is its length.
+    fn length_in(&self, e: ExprId) -> Option<ExprId> {
+        match &self.tree.expr(e).kind {
+            ExprKind::Field { base, .. } => match &self.typing.exprs[base.0 as usize] {
+                Ty::Array(..) => Some(e),
+                Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                    self.length_in(*base)
+                }
+            },
+            ExprKind::Index { base, .. } => self.length_in(*base),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
+        }
+    }
+
     fn array(&mut self, items: &[ExprId]) -> Ty {
         let mut elem = Ty::Any;
         for &i in items {
@@ -1198,16 +1298,16 @@ impl Checker<'_> {
         if !used {
             return Ty::Unit;
         }
-        // A branch that leaves has any type.
-        let then_ty = if block_ends(self.tree, then) {
+        // A branch that leaves has any type; one whose operand leaves keeps its own.
+        let then_ty = if block_leaves(self.tree, then) {
+            Ty::Any
+        } else {
             then_ty
-        } else {
-            Ty::Any
         };
-        let else_ty = if else_ends(self.tree, otherwise) {
-            else_ty
-        } else {
+        let else_ty = if else_leaves(self.tree, otherwise) {
             Ty::Any
+        } else {
+            else_ty
         };
         then_ty.join(&else_ty).unwrap_or_else(|| {
             self.mismatch(
@@ -1428,7 +1528,14 @@ impl Checker<'_> {
             Some(s) => {
                 let hint = match &self.tree.stmt(s).kind {
                     StmtKind::Expr(e) => self.no_value_hint(*e),
-                    _ => String::new(),
+                    StmtKind::Binding { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::While { .. }
+                    | StmtKind::Guard { .. }
+                    | StmtKind::Return(_)
+                    | StmtKind::Break
+                    | StmtKind::Continue
+                    | StmtKind::Discard(_) => String::new(),
                 };
                 (self.tree.stmt(s).span, hint)
             }
@@ -1455,6 +1562,16 @@ enum Read<'a> {
     Int(Exact, Exact, String),
     /// A value whose type a diagnostic already reported, or none a `match` reads.
     Other,
+}
+
+/// The range of every integer a 128-bit type holds, `i128`'s lowest to `u128`'s highest, as a
+/// message writes it: what a `match` reads of an integer of no one type.
+fn every_integer() -> (Exact, Exact, String) {
+    (
+        Exact::new(true, 1 << 127),
+        Exact::new(false, u128::MAX),
+        String::from("integer"),
+    )
 }
 
 /// A value of a pattern, as coverage counts it: a variant by its tag, a `bool`, or an integer.
@@ -1656,8 +1773,10 @@ impl<'a> Checker<'a> {
                 let (lo, hi, text) = self.int_read(scrutinee, *i);
                 Read::Int(lo, hi, text)
             }
-            Ty::Any => Read::Other,
-            other => {
+            // A scrutinee of no type is read as its first pattern of a kind reads it, so that
+            // its patterns agree with one another (`core-calculus.md`, item 14).
+            Ty::Any => self.first_read(arms),
+            other @ (Ty::Array(..) | Ty::Struct(_) | Ty::Unit) => {
                 self.mismatch(
                     scrutinee,
                     format!(
@@ -1668,10 +1787,12 @@ impl<'a> Checker<'a> {
                 Read::Other
             }
         };
-        let mut clean = !matches!(read, Read::Other);
+        // Arms that never run cover nothing.
+        let no_type = found == Ty::Any;
+        let mut clean = !matches!(read, Read::Other) && !no_type;
         let mut values: Vec<Option<Value>> = Vec::new();
         for (k, arm) in arms.iter().enumerate() {
-            let v = self.pattern(at, k, arm, &read);
+            let v = self.pattern(at, k, arm, &read, no_type);
             clean &= v.is_some();
             values.push(v.flatten());
         }
@@ -1690,11 +1811,11 @@ impl<'a> Checker<'a> {
                 }
                 (ArmBody::Block(b), used) => self.block(b, used),
             };
-            // An arm that leaves has any type.
-            types.push(if arm_ends(self.tree, arm.body) {
-                t
-            } else {
+            // An arm that leaves has any type; one whose operand leaves keeps its own.
+            types.push(if arm_leaves(self.tree, arm.body) {
                 Ty::Any
+            } else {
+                t
             });
         }
         if !used {
@@ -1719,6 +1840,26 @@ impl<'a> Checker<'a> {
             }
         }
         joined
+    }
+
+    /// What the first pattern of `arms` that is not `_` reads: a variant of an enum whose
+    /// declaration checks, a `bool` or an integer of any type; nothing when there is none.
+    fn first_read(&self, arms: &[Arm]) -> Read<'a> {
+        for arm in arms {
+            return match &arm.pattern.kind {
+                PatternKind::Wildcard => continue,
+                PatternKind::Variant { enum_name, .. } => match self.structs.get_enum(enum_name) {
+                    Some(def) if def.ok => Read::Enum(def),
+                    _ => Read::Other,
+                },
+                PatternKind::Bool(_) => Read::Bool,
+                PatternKind::Int { .. } => {
+                    let (lo, hi, text) = every_integer();
+                    Read::Int(lo, hi, text)
+                }
+            };
+        }
+        Read::Other
     }
 
     /// The range of integers an integer scrutinee takes: its declared refinement's when both
@@ -1752,13 +1893,7 @@ impl<'a> Checker<'a> {
         let t = match i {
             Int::One(t) | Int::Mixed(Some(t)) => t,
             Int::Literal => crate::types::I64,
-            Int::Mixed(None) => {
-                return (
-                    Exact::new(true, 1 << 127),
-                    Exact::new(false, u128::MAX),
-                    String::from("integer"),
-                )
-            }
+            Int::Mixed(None) => return every_integer(),
         };
         (
             Exact::new(true, t.min_magnitude()),
@@ -1785,35 +1920,63 @@ impl<'a> Checker<'a> {
                     let (_, f) = def.field(name)?;
                     Some((def.tree(), f.decl))
                 }
-                _ => None,
+                Ty::Int(_) | Ty::Bool | Ty::Array(..) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
             },
             ExprKind::Index { base, .. } => {
                 let (tree, t) = self.declared_type(*base)?;
                 match &tree.ty(t).kind {
                     TypeKind::Array { elem, .. } => Some((tree, *elem)),
-                    _ => None,
+                    TypeKind::Int { .. }
+                    | TypeKind::Bool
+                    | TypeKind::Named(_)
+                    | TypeKind::Enum(_)
+                    | TypeKind::Error => None,
                 }
             }
-            _ => None,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         }
     }
 
     /// Checks the pattern of arm `k` of the `match` at `m` against what the `match` reads, and
     /// gives its bindings their fields' types: `None` after reporting a pattern of another kind
-    /// or a variant the enum lacks; otherwise the value it matches, `None` for `_`.
+    /// or a variant the enum lacks; otherwise the value it matches, `None` for `_`. `no_type`
+    /// tells that the scrutinee has no type, and `read` is what its first pattern reads.
     fn pattern(
         &mut self,
         m: ExprId,
         k: usize,
         arm: &Arm,
         read: &Read<'a>,
+        no_type: bool,
     ) -> Option<Option<Value>> {
         let p = &arm.pattern;
         let kind = match read {
             Read::Enum(def) => format!("`{}`", def.name),
             Read::Bool => String::from("a `bool`"),
+            Read::Int(..) if no_type => String::from("an integer"),
             Read::Int(_, _, text) => format!("an integer, `{}`", text),
             Read::Other => String::from("a value of no type it reads"),
+        };
+        let kind = if no_type {
+            format!(
+                "a value of no type, which its first pattern reads as {}",
+                kind
+            )
+        } else {
+            kind
         };
         let wrong = |what: &str| {
             Diagnostic::error(
@@ -1875,8 +2038,12 @@ impl<'a> Checker<'a> {
                 Some(Some(Value::Variant(tag)))
             }
             (PatternKind::Wildcard, Read::Int(..) | Read::Other) => Some(None),
-            (PatternKind::Wildcard, Read::Enum(_) | Read::Bool) => {
-                self.errors.push(self.wildcard(m, k, read));
+            (PatternKind::Wildcard, Read::Enum(def)) => {
+                self.errors.push(self.wildcard(m, k, Some(def)));
+                None
+            }
+            (PatternKind::Wildcard, Read::Bool) => {
+                self.errors.push(self.wildcard(m, k, None));
                 None
             }
             (PatternKind::Bool(b), Read::Bool) => Some(Some(Value::Bool(*b))),
@@ -1925,7 +2092,7 @@ impl<'a> Checker<'a> {
                 match read {
                     Read::Int(..) => Some(Some(Value::Int(Exact::new(*negative, *value)))),
                     Read::Other => None,
-                    _ => {
+                    Read::Enum(_) | Read::Bool => {
                         self.errors.push(wrong("an integer"));
                         None
                     }
@@ -2093,15 +2260,15 @@ impl<'a> Checker<'a> {
 
     /// `E0231` for `_` in arm `k`, on an enum or a `bool`: `_` never covers a variant, so that
     /// a variant added to an enum makes every `match` on it name it. The fix writes an arm for
-    /// each value no arm before it matches, with `_`'s body.
-    fn wildcard(&self, m: ExprId, k: usize, read: &Read) -> Diagnostic {
+    /// each value no arm before it matches, with `_`'s body. `on` is the enum, none for a `bool`.
+    fn wildcard(&self, m: ExprId, k: usize, on: Option<&crate::structs::EnumDef>) -> Diagnostic {
         let ExprKind::Match { arms, .. } = &self.tree.expr(m).kind else {
             unreachable!("a pattern of a `match`")
         };
         let arm = &arms[k];
         let before: Vec<&PatternKind> = arms[..k].iter().map(|a| &a.pattern.kind).collect();
-        let left: Vec<String> = match read {
-            Read::Enum(def) => def
+        let left: Vec<String> = match on {
+            Some(def) => def
                 .variants
                 .iter()
                 .filter(|v| {
@@ -2111,18 +2278,18 @@ impl<'a> Checker<'a> {
                 })
                 .map(|v| variant_pattern(&def.name, v))
                 .collect(),
-            _ => [true, false]
+            None => [true, false]
                 .iter()
                 .filter(|b| !before.contains(&&PatternKind::Bool(**b)))
                 .map(|b| b.to_string())
                 .collect(),
         };
-        let message = match read {
-            Read::Enum(def) => format!(
+        let message = match on {
+            Some(def) => format!(
                 "`_` stands only on an integer, but this `match` reads an enum, `{}`: name each variant, so that one added later must be named too",
                 def.name
             ),
-            _ => String::from(
+            None => String::from(
                 "`_` stands only on an integer, but this `match` reads a `bool`: name both values, `true` and `false`",
             ),
         };
@@ -2269,7 +2436,7 @@ impl<'a> Checker<'a> {
         let mut d = Diagnostic::error("E0229", span, message);
         let new_arms: Vec<String> = match read {
             Read::Int(..) => vec![String::from("_")],
-            _ => missing,
+            Read::Enum(_) | Read::Bool | Read::Other => missing,
         };
         if let Some(last) = arms.last() {
             let indent = " ".repeat(last.span.col.saturating_sub(1) as usize);
@@ -2415,7 +2582,21 @@ impl<'a> Checker<'a> {
                     ExprKind::Int { .. } => true,
                     ExprKind::Name(_) => self.resolution.names[index.0 as usize]
                         .is_some_and(|b| !changed.contains(&b)),
-                    _ => false,
+                    ExprKind::Bool(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Construct { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::Array(_)
+                    | ExprKind::Repeat { .. }
+                    | ExprKind::If { .. }
+                    | ExprKind::Error => false,
                 };
                 if !fixed {
                     return None;
@@ -2506,7 +2687,21 @@ impl<'a> Checker<'a> {
                 p.push(Some(name.clone()));
                 p
             }
-            _ => Vec::new(),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => Vec::new(),
         }
     }
 }
@@ -2672,7 +2867,23 @@ fn negated_literals(tree: &Tree) -> HashSet<ExprId> {
                 op: UnaryOp::Neg,
                 operand,
             } => Some(operand),
-            _ => None,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         })
         .collect()
 }
@@ -2682,7 +2893,20 @@ pub fn is_place(tree: &Tree, e: ExprId) -> bool {
     match &tree.expr(e).kind {
         ExprKind::Name(_) => true,
         ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => is_place(tree, *base),
-        _ => false,
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => false,
     }
 }
 
@@ -2694,25 +2918,81 @@ pub fn block_ends(tree: &Tree, b: BlockId) -> bool {
         .iter()
         .all(|&s| match &tree.stmt(s).kind {
             StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => false,
-            StmtKind::Expr(e)
-            | StmtKind::Discard(e)
-            | StmtKind::Binding { init: e, .. }
-            | StmtKind::Assign { value: e, .. } => expr_ends(tree, *e),
-            StmtKind::While { .. } | StmtKind::Guard { .. } => true,
+            StmtKind::Expr(e) | StmtKind::Discard(e) | StmtKind::Binding { init: e, .. } => {
+                expr_ends(tree, *e)
+            }
+            // The place's indexes are evaluated before the value.
+            StmtKind::Assign { place, value, .. } => {
+                expr_ends(tree, *place) && expr_ends(tree, *value)
+            }
+            // A `guard`'s `else` never reaches its end (`E0211`), and a loop's body may not run:
+            // either ends where its condition does.
+            StmtKind::While { cond, .. } | StmtKind::Guard { cond, .. } => expr_ends(tree, *cond),
         })
 }
 
-fn expr_ends(tree: &Tree, e: ExprId) -> bool {
+/// Whether control can reach the end of `e`: every operand it always evaluates does, in the
+/// order it evaluates them. The right operand of `and` and `or` may not run, so it never stops
+/// its operation from ending.
+pub fn expr_ends(tree: &Tree, e: ExprId) -> bool {
+    let all = |items: Vec<ExprId>| items.into_iter().all(|x| expr_ends(tree, x));
     match &tree.expr(e).kind {
         ExprKind::Todo(_) | ExprKind::Unreachable(_) => false,
-        ExprKind::If {
-            then,
-            otherwise: Some(o),
+        ExprKind::Int { .. } | ExprKind::Bool(_) | ExprKind::Name(_) | ExprKind::Error => true,
+        ExprKind::Unary { operand, .. } => expr_ends(tree, *operand),
+        ExprKind::Binary {
+            op: BinaryOp::And | BinaryOp::Or,
+            lhs,
             ..
-        } => block_ends(tree, *then) || else_ends(tree, *o),
+        } => expr_ends(tree, *lhs),
+        ExprKind::Binary {
+            op:
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem,
+            lhs,
+            rhs,
+        } => expr_ends(tree, *lhs) && expr_ends(tree, *rhs),
+        ExprKind::Index { base, index } => expr_ends(tree, *base) && expr_ends(tree, *index),
+        ExprKind::Field { base, .. } => expr_ends(tree, *base),
+        ExprKind::Call { args, .. } => all(args.iter().map(|a| a.value).collect()),
+        ExprKind::Construct { fields, .. } => all(fields.iter().map(|f| f.value).collect()),
+        ExprKind::Variant { payload, .. } => match payload {
+            Payload::None => true,
+            Payload::Named(fields) => all(fields.iter().map(|f| f.value).collect()),
+            Payload::Positional(args) => all(args.iter().map(|a| a.value).collect()),
+        },
+        ExprKind::Array(items) => all(items.clone()),
+        ExprKind::Repeat { value, .. } => expr_ends(tree, *value),
+        ExprKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            expr_ends(tree, *cond)
+                && match otherwise {
+                    Some(o) => block_ends(tree, *then) || else_ends(tree, *o),
+                    // Without `else`, the `if` ends whenever its condition is false.
+                    None => true,
+                }
+        }
         // A `match` is exhaustive, so its end is reached only through an arm that ends.
-        ExprKind::Match { arms, .. } => arms.iter().any(|a| arm_ends(tree, a.body)),
-        _ => true,
+        ExprKind::Match { scrutinee, arms } => {
+            expr_ends(tree, *scrutinee) && arms.iter().any(|a| arm_ends(tree, a.body))
+        }
     }
 }
 
@@ -2728,6 +3008,70 @@ fn else_ends(tree: &Tree, o: Else) -> bool {
     match o {
         Else::Block(b) => block_ends(tree, b),
         Else::If(i) => expr_ends(tree, i),
+    }
+}
+
+/// Whether the branch `b` leaves, so that it has any type (`core-calculus.md`, item 6): a
+/// statement of it is `return`, `break` or `continue`, or holds a value that leaves. An operand
+/// that leaves does not: the branch then gives its operation's type, which its `if` or `match`
+/// shares, though control never reaches its end ([`block_ends`]).
+pub fn block_leaves(tree: &Tree, b: BlockId) -> bool {
+    tree.block(b)
+        .stmts
+        .iter()
+        .any(|&s| match &tree.stmt(s).kind {
+            StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => true,
+            StmtKind::Expr(e)
+            | StmtKind::Discard(e)
+            | StmtKind::Binding { init: e, .. }
+            | StmtKind::Assign { value: e, .. } => value_leaves(tree, *e),
+            StmtKind::While { .. } | StmtKind::Guard { .. } => false,
+        })
+}
+
+/// Whether the value `e` is itself one that leaves: `todo`, `unreachable`, or an `if` or a
+/// `match` whose every branch leaves.
+pub fn value_leaves(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Todo(_) | ExprKind::Unreachable(_) => true,
+        ExprKind::If {
+            then,
+            otherwise: Some(o),
+            ..
+        } => block_leaves(tree, *then) && else_leaves(tree, *o),
+        // Without `else`, an `if` gives no value, and runs on when its condition is false.
+        ExprKind::If {
+            otherwise: None, ..
+        } => false,
+        ExprKind::Match { arms, .. } => arms.iter().all(|a| arm_leaves(tree, a.body)),
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Error => false,
+    }
+}
+
+/// Whether an arm leaves, so that it has any type.
+pub fn arm_leaves(tree: &Tree, body: ArmBody) -> bool {
+    match body {
+        ArmBody::Expr(x) => value_leaves(tree, x),
+        ArmBody::Block(b) => block_leaves(tree, b),
+    }
+}
+
+fn else_leaves(tree: &Tree, o: Else) -> bool {
+    match o {
+        Else::Block(b) => block_leaves(tree, b),
+        Else::If(i) => value_leaves(tree, i),
     }
 }
 
@@ -3677,6 +4021,104 @@ pub fn f(mut p: Pair) {
         }
     }
 
+    /// A statement reaches its end only when every operand it always evaluates does: an operand
+    /// that is `todo`, `unreachable`, or an `if` or `match` whose every branch leaves, leaves
+    /// the statement too (`core-calculus.md`, item 6). The right operand of `and` and `or`, the
+    /// branch of an `if` without `else` and a loop's body may not run, so they leave nothing.
+    /// A branch has any type only when it leaves by a statement or a value that leaves, not by
+    /// an operand: a branch whose value is `x + todo("r")` gives its operation's type, which the
+    /// other branches share (`core-calculus.md`, item 6).
+    #[test]
+    fn test_a_branch_with_an_operand_that_leaves_keeps_its_type() {
+        // Each branch keeps its type, so these values have one, and the functions check.
+        for ok in [
+            "pub fn f(c: bool, x: u8) -> u8 {\n  val y = match c {\n    true => x + todo(\"a\")\n    false => x - todo(\"b\")\n  }\n  y\n}",
+            "pub fn f(c: bool, x: u8) -> u8 {\n  val y = if c { x + todo(\"a\") } else { x + todo(\"b\") }\n  y\n}",
+        ] {
+            assert_eq!(codes(ok), NONE, "{}", ok);
+            assert_eq!(
+                binding_types(ok).last().map(|(n, t)| (n.as_str(), t.as_str())),
+                Some(("y", "u8")),
+                "{}",
+                ok
+            );
+        }
+        // A branch whose operand leaves still meets the other branches in one type.
+        for (src, why) in [
+            ("pub fn f(c: bool, x: u8) -> bool {\n  val y: bool = if c { x + todo(\"r\") } else { true }\n  y\n}", "u8 beside bool"),
+            ("pub fn f(c: bool, x: u8) -> u8 {\n  val a: [3]u8 = if c { [x, todo(\"r\")] } else { [1, 2, 3] }\n  a[2]\n}", "[2] beside [3]"),
+            ("pub fn f(c: bool, x: u8) -> u8 {\n  val a: u8 = match c {\n    true => [x, todo(\"r\")]\n    false => 7\n  }\n  a\n}", "an array beside u8"),
+            // A branch whose statement holds an `if` of which one branch only leaves runs on.
+            ("pub fn f(c: bool, d: bool) -> bool {\n  val y: bool = if d {\n    _ = if c { return true } else { 2 }\n    3\n  } else {\n    true\n  }\n  y\n}", "a value after an `if` that may run on"),
+            ("pub fn f(c: bool, d: bool) -> bool {\n  val y: bool = if d {\n    _ = if c { 2 } else { return true }\n    3\n  } else {\n    true\n  }\n  y\n}", "a value after an `if` that may run on"),
+        ] {
+            assert!(codes(src).contains(&"E0203"), "{}: {}", why, src);
+        }
+    }
+
+    #[test]
+    fn test_an_operand_that_leaves_leaves_its_statement() {
+        let guarded = |e: &str| {
+            format!(
+                "pub fn f(c: bool, x: u8) -> u8 {{\n  guard c else {{\n    _ = {}\n  }}\n  x\n}}",
+                e
+            )
+        };
+        let leaves = [
+            "x + todo(\"later\")",
+            "-todo(\"later\")",
+            "id(unreachable(\"x\"))",
+            "[x, todo(\"later\")]",
+            "[todo(\"later\"); 2]",
+            "[x; 2][todo(\"later\")]",
+            "todo(\"later\") and c",
+            "1 + (if c { return 1 } else { return 2 })",
+            "if todo(\"later\") { x } else { x }",
+            "match c {\n    true => todo(\"t\")\n    false => unreachable(\"f\")\n  }",
+            "match todo(\"later\") {\n    true => x\n    false => x\n  }",
+        ];
+        for e in leaves {
+            // A body with a result type that ends with such a statement needs no result.
+            let body = format!("pub fn f(c: bool, x: u8) -> u8 {{\n  _ = {}\n}}", e);
+            assert_eq!(codes(&body), NONE, "{}", body);
+            // The `else` of a `guard` that holds one does not reach its end.
+            let guard = guarded(e);
+            assert_eq!(codes(&guard), NONE, "{}", guard);
+        }
+        // A loop or a `guard` whose condition leaves leaves its statement.
+        for ok in [
+            "pub fn f(x: u8) -> u8 {\n  while todo(\"later\") {\n    _ = x\n  }\n}",
+            "pub fn f(x: u8) -> u8 {\n  guard todo(\"later\") else {\n    return x\n  }\n}",
+            "pub fn f(x: u8) -> u8 {\n  var y: u8 = x\n  y = id(todo(\"later\"))\n}",
+            "pub fn f(x: u8) -> u8 {\n  val y: u8 = x + todo(\"later\")\n}",
+            // The indexes of the place an assignment writes are evaluated before its value.
+            "pub fn f(xs: [2]u8, x: u8) -> u8 {\n  var ys: [2]u8 = xs\n  ys[todo(\"later\")] = x\n}",
+            "pub fn f(a: u8) -> u8 {\n  var b: [2]u8 = [a, a]\n  b[todo(\"later\")] += 1\n}",
+            "pub fn f(c: bool, xs: [2]u8, x: u8) -> u8 {\n  var ys: [2]u8 = xs\n  guard c else {\n    ys[todo(\"later\")] = x\n  }\n  ys[0]\n}",
+        ] {
+            assert_eq!(codes(ok), NONE, "{}", ok);
+        }
+        // What may not run leaves nothing.
+        let ends = [
+            "c and todo(\"later\")",
+            "c or todo(\"later\")",
+            "id(if c { todo(\"later\") } else { x })",
+            "match c {\n    true => todo(\"t\")\n    false => x\n  }",
+        ];
+        for e in ends {
+            let body = format!("pub fn f(c: bool, x: u8) -> u8 {{\n  _ = {}\n}}", e);
+            assert_eq!(codes(&body), ["E0210"], "{}", body);
+            let guard = guarded(e);
+            assert_eq!(codes(&guard), ["E0211"], "{}", guard);
+        }
+        assert_eq!(
+            codes(
+                "pub fn f(c: bool, x: u8) -> u8 {\n  while c {\n    return todo(\"later\")\n  }\n}"
+            ),
+            ["E0210"]
+        );
+    }
+
     #[test]
     fn test_places_are_bindings_and_their_elements() {
         let src = "module m\npub fn f(xs: [2][2]u8) = xs[0][1] + xs[1][0] + 1\n";
@@ -3743,6 +4185,36 @@ pub fn f(mut p: Pair) {
         assert_eq!(
             codes("pub fn f(mut n: u8, mut xs: [2]u8) {\n  var m = 1\n  m = 2\n  n = 3\n  xs[1] = 4\n}"),
             NONE
+        );
+    }
+
+    /// An array's `.len` is a value its type fixes, not a place: assigning it is `E0205`, and
+    /// passing it as `mut` is `E0206`, though its root is a `var`.
+    #[test]
+    fn test_an_array_length_is_no_place() {
+        let set = diagnostics(
+            "pub fn f(xs: [2]u8) -> usize {\n  var ys: [2]u8 = xs\n  ys.len = 3\n  ys.len\n}",
+        );
+        assert_eq!(set.len(), 1, "{:?}", set);
+        assert_eq!(set[0].code, "E0205");
+        assert_eq!(
+            set[0].message,
+            "cannot assign to `ys.len`: `.len` is an array's length, which its type fixes"
+        );
+        assert_eq!(
+            codes(
+                "pub fn f(xs: [2]u8) -> usize {\n  var ys: [2]u8 = xs\n  ys.len += 3\n  ys.len\n}"
+            ),
+            ["E0205"]
+        );
+        assert_eq!(
+            codes("pub fn bump(mut z: usize) {\n  z = z + 1\n}\npub fn f(xs: [2]u8) -> usize {\n  var ys: [2]u8 = xs\n  bump(mut ys.len)\n  ys.len\n}"),
+            ["E0206"]
+        );
+        // The length of an inner array is no place either.
+        assert_eq!(
+            codes("pub fn f(xs: [2][3]u8) -> usize {\n  var ys: [2][3]u8 = xs\n  ys[0].len = 1\n  ys[0].len\n}"),
+            ["E0205"]
         );
     }
 
@@ -4039,6 +4511,12 @@ pub enum Light {
             ("pub fn f(x: u8) -> u8 = match x {\n  300_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `300`"),
             ("pub fn f(x: u8) -> u8 = match x {\n  0_u8 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `0`"),
             ("pub fn f(x: i8) -> u8 = match x {\n  -1_i64 => 1\n  _ => 2\n}", "a pattern's literal takes the type of what the `match` reads, so it has no suffix: `-1`"),
+            // A scrutinee of no type is matched as its first pattern reads it.
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  300 => 1\n  true => 4\n}", "this pattern is a `bool`, but the `match` reads a value of no type, which its first pattern reads as an integer"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  Light.Red => 2\n  -1 => 3\n}", "this pattern is an integer, but the `match` reads a value of no type, which its first pattern reads as `Light`"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  _ => 1\n  -1 => 2\n  Light.Red => 3\n}", "this pattern is a variant of `Light`, but the `match` reads a value of no type, which its first pattern reads as an integer"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  true => 1\n  Light.Red => 2\n}", "this pattern is a variant of `Light`, but the `match` reads a value of no type, which its first pattern reads as a `bool`"),
+            ("pub fn f() -> u8 = match todo(\"q\") {\n  Light.Red => 1\n  Shape.Dot => 2\n}", "this pattern is a variant of `Shape`, but the `match` reads a value of no type, which its first pattern reads as `Light`"),
         ] {
             assert_eq!(messages(&with(src)), [message], "{}", src);
         }
@@ -4085,6 +4563,36 @@ pub enum Light {
                 "pub fn f() -> u8 = match nope {\n  0 => 1\n  _ => 2\n}"
             )),
             ["E0201"]
+        );
+        // Patterns of one kind on a scrutinee of no type check, whatever their values: the arms
+        // never run, so there is nothing to cover. A variant's pattern still names its fields,
+        // and its bindings take their types.
+        for src in [
+            "pub fn f() -> u8 = match todo(\"q\") {\n  300 => 1\n  -1 => 2\n}",
+            "pub fn f() -> u8 = match todo(\"q\") {\n  true => 1\n}",
+            "pub fn f() -> u8 = match todo(\"q\") {\n  Light.Red => 1\n}",
+        ] {
+            assert_eq!(codes(&with(src)), NONE, "{}", src);
+        }
+        assert_eq!(
+            binding_types(&with(
+                "pub fn f() -> u16 = match todo(\"q\") {\n  Shape.Rect(w: a, h: b) => a + b\n  Shape.Dot => 0\n}"
+            )),
+            [("a", "u8"), ("b", "u16")].map(|(n, t)| (n.to_string(), t.to_string()))
+        );
+        assert_eq!(
+            codes(&with(
+                "pub fn f() -> u8 = match todo(\"q\") {\n  Shape.Rect(h: b) => 1\n  Shape.Dot => 0\n}"
+            )),
+            ["E0226"]
+        );
+        // An enum whose declaration is in error reads nothing, as when the scrutinee has its
+        // type: the patterns after its variant are not reported against it.
+        assert_eq!(
+            codes(&with(
+                "pub enum Bad {\n  A(p: Nope)\n  B\n}\npub fn f() -> u8 = match todo(\"q\") {\n  Bad.B => 1\n  3 => 2\n}"
+            )),
+            ["E0116"]
         );
         // An enum whose declaration is in error is matched without coverage being reported.
         assert_eq!(

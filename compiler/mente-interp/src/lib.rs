@@ -12,6 +12,12 @@
 //! the interpreter judges Tier 1 independently
 //! ([`interpreter-checks-contracts`](../../docs/design-review.md#interpreter-checks-contracts)).
 
+// A match over an enum names every variant, so that a variant added later does not compile until
+// each match decides what it does with it; a `_` arm once let walkers skip expression kinds
+// ([`guard-per-problem`](../../docs/design-review.md#guard-per-problem)). A match that is a
+// classifier by nature keeps `#[expect]`, with the reason every variant belongs in its arm.
+#![deny(clippy::wildcard_enum_match_arm)]
+
 mod eval;
 pub mod int;
 
@@ -188,6 +194,11 @@ pub struct Trap {
     pub span: Span,
 }
 
+/// What the message of a broken run, [`Stop::Broken`], starts with: the comparison of the
+/// execution paths reads it to blame the reference interpreter rather than the path it is
+/// compared with.
+pub const BROKEN: &str = "broken interpreter state";
+
 /// Why a run stopped without a value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stop {
@@ -200,6 +211,9 @@ pub enum Stop {
     NoFunction(String),
     /// The arguments do not match the function's parameters.
     BadArguments(String),
+    /// The run reached a state the checks rule out, such as an operand of no integer where one
+    /// is read: a bug of the compiler, never of the program.
+    Broken(String),
 }
 
 impl fmt::Display for Stop {
@@ -217,6 +231,7 @@ impl fmt::Display for Stop {
             Stop::TooLarge(n) => write!(f, "an array of {} elements is over the limit", n),
             Stop::NoFunction(name) => write!(f, "no function `{}` with a body to run", name),
             Stop::BadArguments(why) => write!(f, "{}", why),
+            Stop::Broken(why) => write!(f, "{}: {}", BROKEN, why),
         }
     }
 }

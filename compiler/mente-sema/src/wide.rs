@@ -53,7 +53,7 @@ impl Num {
         }
         Some(match self.mag.cmp(&o.mag) {
             Ordering::Less => Num::new(o.neg, o.mag - self.mag),
-            _ => Num::new(self.neg, self.mag - o.mag),
+            Ordering::Equal | Ordering::Greater => Num::new(self.neg, self.mag - o.mag),
         })
     }
 
@@ -129,26 +129,62 @@ impl Range {
     }
 }
 
+/// The arithmetic operators, whose exact results this module bounds: the others give a `bool`
+/// or work on the bits of one type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arith {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+impl Arith {
+    fn of(op: BinaryOp) -> Option<Arith> {
+        match op {
+            BinaryOp::Add => Some(Arith::Add),
+            BinaryOp::Sub => Some(Arith::Sub),
+            BinaryOp::Mul => Some(Arith::Mul),
+            BinaryOp::Div => Some(Arith::Div),
+            BinaryOp::Rem => Some(Arith::Rem),
+            BinaryOp::Or
+            | BinaryOp::And
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::BitAnd
+            | BinaryOp::Shl
+            | BinaryOp::Shr => None,
+        }
+    }
+}
+
 /// Whether `a op b` can be negative.
-fn may_be_negative(op: BinaryOp, a: Range, b: Range) -> bool {
+fn may_be_negative(op: Arith, a: Range, b: Range) -> bool {
     match op {
-        BinaryOp::Sub => a.lo < b.hi,
-        _ => a.lo.neg || b.lo.neg,
+        Arith::Sub => a.lo < b.hi,
+        Arith::Add | Arith::Mul | Arith::Div | Arith::Rem => a.lo.neg || b.lo.neg,
     }
 }
 
 /// The range of `a op b`, or `None` when a bound's magnitude reaches 2^128.
-fn arithmetic(op: BinaryOp, a: Range, b: Range) -> Option<Range> {
+fn arithmetic(op: Arith, a: Range, b: Range) -> Option<Range> {
     match op {
-        BinaryOp::Add => Some(Range {
+        Arith::Add => Some(Range {
             lo: a.lo.add(b.lo)?,
             hi: a.hi.add(b.hi)?,
         }),
-        BinaryOp::Sub => Some(Range {
+        Arith::Sub => Some(Range {
             lo: a.lo.add(b.hi.negated())?,
             hi: a.hi.add(b.lo.negated())?,
         }),
-        BinaryOp::Mul => {
+        Arith::Mul => {
             let corners = [
                 a.lo.mul(b.lo)?,
                 a.lo.mul(b.hi)?,
@@ -162,22 +198,21 @@ fn arithmetic(op: BinaryOp, a: Range, b: Range) -> Option<Range> {
         }
         // A quotient is no larger than its dividend, and a remainder than either operand; a
         // remainder takes its dividend's sign.
-        BinaryOp::Div => Some(Range::within(a.magnitude(), !a.lo.neg && !b.lo.neg)),
-        _ => Some(Range::within(a.magnitude().min(b.magnitude()), !a.lo.neg)),
+        Arith::Div => Some(Range::within(a.magnitude(), !a.lo.neg && !b.lo.neg)),
+        Arith::Rem => Some(Range::within(a.magnitude().min(b.magnitude()), !a.lo.neg)),
     }
-}
-
-fn is_arithmetic(op: BinaryOp) -> bool {
-    matches!(
-        op,
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
-    )
 }
 
 fn int_ty(t: &Ty) -> Option<IntTy> {
     match t {
         Ty::Int(Int::One(t)) | Ty::Int(Int::Mixed(Some(t))) => Some(*t),
-        _ => None,
+        Ty::Int(Int::Literal | Int::Mixed(None))
+        | Ty::Bool
+        | Ty::Array(..)
+        | Ty::Struct(_)
+        | Ty::Enum(_)
+        | Ty::Unit
+        | Ty::Any => None,
     }
 }
 
@@ -208,8 +243,8 @@ pub fn check(f: &FnSyntax, resolution: &Resolution, typing: &Typing, src: &str) 
             value,
         } = &s.kind
         {
-            if is_arithmetic(*op) {
-                w.operation(s.span, Some(*op), *place, Some(*value), Some(*value));
+            if let Some(op) = Arith::of(*op) {
+                w.operation(s.span, Some(op), *place, Some(*value), Some(*value));
             }
         }
     }
@@ -263,9 +298,9 @@ pub fn intervals(f: &FnSyntax, resolution: &Resolution, typing: &Typing) -> Vec<
 }
 
 /// The static range of `a op b`, for an arithmetic `op`, as a compound assignment computes it;
-/// `None` when it might leave 128 bits, which `E0222` rejects.
+/// `None` when it might leave 128 bits, which `E0222` rejects, or when `op` is not arithmetic.
 pub fn combine(op: BinaryOp, a: Interval, b: Interval) -> Option<Interval> {
-    arithmetic(op, a.into(), b.into())
+    arithmetic(Arith::of(op)?, a.into(), b.into())
         .filter(|r| r.fits())
         .map(Interval::from)
 }
@@ -307,15 +342,18 @@ impl Wide<'_> {
             // M1's only field is `.len`.
             ExprKind::Field { base, .. } => match &self.typing.exprs[base.0 as usize] {
                 Ty::Array(n, _) => Some(Range::point(Num::new(false, *n))),
-                _ => typed,
+                Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => typed,
             },
             ExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
             } => self.operation(span, None, *operand, None, Some(*operand)),
-            ExprKind::Binary { op, lhs, rhs } if is_arithmetic(*op) => {
-                self.operation(span, Some(*op), *lhs, Some(*rhs), None)
-            }
+            ExprKind::Binary { op, lhs, rhs } => match Arith::of(*op) {
+                Some(op) => self.operation(span, Some(op), *lhs, Some(*rhs), None),
+                // A comparison or a logical operator gives a `bool`, and a bit operation stays in
+                // its operands' one type.
+                None => typed,
+            },
             ExprKind::Array(items) => {
                 self.array(span, e, items);
                 typed
@@ -382,7 +420,6 @@ impl Wide<'_> {
             | ExprKind::Todo(_)
             | ExprKind::Unreachable(_)
             | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
             | ExprKind::Index { .. }
             | ExprKind::Call { .. }
             | ExprKind::Construct { .. }
@@ -487,7 +524,21 @@ impl Wide<'_> {
                         return false;
                     }
                 }
-                _ => {
+                ExprKind::Int { .. }
+                | ExprKind::Bool(_)
+                | ExprKind::Name(_)
+                | ExprKind::Todo(_)
+                | ExprKind::Unreachable(_)
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Construct { .. }
+                | ExprKind::Variant { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::If { .. }
+                | ExprKind::Error => {
                     let mut t = &self.typing.exprs[i.0 as usize];
                     while let Ty::Array(_, inner) = t {
                         t = inner;
@@ -520,7 +571,7 @@ impl Wide<'_> {
         };
         let literal = |b: &Bound| match b {
             Bound::Int { negative, value } => Some(Num::new(*negative, *value)),
-            _ => None,
+            Bound::Name(_) | Bound::Len(_) => None,
         };
         let hi = literal(&r.hi)?;
         Some(Range {
@@ -537,7 +588,14 @@ impl Wide<'_> {
     fn tail(&self, b: BlockId) -> Option<ExprId> {
         match &self.tree.stmt(*self.tree.block(b).stmts.last()?).kind {
             StmtKind::Expr(e) => Some(*e),
-            _ => None,
+            StmtKind::Binding { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Guard { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Discard(_) => None,
         }
     }
 
@@ -547,7 +605,7 @@ impl Wide<'_> {
     fn operation(
         &mut self,
         at: Span,
-        op: Option<BinaryOp>,
+        op: Option<Arith>,
         a: ExprId,
         b: Option<ExprId>,
         bind: Option<ExprId>,
@@ -589,7 +647,22 @@ impl Wide<'_> {
                 true,
                 match self.tree.expr(a).kind {
                     ExprKind::Int { .. } => Vec::new(),
-                    _ => vec![ra],
+                    ExprKind::Bool(_)
+                    | ExprKind::Name(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Construct { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::Array(_)
+                    | ExprKind::Repeat { .. }
+                    | ExprKind::If { .. }
+                    | ExprKind::Error => vec![ra],
                 },
             ),
         };
@@ -717,7 +790,23 @@ impl Wide<'_> {
             ExprKind::Binary {
                 op: BinaryOp::Sub, ..
             } => "difference",
-            _ => "wide",
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => "wide",
         };
         let taken = |n: &str| self.resolution.bindings.iter().any(|b| b.name == n);
         (1..)
@@ -741,7 +830,22 @@ impl Wide<'_> {
             .iter()
             .filter_map(|x| match &x.kind {
                 ExprKind::Match { arms, .. } => Some(arms),
-                _ => None,
+                ExprKind::Int { .. }
+                | ExprKind::Bool(_)
+                | ExprKind::Name(_)
+                | ExprKind::Todo(_)
+                | ExprKind::Unreachable(_)
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Construct { .. }
+                | ExprKind::Variant { .. }
+                | ExprKind::Array(_)
+                | ExprKind::Repeat { .. }
+                | ExprKind::If { .. }
+                | ExprKind::Error => None,
             })
             .flatten()
             .filter_map(|a| match a.body {
@@ -825,9 +929,8 @@ impl Wide<'_> {
 #[cfg(test)]
 mod tests {
     use mente_syntax::diagnostics::apply_fix;
-    use mente_syntax::tree::BinaryOp;
 
-    use super::{arithmetic, may_be_negative, Num, Range};
+    use super::{arithmetic, may_be_negative, Arith, Num, Range};
     use crate::check_source;
 
     fn n(v: i128) -> Num {
@@ -849,20 +952,17 @@ mod tests {
         assert_eq!(Num::new(false, u128::MAX).add(n(1)), None);
         assert_eq!(n(-3).mul(n(4)), Some(n(-12)));
         assert_eq!(Num::new(false, 1 << 64).mul(Num::new(false, 1 << 64)), None);
-        assert_eq!(arithmetic(BinaryOp::Add, r(-1, 2), r(3, 4)), Some(r(2, 6)));
-        assert_eq!(arithmetic(BinaryOp::Sub, r(0, 10), r(1, 3)), Some(r(-3, 9)));
-        assert_eq!(
-            arithmetic(BinaryOp::Mul, r(-2, 3), r(4, 5)),
-            Some(r(-10, 15))
-        );
+        assert_eq!(arithmetic(Arith::Add, r(-1, 2), r(3, 4)), Some(r(2, 6)));
+        assert_eq!(arithmetic(Arith::Sub, r(0, 10), r(1, 3)), Some(r(-3, 9)));
+        assert_eq!(arithmetic(Arith::Mul, r(-2, 3), r(4, 5)), Some(r(-10, 15)));
         // A quotient is no larger than its dividend, and negative only with a negative operand.
-        assert_eq!(arithmetic(BinaryOp::Div, r(0, 9), r(1, 3)), Some(r(0, 9)));
-        assert_eq!(arithmetic(BinaryOp::Div, r(0, 9), r(-3, 3)), Some(r(-9, 9)));
-        assert_eq!(arithmetic(BinaryOp::Div, r(-9, 2), r(1, 3)), Some(r(-9, 9)));
+        assert_eq!(arithmetic(Arith::Div, r(0, 9), r(1, 3)), Some(r(0, 9)));
+        assert_eq!(arithmetic(Arith::Div, r(0, 9), r(-3, 3)), Some(r(-9, 9)));
+        assert_eq!(arithmetic(Arith::Div, r(-9, 2), r(1, 3)), Some(r(-9, 9)));
         // A remainder is no larger than either operand, and takes its dividend's sign.
-        assert_eq!(arithmetic(BinaryOp::Rem, r(0, 9), r(-4, 4)), Some(r(0, 4)));
+        assert_eq!(arithmetic(Arith::Rem, r(0, 9), r(-4, 4)), Some(r(0, 4)));
         assert_eq!(
-            arithmetic(BinaryOp::Rem, r(-20, 9), r(1, 30)),
+            arithmetic(Arith::Rem, r(-20, 9), r(1, 30)),
             Some(r(-20, 20))
         );
     }
@@ -887,11 +987,11 @@ mod tests {
 
     #[test]
     fn test_a_result_may_be_negative_by_its_operands_signs() {
-        assert!(!may_be_negative(BinaryOp::Sub, r(3, 10), r(0, 3)));
-        assert!(may_be_negative(BinaryOp::Sub, r(2, 10), r(0, 3)));
-        assert!(!may_be_negative(BinaryOp::Mul, r(0, 1), r(0, 1)));
-        assert!(may_be_negative(BinaryOp::Mul, r(-1, 1), r(0, 1)));
-        assert!(may_be_negative(BinaryOp::Mul, r(0, 1), r(-1, 1)));
+        assert!(!may_be_negative(Arith::Sub, r(3, 10), r(0, 3)));
+        assert!(may_be_negative(Arith::Sub, r(2, 10), r(0, 3)));
+        assert!(!may_be_negative(Arith::Mul, r(0, 1), r(0, 1)));
+        assert!(may_be_negative(Arith::Mul, r(-1, 1), r(0, 1)));
+        assert!(may_be_negative(Arith::Mul, r(0, 1), r(-1, 1)));
     }
 
     fn module(src: &str) -> String {

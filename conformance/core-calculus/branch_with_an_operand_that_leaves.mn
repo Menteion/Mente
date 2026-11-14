@@ -1,0 +1,22 @@
+// expect: pass
+module conformance
+// A branch whose operand leaves keeps its operation's type, so the `if` or `match` it is a
+// branch of has a value of that type, which every path runs to its `todo` (core-calculus.md,
+// item 6).
+pub fn matched(c: bool, x: u8) -> u8 {
+  val y = match c {
+    true => x + todo("a")
+    false => x - todo("b")
+  }
+  y
+}
+
+pub fn chosen(c: bool, x: u8) -> u8 {
+  val y = if c { x + todo("a") } else { x + todo("b") }
+  y
+}
+
+pub fn element(c: bool, x: u8) -> u8 {
+  val a: [2]u8 = [if c { x + todo("a") } else { x - todo("b") }, 1]
+  a[1]
+}

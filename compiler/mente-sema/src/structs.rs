@@ -389,7 +389,12 @@ pub fn enum_names(module: &ModuleFile) -> HashSet<String> {
         .iter()
         .filter_map(|i| match i {
             ItemDecl::Enum(e) => Some(e.name.clone()),
-            _ => None,
+            ItemDecl::Unit(_)
+            | ItemDecl::Struct(_)
+            | ItemDecl::BitStruct(_)
+            | ItemDecl::Trait(_)
+            | ItemDecl::Fn(_)
+            | ItemDecl::Example(_) => None,
         })
         .collect()
 }
@@ -819,7 +824,11 @@ fn within(root: TypeId, t: TypeId, tree: &Tree) -> bool {
     root == t
         || match &tree.ty(root).kind {
             TypeKind::Array { elem, .. } => within(*elem, t, tree),
-            _ => false,
+            TypeKind::Int { .. }
+            | TypeKind::Bool
+            | TypeKind::Named(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Error => false,
         }
 }
 
@@ -828,7 +837,7 @@ fn held(t: &Ty) -> Vec<String> {
     match t {
         Ty::Struct(name) | Ty::Enum(name) => vec![name.clone()],
         Ty::Array(_, elem) => held(elem),
-        _ => Vec::new(),
+        Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Any => Vec::new(),
     }
 }
 

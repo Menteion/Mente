@@ -61,7 +61,7 @@ impl Int {
         }
         Some(match self.mag.cmp(&other.mag) {
             Ordering::Less => Int::new(other.neg, other.mag - self.mag),
-            _ => Int::new(self.neg, self.mag - other.mag),
+            Ordering::Equal | Ordering::Greater => Int::new(self.neg, self.mag - other.mag),
         })
     }
 

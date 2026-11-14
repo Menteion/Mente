@@ -36,11 +36,22 @@ fn trap<T>(kind: TrapKind, span: Span) -> Flow<T> {
     Err(Exit::Stop(Stop::Trap(Trap { kind, span })))
 }
 
+/// A state the checks rule out, reported rather than run on with a made-up value.
+fn broken<T>(what: &str) -> Flow<T> {
+    Err(Exit::Stop(Stop::Broken(what.to_string())))
+}
+
 /// The integer type a static type names: its one type, or the type that holds a mix.
 fn int_ty(ty: &Ty) -> Option<IntTy> {
     match ty {
         Ty::Int(IntType::One(t)) | Ty::Int(IntType::Mixed(Some(t))) => Some(*t),
-        _ => None,
+        Ty::Int(IntType::Literal | IntType::Mixed(None))
+        | Ty::Bool
+        | Ty::Array(..)
+        | Ty::Struct(_)
+        | Ty::Enum(_)
+        | Ty::Unit
+        | Ty::Any => None,
     }
 }
 
@@ -326,7 +337,7 @@ impl<'m> Machine<'m> {
             }
             StmtKind::Binding { ty, init, .. } => {
                 let Some(id) = f.resolution.stmts[s.0 as usize] else {
-                    return Ok(Value::Unit);
+                    return broken("a binding statement that declares no binding");
                 };
                 let plain = f.typing.bindings[id.0 as usize].clone();
                 let v = self.eval(frame, *init, int_ty(&plain))?;
@@ -426,7 +437,7 @@ impl<'m> Machine<'m> {
         let tree = &f.syntax.tree;
         let path = self.place(frame, place)?;
         let plain = f.typing.exprs[place.0 as usize].clone();
-        let declared = self.place_type(frame, &path);
+        let declared = self.place_type(frame, &path)?;
         let new = match op {
             AssignOp::Set => self.eval(frame, value, int_ty(&plain))?,
             AssignOp::Compound(op) => {
@@ -454,66 +465,122 @@ impl<'m> Machine<'m> {
             ExprKind::Field { base, name } => {
                 let (root, mut steps) = self.place(frame, *base)?;
                 let k = match &f.typing.exprs[base.0 as usize] {
-                    Ty::Struct(s) => self
-                        .module
-                        .structs
-                        .get(s)
-                        .and_then(|d| d.field(name))
-                        .map_or(0, |(k, _)| k),
-                    _ => 0,
+                    Ty::Struct(s) => match self.module.structs.get(s).and_then(|d| d.field(name)) {
+                        Some((k, _)) => k,
+                        None => return broken("a field its struct does not declare"),
+                    },
+                    Ty::Int(_) | Ty::Bool | Ty::Array(..) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        return broken("a field of a place that is not a struct")
+                    }
                 };
                 steps.push(Step::Field(k));
                 Ok((root, steps))
             }
-            _ => Ok((
-                f.resolution.names[e.0 as usize].unwrap_or(BindingId(0)),
-                Vec::new(),
-            )),
+            ExprKind::Name(_) => match f.resolution.names[e.0 as usize] {
+                Some(root) => Ok((root, Vec::new())),
+                None => broken("a place whose name was never resolved"),
+            },
+            // The checker passes as a place only a binding, an element, or a field of a struct
+            // (`E0205`, `E0206`).
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => broken("a place that is not a binding, an element or a field"),
         }
     }
 
     /// The declared type of a place: its root binding's, when it states one, down its indexes;
     /// a field's, in its struct's declaration, whatever its root states.
-    fn place_type(&self, frame: &Frame<'m>, (root, steps): &Place) -> Declared<'m> {
+    fn place_type(&self, frame: &Frame<'m>, (root, steps): &Place) -> Flow<Declared<'m>> {
         let f = frame.f;
-        let mut declared = f
-            .resolution
-            .bindings
-            .get(root.0 as usize)?
-            .ty
-            .map(|t| (&f.syntax.tree, t));
-        let mut ty = f.typing.bindings.get(root.0 as usize)?.clone();
+        let (Some(binding), Some(ty)) = (
+            f.resolution.bindings.get(root.0 as usize),
+            f.typing.bindings.get(root.0 as usize),
+        ) else {
+            return broken("a place whose root binding does not exist");
+        };
+        let mut declared = binding.ty.map(|t| (&f.syntax.tree, t));
+        let mut ty = ty.clone();
         for step in steps {
-            match (step, ty) {
-                (Step::Index(..), Ty::Array(_, elem)) => {
-                    declared = declared.and_then(|(tree, t)| match &tree.ty(t).kind {
-                        TypeKind::Array { elem, .. } => Some((tree, *elem)),
-                        _ => None,
-                    });
-                    ty = *elem;
+            match step {
+                Step::Index(..) => {
+                    let elem = match ty {
+                        Ty::Array(_, elem) => *elem,
+                        Ty::Int(_)
+                        | Ty::Bool
+                        | Ty::Struct(_)
+                        | Ty::Enum(_)
+                        | Ty::Unit
+                        | Ty::Any => return broken("an element of a place that is not an array"),
+                    };
+                    // A binding declared without a type has none down its elements either.
+                    declared = match declared {
+                        None => None,
+                        Some((tree, t)) => match &tree.ty(t).kind {
+                            TypeKind::Array { elem, .. } => Some((tree, *elem)),
+                            TypeKind::Int { .. }
+                            | TypeKind::Bool
+                            | TypeKind::Named(_)
+                            | TypeKind::Enum(_)
+                            | TypeKind::Error => {
+                                return broken("an array place declared of another type")
+                            }
+                        },
+                    };
+                    ty = elem;
                 }
-                (Step::Field(k), Ty::Struct(s)) => {
-                    let def = self.module.structs.get(&s)?;
-                    let field = def.fields.get(*k)?;
-                    declared = Some((def.tree(), field.decl));
-                    ty = field.ty.clone();
+                Step::Field(k) => {
+                    let s = match ty {
+                        Ty::Struct(s) => s,
+                        Ty::Int(_)
+                        | Ty::Bool
+                        | Ty::Array(..)
+                        | Ty::Enum(_)
+                        | Ty::Unit
+                        | Ty::Any => return broken("a field of a place that is not a struct"),
+                    };
+                    let Some(field) = self.module.structs.get(&s).and_then(|d| {
+                        d.fields
+                            .get(*k)
+                            .map(|field| (d.tree(), field.decl, field.ty.clone()))
+                    }) else {
+                        return broken("a field its struct does not declare");
+                    };
+                    declared = Some((field.0, field.1));
+                    ty = field.2;
                 }
-                _ => return None,
             }
         }
-        declared
+        Ok(declared)
     }
 
     fn read(&self, frame: &Frame<'m>, (root, steps): &Place) -> Flow<Value> {
-        let mut v = frame.slots[root.0 as usize]
-            .as_ref()
-            .unwrap_or(&Value::Unit);
+        let Some(mut v) = frame.slots[root.0 as usize].as_ref() else {
+            return broken("a place whose binding holds no value");
+        };
         for step in steps {
             v = match step {
                 Step::Index(i, span) => element(v, *i, *span)?,
                 Step::Field(k) => match v {
-                    Value::Struct(_, fields) => fields.get(*k).map_or(v, |(_, f)| f),
-                    _ => v,
+                    Value::Struct(_, fields) => match fields.get(*k) {
+                        Some((_, f)) => f,
+                        None => return broken("a field its struct value does not hold"),
+                    },
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Enum(..)
+                    | Value::Unit => return broken("a field read of a value that is not a struct"),
                 },
             };
         }
@@ -523,21 +590,34 @@ impl<'m> Machine<'m> {
     fn write(&self, frame: &mut Frame<'m>, (root, steps): &Place, new: Value) -> Flow<()> {
         let mut v = frame.slots[root.0 as usize].get_or_insert(Value::Unit);
         for step in steps {
-            match (step, v) {
-                (Step::Index(i, span), Value::Array(items)) => {
-                    let len = items.len();
-                    match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
-                        Some(k) if k < len => v = &mut items[k],
-                        _ => {
-                            return trap(TrapKind::IndexOutOfBounds { index: *i, len }, *span);
+            match step {
+                Step::Index(i, span) => match v {
+                    Value::Array(items) => {
+                        let len = items.len();
+                        match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
+                            Some(k) if k < len => v = &mut items[k],
+                            _ => {
+                                return trap(TrapKind::IndexOutOfBounds { index: *i, len }, *span);
+                            }
                         }
                     }
-                }
-                (Step::Field(k), Value::Struct(_, fields)) => match fields.get_mut(*k) {
-                    Some((_, f)) => v = f,
-                    None => return Ok(()),
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Struct(..)
+                    | Value::Enum(..)
+                    | Value::Unit => return broken("a store into an element of a non-array"),
                 },
-                _ => return Ok(()),
+                Step::Field(k) => match v {
+                    Value::Struct(_, fields) => match fields.get_mut(*k) {
+                        Some((_, f)) => v = f,
+                        None => return broken("a store into a field its struct value lacks"),
+                    },
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Enum(..)
+                    | Value::Unit => return broken("a store into a field of a non-struct"),
+                },
             }
         }
         *v = new;
@@ -548,10 +628,26 @@ impl<'m> Machine<'m> {
         Ok(self.eval(frame, e, None)? == Value::Bool(true))
     }
 
+    /// An order comparison of two integers, the left operand evaluated first.
+    fn compare(
+        &mut self,
+        frame: &mut Frame<'m>,
+        (lhs, rhs): (ExprId, ExprId),
+        holds: fn(&Int, &Int) -> bool,
+    ) -> Flow<Value> {
+        let l = self.int(frame, lhs, None)?;
+        let r = self.int(frame, rhs, None)?;
+        Ok(Value::Bool(holds(&l, &r)))
+    }
+
     fn int(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Int> {
         match self.eval(frame, e, ctx)? {
             Value::Int(i) => Ok(i),
-            _ => Ok(Int::ZERO),
+            Value::Bool(_)
+            | Value::Array(_)
+            | Value::Struct(..)
+            | Value::Enum(..)
+            | Value::Unit => broken("an integer operand that is not an integer"),
         }
     }
 
@@ -564,9 +660,14 @@ impl<'m> Machine<'m> {
         Ok(match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => Value::Int(Int::from_u128(*value)),
             ExprKind::Bool(b) => Value::Bool(*b),
-            ExprKind::Name(_) => f.resolution.names[e.0 as usize]
-                .and_then(|id| frame.slots[id.0 as usize].clone())
-                .unwrap_or(Value::Unit),
+            ExprKind::Name(_) => {
+                match f.resolution.names[e.0 as usize]
+                    .and_then(|id| frame.slots[id.0 as usize].clone())
+                {
+                    Some(v) => v,
+                    None => return broken("a name without a value"),
+                }
+            }
             ExprKind::Todo(reason) => return trap(TrapKind::Todo(reason.clone()), span),
             ExprKind::Unreachable(reason) => {
                 return trap(TrapKind::Unreachable(reason.clone()), span)
@@ -598,17 +699,20 @@ impl<'m> Machine<'m> {
                     let r = self.eval(frame, *rhs, None)?;
                     Value::Bool((l == r) == (*op == BinaryOp::Eq))
                 }
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    let l = self.int(frame, *lhs, None)?;
-                    let r = self.int(frame, *rhs, None)?;
-                    Value::Bool(match op {
-                        BinaryOp::Lt => l < r,
-                        BinaryOp::Le => l <= r,
-                        BinaryOp::Gt => l > r,
-                        _ => l >= r,
-                    })
-                }
-                _ => {
+                BinaryOp::Lt => self.compare(frame, (*lhs, *rhs), |l, r| l < r)?,
+                BinaryOp::Le => self.compare(frame, (*lhs, *rhs), |l, r| l <= r)?,
+                BinaryOp::Gt => self.compare(frame, (*lhs, *rhs), |l, r| l > r)?,
+                BinaryOp::Ge => self.compare(frame, (*lhs, *rhs), |l, r| l >= r)?,
+                BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem => {
                     let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
                     let l = self.eval(frame, *lhs, ctx)?;
                     let r = self.eval(frame, *rhs, if shift { None } else { ctx })?;
@@ -627,11 +731,13 @@ impl<'m> Machine<'m> {
             // and each checked, from left to right (`core-calculus.md`, items 10 and 12).
             ExprKind::Field { base, name } => match self.eval(frame, *base, None)? {
                 Value::Array(items) => Value::Int(Int::from_u128(items.len() as u128)),
-                Value::Struct(_, fields) => fields
-                    .into_iter()
-                    .find(|(n, _)| n == name)
-                    .map_or(Value::Unit, |(_, v)| v),
-                _ => Value::Unit,
+                Value::Struct(_, fields) => match fields.into_iter().find(|(n, _)| n == name) {
+                    Some((_, v)) => v,
+                    None => return broken("a field its struct value does not hold"),
+                },
+                Value::Int(_) | Value::Bool(_) | Value::Enum(..) | Value::Unit => {
+                    return broken("a field read of a value that is neither an array nor a struct")
+                }
             },
             // Each value is narrowed into its field's type and refinement where it lands, in the
             // order written, which is the declaration's (`core-calculus.md`, item 13).
@@ -659,16 +765,20 @@ impl<'m> Machine<'m> {
                 let def = self.module.structs.get_enum(enum_name);
                 let variant = def.and_then(|d| d.variant(name)).map(|(_, v)| v);
                 let mut values = Vec::new();
-                if let Payload::Named(fields) = payload {
-                    for fi in fields {
-                        let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
-                        let fty = field.map_or(Ty::Any, |f| f.ty.clone());
-                        let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                        let v = self.eval(frame, fi.value, int_ty(&fty))?;
-                        let at = tree.expr(fi.value).span;
-                        let v = self.narrow(frame, v, declared, &fty, at)?;
-                        values.push((fi.name.clone(), v));
-                    }
+                let fields: &[mente_syntax::tree::FieldInit] = match payload {
+                    Payload::Named(fields) => fields,
+                    Payload::None => &[],
+                    // A variant built by position is `E0226`.
+                    Payload::Positional(_) => return broken("a variant built by position"),
+                };
+                for fi in fields {
+                    let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
+                    let fty = field.map_or(Ty::Any, |f| f.ty.clone());
+                    let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
+                    let v = self.eval(frame, fi.value, int_ty(&fty))?;
+                    let at = tree.expr(fi.value).span;
+                    let v = self.narrow(frame, v, declared, &fty, at)?;
+                    values.push((fi.name.clone(), v));
                 }
                 Value::Enum(enum_name.clone(), name.clone(), values)
             }
@@ -678,11 +788,17 @@ impl<'m> Machine<'m> {
                 // ([`match-scrutinee-narrowing`]); literals alone are an `i64`.
                 let read = match &f.typing.exprs[scrutinee.0 as usize] {
                     Ty::Int(IntType::Literal) => Ty::Int(IntType::One(I64)),
-                    t => t.clone(),
+                    t @ (Ty::Int(_)
+                    | Ty::Bool
+                    | Ty::Array(..)
+                    | Ty::Struct(_)
+                    | Ty::Enum(_)
+                    | Ty::Unit
+                    | Ty::Any) => t.clone(),
                 };
                 let v = self.narrow_plain(v, &read, tree.expr(*scrutinee).span)?;
                 for (k, arm) in arms.iter().enumerate() {
-                    if !self.matches(frame, e, k, &arm.pattern.kind, &v) {
+                    if !self.matches(frame, e, k, &arm.pattern.kind, &v)? {
                         continue;
                     }
                     return match arm.body {
@@ -698,7 +814,7 @@ impl<'m> Machine<'m> {
             }
             ExprKind::Call { args, .. } => {
                 let Some(index) = f.resolution.calls[e.0 as usize] else {
-                    return Ok(Value::Unit);
+                    return broken("a call that was never resolved");
                 };
                 let callee = self.function(index)?;
                 let mut values = Vec::new();
@@ -721,7 +837,7 @@ impl<'m> Machine<'m> {
                 for (place, v) in places.into_iter().zip(finals) {
                     if let Some(path) = place {
                         // The value a `mut` parameter hands back enters the place's refinement.
-                        let declared = self.place_type(frame, &path);
+                        let declared = self.place_type(frame, &path)?;
                         self.refined(frame, &v, declared, span)?;
                         self.write(frame, &path, v)?;
                     }
@@ -732,17 +848,16 @@ impl<'m> Machine<'m> {
             // (`core-calculus.md`, item 4).
             ExprKind::Array(items) => {
                 let elem_ty = match &f.typing.exprs[e.0 as usize] {
-                    Ty::Array(_, elem) => Some(elem.as_ref()),
-                    _ => None,
+                    Ty::Array(_, elem) => elem.as_ref(),
+                    Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        return broken("an array literal whose type is not an array")
+                    }
                 };
-                let elem = elem_ty.and_then(int_ty);
+                let elem = int_ty(elem_ty);
                 let mut values = Vec::new();
                 for &i in items {
                     let v = self.eval(frame, i, elem.or(ctx))?;
-                    values.push(match elem_ty {
-                        Some(t) => self.narrow_plain(v, t, span)?,
-                        None => v,
-                    });
+                    values.push(self.narrow_plain(v, elem_ty, span)?);
                 }
                 Value::Array(values)
             }
@@ -753,7 +868,9 @@ impl<'m> Machine<'m> {
                 let v = self.eval(frame, *value, ctx)?;
                 let v = match &f.typing.exprs[e.0 as usize] {
                     Ty::Array(_, elem_ty) => self.narrow_plain(v, elem_ty, span)?,
-                    _ => v,
+                    Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        return broken("an array literal whose type is not an array")
+                    }
                 };
                 Value::Array(vec![v; *count as usize])
             }
@@ -785,22 +902,42 @@ impl<'m> Machine<'m> {
         k: usize,
         p: &PatternKind,
         v: &Value,
-    ) -> bool {
-        match (p, v) {
-            (PatternKind::Wildcard, _) => true,
-            (PatternKind::Bool(b), Value::Bool(x)) => b == x,
-            (
-                PatternKind::Int {
-                    negative, value, ..
-                },
-                Value::Int(x),
-            ) => {
-                let lit = Int::from_u128(*value);
-                *x == if *negative { lit.negate() } else { lit }
-            }
-            (PatternKind::Variant { name, bindings, .. }, Value::Enum(_, variant, fields)) => {
+    ) -> Flow<bool> {
+        let mismatch = || broken("a pattern of another kind than the value it matches");
+        match p {
+            PatternKind::Wildcard => Ok(true),
+            PatternKind::Bool(b) => match v {
+                Value::Bool(x) => Ok(b == x),
+                Value::Int(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            PatternKind::Int {
+                negative, value, ..
+            } => match v {
+                Value::Int(x) => {
+                    let lit = Int::from_u128(*value);
+                    Ok(*x == if *negative { lit.negate() } else { lit })
+                }
+                Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            PatternKind::Variant { name, bindings, .. } => {
+                let (variant, fields) = match v {
+                    Value::Enum(_, variant, fields) => (variant, fields),
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Struct(..)
+                    | Value::Unit => return mismatch(),
+                };
                 if name != variant {
-                    return false;
+                    return Ok(false);
                 }
                 for (i, b) in bindings.iter().flatten().enumerate() {
                     let Some(id) = frame.f.resolution.patterns.get(&(m, k, i)) else {
@@ -812,9 +949,8 @@ impl<'m> Machine<'m> {
                     };
                     frame.slots[id.0 as usize] = field.map(|(_, x)| x.clone());
                 }
-                true
+                Ok(true)
             }
-            _ => false,
         }
     }
 
@@ -829,7 +965,15 @@ impl<'m> Machine<'m> {
     ) -> Flow<Value> {
         let tree = &frame.f.syntax.tree;
         let (Value::Int(a), Value::Int(b)) = (l, r) else {
-            return Ok(Value::Unit);
+            return broken("an integer operand that is not an integer");
+        };
+        // A bit operation works on the operands' bits in one type: either operand's, or the
+        // place's.
+        let bits = |on: fn(u128, u128) -> u128| -> Flow<Value> {
+            let t = int_ty(lt).or(int_ty(rt)).or(ctx).unwrap_or(I64);
+            let x = fit(a, t, tree.expr(le).span)?.to_bits(t);
+            let y = fit(b, t, tree.expr(re).span)?.to_bits(t);
+            Ok(Value::Int(Int::from_bits(on(x, y), t)))
         };
         let result = match op {
             BinaryOp::Shl | BinaryOp::Shr => {
@@ -862,17 +1006,9 @@ impl<'m> Machine<'m> {
                     ),
                 };
             }
-            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                let t = int_ty(lt).or(int_ty(rt)).or(ctx).unwrap_or(I64);
-                let x = fit(a, t, tree.expr(le).span)?.to_bits(t);
-                let y = fit(b, t, tree.expr(re).span)?.to_bits(t);
-                let bits = match op {
-                    BinaryOp::BitAnd => x & y,
-                    BinaryOp::BitOr => x | y,
-                    _ => x ^ y,
-                };
-                return Ok(Value::Int(Int::from_bits(bits, t)));
-            }
+            BinaryOp::BitAnd => return bits(|x, y| x & y),
+            BinaryOp::BitOr => return bits(|x, y| x | y),
+            BinaryOp::BitXor => return bits(|x, y| x ^ y),
             BinaryOp::Div | BinaryOp::Rem if b == Int::ZERO => {
                 return trap(TrapKind::DivisionByZero, span);
             }
@@ -880,7 +1016,18 @@ impl<'m> Machine<'m> {
             BinaryOp::Sub => a.checked_sub(b),
             BinaryOp::Mul => a.checked_mul(b),
             BinaryOp::Div => a.checked_div(b),
-            _ => a.checked_rem(b),
+            BinaryOp::Rem => a.checked_rem(b),
+            // `eval` gives these their own arms, which never come here.
+            BinaryOp::Or
+            | BinaryOp::And
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => {
+                return broken("a logical or comparison operator taken as arithmetic")
+            }
         };
         // An operation on 128-bit operands may leave 128 bits, so it is narrowed into their
         // type (`core-calculus.md`, item 4).
@@ -919,45 +1066,93 @@ impl<'m> Machine<'m> {
 
     /// Narrows a value into the integer ranges of a static type, elementwise for an array.
     fn narrow_plain(&self, v: Value, plain: &Ty, span: Span) -> Flow<Value> {
-        match (v, plain) {
-            (Value::Int(x), ty) => match int_ty(ty) {
-                Some(t) => fit(x, t, span).map(Value::Int),
-                None => Ok(Value::Int(x)),
+        let mismatch = || broken("a value of another shape than its static type");
+        match plain {
+            // A literal of no suffix is narrowed where it lands, which gives it its type.
+            Ty::Int(_) => match v {
+                Value::Int(x) => match int_ty(plain) {
+                    Some(t) => fit(x, t, span).map(Value::Int),
+                    None => Ok(Value::Int(x)),
+                },
+                Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
             },
-            (Value::Array(items), Ty::Array(_, elem)) => items
-                .into_iter()
-                .map(|v| self.narrow_plain(v, elem, span))
-                .collect::<Flow<Vec<Value>>>()
-                .map(Value::Array),
+            Ty::Array(_, elem) => match v {
+                Value::Array(items) => items
+                    .into_iter()
+                    .map(|v| self.narrow_plain(v, elem, span))
+                    .collect::<Flow<Vec<Value>>>()
+                    .map(Value::Array),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
             // A struct's fields, each into its type, in the order of the declaration: a value
             // built in the program already lies there, one from outside it may not.
-            (Value::Struct(name, fields), Ty::Struct(s)) => {
-                let Some(def) = self.module.structs.get(s) else {
-                    return Ok(Value::Struct(name, fields));
-                };
-                let mut out = Vec::new();
-                for ((n, v), d) in fields.into_iter().zip(&def.fields) {
-                    out.push((n, self.narrow_plain(v, &d.ty, span)?));
+            Ty::Struct(s) => match v {
+                Value::Struct(name, fields) => {
+                    let Some(def) = self.module.structs.get(s) else {
+                        return broken("a struct the module does not declare");
+                    };
+                    let mut out = Vec::new();
+                    for ((n, v), d) in fields.into_iter().zip(&def.fields) {
+                        out.push((n, self.narrow_plain(v, &d.ty, span)?));
+                    }
+                    Ok(Value::Struct(name, out))
                 }
-                Ok(Value::Struct(name, out))
-            }
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
             // A variant's payload, each field into its type, likewise.
-            (Value::Enum(name, variant, fields), Ty::Enum(e)) => {
-                let Some((_, def)) = self
-                    .module
-                    .structs
-                    .get_enum(e)
-                    .and_then(|d| d.variant(&variant))
-                else {
-                    return Ok(Value::Enum(name, variant, fields));
-                };
-                let mut out = Vec::new();
-                for ((n, v), d) in fields.into_iter().zip(&def.fields) {
-                    out.push((n, self.narrow_plain(v, &d.ty, span)?));
+            Ty::Enum(e) => match v {
+                Value::Enum(name, variant, fields) => {
+                    let Some((_, def)) = self
+                        .module
+                        .structs
+                        .get_enum(e)
+                        .and_then(|d| d.variant(&variant))
+                    else {
+                        return broken("a variant its enum does not declare");
+                    };
+                    let mut out = Vec::new();
+                    for ((n, v), d) in fields.into_iter().zip(&def.fields) {
+                        out.push((n, self.narrow_plain(v, &d.ty, span)?));
+                    }
+                    Ok(Value::Enum(name, variant, out))
                 }
-                Ok(Value::Enum(name, variant, out))
-            }
-            (v, _) => Ok(v),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Unit => mismatch(),
+            },
+            Ty::Bool => match v {
+                Value::Bool(_) => Ok(v),
+                Value::Int(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            Ty::Unit => match v {
+                Value::Unit => Ok(v),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..) => mismatch(),
+            },
+            // `todo`, `unreachable` and a value whose every branch leaves have any type, and
+            // never give a value to narrow.
+            Ty::Any => broken("a value of no type"),
         }
     }
 
@@ -973,48 +1168,83 @@ impl<'m> Machine<'m> {
         let Some((tree, id)) = declared else {
             return Ok(());
         };
-        match (v, &tree.ty(id).kind) {
-            (
-                Value::Int(x),
-                TypeKind::Int {
-                    refinement: Some(r),
-                    ..
+        let mismatch = || broken("a value of another shape than its declared type");
+        match &tree.ty(id).kind {
+            TypeKind::Int { refinement, .. } => match v {
+                Value::Int(x) => match refinement {
+                    Some(r) => self.in_range(frame, *x, r, span),
+                    None => Ok(()),
                 },
-            ) => self.in_range(frame, *x, r, span),
-            (Value::Array(items), TypeKind::Array { elem, .. }) => {
-                for item in items {
-                    self.refined(frame, item, Some((tree, *elem)), span)?;
+                Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Bool => match v {
+                Value::Bool(_) => Ok(()),
+                Value::Int(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Array { elem, .. } => match v {
+                Value::Array(items) => {
+                    for item in items {
+                        self.refined(frame, item, Some((tree, *elem)), span)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            (Value::Struct(_, fields), TypeKind::Named(s)) => {
-                let Some(def) = self.module.structs.get(s) else {
-                    return Ok(());
-                };
-                for ((_, v), d) in fields.iter().zip(&def.fields) {
-                    self.refined(frame, v, Some((def.tree(), d.decl)), span)?;
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Struct(..)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Named(s) => match v {
+                Value::Struct(_, fields) => {
+                    let Some(def) = self.module.structs.get(s) else {
+                        return broken("a struct the module does not declare");
+                    };
+                    for ((_, v), d) in fields.iter().zip(&def.fields) {
+                        self.refined(frame, v, Some((def.tree(), d.decl)), span)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            (Value::Enum(_, variant, fields), TypeKind::Enum(e)) => {
-                let Some(def) = self.module.structs.get_enum(e) else {
-                    return Ok(());
-                };
-                let Some((_, v)) = def.variant(variant) else {
-                    return Ok(());
-                };
-                for ((_, x), d) in fields.iter().zip(&v.fields) {
-                    self.refined(frame, x, Some((def.tree(), d.decl)), span)?;
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Enum(..)
+                | Value::Unit => mismatch(),
+            },
+            TypeKind::Enum(e) => match v {
+                Value::Enum(_, variant, fields) => {
+                    let Some(def) = self.module.structs.get_enum(e) else {
+                        return broken("an enum the module does not declare");
+                    };
+                    let Some((_, v)) = def.variant(variant) else {
+                        return broken("a variant its enum does not declare");
+                    };
+                    for ((_, x), d) in fields.iter().zip(&v.fields) {
+                        self.refined(frame, x, Some((def.tree(), d.decl)), span)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            _ => Ok(()),
+                Value::Int(_)
+                | Value::Bool(_)
+                | Value::Array(_)
+                | Value::Struct(..)
+                | Value::Unit => mismatch(),
+            },
+            // A checked module has no type a diagnostic replaced.
+            TypeKind::Error => broken("a value of a type a diagnostic replaced"),
         }
     }
 
     fn in_range(&self, frame: &Frame<'m>, x: Int, r: &Refinement, span: Span) -> Flow<()> {
-        let lo = self.bound(frame, &r.lo);
-        let hi = self.bound(frame, &r.hi);
+        let lo = self.bound(frame, &r.lo)?;
+        let hi = self.bound(frame, &r.hi)?;
         let below = if r.inclusive { x <= hi } else { x < hi };
         if lo <= x && below {
             return Ok(());
@@ -1023,8 +1253,9 @@ impl<'m> Machine<'m> {
         trap(TrapKind::Refinement { value: x, range }, span)
     }
 
-    /// The value of a refinement bound in this frame.
-    fn bound(&self, frame: &Frame<'m>, b: &Bound) -> Int {
+    /// The value of a refinement bound in this frame: a name's an integer binding's, a length's
+    /// an array binding's, as name resolution and the checker require.
+    fn bound(&self, frame: &Frame<'m>, b: &Bound) -> Flow<Int> {
         let slot = |name: &str| {
             frame
                 .f
@@ -1034,7 +1265,7 @@ impl<'m> Machine<'m> {
                 .position(|binding| binding.name == name)
                 .and_then(|i| frame.slots[i].as_ref())
         };
-        match b {
+        Ok(match b {
             Bound::Int { negative, value } => {
                 let v = Int::from_u128(*value);
                 if *negative {
@@ -1045,13 +1276,27 @@ impl<'m> Machine<'m> {
             }
             Bound::Name(n) => match slot(n) {
                 Some(Value::Int(i)) => *i,
-                _ => Int::ZERO,
+                Some(
+                    Value::Bool(_)
+                    | Value::Array(_)
+                    | Value::Struct(..)
+                    | Value::Enum(..)
+                    | Value::Unit,
+                )
+                | None => return broken("a refinement bound that names no integer"),
             },
             Bound::Len(n) => match slot(n) {
                 Some(Value::Array(items)) => Int::from_u128(items.len() as u128),
-                _ => Int::ZERO,
+                Some(
+                    Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Struct(..)
+                    | Value::Enum(..)
+                    | Value::Unit,
+                )
+                | None => return broken("a refinement bound that names no array"),
             },
-        }
+        })
     }
 }
 
@@ -1072,8 +1317,11 @@ fn fit(x: Int, t: IntTy, span: Span) -> Flow<Int> {
 
 /// The element `i` of an array, or an index trap.
 fn element(v: &Value, i: Int, span: Span) -> Flow<&Value> {
-    let Value::Array(items) = v else {
-        return Ok(v);
+    let items = match v {
+        Value::Array(items) => items,
+        Value::Int(_) | Value::Bool(_) | Value::Struct(..) | Value::Enum(..) | Value::Unit => {
+            return broken("an index into a value that is not an array")
+        }
     };
     match i.to_u128().and_then(|i| usize::try_from(i).ok()) {
         Some(k) if k < items.len() => Ok(&items[k]),

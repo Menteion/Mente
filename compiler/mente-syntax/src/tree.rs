@@ -252,6 +252,53 @@ pub enum Else {
     If(ExprId),
 }
 
+impl ExprKind {
+    /// Whether this is an array literal, its elements written out or repeated.
+    pub fn is_array_literal(&self) -> bool {
+        match self {
+            ExprKind::Array(_) | ExprKind::Repeat { .. } => true,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => false,
+        }
+    }
+
+    /// Whether this chooses its value among branches where it is evaluated: an `if` or a
+    /// `match`, whose value a `guard` that repeats it says nothing of.
+    pub fn is_choice(&self) -> bool {
+        match self {
+            ExprKind::If { .. } | ExprKind::Match { .. } => true,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::Error => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Expr {
     pub kind: ExprKind,

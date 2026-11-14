@@ -775,7 +775,9 @@ impl Translate {
         let t = cl_type(rty, ptr);
         let int = |x: cfg::Ty| match x {
             cfg::Ty::Int(i) => Ok(i),
-            _ => Err(err("an integer operation on a value that is not one")),
+            cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => {
+                Err(err("an integer operation on a value that is not one"))
+            }
         };
         Ok(Some(match f.op(v) {
             Op::Param => return Err(err("a parameter among instructions")),
@@ -921,7 +923,7 @@ impl Translate {
                     .zip(&arg_tys[1..])
                     .filter_map(|(v, t)| match t {
                         cfg::Ty::Int(i) => Some((*v, *i)),
-                        _ => None,
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => None,
                     })
                     .collect();
                 let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
@@ -1095,7 +1097,22 @@ fn constant(f: &cfg::Function, v: NodeId) -> Option<Num> {
     match f.op(v) {
         Op::Int(bits) => Some(Num::from_bits(*bits, t)),
         Op::Cast => constant(f, *f.args(v).first()?).filter(|n| t.holds(*n)),
-        _ => None,
+        Op::Param
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Check { .. }
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Store
+        | Op::Copy { .. }
+        | Op::Call(_) => None,
     }
 }
 
@@ -1349,7 +1366,9 @@ fn make_call(
                 (false, Shape::Int(_), Arg::Int(n)) => {
                     let i = match mty {
                         cfg::Ty::Int(i) => *i,
-                        _ => return Err(err("an integer argument of another type")),
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => {
+                            return Err(err("an integer argument of another type"))
+                        }
                     };
                     if !i.holds(*n) {
                         return Err(err(format!("the argument {} lies outside `{}`", n, i)));
@@ -1387,7 +1406,10 @@ fn make_call(
                 emit_num(writer, rt, &mut e, 1, v, i);
             }
             (None, Shape::Bool) => print_bool(writer, rt, &mut e, results[0])?,
-            _ => emit_text(writer, rt, &mut e, 1, "()")?,
+            (None, Shape::Unit) => emit_text(writer, rt, &mut e, 1, "()")?,
+            (None, Shape::Array(..) | Shape::Struct(_) | Shape::Enum(_)) => {
+                return Err(err("a result in memory without its slot"))
+            }
         }
         emit_text(writer, rt, &mut e, 1, "\n")?;
         for (at, shape) in leaves {

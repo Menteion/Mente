@@ -382,7 +382,7 @@ impl Function {
             Op::Param => "param".into(),
             Op::Int(bits) => match self.ty(v) {
                 Ty::Int(t) => format!("int {}", Num::from_bits(*bits, t)),
-                _ => format!("int {}", bits),
+                Ty::Bool | Ty::Addr | Ty::Unit => format!("int {}", bits),
             },
             Op::Bool(b) => format!("bool {}", b),
             Op::Arith { op, trap } => {
@@ -817,7 +817,7 @@ impl Memory {
                 Ok(Val::Int(Num::from_bits(u128::from_le_bytes(bits), t)))
             }
             Ty::Bool => Ok(Val::Bool(self.bytes[self.range(at, 1)?.start] != 0)),
-            _ => Err(Stop::Broken(format!("a load of {}", ty))),
+            Ty::Addr | Ty::Unit => Err(Stop::Broken(format!("a load of {}", ty))),
         }
     }
 
@@ -1007,7 +1007,9 @@ impl<'m> Machine<'m> {
                     let (t, args) = match get(cond) {
                         Val::Bool(true) => then,
                         Val::Bool(false) => otherwise,
-                        _ => return Err(broken("a branch on a value that is not a bool")),
+                        Val::Int(_) | Val::Addr(_) | Val::Unit => {
+                            return Err(broken("a branch on a value that is not a bool"))
+                        }
                     };
                     let args = args.iter().map(get).collect();
                     enter(top, *t, args)?;
@@ -1053,7 +1055,9 @@ impl<'m> Machine<'m> {
             Op::Param => return Err(broken("a parameter in a block's instructions")),
             Op::Int(bits) => match ty {
                 Ty::Int(t) => Val::Int(Num::from_bits(*bits, t)),
-                _ => return Err(broken("an integer of a type that is not one")),
+                Ty::Bool | Ty::Addr | Ty::Unit => {
+                    return Err(broken("an integer of a type that is not one"))
+                }
             },
             Op::Bool(b) => Val::Bool(*b),
             Op::Arith { op, trap } => {
@@ -1136,7 +1140,7 @@ impl<'m> Machine<'m> {
                         .iter()
                         .map(|a| match a {
                             Val::Int(n) => Some(*n),
-                            _ => None,
+                            Val::Bool(_) | Val::Addr(_) | Val::Unit => None,
                         })
                         .collect();
                     return Err(trap(f, *at, &shown));

@@ -1,0 +1,30 @@
+// expect: E0203 E0203 E0203 E0203 E0203
+module conformance
+// Two branches whose operands both leave still give their constructs' types, an array and a
+// struct here, which differ (core-calculus.md, item 6).
+struct P {
+  a: u8
+  b: u16
+}
+
+pub fn both(c: bool, x: u8) -> u8 {
+  _ = if c { [x, todo("a")] } else { P(a: x, b: todo("b")) }
+  x
+}
+
+pub fn tail(c: bool, x: u8) -> u8 = match c {
+  true => P(a: x, b: todo("a"))
+  false => [x, unreachable("b")]
+}
+
+pub fn compared(c: bool, x: u8) -> bool {
+  (if c { [x, todo("a")] } else { x + todo("b") }) == 3
+}
+
+pub fn added(c: bool, x: u8) -> u8 {
+  x + (if c { P(a: x, b: todo("a")) } else { [x, todo("b")] })
+}
+
+pub fn indexed(c: bool, x: u8) -> u8 {
+  [x, 2][if c { P(a: x, b: todo("a")) } else { [x, todo("b")] }]
+}

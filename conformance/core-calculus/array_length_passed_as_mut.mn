@@ -1,0 +1,13 @@
+// expect: E0206
+module conformance
+// An array's `.len` is no place to pass as `mut`, though the array is a `var`
+// (core-calculus.md, item 3).
+fn bump(mut z: usize) {
+  z = z + 1
+}
+
+pub fn f(xs: [2]u8) -> usize {
+  var ys: [2]u8 = xs
+  bump(mut ys.len)
+  ys.len
+}

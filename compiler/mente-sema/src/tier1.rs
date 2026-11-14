@@ -287,7 +287,17 @@ fn form(tree: &Tree, e: ExprId, names: &Names) -> Result<Form, String> {
         ExprKind::Name(_) => Err("a value that is not an integer".to_string()),
         ExprKind::Call { .. } => Err("a call".to_string()),
         ExprKind::Index { .. } => Err("an array element".to_string()),
-        _ => Err("an expression that is not linear arithmetic".to_string()),
+        ExprKind::Bool(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => Err("an expression that is not linear arithmetic".to_string()),
     }
 }
 
@@ -323,7 +333,22 @@ pub fn outside_fragment(tree: &Tree, e: ExprId, names: &Names) -> Option<String>
         ExprKind::Unary {
             op: UnaryOp::Not, ..
         } => Some("`not`".to_string()),
-        _ => Some("a value that is not a comparison".to_string()),
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => Some("a value that is not a comparison".to_string()),
     }
 }
 
@@ -406,14 +431,14 @@ fn negate(v: &Val) -> Val {
             div: *div,
         },
         Val::Itv(lo, hi) => Val::Itv(-hi, -lo),
-        other => other.clone(),
+        other @ (Val::Arr(_) | Val::Other) => other.clone(),
     }
 }
 
 fn as_const(v: &Val) -> Option<i128> {
     match v {
         Val::Lin(t, c) if t.is_empty() => Some(*c),
-        _ => None,
+        Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) | Val::Arr(_) | Val::Other => None,
     }
 }
 
@@ -458,7 +483,7 @@ fn interval(st: &Octagon, v: &Val) -> (i128, i128) {
             (lo, hi)
         }
         Val::Itv(lo, hi) => (*lo, *hi),
-        _ => (-INF, INF),
+        Val::Arr(_) | Val::Other => (-INF, INF),
     }
 }
 
@@ -466,7 +491,7 @@ fn interval(st: &Octagon, v: &Val) -> (i128, i128) {
 fn summary_of(st: &Octagon, v: &Val) -> Val {
     match v {
         Val::Arr(_) | Val::Other => v.clone(),
-        _ => {
+        Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) => {
             let (lo, hi) = interval(st, v);
             Val::Itv(lo, hi)
         }
@@ -602,7 +627,13 @@ fn int_range(t: IntTy) -> (i128, i128) {
 fn int_of(t: &Ty) -> Option<IntTy> {
     match t {
         Ty::Int(Int::One(t)) => Some(*t),
-        _ => None,
+        Ty::Int(Int::Literal | Int::Mixed(_))
+        | Ty::Bool
+        | Ty::Array(..)
+        | Ty::Struct(_)
+        | Ty::Enum(_)
+        | Ty::Unit
+        | Ty::Any => None,
     }
 }
 
@@ -647,7 +678,24 @@ fn bits_vals(st: &Octagon, op: BinaryOp, l: &Val, r: &Val, t: Option<IntTy>) -> 
         BinaryOp::BitAnd if a >= 0 => Val::Itv(0, b),
         BinaryOp::BitAnd if c >= 0 => Val::Itv(0, d),
         BinaryOp::BitOr | BinaryOp::BitXor if a >= 0 && c >= 0 => Val::Itv(0, ones(b.max(d))),
-        _ => TOP,
+        BinaryOp::Or
+        | BinaryOp::And
+        | BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::BitAnd
+        | BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Rem => TOP,
     };
     clamp_to(v, t, st)
 }
@@ -689,7 +737,7 @@ struct Refine {
 fn bound_exact(b: &Bound) -> Option<Exact> {
     match b {
         Bound::Int { negative, value } => Some(Exact::new(*negative, *value)),
-        _ => None,
+        Bound::Name(_) | Bound::Len(_) => None,
     }
 }
 
@@ -744,7 +792,7 @@ impl Shape {
             },
             Ty::Array(n, e) => Shape::Array(*n, Box::new(Shape::plain(e))),
             Ty::Struct(name) => Shape::Struct(name.clone()),
-            _ => Shape::Other,
+            Ty::Bool | Ty::Enum(_) | Ty::Unit | Ty::Any => Shape::Other,
         }
     }
 
@@ -764,7 +812,7 @@ impl Shape {
     fn element(&self) -> Shape {
         match self {
             Shape::Array(_, e) => (**e).clone(),
-            _ => Shape::Other,
+            Shape::Int { .. } | Shape::Struct(_) | Shape::Other => Shape::Other,
         }
     }
 }
@@ -822,21 +870,75 @@ fn bound_int(negative: bool, value: u128) -> Val {
 // Conditions
 // ---------------------------------------------------------------------------------------------
 
+/// A comparison, the relation a condition states between two values: the six operators that
+/// compare, and no other, so that a condition never holds an operator it cannot narrow by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rel {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl Rel {
+    /// The comparison `op` is, none for an operator that does not compare.
+    fn of(op: BinaryOp) -> Option<Rel> {
+        match op {
+            BinaryOp::Eq => Some(Rel::Eq),
+            BinaryOp::Ne => Some(Rel::Ne),
+            BinaryOp::Lt => Some(Rel::Lt),
+            BinaryOp::Le => Some(Rel::Le),
+            BinaryOp::Gt => Some(Rel::Gt),
+            BinaryOp::Ge => Some(Rel::Ge),
+            BinaryOp::Or
+            | BinaryOp::And
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::BitAnd
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem => None,
+        }
+    }
+
+    /// The operator that writes it.
+    fn op(self) -> BinaryOp {
+        match self {
+            Rel::Eq => BinaryOp::Eq,
+            Rel::Ne => BinaryOp::Ne,
+            Rel::Lt => BinaryOp::Lt,
+            Rel::Le => BinaryOp::Le,
+            Rel::Gt => BinaryOp::Gt,
+            Rel::Ge => BinaryOp::Ge,
+        }
+    }
+
+    fn symbol(self) -> &'static str {
+        self.op().symbol()
+    }
+}
+
 /// A condition whose operands are evaluated.
 #[derive(Clone, Debug)]
 enum Cond {
     Const(bool),
-    Cmp(BinaryOp, Box<Val>, Box<Val>),
+    Cmp(Rel, Box<Val>, Box<Val>),
     /// A value compared with a constant beyond the octagon's reach, kept exactly; boxed, so
     /// that a condition stays small in the frames of nested expressions.
-    Far(BinaryOp, Box<(Val, Exact)>),
+    Far(Rel, Box<(Val, Exact)>),
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
     Not(Box<Cond>),
     Unknown,
 }
 
-fn cmp(op: BinaryOp, l: Val, r: Val) -> Cond {
+fn cmp(op: Rel, l: Val, r: Val) -> Cond {
     Cond::Cmp(op, Box::new(l), Box::new(r))
 }
 
@@ -845,9 +947,9 @@ fn cmp(op: BinaryOp, l: Val, r: Val) -> Cond {
 fn lex_less(a: &[Val], b: &[Val]) -> Cond {
     match (a, b) {
         ([x, xs @ ..], [y, ys @ ..]) => Cond::Or(
-            Box::new(cmp(BinaryOp::Lt, x.clone(), y.clone())),
+            Box::new(cmp(Rel::Lt, x.clone(), y.clone())),
             Box::new(Cond::And(
-                Box::new(cmp(BinaryOp::Eq, x.clone(), y.clone())),
+                Box::new(cmp(Rel::Eq, x.clone(), y.clone())),
                 Box::new(lex_less(xs, ys)),
             )),
         ),
@@ -865,24 +967,26 @@ fn tuple(values: &[Exact]) -> String {
 }
 
 /// The comparison with its operands swapped: `a < b` is `b > a`.
-fn mirror(op: BinaryOp) -> BinaryOp {
+fn mirror(op: Rel) -> Rel {
     match op {
-        BinaryOp::Lt => BinaryOp::Gt,
-        BinaryOp::Le => BinaryOp::Ge,
-        BinaryOp::Gt => BinaryOp::Lt,
-        BinaryOp::Ge => BinaryOp::Le,
-        other => other,
+        Rel::Lt => Rel::Gt,
+        Rel::Le => Rel::Ge,
+        Rel::Gt => Rel::Lt,
+        Rel::Ge => Rel::Le,
+        Rel::Eq => Rel::Eq,
+        Rel::Ne => Rel::Ne,
     }
 }
 
-fn flip(op: BinaryOp) -> BinaryOp {
+/// The comparison that holds exactly where `op` fails.
+fn flip(op: Rel) -> Rel {
     match op {
-        BinaryOp::Lt => BinaryOp::Ge,
-        BinaryOp::Le => BinaryOp::Gt,
-        BinaryOp::Gt => BinaryOp::Le,
-        BinaryOp::Ge => BinaryOp::Lt,
-        BinaryOp::Eq => BinaryOp::Ne,
-        _ => BinaryOp::Eq,
+        Rel::Lt => Rel::Ge,
+        Rel::Le => Rel::Gt,
+        Rel::Gt => Rel::Le,
+        Rel::Ge => Rel::Lt,
+        Rel::Eq => Rel::Ne,
+        Rel::Ne => Rel::Eq,
     }
 }
 
@@ -907,7 +1011,7 @@ fn mentions(v: &Val, var: usize) -> bool {
     match v {
         Val::Lin(t, _) => has(t),
         Val::Quot { base, num, .. } => has(&base.0) || has(&num.0),
-        _ => false,
+        Val::Itv(..) | Val::Arr(_) | Val::Other => false,
     }
 }
 
@@ -942,7 +1046,7 @@ fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
 
 /// Narrows `st` to the points where `t + k op c` holds, `c` a constant beyond the octagon's
 /// reach, as an exact bound of `t`'s variable.
-fn constrain_far(st: &mut Octagon, op: BinaryOp, t: Term, k: i128, c: Exact) {
+fn constrain_far(st: &mut Octagon, op: Rel, t: Term, k: i128, c: Exact) {
     // `±x + k op c` is `±x op c - k`, and `-x op b` is `x op' -b`.
     let Some(b) = c.plus(k.checked_neg().unwrap_or(i128::MAX)) else {
         return;
@@ -953,9 +1057,9 @@ fn constrain_far(st: &mut Octagon, op: BinaryOp, t: Term, k: i128, c: Exact) {
         (op, b)
     };
     let bound = match op {
-        BinaryOp::Lt => b.plus(-1),
-        BinaryOp::Gt => b.plus(1),
-        _ => Some(b),
+        Rel::Lt => b.plus(-1),
+        Rel::Gt => b.plus(1),
+        Rel::Eq | Rel::Ne | Rel::Le | Rel::Ge => Some(b),
     };
     // No value lies beyond the exact integers, which hold every value of a 128-bit type: a
     // strict comparison past them holds nowhere.
@@ -964,10 +1068,11 @@ fn constrain_far(st: &mut Octagon, op: BinaryOp, t: Term, k: i128, c: Exact) {
         return;
     };
     let (lower, upper) = match op {
-        BinaryOp::Lt | BinaryOp::Le => (None, Some(bound)),
-        BinaryOp::Gt | BinaryOp::Ge => (Some(bound), None),
-        BinaryOp::Eq => (Some(bound), Some(bound)),
-        _ => (None, None),
+        Rel::Lt | Rel::Le => (None, Some(bound)),
+        Rel::Gt | Rel::Ge => (Some(bound), None),
+        Rel::Eq => (Some(bound), Some(bound)),
+        // A value other than one beyond the octagon's reach: no bound narrows to it.
+        Rel::Ne => (None, None),
     };
     st.add_exact(t.var, lower, upper);
 }
@@ -1025,7 +1130,19 @@ fn prec(kind: &ExprKind) -> u8 {
             op: UnaryOp::Not, ..
         } => 3,
         ExprKind::Unary { .. } => 11,
-        _ => 12,
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Error => 12,
     }
 }
 
@@ -1210,7 +1327,7 @@ fn scalar_paths(
                     out.push((names, shape));
                 }
             }
-            _ => {}
+            Shape::Array(..) | Shape::Other => {}
         }
     }
     Some(out)
@@ -1238,7 +1355,21 @@ fn field_chain(tree: &Tree, resolution: &Resolution, e: ExprId) -> Option<(usize
             Some((root, names))
         }
         ExprKind::Name(_) => resolution.names[e.0 as usize].map(|b| (b.0 as usize, Vec::new())),
-        _ => None,
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
     }
 }
 
@@ -1252,7 +1383,21 @@ fn chain_of(tree: &Tree, e: ExprId) -> Option<(String, Vec<String>)> {
             Some((root, names))
         }
         ExprKind::Name(n) => Some((n.clone(), Vec::new())),
-        _ => None,
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
     }
 }
 
@@ -1268,7 +1413,19 @@ fn fragment_followed(tree: &Tree, e: ExprId, read: &dyn Fn(ExprId) -> Option<boo
             fragment_followed(tree, *lhs, read) && fragment_followed(tree, *rhs, read)
         }
         ExprKind::Int { .. } | ExprKind::Bool(_) => true,
-        _ => false,
+        ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => false,
     }
 }
 
@@ -1293,7 +1450,21 @@ fn clause_paths(tree: &Tree, e: ExprId, param: &str, out: &mut Vec<Vec<String>>)
             clause_paths(tree, *lhs, param, out);
             clause_paths(tree, *rhs, param, out);
         }
-        _ => {}
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => {}
     }
 }
 
@@ -1575,9 +1746,30 @@ fn named(tree: &Tree, resolution: &Resolution, e: ExprId) -> Vec<usize> {
         .iter()
         .map(|id| id.0 as usize)
         .collect();
-    if let ExprKind::Binary { lhs, rhs, .. } = &tree.expr(e).kind {
-        out.extend(named(tree, resolution, *lhs));
-        out.extend(named(tree, resolution, *rhs));
+    match &tree.expr(e).kind {
+        ExprKind::Binary { lhs, rhs, .. } => {
+            out.extend(named(tree, resolution, *lhs));
+            out.extend(named(tree, resolution, *rhs));
+        }
+        ExprKind::Unary { operand, .. } => out.extend(named(tree, resolution, *operand)),
+        // A name is itself; arithmetic does not reach inside the others: an index or a field
+        // reads an element, and a call, an aggregate, an `if` or a `match` gives a value of its
+        // own.
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Call { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Error => {}
     }
     out
 }
@@ -1639,7 +1831,10 @@ impl<'a> Fx<'a> {
             .zip(&f.typing.bindings)
             .map(|(b, t)| match b.kind {
                 BindingKind::Result => result,
-                _ => n.alloc(matches!(t, Ty::Int(_))),
+                BindingKind::Param { .. }
+                | BindingKind::Val
+                | BindingKind::Var
+                | BindingKind::Pattern => n.alloc(matches!(t, Ty::Int(_))),
             })
             .collect();
         // The rest of the function's variables, a field read's included, come first. A
@@ -1791,7 +1986,22 @@ impl<'a> Fx<'a> {
                     ExprKind::Int { value, .. } if Exact::new(false, *value).is_far() => {
                         Site::Value(n.alloc(true).unwrap_or(0))
                     }
-                    _ => Site::None,
+                    ExprKind::Int { .. }
+                    | ExprKind::Bool(_)
+                    | ExprKind::Name(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Construct { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::Array(_)
+                    | ExprKind::Repeat { .. }
+                    | ExprKind::If { .. }
+                    | ExprKind::Error => Site::None,
                 }
             })
             .collect();
@@ -1806,7 +2016,14 @@ impl<'a> Fx<'a> {
                     .iter()
                     .map(|_| (n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)))
                     .collect(),
-                _ => Vec::new(),
+                StmtKind::Binding { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Guard { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Discard(_)
+                | StmtKind::Expr(_) => Vec::new(),
             })
             .collect();
         let entry_measures = f
@@ -1871,7 +2088,7 @@ impl<'a> Fx<'a> {
             },
             TypeKind::Array { len, elem } => Shape::Array(*len, Box::new(self.own_shape(*elem))),
             TypeKind::Named(name) => Shape::Struct(name.clone()),
-            _ => Shape::Other,
+            TypeKind::Bool | TypeKind::Enum(_) | TypeKind::Error => Shape::Other,
         }
     }
 
@@ -1892,7 +2109,11 @@ impl<'a> Fx<'a> {
         let param = |n: &str| c.syntax.params.iter().position(|p| p.name == n);
         let len = |k: usize| match &tree.ty(c.syntax.params[k].ty).kind {
             TypeKind::Array { len, .. } => Some(*len),
-            _ => None,
+            TypeKind::Int { .. }
+            | TypeKind::Bool
+            | TypeKind::Named(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Error => None,
         };
         let bound = |b: &Bound| match b {
             Bound::Int { negative, value } => bound_int(*negative, *value),
@@ -1929,7 +2150,9 @@ impl<'a> Fx<'a> {
                 Shape::Array(*len, Box::new(self.callee_shape(c, site, args, *elem)))
             }
             // A struct tells a call's checks nothing more: its fields hold their refinements.
-            _ => Shape::Other,
+            TypeKind::Bool | TypeKind::Named(_) | TypeKind::Enum(_) | TypeKind::Error => {
+                Shape::Other
+            }
         }
     }
 
@@ -1953,7 +2176,7 @@ impl<'a> Fx<'a> {
                 refine: refinement.as_ref().map(|r| {
                     let bound = |b: &Bound| match b {
                         Bound::Int { negative, value } => bound_int(*negative, *value),
-                        _ => TOP,
+                        Bound::Name(_) | Bound::Len(_) => TOP,
                     };
                     Box::new(Refine {
                         lo: bound(&r.lo),
@@ -1972,7 +2195,7 @@ impl<'a> Fx<'a> {
                 Shape::Array(*len, Box::new(Self::declared_shape(tree, *elem)))
             }
             TypeKind::Named(name) => Shape::Struct(name.clone()),
-            _ => Shape::Other,
+            TypeKind::Bool | TypeKind::Enum(_) | TypeKind::Error => Shape::Other,
         }
     }
 
@@ -2012,7 +2235,20 @@ impl<'a> Fx<'a> {
                 lhs,
                 rhs,
             } => self.followed(*lhs) && self.followed(*rhs),
-            _ => false,
+            ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => false,
         }
     }
 
@@ -2201,7 +2437,22 @@ impl<'a> Fx<'a> {
                 op: UnaryOp::Neg,
                 operand,
             } => self.literal(*operand).map(Exact::negated),
-            _ => None,
+            ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         }
     }
 
@@ -2636,7 +2887,7 @@ impl<'a> Fx<'a> {
         let self_ref = match v {
             Val::Lin(t, _) => mentions(t),
             Val::Quot { base, num, .. } => mentions(&base.0) || mentions(&num.0),
-            _ => false,
+            Val::Itv(..) | Val::Arr(_) | Val::Other => false,
         };
         if self_ref {
             let s = self.scratch;
@@ -2675,7 +2926,7 @@ impl<'a> Fx<'a> {
                 }
             }
             Val::Itv(lo, hi) => constrain_offset(st, var, &[], 0, *lo, *hi),
-            _ => {}
+            Val::Arr(_) | Val::Other => {}
         }
     }
 
@@ -2687,7 +2938,7 @@ impl<'a> Fx<'a> {
                 self.assign(st, temp, v);
                 Some((vec![Term::pos(temp)], 0))
             }
-            _ => None,
+            Val::Arr(_) | Val::Other => None,
         }
     }
 
@@ -2709,23 +2960,22 @@ impl<'a> Fx<'a> {
         st.forget(t1);
     }
 
-    fn constrain(&self, st: &mut Octagon, op: BinaryOp, l: &Val, r: &Val) {
+    fn constrain(&self, st: &mut Octagon, op: Rel, l: &Val, r: &Val) {
         match op {
-            BinaryOp::Lt => self.le(st, l, r, -1),
-            BinaryOp::Le => self.le(st, l, r, 0),
-            BinaryOp::Gt => self.le(st, r, l, -1),
-            BinaryOp::Ge => self.le(st, r, l, 0),
-            BinaryOp::Eq => {
+            Rel::Lt => self.le(st, l, r, -1),
+            Rel::Le => self.le(st, l, r, 0),
+            Rel::Gt => self.le(st, r, l, -1),
+            Rel::Ge => self.le(st, r, l, 0),
+            Rel::Eq => {
                 self.le(st, l, r, 0);
                 self.le(st, r, l, 0);
             }
-            BinaryOp::Ne => {
+            Rel::Ne => {
                 let mut below = st.clone();
                 self.le(&mut below, l, r, -1);
                 self.le(st, r, l, -1);
                 *st = below.join(st);
             }
-            _ => {}
         }
     }
 
@@ -2762,7 +3012,11 @@ impl<'a> Fx<'a> {
                 // scratch variable, which takes the bounds the octagon gives it.
                 let (t, k) = match &far.0 {
                     Val::Lin(terms, k) if terms.len() == 1 => (terms[0], *k),
-                    v => {
+                    v @ (Val::Lin(..)
+                    | Val::Quot { .. }
+                    | Val::Itv(..)
+                    | Val::Arr(_)
+                    | Val::Other) => {
                         self.assign(st, self.scratch, v);
                         (Term::pos(self.scratch), 0)
                     }
@@ -2804,14 +3058,10 @@ impl<'a> Fx<'a> {
             }
             if let Some(r) = refine {
                 let v = var_val(var);
-                let op = if r.inclusive {
-                    BinaryOp::Le
-                } else {
-                    BinaryOp::Lt
-                };
+                let op = if r.inclusive { Rel::Le } else { Rel::Lt };
                 match far(r.lo_lit) {
-                    Some(c) => constrain_far(st, BinaryOp::Ge, Term::pos(var), 0, c),
-                    None => self.constrain(st, BinaryOp::Ge, &v, &r.lo),
+                    Some(c) => constrain_far(st, Rel::Ge, Term::pos(var), 0, c),
+                    None => self.constrain(st, Rel::Ge, &v, &r.lo),
                 }
                 match far(r.hi_lit) {
                     Some(c) => constrain_far(st, op, Term::pos(var), 0, c),
@@ -2914,7 +3164,7 @@ impl<'a> Fx<'a> {
             Shape::Array(_, elem) => {
                 let each = match v {
                     Val::Arr(s) => (**s).clone(),
-                    _ => TOP,
+                    Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) | Val::Other => TOP,
                 };
                 let place = format!("each element of {}", place);
                 self.narrow(st, &each, elem, (span, tag), &place, None);
@@ -2933,15 +3183,11 @@ impl<'a> Fx<'a> {
         place: &str,
         what: Option<(String, u8)>,
     ) {
-        let high_op = if r.inclusive {
-            BinaryOp::Le
-        } else {
-            BinaryOp::Lt
-        };
+        let high_op = if r.inclusive { Rel::Le } else { Rel::Lt };
         // A literal bound beyond the octagon's reach is compared exactly.
         let low = match far(r.lo_lit) {
-            Some(c) => Cond::Far(BinaryOp::Ge, Box::new((v.clone(), c))),
-            None => cmp(BinaryOp::Ge, v.clone(), r.lo.clone()),
+            Some(c) => Cond::Far(Rel::Ge, Box::new((v.clone(), c))),
+            None => cmp(Rel::Ge, v.clone(), r.lo.clone()),
         };
         let high = match far(r.hi_lit) {
             Some(c) => Cond::Far(high_op, Box::new((v.clone(), c))),
@@ -3009,17 +3255,19 @@ impl<'a> Fx<'a> {
                     value,
                     outside
                 ),
-                _ => format!(
-                    "Tier 1 cannot rule out that {} is {}, {}",
-                    shown, value, outside
-                ),
+                Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) | Val::Arr(_) | Val::Other => {
+                    format!(
+                        "Tier 1 cannot rule out that {} is {}, {}",
+                        shown, value, outside
+                    )
+                }
             }
         } else {
             // The probe holds the value, outside the refinement on the side that fails.
             let probe = var_val(self.probe);
             self.assign(&mut s, self.probe, v);
             let (op, bound) = match fail_low {
-                Some(_) => (BinaryOp::Ge, &r.lo),
+                Some(_) => (Rel::Ge, &r.lo),
                 None => (high_op, &r.hi),
             };
             self.assume(&mut s, &cmp(op, probe, bound.clone()), false);
@@ -3041,7 +3289,9 @@ impl<'a> Fx<'a> {
                         format!("Tier 1 cannot rule out `{}`, where {}", valuation, core)
                     }
                 }
-                _ => format!("Tier 1 cannot rule out that {}", core),
+                Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) | Val::Arr(_) | Val::Other => {
+                    format!("Tier 1 cannot rule out that {}", core)
+                }
             }
         };
         let read = what.as_ref().and_then(|w| {
@@ -3233,7 +3483,14 @@ impl<'a> Fx<'a> {
                 let last = self.tree.block(b).stmts.last().copied();
                 let tail = last.and_then(|s| match self.tree.stmt(s).kind {
                     StmtKind::Expr(e) => Some(e),
-                    _ => None,
+                    StmtKind::Binding { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::While { .. }
+                    | StmtKind::Guard { .. }
+                    | StmtKind::Return(_)
+                    | StmtKind::Break
+                    | StmtKind::Continue
+                    | StmtKind::Discard(_) => None,
                 });
                 match (&shape, tail, last) {
                     (Some(_), Some(e), Some(s)) => self.ensures(
@@ -3354,7 +3611,23 @@ impl<'a> Fx<'a> {
                 steps.push(Step::Field(name.clone()));
                 root
             }
-            _ => self.resolution.names[e.0 as usize].map(|b| b.0 as usize),
+            ExprKind::Name(_) => self.resolution.names[e.0 as usize].map(|b| b.0 as usize),
+            // The checker passes as a place only a binding, an element, or a field of a struct
+            // (`E0205`, `E0206`).
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         }
     }
 
@@ -3458,10 +3731,7 @@ impl<'a> Fx<'a> {
                 let what = self.own_text(e);
                 // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one's
                 // value, whose variable is given anew where it is evaluated.
-                let control = matches!(
-                    self.tree.expr(e).kind,
-                    ExprKind::If { .. } | ExprKind::Match { .. }
-                );
+                let control = self.tree.expr(e).kind.is_choice();
                 let was = std::mem::replace(&mut self.unfollowed, control);
                 self.narrow(st, &v, shape, (self.span(e), Tag::None), place, Some(what));
                 self.unfollowed = was;
@@ -3481,7 +3751,7 @@ impl<'a> Fx<'a> {
                 st.add_exact(var, Some(exact), Some(exact));
                 var_val(var)
             }
-            _ => int_literal(value),
+            Site::None | Site::Call(_) => int_literal(value),
         }
     }
 
@@ -3511,7 +3781,7 @@ impl<'a> Fx<'a> {
                         built.push((names, v));
                     }
                 }
-                _ => {}
+                Shape::Array(..) | Shape::Other => {}
             }
         }
         self.built[e.0 as usize] = Some(built);
@@ -3569,7 +3839,16 @@ impl<'a> Fx<'a> {
                     self.cond(st, e);
                     Val::Other
                 }
-                _ => {
+                BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem => {
                     let mut l = self.eval(st, *lhs);
                     self.read_before(st, *rhs, [&mut l]);
                     let r = self.eval(st, *rhs);
@@ -3584,7 +3863,9 @@ impl<'a> Fx<'a> {
                 }
                 let each = match b {
                     Val::Arr(each) => *each,
-                    _ => self.summary(st, &Shape::plain(&typing.exprs[e.0 as usize])),
+                    Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) | Val::Other => {
+                        self.summary(st, &Shape::plain(&typing.exprs[e.0 as usize]))
+                    }
                 };
                 // An element of a binding has its declared element type's refinement, whose
                 // bounds may name other bindings.
@@ -3619,7 +3900,7 @@ impl<'a> Fx<'a> {
                         self.facts(st, var, &shape);
                         var_val(var)
                     }
-                    _ => TOP,
+                    Ty::Int(_) | Ty::Bool | Ty::Enum(_) | Ty::Unit | Ty::Any => TOP,
                 }
             }
             ExprKind::Call { args, .. } => self.call(st, e, args),
@@ -3709,7 +3990,17 @@ impl<'a> Fx<'a> {
             }
             BinaryOp::Sub => add_vals(st, l, &negate(r)),
             BinaryOp::Mul => mul_vals(st, l, r),
-            _ => add_vals(st, l, r),
+            BinaryOp::Add => add_vals(st, l, r),
+            // `eval` gives comparisons and `and` and `or` arms of their own, so they never come
+            // here; were one to, Tier 1 would know nothing of its value.
+            BinaryOp::Or
+            | BinaryOp::And
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => TOP,
         };
         // An operation on 128-bit operands is narrowed into their type (`core-calculus.md`,
         // item 4).
@@ -3821,7 +4112,7 @@ impl<'a> Fx<'a> {
                 });
                 return var_val(var);
             }
-            _ => {
+            Site::None | Site::Call(_) => {
                 let vals: Vec<Val> = ends
                     .iter()
                     .filter(|(s, _)| !s.is_empty())
@@ -3865,24 +4156,49 @@ impl<'a> Fx<'a> {
         let t = match &self.typing.exprs[scrutinee.0 as usize] {
             Ty::Int(Int::One(t)) | Ty::Int(Int::Mixed(Some(t))) => *t,
             Ty::Int(Int::Literal) => crate::types::I64,
-            _ => return,
+            Ty::Int(Int::Mixed(None))
+            | Ty::Bool
+            | Ty::Array(..)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Unit
+            | Ty::Any => return,
         };
         let span = self.span(scrutinee);
         let kind = &self.tree.expr(scrutinee).kind;
-        let stored = matches!(
-            kind,
+        // A value read from a place or given by a call already lies in its type.
+        let stored = match kind {
             ExprKind::Name(_)
-                | ExprKind::Field { .. }
-                | ExprKind::Index { .. }
-                | ExprKind::Call { .. }
-        );
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. } => true,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => false,
+        };
         // An operation on operands of one 128-bit type is checked at its operator against that
         // type (`core-calculus.md`, item 4), so its value, and an `if`'s or a `match`'s of that
         // type, already lies within it.
-        let checked = matches!(
-            &self.typing.exprs[scrutinee.0 as usize],
-            Ty::Int(Int::One(t)) if t.bits == 128
-        );
+        let checked = match &self.typing.exprs[scrutinee.0 as usize] {
+            Ty::Int(Int::One(t)) => t.bits == 128,
+            Ty::Int(Int::Literal | Int::Mixed(_))
+            | Ty::Bool
+            | Ty::Array(..)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Unit
+            | Ty::Any => false,
+        };
         let settled = st.is_empty() || stored || checked;
         let what = self.own_text(scrutinee);
         if settled {
@@ -3891,7 +4207,7 @@ impl<'a> Fx<'a> {
             self.always_traps(&side, t, span, &format!("`{}`", what.0));
         } else if !within(st, value, t) {
             // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one.
-            let control = matches!(kind, ExprKind::If { .. } | ExprKind::Match { .. });
+            let control = kind.is_choice();
             let was = std::mem::replace(&mut self.unfollowed, control);
             self.refinement(
                 st,
@@ -3906,10 +4222,7 @@ impl<'a> Fx<'a> {
         // Past the narrowing, the value lies within the type: a bound beyond the octagon's
         // reach, a 128-bit type's, is compared exactly.
         let r = type_refine(t);
-        for (op, bound, lit) in [
-            (BinaryOp::Ge, r.lo, r.lo_lit),
-            (BinaryOp::Le, r.hi, r.hi_lit),
-        ] {
+        for (op, bound, lit) in [(Rel::Ge, r.lo, r.lo_lit), (Rel::Le, r.hi, r.hi_lit)] {
             let c = match far(lit) {
                 Some(c) => Cond::Far(op, Box::new((value.clone(), c))),
                 None => cmp(op, value.clone(), bound),
@@ -3949,9 +4262,9 @@ impl<'a> Fx<'a> {
                     let lit = Exact::new(*negative, *n);
                     literals.push(lit);
                     let c = if lit.is_far() {
-                        Cond::Far(BinaryOp::Eq, Box::new((value.clone(), lit)))
+                        Cond::Far(Rel::Eq, Box::new((value.clone(), lit)))
                     } else {
-                        cmp(BinaryOp::Eq, value.clone(), bound_int(*negative, *n))
+                        cmp(Rel::Eq, value.clone(), bound_int(*negative, *n))
                     };
                     self.assume(&mut a, &c, true);
                 }
@@ -3969,7 +4282,7 @@ impl<'a> Fx<'a> {
                         }
                         self.assume(
                             &mut a,
-                            &cmp(BinaryOp::Ge, value.clone(), lin(Vec::new(), l)),
+                            &cmp(Rel::Ge, value.clone(), lin(Vec::new(), l)),
                             true,
                         );
                     }
@@ -3980,7 +4293,7 @@ impl<'a> Fx<'a> {
                         }
                         self.assume(
                             &mut a,
-                            &cmp(BinaryOp::Le, value.clone(), lin(Vec::new(), h)),
+                            &cmp(Rel::Le, value.clone(), lin(Vec::new(), h)),
                             true,
                         );
                     }
@@ -4047,7 +4360,7 @@ impl<'a> Fx<'a> {
                 self.assign(&mut o, var, &ov);
                 var_val(var)
             }
-            _ => {
+            Site::None | Site::Call(_) => {
                 let arms: Vec<Val> = [(&t, &tv), (&o, &ov)]
                     .into_iter()
                     .filter(|(s, _)| !s.is_empty())
@@ -4105,27 +4418,38 @@ impl<'a> Fx<'a> {
                     Cond::Or(Box::new(l), Box::new(r))
                 }
             }
-            ExprKind::Binary {
-                op:
-                    op @ (BinaryOp::Eq
-                    | BinaryOp::Ne
-                    | BinaryOp::Lt
-                    | BinaryOp::Le
-                    | BinaryOp::Gt
-                    | BinaryOp::Ge),
-                lhs,
-                rhs,
-            } => {
-                let mut l = self.eval(st, *lhs);
-                self.read_before(st, *rhs, [&mut l]);
-                let r = self.eval(st, *rhs);
-                match (far(self.literal(*lhs)), far(self.literal(*rhs))) {
-                    (_, Some(c)) => Cond::Far(*op, Box::new((l, c))),
-                    (Some(c), None) => Cond::Far(mirror(*op), Box::new((r, c))),
-                    (None, None) => cmp(*op, l, r),
+            // `and` and `or` have their arm above; an arithmetic or bit operation is a value.
+            ExprKind::Binary { op, lhs, rhs } => match Rel::of(*op) {
+                Some(op) => {
+                    let mut l = self.eval(st, *lhs);
+                    self.read_before(st, *rhs, [&mut l]);
+                    let r = self.eval(st, *rhs);
+                    match (far(self.literal(*lhs)), far(self.literal(*rhs))) {
+                        (_, Some(c)) => Cond::Far(op, Box::new((l, c))),
+                        (Some(c), None) => Cond::Far(mirror(op), Box::new((r, c))),
+                        (None, None) => cmp(op, l, r),
+                    }
                 }
-            }
-            _ => {
+                None => {
+                    self.eval(st, e);
+                    Cond::Unknown
+                }
+            },
+            ExprKind::Int { .. }
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => {
                 self.eval(st, e);
                 Cond::Unknown
             }
@@ -4168,7 +4492,19 @@ impl<'a> Fx<'a> {
                         let (lo, hi) = rem_interval(st, &l, &r);
                         Val::Itv(lo, hi)
                     }
-                    _ => TOP,
+                    BinaryOp::Or
+                    | BinaryOp::And
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitAnd
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr => TOP,
                 }
             }
             ExprKind::Field { .. } if self.callee_path_var(c, site, e, after).is_some() => {
@@ -4182,12 +4518,43 @@ impl<'a> Fx<'a> {
                     .find(|p| p.name == *n)
                     .and_then(|p| match &tree.ty(p.ty).kind {
                         TypeKind::Array { len, .. } => Some(int_literal(*len)),
-                        _ => None,
+                        TypeKind::Int { .. }
+                        | TypeKind::Bool
+                        | TypeKind::Named(_)
+                        | TypeKind::Enum(_)
+                        | TypeKind::Error => None,
                     })
                     .unwrap_or(TOP),
-                _ => TOP,
+                ExprKind::Int { .. }
+                | ExprKind::Bool(_)
+                | ExprKind::Todo(_)
+                | ExprKind::Unreachable(_)
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Construct { .. }
+                | ExprKind::Variant { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::Array(_)
+                | ExprKind::Repeat { .. }
+                | ExprKind::If { .. }
+                | ExprKind::Error => TOP,
             },
-            _ => TOP,
+            ExprKind::Bool(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => TOP,
         }
     }
 
@@ -4217,22 +4584,30 @@ impl<'a> Fx<'a> {
                 lhs,
                 rhs,
             } => Cond::Or(sub(*lhs), sub(*rhs)),
-            ExprKind::Binary {
-                op:
-                    op @ (BinaryOp::Eq
-                    | BinaryOp::Ne
-                    | BinaryOp::Lt
-                    | BinaryOp::Le
-                    | BinaryOp::Gt
-                    | BinaryOp::Ge),
-                lhs,
-                rhs,
-            } => cmp(
-                *op,
-                self.callee_val(st, c, site, *lhs, after),
-                self.callee_val(st, c, site, *rhs, after),
-            ),
-            _ => Cond::Unknown,
+            // `and` and `or` have their arms above; an arithmetic or bit operation is a value.
+            ExprKind::Binary { op, lhs, rhs } => match Rel::of(*op) {
+                Some(op) => cmp(
+                    op,
+                    self.callee_val(st, c, site, *lhs, after),
+                    self.callee_val(st, c, site, *rhs, after),
+                ),
+                None => Cond::Unknown,
+            },
+            ExprKind::Int { .. }
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => Cond::Unknown,
         }
     }
 
@@ -4303,7 +4678,7 @@ impl<'a> Fx<'a> {
                 .copied()
                 .flatten()
                 .map(|c| (site.clone(), c)),
-            _ => None,
+            Site::None | Site::Value(_) => None,
         };
         let Some((site, c)) = known else {
             // A function without a body: its `mut` arguments may change. The checker refuses
@@ -4472,7 +4847,23 @@ impl<'a> Fx<'a> {
                 self.conjuncts(*lhs, out);
                 self.conjuncts(*rhs, out);
             }
-            _ => out.push(Cand::Expr(e)),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Repeat { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => out.push(Cand::Expr(e)),
         }
     }
 
@@ -4708,9 +5099,9 @@ impl<'a> Fx<'a> {
         ) {
             (Cand::Weak(_), ExprKind::Binary { op, lhs, rhs }) => {
                 let weak = if *op == BinaryOp::Lt {
-                    BinaryOp::Le
+                    Rel::Le
                 } else {
-                    BinaryOp::Ge
+                    Rel::Ge
                 };
                 let l = self.eval(st, *lhs);
                 let r = self.eval(st, *rhs);
@@ -4810,7 +5201,7 @@ impl<'a> Fx<'a> {
                 Val::Lin(t, _) if t.iter().all(|t| self.vars.contains(&Some(t.var))) => {
                     Some(t.clone())
                 }
-                _ => None,
+                Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) | Val::Arr(_) | Val::Other => None,
             };
             tracked.push(terms.is_some());
             match terms {
@@ -4848,7 +5239,14 @@ impl<'a> Fx<'a> {
                 .zip(&self.measures[s.0 as usize])
                 .map(|(e, (start, end))| (*e, *start, *end))
                 .collect(),
-            _ => Vec::new(),
+            StmtKind::Binding { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::Guard { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Discard(_)
+            | StmtKind::Expr(_) => Vec::new(),
         }
     }
 
@@ -4865,7 +5263,7 @@ impl<'a> Fx<'a> {
         if !self.recording {
             return;
         }
-        let never_negative = cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0));
+        let never_negative = cmp(Rel::Ge, v.clone(), lin(Vec::new(), 0));
         let failing = self.refute(b, &never_negative);
         self.record(
             ObligationKind::Decreases,
@@ -4883,7 +5281,7 @@ impl<'a> Fx<'a> {
         let c = self.cond(&mut first, cond);
         self.assume(&mut first, &c, true);
         let v0 = self.eval(&mut first, e);
-        let on_entry = self.refute(&first, &cmp(BinaryOp::Ge, v0, lin(Vec::new(), 0)));
+        let on_entry = self.refute(&first, &cmp(Rel::Ge, v0, lin(Vec::new(), 0)));
         self.recording = true;
         let anchor = match on_entry {
             Some(_) => Anchor::Before(s),
@@ -4935,7 +5333,15 @@ impl<'a> Fx<'a> {
                 StmtKind::Expr(e) if i + 1 == stmts.len() => {
                     ends = self.if_ends(std::mem::replace(&mut st, Octagon::new(0)), *e);
                 }
-                _ => {
+                StmtKind::Binding { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Guard { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Discard(_)
+                | StmtKind::Expr(_) => {
                     self.stmt_eval(&mut st, s, None);
                 }
             }
@@ -5120,7 +5526,7 @@ impl<'a> Fx<'a> {
             let v = self.callee_val(st, c, site, clause.expr, false);
             let text = print(&callee.tree, clause.expr, &no_subst).0;
             let what = format!("the measure `{}` of `{}`", text, callee.name);
-            let never_negative = cmp(BinaryOp::Ge, v.clone(), lin(Vec::new(), 0));
+            let never_negative = cmp(Rel::Ge, v.clone(), lin(Vec::new(), 0));
             let failing = self.refute(st, &never_negative);
             let tag = Tag::Clause(callee.tree.expr(clause.expr).span);
             self.record(
@@ -5259,7 +5665,23 @@ impl<'a> Fx<'a> {
                         op: BinaryOp::Lt | BinaryOp::Gt,
                         ..
                     } => Some(Cand::Weak(*e)),
-                    _ => None,
+                    ExprKind::Int { .. }
+                    | ExprKind::Bool(_)
+                    | ExprKind::Name(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Construct { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::Array(_)
+                    | ExprKind::Repeat { .. }
+                    | ExprKind::If { .. }
+                    | ExprKind::Error => None,
                 },
                 Cand::Weak(_) => None,
             })
@@ -5408,7 +5830,12 @@ mod tests {
             .iter()
             .filter_map(|i| match i {
                 ItemDecl::Fn(f) => Some(Routing::of(&f.attrs)),
-                _ => None,
+                ItemDecl::Unit(_)
+                | ItemDecl::Struct(_)
+                | ItemDecl::BitStruct(_)
+                | ItemDecl::Enum(_)
+                | ItemDecl::Trait(_)
+                | ItemDecl::Example(_) => None,
             })
             .collect();
         let names: Vec<String> = parsed.iter().map(|p| p.name.clone()).collect();
@@ -7342,8 +7769,16 @@ mod tests {
         };
         assert_eq!(interval(&rel, &q), (2, 11));
         assert_eq!(interval(&st, &Val::Lin(vec![x], 3)), (-INF, INF));
-        assert_eq!(flip(BinaryOp::Ne), BinaryOp::Eq);
-        assert_eq!(flip(BinaryOp::Eq), BinaryOp::Ne);
+        assert_eq!(flip(Rel::Ne), Rel::Eq);
+        assert_eq!(flip(Rel::Eq), Rel::Ne);
+        // Each comparison is the operator that writes it, and flipping or mirroring it twice gives
+        // it back.
+        for r in [Rel::Eq, Rel::Ne, Rel::Lt, Rel::Le, Rel::Gt, Rel::Ge] {
+            assert_eq!(Rel::of(r.op()), Some(r));
+            assert_eq!(flip(flip(r)), r);
+            assert_eq!(mirror(mirror(r)), r);
+        }
+        assert_eq!(Rel::of(BinaryOp::Add), None);
         // Division: by a constant, by a positive or a negative divisor, by one that may be
         // zero, and with an unbounded dividend.
         assert_eq!(
@@ -7937,13 +8372,19 @@ mod tests {
     #[test]
     fn test_the_refined_var_may_be_one_the_value_does_not_read() {
         // `lo`, which the result reads, is tried first and fails at `lo = mid + 1`; `hi`, named
-        // with it in the loop's condition, directly or through arithmetic, bounds it.
+        // with it in the loop's condition, directly or through arithmetic, a negation included,
+        // bounds it.
         let search = |cond: &str| {
             format!("pub fn lower_bound(a: [16]i32, x: i32) -> usize[0..=16] {{\n  var lo: usize = 0\n  var hi: usize = 16\n  while {} {{\n    val mid = lo + (hi - lo) / 2\n    if a[mid] < x {{\n      lo = mid + 1\n    }} else {{\n      hi = mid\n    }}\n  }}\n  lo\n}}", cond)
         };
         // A parameter is bounded by a `var` a `guard` compares it with.
         let param = "pub fn f(a: [16]i32, n: usize) -> usize[0..=16] {\n  var hi: usize = 16\n  while hi > 0 and a[hi - 1] > 0 {\n    hi -= 1\n  }\n  guard n <= hi else {\n    return 0\n  }\n  n\n}";
-        for src in [search("lo < hi"), search("hi - lo > 0"), param.to_string()] {
+        for src in [
+            search("lo < hi"),
+            search("hi - lo > 0"),
+            search("-hi < -lo"),
+            param.to_string(),
+        ] {
             assert_eq!(
                 fix_messages(&src)[0],
                 "declare `hi` as `usize[0..=16]`",

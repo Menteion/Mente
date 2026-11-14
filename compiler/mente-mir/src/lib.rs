@@ -11,6 +11,12 @@
 //! - [`cfg_mutate`]: mutation operators over that MIR, which the mutation gate on lowered code
 //!   runs in memory.
 
+// A match over an enum names every variant, so that a variant added later does not compile until
+// each match decides what it does with it; a `_` arm once let walkers skip expression kinds
+// ([`guard-per-problem`](../../docs/design-review.md#guard-per-problem)). A match that is a
+// classifier by nature keeps `#[expect]`, with the reason every variant belongs in its arm.
+#![deny(clippy::wildcard_enum_match_arm)]
+
 pub mod cfg;
 pub mod cfg_mutate;
 
@@ -282,7 +288,12 @@ pub fn run_in_memory_mutation_gate(
             MirOp::SubSatQ16 => Some(MirOp::AddSatQ16),
             MirOp::CmpGe => Some(MirOp::CmpLt),
             MirOp::CmpLt => Some(MirOp::CmpGe),
-            _ => None,
+            MirOp::Param(_)
+            | MirOp::Const(_)
+            | MirOp::Shr
+            | MirOp::CmpEq
+            | MirOp::SelectBranchless
+            | MirOp::BranchCondJump => None,
         };
 
         if let Some(m_op) = mutated_op {
