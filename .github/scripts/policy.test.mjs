@@ -1177,52 +1177,98 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
   }
 });
 
-/// The required jobs that run code of a change on a Linux runner outside the sandbox, each with its
-/// reason and what bringing it in would take (ROADMAP.md, M2, the guards of the audit). In each,
-/// that code itself produces the evidence its step reads. A job that leaves the pinned jobs and
-/// is not named here fails the check below: dropping a job from PINNED_JOBS takes its tests out of
-/// the sandbox unseen otherwise.
+/// Every required job that runs on a Linux runner is in exactly one of three lists, each with its
+/// reason: PINNED_JOBS, whose code of the change runs in the sandbox; LEFT_OUTSIDE, which runs code
+/// of the change outside it; and GATE_ONLY, which runs none but the gate's own scripts. A job in
+/// none of them fails the check below, so that a job that leaves the pinned ones, or a required job
+/// added later, is classified where review sees it, not by a pattern of what its steps run.
+///
+/// LEFT_OUTSIDE: in each, the change's own code produces the evidence its step reads, so a sandbox
+/// would keep that code from the runner but not from its own result; what bringing each in would
+/// take is in ROADMAP.md, M2, the guards of the audit.
 const LEFT_OUTSIDE = new Map([
   ["ci.yml#bench", "its tests read the base branch's medians from a file of the runner's and write the job's summary"],
   ["ci.yml#tier1-latency", "its test writes the job's summary"],
   ["ci.yml#debuggers", "a script of the change drives the debugger over the binary it built"],
+  ["ci.yml#docs", "it runs the change's own node code: the benchmark's checker and its tests, the harness's tests and the documentation tools"],
   ["smt.yml#z3", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
   ["fuzz.yml#fuzz", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
   ["mir-mutants.yml#gate", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
   ["perf.yml#kernels", "it measures mn and its kernels through perf, with the base branch's compiler beside the change's"],
   ["harness.yml#fixtures", "its own sandbox confines agent code, not mn"],
 ]);
-/// Whether a step's script runs code of the change through cargo, or a binary it built.
-const runsBuiltCode = (text) => /\bcargo(-nextest)?\b[^\n]*\b(test|t|run|r|nextest|mutants|bench|llvm-cov)\b|\btarget\/(debug|release)\//.test(String(text));
+/// GATE_ONLY: the required jobs that run no code of the change but the gate's own scripts under
+/// .github/, which the code owner reviews.
+const GATE_ONLY = new Map([["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"]]);
+/// Why a script could run code of the change though its job claims to run only the gate's own: a
+/// program it starts that builds or runs the change's code (cargo, rustc, npm, npx, a built binary,
+/// make), or any path outside .github/ that it names: a file or a directory of the repository, a
+/// path that climbs out with `..`, or a path written relative to where the step stands.
+export function gateOnlyProblems(script) {
+  const found = [];
+  const lines = logicalLines(script)
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+  for (const line of lines) {
+    if (/(^|[\s;&|(`$])(cargo|cargo-[\w-]+|rustc|rustup|npm|npx|pnpm|yarn|make|bun|deno)(\s|$)/.test(line)) found.push(`it starts a tool that builds or runs the change's code: ${line}`);
+    if (/(^|[^\w.-])target\//.test(line) || /(^|[\s;&|(=])\.\.?\//.test(line.replace(/\.\/\.github\//g, ""))) found.push(`it names a built binary or a path by a relative name: ${line}`);
+    for (const token of line.split(/[\s;|&()<>"'`=,{}]+/)) {
+      const t = token.replace(/^\.\//, "");
+      if (t === "" || t.startsWith("-") || t.startsWith("$") || t.startsWith("/")) continue;
+      const outside = !t.startsWith(".github/") || t.split("/").includes("..");
+      if (outside && (/^[\w.-]+\/[\w./-]*$/.test(t) || tracked().has(t) || isDir(t))) found.push(`it names ${t}, a path outside .github/: ${line}`);
+    }
+  }
+  return found;
+}
 
-check("every required job that runs code of a change on Linux runs it in the sandbox, or says why not", () => {
+check("every required job on Linux runs the change's code in the sandbox, or says why it does not", () => {
   const pinned = new Set(PINNED_JOBS.keys());
+  const lists = [
+    ["PINNED_JOBS", pinned],
+    ["LEFT_OUTSIDE", new Set(LEFT_OUTSIDE.keys())],
+    ["GATE_ONLY", new Set(GATE_ONLY.keys())],
+  ];
+  const required = new Set();
   for (const { file, id, job } of requiredJobs()) {
     const key = `${file}#${id}`;
+    required.add(key);
     const linux = /ubuntu-/.test(JSON.stringify([job["runs-on"], job.strategy?.matrix ?? null]));
-    if (!linux || !steps(job).some((s) => runsBuiltCode(s.run ?? ""))) continue;
-    assert.ok(pinned.has(key) || LEFT_OUTSIDE.has(key), `${key} runs code of the change on a Linux runner, and is neither pinned with the sandbox (PINNED_JOBS) nor named, with its reason, in LEFT_OUTSIDE in .github/scripts/policy.test.mjs`);
+    const holding = lists.filter(([, set]) => set.has(key)).map(([name]) => name);
+    if (!linux) {
+      assert.deepEqual(holding.filter((n) => n !== "PINNED_JOBS"), [], `${key} runs on no Linux runner, and is classified for one in ${holding.join(", ")}`);
+      continue;
+    }
+    assert.equal(holding.length, 1, `${key}, a required job on a Linux runner, is in ${holding.length === 0 ? "none" : holding.join(" and ")} of PINNED_JOBS, LEFT_OUTSIDE and GATE_ONLY in .github/scripts/policy.test.mjs, not exactly one: it says, with its reason, whether its code of the change runs in the sandbox, outside it, or not at all`);
+    if (GATE_ONLY.has(key)) {
+      for (const s of steps(job)) {
+        if (String(s.uses ?? "") !== "" && !/^actions\/checkout@/.test(String(s.uses))) assert.fail(`${stepKey(file, id, s)}: a job of GATE_ONLY runs an action other than the checkout`);
+        if (typeof s.run === "string") assert.deepEqual(gateOnlyProblems(s.run), [], `${stepKey(file, id, s)}: a job of GATE_ONLY runs code of the change`);
+      }
+    }
+  }
+  for (const [name, set] of lists) {
+    for (const key of set) assert.ok(required.has(key) || (name === "PINNED_JOBS" && key === "mutants-full.yml#full"), `${name} names ${key}, which is no required job`);
   }
   // Nothing of the change lies under target/, where the tests are built: root mounts the tests'
   // own directory there, and refuses to through a link the change tracks (test-sandbox.sh); this
   // refuses the tracked file before any job runs.
   const underTarget = [...tracked()].filter((f) => f === "target" || f.startsWith("target/"));
   assert.deepEqual(underTarget, [], "files under target/ are tracked: the sandbox mounts the tests' own directory there, and a tracked link could aim it elsewhere");
-  const required = new Set(requiredJobs().map(({ file, id }) => `${file}#${id}`));
-  for (const key of LEFT_OUTSIDE.keys()) {
-    assert.ok(required.has(key), `LEFT_OUTSIDE names ${key}, which is no required job`);
-    assert.ok(!pinned.has(key), `LEFT_OUTSIDE names ${key}, which runs in the sandbox`);
-  }
-  for (const [text, runs] of [
-    ["timeout 15m cargo test --release --locked -p mente-cli -- --ignored x", true],
-    ["cargo build --release --locked --bin mn\n./target/release/mn smt examples", true],
-    ["bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn", true],
-    ["cargo llvm-cov --workspace --locked --lcov --output-path lcov.info", true],
-    ["cargo t --release", true],
-    ["rustup toolchain install", false],
-    ["node --test .github/scripts/policy.test.mjs", false],
+  // What a job of GATE_ONLY may run, and what it may not: the plants of the review of 4e896ca.
+  assert.deepEqual(gateOnlyProblems("node .github/scripts/commits.mjs\n"), []);
+  assert.deepEqual(gateOnlyProblems('echo "$PR_TITLE" | node .github/scripts/commits.mjs --stdin\n'), []);
+  for (const plant of [
+    "cargo build --locked --bin mn\ncd target\n./debug/mn spec\n",
+    "bash compiler/mente-cli/tests/debuggers/run-all.sh\n",
+    "npm run test:benchmark\n",
+    "node benchmark/check.mjs\n",
+    "npx --no-install spec-guard\n",
+    "cd compiler && sh run.sh\n",
+    "node .github/../benchmark/check.mjs\n",
+    "rustup run stable rustc x.rs\n",
   ]) {
-    assert.equal(runsBuiltCode(text), runs, text);
+    assert.ok(gateOnlyProblems(plant).length > 0, `the rule for GATE_ONLY lets through: ${plant}`);
   }
 });
 
@@ -1306,7 +1352,14 @@ check("as cargo reads the manifests and the lock, no package of the workspace ru
   const runs = docs.map((s) => String(s.run ?? "").trim());
   const at = runs.indexOf("node .github/scripts/build-time-code.mjs");
   assert.ok(at >= 0, "the Documentation job does not run build-time-code.mjs");
-  assert.deepEqual(runs.slice(0, at + 1).filter((r) => r !== ""), ["node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs", "node .github/scripts/action-pins.mjs", "rustup toolchain install", "node .github/scripts/build-time-code.mjs"], "the Documentation job runs something else before cargo reads the manifests, or reads them before the policy has run");
+  // Every step up to it, actions included: an action is code too, and one more before cargo's
+  // reading could change what cargo is.
+  const step = (s) => (s.uses !== undefined ? `uses ${String(s.uses).replace(/@[0-9a-f]{40}$/, "")}` : `run ${String(s.run).trim()}`);
+  assert.deepEqual(
+    docs.slice(0, at + 1).map(step),
+    ["uses actions/checkout", "uses actions/setup-node", "run node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs", "run node .github/scripts/action-pins.mjs", "run rustup toolchain install", "run node .github/scripts/build-time-code.mjs"],
+    "the Documentation job runs something else before cargo reads the manifests, an action among them, or reads them before the policy has run",
+  );
   for (const s of docs.slice(0, at + 1)) for (const key of ["if", "continue-on-error", "env", "shell"]) assert.ok(!(key in s), `${s.name ?? s.uses}: a step up to cargo's reading of the manifests carries ${key}:`);
   assert.ok(!docs.some((s) => /\bcargo\s+(build|test|run|check|clippy|nextest|install)\b/.test(String(s.run ?? ""))), "the Documentation job builds, so code of the change could run in it before the manifests are read");
   // What the reading refuses, on what cargo reports: the plants of the review of pull request
@@ -2545,6 +2598,8 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     outcome("caught, no test failed", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}error: no tests to run\n`),
     outcome("caught, by tests that ran outside the sandbox", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${FAILED}*** result: Failure(100)\n`),
     outcome("caught, by tests another runner took", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`env\` defined by \`--config\`\n${FAILED}`),
+    outcome("caught, the runner's line printed by a test", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `    Starting 3 tests across 1 binary\n${SANDBOXED}${FAILED}`),
+    outcome("caught, the runner's line after the failure", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${FAILED}${SANDBOXED}`),
     outcome("unviable, built", "Unviable", [build("Success")], "error[E0277]: x\n"),
     outcome("unviable, no error", "Unviable", [build({ Failure: 101 })], "*** result: Failure(101)\n"),
   ];

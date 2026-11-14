@@ -336,10 +336,12 @@ jobs:
         # For cargo's reading of the manifests alone: this job builds nothing. The policy, two
         # steps up, has read rust-toolchain.toml and refused every cargo configuration file.
         run: rustup toolchain install
-      - name: No code of the change runs at build time, and every crate is an approved one, as cargo reads the manifests
-        # A build script, a procedural macro or a new crate's build script would run where cargo
-        # builds, outside every sandbox, before any test could refuse it. Here cargo reads the
-        # manifests and the lock and builds nothing (.github/scripts/build-time-code.mjs).
+      - name: No package of the change has code that runs at build time, and every crate is an approved one, as cargo reads the manifests
+        # A build script, a procedural macro or a new crate's build script runs where cargo builds,
+        # outside every sandbox. Here cargo reads the manifests and the lock and builds nothing, and
+        # such code fails this required check, so the change cannot merge. It does not keep that
+        # code from running in the jobs of the same run that build, before this fails; checking
+        # first in each of them is the next step (.github/scripts/build-time-code.mjs).
         run: node .github/scripts/build-time-code.mjs
       # No package's install script runs: none is needed, and one could write the environment of
       # the steps after it.
