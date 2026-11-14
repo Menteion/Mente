@@ -26,7 +26,7 @@
 #     signal or trace none; it has no network interface but a loopback that is down; and when it
 #     ends, the kernel ends every process it started;
 #   - an environment of the variables cargo, nextest and the tests set (CARGO_*, NEXTEST*,
-#     MENTE_*, RUST*), and the limits on memory and file size of the shell that started it;
+#     MENTE_*, RUST_*), and the limits on memory and file size of the shell that started it;
 #   - no core dump: a crash there starts no handler of the runner's, which would run as root.
 #
 # Two guards that a user of its own would switch off are kept. nextest stops a test past its time
@@ -216,7 +216,7 @@ run() {
   printf '%s\n' "$1" >> "$log"
   for name in $(compgen -e); do
     case "$name" in
-      CARGO | CARGO_* | NEXTEST | NEXTEST_* | MENTE_* | RUST_* | RUSTC_* | TERM | LANG | LC_* | TZ | CI | NO_COLOR | CLICOLOR | CLICOLOR_FORCE | FORCE_COLOR)
+      CARGO | CARGO_* | NEXTEST | NEXTEST_* | MENTE_* | RUST_* | TERM | LANG | LC_* | TZ | CI | NO_COLOR | CLICOLOR | CLICOLOR_FORCE | FORCE_COLOR)
         envs+=("$name=${!name}")
         ;;
     esac
