@@ -332,6 +332,15 @@ jobs:
         # The policy checks a pin's form; this asks each action's repository for the commit its
         # tag names (.github/scripts/action-pins.mjs).
         run: node .github/scripts/action-pins.mjs
+      - name: Install the toolchain rust-toolchain.toml pins
+        # For cargo's reading of the manifests alone: this job builds nothing. The policy, two
+        # steps up, has read rust-toolchain.toml and refused every cargo configuration file.
+        run: rustup toolchain install
+      - name: No code of the change runs at build time, and every crate is an approved one, as cargo reads the manifests
+        # A build script, a procedural macro or a new crate's build script would run where cargo
+        # builds, outside every sandbox, before any test could refuse it. Here cargo reads the
+        # manifests and the lock and builds nothing (.github/scripts/build-time-code.mjs).
+        run: node .github/scripts/build-time-code.mjs
       # No package's install script runs: none is needed, and one could write the environment of
       # the steps after it.
       - run: npm ci --ignore-scripts

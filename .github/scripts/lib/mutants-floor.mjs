@@ -26,7 +26,8 @@
 //   node .github/scripts/mutants-floor.mjs evidence <mutants.out>...
 //
 // `evidence` prints each mutant whose outcome its log does not show: caught without nextest's exit
-// for a failed run and a failed test, unviable without a failed build and a compiler's error. What
+// for a failed run, a failed test and nextest's own line that it hands the tests to the sandbox,
+// unviable without a failed build and a compiler's error. What
 // it stops, and what it does not: it catches a test tool that is missing or broken, and a stub
 // left in its place that exits at once. It does not stop code of the change that sets out to
 // defeat it, which runs with the job's rights: a stub that prints a failing test and exits as
@@ -191,9 +192,15 @@ export function readList(text) {
 /// timeout, a leak that fails, or a signal or an abort.
 const FAILED_TEST = /^\s+(FAIL|TIMEOUT|LEAK-FAIL|SIG[A-Z]+|ABORT) \[/m;
 
+/// What nextest prints before a run whose test executables it hands to the sandbox
+/// (.github/scripts/test-sandbox.sh): its own line, for each mutant, in that mutant's log. The
+/// count of sandboxed commands at the step's end cannot tell one mutant's tests from another's.
+const SANDBOX_RUNNER = /^\s*info: (?:for the \w+ platform, )?using target runner `[^`\n]*\/test-sandbox\.sh run`/m;
+
 /// Why a run's outcomes do not show the work they claim, one message a mutant: a mutant counts as
-/// caught only when its tests ran and one failed, nextest exiting 100 with a failing test in the
-/// log, and as unviable only when its build failed with an error of the compiler. A stub in place of
+/// caught only when its tests ran in the sandbox and one failed, nextest exiting 100 with a failing
+/// test in the log after its line that names the sandbox as its runner, and as unviable only when
+/// its build failed with an error of the compiler. A stub in place of
 /// nextest or cargo, which exits at once, would otherwise make every mutant caught or unviable,
 /// and the floor count them all as tested. Times cannot tell: a caught mutant's tests took 0.15 s
 /// in the runs of #120. `readLog` reads a log by the path the outcome names.
@@ -209,6 +216,7 @@ export function evidence(outcomes, readLog) {
       const test = phase("Test");
       if (test?.process_status?.Failure !== 100) found.push(`${name}: caught, but its tests did not end as nextest ends a failed run (${JSON.stringify(test?.process_status ?? null)})`);
       else if (!FAILED_TEST.test(log)) found.push(`${name}: caught, but no test failed in its log`);
+      else if (!SANDBOX_RUNNER.test(log)) found.push(`${name}: caught, but its log does not show nextest handing its tests to the sandbox`);
     } else {
       const build = phase("Build");
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);
