@@ -149,6 +149,9 @@ pub struct Report {
     pub obligations: Vec<Obligation>,
     pub diagnostics: Vec<Diagnostic>,
     pub axioms: Vec<(Span, String)>,
+    /// How many variables the function has: Tier 1 relates their values up to
+    /// [`RELATIONAL_LIMIT`], and holds each one's bounds alone in a function of more.
+    pub variables: usize,
 }
 
 /// What a caller's check reads of a function: its parameters' and result's types with their
@@ -1586,6 +1589,7 @@ fn run(
     let mut st = Octagon::new(fx.count);
     fx.entry(&mut st);
     fx.body(&mut st);
+    fx.report.variables = fx.count;
     (fx.report, fx.retries, fx.queries.unwrap_or_default())
 }
 
@@ -5884,6 +5888,10 @@ mod tests {
         // smaller, and bounds alone do not.
         assert_eq!(codes(&with(10)), NONE);
         assert_eq!(codes(&with(70)), ["E0507"]);
+        // The report says on which side of the limit a function lies.
+        assert!(report(&with(10)).variables <= RELATIONAL_LIMIT);
+        assert!(report(&with(70)).variables > RELATIONAL_LIMIT);
+        assert_eq!(report(&with(11)).variables, report(&with(10)).variables + 2);
         // Bounds alone still prove what bounds prove.
         assert_eq!(
             codes("pub fn g(v: u8) -> u8 = v\npub fn f(x: u8[0..10]) -> u8 {\n  _ = g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))\n  x + 1\n}"),

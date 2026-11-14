@@ -341,6 +341,11 @@ impl IntT {
             hi: self.max(),
         }
     }
+
+    /// Whether every value of `o` is one of this type.
+    fn holds(self, o: IntT) -> bool {
+        self.min() <= o.min() && o.max() <= self.max()
+    }
 }
 
 /// A type of M1, or a struct or an enum the program declares.
@@ -776,28 +781,54 @@ impl E {
 }
 
 /// What the operands of an integer expression have in common, which decides its type
-/// (`core-calculus.md` item 5): one integer type, literals alone, or several types.
+/// (`core-calculus.md` item 5): one integer type, literals alone, or several types, with the
+/// smallest standard type that holds them all, if there is one, as the checker keeps it
+/// (`types.rs`, `Int`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cls {
     One(IntT),
     Lit,
-    Mixed,
+    Mixed(Option<IntT>),
 }
+
+/// The standard types from the smallest: the order in which the checker looks for the type
+/// that holds two others.
+const BY_SIZE: [IntT; 11] = [
+    INTS[0], INTS[6], INTS[1], INTS[7], INTS[2], INTS[8], INTS[3], INTS[5], INTS[9], INTS[4],
+    INTS[10],
+];
 
 impl Cls {
     fn join(self, o: Cls) -> Cls {
         match (self, o) {
+            (Cls::Lit, x) | (x, Cls::Lit) => x,
             (Cls::One(a), Cls::One(b)) if a == b => Cls::One(a),
-            (Cls::One(a), Cls::Lit) | (Cls::Lit, Cls::One(a)) => Cls::One(a),
-            (Cls::Lit, Cls::Lit) => Cls::Lit,
-            _ => Cls::Mixed,
+            (a, b) => Cls::Mixed(a.holder().zip(b.holder()).and_then(|(a, b)| {
+                if a.holds(b) {
+                    Some(a)
+                } else if b.holds(a) {
+                    Some(b)
+                } else {
+                    BY_SIZE.iter().copied().find(|t| t.holds(a) && t.holds(b))
+                }
+            })),
         }
     }
 
-    /// The 128-bit type that makes an operation on this operand checked at the operator.
+    /// The smallest standard type that holds this class's values, if there is one.
+    fn holder(self) -> Option<IntT> {
+        match self {
+            Cls::Lit => Some(I64),
+            Cls::One(t) => Some(t),
+            Cls::Mixed(t) => t,
+        }
+    }
+
+    /// The 128-bit type that makes an operation on this operand checked at the operator: its
+    /// one type, or the type that holds its several.
     fn wide(self) -> Option<IntT> {
         match self {
-            Cls::One(t) if t.bits == 128 => Some(t),
+            Cls::One(t) | Cls::Mixed(Some(t)) if t.bits == 128 => Some(t),
             _ => None,
         }
     }
@@ -901,6 +932,10 @@ struct Binding {
     /// it. None for no more than its type and refinement say. Only what a narrowing may take
     /// reads it ([`Gen::fact`]): nothing that must be proven rests on it.
     known: Option<R>,
+    /// The refinement of its elements, with literal bounds, when a pattern binds it to a field
+    /// that is an array of refined integers: a `match` on one of its elements covers that
+    /// range (`core-calculus.md`, item 14).
+    elements: Option<R>,
     read: bool,
     assigned: bool,
 }
@@ -939,6 +974,33 @@ enum Req {
     Sum(usize, usize, Num),
     /// `a < b.len`.
     Below(usize, usize),
+}
+
+impl Sig {
+    /// For each parameter, the parameters a `requires` or a refinement bound relates it to:
+    /// `a op b`, `a + b <= c`, and a bound that names another parameter.
+    fn related(&self) -> Vec<Vec<usize>> {
+        let mut out = vec![Vec::new(); self.params.len()];
+        let mut pair = |a: usize, b: usize| {
+            out[a].push(b);
+            out[b].push(a);
+        };
+        for r in &self.requires {
+            match *r {
+                Req::Order(a, _, b) | Req::Sum(a, b, _) => pair(a, b),
+                Req::Bound(..) | Req::Below(..) => {}
+            }
+        }
+        for (k, p) in self.params.iter().enumerate() {
+            for b in p.refine.iter().flat_map(|r| [&r.lo, &r.hi]) {
+                match b {
+                    Bnd::Name(i) => pair(k, *i),
+                    Bnd::Lit(_) | Bnd::Len(_) => {}
+                }
+            }
+        }
+        out
+    }
 }
 
 /// A function's signature as its callers see it, with the work a call does at most.
@@ -1028,6 +1090,8 @@ struct Gen {
     current: Option<Sig>,
     /// The depth bound of the function's recursion, when it recurses.
     recursion: Option<u64>,
+    /// Whether the function being generated is written to stay small ([`Gen::relates`]).
+    small: bool,
     recursed: bool,
     binds: Vec<Binding>,
     scopes: Vec<Vec<usize>>,
@@ -1060,6 +1124,7 @@ impl Gen {
             sigs: Vec::new(),
             current: None,
             recursion: None,
+            small: false,
             recursed: false,
             binds: Vec::new(),
             scopes: Vec::new(),
@@ -1447,7 +1512,7 @@ impl Gen {
             let u = match g.cls {
                 Cls::One(u) => u,
                 Cls::Lit => I64,
-                Cls::Mixed => {
+                Cls::Mixed(_) => {
                     self.restore(m);
                     continue;
                 }
@@ -1518,11 +1583,14 @@ impl Gen {
             .map(|(f, binds)| {
                 binds.then(|| {
                     let name = self.fresh("q");
-                    let range = match (&f.ty, f.refine) {
-                        (Ty::Int(_), r) => r,
-                        _ => None,
+                    let (range, elements) = match (&f.ty, f.refine) {
+                        (Ty::Int(_), r) => (r, None),
+                        (Ty::Array(_, inner), r) if matches!(**inner, Ty::Int(_)) => (None, r),
+                        _ => (None, None),
                     };
-                    self.declare(name, f.ty.clone(), Kind::Pattern, range)
+                    let id = self.declare(name, f.ty.clone(), Kind::Pattern, range);
+                    self.binds[id].elements = elements;
+                    id
                 })
             })
             .collect()
@@ -2081,6 +2149,7 @@ impl Gen {
             kind,
             range,
             known: None,
+            elements: None,
             read: false,
             assigned: false,
         });
@@ -3224,6 +3293,16 @@ impl Gen {
         if options.is_empty() {
             return None;
         }
+        // A function that stays small calls, more often than not, a function that relates two
+        // of its parameters when there is one: only there may the arguments be two names.
+        let relating: Vec<Sig> = options
+            .iter()
+            .filter(|s| s.related().iter().any(|r| !r.is_empty()))
+            .cloned()
+            .collect();
+        if self.relates() && !relating.is_empty() && self.rng.chance(60) {
+            options = relating;
+        }
         let sig = self.rng.pick(&options).clone();
         let is_self = recursive.as_ref().is_some_and(|s| s.name == sig.name);
         let m = self.mark();
@@ -3279,6 +3358,21 @@ impl Gen {
                 }
             }
         }
+        // The parameters a refinement bound or a `requires` relates to each one: its
+        // arguments are two values the call must be proven to relate.
+        let related = sig.related();
+        let relates = self.relates();
+        // The most an argument may be that a `requires` adds to another: a literal above it
+        // never meets the clause, and one near the limit of a 128-bit type makes the sum the
+        // guard states leave 128 bits (`E0222`).
+        let mut most: Vec<Option<Num>> = vec![None; sig.params.len()];
+        for r in &sig.requires {
+            if let Req::Sum(a, b, c) = *r {
+                for k in [a, b] {
+                    most[k] = Some(most[k].map_or(c, |m| m.min(c)));
+                }
+            }
+        }
         for (k, p) in sig.params.iter().enumerate() {
             if let Some(place) = places[k].take() {
                 args.push((true, place));
@@ -3295,7 +3389,58 @@ impl Gen {
                     }),
                     _ => None,
                 });
-                self.simple(&p.ty, literal)
+                let literal = literal.or(match (&p.ty, most[k]) {
+                    (Ty::Int(t), Some(c)) => t.range().meet(R {
+                        lo: Num::ZERO,
+                        hi: c,
+                    }),
+                    _ => None,
+                });
+                // The arguments before this one that it is related to, which name a binding.
+                let named: Vec<&E> = related[k]
+                    .iter()
+                    .filter(|&&j| j < k)
+                    .map(|&j| &args[j].1)
+                    .filter(|a| names(a, &|_| true))
+                    .collect();
+                // Tier 1 relates two names only in a function that stays within the
+                // variables it relates ([`Gen::relates`]); past them it holds each one's
+                // bounds alone, which prove a name against a literal and nothing of two
+                // names. And it holds no sum of a name with itself, `n + n`, in any function.
+                // So an argument related to a name is a literal in a function that may grow,
+                // and is another name than that one in a function that stays small.
+                let m = self.mark();
+                // Where two names may be related, a related argument is a name whenever one
+                // is in scope.
+                let name = match (&p.ty, relates && !related[k].is_empty()) {
+                    (Ty::Int(_), true) => self.int_name(None, false).map(|(e, ..)| e),
+                    _ => None,
+                };
+                let e = match name {
+                    Some(e) => e,
+                    None => self.simple(&p.ty, literal),
+                };
+                let again = named
+                    .iter()
+                    .any(|a| !relates || names(a, &|n| names(&e, &|x| x == n)));
+                match (&p.ty, again) {
+                    (Ty::Int(t), true) => {
+                        // The name is not read after all. A literal near the least value
+                        // the parameter takes meets what relates it to a name most often.
+                        self.restore(m);
+                        let all = literal.unwrap_or(t.range());
+                        let least = match p.refine.as_ref().map(|r| &r.lo) {
+                            Some(Bnd::Lit(lo)) => *lo,
+                            Some(Bnd::Name(_) | Bnd::Len(_)) | None => Num::ZERO,
+                        };
+                        let few = least
+                            .add(Num::small(3))
+                            .and_then(|hi| all.meet(R { lo: least, hi }));
+                        let n = self.value_in(few.unwrap_or(all));
+                        self.literal(n, None)
+                    }
+                    _ => e,
+                }
             } else {
                 self.value(&p.ty, depth + 1)
             };
@@ -3445,8 +3590,14 @@ impl Gen {
                     .find(|g| g.name == *f)
                     .and_then(|g| g.refine)
             }
-            E::Index(b, _) => match self.place_ty(id, b) {
-                Ty::Array(_, inner) if matches!(*inner, Ty::Int(_)) => self.place_refine(id, b),
+            E::Index(b, _) => match (self.place_ty(id, b), &**b) {
+                // An element of what a pattern bound to an array field, or of the field itself.
+                (Ty::Array(_, inner), E::Name(_)) if matches!(*inner, Ty::Int(_)) => {
+                    self.binds[id].elements
+                }
+                (Ty::Array(_, inner), _) if matches!(*inner, Ty::Int(_)) => {
+                    self.place_refine(id, b)
+                }
                 _ => None,
             },
             _ => None,
@@ -3554,12 +3705,13 @@ impl Gen {
         Block { stmts, tail }
     }
 
-    /// Whether the function being generated must prove a fact that relates two values: its
-    /// recursion's measure at the call against the one on entry. Tier 1 relates the values of
-    /// a function of at most `RELATIONAL_LIMIT` variables, and keeps each one's bounds alone
-    /// past that (`octagon.rs`), so such a function stays small.
+    /// Whether the function being generated may have to prove a fact that relates two values:
+    /// its recursion's measure at the call against the one on entry, or two names a call
+    /// passes to parameters its callee relates ([`Gen::arguments`]). Tier 1 relates the values
+    /// of a function of at most `RELATIONAL_LIMIT` variables, and keeps each one's bounds
+    /// alone past that (`octagon.rs`), so such a function stays small.
     fn relates(&self) -> bool {
-        self.mode == Mode::Refined && self.recursion.is_some()
+        self.mode == Mode::Refined && (self.recursion.is_some() || self.small)
     }
 
     /// Ends a scope: each binding of it nobody read is discarded on purpose before the block
@@ -4032,7 +4184,7 @@ impl Gen {
         let t = match g.cls {
             Cls::One(t) => t,
             Cls::Lit => I64,
-            Cls::Mixed => return None,
+            Cls::Mixed(_) => return None,
         };
         (g.r.meets(t.range()) && g.k.is_none_or(|v| t.range().holds(v)) && self.may_fit(&g.e, t))
             .then_some((Ty::Int(t), g.e))
@@ -4357,6 +4509,9 @@ impl Gen {
             .rng
             .chance(if refined { 20 } else { 10 })
             .then(|| 2 + self.rng.below(6));
+        // Now and then a refined function that does not recurse stays small too, so that its
+        // calls may relate two names.
+        self.small = refined && self.recursion.is_none() && self.rng.chance(50);
         if let Some(depth) = self.recursion {
             params.push(Param {
                 name: "n".into(),
@@ -5572,6 +5727,215 @@ mod tests {
             .map(|d| always_traps(&kept, program, 0, d, &mut problems))
             .collect();
         (seen, problems)
+    }
+
+    /// A `match` covers the refinement of what it reads (`core-calculus.md`, item 14), so the
+    /// generator knows it wherever the checker does: of a binding, of a field, of an element
+    /// of an array field, and of an element of what a pattern bound to such a field, whose
+    /// own range, as `E0222` takes it, stays its type's.
+    #[test]
+    fn test_a_pattern_binding_keeps_the_refinement_a_match_covers() {
+        let r = R {
+            lo: Num::small(2),
+            hi: Num::small(16),
+        };
+        let field = |name: &str, ty: Ty| GField {
+            name: name.into(),
+            ty,
+            refine: Some(r),
+            exclusive: false,
+            is_pub: true,
+        };
+        let int = Ty::Int(INTS[7]);
+        let array = Ty::Array(1, Box::new(int.clone()));
+        let mut g = Gen::new(0, Mode::Refined);
+        g.scopes = vec![Vec::new()];
+        let pattern = Pat::Variant(
+            "E".into(),
+            "V".into(),
+            vec![(field("y0", int), true), (field("y1", array.clone()), true)],
+        );
+        let ids = g.bind_pattern(&pattern);
+        let (Some(scalar), Some(elements)) = (ids[0], ids[1]) else {
+            panic!("the pattern binds both fields");
+        };
+        // An array no pattern bound has elements of its type's range.
+        let plain = g.declare("v".into(), array, Kind::Val, None);
+        let name = |id: usize| E::name(&g.binds[id].name);
+        let first = |e: E| E::Index(Box::new(e), Box::new(E::Lit("0".into())));
+        assert_eq!(g.declared_range(&name(scalar)), Some(r));
+        assert_eq!(g.declared_range(&first(name(elements))), Some(r));
+        assert_eq!(g.declared_range(&name(elements)), None);
+        assert_eq!(g.declared_range(&first(name(plain))), None);
+    }
+
+    /// What a call passes to parameters its callee relates, by a `requires` of two of them or
+    /// a bound that names one: in a function that may grow past the variables Tier 1 relates,
+    /// at most one of them names a binding, since bounds alone prove a name against a literal
+    /// and nothing of two names; in one written to stay small both may, but never one name
+    /// on both sides of a sum, which Tier 1 holds in no function.
+    #[test]
+    fn test_a_call_relates_two_names_only_where_tier1_relates_them() {
+        let param = |name: &str, refine: Option<Refine>| Param {
+            name: name.into(),
+            is_mut: false,
+            ty: Ty::Int(INTS[2]),
+            refine,
+        };
+        // A parameter of a 128-bit type, whose literals reach its limits.
+        let wide = |name: &str| Param {
+            name: name.into(),
+            is_mut: false,
+            ty: Ty::Int(INTS[10]),
+            refine: None,
+        };
+        let below = |i: usize| {
+            Some(Refine {
+                lo: Bnd::Lit(Num::ZERO),
+                hi: Bnd::Name(i),
+                inclusive: false,
+            })
+        };
+        let sigs = [
+            (
+                vec![param("a", None), param("b", below(0))],
+                Vec::new(),
+                false,
+            ),
+            (
+                vec![param("a", None), param("b", None)],
+                vec![Req::Order(0, Op::Lt, 1)],
+                false,
+            ),
+            (
+                vec![param("a", None), wide("b")],
+                vec![Req::Sum(0, 1, Num::small(9))],
+                true,
+            ),
+        ];
+        let named = |e: &E| {
+            let mut out = Vec::new();
+            for n in ["x", "y", "z"] {
+                if names(e, &|m| m == n) {
+                    out.push(n);
+                }
+            }
+            out
+        };
+        for (params, requires, sum) in sigs {
+            let sig = Sig {
+                name: "callee".into(),
+                params,
+                ret: None,
+                ret_range: None,
+                requires,
+                cost: 0,
+            };
+            for small in [false, true] {
+                let (mut both, mut one, mut none) = (0, 0, 0);
+                for seed in 0..400 {
+                    let mut g = Gen::new(seed, Mode::Refined);
+                    g.scopes = vec![Vec::new()];
+                    g.small = small;
+                    for n in ["x", "y", "z"] {
+                        g.declare(n.into(), Ty::Int(INTS[2]), Kind::Val, None);
+                    }
+                    let Some(E::Call(_, args)) = g.arguments(&sig, false, 0) else {
+                        panic!("no call");
+                    };
+                    let (a, b) = (named(&args[0].1), named(&args[1].1));
+                    match (a.is_empty(), b.is_empty()) {
+                        (false, false) => both += 1,
+                        (true, true) => none += 1,
+                        _ => one += 1,
+                    }
+                    assert!(
+                        small || a.is_empty() || b.is_empty(),
+                        "two names, {:?} and {:?}, in a function that may grow",
+                        a,
+                        b
+                    );
+                    assert!(
+                        !sum || a.iter().all(|n| !b.contains(n)),
+                        "{:?} on both sides of a sum",
+                        a
+                    );
+                    // A literal a sum takes is one the clause may allow.
+                    for (_, e) in &args {
+                        if let (true, Some(n)) = (sum, constant(e)) {
+                            assert!(Num::ZERO <= n && n <= Num::small(9), "{} in a sum", n);
+                        }
+                    }
+                    // Each name the call reads is read, and none it gave up is.
+                    for (id, n) in ["x", "y", "z"].iter().enumerate() {
+                        assert_eq!(
+                            g.binds[id].read,
+                            a.contains(n) || b.contains(n),
+                            "{} in {:?}, {:?}",
+                            n,
+                            a,
+                            b
+                        );
+                    }
+                }
+                // Where it may, a call relates two names most of the time; where it may not,
+                // one name and a literal, and two literals now and then.
+                assert!(
+                    small || (one > 40 && none > 0),
+                    "{} with one name, {} with none",
+                    one,
+                    none
+                );
+                assert_eq!(both > 200, small, "{} with two names", both);
+            }
+        }
+    }
+
+    /// The class the generator gives an expression is the type the checker gives it, for
+    /// every pair of classes: one type, literals alone, and several types with the type that
+    /// holds them; and an operand the checker types in 128 bits, whose operations it checks at
+    /// the operator, is one the generator reads as wide.
+    #[test]
+    fn test_the_class_of_an_expression_is_the_checkers_type_of_it() {
+        use mente_sema::types::{Int as Checked, INT_TYPES};
+        let checked = |c: Cls| match c {
+            Cls::Lit => Checked::Literal,
+            Cls::One(t) => Checked::One(*INT_TYPES.iter().find(|u| u.name == t.name).unwrap()),
+            Cls::Mixed(t) => {
+                Checked::Mixed(t.map(|t| *INT_TYPES.iter().find(|u| u.name == t.name).unwrap()))
+            }
+        };
+        let mut classes: Vec<Cls> = INTS.iter().map(|t| Cls::One(*t)).collect();
+        classes.push(Cls::Lit);
+        // The types that hold two others, and the mix that none holds.
+        for a in INTS {
+            for b in INTS {
+                classes.push(Cls::One(a).join(Cls::One(b)));
+            }
+        }
+        classes.dedup();
+        assert!(classes.contains(&Cls::Mixed(None)));
+        let mut wide = 0;
+        for &a in &classes {
+            for &b in &classes {
+                let joined = a.join(b);
+                assert_eq!(
+                    checked(joined),
+                    checked(a).join(checked(b)),
+                    "{:?} with {:?}",
+                    a,
+                    b
+                );
+                // An operand the checker types in 128 bits is one this reads as wide.
+                let bits = match checked(joined) {
+                    Checked::One(t) | Checked::Mixed(Some(t)) => t.bits,
+                    Checked::Literal | Checked::Mixed(None) => 0,
+                };
+                assert_eq!(joined.wide().is_some(), bits == 128, "{:?} with {:?}", a, b);
+                wide += usize::from(bits == 128 && matches!(joined, Cls::Mixed(_)));
+            }
+        }
+        assert!(wide > 0, "no mix of types is held in 128 bits");
     }
 
     /// An `E0508`'s claim is read from the message Tier 1 writes, so that a change of its

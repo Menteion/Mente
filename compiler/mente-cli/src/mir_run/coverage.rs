@@ -11,10 +11,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mente_sema::check;
-use mente_sema::octagon::INF;
+use mente_sema::octagon::{INF, RELATIONAL_LIMIT};
 use mente_sema::types::INT_TYPES;
 use mente_sema::wide::{self, Interval};
-use mente_sema::CheckedFn;
+use mente_sema::{CheckedFn, CheckedModule};
 use mente_syntax::tree::{
     Arg, ArmBody, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, EnumSyntax,
     ExprId, ExprKind, FieldSyntax, FnSyntax, Param, PatBinding, PatternKind, Payload, Refinement,
@@ -256,6 +256,9 @@ const EDGES: &[&str] = &[
     "index computed from a value past Tier 1's domain",
     "narrowing of a value computed from one past Tier 1's domain",
 ];
+
+/// What a call's arguments are to two parameters its callee relates.
+const RELATIONS: &[&str] = &["call that relates two names"];
 
 /// What generated programs never hold, each with its reason.
 const NOT_GENERATED: &[(&str, &str)] = &[
@@ -682,6 +685,113 @@ fn reached_edges(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     }
 }
 
+/// The pairs of parameters `f` relates, each with whether it is by their sum: a `requires`
+/// of the form `a op b` or `a + b <= c`, and a refinement bound that names a parameter.
+fn related_parameters(f: &FnSyntax) -> Vec<(usize, usize, bool)> {
+    let tree = &f.tree;
+    let index = |name: &str| f.params.iter().position(|p| p.name == name);
+    let named = |e: ExprId| match &tree.expr(e).kind {
+        ExprKind::Name(n) => index(n),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    for c in &f.contracts {
+        let (ContractKind::Requires, ExprKind::Binary { lhs, rhs, .. }) =
+            (c.kind, &tree.expr(c.expr).kind)
+        else {
+            continue;
+        };
+        if let (Some(a), Some(b)) = (named(*lhs), named(*rhs)) {
+            out.push((a, b, false));
+        }
+        if let ExprKind::Binary {
+            op: BinaryOp::Add,
+            lhs: a,
+            rhs: b,
+        } = &tree.expr(*lhs).kind
+        {
+            if let (Some(a), Some(b)) = (named(*a), named(*b)) {
+                out.push((a, b, true));
+            }
+        }
+    }
+    for (k, p) in f.params.iter().enumerate() {
+        if let TypeKind::Int {
+            refinement: Some(Refinement { lo, hi, .. }),
+            ..
+        } = &tree.ty(p.ty).kind
+        {
+            for b in [lo, hi] {
+                if let Bound::Name(n) = b {
+                    out.extend(index(n).map(|i| (k, i, false)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The bindings an argument names, through the arithmetic it is written with.
+fn named_in(tree: &Tree, e: ExprId, out: &mut BTreeSet<String>) {
+    match &tree.expr(e).kind {
+        ExprKind::Name(n) => {
+            out.insert(n.clone());
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            named_in(tree, *lhs, out);
+            named_in(tree, *rhs, out);
+        }
+        ExprKind::Unary { operand, .. } => named_in(tree, *operand, out),
+        _ => {}
+    }
+}
+
+/// What the calls of `f` ask Tier 1 to relate: the row of [`RELATIONS`] for a call whose
+/// callee relates two parameters and whose arguments for them both name a binding; and, as
+/// the lines returned, the calls Tier 1 cannot prove. It relates two names only in a function
+/// of at most [`RELATIONAL_LIMIT`] variables, and holds each one's bounds alone in a function
+/// of more, where a `guard` on two names proves nothing of them at the call. And it holds no
+/// sum of a name with itself in any function.
+fn reached_relations(
+    module: &CheckedModule,
+    f: &CheckedFn,
+    seen: &mut BTreeSet<String>,
+) -> Vec<String> {
+    let tree = &f.syntax.tree;
+    let mut wrong = Vec::new();
+    for (i, e) in tree.exprs.iter().enumerate() {
+        let ExprKind::Call { args, .. } = &e.kind else {
+            continue;
+        };
+        let Some(callee) = f.resolution.calls[i].and_then(|c| module.functions[c].as_ref()) else {
+            continue;
+        };
+        for (a, b, sum) in related_parameters(&callee.syntax) {
+            let (mut first, mut second) = (BTreeSet::new(), BTreeSet::new());
+            named_in(tree, args[a].value, &mut first);
+            named_in(tree, args[b].value, &mut second);
+            if first.is_empty() || second.is_empty() {
+                continue;
+            }
+            seen.insert("call that relates two names".to_string());
+            if f.variables > RELATIONAL_LIMIT {
+                wrong.push(format!(
+                    "`{}`, of {} variables where Tier 1 relates {}, passes two names to \
+                     parameters `{}` relates",
+                    f.syntax.name, f.variables, RELATIONAL_LIMIT, callee.syntax.name
+                ));
+            }
+            if sum && !first.is_disjoint(&second) {
+                wrong.push(format!(
+                    "`{}` passes one name twice to parameters `{}` adds",
+                    f.syntax.name, callee.syntax.name
+                ));
+            }
+        }
+    }
+    wrong
+}
+
 /// The constructs a struct declaration holds.
 fn reached_struct(s: &StructSyntax, seen: &mut BTreeSet<String>) {
     let StructSyntax {
@@ -862,6 +972,7 @@ fn grammar() -> BTreeSet<String> {
         ARMS,
         VARIANTS,
         EDGES,
+        RELATIONS,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -906,11 +1017,12 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
             enums(text).iter().for_each(|e| reached_enum(e, &mut seen));
-            module
-                .functions
-                .iter()
-                .flatten()
-                .for_each(|f| reached_edges(f, &mut seen));
+            for f in module.functions.iter().flatten() {
+                reached_edges(f, &mut seen);
+                for wrong in reached_relations(module, f, &mut seen) {
+                    problems.push(format!("seed {}: {}", seed, wrong));
+                }
+            }
             // What the checker accepts, the lowering lowers: a program it refused would run
             // on the reference interpreter alone.
             if let Err(why) = mente_codegen::lower::lower(module) {
