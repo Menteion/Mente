@@ -383,8 +383,10 @@ check() {
   decoy=$!
   node -e 'require("net").createServer((s) => s.end()).listen(0, "127.0.0.1", function () { console.log(this.address().port); })' > "$work/port" &
   listener=$!
-  # Neither outlives the canary, however it ends.
-  trap 'kill "$decoy" "$listener" 2> /dev/null || true' EXIT
+  # Neither outlives the canary, however it ends. The two are named now, in double quotes: when
+  # the script ends, this function's variables are gone.
+  # shellcheck disable=SC2064
+  trap "kill $decoy $listener 2> /dev/null || true" EXIT
   if ! within test -s "$work/port"; then fail "the canary's listener did not start"; fi
   port=$(< "$work/port")
   args=(

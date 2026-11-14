@@ -585,7 +585,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "1ee899461cdbfd61218dea2ff348bef738d979b8dceda2f94f048b26c3985ee3"],
+  [".github/scripts/test-sandbox.sh", "6a376c4bf00a262d15aac0329ba90e9d5cf5f85b11f49b3296aac60fb628b0c3"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
 ]);
 const PINNED_JOBS = new Map([
@@ -920,6 +920,17 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
   assert.match(stopped.out, /::error::the sandbox is not set up/);
   assert.doesNotMatch(stopped.out, /the step went on/);
   assert.deepEqual(sourced("Windows"), { status: 0, out: "the step went on, its runner none\n" }, "test-sandbox-env.sh changes a step on Windows, which has no sandbox");
+  // A trap on EXIT runs when the script ends, after every function has returned and its local
+  // variables are gone. One that reads them then fails, under `set -u`, a canary that had passed,
+  // as the first such trap did on every runner. So in the pinned scripts a trap on EXIT names what
+  // it needs when it is set, in double quotes.
+  const lateExitTrap = /^\s*trap '[^'\n]*\$[^'\n]*' EXIT\b/m;
+  for (const f of [...PINNED_FILES.keys()].filter((f) => f.endsWith(".sh"))) {
+    assert.doesNotMatch(read(f), lateExitTrap, `${f} sets a trap on EXIT that reads its variables only when the script ends, where a function's are gone`);
+  }
+  assert.match(`  trap 'kill "$decoy" "$listener" 2> /dev/null || true' EXIT`, lateExitTrap);
+  assert.doesNotMatch('  trap "kill $decoy $listener 2> /dev/null || true" EXIT', lateExitTrap);
+  assert.doesNotMatch("  trap 'signal=15' TERM", lateExitTrap);
   // What the script does on any machine: it names no runner where no sandbox is set up, it fails a
   // step whose tools ran nothing in the sandbox, and it refuses a command it could not hand over
   // whole. The sandbox itself is proven where it runs, by the canary.
