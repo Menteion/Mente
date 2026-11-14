@@ -1494,8 +1494,6 @@ impl Checker<'_> {
                 let found = self.value(value);
                 let computed = self.binary(value, op, (place, &target), (value, &found));
                 self.check_ty(value, &computed, &target, "in this assignment");
-                // `x op= e` is `x = x op e`, so `e` stands beside an operand of `x`'s type.
-                self.lands(value, &target);
             }
         }
     }

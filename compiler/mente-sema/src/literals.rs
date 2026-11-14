@@ -1,27 +1,25 @@
-//! The integer type an expression of literals alone takes (`core-calculus.md`, item 5).
+//! The integer type an expression of literals alone takes (`core-calculus.md`, item 5;
+//! [`literal-type-from-operands`]).
 //!
 //! A literal without a suffix has no type of its own. Arithmetic on literals is exact and needs
 //! none, but `~`, `&`, `|`, `^` and a shift work on bits in one type, so under one of them an
-//! expression of literals alone needs the type its literals take. [`taken`] gives it, for each
-//! expression of a function whose type is that of literals alone:
+//! expression of literals alone needs the type its literals take. Types flow one way, up from
+//! the operands: [`taken`] gives each expression whose type is that of literals alone the type
+//! of the smallest expression around it that has one, through arithmetic, the bit operations, a
+//! shift's left operand, unary `-` and `~`, the branches of an `if`, the arms of a `match` and
+//! the elements of an array literal, whose values make that expression's type; and `i64` where
+//! none has. The place a value is narrowed into never gives a literal its type, nor do the
+//! operands of a comparison, which compare exact values across types, give each other one.
 //!
-//! - the type of the smallest expression around it that has one: through arithmetic, the bit
-//!   operations, a shift's left operand, unary `-` and `~`, and the branches of an `if` and the
-//!   arms of a `match`, whose values share a type;
-//! - where none has, the type of the place that expression is narrowed into, a binding's, an
-//!   assigned place's, a parameter's, a result's, a field's or an element's, through the array
-//!   literals around it;
-//! - and `i64` where there is no such place: an operand of a comparison, an index, a shift
-//!   amount, a scrutinee, a discarded value, a binding that states no type.
+//! The static ranges (`wide.rs`), Tier 1 and the lowering read this table. The reference
+//! interpreter does not: it derives the same type from the expressions around the literals as
+//! it evaluates, so that the comparison of the paths checks one against the other.
 //!
-//! The type checker records the place each expression is narrowed into ([`Typing::places`]);
-//! the rest is read from the tree. The static ranges (`wide.rs`) and the lowering read this
-//! table. The reference interpreter does not: it follows the same rule as it evaluates, so
-//! that the comparison of the paths checks one against the other.
+//! [`literal-type-from-operands`]: ../../docs/design-review.md#literal-type-from-operands
 
 use mente_syntax::tree::{
-    ArmBody, BinaryOp, BlockId, Body, Else, ExprId, ExprKind, FnSyntax, Payload, StmtId, StmtKind,
-    Tree, UnaryOp,
+    ArmBody, AssignOp, BinaryOp, BlockId, Body, Else, ExprId, ExprKind, FnSyntax, Payload, StmtId,
+    StmtKind, Tree, UnaryOp,
 };
 
 use crate::check::Typing;
@@ -32,9 +30,7 @@ use crate::types::{Int, IntTy, Ty, I64};
 pub enum From {
     /// The other operands: an expression around it has an integer type.
     Operands,
-    /// The place the value is narrowed into.
-    Place,
-    /// Neither: the type is `i64`.
+    /// None: the type is `i64`.
     Alone,
 }
 
@@ -64,31 +60,18 @@ pub fn taken(f: &FnSyntax, typing: &Typing) -> Vec<Option<Taken>> {
     w.out
 }
 
-/// The integer type a type names: its one type, or the type that holds a mix.
-fn int_ty(t: &Ty) -> Option<IntTy> {
+/// The integer type a value of type `t` is made of, an array's through its elements: its one
+/// type, or the type that holds a mix; none for literals alone or a type of no integers.
+fn leaf(t: &Ty) -> Option<IntTy> {
     match t {
         Ty::Int(Int::One(t)) | Ty::Int(Int::Mixed(Some(t))) => Some(*t),
+        Ty::Array(_, elem) => leaf(elem),
         Ty::Int(Int::Literal | Int::Mixed(None))
         | Ty::Bool
-        | Ty::Array(..)
         | Ty::Struct(_)
         | Ty::Enum(_)
         | Ty::Unit
         | Ty::Any => None,
-    }
-}
-
-/// The type the elements of an array of type `own` take: its element type where that names
-/// one, and otherwise the element type of `here`, the type its own literals take.
-fn element(own: &Ty, here: Option<&(Ty, From)>) -> Option<(Ty, From)> {
-    let of = |t: &Ty| match t {
-        Ty::Array(_, elem) => Some((**elem).clone()),
-        Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
-    };
-    match of(own) {
-        // The other elements give the type, as the other operands of an operation do.
-        Some(elem) if elem.settled() == elem && elem != Ty::Any => Some((elem, From::Operands)),
-        Some(_) | None => here.and_then(|(t, from)| of(t).map(|elem| (elem, *from))),
     }
 }
 
@@ -99,30 +82,27 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// Walks `e`. `around` is the type the expression around it gives its literals, where it
-    /// gives one, with where that type comes from.
-    fn expr(&mut self, e: ExprId, around: Option<&(Ty, From)>) {
+    /// Walks `e`. `around` is the integer type the expression around it gives its literals,
+    /// where it gives one.
+    fn expr(&mut self, e: ExprId, around: Option<IntTy>) {
         let tree = self.tree;
         let own = &self.typing.exprs[e.0 as usize];
-        // The place the value is narrowed into, where it is narrowed into one; else what the
-        // expression around it gives.
-        let landing: Option<(Ty, From)> = self.typing.places[e.0 as usize]
-            .clone()
-            .map(|t| (t, From::Place))
-            .or(around.cloned());
-        // What this expression gives its own operands: its type where it has one, since they
-        // are each other's "other operands", and else what it was given.
-        let here: Option<(Ty, From)> = match int_ty(own) {
-            Some(t) => Some((Ty::int(t), From::Operands)),
-            None => landing,
-        };
+        // What this expression gives the literals among its operands: its own type where it has
+        // one, since they are each other's other operands, and else what it was given.
+        let here = leaf(own).or(around);
         match own {
             Ty::Int(Int::Literal) => {
-                let given = here
-                    .as_ref()
-                    .and_then(|(t, from)| Some((int_ty(t)?, *from)));
-                let (ty, from) = given.unwrap_or((I64, From::Alone));
-                self.out[e.0 as usize] = Some(Taken { ty, from });
+                let taken = match here {
+                    Some(ty) => Taken {
+                        ty,
+                        from: From::Operands,
+                    },
+                    None => Taken {
+                        ty: I64,
+                        from: From::Alone,
+                    },
+                };
+                self.out[e.0 as usize] = Some(taken);
             }
             Ty::Int(Int::One(_) | Int::Mixed(_))
             | Ty::Bool
@@ -132,7 +112,6 @@ impl Walk<'_> {
             | Ty::Unit
             | Ty::Any => {}
         }
-        let here = here.as_ref();
         match &tree.expr(e).kind {
             ExprKind::Int { .. }
             | ExprKind::Bool(_)
@@ -179,7 +158,8 @@ impl Walk<'_> {
                 self.expr(*index, None);
             }
             ExprKind::Field { base, .. } => self.expr(*base, None),
-            // Each argument and each field's value is narrowed into a place of its own.
+            // An argument and a field's value are each narrowed into a place of their own,
+            // which gives their literals no type.
             ExprKind::Call { args, .. } => {
                 for a in args {
                     self.expr(a.value, None);
@@ -212,16 +192,13 @@ impl Walk<'_> {
                     }
                 }
             }
+            // The elements make the literal's type, so each is the others' operand.
             ExprKind::Array(items) => {
-                let elem = element(own, here);
                 for &i in items {
-                    self.expr(i, elem.as_ref());
+                    self.expr(i, here);
                 }
             }
-            ExprKind::Repeat { value, .. } => {
-                let elem = element(own, here);
-                self.expr(*value, elem.as_ref());
-            }
+            ExprKind::Repeat { value, .. } => self.expr(*value, here),
             ExprKind::If {
                 cond,
                 then,
@@ -240,7 +217,7 @@ impl Walk<'_> {
 
     /// Walks a block whose value, its last statement's when that is an expression, takes
     /// `around`.
-    fn block(&mut self, b: BlockId, around: Option<&(Ty, From)>) {
+    fn block(&mut self, b: BlockId, around: Option<IntTy>) {
         let stmts = &self.tree.block(b).stmts;
         for (i, &s) in stmts.iter().enumerate() {
             let last = i + 1 == stmts.len();
@@ -248,13 +225,19 @@ impl Walk<'_> {
         }
     }
 
-    fn stmt(&mut self, s: StmtId, around: Option<&(Ty, From)>) {
+    fn stmt(&mut self, s: StmtId, around: Option<IntTy>) {
         let tree = self.tree;
         match &tree.stmt(s).kind {
             StmtKind::Binding { init, .. } => self.expr(*init, None),
-            StmtKind::Assign { place, value, .. } => {
+            StmtKind::Assign { place, op, value } => {
                 self.expr(*place, None);
-                self.expr(*value, None);
+                // `x op= e` is `x = x op e` (item 6): `x` is the other operand of `e`, unless
+                // `e` is a shift's amount.
+                let other = match op {
+                    AssignOp::Compound(BinaryOp::Shl | BinaryOp::Shr) | AssignOp::Set => None,
+                    AssignOp::Compound(_) => leaf(&self.typing.exprs[place.0 as usize]),
+                };
+                self.expr(*value, other);
             }
             StmtKind::While {
                 cond,
@@ -317,12 +300,13 @@ mod tests {
         f.typing.literals[at].map(|t| (t.ty.name, t.from))
     }
 
-    /// The other operands come first, wherever the value goes: an expression around the
+    /// The other operands give the type, wherever the value goes: an expression around the
     /// literals that has a type gives it, through arithmetic, bit operations, a shift's left
     /// operand, unary `-` and `~`, the branches of an `if`, the arms of a `match` and the
-    /// other elements of an array literal.
+    /// other elements of an array literal; and `x op= e` is `x = x op e`, so `x` gives `e`
+    /// its type.
     #[test]
-    fn test_literals_take_the_type_of_the_other_operands_first() {
+    fn test_literals_take_the_type_of_the_other_operands() {
         for (src, text, ty) in [
             ("pub fn f(a: u8) -> u8 = a & ~3", "~3", "u8"),
             ("pub fn f(a: u8) -> u8 = a & ~3", "3", "u8"),
@@ -357,6 +341,21 @@ mod tests {
             ("pub fn f(a: u8) -> [2]u16 = [~3, a]", "~3", "u8"),
             ("pub fn f(a: u8) -> [2][1]u16 = [[~3], [a]]", "~3", "u8"),
             ("pub fn f(a: i128) -> i128 = a ^ ~0", "~0", "i128"),
+            (
+                "pub fn f() -> u16 {\n  var m: u16 = 0\n  m &= ~1\n  m\n}",
+                "~1",
+                "u16",
+            ),
+            (
+                "pub fn f(xs: [2]u8) -> u8 {\n  var ys = xs\n  ys[0] ^= ~0\n  ys[0]\n}",
+                "~0",
+                "u8",
+            ),
+            (
+                "pub fn f(c: bool, xs: [1]u8) -> [1]u8 = if c { [~3] } else { xs }",
+                "~3",
+                "u8",
+            ),
         ] {
             assert_eq!(
                 of(src, text),
@@ -368,80 +367,54 @@ mod tests {
         }
     }
 
-    /// Where no expression around them has a type, the literals take the type of the place
-    /// the value is narrowed into: a binding that states its type, an assigned place, the
-    /// place of a compound assignment, a parameter, a field, a result, and the elements of
-    /// an array any of these holds.
+    /// The place a value is narrowed into never gives a literal its type: a binding that
+    /// states its type, an assigned place, a parameter, a field, a result, and the elements
+    /// of an array any of these holds. Where no expression around the literals has a type,
+    /// they are an `i64`, and the value is narrowed into the place as any value is. A
+    /// compound assignment's place is the other operand of its right side, but not of a
+    /// shift's amount.
     #[test]
-    fn test_literals_take_the_type_of_the_place_next() {
+    fn test_a_place_never_gives_a_literal_its_type() {
         let decls =
             "struct P {\n  m: u8\n}\nenum E {\n  V(y: u8)\n  W\n}\nfn mask(m: u8) -> u8 = m\n";
-        for (src, text, ty) in [
-            ("pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}", "~3", "u8"),
-            (
-                "pub fn f() -> u8 {\n  val m: u8 = 1 + ~3\n  m\n}",
-                "~3",
-                "u8",
-            ),
-            (
-                "pub fn f() -> u16 {\n  var m: u16 = 0\n  m = ~0x0F\n  m\n}",
-                "~0x0F",
-                "u16",
-            ),
-            (
-                "pub fn f() -> u16 {\n  var m: u16 = 0\n  m &= ~1\n  m\n}",
-                "~1",
-                "u16",
-            ),
+        for (src, text) in [
+            ("pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}", "~3"),
+            ("pub fn f() -> u8 {\n  val m: u8 = 1 + ~3\n  m\n}", "~3"),
+            ("pub fn f() -> u16 {\n  var m: u16 = 0\n  m = ~0x0F\n  m\n}", "~0x0F"),
             (
                 "pub fn f() -> u16 {\n  var xs: [2]u16 = [0; 2]\n  xs[1] = 1 << 15\n  xs[0]\n}",
                 "1 << 15",
-                "u16",
             ),
-            ("pub fn f() -> u8 = mask(~3)", "~3", "u8"),
-            ("pub fn f() -> u8 = P(m: ~3).m", "~3", "u8"),
-            ("pub fn f() -> E = E.V(y: ~3)", "~3", "u8"),
-            ("pub fn f() -> u8 = ~3", "~3", "u8"),
-            ("pub fn f() -> u8 {\n  ~3\n}", "~3", "u8"),
-            (
-                "pub fn f(c: bool) -> u8 {\n  if c {\n    return ~3\n  }\n  0\n}",
-                "~3",
-                "u8",
-            ),
-            ("pub fn f() -> u64 = 1 << 63", "1", "u64"),
-            (
-                "pub fn f() -> u64 = 1 | 9223372036854775808",
-                "1 | 9223372036854775808",
-                "u64",
-            ),
+            ("pub fn f() -> u16 {\n  var m: u16 = 1\n  m <<= ~0 & 3\n  m\n}", "~0 & 3"),
+            ("pub fn f() -> u8 = mask(~3)", "~3"),
+            ("pub fn f() -> u8 = P(m: ~3).m", "~3"),
+            ("pub fn f() -> E = E.V(y: ~3)", "~3"),
+            ("pub fn f() -> u8 = ~3", "~3"),
+            ("pub fn f() -> u8 {\n  ~3\n}", "~3"),
+            ("pub fn f(c: bool) -> u8 {\n  if c {\n    return ~3\n  }\n  0\n}", "~3"),
+            ("pub fn f() -> u64 = 1 << 63", "1"),
+            ("pub fn f() -> u64 = 1 | 9223372036854775808", "1 | 9223372036854775808"),
             (
                 "pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { ~3 } else { 4 }\n  m\n}",
                 "~3",
-                "u8",
             ),
             (
                 "pub fn f(c: bool) -> u8 {\n  val m: u8 = match c {\n    true => ~3\n    false => 4\n  }\n  m\n}",
                 "~3",
-                "u8",
             ),
-            ("pub fn f() -> [2]u8 = [~3, 1]", "~3", "u8"),
-            ("pub fn f() -> [2]u8 = [~3; 2]", "~3", "u8"),
-            ("pub fn f() -> [1][2]u8 = [[~3, 1]]", "~3", "u8"),
+            ("pub fn f() -> [2]u8 = [~3, 1]", "~3"),
+            ("pub fn f() -> [2]u8 = [~3; 2]", "~3"),
+            ("pub fn f() -> [1][2]u8 = [[~3, 1]]", "~3"),
             (
                 "pub fn f() -> [1][2]u8 {\n  val xs: [1][2]u8 = [[~3; 2]; 1]\n  xs\n}",
                 "~3",
-                "u8",
             ),
-            (
-                "pub fn f(c: bool) -> [1]u8 = if c { [~3] } else { [1] }",
-                "~3",
-                "u8",
-            ),
+            ("pub fn f(c: bool) -> [1]u8 = if c { [~3] } else { [1] }", "~3"),
         ] {
             let src = format!("{}{}", decls, src);
             assert_eq!(
                 of(&src, text),
-                Some((ty, From::Place)),
+                Some(("i64", From::Alone)),
                 "`{}` in {}",
                 text,
                 src
@@ -506,9 +479,12 @@ mod tests {
             range("pub fn f(a: u8) -> u16 = a + ~3", "a + ~3"),
             Some(((false, 0), (false, 510)))
         );
-        assert_eq!(range("pub fn f() -> [2]u8 = [~3, 1]", "~3"), u8_);
-        assert_eq!(range("pub fn f() -> u8 = 1 << 7", "1 << 7"), u8_);
-        assert_eq!(range("pub fn f() -> u8 = 3 & 5", "3 & 5"), u8_);
+        assert_eq!(range("pub fn f(a: u8) -> [2]u8 = [~3, a]", "~3"), u8_);
+        // A place gives none: these are `i64`s narrowed where they land.
+        let i64_ = Some(((true, 1 << 63), (false, (1 << 63) - 1)));
+        assert_eq!(range("pub fn f() -> [2]u8 = [~3, 1]", "~3"), i64_);
+        assert_eq!(range("pub fn f() -> u8 = 1 << 7", "1 << 7"), i64_);
+        assert_eq!(range("pub fn f() -> u8 = 3 & 5", "3 & 5"), i64_);
         assert_eq!(
             range("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "~3"),
             Some(((true, 1 << 63), (false, (1 << 63) - 1)))

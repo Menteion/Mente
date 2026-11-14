@@ -271,10 +271,12 @@ const TRAPS: &[&str] = &[
 ];
 
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
-/// (`core-calculus.md`, item 5), by what the checker's table says of it.
+/// (`core-calculus.md`, item 5), by what the checker's table says of it: beside an operand
+/// of a type, which gives it; and alone, an `i64`, either narrowed into a place, which gives
+/// it none, or not.
 const LITERALS: &[&str] = &[
     "bit operation on literals alone, beside an operand of a type",
-    "bit operation on literals alone, into a place",
+    "bit operation on literals alone, narrowed into a place",
     "bit operation on literals alone, of no type but i64",
 ];
 
@@ -687,11 +689,14 @@ fn reached_literals(f: &CheckedFn, seen: &mut BTreeSet<String>) {
         let Some(taken) = f.typing.literals.get(k).copied().flatten().filter(|_| bits) else {
             continue;
         };
+        let narrowed = matches!(f.typing.places[k], Some(Ty::Int(_)));
         seen.insert(
-            match taken.from {
-                From::Operands => "bit operation on literals alone, beside an operand of a type",
-                From::Place => "bit operation on literals alone, into a place",
-                From::Alone => "bit operation on literals alone, of no type but i64",
+            match (taken.from, narrowed) {
+                (From::Operands, _) => {
+                    "bit operation on literals alone, beside an operand of a type"
+                }
+                (From::Alone, true) => "bit operation on literals alone, narrowed into a place",
+                (From::Alone, false) => "bit operation on literals alone, of no type but i64",
             }
             .to_string(),
         );

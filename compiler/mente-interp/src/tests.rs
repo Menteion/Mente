@@ -268,11 +268,12 @@ fn test_array_literal_elements_are_narrowed_into_its_element_type() {
 }
 
 /// A bit operation, a shift or `~` over literals alone works in the type its literals take
-/// (`core-calculus.md`, item 5): the other operands' first, whatever place the value goes
-/// to; then the place's, through the branches of an `if`, the arms of a `match`, a block's
-/// value and the elements of an array; and `i64` where there is neither.
+/// (`core-calculus.md`, item 5): the other operands', through arithmetic, the branches of an
+/// `if`, the arms of a `match` and the elements of an array, and `x`'s in `x op= e`;
+/// otherwise `i64`, whatever place the value is narrowed into, where the `i64` value is then
+/// narrowed as any value is.
 #[test]
-fn test_literals_under_a_bit_operation_take_their_operands_type_then_their_places() {
+fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
     let decls = "struct P {\n  m: u8\n}\nfn mask(m: u8) -> u8 = m\n";
     for (f, call, value) in [
         // The other operands, though the place is wider.
@@ -280,52 +281,113 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_then_their_place
         ("pub fn f(a: u8) -> u16 = a & ~3", "f(255)", "252"),
         ("pub fn f(a: u8) -> u16 = a + ~3", "f(1)", "253"),
         ("pub fn f(a: u8) -> u16 = (1 + ~3) + a", "f(1)", "254"),
-        ("pub fn f(a: u8, b: u16) -> u32 = a + b + ~3", "f(1, 1)", "65534"),
-        ("pub fn f(a: u8, c: bool) -> u16 = if c { ~3 } else { a }", "f(1, true)", "252"),
-        ("pub fn f(a: u8) -> u16 = match a {\n  0 => {\n    ~3\n  }\n  _ => a\n}", "f(0)", "252"),
+        (
+            "pub fn f(a: u8, b: u16) -> u32 = a + b + ~3",
+            "f(1, 1)",
+            "65534",
+        ),
+        (
+            "pub fn f(a: u8, c: bool) -> u16 = if c { ~3 } else { a }",
+            "f(1, true)",
+            "252",
+        ),
+        (
+            "pub fn f(a: u8) -> u16 = match a {\n  0 => {\n    ~3\n  }\n  _ => a\n}",
+            "f(0)",
+            "252",
+        ),
         ("pub fn f(a: u8) -> [2]u16 = [~3, a]", "f(7)", "[252, 7]"),
-        ("pub fn f(a: u8) -> [2][1]u16 = [[~3], [a]]", "f(7)", "[[252], [7]]"),
+        (
+            "pub fn f(a: u8) -> [2][1]u16 = [[~3], [a]]",
+            "f(7)",
+            "[[252], [7]]",
+        ),
+        (
+            "pub fn f(c: bool, xs: [1]u8) -> [1]u8 = if c { [~3] } else { xs }",
+            "f(true, [0])",
+            "[252]",
+        ),
         ("pub fn f(a: i128) -> i128 = a ^ ~0", "f(5)", "-6"),
-        // The place.
-        ("pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}", "f()", "252"),
-        ("pub fn f() -> u16 {\n  val m: u16 = 1 + ~3\n  m\n}", "f()", "65533"),
-        ("pub fn f() -> u16 {\n  var m: u16 = 0\n  m = ~0x0F\n  m\n}", "f()", "65520"),
-        ("pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m &= ~1\n  m\n}", "f(255)", "254"),
-        ("pub fn f() -> u8 = mask(~3)", "f()", "252"),
-        ("pub fn f() -> u8 = P(m: ~3).m", "f()", "252"),
-        ("pub fn f() -> u8 {\n  ~3\n}", "f()", "252"),
-        ("pub fn f(c: bool) -> u8 {\n  if c {\n    return ~3\n  }\n  0\n}", "f(true)", "252"),
-        ("pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { ~3 } else { 4 }\n  m\n}", "f(true)", "252"),
-        ("pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { if c { ~3 } else { 1 } } else { 4 }\n  m\n}", "f(true)", "252"),
-        ("pub fn f(c: bool) -> u8 {\n  val m: u8 = match c {\n    true => ~3\n    false => 4\n  }\n  m\n}", "f(true)", "252"),
-        ("pub fn f() -> [2]u8 = [~3, 1]", "f()", "[252, 1]"),
-        ("pub fn f() -> [2]u8 = [~3; 2]", "f()", "[252, 252]"),
-        ("pub fn f() -> [1][2]u8 = [[~3, 1]]", "f()", "[[252, 1]]"),
-        ("pub fn f(c: bool) -> [1]u8 = if c { [~3] } else { [1] }", "f(true)", "[252]"),
-        ("pub fn f() -> u64 = 1 << 63", "f()", "9223372036854775808"),
-        ("pub fn f() -> u64 = 1 | 9223372036854775808", "f()", "9223372036854775809"),
-        ("pub fn f() -> i8 = ~127", "f()", "-128"),
-        // Neither.
-        ("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "f()", "-4"),
-        ("pub fn f() -> i64 {\n  val xs = [~3, 1]\n  xs[0]\n}", "f()", "-4"),
-        ("pub fn f(a: u8) -> bool = a == ~3", "f(252)", "false"),
-        ("pub fn f(xs: [8]u8) -> u8 = xs[~3 & 7]", "f([1, 2, 3, 4, 5, 6, 7, 8])", "5"),
-        ("pub fn f(a: u8) -> u8 = a << (~3 & 1)", "f(9)", "9"),
-        ("pub fn f() -> u8 = match ~3 {\n  -4 => 1\n  _ => 2\n}", "f()", "1"),
-    ] {
-        assert_eq!(run(&format!("{}{}", decls, f), call), value, "{}", f);
-    }
-    // A literal the type does not hold traps where the operation narrows it, and a shift
-    // by the width of the type the literal takes where it checks its amount.
-    for (f, trap) in [
+        (
+            "pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m &= ~1\n  m\n}",
+            "f(255)",
+            "254",
+        ),
+        (
+            "pub fn f(a: u16) -> u16 {\n  var m: u16 = a\n  m ^= ~0\n  m\n}",
+            "f(1)",
+            "65534",
+        ),
+        // No other operand: an `i64`, narrowed where it lands.
+        (
+            "pub fn f() -> u8 {\n  val m: u8 = 3 & 5\n  m\n}",
+            "f()",
+            "1",
+        ),
+        (
+            "pub fn f() -> u16 {\n  val m: u16 = 1 + ~3\n  m\n}",
+            "f()",
+            "trap",
+        ),
         (
             "pub fn f() -> u8 {\n  val m: u8 = -1 & 255\n  m\n}",
-            "narrowing",
+            "f()",
+            "255",
         ),
-        ("pub fn f() -> u8 = ~256", "narrowing"),
-        ("pub fn f() -> i8 = 1 << 7", "narrowing"),
-        ("pub fn f() -> u8 = 1 << 8", "shift-amount"),
-        ("pub fn f() -> u16 = 1 << 8", "none"),
+        ("pub fn f() -> u8 = mask(1 << 7)", "f()", "128"),
+        ("pub fn f() -> i8 = P(m: ~3).m", "f()", "trap"),
+        (
+            "pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { ~3 } else { 4 }\n  m\n}",
+            "f(true)",
+            "trap",
+        ),
+        (
+            "pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { ~3 } else { 4 }\n  m\n}",
+            "f(false)",
+            "4",
+        ),
+        ("pub fn f() -> i8 = ~127", "f()", "-128"),
+        ("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "f()", "-4"),
+        (
+            "pub fn f() -> i64 {\n  val xs = [~3, 1]\n  xs[0]\n}",
+            "f()",
+            "-4",
+        ),
+        ("pub fn f(a: u8) -> bool = a == ~3", "f(252)", "false"),
+        (
+            "pub fn f(xs: [8]u8) -> u8 = xs[~3 & 7]",
+            "f([1, 2, 3, 4, 5, 6, 7, 8])",
+            "5",
+        ),
+        ("pub fn f(a: u8) -> u8 = a << (~3 & 1)", "f(9)", "9"),
+        (
+            "pub fn f() -> u8 = match ~3 {\n  -4 => 1\n  _ => 2\n}",
+            "f()",
+            "1",
+        ),
+        ("pub fn f() -> u8 = ~3_u8", "f()", "252"),
+        (
+            "pub fn f() -> u64 = 1_u64 << 63",
+            "f()",
+            "9223372036854775808",
+        ),
+    ] {
+        let src = format!("{}{}", decls, f);
+        let got = match run_with(&src, call, Limits::default()) {
+            Ok(v) => v.to_string(),
+            Err(Stop::Trap(_)) => "trap".to_string(),
+            Err(other) => other.to_string(),
+        };
+        assert_eq!(got, value, "{}", f);
+    }
+    // A literal outside `i64`, or shifted past it, traps where the operation narrows it into
+    // `i64`, before the value reaches its place.
+    for (f, trap) in [
+        ("pub fn f() -> u64 = 1 << 63", "narrowing"),
+        ("pub fn f() -> u64 = 1 | 9223372036854775808", "narrowing"),
+        ("pub fn f() -> u128 = 1 << 64", "shift-amount"),
+        ("pub fn f() -> u8 = ~3", "narrowing"),
+        ("pub fn f() -> u16 = 1 << 15", "none"),
     ] {
         let got = match run_with(f, "f()", Limits::default()) {
             Ok(_) => "none".to_string(),
@@ -334,6 +396,8 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_then_their_place
         };
         assert_eq!(got, trap, "{}", f);
     }
+    let shifted = run("pub fn f() -> u64 = 1 << 63", "f()");
+    assert!(shifted.contains("does not fit in `i64`"), "{}", shifted);
 }
 
 #[test]
@@ -369,10 +433,19 @@ fn test_bits_and_shifts_work_in_their_type() {
     assert_eq!(run(shr, "shr(-8, 1)"), "-4");
     assert_eq!(run(shr, "shr(-7, 1)"), "-4");
     assert_eq!(kind(shr, "shr(8, -1)"), "shift-amount");
-    let lit = "pub fn lit() -> u8 {\n  val m: u8 = 1 << 7\n  val k: u8 = ~0\n  m - 1 + k - 255\n}";
+    // Literals alone are an `i64`, whatever place they land in (`core-calculus.md`, item 5):
+    // `1 << 7` is 128, `~0` is -1 unless a suffix states `u8`, and `1 << 8` is 256, which the
+    // binding narrows.
+    let lit =
+        "pub fn lit() -> u8 {\n  val m: u8 = 1 << 7\n  val k: u8 = ~0_u8\n  m - 1 + k - 255\n}";
     assert_eq!(run(lit, "lit()"), "127");
+    let minus = "pub fn minus() -> u8 {\n  val k: u8 = ~0\n  k\n}";
+    assert_eq!(
+        run(minus, "minus()"),
+        "trap[narrowing] at 3:15: -1 does not fit in `u8`"
+    );
     let too_far = "pub fn far() -> u8 {\n  val m: u8 = 1 << 8\n  m\n}";
-    assert_eq!(kind(too_far, "far()"), "shift-amount");
+    assert_eq!(kind(too_far, "far()"), "narrowing");
     let wide = "pub fn wide(k: u8) -> i64 = 1 << k";
     assert_eq!(run(wide, "wide(40)"), "1099511627776");
     let huge = "pub fn huge(x: u128) -> u128 = x << 127";

@@ -55,23 +55,12 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
     }
 }
 
-/// The integer type the literals of a value narrowed into a place of type `ty` take: the
-/// place's own, or its elements', through arrays of arrays.
-fn place_int(ty: &Ty) -> Option<IntTy> {
+/// The integer type a value of type `ty` is made of, an array's through its elements: what an
+/// expression of that type gives the literals among its operands (`core-calculus.md`, item 5).
+fn leaf_int(ty: &Ty) -> Option<IntTy> {
     match ty {
-        Ty::Array(_, elem) => place_int(elem),
+        Ty::Array(_, elem) => leaf_int(elem),
         Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => int_ty(ty),
-    }
-}
-
-/// The type the elements of an array literal of element type `elem` take: the element type's
-/// integer type where the other elements give it one, and otherwise `ctx`, the type the
-/// literal itself was given (`core-calculus.md`, item 5).
-fn element_int(elem: &Ty, ctx: Option<IntTy>) -> Option<IntTy> {
-    if elem.settled() == *elem && *elem != Ty::Any {
-        place_int(elem)
-    } else {
-        ctx
     }
 }
 
@@ -298,7 +287,7 @@ impl<'m> Machine<'m> {
         let (result, ret_span) = match f.syntax.body {
             // An expression body leaves by `return` too, from a branch of an `if` or an arm of
             // a `match` in it, which ends this call alone.
-            Some(Body::Expr(e)) => match self.eval(frame, e, place_int(&result_ty)) {
+            Some(Body::Expr(e)) => match self.eval(frame, e, None) {
                 Ok(v) => {
                     let span = tree.expr(e).span;
                     (self.narrow(frame, v, declared, &result_ty, span)?, span)
@@ -306,7 +295,7 @@ impl<'m> Machine<'m> {
                 Err(Exit::Return(v, span)) => (v, span),
                 Err(e) => return Err(e),
             },
-            Some(Body::Block(b)) => match self.block(frame, b, place_int(&result_ty)) {
+            Some(Body::Block(b)) => match self.block(frame, b, None) {
                 Ok(v) => {
                     let span = tree
                         .block(b)
@@ -369,7 +358,7 @@ impl<'m> Machine<'m> {
                     return broken("a binding statement that declares no binding");
                 };
                 let plain = f.typing.bindings[id.0 as usize].clone();
-                let v = self.eval(frame, *init, place_int(&plain))?;
+                let v = self.eval(frame, *init, None)?;
                 let declared = ty.map(|t| (tree, t));
                 let v = self.narrow(frame, v, declared, &plain, tree.expr(*init).span)?;
                 frame.slots[id.0 as usize] = Some(v);
@@ -394,7 +383,7 @@ impl<'m> Machine<'m> {
                 };
                 let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
                 let span = tree.expr(*e).span;
-                let v = self.eval(frame, *e, place_int(&result_ty))?;
+                let v = self.eval(frame, *e, None)?;
                 let declared = f.syntax.result.map(|t| (tree, t));
                 let v = self.narrow(frame, v, declared, &result_ty, span)?;
                 return Err(Exit::Return(v, span));
@@ -471,10 +460,32 @@ impl<'m> Machine<'m> {
         let plain = f.typing.exprs[place.0 as usize].clone();
         let declared = self.place_type(frame, &path)?;
         let new = match op {
-            AssignOp::Set => self.eval(frame, value, place_int(&plain))?,
+            AssignOp::Set => self.eval(frame, value, None)?,
             AssignOp::Compound(op) => {
                 let current = self.read(frame, &path)?;
-                let rhs = self.eval(frame, value, place_int(&plain))?;
+                // `x op= e` is `x = x op e` (item 6): `x` is the other operand of `e`,
+                // unless `e` is a shift's amount.
+                let other = match op {
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Rem
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor => int_ty(&plain),
+                    BinaryOp::Shl
+                    | BinaryOp::Shr
+                    | BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge => None,
+                };
+                let rhs = self.eval(frame, value, other)?;
                 let rt = f.typing.exprs[value.0 as usize].clone();
                 let operands = [(current, &plain, place), (rhs, &rt, value)];
                 let new = self.arith(frame, op, operands, int_ty(&plain), tree.expr(value).span)?;
@@ -690,7 +701,8 @@ impl<'m> Machine<'m> {
     }
 
     /// The value of `e`, whose integers an observer of the run is shown. `ctx` is the integer
-    /// type of the place the value is narrowed into, which literals alone take
+    /// type an expression around `e` gives the literals among its operands, which an
+    /// expression of literals alone takes; the place a value is narrowed into gives none
     /// (`core-calculus.md`, item 5).
     fn eval(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
         let v = self.value(frame, e, ctx)?;
@@ -708,7 +720,7 @@ impl<'m> Machine<'m> {
         // What this expression gives the literals among its operands, the branches of an `if`
         // and the arms of a `match` included: its own type where it has one, since they are
         // each other's other operands, and else the type it was given itself.
-        let here = int_ty(&f.typing.exprs[e.0 as usize]).or(ctx);
+        let here = leaf_int(&f.typing.exprs[e.0 as usize]).or(ctx);
         Ok(match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => Value::Int(Int::from_u128(*value)),
             ExprKind::Bool(b) => Value::Bool(*b),
@@ -800,7 +812,7 @@ impl<'m> Machine<'m> {
                     let field = def.and_then(|d| d.field(&fi.name)).map(|(_, f)| f);
                     let fty = field.map_or(Ty::Any, |f| f.ty.clone());
                     let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, place_int(&fty))?;
+                    let v = self.eval(frame, fi.value, None)?;
                     let at = tree.expr(fi.value).span;
                     let v = self.narrow(frame, v, declared, &fty, at)?;
                     values.push((fi.name.clone(), v));
@@ -827,7 +839,7 @@ impl<'m> Machine<'m> {
                     let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
                     let fty = field.map_or(Ty::Any, |f| f.ty.clone());
                     let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, place_int(&fty))?;
+                    let v = self.eval(frame, fi.value, None)?;
                     let at = tree.expr(fi.value).span;
                     let v = self.narrow(frame, v, declared, &fty, at)?;
                     values.push((fi.name.clone(), v));
@@ -868,18 +880,18 @@ impl<'m> Machine<'m> {
                 let Some(index) = f.resolution.calls[e.0 as usize] else {
                     return broken("a call that was never resolved");
                 };
-                let callee = self.function(index)?;
+                // A function without a body stops the run before its arguments are evaluated.
+                self.function(index)?;
                 let mut values = Vec::new();
                 let mut spans = Vec::new();
                 let mut places = Vec::new();
-                for (a, p) in args.iter().zip(&callee.syntax.params) {
+                for a in args {
                     if a.is_mut {
                         let path = self.place(frame, a.value)?;
                         values.push(self.read(frame, &path)?);
                         places.push(Some(path));
                     } else {
-                        let pt = Ty::of(&callee.syntax.tree, p.ty);
-                        values.push(self.eval(frame, a.value, place_int(&pt))?);
+                        values.push(self.eval(frame, a.value, None)?);
                         places.push(None);
                     }
                     spans.push(tree.expr(a.value).span);
@@ -905,10 +917,9 @@ impl<'m> Machine<'m> {
                         return broken("an array literal whose type is not an array")
                     }
                 };
-                let elem = element_int(elem_ty, ctx);
                 let mut values = Vec::new();
                 for &i in items {
-                    let v = self.eval(frame, i, elem)?;
+                    let v = self.eval(frame, i, here)?;
                     values.push(self.narrow_plain(v, elem_ty, span)?);
                 }
                 Value::Array(values)
@@ -917,11 +928,7 @@ impl<'m> Machine<'m> {
                 if *count > self.limits.max_array {
                     return Err(Exit::Stop(Stop::TooLarge(*count)));
                 }
-                let elem = match &f.typing.exprs[e.0 as usize] {
-                    Ty::Array(_, elem_ty) => element_int(elem_ty, ctx),
-                    Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => ctx,
-                };
-                let v = self.eval(frame, *value, elem)?;
+                let v = self.eval(frame, *value, here)?;
                 let v = match &f.typing.exprs[e.0 as usize] {
                     Ty::Array(_, elem_ty) => self.narrow_plain(v, elem_ty, span)?,
                     Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {

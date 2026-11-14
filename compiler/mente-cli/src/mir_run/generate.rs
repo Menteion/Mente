@@ -436,6 +436,27 @@ fn reads_pattern(e: &E) -> bool {
     })
 }
 
+/// Whether `e` passes a place whose root is the binding `name` as a `mut` argument, which
+/// assigns it.
+fn passes_mut(e: &E, name: &str) -> bool {
+    let sub = |x: &E| passes_mut(x, name);
+    match e {
+        E::Call(_, args) => args
+            .iter()
+            .any(|(is_mut, a)| (*is_mut && names(a, &|n| n == name)) || sub(a)),
+        E::Lit(_) | E::Name(_) | E::Builtin(..) => false,
+        E::Index(a, b) | E::Bin(_, a, b) => sub(a) || sub(b),
+        E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
+            sub(x)
+        }
+        E::Construct(_, fields) | E::Variant(_, _, fields) => fields.iter().any(|(_, x)| sub(x)),
+        E::If(c, a, b) => sub(c) || sub(a) || sub(b),
+        E::Array(items) => items.iter().any(sub),
+        E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
+        E::Return(x) => sub(x),
+    }
+}
+
 /// Whether `e` reads a name that `is` holds of.
 fn names(e: &E, is: &dyn Fn(&str) -> bool) -> bool {
     let sub = |x: &E| names(x, is);
@@ -2338,10 +2359,9 @@ impl Gen {
     }
 
     /// A bit operation, a shift or `~` over literals alone, written where its literals take
-    /// the type `t` (`core-calculus.md`, item 5): beside an operand of type `t`, as the whole
-    /// value narrowed into a place of type `t`, or, for `i64`, where there is neither. Each
-    /// literal is one `t` holds, so the operation works in `t` without a trap; its static
-    /// range is the type's, and its value is known.
+    /// the type `t` (`core-calculus.md`, item 5): beside an operand of type `t`, or, for
+    /// `i64`, where no operand gives one. Each literal is one `t` holds, so the operation
+    /// works in `t` without a trap; its static range is the type's, and its value is known.
     fn literal_bits(&mut self, t: IntT) -> G {
         let within = R {
             lo: Num::ZERO,
@@ -2386,6 +2406,20 @@ impl Gen {
             r: t.range(),
             k: Some(v),
         }
+    }
+
+    /// A bit operation over literals alone as the whole value of a place of type `t`: the
+    /// place gives the literals no type, so the operation works in `i64` and its value is
+    /// narrowed into `t` (`core-calculus.md`, item 5). One whose `i64` value `t` holds,
+    /// tried a few times, since one it does not hold always traps there (`E0508`).
+    fn literal_bits_into(&mut self, t: IntT) -> Option<E> {
+        for _ in 0..4 {
+            let g = self.literal_bits(I64);
+            if g.k.is_some_and(|v| t.range().holds(v)) {
+                return Some(g.e);
+            }
+        }
+        None
     }
 
     /// A name of an integer binding narrower than 128 bits, or a literal: an operand that
@@ -3930,23 +3964,28 @@ impl Gen {
     }
 
     /// Which bindings count as read, to compare with after a value is generated.
-    fn reads(&self) -> Vec<bool> {
-        self.binds.iter().map(|b| b.read).collect()
+    /// Which bindings are read, and which assigned, so far.
+    fn reads(&self) -> Vec<(bool, bool)> {
+        self.binds.iter().map(|b| (b.read, b.assigned)).collect()
     }
 
-    /// Takes back the reads counted since `before` that `kept` and the pending guards do not
-    /// hold: a part of a generated value was replaced, and a binding only that part read is
-    /// still unread, so its scope discards it when it closes (`E0218`).
-    fn forget_reads(&mut self, before: &[bool], kept: &E) {
-        for (id, was) in before.iter().enumerate() {
-            if *was || !self.binds[id].read {
-                continue;
-            }
+    /// Takes back the reads and the assignments counted since `before` that `kept` and the
+    /// pending guards do not hold: a part of a generated value was replaced, and a binding only
+    /// that part read is still unread, so its scope discards it when it closes (`E0218`), and a
+    /// `var` only a `mut` argument of that part assigned is still unassigned, so it is printed
+    /// a `val` (`E0219`).
+    fn forget_reads(&mut self, before: &[(bool, bool)], kept: &E) {
+        for (id, &(read, assigned)) in before.iter().enumerate() {
             let name = [self.binds[id].name.clone()];
-            let held = Gen::reads_any(kept, &name)
-                || self.pending.iter().any(|c| Gen::reads_any(c, &name));
-            if !held {
-                self.binds[id].read = false;
+            if !read && self.binds[id].read {
+                let held = Gen::reads_any(kept, &name)
+                    || self.pending.iter().any(|c| Gen::reads_any(c, &name));
+                if !held {
+                    self.binds[id].read = false;
+                }
+            }
+            if !assigned && self.binds[id].assigned && !passes_mut(kept, &name[0]) {
+                self.binds[id].assigned = false;
             }
         }
     }
@@ -4288,8 +4327,11 @@ impl Gen {
                     }
                 }
             }
-            // Literals alone under a bit operation, which take the binding's type.
-            Ty::Int(t) if self.rng.chance(4) => self.literal_bits(*t).e,
+            // Literals alone under a bit operation, an `i64` that the binding's type holds.
+            Ty::Int(t) if self.rng.chance(4) => match self.literal_bits_into(*t) {
+                Some(e) => e,
+                None => self.full(&ty, depth),
+            },
             Ty::Int(t) if self.guarded() && self.rng.chance(30) => {
                 match self.guarded_narrowing(*t) {
                     Some(e) => e,
@@ -4409,8 +4451,11 @@ impl Gen {
             // elements are refined, elements proven so.
             (Ty::Int(_), Some(r)) => ("=", self.refined_value(r)),
             (Ty::Array(n, _), Some(r)) => ("=", self.refined_array(*n, r)),
-            // Literals alone under a bit operation, which take the place's type.
-            (Ty::Int(t), None) if self.rng.chance(5) => ("=", self.literal_bits(*t).e),
+            // Literals alone under a bit operation, an `i64` that the place's type holds.
+            (Ty::Int(t), None) if self.rng.chance(5) => match self.literal_bits_into(*t) {
+                Some(e) => ("=", e),
+                None => return Vec::new(),
+            },
             (Ty::Int(t), None) if self.rng.chance(50) => {
                 let place_range = match &place {
                     E::Name(_) => self.binds[id].range.unwrap_or(t.range()),
@@ -6349,6 +6394,39 @@ mod tests {
             ends,
             blocks
         );
+    }
+
+    /// A part of a generated value that is replaced takes back what it counted: a binding only
+    /// it read is unread again, and a `var` only its `mut` argument assigned is unassigned again,
+    /// so that it is printed a `val` (`E0219`, seed 14451); what the kept value reads or passes
+    /// `mut` keeps its count, and so does what was counted before.
+    #[test]
+    fn test_a_replaced_part_takes_back_its_reads_and_assignments() {
+        let mut g = Gen::new(0, Mode::Plain);
+        g.scopes = vec![Vec::new()];
+        let x = g.declare("x".into(), Ty::Int(U8), Kind::Var, None);
+        let y = g.declare("y".into(), Ty::Int(U8), Kind::Var, None);
+        let z = g.declare("z".into(), Ty::Int(U8), Kind::Var, None);
+        g.binds[z].assigned = true;
+        let before = g.reads();
+        // The replaced part read and assigned all three, `f(mut x, mut y, mut z)`.
+        for id in [x, y, z] {
+            g.binds[id].read = true;
+            g.binds[id].assigned = true;
+        }
+        // The kept value passes `y` as `mut` and reads `x`.
+        let kept = E::Call(
+            "g".into(),
+            vec![(false, E::name("x")), (true, E::name("y"))],
+        );
+        g.forget_reads(&before, &kept);
+        let seen: Vec<(bool, bool)> = [x, y, z]
+            .iter()
+            .map(|&id| (g.binds[id].read, g.binds[id].assigned))
+            .collect();
+        assert_eq!(seen, [(true, false), (true, true), (false, true)]);
+        assert!(passes_mut(&E::Array(vec![kept.clone()]), "y"));
+        assert!(!passes_mut(&kept, "x"));
     }
 
     /// A `match` covers the refinement of what it reads (`core-calculus.md`, item 14), so the

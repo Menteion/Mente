@@ -632,6 +632,61 @@ fn bits_vals(st: &Octagon, op: BinaryOp, l: &Val, r: &Val, t: Option<IntTy>) -> 
     clamp_to(v, t, st)
 }
 
+/// The literal `e` complements, with its value, when `e` is `~` of a literal without a suffix.
+fn complemented_literal(tree: &Tree, e: ExprId) -> Option<(ExprId, u128)> {
+    let operand = match &tree.expr(e).kind {
+        ExprKind::Unary {
+            op: UnaryOp::BitNot,
+            operand,
+        } => *operand,
+        ExprKind::Unary {
+            op: UnaryOp::Not | UnaryOp::Neg,
+            ..
+        }
+        | ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => return None,
+    };
+    match &tree.expr(operand).kind {
+        ExprKind::Int {
+            value,
+            suffix: None,
+        } => Some((operand, *value)),
+        ExprKind::Int {
+            suffix: Some(_), ..
+        }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
+    }
+}
+
 /// `~x`: `max - x` in an unsigned type, `-x - 1` in a signed one. A value of no linear form
 /// gives one within the type, which `x` is narrowed into before `~` applies, so that no
 /// valuation of `~x` lies outside it.
@@ -3069,7 +3124,39 @@ impl<'a> Fx<'a> {
             t.name,
             t.range_text()
         );
+        let recorded = self.recording;
         self.emit("E0508", span, message, None, Anchor::Nowhere);
+        if let (true, Some(fix)) = (recorded, self.suffix_fix(span, t)) {
+            if let Some(d) = self.report.diagnostics.last_mut() {
+                d.fixes.push(fix);
+            }
+        }
+    }
+
+    /// The fix of an `E0508` whose value is `~` of a literal, such as `~3` narrowed into a
+    /// `u8`: the place gives a literal no type, so `~3` is -4, an `i64` (`core-calculus.md`,
+    /// item 5). The literal is written with the place's type, `~3_u8`, which keeps `~` in that
+    /// type and its value within it, so the narrowing fits. None for any other value, and where
+    /// the literal does not lie in the type, as in `~256` for a `u8`.
+    fn suffix_fix(&self, span: Span, t: IntTy) -> Option<Fix> {
+        let tree = self.tree;
+        let e = (0..tree.exprs.len())
+            .map(|i| ExprId(i as u32))
+            .find(|&e| tree.expr(e).span == span)?;
+        let literal = complemented_literal(tree, e).filter(|(_, value)| *value <= t.max())?;
+        let at = tree.expr(literal.0).span;
+        let replacement = format!("{}_{}", self.src.get(at.start..at.end)?, t.name);
+        Some(Fix {
+            message: format!(
+                "write the literal as `{}`, `{}`, so that `~` works in it",
+                t.name, replacement
+            ),
+            applicability: Applicability::MachineApplicable,
+            edits: vec![Edit {
+                span: at,
+                replacement,
+            }],
+        })
     }
 
     /// A value narrowed into a place of shape `shape`: its plain range may stay a run-time
@@ -6951,7 +7038,7 @@ mod tests {
             obligations("pub fn f(x: u8, k: i8[-1..=3]) -> u8 = x >> k")[0],
             (Shift, false, false)
         );
-        // A literal shifted takes the type of the place it lands in (`core-calculus.md`,
+        // A literal shifted is an `i64`, whatever place it lands in (`core-calculus.md`,
         // item 5): the amount lies within that type's width, and the value the shift narrows
         // into it fits the place.
         assert_eq!(
@@ -6964,6 +7051,10 @@ mod tests {
         );
         assert_eq!(
             obligations("pub fn f(k: u8[0..=8]) -> u8 = 1 << k")[0],
+            (Shift, false, true)
+        );
+        assert_eq!(
+            obligations("pub fn f(k: u8[0..=64]) -> u8 = 1 << k")[0],
             (Shift, false, false)
         );
         assert_eq!(
@@ -7585,30 +7676,95 @@ mod tests {
     }
 
     /// A bit operation, a shift or `~` over literals alone works in the type its literals
-    /// take (`core-calculus.md`, item 5), and Tier 1 follows it there: `~3` alone is -4, an
-    /// `i64`, so a `match` reads it within its type and no valuation of it lies outside;
-    /// beside a `u8` or in a `u8` place it is 252; a literal shifted is checked against the
-    /// width of the type it takes, and the shift's own narrowing, not the place's, is what
-    /// traps when the value leaves that type.
+    /// take, the other operands' or `i64`, never the place's (`core-calculus.md`, item 5),
+    /// and Tier 1 follows it there: `~3` alone is -4, so a `match` reads it within `i64` and
+    /// a narrowing of it into a `u8` always traps (`E0508`); beside a `u8` it is 252; a
+    /// literal shifted is an `i64`, so `1 << 7` is 128 and fits a `u8`, and `1 << 8` into
+    /// a `u8` always traps where it lands.
     #[test]
     fn test_literals_under_a_bit_operation_have_the_type_they_take() {
         for f in [
             "pub fn f() -> u8 = match ~3 {\n  -4 => 1\n  _ => 2\n}",
             "pub fn f() -> i64[-4..=-4] {\n  val m = ~3\n  m\n}",
-            "pub fn f() -> u8[252..=252] {\n  val m: u8 = ~3\n  m\n}",
+            "pub fn f() -> u8[252..=252] {\n  val m: u8 = ~3_u8\n  m\n}",
             "pub fn f(a: u8) -> u16[0..=255] = a & ~3",
             "pub fn f(a: u8[0..=3]) -> u16[252..=255] = a + ~3",
             "pub fn f() -> u8[128..=128] = 1 << 7",
-            // The shift traps at its own narrowing, which is no error, and gives no value
-            // for the place's narrowing to refuse.
-            "pub fn f() -> i8 = 1 << 7",
-            "pub fn f() -> u8 = 1 << 8",
+            "pub fn f() -> u8 = -1 & 255",
+            "pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m &= ~1\n  m\n}",
         ] {
             assert_eq!(codes(f), NONE, "{}", f);
         }
+        for f in [
+            "pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}",
+            "pub fn f() -> i8 = 1 << 7",
+            "pub fn f() -> u8 = 1 << 8",
+            "pub fn f() -> [2]u8 = [~3, 1]",
+            "fn mask(m: u8) -> u8 = m\npub fn f() -> u8 = mask(~3)",
+        ] {
+            assert_eq!(codes(f), ["E0508"], "{}", f);
+        }
         assert_eq!(
-            messages("pub fn f() -> u8[0..=251] {\n  val m: u8 = ~3\n  m\n}"),
+            messages("pub fn f() -> u8[0..=251] {\n  val m: u8 = ~3_u8\n  m\n}"),
             ["Tier 1 cannot rule out `m = 252`, outside `u8[0..=251]`, the type of the result of `f`"]
+        );
+    }
+
+    /// An `E0508` of `~` of a literal offers, machine-applicable, the literal written with
+    /// the place's type, and once applied the module checks: `~3` into a `u8` becomes `~3_u8`,
+    /// at a binding, an argument, a field, an element, a result and an assignment, in a hex
+    /// literal too. No such fix is offered where the literal does not lie in the type, nor
+    /// for a value of another form, whose suffix would not keep it within the type.
+    #[test]
+    fn test_a_narrowing_of_literals_alone_is_fixed_by_their_suffix() {
+        let decls = "struct P {\n  m: u8\n}\nfn mask(m: u8) -> u8 = m\n";
+        for (f, fixed) in [
+            (
+                "pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}",
+                "val m: u8 = ~3_u8",
+            ),
+            ("pub fn f() -> u8 = mask(~3)", "mask(~3_u8)"),
+            ("pub fn f() -> u8 = P(m: ~3).m", "P(m: ~3_u8)"),
+            ("pub fn f() -> [2]u8 = [~3, 1]", "[~3_u8, 1]"),
+            ("pub fn f() -> u8 = ~0", "~0_u8"),
+            (
+                "pub fn f() -> u16 {\n  var m: u16 = 0\n  m = ~0x0F\n  m\n}",
+                "m = ~0x0F_u16",
+            ),
+            ("pub fn f() -> u8 = ~255", "~255_u8"),
+            ("pub fn f() -> i8 = ~127 - 1", ""),
+            ("pub fn f() -> u8 = ~256", ""),
+            ("pub fn f() -> i8 = ~-129", ""),
+            ("pub fn f() -> u8 = ~3 + 1", ""),
+            ("pub fn f() -> u8 = ~3_i8", ""),
+        ] {
+            let src = format!("{}{}", decls, f);
+            let text = module(&src);
+            let d = diagnostics(&src);
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            assert_eq!(d[0].code, "E0508", "{}", f);
+            if fixed.is_empty() {
+                assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
+                continue;
+            }
+            let fix = &d[0].fixes[0];
+            assert_eq!(fix.applicability, Applicability::MachineApplicable, "{}", f);
+            let applied = apply_fix(&text, fix).unwrap();
+            assert!(applied.contains(fixed), "{}: {}", f, applied);
+            assert!(
+                crate::check_program(&applied).is_ok(),
+                "{}: {:?}",
+                applied,
+                crate::check_program(&applied).err()
+            );
+        }
+        assert_eq!(
+            messages("pub fn f() -> u8 = ~3")[0],
+            "Tier 1 proves `~3` is at most -4 here, outside `u8` (0 to 255), so this narrowing always traps"
+        );
+        assert_eq!(
+            diagnostics("pub fn f() -> u8 = ~3")[0].fixes[0].message,
+            "write the literal as `u8`, `3_u8`, so that `~` works in it"
         );
     }
 
