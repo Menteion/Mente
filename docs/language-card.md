@@ -1,5 +1,6 @@
 ---
 title: Mente Language Card
+id: mente-language-card
 version: 0.1.0
 status: first version
 date: 2026-11-10
