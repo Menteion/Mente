@@ -74,6 +74,169 @@ fail() {
   exit 1
 }
 
+# The processes alive in this namespace beside its first and the watcher, in `left`. A process
+# has ended when the kernel says so (State: Z) and no other thread of it runs: its name, which it
+# chooses, is never read, and one whose first thread alone has ended still counts.
+remaining() {
+  local dir pid key value rest state threads
+  left=
+  for dir in /proc/[0-9]*; do
+    pid=${dir#/proc/}
+    if [ "$pid" = 1 ] || [ "$pid" = "$watcher" ]; then continue; fi
+    state='' threads=''
+    {
+      while read -r key value rest; do
+        case "$key" in
+          State:) state=$value ;;
+          Threads:) threads=$value ;;
+        esac
+      done < "$dir/status"
+    } 2> /dev/null || continue
+    if [ -z "$state" ]; then continue; fi
+    if [ "$state" = Z ] && [ "${threads:-1}" -le 1 ]; then continue; fi
+    left="$left $pid"
+  done
+}
+
+# The first process of the namespace, as root: the mounts, the root, then the command as the
+# sandbox's user. Its standard input is the wrapper's lifeline.
+inner() {
+  local cwd=$1 vlimit=$2 flimit=$3 envs=() workspace status=0 watcher left k dir
+  shift 3
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    envs+=("$1")
+    shift
+  done
+  if [ "$#" -lt 2 ]; then
+    echo "test-sandbox: no command" >&2
+    exit 2
+  fi
+  shift
+  if [ "$$" != 1 ]; then
+    echo "test-sandbox: not the first process of a namespace of its own" >&2
+    exit 2
+  fi
+  workspace=$(< "$home/workspace")
+  exec 8<&0 < /dev/null
+  # Memory backs the temporary filesystems, so they are bounded: four tests at once write at most
+  # 6 GB.
+  /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=1g tmpfs "$root/tmp"
+  # Root mounts over two directories of the workspace, whose files are the change's own: where
+  # cargo sends an integration test's files (CARGO_TARGET_TMPDIR), which the test may write, and
+  # .git, which it may not read, so that the history is out of its sight (a test can still tell a
+  # mutant by other signs, which the file's header names). Each must be that very directory, no
+  # link and nothing under a link, or root would mount wherever the change aimed it, over a
+  # directory of /usr or /etc.
+  # These two are every path under the workspace that root resolves before it changes root.
+  for dir in "$workspace/target/tmp" "$workspace/.git"; do
+    if [ ! -e "$root$dir" ] && [ ! -L "$root$dir" ]; then continue; fi
+    if [ ! -d "$root$dir" ] || [ "$(/usr/bin/realpath -e -- "$root$dir")" != "$root$dir" ]; then
+      echo "test-sandbox: $dir is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere" >&2
+      exit 2
+    fi
+    case "$dir" in
+      */.git) /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,mode=0555,size=4k tmpfs "$root$dir" ;;
+      *) /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs "$root$dir" ;;
+    esac
+  done
+  /usr/bin/mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
+  cd "$root"
+  /usr/sbin/pivot_root . .old
+  /usr/bin/umount -l /.old
+  # The command starts where cargo started it, which is a directory of the workspace itself.
+  if ! cd -P -- "$cwd" 2> /dev/null; then
+    echo "test-sandbox: the working directory $cwd is not in the sandbox" >&2
+    exit 2
+  fi
+  case "$PWD/" in
+    "$workspace"/*) ;;
+    *)
+      echo "test-sandbox: the working directory $cwd leads out of the workspace, to $PWD" >&2
+      exit 2
+      ;;
+  esac
+  ulimit -v "$vlimit" -f "$flimit"
+  # A core limit of one byte, which the command cannot raise: no crash writes a core file.
+  /usr/bin/prlimit --pid "$$" --core=1:1
+  # When the wrapper ends or asks, every process here but this one ends, and so the command. The
+  # watcher goes on ending them for as long as this process lives: a wrapper that ended before the
+  # command had started must not leave the command to run on without it.
+  {
+    read -r -u 8 _ || true
+    while :; do kill -s KILL -- -1 || true; done
+  } > /dev/null 2>&1 &
+  watcher=$!
+  /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs \
+    --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- \
+    /usr/bin/env -i "${envs[@]}" PATH=/usr/bin:/bin HOME=/tmp TMPDIR=/tmp "$@" 8<&- || status=$?
+  # A process the command left behind ends with the namespace. As under nextest's leak-timeout,
+  # 100 ms after the command, that fails it.
+  remaining
+  for k in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -z "$left" ]; then break; fi
+    /usr/bin/sleep 0.01
+    remaining
+  done
+  if [ -n "$left" ]; then
+    echo "test-sandbox: the command left processes behind, which end with it:$left" >&2
+    if [ "$status" = 0 ]; then status=1; fi
+  fi
+  exit "$status"
+}
+
+# The wrapper, as the runner's user: cargo's runner. It records the command, starts the namespace
+# through sudo, and waits; its end ends the namespace.
+run() {
+  local name envs=() child status=0 signal=
+  if [ "$#" -lt 1 ]; then
+    echo "test-sandbox: no command" >&2
+    exit 2
+  fi
+  case "$1" in
+    *=*)
+      echo "test-sandbox: a command with = in its path would be read as a variable: $1" >&2
+      exit 2
+      ;;
+  esac
+  printf '%s\n' "$1" >> "$log"
+  for name in $(compgen -e); do
+    case "$name" in
+      CARGO | CARGO_* | NEXTEST | NEXTEST_* | MENTE_* | RUST_* | TERM | LANG | LC_* | TZ | CI | NO_COLOR | CLICOLOR | CLICOLOR_FORCE | FORCE_COLOR)
+        envs+=("$name=${!name}")
+        ;;
+    esac
+  done
+  # The lifeline: a pipe this shell alone writes, which the namespace reads as its standard
+  # input. It ends when this shell does, by any signal, SIGKILL too.
+  exec 9> >(exec /usr/bin/sudo -n -- /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- \
+    /usr/bin/bash "$self" inner "$PWD" "$(ulimit -v)" "$(ulimit -f)" "${envs[@]}" -- "$@")
+  child=$!
+  trap '' PIPE
+  trap 'signal=15; printf "\n" >&9 2> /dev/null' TERM
+  trap 'signal=2; printf "\n" >&9 2> /dev/null' INT
+  trap 'signal=1; printf "\n" >&9 2> /dev/null' HUP
+  wait "$child" || status=$?
+  # A signal ends the wait before the namespace has ended.
+  while [ -e "/proc/$child" ]; do
+    status=0
+    wait "$child" || status=$?
+  done
+  if [ -n "$signal" ]; then exit $((128 + signal)); fi
+  exit "$status"
+}
+
+# The two subcommands every sandboxed command starts, the wrapper and the namespace's first
+# process, end here: bash reads no further, so the length of the rest of this file, setup and the
+# canary, adds nothing to the cost of a test.
+case "${1:-}" in
+  run | inner)
+    subcommand=$1
+    shift
+    "$subcommand" "$@"
+    exit
+    ;;
+esac
+
 # The AppArmor profiles of this runner that grant a user namespace, one name a line: each is a way
 # for an unconfined process around Ubuntu's refusal of one, by changing to it first (aa-exec).
 userns_profiles() {
@@ -221,156 +384,6 @@ setup() {
   /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace"
   : > "$log"
   echo "The sandbox of $workspace is at $root, for the user $uid."
-}
-
-# The processes alive in this namespace beside its first and the watcher, in `left`. A process
-# has ended when the kernel says so (State: Z) and no other thread of it runs: its name, which it
-# chooses, is never read, and one whose first thread alone has ended still counts.
-remaining() {
-  local dir pid key value rest state threads
-  left=
-  for dir in /proc/[0-9]*; do
-    pid=${dir#/proc/}
-    if [ "$pid" = 1 ] || [ "$pid" = "$watcher" ]; then continue; fi
-    state='' threads=''
-    {
-      while read -r key value rest; do
-        case "$key" in
-          State:) state=$value ;;
-          Threads:) threads=$value ;;
-        esac
-      done < "$dir/status"
-    } 2> /dev/null || continue
-    if [ -z "$state" ]; then continue; fi
-    if [ "$state" = Z ] && [ "${threads:-1}" -le 1 ]; then continue; fi
-    left="$left $pid"
-  done
-}
-
-# The first process of the namespace, as root: the mounts, the root, then the command as the
-# sandbox's user. Its standard input is the wrapper's lifeline.
-inner() {
-  local cwd=$1 vlimit=$2 flimit=$3 envs=() workspace status=0 watcher left k dir
-  shift 3
-  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
-    envs+=("$1")
-    shift
-  done
-  if [ "$#" -lt 2 ]; then
-    echo "test-sandbox: no command" >&2
-    exit 2
-  fi
-  shift
-  if [ "$$" != 1 ]; then
-    echo "test-sandbox: not the first process of a namespace of its own" >&2
-    exit 2
-  fi
-  workspace=$(< "$home/workspace")
-  exec 8<&0 < /dev/null
-  # Memory backs the temporary filesystems, so they are bounded: four tests at once write at most
-  # 6 GB.
-  /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=1g tmpfs "$root/tmp"
-  # Root mounts over two directories of the workspace, whose files are the change's own: where
-  # cargo sends an integration test's files (CARGO_TARGET_TMPDIR), which the test may write, and
-  # .git, which it may not read, so that it cannot tell a mutant from the commit's own sources
-  # without holding a copy of them. Each must be that very directory, no link and nothing under a
-  # link, or root would mount wherever the change aimed it, over a directory of /usr or /etc.
-  # These two are every path under the workspace that root resolves before it changes root.
-  for dir in "$workspace/target/tmp" "$workspace/.git"; do
-    if [ ! -e "$root$dir" ] && [ ! -L "$root$dir" ]; then continue; fi
-    if [ ! -d "$root$dir" ] || [ "$(/usr/bin/realpath -e -- "$root$dir")" != "$root$dir" ]; then
-      echo "test-sandbox: $dir is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere" >&2
-      exit 2
-    fi
-    case "$dir" in
-      */.git) /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,mode=0555,size=4k tmpfs "$root$dir" ;;
-      *) /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs "$root$dir" ;;
-    esac
-  done
-  /usr/bin/mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
-  cd "$root"
-  /usr/sbin/pivot_root . .old
-  /usr/bin/umount -l /.old
-  # The command starts where cargo started it, which is a directory of the workspace itself.
-  if ! cd -P -- "$cwd" 2> /dev/null; then
-    echo "test-sandbox: the working directory $cwd is not in the sandbox" >&2
-    exit 2
-  fi
-  case "$PWD/" in
-    "$workspace"/*) ;;
-    *)
-      echo "test-sandbox: the working directory $cwd leads out of the workspace, to $PWD" >&2
-      exit 2
-      ;;
-  esac
-  ulimit -v "$vlimit" -f "$flimit"
-  # A core limit of one byte, which the command cannot raise: no crash writes a core file.
-  /usr/bin/prlimit --pid "$$" --core=1:1
-  # When the wrapper ends or asks, every process here but this one ends, and so the command. The
-  # watcher goes on ending them for as long as this process lives: a wrapper that ended before the
-  # command had started must not leave the command to run on without it.
-  {
-    read -r -u 8 _ || true
-    while :; do kill -s KILL -- -1 || true; done
-  } > /dev/null 2>&1 &
-  watcher=$!
-  /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs \
-    --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- \
-    /usr/bin/env -i "${envs[@]}" PATH=/usr/bin:/bin HOME=/tmp TMPDIR=/tmp "$@" 8<&- || status=$?
-  # A process the command left behind ends with the namespace. As under nextest's leak-timeout,
-  # 100 ms after the command, that fails it.
-  remaining
-  for k in 1 2 3 4 5 6 7 8 9 10; do
-    if [ -z "$left" ]; then break; fi
-    /usr/bin/sleep 0.01
-    remaining
-  done
-  if [ -n "$left" ]; then
-    echo "test-sandbox: the command left processes behind, which end with it:$left" >&2
-    if [ "$status" = 0 ]; then status=1; fi
-  fi
-  exit "$status"
-}
-
-# The wrapper, as the runner's user: cargo's runner. It records the command, starts the namespace
-# through sudo, and waits; its end ends the namespace.
-run() {
-  local name envs=() child status=0 signal=
-  if [ "$#" -lt 1 ]; then
-    echo "test-sandbox: no command" >&2
-    exit 2
-  fi
-  case "$1" in
-    *=*)
-      echo "test-sandbox: a command with = in its path would be read as a variable: $1" >&2
-      exit 2
-      ;;
-  esac
-  printf '%s\n' "$1" >> "$log"
-  for name in $(compgen -e); do
-    case "$name" in
-      CARGO | CARGO_* | NEXTEST | NEXTEST_* | MENTE_* | RUST_* | TERM | LANG | LC_* | TZ | CI | NO_COLOR | CLICOLOR | CLICOLOR_FORCE | FORCE_COLOR)
-        envs+=("$name=${!name}")
-        ;;
-    esac
-  done
-  # The lifeline: a pipe this shell alone writes, which the namespace reads as its standard
-  # input. It ends when this shell does, by any signal, SIGKILL too.
-  exec 9> >(exec /usr/bin/sudo -n -- /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- \
-    /usr/bin/bash "$self" inner "$PWD" "$(ulimit -v)" "$(ulimit -f)" "${envs[@]}" -- "$@")
-  child=$!
-  trap '' PIPE
-  trap 'signal=15; printf "\n" >&9 2> /dev/null' TERM
-  trap 'signal=2; printf "\n" >&9 2> /dev/null' INT
-  trap 'signal=1; printf "\n" >&9 2> /dev/null' HUP
-  wait "$child" || status=$?
-  # A signal ends the wait before the namespace has ended.
-  while [ -e "/proc/$child" ]; do
-    status=0
-    wait "$child" || status=$?
-  done
-  if [ -n "$signal" ]; then exit $((128 + signal)); fi
-  exit "$status"
 }
 
 env_lines() {
@@ -704,14 +717,6 @@ check() {
 case "${1:-}" in
   setup) setup ;;
   setup-as-root) setup_as_root "$2" "$3" ;;
-  run)
-    shift
-    run "$@"
-    ;;
-  inner)
-    shift
-    inner "$@"
-    ;;
   env) env_lines ;;
   uid) echo "$uid" ;;
   ran) ran "${2:-}" ;;
