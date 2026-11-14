@@ -300,7 +300,7 @@ env_lines() {
   esac
   : > "$log"
   printf "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
-  printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
+  printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GUN_RUNNER='/usr/bin/bash %s run'\n" "$self"
 }
 
 # Whether the step's tools handed commands to the sandbox at all: it fails a step in which cargo

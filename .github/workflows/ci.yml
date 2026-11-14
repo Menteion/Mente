@@ -102,6 +102,16 @@ jobs:
           cargo-nextest nextest run --locked --workspace --profile ci
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
+      - name: Plant, what the runner's core handler did, read outside the sandbox
+        if: always() && runner.os == 'Linux'
+        run: |
+          echo "core_pattern: $(cat /proc/sys/kernel/core_pattern)"
+          echo "--- systemd-coredump in the journal"
+          sudo journalctl --no-pager -o cat -t systemd-coredump --since "-30min" | cut -c1-300 | tail -n 30 || true
+          echo "--- coredumpctl"
+          sudo coredumpctl list --no-pager 2>&1 | tail -n 10 || true
+          echo "--- /usr/lib/locale on the runner itself"
+          ls -la /usr/lib/locale
       - name: No doctests
         # nextest runs no doctests, and `cargo test --doc` has no limit for one: rustdoc lists
         # every doc example it would compile, in any spelling of a doc comment or attribute, and
