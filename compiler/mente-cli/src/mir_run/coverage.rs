@@ -1184,7 +1184,8 @@ fn grammar() -> BTreeSet<String> {
 /// none is left out unseen: nothing refuses one but a narrowing Tier 1 proves always traps
 /// (`E0508`), whose function is generated again once the reference interpreter has run the
 /// claim ([`generate::checked`]), within the bars every run of generated programs is held to
-/// ([`generate::beyond_the_bars`]). At least
+/// ([`generate::beyond_the_bars`]). Some function is generated again, and its program comes
+/// again from its seed and the attempt each function is at. At least
 /// [`MIN_SEEDS_PER_ROW`] of the programs reach each construct of M1's grammar but those
 /// [`NOT_GENERATED`] names, which none reaches.
 #[test]
@@ -1226,6 +1227,14 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 ));
             }
         }
+        // A program with a function generated again comes again from its seed and the attempt
+        // each function is at, as the replay tests of `differential.rs` hold of their seeds.
+        if c.regenerated > 0 && generate::generated(seed, &c.attempts).text != c.program.text {
+            problems.push(format!(
+                "seed {}: its functions generated again give another program from the same attempts",
+                seed
+            ));
+        }
         (seed, seen, c.claims, c.regenerated, problems)
     });
     for (seed, seen, claimed, again, wrong) in programs {
@@ -1238,6 +1247,10 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
     }
     println!("{}", generate::claims_summary(regenerated, &claims));
     problems.extend(generate::beyond_the_bars(SEEDS, regenerated, &claims));
+    // Some function is generated again, so that a program replayed from its attempts is seen.
+    if regenerated == 0 {
+        problems.push("no function of these seeds is generated again".to_string());
+    }
     assert!(
         problems.is_empty(),
         "generated programs the checker refuses, claims of Tier 1 a run contradicts, or more \

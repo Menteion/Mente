@@ -1,0 +1,10 @@
+perf/kernels/bsearch.mn x86_64-unknown-linux-gnu 10544 bytes b9d2e7715dd0e582
+perf/kernels/collatz.mn x86_64-unknown-linux-gnu 7576 bytes b87aaf7d3d8b06de
+perf/kernels/dot.mn x86_64-unknown-linux-gnu 8336 bytes 6a8e5a1b508c12ef
+perf/kernels/isort.mn x86_64-unknown-linux-gnu 9384 bytes 3ca51fe0709e728c
+perf/kernels/matmul.mn x86_64-unknown-linux-gnu 9912 bytes 4c31311d0543b97b
+perf/kernels/popcount.mn x86_64-unknown-linux-gnu 9216 bytes df94180344ae531c
+perf/kernels/prefix.mn x86_64-unknown-linux-gnu 8136 bytes 2404a95236843383
+perf/kernels/sieve.mn x86_64-unknown-linux-gnu 9008 bytes 001b7a89bdfd48af
+perf/kernels/sum.mn x86_64-unknown-linux-gnu 7416 bytes 38bfd5904003ef37
+compiler/mente-cli/tests/debuggers/demo.mn x86_64-unknown-linux-gnu 7968 bytes 8a9a0037cdff9b06

@@ -238,58 +238,74 @@ fn test_mir_is_reproducible() {
     check_golden("mir.txt", &all);
 }
 
-#[test]
-fn test_objects_are_reproducible_and_independent_of_the_machine() {
+/// The object `mn build --object` writes for each native program for `triple`, built in two
+/// directories, is the same both times and the same as on every other machine, which the
+/// golden file `golden` holds for that target. Each target is a test of its own, so that each
+/// stays within half a test's time limit: the three together took 33 to 38 s on the Linux
+/// runners, near the limit of 40.
+fn objects_are_reproducible(triple: &str, golden: &str) {
     let root = repo_root();
-    let dirs = [scratch("objects-1"), scratch("objects-2")];
+    let dirs = [
+        scratch(&format!("objects-{}-1", triple)),
+        scratch(&format!("objects-{}-2", triple)),
+    ];
     let mut all = String::new();
     for (path, call) in native_programs() {
-        for triple in [
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-gnu",
-            "x86_64-pc-windows-msvc",
-        ] {
-            // The same file name in both directories: CodeView records the object's name.
-            let objects: Vec<Vec<u8>> = dirs
-                .iter()
-                .map(|dir| {
-                    let out = dir.join("program.o");
-                    let (status, printed) = mn_status(
-                        &root,
-                        &[
-                            "build",
-                            &path,
-                            "--call",
-                            &call,
-                            "--object",
-                            "--target",
-                            triple,
-                            "--compilation-dir",
-                            "/mente",
-                            "-o",
-                            out.to_str().unwrap(),
-                        ],
-                    );
-                    assert_eq!(status, 0, "{} for {}: {}", path, triple, printed);
-                    fs::read(&out).unwrap()
-                })
-                .collect();
-            assert!(
-                objects[0] == objects[1],
-                "{}: two objects for {} differ",
-                path,
-                triple
-            );
-            all.push_str(&format!(
-                "{} {} {} bytes {}\n",
-                path,
-                triple,
-                objects[0].len(),
-                digest(&objects[0])
-            ));
-        }
+        // The same file name in both directories: CodeView records the object's name.
+        let objects: Vec<Vec<u8>> = dirs
+            .iter()
+            .map(|dir| {
+                let out = dir.join("program.o");
+                let (status, printed) = mn_status(
+                    &root,
+                    &[
+                        "build",
+                        &path,
+                        "--call",
+                        &call,
+                        "--object",
+                        "--target",
+                        triple,
+                        "--compilation-dir",
+                        "/mente",
+                        "-o",
+                        out.to_str().unwrap(),
+                    ],
+                );
+                assert_eq!(status, 0, "{} for {}: {}", path, triple, printed);
+                fs::read(&out).unwrap()
+            })
+            .collect();
+        assert!(
+            objects[0] == objects[1],
+            "{}: two objects for {} differ",
+            path,
+            triple
+        );
+        all.push_str(&format!(
+            "{} {} {} bytes {}\n",
+            path,
+            triple,
+            objects[0].len(),
+            digest(&objects[0])
+        ));
     }
-    check_golden("objects.txt", &all);
+    check_golden(golden, &all);
+}
+
+#[test]
+fn test_objects_for_x86_64_linux_are_reproducible_and_independent_of_the_machine() {
+    objects_are_reproducible("x86_64-unknown-linux-gnu", "objects-x86_64-linux.txt");
+}
+
+#[test]
+fn test_objects_for_aarch64_linux_are_reproducible_and_independent_of_the_machine() {
+    objects_are_reproducible("aarch64-unknown-linux-gnu", "objects-aarch64-linux.txt");
+}
+
+#[test]
+fn test_objects_for_x86_64_windows_are_reproducible_and_independent_of_the_machine() {
+    objects_are_reproducible("x86_64-pc-windows-msvc", "objects-x86_64-windows.txt");
 }
 
 #[test]

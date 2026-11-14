@@ -699,22 +699,30 @@ mod tests {
         exhaustive: 64,
     };
 
-    /// The programs of the first seeds of each mode: each seed gives the same text every time,
-    /// the functions generated again included, every one passes every check, Tier 1 included,
-    /// and together they reach what each mode adds.
-    #[test]
-    fn test_generated_programs_are_well_typed_and_replayable() {
+    /// The programs of `seeds`, the first of each mode: each seed gives the same text every
+    /// time, a program with a function generated again the same one from its seed and the
+    /// attempt each function is at, every one passes every check, Tier 1 included, and together
+    /// they are held to the bars of every run. The first ninety seeds are checked in three parts
+    /// of thirty, ten of each mode, so that each part stays within half a test's time limit on
+    /// the slowest runner: a seed whose function Tier 1 refuses is checked twice, and a few take
+    /// a second or more in a debug build. That some seed has a function generated again, and so
+    /// a program replayed from its attempts, the coverage test asserts over its own seeds.
+    fn well_typed_and_replayable(seeds: std::ops::Range<u64>) {
+        let count = seeds.end - seeds.start;
         // Each seed on its own, on as many threads as the machine has: the program that checks,
         // what Tier 1 proves of it, and whether the same text comes of the seed again.
-        let programs = parallel((0..90).collect(), |seed| {
+        let programs = parallel(seeds.collect(), |seed| {
             let c = generate::checked(seed);
             let first = generate::program(seed).text;
             assert_eq!(first, generate::program(seed).text, "seed {}", seed);
-            // A program with a function generated again is the same one the next time too.
-            let again = c.regenerated > 0;
-            if again {
+            if c.regenerated > 0 {
                 let text = &c.program.text;
-                assert_eq!(*text, generate::checked(seed).program.text, "seed {}", seed);
+                assert_eq!(
+                    *text,
+                    generate::generated(seed, &c.attempts).text,
+                    "seed {}",
+                    seed
+                );
                 assert_ne!(*text, first, "seed {}", seed);
             }
             assert!(c.problems.is_empty(), "seed {}: {:?}", seed, c.problems);
@@ -728,27 +736,49 @@ mod tests {
                 .flat_map(|f| &f.obligations)
                 .filter(|o| o.proven)
                 .count();
-            (c.program, proven, again, c.regenerated, c.claims)
+            (c.program.seed, proven, c.regenerated, c.claims)
         });
         let mut proven = 0;
-        let mut again = 0;
         let mut functions = 0;
         let mut claims = Vec::new();
-        let mut text = BTreeMap::<&str, String>::new();
-        for (p, proved, regenerated, count, claimed) in programs {
+        for (seed, proved, count, claimed) in programs {
             proven += proved;
-            again += usize::from(regenerated);
             functions += count;
-            claims.extend(claimed.into_iter().map(|c| (p.seed, c)));
-            text.entry(group(p.mode)).or_default().push_str(&p.text);
+            claims.extend(claimed.into_iter().map(|c| (seed, c)));
         }
-        assert!(again > 0, "no function of these seeds is generated again");
         // These programs are held to the bars of every run.
         assert_eq!(
-            generate::beyond_the_bars(90, functions, &claims),
+            generate::beyond_the_bars(count, functions, &claims),
             Vec::<String>::new()
         );
         assert!(proven >= 100, "Tier 1 proves only {} obligations", proven);
+    }
+
+    #[test]
+    fn test_generated_programs_of_seeds_0_to_29_are_well_typed_and_replayable() {
+        well_typed_and_replayable(0..30);
+    }
+
+    #[test]
+    fn test_generated_programs_of_seeds_30_to_59_are_well_typed_and_replayable() {
+        well_typed_and_replayable(30..60);
+    }
+
+    #[test]
+    fn test_generated_programs_of_seeds_60_to_89_are_well_typed_and_replayable() {
+        well_typed_and_replayable(60..90);
+    }
+
+    /// Together the first programs of seeds 0 to 89, thirty of each mode, reach what each mode
+    /// adds: a plain program its statements and operators, a refined one its contracts and
+    /// refinements, which no plain program has. Generating them takes a fraction of a second.
+    #[test]
+    fn test_generated_programs_of_each_mode_hold_what_it_adds() {
+        let mut text = BTreeMap::<&str, String>::new();
+        for seed in 0..90 {
+            let p = generate::program(seed);
+            text.entry(group(p.mode)).or_default().push_str(&p.text);
+        }
         for word in [
             "while ", "guard ", "break", "continue", "mut ", "if ", "[", "<<", "%",
         ] {

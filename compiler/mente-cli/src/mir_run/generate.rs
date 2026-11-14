@@ -970,7 +970,7 @@ pub fn program(seed: u64) -> Program {
 
 /// The program of `seed` whose function `k` has the body of its attempt `attempts[k]`, the
 /// first one where none is given: every attempt keeps the function's signature.
-fn generated(seed: u64, attempts: &[u32]) -> Program {
+pub fn generated(seed: u64, attempts: &[u32]) -> Program {
     let mode = Mode::of(seed);
     let mut g = Gen::new(seed, mode);
     g.attempts = attempts.to_vec();
@@ -5360,6 +5360,9 @@ pub struct Checked {
     /// How many times a function of the program was generated again, a function of several
     /// claims once for them all.
     pub regenerated: usize,
+    /// The attempt each function of the program is at, the first where none is given: with the
+    /// seed, what gives the program again ([`generated`]).
+    pub attempts: Vec<u32>,
     /// What no generated program may show: a diagnostic other than `E0508`, which is a bug of
     /// the generator; an `E0508` the reference interpreter contradicts, which is a bug of
     /// Tier 1; and a program that still has one after [`MAX_ROUNDS`].
@@ -5491,12 +5494,14 @@ pub fn checked(seed: u64) -> Checked {
     let mut problems = Vec::new();
     for round in 0.. {
         let program = generated(seed, &attempts);
-        let refused = |program, claims, problems| Checked {
+        let tried = attempts.clone();
+        let refused = move |program, claims, problems| Checked {
             program,
             module: None,
             claims,
             regenerated,
             problems,
+            attempts: tried,
         };
         let diagnostics = match panic::catch_unwind(|| mente_sema::check_program(&program.text)) {
             Ok(Ok(module)) => {
@@ -5506,6 +5511,7 @@ pub fn checked(seed: u64) -> Checked {
                     claims,
                     regenerated,
                     problems,
+                    attempts,
                 }
             }
             Ok(Err(diagnostics)) => diagnostics,
