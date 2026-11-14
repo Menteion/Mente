@@ -681,3 +681,11 @@ fn private_helper(x: u32) -> u32 = x
 
 #[cfg(test)]
 mod overflow_traps;
+
+// A plant, never to merge: the macro of a listed member and a path dependency outside the members.
+mente_plant_macro::plant!();
+
+/// A plant, never to merge.
+pub fn plant_dependency() -> String {
+    mente_plant_dep::plant_zero().to_string()
+}

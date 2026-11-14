@@ -1,0 +1,9 @@
+[package]
+name = "mente-plant-dep"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A plant, never to merge: a path dependency with a build script, not listed in the members"
+
+[dependencies]
+num-traits = "0.2"

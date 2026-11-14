@@ -1,4 +1,5 @@
 [package]
+"\u0062uild" = "plant-build.rs"
 name = "mente-ast"
 version.workspace = true
 edition.workspace = true
@@ -7,6 +8,8 @@ description = "Mente Canonical AST, dual semantic hashing (spec_hash / body_hash
 
 [dependencies]
 mente-syntax = { path = "../mente-syntax" }
+mente-plant-macro = { path = "../../spikes/plant-macro" }
+mente-plant-dep = { path = "../../spikes/plant-dep" }
 
 [lints]
 workspace = true
