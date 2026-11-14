@@ -12,6 +12,7 @@
 // classifier by nature keeps `#[expect]`, with the reason every variant belongs in its arm.
 #![deny(clippy::wildcard_enum_match_arm)]
 
+pub mod bounds;
 pub mod check;
 pub mod incremental;
 pub mod names;

@@ -1,0 +1,18 @@
+// expect: pass
+module conformance
+// A bound past the limit of Tier 1's domain, about 2^125, is never read as no bound on the
+// other side, so no narrowing is said to trap always for it (`E0508`): each of these fits its
+// type for some arguments (ghost-contracts-and-totality.md, item 4).
+//
+// The quotient is 1 for `z` of 2^126: its narrowing into `u8` does not always trap.
+pub fn narrowed(x: u128[9223372036854775808..=18446744073709551615], y: u128[9223372036854775808..=18446744073709551615], z: u128) -> u8 = x * y / z
+
+// And it fits `u64` for `z` near `x * y`: the narrowing does not always trap.
+pub fn fits(x: u128[9223372036854775808..=18446744073709551615], y: u128[9223372036854775808..=18446744073709551615], z: u128) -> u64 {
+  val w: u64 = x * y - z
+  w
+}
+
+pub fn narrowed_at_the_edge() -> u8 = narrowed(9223372036854775808, 9223372036854775808, 85070591730234615865843651857942052864)
+
+pub fn fits_at_the_edge() -> u64 = fits(9223372036854775808, 9223372036854775808, 85070591730234615865843651857942052863)
