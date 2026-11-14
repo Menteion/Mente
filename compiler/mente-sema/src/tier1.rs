@@ -2539,11 +2539,9 @@ impl<'a> Fx<'a> {
             for n in &names[i..] {
                 t = match &t {
                     Ty::Struct(s) => self.structs.get(s)?.field(n)?.1.ty.clone(),
-                    // An array's one field.
-                    Ty::Array(..) if n == "len" => Ty::Int(Int::One(USIZE)),
-                    Ty::Int(_) | Ty::Bool | Ty::Array(..) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
-                        return None
-                    }
+                    // An array's one field, `.len`: the checker allows no other.
+                    Ty::Array(..) => Ty::Int(Int::One(USIZE)),
+                    Ty::Int(_) | Ty::Bool | Ty::Enum(_) | Ty::Unit | Ty::Any => return None,
                 };
             }
             return int_type(&t);
@@ -8028,7 +8026,27 @@ mod tests {
             ),
             (
                 "fn big(w: u16) -> u16\n  requires w > 30\n= w\npub fn f(x: u8) -> u16 = big(x)",
-                "x > 30 ",
+                "x > 30",
+            ),
+            // A suffixed literal gives the operand its type: `x + 0_u16` is a `u16`.
+            (
+                "fn big(w: u16) -> u16
+  requires w + 0_u16 > 300
+= w
+pub fn f(x: u8) -> u16 = big(x)",
+                "x + 0_u16 > 300",
+            ),
+            // A struct literal's field is its value, of the value's type.
+            (
+                "pub struct P {
+  a: u8
+  b: u16
+}
+fn needs(i: P) -> u16
+  requires i.b > 300
+= i.b
+pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
+                "y > 300",
             ),
         ] {
             let text = module(f);
@@ -8036,7 +8054,7 @@ mod tests {
             assert_eq!(d.len(), 1, "{}: {:?}", f, d);
             let fix = &d[0].fixes[0];
             assert!(
-                fix.message.contains(&format!("guard {}", guard)),
+                fix.message.contains(&format!("guard {} else", guard)),
                 "{}: {}",
                 f,
                 fix.message
