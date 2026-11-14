@@ -6,20 +6,22 @@ module conformance
 // dividend's magnitude and its negation. Tier 1 proves the narrowings these bounds allow, and
 // MIR and native code leave those checks out; the check of the divisor stays, and so does the
 // narrowing of a quotient that may leave its type (core-calculus.md, item 8). Each function
-// below is one range of divisor, and the calls after them are its edges.
-pub fn unsigned(a: u8, b: u8) -> u8 = a / b
+// below is one range of divisor, and the calls after them are its edges. Two operands of
+// the whole of their type are 16 bits wide, where the rule is the same as for 8, so that a
+// comparison takes random arguments rather than every pair.
+pub fn unsigned(a: u16, b: u16) -> u16 = a / b
 
-pub fn signed(a: i8, b: i8) -> i8 = a / b
+pub fn signed(a: i16, b: i16) -> i16 = a / b
 
-pub fn by_none_or_more(a: i8, b: i8[0..=127]) -> i8 = a / b
+pub fn by_none_or_more(a: i16, b: i16[0..=32767]) -> i16 = a / b
 
-pub fn by_none_or_less(a: i8, b: i8[-128..=0]) -> i8 = a / b
+pub fn by_none_or_less(a: i16, b: i16[-32768..=0]) -> i16 = a / b
 
-pub fn into_an_unsigned_type(a: i8[0..=127], b: i8[0..=127]) -> u8 = a / b
+pub fn into_an_unsigned_type(a: i16[0..=32767], b: i16[0..=32767]) -> u16 = a / b
 
-pub fn of_a_negative(a: i8[-128..=-1], b: i8[0..=127]) -> i8[-128..=0] = a / b
+pub fn of_a_negative(a: i16[-32768..=-1], b: i16[0..=32767]) -> i16[-32768..=0] = a / b
 
-pub fn of_a_negative_by_none_or_less(a: i8[-128..=-1], b: i8[-128..=0]) -> u8[0..=128] = a / b
+pub fn of_a_negative_by_none_or_less(a: i16[-32768..=-1], b: i16[-32768..=0]) -> u16[0..=32768] = a / b
 
 pub fn no_larger_than_its_dividend(a: u8[10..=20], b: u8[0..=3]) -> u8[3..=20] = a / b
 
@@ -41,7 +43,7 @@ pub fn as_an_index_past_the_end(xs: [4]u8, a: u8[0..=4], b: u8[0..=3]) -> u8 = x
 
 pub fn as_a_shift_amount(x: u8, a: u8[0..=7], b: u8) -> u8 = x >> (a / b)
 
-pub fn as_a_divisor(x: u8, a: u8[1..=9], b: u8[0..=9]) -> u8 = x / (a / b)
+pub fn as_a_divisor(x: u16, a: u16[1..=9], b: u16[0..=9]) -> u16 = x / (a / b)
 
 pub fn as_a_scrutinee(a: u8[0..=2], b: u8) -> u8 = match a / b {
   0 => 10
@@ -56,53 +58,53 @@ pub fn remainder(a: u8, b: u8[0..=8]) -> u8[0..=7] = a % b
 
 pub fn remainder_of_a_negative(a: i8[-128..=-1], b: i8[-8..=0]) -> i8[-7..=0] = a % b
 
-pub fn unsigned_at_the_limit() -> u8 = unsigned(255, 1)
+pub fn unsigned_at_the_limit() -> u16 = unsigned(65535, 1)
 
-pub fn unsigned_of_equals() -> u8 = unsigned(255, 255)
+pub fn unsigned_of_equals() -> u16 = unsigned(65535, 65535)
 
-pub fn unsigned_of_none() -> u8 = unsigned(0, 255)
+pub fn unsigned_of_none() -> u16 = unsigned(0, 65535)
 
-pub fn unsigned_by_none() -> u8 = unsigned(255, 0)
+pub fn unsigned_by_none() -> u16 = unsigned(65535, 0)
 
-pub fn signed_past_the_limit() -> i8 = signed(-128, -1)
+pub fn signed_past_the_limit() -> i16 = signed(-32768, -1)
 
-pub fn signed_at_the_least() -> i8 = signed(-128, 1)
+pub fn signed_at_the_least() -> i16 = signed(-32768, 1)
 
-pub fn signed_next_to_the_limit() -> i8 = signed(-127, -1)
+pub fn signed_next_to_the_limit() -> i16 = signed(-32767, -1)
 
-pub fn signed_by_none() -> i8 = signed(-128, 0)
+pub fn signed_by_none() -> i16 = signed(-32768, 0)
 
-pub fn by_none_or_more_at_the_least() -> i8 = by_none_or_more(-128, 1)
+pub fn by_none_or_more_at_the_least() -> i16 = by_none_or_more(-32768, 1)
 
-pub fn by_none_or_more_at_the_greatest() -> i8 = by_none_or_more(127, 1)
+pub fn by_none_or_more_at_the_greatest() -> i16 = by_none_or_more(32767, 1)
 
-pub fn by_none_or_more_by_the_greatest() -> i8 = by_none_or_more(-128, 127)
+pub fn by_none_or_more_by_the_greatest() -> i16 = by_none_or_more(-32768, 32767)
 
-pub fn by_none_or_more_by_none() -> i8 = by_none_or_more(-128, 0)
+pub fn by_none_or_more_by_none() -> i16 = by_none_or_more(-32768, 0)
 
-pub fn by_none_or_less_past_the_limit() -> i8 = by_none_or_less(-128, -1)
+pub fn by_none_or_less_past_the_limit() -> i16 = by_none_or_less(-32768, -1)
 
-pub fn by_none_or_less_at_the_limit() -> i8 = by_none_or_less(-127, -1)
+pub fn by_none_or_less_at_the_limit() -> i16 = by_none_or_less(-32767, -1)
 
-pub fn by_none_or_less_by_the_least() -> i8 = by_none_or_less(-128, -128)
+pub fn by_none_or_less_by_the_least() -> i16 = by_none_or_less(-32768, -32768)
 
-pub fn by_none_or_less_by_none() -> i8 = by_none_or_less(127, 0)
+pub fn by_none_or_less_by_none() -> i16 = by_none_or_less(32767, 0)
 
-pub fn unsigned_type_at_the_limit() -> u8 = into_an_unsigned_type(127, 1)
+pub fn unsigned_type_at_the_limit() -> u16 = into_an_unsigned_type(32767, 1)
 
-pub fn unsigned_type_by_none() -> u8 = into_an_unsigned_type(0, 0)
+pub fn unsigned_type_by_none() -> u16 = into_an_unsigned_type(0, 0)
 
-pub fn negative_at_the_least() -> i8 = of_a_negative(-128, 1)
+pub fn negative_at_the_least() -> i16 = of_a_negative(-32768, 1)
 
-pub fn negative_that_rounds_to_none() -> i8 = of_a_negative(-1, 127)
+pub fn negative_that_rounds_to_none() -> i16 = of_a_negative(-1, 32767)
 
-pub fn negative_by_none() -> i8 = of_a_negative(-1, 0)
+pub fn negative_by_none() -> i16 = of_a_negative(-1, 0)
 
-pub fn negative_by_none_or_less_at_the_limit() -> u8 = of_a_negative_by_none_or_less(-128, -1)
+pub fn negative_by_none_or_less_at_the_limit() -> u16 = of_a_negative_by_none_or_less(-32768, -1)
 
-pub fn negative_by_none_or_less_of_none() -> u8 = of_a_negative_by_none_or_less(-1, -128)
+pub fn negative_by_none_or_less_of_none() -> u16 = of_a_negative_by_none_or_less(-1, -32768)
 
-pub fn negative_by_none_or_less_by_none() -> u8 = of_a_negative_by_none_or_less(-128, 0)
+pub fn negative_by_none_or_less_by_none() -> u16 = of_a_negative_by_none_or_less(-32768, 0)
 
 pub fn dividend_at_its_least() -> u8 = no_larger_than_its_dividend(10, 3)
 
@@ -142,11 +144,11 @@ pub fn shift_amount_at_the_limit() -> u8 = as_a_shift_amount(128, 7, 1)
 
 pub fn shift_amount_by_none() -> u8 = as_a_shift_amount(128, 7, 0)
 
-pub fn divisor_of_none() -> u8 = as_a_divisor(255, 1, 9)
+pub fn divisor_of_none() -> u16 = as_a_divisor(65535, 1, 9)
 
-pub fn divisor_at_the_limit() -> u8 = as_a_divisor(255, 9, 1)
+pub fn divisor_at_the_limit() -> u16 = as_a_divisor(65535, 9, 1)
 
-pub fn divisor_by_none() -> u8 = as_a_divisor(255, 9, 0)
+pub fn divisor_by_none() -> u16 = as_a_divisor(65535, 9, 0)
 
 pub fn scrutinee_at_the_limit() -> u8 = as_a_scrutinee(2, 1)
 
