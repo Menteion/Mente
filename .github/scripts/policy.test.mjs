@@ -768,23 +768,104 @@ export function gitattributesProblems(text) {
   }
   return found;
 }
-/// `mutants::skip` in any spelling cargo-mutants reads, a comment or a space between the words or
-/// under a cfg_attr: it takes a function out of every mutation run, the floor included.
-const MUTANTS_SKIP = /\b(?:r#)?mutants(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*::(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*(?:r#)?skip\b/;
+/// A Rust source as its tokens read, for a rule over them: each comment, nested block comments
+/// too, made one space, and each string, raw string or character literal made `""`. One pass, so
+/// that no text makes a rule over it slow, and no `"/*"` in a string hides the code after it.
+export function rustTokensText(text) {
+  const out = [];
+  const n = text.length;
+  const raw = /[bc]?r(#*)"/y;
+  let k = 0;
+  let from = 0;
+  const cut = (to, put) => {
+    out.push(text.slice(from, k), put);
+    k = to;
+    from = to;
+  };
+  while (k < n) {
+    const c = text[k];
+    raw.lastIndex = k;
+    const rawMatch = /[bcr]/.test(c) && !/\w/.test(text[k - 1] ?? "") ? raw.exec(text) : null;
+    if (c === "/" && text[k + 1] === "/") {
+      const end = text.indexOf("\n", k);
+      cut(end < 0 ? n : end, " ");
+    } else if (c === "/" && text[k + 1] === "*") {
+      let depth = 0;
+      let j = k;
+      while (j < n) {
+        if (text[j] === "/" && text[j + 1] === "*") {
+          depth++;
+          j += 2;
+        } else if (text[j] === "*" && text[j + 1] === "/") {
+          depth--;
+          j += 2;
+          if (depth === 0) break;
+        } else j++;
+      }
+      cut(Math.min(j, n), " ");
+    } else if (rawMatch) {
+      const close = `"${rawMatch[1]}`;
+      const end = text.indexOf(close, k + rawMatch[0].length);
+      cut(end < 0 ? n : end + close.length, '""');
+    } else if (c === '"') {
+      let j = k + 1;
+      while (j < n && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      cut(Math.min(j + 1, n), '""');
+    } else if (c === "'" && text[k + 1] === "\\") {
+      let j = k + 3;
+      while (j < n && text[j] !== "'" && text[j] !== "\n") j++;
+      cut(Math.min(j + 1, n), '""');
+    } else if (c === "'" && k + 1 < n && text[k + 1] !== "\n") {
+      const width = text.codePointAt(k + 1) > 0xffff ? 2 : 1;
+      if (text[k + 1 + width] === "'") cut(k + 2 + width, '""');
+      else k++;
+    } else k++;
+  }
+  out.push(text.slice(from));
+  return out.join("");
+}
+/// `mutants::skip` as cargo-mutants reads it, in its tokens: a space, a line or a comment between
+/// the words, a raw identifier, or under a cfg_attr. It takes a function out of every mutation
+/// run, the floor included.
+const MUTANTS_SKIP = /\b(?:r#)?mutants\s*::\s*(?:r#)?skip\b/;
+const namesMutantsSkip = (text) => MUTANTS_SKIP.test(rustTokensText(text));
 
 check("git reads every change as text, and no source takes a function out of the mutation runs", () => {
   assert.deepEqual(gitattributesProblems(read(".gitattributes")), []);
   const nested = [...tracked()].filter((f) => f !== ".gitattributes" && path.posix.basename(f) === ".gitattributes");
   assert.deepEqual(nested, [], "a .gitattributes below the root, which the policy does not read");
-  const skipping = [...tracked()].filter((f) => f.endsWith(".rs") && MUTANTS_SKIP.test(read(f)));
+  const skipping = [...tracked()].filter((f) => f.endsWith(".rs") && namesMutantsSkip(read(f)));
   assert.deepEqual(skipping, [], "these sources name mutants::skip, which takes a function out of every mutation run, the Mutants floor's included");
   // The plants of the second review of 4e896ca, H-1, and the other spellings.
   for (const plant of ["compiler/** -diff", "*.rs binary", "*.rs diff=plain", "*.rs -text -diff", "*.rs !diff", "*.rs filter=lfs", "*.rs merge=ours", "* export-ignore", "[attr]hide -diff", "*.rs hide", '"compiler/a b.rs" text', "*.rs working-tree-encoding=UTF-16", "*.rs text eol=crlf", "  *.rs -diff", "*.rs", "*.rs text\r-diff"]) {
     assert.ok(gitattributesProblems(`* text=auto eol=lf\n${plant}\n`).length > 0, `the .gitattributes rule lets through: ${JSON.stringify(plant)}`);
   }
   assert.deepEqual(gitattributesProblems("# c\n\n* text=auto eol=lf\r\n*.mn text eol=lf linguist-language=Rust\nspec/*.md linguist-documentation=true\n"), []);
-  for (const plant of ["#[mutants::skip]", "#[mutants :: skip]", "#[cfg_attr(test, mutants::skip)]", "#[mutants/* c */::/* d */skip]", "#[mutants // c\n::skip]", "#[::mutants::skip]", "#[r#mutants::r#skip]"]) assert.match(`fn f() {}\n${plant}\nfn g() {}\n`, MUTANTS_SKIP, plant);
-  for (const fine of ["mir_mutants::command(&root)", "mutants_skip", "mutants::skipped_count"]) assert.doesNotMatch(fine, MUTANTS_SKIP, fine);
+  for (const plant of [
+    "#[mutants::skip]",
+    "#[mutants :: skip]",
+    "#[cfg_attr(test, mutants::skip)]",
+    "#[mutants/* c */::/* d */skip]",
+    "#[mutants/* a /* nested */ b */::skip]",
+    "#[mutants // c\n::skip]",
+    "#[::mutants::skip]",
+    "#[r#mutants::r#skip]",
+    // A string that opens a comment, or closes one, hides nothing after it.
+    'const A: &str = "/*";\n#[mutants::skip]\nconst B: &str = "*/";',
+    "const A: char = '\"';\n#[mutants::skip]\nconst B: &str = \"\";",
+    'const A: &str = r#"/*"#;\n#[mutants::skip]',
+    "fn f<'a>(x: &'a str) {}\n#[mutants::skip]",
+  ]) {
+    assert.ok(namesMutantsSkip(`fn f() {}\n${plant}\nfn g() {}\n`), `the mutants::skip rule lets through: ${plant}`);
+  }
+  for (const fine of ["mir_mutants::command(&root)", "mutants_skip", "mutants::skipped_count", "// #[mutants::skip]", "/* #[mutants::skip] */", 'const S: &str = "#[mutants::skip]";', 'const S: &str = r##"#[mutants::skip]"##;']) {
+    assert.ok(!namesMutantsSkip(fine), `the mutants::skip rule refuses: ${fine}`);
+  }
+  // In time linear in the text, whatever it holds (CodeQL found the first pattern backtracking on
+  // many repetitions of "*//*").
+  const started = Date.now();
+  for (const bulk of [`mutants${"*//*".repeat(50000)}`, `mutants ${"/* ".repeat(50000)}`, `${"mutants ".repeat(50000)}::`, `"${"\\\\".repeat(50000)}`, "'".repeat(100000)]) namesMutantsSkip(bulk);
+  assert.ok(Date.now() - started < 2000, `the mutants::skip rule took ${Date.now() - started} ms over 1 MB of text`);
 });
 
 /// The digest a pin holds: SHA-256 of the text, Windows line ends read as Unix ones.
