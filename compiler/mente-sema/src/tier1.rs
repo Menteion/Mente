@@ -7560,6 +7560,75 @@ mod tests {
         );
     }
 
+    /// Where a division runs its divisor is at least 1 in magnitude, so the quotient is no
+    /// larger than its dividend: by a divisor whose range only touches zero it lies within the
+    /// dividend's bounds over the rest of that range, and the remainder below that range's
+    /// greatest magnitude; by one whose range crosses zero it lies between the dividend's
+    /// greatest magnitude and its negation. Each bound is the tightest: Tier 1 cannot rule out
+    /// the value at it.
+    #[test]
+    fn test_a_quotient_is_no_larger_than_its_dividend() {
+        for f in [
+            "pub fn f(x: u8[10..=20], y: u8[0..=3]) -> u8[3..=20] = x / y",
+            "pub fn f(x: i8[-20..=-10], y: i8[-3..=0]) -> i8[3..=20] = x / y",
+            "pub fn f(x: i8[-20..=-10], y: u8[0..=3]) -> i8[-20..=-3] = x / y",
+            "pub fn f(x: i8[-100..=100], y: i8[-3..=3]) -> i8[-100..=100] = x / y",
+            "pub fn f(x: i8[-100..=50], y: i8[-3..=3]) -> i8[-100..=100] = x / y",
+            "pub fn f(x: u8, y: u8[0..=8]) -> u8[0..=7] = x % y",
+            "pub fn f(x: i8[-128..=-1], y: i8[-8..=0]) -> i8[-7..=0] = x % y",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        for (f, e, v, t) in [
+            (
+                "pub fn f(x: u8[10..=20], y: u8[0..=3]) -> u8[4..=20] = x / y",
+                "x / y",
+                "3",
+                "u8[4..=20]",
+            ),
+            (
+                "pub fn f(x: u8[10..=20], y: u8[0..=3]) -> u8[3..=19] = x / y",
+                "x / y",
+                "20",
+                "u8[3..=19]",
+            ),
+            (
+                "pub fn f(x: i8[-20..=-10], y: i8[-3..=0]) -> i8[3..=19] = x / y",
+                "x / y",
+                "20",
+                "i8[3..=19]",
+            ),
+            (
+                "pub fn f(x: i8[-100..=50], y: i8[-3..=3]) -> i8[-100..=99] = x / y",
+                "x / y",
+                "100",
+                "i8[-100..=99]",
+            ),
+            (
+                "pub fn f(x: i8[-100..=50], y: i8[-3..=3]) -> i8[-99..=100] = x / y",
+                "x / y",
+                "-100",
+                "i8[-99..=100]",
+            ),
+            (
+                "pub fn f(x: u8, y: u8[0..=8]) -> u8[0..=6] = x % y",
+                "x % y",
+                "7",
+                "u8[0..=6]",
+            ),
+        ] {
+            assert_eq!(
+                messages(f),
+                [format!(
+                    "Tier 1 cannot rule out that `{}` is {}, outside `{}`, the type of the result of `f`",
+                    e, v, t
+                )],
+                "{}",
+                f
+            );
+        }
+    }
+
     /// `~x` lies within the type of `x`, which `x` is narrowed into first, whatever Tier 1
     /// knows of `x`: a value of no linear form, such as a shift's, still gives one within the
     /// type, and no valuation of it lies outside, such as -1 for an unsigned type (Engineering

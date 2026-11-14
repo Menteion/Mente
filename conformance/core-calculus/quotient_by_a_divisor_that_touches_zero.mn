@@ -1,0 +1,167 @@
+// expect: pass
+module conformance
+// A zero divisor traps, so the quotient that is reached has a divisor of at least 1 in
+// magnitude: by a divisor that touches zero it keeps the sign the divisor's other values give
+// it and is no larger than its dividend, and by one that crosses zero it lies between the
+// dividend's magnitude and its negation. Tier 1 proves the narrowings these bounds allow, and
+// MIR and native code leave those checks out; the check of the divisor stays, and so does the
+// narrowing of a quotient that may leave its type (core-calculus.md, item 8). Each function
+// below is one range of divisor, and the calls after them are its edges.
+pub fn unsigned(a: u8, b: u8) -> u8 = a / b
+
+pub fn signed(a: i8, b: i8) -> i8 = a / b
+
+pub fn by_none_or_more(a: i8, b: i8[0..=127]) -> i8 = a / b
+
+pub fn by_none_or_less(a: i8, b: i8[-128..=0]) -> i8 = a / b
+
+pub fn into_an_unsigned_type(a: i8[0..=127], b: i8[0..=127]) -> u8 = a / b
+
+pub fn of_a_negative(a: i8[-128..=-1], b: i8[0..=127]) -> i8[-128..=0] = a / b
+
+pub fn of_a_negative_by_none_or_less(a: i8[-128..=-1], b: i8[-128..=0]) -> u8[0..=128] = a / b
+
+pub fn no_larger_than_its_dividend(a: u8[10..=20], b: u8[0..=3]) -> u8[3..=20] = a / b
+
+pub fn by_a_divisor_that_crosses_zero(a: i8[-100..=100], b: i8[-3..=3]) -> i8[-100..=100] = a / b
+
+pub fn of_the_least_by_a_divisor_that_crosses_zero(a: i8, b: i8[-1..=1]) -> i8 = a / b
+
+pub fn by_none_alone(a: u8, b: u8[0..=0]) -> u8 = a / b
+
+pub fn of_128_bits(a: u128, b: u128) -> u128 = a / b
+
+pub fn of_128_bits_signed(a: i128, b: i128[0..=170141183460469231731687303715884105727]) -> i128 = a / b
+
+// The quotient as an index, a shift amount, a divisor and a scrutinee: each check its bounds
+// allow is left out, and none it does not.
+pub fn as_an_index(xs: [4]u8, a: u8[0..=3], b: u8[0..=3]) -> u8 = xs[a / b]
+
+pub fn as_an_index_past_the_end(xs: [4]u8, a: u8[0..=4], b: u8[0..=3]) -> u8 = xs[a / b]
+
+pub fn as_a_shift_amount(x: u8, a: u8[0..=7], b: u8) -> u8 = x >> (a / b)
+
+pub fn as_a_divisor(x: u8, a: u8[1..=9], b: u8[0..=9]) -> u8 = x / (a / b)
+
+pub fn as_a_scrutinee(a: u8[0..=2], b: u8) -> u8 = match a / b {
+  0 => 10
+  1 => 11
+  2 => 12
+  _ => unreachable("the quotient is no larger than its dividend")
+}
+
+// The remainder by a divisor that touches zero is smaller in magnitude than the divisor's
+// other values, and has its dividend's sign.
+pub fn remainder(a: u8, b: u8[0..=8]) -> u8[0..=7] = a % b
+
+pub fn remainder_of_a_negative(a: i8[-128..=-1], b: i8[-8..=0]) -> i8[-7..=0] = a % b
+
+pub fn unsigned_at_the_limit() -> u8 = unsigned(255, 1)
+
+pub fn unsigned_of_equals() -> u8 = unsigned(255, 255)
+
+pub fn unsigned_of_none() -> u8 = unsigned(0, 255)
+
+pub fn unsigned_by_none() -> u8 = unsigned(255, 0)
+
+pub fn signed_past_the_limit() -> i8 = signed(-128, -1)
+
+pub fn signed_at_the_least() -> i8 = signed(-128, 1)
+
+pub fn signed_next_to_the_limit() -> i8 = signed(-127, -1)
+
+pub fn signed_by_none() -> i8 = signed(-128, 0)
+
+pub fn by_none_or_more_at_the_least() -> i8 = by_none_or_more(-128, 1)
+
+pub fn by_none_or_more_at_the_greatest() -> i8 = by_none_or_more(127, 1)
+
+pub fn by_none_or_more_by_the_greatest() -> i8 = by_none_or_more(-128, 127)
+
+pub fn by_none_or_more_by_none() -> i8 = by_none_or_more(-128, 0)
+
+pub fn by_none_or_less_past_the_limit() -> i8 = by_none_or_less(-128, -1)
+
+pub fn by_none_or_less_at_the_limit() -> i8 = by_none_or_less(-127, -1)
+
+pub fn by_none_or_less_by_the_least() -> i8 = by_none_or_less(-128, -128)
+
+pub fn by_none_or_less_by_none() -> i8 = by_none_or_less(127, 0)
+
+pub fn unsigned_type_at_the_limit() -> u8 = into_an_unsigned_type(127, 1)
+
+pub fn unsigned_type_by_none() -> u8 = into_an_unsigned_type(0, 0)
+
+pub fn negative_at_the_least() -> i8 = of_a_negative(-128, 1)
+
+pub fn negative_that_rounds_to_none() -> i8 = of_a_negative(-1, 127)
+
+pub fn negative_by_none() -> i8 = of_a_negative(-1, 0)
+
+pub fn negative_by_none_or_less_at_the_limit() -> u8 = of_a_negative_by_none_or_less(-128, -1)
+
+pub fn negative_by_none_or_less_of_none() -> u8 = of_a_negative_by_none_or_less(-1, -128)
+
+pub fn negative_by_none_or_less_by_none() -> u8 = of_a_negative_by_none_or_less(-128, 0)
+
+pub fn dividend_at_its_least() -> u8 = no_larger_than_its_dividend(10, 3)
+
+pub fn dividend_at_its_greatest() -> u8 = no_larger_than_its_dividend(20, 1)
+
+pub fn dividend_by_none() -> u8 = no_larger_than_its_dividend(20, 0)
+
+pub fn crossing_at_the_greatest() -> i8 = by_a_divisor_that_crosses_zero(-100, -1)
+
+pub fn crossing_at_the_least() -> i8 = by_a_divisor_that_crosses_zero(-100, 1)
+
+pub fn crossing_by_none() -> i8 = by_a_divisor_that_crosses_zero(100, 0)
+
+pub fn crossing_past_the_limit() -> i8 = of_the_least_by_a_divisor_that_crosses_zero(-128, -1)
+
+pub fn crossing_at_the_limit() -> i8 = of_the_least_by_a_divisor_that_crosses_zero(-128, 1)
+
+pub fn by_none_alone_of_all() -> u8 = by_none_alone(255, 0)
+
+pub fn of_128_bits_at_the_limit() -> u128 = of_128_bits(340282366920938463463374607431768211455, 1)
+
+pub fn of_128_bits_by_none() -> u128 = of_128_bits(340282366920938463463374607431768211455, 0)
+
+pub fn of_128_bits_signed_at_the_least() -> i128 = of_128_bits_signed(-170141183460469231731687303715884105728, 1)
+
+pub fn of_128_bits_signed_by_none() -> i128 = of_128_bits_signed(-170141183460469231731687303715884105728, 0)
+
+pub fn index_at_the_end() -> u8 = as_an_index([1, 2, 3, 4], 3, 1)
+
+pub fn index_by_none() -> u8 = as_an_index([1, 2, 3, 4], 3, 0)
+
+pub fn index_past_the_end() -> u8 = as_an_index_past_the_end([1, 2, 3, 4], 4, 1)
+
+pub fn index_within_the_end() -> u8 = as_an_index_past_the_end([1, 2, 3, 4], 4, 2)
+
+pub fn shift_amount_at_the_limit() -> u8 = as_a_shift_amount(128, 7, 1)
+
+pub fn shift_amount_by_none() -> u8 = as_a_shift_amount(128, 7, 0)
+
+pub fn divisor_of_none() -> u8 = as_a_divisor(255, 1, 9)
+
+pub fn divisor_at_the_limit() -> u8 = as_a_divisor(255, 9, 1)
+
+pub fn divisor_by_none() -> u8 = as_a_divisor(255, 9, 0)
+
+pub fn scrutinee_at_the_limit() -> u8 = as_a_scrutinee(2, 1)
+
+pub fn scrutinee_of_none() -> u8 = as_a_scrutinee(2, 255)
+
+pub fn scrutinee_by_none() -> u8 = as_a_scrutinee(2, 0)
+
+pub fn remainder_at_the_limit() -> u8 = remainder(255, 8)
+
+pub fn remainder_by_one() -> u8 = remainder(255, 1)
+
+pub fn remainder_by_none() -> u8 = remainder(255, 0)
+
+pub fn remainder_of_a_negative_at_the_limit() -> i8 = remainder_of_a_negative(-127, -8)
+
+pub fn remainder_of_a_negative_of_none() -> i8 = remainder_of_a_negative(-128, -8)
+
+pub fn remainder_of_a_negative_by_none() -> i8 = remainder_of_a_negative(-128, 0)
