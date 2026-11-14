@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 55;
+const FLOOR = 56;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1174,6 +1174,55 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     assert.equal(run(["nothing"], "Linux").status, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/// The required jobs that run code of a change on a Linux runner outside the sandbox, each with its
+/// reason and what bringing it in would take (ROADMAP.md, M2, the guards of the audit). In each,
+/// that code itself produces the evidence its step reads. A job that leaves the pinned jobs and
+/// is not named here fails the check below: dropping a job from PINNED_JOBS takes its tests out of
+/// the sandbox unseen otherwise.
+const LEFT_OUTSIDE = new Map([
+  ["ci.yml#bench", "its tests read the base branch's medians from a file of the runner's and write the job's summary"],
+  ["ci.yml#tier1-latency", "its test writes the job's summary"],
+  ["ci.yml#debuggers", "a script of the change drives the debugger over the binary it built"],
+  ["smt.yml#z3", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
+  ["fuzz.yml#fuzz", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
+  ["mir-mutants.yml#gate", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
+  ["perf.yml#kernels", "it measures mn and its kernels through perf, with the base branch's compiler beside the change's"],
+  ["harness.yml#fixtures", "its own sandbox confines agent code, not mn"],
+]);
+/// Whether a step's script runs code of the change through cargo, or a binary it built.
+const runsBuiltCode = (text) => /\bcargo(-nextest)?\b[^\n]*\b(test|t|run|r|nextest|mutants|bench|llvm-cov)\b|\btarget\/(debug|release)\//.test(String(text));
+
+check("every required job that runs code of a change on Linux runs it in the sandbox, or says why not", () => {
+  const pinned = new Set(PINNED_JOBS.keys());
+  for (const { file, id, job } of requiredJobs()) {
+    const key = `${file}#${id}`;
+    const linux = /ubuntu-/.test(JSON.stringify([job["runs-on"], job.strategy?.matrix ?? null]));
+    if (!linux || !steps(job).some((s) => runsBuiltCode(s.run ?? ""))) continue;
+    assert.ok(pinned.has(key) || LEFT_OUTSIDE.has(key), `${key} runs code of the change on a Linux runner, and is neither pinned with the sandbox (PINNED_JOBS) nor named, with its reason, in LEFT_OUTSIDE in .github/scripts/policy.test.mjs`);
+  }
+  // Nothing of the change lies under target/, where the tests are built: root mounts the tests'
+  // own directory there, and refuses to through a link the change tracks (test-sandbox.sh); this
+  // refuses the tracked file before any job runs.
+  const underTarget = [...tracked()].filter((f) => f === "target" || f.startsWith("target/"));
+  assert.deepEqual(underTarget, [], "files under target/ are tracked: the sandbox mounts the tests' own directory there, and a tracked link could aim it elsewhere");
+  const required = new Set(requiredJobs().map(({ file, id }) => `${file}#${id}`));
+  for (const key of LEFT_OUTSIDE.keys()) {
+    assert.ok(required.has(key), `LEFT_OUTSIDE names ${key}, which is no required job`);
+    assert.ok(!pinned.has(key), `LEFT_OUTSIDE names ${key}, which runs in the sandbox`);
+  }
+  for (const [text, runs] of [
+    ["timeout 15m cargo test --release --locked -p mente-cli -- --ignored x", true],
+    ["cargo build --release --locked --bin mn\n./target/release/mn smt examples", true],
+    ["bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn", true],
+    ["cargo llvm-cov --workspace --locked --lcov --output-path lcov.info", true],
+    ["cargo t --release", true],
+    ["rustup toolchain install", false],
+    ["node --test .github/scripts/policy.test.mjs", false],
+  ]) {
+    assert.equal(runsBuiltCode(text), runs, text);
   }
 });
 
