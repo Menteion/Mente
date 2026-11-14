@@ -2137,7 +2137,10 @@ impl<'a> Lower<'a> {
                 },
                 UnaryOp::Neg => self.negate(e, *operand, span)?,
                 UnaryOp::BitNot => {
-                    let t = self.int_of(*operand).unwrap_or(I64);
+                    let t = self
+                        .int_of(*operand)
+                        .or(self.taken(*operand))
+                        .unwrap_or(I64);
                     let v = self.expr(*operand)?;
                     let Some((x, from)) = v.int_node("an operand of `~`")? else {
                         return Ok(V::Never);
@@ -2584,6 +2587,13 @@ impl<'a> Lower<'a> {
     }
 
     /// The integer type of an expression, as the interpreter's operations take it.
+    /// The type the literals of `e` take, when `e` is an expression of literals alone: the
+    /// type a bit operation, a shift or `~` over it works in (`core-calculus.md`, item 5).
+    fn taken(&self, e: ExprId) -> Option<SemaIntTy> {
+        let all = &self.s.f.typing.literals;
+        all.get(e.0 as usize).copied().flatten().map(|t| t.ty)
+    }
+
     fn int_of(&self, e: ExprId) -> Option<SemaIntTy> {
         match &self.s.f.typing.exprs[e.0 as usize] {
             SemaTy::Int(i) => int_ty(i),
@@ -2949,7 +2959,7 @@ impl<'a> Lower<'a> {
         self.at(span);
         match op {
             BinaryOp::Shl | BinaryOp::Shr => {
-                let t = lt.unwrap_or(I64);
+                let t = lt.or(self.taken(le)).unwrap_or(I64);
                 let w = mir(t);
                 // The amount lies within the type's width, unless Tier 1 proves it does.
                 if !self.proven(
@@ -2983,7 +2993,11 @@ impl<'a> Lower<'a> {
                 }
             }
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                let t = lt.or(rt).unwrap_or(I64);
+                let t = lt
+                    .or(rt)
+                    .or(self.taken(le))
+                    .or(self.taken(re))
+                    .unwrap_or(I64);
                 let (ls, rs) = (tree.expr(le).span, tree.expr(re).span);
                 let x = self.narrow_int(a, ta, t, ls, Some(ls));
                 let y = self.narrow_int(b, tb, t, rs, Some(rs));

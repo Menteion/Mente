@@ -2293,6 +2293,7 @@ impl Gen {
         };
         let a = self.int_expr(inner, depth + 1);
         let b = match inner {
+            Want::Exact(t) if a.cls == Cls::One(t) && self.rng.chance(6) => self.literal_bits(t),
             Want::Exact(t) if self.rng.chance(30) => {
                 let n = self.value_in(t.range());
                 G {
@@ -2334,6 +2335,57 @@ impl Gen {
             r,
             k,
         })
+    }
+
+    /// A bit operation, a shift or `~` over literals alone, written where its literals take
+    /// the type `t` (`core-calculus.md`, item 5): beside an operand of type `t`, as the whole
+    /// value narrowed into a place of type `t`, or, for `i64`, where there is neither. Each
+    /// literal is one `t` holds, so the operation works in `t` without a trap; its static
+    /// range is the type's, and its value is known.
+    fn literal_bits(&mut self, t: IntT) -> G {
+        let within = R {
+            lo: Num::ZERO,
+            hi: t.max(),
+        };
+        let n = self.value_in(within);
+        let m = self.value_in(within);
+        let (e, v) = match self.rng.below(5) {
+            0 | 1 => {
+                let e = E::BitNot(Box::new(self.literal(n, None)));
+                (e, unbits(t, !bits(t, n)))
+            }
+            2 => {
+                let op = *self.rng.pick(&[Op::BitAnd, Op::BitOr, Op::BitXor]);
+                let (x, y) = (bits(t, n), bits(t, m));
+                let v = match op {
+                    Op::BitAnd => x & y,
+                    Op::BitOr => x | y,
+                    _ => x ^ y,
+                };
+                let e = E::bin(op, self.literal(n, None), self.literal(m, None));
+                (e, unbits(t, v))
+            }
+            3 => {
+                // `~n & m`: the complement takes the type the whole operation does.
+                let not = E::BitNot(Box::new(self.literal(n, None)));
+                let e = E::bin(Op::BitAnd, not, self.literal(m, None));
+                (e, unbits(t, !bits(t, n) & bits(t, m)))
+            }
+            _ => {
+                // `1 << k`, up to the type's highest bit an unsigned value has, or the one
+                // below its sign.
+                let most = t.bits - u32::from(t.signed) - 1;
+                let k = self.rng.below(u64::from(most) + 1) as u32;
+                let e = E::bin(Op::Shl, E::Lit("1".into()), E::Lit(k.to_string()));
+                (e, Num::new(false, 1 << k))
+            }
+        };
+        G {
+            e,
+            cls: Cls::Lit,
+            r: t.range(),
+            k: Some(v),
+        }
     }
 
     /// A name of an integer binding narrower than 128 bits, or a literal: an operand that
@@ -2503,29 +2555,35 @@ impl Gen {
     /// A divisor: one that is always zero becomes one most of the time, and a name is guarded
     /// positive in the modes with guards.
     fn divisor(&mut self, b: G) -> G {
-        let zero = b.r == R::point(Num::ZERO) || b.k == Some(Num::ZERO);
+        // Zero as written, or as a run knows it: `16 % x` after `guard x <= 1`.
+        let zero = b.r == R::point(Num::ZERO)
+            || b.k == Some(Num::ZERO)
+            || self.fact(&b.e) == Some(R::point(Num::ZERO));
         if zero && !self.rng.chance(90) {
             self.zero_divisor = true;
             self.doomed = true;
             return b;
         }
         if zero {
-            // What names nothing is replaced; what names a binding, as `x - x` and
+            let one = G {
+                e: E::Lit("1".into()),
+                cls: Cls::Lit,
+                r: R::point(Num::small(1)),
+                k: Some(Num::small(1)),
+            };
+            // What names nothing is replaced. What names a binding, as `x - x` and
             // `xs.len - 3` do, keeps its reads and has one added, or a binding only it read
-            // would be left unread (`E0218`).
-            return if names(&b.e, &|_| true) {
-                G {
-                    e: E::bin(Op::Add, b.e, E::Lit("1".into())),
-                    cls: b.cls,
-                    r: R::point(Num::small(1)),
-                    k: None,
-                }
-            } else {
-                G {
-                    e: E::Lit("1".into()),
-                    cls: Cls::Lit,
-                    r: R::point(Num::small(1)),
-                    k: Some(Num::small(1)),
+            // would be left unread (`E0218`); where that sum might leave 128 bits (`E0222`),
+            // the divisor stays as it is, zero.
+            if !names(&b.e, &|_| true) {
+                return one;
+            }
+            return match Self::combined(Op::Add, b.clone(), one) {
+                Some(sum) => sum,
+                None => {
+                    self.zero_divisor = true;
+                    self.doomed = true;
+                    b
                 }
             };
         }
@@ -2551,6 +2609,10 @@ impl Gen {
                 hi: t.max(),
             });
             (self.literal(n, None), Some(n))
+        } else if a.cls == Cls::One(t) && self.rng.chance(15) {
+            // Literals alone under a bit operation of their own, beside an operand of a type.
+            let b = self.literal_bits(t);
+            (b.e, b.k)
         } else {
             let b = self.int_expr(Want::Exact(t), depth + 1);
             (b.e, b.k)
@@ -2949,6 +3011,10 @@ impl Gen {
                 let b = if self.rng.chance(50) {
                     let n = self.value_in(a.r);
                     self.literal(n, None)
+                } else if self.rng.chance(8) {
+                    // Literals alone under a bit operation: a comparison gives them no type,
+                    // so they are an `i64`.
+                    self.literal_bits(I64).e
                 } else {
                     self.int_expr(Want::Any, depth + 1).e
                 };
@@ -3037,6 +3103,16 @@ impl Gen {
             }
             // A quotient, its divisor never zero where the division runs.
             E::Bin(Op::Div, a, b) => quotient(self.fact(a)?, self.fact(b)?),
+            // A remainder: smaller in magnitude than its divisor's greatest, no larger than
+            // its dividend, and of its dividend's sign. None by a divisor that is zero alone.
+            E::Bin(Op::Rem, a, b) => {
+                let (a, b) = (self.fact(a)?, self.fact(b)?);
+                let most = b.magnitude().checked_sub(1)?.min(a.magnitude());
+                Some(R {
+                    lo: Num::new(a.lo.neg, if a.lo.neg { most } else { 0 }),
+                    hi: Num::new(false, if a.hi.neg { 0 } else { most }),
+                })
+            }
             _ => None,
         }
     }
@@ -3345,7 +3421,7 @@ impl Gen {
             .filter(|s| s.related().iter().any(|r| !r.is_empty()))
             .cloned()
             .collect();
-        if self.relates() && !relating.is_empty() && self.rng.chance(60) {
+        if self.relates() && !relating.is_empty() && self.rng.chance(85) {
             options = relating;
         }
         let sig = self.rng.pick(&options).clone();
@@ -3863,7 +3939,8 @@ impl Gen {
         let Some(leave) = self.leaving_if() else {
             return Vec::new();
         };
-        let s = match self.rng.below(3) {
+        // An argument comes up most: a call that takes one is not always there to write.
+        let s = match self.rng.below(5) {
             0 => {
                 let x = self.value(&Ty::Int(U8), 1);
                 S::Discard(E::bin(Op::Add, x, leave))
@@ -4019,7 +4096,7 @@ impl Gen {
             (matches!(ret, Some(Ty::Array(n, _)) if n > 0), 3),
             (!places.is_empty(), 3),
             (has_field, 3),
-            (has_payload, 3),
+            (has_payload, 5),
             (true, 1),
             (true, 1),
         ]
@@ -4193,6 +4270,8 @@ impl Gen {
                     }
                 }
             }
+            // Literals alone under a bit operation, which take the binding's type.
+            Ty::Int(t) if self.rng.chance(4) => self.literal_bits(*t).e,
             Ty::Int(t) if self.guarded() && self.rng.chance(30) => {
                 match self.guarded_narrowing(*t) {
                     Some(e) => e,
@@ -4222,6 +4301,11 @@ impl Gen {
     /// `bool`. None when the operands have several types, which needs a stated type (`E0212`),
     /// or when the value cannot land in the type.
     fn inferred(&mut self, depth: u32) -> Option<(Ty, E)> {
+        // Literals alone under a bit operation: a binding that states no type gives them
+        // none, so they are an `i64`, and so is the binding.
+        if self.rng.chance(4) {
+            return Some((Ty::Int(I64), self.literal_bits(I64).e));
+        }
         if self.rng.chance(25) {
             return Some((Ty::Bool, self.bool_expr(depth)));
         }
@@ -4307,6 +4391,8 @@ impl Gen {
             // elements are refined, elements proven so.
             (Ty::Int(_), Some(r)) => ("=", self.refined_value(r)),
             (Ty::Array(n, _), Some(r)) => ("=", self.refined_array(*n, r)),
+            // Literals alone under a bit operation, which take the place's type.
+            (Ty::Int(t), None) if self.rng.chance(5) => ("=", self.literal_bits(*t).e),
             (Ty::Int(t), None) if self.rng.chance(50) => {
                 let place_range = match &place {
                     E::Name(_) => self.binds[id].range.unwrap_or(t.range()),
@@ -6149,6 +6235,57 @@ mod tests {
             kept,
             replaced
         );
+        // A divisor a run knows to be zero is one too, though its static range is wider:
+        // `16 % x` where a `guard` left `x` at most 1. Tier 1 knows it, and refuses a `match`
+        // on a quotient by it.
+        let mut h = fresh(2);
+        h.learn(&E::bin(Op::Le, E::name("x"), E::Lit("1".into())));
+        let rem = E::bin(Op::Rem, E::Lit("16".into()), E::name("x"));
+        assert_eq!(h.fact(&rem), Some(R::point(Num::ZERO)));
+        let known = G {
+            e: rem,
+            cls: Cls::One(U8),
+            r: R {
+                lo: Num::ZERO,
+                hi: Num::small(16),
+            },
+            k: None,
+        };
+        let (mut kept, mut replaced) = (0, 0);
+        for _ in 0..600 {
+            h.zero_divisor = false;
+            let d = h.divisor(known.clone());
+            let is = d.e.text() == "16 % x";
+            assert_eq!(h.zero_divisor, is, "{}", d.e.text());
+            kept += usize::from(is);
+            replaced += usize::from(d.e.text() == "16 % x + 1");
+        }
+        assert!(
+            kept > 0 && replaced > kept,
+            "{} kept, {} replaced",
+            kept,
+            replaced
+        );
+        // A remainder's range, by its dividend's sign.
+        let lit = |n: i64| {
+            if n < 0 {
+                E::Neg(Box::new(E::Lit((-n).to_string())))
+            } else {
+                E::Lit(n.to_string())
+            }
+        };
+        let rem = |a: i64, b: i64| h.fact(&E::bin(Op::Rem, lit(a), lit(b)));
+        let range = |lo: i64, hi: i64| {
+            Some(R {
+                lo: Num::small(lo),
+                hi: Num::small(hi),
+            })
+        };
+        assert_eq!(rem(100, 7), range(0, 6));
+        assert_eq!(rem(-100, 7), range(-6, 0));
+        assert_eq!(rem(3, 7), range(0, 3));
+        assert_eq!(rem(100, -7), range(0, 6));
+        assert_eq!(rem(100, 0), None);
         // The guards: the second leaves `x` no value.
         g.doomed = false;
         g.learn(&E::bin(Op::Le, E::name("x"), E::Lit("5".into())));

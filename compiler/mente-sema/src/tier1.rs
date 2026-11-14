@@ -3757,7 +3757,7 @@ impl<'a> Fx<'a> {
                 operand,
             } => {
                 let v = self.eval(st, *operand);
-                let t = int_of(&typing.exprs[operand.0 as usize]);
+                let t = self.bits_of(*operand);
                 let not = bit_not(&v, t);
                 // The linear form holds of an operand within its type, which it is narrowed
                 // into first: where it may lie outside, the form bounds `~` only within the
@@ -3878,6 +3878,13 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// The type a bit operation, a shift or `~` works in on the operand `e`: its own, or, for
+    /// an expression of literals alone, the one its literals take (`core-calculus.md`, item 5).
+    fn bits_of(&self, e: ExprId) -> Option<IntTy> {
+        let taken = self.typing.literals.get(e.0 as usize).copied().flatten();
+        int_of(&self.typing.exprs[e.0 as usize]).or(taken.map(|t| t.ty))
+    }
+
     fn binary(
         &mut self,
         st: &mut Octagon,
@@ -3891,6 +3898,8 @@ impl<'a> Fx<'a> {
         let (span, rspan) = (self.span(e), self.span(re));
         let v = match op {
             BinaryOp::Shl | BinaryOp::Shr => {
+                // The type the shift works in: its left operand's, or the one its literals take.
+                let lt = self.bits_of(le);
                 let (lo, hi) = interval(st, r);
                 let width = lt.map_or(0, |t| i128::from(t.bits));
                 let o = Obligation {
@@ -3908,7 +3917,7 @@ impl<'a> Fx<'a> {
                 return clamp_to(v, lt, st);
             }
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                let t = lt.or(rt);
+                let t = lt.or(rt).or(self.bits_of(le));
                 self.fits(st, l, t, self.span(le));
                 self.fits(st, r, t, rspan);
                 return bits_vals(st, op, l, r, t);
@@ -6942,13 +6951,20 @@ mod tests {
             obligations("pub fn f(x: u8, k: i8[-1..=3]) -> u8 = x >> k")[0],
             (Shift, false, false)
         );
+        // A literal shifted takes the type of the place it lands in (`core-calculus.md`,
+        // item 5): the amount lies within that type's width, and the value the shift narrows
+        // into it fits the place.
         assert_eq!(
             obligations("pub fn f(k: u8[0..8]) -> i64 = 1 << k"),
             [
-                (Shift, false, false),
+                (Shift, false, true),
                 (Range, false, false),
-                (Range, false, false)
+                (Range, false, true)
             ]
+        );
+        assert_eq!(
+            obligations("pub fn f(k: u8[0..=8]) -> u8 = 1 << k")[0],
+            (Shift, false, false)
         );
         assert_eq!(
             obligations("pub fn f(x: u8[0..16]) -> u8 = x << 4"),
@@ -7565,6 +7581,34 @@ mod tests {
         assert_eq!(
             messages("pub fn f(x: u8[0..=9], y: i8) -> i16[0..=9] = x / y"),
             ["Tier 1 cannot rule out that `x / y` is -1, outside `i16[0..=9]`, the type of the result of `f`"]
+        );
+    }
+
+    /// A bit operation, a shift or `~` over literals alone works in the type its literals
+    /// take (`core-calculus.md`, item 5), and Tier 1 follows it there: `~3` alone is -4, an
+    /// `i64`, so a `match` reads it within its type and no valuation of it lies outside;
+    /// beside a `u8` or in a `u8` place it is 252; a literal shifted is checked against the
+    /// width of the type it takes, and the shift's own narrowing, not the place's, is what
+    /// traps when the value leaves that type.
+    #[test]
+    fn test_literals_under_a_bit_operation_have_the_type_they_take() {
+        for f in [
+            "pub fn f() -> u8 = match ~3 {\n  -4 => 1\n  _ => 2\n}",
+            "pub fn f() -> i64[-4..=-4] {\n  val m = ~3\n  m\n}",
+            "pub fn f() -> u8[252..=252] {\n  val m: u8 = ~3\n  m\n}",
+            "pub fn f(a: u8) -> u16[0..=255] = a & ~3",
+            "pub fn f(a: u8[0..=3]) -> u16[252..=255] = a + ~3",
+            "pub fn f() -> u8[128..=128] = 1 << 7",
+            // The shift traps at its own narrowing, which is no error, and gives no value
+            // for the place's narrowing to refuse.
+            "pub fn f() -> i8 = 1 << 7",
+            "pub fn f() -> u8 = 1 << 8",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        assert_eq!(
+            messages("pub fn f() -> u8[0..=251] {\n  val m: u8 = ~3\n  m\n}"),
+            ["Tier 1 cannot rule out `m = 252`, outside `u8[0..=251]`, the type of the result of `f`"]
         );
     }
 
@@ -8409,8 +8453,8 @@ mod tests {
         assert_eq!(
             details("pub fn f(k: u8[0..8]) -> i64 = 1 << k"),
             [
-                (Shift, String::new()),
-                (Range, "into its type".to_string()),
+                (Shift, "below 64".to_string()),
+                (Range, "into `i64`".to_string()),
                 (Range, "into `i64`".to_string()),
             ]
         );

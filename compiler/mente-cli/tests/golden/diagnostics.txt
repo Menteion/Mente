@@ -54,6 +54,8 @@
 {"version":1,"diagnostics":[{"code":"E0212","severity":"error","message":"`total` is computed from integers of different types, so it states its type; `u32` holds them all","primary":{"file":"binding_of_mixed_integers.mn","start":75,"end":80,"line":4,"column":7},"related":[],"fixes":[{"message":"declare `total` as `u32`","applicability":"suggestion","edits":[{"span":{"file":"binding_of_mixed_integers.mn","start":80,"end":80,"line":4,"column":12},"replacement":": u32"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/bit_operation_on_two_types.mn ==
 {"version":1,"diagnostics":[{"code":"E0216","severity":"error","message":"`&` works on the bits of one integer type, but its operands are `u8` and `u16`; bind one of them to a `val` of the other's type first","primary":{"file":"bit_operation_on_two_types.mn","start":69,"end":74,"line":3,"column":34},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
+== core-calculus/bit_operations_on_literals_alone.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/bound_past_the_domain_may_fit.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/bound_past_the_domain_of_tier1.mn ==

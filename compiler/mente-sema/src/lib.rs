@@ -15,6 +15,7 @@
 pub mod bounds;
 pub mod check;
 pub mod incremental;
+pub mod literals;
 pub mod names;
 pub mod octagon;
 pub mod structs;

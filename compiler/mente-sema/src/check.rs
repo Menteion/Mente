@@ -22,6 +22,7 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
+use crate::literals::{self, Taken};
 use crate::names::{closest, BindingId, BindingKind, Resolution};
 use crate::octagon::Exact;
 use crate::structs::{too_many_elements, Structs, ARRAY_ELEMENTS, VALUE_BYTES};
@@ -67,6 +68,13 @@ impl Signature {
 pub struct Typing {
     pub exprs: Vec<Ty>,
     pub bindings: Vec<Ty>,
+    /// For each expression, the type of the place its value is narrowed into, where it is
+    /// narrowed into one: a binding that states its type, an assigned place, a parameter, a
+    /// result, or a field (`core-calculus.md`, item 4).
+    pub places: Vec<Option<Ty>>,
+    /// For each expression whose type is that of literals alone, the type its literals take
+    /// (`core-calculus.md`, item 5; [`literals::taken`]).
+    pub literals: Vec<Option<Taken>>,
 }
 
 /// Checks the types of `f`, whose names `resolution` binds. `signatures` holds, for each
@@ -100,6 +108,8 @@ pub fn check(
         typing: Typing {
             exprs: vec![Ty::Any; tree.exprs.len()],
             bindings,
+            places: vec![None; tree.exprs.len()],
+            literals: Vec::new(),
         },
         negated: negated_literals(tree),
         src,
@@ -129,6 +139,7 @@ pub fn check(
     }
     c.arrays_in_one_piece();
     c.bounds_have_their_types();
+    c.typing.literals = literals::taken(f, &c.typing);
     (c.typing, c.errors)
 }
 
@@ -300,7 +311,20 @@ impl Checker<'_> {
     fn expect(&mut self, e: ExprId, want: &Ty, place: &str) -> Ty {
         let found = self.value(e);
         self.check_ty(e, &found, want, place);
+        self.lands(e, want);
         found
+    }
+
+    /// Records that the value of `e` is narrowed into a place of type `want`. An operand, an
+    /// index and a condition are asked for an integer or a `bool` of no one type, which is no
+    /// place.
+    fn lands(&mut self, e: ExprId, want: &Ty) {
+        match want {
+            Ty::Int(Int::Literal) | Ty::Bool | Ty::Unit | Ty::Any => {}
+            Ty::Int(Int::One(_) | Int::Mixed(_)) | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) => {
+                self.typing.places[e.0 as usize] = Some(want.clone());
+            }
+        }
     }
 
     /// The type of `e`, whose value is used.
@@ -926,6 +950,7 @@ impl Checker<'_> {
                 } else {
                     let place = format!("for parameter `{}` of `{}`", p.name, callee);
                     self.check_ty(a.value, &found, &p.ty, &place);
+                    self.lands(a.value, &p.ty);
                 }
             }
         }
@@ -1469,6 +1494,8 @@ impl Checker<'_> {
                 let found = self.value(value);
                 let computed = self.binary(value, op, (place, &target), (value, &found));
                 self.check_ty(value, &computed, &target, "in this assignment");
+                // `x op= e` is `x = x op e`, so `e` stands beside an operand of `x`'s type.
+                self.lands(value, &target);
             }
         }
     }
@@ -1521,6 +1548,7 @@ impl Checker<'_> {
             if found != Ty::Unit {
                 let place = self.as_result();
                 self.check_ty(*e, &found, &want, &place);
+                self.lands(*e, &want);
                 return;
             }
         }

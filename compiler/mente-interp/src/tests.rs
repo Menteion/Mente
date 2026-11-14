@@ -267,6 +267,75 @@ fn test_array_literal_elements_are_narrowed_into_its_element_type() {
     );
 }
 
+/// A bit operation, a shift or `~` over literals alone works in the type its literals take
+/// (`core-calculus.md`, item 5): the other operands' first, whatever place the value goes
+/// to; then the place's, through the branches of an `if`, the arms of a `match`, a block's
+/// value and the elements of an array; and `i64` where there is neither.
+#[test]
+fn test_literals_under_a_bit_operation_take_their_operands_type_then_their_places() {
+    let decls = "struct P {\n  m: u8\n}\nfn mask(m: u8) -> u8 = m\n";
+    for (f, call, value) in [
+        // The other operands, though the place is wider.
+        ("pub fn f(a: u8) -> u8 = a & ~3", "f(255)", "252"),
+        ("pub fn f(a: u8) -> u16 = a & ~3", "f(255)", "252"),
+        ("pub fn f(a: u8) -> u16 = a + ~3", "f(1)", "253"),
+        ("pub fn f(a: u8) -> u16 = (1 + ~3) + a", "f(1)", "254"),
+        ("pub fn f(a: u8, b: u16) -> u32 = a + b + ~3", "f(1, 1)", "65534"),
+        ("pub fn f(a: u8, c: bool) -> u16 = if c { ~3 } else { a }", "f(1, true)", "252"),
+        ("pub fn f(a: u8) -> u16 = match a {\n  0 => {\n    ~3\n  }\n  _ => a\n}", "f(0)", "252"),
+        ("pub fn f(a: u8) -> [2]u16 = [~3, a]", "f(7)", "[252, 7]"),
+        ("pub fn f(a: u8) -> [2][1]u16 = [[~3], [a]]", "f(7)", "[[252], [7]]"),
+        ("pub fn f(a: i128) -> i128 = a ^ ~0", "f(5)", "-6"),
+        // The place.
+        ("pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}", "f()", "252"),
+        ("pub fn f() -> u16 {\n  val m: u16 = 1 + ~3\n  m\n}", "f()", "65533"),
+        ("pub fn f() -> u16 {\n  var m: u16 = 0\n  m = ~0x0F\n  m\n}", "f()", "65520"),
+        ("pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m &= ~1\n  m\n}", "f(255)", "254"),
+        ("pub fn f() -> u8 = mask(~3)", "f()", "252"),
+        ("pub fn f() -> u8 = P(m: ~3).m", "f()", "252"),
+        ("pub fn f() -> u8 {\n  ~3\n}", "f()", "252"),
+        ("pub fn f(c: bool) -> u8 {\n  if c {\n    return ~3\n  }\n  0\n}", "f(true)", "252"),
+        ("pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { ~3 } else { 4 }\n  m\n}", "f(true)", "252"),
+        ("pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { if c { ~3 } else { 1 } } else { 4 }\n  m\n}", "f(true)", "252"),
+        ("pub fn f(c: bool) -> u8 {\n  val m: u8 = match c {\n    true => ~3\n    false => 4\n  }\n  m\n}", "f(true)", "252"),
+        ("pub fn f() -> [2]u8 = [~3, 1]", "f()", "[252, 1]"),
+        ("pub fn f() -> [2]u8 = [~3; 2]", "f()", "[252, 252]"),
+        ("pub fn f() -> [1][2]u8 = [[~3, 1]]", "f()", "[[252, 1]]"),
+        ("pub fn f(c: bool) -> [1]u8 = if c { [~3] } else { [1] }", "f(true)", "[252]"),
+        ("pub fn f() -> u64 = 1 << 63", "f()", "9223372036854775808"),
+        ("pub fn f() -> u64 = 1 | 9223372036854775808", "f()", "9223372036854775809"),
+        ("pub fn f() -> i8 = ~127", "f()", "-128"),
+        // Neither.
+        ("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "f()", "-4"),
+        ("pub fn f() -> i64 {\n  val xs = [~3, 1]\n  xs[0]\n}", "f()", "-4"),
+        ("pub fn f(a: u8) -> bool = a == ~3", "f(252)", "false"),
+        ("pub fn f(xs: [8]u8) -> u8 = xs[~3 & 7]", "f([1, 2, 3, 4, 5, 6, 7, 8])", "5"),
+        ("pub fn f(a: u8) -> u8 = a << (~3 & 1)", "f(9)", "9"),
+        ("pub fn f() -> u8 = match ~3 {\n  -4 => 1\n  _ => 2\n}", "f()", "1"),
+    ] {
+        assert_eq!(run(&format!("{}{}", decls, f), call), value, "{}", f);
+    }
+    // A literal the type does not hold traps where the operation narrows it, and a shift
+    // by the width of the type the literal takes where it checks its amount.
+    for (f, trap) in [
+        (
+            "pub fn f() -> u8 {\n  val m: u8 = -1 & 255\n  m\n}",
+            "narrowing",
+        ),
+        ("pub fn f() -> u8 = ~256", "narrowing"),
+        ("pub fn f() -> i8 = 1 << 7", "narrowing"),
+        ("pub fn f() -> u8 = 1 << 8", "shift-amount"),
+        ("pub fn f() -> u16 = 1 << 8", "none"),
+    ] {
+        let got = match run_with(f, "f()", Limits::default()) {
+            Ok(_) => "none".to_string(),
+            Err(Stop::Trap(t)) => t.kind.name().to_string(),
+            Err(other) => other.to_string(),
+        };
+        assert_eq!(got, trap, "{}", f);
+    }
+}
+
 #[test]
 fn test_bits_and_shifts_work_in_their_type() {
     let not = "pub fn not8(x: u8) -> u8 = ~x";

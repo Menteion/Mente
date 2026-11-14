@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mente_sema::check;
+use mente_sema::literals::From;
 use mente_sema::octagon::{INF, RELATIONAL_LIMIT};
 use mente_sema::types::{Int, Ty, INT_TYPES};
 use mente_sema::wide::{self, Interval};
@@ -267,6 +268,14 @@ const TRAPS: &[&str] = &[
     "divisor that is always zero",
     "index at its array's length",
     "shift by its type's width or more",
+];
+
+/// Where a bit operation, a shift or `~` over literals alone takes the type it works in
+/// (`core-calculus.md`, item 5), by what the checker's table says of it.
+const LITERALS: &[&str] = &[
+    "bit operation on literals alone, beside an operand of a type",
+    "bit operation on literals alone, into a place",
+    "bit operation on literals alone, of no type but i64",
 ];
 
 /// What generated programs never hold, each with its reason.
@@ -623,6 +632,35 @@ fn computed_from(tree: &Tree, e: ExprId, past: &dyn Fn(ExprId) -> bool) -> bool 
             ExprKind::Unary { operand, .. } => computed_from(tree, *operand, past),
             _ => false,
         }
+}
+
+/// The rows of [`LITERALS`] a checked function reaches.
+fn reached_literals(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    for (k, e) in f.syntax.tree.exprs.iter().enumerate() {
+        let bits = match &e.kind {
+            ExprKind::Unary { op, .. } => *op == UnaryOp::BitNot,
+            ExprKind::Binary { op, .. } => matches!(
+                op,
+                BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+            ),
+            _ => false,
+        };
+        let Some(taken) = f.typing.literals.get(k).copied().flatten().filter(|_| bits) else {
+            continue;
+        };
+        seen.insert(
+            match taken.from {
+                From::Operands => "bit operation on literals alone, beside an operand of a type",
+                From::Place => "bit operation on literals alone, into a place",
+                From::Alone => "bit operation on literals alone, of no type but i64",
+            }
+            .to_string(),
+        );
+    }
 }
 
 /// The rows of [`TRAPS`] a checked function reaches.
@@ -1029,6 +1067,7 @@ fn grammar() -> BTreeSet<String> {
         EDGES,
         RELATIONS,
         TRAPS,
+        LITERALS,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -1077,6 +1116,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             for f in module.functions.iter().flatten() {
                 reached_edges(f, &mut seen);
                 reached_traps(f, &mut seen);
+                reached_literals(f, &mut seen);
                 for wrong in reached_relations(module, f, &mut seen) {
                     problems.push(format!("seed {}: {}", seed, wrong));
                 }
@@ -1133,6 +1173,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
         EDGES
             .iter()
             .chain(TRAPS)
+            .chain(LITERALS)
             .map(|name| format!("`{}` {}", name, seeds.get(*name).map_or(0, |s| s.len())))
             .collect::<Vec<_>>()
             .join(", ")

@@ -335,6 +335,15 @@ impl Wide<'_> {
 
     fn compute(&mut self, e: ExprId) -> Option<Range> {
         let typed = self.typed(e).map(Range::of);
+        // A bit operation, a shift or `~` over literals alone works in the type its literals
+        // take, and its value lies within it (`core-calculus.md`, item 5).
+        let taken = self
+            .typing
+            .literals
+            .get(e.0 as usize)
+            .copied()
+            .flatten()
+            .map(|t| Range::of(t.ty));
         let span = self.tree.expr(e).span;
         match &self.tree.expr(e).kind {
             ExprKind::Int { value, .. } => Some(Range::point(Num::new(false, *value))),
@@ -351,8 +360,8 @@ impl Wide<'_> {
             ExprKind::Binary { op, lhs, rhs } => match Arith::of(*op) {
                 Some(op) => self.operation(span, Some(op), *lhs, Some(*rhs), None),
                 // A comparison or a logical operator gives a `bool`, and a bit operation stays in
-                // its operands' one type.
-                None => typed,
+                // its operands' one type, or in the one their literals take.
+                None => typed.or(taken),
             },
             ExprKind::Array(items) => {
                 self.array(span, e, items);
@@ -425,7 +434,7 @@ impl Wide<'_> {
             | ExprKind::Construct { .. }
             | ExprKind::Variant { .. }
             | ExprKind::Repeat { .. }
-            | ExprKind::Error => typed,
+            | ExprKind::Error => typed.or(taken),
         }
     }
 
