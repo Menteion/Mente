@@ -21,7 +21,7 @@ date: 2026-11-04
 
 | Mode | Declaration syntax | Call-site syntax | Semantic contract | Machine ABI lowering |
 | :--- | :--- | :--- | :--- | :--- |
-| **Shared projection (`ReadOnly`)** | `x: T` | `f(a)` | Read-only immutable view; caller retains ownership; zero deep copies. | Register value if `sizeof(T) <= 16B`; `const T*` pointer if `> 16B`. |
+| **Shared projection (`ReadOnly`)** | `x: T` | `f(a)` | Read-only immutable view; caller retains ownership; zero deep copies. | Register value if `sizeof(T) <= 16B` and `T` is plain; otherwise a `const T*` pointer. |
 | **In-place projection (`Mut`)** | `mut x: T` | `f(mut a)` | Exclusive access to a value for the call's duration, defined by copy-in/copy-out (item 4); no other argument to `f` may alias `a`. | Non-aliasing `T* restrict` pointer (`noalias`) to the caller's storage when `a` is stored contiguously; otherwise a temporary written back on return. |
 | **Consuming transfer (`Own`)** | `own x: T` | `f(own a)` | Ownership transferred to `f`; `a` is statically invalidated at caller after call. | Register / bitwise move transfer; drop responsibility moves to callee. |
 
