@@ -247,7 +247,7 @@ env_lines() {
   fi
   : > "$log"
   printf "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
-  printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
+  printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GUN_RUNNER='/usr/bin/bash %s run'\n" "$self"
 }
 
 ran() {

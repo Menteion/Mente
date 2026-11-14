@@ -585,7 +585,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "6a376c4bf00a262d15aac0329ba90e9d5cf5f85b11f49b3296aac60fb628b0c3"],
+  [".github/scripts/test-sandbox.sh", "307304c982e5d286f89c59215b22d63283b000fe998e2447d55df9adbcc83708"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
 ]);
 const PINNED_JOBS = new Map([
