@@ -29,11 +29,12 @@ fn run(src: &str, call_text: &str) -> String {
 }
 
 /// A run shows its observer each integer an expression gives, exact and with the expression's
-/// text, in the order of evaluation and up to the trap that ends the run; a run nobody
-/// observes gives the same result.
+/// text, in the order of evaluation and up to the trap that ends the run, and the value a
+/// compound assignment computes, with the assignment's text, before it is narrowed into its
+/// place; a run nobody observes gives the same result.
 #[test]
 fn test_an_observer_sees_each_integer_an_expression_gives() {
-    let src = "pub struct P {\n  a: u8\n}\npub fn f(x: u8, c: bool) -> u8 {\n  val y: u8 = x + 250\n  if c { y } else { 7 }\n}\npub fn g(x: u16, p: P) -> [2][1]u16 {\n  val q = P(a: p.a)\n  _ = q\n  [[x], [300]]\n}";
+    let src = "pub struct P {\n  a: u8\n}\npub fn f(x: u8, c: bool) -> u8 {\n  val y: u8 = x + 250\n  if c { y } else { 7 }\n}\npub fn g(x: u16, p: P) -> [2][1]u16 {\n  val q = P(a: p.a)\n  _ = q\n  [[x], [300]]\n}\npub fn h(x: u8) -> u8 {\n  var v: u8 = x\n  v += 250\n  v = 3\n  v\n}";
     let text = format!("module m\n{}\n", src);
     let m = module(src);
     let seen = |call_text: &str| {
@@ -73,6 +74,25 @@ fn test_an_observer_sees_each_integer_an_expression_gives() {
             ]),
             "251".to_string()
         )
+    );
+    // A compound assignment shows its right side, then the sum, and a plain one its value
+    // alone; the sum that does not fit its place is shown before the trap.
+    assert_eq!(
+        seen("h(5)"),
+        (
+            pairs(&[
+                ("x", "5"),
+                ("250", "250"),
+                ("v += 250", "255"),
+                ("3", "3"),
+                ("v", "3"),
+            ]),
+            "3".to_string()
+        )
+    );
+    assert_eq!(
+        seen("h(6)").0,
+        pairs(&[("x", "6"), ("250", "250"), ("v += 250", "256")])
     );
     assert_eq!(
         seen("f(1, false)").0,

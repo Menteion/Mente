@@ -993,9 +993,9 @@ fn grammar() -> BTreeSet<String> {
 
 /// Every generated program passes every check and lowers, so that the three paths run it and
 /// none is left out unseen: nothing refuses one but a narrowing Tier 1 proves always traps
-/// (`E0508`), whose
-/// function is generated again once the reference interpreter has run the claim
-/// ([`generate::checked`]), at most [`MAX_REGENERATED`] times over these seeds. At least
+/// (`E0508`), whose function is generated again once the reference interpreter has run the
+/// claim ([`generate::checked`]), within the bars every run of generated programs is held to
+/// ([`generate::beyond_the_bars`]). At least
 /// [`MIN_SEEDS_PER_ROW`] of the programs reach each construct of M1's grammar but those
 /// [`NOT_GENERATED`] names, which none reaches.
 #[test]
@@ -1004,7 +1004,8 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
     // The seeds whose program reaches each construct.
     let mut seeds: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut problems = Vec::new();
-    let mut regenerated = Vec::new();
+    let mut claims = Vec::new();
+    let mut regenerated = 0;
     // Each seed's program is checked on its own, on as many threads as the machine has.
     let programs = super::differential::parallel((0..SEEDS).collect(), |seed| {
         let c = generate::checked(seed);
@@ -1032,40 +1033,23 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 ));
             }
         }
-        (seed, seen, c.regenerated, problems)
+        (seed, seen, c.claims, c.regenerated, problems)
     });
-    for (seed, seen, again, wrong) in programs {
+    for (seed, seen, claimed, again, wrong) in programs {
         problems.extend(wrong);
-        regenerated.extend(again.into_iter().map(|r| (seed, r)));
+        claims.extend(claimed.into_iter().map(|c| (seed, c)));
+        regenerated += again;
         for name in seen {
             seeds.entry(name).or_default().push(seed);
         }
     }
+    println!("{}", generate::claims_summary(regenerated, &claims));
+    problems.extend(generate::beyond_the_bars(SEEDS, regenerated, &claims));
     assert!(
         problems.is_empty(),
-        "generated programs the checker refuses, or claims of Tier 1 a run contradicts:\n{}",
+        "generated programs the checker refuses, claims of Tier 1 a run contradicts, or more \
+         of them than a run may have:\n{}",
         problems.join("\n")
-    );
-    let checked = regenerated.iter().filter(|(_, r)| r.reached > 0).count();
-    println!(
-        "{} functions generated again for a narrowing that always traps, {} of them with the \
-         claim seen to hold in a run",
-        regenerated.len(),
-        checked
-    );
-    assert!(
-        regenerated.len() <= MAX_REGENERATED,
-        "{} functions were generated again for a narrowing that always traps, above the bound \
-         of {}: the generator writes more of them than it did: {:?}",
-        regenerated.len(),
-        MAX_REGENERATED,
-        regenerated
-            .iter()
-            .map(|(seed, r)| format!(
-                "seed {} {} {}:{}: {}",
-                seed, r.function, r.line, r.col, r.message
-            ))
-            .collect::<Vec<_>>()
     );
     for name in seeds.keys() {
         assert!(grammar.contains(name), "`{}` is not in the grammar", name);
@@ -1156,8 +1140,3 @@ const RARE_ROWS_SHOWN: usize = 12;
 /// How many of those seeds' programs must reach each construct: a construct that hangs on one
 /// program or two is lost by any change to what the generator chooses at random.
 const MIN_SEEDS_PER_ROW: usize = 3;
-
-/// The most functions the programs of those seeds have generated again for a narrowing Tier 1
-/// proves always traps (`E0508`). A generator that writes more of them than this has lost what it
-/// knows of the values it narrows.
-const MAX_REGENERATED: usize = 40;

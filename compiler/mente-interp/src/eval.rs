@@ -352,7 +352,9 @@ impl<'m> Machine<'m> {
                 let v = self.narrow(frame, v, declared, &plain, tree.expr(*init).span)?;
                 frame.slots[id.0 as usize] = Some(v);
             }
-            StmtKind::Assign { place, op, value } => self.assign(frame, *place, *op, *value)?,
+            StmtKind::Assign { place, op, value } => {
+                self.assign(frame, *place, *op, *value, tree.stmt(s).span)?
+            }
             StmtKind::While {
                 cond,
                 invariants,
@@ -439,6 +441,7 @@ impl<'m> Machine<'m> {
         place: ExprId,
         op: AssignOp,
         value: ExprId,
+        whole: Span,
     ) -> Flow<()> {
         let f = frame.f;
         let tree = &f.syntax.tree;
@@ -452,7 +455,13 @@ impl<'m> Machine<'m> {
                 let rhs = self.eval(frame, value, int_ty(&plain))?;
                 let rt = f.typing.exprs[value.0 as usize].clone();
                 let operands = [(current, &plain, place), (rhs, &rt, value)];
-                self.arith(frame, op, operands, int_ty(&plain), tree.expr(value).span)?
+                let new = self.arith(frame, op, operands, int_ty(&plain), tree.expr(value).span)?;
+                // No expression of the program gives `x op e`: an observer is shown it with
+                // the span of the whole assignment, before it is narrowed into the place.
+                if let Some(seen) = self.seen.as_mut() {
+                    show(&new, whole, &mut **seen);
+                }
+                new
             }
         };
         let new = self.narrow(frame, new, declared, &plain, tree.expr(value).span)?;

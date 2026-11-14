@@ -429,10 +429,11 @@ struct Report {
     unproven: u64,
     /// Each program with findings: its name, its text and what was found.
     failures: Vec<(String, String, Vec<Finding>)>,
-    /// The functions generated again for a narrowing Tier 1 proved always traps (`E0508`), and
-    /// those of them whose claim a run of the reference interpreter saw hold.
-    regenerated: u64,
-    confirmed: u64,
+    /// How many functions were generated again for a narrowing Tier 1 proved always traps
+    /// (`E0508`), and each such claim with its seed and what the reference interpreter saw
+    /// of it.
+    regenerated: usize,
+    claims: Vec<(u64, generate::AlwaysTraps)>,
     /// What no generated program may show (`generate::Checked::problems`).
     problems: Vec<String>,
 }
@@ -496,11 +497,8 @@ impl Report {
             ));
         }
         if self.regenerated > 0 {
-            s.push_str(&format!(
-                "\n{} functions generated again for a narrowing Tier 1 proved always traps \
-                 (E0508), {} of them with the claim seen to hold in a run",
-                self.regenerated, self.confirmed
-            ));
+            s.push('\n');
+            s.push_str(&generate::claims_summary(self.regenerated, &self.claims));
         }
         for p in &self.problems {
             s.push_str(&format!("\nproblem: {}", p));
@@ -584,10 +582,15 @@ fn run_generated(first: u64, count: u64, plan: CallPlan, natively: bool) -> Repo
         let p = &c.program;
         let name = format!("seed {} ({})", p.seed, group(p.mode));
         report.add(name, group(p.mode), &p.text, r);
-        report.regenerated += c.regenerated.len() as u64;
-        report.confirmed += c.regenerated.iter().filter(|a| a.reached > 0).count() as u64;
+        report.regenerated += c.regenerated;
         report.problems.extend(c.problems);
+        report
+            .claims
+            .extend(c.claims.into_iter().map(|a| (p.seed, a)));
     }
+    // Whatever its size, a run is held to the bars of its claims.
+    let beyond = generate::beyond_the_bars(count, report.regenerated, &report.claims);
+    report.problems.extend(beyond);
     report
 }
 
@@ -708,7 +711,7 @@ mod tests {
             let first = generate::program(seed).text;
             assert_eq!(first, generate::program(seed).text, "seed {}", seed);
             // A program with a function generated again is the same one the next time too.
-            let again = !c.regenerated.is_empty();
+            let again = c.regenerated > 0;
             if again {
                 let text = &c.program.text;
                 assert_eq!(*text, generate::checked(seed).program.text, "seed {}", seed);

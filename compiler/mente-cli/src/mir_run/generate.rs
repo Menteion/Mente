@@ -34,7 +34,7 @@ use mente_interp::{Int, Value};
 use mente_sema::structs::Structs;
 use mente_sema::CheckedModule;
 use mente_syntax::diagnostics::Diagnostic;
-use mente_syntax::tree::{Bound, Tree, TypeId, TypeKind};
+use mente_syntax::tree::{AssignOp, Bound, ExprKind, StmtKind, Tree, TypeId, TypeKind};
 use mente_syntax::Span;
 
 use super::CallArgs;
@@ -233,6 +233,47 @@ fn arithmetic(op: Op, a: R, b: R) -> Option<R> {
         Op::Div => Some(R::within(a.magnitude(), !a.lo.neg && !b.lo.neg)),
         _ => Some(R::within(a.magnitude().min(b.magnitude()), !a.lo.neg)),
     }
+}
+
+/// What a run can know of `a / b` from its operands' ranges, the divisor never zero where the
+/// division runs: by a divisor of one sign, whose values nearest zero are at least 1 in
+/// magnitude, between the corners of the dividend's bounds over the divisor's; by one of
+/// either sign, between the dividend's greatest magnitude and its negation. None for a
+/// divisor that is zero alone, whose quotient no run gives.
+fn quotient(a: R, b: R) -> Option<R> {
+    let one = Num::small(1);
+    let b = match (b.lo.neg, b.hi.neg || b.hi.mag == 0) {
+        // Never negative: from 1 up.
+        (false, _) => R {
+            lo: b.lo.max(one),
+            hi: b.hi,
+        },
+        // Never positive: up to -1.
+        (true, true) => R {
+            lo: b.lo,
+            hi: b.hi.min(one.negated()),
+        },
+        (true, false) => {
+            let m = a.magnitude();
+            return Some(R {
+                lo: Num::new(true, m),
+                hi: Num::new(false, m),
+            });
+        }
+    };
+    if b.lo > b.hi {
+        return None;
+    }
+    let corners = [
+        fold(Op::Div, a.lo, b.lo)?,
+        fold(Op::Div, a.lo, b.hi)?,
+        fold(Op::Div, a.hi, b.lo)?,
+        fold(Op::Div, a.hi, b.hi)?,
+    ];
+    Some(R {
+        lo: *corners.iter().min()?,
+        hi: *corners.iter().max()?,
+    })
 }
 
 /// The exact value of `a op b` for an arithmetic `op`: `/` truncates toward zero and `%` takes
@@ -1063,6 +1104,7 @@ struct Mark {
     pending: usize,
     cost: u64,
     recursed: bool,
+    doomed: bool,
 }
 
 struct Gen {
@@ -1077,6 +1119,11 @@ struct Gen {
     frozen: Vec<usize>,
     /// Whether an integer expression being generated divides by a divisor known to be zero.
     zero_divisor: bool,
+    /// Whether the statement being generated is known never to reach its end: it holds an
+    /// operation written to trap, an index at its array's length, a zero divisor or a shift
+    /// by its type's width, or a `guard` no value passes. Nothing after it in its block
+    /// would ever run, so nothing is written there ([`Gen::block`]).
+    doomed: bool,
     /// The program's seed, which with a function's index gives the function its random sources.
     seed: u64,
     /// Which attempt at its body each function takes, the first where none is given.
@@ -1116,6 +1163,7 @@ impl Gen {
             seed,
             attempts: Vec::new(),
             zero_divisor: false,
+            doomed: false,
             mode,
             structs: Vec::new(),
             enums: Vec::new(),
@@ -2185,6 +2233,7 @@ impl Gen {
             pending: self.pending.len(),
             cost: self.cost,
             recursed: self.recursed,
+            doomed: self.doomed,
         }
     }
 
@@ -2196,6 +2245,7 @@ impl Gen {
         self.pending.truncate(m.pending);
         self.cost = m.cost;
         self.recursed = m.recursed;
+        self.doomed = m.doomed;
     }
 
     // ---------------------------------------------------------------- integer expressions
@@ -2456,6 +2506,7 @@ impl Gen {
         let zero = b.r == R::point(Num::ZERO) || b.k == Some(Num::ZERO);
         if zero && !self.rng.chance(90) {
             self.zero_divisor = true;
+            self.doomed = true;
             return b;
         }
         if zero {
@@ -2542,6 +2593,7 @@ impl Gen {
         let k = match self.rng.below(10) {
             0..=5 => {
                 let n = if self.rng.chance(5) {
+                    self.doomed = true;
                     width + self.rng.below(2) as u128
                 } else {
                     u128::from(self.rng.next()) % width
@@ -2840,7 +2892,10 @@ impl Gen {
                 }
                 E::Lit((n - 1).to_string())
             }
-            _ => E::Lit(n.to_string()),
+            _ => {
+                self.doomed = true;
+                E::Lit(n.to_string())
+            }
         }
     }
 
@@ -2980,19 +3035,8 @@ impl Gen {
                 let power = Num::new(false, 1u128.checked_shl(k)?);
                 arithmetic(Op::Mul, self.fact(a)?, R::point(power))
             }
-            // A quotient of values that are never negative, its divisor never zero where the
-            // division runs: between the least over the greatest and the greatest over the
-            // least.
-            E::Bin(Op::Div, a, b) => {
-                let (a, b) = (self.fact(a)?, self.fact(b)?);
-                if a.lo.neg || b.lo.neg || b.hi.mag == 0 {
-                    return None;
-                }
-                Some(R {
-                    lo: Num::new(false, a.lo.mag / b.hi.mag),
-                    hi: Num::new(false, a.hi.mag / b.lo.mag.max(1)),
-                })
-            }
+            // A quotient, its divisor never zero where the division runs.
+            E::Bin(Op::Div, a, b) => quotient(self.fact(a)?, self.fact(b)?),
             _ => None,
         }
     }
@@ -3052,8 +3096,9 @@ impl Gen {
             _ => None,
         };
         // A `guard` no value passes leaves nothing to know: what follows it never runs.
-        if let Some(r) = bound.and_then(|b| now.meet(b)) {
-            self.binds[id].known = Some(r);
+        match bound.and_then(|b| now.meet(b)) {
+            Some(r) => self.binds[id].known = Some(r),
+            None => self.doomed = true,
         }
     }
 
@@ -3653,17 +3698,22 @@ impl Gen {
         let mut stmts = first;
         let count = 1 + self.rng.below(if depth == 0 { 6 } else { 4 });
         let mut ended = false;
+        // What dooms a statement of this block says nothing of the statement the block is in.
+        let outside = self.doomed;
         for _ in 0..count {
             if self.cost > COST_BUDGET || (self.relates() && self.binds.len() >= RELATED) {
                 break;
             }
+            self.doomed = false;
             let s = self.statement(depth);
             ended = s.last().is_some_and(S::leaves);
             stmts.extend(s);
-            if ended {
+            // Nothing after a statement known never to reach its end would run.
+            if ended || self.doomed {
                 break;
             }
         }
+        self.doomed = outside;
         let tail = match (ended, value) {
             (false, Some(ty)) => {
                 let e = self.full(ty, 0);
@@ -5019,7 +5069,10 @@ pub struct Checked {
     pub module: Option<CheckedModule>,
     /// Each narrowing Tier 1 proved always traps (`E0508`), whose function was generated again,
     /// with what the reference interpreter saw of the claim.
-    pub regenerated: Vec<AlwaysTraps>,
+    pub claims: Vec<AlwaysTraps>,
+    /// How many times a function of the program was generated again, a function of several
+    /// claims once for them all.
+    pub regenerated: usize,
     /// What no generated program may show: a diagnostic other than `E0508`, which is a bug of
     /// the generator; an `E0508` the reference interpreter contradicts, which is a bug of
     /// Tier 1; and a program that still has one after [`MAX_ROUNDS`].
@@ -5035,13 +5088,18 @@ pub struct AlwaysTraps {
     pub col: u32,
     /// The claim, as Tier 1 words it.
     pub message: String,
-    /// Whether the claim is about the value of the expression it points at, which the runs
-    /// can see; a compound assignment's is about `x + e` and points at `e`.
+    /// Whether the runs can see the value the claim is about: that of the expression it points
+    /// at, or of the compound assignment whose right side it points at, `x + e` for `e`.
     pub seen: bool,
     /// The calls made of the function.
     pub calls: usize,
-    /// Those that gave the expression a value: every time outside its type, as claimed.
+    /// Those that gave the value: every time outside its type, as claimed.
     pub reached: usize,
+    /// The value seen nearest the bound claimed, on its side of it.
+    pub nearest: Option<String>,
+    /// How the call that served the check best ended: for a claim never reached, the call
+    /// that came furthest toward it.
+    pub furthest: String,
 }
 
 /// The least magnitude of an operand [`Gen::near_edge`] reads as lying near 2^62 or beyond.
@@ -5061,6 +5119,79 @@ const CLAIM_CALLS: CallPlan = CallPlan {
     exhaustive: 256,
 };
 
+/// The calls made after those, when they are not every call there is: each changes the
+/// arguments of the call that served the check best, to reach the value the claim is about,
+/// and then to bring it nearer the bound claimed.
+const CLAIM_SEARCH: usize = 400;
+
+/// The most functions a run of generated programs generates again for a narrowing Tier 1
+/// proves always traps (`E0508`), for every hundred of its programs, and the few more any run
+/// may have. A generator that writes more of them than this has lost what it knows of the
+/// values it narrows.
+pub const MAX_REGENERATED_PER_HUNDRED: usize = 12;
+const REGENERATED_ROOM: usize = 6;
+
+/// The most claims of a run, of every hundred, whose value no call of the reference
+/// interpreter reached, and the few more any run may have: such a claim was not checked. Of
+/// the claims of seeds 0 to 15999, 43 in a hundred were never reached, and twelve times as
+/// many calls reached no more of those of the first thousand seeds: they stand where no
+/// argument leads, in a loop of no rounds, an arm no value takes, or after a statement that
+/// traps or leaves on every call, which neither the generator nor Tier 1 knows.
+pub const MAX_UNREACHED_PER_HUNDRED: usize = 55;
+const UNREACHED_ROOM: usize = 3;
+
+/// What the claims of a run of `programs` generated programs show that none may: more
+/// functions generated again than [`MAX_REGENERATED_PER_HUNDRED`] allows, and more claims never
+/// reached than [`MAX_UNREACHED_PER_HUNDRED`] does. `claims` holds each with its seed.
+pub fn beyond_the_bars(
+    programs: u64,
+    regenerated: usize,
+    claims: &[(u64, AlwaysTraps)],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let most = MAX_REGENERATED_PER_HUNDRED * programs as usize / 100 + REGENERATED_ROOM;
+    if regenerated > most {
+        out.push(format!(
+            "{} functions were generated again for a narrowing that always traps, above the \
+             {} that {} programs may have: the generator writes more of them than it did",
+            regenerated, most, programs
+        ));
+    }
+    let unreached = claims.iter().filter(|(_, c)| c.reached == 0).count();
+    let most = MAX_UNREACHED_PER_HUNDRED * claims.len() / 100 + UNREACHED_ROOM;
+    if unreached > most {
+        out.push(format!(
+            "{} of {} claims that a narrowing always traps were never reached by a run, above \
+             the {} that may be: they are not checked",
+            unreached,
+            claims.len(),
+            most
+        ));
+    }
+    out
+}
+
+/// The lines a run prints of its claims: how many functions were generated again, how many
+/// claims a run saw hold, and each claim no run reached, with the furthest it was told.
+pub fn claims_summary(regenerated: usize, claims: &[(u64, AlwaysTraps)]) -> String {
+    let reached = claims.iter().filter(|(_, c)| c.reached > 0).count();
+    let mut s = format!(
+        "{} functions generated again for a narrowing Tier 1 proved always traps (E0508): {} \
+         claims, {} of them seen to hold in a run, {} never reached",
+        regenerated,
+        claims.len(),
+        reached,
+        claims.len() - reached
+    );
+    for (seed, c) in claims.iter().filter(|(_, c)| c.reached == 0) {
+        s.push_str(&format!(
+            "\nnever reached: seed {} `{}` {}:{}, where the furthest of {} calls ends: {}\n  {}",
+            seed, c.function, c.line, c.col, c.calls, c.furthest, c.message
+        ));
+    }
+    s
+}
+
 /// The program of `seed` that passes every check. A function with a narrowing Tier 1 proves
 /// always traps is refused (`E0508`): the reference interpreter first runs the function on
 /// generated arguments, and every value the narrowed expression takes must lie outside the type
@@ -5068,13 +5199,15 @@ const CLAIM_CALLS: CallPlan = CallPlan {
 /// generated again, under the same signature. Nothing else may refuse a generated program.
 pub fn checked(seed: u64) -> Checked {
     let mut attempts: Vec<u32> = Vec::new();
-    let mut regenerated = Vec::new();
+    let mut claims = Vec::new();
+    let mut regenerated = 0;
     let mut problems = Vec::new();
     for round in 0.. {
         let program = generated(seed, &attempts);
-        let refused = |program, regenerated, problems| Checked {
+        let refused = |program, claims, problems| Checked {
             program,
             module: None,
+            claims,
             regenerated,
             problems,
         };
@@ -5083,6 +5216,7 @@ pub fn checked(seed: u64) -> Checked {
                 return Checked {
                     program,
                     module: Some(module),
+                    claims,
                     regenerated,
                     problems,
                 }
@@ -5090,7 +5224,7 @@ pub fn checked(seed: u64) -> Checked {
             Ok(Err(diagnostics)) => diagnostics,
             Err(_) => {
                 problems.push(format!("seed {}: the checker panicked", seed));
-                return refused(program, regenerated, problems);
+                return refused(program, claims, problems);
             }
         };
         let others: Vec<String> = diagnostics
@@ -5105,14 +5239,14 @@ pub fn checked(seed: u64) -> Checked {
             .collect();
         if !others.is_empty() {
             problems.extend(others);
-            return refused(program, regenerated, problems);
+            return refused(program, claims, problems);
         }
         if round == MAX_ROUNDS {
             problems.push(format!(
                 "seed {}: a narrowing still always traps after {} rounds of generating its function again",
                 seed, MAX_ROUNDS
             ));
-            return refused(program, regenerated, problems);
+            return refused(program, claims, problems);
         }
         // Tier 1 alone refuses the program, so without it the functions run.
         let Ok(Ok(kept)) =
@@ -5122,7 +5256,7 @@ pub fn checked(seed: u64) -> Checked {
                 "seed {}: Tier 1 alone refuses the program, which does not check without it",
                 seed
             ));
-            return refused(program, regenerated, problems);
+            return refused(program, claims, problems);
         };
         attempts.resize(program.functions.len(), 0);
         let mut again = BTreeSet::new();
@@ -5136,11 +5270,12 @@ pub fn checked(seed: u64) -> Checked {
                     "seed {}: E0508 at {}:{}, in no function",
                     seed, d.primary.line, d.primary.col
                 ));
-                return refused(program, regenerated, problems);
+                return refused(program, claims, problems);
             };
-            regenerated.push(always_traps(&kept, &program, k, d, &mut problems));
+            claims.push(always_traps(&kept, &program, k, d, &mut problems));
             again.insert(k);
         }
+        regenerated += again.len();
         for k in again {
             attempts[k] += 1;
         }
@@ -5186,6 +5321,14 @@ impl Claim {
         })
     }
 
+    /// Whether the bound claimed lies outside the type on the side it bounds: below it for a
+    /// value that is at most the bound, above it for one that is at least. A claim of any
+    /// other bound does not say the narrowing always traps, whatever a run shows.
+    fn traps(&self) -> bool {
+        let bound = Int::from_i128(self.bound);
+        !bound.fits(self.ty) && bound.is_negative() == self.at_most
+    }
+
     /// Why `x`, a value the expression took, contradicts the claim, if it does.
     fn broken_by(&self, x: Int) -> Option<String> {
         let bound = Int::from_i128(self.bound);
@@ -5204,10 +5347,125 @@ impl Claim {
     }
 }
 
-/// Checks the `E0508` `d` of function `k` of `program` by running the function: the reference
-/// interpreter calls it on generated arguments in `kept`, the module checked without Tier 1,
-/// and every integer the expression `d` points at gives, an array's elements included, must be
-/// what Tier 1 claims. A value that is not is pushed on `problems` with its call.
+/// What one run shows of the value a claim is about.
+struct Probe {
+    /// Each value it took, in order.
+    values: Vec<Int>,
+    /// How far into the function's text the run evaluated an integer before the value's own
+    /// place, when it never came to it.
+    progress: usize,
+    /// How the run ended: that it returned, or what stopped it.
+    end: String,
+}
+
+impl Probe {
+    /// The value nearest to contradicting the claim: the greatest where the claim is of an
+    /// upper bound, the least where it is of a lower one.
+    fn nearest(&self, claim: &Claim) -> Option<Int> {
+        if claim.at_most {
+            self.values.iter().copied().max()
+        } else {
+            self.values.iter().copied().min()
+        }
+    }
+
+    /// Whether this run serves the check at least as well as `o`: it reached the value where
+    /// `o` did not, or took one nearer the bound, or came as far toward it.
+    fn serves(&self, o: &Probe, claim: &Claim) -> bool {
+        match (self.nearest(claim), o.nearest(claim)) {
+            (Some(x), Some(y)) if claim.at_most => x > y,
+            (Some(x), Some(y)) => x < y,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => self.progress >= o.progress,
+        }
+    }
+}
+
+/// The span of the compound assignment of function `name` whose right side is at `at`: the
+/// value `x op e` such an assignment computes is shown with it (`mente_interp::Observer`).
+fn compound_at(kept: &CheckedModule, name: &str, at: Span) -> Option<(usize, usize)> {
+    let f = kept.functions.get(kept.index(name)?)?.as_ref()?;
+    let tree = &f.syntax.tree;
+    tree.stmts.iter().find_map(|s| match &s.kind {
+        StmtKind::Assign {
+            op: AssignOp::Compound(_),
+            value,
+            ..
+        } => {
+            let v = tree.expr(*value).span;
+            ((v.start, v.end) == (at.start, at.end)).then_some((s.span.start, s.span.end))
+        }
+        _ => None,
+    })
+}
+
+/// The integer literals of function `name`, each with the values beside it and its negation:
+/// what its conditions compare its arguments with, more often than chance finds.
+fn literals_of(kept: &CheckedModule, name: &str) -> Vec<Num> {
+    let Some(f) = kept
+        .index(name)
+        .and_then(|k| kept.functions.get(k))
+        .and_then(|f| f.as_ref())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in &f.syntax.tree.exprs {
+        if let ExprKind::Int { value, .. } = &e.kind {
+            let n = Num::new(false, *value);
+            let one = Num::small(1);
+            out.extend(
+                [Some(n), n.add(one), n.sub(one), Some(n.negated())]
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The arguments `base` with one changed, or two: an integer moved a little, set to a literal
+/// of the function's text, or drawn again, and an argument of another kind drawn again. None
+/// when the parameters' refinements leave one of them no value.
+fn changed(
+    params: &[(String, bool, Domain)],
+    base: &[(bool, Value)],
+    literals: &[Num],
+    rng: &mut Rng,
+) -> Option<Vec<(bool, Value)>> {
+    let fresh = one_call(params, rng, Pick::Mixed)?;
+    let mut out = base.to_vec();
+    for _ in 0..1 + rng.below(2) {
+        let k = rng.below(params.len() as u64) as usize;
+        out[k].1 = match (&base[k].1, rng.below(4)) {
+            (Value::Int(x), 0) => {
+                let step = Int::from_i128(1 << rng.below(8));
+                let moved = if rng.chance(50) {
+                    x.checked_add(step)
+                } else {
+                    x.checked_sub(step)
+                };
+                Value::Int(moved.unwrap_or(*x))
+            }
+            (Value::Int(_), 1) if !literals.is_empty() => rng.pick(literals).value(),
+            _ => fresh[k].clone(),
+        };
+    }
+    Some(out)
+}
+
+/// Checks the `E0508` `d` of function `k` of `program`. The bound it claims must lie outside
+/// the type, on its side. Then the reference interpreter runs the function in `kept`, the
+/// module checked without Tier 1, and every integer the value takes must be what Tier 1
+/// claims: the value of the expression `d` points at, an array's elements included, or of the
+/// compound assignment whose right side it points at. The function is called on generated
+/// arguments, and then, unless those are every call there is, on [`CLAIM_SEARCH`] more, each
+/// the call that served best so far with an argument changed: first to reach the value, then
+/// to bring it nearer the bound. What contradicts the claim is pushed on `problems` with its
+/// call.
 fn always_traps(
     kept: &CheckedModule,
     program: &Program,
@@ -5225,6 +5483,8 @@ fn always_traps(
         seen: false,
         calls: 0,
         reached: 0,
+        nearest: None,
+        furthest: String::new(),
     };
     let source = program.text.get(at.start..at.end).unwrap_or("");
     let Some(claim) = Claim::read(&d.message, source) else {
@@ -5234,49 +5494,118 @@ fn always_traps(
         ));
         return out;
     };
-    out.seen = claim.seen;
-    if !claim.seen {
+    let wrong = |why: &str| {
+        format!(
+            "seed {}: E0508 at {}:{} is wrong: {}\n  {}",
+            program.seed, at.line, at.col, d.message, why
+        )
+    };
+    if !claim.traps() {
+        problems.push(wrong(&format!(
+            "a value that is {} {} may fit `{}`, so the claim does not say it always traps",
+            if claim.at_most { "at most" } else { "at least" },
+            claim.bound,
+            claim.ty.name
+        )));
         return out;
     }
+    // The value's own place in the text: the expression's, or its compound assignment's.
+    let watch = if claim.seen {
+        Some((at.start, at.end))
+    } else {
+        compound_at(kept, name, at)
+    };
+    let Some(watch) = watch else {
+        return out;
+    };
+    out.seen = true;
     let limits = mente_interp::Limits {
         max_depth: 64,
         max_steps: 200_000,
         ..mente_interp::Limits::default()
     };
+    let Some(params) = parameters(kept, name, limits.max_array) else {
+        return out;
+    };
+    let body = &program.functions[k].1;
+    let literals = literals_of(kept, name);
     let mut rng = Rng::new(program.seed ^ 0x0E05_08C1_A135_7EED);
-    let calls = arguments_of(kept, name, &mut rng, CLAIM_CALLS, limits.max_array);
-    for args in calls.unwrap_or_default() {
+    let mut first = function_calls(&params, &mut rng, CLAIM_CALLS);
+    first.reverse();
+    // Every call there is needs no search, and a function without parameters has one call.
+    let mut search = if every(&params, CLAIM_CALLS.exhaustive).is_some() || params.is_empty() {
+        0
+    } else {
+        CLAIM_SEARCH
+    };
+    let mut best: Option<(Vec<(bool, Value)>, Probe)> = None;
+    loop {
+        let args = match (first.pop(), &best) {
+            (Some(args), _) => args,
+            (None, Some((base, _))) if search > 0 => {
+                search -= 1;
+                match changed(&params, base, &literals, &mut rng) {
+                    Some(args) => args,
+                    None => continue,
+                }
+            }
+            (None, _) => break,
+        };
         out.calls += 1;
-        let text: Vec<String> = args
-            .iter()
-            .map(|(is_mut, v)| format!("{}{}", if *is_mut { "mut " } else { "" }, v))
-            .collect();
-        let values = args.into_iter().map(|(_, v)| v).collect();
-        let mut taken: Vec<Int> = Vec::new();
-        // The run's end, a value or a trap, says nothing of the claim: what the expression
-        // gave before it does.
-        let _ =
+        let mut probe = Probe {
+            values: Vec::new(),
+            progress: 0,
+            end: String::new(),
+        };
+        // The run's end, a value or a trap, says nothing of the claim: what the value was
+        // before it does.
+        let values = args.iter().map(|(_, v)| v.clone()).collect();
+        let end =
             mente_interp::call_observed(kept, name, values, limits, &mut |span: Span, x: Int| {
-                if (span.start, span.end) == (at.start, at.end) {
-                    taken.push(x);
+                if (span.start, span.end) == watch {
+                    probe.values.push(x);
+                } else if body.contains(&span.start) && span.start <= watch.0 {
+                    probe.progress = probe.progress.max(span.start);
                 }
             });
-        if !taken.is_empty() {
+        probe.end = match &end {
+            Ok(_) => "it returns".to_string(),
+            Err(stop) => stop.to_string(),
+        };
+        // An operation on a 128-bit operand is checked at its operator, so it traps there
+        // and gives no value: the trap holds the exact result it computed.
+        if let Err(mente_interp::Stop::Trap(mente_interp::Trap {
+            kind: mente_interp::TrapKind::Narrowing { value: Some(x), .. },
+            span,
+        })) = end
+        {
+            if (span.start, span.end) == watch && probe.values.is_empty() {
+                probe.values.push(x);
+            }
+        }
+        if !probe.values.is_empty() {
             out.reached += 1;
         }
-        if let Some(why) = taken.iter().find_map(|x| claim.broken_by(*x)) {
-            problems.push(format!(
-                "seed {}: E0508 at {}:{} is wrong: {}\n  in the call {}({}): {}",
-                program.seed,
-                at.line,
-                at.col,
-                d.message,
+        if let Some(why) = probe.values.iter().find_map(|x| claim.broken_by(*x)) {
+            let text: Vec<String> = args
+                .iter()
+                .map(|(is_mut, v)| format!("{}{}", if *is_mut { "mut " } else { "" }, v))
+                .collect();
+            problems.push(wrong(&format!(
+                "in the call {}({}): {}",
                 name,
                 text.join(", "),
                 why
-            ));
+            )));
             break;
         }
+        if best.as_ref().is_none_or(|(_, b)| probe.serves(b, &claim)) {
+            best = Some((args, probe));
+        }
+    }
+    if let Some((_, p)) = &best {
+        out.nearest = p.nearest(&claim).map(|x| x.to_string());
+        out.furthest = p.end.clone();
     }
     out
 }
@@ -5424,6 +5753,16 @@ fn arguments_of(
     plan: CallPlan,
     most: u128,
 ) -> Option<Vec<Vec<(bool, Value)>>> {
+    Some(function_calls(&parameters(module, name, most)?, rng, plan))
+}
+
+/// The parameters of function `name` of `module`, each with its name, whether it is `mut`, and
+/// the values it takes; none as [`arguments_of`] has none.
+fn parameters(
+    module: &CheckedModule,
+    name: &str,
+    most: u128,
+) -> Option<Vec<(String, bool, Domain)>> {
     let f = module.functions.get(module.index(name)?)?.as_ref()?;
     let tree = &f.syntax.tree;
     let params: Vec<(String, bool, Domain)> = f
@@ -5441,7 +5780,7 @@ fn arguments_of(
     if params.iter().any(|(_, _, d)| d.values() > most) {
         return None;
     }
-    Some(function_calls(&params, rng, plan))
+    Some(params)
 }
 
 /// The argument lists of one function, each argument marked `mut` as its parameter is.
@@ -5727,6 +6066,134 @@ mod tests {
             .map(|d| always_traps(&kept, program, 0, d, &mut problems))
             .collect();
         (seen, problems)
+    }
+
+    /// Whether `e` reads `xs` at index 3, in any of its operands.
+    fn at_length(e: &E) -> bool {
+        let sub = |x: &E| at_length(x);
+        match e {
+            E::Index(b, i) => {
+                matches!((&**b, &**i), (E::Name(n), E::Lit(k)) if n == "xs" && k == "3")
+                    || sub(b)
+                    || sub(i)
+            }
+            E::Lit(_) | E::Name(_) | E::Builtin(..) => false,
+            E::Bin(_, a, b) => sub(a) || sub(b),
+            E::Len(x)
+            | E::Field(x, _)
+            | E::Neg(x)
+            | E::BitNot(x)
+            | E::Not(x)
+            | E::Repeat(x, _)
+            | E::Return(x) => sub(x),
+            E::Construct(_, fields) | E::Variant(_, _, fields) => {
+                fields.iter().any(|(_, x)| sub(x))
+            }
+            E::Call(_, args) => args.iter().any(|(_, x)| sub(x)),
+            E::If(c, a, b) => sub(c) || sub(a) || sub(b),
+            E::Array(items) => items.iter().any(sub),
+            E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
+        }
+    }
+
+    /// What the generator knows never reaches its end dooms the statement it is written in: an
+    /// index at its array's length, a divisor known to be zero that is kept, a shift by its
+    /// type's width, and a `guard` no value passes. Nothing is written after such a statement
+    /// in its block, where it would never run: of the blocks of many seeds, a statement that
+    /// reads `xs`, of three elements, at index 3 is always the last.
+    #[test]
+    fn test_nothing_is_written_after_a_statement_known_to_trap() {
+        let fresh = |seed: u64| {
+            let mut g = Gen::new(seed, Mode::Plain);
+            g.scopes = vec![Vec::new()];
+            g.declare(
+                "xs".into(),
+                Ty::Array(3, Box::new(Ty::Int(U8))),
+                Kind::Var,
+                None,
+            );
+            g.declare("x".into(), Ty::Int(U8), Kind::Val, None);
+            g
+        };
+        // The index.
+        let mut g = fresh(1);
+        let mut doomed = 0;
+        for _ in 0..600 {
+            g.doomed = false;
+            let e = g.index(3);
+            let is = matches!(&e, E::Lit(k) if k == "3");
+            assert_eq!(g.doomed, is, "{}", e.text());
+            doomed += usize::from(is);
+        }
+        assert!(doomed > 0, "no index at the array's length");
+        // The divisor: one known to be zero is replaced most of the time, and dooms the
+        // statement when it is kept.
+        let zero = G {
+            e: E::Lit("0".into()),
+            cls: Cls::Lit,
+            r: R::point(Num::ZERO),
+            k: Some(Num::ZERO),
+        };
+        let (mut kept, mut replaced) = (0, 0);
+        for _ in 0..600 {
+            g.doomed = false;
+            let d = g.divisor(zero.clone());
+            let is = d.k == Some(Num::ZERO);
+            assert_eq!(g.doomed, is, "{}", d.e.text());
+            kept += usize::from(is);
+            replaced += usize::from(!is);
+        }
+        assert!(
+            kept > 0 && replaced > kept,
+            "{} kept, {} replaced",
+            kept,
+            replaced
+        );
+        // The guards: the second leaves `x` no value.
+        g.doomed = false;
+        g.learn(&E::bin(Op::Le, E::name("x"), E::Lit("5".into())));
+        assert!(!g.doomed);
+        g.learn(&E::bin(Op::Ge, E::name("x"), E::Lit("9".into())));
+        assert!(g.doomed);
+        // An attempt given up leaves the statement as it was.
+        let m = g.mark();
+        g.doomed = false;
+        g.restore(m);
+        assert!(g.doomed);
+        // The blocks.
+        let (mut ends, mut blocks) = (0, 0);
+        for seed in 0..400 {
+            let mut g = fresh(seed);
+            let b = g.block(1, None, Vec::new(), None);
+            // What dooms a statement of the block is not left to the statement around it.
+            assert!(!g.doomed, "seed {}", seed);
+            blocks += 1;
+            let own = |s: &S| match s {
+                S::Bind(_, _, e) | S::Discard(e) | S::Expr(e) => at_length(e),
+                S::Assign(place, _, e) => at_length(place) || at_length(e),
+                S::If(c, ..) | S::Match(c, _) | S::While(c, ..) | S::Guard(c, _) => at_length(c),
+                S::Return(e) => e.as_ref().is_some_and(at_length),
+                S::Break | S::Continue => false,
+            };
+            // The binding the block's end discards may follow: it reads nothing.
+            let last = b
+                .stmts
+                .iter()
+                .rposition(|s| !matches!(s, S::Discard(E::Name(_))))
+                .unwrap_or(0);
+            for (k, s) in b.stmts.iter().enumerate() {
+                if own(s) {
+                    assert_eq!(k, last, "seed {}: a statement follows one that traps", seed);
+                    ends += 1;
+                }
+            }
+        }
+        assert!(
+            ends >= 5,
+            "{} of {} blocks end at such an index",
+            ends,
+            blocks
+        );
     }
 
     /// A `match` covers the refinement of what it reads (`core-calculus.md`, item 14), so the
@@ -6031,7 +6498,8 @@ mod tests {
     /// The check runs the function: every call reaches a narrowing at its top and sees the
     /// value outside the type; a narrowing behind a branch is reached by the calls that take
     /// the branch; and a compound assignment's claim, about a value no expression of the
-    /// program gives, is not run. None of them is a problem, since each claim holds.
+    /// program gives, is checked on the value the assignment computes. None of them is a
+    /// problem, since each claim holds.
     #[test]
     fn test_an_always_trap_claim_is_checked_by_running_its_function() {
         let (seen, problems) = claims(&written(
@@ -6059,6 +6527,213 @@ mod tests {
         ));
         assert_eq!(problems, Vec::<String>::new());
         assert_eq!(seen.len(), 1);
-        assert_eq!((seen[0].seen, seen[0].calls), (false, 0));
+        assert!(seen[0].seen && seen[0].calls == 256, "{:?}", seen[0]);
+        assert_eq!(seen[0].reached, seen[0].calls, "{:?}", seen[0]);
+        // The least sum is the nearest to the type: 0 + 300.
+        assert_eq!(seen[0].nearest.as_deref(), Some("300"));
+    }
+
+    /// The `E0508`s of `program` with `from` in their messages replaced by `to`: a claim
+    /// Tier 1 did not make, checked as one it did.
+    fn claimed(program: &Program, from: &str, to: &str) -> (Vec<AlwaysTraps>, Vec<String>) {
+        let diagnostics = mente_sema::check_program(&program.text)
+            .err()
+            .unwrap_or_default();
+        let kept = mente_sema::check_program_without_proofs(&program.text).unwrap();
+        let mut problems = Vec::new();
+        let seen = diagnostics
+            .iter()
+            .filter(|d| d.code == "E0508")
+            .map(|d| {
+                assert!(d.message.contains(from), "{}", d.message);
+                let mut d = d.clone();
+                d.message = d.message.replace(from, to);
+                always_traps(&kept, program, 0, &d, &mut problems)
+            })
+            .collect();
+        (seen, problems)
+    }
+
+    /// A claim says the narrowing always traps only when its bound lies outside the type on
+    /// the side it bounds: one whose bound a value of the type meets is wrong whatever the
+    /// runs show, and is reported without one, a claim no run could reach included.
+    #[test]
+    fn test_a_claim_whose_bound_lies_within_the_type_is_wrong_without_a_run() {
+        let ty = |name: &str| {
+            *mente_sema::types::INT_TYPES
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+        };
+        let traps = |name: &str, at_most: bool, bound: i128| {
+            Claim {
+                ty: ty(name),
+                at_most,
+                bound,
+                seen: true,
+            }
+            .traps()
+        };
+        for (name, at_most, bound, says) in [
+            ("u8", true, -1, true),
+            ("u8", true, 0, false),
+            ("u8", true, 255, false),
+            ("u8", true, 256, false),
+            ("u8", false, 256, true),
+            ("u8", false, 255, false),
+            ("u8", false, 0, false),
+            ("u8", false, -1, false),
+            ("i8", true, -129, true),
+            ("i8", true, -128, false),
+            ("i8", false, 128, true),
+            ("i8", false, 127, false),
+            ("i8", false, -129, false),
+            ("u128", true, -1, true),
+            ("u128", true, 0, false),
+        ] {
+            assert_eq!(
+                traps(name, at_most, bound),
+                says,
+                "{} {} {}",
+                name,
+                at_most,
+                bound
+            );
+        }
+        // The narrowing below is never reached: its claim is still read.
+        let dead = written(
+            "pub fn f(x: u8, c: bool) -> u8 {\n  guard c and not c else {\n    return 0\n  }\n  val y: i16 = 0 - x - 1\n  y\n}",
+        );
+        let (seen, problems) = claims(&dead);
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!((seen.len(), seen[0].reached), (1, 0), "{:?}", seen);
+        assert_eq!(seen[0].furthest, "it returns");
+        let (seen, problems) = claimed(&dead, "at most -1", "at most 0");
+        assert_eq!(seen[0].calls, 0);
+        assert_eq!(problems.len(), 1, "{:?}", problems);
+        assert!(
+            problems[0].ends_with(
+                "a value that is at most 0 may fit `u8`, so the claim does not say it always traps"
+            ),
+            "{}",
+            problems[0]
+        );
+    }
+
+    /// The calls are searched for one that reaches the value: a narrowing behind a `guard`
+    /// that one argument in four thousand million passes is reached through the literal the
+    /// guard names, and one whose value meets a wrong bound on one argument alone is caught
+    /// there. An operation of a 128-bit operand, checked at its operator, traps before it
+    /// gives a value: its claim is checked on the result the trap holds.
+    #[test]
+    fn test_the_calls_are_searched_for_one_that_reaches_the_claim() {
+        let behind = written(
+            "pub fn f(x: u32, y: u32) -> u8 {\n  guard x == 77777 else {\n    return 0\n  }\n  val z: u8 = y + 300\n  z\n}",
+        );
+        let (seen, problems) = claims(&behind);
+        assert_eq!(problems, Vec::<String>::new());
+        assert!(seen[0].reached > 0, "{:?}", seen[0]);
+        assert!(seen[0].calls > CLAIM_CALLS.random, "{:?}", seen[0]);
+        // The nearest value a search brings is nearer than a first call's.
+        let nearest: u128 = seen[0].nearest.as_deref().unwrap().parse().unwrap();
+        assert!((300..100_000).contains(&nearest), "{:?}", seen[0]);
+
+        // Past the guard `x` is 5000 or above 60000, and only 5000 gives -5300: the calls
+        // that reach the value by chance pass above 60000, and the search finds the one that
+        // contradicts the claim as changed.
+        let peak = written(
+            "pub fn f(x: u32[0..=100000]) -> u8 {\n  guard x == 5000 or x > 60000 else {\n    return 0\n  }\n  val y: u8 = 0 - x - 300\n  y\n}",
+        );
+        let (seen, problems) = claims(&peak);
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen[0].nearest.as_deref(), Some("-5300"), "{:?}", seen[0]);
+        let (_, problems) = claimed(&peak, "at most -5300", "at most -5301");
+        assert_eq!(problems.len(), 1, "{:?}", problems);
+        assert!(
+            problems[0].ends_with("in the call f(5000): -5300 is above -5301"),
+            "{}",
+            problems[0]
+        );
+
+        let wide = written("pub fn f(x: u128) -> u128 {\n  var v = x\n  v = -4 - v\n  v\n}");
+        let (seen, problems) = claims(&wide);
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen.len(), 1);
+        // Every call but one whose result needs more than 128 bits, which the trap holds not.
+        assert!(seen[0].reached > 200, "{:?}", seen[0]);
+        assert_eq!(seen[0].nearest.as_deref(), Some("-4"));
+    }
+
+    /// A run is held to two bars, whatever its size: the functions it generates again for
+    /// each hundred programs, and the claims of each hundred that no call reached. Each is
+    /// reported with its count, and the summary names every claim never reached.
+    #[test]
+    fn test_a_run_is_held_to_the_bars_of_its_claims() {
+        let claim = |reached: usize| AlwaysTraps {
+            function: "f1".into(),
+            line: 7,
+            col: 3,
+            message: "Tier 1 proves the value is at least 300 here".into(),
+            seen: true,
+            calls: 424,
+            reached,
+            nearest: None,
+            furthest: "it returns".into(),
+        };
+        let claims = |reached: usize, unreached: usize| -> Vec<(u64, AlwaysTraps)> {
+            (0..reached)
+                .map(|k| (k as u64, claim(1)))
+                .chain((0..unreached).map(|k| (k as u64, claim(0))))
+                .collect()
+        };
+        let most = MAX_REGENERATED_PER_HUNDRED * 3 + REGENERATED_ROOM;
+        assert_eq!(beyond_the_bars(300, most, &[]), Vec::<String>::new());
+        assert_eq!(
+            beyond_the_bars(300, most + 1, &[]),
+            [format!(
+                "{} functions were generated again for a narrowing that always traps, above the \
+                 {} that 300 programs may have: the generator writes more of them than it did",
+                most + 1,
+                most
+            )]
+        );
+        // A run of few programs may have the few, and no more than its share with them.
+        let few = MAX_REGENERATED_PER_HUNDRED * 9 / 100 + REGENERATED_ROOM;
+        assert!(few >= REGENERATED_ROOM);
+        assert_eq!(beyond_the_bars(9, few, &[]), Vec::<String>::new());
+        assert_eq!(beyond_the_bars(9, few + 1, &[]).len(), 1);
+        // Of a hundred claims, the bar's share and the few may be unreached.
+        let allowed = MAX_UNREACHED_PER_HUNDRED + UNREACHED_ROOM;
+        assert_eq!(
+            beyond_the_bars(300, 0, &claims(100 - allowed, allowed)),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            beyond_the_bars(300, 0, &claims(100 - allowed - 1, allowed + 1)),
+            [format!(
+                "{} of 100 claims that a narrowing always traps were never reached by a run, \
+                 above the {} that may be: they are not checked",
+                allowed + 1,
+                allowed
+            )]
+        );
+        // A few claims may all be unreached, and no more than the few.
+        assert_eq!(
+            beyond_the_bars(9, 0, &claims(0, UNREACHED_ROOM)),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            beyond_the_bars(9, 0, &claims(0, 3 * UNREACHED_ROOM)).len(),
+            1
+        );
+        // The bars leave a run that reaches no claim at all no room.
+        const { assert!(MAX_UNREACHED_PER_HUNDRED < 100 && MAX_REGENERATED_PER_HUNDRED < 100) };
+        assert_eq!(
+            claims_summary(4, &claims(2, 1)),
+            "4 functions generated again for a narrowing Tier 1 proved always traps (E0508): 3 \
+             claims, 2 of them seen to hold in a run, 1 never reached\nnever reached: seed 0 \
+             `f1` 7:3, where the furthest of 424 calls ends: it returns\n  Tier 1 proves the \
+             value is at least 300 here"
+        );
     }
 }

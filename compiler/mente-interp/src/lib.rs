@@ -281,7 +281,8 @@ pub fn call_leaving(
 }
 
 /// What a run shows of its values: each integer an expression gives, an array's elements
-/// included, with the expression's span, as it is evaluated.
+/// included, with the expression's span, as it is evaluated; and the value a compound
+/// assignment computes, `x op e`, which no expression gives, with the span of the assignment.
 pub type Observer<'a> = &'a mut (dyn FnMut(Span, Int) + Send);
 
 /// Calls the function `name` like [`call_leaving`], showing `seen` each integer an expression
