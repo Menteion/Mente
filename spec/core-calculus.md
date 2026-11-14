@@ -190,9 +190,9 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
     - Every type is plain or owning, by its structure. An owning type holds a heap buffer: `String`, `List<T>`, and every array, struct, enum and `?T` that holds an owning type. Every other type is plain: integers, `bool`, views, and arrays, structs, enums and `?T` of plain types.
     - A plain value is copied, bit for bit, wherever it is bound, assigned, passed or returned, and `own` never makes its binding unusable.
     - An owning value is never copied implicitly. A place of owning type gives its value only where `own` is written or where its life ends anyway: `val b = own a` and `f(own a)` move it, `a.clone()` copies it at a cost the code shows, and `return a`, `raise a` (item 16) and a body's last expression `a` move a local binding or an `own` parameter, since nothing after them can read it. Anywhere else, as in `val b = a`, `b = a`, a field of a struct being built or an element of an array literal, it is an error whose fixes are `own a` and `a.clone()`. An owning value that no binding holds, such as a call's result, moves to where it lands.
-    - A read-only argument of owning type is passed without a copy: the callee reads the caller's value, which the Law of Exclusivity keeps unchanged for the call (item 20).
+    - A read-only argument of owning type is passed without a copy: the callee reads the caller's value, which the Law of Exclusivity keeps unchanged for the call (item 20). No later operand of the same expression may change it either: where a plain value would be kept as a copy, an owning one is an error (item 20).
     - An owning value is freed, every buffer it holds included, when the binding that holds it ends: at the end of its block, in the reverse order of declaration; on every exit from the block, by `return`, `break`, `continue`, `raise` or `!`; and when a value is assigned over it, after the new value is computed. A moved binding is not freed, since its value lives on elsewhere. An owning value that nothing holds, such as a call's result passed to a read-only parameter, is freed at the end of its statement.
-    - `Specified`: for that rule a condition ends as a statement does ([`stack-budget`](../docs/design-review.md#stack-budget)). An owning value nothing holds that the condition of an `if`, a `while` or a `guard`, a clause, or an operand of `and` or `or` makes is freed when that condition, clause or operand has its value, before a branch, a round or the other operand runs; so a loop frees it in every round, and holds no more for running longer. The scrutinee of a `match`, an `if val` or a `guard val` is no condition: it is held as items 14 and 15 say.
+    - `Specified`: for that rule these each end as a statement does ([`stack-budget`](../docs/design-review.md#stack-budget)): the condition of an `if`, a `while` or a `guard`; a clause; an arm of a `match` or of a `catch`, and a branch of an `if`, whether it is an expression or a block; and so an operand of `and` or `or`, the left being the condition and the right a branch of the `if` it translates to (item 24). An owning value nothing holds that one of them makes is freed when it has its value, before a branch, a round, the other operand or what consumes the arm's value runs; so a loop frees it in every round, and holds no more for running longer. The scrutinee of a `match`, an `if val` or a `guard val`, and the call of a `catch`, is no such part: an owning one that nothing holds is held to the end of the statement it stands in, as items 14 to 16 say. The same boundaries end the freeze of a view no binding holds (item 17).
     - Before M4 no type has a destructor of its own: freeing returns memory and does nothing else, so the order in which the parts of one value are freed cannot be observed.
     - `Implemented`: a struct of plain types is copied wherever it is bound, assigned, passed or returned.
       <!-- @assert-count target="compiler/mente-interp/src/tests.rs" symbol="fn test_structs_are_values_built_in_field_order" min="1" reason="A copy of a struct stays apart from its original" -->
@@ -293,7 +293,7 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
     - A view is a read-only window onto values held elsewhere: `[]T` onto a contiguous run of `T`, and `str` onto UTF-8 text (item 18). A view is plain: copying it copies the window, never the values.
     - A view is made only explicitly, from an array, a `List`, a `String` or another view: `xs[..]` views the whole, and `xs[a..b]` the elements from `a` up to but not including `b`. `a` and `b` may have any integer type. `0 <= a <= b <= xs.len` is checked at run time, and the check is erased where Tier 1 proves it; a range outside it traps. A range has no open end and no `..=`.
     - `v[i]` reads an element, its index checked as an array's is, and `v.len` is the window's length. Nothing writes through a view: an element store through one is an error. A `var` view, or a `mut` view parameter, can be given another window, which changes no element.
-    - A view's sources are the owners and views it was made from, and a `var` view's are those of every value assigned to it. While a binding holds a view, or a struct or enum that holds one, its sources are frozen for the whole block that declares the binding: nothing assigns to them or to any part of them, passes them as `mut` or `own`, or calls what changes them. A view that no binding holds, such as the argument of `f(xs[..])`, freezes its sources for its statement. A view of a value that no binding holds, such as a call's result, is an error.
+    - A view's sources are the owners and views it was made from, and a `var` view's are those of every value assigned to it. While a binding holds a view, or a struct or enum that holds one, its sources are frozen for the whole block that declares the binding: nothing assigns to them or to any part of them, passes them as `mut` or `own`, or calls what changes them. A view that no binding holds, such as the argument of `f(xs[..])`, freezes its sources for its statement, where a statement ends as item 12 has it for an owning value nothing holds: a condition, a clause, an arm and a branch each end as one, so `while n(xs[..]) > 0 { mut xs.pop() }` freezes `xs` for the condition and not for the body. A view of a value that no binding holds, such as a call's result, is an error.
     - A function that returns a view, or a value that holds one, takes it from its parameters, as its signature says (`regions-and-pools.md`, item 1): by default from every read-only parameter that is or holds a view, and with `from p, q` from the ones named. Only such parameters can be sources: a `from` that names a `mut` or `own` parameter, or an owner such as an array, a `List` or a `String`, is an error (`E0311`). A caller holds the result as a view of its arguments' sources.
     - A view that would outlive its sources, stored where it lasts longer than they do, is an error (`E0310`). Its fixes are an owned copy in M2 (`String.from`, `List.from`) and, as Engineering Guardrail #3 requires, an arena or a `Pool<T>` with `Handle<T>`, which come in M3.
     - `Specified` **Holding a view is a property of a type** ([`view-holder-types`](../docs/design-review.md#view-holder-types)): it is derived from the type's fields and type arguments, and never written by hand. `[]T` and `str` hold a view; a struct, an enum, an array, `?T` or `List<T>` holds one when any part of it does: a field, a field of a payload, an element or the present value. Integers, `bool` and `String` hold none. A view holder takes three rules of a view, and only these: provenance, in that its sources are the union of its parts' sources, it is returned only from the parameters its signature names, and storing it where it outlives its sources is `E0310`; the freeze, in that a binding that holds it freezes its sources as one that holds a view does; and the rule on type arguments below. Holding a view makes a type neither plain nor read-only: a `List<[]u8>` is owning, moved, cloned and freed as item 12 says, and its elements are stored as any `List`'s are.
@@ -319,6 +319,7 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
     - A binding moved on any path is dead where the paths join, and reading it there is an error. Only assigning a `var` on every path brings it back. Where one branch moves a binding, every other branch moves it too or discards it with `_ = own a`, so no flag is kept at run time. A binding declared outside a loop and moved inside it is brought back before the loop's next round, or the loop leaves after the move.
     - Within one call, the root binding of a `mut` or `own` argument appears in no other argument: item 7's rule, for every projection. `f(mut s.a, mut s.b)`, `f(own a, a.len)` and `f(mut xs[i], xs[j])` are errors.
     - A call that changes its receiver is marked: `mut xs.push(v)`. The receiver counts as a `mut` argument, so `mut xs.push(xs[0])` is an error whose fix reads the element first. A call that only reads its receiver, such as `s.bytes()`, is not marked.
+    - `Specified` **An owning place a later operand would change** ([`owning-operand-exclusivity`](../docs/design-review.md#owning-operand-exclusivity)): within one expression, a later operand may not change an owning place that an earlier operand read. This carries the rule above from the arguments of one call to calls nested in them: `two(xs, bump(mut xs))`, with `xs` a `List`, is an error where the module is checked. A plain value read there keeps the value it was evaluated to, as a copy (item 12); an owning value is never copied implicitly, so there is nothing to keep, and no copy is made. The fix binds a `.clone()` of the place first, at a cost the code shows, or moves the call that changes it into an earlier statement. The rule applies to every list of operands that item 25's rule of a value kept names: the receiver and the arguments of a call, the two operands of an operator, the fields of a struct or a variant built, the elements of an array literal, and the base of an element read against its index. So the two rules cover the same sites: a plain place is kept, and an owning place is an error. "May change" is as item 25 has it: the later operand holds, at any depth, a `mut` argument or an assignment whose place has that binding as its root. The error's code comes with `List<T>` and `String`.
     - `Implemented`: within one call, the root binding of a `mut` argument appears in no other argument, through fields and elements alike and inside an `if` that is an argument: `f(mut s.a, mut s.b)` and `f(mut s.a, s.b)` are errors (`E0207`).
       <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_fields_are_read_and_stored_through_places" min="1" reason="Two fields of one binding in one call, one of them mut, are E0207" -->
 21. `Specified` **Layouts** ([`struct-field-order`](../docs/design-review.md#struct-field-order), [`enum-layout`](../docs/design-review.md#enum-layout), [`sympathetic-defaults`](../docs/design-review.md#sympathetic-defaults)):
@@ -385,9 +386,9 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
       | An integer literal, `true`, `false`, a byte literal | None | The size of its type |
       | A string literal | None | 16 bytes, a `str` |
       | A place read: a name, or a field read `p.f` or an element read `p[i]` whose base is a place | Its indexes; and before an index, the base it indexes where that base is a value kept, below. No other base inside it is an operand | The size of its type when that is an integer type or `bool`. Otherwise 8 bytes, an address, since nothing is copied to read it; or the size of its type where it is itself a value kept |
-      | `p?.f` whose base is a place | The indexes of `p` | 8 bytes, an address or none, where it is only read: as an operand of `==`, or as the scrutinee of a `match`, an `if val` or a `guard val`. Where it lands in a place, as an argument, an initializer or a returned value, a `?U` is built, by the row of a value narrowed |
+      | A projection: a place read through one or more `?.`, as `p?.f`, `p?.a?.big` and `p?.xs[i]`. It is read as a whole, as a place is, whatever follows the `?.` | Its indexes | 8 bytes, an address or none, where it is read in place: as an operand of `==` or `!=`, as a scrutinee, and as a read-only argument (item 15). Where it lands in a place that holds a `?U`, as an initializer, a field, an element or a returned value, the `?U` is built there, by the row of a value narrowed. Where it is a value kept, below, it holds the size of its `?U` |
       | A field read `e.f`, an element read `e[i]` or an `e?.f` whose base `e` is no place, as in `make()[i]` | `e`, then `i` | The size of its type |
-      | `e.len` | `e`, where it is no place | 8 bytes, a `usize` |
+      | `e.len` | `e`, where it is no place; its indexes, where it is a place | 8 bytes, a `usize` |
       | Unary `-`, `~`, `not`; an arithmetic, bit or shift operator; a comparison, `==`, `!=` | Its operand, or its left and then its right | The size of its result's type, which is 1 byte for a comparison |
       | `a and b`, `a or b` | As `if a { b } else { false }` and `if a { true } else { b }` | 1 byte |
       | `own a` | None | 8 bytes, as a place read: the value moves to where it lands, which holds it |
@@ -397,10 +398,11 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
       | An array literal | Its elements | The array's size |
       | A repeat `[v; n]` | `v`; the count `n` is no operand | The array's size |
       | A struct built; a variant built, `Name.A` among them | Its fields, in the order written | The size of its type |
-      | `none` | None | The size of the `?T` it lands in |
-      | A view made, `xs[a..b]` and `xs[..]` | The value it is made from, where that is no place; then its bounds | 16 bytes |
+      | `none` | None | The size of the `?T` it lands in. Nothing where it is an operand of `==` or `!=`, which reads only whether the other operand is present |
+      | A view made, `xs[a..b]` and `xs[..]` | The value it is made from, where that is no place, or its indexes, where it is a place; then its bounds | 16 bytes |
       | `if`, `match`, `if val` | See below | The size of its value's type where it gives a value, and nothing where it stands as a statement |
-      | A value narrowed where it lands in a place of another type (item 4), a returned value and a body's last expression among them: an integer into another integer type, an array whose elements are narrowed, a `T` or a `p?.f` that enters a `?T`. A refinement of the value's own type is no other type | The value | The size of the type it enters, beside the value it was, which is held until the narrowing is done |
+      | A value narrowed where it lands in a place of another type (item 4), a returned value and a body's last expression among them: an integer into another integer type, an array whose elements are narrowed, a `T` or a projection that enters a place holding a `?T`. A refinement of the value's own type is no other type, and neither is the type a `match`'s scrutinee enters, which is its own | The value | The size of the type it enters, beside the value it was, which is held until the narrowing is done |
+      | `raise e` | `e` | Nothing: it leaves |
       | `todo("reason")`, `unreachable("reason")`, and any expression that gives no value | None; a reason is no value | Nothing |
 
     - `Specified` **What is held at once.** A frame counts the most its function holds at one moment, not the sum of all it ever holds, and one principle says for how long anything is held: a value is held until what consumes it is complete. An operand is held until the operator's value is made, and an argument until the call returns. The value of a branch or of an arm is held until the value of its `if`, `match` or `catch` is made, and so are a scrutinee and what a failing call returned. A block's bindings, and the value of its last expression, are held until the value made from the block's value is made. The equations below apply the principle to each production of `grammar.md` that gives a value or holds one; they decide, and a production without one is a fault of this item:
@@ -409,8 +411,9 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
       size(T)  the size of type T (item 21)
       v(e)     what the value of e holds, by the table
       m(e)     the most held while e is evaluated, the making of its value included
-      l(e)     the owning values no binding holds that e's operands gave, at any depth
-               in the same statement; each is held to that statement's end (item 12)
+      o(e)     v(e) where e gives a value of an owning type that no binding holds; else 0
+      l(e)     the owning values no binding holds that the evaluation of e left held,
+               each to the end of its statement (item 12); an equation below for each form
       r(e)     what is held once e has its value, until what consumes it is complete:
                r(e) = v(e) + l(e)
       c(e)     the size of the type e enters, where it lands in a place of another type
@@ -419,13 +422,14 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
       r'(e)    = c(e) + l(e) where c(e) > 0, else r(e)
 
       A literal, none, own a, todo, unreachable:
-        m(e) = v(e)
+        m(e) = v(e)        l(e) = 0
       ( e ) is e. A pattern holds nothing: its names are places.
 
-      Operands e1 .. en and a value: an operator, not, a place read, a read of a
-      value that is no place, .len, a view made:
+      Operands e1 .. en and a value: an operator, not, a place read, a projection,
+      a mut argument, a read of a value that is no place, .len, a view made:
         m(e) = max( r(e1) + .. + r(e[i-1]) + m(ei)       for each i,
                     r(e1) + .. + r(en) + v(e) )
+        l(e) = l(e1) + o(e1) + .. + l(en) + o(en)
 
       An array literal, a repeat, a struct or a variant built, whose operands land
       as they are evaluated: the same, with m' and r' for each operand.
@@ -434,48 +438,57 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
         m(e) = max( r(a1) + .. + r(a[i-1]) + m(ai)                         each evaluated,
                     r'(a1) + .. + r'(a[i-1]) + r(ai) + .. + r(an) + c(ai)   then each narrowed,
                     r'(a1) + .. + r'(an) + v(e) )                           then the call returns
-
-      a and b, a or b:
-        m(e) = max( m(a), m(b), r(b) + 1, 2 )
+        l(e) = l(a1) + o(a1) + .. + l(an) + o(an)
 
       if c { B1 } else { B2 }, as an expression or a statement, with B2 or without:
         m(e) = max( m(c), M(B1), M(B2), R(B1) + v(e), R(B2) + v(e) )
-      if val x = s { B1 } else { B2 }:
-        m(e) = max( m(s), r(s) + M(Bi), r(s) + R(Bi) + v(e) )
+        l(e) = 0           the condition and each branch end as a statement does (item 12)
       match s { p => A ... }, over its arms A:
-        m(e) = max( m'(s), r'(s) + M(A), r'(s) + R(A) + v(e) )
+        m(e) = max( m(s), r(s) + M(A), r(s) + R(A) + v(e) )
+        l(e) = l(s) + o(s)   the scrutinee is held to the end of its statement; each arm ends
       s catch { p => A ... }, over its arms A:
         m(e) = max( m(s), r(s) + v(e), r(s) + M(A), r(s) + R(A) + v(e) )
-      s!:
-        m(e) = max( m(s), r(s) + v(e), r(s) + 8 )
+        l(e) = l(s) + o(s)
+      raise e, as a statement or as an arm:
+        m = m(e); it gives no value and leaves: v = 0, l = 0, M = m(e), R = 0
 
-      A block { s1 .. sn }, where b(i) is the sizes of the bindings s1 .. si declare,
-      and of what a guard val among them holds:
+      The elaborations count as their translations (item 24); the translation's count
+      is the definition, and what follows "so" is what it comes to:
+        a and b                           is  if a { b } else { false }
+                                          so  m(e) = max( m(a), m(b), 2 ), l(e) = 0
+        a or b                            is  if a { true } else { b }, likewise
+        guard c else { B }                is  if c { } else { B }
+                                          so  M = max( m(c), M(B) )
+        if val x = s { B1 } else { B2 }   is  match s { none => B2   x => B1 }
+        { S  guard val x = s else { B }  T }
+                                          is  { S  match s { none => B   x => { T } } }
+        s!                                is  s catch { $e => raise $e }
+                                          so  m(e) = max( m(s), r(s) + v(e), r(s) + 8 )
+        _ = e                             is  { val $d = e }
+                                          so  M = size(T) + m(e), T the type of e
+
+      A block { s1 .. sn }, where b(i) is the sizes of the bindings s1 .. si declare:
         M(B) = max( b(i-1) + M(si) )    for each i
-        R(B) = b(n) + r(e)              where sn is the expression e that gives its value,
+        R(B) = b(n) + v(e)              where sn is the expression e that gives its value,
                                         and 0 where the block gives none
       An arm or a branch that is an expression e:
-        M = m(e), R = r(e)
+        M = m(e), R = v(e)
 
       val x: T = e, var x: T = e      M = size(T) + m'(e)
-      p = e                           M = max( I(j-1) + m(ij), I(k) + m'(e) )
-      p op= e                         M = max( I(j-1) + m(ij), I(k) + size(P) + m(e),
-                                               I(k) + size(P) + r(e) + size(P) )
-                                      i1 .. ik the indexes of p, I(j) = r(i1) + .. + r(ij),
+      p = e                           M = max( I(j-1) + m(ij), I(q) + m'(e) )
+      p op= e                         M = max( I(j-1) + m(ij), I(q) + size(P) + m(e),
+                                               I(q) + size(P) + r(e) + size(P) )
+                                      i1 .. iq the indexes of p, I(j) = r(i1) + .. + r(ij),
                                       P the type of p
-      _ = e                           M = size(T) + m(e), T the type of e
-      while c  clauses  { B }         M = k + max( m(c), m(q) for each clause q, M(B) )
-                                      k = 16 for each decreases clause, and 1 more if it has any
-      guard c else { B }              M = max( m(c), M(B) )
-      guard val x = s else { B }      M = max( m(s), r(s) + M(B) ); r(s) then joins b(i)
+      while c  clauses  { B }         M = d + max( m(c), m(g) for each clause g, M(B) )
+                                      d = 16 for each decreases clause, and 1 more if it has any
       return e                        M = m'(e)
-      raise e                         M = m(e)
       return, break, continue         M = 0
       e                               M = m(e)
 
       frame(f) = 64 + what its parameters count + 16 for each decreases clause of f
-               + max( m(q) for each requires and decreases clause q,
-                      M(body) + max( m(q) for each ensures clause q ) )
+               + max( m(g) for each requires and decreases clause g,
+                      M(body) + max( m(g) for each ensures clause g ) )
       The value a body gives, written = e or as the last expression of its block, is
       narrowed as a returned value: m'(e) in place of m(e).
       ```
@@ -483,12 +496,13 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
     - Beside the equations, in words, and with the count each gives. Where no type is given, a value is a `u64`:
       - **An expression.** Its operands are evaluated in the order of the table, each held while the next is evaluated, and its own value is made while all are held. So `n + 1` holds 24 bytes, and `g(h(a / 2), h(a / 3), h(a / 4))` holds 40: two results and the 24 of the third argument. With `a: u8` and `b: u32`, `a + b` holds 21, the sum being of no one type, and 24 where it is then narrowed into a `u64`.
       - **A call.** Its arguments are all evaluated, then each is narrowed in order, then the call returns (item 7). So `f(wide(), make())`, with `wide() -> [1000]u64` into a parameter of `[1000]u8` and `make() -> [1000]u8`, holds 10,000 bytes: both values and the 1,000 the first is narrowed into.
-      - **A value kept.** An operand that is a place read of a plain type other than an integer type or `bool` holds its type's size, in place of 8 bytes, where a later operand of the same expression may change its root binding, since it keeps the value it was evaluated to (item 12). That holds for every list of operands: the receiver and the arguments of a call, the two operands of an operator such as `==` on arrays, the fields of a struct or a variant built, the elements of an array literal, and the base of an element read against its index, under a field path or not. A later operand may change a binding where it holds, at any depth, a `mut` argument or an assignment whose place has that binding as its root. So in `use(Pair(a: xs, b: pick(mut xs, make())))`, with `xs` of 1,000 bytes and `make()` of 4,000, the field `a` holds 1,000 bytes while `b` is evaluated; and `xs[bump(mut xs)]`, with `xs: [1000]u64` and `bump` giving a `usize`, holds 8,016. A view is no such operand: it reads its owner in place, and item 17 freezes the owner, so `f(xs[..], g(mut xs))` is an error. Nor is a place of an owning type, which nothing copies implicitly (item 12).
-      - **An owning value no binding holds.** A value of an owning type that an expression gives and no binding holds is held to the end of its statement, where item 12 frees it or from where it has moved on, and not only until the expression it is an operand of has its value. So with `make() -> [100]String`, of 2,400 bytes, `total(make()) + total(make())` holds 4,824: both arrays, both results and their sum. A condition ends as a statement does (item 12): `total(make()) > 0 and total(make()) > 1` holds 2,417, one array at a time.
-      - **`if`, `and`, `or`, `guard`.** The condition is evaluated, and ends. Then one branch runs, so of the branches only the one that holds the most counts. The value of an `if` is made while the value of the branch that gave it is held, and with it the bindings of that branch's block: `if c { m1() } else { m2() }` of `[1000]u8` holds 2,000 bytes, and `if c { var t = xs  fill(mut t)  t } else { xs }`, of the same type, holds 2,008: `t`, the read of it, and the value made from it. `a and b`, of two names, holds 2.
-      - **`match`, `if val`, `guard val`.** The scrutinee is evaluated and held while an arm runs and while the value is made, since a pattern's names read it in place (items 14 and 15); those names are places. Of the arms only the one that holds the most counts. So with `enum Msg { Empty(pad: u8), Big(data: [1000]u8) }`, `match get() { Msg.Empty(pad: _) => m0   Msg.Big(data: d) => d }` holds 2,009: the scrutinee's 1,001, the read of `d`, and the value. `guard val v = e else { b }` holds `e` while `b` runs and to the end of its block, as item 15 has it live.
+      - **A value kept.** An operand that is a place read, or a projection, of a plain type other than an integer type or `bool` holds its type's size, in place of 8 bytes, where a later operand of the same expression may change its root binding, since it keeps the value it was evaluated to (item 12). That holds for every list of operands: the receiver and the arguments of a call, the two operands of an operator such as `==` on arrays, the fields of a struct or a variant built, the elements of an array literal, and the base of an element read against its index, under a field path or not. A later operand may change a binding where it holds, at any depth, a `mut` argument or an assignment whose place has that binding as its root. So in `use(Pair(a: xs, b: pick(mut xs, make())))`, with `xs` of 1,000 bytes and `make()` of 4,000, the field `a` holds 1,000 bytes while `b` is evaluated; `xs[bump(mut xs)]`, with `xs: [1000]u64` and `bump` giving a `usize`, holds 8,016; and in `use2(p?.big, wipe(mut p, wide()))`, with `big: [1000]u8` and `wide() -> [1000]u64`, the first argument holds the 1,001 bytes of its `?[1000]u8` while `wipe` runs, and the call 9,017. A view is no such operand: it reads its owner in place, and item 17 freezes the owner, so `f(xs[..], g(mut xs))` is an error. And a place of an owning type is never kept: nothing copies it implicitly (item 12), so a later operand that may change it is an error (item 20), and there is nothing to count.
+      - **An owning value no binding holds.** A value of an owning type that an expression gives and no binding holds is held to the end of its statement, where item 12 frees it or from where it has moved on, and not only until the expression it is an operand of has its value. So with `make() -> [100]String`, of 2,400 bytes, `total(make()) + total(make())` holds 4,824: both arrays, both results and their sum. A condition, an operand of `and` or `or`, an arm and a branch each end as a statement does (item 12), so nothing lingers out of one: `total(make()) > 0 and total(make()) > 1` holds 2,417, one array at a time; `x and ok(make())` holds 2,401; and `pair(match k { 0 => total(make())  _ => 0 }, wide())`, with `k: u8` and `wide() -> [1000]u8`, holds 2,409, the array being gone when `wide()` is called. A scrutinee is no such part: an owning one no binding holds is held to the end of its statement.
+      - **`if`, `and`, `or`, `guard`.** The condition is evaluated, and ends. Then one branch runs, so of the branches only the one that holds the most counts. The value of an `if` is made while the value of the branch that gave it is held, and with it the bindings of that branch's block: `if c { m1() } else { m2() }` of `[1000]u8` holds 2,000 bytes, and `if c { var t = xs  fill(mut t)  t } else { xs }`, of the same type, holds 2,008: `t`, the read of it, and the value made from it. `a and b`, of two names, holds 2. With `xs: ?[1000]u8`, `if xs == none { 1 } else { 0 }` holds 16: the comparison holds 9, `none` nothing, and each branch's value stands beside the `if`'s.
+      - **`match`, `if val`, `guard val`.** The scrutinee is evaluated and held while an arm runs and while the value is made, since a pattern's names read it in place (items 14 and 15); those names are places. Of the arms only the one that holds the most counts. So with `enum Msg { Empty(pad: u8), Big(data: [1000]u8) }`, `match get() { Msg.Empty(pad: _) => m0   Msg.Big(data: d) => d }` holds 2,009: the scrutinee's 1,001, the read of `d`, and the value. A scrutinee enters its own type, so with `a: u8` and `b: u32`, `match a + b { 0 => 1  _ => 2 }` holds 32: the sum's 16, an arm's 8 and the value's 8. `if val` and `guard val` count as the `match` each translates to, and that count is the definition: `fn g() -> [1000]u8 { guard val v = find() else { unreachable("x") }  v }`, with `find() -> ?[1000]u8`, has a frame of 2,073, the rest of its block being an arm whose value is made while the scrutinee is held.
       - **`catch`, `!`.** What the call holds is held while an arm runs and while the value is made, and an arm's value is held beside the `catch`'s. So `f()!` with `f() -> u64 ! E`, `E` of one byte, holds 25 bytes: the call's 17, and the 8 of its value or of the error an arm reads. And `f() catch { E.Bad => big() }`, with a value of `[1000]u8`, holds 3,009.
-      - **A `?U` projected.** `p?.f` is an address, or none, where it is only read. Where it lands in a place it is built: `use(p?.big)`, with `big: [1000]u8`, holds 1,009, the address and the `?[1000]u8` of 1,001 bytes its caller makes.
+      - **A projection.** A place read through `?.` is an address, or none, where it is read in place, however long the chain: with `struct Outer { a: Inner }` and `struct Inner { big: [1000]u8 }`, `fn g(p: ?Outer) -> u64 { if val x = p?.a?.big { use(x) } else { 0 } }` has a frame of 96, and `use(p?.big)` holds 16, the address and the call's value, since a read-only argument is read in place (item 15). Where it lands in a place that holds a `?U`, the `?U` is built: `val q: ?[1000]u8 = p?.big` holds 2,010, the binding's 1,001, the address, and the 1,001 it is built into.
+      - **`.len` and a view.** The indexes of the place they read are their operands: with `rows: [4][8]u8` and `wide() -> [1000]u64`, `rows[pick(wide())].len` holds 8,008.
       - **A block.** Its statements run in order. A `val` or a `var` holds the size of its type from the start of its own statement, while its initializer is evaluated, to the end of its block; whatever else a statement holds ends with the statement. So the count bounds a lowering that builds the value and then copies it into the binding, and one that builds it in place holds less: `val a = n + 1` holds 32 bytes; `val a: u64[0..10] = n` holds 16, a refinement being no other type; and `val a: [4]u64 = make()`, with `make() -> [4]u8`, holds 68, the binding's 32, the call's 4 and the 32 it is narrowed into. `_ = e` is `{ val $d = e }`: it holds a binding of `e`'s type and `e`, for its statement.
       - **A loop.** The condition, the clauses and the body of a `while` are held one after another, and the body once, however many rounds run: of these only the one that holds the most counts. A loop with `decreases` clauses also holds, for as long as it runs, 16 bytes for each clause, its measure of the round before, an exact integer, and 1 byte for the loop, whether a round has run, whatever the number of its clauses.
       - **An assignment.** The operands of `p = e` are the indexes of `p`, then `e`. Those of a compound assignment `p op= e` are the indexes of `p`, then the value read from `p`, then `e` (item 10), and its result, of `p`'s type, is made while they are held. So `x += f(x)`, with `f(u64) -> u64`, holds 24 bytes; and `xs[i] += f(mut ys)`, with `xs` of `u32` elements, `i: usize` and `f` giving a `u32`, holds 24: the index, the value read, the argument and the call's value.
@@ -507,7 +521,7 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
     - This order settles a case the two interpreters decide differently today. A call that would both run out of stack and narrow an argument out of its parameter's type traps as running out of stack, as the reference interpreter has it. MIR narrows the arguments and checks the callee's refinements, `requires` and `decreases` first, and so reports the narrowing.
     - Running out of stack is the trap of kind `stack-overflow`, whose text is `the call stack ran out`, at the call (item 9).
     - The run's first call, of `main` (item 10) or of the function `mn run --call` names, is counted as any call is, against a stack with nothing in use, and its frame stays in use for the whole run. The values a run is given from outside, and its result, are the run's own and count nothing.
-    - Left open, each to the entry or the milestone that decides it. The routines that free, clone, compare and print a value descend with data that may nest without end, such as `struct Node { kids: List<Node> }`, in no declared call: what bounds them is decided with `List<T>`, before it is implemented ([`recursive-data-descent`](../docs/design-review.md#recursive-data-descent)). What `@max_stack(n)` promises of the machine's own stack, and what a call in `@branchless` code does, whose check is a branch, are decided before M5 implements them ([`max-stack-unit`](../docs/design-review.md#max-stack-unit)). A `dyn` call has no one callee to count, and a call of an `extern` function runs code that counts nothing: M4, which brings both, says what each counts; until then a program calls only functions with bodies (`E0224`). A program has one stack until M7 brings tasks, each with a budget of its own (`structured-concurrency.md`). And whether a later operand may change an owning place an earlier operand of the same expression read, which no kept copy can answer, is for items 12 and 20 to say where owning types are implemented.
+    - Left open, each to the entry or the milestone that decides it. The routines that free, clone, compare and print a value descend with data that may nest without end, such as `struct Node { kids: List<Node> }`, in no declared call: what bounds them is decided with `List<T>`, before it is implemented ([`recursive-data-descent`](../docs/design-review.md#recursive-data-descent)). What `@max_stack(n)` promises of the machine's own stack, and what a call in `@branchless` code does, whose check is a branch, are decided before M5 implements them ([`max-stack-unit`](../docs/design-review.md#max-stack-unit)). A `dyn` call has no one callee to count, and a call of an `extern` function runs code that counts nothing: M4, which brings both, says what each counts; until then a program calls only functions with bodies (`E0224`). And a program has one stack until M7 brings tasks, each with a budget of its own (`structured-concurrency.md`).
     - `Specified`: a function whose frame is larger than the budget is an error where it is declared, since every call of it traps, as a narrowing that always traps is an error (item 8). Its fix names the largest parts of the frame, and only what the compiler's milestone has to hold them elsewhere, as `E0109` names a milestone: a smaller value, a value its caller passes in, and a `List<T>` (item 19), which holds its elements on the heap, once the milestone has it. The error's code comes with its implementation, beside a program that fails and its near miss, a frame of exactly the budget.
     - `Specified`: the cost report gives each function's frame, with what holds the most and the bytes of each part, and says of each call whether it is checked when it runs, and of each clause whether it stays evaluated ([`cost-report`](../docs/design-review.md#cost-report)). `@max_stack(bytes)` bounds a call graph in the same bytes; it erases checks where its bound fits and moves no trap (`hardware-contracts.md`, item 1). What native code does at a call, how large its real stack is, and the ceiling the compiler keeps on its machine frames, are in `mir-and-codegen.md` (item 5).
     - `Implemented`: the reference interpreter counts open calls, not yet bytes, the run's first among them: a call that would be one more than its limit, 10,000 by default, traps with the kind `stack-overflow` and the text `the call stack ran out`, at the call, and calls made one after another do not add up.
@@ -526,8 +540,10 @@ This file is normative for the language of milestones M1 and M2 ([`core-calculus
       - mutual recursion through frames of 80 and 96 bytes, begun in the smaller: 11,915 calls are open, and the 11,916th traps;
       - what is not added up: the branches of an `if`, two statements one after the other, the bindings of two blocks that follow one another, and the rounds of a loop;
       - what is: the arguments of one call, the operands of one operator, a binding beside its initializer, a scrutinee beside its arm and beside the value made from it, a branch's value and its block's bindings beside the `if`'s value, an arm's value beside the `catch`'s, and two owning values no binding holds in one statement;
+      - what does not linger: an owning value made in a condition, in an operand of `and`, in an arm or in a branch, each gone before what follows it runs, the three examples above;
       - a value kept in each list of operands: `two(xs, bump(mut xs))`, a struct's field before a later field's `mut` call, an array literal's element, the left operand of `==` on arrays, and `xs[bump(mut xs)]`;
-      - a call's arguments narrowed after all are evaluated, `f(wide(), make())` above; an integer of no one type, `mix` above; and a `?U` built where a `p?.f` lands;
+      - a call's arguments narrowed after all are evaluated, `f(wide(), make())` above; an integer of no one type, `mix` above, and as a scrutinee; a projection read in place through a chain, as a read-only argument and beside `none`, kept against a later operand, and built where it lands in a binding; and the index of a place whose `.len` is read;
+      - each elaboration beside its translation, with one count: `guard val` and the `match` it is, above, `if val`, `!` and `catch`, `and` and `if`, `_ = e` and a binding;
       - a call inside an argument: `f(g(x))` runs where `g`'s frame and `f`'s each fit what is left and the two together do not;
       - a call at which the stack runs out and an argument does not fit its parameter's type: `stack-overflow`, not a narrowing;
       - a large array and a large struct passed down a recursion, read-only and `mut`, which count 16 bytes a call, beside the same recursion binding one in each frame, which counts its size: `walk(xs: [1000]u8, n: u32)`, which passes `xs` on, has a frame of 96 bytes against `down`'s 80;
