@@ -2152,6 +2152,7 @@ impl Gen {
             52..=61 => self.shift(want, depth),
             62..=68 => self.negation(want, depth),
             69..=80 => self.int_call(want, depth),
+            81..=83 if want == Want::Any => self.edge(false, depth),
             _ => Some(self.int_leaf(want)),
         }
     }
@@ -2189,6 +2190,12 @@ impl Gen {
         } else {
             b
         };
+        Self::combined(op, a, b)
+    }
+
+    /// `a op b` for an arithmetic `op`, with its operands' type, its static range and its
+    /// value; none when the range might leave 128 bits, which `E0222` rejects.
+    fn combined(op: Op, a: G, b: G) -> Option<G> {
         let cls = a.cls.join(b.cls);
         let wide = a.cls.wide().or(b.cls.wide());
         let r = match wide {
@@ -2208,6 +2215,170 @@ impl Gen {
             r,
             k,
         })
+    }
+
+    /// A name of an integer binding narrower than 128 bits, or a literal: an operand that
+    /// evaluates nothing else.
+    fn plain_operand(&mut self) -> G {
+        let narrow: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| {
+                matches!(self.binds[id].ty, Ty::Int(t) if t.bits < 128)
+                    && self.binds[id].kind != Kind::Pattern
+            })
+            .collect();
+        if narrow.is_empty() || self.rng.chance(25) {
+            return self.int_literal(Want::Any);
+        }
+        let id = *self.rng.pick(&narrow);
+        let Ty::Int(t) = self.binds[id].ty else {
+            return self.int_literal(Want::Any);
+        };
+        G {
+            e: self.read(id),
+            cls: Cls::One(t),
+            r: self.binds[id].range.unwrap_or(t.range()),
+            k: None,
+        }
+    }
+
+    /// An operand near 2^62, 2^63 or 2^64, on either side of zero: a literal, a small name
+    /// added to one or taken from one, or a binding refined there. The product of two lies
+    /// around the limit of Tier 1's domain, about 2^125
+    /// (`ghost-contracts-and-totality.md`, item 4): at 2^124, half the limit, where the
+    /// octagon's constants end; at the limit itself, from either side; at 2^126 and 2^127,
+    /// wholly past it; and just below 2^128.
+    fn near_edge(&mut self) -> G {
+        // A binding whose refinement lies there already.
+        let there: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| {
+                matches!(self.binds[id].ty, Ty::Int(t) if t.bits < 128)
+                    && self.binds[id].range.is_some_and(|r| {
+                        r.lo.mag.min(r.hi.mag) >= EDGE_OPERAND && r.lo.neg == r.hi.neg
+                    })
+            })
+            .collect();
+        if !there.is_empty() && self.rng.chance(50) {
+            let id = *self.rng.pick(&there);
+            if let (Ty::Int(t), Some(r)) = (self.binds[id].ty.clone(), self.binds[id].range) {
+                return G {
+                    e: self.read(id),
+                    cls: Cls::One(t),
+                    r,
+                    k: None,
+                };
+            }
+        }
+        let power = 1u128 << *self.rng.pick(&[62u32, 62, 63, 63, 63, 64]);
+        let base = match self.rng.below(4) {
+            0 => power - 1,
+            1 if power < 1 << 64 => power + 1,
+            _ if power < 1 << 64 => power,
+            _ => power - 1,
+        };
+        let literal = Num::new(false, base);
+        let lit = G {
+            e: E::Lit(base.to_string()),
+            cls: Cls::Lit,
+            r: R::point(literal),
+            k: Some(literal),
+        };
+        let small: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| {
+                matches!(self.binds[id].ty, Ty::Int(t) if t.bits <= 32)
+                    && self.binds[id].kind != Kind::Pattern
+            })
+            .collect();
+        let g = if !small.is_empty() && self.rng.chance(55) {
+            let id = *self.rng.pick(&small);
+            let name = match self.binds[id].ty {
+                Ty::Int(t) => G {
+                    e: E::name(&self.binds[id].name),
+                    cls: Cls::One(t),
+                    r: self.binds[id].range.unwrap_or(t.range()),
+                    k: None,
+                },
+                _ => return lit,
+            };
+            let sum = if self.rng.chance(70) {
+                Self::combined(Op::Add, name, lit.clone())
+            } else {
+                Self::combined(Op::Sub, lit.clone(), name)
+            };
+            // The name is read only where the sum holds it.
+            match sum {
+                Some(sum) => {
+                    self.binds[id].read = true;
+                    sum
+                }
+                None => lit,
+            }
+        } else {
+            lit
+        };
+        if self.rng.chance(20) {
+            let r = R {
+                lo: g.r.hi.negated(),
+                hi: g.r.lo.negated(),
+            };
+            if r.hull(g.r).fits() {
+                return G {
+                    e: E::Neg(Box::new(g.e)),
+                    cls: g.cls,
+                    r,
+                    k: g.k.map(Num::negated),
+                };
+            }
+        }
+        g
+    }
+
+    /// An expression at the edge of Tier 1's domain: the product of two operands
+    /// [`Gen::near_edge`] gives, of which Tier 1 holds a bound weakened to the nearest it has,
+    /// then divided, reduced or subtracted, on either side of the operator, by another such
+    /// product now and then; and half the time under a dividend, where the value is small
+    /// again and an index or a narrow type may take it. `plain` keeps the other operands to
+    /// names and literals, as an index needs.
+    fn edge(&mut self, plain: bool, depth: u32) -> Option<G> {
+        let (a, b) = (self.near_edge(), self.near_edge());
+        let product = Self::combined(Op::Mul, a, b)?;
+        let op = *self
+            .rng
+            .pick(&[Op::Div, Op::Div, Op::Sub, Op::Sub, Op::Rem]);
+        let other = if self.rng.chance(30) {
+            let (c, d) = (self.near_edge(), self.near_edge());
+            Self::combined(Op::Mul, c, d)?
+        } else if plain {
+            self.plain_operand()
+        } else {
+            self.int_expr(Want::Any, depth + 1)
+        };
+        let (x, y) = if self.rng.chance(70) {
+            (product, other)
+        } else {
+            (other, product)
+        };
+        let y = if matches!(op, Op::Div | Op::Rem) {
+            self.divisor(y)
+        } else {
+            y
+        };
+        let g = Self::combined(op, x, y)?;
+        if !self.rng.chance(50) {
+            return Some(g);
+        }
+        let over = if plain {
+            self.plain_operand()
+        } else {
+            self.int_expr(Want::Any, depth + 1)
+        };
+        let under = self.divisor(g);
+        Self::combined(*self.rng.pick(&[Op::Div, Op::Div, Op::Rem]), over, under)
     }
 
     /// A divisor: one that is always zero becomes one most of the time, and a name is guarded
@@ -2583,6 +2754,23 @@ impl Gen {
                 Some(e) => E::bin(Op::Rem, e, E::Lit(n.to_string())),
                 None => E::Lit((n - 1).to_string()),
             },
+            // A value computed at the edge of Tier 1's domain that may lie within the array.
+            96..=97 => {
+                let within = R {
+                    lo: Num::ZERO,
+                    hi: Num::new(false, n - 1),
+                };
+                for _ in 0..4 {
+                    let m = self.mark();
+                    match self.edge(true, 3) {
+                        Some(g) if g.r.meets(within) && g.k.is_none_or(|v| within.holds(v)) => {
+                            return g.e;
+                        }
+                        _ => self.restore(m),
+                    }
+                }
+                E::Lit((n - 1).to_string())
+            }
             _ => E::Lit(n.to_string()),
         }
     }
@@ -2808,9 +2996,20 @@ impl Gen {
 
     /// [`Gen::narrowed`], with the expression's static range.
     fn narrowed_range(&mut self, t: IntT, depth: u32) -> (E, R) {
+        // Now and then a value computed at the edge of Tier 1's domain.
+        let edge = self.rng.chance(6);
         for _ in 0..6 {
-            let m = self.mark();
-            let g = self.int_expr(Want::Any, depth);
+            let mut m = self.mark();
+            let tried = if edge { self.edge(false, depth) } else { None };
+            let g = match tried {
+                Some(g) => g,
+                None => {
+                    // What the attempt read, it no longer reads.
+                    self.restore(m);
+                    m = self.mark();
+                    self.int_expr(Want::Any, depth)
+                }
+            };
             if g.r.meets(t.range())
                 && g.k.is_none_or(|v| t.range().holds(v))
                 && self.may_fit(&g.e, t)
@@ -4426,6 +4625,31 @@ impl Gen {
         let names: Vec<usize> = (0..before.len())
             .filter(|&i| matches!(before[i].ty, Ty::Int(_)) && !before[i].is_mut)
             .collect();
+        // Now and then a 64-bit parameter whose values all lie near 2^62 or 2^63, or from
+        // 2^63 up: the product of two such lies wholly past Tier 1's domain
+        // ([`Gen::near_edge`]).
+        if t.bits == 64 && self.rng.chance(12) {
+            let half = 1u128 << 62;
+            let (lo, hi) = match (t.signed, self.rng.below(3)) {
+                (false, 0) => (2 * half, t.max().mag),
+                (_, 1) => (half, half + u128::from(self.rng.below(1000))),
+                _ => (
+                    2 * half - 1 - u128::from(self.rng.below(1000)),
+                    2 * half - 1,
+                ),
+            };
+            let down = t.signed && self.rng.chance(30);
+            let (lo, hi) = if down {
+                (Num::new(true, hi), Num::new(true, lo))
+            } else {
+                (Num::new(false, lo), Num::new(false, hi))
+            };
+            return Some(Refine {
+                lo: Bnd::Lit(lo),
+                hi: Bnd::Lit(hi),
+                inclusive: true,
+            });
+        }
         match self.rng.below(10) {
             0..=3 if !arrays.is_empty() && !t.signed => Some(Refine {
                 lo: Bnd::Lit(Num::ZERO),
@@ -4664,6 +4888,9 @@ pub struct AlwaysTraps {
     /// Those that gave the expression a value: every time outside its type, as claimed.
     pub reached: usize,
 }
+
+/// The least magnitude of an operand [`Gen::near_edge`] reads as lying near 2^62 or beyond.
+const EDGE_OPERAND: u128 = 1 << 61;
 
 /// The most bindings a function that must prove a relation between two values declares
 /// ([`Gen::relates`]): with its calls' arguments and its fields they stay well within the

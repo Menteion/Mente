@@ -11,7 +11,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mente_sema::check;
+use mente_sema::octagon::INF;
 use mente_sema::types::INT_TYPES;
+use mente_sema::wide::{self, Interval};
+use mente_sema::CheckedFn;
 use mente_syntax::tree::{
     Arg, ArmBody, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, EnumSyntax,
     ExprId, ExprKind, FieldSyntax, FnSyntax, Param, PatBinding, PatternKind, Payload, Refinement,
@@ -238,6 +241,21 @@ constructs!(body_kind, BODIES: Option<Body> {
     Some(Body::Block(_)) => "block body",
     Some(Body::Expr(_)) => "expression body",
 });
+
+/// What a function holds of the edge of Tier 1's domain
+/// (`ghost-contracts-and-totality.md`, item 4): a value whose static range lies wholly past
+/// the limit, of which Tier 1 holds only a bound weakened to the nearest it has, under the
+/// operations that carry that bound on, and the index and the narrowing computed from it.
+const EDGES: &[&str] = &[
+    "product past Tier 1's domain",
+    "quotient of a value past Tier 1's domain",
+    "quotient by a value past Tier 1's domain",
+    "difference with a value past Tier 1's domain",
+    "remainder with a value past Tier 1's domain",
+    "operand below Tier 1's domain",
+    "index computed from a value past Tier 1's domain",
+    "narrowing of a value computed from one past Tier 1's domain",
+];
 
 /// What generated programs never hold, each with its reason.
 const NOT_GENERATED: &[(&str, &str)] = &[
@@ -583,6 +601,87 @@ fn calls_with_mut(tree: &Tree, e: ExprId) -> bool {
     }
 }
 
+/// Whether `e` is a value `past` holds of, or arithmetic on one.
+fn computed_from(tree: &Tree, e: ExprId, past: &dyn Fn(ExprId) -> bool) -> bool {
+    past(e)
+        || match &tree.expr(e).kind {
+            ExprKind::Binary { lhs, rhs, .. } => {
+                computed_from(tree, *lhs, past) || computed_from(tree, *rhs, past)
+            }
+            ExprKind::Unary { operand, .. } => computed_from(tree, *operand, past),
+            _ => false,
+        }
+}
+
+/// The rows of [`EDGES`] a checked function reaches. A value lies past the domain when its
+/// static range, as `E0222` computes it, lies wholly at or beyond the limit on one side of
+/// zero: no value of it is one Tier 1 holds exactly.
+fn reached_edges(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let limit = INF.unsigned_abs();
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    // 1 for a value wholly past the limit, -1 for one wholly below its negation, else 0.
+    let side = |e: ExprId| -> i8 {
+        match ranges[e.0 as usize] {
+            Some(Interval { lo: (false, m), .. }) if m >= limit => 1,
+            Some(Interval { hi: (true, m), .. }) if m >= limit => -1,
+            _ => 0,
+        }
+    };
+    let past = |e: ExprId| side(e) != 0;
+    let mut mark = |name: &str| {
+        seen.insert(name.to_string());
+    };
+    for (k, e) in tree.exprs.iter().enumerate() {
+        match &e.kind {
+            ExprKind::Binary { op, lhs, rhs } => {
+                let (l, r) = (side(*lhs), side(*rhs));
+                match op {
+                    BinaryOp::Mul if l == 0 && r == 0 && past(ExprId(k as u32)) => {
+                        mark("product past Tier 1's domain")
+                    }
+                    BinaryOp::Div => {
+                        if l != 0 {
+                            mark("quotient of a value past Tier 1's domain");
+                        }
+                        if r != 0 {
+                            mark("quotient by a value past Tier 1's domain");
+                        }
+                    }
+                    BinaryOp::Sub if l != 0 || r != 0 => {
+                        mark("difference with a value past Tier 1's domain")
+                    }
+                    BinaryOp::Rem if l != 0 || r != 0 => {
+                        mark("remainder with a value past Tier 1's domain")
+                    }
+                    _ => {}
+                }
+                if matches!(op, BinaryOp::Div | BinaryOp::Sub | BinaryOp::Rem) && (l < 0 || r < 0) {
+                    mark("operand below Tier 1's domain");
+                }
+            }
+            ExprKind::Index { index, .. } if computed_from(tree, *index, &past) => {
+                mark("index computed from a value past Tier 1's domain")
+            }
+            _ => {}
+        }
+    }
+    for s in &tree.stmts {
+        let value = match &s.kind {
+            StmtKind::Binding {
+                ty: Some(_), init, ..
+            } => Some(*init),
+            StmtKind::Assign { value, .. } => Some(*value),
+            _ => None,
+        };
+        // The value itself may fit its place: one wholly past the domain fits no type but a
+        // 128-bit one.
+        if value.is_some_and(|v| !past(v) && computed_from(tree, v, &past)) {
+            mark("narrowing of a value computed from one past Tier 1's domain");
+        }
+    }
+}
+
 /// The constructs a struct declaration holds.
 fn reached_struct(s: &StructSyntax, seen: &mut BTreeSet<String>) {
     let StructSyntax {
@@ -762,6 +861,7 @@ fn grammar() -> BTreeSet<String> {
         BINDINGS,
         ARMS,
         VARIANTS,
+        EDGES,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -806,6 +906,11 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
             enums(text).iter().for_each(|e| reached_enum(e, &mut seen));
+            module
+                .functions
+                .iter()
+                .flatten()
+                .for_each(|f| reached_edges(f, &mut seen));
             // What the checker accepts, the lowering lowers: a program it refused would run
             // on the reference interpreter alone.
             if let Err(why) = mente_codegen::lower::lower(module) {
@@ -862,27 +967,23 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             reason
         );
     }
+    // The rows the fewest programs reach, with their seeds, so that a row about to be lost
+    // shows before it is.
     let mut least: Vec<(usize, &String)> = seeds.iter().map(|(n, s)| (s.len(), n)).collect();
     least.sort();
+    println!("the constructs the fewest programs reach:");
+    for (count, name) in least.iter().take(RARE_ROWS_SHOWN) {
+        println!("  `{}` {}: seeds {:?}", name, count, seeds[*name]);
+    }
     println!(
-        "the constructs the fewest programs reach: {}",
-        least
+        "the edge of Tier 1's domain: {}",
+        EDGES
             .iter()
-            .take(8)
-            .map(|(count, name)| format!("`{}` {}", name, count))
+            .map(|name| format!("`{}` {}", name, seeds.get(*name).map_or(0, |s| s.len())))
             .collect::<Vec<_>>()
             .join(", ")
     );
-    // A construct one or two programs hold is lost by any change to the generator's choices,
-    // so each is asked of a few.
-    let few: Vec<String> = grammar
-        .iter()
-        .filter(|n| NOT_GENERATED.iter().all(|(x, _)| x != n))
-        .filter_map(|n| {
-            let reach = seeds.get(n).map_or(&[][..], |s| s.as_slice());
-            (reach.len() < MIN_SEEDS_PER_ROW).then(|| format!("`{}` in seeds {:?}", n, reach))
-        })
-        .collect();
+    let few = too_few(&grammar, &seeds, MIN_SEEDS_PER_ROW);
     assert!(
         few.is_empty(),
         "fewer than {} of the programs of seeds 0 to {} reach each of these:\n{}",
@@ -892,8 +993,53 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
     );
 }
 
+/// The constructs of `grammar` that fewer than `bar` programs reach, each with the seeds
+/// that do, those [`NOT_GENERATED`] names aside. A construct one or two programs hold is lost
+/// by any change to the generator's choices, so each is asked of a few.
+fn too_few(
+    grammar: &BTreeSet<String>,
+    seeds: &BTreeMap<String, Vec<u64>>,
+    bar: usize,
+) -> Vec<String> {
+    grammar
+        .iter()
+        .filter(|n| NOT_GENERATED.iter().all(|(x, _)| x != n))
+        .filter_map(|n| {
+            let reach = seeds.get(n).map_or(&[][..], |s| s.as_slice());
+            (reach.len() < bar).then(|| format!("`{}` in seeds {:?}", n, reach))
+        })
+        .collect()
+}
+
+/// The bar asks a few programs of every row: at least three, so that no row hangs on one
+/// program or two, and a row below the bar is named with its seeds, one no program reaches
+/// included; what [`NOT_GENERATED`] excuses is not asked for.
+#[test]
+fn test_each_row_is_asked_of_at_least_three_programs() {
+    const { assert!(MIN_SEEDS_PER_ROW >= 3) };
+    let excused = NOT_GENERATED[0].0;
+    let grammar: BTreeSet<String> = ["val", "var", "while", excused]
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    let seeds: BTreeMap<String, Vec<u64>> = [("val", vec![4, 9, 30]), ("var", vec![7, 8])]
+        .into_iter()
+        .map(|(n, s)| (n.to_string(), s))
+        .collect();
+    assert_eq!(
+        too_few(&grammar, &seeds, 3),
+        ["`var` in seeds [7, 8]", "`while` in seeds []"]
+    );
+    assert_eq!(too_few(&grammar, &seeds, 2), ["`while` in seeds []"]);
+    assert_eq!(too_few(&grammar, &seeds, 0), [""; 0]);
+    assert_eq!(too_few(&grammar, &seeds, 4).len(), 3);
+}
+
 /// The seeds the test reads: the first programs of each mode.
 const SEEDS: u64 = 300;
+
+/// How many of the rows the fewest programs reach the test prints with their seeds.
+const RARE_ROWS_SHOWN: usize = 12;
 
 /// How many of those seeds' programs must reach each construct: a construct that hangs on one
 /// program or two is lost by any change to what the generator chooses at random.
