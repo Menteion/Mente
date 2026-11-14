@@ -141,8 +141,7 @@ pub fn check(
     c.arrays_in_one_piece();
     c.bounds_have_their_types();
     c.typing.literals = literals::taken(f, &c.typing);
-    let ranges = wide::intervals(f, c.resolution, &c.typing);
-    c.compared_literals(&ranges);
+    c.compared_literals(f);
     (c.typing, c.errors)
 }
 
@@ -278,8 +277,10 @@ impl Checker<'_> {
     /// type would make the comparison constant. The fix spells an ordering in range, which means
     /// the same over the type, machine-applicable; or, for `==` and `!=`, states the literal's
     /// type with a suffix, so that it is compared exactly.
-    fn compared_literals(&mut self, ranges: &[Option<Interval>]) {
+    fn compared_literals(&mut self, f: &FnSyntax) {
         let tree = self.tree;
+        // The static ranges, computed only for a module that has such a literal.
+        let mut ranges: Option<Vec<Option<Interval>>> = None;
         for i in 0..tree.exprs.len() {
             let e = ExprId(i as u32);
             let Some((op, lhs, rhs)) = comparison(tree, e) else {
@@ -298,6 +299,8 @@ impl Checker<'_> {
                 if !v.fits(taken.ty) {
                     // Whether the other operand's values lie in its type, as a name's do, so
                     // that the comparison is constant; an exact sum's may leave it.
+                    let ranges = ranges
+                        .get_or_insert_with(|| wide::intervals(f, self.resolution, &self.typing));
                     let kept = ranges[other.0 as usize].is_some_and(|i| {
                         let end = |(negative, magnitude)| literals::Exact {
                             negative,
