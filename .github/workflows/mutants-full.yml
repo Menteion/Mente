@@ -47,8 +47,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the toolchain rust-toolchain.toml pins
-        run: rustup toolchain install
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       - name: Install cargo-mutants
         # Built from its crate, which cargo checks, never restored from a cache that another run
         # on the same branch could have written.

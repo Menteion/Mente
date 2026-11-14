@@ -47,10 +47,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the toolchain rust-toolchain.toml pins
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
         run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
           rustup toolchain install
-          rustc --version
+          node .github/scripts/build-time-code.mjs
       - name: rustfmt
         if: matrix.os == 'ubuntu-24.04'
         run: cargo fmt --all --check
@@ -185,8 +190,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install the toolchain rust-toolchain.toml pins
-        run: rustup toolchain install
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       - name: Overflow checks in this job's release build
         run: bash .github/scripts/overflow-proof.sh
       - name: Measure the base branch
@@ -240,8 +252,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the toolchain rust-toolchain.toml pins
-        run: rustup toolchain install
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       - name: The sandbox the code of the change runs in, proven before any of it runs
         # On Linux every test executable runs apart from cargo and the runner's own files, and
         # the canary proves it on this runner (.github/scripts/test-sandbox.sh).
@@ -282,8 +301,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the toolchain rust-toolchain.toml pins
-        run: rustup toolchain install
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       - name: Install gdb
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q gdb && gdb --version | head -1
@@ -303,8 +329,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the toolchain rust-toolchain.toml pins
-        run: rustup toolchain install
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       - name: Measure
         run: MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
       - name: Overflow checks in this job's release build
@@ -337,11 +370,10 @@ jobs:
         # steps up, has read rust-toolchain.toml and refused every cargo configuration file.
         run: rustup toolchain install
       - name: No package of the change has code that runs at build time, and every crate is an approved one, as cargo reads the manifests
-        # A build script, a procedural macro or a new crate's build script runs where cargo builds,
-        # outside every sandbox. Here cargo reads the manifests and the lock and builds nothing, and
-        # such code fails this required check, so the change cannot merge. It does not keep that
-        # code from running in the jobs of the same run that build, before this fails; checking
-        # first in each of them is the next step (.github/scripts/build-time-code.mjs).
+        # A build script, a procedural macro or a new crate's build script would run where cargo
+        # builds, outside every sandbox. Every job that builds runs this check first, before its
+        # toolchain is installed; here, in a job that builds nothing, it runs after the policy
+        # (.github/scripts/build-time-code.mjs).
         run: node .github/scripts/build-time-code.mjs
       # No package's install script runs: none is needed, and one could write the environment of
       # the steps after it.

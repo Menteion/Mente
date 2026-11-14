@@ -38,7 +38,7 @@ import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullR
 import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 import { doctestProblems, problems as testListProblems, slowTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
-import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems } from "./lib/build-time-code.mjs";
+import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 56;
+const FLOOR = 57;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -775,11 +775,11 @@ const PINNED_FILES = new Map([
 /// steps line by line and no further let through a runner unset after its source, a check inside
 /// `if false`, and cargo's shorter spellings (`cargo t`).
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "83af07e0452ecc08842f7c6f818590a9d7031bcb509773481e0927b6d93993f4"],
-  ["mutants.yml#in-diff", "9a8344c3d7f6089290181cbe5b29906c5faea017032db024960243dc52d1c816"],
-  ["mutants-full.yml#full", "ae768e1943c65b7ee21c19ea7bdc28f35e0b365329459ebf167b6f73dc31562b"],
-  ["ci.yml#execution-paths", "022b5bf7cee91eeb594c1d0bb8b8ab76bd7f473c1ce702eb3cf34adace15f0a2"],
-  ["generated.yml#paths", "22398b55b75ba1125079f1d616896297e468c96c06a8f3fbc46b246607f6b034"],
+  ["ci.yml#rust", "b083cb0250a468f400630f2d429cd72dbaf8d80999fcb84a6ca952f4f665691b"],
+  ["mutants.yml#in-diff", "c556e2a4e04fd41d2be461f76a4fdf23418e92f81bd3c00bf9e1b838ad0bf1af"],
+  ["mutants-full.yml#full", "96970c2b8c155d04957b5b14ce56f212aa35683afce0be1c5d22f0c7da5f8eff"],
+  ["ci.yml#execution-paths", "e232905a2ee58528e2907a5777b050bc202ad96c6a1c73b41d178d4997fc7582"],
+  ["generated.yml#paths", "7e0ebac7477ec80359e5121a211dd7476aea636051c4710275f549413b918580"],
 ]);
 /// The pinned jobs that run the workspace's tests through nextest, under the shared limits, and
 /// record their tools: the required Rust jobs and the mutation runs.
@@ -1415,17 +1415,110 @@ check("as cargo reads the manifests and the lock, no package of the workspace ru
     fs.writeFileSync(path.join(dir, "Cargo.toml"), '[workspace]\nmembers = ["compiler/a"]\n');
     const report = (packages) => () => JSON.stringify({ workspace_root: dir, packages });
     const a = (kinds) => ({ name: "mente-a", version: "0.1.0", source: null, manifest_path: path.join(dir, "compiler", "a", "Cargo.toml"), targets: kinds.map((k) => ({ kind: [k] })) });
+    // The toolchain's check runs first, in a tree of its own: a cargo home with nothing in it, and a
+    // walk up that stops at this directory, so that a configuration of the machine running the
+    // policy does not count.
+    fs.mkdirSync(path.join(dir, "home"));
+    const toolchain = { cargoHome: path.join(dir, "home"), tracked: [], top: dir };
+    const run = (metadata, options = {}) => buildTimeCode(dir, metadata, { toolchain, ...options });
+    fs.writeFileSync(path.join(dir, "rust-toolchain.toml"), '# c\n[toolchain]\nchannel = "1.97.1"\ncomponents = ["clippy", "rustfmt"]\nprofile = "minimal"\n');
     fs.writeFileSync(path.join(dir, "Cargo.lock"), lock(""));
-    const clean = buildTimeCode(dir, report([a(["lib"]), crate("top")]));
+    const clean = run(report([a(["lib"]), crate("top")]));
     assert.deepEqual(clean.problems, []);
     assert.match(clean.summary, /cargo reads 1 packages of the workspace.* and 1 crates of crates\.io/);
-    assert.equal(buildTimeCode(dir, report([a(["lib", "custom-build"]), crate("top")])).problems.length, 1);
+    assert.equal(run(report([a(["lib", "custom-build"]), crate("top")])).problems.length, 1);
+    assert.deepEqual(run(() => assert.fail("cargo runs before the toolchain is installed"), { beforeToolchain: true }).problems, []);
     fs.writeFileSync(path.join(dir, "Cargo.lock"), lock('\n[[package]]\nname = "leaf"\nversion = "2.0.0"\nsource = "git+https://example.invalid/leaf#abc"\n'));
-    const unread = buildTimeCode(dir, () => assert.fail("cargo runs on a lock that names another source"));
+    const unread = run(() => assert.fail("cargo runs on a lock that names another source"));
     assert.match(unread.problems[0], /leaf comes from git\+https/);
+    fs.writeFileSync(path.join(dir, "Cargo.lock"), lock(""));
+    // What the toolchain's check refuses before rustup or cargo runs, cargo itself never asked.
+    const valid = fs.readFileSync(path.join(dir, "rust-toolchain.toml"), "utf8");
+    const refused = (why) => {
+      const r = run(() => assert.fail(`cargo runs though ${why}`), {});
+      assert.ok(r.problems.length > 0, `the toolchain's check lets through ${why}`);
+    };
+    for (const [text, why] of [
+      [`${valid}path = "/tmp/toolchain"\n`, "a path toolchain"],
+      [`${valid}targets = ["wasm32-unknown-unknown"]\n`, "another target"],
+      [valid.replace('"1.97.1"', '"stable"'), "a channel that is no release"],
+      [valid.replace('profile = "minimal"', 'profile = "default"'), "another profile"],
+      [`${valid}channel = "1.97.1"\n`, "a channel twice"],
+      [valid.replace("[toolchain]\n", ""), "no table"],
+      [valid.replace("[toolchain]", '"toolchain"'), "a table spelled otherwise"],
+    ]) {
+      fs.writeFileSync(path.join(dir, "rust-toolchain.toml"), text);
+      refused(why);
+    }
+    fs.writeFileSync(path.join(dir, "rust-toolchain.toml"), valid);
+    for (const [file, why] of [
+      [path.join(dir, "rust-toolchain"), "a rust-toolchain file beside rust-toolchain.toml"],
+      [path.join(dir, ".cargo", "config.toml"), "a cargo configuration file in the workspace"],
+      [path.join(dir, "home", "config"), "a cargo configuration file in CARGO_HOME"],
+    ]) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "x\n");
+      refused(why);
+      fs.rmSync(file);
+    }
+    const nested = path.join(dir, "inner");
+    fs.mkdirSync(path.join(dir, ".cargo"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".cargo", "config"), "x\n");
+    for (const f of ["rust-toolchain.toml", ".config/approved-crates.txt", "Cargo.toml", "Cargo.lock"]) {
+      fs.mkdirSync(path.dirname(path.join(nested, f)), { recursive: true });
+      fs.copyFileSync(path.join(dir, f), path.join(nested, f));
+    }
+    assert.ok(toolchainProblems(nested, { ...toolchain }).some((p) => /\.cargo[\\/]config: a cargo configuration file/.test(p)), "the toolchain's check does not walk up to a configuration above the workspace");
+    fs.rmSync(path.join(dir, ".cargo"), { recursive: true });
+    assert.ok(toolchainProblems(dir, { ...toolchain, tracked: ["compiler/x/.cargo/config.toml"] }).length > 0, "the toolchain's check lets through a tracked configuration deeper in the tree");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/// The toolchain step of every job that builds: before rustup or cargo reads anything of the
+/// workspace, the check that rust-toolchain.toml names a release alone and no cargo configuration
+/// is there; then the toolchain; then cargo's reading of the manifests and the lock. So a change
+/// whose code would run where cargo builds fails each such job before any of it is built.
+const TOOLCHAIN_STEP = "node .github/scripts/build-time-code.mjs --before-toolchain\nrustup toolchain install\nnode .github/scripts/build-time-code.mjs\n";
+
+check("every job that builds checks, before anything of the workspace is built or installed, that nothing of the change can run where cargo builds", () => {
+  const keys = new Set([...requiredJobs().map(({ file, id }) => `${file}#${id}`), ...PINNED_JOBS.keys()]);
+  let building = 0;
+  for (const { file, id, job } of allJobs().filter((j) => keys.has(`${j.file}#${j.id}`))) {
+    const key = `${file}#${id}`;
+    // The Documentation job reads the manifests in its own order, after the policy, which reads
+    // rust-toolchain.toml and refuses every cargo configuration file (the check above).
+    if (key === "ci.yml#docs") continue;
+    const all = steps(job);
+    if (!all.some((s) => /(^|[\s;&|(])(cargo|rustup|rustc)\s|overflow-proof\.sh/m.test(String(s.run ?? "")))) continue;
+    building++;
+    const at = all.findIndex((s) => s.run === TOOLCHAIN_STEP);
+    assert.ok(at >= 0, `${key} builds, and none of its steps is TOOLCHAIN_STEP in .github/scripts/policy.test.mjs: the check that nothing of the change can run where cargo builds, before rustup installs the toolchain`);
+    assert.equal(all.filter((s) => s.run === TOOLCHAIN_STEP).length, 1, `${key} installs the toolchain more than once`);
+    assert.deepEqual(Object.keys(all[at]).filter((k) => k !== "if").sort(), ["name", "run"], `${stepKey(file, id, all[at])} carries more than its name, its script and the watch's condition`);
+    // Before it: the checkout, node, the watch, and steps that start no tool of the change's and
+    // name nothing of the workspace.
+    for (const s of all.slice(0, at)) {
+      const where = `${stepKey(file, id, s)}, before the check that nothing of the change can run where cargo builds`;
+      if (s.uses !== undefined) {
+        assert.match(String(s.uses), /^actions\/(checkout|setup-node)@[0-9a-f]{40}$/, `${where}, runs an action other than the checkout and node`);
+        continue;
+      }
+      if (String(s.run).trim() === `node .github/scripts/watch.mjs ${file}`) continue;
+      assert.deepEqual(gateOnlyProblems(s.run), [], `${where}, runs or names something of the workspace`);
+      assert.doesNotMatch(String(s.run), /\.github\//, `${where}, runs a script of the workspace`);
+    }
+    // After it, no step changes the toolchain, but in the base branch's own worktree, whose
+    // rust-toolchain.toml is the base's (the performance jobs build the base's compiler there).
+    for (const s of all.slice(at + 1)) {
+      for (const line of logicalLines(s.run ?? "").map((l) => l.trim())) {
+        if (/^\(cd \.\.\/base && /.test(line)) continue;
+        assert.doesNotMatch(line, /\brustup\s+(toolchain|default|override|component|target)\b/, `${stepKey(file, id, s)} changes the toolchain after the check: ${line}`);
+      }
+    }
+  }
+  assert.ok(building >= 13, `the policy reads the steps of ${building} jobs that build, not every one`);
 });
 
 /// The code blocks of a library's doc comments rustdoc lists as doctests, as `file:line`: a fenced

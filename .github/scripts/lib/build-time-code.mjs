@@ -8,8 +8,13 @@
 // package it would build, with its source and its targets, and builds nothing. A reader of the
 // manifests' text sees no key written with a TOML escape, and no package that only a path names.
 //
-//   node .github/scripts/build-time-code.mjs
+//   node .github/scripts/build-time-code.mjs --before-toolchain   before rustup installs anything
+//   node .github/scripts/build-time-code.mjs                      once the toolchain is installed
 //
+// - rust-toolchain.toml names a release, its two components and its profile, and nothing else, and
+//   no cargo configuration file is in the tree, above it or in CARGO_HOME: rustup installs what the
+//   first names, and cargo starts what the second names, before any manifest is read. This runs
+//   first in both forms, and alone in the first.
 // - A package cargo takes from a path is a member the root manifest lists, and has no build script
 //   and no procedural macro, but for those BUILD_TIME_CODE names.
 // - Every other package comes from crates.io and is in .config/approved-crates.txt.
@@ -17,9 +22,9 @@
 //   with a source is approved. This is read before cargo runs, so that cargo fetches from nowhere
 //   else.
 //
-// It runs in the Documentation job, a required check that builds nothing, after the workflow
-// policy, which has refused every cargo configuration file and read rust-toolchain.toml: there no
-// code of the change has run when it reads, as it has where a job builds before it tests.
+// It runs in every job that builds, as its first step that reads the workspace after the watch, so
+// that a change whose build-time code would run fails there before any of it runs; and in the
+// Documentation job, which builds nothing, after the workflow policy.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -141,6 +146,41 @@ export function metadataProblems(metadata, { listed, lock }) {
   return problems;
 }
 
+/// The lines rust-toolchain.toml may hold: its table, a release, the two components and the minimal
+/// profile, each once, with comments and blanks. A `path`, a `targets` or any other key could
+/// name a toolchain of the change, which rustup would install and cargo run.
+const TOOLCHAIN_LINES = [/^\[toolchain\]$/, /^channel = "\d+\.\d+\.\d+"$/, /^components = \["clippy", "rustfmt"\]$/, /^profile = "minimal"$/];
+
+/// Why the toolchain rustup installs, or the cargo that reads the manifests, could be the change's
+/// own: a rust-toolchain file beside rust-toolchain.toml, any line of rust-toolchain.toml but
+/// those above, or a cargo configuration file anywhere in the tree, above it or in CARGO_HOME,
+/// which can name a wrapper around rustc that cargo would start. Read before rustup or cargo runs.
+/// `top` is the directory the walk up stops at, the filesystem's root unless a test names another.
+export function toolchainProblems(root, { cargoHome = process.env.CARGO_HOME ?? path.join(process.env.HOME ?? process.env.USERPROFILE ?? "", ".cargo"), tracked, top } = {}) {
+  const found = [];
+  if (fs.existsSync(path.join(root, "rust-toolchain"))) found.push("a rust-toolchain file beside rust-toolchain.toml: rustup reads it instead");
+  const lines = fs.readFileSync(path.join(root, "rust-toolchain.toml"), "utf8").split(/\r?\n/);
+  const seen = new Array(TOOLCHAIN_LINES.length).fill(0);
+  for (const [n, raw] of lines.entries()) {
+    const line = raw.replace(/\s+#.*$/, "").trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const k = TOOLCHAIN_LINES.findIndex((re) => re.test(line));
+    if (k < 0) found.push(`rust-toolchain.toml:${n + 1}: not a line a pinned release holds: ${raw}`);
+    else seen[k]++;
+  }
+  if (seen.some((c) => c !== 1)) found.push("rust-toolchain.toml does not hold its table, its release, its two components and its profile once each");
+  const configs = new Set();
+  for (let dir = path.resolve(root); ; dir = path.dirname(dir)) {
+    for (const name of ["config", "config.toml"]) configs.add(path.join(dir, ".cargo", name));
+    if (path.dirname(dir) === dir || (top !== undefined && dir === path.resolve(top))) break;
+  }
+  for (const name of ["config", "config.toml"]) configs.add(path.resolve(cargoHome, name));
+  for (const f of configs) if (fs.existsSync(f)) found.push(`${f}: a cargo configuration file could name a wrapper around rustc, which cargo would start`);
+  const files = tracked ?? execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\0").filter(Boolean);
+  for (const f of files) if (/(^|\/)\.cargo\/config(\.toml)?$/.test(f)) found.push(`${f}: a cargo configuration file in the tree`);
+  return found;
+}
+
 /// What cargo reports of the workspace, with every feature on, so that no optional dependency is
 /// left out, and with the lock as it stands. cargo reads the manifests and fetches the crates the
 /// lock names; it compiles nothing and runs no build script.
@@ -150,8 +190,12 @@ function cargoMetadata(root) {
 
 /// The CLI: the problems found, and what was read. `metadata` stands in for cargo in the policy's
 /// tests.
-export function main(root = process.cwd(), metadata = cargoMetadata) {
+export function main(root = process.cwd(), metadata = cargoMetadata, { beforeToolchain = false, toolchain = {} } = {}) {
   const read = (f) => fs.readFileSync(path.join(root, f), "utf8");
+  // The toolchain and cargo's configuration first: rustup installs what rust-toolchain.toml names,
+  // and cargo starts what a configuration file names, before any manifest is read.
+  const own = toolchainProblems(root, toolchain);
+  if (own.length > 0 || beforeToolchain) return { problems: own, summary: "rust-toolchain.toml names a release alone, and no cargo configuration file is in the tree, above it or in CARGO_HOME." };
   const approved = approvedCrates(read(".config/approved-crates.txt"));
   const lockText = read("Cargo.lock");
   // The lock first: cargo fetches what it names.
@@ -160,7 +204,7 @@ export function main(root = process.cwd(), metadata = cargoMetadata) {
   const report = JSON.parse(metadata(root));
   const lock = lockPackages(lockText).packages;
   const problems = [...unapproved, ...metadataProblems(report, { listed: listedMembers(read("Cargo.toml")), lock })];
-  const own = (report.packages ?? []).filter((p) => p.source === null || p.source === undefined);
-  const summary = `cargo reads ${own.length} packages of the workspace, none with a build script or a procedural macro, and ${report.packages.length - own.length} crates of crates.io, each approved.`;
+  const members = (report.packages ?? []).filter((p) => p.source === null || p.source === undefined);
+  const summary = `cargo reads ${members.length} packages of the workspace, none with a build script or a procedural macro, and ${report.packages.length - members.length} crates of crates.io, each approved.`;
   return { problems, summary };
 }

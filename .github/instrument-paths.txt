@@ -38,6 +38,9 @@ rust-toolchain.toml
 .github/scripts/mutants-floor.mjs
 .github/scripts/lib/mutants-floor.mjs
 .github/workflows/mutants.yml
+# The check that nothing of the change can run where cargo builds, which runs first.
+.github/scripts/build-time-code.mjs
+.github/scripts/lib/build-time-code.mjs
 
 [generated.yml]
 compiler/**
@@ -52,6 +55,9 @@ rust-toolchain.toml
 .github/scripts/test-sandbox.sh
 .github/scripts/test-sandbox-env.sh
 .github/workflows/generated.yml
+# The check that nothing of the change can run where cargo builds, which runs first.
+.github/scripts/build-time-code.mjs
+.github/scripts/lib/build-time-code.mjs
 
 [fuzz.yml]
 merge_group: skip
@@ -69,6 +75,9 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .github/workflows/fuzz.yml
+# The check that nothing of the change can run where cargo builds, which runs first.
+.github/scripts/build-time-code.mjs
+.github/scripts/lib/build-time-code.mjs
 
 [smt.yml]
 compiler/**
@@ -85,6 +94,9 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .github/workflows/smt.yml
+# The check that nothing of the change can run where cargo builds, which runs first.
+.github/scripts/build-time-code.mjs
+.github/scripts/lib/build-time-code.mjs
 
 [mir-mutants.yml]
 compiler/**
@@ -100,6 +112,9 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .github/workflows/mir-mutants.yml
+# The check that nothing of the change can run where cargo builds, which runs first.
+.github/scripts/build-time-code.mjs
+.github/scripts/lib/build-time-code.mjs
 
 [perf.yml]
 compiler/**
@@ -111,6 +126,9 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .github/workflows/perf.yml
+# The check that nothing of the change can run where cargo builds, which runs first.
+.github/scripts/build-time-code.mjs
+.github/scripts/lib/build-time-code.mjs
 
 [harness.yml]
 benchmark/**
@@ -123,3 +141,6 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .github/workflows/harness.yml
+# The check that nothing of the change can run where cargo builds, which runs first.
+.github/scripts/build-time-code.mjs
+.github/scripts/lib/build-time-code.mjs
