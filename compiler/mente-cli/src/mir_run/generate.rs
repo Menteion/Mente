@@ -2644,6 +2644,24 @@ impl Gen {
             Want::Exact(t) => t,
             Want::Any => self.int_ty(),
         };
+        // Now and then, in a 128-bit type, a literal that fits 64 bits shifted right by 64 or
+        // more: the amount is valid for the type and reaches past the bits the value is kept
+        // in, where the value is 0, or -1 for a negative one.
+        if t.bits == 128 && self.rng.chance(25) {
+            let x = match (t.signed, self.rng.below(4)) {
+                (true, 0) => Num::new(true, 1 << 63),
+                (true, 1) => Num::small(-(1 + self.rng.below(9) as i64)),
+                (_, 2) => Num::new(false, u128::from(u64::MAX)),
+                _ => Num::small(1 + self.rng.below(9) as i64),
+            };
+            let k = 64 + self.rng.below(64);
+            return Some(G {
+                e: E::bin(Op::Shr, self.literal(x, Some(t)), E::Lit(k.to_string())),
+                cls: Cls::One(t),
+                r: t.range(),
+                k: Some(if x.neg { Num::small(-1) } else { Num::ZERO }),
+            });
+        }
         let op = if self.rng.chance(50) {
             Op::Shl
         } else {

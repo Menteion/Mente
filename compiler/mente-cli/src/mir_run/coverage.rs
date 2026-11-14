@@ -278,6 +278,12 @@ const LITERALS: &[&str] = &[
     "bit operation on literals alone, of no type but i64",
 ];
 
+/// A right shift whose amount is valid for the type and reaches past the bits its value is
+/// kept in: a value of a 128-bit type whose static range fits 64 bits, shifted by 64 or more.
+/// Native code shifts within the width of the value it is given, and must still give 0, or -1
+/// for a negative value (`core-calculus.md`, item 4).
+const SHIFTS: &[&str] = &["right shift past the bits its value is kept in"];
+
 /// What generated programs never hold, each with its reason.
 const NOT_GENERATED: &[(&str, &str)] = &[
     (
@@ -632,6 +638,35 @@ fn computed_from(tree: &Tree, e: ExprId, past: &dyn Fn(ExprId) -> bool) -> bool 
             ExprKind::Unary { operand, .. } => computed_from(tree, *operand, past),
             _ => false,
         }
+}
+
+/// The row of [`SHIFTS`], when a checked function reaches it.
+fn reached_shifts(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    // Whether a bound lies within 64 bits, of either sign.
+    let narrow = |(neg, mag): (bool, u128)| mag <= if neg { 1 << 63 } else { u128::from(u64::MAX) };
+    for e in &f.syntax.tree.exprs {
+        let ExprKind::Binary {
+            op: BinaryOp::Shr,
+            lhs,
+            rhs,
+        } = &e.kind
+        else {
+            continue;
+        };
+        let wide_type = matches!(
+            &f.typing.exprs[lhs.0 as usize],
+            Ty::Int(Int::One(t) | Int::Mixed(Some(t))) if t.bits == 128
+        );
+        let kept_narrow = ranges[lhs.0 as usize].is_some_and(|i| narrow(i.lo) && narrow(i.hi));
+        let far = matches!(
+            ranges[rhs.0 as usize],
+            Some(Interval { lo: (false, k), .. }) if k >= 64
+        );
+        if wide_type && kept_narrow && far {
+            seen.insert("right shift past the bits its value is kept in".to_string());
+        }
+    }
 }
 
 /// The rows of [`LITERALS`] a checked function reaches.
@@ -1068,6 +1103,7 @@ fn grammar() -> BTreeSet<String> {
         RELATIONS,
         TRAPS,
         LITERALS,
+        SHIFTS,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -1117,6 +1153,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 reached_edges(f, &mut seen);
                 reached_traps(f, &mut seen);
                 reached_literals(f, &mut seen);
+                reached_shifts(f, &mut seen);
                 for wrong in reached_relations(module, f, &mut seen) {
                     problems.push(format!("seed {}: {}", seed, wrong));
                 }
@@ -1174,6 +1211,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             .iter()
             .chain(TRAPS)
             .chain(LITERALS)
+            .chain(SHIFTS)
             .map(|name| format!("`{}` {}", name, seeds.get(*name).map_or(0, |s| s.len())))
             .collect::<Vec<_>>()
             .join(", ")

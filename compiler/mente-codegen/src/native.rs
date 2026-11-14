@@ -880,10 +880,22 @@ impl Translate {
             }
             Op::Shr => {
                 let i = int(rty)?;
+                // `a / 2^k` rounded down, for every `k` MIR allows, which is any below 128
+                // whatever the value's type: a value of a 128-bit type that fits 64 bits is
+                // kept in 64. Cranelift takes an amount modulo the width of the value it
+                // shifts, so an amount at or past that width is brought to the last bit, which
+                // gives a signed value its 0 or -1; an unsigned value is 0 there.
+                let k = args[1];
+                let kt = e.b.func.dfg.value_type(k);
+                let last = e.iconst(kt, i64::from(i.bits) - 1);
+                let past = e.b.ins().icmp(IntCC::UnsignedGreaterThan, k, last);
+                let within = e.b.ins().select(past, last, k);
                 if i.signed {
-                    e.b.ins().sshr(args[0], args[1])
+                    e.b.ins().sshr(args[0], within)
                 } else {
-                    e.b.ins().ushr(args[0], args[1])
+                    let shifted = e.b.ins().ushr(args[0], within);
+                    let zero = e.int(int_type(i), Num::ZERO, i);
+                    e.b.ins().select(past, zero, shifted)
                 }
             }
             Op::Cmp(op) => {

@@ -322,6 +322,8 @@
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/shadowing.mn ==
 {"version":1,"diagnostics":[{"code":"E0202","severity":"error","message":"`x` is already declared in this function; Mente has no shadowing, so give this one a new name","primary":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"related":[{"message":"first declared here","span":{"file":"shadowing.mn","start":45,"end":46,"line":3,"column":10}}],"fixes":[{"message":"rename this `x` and its uses to `x2`","applicability":"suggestion","edits":[{"span":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"replacement":"x2"},{"span":{"file":"shadowing.mn","start":74,"end":75,"line":5,"column":3},"replacement":"x2"}]}]}],"todos":[],"trusted":[]}
+== core-calculus/shift_right_past_the_width_a_value_is_kept_in.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/struct_beyond_4_gib.mn ==
 {"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"a struct of type `Huge` holds 4294967296 bytes, more than the 4294967295 a value, kept in one piece, may hold","primary":{"file":"struct_beyond_4_gib.mn","start":47,"end":51,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_built_by_position.mn ==
