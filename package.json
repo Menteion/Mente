@@ -12,6 +12,7 @@
     "spec-guard:prove": "spec-guard prove \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md",
     "spec-guard:claims": "spec-guard claims",
     "spec-graph": "spec-graph check",
+    "spec-graph:whole": "spec-graph check --format json | node .github/scripts/graph-whole.mjs",
     "spec-brief": "spec-brief lint --strict",
     "check:benchmark": "node benchmark/check.mjs",
     "test:benchmark": "node --test benchmark/check.test.mjs",
@@ -19,11 +20,11 @@
     "site": "node site/build.mjs",
     "test:site": "node --test site/site.test.mjs",
     "test:ci": "node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs",
-    "verify:docs": "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief"
+    "verify:docs": "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-graph:whole && npm run spec-brief"
   },
   "devDependencies": {
-    "@spec-family/spec-brief": "0.13.0",
-    "@spec-family/spec-graph": "0.23.1",
-    "@spec-family/spec-guard": "0.32.0"
+    "@spec-family/spec-brief": "0.15.0",
+    "@spec-family/spec-graph": "0.26.0",
+    "@spec-family/spec-guard": "0.35.0"
   }
 }

@@ -640,7 +640,7 @@ const BEFORE_POLICY: [&str; 2] = [
 
 /// The npm scripts, exactly: no `pre`, `post` or lifecycle script can run before or around one of
 /// them, and `test:ci` runs the policy's suites with no option that could skip a test.
-const SCRIPTS: [(&str, &str); 12] = [
+const SCRIPTS: [(&str, &str); 13] = [
     (
         "spec-guard",
         r#"spec-guard "spec/*.md" "docs/*.md" README.md ROADMAP.md CLAUDE.md"#,
@@ -651,6 +651,10 @@ const SCRIPTS: [(&str, &str); 12] = [
     ),
     ("spec-guard:claims", "spec-guard claims"),
     ("spec-graph", "spec-graph check"),
+    (
+        "spec-graph:whole",
+        "spec-graph check --format json | node .github/scripts/graph-whole.mjs",
+    ),
     ("spec-brief", "spec-brief lint --strict"),
     ("check:benchmark", "node benchmark/check.mjs"),
     ("test:benchmark", "node --test benchmark/check.test.mjs"),
@@ -663,7 +667,7 @@ const SCRIPTS: [(&str, &str); 12] = [
     ),
     (
         "verify:docs",
-        "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-brief",
+        "npm run spec-guard && npm run spec-guard:prove && npm run spec-guard:claims && npm run spec-graph && npm run spec-graph:whole && npm run spec-brief",
     ),
 ];
 
