@@ -1,0 +1,97 @@
+// expect: pass
+module conformance
+// A literal operand of a comparison takes the type of the other operand, as it does under an
+// arithmetic or a bit operator (core-calculus.md, items 4 and 5): `a == ~3` for a `u8` `a`
+// compares `a` with 252. Every literal below lies in the type it takes, so each comparison
+// stands; two operands that are not literals compare exactly whatever their types.
+pub fn complement(a: u8) -> bool = a == ~3
+
+pub fn complement_on_the_left(a: u8) -> bool = ~3 == a
+
+pub fn literal_on_the_left(a: u8) -> bool = 252 == a
+
+pub fn sum_of_literals(a: u8) -> bool = a == 3 + 4
+
+pub fn both_literals() -> bool = ~3 == -4
+
+pub fn beside_an_expression(a: u8) -> bool = a + 1 == 255
+
+pub fn signed(a: i8) -> bool = a == -1
+
+pub fn every_operator(a: u8) -> [6]bool = [a == 0, a != 255, a < 255, a <= 255, a > 0, a >= 0]
+
+pub fn at_the_limits_of_u8(a: u8) -> bool = a <= 255 and a >= 0
+
+pub fn at_the_limits_of_i8(a: i8) -> bool = a >= -128 and a <= 127
+
+pub fn at_the_limits_of_u128(a: u128) -> bool = a <= 340282366920938463463374607431768211455
+
+pub fn at_the_limits_of_i128(a: i128) -> bool = a >= -170141183460469231731687303715884105728
+
+pub fn at_the_limits_of_usize(a: usize) -> bool = a < 18446744073709551615
+
+pub fn i128_beside_u128(a: i128, b: u128) -> bool = a == -1 and b == 340282366920938463463374607431768211455
+
+// A refinement does not change the type a literal takes: `11` is a `u8`.
+pub fn refined(a: u8[0..10]) -> bool = a == 11
+
+// Two operands that are not literals compare exactly: `b + 1` is a `u32`.
+pub fn mixed(a: u8, b: u32) -> bool = a == b + 1
+
+pub fn in_an_if(a: u8) -> u8 = if a == ~0 { 1 } else { 0 }
+
+pub fn in_a_guard(a: u8) -> u8 {
+  guard a != ~0 else {
+    return 1
+  }
+  0
+}
+
+pub fn in_a_loop(a: u8) -> u8 {
+  var i: u8 = a
+  while i < ~250
+    decreases ~250 - i
+  {
+    i += 1
+  }
+  i
+}
+
+pub fn in_a_clause(a: u8) -> u8
+  requires a <= 255
+  ensures result >= 0
+= a
+
+pub fn complement_at_252() -> bool = complement(252)
+
+pub fn complement_at_4() -> bool = complement(4)
+
+pub fn complement_on_the_left_at_252() -> bool = complement_on_the_left(252)
+
+pub fn literal_on_the_left_at_252() -> bool = literal_on_the_left(252)
+
+pub fn sum_at_7() -> bool = sum_of_literals(7)
+
+pub fn beside_an_expression_at_254() -> bool = beside_an_expression(254)
+
+pub fn beside_an_expression_at_255() -> bool = beside_an_expression(255)
+
+pub fn signed_at_minus_one() -> bool = signed(-1)
+
+pub fn operators_at_0() -> [6]bool = every_operator(0)
+
+pub fn operators_at_255() -> [6]bool = every_operator(255)
+
+pub fn limits_of_usize() -> bool = at_the_limits_of_usize(18446744073709551615)
+
+pub fn wide_pair() -> bool = i128_beside_u128(-1, 340282366920938463463374607431768211455)
+
+pub fn mixed_at_255() -> bool = mixed(255, 254)
+
+pub fn mixed_past_u8() -> bool = mixed(255, 255)
+
+pub fn if_at_255() -> u8 = in_an_if(255)
+
+pub fn guard_at_255() -> u8 = in_a_guard(255)
+
+pub fn loop_from_0() -> u8 = in_a_loop(0)

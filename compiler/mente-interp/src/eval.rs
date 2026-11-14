@@ -14,7 +14,7 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
-use crate::{Int, Limits, Observer, Stop, Trap, TrapKind, Value};
+use crate::{Int, Limits, Observer, Shown, Stop, Trap, TrapKind, Value};
 
 /// How control leaves a statement other than by its end.
 enum Exit {
@@ -492,7 +492,7 @@ impl<'m> Machine<'m> {
                 // No expression of the program gives `x op e`: an observer is shown it with
                 // the span of the whole assignment, before it is narrowed into the place.
                 if let Some(seen) = self.seen.as_mut() {
-                    show(&new, whole, &mut **seen);
+                    show(&new, whole, Shown::Given, &mut **seen);
                 }
                 new
             }
@@ -684,9 +684,21 @@ impl<'m> Machine<'m> {
         (lhs, rhs): (ExprId, ExprId),
         holds: fn(&Int, &Int) -> bool,
     ) -> Flow<Value> {
-        let l = self.int(frame, lhs, None)?;
-        let r = self.int(frame, rhs, None)?;
+        let (left, right) = self.compared(frame, (lhs, rhs));
+        let l = self.int(frame, lhs, left)?;
+        let r = self.int(frame, rhs, right)?;
         Ok(Value::Bool(holds(&l, &r)))
+    }
+
+    /// What each operand of a comparison gives the literals of the other: its type, an
+    /// array's through its elements (`core-calculus.md`, item 5).
+    fn compared(
+        &self,
+        frame: &Frame<'m>,
+        (lhs, rhs): (ExprId, ExprId),
+    ) -> (Option<IntTy>, Option<IntTy>) {
+        let ty = |e: ExprId| leaf_int(&frame.f.typing.exprs[e.0 as usize]);
+        (ty(rhs), ty(lhs))
     }
 
     fn int(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Int> {
@@ -707,7 +719,12 @@ impl<'m> Machine<'m> {
     fn eval(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
         let v = self.value(frame, e, ctx)?;
         if let Some(seen) = self.seen.as_mut() {
-            show(&v, frame.f.syntax.tree.expr(e).span, &mut **seen);
+            show(
+                &v,
+                frame.f.syntax.tree.expr(e).span,
+                Shown::Given,
+                &mut **seen,
+            );
         }
         Ok(v)
     }
@@ -759,8 +776,9 @@ impl<'m> Machine<'m> {
                 BinaryOp::And => Value::Bool(self.cond(frame, *lhs)? && self.cond(frame, *rhs)?),
                 BinaryOp::Or => Value::Bool(self.cond(frame, *lhs)? || self.cond(frame, *rhs)?),
                 BinaryOp::Eq | BinaryOp::Ne => {
-                    let l = self.eval(frame, *lhs, None)?;
-                    let r = self.eval(frame, *rhs, None)?;
+                    let (left, right) = self.compared(frame, (*lhs, *rhs));
+                    let l = self.eval(frame, *lhs, left)?;
+                    let r = self.eval(frame, *rhs, right)?;
                     Value::Bool((l == r) == (*op == BinaryOp::Eq))
                 }
                 BinaryOp::Lt => self.compare(frame, (*lhs, *rhs), |l, r| l < r)?,
@@ -1115,7 +1133,7 @@ impl<'m> Machine<'m> {
     /// Narrows a value into a place of static type `plain`, and into the refinement of its
     /// declared type `declared` when it has one.
     fn narrow(
-        &self,
+        &mut self,
         frame: &Frame<'m>,
         v: Value,
         declared: Declared<'m>,
@@ -1127,14 +1145,20 @@ impl<'m> Machine<'m> {
         Ok(v)
     }
 
-    /// Narrows a value into the integer ranges of a static type, elementwise for an array.
-    fn narrow_plain(&self, v: Value, plain: &Ty, span: Span) -> Flow<Value> {
+    /// Narrows a value into the integer ranges of a static type, elementwise for an array,
+    /// showing an observer of the run each integer it narrows.
+    fn narrow_plain(&mut self, v: Value, plain: &Ty, span: Span) -> Flow<Value> {
         let mismatch = || broken("a value of another shape than its static type");
         match plain {
-            // A literal of no suffix is narrowed where it lands, which gives it its type.
+            // A literal's value is narrowed as any value is: the place gives it no type.
             Ty::Int(_) => match v {
                 Value::Int(x) => match int_ty(plain) {
-                    Some(t) => fit(x, t, span).map(Value::Int),
+                    Some(t) => {
+                        if let Some(seen) = self.seen.as_mut() {
+                            seen(span, x, Shown::Narrowed);
+                        }
+                        fit(x, t, span).map(Value::Int)
+                    }
                     None => Ok(Value::Int(x)),
                 },
                 Value::Bool(_)
@@ -1144,11 +1168,13 @@ impl<'m> Machine<'m> {
                 | Value::Unit => mismatch(),
             },
             Ty::Array(_, elem) => match v {
-                Value::Array(items) => items
-                    .into_iter()
-                    .map(|v| self.narrow_plain(v, elem, span))
-                    .collect::<Flow<Vec<Value>>>()
-                    .map(Value::Array),
+                Value::Array(items) => {
+                    let mut out = Vec::new();
+                    for v in items {
+                        out.push(self.narrow_plain(v, elem, span)?);
+                    }
+                    Ok(Value::Array(out))
+                }
                 Value::Int(_)
                 | Value::Bool(_)
                 | Value::Struct(..)
@@ -1363,13 +1389,13 @@ impl<'m> Machine<'m> {
     }
 }
 
-/// Shows `seen` each integer of `v`, the value of the expression at `span`: itself, or those
-/// of an array's elements, through the arrays nested in it. A struct's and a variant's fields
-/// were shown where they were built.
-fn show(v: &Value, span: Span, seen: &mut (dyn FnMut(Span, Int) + Send)) {
+/// Shows `seen` each integer of `v`, the value given at `span` for the reason `why`: itself,
+/// or those of an array's elements, through the arrays nested in it. A struct's and a
+/// variant's fields were shown where they were built.
+fn show(v: &Value, span: Span, why: Shown, seen: &mut (dyn FnMut(Span, Int, Shown) + Send)) {
     match v {
-        Value::Int(x) => seen(span, *x),
-        Value::Array(items) => items.iter().for_each(|i| show(i, span, seen)),
+        Value::Int(x) => seen(span, *x, why),
+        Value::Array(items) => items.iter().for_each(|i| show(i, span, why, seen)),
         Value::Bool(_) | Value::Struct(..) | Value::Enum(..) | Value::Unit => {}
     }
 }

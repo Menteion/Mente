@@ -3380,13 +3380,20 @@ t0: unreachable @112:3 ["unreachable reached: control left the code the checker 
 f29: fn compared(u8) -> bool {
 block0(v0: u8):
   v1: i64 = int 3 @115:40
-  v2: i64 = not v1 @115:40
-  v3: i64 = cast v0 @115:40
-  v4: bool = eq v3, v2 @115:40
-  return v4
+  v2: i64 = int 0 @115:40
+  v3: bool = ge v1, v2 @115:40
+  v4: i64 = int 255 @115:40
+  v5: bool = le v1, v4 @115:40
+  v6: bool = and v3, v5 @115:40
+  v7: unit = check t0 v6, v1 @115:40
+  v8: u8 = cast v1 @115:40
+  v9: u8 = not v8 @115:40
+  v10: bool = eq v0, v9 @115:40
+  return v10
 block1():
-  trap t0
-t0: unreachable @115:40 ["unreachable reached: control left the code the checker allows"]
+  trap t1
+t0: narrowing @115:40 ["", " does not fit in `u8`"]
+t1: unreachable @115:40 ["unreachable reached: control left the code the checker allows"]
 }
 
 f30: fn indexed(addr) -> u8 {
@@ -4556,6 +4563,881 @@ t0: unreachable @19:8 ["unreachable reached: control left the code the checker a
 == conformance/core-calculus/branches_of_two_aggregates_that_leave.mn == (exit 2)
 == conformance/core-calculus/break_outside_a_loop.mn == (exit 2)
 == conformance/core-calculus/call_without_body.mn == (exit 2)
+== conformance/core-calculus/comparison_literal_outside_the_type_it_takes.mn == (exit 2)
+== conformance/core-calculus/comparison_literal_takes_the_other_operands_type.mn ==
+mente-dump 2 mir
+f0: fn complement(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 3 @7:42
+  v2: i64 = int 0 @7:42
+  v3: bool = ge v1, v2 @7:42
+  v4: i64 = int 255 @7:42
+  v5: bool = le v1, v4 @7:42
+  v6: bool = and v3, v5 @7:42
+  v7: unit = check t0 v6, v1 @7:42
+  v8: u8 = cast v1 @7:42
+  v9: u8 = not v8 @7:42
+  v10: bool = eq v0, v9 @7:42
+  return v10
+block1():
+  trap t1
+t0: narrowing @7:42 ["", " does not fit in `u8`"]
+t1: unreachable @7:42 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn complement_on_the_left(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 3 @9:49
+  v2: i64 = int 0 @9:49
+  v3: bool = ge v1, v2 @9:49
+  v4: i64 = int 255 @9:49
+  v5: bool = le v1, v4 @9:49
+  v6: bool = and v3, v5 @9:49
+  v7: unit = check t0 v6, v1 @9:49
+  v8: u8 = cast v1 @9:49
+  v9: u8 = not v8 @9:49
+  v10: bool = eq v9, v0 @9:54
+  return v10
+block1():
+  trap t1
+t0: narrowing @9:49 ["", " does not fit in `u8`"]
+t1: unreachable @9:54 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn literal_on_the_left(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 252 @11:45
+  v2: i64 = cast v0 @11:52
+  v3: bool = eq v1, v2 @11:52
+  return v3
+block1():
+  trap t0
+t0: unreachable @11:52 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn sum_of_literals(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 3 @13:46
+  v2: i64 = int 4 @13:50
+  v3: i64 = add v1, v2 @13:46
+  v4: i64 = cast v0 @13:46
+  v5: bool = eq v4, v3 @13:46
+  return v5
+block1():
+  trap t0
+t0: unreachable @13:46 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn both_literals() -> bool {
+block0():
+  v0: i64 = int 3 @15:35
+  v1: i64 = not v0 @15:35
+  v2: i64 = int -4 @15:40
+  v3: bool = eq v1, v2 @15:40
+  return v3
+block1():
+  trap t0
+t0: unreachable @15:40 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn beside_an_expression(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 1 @17:50
+  v2: i64 = cast v0 @17:46
+  v3: i64 = add v2, v1 @17:46
+  v4: i64 = int 255 @17:55
+  v5: bool = eq v3, v4 @17:55
+  return v5
+block1():
+  trap t0
+t0: unreachable @17:55 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn signed(i8) -> bool {
+block0(v0: i8):
+  v1: i64 = int -1 @19:37
+  v2: i64 = cast v0 @19:37
+  v3: bool = eq v2, v1 @19:37
+  return v3
+block1():
+  trap t0
+t0: unreachable @19:37 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn every_operator(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: addr = slot 6 @21:43
+  v3: i64 = int 0 @21:49
+  v4: i64 = cast v1 @21:49
+  v5: bool = eq v4, v3 @21:49
+  v6: u64 = int 0 @21:49
+  v7: addr = elem 1 v2, v6 @21:49
+  v8: unit = store v7, v5 @21:49
+  v9: i64 = int 255 @21:57
+  v10: i64 = cast v1 @21:57
+  v11: bool = ne v10, v9 @21:57
+  v12: u64 = int 1 @21:57
+  v13: addr = elem 1 v2, v12 @21:57
+  v14: unit = store v13, v11 @21:57
+  v15: i64 = int 255 @21:66
+  v16: i64 = cast v1 @21:66
+  v17: bool = lt v16, v15 @21:66
+  v18: u64 = int 2 @21:66
+  v19: addr = elem 1 v2, v18 @21:66
+  v20: unit = store v19, v17 @21:66
+  v21: i64 = int 255 @21:76
+  v22: i64 = cast v1 @21:76
+  v23: bool = le v22, v21 @21:76
+  v24: u64 = int 3 @21:76
+  v25: addr = elem 1 v2, v24 @21:76
+  v26: unit = store v25, v23 @21:76
+  v27: i64 = int 0 @21:85
+  v28: i64 = cast v1 @21:85
+  v29: bool = gt v28, v27 @21:85
+  v30: u64 = int 4 @21:85
+  v31: addr = elem 1 v2, v30 @21:85
+  v32: unit = store v31, v29 @21:85
+  v33: i64 = int 0 @21:93
+  v34: i64 = cast v1 @21:93
+  v35: bool = ge v34, v33 @21:93
+  v36: u64 = int 5 @21:93
+  v37: addr = elem 1 v2, v36 @21:93
+  v38: unit = store v37, v35 @21:93
+  v39: unit = copy 6 v0, v2 @21:43
+  return
+block1():
+  trap t0
+t0: unreachable @21:43 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn at_the_limits_of_u8(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 255 @23:50
+  v2: i64 = cast v0 @23:50
+  v3: bool = le v2, v1 @23:50
+  branch v3, block1(), block2(v3)
+block1():
+  v5: i64 = int 0 @23:63
+  v6: i64 = cast v0 @23:63
+  v7: bool = ge v6, v5 @23:63
+  jump block2(v7)
+block2(v4: bool):
+  return v4
+block3():
+  trap t0
+t0: unreachable @23:63 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn at_the_limits_of_i8(i8) -> bool {
+block0(v0: i8):
+  v1: i64 = int -128 @25:50
+  v2: i64 = cast v0 @25:50
+  v3: bool = ge v2, v1 @25:50
+  branch v3, block1(), block2(v3)
+block1():
+  v5: i64 = int 127 @25:64
+  v6: i64 = cast v0 @25:64
+  v7: bool = le v6, v5 @25:64
+  jump block2(v7)
+block2(v4: bool):
+  return v4
+block3():
+  trap t0
+t0: unreachable @25:64 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn at_the_limits_of_u128(u128) -> bool {
+block0(v0: u128):
+  v1: u128 = int 340282366920938463463374607431768211455 @27:54
+  v2: bool = le v0, v1 @27:54
+  return v2
+block1():
+  trap t0
+t0: unreachable @27:54 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn at_the_limits_of_i128(i128) -> bool {
+block0(v0: i128):
+  v1: i128 = int -170141183460469231731687303715884105728 @29:54
+  v2: bool = ge v0, v1 @29:54
+  return v2
+block1():
+  trap t0
+t0: unreachable @29:54 ["unreachable reached: control left the code the checker allows"]
+}
+
+f12: fn at_the_limits_of_usize(u64) -> bool {
+block0(v0: u64):
+  v1: u64 = int 18446744073709551615 @31:55
+  v2: bool = lt v0, v1 @31:55
+  return v2
+block1():
+  trap t0
+t0: unreachable @31:55 ["unreachable reached: control left the code the checker allows"]
+}
+
+f13: fn i128_beside_u128(i128, u128) -> bool {
+block0(v0: i128, v1: u128):
+  v2: i64 = int -1 @33:58
+  v3: i128 = cast v2 @33:58
+  v4: bool = eq v0, v3 @33:58
+  branch v4, block1(), block2(v4)
+block1():
+  v6: u128 = int 340282366920938463463374607431768211455 @33:70
+  v7: bool = eq v1, v6 @33:70
+  jump block2(v7)
+block2(v5: bool):
+  return v5
+block3():
+  trap t0
+t0: unreachable @33:70 ["unreachable reached: control left the code the checker allows"]
+}
+
+f14: fn refined(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 11 @36:45
+  v2: i64 = cast v0 @36:45
+  v3: bool = eq v2, v1 @36:45
+  return v3
+block1():
+  trap t0
+t0: unreachable @36:45 ["unreachable reached: control left the code the checker allows"]
+}
+
+f15: fn mixed(u8, u32) -> bool {
+block0(v0: u8, v1: u32):
+  v2: i64 = int 1 @39:48
+  v3: i64 = cast v1 @39:44
+  v4: i64 = add v3, v2 @39:44
+  v5: i64 = cast v0 @39:44
+  v6: bool = eq v5, v4 @39:44
+  return v6
+block1():
+  trap t0
+t0: unreachable @39:44 ["unreachable reached: control left the code the checker allows"]
+}
+
+f16: fn in_an_if(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @41:41
+  v2: i64 = int 0 @41:41
+  v3: bool = ge v1, v2 @41:41
+  v4: i64 = int 255 @41:41
+  v5: bool = le v1, v4 @41:41
+  v6: bool = and v3, v5 @41:41
+  v7: unit = check t0 v6, v1 @41:41
+  v8: u8 = cast v1 @41:41
+  v9: u8 = not v8 @41:41
+  v10: bool = eq v0, v9 @41:41
+  branch v10, block1(), block2()
+block1():
+  v12: i64 = int 1 @41:45
+  jump block3(v12)
+block2():
+  v13: i64 = int 0 @41:56
+  jump block3(v13)
+block3(v11: i64):
+  v14: u8 = cast v11 @41:56
+  return v14
+block4():
+  trap t1
+t0: narrowing @41:41 ["", " does not fit in `u8`"]
+t1: unreachable @41:56 ["unreachable reached: control left the code the checker allows"]
+}
+
+f17: fn in_a_guard(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @44:15
+  v2: i64 = int 0 @44:15
+  v3: bool = ge v1, v2 @44:15
+  v4: i64 = int 255 @44:15
+  v5: bool = le v1, v4 @44:15
+  v6: bool = and v3, v5 @44:15
+  v7: unit = check t0 v6, v1 @44:15
+  v8: u8 = cast v1 @44:15
+  v9: u8 = not v8 @44:15
+  v10: bool = ne v0, v9 @44:15
+  branch v10, block1(), block2()
+block1():
+  v13: i64 = int 0 @47:3
+  v14: u8 = cast v13 @47:3
+  return v14
+block2():
+  v11: i64 = int 1 @45:12
+  v12: u8 = cast v11 @45:12
+  return v12
+block3():
+  trap t1
+block4():
+  trap t1
+t0: narrowing @44:15 ["", " does not fit in `u8`"]
+t1: unreachable @47:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f18: fn in_a_loop(u8) -> u8 {
+block0(v0: u8):
+  v1: addr = slot 1 @51:15
+  v2: unit = store v1, v0 @51:15
+  v3: addr = slot 1 @52:3
+  v4: bool = bool false @52:3
+  v5: unit = store v3, v4 @52:3
+  v6: addr = slot 16 @52:3
+  jump block1()
+block1():
+  v7: u8 = load v1 @52:9
+  v8: i64 = int 250 @52:14
+  v9: i64 = int 0 @52:14
+  v10: bool = ge v8, v9 @52:14
+  v11: i64 = int 255 @52:14
+  v12: bool = le v8, v11 @52:14
+  v13: bool = and v10, v12 @52:14
+  v14: unit = check t0 v13, v8 @52:14
+  v15: u8 = cast v8 @52:14
+  v16: u8 = not v15 @52:14
+  v17: bool = lt v7, v16 @52:14
+  branch v17, block2(), block3()
+block2():
+  v18: i64 = int 250 @53:16
+  v19: i64 = int 0 @53:16
+  v20: bool = ge v18, v19 @53:16
+  v21: i64 = int 255 @53:16
+  v22: bool = le v18, v21 @53:16
+  v23: bool = and v20, v22 @53:16
+  v24: unit = check t1 v23, v18 @53:16
+  v25: u8 = cast v18 @53:16
+  v26: u8 = not v25 @53:16
+  v27: u8 = load v1 @53:22
+  v28: i64 = cast v26 @53:15
+  v29: i64 = cast v27 @53:15
+  v30: i64 = sub v28, v29 @53:15
+  v31: u128 = load v6 @53:15
+  v32: bool = bool false @53:15
+  v33: i64 = int 0 @53:15
+  v34: bool = lt v30, v33 @53:15
+  branch v34, block4(), block5()
+block3():
+  v60: u8 = load v1 @57:3
+  return v60
+block4():
+  v36: bool = bool true @53:15
+  jump block6(v36)
+block5():
+  v37: u128 = cast v30 @53:15
+  v38: bool = lt v37, v31 @53:15
+  jump block6(v38)
+block6(v35: bool):
+  v39: i64 = int 0 @53:15
+  v40: bool = lt v30, v39 @53:15
+  branch v40, block7(), block8()
+block7():
+  v42: bool = bool false @53:15
+  jump block9(v42)
+block8():
+  v43: u128 = cast v30 @53:15
+  v44: bool = eq v43, v31 @53:15
+  jump block9(v44)
+block9(v41: bool):
+  v45: bool = and v41, v32 @53:15
+  v46: bool = or v35, v45 @53:15
+  v47: bool = load v3 @53:15
+  v48: bool = not v47 @53:15
+  v49: bool = or v48, v46 @53:15
+  v50: bool = bool true @53:15
+  v51: unit = store v3, v50 @53:15
+  v52: u128 = cast v30 @53:15
+  v53: unit = store v6, v52 @53:15
+  v54: u8 = load v1 @55:5
+  v55: i64 = int 1 @55:10
+  v56: i64 = cast v54 @55:10
+  v57: i64 = add v56, v55 @55:10
+  v58: u8 = cast v57 @55:10
+  v59: unit = store v1, v58 @55:10
+  jump block1()
+block10():
+  trap t2
+t0: narrowing @52:14 ["", " does not fit in `u8`"]
+t1: narrowing @53:16 ["", " does not fit in `u8`"]
+t2: unreachable @57:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f19: fn in_a_clause(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 0 @62:21
+  v2: i64 = cast v0 @62:21
+  v3: bool = ge v2, v1 @62:21
+  return v0
+block1():
+  trap t0
+t0: unreachable @62:21 ["unreachable reached: control left the code the checker allows"]
+}
+
+f20: fn complement_at_252() -> bool {
+block0():
+  v0: i64 = int 252 @65:49
+  v1: u8 = cast v0 @65:49
+  v2: bool = call f0 v1 @65:38
+  return v2
+block1():
+  trap t0
+t0: unreachable @65:38 ["unreachable reached: control left the code the checker allows"]
+}
+
+f21: fn complement_at_4() -> bool {
+block0():
+  v0: i64 = int 4 @67:47
+  v1: u8 = cast v0 @67:47
+  v2: bool = call f0 v1 @67:36
+  return v2
+block1():
+  trap t0
+t0: unreachable @67:36 ["unreachable reached: control left the code the checker allows"]
+}
+
+f22: fn complement_on_the_left_at_252() -> bool {
+block0():
+  v0: i64 = int 252 @69:73
+  v1: u8 = cast v0 @69:73
+  v2: bool = call f1 v1 @69:50
+  return v2
+block1():
+  trap t0
+t0: unreachable @69:50 ["unreachable reached: control left the code the checker allows"]
+}
+
+f23: fn literal_on_the_left_at_252() -> bool {
+block0():
+  v0: i64 = int 252 @71:67
+  v1: u8 = cast v0 @71:67
+  v2: bool = call f2 v1 @71:47
+  return v2
+block1():
+  trap t0
+t0: unreachable @71:47 ["unreachable reached: control left the code the checker allows"]
+}
+
+f24: fn sum_at_7() -> bool {
+block0():
+  v0: i64 = int 7 @73:45
+  v1: u8 = cast v0 @73:45
+  v2: bool = call f3 v1 @73:29
+  return v2
+block1():
+  trap t0
+t0: unreachable @73:29 ["unreachable reached: control left the code the checker allows"]
+}
+
+f25: fn beside_an_expression_at_254() -> bool {
+block0():
+  v0: i64 = int 254 @75:69
+  v1: u8 = cast v0 @75:69
+  v2: bool = call f5 v1 @75:48
+  return v2
+block1():
+  trap t0
+t0: unreachable @75:48 ["unreachable reached: control left the code the checker allows"]
+}
+
+f26: fn beside_an_expression_at_255() -> bool {
+block0():
+  v0: i64 = int 255 @77:69
+  v1: u8 = cast v0 @77:69
+  v2: bool = call f5 v1 @77:48
+  return v2
+block1():
+  trap t0
+t0: unreachable @77:48 ["unreachable reached: control left the code the checker allows"]
+}
+
+f27: fn signed_at_minus_one() -> bool {
+block0():
+  v0: i64 = int -1 @79:47
+  v1: i8 = cast v0 @79:47
+  v2: bool = call f6 v1 @79:40
+  return v2
+block1():
+  trap t0
+t0: unreachable @79:40 ["unreachable reached: control left the code the checker allows"]
+}
+
+f28: fn operators_at_0(addr) {
+block0(v0: addr):
+  v1: i64 = int 0 @81:53
+  v2: addr = slot 6 @81:53
+  v3: u8 = cast v1 @81:53
+  v4: unit = call f7 v2, v3 @81:38
+  v5: unit = copy 6 v0, v2 @81:38
+  return
+block1():
+  trap t0
+t0: unreachable @81:38 ["unreachable reached: control left the code the checker allows"]
+}
+
+f29: fn operators_at_255(addr) {
+block0(v0: addr):
+  v1: i64 = int 255 @83:55
+  v2: addr = slot 6 @83:55
+  v3: u8 = cast v1 @83:55
+  v4: unit = call f7 v2, v3 @83:40
+  v5: unit = copy 6 v0, v2 @83:40
+  return
+block1():
+  trap t0
+t0: unreachable @83:40 ["unreachable reached: control left the code the checker allows"]
+}
+
+f30: fn limits_of_usize() -> bool {
+block0():
+  v0: u64 = int 18446744073709551615 @85:59
+  v1: bool = call f12 v0 @85:36
+  return v1
+block1():
+  trap t0
+t0: unreachable @85:36 ["unreachable reached: control left the code the checker allows"]
+}
+
+f31: fn wide_pair() -> bool {
+block0():
+  v0: i64 = int -1 @87:47
+  v1: u128 = int 340282366920938463463374607431768211455 @87:51
+  v2: i128 = cast v0 @87:51
+  v3: bool = call f13 v2, v1 @87:30
+  return v3
+block1():
+  trap t0
+t0: unreachable @87:30 ["unreachable reached: control left the code the checker allows"]
+}
+
+f32: fn mixed_at_255() -> bool {
+block0():
+  v0: i64 = int 255 @89:39
+  v1: i64 = int 254 @89:44
+  v2: u8 = cast v0 @89:44
+  v3: u32 = cast v1 @89:44
+  v4: bool = call f15 v2, v3 @89:33
+  return v4
+block1():
+  trap t0
+t0: unreachable @89:33 ["unreachable reached: control left the code the checker allows"]
+}
+
+f33: fn mixed_past_u8() -> bool {
+block0():
+  v0: i64 = int 255 @91:40
+  v1: i64 = int 255 @91:45
+  v2: u8 = cast v0 @91:45
+  v3: u32 = cast v1 @91:45
+  v4: bool = call f15 v2, v3 @91:34
+  return v4
+block1():
+  trap t0
+t0: unreachable @91:34 ["unreachable reached: control left the code the checker allows"]
+}
+
+f34: fn if_at_255() -> u8 {
+block0():
+  v0: i64 = int 255 @93:37
+  v1: u8 = cast v0 @93:37
+  v2: u8 = call f16 v1 @93:28
+  return v2
+block1():
+  trap t0
+t0: unreachable @93:28 ["unreachable reached: control left the code the checker allows"]
+}
+
+f35: fn guard_at_255() -> u8 {
+block0():
+  v0: i64 = int 255 @95:42
+  v1: u8 = cast v0 @95:42
+  v2: u8 = call f17 v1 @95:31
+  return v2
+block1():
+  trap t0
+t0: unreachable @95:31 ["unreachable reached: control left the code the checker allows"]
+}
+
+f36: fn loop_from_0() -> u8 {
+block0():
+  v0: i64 = int 0 @97:40
+  v1: u8 = cast v0 @97:40
+  v2: u8 = call f18 v1 @97:30
+  return v2
+block1():
+  trap t0
+t0: unreachable @97:30 ["unreachable reached: control left the code the checker allows"]
+}
+
+f37: fn enter complement(u8) -> bool {
+block0(v0: u8):
+  v1: bool = call f0 v0 @7:8
+  return v1
+t0: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f38: fn enter complement_on_the_left(u8) -> bool {
+block0(v0: u8):
+  v1: bool = call f1 v0 @9:8
+  return v1
+t0: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f39: fn enter literal_on_the_left(u8) -> bool {
+block0(v0: u8):
+  v1: bool = call f2 v0 @11:8
+  return v1
+t0: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f40: fn enter sum_of_literals(u8) -> bool {
+block0(v0: u8):
+  v1: bool = call f3 v0 @13:8
+  return v1
+t0: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f41: fn enter both_literals() -> bool {
+block0():
+  v0: bool = call f4 @15:8
+  return v0
+t0: unreachable @15:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f42: fn enter beside_an_expression(u8) -> bool {
+block0(v0: u8):
+  v1: bool = call f5 v0 @17:8
+  return v1
+t0: unreachable @17:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f43: fn enter signed(i8) -> bool {
+block0(v0: i8):
+  v1: bool = call f6 v0 @19:8
+  return v1
+t0: unreachable @19:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f44: fn enter every_operator(addr, u8) {
+block0(v0: addr, v1: u8):
+  v2: unit = call f7 v0, v1 @21:8
+  return
+t0: unreachable @21:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f45: fn enter at_the_limits_of_u8(u8) -> bool {
+block0(v0: u8):
+  v1: bool = call f8 v0 @23:8
+  return v1
+t0: unreachable @23:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f46: fn enter at_the_limits_of_i8(i8) -> bool {
+block0(v0: i8):
+  v1: bool = call f9 v0 @25:8
+  return v1
+t0: unreachable @25:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f47: fn enter at_the_limits_of_u128(u128) -> bool {
+block0(v0: u128):
+  v1: bool = call f10 v0 @27:8
+  return v1
+t0: unreachable @27:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f48: fn enter at_the_limits_of_i128(i128) -> bool {
+block0(v0: i128):
+  v1: bool = call f11 v0 @29:8
+  return v1
+t0: unreachable @29:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f49: fn enter at_the_limits_of_usize(u64) -> bool {
+block0(v0: u64):
+  v1: bool = call f12 v0 @31:8
+  return v1
+t0: unreachable @31:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f50: fn enter i128_beside_u128(i128, u128) -> bool {
+block0(v0: i128, v1: u128):
+  v2: bool = call f13 v0, v1 @33:8
+  return v2
+t0: unreachable @33:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f51: fn enter refined(u8) -> bool {
+block0(v0: u8):
+  v1: i64 = int 0 @0:0
+  v2: i64 = int 10 @0:0
+  v3: i64 = cast v0 @0:0
+  v4: bool = ge v3, v1 @0:0
+  v5: i64 = cast v0 @0:0
+  v6: bool = lt v5, v2 @0:0
+  v7: bool = and v4, v6 @0:0
+  v8: unit = check t0 v7, v0, v1, v2 @36:8
+  v9: bool = call f14 v0 @36:8
+  return v9
+t0: refinement @36:8 ["", " lies outside the refinement `[", "..", "]`"]
+t1: unreachable @36:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f52: fn enter mixed(u8, u32) -> bool {
+block0(v0: u8, v1: u32):
+  v2: bool = call f15 v0, v1 @39:8
+  return v2
+t0: unreachable @39:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f53: fn enter in_an_if(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f16 v0 @41:8
+  return v1
+t0: unreachable @41:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f54: fn enter in_a_guard(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f17 v0 @43:8
+  return v1
+t0: unreachable @43:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f55: fn enter in_a_loop(u8) -> u8 {
+block0(v0: u8):
+  v1: u8 = call f18 v0 @50:8
+  return v1
+t0: unreachable @50:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f56: fn enter in_a_clause(u8) -> u8 {
+block0(v0: u8):
+  v1: i64 = int 255 @61:17
+  v2: i64 = cast v0 @61:17
+  v3: bool = le v2, v1 @61:17
+  v4: unit = check t0 v3 @60:8
+  v5: u8 = call f19 v0 @60:8
+  return v5
+t0: requires @60:8 ["`requires (<= a 255)` is false at this call"]
+t1: unreachable @60:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f57: fn enter complement_at_252() -> bool {
+block0():
+  v0: bool = call f20 @65:8
+  return v0
+t0: unreachable @65:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f58: fn enter complement_at_4() -> bool {
+block0():
+  v0: bool = call f21 @67:8
+  return v0
+t0: unreachable @67:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f59: fn enter complement_on_the_left_at_252() -> bool {
+block0():
+  v0: bool = call f22 @69:8
+  return v0
+t0: unreachable @69:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f60: fn enter literal_on_the_left_at_252() -> bool {
+block0():
+  v0: bool = call f23 @71:8
+  return v0
+t0: unreachable @71:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f61: fn enter sum_at_7() -> bool {
+block0():
+  v0: bool = call f24 @73:8
+  return v0
+t0: unreachable @73:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f62: fn enter beside_an_expression_at_254() -> bool {
+block0():
+  v0: bool = call f25 @75:8
+  return v0
+t0: unreachable @75:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f63: fn enter beside_an_expression_at_255() -> bool {
+block0():
+  v0: bool = call f26 @77:8
+  return v0
+t0: unreachable @77:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f64: fn enter signed_at_minus_one() -> bool {
+block0():
+  v0: bool = call f27 @79:8
+  return v0
+t0: unreachable @79:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f65: fn enter operators_at_0(addr) {
+block0(v0: addr):
+  v1: unit = call f28 v0 @81:8
+  return
+t0: unreachable @81:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f66: fn enter operators_at_255(addr) {
+block0(v0: addr):
+  v1: unit = call f29 v0 @83:8
+  return
+t0: unreachable @83:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f67: fn enter limits_of_usize() -> bool {
+block0():
+  v0: bool = call f30 @85:8
+  return v0
+t0: unreachable @85:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f68: fn enter wide_pair() -> bool {
+block0():
+  v0: bool = call f31 @87:8
+  return v0
+t0: unreachable @87:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f69: fn enter mixed_at_255() -> bool {
+block0():
+  v0: bool = call f32 @89:8
+  return v0
+t0: unreachable @89:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f70: fn enter mixed_past_u8() -> bool {
+block0():
+  v0: bool = call f33 @91:8
+  return v0
+t0: unreachable @91:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f71: fn enter if_at_255() -> u8 {
+block0():
+  v0: u8 = call f34 @93:8
+  return v0
+t0: unreachable @93:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f72: fn enter guard_at_255() -> u8 {
+block0():
+  v0: u8 = call f35 @95:8
+  return v0
+t0: unreachable @95:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f73: fn enter loop_from_0() -> u8 {
+block0():
+  v0: u8 = call f36 @97:8
+  return v0
+t0: unreachable @97:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/comparison_read_before_a_later_operand_changes_it.mn == (exit 2)
 == conformance/core-calculus/complement_lies_within_its_operands_type.mn ==
 mente-dump 2 mir

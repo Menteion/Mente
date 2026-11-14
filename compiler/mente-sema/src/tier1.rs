@@ -30,7 +30,7 @@ use crate::bounds;
 use crate::check::Typing;
 use crate::names::{BindingKind, Resolution};
 use crate::octagon::{Exact, Octagon, Term, BIG, INF, RELATIONAL_LIMIT};
-use crate::types::{Int, IntTy, Ty};
+use crate::types::{Int, IntTy, Ty, I64, INT_TYPES, USIZE};
 
 pub mod smt;
 
@@ -1160,6 +1160,30 @@ fn paren((text, p): (String, u8), min: u8) -> String {
 
 type Subst<'s> = &'s dyn Fn(ExprId, &str) -> Option<(String, u8)>;
 
+/// An expression as a `guard` writes it: its text, its precedence, and the type a literal
+/// compared with it takes (`core-calculus.md`, item 5).
+type Guarded = (String, u8, IntTy);
+
+/// The type a literal compared with an operand of type `t` takes: the operand's, or `i64`
+/// beside one of literals alone or of types no one type holds (`core-calculus.md`, item 5).
+fn compared_type(t: &Ty) -> IntTy {
+    match t {
+        Ty::Int(Int::One(t) | Int::Mixed(Some(t))) => *t,
+        Ty::Int(Int::Literal | Int::Mixed(None))
+        | Ty::Bool
+        | Ty::Array(..)
+        | Ty::Struct(_)
+        | Ty::Enum(_)
+        | Ty::Unit
+        | Ty::Any => I64,
+    }
+}
+
+/// Whether the exact value `c` lies in the integer type `t`.
+fn exact_in(c: Exact, t: IntTy) -> bool {
+    Exact::new(t.signed, t.min_magnitude()) <= c && c <= Exact::new(false, t.max())
+}
+
 fn no_subst(_: ExprId, _: &str) -> Option<(String, u8)> {
     None
 }
@@ -1172,7 +1196,8 @@ fn print(tree: &Tree, e: ExprId, subst: Subst) -> (String, u8) {
     let text = match kind {
         ExprKind::Int { value, suffix } => match suffix {
             Some(s) => format!("{}_{}", value, s),
-            None => value.to_string(),
+            // A literal may be written with a type in another function's terms ([`retyped`]).
+            None => return subst(e, "").unwrap_or((value.to_string(), p)),
         },
         ExprKind::Bool(b) => b.to_string(),
         ExprKind::Name(n) => return subst(e, n).unwrap_or((n.clone(), p)),
@@ -1376,6 +1401,202 @@ fn field_chain(tree: &Tree, resolution: &Resolution, e: ExprId) -> Option<(usize
 
 /// The name a chain of fields `e` starts from, and its fields: `s.a.b` is `s` and `["a", "b"]`,
 /// and `s` alone is `s` and none.
+/// The integer type `t` is, when it is one.
+fn int_type(t: &Ty) -> Option<Int> {
+    match t {
+        Ty::Int(i) => Some(*i),
+        Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
+    }
+}
+
+/// The literals the clause `e` of `tree` compares with an operand whose type, in the terms a
+/// `guard` writes the clause in, they lie outside, each with the smallest standard type that
+/// holds it. A compared literal takes the type of the other operand (`core-calculus.md`, item
+/// 5), and writing a clause in a caller's terms may change that type, which would make the
+/// guard an error (`E0233`): such a literal states its own type, and the guard compares it
+/// exactly, as the clause did. `leaf` gives the type of a name or a field path there, or none
+/// when it is not known; a literal beside an operand whose type is not known states its own.
+fn retyped(tree: &Tree, e: ExprId, leaf: &dyn Fn(ExprId) -> Option<Int>) -> Vec<(ExprId, IntTy)> {
+    let mut out = Vec::new();
+    retyped_into(tree, e, leaf, &mut out);
+    out
+}
+
+fn retyped_into(
+    tree: &Tree,
+    e: ExprId,
+    leaf: &dyn Fn(ExprId) -> Option<Int>,
+    out: &mut Vec<(ExprId, IntTy)>,
+) {
+    match &tree.expr(e).kind {
+        ExprKind::Binary { op, lhs, rhs } => {
+            let compares = match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => true,
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::And
+                | BinaryOp::Or => false,
+            };
+            if compares {
+                for (lit, other) in [(*lhs, *rhs), (*rhs, *lhs)] {
+                    let Some((at, v)) = plain_literal(tree, lit) else {
+                        continue;
+                    };
+                    let fits = operand_int(tree, other, leaf)
+                        .is_some_and(|t| exact_in(v, compared_type(&Ty::Int(t))));
+                    let holder = INT_TYPES.iter().find(|t| exact_in(v, **t));
+                    if let (false, Some(t)) = (fits, holder) {
+                        out.push((at, *t));
+                    }
+                }
+            }
+            retyped_into(tree, *lhs, leaf, out);
+            retyped_into(tree, *rhs, leaf, out);
+        }
+        ExprKind::Unary { operand, .. } => retyped_into(tree, *operand, leaf, out),
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Error => {}
+    }
+}
+
+/// The literal `e` is, with no suffix, alone or negated: the literal's own expression and the
+/// value.
+fn plain_literal(tree: &Tree, e: ExprId) -> Option<(ExprId, Exact)> {
+    match &tree.expr(e).kind {
+        ExprKind::Int { value, suffix } => match suffix {
+            None => Some((e, Exact::new(false, *value))),
+            Some(_) => None,
+        },
+        ExprKind::Unary { op, operand } => match op {
+            // The literal under the `-`, not one under two.
+            UnaryOp::Neg => plain_literal(tree, *operand)
+                .filter(|(at, _)| at == operand)
+                .map(|(at, v)| (at, v.negated())),
+            UnaryOp::Not | UnaryOp::BitNot => None,
+        },
+        ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Binary { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Error => None,
+    }
+}
+
+/// The integer type of the operand `e` of a clause in the terms `leaf` gives its names and
+/// field paths, as the checker types an operation (`core-calculus.md`, item 5); none when it is
+/// not known.
+fn operand_int(tree: &Tree, e: ExprId, leaf: &dyn Fn(ExprId) -> Option<Int>) -> Option<Int> {
+    let of = |x: ExprId| operand_int(tree, x, leaf);
+    match &tree.expr(e).kind {
+        ExprKind::Int { suffix: None, .. } => Some(Int::Literal),
+        ExprKind::Int {
+            suffix: Some(s), ..
+        } => INT_TYPES
+            .iter()
+            .find(|t| t.name == s.as_str())
+            .map(|t| Int::One(*t)),
+        ExprKind::Name(_) | ExprKind::Field { .. } => leaf(e),
+        ExprKind::Unary { op, operand } => match op {
+            UnaryOp::Neg | UnaryOp::BitNot => of(*operand),
+            UnaryOp::Not => None,
+        },
+        ExprKind::Binary { op, lhs, rhs } => match op {
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor => Some(of(*lhs)?.join(of(*rhs)?)),
+            // A shift has its left operand's type.
+            BinaryOp::Shl | BinaryOp::Shr => of(*lhs),
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::And
+            | BinaryOp::Or => None,
+        },
+        ExprKind::Bool(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Error => None,
+    }
+}
+
+/// The text of the literal `e` of `tree` when [`retyped`] gives it a type: its digits and the
+/// type's suffix.
+fn retyped_text(tree: &Tree, retyped: &[(ExprId, IntTy)], e: ExprId) -> Option<(String, u8)> {
+    let (_, t) = retyped.iter().find(|(at, _)| *at == e)?;
+    let kind = &tree.expr(e).kind;
+    match kind {
+        ExprKind::Int { value, .. } => Some((format!("{}_{}", value, t.name), prec(kind))),
+        ExprKind::Unary { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Binary { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Error => None,
+    }
+}
+
 fn chain_of(tree: &Tree, e: ExprId) -> Option<(String, Vec<String>)> {
     match &tree.expr(e).kind {
         ExprKind::Field { base, name } => {
@@ -2286,6 +2507,50 @@ impl<'a> Fx<'a> {
         Some(self.reading(args.get(k)?.value, &names))
     }
 
+    /// The integer type, in this function, of field path `names` of `at`, an expression of
+    /// it, as [`Self::reading`] reads it: a struct literal's field is its value, and the rest
+    /// of the path has the type its fields are declared with.
+    fn reading_type(&self, mut at: ExprId, names: &[String]) -> Option<Int> {
+        for (i, name) in names.iter().enumerate() {
+            let field = match &self.tree.expr(at).kind {
+                ExprKind::Construct { fields, .. } => fields.iter().find(|f| f.name == *name),
+                ExprKind::Int { .. }
+                | ExprKind::Bool(_)
+                | ExprKind::Name(_)
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Variant { .. }
+                | ExprKind::Array(_)
+                | ExprKind::Repeat { .. }
+                | ExprKind::Todo(_)
+                | ExprKind::Unreachable(_)
+                | ExprKind::If { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::Error => None,
+            };
+            if let Some(f) = field {
+                at = f.value;
+                continue;
+            }
+            let mut t = self.typing.exprs[at.0 as usize].clone();
+            for n in &names[i..] {
+                t = match &t {
+                    Ty::Struct(s) => self.structs.get(s)?.field(n)?.1.ty.clone(),
+                    // An array's one field.
+                    Ty::Array(..) if n == "len" => Ty::Int(Int::One(USIZE)),
+                    Ty::Int(_) | Ty::Bool | Ty::Array(..) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                        return None
+                    }
+                };
+            }
+            return int_type(&t);
+        }
+        int_type(&self.typing.exprs[at.0 as usize])
+    }
+
     /// The text, in this function, of field path `names` of `at`, an expression of it, and
     /// whether Tier 1 follows the value that text reads: a struct literal's field is its value,
     /// and the rest of the path is read from `at` as it is.
@@ -2456,6 +2721,12 @@ impl<'a> Fx<'a> {
             | ExprKind::If { .. }
             | ExprKind::Error => None,
         }
+    }
+
+    /// `e` as a `guard` writes it, with the type a literal compared with it takes.
+    fn guarded(&self, e: ExprId) -> Guarded {
+        let (text, p) = self.own_text(e);
+        (text, p, compared_type(&self.typing.exprs[e.0 as usize]))
     }
 
     fn own_text(&self, e: ExprId) -> (String, u8) {
@@ -3168,7 +3439,7 @@ impl<'a> Fx<'a> {
         shape: &Shape,
         (span, tag): (Span, Tag),
         place: &str,
-        what: Option<(String, u8)>,
+        what: Option<Guarded>,
     ) {
         match shape {
             Shape::Int { int, refine } => {
@@ -3204,7 +3475,7 @@ impl<'a> Fx<'a> {
         r: &Refine,
         (span, tag): (Span, Tag),
         place: &str,
-        what: Option<(String, u8)>,
+        what: Option<Guarded>,
     ) {
         let high_op = if r.inclusive { Rel::Le } else { Rel::Lt };
         // A literal bound beyond the octagon's reach is compared exactly.
@@ -3330,14 +3601,37 @@ impl<'a> Fx<'a> {
                 .iter()
                 .any(|t| t.kind == mente_syntax::TokenKind::Mut)
         });
-        let guard = what.map(|w| {
-            let x = paren(w, OPERAND);
+        let guard = what.map(|(text, p, ty)| {
+            let x = paren((text, p), OPERAND);
+            // A literal bound takes the type of `x`, the other operand, and one outside it would
+            // be an error (`E0233`): it states its own type, the place's, which a value that
+            // has entered the place's plain type fits too, or else the smallest standard type
+            // that holds it, so that the guard compares exactly (`core-calculus.md`, item 5).
+            let place = r
+                .declared
+                .as_ref()
+                .and_then(|(name, _)| INT_TYPES.iter().find(|t| t.name == name.as_str()));
+            let bound = |lit: Option<Exact>, text: &str| match lit
+                .filter(|c| !exact_in(*c, ty))
+                .and_then(|c| {
+                    place
+                        .filter(|t| exact_in(c, **t))
+                        .or_else(|| INT_TYPES.iter().find(|t| exact_in(c, **t)))
+                }) {
+                Some(t) => format!("{}_{}", text, t.name),
+                None => text.to_string(),
+            };
             let mut parts = Vec::new();
             if fail_low.is_some() {
-                parts.push(format!("{} >= {}", x, r.lo_text));
+                parts.push(format!("{} >= {}", x, bound(r.lo_lit, &r.lo_text)));
             }
             if fail_high.is_some() {
-                parts.push(format!("{} {} {}", x, high_op.symbol(), r.hi_text));
+                parts.push(format!(
+                    "{} {} {}",
+                    x,
+                    high_op.symbol(),
+                    bound(r.hi_lit, &r.hi_text)
+                ));
             }
             parts.join(" and ")
         });
@@ -3441,7 +3735,20 @@ impl<'a> Fx<'a> {
             let clause = print(self.tree, c.expr, &no_subst).0;
             // `result`, and a field path of it, read the returned value.
             let read = |id: ExprId| value.and_then(|v| self.result_reading(id, v));
-            let subst = |id: ExprId, _: &str| read(id).map(|r| r.0);
+            // A literal the returned value's type would not hold states its own.
+            let leaf = |id: ExprId| match (read(id), value) {
+                // `result`, or a field path of it, read in the returned value.
+                (Some(_), Some(v)) => {
+                    let (_, names) = field_chain(self.tree, self.resolution, id)?;
+                    self.reading_type(v, &names)
+                }
+                (Some(_), None) => None,
+                (None, _) => int_type(&self.typing.exprs[id.0 as usize]),
+            };
+            let retyped = retyped(self.tree, c.expr, &leaf);
+            let subst = |id: ExprId, _: &str| {
+                retyped_text(self.tree, &retyped, id).or_else(|| read(id).map(|r| r.0))
+            };
             let here = print(self.tree, c.expr, &subst).0;
             let followed = fragment_followed(self.tree, c.expr, &|id| {
                 read(id)
@@ -3691,13 +3998,22 @@ impl<'a> Fx<'a> {
                     bop.symbol(),
                     paren(self.own_text(value), p + 1)
                 );
+                // `x op e` has the type the operation gives its operands' types.
+                let ty = match (
+                    int_type(&self.typing.exprs[place.0 as usize]),
+                    int_type(&self.typing.exprs[value.0 as usize]),
+                ) {
+                    (Some(a), Some(b)) => Ty::Int(a.join(b)),
+                    (Some(a), None) => Ty::Int(a),
+                    (None, Some(_) | None) => Ty::Any,
+                };
                 self.narrow(
                     st,
                     &v,
                     &shape,
                     (self.span(value), Tag::None),
                     &place_name,
-                    Some((what, p)),
+                    Some((what, p, compared_type(&ty))),
                 );
                 v
             }
@@ -3751,7 +4067,7 @@ impl<'a> Fx<'a> {
             }
             _ => {
                 let v = self.eval(st, e);
-                let what = self.own_text(e);
+                let what = self.guarded(e);
                 // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one's
                 // value, whose variable is given anew where it is evaluated.
                 let control = self.tree.expr(e).kind.is_choice();
@@ -4240,7 +4556,7 @@ impl<'a> Fx<'a> {
             | Ty::Any => false,
         };
         let settled = st.is_empty() || stored || checked;
-        let what = self.own_text(scrutinee);
+        let what = self.guarded(scrutinee);
         if settled {
             // Nothing to prove.
         } else if let Some(side) = self.fits(st, value, Some(t), span) {
@@ -4769,7 +5085,7 @@ impl<'a> Fx<'a> {
         for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
             let shape = self.callee_shape(&c, &site, args, p.ty).refinements();
             let place = format!("parameter `{}` of `{}`", p.name, callee.name);
-            let what = self.own_text(a.value);
+            let what = self.guarded(a.value);
             let v = site.ins[k].map_or_else(|| vals[k].clone(), var_val);
             self.narrow(
                 st,
@@ -4806,7 +5122,16 @@ impl<'a> Fx<'a> {
             let extra = self.call_named(callee, &site);
             let (valuation, _) = self.valuation(&failing, &extra, &[]);
             let text = print(&callee.tree, clause.expr, &no_subst).0;
-            let subst = |id: ExprId, _: &str| self.arg_text(callee, args, id);
+            // A literal an argument's type would not hold states its own.
+            let leaf = |id: ExprId| {
+                let (root, names) = chain_of(&callee.tree, id)?;
+                let k = callee.params.iter().position(|p| p.name == *root)?;
+                self.reading_type(args.get(k)?.value, &names)
+            };
+            let retyped = retyped(&callee.tree, clause.expr, &leaf);
+            let subst = |id: ExprId, _: &str| {
+                retyped_text(&callee.tree, &retyped, id).or_else(|| self.arg_text(callee, args, id))
+            };
             let at_call = print(&callee.tree, clause.expr, &subst).0;
             let what = format!("`requires {}` of `{}`", text, callee.name);
             let message = Fx::cannot_rule_out(
@@ -6472,11 +6797,11 @@ mod tests {
             NONE
         );
         assert_eq!(
-            codes("pub fn f(y: u8, z: u8) -> u8[0..1] {\n  guard y + z - 600 <= -170141183460469231731687303715884105727 else {\n    return 0\n  }\n  y\n}"),
+            codes("pub fn f(y: u8, z: u8) -> u8[0..1] {\n  guard y + z - 600 <= -170141183460469231731687303715884105727_i128 else {\n    return 0\n  }\n  y\n}"),
             NONE
         );
         assert_eq!(
-            codes("pub fn f(y: u8, z: u8) -> u8[0..1] {\n  guard y + z - 600 < -170141183460469231731687303715884105727 else {\n    return 0\n  }\n  y\n}"),
+            codes("pub fn f(y: u8, z: u8) -> u8[0..1] {\n  guard y + z - 600 < -170141183460469231731687303715884105727_i128 else {\n    return 0\n  }\n  y\n}"),
             NONE
         );
         // The i128 limits: its smallest value and one below its largest.
@@ -7294,7 +7619,7 @@ mod tests {
             "x < y",
             "xs.len > 0",
             "x + 1 <= y",
-            "-x - y >= -400",
+            "-x - y >= -400_i16",
             "x - y == 2 - 2",
             "x + x - x <= 3 * 4",
             "x <= 3 * 4 - 1",
@@ -7318,9 +7643,9 @@ mod tests {
             codes("pub fn f(x: u8) -> u8\n  ensures result != 3\n= 4"),
             ["E0503"]
         );
-        let inv = "pub fn f(n: u8) {\n  var i: u8 = 0\n  while i < n invariant i != 300 {\n    i += 1\n  }\n}";
+        let inv = "pub fn f(n: u8) {\n  var i: u8 = 0\n  while i < n invariant i != 300_u16 {\n    i += 1\n  }\n}";
         assert_eq!(codes(inv), ["E0503"]);
-        assert!(messages(inv)[0].starts_with("`invariant i != 300` lies outside"));
+        assert!(messages(inv)[0].starts_with("`invariant i != 300_u16` lies outside"));
         let indented = diagnostics("  pub fn f(x: u8)\n    requires x != 3\n  {\n  }");
         assert_eq!(indented[0].fixes[0].edits[0].replacement, "  @checked\n");
         assert_eq!(
@@ -7334,19 +7659,19 @@ mod tests {
         // assumes it and proves it nowhere, at the definition or at a call.
         for attr in ["@checked", "@prove"] {
             let src = format!(
-                "{}\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  ensures result * 2 == x\n= x / 2\npub fn f(y: u8) -> u8 = half(y)\n{}\npub fn g(n: u8) -> u8 {{\n  var i: u8 = 0\n  while i < n invariant i != 300 {{\n    i += 1\n  }}\n  i\n}}",
+                "{}\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  ensures result * 2 == x\n= x / 2\npub fn f(y: u8) -> u8 = half(y)\n{}\npub fn g(n: u8) -> u8 {{\n  var i: u8 = 0\n  while i < n invariant i != 300_u16 {{\n    i += 1\n  }}\n  i\n}}",
                 attr, attr
             );
             assert_eq!(codes(&src), NONE, "{}", attr);
         }
         // A routed invariant is assumed at the head; the assumption is the trusted part.
-        let assumed = "@prove\npub fn f(n: u8) -> u8[0..10] {\n  var i: u8 = 0\n  while i < n invariant i < 10 or i > 300 {\n    i += 1\n  }\n  i\n}";
+        let assumed = "@prove\npub fn f(n: u8) -> u8[0..10] {\n  var i: u8 = 0\n  while i < n invariant i < 10 or i > 300_u16 {\n    i += 1\n  }\n  i\n}";
         assert_eq!(codes(assumed), NONE);
         // A routed `requires` of the function itself is assumed on entry.
-        let entry = "@checked\npub fn f(x: u8) -> u8[0..10]\n  requires x < 10 or x > 300\n= x";
+        let entry = "@checked\npub fn f(x: u8) -> u8[0..10]\n  requires x < 10 or x > 300_u16\n= x";
         assert_eq!(codes(entry), NONE);
         // A callee's routed `ensures` is assumed after the call.
-        let ensured = "@checked\npub fn small(x: u8) -> u8\n  ensures result < 5 or result > 300\n= x\npub fn f(x: u8) -> u8[0..5] = small(x)";
+        let ensured = "@checked\npub fn small(x: u8) -> u8\n  ensures result < 5 or result > 300_u16\n= x\npub fn f(x: u8) -> u8[0..5] = small(x)";
         assert_eq!(codes(ensured), NONE);
     }
 
@@ -7673,6 +7998,57 @@ mod tests {
             messages("pub fn f(x: u8[0..=9], y: i8) -> i16[0..=9] = x / y"),
             ["Tier 1 cannot rule out that `x / y` is -1, outside `i16[0..=9]`, the type of the result of `f`"]
         );
+    }
+
+    /// A `guard` Tier 1 prescribes compares a literal with an operand whose type may not hold
+    /// it: a refinement's bound beside an exact difference, a callee's clause written over an
+    /// argument of a narrower type or a returned value of one. A compared literal takes the
+    /// other operand's type (`core-calculus.md`, item 5), so such a literal states its own,
+    /// the place's or the smallest standard type that holds it, and the guard compares exactly
+    /// what the obligation did; applied, it checks, where without the suffix it would be `E0233`. A
+    /// literal the operand's type holds keeps its plain spelling.
+    #[test]
+    fn test_a_prescribed_guard_states_the_type_of_a_literal_its_operand_does_not_hold() {
+        for (f, guard) in [
+            (
+                "pub fn f(x: u8, y: u8) -> i8[-5..5] = x - y",
+                "x - y >= -5_i8 and x - y < 5",
+            ),
+            (
+                "fn big(w: u16) -> u16\n  requires w > 300\n= w\npub fn f(x: u8) -> u16 = big(x)",
+                "x > 300_u16",
+            ),
+            (
+                "fn small(w: i16) -> i16\n  requires w > -300\n= w\npub fn f(x: u8, y: u8) -> i16 = small(x - y - 200)",
+                "x - y - 200 > -300_i16",
+            ),
+            (
+                "pub fn f(x: u8) -> u16\n  ensures result > 300\n= x",
+                "x > 300_u16",
+            ),
+            (
+                "fn big(w: u16) -> u16\n  requires w > 30\n= w\npub fn f(x: u8) -> u16 = big(x)",
+                "x > 30 ",
+            ),
+        ] {
+            let text = module(f);
+            let d = diagnostics(f);
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            let fix = &d[0].fixes[0];
+            assert!(
+                fix.message.contains(&format!("guard {}", guard)),
+                "{}: {}",
+                f,
+                fix.message
+            );
+            let applied = apply_fix(&text, fix).unwrap();
+            assert!(
+                crate::check_program(&applied).is_ok(),
+                "{}: {:?}",
+                applied,
+                crate::check_program(&applied).err()
+            );
+        }
     }
 
     /// A bit operation, a shift or `~` over literals alone works in the type its literals
@@ -8625,7 +9001,7 @@ mod tests {
 
     #[test]
     fn test_a_prove_function_trusts_the_clauses_outside_the_fragment() {
-        let src = "@prove\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  requires x < 200\n  ensures result * 2 == x\n= x / 2\n@prove\npub fn g(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i != 300 invariant i <= n {\n    i += 1\n  }\n  i\n}\n@checked\npub fn h(x: u8)\n  requires x != 3\n{\n}";
+        let src = "@prove\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  requires x < 200\n  ensures result * 2 == x\n= x / 2\n@prove\npub fn g(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i != 300_u16 invariant i <= n {\n    i += 1\n  }\n  i\n}\n@checked\npub fn h(x: u8)\n  requires x != 3\n{\n}";
         let all: Vec<(u32, u32, String)> = reports(src)
             .into_iter()
             .flat_map(|r| r.axioms)
@@ -8636,7 +9012,7 @@ mod tests {
             [
                 (4, 12, "requires x % 2 == 0 of half".to_string()),
                 (6, 11, "ensures result * 2 == x of half".to_string()),
-                (11, 25, "invariant i != 300 in g".to_string()),
+                (11, 25, "invariant i != 300_u16 in g".to_string()),
             ]
         );
         assert_eq!(codes(src), NONE);
@@ -9000,7 +9376,7 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
     /// message says what the clause reads there.
     #[test]
     fn test_clauses_offer_only_guards_tier1_can_use() {
-        let decls = "pub struct O {\n  w: u8\n}\nfn mk(x: u8) -> O = O(w: x)\nfn needs(i: O) -> u8\n  requires i.w > 2\n= i.w\nfn below(i: O) -> u8\n  requires -i.w < -2\n= i.w\nfn lens(xs: [3]u8) -> u8\n  requires xs.len > 3\n= 0\n";
+        let decls = "pub struct O {\n  w: u8\n}\nfn mk(x: u8) -> O = O(w: x)\nfn needs(i: O) -> u8\n  requires i.w > 2\n= i.w\nfn below(i: O) -> u8\n  requires -i.w < -2_i8\n= i.w\nfn lens(xs: [3]u8) -> u8\n  requires xs.len > 3\n= 0\n";
         let with = |f: &str| format!("{}{}", decls, f);
         // What Tier 1 follows proves the clause where it holds.
         assert_eq!(
@@ -9022,7 +9398,7 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
                 "x + 1 > 2",
             ),
             ("pub fn f(i: O) -> u8 = needs(i)", "i.w > 2"),
-            ("pub fn f(x: u8) -> u8 = below(O(w: x))", "-x < -2"),
+            ("pub fn f(x: u8) -> u8 = below(O(w: x))", "-x < -2_i8"),
             ("pub fn f(ys: [3]u8) -> u8 = lens(ys)", "ys.len > 3"),
             (
                 "pub fn f(xs: [3]u8) -> u8\n  ensures result == xs.len\n= 0",

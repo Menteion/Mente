@@ -774,7 +774,7 @@ fn test_mn_check_lists_todos_and_trusted_clauses() {
     let dir = scratch("listings");
     fs::write(
         dir.join("open.mn"),
-        "module m\npub fn later(x: u8) -> u8 = todo(\"think about x\")\n@prove\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  ensures x > 1 or x == 0\n= x / 2\n@prove\npub fn g(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i != 300 {\n    i += 1\n  }\n  i\n}\n",
+        "module m\npub fn later(x: u8) -> u8 = todo(\"think about x\")\n@prove\npub fn half(x: u8) -> u8\n  requires x % 2 == 0\n  ensures x > 1 or x == 0\n= x / 2\n@prove\npub fn g(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i != 300_u16 {\n    i += 1\n  }\n  i\n}\n",
     )
     .unwrap();
     fs::write(
@@ -795,7 +795,7 @@ fn test_mn_check_lists_todos_and_trusted_clauses() {
             "todo: open.mn:2:29: \"think about x\"",
             "trusted: open.mn:5:12: requires x % 2 == 0 of half, assumed until mn prove runs",
             "trusted: open.mn:6:11: ensures x > 1 or x == 0 of half, assumed until mn prove runs",
-            "trusted: open.mn:11:25: invariant i != 300 in g, assumed until mn prove runs",
+            "trusted: open.mn:11:25: invariant i != 300_u16 in g, assumed until mn prove runs",
         ]
     );
     let json = text(&mn(&dir, &["check", "--json", "open.mn"]).stdout);

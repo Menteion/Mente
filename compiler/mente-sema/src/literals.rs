@@ -7,9 +7,10 @@
 //! the operands: [`taken`] gives each expression whose type is that of literals alone the type
 //! of the smallest expression around it that has one, through arithmetic, the bit operations, a
 //! shift's left operand, unary `-` and `~`, the branches of an `if`, the arms of a `match` and
-//! the elements of an array literal, whose values make that expression's type; and `i64` where
-//! none has. The place a value is narrowed into never gives a literal its type, nor do the
-//! operands of a comparison, which compare exact values across types, give each other one.
+//! the elements of an array literal, whose values make that expression's type, and the other
+//! operand of a comparison; and `i64` where none has. The place a value is narrowed into never
+//! gives a literal its type. [`value`] computes an expression of literals alone in those types,
+//! for the check of a compared literal (`E0233`).
 //!
 //! The static ranges (`wide.rs`), Tier 1 and the lowering read this table. The reference
 //! interpreter does not: it derives the same type from the expressions around the literals as
@@ -72,6 +73,187 @@ fn leaf(t: &Ty) -> Option<IntTy> {
         | Ty::Enum(_)
         | Ty::Unit
         | Ty::Any => None,
+    }
+}
+
+/// An exact integer: whether it is negative, and its magnitude.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exact {
+    pub negative: bool,
+    pub magnitude: u128,
+}
+
+impl Exact {
+    pub fn new(negative: bool, magnitude: u128) -> Exact {
+        Exact {
+            negative: negative && magnitude != 0,
+            magnitude,
+        }
+    }
+
+    fn negated(self) -> Exact {
+        Exact::new(!self.negative, self.magnitude)
+    }
+
+    fn plus(self, o: Exact) -> Option<Exact> {
+        if self.negative == o.negative {
+            return Some(Exact::new(
+                self.negative,
+                self.magnitude.checked_add(o.magnitude)?,
+            ));
+        }
+        Some(if self.magnitude >= o.magnitude {
+            Exact::new(self.negative, self.magnitude - o.magnitude)
+        } else {
+            Exact::new(o.negative, o.magnitude - self.magnitude)
+        })
+    }
+
+    fn times(self, o: Exact) -> Option<Exact> {
+        Some(Exact::new(
+            self.negative != o.negative,
+            self.magnitude.checked_mul(o.magnitude)?,
+        ))
+    }
+
+    /// Whether the value is one of type `t`.
+    pub fn fits(self, t: IntTy) -> bool {
+        if self.negative {
+            self.magnitude <= t.min_magnitude()
+        } else {
+            self.magnitude <= t.max()
+        }
+    }
+
+    /// The value's two's-complement bits in type `t`, which holds it.
+    fn bits(self, t: IntTy) -> u128 {
+        let raw = if self.negative {
+            self.magnitude.wrapping_neg()
+        } else {
+            self.magnitude
+        };
+        raw & mask(t)
+    }
+
+    /// The value of type `t` whose bits are `bits`.
+    fn of_bits(bits: u128, t: IntTy) -> Exact {
+        let bits = bits & mask(t);
+        let sign = 1u128 << (t.bits - 1);
+        if t.signed && bits & sign != 0 {
+            Exact::new(true, (bits ^ mask(t)) + 1)
+        } else {
+            Exact::new(false, bits)
+        }
+    }
+}
+
+/// The bits of type `t`.
+fn mask(t: IntTy) -> u128 {
+    u128::MAX >> (128 - t.bits)
+}
+
+/// The exact value of `e`, an expression of literals alone of function `f`: arithmetic exact,
+/// and `~`, `&`, `|`, `^` and a shift in the type their literals take (`literals`, as
+/// [`taken`] gives it). None where an operation traps, an operand outside the type it is
+/// narrowed into, a zero divisor or a shift amount out of range, where the value leaves 128 bits,
+/// and for an expression of any other kind.
+pub fn value(tree: &Tree, literals: &[Option<Taken>], e: ExprId) -> Option<Exact> {
+    let ty = || literals.get(e.0 as usize).copied().flatten().map(|t| t.ty);
+    let of = |x: ExprId| value(tree, literals, x);
+    match &tree.expr(e).kind {
+        ExprKind::Int {
+            value,
+            suffix: None,
+        } => Some(Exact::new(false, *value)),
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => Some(of(*operand)?.negated()),
+        ExprKind::Unary {
+            op: UnaryOp::BitNot,
+            operand,
+        } => {
+            let t = ty()?;
+            let x = of(*operand).filter(|x| x.fits(t))?;
+            Some(Exact::of_bits(!x.bits(t), t))
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            let (a, b) = (of(*lhs)?, of(*rhs)?);
+            match op {
+                BinaryOp::Add => a.plus(b),
+                BinaryOp::Sub => a.plus(b.negated()),
+                BinaryOp::Mul => a.times(b),
+                // Truncated toward zero, the remainder with the dividend's sign.
+                BinaryOp::Div => Some(Exact::new(
+                    a.negative != b.negative,
+                    a.magnitude.checked_div(b.magnitude)?,
+                )),
+                BinaryOp::Rem => Some(Exact::new(
+                    a.negative,
+                    a.magnitude.checked_rem(b.magnitude)?,
+                )),
+                BinaryOp::BitAnd => in_type(ty()?, a, b, |x, y| x & y),
+                BinaryOp::BitOr => in_type(ty()?, a, b, |x, y| x | y),
+                BinaryOp::BitXor => in_type(ty()?, a, b, |x, y| x ^ y),
+                BinaryOp::Shl | BinaryOp::Shr => {
+                    let t = ty()?;
+                    let k = u32::try_from(b.magnitude)
+                        .ok()
+                        .filter(|k| !b.negative && *k < t.bits)?;
+                    let x = a.filter_fits(t)?;
+                    if *op == BinaryOp::Shl {
+                        x.times(Exact::new(false, 1u128 << k)).filter(|v| v.fits(t))
+                    } else {
+                        // Rounded toward negative infinity.
+                        let q = x.magnitude >> k;
+                        let exact = q << k == x.magnitude;
+                        Some(Exact::new(x.negative, q + u128::from(x.negative && !exact)))
+                    }
+                }
+                BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => None,
+            }
+        }
+        ExprKind::Int {
+            suffix: Some(_), ..
+        }
+        | ExprKind::Unary {
+            op: UnaryOp::Not, ..
+        }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
+    }
+}
+
+/// A bit operation of `a` and `b` in type `t`: none where either lies outside it, since each is
+/// narrowed into it first.
+fn in_type(t: IntTy, a: Exact, b: Exact, op: fn(u128, u128) -> u128) -> Option<Exact> {
+    let (x, y) = (a.filter_fits(t)?.bits(t), b.filter_fits(t)?.bits(t));
+    Some(Exact::of_bits(op(x, y), t))
+}
+
+impl Exact {
+    /// The value, when type `t` holds it.
+    fn filter_fits(self, t: IntTy) -> Option<Exact> {
+        self.fits(t).then_some(self)
     }
 }
 
@@ -140,15 +322,19 @@ impl Walk<'_> {
                     self.expr(*lhs, here);
                     self.expr(*rhs, None);
                 }
-                // A comparison compares exact values, across types: it gives none.
-                BinaryOp::And
-                | BinaryOp::Or
-                | BinaryOp::Eq
+                // A comparison gives each operand the other's type.
+                BinaryOp::Eq
                 | BinaryOp::Ne
                 | BinaryOp::Lt
                 | BinaryOp::Le
                 | BinaryOp::Gt
                 | BinaryOp::Ge => {
+                    let ty = |x: &ExprId| leaf(&self.typing.exprs[x.0 as usize]);
+                    let (left, right) = (ty(rhs), ty(lhs));
+                    self.expr(*lhs, left);
+                    self.expr(*rhs, right);
+                }
+                BinaryOp::And | BinaryOp::Or => {
                     self.expr(*lhs, None);
                     self.expr(*rhs, None);
                 }
@@ -431,13 +617,10 @@ mod tests {
         for (src, text) in [
             ("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "~3"),
             ("pub fn f() -> i64 {\n  val xs = [~3, 1]\n  xs[0]\n}", "~3"),
-            ("pub fn f(a: u8) -> bool = a == ~3", "~3"),
-            ("pub fn f(a: u8) -> bool = ~3 < a", "~3"),
             ("pub fn f(xs: [8]u8) -> u8 = xs[~3 & 7]", "~3 & 7"),
             ("pub fn f(a: u8) -> u8 = a << (~3 & 1)", "~3 & 1"),
             ("pub fn f() -> u8 = match ~3 {\n  0 => 1\n  _ => 2\n}", "~3"),
             ("pub fn f() -> u8 {\n  _ = ~3\n  0\n}", "~3"),
-            ("pub fn f(a: u8) -> u8\n  requires a < ~3\n= a", "~3"),
             (
                 "pub fn f(c: bool) -> u8 {\n  if c {\n    _ = ~3\n  }\n  0\n}",
                 "~3",
@@ -460,6 +643,173 @@ mod tests {
         ] {
             assert_eq!(of(src, text), None, "`{}` in {}", text, src);
         }
+    }
+
+    /// A comparison gives each operand's literals the other operand's type, on either side,
+    /// through the expression the literals stand in; two
+    /// expressions of literals alone compared are each an `i64`, and so are the literals of a
+    /// comparison's operand that a shift's amount or an index holds.
+    #[test]
+    fn test_a_compared_literal_takes_the_type_of_the_other_operand() {
+        for (src, text, ty, from) in [
+            (
+                "pub fn f(a: u8) -> bool = a == ~3",
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8) -> bool = ~3 != a",
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8) -> bool = 252 < a",
+                "252",
+                "u8",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8) -> bool = a <= 3 + 4",
+                "3 + 4",
+                "u8",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8) -> bool = a + 1 > 255",
+                "255",
+                "u8",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: i16) -> bool = a >= -1",
+                "-1",
+                "i16",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8) -> u8\n  requires a < ~3\n= a",
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            ("pub fn f() -> bool = ~3 == -4", "~3", "i64", From::Alone),
+            ("pub fn f() -> bool = ~3 == -4", "-4", "i64", From::Alone),
+            (
+                "pub fn f(a: u8) -> bool = a == 1 << (~3 & 1)",
+                "~3 & 1",
+                "i64",
+                From::Alone,
+            ),
+            (
+                "pub fn f(a: u8, b: bool) -> bool = b == (a < 3)",
+                "3",
+                "u8",
+                From::Operands,
+            ),
+        ] {
+            assert_eq!(of(src, text), Some((ty, from)), "`{}` in {}", text, src);
+        }
+        // An operand of a type takes none from the other, a literal or not.
+        for (src, text) in [
+            ("pub fn f(a: u8) -> bool = a == ~3", "a"),
+            ("pub fn f(a: u8, b: u32) -> bool = a == b + 1", "b + 1"),
+        ] {
+            assert_eq!(of(src, text), None, "`{}` in {}", text, src);
+        }
+    }
+
+    /// The exact value of an expression of literals alone: arithmetic exact, a bit operation
+    /// and a shift in the type their literals take, here a `u8`'s or an `i8`'s from the operand
+    /// beside them; none where an operation would trap.
+    #[test]
+    fn test_the_value_of_literals_alone_is_computed_in_the_type_they_take() {
+        let value_in = |ty: &str, text: &str| -> Option<(bool, u128)> {
+            let full = format!(
+                "module m\npub fn f(a: {}) -> {} {{\n  _ = a + ({})\n  a\n}}\n",
+                ty, ty, text
+            );
+            let (m, at) = at(&full, text);
+            let f = m.functions.last().and_then(|f| f.as_ref())?;
+            value(&f.syntax.tree, &f.typing.literals, ExprId(at as u32))
+                .map(|v| (v.negative, v.magnitude))
+        };
+        let pos = |v: u128| Some((false, v));
+        let neg = |v: u128| Some((true, v));
+        for (ty, text, expected) in [
+            ("u8", "7", pos(7)),
+            ("u8", "-7", neg(7)),
+            ("u8", "-0", pos(0)),
+            ("u8", "3 + 4", pos(7)),
+            ("u8", "3 - 4", neg(1)),
+            ("u8", "-3 - 4", neg(7)),
+            ("u8", "-3 + 4", pos(1)),
+            ("u8", "4 - 4", pos(0)),
+            ("u8", "20 * 15", pos(300)),
+            ("u8", "-20 * 15", neg(300)),
+            ("u8", "-20 * -15", pos(300)),
+            ("u8", "7 / 2", pos(3)),
+            ("u8", "-7 / 2", neg(3)),
+            ("u8", "7 / -2", neg(3)),
+            ("u8", "7 / 0", None),
+            ("u8", "-7 % 2", neg(1)),
+            ("u8", "7 % -2", pos(1)),
+            ("u8", "7 % 0", None),
+            ("u8", "~3", pos(252)),
+            ("u8", "~0", pos(255)),
+            ("u8", "~256", None),
+            ("u8", "~-1", None),
+            ("i8", "~3", neg(4)),
+            ("i8", "~-128", pos(127)),
+            ("i8", "~128", None),
+            ("u8", "12 & 10", pos(8)),
+            ("u8", "12 | 10", pos(14)),
+            ("u8", "12 ^ 10", pos(6)),
+            ("u8", "256 & 1", None),
+            ("u8", "1 | 256", None),
+            ("i8", "-1 & 5", pos(5)),
+            ("i8", "-1 ^ 5", neg(6)),
+            ("i8", "-128 | 0", neg(128)),
+            ("u8", "1 << 7", pos(128)),
+            ("u8", "1 << 8", None),
+            ("u8", "2 << 7", None),
+            ("u8", "256 << 0", None),
+            ("u8", "1 << -1", None),
+            ("u8", "128 >> 7", pos(1)),
+            ("i8", "-7 >> 1", neg(4)),
+            ("i8", "-8 >> 1", neg(4)),
+            ("i8", "7 >> 1", pos(3)),
+            ("i8", "-128 >> 7", neg(1)),
+            ("i8", "-1 >> 8", None),
+            ("u128", "~0", pos(u128::MAX)),
+            ("i128", "~0", neg(1)),
+            (
+                "i128",
+                "-170141183460469231731687303715884105728 | 0",
+                neg(1 << 127),
+            ),
+        ] {
+            assert_eq!(value_in(ty, text), expected, "`{}` beside {}", text, ty);
+        }
+        // A suffix, a name and a comparison are no literals alone.
+        let full = "module m\npub fn f(a: u8) -> bool = a == 3_u8\n";
+        let (m, at3) = at(full, "3_u8");
+        let f = m.functions.last().and_then(|f| f.as_ref()).unwrap();
+        assert_eq!(
+            value(&f.syntax.tree, &f.typing.literals, ExprId(at3 as u32)),
+            None
+        );
+        let (_, a) = at(full, "a");
+        assert_eq!(
+            value(&f.syntax.tree, &f.typing.literals, ExprId(a as u32)),
+            None
+        );
+        let (_, all) = at(full, "a == 3_u8");
+        assert_eq!(
+            value(&f.syntax.tree, &f.typing.literals, ExprId(all as u32)),
+            None
+        );
     }
 
     /// The static range of a bit operation over literals alone is that of the type its

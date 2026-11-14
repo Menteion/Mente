@@ -30,7 +30,7 @@ use std::fmt;
 use std::ops::Range;
 use std::panic;
 
-use mente_interp::{Int, Value};
+use mente_interp::{Int, Shown, Value};
 use mente_sema::structs::Structs;
 use mente_sema::CheckedModule;
 use mente_syntax::diagnostics::Diagnostic;
@@ -434,6 +434,28 @@ fn reads_pattern(e: &E) -> bool {
         n.strip_prefix('q')
             .is_some_and(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
     })
+}
+
+/// The suffix a compared literal of value `n` beside an operand of class `other` is written
+/// with: none when `n` lies in the type it takes from `other` (`core-calculus.md`, item 5),
+/// and otherwise that of the smallest type that holds it, as the checker's fix of an equality
+/// writes it, so that the literal is compared exactly rather than rejected (`E0233`).
+fn suffix_beside(n: Num, other: Cls) -> Option<IntT> {
+    if Gen::taken(other).range().holds(n) {
+        return None;
+    }
+    BY_SIZE.iter().copied().find(|t| t.range().holds(n))
+}
+
+/// The comparison `b op a` is the same as `a op' b`: `op'` is `op` turned round.
+fn turned(op: Op) -> Op {
+    match op {
+        Op::Lt => Op::Gt,
+        Op::Le => Op::Ge,
+        Op::Gt => Op::Lt,
+        Op::Ge => Op::Le,
+        other => other,
+    }
 }
 
 /// Whether `e` passes a place whose root is the binding `name` as a `mut` argument, which
@@ -1972,15 +1994,22 @@ impl Gen {
     /// A value Tier 1 proves inside `r`: a literal, or now and then a name guarded into it.
     fn refined_value(&mut self, r: R) -> E {
         if self.rng.chance(30) {
-            if let Some((x, xr, _)) = self.int_name(None, false) {
-                if !(r.lo <= xr.lo && xr.hi <= r.hi) {
-                    self.pending.push(E::bin(
-                        Op::And,
-                        E::bin(Op::Ge, x.clone(), E::num(r.lo)),
-                        E::bin(Op::Le, x.clone(), E::num(r.hi)),
-                    ));
+            let m = self.mark();
+            if let Some((x, xr, t)) = self.int_name(None, false) {
+                // The guard's literals take the type of `x` (`core-calculus.md`, item 5), and
+                // one outside it is an error (`E0233`): the guard states the part of `r` that
+                // type holds, and a name whose type holds none of `r` is not used.
+                if let Some(r) = r.meet(t.range()) {
+                    if !(r.lo <= xr.lo && xr.hi <= r.hi) {
+                        self.pending.push(E::bin(
+                            Op::And,
+                            E::bin(Op::Ge, x.clone(), E::num(r.lo)),
+                            E::bin(Op::Le, x.clone(), E::num(r.hi)),
+                        ));
+                    }
+                    return x;
                 }
-                return x;
+                self.restore(m);
             }
         }
         let n = self.value_in(r);
@@ -2420,6 +2449,33 @@ impl Gen {
             }
         }
         None
+    }
+
+    /// The type the literals of an operand take beside one of class `cls` in a comparison or an
+    /// operation (`core-calculus.md`, item 5): its type, or `i64` where it has none.
+    fn taken(cls: Cls) -> IntT {
+        match cls {
+            Cls::One(t) | Cls::Mixed(Some(t)) => t,
+            Cls::Lit | Cls::Mixed(None) => I64,
+        }
+    }
+
+    /// The operand `x` of a comparison beside `other`: itself, or, when it is literals alone
+    /// whose value lies outside the type it takes from `other`, a literal within that type,
+    /// since a compared literal outside it is an error (`E0233`). A literal value that is not
+    /// known is replaced too.
+    fn compared(&mut self, x: G, other: &G) -> G {
+        let t = Self::taken(other.cls);
+        if x.cls != Cls::Lit || x.k.is_some_and(|v| t.range().holds(v)) {
+            return x;
+        }
+        let n = self.value_in(t.range());
+        G {
+            e: self.literal(n, None),
+            cls: Cls::Lit,
+            r: R::point(n),
+            k: Some(n),
+        }
     }
 
     /// A name of an integer binding narrower than 128 bits, or a literal: an operand that
@@ -3061,16 +3117,29 @@ impl Gen {
                     .pick(&[Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge]);
                 let a = self.int_expr(Want::Any, depth + 1);
                 let b = if self.rng.chance(50) {
-                    let n = self.value_in(a.r);
-                    self.literal(n, None)
+                    let within = a.r.meet(Self::taken(a.cls).range());
+                    let n = self.value_in(within.unwrap_or(Self::taken(a.cls).range()));
+                    G {
+                        e: self.literal(n, None),
+                        cls: Cls::Lit,
+                        r: R::point(n),
+                        k: Some(n),
+                    }
                 } else if self.rng.chance(8) {
-                    // Literals alone under a bit operation: a comparison gives them no type,
-                    // so they are an `i64`.
-                    self.literal_bits(I64).e
+                    // Literals alone under a bit operation, in the type of the operand beside.
+                    self.literal_bits(Self::taken(a.cls))
                 } else {
-                    self.int_expr(Want::Any, depth + 1).e
+                    self.int_expr(Want::Any, depth + 1)
                 };
-                E::bin(op, a.e, b)
+                // `compared` keeps an operand's class, so `b` is compared beside `a`'s.
+                let a = self.compared(a, &b);
+                let b = self.compared(b, &a);
+                // Now and then the literal, or what stands there, on the left.
+                if self.rng.chance(30) {
+                    E::bin(turned(op), b.e, a.e)
+                } else {
+                    E::bin(op, a.e, b.e)
+                }
             }
             45..=59 => {
                 let op = if self.rng.chance(50) { Op::And } else { Op::Or };
@@ -3546,13 +3615,25 @@ impl Gen {
                 }
             }
         }
+        // What a guard compares each argument as: an operand of the parameter's type, of the
+        // type of the name passed, or a literal of a value.
+        let mut operands: Vec<(Cls, Option<Num>)> = Vec::new();
         for (k, p) in sig.params.iter().enumerate() {
+            let typed = match &p.ty {
+                Ty::Int(t) => Cls::One(*t),
+                // No guard compares an argument of another type.
+                Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) => Cls::Mixed(None),
+            };
             if let Some(place) = places[k].take() {
                 args.push((true, place));
+                operands.push((typed, None));
                 continue;
             }
-            let e = if is_self && k == 0 {
-                E::bin(Op::Sub, E::name(&p.name), E::Lit("1".into()))
+            let (e, operand) = if is_self && k == 0 {
+                (
+                    E::bin(Op::Sub, E::name(&p.name), E::Lit("1".into())),
+                    (typed, None),
+                )
             } else if p.refine.is_some() || simple[k] {
                 let literal = p.refine.as_ref().and_then(|r| match (&r.lo, &r.hi) {
                     (Bnd::Lit(lo), Bnd::Lit(hi)) if r.inclusive => Some(R { lo: *lo, hi: *hi }),
@@ -3586,11 +3667,13 @@ impl Gen {
                 // Where two names may be related, a related argument is a name whenever one
                 // is in scope.
                 let name = match (&p.ty, relates && !related[k].is_empty()) {
-                    (Ty::Int(_), true) => self.int_name(None, false).map(|(e, ..)| e),
+                    (Ty::Int(_), true) => self
+                        .int_name(None, false)
+                        .map(|(e, _, t)| (e, (Cls::One(t), None))),
                     _ => None,
                 };
-                let e = match name {
-                    Some(e) => e,
+                let (e, operand) = match name {
+                    Some(named) => named,
                     None => self.simple(&p.ty, literal),
                 };
                 let again = named
@@ -3610,33 +3693,39 @@ impl Gen {
                             .add(Num::small(3))
                             .and_then(|hi| all.meet(R { lo: least, hi }));
                         let n = self.value_in(few.unwrap_or(all));
-                        self.literal(n, None)
+                        (self.literal(n, None), (Cls::Lit, Some(n)))
                     }
-                    _ => e,
+                    _ => (e, operand),
                 }
             } else {
-                self.value(&p.ty, depth + 1)
+                (self.value(&p.ty, depth + 1), (typed, None))
             };
             args.push((false, e));
+            operands.push(operand);
         }
         self.exclude.truncate(saved);
         // What the callee's refinements and `requires` need, stated over the arguments.
-        let arg = |k: usize| args[k].1.clone();
+        let arg = |k: usize| {
+            let (cls, value) = operands[k];
+            (args[k].1.clone(), cls, value)
+        };
+        let lit = |n: Num| (E::num(n), Cls::Lit, Some(n));
+        let len = |i: usize| match &sig.params[i].ty {
+            Ty::Array(n, _) => lit(Num::small(i64::from(*n))),
+            Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) => lit(Num::ZERO),
+        };
         for (k, p) in sig.params.iter().enumerate() {
             let Some(r) = &p.refine else { continue };
             if is_self && k == 0 {
                 continue;
             }
             let bound = |b: &Bnd| match b {
-                Bnd::Lit(n) => E::num(*n),
+                Bnd::Lit(n) => lit(*n),
                 Bnd::Name(i) => arg(*i),
-                Bnd::Len(i) => match &sig.params[*i].ty {
-                    Ty::Array(n, _) => E::Lit(n.to_string()),
-                    _ => E::Lit("0".into()),
-                },
+                Bnd::Len(i) => len(*i),
             };
-            let lo = E::bin(Op::Ge, arg(k), bound(&r.lo));
-            let hi = E::bin(
+            let lo = self.stated(Op::Ge, arg(k), bound(&r.lo));
+            let hi = self.stated(
                 if r.inclusive { Op::Le } else { Op::Lt },
                 arg(k),
                 bound(&r.hi),
@@ -3644,32 +3733,65 @@ impl Gen {
             self.pending.push(E::bin(Op::And, lo, hi));
         }
         for r in &sig.requires {
-            let len = |i: usize| match &sig.params[i].ty {
-                Ty::Array(n, _) => E::Lit(n.to_string()),
-                _ => E::Lit("0".into()),
+            let e = match *r {
+                Req::Bound(a, op, c) => self.stated(op, arg(a), lit(c)),
+                Req::Order(a, op, b) => self.stated(op, arg(a), arg(b)),
+                Req::Sum(a, b, c) => {
+                    let ((x, xc, xk), (y, yc, yk)) = (arg(a), arg(b));
+                    let sum = (
+                        E::bin(Op::Add, x, y),
+                        xc.join(yc),
+                        xk.zip(yk).and_then(|(x, y)| x.add(y)),
+                    );
+                    self.stated(Op::Le, sum, lit(c))
+                }
+                Req::Below(a, b) => self.stated(Op::Lt, arg(a), len(b)),
             };
-            self.pending.push(match *r {
-                Req::Bound(a, op, c) => E::bin(op, arg(a), E::num(c)),
-                Req::Order(a, op, b) => E::bin(op, arg(a), arg(b)),
-                Req::Sum(a, b, c) => E::bin(Op::Le, E::bin(Op::Add, arg(a), arg(b)), E::num(c)),
-                Req::Below(a, b) => E::bin(Op::Lt, arg(a), len(b)),
-            });
+            self.pending.push(e);
         }
         Some(E::Call(sig.name.clone(), args))
     }
 
-    /// An argument a guard can speak of: a name of a binding of an integer type, or a literal,
-    /// in `literal` when it is given; anything else for other types.
-    fn simple(&mut self, ty: &Ty, literal: Option<R>) -> E {
+    /// The comparison `x op y` a guard states, its meaning kept. Each operand is an expression,
+    /// its class and, for literals alone, their value. A literal takes the type of the operand
+    /// beside it, an `i64`'s beside literals alone (`core-calculus.md`, item 5), and one
+    /// outside that type is an error (`E0233`): such a literal is written with the suffix of
+    /// the smallest type that holds it, as the checker's fix of an equality writes it, and is
+    /// then compared exactly. A suffix on one side gives a literal on the other its type, so
+    /// that side is looked at again.
+    fn stated(&mut self, op: Op, x: (E, Cls, Option<Num>), y: (E, Cls, Option<Num>)) -> E {
+        let x = self.suffixed(x, y.1);
+        let y = self.suffixed(y, x.1);
+        let x = self.suffixed(x, y.1);
+        E::bin(op, x.0, y.0)
+    }
+
+    /// The operand `x` of a comparison beside one of class `other`: itself, or, when it is a
+    /// literal of a value outside the type it takes from `other`, that literal with a suffix
+    /// ([`suffix_beside`]).
+    fn suffixed(&mut self, x: (E, Cls, Option<Num>), other: Cls) -> (E, Cls, Option<Num>) {
+        let (Cls::Lit, Some(n)) = (x.1, x.2) else {
+            return x;
+        };
+        match suffix_beside(n, other) {
+            Some(t) => (self.literal(n, Some(t)), Cls::One(t), Some(n)),
+            None => x,
+        }
+    }
+
+    /// An argument a guard can speak of, with what a guard compares it as: a name of a binding
+    /// of an integer type, or a literal, in `literal` when it is given; anything else for other
+    /// types.
+    fn simple(&mut self, ty: &Ty, literal: Option<R>) -> (E, (Cls, Option<Num>)) {
         match ty {
             Ty::Int(t) => match self.rng.chance(75).then(|| self.int_name(None, false)) {
-                Some(Some((e, ..))) => e,
+                Some(Some((e, _, u))) => (e, (Cls::One(u), None)),
                 _ => {
                     let n = self.value_in(literal.unwrap_or(t.range()));
-                    E::num(n)
+                    (E::num(n), (Cls::Lit, Some(n)))
                 }
             },
-            _ => self.value(ty, 2),
+            _ => (self.value(ty, 2), (Cls::Mixed(None), None)),
         }
     }
 
@@ -4425,10 +4547,14 @@ impl Gen {
                 Some((E::bin(Op::Rem, x, E::Lit(k.to_string())), range))
             }
             _ => {
-                let (x, ..) = self.int_name(None, false)?;
-                let lo = self.value_in(t.range());
+                let (x, _, u) = self.int_name(None, false)?;
+                // The guard's literals take the type of `x` (`core-calculus.md`, item 5), and
+                // one outside it is an error (`E0233`): the range lies in both types, which
+                // share 0 at least.
+                let both = t.range().meet(u.range())?;
+                let lo = self.value_in(both);
                 let width = Num::new(false, u128::from(self.rng.below(200)));
-                let hi = lo.add(width)?.min(t.max());
+                let hi = lo.add(width)?.min(both.hi);
                 let guard = E::bin(
                     Op::And,
                     E::bin(Op::Ge, x.clone(), E::num(lo)),
@@ -5203,7 +5329,19 @@ fn req_text(r: &Req, params: &[Param]) -> String {
     match *r {
         Req::Bound(a, op, c) => format!("{} {} {}", n(a), op.text(), c),
         Req::Order(a, op, b) => format!("{} {} {}", n(a), op.text(), n(b)),
-        Req::Sum(a, b, c) => format!("{} + {} <= {}", n(a), n(b), c),
+        Req::Sum(a, b, c) => {
+            // The sum is exact, and the literal takes its type: one past it states its own.
+            let sum = if let (Ty::Int(x), Ty::Int(y)) = (&params[a].ty, &params[b].ty) {
+                Cls::One(*x).join(Cls::One(*y))
+            } else {
+                Cls::Lit
+            };
+            let c = match suffix_beside(c, sum) {
+                Some(t) => format!("{}_{}", c, t.name),
+                None => c.to_string(),
+            };
+            format!("{} + {} <= {}", n(a), n(b), c)
+        }
         Req::Below(a, b) => format!("{} < {}.len", n(a), n(b)),
     }
 }
@@ -5707,16 +5845,34 @@ fn always_traps(
             end: String::new(),
         };
         // The run's end, a value or a trap, says nothing of the claim: what the value was
-        // before it does.
+        // before it does, where its narrowing is reached. A value is given before it is
+        // narrowed, and not always just before: a call narrows its arguments once all are
+        // evaluated, so an argument's value never reaches its narrowing when an earlier
+        // argument's traps, and the claim, which takes the earlier narrowing as a fact, says
+        // nothing of it. So a value given at the watched place counts once a narrowing whose
+        // place holds the diagnostic's narrows it, the latest given first, since a call
+        // inside a later argument may give and narrow there again.
         let values = args.iter().map(|(_, v)| v.clone()).collect();
-        let end =
-            mente_interp::call_observed(kept, name, values, limits, &mut |span: Span, x: Int| {
-                if (span.start, span.end) == watch {
-                    probe.values.push(x);
-                } else if body.contains(&span.start) && span.start <= watch.0 {
-                    probe.progress = probe.progress.max(span.start);
+        let mut given: Vec<Int> = Vec::new();
+        let end = mente_interp::call_observed(
+            kept,
+            name,
+            values,
+            limits,
+            &mut |span: Span, x: Int, why: Shown| match why {
+                Shown::Given if (span.start, span.end) == watch => given.push(x),
+                Shown::Given => {
+                    if body.contains(&span.start) && span.start <= watch.0 {
+                        probe.progress = probe.progress.max(span.start);
+                    }
                 }
-            });
+                Shown::Narrowed => {
+                    if span.start <= at.start && at.end <= span.end {
+                        probe.values.extend(given.pop());
+                    }
+                }
+            },
+        );
         probe.end = match &end {
             Ok(_) => "it returns".to_string(),
             Err(stop) => stop.to_string(),
@@ -6764,6 +6920,29 @@ mod tests {
         assert_eq!(seen[0].reached, seen[0].calls, "{:?}", seen[0]);
         // The least sum is the nearest to the type: 0 + 300.
         assert_eq!(seen[0].nearest.as_deref(), Some("300"));
+    }
+
+    /// A call narrows its arguments once all are evaluated (`core-calculus.md`, item 7), so a
+    /// claim at a later argument takes an earlier argument's narrowing as a fact, and a run
+    /// whose earlier narrowing traps never reaches the later one: the value given there is no
+    /// counterexample (seed 12741). The runs that pass the earlier narrowing reach the claim.
+    #[test]
+    fn test_a_claim_at_a_later_argument_is_checked_where_its_narrowing_is_reached() {
+        let (seen, problems) = claims(&written(
+            "fn g(x: i8, y: i8) -> i8 = y\npub fn f(p: i32) -> i8 = g(26744 - p, p)",
+        ));
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen.len(), 1, "{:?}", seen);
+        assert!(
+            seen[0].message.contains("is at least 26617"),
+            "{}",
+            seen[0].message
+        );
+        assert!(
+            seen[0].seen && 0 < seen[0].reached && seen[0].reached < seen[0].calls,
+            "{:?}",
+            seen[0]
+        );
     }
 
     /// The `E0508`s of `program` with `from` in their messages replaced by `to`: a claim

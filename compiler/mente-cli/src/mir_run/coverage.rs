@@ -280,6 +280,17 @@ const LITERALS: &[&str] = &[
     "bit operation on literals alone, of no type but i64",
 ];
 
+/// What a comparison's operands are, by what the checker's table says of its literals
+/// (`core-calculus.md`, item 5): a literal takes the type of the other operand, on the right
+/// or on the left; two expressions of literals alone are each an `i64`; and operands of two
+/// types, a suffixed literal among them, are compared exactly.
+const COMPARISONS: &[&str] = &[
+    "literal compared with an operand of a type",
+    "literal on the left of a comparison",
+    "literals alone compared",
+    "operands of two types compared",
+];
+
 /// A right shift whose amount is valid for the type and reaches past the bits its value is
 /// kept in: a value of a 128-bit type whose static range fits 64 bits, shifted by 64 or more.
 /// Native code shifts within the width of the value it is given, and must still give 0, or -1
@@ -703,6 +714,47 @@ fn reached_literals(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     }
 }
 
+/// The rows of [`COMPARISONS`] a checked function reaches.
+fn reached_comparisons(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let taken = |e: ExprId| f.typing.literals.get(e.0 as usize).copied().flatten();
+    let typed = |e: ExprId| match &f.typing.exprs[e.0 as usize] {
+        Ty::Int(Int::One(t) | Int::Mixed(Some(t))) => Some(*t),
+        _ => None,
+    };
+    for e in &f.syntax.tree.exprs {
+        let ExprKind::Binary { op, lhs, rhs } = &e.kind else {
+            continue;
+        };
+        if !matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) {
+            continue;
+        }
+        let mut reach = |name: &str| seen.insert(name.to_string());
+        match (taken(*lhs), taken(*rhs)) {
+            (Some(l), Some(r)) if l.from == From::Alone && r.from == From::Alone => {
+                reach("literals alone compared");
+            }
+            (Some(l), None) if l.from == From::Operands => {
+                reach("literal compared with an operand of a type");
+                reach("literal on the left of a comparison");
+            }
+            (None, Some(r)) if r.from == From::Operands => {
+                reach("literal compared with an operand of a type");
+            }
+            (None, None) => {
+                if let (Some(a), Some(b)) = (typed(*lhs), typed(*rhs)) {
+                    if a != b {
+                        reach("operands of two types compared");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The rows of [`TRAPS`] a checked function reaches.
 fn reached_traps(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     let tree = &f.syntax.tree;
@@ -1108,6 +1160,7 @@ fn grammar() -> BTreeSet<String> {
         RELATIONS,
         TRAPS,
         LITERALS,
+        COMPARISONS,
         SHIFTS,
         &["array of arrays"],
     ];
@@ -1158,6 +1211,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 reached_edges(f, &mut seen);
                 reached_traps(f, &mut seen);
                 reached_literals(f, &mut seen);
+                reached_comparisons(f, &mut seen);
                 reached_shifts(f, &mut seen);
                 for wrong in reached_relations(module, f, &mut seen) {
                     problems.push(format!("seed {}: {}", seed, wrong));

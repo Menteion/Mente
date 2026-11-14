@@ -31,7 +31,8 @@ fn run(src: &str, call_text: &str) -> String {
 /// A run shows its observer each integer an expression gives, exact and with the expression's
 /// text, in the order of evaluation and up to the trap that ends the run, and the value a
 /// compound assignment computes, with the assignment's text, before it is narrowed into its
-/// place; a run nobody observes gives the same result.
+/// place; a run nobody observes gives the same result. What a narrowing point narrows is
+/// shown too, and left out here.
 #[test]
 fn test_an_observer_sees_each_integer_an_expression_gives() {
     let src = "pub struct P {\n  a: u8\n}\npub fn f(x: u8, c: bool) -> u8 {\n  val y: u8 = x + 250\n  if c { y } else { 7 }\n}\npub fn g(x: u16, p: P) -> [2][1]u16 {\n  val q = P(a: p.a)\n  _ = q\n  [[x], [300]]\n}\npub fn h(x: u8) -> u8 {\n  var v: u8 = x\n  v += 250\n  v = 3\n  v\n}";
@@ -45,8 +46,10 @@ fn test_an_observer_sees_each_integer_an_expression_gives() {
             &name,
             args.clone(),
             Limits::default(),
-            &mut |span: Span, x: Int| {
-                values.push((text[span.start..span.end].to_string(), x.to_string()));
+            &mut |span: Span, x: Int, why: Shown| {
+                if why == Shown::Given {
+                    values.push((text[span.start..span.end].to_string(), x.to_string()));
+                }
             },
         );
         let result = |r: Result<(Value, Vec<Value>), Stop>| match r {
@@ -124,6 +127,71 @@ fn test_an_observer_sees_each_integer_an_expression_gives() {
             ("[300]", "300"),
             ("[[x], [300]]", "4"),
             ("[[x], [300]]", "300"),
+        ])
+    );
+}
+
+/// A run shows its observer each integer a narrowing point narrows, with the text the
+/// narrowing traps at, as it enters the type: a binding's initializer, each argument, a
+/// result and each element of an array literal. A call's arguments are all evaluated before
+/// the first is narrowed, so a later argument's value is given and never narrowed when an
+/// earlier one's narrowing traps (`core-calculus.md`, item 7). The arguments a run starts with enter at the function's name.
+#[test]
+fn test_an_observer_sees_each_integer_a_narrowing_point_narrows() {
+    let src = "fn g(x: i8, y: i8) -> i8 = y\npub fn f(a: i32) -> i8 {\n  val v: u8 = 3\n  _ = v\n  g(a + 1, a)\n}\npub fn e(a: u8) -> [2]u16 = [a, 30]";
+    let text = format!("module m\n{}\n", src);
+    let m = module(src);
+    let seen = |call_text: &str| {
+        let (name, args) = parse_call(call_text).unwrap();
+        let mut given: Vec<String> = Vec::new();
+        let mut narrowed: Vec<(String, String)> = Vec::new();
+        let _ = call_observed(
+            &m,
+            &name,
+            args,
+            Limits::default(),
+            &mut |span: Span, x: Int, why: Shown| {
+                let at = text[span.start..span.end].to_string();
+                match why {
+                    Shown::Given => given.push(at),
+                    Shown::Narrowed => narrowed.push((at, x.to_string())),
+                }
+            },
+        );
+        (given, narrowed)
+    };
+    let pairs = |all: &[(&str, &str)]| -> Vec<(String, String)> {
+        all.iter()
+            .map(|(e, v)| (e.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        seen("f(5)").1,
+        pairs(&[
+            ("f", "5"),
+            ("3", "3"),
+            ("a + 1", "6"),
+            ("a", "5"),
+            ("y", "5"),
+            ("g(a + 1, a)", "5"),
+        ])
+    );
+    // `a` is given, and its narrowing is never reached: the first argument's traps.
+    let (given, narrowed) = seen("f(200)");
+    assert!(given.iter().any(|g| g == "a + 1"), "{:?}", given);
+    assert_eq!(given.last().map(String::as_str), Some("a"), "{:?}", given);
+    assert_eq!(
+        narrowed,
+        pairs(&[("f", "200"), ("3", "3"), ("a + 1", "201")])
+    );
+    assert_eq!(
+        seen("e(7)").1,
+        pairs(&[
+            ("e", "7"),
+            ("[a, 30]", "7"),
+            ("[a, 30]", "30"),
+            ("[a, 30]", "7"),
+            ("[a, 30]", "30"),
         ])
     );
 }
@@ -353,7 +421,22 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
             "f()",
             "-4",
         ),
-        ("pub fn f(a: u8) -> bool = a == ~3", "f(252)", "false"),
+        // A comparison gives a literal the other operand's type: `~3` is 252 beside a `u8`,
+        // on either side, and literals alone compared are `i64`s.
+        ("pub fn f(a: u8) -> bool = a == ~3", "f(252)", "true"),
+        ("pub fn f(a: u8) -> bool = a == ~3", "f(4)", "false"),
+        ("pub fn f(a: u8) -> bool = ~3 != a", "f(252)", "false"),
+        ("pub fn f(a: u8) -> bool = a < ~3", "f(251)", "true"),
+        ("pub fn f(a: u8) -> bool = ~3 <= a", "f(252)", "true"),
+        ("pub fn f(a: u8) -> bool = a > ~3", "f(252)", "false"),
+        ("pub fn f(a: u8) -> bool = ~3 >= a", "f(253)", "false"),
+        ("pub fn f(a: i8) -> bool = a == ~3", "f(-4)", "true"),
+        ("pub fn f() -> bool = ~3 == -4", "f()", "true"),
+        (
+            "pub fn f(a: u8, b: u32) -> bool = a == b + 1",
+            "f(255, 254)",
+            "true",
+        ),
         (
             "pub fn f(xs: [8]u8) -> u8 = xs[~3 & 7]",
             "f([1, 2, 3, 4, 5, 6, 7, 8])",

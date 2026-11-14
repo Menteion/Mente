@@ -281,14 +281,27 @@ pub fn call_leaving(
 }
 
 /// What a run shows of its values: each integer an expression gives, an array's elements
-/// included, with the expression's span, as it is evaluated; and the value a compound
-/// assignment computes, `x op e`, which no expression gives, with the span of the assignment.
-pub type Observer<'a> = &'a mut (dyn FnMut(Span, Int) + Send);
+/// included, with the expression's span, as it is evaluated; the value a compound assignment
+/// computes, `x op e`, which no expression gives, with the span of the assignment; and each
+/// integer a narrowing point narrows, with the span the narrowing traps at, as it enters the
+/// type and before it is checked there ([`Shown`]).
+pub type Observer<'a> = &'a mut (dyn FnMut(Span, Int, Shown) + Send);
+
+/// Why a run shows its observer an integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// An expression gave it, or a compound assignment computed it.
+    Given,
+    /// A narrowing point narrows it (`core-calculus.md`, item 4). A value is not always
+    /// narrowed as soon as it is given: a call's arguments are all evaluated before the first
+    /// is narrowed, so a later argument's value may never reach its narrowing.
+    Narrowed,
+}
 
 /// Calls the function `name` like [`call_leaving`], showing `seen` each integer an expression
-/// gives, exact, before it is narrowed anywhere, in the order of evaluation and up to the trap
-/// that ends the run. A claim about the values an expression takes, such as Tier 1's that a
-/// narrowing always traps (`E0508`), is checked against them.
+/// gives, exact, before it is narrowed anywhere, and each integer a narrowing point narrows,
+/// in the order of the run and up to the trap that ends it. A claim about the values a
+/// narrowing takes, such as Tier 1's that it always traps (`E0508`), is checked against them.
 pub fn call_observed<'m>(
     module: &'m CheckedModule,
     name: &str,

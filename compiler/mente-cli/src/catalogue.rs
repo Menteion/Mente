@@ -873,6 +873,25 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 = match c {\n  Cell.Held(n: n) => {\n    c = Cell.Empty\n    n\n  }\n  Cell.Empty => 0\n}\n",
         "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 {\n  val k = match c {\n    Cell.Held(n: n) => n\n    Cell.Empty => 0\n  }\n  c = Cell.Empty\n  k\n}\n",
     ),
+    emitted(
+        "E0233",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A compared literal outside the type it takes",
+        "A literal takes the type of the other operand of the operation it stands in, a \
+         comparison included, and literals alone are an `i64`. A comparison compares a literal \
+         operand in that type, and one whose value lies outside it is an error: with `a: u8`, \
+         `a == 300` would be always false and `a < 256` always true, and `a + b <= 300` for \
+         two `u8`s is an error too, though the exact sum may reach 510. Beside an operand that \
+         stays in its type, as a name does, an ordering is spelled in range, `a <= 255`, which \
+         says the same over the type and is machine-applicable; an equality, or an ordering \
+         beside an operand that may leave its type, states the literal's type, `a == 300_u16` \
+         or `a + b <= 300_u16`, so that it is compared exactly, as two operands of different \
+         types are. A literal under arithmetic stands, since arithmetic is exact: `a + 300` is \
+         no error.",
+        "module m\npub fn f(a: u8) -> bool = a < 256\n",
+        "module m\npub fn f(a: u8) -> bool = a <= 255\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

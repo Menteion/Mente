@@ -1,0 +1,50 @@
+// expect: E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233
+module conformance
+// A comparison compares a literal operand in the type it takes from the other operand
+// (core-calculus.md, item 5), so a literal whose value lies outside that type would make the
+// comparison constant: each is an error, in a condition, a `guard`, a loop and a contract
+// clause alike.
+pub fn equal(a: u8) -> bool = a == 300
+
+pub fn equal_to_a_negative(a: u8) -> bool = a == -1
+
+pub fn below(a: u8) -> bool = a < 256
+
+pub fn on_the_left(a: u8) -> bool = 256 > a
+
+pub fn above(a: u8) -> bool = a > -1
+
+pub fn sum_of_literals(a: u8) -> bool = a == 200 + 100
+
+// The literal takes the type of `a + 1`, a `u8`.
+pub fn beside_an_expression(a: u8) -> bool = a + 1 == 300
+
+pub fn past_i128(a: i128) -> bool = a == 170141183460469231731687303715884105728
+
+pub fn below_u128(a: u128) -> bool = a == -1
+
+pub fn past_usize(a: usize) -> bool = a < 18446744073709551616
+
+// Two expressions of literals alone are each an `i64`.
+pub fn both_literals() -> bool = 3 == 9223372036854775808
+
+pub fn in_a_guard(a: u8) -> u8 {
+  guard a != 300 else {
+    return 1
+  }
+  0
+}
+
+pub fn in_a_loop(a: u8) -> u8 {
+  var i: u8 = a
+  while i < 300 and i < 10
+    decreases 10 - i
+  {
+    i += 1
+  }
+  i
+}
+
+pub fn in_a_clause(a: u8) -> u8
+  requires a < 256
+= a
