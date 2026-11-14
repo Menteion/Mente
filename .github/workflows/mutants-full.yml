@@ -57,6 +57,13 @@ jobs:
         run: bash .github/scripts/install-nextest.sh
       - name: Record the tools, before any code of the change runs
         run: /usr/bin/bash .github/scripts/tools.sh record
+      - name: The sandbox the code of the change runs in, proven before any of it runs
+        # As in mutants.yml: every test executable runs apart from cargo-mutants, nextest and what
+        # they write (.github/scripts/test-sandbox.sh).
+        run: |
+          /usr/bin/bash .github/scripts/test-sandbox.sh setup
+          /usr/bin/bash .github/scripts/test-sandbox.sh check
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: Run the tests once without a mutant
         # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
         # runs the whole workspace's tests, so the timeout it set from that baseline was often
@@ -70,6 +77,7 @@ jobs:
           { echo "## Slowest tests without a mutant"; echo '```text'
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Mutate this shard of the compiler
         env:
@@ -102,6 +110,10 @@ jobs:
             echo "::error::mutants are counted caught or unviable without a failed test or a failed build in their logs"
             failed=1
           fi
+          # Every mutant caught had a test fail, and that test ran in the sandbox.
+          caught=$(cat mutants.out/caught.txt 2>/dev/null | grep -c . || true)
+          case "$caught" in ''|*[!0-9]*) echo "::error::the mutants caught is not a count: '$caught'"; exit 1 ;; esac
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
           /usr/bin/bash .github/scripts/tools.sh verify
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

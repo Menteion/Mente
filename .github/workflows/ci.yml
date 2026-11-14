@@ -64,6 +64,17 @@ jobs:
         # runs or set its path or environment; each checks the tools at its end
         # (.github/scripts/tools.sh).
         run: /usr/bin/bash .github/scripts/tools.sh record
+      - name: The sandbox the code of the change runs in, proven before any of it runs
+        # On Linux every test executable, and every binary `cargo run` starts, runs as a user of
+        # its own in a root that holds the workspace read-only and none of the tools, with no
+        # network and no sight of another process, so that it cannot fake the steps that judge it.
+        # The canary tries each route as the runner's user, where it must be open, and in the
+        # sandbox, where it must be closed (.github/scripts/test-sandbox.sh). Windows has no
+        # sandbox yet (docs/design-review.md, untrusted-test-isolation).
+        run: |
+          /usr/bin/bash .github/scripts/test-sandbox.sh setup
+          /usr/bin/bash .github/scripts/test-sandbox.sh check
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: Build the tests
         run: |
           cargo test --locked --workspace --no-run
@@ -76,6 +87,7 @@ jobs:
           . .github/scripts/limits.sh
           cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
           node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Tests, through nextest under the ci profile's limits
         # Each test runs in a process of its own under the time limits of .config/nextest.toml: a
@@ -84,9 +96,11 @@ jobs:
         # mutation runs share: a test that allocates without end fails instead of taking the
         # runner down. The tests were built above, outside the limits. nextest runs as its own
         # binary, which install-nextest.sh checked, not through cargo, where an alias could stand in.
+        # On Linux each test runs in the sandbox, and the step fails if none did.
         run: |
           . .github/scripts/limits.sh
           cargo-nextest nextest run --locked --workspace --profile ci
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: No doctests
         # nextest runs no doctests, and `cargo test --doc` has no limit for one: rustdoc lists
@@ -103,21 +117,25 @@ jobs:
         run: |
           . .github/scripts/limits.sh
           cargo test --locked -p mente-cli --test gates
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn spec
         run: |
           . .github/scripts/limits.sh
           cargo run --locked --bin mn -- spec
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn test --mutate
         run: |
           . .github/scripts/limits.sh
           cargo run --locked --bin mn -- test --mutate
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn view --spec
         run: |
           . .github/scripts/limits.sh
           cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
 
   coverage:

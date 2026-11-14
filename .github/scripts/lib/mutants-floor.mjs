@@ -31,8 +31,9 @@
 // left in its place that exits at once. It does not stop code of the change that sets out to
 // defeat it, which runs with the job's rights: a stub that prints a failing test and exits as
 // nextest does, logs or outcomes rewritten after the run, or this script rewritten before it runs.
-// Against that, the guard is the review of the change, until its code runs isolated from the
-// trusted steps (docs/design-review.md, untrusted-test-isolation).
+// Against that, the mutation runs' tests run in a sandbox, on Linux, where every mutation run is:
+// cargo-mutants and nextest write the outcomes and the logs outside it, where no test can
+// (.github/scripts/test-sandbox.sh; docs/design-review.md, untrusted-test-isolation).
 
 import fs from "node:fs";
 

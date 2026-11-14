@@ -62,6 +62,17 @@ jobs:
         # The steps after it run the change's tests, which could replace a tool the next step
         # runs; each checks the tools at its end (.github/scripts/tools.sh).
         run: /usr/bin/bash .github/scripts/tools.sh record
+      - name: The sandbox the code of the change runs in, proven before any of it runs
+        if: steps.watch.outputs.run != 'false'
+        # Every test executable of the baseline and of each mutant runs as a user of its own in a
+        # root that holds the workspace read-only and none of the tools, with no network and no
+        # sight of another process: cargo-mutants and nextest, and the outcomes and logs they
+        # write, are out of its reach. The canary proves it on this runner
+        # (.github/scripts/test-sandbox.sh).
+        run: |
+          /usr/bin/bash .github/scripts/test-sandbox.sh setup
+          /usr/bin/bash .github/scripts/test-sandbox.sh check
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: The diff and the lists the floor reads, before any code of the change runs
         if: steps.watch.outputs.run != 'false'
         env:
@@ -107,6 +118,7 @@ jobs:
           { echo "## Slowest tests without a mutant"; echo '```text'
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Mutate the lines this pull request changes
         if: steps.watch.outputs.run != 'false'
@@ -191,6 +203,10 @@ jobs:
               failed=1
             fi
           fi
+          # Every mutant caught had a test fail, and that test ran in the sandbox.
+          caught=$(cat mutants.out/caught.txt deleted/mutants.out/caught.txt 2>/dev/null | grep -c . || true)
+          count "$caught" "the mutants caught"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
           /usr/bin/bash .github/scripts/tools.sh verify
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

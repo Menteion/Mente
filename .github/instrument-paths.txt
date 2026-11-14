@@ -31,6 +31,8 @@ rust-toolchain.toml
 .github/scripts/limits.sh
 .github/scripts/memory-guard.sh
 .github/scripts/tools.sh
+# The sandbox its tests run in.
+.github/scripts/test-sandbox.sh
 # The floor of work the job checks.
 .github/scripts/mutants-floor.mjs
 .github/scripts/lib/mutants-floor.mjs

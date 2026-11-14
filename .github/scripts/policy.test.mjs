@@ -18,6 +18,8 @@
 //   runs on `pull_request_target` or `workflow_run`, no `run:` script and no `script:` input holds
 //   an expression, overflow checks stay on in every build, and a measured benchmark run proves its
 //   sandbox before any agent code runs.
+// - On Linux the testing jobs set up and prove the sandbox the code of a change runs in before any
+//   of it runs, and every step that runs it checks that it ran there.
 // - Every milestone ROADMAP.md marks done on the base has its tag, and every instrument
 //   docs/design-brief.md section 7.7 schedules for a finished milestone has its checks required.
 
@@ -43,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 52;
+const FLOOR = 53;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -576,23 +578,25 @@ export function jobDigest(doc, job) {
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
 const PINNED_FILES = new Map([
-  [".github/scripts/limits.sh", "ac31047e639bbd2d2777c8bcc44fbce038ed40407dbf45d484ee5018ab7468aa"],
-  [".github/scripts/memory-guard.sh", "2803d3fdd012923cd6c276c23db0af506596193b42b332903f5b4127f67fcfc1"],
+  [".github/scripts/limits.sh", "550ede6b38c53a5b7ac2ddfa07e9a6ae27953c1c95249689be842546413c8046"],
+  [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
-  [".github/scripts/tools.sh", "56b749faa873ee690ebdc2ea0c14223aecbf016af10957f96697e2fe5c4448d0"],
+  [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
+  [".github/scripts/test-sandbox.sh", "155098da067472218bd550c888ecca9fb2e3481ce66065880a0ec76c92f1ce33"],
 ]);
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "7be20495b5948c94fc565601cbb78d03c7e101d2a53bf200881b7d9b5c84ec68"],
-  ["mutants.yml#in-diff", "f94088be2f2995f9ba495dba6ff5034d7195da6cf065a52a7a1fa0b1d07e3f61"],
-  ["mutants-full.yml#full", "c797756d65bd634b69a294a75eec9ec4d6b1b4638805decb9878905c02317d32"],
+  ["ci.yml#rust", "83af07e0452ecc08842f7c6f818590a9d7031bcb509773481e0927b6d93993f4"],
+  ["mutants.yml#in-diff", "ca03856ca0426b5f5b501ce0b675af2492ffd6cb9a64669a5016fe3c8e953a84"],
+  ["mutants-full.yml#full", "3fe0f4f40450abfe126af5927face322ce385a4ee769dfb41af7f2a834b8666d"],
 ]);
 /// The step of the required Rust jobs that runs the tests: the shared limits first, then nextest's
 /// own binary under the ci profile, with nothing after either that could filter, retry or forgive a
-/// failure, and nothing on the step but its name and this script.
-const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/tools.sh verify\n";
+/// failure, then the check that the tests ran in the sandbox, and nothing on the step but its name
+/// and this script.
+const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/test-sandbox.sh ran\n/usr/bin/bash .github/scripts/tools.sh verify\n";
 
 /// The shell and PowerShell scripts under .github/scripts a text names by path.
 const namedScripts = (text) => [...String(text).matchAll(/\.github\/scripts\/[\w./-]+\.(?:sh|ps1)\b/g)].map((m) => m[0]);
@@ -784,6 +788,102 @@ check("tools.sh finds a tool replaced or added, and a step that sets the next on
   }
 });
 
+/// The step that sets up the sandbox the code of a change runs in on Linux, and proves it on that
+/// runner with the canary, in every testing job: exactly this, with the check of the tools after
+/// the canary, whose probe makes and removes a file among them as the runner's user.
+const SANDBOX_STEP = "/usr/bin/bash .github/scripts/test-sandbox.sh setup\n/usr/bin/bash .github/scripts/test-sandbox.sh check\n/usr/bin/bash .github/scripts/tools.sh verify\n";
+/// What a step that ran code of the change ends with, before the check of the tools: at least one
+/// command ran in the sandbox, or, after cargo-mutants, at least one for each mutant caught.
+const RAN = "/usr/bin/bash .github/scripts/test-sandbox.sh ran";
+/// Whether a line of a step runs code of the change: tests through nextest or cargo, nextest's
+/// list, which runs every test executable, a binary through `cargo run`, mutants. A build
+/// (`--no-run`) and a list of mutants or of doctests run none.
+const runsCode = (line) => /^(cargo-nextest nextest (run|list)\b|cargo nextest run\b|cargo run\b|cargo mutants (?!.*--list)|cargo test (?!.*(--no-run|--doc\b.*--list)))/.test(line);
+
+check("on Linux the testing jobs prove the tests' sandbox first, and every step that runs code of the change ran it there", () => {
+  for (const key of PINNED_JOBS.keys()) {
+    const [file, id] = key.split("#");
+    const w = workflows().find((x) => x.file === file);
+    const all = steps(w.doc.jobs[id]);
+    // Right after the tools are recorded: before the tests are built, and so before any runs.
+    const record = all.findIndex((s) => String(s.run ?? "").trim() === "/usr/bin/bash .github/scripts/tools.sh record");
+    const sandbox = all[record + 1];
+    assert.ok(record >= 0 && sandbox?.run === SANDBOX_STEP, `${key}: the step after the record of the tools does not set up and prove the sandbox as SANDBOX_STEP in .github/scripts/policy.test.mjs reads it`);
+    assert.deepEqual(Object.keys(sandbox).filter((k) => k !== "if").sort(), ["name", "run"], `${stepKey(file, id, sandbox)} carries more than its name, its script and the watch's condition`);
+    let running = 0;
+    for (const [k, s] of all.entries()) {
+      if (typeof s.run !== "string") continue;
+      const lines = logicalLines(s.run).map((l) => l.trim());
+      const runs = lines.flatMap((l, at) => (runsCode(l) ? [at] : []));
+      if (runs.length === 0) continue;
+      running++;
+      const where = stepKey(file, id, s);
+      assert.ok(k > record + 1, `${where} runs code of the change before the sandbox is set up and proven`);
+      // The limits name the sandbox as cargo's runner, and start the count of what ran in it.
+      const source = lines.indexOf(". .github/scripts/limits.sh");
+      assert.ok(source >= 0 && source < runs[0], `${where} runs code of the change before it sources limits.sh, and so outside the sandbox: ${lines[runs[0]]}`);
+      const mutants = lines.some((l) => /^cargo mutants (?!.*--list)/.test(l));
+      const ran = lines.flatMap((l, at) => (l === RAN || l.startsWith(`${RAN} `) ? [at] : []));
+      assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${where} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
+      assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${where} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
+    }
+    assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
+  }
+  for (const [line, runs] of [
+    ["cargo-nextest nextest run --locked --workspace --profile ci", true],
+    ["cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > x", true],
+    ["cargo nextest run --workspace 2>&1 | tee baseline.log", true],
+    ["cargo test --locked -p mente-cli --test gates", true],
+    ["cargo run --locked --bin mn -- spec", true],
+    ['cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place || status=$?', true],
+    ["cargo test --locked --workspace --no-run", false],
+    ["cargo test --locked --workspace --doc -- --list > x 2>&1", false],
+    ["cargo mutants --in-diff pr.diff --list --json > diff-mutants.json", false],
+    ["cargo fmt --all --check", false],
+  ]) {
+    assert.equal(runsCode(line), runs, line);
+  }
+  // limits.sh, which every such step sources, takes cargo's runner from the sandbox's script, and
+  // stops when there is no sandbox.
+  assert.match(
+    read(".github/scripts/limits.sh").replace(/\r\n/g, "\n"),
+    /\n    if ! limits_sandbox=\$\(\/usr\/bin\/bash \.github\/scripts\/test-sandbox\.sh env\); then\n      echo "\$limits_sandbox"\n      exit 1\n    fi\n    eval "\$limits_sandbox"\n/,
+    "limits.sh does not take cargo's runner from test-sandbox.sh env on Linux, or goes on without it",
+  );
+  // What the script does on any machine: it names no runner where no sandbox is set up, it fails a
+  // step whose tools ran nothing in the sandbox, and it refuses a command it could not hand over
+  // whole. The sandbox itself is proven where it runs, by the canary.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "test-sandbox-"));
+  try {
+    const run = (args, os_, temp = dir) => {
+      const env = { ...process.env, RUNNER_OS: os_, RUNNER_TEMP: temp.replace(/\\/g, "/") };
+      const r = spawnSync(bashPath(), [".github/scripts/test-sandbox.sh", ...args], { cwd: ROOT, encoding: "utf8", env, timeout: 30000 });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    const unset = run(["env"], "Linux");
+    assert.equal(unset.status, 1, `test-sandbox.sh env names a runner with no sandbox set up: ${unset.out}`);
+    assert.match(unset.out, /::error::the sandbox is not set up/);
+    assert.doesNotMatch(unset.out, /RUNNER=/, "test-sandbox.sh env names a runner with no sandbox set up");
+    assert.deepEqual(run(["env"], "Windows"), { status: 0, out: "" }, "test-sandbox.sh env names a runner on Windows, which has no sandbox");
+    assert.match(run(["ran"], "Linux").out, /::error::no record of the commands that ran in the sandbox/);
+    const log = path.join(dir, "test-sandbox-runs.log");
+    fs.writeFileSync(log, "");
+    assert.equal(run(["ran"], "Linux").status, 1, "a step whose tools ran nothing in the sandbox passes");
+    assert.equal(run(["ran", "0"], "Linux").status, 0);
+    fs.writeFileSync(log, "target/debug/deps/a\ntarget/debug/deps/b\n");
+    assert.equal(run(["ran"], "Linux").status, 0, `two commands in the sandbox are refused: ${run(["ran"], "Linux").out}`);
+    assert.equal(run(["ran", "2"], "Linux").status, 0);
+    assert.equal(run(["ran", "3"], "Linux").status, 1, "fewer commands in the sandbox than mutants caught passes");
+    assert.equal(run(["ran", "many"], "Linux").status, 1, "a count that is no number passes");
+    assert.equal(run(["ran"], "Windows", path.join(dir, "none")).status, 0, "Windows, which has no sandbox, fails the check that a command ran in it");
+    assert.equal(run(["run", "A=b"], "Linux").status, 2, "a command that env would read as a variable is handed over");
+    assert.equal(run(["run"], "Linux").status, 2);
+    assert.equal(run(["nothing"], "Linux").status, 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 check("no required job restores a cache, and no job caches nextest", () => {
   // Another job of the same pull request, pinned or not, can save any entry under any key in the
   // pull request's scope, and a later run restores it.
@@ -960,12 +1060,21 @@ check("the memory guard goes on when the process it would stop is already gone",
     // No clock decides: the guard either goes on through all five, and the subshell says so after
     // it, or stops at the first failed `kill`.
     const ROUNDS = 5;
-    const script = `rounds=0; sleep() { rounds=$((rounds + 1)); [ "$rounds" -le ${ROUNDS} ]; }; ps() { echo "999999 1"; }; (. .github/scripts/memory-guard.sh "$1"; echo "the guard went on through $((rounds - 1)) rounds")`;
+    // `sudo` stands in too, and says what it was asked: the guard stops through it a process of
+    // the sandbox's user, which the runner's user cannot stop, and no other.
+    const guard = (owner) =>
+      `rounds=0; sleep() { rounds=$((rounds + 1)); [ "$rounds" -le ${ROUNDS} ]; }; ps() { case "$*" in *uid=*) echo " ${owner}" ;; *) echo "999999 1" ;; esac; }; sudo() { echo "sudo $*"; }; (. .github/scripts/memory-guard.sh "$1"; echo "the guard went on through $((rounds - 1)) rounds")`;
+    const script = guard("1001");
     const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", script, "guard", meminfo.replace(/\\/g, "/")], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
     const rounds = (String(r.stdout).match(/^memory guard: 1 MB available, stopping /gm) ?? []).length;
     assert.equal(rounds, ROUNDS, `the guard stopped after ${rounds} of ${ROUNDS} rounds: ${r.error ?? ""}${r.stdout}${r.stderr}`);
     assert.match(String(r.stdout), new RegExp(`^the guard went on through ${ROUNDS} rounds$`, "m"), `the guard did not go on after its rounds: ${r.stdout}${r.stderr}`);
     assert.equal(r.status, 0, `the guard's shell failed: ${r.error ?? ""}${r.stderr}`);
+    assert.doesNotMatch(String(r.stdout), /^sudo /m, "the guard stops through sudo a process that is not the sandbox's");
+    const uid = spawnSync(bashPath(), [".github/scripts/test-sandbox.sh", "uid"], { cwd: ROOT, encoding: "utf8", timeout: 30000 }).stdout.trim();
+    assert.match(uid, /^\d+$/, "test-sandbox.sh names no user for the tests");
+    const s = spawnSync(bashPath(), ["-eo", "pipefail", "-c", guard(uid), "guard", meminfo.replace(/\\/g, "/")], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
+    assert.equal((String(s.stdout).match(/^sudo -n kill -9 999999$/gm) ?? []).length, ROUNDS, `the guard does not stop a process of the sandbox's user through sudo: ${s.error ?? ""}${s.stdout}${s.stderr}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -15,6 +15,9 @@ ci.yml#rust: cargo-nextest nextest run --locked --workspace --profile ci
 ci.yml#rust: cargo test --locked --workspace --doc -- --list > "$RUNNER_TEMP/doctests.txt" 2>&1
 ci.yml#rust: node .github/scripts/test-list.mjs doctests "$RUNNER_TEMP/doctests.txt"
 ci.yml#rust: /usr/bin/bash .github/scripts/tools.sh record
+ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh check
+ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 ci.yml#rust: cargo test --locked -p mente-cli --test gates
 ci.yml#rust: cargo run --locked --bin mn -- spec
 ci.yml#rust: cargo run --locked --bin mn -- test --mutate
@@ -36,6 +39,10 @@ ci.yml#docs: npm run test:harness
 
 commits.yml#commits: node .github/scripts/commits.mjs
 
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh check
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
 mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs evidence mutants.out deleted/mutants.out > evidence.txt
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
