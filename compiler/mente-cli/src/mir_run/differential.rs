@@ -390,7 +390,7 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 /// `f` on every item, on as many threads as the machine has, the results in order.
-fn parallel<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync) -> Vec<U> {
+pub(super) fn parallel<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync) -> Vec<U> {
     let workers = std::thread::available_parallelism()
         .map_or(2, |n| n.get())
         .min(items.len().max(1));
@@ -701,43 +701,41 @@ mod tests {
     /// and together they reach what each mode adds.
     #[test]
     fn test_generated_programs_are_well_typed_and_replayable() {
-        let mut proven = 0;
-        let mut again = 0;
-        let mut text = BTreeMap::<&str, String>::new();
-        for seed in 0..90 {
+        // Each seed on its own, on as many threads as the machine has: the program that checks,
+        // what Tier 1 proves of it, and whether the same text comes of the seed again.
+        let programs = parallel((0..90).collect(), |seed| {
             let c = generate::checked(seed);
-            let p = &c.program;
-            assert_eq!(
-                generate::program(seed).text,
-                generate::program(seed).text,
-                "seed {}",
-                seed
-            );
+            let first = generate::program(seed).text;
+            assert_eq!(first, generate::program(seed).text, "seed {}", seed);
             // A program with a function generated again is the same one the next time too.
-            if !c.regenerated.is_empty() && again < 3 {
-                again += 1;
-                assert_eq!(
-                    p.text,
-                    generate::checked(seed).program.text,
-                    "seed {}",
-                    seed
-                );
-                assert_ne!(p.text, generate::program(seed).text, "seed {}", seed);
+            let again = !c.regenerated.is_empty();
+            if again {
+                let text = &c.program.text;
+                assert_eq!(*text, generate::checked(seed).program.text, "seed {}", seed);
+                assert_ne!(*text, first, "seed {}", seed);
             }
             assert!(c.problems.is_empty(), "seed {}: {:?}", seed, c.problems);
             let Some(m) = &c.module else {
                 panic!("seed {} does not check", seed);
             };
-            proven += m
+            let proven = m
                 .functions
                 .iter()
                 .flatten()
                 .flat_map(|f| &f.obligations)
                 .filter(|o| o.proven)
                 .count();
+            (c.program, proven, again)
+        });
+        let mut proven = 0;
+        let mut again = 0;
+        let mut text = BTreeMap::<&str, String>::new();
+        for (p, proved, regenerated) in programs {
+            proven += proved;
+            again += usize::from(regenerated);
             text.entry(group(p.mode)).or_default().push_str(&p.text);
         }
-        assert_eq!(again, 3, "no function of these seeds is generated again");
+        assert!(again > 0, "no function of these seeds is generated again");
         assert!(proven >= 100, "Tier 1 proves only {} obligations", proven);
         for word in [
             "while ", "guard ", "break", "continue", "mut ", "if ", "[", "<<", "%",

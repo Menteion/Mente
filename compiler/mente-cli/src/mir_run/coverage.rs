@@ -8,7 +8,7 @@
 //! which the same macro writes, makes the test require that generated programs reach it, or
 //! that [`NOT_GENERATED`] give the reason they cannot.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mente_sema::check;
 use mente_sema::types::INT_TYPES;
@@ -783,19 +783,20 @@ fn grammar() -> BTreeSet<String> {
 /// Every generated program passes every check, so that the three paths run it and none is left
 /// out unseen: nothing refuses one but a narrowing Tier 1 proves always traps (`E0508`), whose
 /// function is generated again once the reference interpreter has run the claim
-/// ([`generate::checked`]), at most [`MAX_REGENERATED`] times over these seeds. Together the
-/// programs reach every construct of M1's grammar but those [`NOT_GENERATED`] names, and those
-/// never.
+/// ([`generate::checked`]), at most [`MAX_REGENERATED`] times over these seeds. At least
+/// [`MIN_SEEDS_PER_ROW`] of the programs reach each construct of M1's grammar but those
+/// [`NOT_GENERATED`] names, which none reaches.
 #[test]
 fn test_generated_programs_reach_every_construct_of_the_grammar() {
     let grammar = grammar();
-    let mut seen = BTreeSet::new();
+    // The seeds whose program reaches each construct.
+    let mut seeds: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut problems = Vec::new();
     let mut regenerated = Vec::new();
-    for seed in 0..SEEDS {
+    // Each seed's program is checked on its own, on as many threads as the machine has.
+    let programs = super::differential::parallel((0..SEEDS).collect(), |seed| {
         let c = generate::checked(seed);
-        problems.extend(c.problems);
-        regenerated.extend(c.regenerated.into_iter().map(|r| (seed, r)));
+        let mut seen = BTreeSet::new();
         if c.module.is_some() {
             let text = &c.program.text;
             functions(text).iter().for_each(|f| reached(f, &mut seen));
@@ -803,6 +804,14 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
             enums(text).iter().for_each(|e| reached_enum(e, &mut seen));
+        }
+        (seed, seen, c.regenerated, c.problems)
+    });
+    for (seed, seen, again, wrong) in programs {
+        problems.extend(wrong);
+        regenerated.extend(again.into_iter().map(|r| (seed, r)));
+        for name in seen {
+            seeds.entry(name).or_default().push(seed);
         }
     }
     assert!(
@@ -825,37 +834,62 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
         MAX_REGENERATED,
         regenerated
             .iter()
-            .map(|(seed, r)| format!("seed {} {} {}:{}", seed, r.function, r.line, r.col))
+            .map(|(seed, r)| format!(
+                "seed {} {} {}:{}: {}",
+                seed, r.function, r.line, r.col, r.message
+            ))
             .collect::<Vec<_>>()
     );
-    for name in &seen {
+    for name in seeds.keys() {
         assert!(grammar.contains(name), "`{}` is not in the grammar", name);
     }
     for (name, reason) in NOT_GENERATED {
         assert!(grammar.contains(*name), "`{}` is not in the grammar", name);
         assert!(
-            !seen.contains(*name),
+            !seeds.contains_key(*name),
             "`{}` is generated now, though excluded because {}",
             name,
             reason
         );
     }
-    let missing: Vec<&String> = grammar
+    let mut least: Vec<(usize, &String)> = seeds.iter().map(|(n, s)| (s.len(), n)).collect();
+    least.sort();
+    println!(
+        "the constructs the fewest programs reach: {}",
+        least
+            .iter()
+            .take(8)
+            .map(|(count, name)| format!("`{}` {}", name, count))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // A construct one or two programs hold is lost by any change to the generator's choices,
+    // so each is asked of a few.
+    let few: Vec<String> = grammar
         .iter()
-        .filter(|n| !seen.contains(*n) && NOT_GENERATED.iter().all(|(x, _)| x != n))
+        .filter(|n| NOT_GENERATED.iter().all(|(x, _)| x != n))
+        .filter_map(|n| {
+            let reach = seeds.get(n).map_or(&[][..], |s| s.as_slice());
+            (reach.len() < MIN_SEEDS_PER_ROW).then(|| format!("`{}` in seeds {:?}", n, reach))
+        })
         .collect();
     assert!(
-        missing.is_empty(),
-        "no checked program of seeds 0 to {} reaches {:?}",
+        few.is_empty(),
+        "fewer than {} of the programs of seeds 0 to {} reach each of these:\n{}",
+        MIN_SEEDS_PER_ROW,
         SEEDS - 1,
-        missing
+        few.join("\n")
     );
 }
 
 /// The seeds the test reads: the first programs of each mode.
 const SEEDS: u64 = 300;
 
+/// How many of those seeds' programs must reach each construct: a construct that hangs on one
+/// program or two is lost by any change to what the generator chooses at random.
+const MIN_SEEDS_PER_ROW: usize = 3;
+
 /// The most functions the programs of those seeds have generated again for a narrowing Tier 1
 /// proves always traps (`E0508`). A generator that writes more of them than this has lost what it
 /// knows of the values it narrows.
-const MAX_REGENERATED: usize = 60;
+const MAX_REGENERATED: usize = 40;

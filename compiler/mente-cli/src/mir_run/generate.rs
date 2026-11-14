@@ -195,6 +195,12 @@ impl R {
         self.lo <= o.hi && o.lo <= self.hi
     }
 
+    /// The values of both ranges, when there are any.
+    fn meet(self, o: R) -> Option<R> {
+        let (lo, hi) = (self.lo.max(o.lo), self.hi.min(o.hi));
+        (lo <= hi).then_some(R { lo, hi })
+    }
+
     fn holds(self, n: Num) -> bool {
         self.lo <= n && n <= self.hi
     }
@@ -355,6 +361,63 @@ impl fmt::Display for Ty {
             Ty::Array(n, e) => write!(f, "[{}]{}", n, e),
             Ty::Struct(name) | Ty::Enum(name) => write!(f, "{}", name),
         }
+    }
+}
+
+/// The value of an integer literal as the generator writes one: decimal, `0x` or `0b`, with
+/// `_` between digits and a type's suffix or none.
+fn literal_value(text: &str) -> Option<Num> {
+    let digits = match text.rsplit_once('_') {
+        Some((digits, suffix)) if INTS.iter().any(|t| t.name == suffix) => digits,
+        _ => text,
+    };
+    let digits = digits.replace('_', "");
+    let mag = if let Some(hex) = digits.strip_prefix("0x") {
+        u128::from_str_radix(hex, 16).ok()?
+    } else if let Some(bin) = digits.strip_prefix("0b") {
+        u128::from_str_radix(bin, 2).ok()?
+    } else {
+        digits.parse().ok()?
+    };
+    Some(Num::new(false, mag))
+}
+
+/// Whether `e` reads a name a pattern binds, which the generator calls `q` and a number.
+fn reads_pattern(e: &E) -> bool {
+    names(e, &|n| {
+        n.strip_prefix('q')
+            .is_some_and(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
+/// Whether `e` reads a name that `is` holds of.
+fn names(e: &E, is: &dyn Fn(&str) -> bool) -> bool {
+    let sub = |x: &E| names(x, is);
+    match e {
+        E::Name(n) => is(n),
+        E::Lit(_) | E::Builtin(..) => false,
+        E::Index(a, b) | E::Bin(_, a, b) => sub(a) || sub(b),
+        E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
+            sub(x)
+        }
+        E::Construct(_, fields) | E::Variant(_, _, fields) => fields.iter().any(|(_, x)| sub(x)),
+        E::Call(_, args) => args.iter().any(|(_, x)| sub(x)),
+        E::If(c, a, b) => sub(c) || sub(a) || sub(b),
+        E::Array(items) => items.iter().any(sub),
+        E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
+        E::Return(x) => sub(x),
+    }
+}
+
+/// The integer `e` is, when it is a literal or one negated.
+fn constant(e: &E) -> Option<Num> {
+    match e {
+        E::Lit(text) => literal_value(text),
+        E::Neg(x) => match &**x {
+            E::Lit(text) => literal_value(text).map(Num::negated),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -833,6 +896,11 @@ struct Binding {
     kind: Kind,
     /// A refinement with literal bounds, which is the range Tier 1 and `E0222` take for it.
     range: Option<R>,
+    /// What a run can know of an integer's value where generation stands, as Tier 1 follows
+    /// it: its initializer's range, an assignment's, and what a `guard` or a loop leaves of
+    /// it. None for no more than its type and refinement say. Only what a narrowing may take
+    /// reads it ([`Gen::fact`]): nothing that must be proven rests on it.
+    known: Option<R>,
     read: bool,
     assigned: bool,
 }
@@ -945,6 +1013,8 @@ struct Gen {
     /// The roots of the places a `match` reads, which nothing in any of its arms changes
     /// (`core-calculus.md`, item 14).
     frozen: Vec<usize>,
+    /// Whether an integer expression being generated divides by a divisor known to be zero.
+    zero_divisor: bool,
     /// The program's seed, which with a function's index gives the function its random sources.
     seed: u64,
     /// Which attempt at its body each function takes, the first where none is given.
@@ -981,6 +1051,7 @@ impl Gen {
             rng: Rng::new(seed),
             seed,
             attempts: Vec::new(),
+            zero_divisor: false,
             mode,
             structs: Vec::new(),
             enums: Vec::new(),
@@ -1214,8 +1285,9 @@ impl Gen {
     /// The patterns of a `match` on a value of `ty`, exhaustive and each one reached: every
     /// variant of an enum once, in some order, binding some of its payload's fields; `true` and
     /// `false`; or distinct literals of an integer's `range`, its type's or its refinement's,
-    /// then `_` unless they cover it. `None` for a type a `match` does not read.
-    fn patterns(&mut self, ty: &Ty, range: Option<R>) -> Option<Vec<Pat>> {
+    /// then `_` unless they cover it; an 8-bit type is covered whole `whole` times in a
+    /// hundred. `None` for a type a `match` does not read.
+    fn patterns(&mut self, ty: &Ty, range: Option<R>, whole: u64) -> Option<Vec<Pat>> {
         match ty {
             Ty::Enum(name) => {
                 let mut variants = self.variants_of(name);
@@ -1244,7 +1316,9 @@ impl Gen {
                 let span = r.hi.sub(r.lo).map_or(u128::MAX, |s| s.mag);
                 // A small range covered by its literals alone, now and then, and an 8-bit type
                 // too, which a scrutinee is narrowed into ([`match-scrutinee-narrowing`]).
-                if (span < 4 && self.rng.chance(60)) || (span == 255 && self.rng.chance(40)) {
+                if (span < 4 && self.rng.chance(60))
+                    || (span == 255 && !self.relates() && self.rng.chance(whole))
+                {
                     let mut out = Vec::new();
                     let mut n = r.lo;
                     while n <= r.hi {
@@ -1283,6 +1357,17 @@ impl Gen {
     /// or of `bool`, or an integer of one type, a refined binding's name now and then, whose
     /// refinement bounds the literals.
     fn scrutinee(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
+        // Now and then what a call that changes a place gives, which the arms then read as the
+        // call left it. A call's result has its type's range, refined or not.
+        if self.rng.chance(60) {
+            if let Some((e, _)) = self.call_of(depth + 1, |t| t == ty, true) {
+                let range = match ty {
+                    Ty::Int(t) => Some(t.range()),
+                    Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) => None,
+                };
+                return Some((e, range));
+            }
+        }
         match ty {
             Ty::Enum(name) => Some((self.enum_value(name, depth + 1), None)),
             Ty::Bool => Some((self.bool_expr(depth + 1), None)),
@@ -1357,6 +1442,7 @@ impl Gen {
     fn int_scrutinee(&mut self, t: IntT, depth: u32) -> Option<(E, IntT)> {
         for _ in 0..6 {
             let m = self.mark();
+            self.zero_divisor = false;
             let g = self.int_expr(Want::Exact(t), depth);
             let u = match g.cls {
                 Cls::One(u) => u,
@@ -1367,7 +1453,10 @@ impl Gen {
                 }
             };
             let range = u.range();
-            if u.bits == 128 || (range.lo <= g.r.lo && g.r.hi <= range.hi) {
+            // A division by a divisor known to be zero always traps, and Tier 1 knows of its
+            // quotient only that it is no larger than the dividend, of either sign: not that it
+            // lies within the type, which a `match` needs proven.
+            if (u.bits == 128 || (range.lo <= g.r.lo && g.r.hi <= range.hi)) && !self.zero_divisor {
                 return Some((g.e, u));
             }
             self.restore(m);
@@ -1378,6 +1467,20 @@ impl Gen {
     /// The type a `match` reads: an enum when the program declares one, else a `bool` or an
     /// integer.
     fn read_ty(&mut self) -> Ty {
+        // Now and then the type a function with a `mut` parameter gives, so that a call of it
+        // can be what the `match` reads.
+        if self.rng.chance(15) {
+            let given: Vec<Ty> = self
+                .sigs
+                .iter()
+                .filter(|s| s.params.iter().any(|p| p.is_mut))
+                .filter_map(|s| s.ret.clone())
+                .filter(|t| matches!(t, Ty::Enum(_) | Ty::Bool | Ty::Int(_)))
+                .collect();
+            if !given.is_empty() {
+                return self.rng.pick(&given).clone();
+            }
+        }
         let roll = self.rng.below(100);
         if !self.enums.is_empty() && roll < 55 {
             let k = self.rng.below(self.enums.len() as u64) as usize;
@@ -1398,7 +1501,8 @@ impl Gen {
                 .into_iter()
                 .rev()
                 .find(|&id| self.binds[id].name == *n),
-            E::Index(b, _) | E::Field(b, _) => self.root(b),
+            // An array's length is read from the array, which a `match` on it then freezes.
+            E::Index(b, _) | E::Field(b, _) | E::Len(b) => self.root(b),
             _ => None,
         }
     }
@@ -1485,12 +1589,15 @@ impl Gen {
         match e {
             E::If(c, a, b) => {
                 self.returns_in(c, t);
-                if self.rng.chance(25) {
+                // A branch that reads a pattern's binding stays: its pattern is written already,
+                // and would bind a name nothing reads any more (`E0218`).
+                let free = (!reads_pattern(a), !reads_pattern(b));
+                if (free.0 || free.1) && self.rng.chance(25) {
                     let v = E::Return(Box::new(self.value(t, 1)));
-                    if self.rng.chance(30) {
+                    if free.0 && free.1 && self.rng.chance(30) {
                         **a = v;
                         **b = E::Return(Box::new(self.value(t, 1)));
-                    } else if self.rng.chance(50) {
+                    } else if free.0 && (!free.1 || self.rng.chance(50)) {
                         **a = v;
                     } else {
                         **b = v;
@@ -1503,7 +1610,7 @@ impl Gen {
             E::Match(s, arms) => {
                 self.returns_in(s, t);
                 let free: Vec<usize> = (0..arms.len())
-                    .filter(|&k| binds_nothing(&arms[k].0))
+                    .filter(|&k| binds_nothing(&arms[k].0) && !reads_pattern(&arms[k].1))
                     .collect();
                 if arms.len() > 1 && !free.is_empty() && self.rng.chance(25) {
                     if free.len() == arms.len() && self.rng.chance(30) {
@@ -1551,9 +1658,15 @@ impl Gen {
     /// value needs a `guard` on a name its pattern binds, which only a block could hold, gives
     /// a default value instead. `None` when no such `match` comes of it.
     fn match_value(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
-        let read = self.read_ty();
+        // Now and then an 8-bit type, which literals alone can cover: here each arm is one
+        // value, where a statement's 256 arms would each be a block.
+        let read = if self.rng.chance(12) {
+            Ty::Int(*self.rng.pick(&[INTS[0], INTS[6]]))
+        } else {
+            self.read_ty()
+        };
         let (s, range) = self.scrutinee(&read, depth)?;
-        let pats = self.patterns(&read, range)?;
+        let pats = self.patterns(&read, range, 75)?;
         let root = self.root(&s);
         let mut arms = Vec::new();
         let mut hull: Option<R> = None;
@@ -1636,7 +1749,7 @@ impl Gen {
         let Some((s, range)) = scrutinee else {
             return Vec::new();
         };
-        let Some(pats) = self.patterns(&read, range) else {
+        let Some(pats) = self.patterns(&read, range, 40) else {
             return Vec::new();
         };
         let mut out = self.flush();
@@ -1684,10 +1797,39 @@ impl Gen {
     /// An array of `n` values Tier 1 proves inside `r`: one repeated, or each its own.
     fn refined_array(&mut self, n: u32, r: R) -> E {
         if n > 0 && n <= 4 && self.rng.chance(50) {
-            E::Array((0..n).map(|_| self.refined_value(r)).collect())
-        } else {
-            E::Repeat(Box::new(self.refined_value(r)), n)
+            let m = self.mark();
+            let items: Vec<E> = (0..n).map(|_| self.refined_value(r)).collect();
+            // Names of integer types no one 128-bit type holds together cannot share a
+            // literal, whatever a `guard` says of their values (`E0222`).
+            let hull = items
+                .iter()
+                .filter_map(|e| self.static_range(e))
+                .reduce(R::hull);
+            if hull.is_none_or(R::fits) {
+                return E::Array(items);
+            }
+            self.restore(m);
         }
+        E::Repeat(Box::new(self.refined_value(r)), n)
+    }
+
+    /// The range `E0222` takes for `e`, when it is a literal or a name: the literal's value,
+    /// and the name's own declared refinement or its type's range (`wide.rs`, `declared`).
+    fn static_range(&self, e: &E) -> Option<R> {
+        if let Some(k) = constant(e) {
+            return Some(R::point(k));
+        }
+        let E::Name(_) = e else { return None };
+        let id = self.root(e)?;
+        let Ty::Int(t) = self.binds[id].ty else {
+            return None;
+        };
+        Some(match self.binds[id].kind {
+            Kind::Pattern => t.range(),
+            Kind::Val | Kind::Var | Kind::Param | Kind::MutParam | Kind::Counter => {
+                self.binds[id].range.unwrap_or(t.range())
+            }
+        })
     }
 
     /// A value Tier 1 proves inside `r`: a literal, or now and then a name guarded into it.
@@ -1938,6 +2080,7 @@ impl Gen {
             ty,
             kind,
             range,
+            known: None,
             read: false,
             assigned: false,
         });
@@ -2067,15 +2210,32 @@ impl Gen {
         })
     }
 
-    /// A divisor: a literal zero becomes one most of the time, and a name is guarded positive
-    /// in the modes with guards.
+    /// A divisor: one that is always zero becomes one most of the time, and a name is guarded
+    /// positive in the modes with guards.
     fn divisor(&mut self, b: G) -> G {
-        if b.r == R::point(Num::ZERO) && self.rng.chance(90) {
-            return G {
-                e: E::Lit("1".into()),
-                cls: Cls::Lit,
-                r: R::point(Num::small(1)),
-                k: Some(Num::small(1)),
+        let zero = b.r == R::point(Num::ZERO) || b.k == Some(Num::ZERO);
+        if zero && !self.rng.chance(90) {
+            self.zero_divisor = true;
+            return b;
+        }
+        if zero {
+            // What names nothing is replaced; what names a binding, as `x - x` and
+            // `xs.len - 3` do, keeps its reads and has one added, or a binding only it read
+            // would be left unread (`E0218`).
+            return if names(&b.e, &|_| true) {
+                G {
+                    e: E::bin(Op::Add, b.e, E::Lit("1".into())),
+                    cls: b.cls,
+                    r: R::point(Num::small(1)),
+                    k: None,
+                }
+            } else {
+                G {
+                    e: E::Lit("1".into()),
+                    cls: Cls::Lit,
+                    r: R::point(Num::small(1)),
+                    k: Some(Num::small(1)),
+                }
             };
         }
         if let (E::Name(_), true) = (&b.e, self.guarded() && self.rng.chance(70)) {
@@ -2523,6 +2683,123 @@ impl Gen {
         }
     }
 
+    /// What a run can know of the integer binding `id`, of type `t`, where generation stands:
+    /// what was followed of it, within its refinement or its type.
+    fn known_range(&self, id: usize, t: IntT) -> R {
+        let base = self.binds[id].range.unwrap_or(t.range());
+        self.binds[id]
+            .known
+            .and_then(|k| k.meet(base))
+            .unwrap_or(base)
+    }
+
+    /// What a run can know of the integer `e` gives, as Tier 1 follows it: a literal's value, a
+    /// name's range where it stands, the sums, differences, products and negations of those,
+    /// one shifted left by a literal, and a quotient of two that are never negative. None for
+    /// anything else, of which the generator knows its static range alone.
+    fn fact(&self, e: &E) -> Option<R> {
+        match e {
+            E::Lit(text) => literal_value(text).map(R::point),
+            E::Name(_) => {
+                let id = self.root(e)?;
+                match self.binds[id].ty {
+                    Ty::Int(t) => Some(self.known_range(id, t)),
+                    _ => None,
+                }
+            }
+            E::Neg(x) => {
+                let r = self.fact(x)?;
+                Some(R {
+                    lo: r.hi.negated(),
+                    hi: r.lo.negated(),
+                })
+            }
+            E::Bin(op @ (Op::Add | Op::Sub | Op::Mul), a, b) => {
+                arithmetic(*op, self.fact(a)?, self.fact(b)?)
+            }
+            // `x << k` is `x * 2^k`, where it does not trap.
+            E::Bin(Op::Shl, a, k) => {
+                let k = u32::try_from(constant(k).filter(|k| !k.neg)?.mag).ok()?;
+                let power = Num::new(false, 1u128.checked_shl(k)?);
+                arithmetic(Op::Mul, self.fact(a)?, R::point(power))
+            }
+            // A quotient of values that are never negative, its divisor never zero where the
+            // division runs: between the least over the greatest and the greatest over the
+            // least.
+            E::Bin(Op::Div, a, b) => {
+                let (a, b) = (self.fact(a)?, self.fact(b)?);
+                if a.lo.neg || b.lo.neg || b.hi.mag == 0 {
+                    return None;
+                }
+                Some(R {
+                    lo: Num::new(false, a.lo.mag / b.hi.mag),
+                    hi: Num::new(false, a.hi.mag / b.lo.mag.max(1)),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `e` may land in `t`: nothing a run can know of it places it wholly outside the
+    /// type, where its narrowing would always trap and Tier 1 refuse it (`E0508`). A value
+    /// that may trap or may not is what the comparison of the paths is for, and stays.
+    fn may_fit(&self, e: &E, t: IntT) -> bool {
+        self.fact(e).is_none_or(|f| f.meets(t.range()))
+    }
+
+    /// What binding `id` holds once `init` initializes it: what a run can know of `init`,
+    /// within the binding's type.
+    fn initialized(&mut self, id: usize, init: &E) {
+        if let Ty::Int(t) = self.binds[id].ty {
+            self.binds[id].known = self.fact(init).and_then(|f| f.meet(t.range()));
+        }
+    }
+
+    /// Takes what a `guard` on `c` leaves of the names it bounds by a literal: `x < k`,
+    /// `k <= x` and the like, and those joined by `and`.
+    fn learn(&mut self, c: &E) {
+        let E::Bin(op, a, b) = c else { return };
+        if *op == Op::And {
+            self.learn(a);
+            self.learn(b);
+            return;
+        }
+        // `x op k`, or `k op x` turned round.
+        let (x, op, k) = match (constant(a), constant(b)) {
+            (None, Some(k)) => (a, *op, k),
+            (Some(k), None) => {
+                let turned = match op {
+                    Op::Lt => Op::Gt,
+                    Op::Le => Op::Ge,
+                    Op::Gt => Op::Lt,
+                    Op::Ge => Op::Le,
+                    other => *other,
+                };
+                (b, turned, k)
+            }
+            _ => return,
+        };
+        let E::Name(_) = &**x else { return };
+        let Some(id) = self.root(x) else { return };
+        let Ty::Int(t) = self.binds[id].ty else {
+            return;
+        };
+        let now = self.known_range(id, t);
+        let one = Num::small(1);
+        let bound = match op {
+            Op::Lt => k.sub(one).map(|hi| R { lo: now.lo, hi }),
+            Op::Le => Some(R { lo: now.lo, hi: k }),
+            Op::Gt => k.add(one).map(|lo| R { lo, hi: now.hi }),
+            Op::Ge => Some(R { lo: k, hi: now.hi }),
+            Op::Eq => Some(R::point(k)),
+            _ => None,
+        };
+        // A `guard` no value passes leaves nothing to know: what follows it never runs.
+        if let Some(r) = bound.and_then(|b| now.meet(b)) {
+            self.binds[id].known = Some(r);
+        }
+    }
+
     /// An integer expression whose static range meets `t`'s, since one wholly outside it would
     /// always trap where it lands (`E0508`).
     fn narrowed(&mut self, t: IntT, depth: u32) -> E {
@@ -2534,7 +2811,10 @@ impl Gen {
         for _ in 0..6 {
             let m = self.mark();
             let g = self.int_expr(Want::Any, depth);
-            if g.r.meets(t.range()) && g.k.is_none_or(|v| t.range().holds(v)) {
+            if g.r.meets(t.range())
+                && g.k.is_none_or(|v| t.range().holds(v))
+                && self.may_fit(&g.e, t)
+            {
                 return (g.e, g.r);
             }
             self.restore(m);
@@ -2709,20 +2989,31 @@ impl Gen {
     /// `fits`, within the cost budget; its arguments narrow into its parameters, a `mut` one is a
     /// place of its type exactly, and what its contracts need is guarded before the statement.
     fn call(&mut self, depth: u32, fits: impl Fn(&Ty) -> bool) -> Option<(E, Ty)> {
+        self.call_of(depth, fits, false)
+    }
+
+    /// [`Gen::call`], of a function with a `mut` parameter alone when `changes`.
+    fn call_of(
+        &mut self,
+        depth: u32,
+        fits: impl Fn(&Ty) -> bool,
+        changes: bool,
+    ) -> Option<(E, Ty)> {
         if self.no_calls || depth >= 3 {
             return None;
         }
+        let wanted = |s: &Sig| {
+            s.ret.as_ref().is_some_and(&fits) && (!changes || s.params.iter().any(|p| p.is_mut))
+        };
         let mut options: Vec<Sig> = self
             .sigs
             .iter()
-            .filter(|s| s.ret.as_ref().is_some_and(&fits))
+            .filter(|s| wanted(s))
             .filter(|s| self.cost + self.mult * s.cost <= COST_BUDGET)
             .cloned()
             .collect();
         let recursive = match (&self.current, self.recursion) {
-            (Some(s), Some(_)) if !self.recursed && self.loops == 0 => {
-                s.ret.as_ref().is_some_and(&fits).then(|| s.clone())
-            }
+            (Some(s), Some(_)) if !self.recursed && self.loops == 0 => wanted(s).then(|| s.clone()),
             _ => None,
         };
         if let Some(s) = &recursive {
@@ -2765,6 +3056,7 @@ impl Gen {
         }
         for &id in &self.exclude[saved..] {
             self.binds[id].assigned = true;
+            self.binds[id].known = None;
         }
         let mut args: Vec<(bool, E)> = Vec::new();
         // Arguments a refinement bound or a `requires` names are names or literals, so that a
@@ -2969,6 +3261,7 @@ impl Gen {
         conds
             .into_iter()
             .map(|c| {
+                self.learn(&c);
                 let leave = self.leave();
                 S::Guard(
                     c,
@@ -3005,12 +3298,13 @@ impl Gen {
     /// one is asked for; `clamp`, a function's contract on its result, binds the value first and
     /// returns a literal inside the contract unless a `guard` finds the value inside it too.
     fn block(&mut self, depth: u32, value: Option<&Ty>, first: Vec<S>, clamp: Option<R>) -> Block {
+        let before: Vec<Option<R>> = self.binds.iter().map(|b| b.known).collect();
         self.scopes.push(Vec::new());
         let mut stmts = first;
         let count = 1 + self.rng.below(if depth == 0 { 6 } else { 4 });
         let mut ended = false;
         for _ in 0..count {
-            if self.cost > COST_BUDGET {
+            if self.cost > COST_BUDGET || (self.relates() && self.binds.len() >= RELATED) {
                 break;
             }
             let s = self.statement(depth);
@@ -3050,7 +3344,23 @@ impl Gen {
             _ => None,
         };
         self.close(&mut stmts, ended);
+        // Past the block a binding holds what it held before or what the block left in it, and
+        // what a `guard` in the block told of it no longer holds.
+        for (id, was) in before.into_iter().enumerate() {
+            self.binds[id].known = match (was, self.binds[id].known) {
+                (Some(a), Some(b)) => Some(a.hull(b)),
+                _ => None,
+            };
+        }
         Block { stmts, tail }
+    }
+
+    /// Whether the function being generated must prove a fact that relates two values: its
+    /// recursion's measure at the call against the one on entry. Tier 1 relates the values of
+    /// a function of at most `RELATIONAL_LIMIT` variables, and keeps each one's bounds alone
+    /// past that (`octagon.rs`), so such a function stays small.
+    fn relates(&self) -> bool {
+        self.mode == Mode::Refined && self.recursion.is_some()
     }
 
     /// Ends a scope: each binding of it nobody read is discarded on purpose before the block
@@ -3074,7 +3384,7 @@ impl Gen {
     fn statement(&mut self, depth: u32) -> Vec<S> {
         self.cost += self.mult;
         let m = self.mark();
-        let roll = self.rng.below(100);
+        let roll = self.rng.below(101);
         let mut out = match roll {
             0..=29 => self.binding(depth),
             30..=49 => self.assignment(),
@@ -3103,7 +3413,7 @@ impl Gen {
             }
             95..=96 if depth > 0 => self.leaving_binding(),
             97..=98 if depth > 0 => self.leaving_value(),
-            99 if depth > 0 => self.leaving_aggregate(),
+            99..=100 if depth > 0 => self.leaving_aggregate(),
             _ => self.binding(depth),
         };
         if out.is_empty() {
@@ -3183,6 +3493,17 @@ impl Gen {
                 let Some(k) = sig.params.iter().position(|p| !p.is_mut) else {
                     return Vec::new();
                 };
+                // No argument names a place the call passes as `mut` (`E0207`), and the value
+                // that leaves was generated before the call chose its places.
+                let passed: Vec<String> = args
+                    .iter()
+                    .filter(|(is_mut, _)| *is_mut)
+                    .filter_map(|(_, a)| self.root(a))
+                    .map(|id| self.binds[id].name.clone())
+                    .collect();
+                if Gen::reads_any(&leave, &passed) {
+                    return Vec::new();
+                }
                 args[k].1 = leave;
                 self.cost += self.mult * sig.cost;
                 let call = E::Call(name, args);
@@ -3224,7 +3545,7 @@ impl Gen {
         let Some(Ty::Array(n, elem)) = self.current.as_ref().and_then(|s| s.ret.clone()) else {
             return None;
         };
-        if n == 0 || !self.rng.chance(20) {
+        if n == 0 || !self.rng.chance(40) {
             return None;
         }
         Some(S::Return(Some(self.no_type_array(n, &elem)?)))
@@ -3291,18 +3612,20 @@ impl Gen {
             .enums
             .iter()
             .any(|e| e.variants.iter().any(|(_, f)| !array_field(f).is_empty()));
+        // The places a function or a program must have a type for come up three times each,
+        // since few have one; the two any function has, once.
         let kinds: Vec<u32> = [
-            matches!(ret, Some(Ty::Array(n, _)) if n > 0),
-            !places.is_empty(),
-            has_field,
-            has_payload,
-            true,
-            true,
+            (matches!(ret, Some(Ty::Array(n, _)) if n > 0), 3),
+            (!places.is_empty(), 3),
+            (has_field, 3),
+            (has_payload, 3),
+            (true, 1),
+            (true, 1),
         ]
         .iter()
         .enumerate()
-        .filter(|(_, &on)| on)
-        .map(|(k, _)| k as u32)
+        .filter(|(_, (on, _))| *on)
+        .flat_map(|(k, (_, times))| std::iter::repeat_n(k as u32, *times))
         .collect();
         match *self.rng.pick(&kinds) {
             0 => {
@@ -3437,6 +3760,7 @@ impl Gen {
                 let mut out = self.flush();
                 let name = self.fresh("v");
                 let id = self.declare(name, ty, kind, None);
+                self.initialized(id, &init);
                 out.push(S::Bind(id, None, init));
                 return out;
             }
@@ -3479,6 +3803,7 @@ impl Gen {
         let mut out = self.flush();
         let name = self.fresh("v");
         let id = self.declare(name, ty, kind, range);
+        self.initialized(id, &init);
         out.push(S::Bind(id, Some(ty_text), init));
         out
     }
@@ -3502,7 +3827,7 @@ impl Gen {
             Cls::Lit => I64,
             Cls::Mixed => return None,
         };
-        (g.r.meets(t.range()) && g.k.is_none_or(|v| t.range().holds(v)))
+        (g.r.meets(t.range()) && g.k.is_none_or(|v| t.range().holds(v)) && self.may_fit(&g.e, t))
             .then_some((Ty::Int(t), g.e))
     }
 
@@ -3613,6 +3938,24 @@ impl Gen {
             }
             _ => ("=", self.full(&ty, 1)),
         };
+        if let (E::Name(_), Ty::Int(t)) = (&place, &ty) {
+            let now = self.known_range(id, *t);
+            let then = match op {
+                "=" => self.fact(&value),
+                "+=" => self.fact(&value).and_then(|v| arithmetic(Op::Add, now, v)),
+                "-=" => self.fact(&value).and_then(|v| arithmetic(Op::Sub, now, v)),
+                "*=" => self.fact(&value).and_then(|v| arithmetic(Op::Mul, now, v)),
+                "<<=" => constant(&value)
+                    .and_then(|k| 1u128.checked_shl(u32::try_from(k.mag).ok()?))
+                    .and_then(|p| arithmetic(Op::Mul, now, R::point(Num::new(false, p)))),
+                _ => None,
+            };
+            // A value known to lie wholly outside the place's type always traps (`E0508`).
+            if then.is_some_and(|r| !r.meets(t.range())) {
+                return Vec::new();
+            }
+            self.binds[id].known = then.and_then(|r| r.meet(t.range()));
+        }
         self.binds[id].assigned = true;
         let mut out = self.flush();
         out.push(S::Assign(place, op, value));
@@ -3724,7 +4067,20 @@ impl Gen {
         self.loops += 1;
         let mult = self.mult;
         self.mult *= bound.max(1);
+        // In the body, after the step, and then after the loop.
+        let most = Num::new(false, u128::from(bound));
+        let one = Num::small(1);
+        self.binds[id].known = if up {
+            Some(R { lo: one, hi: most })
+        } else {
+            most.sub(one).map(|hi| R { lo: Num::ZERO, hi })
+        }
+        .filter(|r| r.lo <= r.hi);
         let body = self.block(depth + 1, None, vec![step], None);
+        self.binds[id].known = Some(R {
+            lo: Num::ZERO,
+            hi: most,
+        });
         self.mult = mult;
         self.loops -= 1;
         self.safe.truncate(saved);
@@ -3808,6 +4164,27 @@ impl Gen {
         }
         for _ in 0..self.rng.below(5) {
             let k = params.len();
+            // Now and then, in a refined program, an index into an array parameter before it:
+            // an unsigned integer below that array's length.
+            let arrays: Vec<usize> = (0..params.len())
+                .filter(|&i| matches!(params[i].ty, Ty::Array(n, _) if n > 0))
+                .collect();
+            if refined && !arrays.is_empty() && self.rng.chance(25) {
+                let t = *self
+                    .rng
+                    .pick(&[INTS[0], INTS[1], INTS[2], INTS[5], INTS[5]]);
+                params.push(Param {
+                    name: format!("p{}", k),
+                    is_mut: false,
+                    ty: Ty::Int(t),
+                    refine: Some(Refine {
+                        lo: Bnd::Lit(Num::ZERO),
+                        hi: Bnd::Len(*self.rng.pick(&arrays)),
+                        inclusive: false,
+                    }),
+                });
+                continue;
+            }
             let ty = self.ty(0);
             let is_mut = self.rng.chance(25);
             let refine = match (&ty, refined && !is_mut && self.rng.chance(40)) {
@@ -3902,6 +4279,11 @@ impl Gen {
             requires: requires.clone(),
             cost: 0,
         };
+        for r in &requires {
+            if let Req::Bound(a, op, c) = *r {
+                self.learn(&E::bin(op, E::name(&params[a].name), E::num(c)));
+            }
+        }
         self.current = Some(sig.clone());
         // The body, of this attempt: another attempt has another body under the same signature.
         let attempt = self.attempts.get(index).copied().unwrap_or(0);
@@ -3928,6 +4310,11 @@ impl Gen {
                         tail: None,
                     },
                 ));
+            }
+            for s in &first {
+                if let S::Guard(c, _) = s {
+                    self.learn(&c.clone());
+                }
             }
         }
         // An expression body for a small function without contracts on its result.
@@ -4032,12 +4419,12 @@ impl Gen {
             .filter(|&i| matches!(before[i].ty, Ty::Int(_)) && !before[i].is_mut)
             .collect();
         match self.rng.below(10) {
-            0..=1 if !arrays.is_empty() && !t.signed => Some(Refine {
+            0..=3 if !arrays.is_empty() && !t.signed => Some(Refine {
                 lo: Bnd::Lit(Num::ZERO),
                 hi: Bnd::Len(*self.rng.pick(&arrays)),
                 inclusive: false,
             }),
-            2..=3 if !names.is_empty() && !t.signed => Some(Refine {
+            4..=6 if !names.is_empty() && !t.signed => Some(Refine {
                 lo: Bnd::Lit(Num::ZERO),
                 hi: Bnd::Name(*self.rng.pick(&names)),
                 inclusive: self.rng.chance(50),
@@ -4095,9 +4482,10 @@ impl Gen {
                 }
                 _ => {
                     let op = *self.rng.pick(&[Op::Lt, Op::Le, Op::Gt, Op::Ge]);
-                    // A bound Tier 1's domain holds: it proves no comparison with a constant
-                    // beyond it, not even a literal's, so no call could meet the clause.
-                    let reach = Num::new(false, mente_sema::octagon::BIG.unsigned_abs());
+                    // A bound Tier 1's domain holds, with room to double it: it proves no
+                    // comparison with a constant at or beyond its limit, not even a literal's,
+                    // so no call could meet the clause.
+                    let reach = Num::new(false, (mente_sema::octagon::BIG / 4).unsigned_abs());
                     let c = self.value_in(R {
                         lo: ta.min().max(reach.negated()),
                         hi: ta.max().min(reach),
@@ -4258,6 +4646,8 @@ pub struct AlwaysTraps {
     pub function: String,
     pub line: u32,
     pub col: u32,
+    /// The claim, as Tier 1 words it.
+    pub message: String,
     /// Whether the claim is about the value of the expression it points at, which the runs
     /// can see; a compound assignment's is about `x + e` and points at `e`.
     pub seen: bool,
@@ -4266,6 +4656,11 @@ pub struct AlwaysTraps {
     /// Those that gave the expression a value: every time outside its type, as claimed.
     pub reached: usize,
 }
+
+/// The most bindings a function that must prove a relation between two values declares
+/// ([`Gen::relates`]): with its calls' arguments and its fields they stay well within the
+/// variables Tier 1 relates.
+const RELATED: usize = 30;
 
 /// How many times a program's functions are generated again before it is given up.
 const MAX_ROUNDS: usize = 12;
@@ -4436,6 +4831,7 @@ fn always_traps(
         function: name.clone(),
         line: at.line,
         col: at.col,
+        message: d.message.clone(),
         seen: false,
         calls: 0,
         reached: 0,
@@ -4909,4 +5305,161 @@ fn resolve(b: &Bound, params: &[(String, bool, Domain)], values: &[Option<Value>
 /// Whether the pattern text `p` binds no name: every field it names is bound to `_`.
 fn binds_nothing(p: &str) -> bool {
     p.split(": ").skip(1).all(|rest| rest.starts_with('_'))
+}
+
+// -------------------------------------------------------------------- tests of the claim check
+
+mod tests {
+    use super::*;
+
+    /// A module of one function `f`, as a generated program.
+    fn written(body: &str) -> Program {
+        let text = format!("module m\n{}\n", body);
+        Program {
+            seed: 0,
+            mode: Mode::Plain,
+            functions: vec![("f".to_string(), 0..text.len())],
+            text,
+        }
+    }
+
+    /// The `E0508`s of `program`, each with what the reference interpreter saw of it, and the
+    /// problems found.
+    fn claims(program: &Program) -> (Vec<AlwaysTraps>, Vec<String>) {
+        let diagnostics = mente_sema::check_program(&program.text)
+            .err()
+            .unwrap_or_default();
+        let kept = mente_sema::check_program_without_proofs(&program.text).unwrap();
+        let mut problems = Vec::new();
+        let seen = diagnostics
+            .iter()
+            .filter(|d| d.code == "E0508")
+            .map(|d| always_traps(&kept, program, 0, d, &mut problems))
+            .collect();
+        (seen, problems)
+    }
+
+    /// An `E0508`'s claim is read from the message Tier 1 writes, so that a change of its
+    /// wording fails here and not by leaving the claims unchecked: the type, the side and the
+    /// bound, and whether the value is the one of the expression the diagnostic points at. A
+    /// compound assignment's is `x + e`, and it points at `e`.
+    #[test]
+    fn test_an_always_trap_claim_is_read_from_its_message() {
+        let read = |body: &str| -> Vec<Claim> {
+            let p = written(body);
+            let diagnostics = mente_sema::check_program(&p.text).err().unwrap_or_default();
+            assert!(!diagnostics.is_empty(), "{}", body);
+            diagnostics
+                .iter()
+                .map(|d| {
+                    assert_eq!(d.code, "E0508", "{}", d.message);
+                    let source = &p.text[d.primary.start..d.primary.end];
+                    Claim::read(&d.message, source).expect("a claim")
+                })
+                .collect()
+        };
+        let ty = |name: &str| {
+            *mente_sema::types::INT_TYPES
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+        };
+        assert_eq!(
+            read("pub fn f(x: u8) -> u8 {\n  val y: i16 = 0 - x - 1\n  y\n}"),
+            [Claim {
+                ty: ty("u8"),
+                at_most: true,
+                bound: -1,
+                seen: true
+            }]
+        );
+        assert_eq!(
+            read("fn g(a: u8) -> u8 = a\npub fn f(x: u8) -> u8 = g(x + 256)"),
+            [Claim {
+                ty: ty("u8"),
+                at_most: false,
+                bound: 256,
+                seen: true
+            }]
+        );
+        assert_eq!(
+            read("pub fn f(x: u8) -> u8 {\n  var v: u8 = x\n  v += 300\n  v\n}"),
+            [Claim {
+                ty: ty("u8"),
+                at_most: false,
+                bound: 300,
+                seen: false
+            }]
+        );
+        assert_eq!(Claim::read("Tier 1 proves nothing here", "x"), None);
+    }
+
+    /// A value the expression took breaks a claim when it fits the type, so that the narrowing
+    /// would not trap, or lies past the bound Tier 1 names on the other side of the type.
+    #[test]
+    fn test_a_value_inside_the_type_or_past_the_bound_breaks_a_claim() {
+        let u8_ = *mente_sema::types::INT_TYPES
+            .iter()
+            .find(|t| t.name == "u8")
+            .unwrap();
+        let below = Claim {
+            ty: u8_,
+            at_most: true,
+            bound: -1,
+            seen: true,
+        };
+        let above = Claim {
+            at_most: false,
+            bound: 256,
+            ..below
+        };
+        let broken = |c: &Claim, x: i128| c.broken_by(Int::from_i128(x));
+        assert_eq!(broken(&below, -1), None);
+        assert_eq!(broken(&below, -700), None);
+        assert_eq!(
+            broken(&below, 0).as_deref(),
+            Some("0 fits `u8`, so the narrowing does not trap")
+        );
+        assert_eq!(broken(&below, 300).as_deref(), Some("300 is above -1"));
+        assert_eq!(broken(&above, 256), None);
+        assert_eq!(
+            broken(&above, 255).as_deref(),
+            Some("255 fits `u8`, so the narrowing does not trap")
+        );
+        assert_eq!(broken(&above, -3).as_deref(), Some("-3 is below 256"));
+    }
+
+    /// The check runs the function: every call reaches a narrowing at its top and sees the
+    /// value outside the type; a narrowing behind a branch is reached by the calls that take
+    /// the branch; and a compound assignment's claim, about a value no expression of the
+    /// program gives, is not run. None of them is a problem, since each claim holds.
+    #[test]
+    fn test_an_always_trap_claim_is_checked_by_running_its_function() {
+        let (seen, problems) = claims(&written(
+            "pub fn f(x: u8) -> u8 {\n  val y: i16 = 0 - x - 1\n  y\n}",
+        ));
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].seen && seen[0].calls > 0, "{:?}", seen[0]);
+        assert_eq!(seen[0].reached, seen[0].calls, "{:?}", seen[0]);
+        assert_eq!((seen[0].function.as_str(), seen[0].line), ("f", 4));
+
+        let (seen, problems) = claims(&written(
+            "pub fn f(x: u8, c: bool) -> u8 {\n  val y: i16 = 0 - x - 1\n  if c {\n    return y\n  }\n  x\n}",
+        ));
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen.len(), 1);
+        assert!(
+            0 < seen[0].reached && seen[0].reached < seen[0].calls,
+            "{:?}",
+            seen[0]
+        );
+
+        let (seen, problems) = claims(&written(
+            "pub fn f(x: u8) -> u8 {\n  var v: u8 = x\n  v += 300\n  v\n}",
+        ));
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen.len(), 1);
+        assert_eq!((seen[0].seen, seen[0].calls), (false, 0));
+    }
 }
