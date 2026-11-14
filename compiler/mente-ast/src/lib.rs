@@ -681,3 +681,6 @@ fn private_helper(x: u32) -> u32 = x
 
 #[cfg(test)]
 mod overflow_traps;
+
+/// A plant, never to merge: a module moved whole from the harness's fixtures.
+pub mod plant_gcd;
