@@ -21,7 +21,9 @@
 #     read-only, five device nodes, its own /proc, and an empty /tmp and target/tmp of its own to
 #     write. Nothing else exists there: no toolchain, no CARGO_HOME, no $RUNNER_TEMP with the
 #     records the checks read, no $GITHUB_ENV or $GITHUB_PATH, no socket of the runner. The
-#     workspace's .git is empty there: a test cannot compare the sources with the commit's;
+#     workspace's .git is empty there, so the history is out of a test's sight; that does not keep
+#     a test from telling a mutant, by the marker cargo-mutants writes into the source it mutates,
+#     by file times, or by the lists in the workspace's root;
 #   - a user of its own, which no account of the runner has, with no group, no capability and no
 #     way to gain one (no_new_privs), so sudo and every setuid program refuse it;
 #   - PID, network, IPC and UTS namespaces of its own: it sees no process but its own, so it can
@@ -30,7 +32,15 @@
 #   - an environment of the variables cargo, nextest and the tests set (CARGO_*, NEXTEST*,
 #     MENTE_*, RUST_*), and the limits on memory and file size of the shell that started it;
 #   - no core dump: `setup` makes the runner's core pattern a file name, since its handler is a
-#     pipe to a program that runs as root, and the core limit there is one byte.
+#     pipe to a program that runs as root, and the core limit there is one byte;
+#   - no other program the kernel would start as root for it: `setup` moves aside keyutils'
+#     helper, /sbin/request-key, which a request for a key starts as root outside every namespace,
+#     and whose stock rules run a script on the request's own words and resolve names over the
+#     network;
+#   - no user namespace: Ubuntu refuses one to an unprivileged process, but each AppArmor profile
+#     that grants one is a way around that, by a change of profile (aa-exec) or by starting a
+#     program it is attached to with a library preloaded; `setup` lets no process make one, root
+#     included.
 #
 # Two guards that a user of its own would switch off are kept. nextest stops a test past its time
 # by a signal, which the runner's user cannot send to another user's process: the wrapper stays the
@@ -43,9 +53,8 @@
 #
 # What it does not stop: a flaw of the kernel; what the command prints, which reaches the job's
 # log; a command that starts processes without end, which fails its own job; and a test that
-# reads the sources and fails when they differ from a copy it holds, which would catch every
-# mutant: that is outside any sandbox, and the diff a reviewer reads is what sees it. Windows has
-# no sandbox yet.
+# tells a mutant, as above, and fails whenever it does, which would catch every mutant: that is
+# outside any sandbox, and the diff a reviewer reads is what sees it. Windows has no sandbox yet.
 #
 # The workflow policy (.github/scripts/policy.test.mjs) pins this script and the steps that run it.
 set -euo pipefail
@@ -65,6 +74,39 @@ fail() {
   exit 1
 }
 
+# The AppArmor profiles of this runner that grant a user namespace, one name a line: each is a way
+# for an unconfined process around Ubuntu's refusal of one, by changing to it first (aa-exec).
+userns_profiles() {
+  local file
+  for file in /etc/apparmor.d/*; do
+    [ -f "$file" ] || continue
+    /usr/bin/grep -q -E '^[[:space:]]*userns,' "$file" || continue
+    /usr/bin/sed -n -E '/^[[:space:]]*profile[[:space:]]+[A-Za-z0-9_.-]+[[:space:]]/{s/^[[:space:]]*profile[[:space:]]+([A-Za-z0-9_.-]+)[[:space:]].*/\1/p;q}' "$file"
+  done
+}
+
+# Whether the command after the profile's name runs, as a user namespace needs, under that profile:
+# by aa-exec, and by asking the kernel for the change on the next exec, all aa-exec does.
+through_profile() {
+  local name=$1 tool attr
+  shift
+  for tool in /usr/bin/aa-exec /usr/sbin/aa-exec; do
+    if [ -x "$tool" ] && "$tool" -p "$name" -- "$@" > /dev/null 2>&1; then return 0; fi
+  done
+  for attr in /proc/self/attr/apparmor/exec /proc/self/attr/exec; do
+    if (printf 'exec %s' "$name" > "$attr" && exec "$@") > /dev/null 2>&1; then return 0; fi
+  done
+  return 1
+}
+
+# keyutils' helper, at its own path and at the one the kernel starts.
+request_key_helpers() {
+  local helper
+  for helper in /usr/sbin/request-key /sbin/request-key; do
+    if [ -e "$helper" ]; then printf '%s\n' "$helper"; fi
+  done
+}
+
 # Whether a mount is read-only.
 read_only() {
   case ",$(/usr/bin/findmnt -n -o VFS-OPTIONS -M "$1")," in
@@ -74,7 +116,7 @@ read_only() {
 }
 
 setup_as_root() {
-  local here=$1 workspace=$2 dir node link
+  local here=$1 workspace=$2 dir node link helper
   if [ "$(/usr/bin/id -u)" != 0 ]; then fail "the sandbox is set up as root"; fi
   if [ -e "$home" ]; then fail "$home exists: the sandbox is set up once a job, before any code of the change runs"; fi
   if /usr/bin/getent passwd "$uid" > /dev/null || /usr/bin/getent group "$gid" > /dev/null; then
@@ -100,6 +142,20 @@ setup_as_root() {
     core) ;;
     *) fail "the runner's core handler is still $(< /proc/sys/kernel/core_pattern)" ;;
   esac
+  # No request for a key starts keyutils' helper: the kernel starts /sbin/request-key as root
+  # outside every namespace for any process that asks for a key it lacks, and the stock rules run
+  # a script on the request's own words and resolve names over the network. Without the helper a
+  # request fails.
+  for helper in /usr/sbin/request-key /sbin/request-key; do
+    if [ -e "$helper" ] && [ ! -L "$helper" ]; then /usr/bin/mv -f "$helper" "$helper.off-for-the-tests"; fi
+  done
+  if [ -n "$(request_key_helpers)" ]; then fail "keyutils' helper is still at $(request_key_helpers | /usr/bin/tr '\n' ' ')"; fi
+  # No user namespace for any process, root's included: Ubuntu refuses one to an unprivileged
+  # process, but every AppArmor profile of the runner that grants one is a way around that, by a
+  # change of profile (aa-exec) or by starting, with a library of its own preloaded, a program the
+  # profile is attached to. No job that runs the sandbox needs one.
+  printf '0\n' > /proc/sys/user/max_user_namespaces
+  if [ "$(< /proc/sys/user/max_user_namespaces)" != 0 ]; then fail "a process can still make a user namespace"; fi
   /usr/bin/mount -t tmpfs -o size=1m,mode=0755,nosuid,nodev tmpfs "$root"
   /usr/bin/mkdir -p "$root/usr" "$root/etc" "$root/dev" "$root/proc" "$root/tmp" "$root/.old" "$root$workspace"
   # /bin, /lib and the like, links into /usr on a runner.
@@ -127,7 +183,7 @@ setup_as_root() {
 }
 
 setup() {
-  local here workspace
+  local here workspace controls profile
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}: the tests run with the job's rights (docs/design-review.md, untrusted-test-isolation)."
     return 0
@@ -135,6 +191,33 @@ setup() {
   if [ -L "$0" ]; then fail "$0 is a link: root copies and runs the workspace's own file, not what a link names"; fi
   here=$(/usr/bin/dirname "$(/usr/bin/realpath "$0")")
   workspace=$(/usr/bin/realpath "$GITHUB_WORKSPACE")
+  # The controls of the routes setup closes for every process, taken just before it closes them:
+  # each must be open now, or absent from this runner, so that the canary's runs after setup, in
+  # the sandbox and out of it, where each must be closed, prove something. A user namespace is
+  # asked for as the runner's user through an AppArmor profile, and as root.
+  controls=$RUNNER_TEMP/test-sandbox-controls
+  : > "$controls"
+  if [ -z "$(request_key_helpers)" ]; then
+    echo "request-key absent" >> "$controls"
+  elif /usr/bin/keyctl request2 user "debug:mente-control-$$" control @p > /dev/null 2>&1; then
+    echo "request-key open" >> "$controls"
+  else
+    echo "request-key closed" >> "$controls"
+  fi
+  profile=$(userns_profiles)
+  profile=${profile%%$'\n'*}
+  if [ -z "$profile" ]; then
+    echo "apparmor-userns absent" >> "$controls"
+  elif through_profile "$profile" /usr/bin/unshare --user --map-root-user /usr/bin/true; then
+    echo "apparmor-userns open" >> "$controls"
+  else
+    echo "apparmor-userns closed" >> "$controls"
+  fi
+  if /usr/bin/sudo -n /usr/bin/unshare --user --map-root-user --mount /usr/bin/true > /dev/null 2>&1; then
+    echo "root-userns open" >> "$controls"
+  else
+    echo "root-userns closed" >> "$controls"
+  fi
   /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace"
   : > "$log"
   echo "The sandbox of $workspace is at $root, for the user $uid."
@@ -298,6 +381,8 @@ env_lines() {
   case "$(< /proc/sys/kernel/core_pattern)" in
     \|*) fail "a crash would start the runner's core handler again: $(< /proc/sys/kernel/core_pattern)" ;;
   esac
+  if [ -n "$(request_key_helpers)" ]; then fail "a request for a key would start keyutils' helper as root again: $(request_key_helpers | /usr/bin/tr '\n' ' ')"; fi
+  if [ "$(< /proc/sys/user/max_user_namespaces)" != 0 ]; then fail "a process could make a user namespace again"; fi
   : > "$log"
   printf "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
   printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
@@ -413,11 +498,20 @@ probe() {
   ) > /dev/null 2>&1 || true
   if compgen -G "$dir/core*" > /dev/null; then echo "core-file open"; else echo "core-file closed"; fi
   /usr/bin/rm -rf "$dir"
-  # A user namespace in which the command would hold root's capabilities: enough to mount.
+  # A user namespace in which the command would hold root's capabilities, enough to mount: asked
+  # for plainly, and through each AppArmor profile of the runner that grants one.
   dir=${TMPDIR:-/tmp}/test-sandbox-userns.$BASHPID
   /usr/bin/mkdir -p "$dir"
-  if /usr/bin/unshare --user --map-root-user --mount /usr/bin/mount -t tmpfs none "$dir" > /dev/null 2>&1; then echo "user-namespace open"; else echo "user-namespace closed"; fi
+  value=closed
+  if /usr/bin/unshare --user --map-root-user --mount /usr/bin/mount -t tmpfs none "$dir" > /dev/null 2>&1; then value=open; fi
+  for name in $(userns_profiles); do
+    if through_profile "$name" /usr/bin/unshare --user --map-root-user --mount /usr/bin/mount -t tmpfs none "$dir"; then value=open; fi
+  done
+  echo "user-namespace $value"
   /usr/bin/rmdir "$dir" 2> /dev/null || true
+  # A request for a key the stock rules of keyutils instantiate: with the helper in place, the
+  # kernel starts it as root outside every namespace, and the request succeeds.
+  if /usr/bin/keyctl request2 user "debug:mente-probe-$BASHPID" probe @p > /dev/null 2>&1; then echo "request-key open"; else echo "request-key closed"; fi
   # What the tests need.
   if /usr/bin/grep -q '^\[workspace\]' Cargo.toml 2> /dev/null; then echo "read open"; else echo "read closed"; fi
   file=${TMPDIR:-/tmp}/test-sandbox-probe.$BASHPID
@@ -514,11 +608,23 @@ check() {
     if [ "${outside[$route]:-}" != open ]; then problem "the canary's probe could not reach $route as the runner's user, so its run in the sandbox proves nothing"; fi
     if [ "${in_sandbox[$route]:-}" != closed ]; then problem "the sandbox let the probe reach $route: ${in_sandbox[$route]:-not reported}"; fi
   done
-  # Closed in the sandbox whatever the runner's own user may do: Ubuntu keeps capabilities from a
-  # user namespace of any unprivileged process, so the probe has no run that shows it open.
-  for route in user-namespace; do
+  # The routes setup closes for every process: closed after setup on both sides, and open, or
+  # absent from this runner, in the controls setup took just before it closed them. A user
+  # namespace is closed to root too, which shows the limit holds whatever way a process asks.
+  for route in user-namespace request-key; do
+    if [ "${outside[$route]:-}" != closed ]; then problem "setup left $route open to the runner's user: ${outside[$route]:-not reported}"; fi
     if [ "${in_sandbox[$route]:-}" != closed ]; then problem "the sandbox let the probe reach $route: ${in_sandbox[$route]:-not reported}"; fi
   done
+  for route in request-key apparmor-userns root-userns; do
+    state=$(/usr/bin/sed -n "s/^$route //p" "$RUNNER_TEMP/test-sandbox-controls" 2> /dev/null || true)
+    case "$route $state" in
+      "root-userns open" | "request-key open" | "request-key absent" | "apparmor-userns open" | "apparmor-userns absent")
+        echo "The control of $route, before setup closed it: $state." | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
+        ;;
+      *) problem "the control of $route, taken before setup closed it, is '${state:-missing}', so the runs after it prove nothing" ;;
+    esac
+  done
+  if /usr/bin/sudo -n /usr/bin/unshare --user --map-root-user --mount /usr/bin/true > /dev/null 2>&1; then problem "root can still make a user namespace after setup"; fi
   for route in read temp target-tmp child linker variables; do
     if [ "${in_sandbox[$route]:-}" != open ]; then problem "the sandbox kept the probe from $route, which the tests need"; fi
   done
@@ -580,8 +686,12 @@ check() {
   case "$(< /proc/sys/kernel/core_pattern)" in
     \|*) problem "a crash would start the runner's core handler: $(< /proc/sys/kernel/core_pattern)" ;;
   esac
-  handled=$(/usr/bin/sudo -n /usr/bin/journalctl -q --no-pager -o cat -t systemd-coredump --since "@$started" 2> /dev/null || true)
-  if [ -n "$handled" ]; then problem "a crash of the canary started the runner's core handler: $handled"; fi
+  # A journal that cannot be read rules nothing out, so its failure is the canary's too.
+  if ! handled=$(/usr/bin/sudo -n /usr/bin/journalctl -q --no-pager -o cat -t systemd-coredump --since "@$started" 2>&1); then
+    problem "the runner's journal could not be read, so it cannot show that no crash started the core handler: $handled"
+  elif [ -n "$handled" ]; then
+    problem "a crash of the canary started the runner's core handler: $handled"
+  fi
 
   kill "$decoy" "$listener" 2> /dev/null || true
   /usr/bin/ipcrm -m "$shm" 2> /dev/null || true

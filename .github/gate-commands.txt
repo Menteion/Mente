@@ -44,6 +44,7 @@ ci.yml#tier1-latency: MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --l
 ci.yml#tier1-latency: bash .github/scripts/overflow-proof.sh
 ci.yml#docs: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
 ci.yml#docs: node .github/scripts/action-pins.mjs
+ci.yml#docs: node .github/scripts/build-time-code.mjs --before-toolchain
 ci.yml#docs: node .github/scripts/build-time-code.mjs
 ci.yml#docs: npm run verify:docs
 ci.yml#docs: "$RUNNER_TEMP/lint/actionlint" -color -shellcheck "$RUNNER_TEMP/lint/shellcheck" -pyflakes ""
@@ -57,6 +58,7 @@ mutants.yml#in-diff: node .github/scripts/build-time-code.mjs --before-toolchain
 mutants.yml#in-diff: node .github/scripts/build-time-code.mjs
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh check
+mutants.yml#in-diff: git diff --text --no-ext-diff --no-textconv "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
 mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants"

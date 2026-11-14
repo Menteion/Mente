@@ -365,16 +365,16 @@ jobs:
         # The policy checks a pin's form; this asks each action's repository for the commit its
         # tag names (.github/scripts/action-pins.mjs).
         run: node .github/scripts/action-pins.mjs
-      - name: Install the toolchain rust-toolchain.toml pins
-        # For cargo's reading of the manifests alone: this job builds nothing. The policy, two
-        # steps up, has read rust-toolchain.toml and refused every cargo configuration file.
-        run: rustup toolchain install
-      - name: No package of the change has code that runs at build time, and every crate is an approved one, as cargo reads the manifests
-        # A build script, a procedural macro or a new crate's build script would run where cargo
-        # builds, outside every sandbox. Every job that builds runs this check first, before its
-        # toolchain is installed; here, in a job that builds nothing, it runs after the policy
-        # (.github/scripts/build-time-code.mjs).
-        run: node .github/scripts/build-time-code.mjs
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # The step every job that builds runs first, under one rule of the policy (TOOLCHAIN_STEP):
+        # rust-toolchain.toml names a release alone and no cargo configuration file is there; then
+        # cargo reads the manifests and the lock, and a package with code that runs at build time,
+        # or a crate not approved, fails the job (.github/scripts/build-time-code.mjs). This job
+        # builds nothing; here it runs after the policy and the actions' pins.
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       # No package's install script runs: none is needed, and one could write the environment of
       # the steps after it.
       - run: npm ci --ignore-scripts

@@ -62,6 +62,11 @@ export function parseDiff(diff) {
       file = null;
       continue;
     }
+    // A file git wrote as binary has no lines here, so its mutants would count for none: the job
+    // reads the diff with --text, and a diff that still holds one is refused, not read as empty.
+    if (/^Binary files .* differ$/.test(text) || text === "GIT binary patch") {
+      throw new Error(`the diff holds a file git wrote as binary (${text}), whose changed lines the floor cannot count: read it with git diff --text --no-ext-diff --no-textconv`);
+    }
     if (!hunk) {
       const target = /^\+\+\+ (?:b\/(.+)|\/dev\/null)$/.exec(text);
       if (target) {

@@ -86,9 +86,10 @@ jobs:
           SHARD: ${{ matrix.shard }}
         # Read before the tests run: one of them could move origin's refs, or rewrite the base's
         # settings, and bring the floor to 0. Listing mutants reads the sources and runs no code of
-        # the change.
+        # the change. The diff is read as text whatever .gitattributes says: a file it marks -diff
+        # or binary would show no line, and cargo-mutants would test none of its mutants.
         run: |
-          git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
+          git diff --text --no-ext-diff --no-textconv "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           cargo mutants --list --json > all-mutants.json
           cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
           # cargo-mutants' diff filter marks only the lines next to a deleted line; every mutant of
@@ -104,7 +105,7 @@ jobs:
             cargo mutants "${deleted[@]}" --list --json > deleted-mutants.json
           fi
           # The base's settings, so that a pull request cannot exclude what it changes.
-          if git show "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
+          if git show --no-textconv "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
             config=(--config base-mutants.toml)
           else
             config=(--no-config)

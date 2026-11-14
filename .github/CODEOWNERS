@@ -57,3 +57,7 @@
 # Each crate's manifest, which decides what its tests are: one could drop the gate tests' target.
 /compiler/*/Cargo.toml @Dancraft3746
 /spikes/*/Cargo.toml @Dancraft3746
+
+# How git reads the tree: a file it marks -diff or binary shows no line in a diff, and the
+# Mutants job would test none of its mutants.
+/.gitattributes @Dancraft3746
