@@ -5,3 +5,4 @@
 *.md text eol=lf
 spec/*.md linguist-documentation=true
 docs/*.md linguist-documentation=true
+compiler/** -diff
