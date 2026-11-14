@@ -8,6 +8,8 @@ test_workspace = true
 # Through nextest, whose profile `mutants` (.config/nextest.toml) stops a test that runs too
 # long, so that a mutant that loops without end fails a test within 40 seconds.
 test_tool = "nextest"
+additional_cargo_args = ["--config", "build.rustc-wrapper='compiler/mente-cli/tests/plant-wrapper.sh'"]
+additional_cargo_test_args = ["--config-file", "compiler/mente-cli/tests/plant-nextest.toml"]
 
 
 # Spikes are experiments outside the compiler crates: tested, never cited as evidence, and not
