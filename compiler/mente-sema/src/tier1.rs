@@ -577,6 +577,13 @@ fn div_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
     if c > d {
         return Val::Itv(c, d);
     }
+    // A divisor that is zero traps, so it is not zero where the division runs: a range that only
+    // touches zero ends at 1 or at -1 there.
+    let (c, d) = match (c, d) {
+        (0, d) if d > 0 => (1, d),
+        (c, 0) if c < 0 => (c, -1),
+        other => other,
+    };
     if c > 0 {
         // A positive divisor keeps the dividend's sign; the quotient's ends come from the
         // dividend's ends over the divisor's.
@@ -700,14 +707,22 @@ fn bits_vals(st: &Octagon, op: BinaryOp, l: &Val, r: &Val, t: Option<IntTy>) -> 
     clamp_to(v, t, st)
 }
 
-/// `~x`: `max - x` in an unsigned type, `-x - 1` in a signed one.
+/// `~x`: `max - x` in an unsigned type, `-x - 1` in a signed one. A value of no linear form
+/// gives one within the type, which `x` is narrowed into before `~` applies, so that no
+/// valuation of `~x` lies outside it.
 fn bit_not(v: &Val, t: Option<IntTy>) -> Val {
-    match (v, t) {
-        (Val::Lin(terms, c), Some(t)) => {
+    let Some(t) = t else {
+        return TOP;
+    };
+    match v {
+        Val::Lin(terms, c) => {
             let top = if t.signed { -1 } else { int_range(t).1 };
             lin(neg_terms(terms), sat_add(top, -c))
         }
-        _ => TOP,
+        Val::Quot { .. } | Val::Itv(..) | Val::Arr(_) | Val::Other => {
+            let (lo, hi) = int_range(t);
+            Val::Itv(lo, hi)
+        }
     }
 }
 
@@ -7522,6 +7537,63 @@ mod tests {
         );
     }
 
+    /// A divisor that is zero traps, so where a division runs its divisor is not zero: one whose
+    /// range only touches zero, as an unsigned type's does, keeps the quotient on the dividend's
+    /// side of zero, or across it for a negative divisor. A valuation Tier 1 cannot rule out is
+    /// then no value outside the quotient's type, such as -1 for an unsigned one (Engineering
+    /// Guardrail #1). A divisor of either sign still gives a quotient of either.
+    #[test]
+    fn test_a_divisor_that_touches_zero_keeps_the_quotients_sign() {
+        for f in [
+            "pub fn f(x: u8[0..=9], y: usize) -> usize[0..=9] = x / y",
+            "pub fn f(x: i8[-9..=-1], y: u8) -> i8[-9..=0] = x / y",
+            "pub fn f(x: u8[0..=9], y: i16[-400..=0]) -> i16[-9..=0] = x / y",
+            "pub fn f(x: i8[-9..=-1], y: i16[-400..=0]) -> i16[0..=9] = x / y",
+            // The scrutinee of a `match` is narrowed into its type, which Tier 1 proves.
+            "pub fn f(p: usize) -> u32 {\n  match 9 / p {\n    0 => 1\n    _ => 2\n  }\n}",
+            // A divisor that is always zero always traps, and is checked without a crash.
+            "pub fn f(x: u8) -> u8 = x / 0",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        assert_eq!(
+            messages("pub fn f(x: u8[0..=9], y: usize) -> usize[0..=8] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is 9, outside `usize[0..=8]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: u8[0..=9], y: i16[-400..=0]) -> i16[-8..=0] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is -9, outside `i16[-8..=0]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: u8[0..=9], y: i8) -> i16[0..=9] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is -1, outside `i16[0..=9]`, the type of the result of `f`"]
+        );
+    }
+
+    /// `~x` lies within the type of `x`, which `x` is narrowed into first, whatever Tier 1
+    /// knows of `x`: a value of no linear form, such as a shift's, still gives one within the
+    /// type, and no valuation of it lies outside, such as -1 for an unsigned type (Engineering
+    /// Guardrail #1).
+    #[test]
+    fn test_a_complement_lies_within_its_operands_type() {
+        for f in [
+            "pub fn f(x: u8, k: u8) -> u16[0..=255] = ~(x >> k)",
+            "pub fn f(x: i8, k: u8) -> i16[-128..=127] = ~(x >> k)",
+            // The scrutinee of a `match` is narrowed into its type, which Tier 1 proves.
+            "pub fn f(p: u8) -> u8 {\n  match ~(18446744073709551615_u64 >> p) {\n    0 => 1\n    _ => 2\n  }\n}",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        assert_eq!(
+            messages("pub fn f(x: u8, k: u8) -> u16[0..=254] = ~(x >> k)"),
+            ["Tier 1 cannot rule out that `~(x >> k)` is 255, outside `u16[0..=254]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: i8, k: u8) -> i16[-127..=127] = ~(x >> k)"),
+            ["Tier 1 cannot rule out that `~(x >> k)` is -128, outside `i16[-127..=127]`, the type of the result of `f`"]
+        );
+    }
+
     /// A loop's condition runs at the head of every round, so a binding or a struct it passes
     /// `mut` keeps only its type and refinement there; and a call in the condition, which the
     /// head reads as a candidate fact too, reports a failure once.
@@ -7724,7 +7796,9 @@ mod tests {
         let u128_ = IntTy::named("u128").unwrap_or(crate::types::I64);
         assert_eq!(int_range(u128_), (0, INF));
         assert_eq!(int_range(u64_), (0, u64::MAX as i128));
-        assert_eq!(bit_not(&TOP, Some(u8_)), TOP);
+        assert_eq!(bit_not(&TOP, Some(u8_)), Val::Itv(0, 255));
+        assert_eq!(bit_not(&Val::Other, Some(u8_)), Val::Itv(0, 255));
+        assert_eq!(bit_not(&TOP, None), TOP);
         assert_eq!(bit_not(&Val::Lin(vec![], 1), None), TOP);
         assert_eq!(
             bit_not(&Val::Lin(vec![], 1), Some(u8_)),

@@ -1393,13 +1393,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-sema/src/tier1.rs",
-        "bit_not",
-        "wildcard arm",
-        "match (v, t) { _ }",
-        "Tier 1 knows nothing of `~x` for any other value or an unknown type, which is sound",
-    ),
-    (
-        "mente-sema/src/tier1.rs",
         "callee_path_var",
         "let-else",
         "let ExprKind::Name(n) = &tree.expr(at).kind",
