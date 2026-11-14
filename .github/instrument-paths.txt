@@ -22,6 +22,9 @@ docs/language-card.md
 docs/platform-layer.md
 # A workspace member: the baseline runs its tests, though .cargo/mutants.toml mutates none of it.
 spikes/tier1-latency/**
+# Plants, never to merge.
+spikes/plant-macro/**
+spikes/plant-dep/**
 Cargo.toml
 Cargo.lock
 rust-toolchain.toml

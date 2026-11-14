@@ -9,6 +9,7 @@ members = [
     "compiler/mente-cli",
     "compiler/mente-interp",
     "spikes/tier1-latency",
+    "spikes/plant-macro",
 ]
 # Workspaces of their own, with the external crates Norman approved for them (their README.md).
 exclude = ["spikes/cranelift-debug-info", "spikes/error-return-registers"]

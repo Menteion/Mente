@@ -349,6 +349,14 @@ name = "mente-mir"
 version = "0.1.0"
 
 [[package]]
+name = "mente-plant-dep"
+version = "0.1.0"
+
+[[package]]
+name = "mente-plant-macro"
+version = "0.1.0"
+
+[[package]]
 name = "mente-sema"
 version = "0.1.0"
 dependencies = [
@@ -449,6 +457,10 @@ checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
 [[package]]
 name = "spike-tier1-latency"
 version = "0.1.0"
+dependencies = [
+ "mente-plant-dep",
+ "mente-plant-macro",
+]
 
 [[package]]
 name = "stable_deref_trait"

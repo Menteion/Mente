@@ -1,0 +1,11 @@
+[package]
+name = "mente-plant-macro"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A plant, never to merge: a procedural macro in a listed member, its key written with an escape"
+
+[lib]
+"proc\u002dmacro" = true
+test = false
+doctest = false

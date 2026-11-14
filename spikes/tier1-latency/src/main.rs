@@ -184,3 +184,11 @@ fn main() -> ExitCode {
         }
     }
 }
+
+// A plant, never to merge: the macro of a listed member and a path dependency outside the members.
+mente_plant_macro::plant!();
+
+/// A plant, never to merge.
+pub fn plant_dependency() -> u32 {
+    mente_plant_dep::plant_zero()
+}

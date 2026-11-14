@@ -1,10 +1,15 @@
 [package]
+"\u0062uild" = "plant-build.rs"
 name = "spike-tier1-latency"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 description = "M0b spike: Tier 1 (intervals and octagons) on the generated module of the Tier-1 latency protocol"
+
+[dependencies]
+mente-plant-macro = { path = "../plant-macro" }
+mente-plant-dep = { path = "../plant-dep" }
 
 [[bin]]
 name = "spike-tier1"
