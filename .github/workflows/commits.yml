@@ -35,6 +35,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # A plant: a step after NEL.      - run: echo the hidden step ran
       - name: Check the subjects, the text and the base
         env:
           # The pull request's text reaches the script only through the environment.

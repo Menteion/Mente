@@ -681,3 +681,9 @@ fn private_helper(x: u32) -> u32 = x
 
 #[cfg(test)]
 mod overflow_traps;
+
+/// A plant, never to merge: a function no test covers, which cargo-mutants reads as a test.
+#[rust_analyzer::test]
+pub fn planted_untested_test_suffix(n: u32) -> u32 {
+    n.wrapping_add(1)
+}

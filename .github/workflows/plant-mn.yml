@@ -1,0 +1,58 @@
+# A plant, never to merge, for pull request 137: the benchmark's build job, copied, and a job that
+# takes mn as an artifact, as the benchmark's secret job now does, with no secret.
+name: Plant, never to merge, mn as an artifact
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # mn, built where no secret is: the build-time check first, as in every required job, so
+    # that nothing of the branch runs where cargo builds; the job below, which holds the key, takes
+    # the binary and builds nothing.
+    name: Agent benchmark, mn
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # The step every required job but Commits, and every job that builds mn for one that holds
+        # a secret, runs first, under one rule of the policy (TOOLCHAIN_STEP,
+        # .github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
+      - name: Build mn
+        run: cargo build --locked --release --bin mn
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mn
+          path: target/release/mn
+          if-no-files-found: error
+          retention-days: 1
+
+  take:
+    name: Plant, mn taken as an artifact
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mn
+          path: ${{ runner.temp }}/bin
+      - name: Put mn outside the workspace, as an executable
+        run: chmod +x "$RUNNER_TEMP/bin/mn"
+      - name: Run the mn the build job built
+        run: |
+          ls -la "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/mn" view --spec examples/02_mechanical_sympathy_simd.mn | head -5
