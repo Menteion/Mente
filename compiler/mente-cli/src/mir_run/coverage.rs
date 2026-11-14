@@ -780,26 +780,54 @@ fn grammar() -> BTreeSet<String> {
     all
 }
 
-/// The generated programs that pass every check, which the three paths run, reach every
-/// construct of M1's grammar but those [`NOT_GENERATED`] names, and those never.
+/// Every generated program passes every check, so that the three paths run it and none is left
+/// out unseen: nothing refuses one but a narrowing Tier 1 proves always traps (`E0508`), whose
+/// function is generated again once the reference interpreter has run the claim
+/// ([`generate::checked`]), at most [`MAX_REGENERATED`] times over these seeds. Together the
+/// programs reach every construct of M1's grammar but those [`NOT_GENERATED`] names, and those
+/// never.
 #[test]
 fn test_generated_programs_reach_every_construct_of_the_grammar() {
     let grammar = grammar();
     let mut seen = BTreeSet::new();
+    let mut problems = Vec::new();
+    let mut regenerated = Vec::new();
     for seed in 0..SEEDS {
-        let p = generate::program(seed);
-        if mente_sema::check_program(&p.text).is_ok() {
-            functions(&p.text)
-                .iter()
-                .for_each(|f| reached(f, &mut seen));
-            structs(&p.text)
+        let c = generate::checked(seed);
+        problems.extend(c.problems);
+        regenerated.extend(c.regenerated.into_iter().map(|r| (seed, r)));
+        if c.module.is_some() {
+            let text = &c.program.text;
+            functions(text).iter().for_each(|f| reached(f, &mut seen));
+            structs(text)
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
-            enums(&p.text)
-                .iter()
-                .for_each(|e| reached_enum(e, &mut seen));
+            enums(text).iter().for_each(|e| reached_enum(e, &mut seen));
         }
     }
+    assert!(
+        problems.is_empty(),
+        "generated programs the checker refuses, or claims of Tier 1 a run contradicts:\n{}",
+        problems.join("\n")
+    );
+    let checked = regenerated.iter().filter(|(_, r)| r.reached > 0).count();
+    println!(
+        "{} functions generated again for a narrowing that always traps, {} of them with the \
+         claim seen to hold in a run",
+        regenerated.len(),
+        checked
+    );
+    assert!(
+        regenerated.len() <= MAX_REGENERATED,
+        "{} functions were generated again for a narrowing that always traps, above the bound \
+         of {}: the generator writes more of them than it did: {:?}",
+        regenerated.len(),
+        MAX_REGENERATED,
+        regenerated
+            .iter()
+            .map(|(seed, r)| format!("seed {} {} {}:{}", seed, r.function, r.line, r.col))
+            .collect::<Vec<_>>()
+    );
     for name in &seen {
         assert!(grammar.contains(name), "`{}` is not in the grammar", name);
     }
@@ -826,3 +854,8 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
 
 /// The seeds the test reads: the first programs of each mode.
 const SEEDS: u64 = 300;
+
+/// The most functions the programs of those seeds have generated again for a narrowing Tier 1
+/// proves always traps (`E0508`). A generator that writes more of them than this has lost what it
+/// knows of the values it narrows.
+const MAX_REGENERATED: usize = 60;

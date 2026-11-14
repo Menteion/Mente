@@ -25,12 +25,17 @@
 //! `mut` arguments, and take and give structs as parameters, results and `if` values.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt;
+use std::ops::Range;
+use std::panic;
 
 use mente_interp::{Int, Value};
 use mente_sema::structs::Structs;
 use mente_sema::CheckedModule;
+use mente_syntax::diagnostics::Diagnostic;
 use mente_syntax::tree::{Bound, Tree, TypeId, TypeKind};
+use mente_syntax::Span;
 
 use super::CallArgs;
 
@@ -350,6 +355,16 @@ impl fmt::Display for Ty {
             Ty::Array(n, e) => write!(f, "[{}]{}", n, e),
             Ty::Struct(name) | Ty::Enum(name) => write!(f, "{}", name),
         }
+    }
+}
+
+/// The range of the integers a value of type `ty` holds, an integer's own or those of an
+/// array's elements, through the arrays nested in it; none when it holds no integers.
+fn leaf_range(ty: &Ty) -> Option<R> {
+    match ty {
+        Ty::Int(t) => Some(t.range()),
+        Ty::Array(_, inner) => leaf_range(inner),
+        Ty::Bool | Ty::Struct(_) | Ty::Enum(_) => None,
     }
 }
 
@@ -686,6 +701,15 @@ impl E {
         self.print(0, &mut s);
         s
     }
+
+    /// Its text where a statement's header holds it, before the `{` of a block: the condition
+    /// of an `if`, a `while` or a `guard`, and what a `match` reads. An `if` or a `match` there
+    /// stands in parentheses, as it does as an operand (`E0115`).
+    fn header(&self) -> String {
+        let mut s = String::new();
+        self.print(1, &mut s);
+        s
+    }
 }
 
 /// What the operands of an integer expression have in common, which decides its type
@@ -757,17 +781,37 @@ pub struct Program {
     pub seed: u64,
     pub mode: Mode,
     pub text: String,
+    /// Each function's name, with where its text lies in `text`.
+    pub functions: Vec<(String, Range<usize>)>,
 }
 
 /// The program `seed` generates, the same on every platform.
 pub fn program(seed: u64) -> Program {
+    generated(seed, &[])
+}
+
+/// The program of `seed` whose function `k` has the body of its attempt `attempts[k]`, the
+/// first one where none is given: every attempt keeps the function's signature.
+fn generated(seed: u64, attempts: &[u32]) -> Program {
     let mode = Mode::of(seed);
     let mut g = Gen::new(seed, mode);
+    g.attempts = attempts.to_vec();
+    let (text, functions) = g.module();
     Program {
         seed,
         mode,
-        text: g.module(),
+        text,
+        functions,
     }
+}
+
+/// The random source of function `index` of the program of `seed`: `part` 0 for its signature,
+/// which every attempt shares, and `1 + attempt` for its body.
+fn stream(seed: u64, index: usize, part: u64) -> Rng {
+    let mut r = Rng::new(seed ^ 0xD6E8_FEB8_6659_FD93_u64.wrapping_mul(index as u64 + 1));
+    r.0 ^= part.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    r.next();
+    r
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -901,6 +945,14 @@ struct Gen {
     /// The roots of the places a `match` reads, which nothing in any of its arms changes
     /// (`core-calculus.md`, item 14).
     frozen: Vec<usize>,
+    /// The program's seed, which with a function's index gives the function its random sources.
+    seed: u64,
+    /// Which attempt at its body each function takes, the first where none is given.
+    attempts: Vec<u32>,
+    /// The range of the integers each array literal being generated holds so far, the innermost
+    /// last: those of the literals nested in one another are kept in one machine type together
+    /// (`E0222`). A value that is no literal starts one of its own, which nothing reads.
+    hulls: Vec<Option<R>>,
     sigs: Vec<Sig>,
     /// The function being generated, which may call itself once when it has a measure.
     current: Option<Sig>,
@@ -927,10 +979,13 @@ impl Gen {
     fn new(seed: u64, mode: Mode) -> Gen {
         Gen {
             rng: Rng::new(seed),
+            seed,
+            attempts: Vec::new(),
             mode,
             structs: Vec::new(),
             enums: Vec::new(),
             frozen: Vec::new(),
+            hulls: Vec::new(),
             sigs: Vec::new(),
             current: None,
             recursion: None,
@@ -948,7 +1003,7 @@ impl Gen {
         }
     }
 
-    fn module(&mut self) -> String {
+    fn module(&mut self) -> (String, Vec<(String, Range<usize>)>) {
         let mut out = String::from("module generated\n");
         // Structs and enums first, each holding only those declared before it, so none contains
         // itself.
@@ -963,14 +1018,22 @@ impl Gen {
                 out.push_str(&text);
             }
         }
+        // What the module decides of its functions comes first: each function then has random
+        // sources of its own, so that one can be generated again and leave the others as they
+        // are.
         let count = 1 + self.rng.below(5) as usize;
-        for k in 0..count {
-            let public = k + 1 == count || self.rng.chance(50);
+        let public: Vec<bool> = (0..count)
+            .map(|k| k + 1 == count || self.rng.chance(50))
+            .collect();
+        let mut functions = Vec::new();
+        for (k, public) in public.into_iter().enumerate() {
             let text = self.function(k, public);
             out.push('\n');
+            let start = out.len();
             out.push_str(&text);
+            functions.push((format!("f{}", k), start..out.len()));
         }
-        out
+        (out, functions)
     }
 
     // ---------------------------------------------------------------- structs
@@ -1204,8 +1267,12 @@ impl Gen {
                         seen.push(n);
                     }
                 }
+                // `_` stands only where the literals leave a value for it (`E0230`).
+                let covered = u128::try_from(seen.len()).is_ok_and(|n| n > span);
                 let mut out: Vec<Pat> = seen.into_iter().map(Pat::Int).collect();
-                out.push(Pat::Wild);
+                if !covered {
+                    out.push(Pat::Wild);
+                }
                 Some(out)
             }
             Ty::Array(..) | Ty::Struct(_) => None,
@@ -1252,7 +1319,8 @@ impl Gen {
                     }
                 }
                 if let Some((e, u)) = self.int_scrutinee(*t, depth + 1) {
-                    return Some((e, Some(u.range())));
+                    let r = self.declared_range(&e).unwrap_or(u.range());
+                    return Some((e, Some(r)));
                 }
                 let names: Vec<usize> = self
                     .visible()
@@ -1263,9 +1331,23 @@ impl Gen {
                     return None;
                 }
                 let id = *self.rng.pick(&names);
-                Some((self.read(id), Some(t.range())))
+                let e = self.read(id);
+                let r = self.declared_range(&e).unwrap_or(t.range());
+                Some((e, Some(r)))
             }
             Ty::Array(..) | Ty::Struct(_) => None,
+        }
+    }
+
+    /// The refinement the checker reads `e` with, when `e` is a place that declares one with
+    /// literal bounds: a binding's, a field's, or an element's of a field whose elements are
+    /// refined. A `match` on such a place covers that range, not its type's
+    /// (`core-calculus.md`, item 14).
+    fn declared_range(&self, e: &E) -> Option<R> {
+        let id = self.root(e)?;
+        match e {
+            E::Name(_) => self.binds[id].range,
+            _ => self.place_refine(id, e),
         }
     }
 
@@ -2217,10 +2299,16 @@ impl Gen {
         let roll = self.rng.below(100);
         if roll < 50 {
             if let Some((e, r, t)) = self.int_name(exact, false) {
+                // The range `E0222` takes for a name is its own declared refinement's, which a
+                // pattern's binding has none of: its field's refinement is a fact for Tier 1
+                // alone (`wide.rs`, `declared`).
+                let pattern = self
+                    .root(&e)
+                    .is_some_and(|id| self.binds[id].kind == Kind::Pattern);
                 return G {
                     e,
                     cls: Cls::One(t),
-                    r,
+                    r: if pattern { t.range() } else { r },
                     k: None,
                 };
             }
@@ -2456,6 +2544,27 @@ impl Gen {
     }
 
     fn array(&mut self, n: u32, elem: &Ty, depth: u32) -> E {
+        // What this value's own parts hold, such as a call's arguments, is nothing to the array
+        // literal around it; the value itself is, with the range of the integers it gives.
+        let (e, hull) = self.apart(|g| g.array_value(n, elem, depth));
+        if let (Some(top), Some(r)) = (self.hulls.last_mut(), hull) {
+            *top = Some(top.map_or(r, |h| h.hull(r)));
+        }
+        e
+    }
+
+    /// What `f` generates, apart from the array literal being generated around it.
+    fn apart<T>(&mut self, f: impl FnOnce(&mut Gen) -> T) -> T {
+        self.hulls.push(None);
+        let v = f(self);
+        self.hulls.pop();
+        v
+    }
+
+    /// A value of `[n]elem`, with the range of the integers it gives an array literal that
+    /// holds it: a literal's own hull, and for any other array the range of its own element
+    /// type, which may be another integer type than `elem` (`wide.rs`, `leaves`).
+    fn array_value(&mut self, n: u32, elem: &Ty, depth: u32) -> (E, Option<R>) {
         let want = Ty::Array(n, Box::new(elem.clone()));
         let names: Vec<usize> = self
             .visible()
@@ -2465,10 +2574,11 @@ impl Gen {
         match self.rng.below(100) {
             0..=39 if !names.is_empty() => {
                 let id = *self.rng.pick(&names);
-                self.read(id)
+                let typed = leaf_range(&self.binds[id].ty);
+                (self.read(id), typed)
             }
             40..=49 => match self.call(depth, |t| flows(t, &want)) {
-                Some((e, _)) => e,
+                Some((e, ty)) => (e, leaf_range(&ty)),
                 None => self.array_literal(n, elem, depth),
             },
             50..=59 => {
@@ -2485,9 +2595,10 @@ impl Gen {
                     [] => self.array_literal(n, elem, depth),
                     _ => {
                         let (id, m) = *self.rng.pick(&outer);
+                        let typed = leaf_range(&self.binds[id].ty);
                         let base = self.read(id);
                         let i = self.index(m);
-                        E::Index(Box::new(base), Box::new(i))
+                        (E::Index(Box::new(base), Box::new(i)), typed)
                     }
                 }
             }
@@ -2495,32 +2606,67 @@ impl Gen {
         }
     }
 
-    /// An array literal of `n` values of type `elem`. Integer elements of different types are
-    /// kept exact in one machine type until the array lands, so their ranges' hull must lie
-    /// within `u128` or within `i128` (`E0222`); elements whose hull does not are generated
-    /// again, and then a repeat of one value stands in.
-    fn array_literal(&mut self, n: u32, elem: &Ty, depth: u32) -> E {
-        if n == 0 || self.rng.chance(30) {
-            let v = self.value(elem, depth + 1);
-            return E::Repeat(Box::new(v), n);
-        }
-        let Ty::Int(t) = elem else {
-            return E::Array((0..n).map(|_| self.value(elem, depth + 1)).collect());
-        };
-        for _ in 0..4 {
-            let m = self.mark();
-            let items: Vec<(E, R)> = (0..n).map(|_| self.narrowed_range(*t, depth + 1)).collect();
-            let hull = items
-                .iter()
-                .skip(1)
-                .fold(items[0].1, |h, (_, r)| h.hull(*r));
-            if hull.fits() {
-                return E::Array(items.into_iter().map(|(e, _)| e).collect());
+    /// An array literal of `n` values of type `elem`, with the hull of the ranges of the
+    /// integers it holds, through the literals nested in it; none for an array of no integers.
+    /// Integers of different types are kept exact in one machine type until the array lands,
+    /// those of nested literals together, so their hull must lie within `u128` or within `i128`
+    /// (`E0222`); elements whose hull does not are generated again, and then a repeat of one
+    /// value stands in.
+    fn array_literal(&mut self, n: u32, elem: &Ty, depth: u32) -> (E, Option<R>) {
+        let repeat = n == 0 || self.rng.chance(30);
+        match elem {
+            Ty::Int(t) if !repeat => {
+                for _ in 0..4 {
+                    let m = self.mark();
+                    let items: Vec<(E, R)> =
+                        self.apart(|g| (0..n).map(|_| g.narrowed_range(*t, depth + 1)).collect());
+                    let hull = items
+                        .iter()
+                        .skip(1)
+                        .fold(items[0].1, |h, (_, r)| h.hull(*r));
+                    if hull.fits() {
+                        let items = items.into_iter().map(|(e, _)| e).collect();
+                        return (E::Array(items), Some(hull));
+                    }
+                    self.restore(m);
+                }
             }
-            self.restore(m);
+            Ty::Array(..) if !repeat => {
+                for _ in 0..4 {
+                    let m = self.mark();
+                    let (items, hull) = self.elements(n, elem, depth);
+                    if hull.is_none_or(|h| h.fits()) {
+                        return (E::Array(items), hull);
+                    }
+                    self.restore(m);
+                }
+            }
+            Ty::Struct(_) | Ty::Enum(_) | Ty::Bool if !repeat => {
+                let (items, _) = self.elements(n, elem, depth);
+                return (E::Array(items), None);
+            }
+            Ty::Int(_) | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Bool => {}
         }
-        let v = self.value(elem, depth + 1);
-        E::Repeat(Box::new(v), n)
+        // One value repeated: its integers fit a machine type by themselves.
+        match elem {
+            Ty::Int(t) => {
+                let (v, r) = self.apart(|g| g.narrowed_range(*t, depth + 1));
+                (E::Repeat(Box::new(v), n), Some(r))
+            }
+            Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Bool => {
+                let (mut items, hull) = self.elements(1, elem, depth);
+                (E::Repeat(Box::new(items.remove(0)), n), hull)
+            }
+        }
+    }
+
+    /// `n` values of type `elem`, with the hull of the ranges of the integers the arrays among
+    /// them give.
+    fn elements(&mut self, n: u32, elem: &Ty, depth: u32) -> (Vec<E>, Option<R>) {
+        self.hulls.push(None);
+        let items = (0..n).map(|_| self.value(elem, depth + 1)).collect();
+        let hull = self.hulls.pop().flatten();
+        (items, leaf_range(elem).and(hull))
     }
 
     /// A value of type `ty` in a place a full expression stands: sometimes an `if`.
@@ -2978,6 +3124,28 @@ impl Gen {
         Some(E::If(Box::new(cond), Box::new(a), Box::new(b)))
     }
 
+    /// Which bindings count as read, to compare with after a value is generated.
+    fn reads(&self) -> Vec<bool> {
+        self.binds.iter().map(|b| b.read).collect()
+    }
+
+    /// Takes back the reads counted since `before` that `kept` and the pending guards do not
+    /// hold: a part of a generated value was replaced, and a binding only that part read is
+    /// still unread, so its scope discards it when it closes (`E0218`).
+    fn forget_reads(&mut self, before: &[bool], kept: &E) {
+        for (id, was) in before.iter().enumerate() {
+            if *was || !self.binds[id].read {
+                continue;
+            }
+            let name = [self.binds[id].name.clone()];
+            let held = Gen::reads_any(kept, &name)
+                || self.pending.iter().any(|c| Gen::reads_any(c, &name));
+            if !held {
+                self.binds[id].read = false;
+            }
+        }
+    }
+
     /// A statement whose value holds a value whose every branch leaves, as an operand, an
     /// element or an argument, so that it leaves where it stands (`core-calculus.md`, item 6).
     fn leaving_value(&mut self) -> Vec<S> {
@@ -3008,6 +3176,7 @@ impl Gen {
                     return Vec::new();
                 }
                 let sig = self.rng.pick(&sigs).clone();
+                let read = self.reads();
                 let Some(E::Call(name, mut args)) = self.arguments(&sig, false, 0) else {
                     return Vec::new();
                 };
@@ -3017,6 +3186,7 @@ impl Gen {
                 args[k].1 = leave;
                 self.cost += self.mult * sig.cost;
                 let call = E::Call(name, args);
+                self.forget_reads(&read, &call);
                 match sig.ret {
                     Some(_) => S::Discard(call),
                     None => S::Expr(call),
@@ -3168,11 +3338,14 @@ impl Gen {
                     return None;
                 };
                 let leave = self.no_type_array(*n, elem)?;
+                let read = self.reads();
                 let E::Construct(_, mut values) = self.construct(&name, 1) else {
                     return None;
                 };
                 values[k].1 = leave;
-                Some(S::Discard(E::Construct(name, values)))
+                let built = E::Construct(name, values);
+                self.forget_reads(&read, &built);
+                Some(S::Discard(built))
             }
             3 => {
                 let variants: Vec<(String, String, Vec<GField>)> = self
@@ -3613,6 +3786,7 @@ impl Gen {
         self.loops = 0;
         self.recursed = false;
         self.safe.clear();
+        self.rng = stream(self.seed, index, 0);
         let name = format!("f{}", index);
         let refined = self.mode == Mode::Refined;
         let mut params: Vec<Param> = Vec::new();
@@ -3729,6 +3903,9 @@ impl Gen {
             cost: 0,
         };
         self.current = Some(sig.clone());
+        // The body, of this attempt: another attempt has another body under the same signature.
+        let attempt = self.attempts.get(index).copied().unwrap_or(0);
+        self.rng = stream(self.seed, index, 1 + u64::from(attempt));
         let mut first = Vec::new();
         if self.recursion.is_some() {
             let leave = S::Return(ret.as_ref().map(|t| self.default_of(t, ret_range)));
@@ -3918,7 +4095,13 @@ impl Gen {
                 }
                 _ => {
                     let op = *self.rng.pick(&[Op::Lt, Op::Le, Op::Gt, Op::Ge]);
-                    let c = self.value_in(ta.range());
+                    // A bound Tier 1's domain holds: it proves no comparison with a constant
+                    // beyond it, not even a literal's, so no call could meet the clause.
+                    let reach = Num::new(false, mente_sema::octagon::BIG.unsigned_abs());
+                    let c = self.value_in(R {
+                        lo: ta.min().max(reach.negated()),
+                        hi: ta.max().min(reach),
+                    });
                     Req::Bound(a, op, c)
                 }
             };
@@ -3964,13 +4147,13 @@ impl Gen {
             S::Discard(e) => out.push_str(&format!("_ = {}\n", e.text())),
             S::Expr(e) => out.push_str(&format!("{}\n", e.text())),
             S::If(c, then, els) => {
-                out.push_str(&format!("if {} {{\n", c.text()));
+                out.push_str(&format!("if {} {{\n", c.header()));
                 self.print_block(then, indent + 1, out);
                 let mut els = els.as_ref();
                 while let Some(e) = els {
                     // An `else` block that holds one `if` alone is written `else if`.
                     if let (None, [S::If(c, then, next)]) = (&e.tail, e.stmts.as_slice()) {
-                        out.push_str(&format!("{}}} else if {} {{\n", pad, c.text()));
+                        out.push_str(&format!("{}}} else if {} {{\n", pad, c.header()));
                         self.print_block(then, indent + 1, out);
                         els = next.as_ref();
                     } else {
@@ -3982,7 +4165,7 @@ impl Gen {
                 out.push_str(&format!("{}}}\n", pad));
             }
             S::Match(s, arms) => {
-                out.push_str(&format!("match {} {{\n", s.text()));
+                out.push_str(&format!("match {} {{\n", s.header()));
                 for (p, body) in arms {
                     out.push_str(&format!("{}  {} => {{\n", pad, p));
                     self.print_block(body, indent + 2, out);
@@ -3991,7 +4174,7 @@ impl Gen {
                 out.push_str(&format!("{}}}\n", pad));
             }
             S::While(c, clauses, body) => {
-                out.push_str(&format!("while {}", c.text()));
+                out.push_str(&format!("while {}", c.header()));
                 for k in clauses {
                     out.push(' ');
                     out.push_str(k);
@@ -4001,7 +4184,7 @@ impl Gen {
                 out.push_str(&format!("{}}}\n", pad));
             }
             S::Guard(c, els) => {
-                out.push_str(&format!("guard {} else {{\n", c.text()));
+                out.push_str(&format!("guard {} else {{\n", c.header()));
                 self.print_block(els, indent + 1, out);
                 out.push_str(&format!("{}}}\n", pad));
             }
@@ -4049,6 +4232,267 @@ fn req_text(r: &Req, params: &[Param]) -> String {
         Req::Sum(a, b, c) => format!("{} + {} <= {}", n(a), n(b), c),
         Req::Below(a, b) => format!("{} < {}.len", n(a), n(b)),
     }
+}
+
+// -------------------------------------------------------------------- programs that check
+
+/// A generated program that passes every check, Tier 1 included, so that the three paths run
+/// it: the program of its seed, with each function Tier 1 refused generated again.
+pub struct Checked {
+    pub program: Program,
+    /// The checked module; none when `problems` tells why the program does not check.
+    pub module: Option<CheckedModule>,
+    /// Each narrowing Tier 1 proved always traps (`E0508`), whose function was generated again,
+    /// with what the reference interpreter saw of the claim.
+    pub regenerated: Vec<AlwaysTraps>,
+    /// What no generated program may show: a diagnostic other than `E0508`, which is a bug of
+    /// the generator; an `E0508` the reference interpreter contradicts, which is a bug of
+    /// Tier 1; and a program that still has one after [`MAX_ROUNDS`].
+    pub problems: Vec<String>,
+}
+
+/// A narrowing Tier 1 proved always traps where it is reached (`E0508`), in a generated
+/// function, and the runs of that function that checked it.
+#[derive(Clone, Debug)]
+pub struct AlwaysTraps {
+    pub function: String,
+    pub line: u32,
+    pub col: u32,
+    /// Whether the claim is about the value of the expression it points at, which the runs
+    /// can see; a compound assignment's is about `x + e` and points at `e`.
+    pub seen: bool,
+    /// The calls made of the function.
+    pub calls: usize,
+    /// Those that gave the expression a value: every time outside its type, as claimed.
+    pub reached: usize,
+}
+
+/// How many times a program's functions are generated again before it is given up.
+const MAX_ROUNDS: usize = 12;
+
+/// The calls the reference interpreter makes of a function to check a claim about it.
+const CLAIM_CALLS: CallPlan = CallPlan {
+    random: 24,
+    exhaustive: 256,
+};
+
+/// The program of `seed` that passes every check. A function with a narrowing Tier 1 proves
+/// always traps is refused (`E0508`): the reference interpreter first runs the function on
+/// generated arguments, and every value the narrowed expression takes must lie outside the type
+/// as Tier 1 claims, or the claim is reported as a problem; then the function's body is
+/// generated again, under the same signature. Nothing else may refuse a generated program.
+pub fn checked(seed: u64) -> Checked {
+    let mut attempts: Vec<u32> = Vec::new();
+    let mut regenerated = Vec::new();
+    let mut problems = Vec::new();
+    for round in 0.. {
+        let program = generated(seed, &attempts);
+        let refused = |program, regenerated, problems| Checked {
+            program,
+            module: None,
+            regenerated,
+            problems,
+        };
+        let diagnostics = match panic::catch_unwind(|| mente_sema::check_program(&program.text)) {
+            Ok(Ok(module)) => {
+                return Checked {
+                    program,
+                    module: Some(module),
+                    regenerated,
+                    problems,
+                }
+            }
+            Ok(Err(diagnostics)) => diagnostics,
+            Err(_) => {
+                problems.push(format!("seed {}: the checker panicked", seed));
+                return refused(program, regenerated, problems);
+            }
+        };
+        let others: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| d.code != "E0508")
+            .map(|d| {
+                format!(
+                    "seed {}: {} at {}:{}: {}",
+                    seed, d.code, d.primary.line, d.primary.col, d.message
+                )
+            })
+            .collect();
+        if !others.is_empty() {
+            problems.extend(others);
+            return refused(program, regenerated, problems);
+        }
+        if round == MAX_ROUNDS {
+            problems.push(format!(
+                "seed {}: a narrowing still always traps after {} rounds of generating its function again",
+                seed, MAX_ROUNDS
+            ));
+            return refused(program, regenerated, problems);
+        }
+        // Tier 1 alone refuses the program, so without it the functions run.
+        let Ok(Ok(kept)) =
+            panic::catch_unwind(|| mente_sema::check_program_without_proofs(&program.text))
+        else {
+            problems.push(format!(
+                "seed {}: Tier 1 alone refuses the program, which does not check without it",
+                seed
+            ));
+            return refused(program, regenerated, problems);
+        };
+        attempts.resize(program.functions.len(), 0);
+        let mut again = BTreeSet::new();
+        for d in &diagnostics {
+            let Some(k) = program
+                .functions
+                .iter()
+                .position(|(_, at)| at.contains(&d.primary.start))
+            else {
+                problems.push(format!(
+                    "seed {}: E0508 at {}:{}, in no function",
+                    seed, d.primary.line, d.primary.col
+                ));
+                return refused(program, regenerated, problems);
+            };
+            regenerated.push(always_traps(&kept, &program, k, d, &mut problems));
+            again.insert(k);
+        }
+        for k in again {
+            attempts[k] += 1;
+        }
+    }
+    unreachable!("the rounds end at MAX_ROUNDS")
+}
+
+/// What an `E0508` claims of a value: that it is at most, or at least, `bound`, which lies
+/// outside the integer type `ty` the value is narrowed into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Claim {
+    ty: mente_sema::types::IntTy,
+    at_most: bool,
+    bound: i128,
+    /// Whether the value is that of the expression the diagnostic points at.
+    seen: bool,
+}
+
+impl Claim {
+    /// The claim of an `E0508`'s `message`, whose span holds `source`: none for a message of
+    /// another form, which is then Tier 1's to keep in step with this reading.
+    fn read(message: &str, source: &str) -> Option<Claim> {
+        let (before, after) = message.split_once(" here, outside `")?;
+        let (ty, _) = after.split_once('`')?;
+        let ty = *mente_sema::types::INT_TYPES.iter().find(|t| t.name == ty)?;
+        let (before, bound) = before.rsplit_once(' ')?;
+        let bound: i128 = bound.parse().ok()?;
+        let (what, at_most) = match before.strip_suffix(" is at most") {
+            Some(what) => (what, true),
+            None => (before.strip_suffix(" is at least")?, false),
+        };
+        let what = what.strip_prefix("Tier 1 proves ")?;
+        let seen = what == "the value"
+            || what
+                .strip_prefix('`')
+                .and_then(|w| w.strip_suffix('`'))
+                .is_some_and(|w| w == source);
+        Some(Claim {
+            ty,
+            at_most,
+            bound,
+            seen,
+        })
+    }
+
+    /// Why `x`, a value the expression took, contradicts the claim, if it does.
+    fn broken_by(&self, x: Int) -> Option<String> {
+        let bound = Int::from_i128(self.bound);
+        if x.fits(self.ty) {
+            Some(format!(
+                "{} fits `{}`, so the narrowing does not trap",
+                x, self.ty.name
+            ))
+        } else if self.at_most && x > bound {
+            Some(format!("{} is above {}", x, bound))
+        } else if !self.at_most && x < bound {
+            Some(format!("{} is below {}", x, bound))
+        } else {
+            None
+        }
+    }
+}
+
+/// Checks the `E0508` `d` of function `k` of `program` by running the function: the reference
+/// interpreter calls it on generated arguments in `kept`, the module checked without Tier 1,
+/// and every integer the expression `d` points at gives, an array's elements included, must be
+/// what Tier 1 claims. A value that is not is pushed on `problems` with its call.
+fn always_traps(
+    kept: &CheckedModule,
+    program: &Program,
+    k: usize,
+    d: &Diagnostic,
+    problems: &mut Vec<String>,
+) -> AlwaysTraps {
+    let name = &program.functions[k].0;
+    let at = d.primary;
+    let mut out = AlwaysTraps {
+        function: name.clone(),
+        line: at.line,
+        col: at.col,
+        seen: false,
+        calls: 0,
+        reached: 0,
+    };
+    let source = program.text.get(at.start..at.end).unwrap_or("");
+    let Some(claim) = Claim::read(&d.message, source) else {
+        problems.push(format!(
+            "seed {}: an E0508 whose claim is not read: {}",
+            program.seed, d.message
+        ));
+        return out;
+    };
+    out.seen = claim.seen;
+    if !claim.seen {
+        return out;
+    }
+    let limits = mente_interp::Limits {
+        max_depth: 64,
+        max_steps: 200_000,
+        ..mente_interp::Limits::default()
+    };
+    let mut rng = Rng::new(program.seed ^ 0x0E05_08C1_A135_7EED);
+    let calls = arguments_of(kept, name, &mut rng, CLAIM_CALLS, limits.max_array);
+    for args in calls.unwrap_or_default() {
+        out.calls += 1;
+        let text: Vec<String> = args
+            .iter()
+            .map(|(is_mut, v)| format!("{}{}", if *is_mut { "mut " } else { "" }, v))
+            .collect();
+        let values = args.into_iter().map(|(_, v)| v).collect();
+        let mut taken: Vec<Int> = Vec::new();
+        // The run's end, a value or a trap, says nothing of the claim: what the expression
+        // gave before it does.
+        let _ =
+            mente_interp::call_observed(kept, name, values, limits, &mut |span: Span, x: Int| {
+                if (span.start, span.end) == (at.start, at.end) {
+                    taken.push(x);
+                }
+            });
+        if !taken.is_empty() {
+            out.reached += 1;
+        }
+        if let Some(why) = taken.iter().find_map(|x| claim.broken_by(*x)) {
+            problems.push(format!(
+                "seed {}: E0508 at {}:{} is wrong: {}\n  in the call {}({}): {}",
+                program.seed,
+                at.line,
+                at.col,
+                d.message,
+                name,
+                text.join(", "),
+                why
+            ));
+            break;
+        }
+    }
+    out
 }
 
 // -------------------------------------------------------------------- arguments
@@ -4173,34 +4617,45 @@ pub fn calls_within(
         .collect();
     let mut rng = Rng::new(seed ^ 0xA5A5_5A5A_C3C3_3C3C);
     let mut out = Vec::new();
-    for (name, f) in module.names.iter().zip(&module.functions) {
-        let Some(f) = f else { continue };
+    for name in &module.names {
         if !public.contains(name) {
             continue;
         }
-        let tree = &f.syntax.tree;
-        let params: Option<Vec<(String, bool, Domain)>> = f
-            .syntax
-            .params
-            .iter()
-            .map(|p| {
-                Some((
-                    p.name.clone(),
-                    p.is_mut,
-                    domain(tree, p.ty, &module.structs)?,
-                ))
-            })
-            .collect();
-        let Some(params) = params else { continue };
-        // A function whose arguments the reference interpreter could not hold is not called.
-        if params.iter().any(|(_, _, d)| d.values() > most) {
-            continue;
-        }
-        for args in function_calls(&params, &mut rng, plan) {
+        for args in arguments_of(module, name, &mut rng, plan, most).unwrap_or_default() {
             out.push((name.clone(), args));
         }
     }
     out
+}
+
+/// The argument lists `plan` gives function `name` of `module`; none for a function without a
+/// body, one with a parameter whose type the generator has no values of, or one whose arguments
+/// hold more than `most` values, which the reference interpreter could not hold.
+fn arguments_of(
+    module: &CheckedModule,
+    name: &str,
+    rng: &mut Rng,
+    plan: CallPlan,
+    most: u128,
+) -> Option<Vec<Vec<(bool, Value)>>> {
+    let f = module.functions.get(module.index(name)?)?.as_ref()?;
+    let tree = &f.syntax.tree;
+    let params: Vec<(String, bool, Domain)> = f
+        .syntax
+        .params
+        .iter()
+        .map(|p| {
+            Some((
+                p.name.clone(),
+                p.is_mut,
+                domain(tree, p.ty, &module.structs)?,
+            ))
+        })
+        .collect::<Option<_>>()?;
+    if params.iter().any(|(_, _, d)| d.values() > most) {
+        return None;
+    }
+    Some(function_calls(&params, rng, plan))
 }
 
 /// The argument lists of one function, each argument marked `mut` as its parameter is.

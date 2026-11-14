@@ -14,7 +14,7 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
-use crate::{Int, Limits, Stop, Trap, TrapKind, Value};
+use crate::{Int, Limits, Observer, Stop, Trap, TrapKind, Value};
 
 /// How control leaves a statement other than by its end.
 enum Exit {
@@ -117,15 +117,22 @@ pub(crate) struct Machine<'m> {
     limits: Limits,
     steps: u64,
     depth: usize,
+    /// What is shown each integer an expression gives, when a run is observed.
+    seen: Option<Observer<'m>>,
 }
 
 impl<'m> Machine<'m> {
-    pub(crate) fn new(module: &'m CheckedModule, limits: Limits) -> Machine<'m> {
+    pub(crate) fn new(
+        module: &'m CheckedModule,
+        limits: Limits,
+        seen: Option<Observer<'m>>,
+    ) -> Machine<'m> {
         Machine {
             module,
             limits,
             steps: 0,
             depth: 0,
+            seen,
         }
     }
 
@@ -651,9 +658,19 @@ impl<'m> Machine<'m> {
         }
     }
 
-    /// The value of `e`. `ctx` is the integer type of the place the value is narrowed into,
-    /// which literals alone take (`core-calculus.md`, item 5).
+    /// The value of `e`, whose integers an observer of the run is shown. `ctx` is the integer
+    /// type of the place the value is narrowed into, which literals alone take
+    /// (`core-calculus.md`, item 5).
     fn eval(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
+        let v = self.value(frame, e, ctx)?;
+        if let Some(seen) = self.seen.as_mut() {
+            show(&v, frame.f.syntax.tree.expr(e).span, &mut **seen);
+        }
+        Ok(v)
+    }
+
+    /// [`Machine::eval`]'s value.
+    fn value(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
         let f = frame.f;
         let tree = &f.syntax.tree;
         let span = tree.expr(e).span;
@@ -1297,6 +1314,17 @@ impl<'m> Machine<'m> {
                 | None => return broken("a refinement bound that names no array"),
             },
         })
+    }
+}
+
+/// Shows `seen` each integer of `v`, the value of the expression at `span`: itself, or those
+/// of an array's elements, through the arrays nested in it. A struct's and a variant's fields
+/// were shown where they were built.
+fn show(v: &Value, span: Span, seen: &mut (dyn FnMut(Span, Int) + Send)) {
+    match v {
+        Value::Int(x) => seen(span, *x),
+        Value::Array(items) => items.iter().for_each(|i| show(i, span, seen)),
+        Value::Bool(_) | Value::Struct(..) | Value::Enum(..) | Value::Unit => {}
     }
 }
 

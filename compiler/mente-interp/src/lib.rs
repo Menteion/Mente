@@ -277,10 +277,40 @@ pub fn call_leaving(
     args: Vec<Value>,
     limits: Limits,
 ) -> Result<(Value, Vec<Value>), Stop> {
+    run(module, name, args, limits, None)
+}
+
+/// What a run shows of its values: each integer an expression gives, an array's elements
+/// included, with the expression's span, as it is evaluated.
+pub type Observer<'a> = &'a mut (dyn FnMut(Span, Int) + Send);
+
+/// Calls the function `name` like [`call_leaving`], showing `seen` each integer an expression
+/// gives, exact, before it is narrowed anywhere, in the order of evaluation and up to the trap
+/// that ends the run. A claim about the values an expression takes, such as Tier 1's that a
+/// narrowing always traps (`E0508`), is checked against them.
+pub fn call_observed<'m>(
+    module: &'m CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+    limits: Limits,
+    seen: Observer<'m>,
+) -> Result<(Value, Vec<Value>), Stop> {
+    run(module, name, args, limits, Some(seen))
+}
+
+fn run<'m>(
+    module: &'m CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+    limits: Limits,
+    seen: Option<Observer<'m>>,
+) -> Result<(Value, Vec<Value>), Stop> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(stack_bytes(limits.max_depth))
-            .spawn_scoped(s, || eval::Machine::new(module, limits).enter(name, args))
+            .spawn_scoped(s, || {
+                eval::Machine::new(module, limits, seen).enter(name, args)
+            })
             .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
             .join()
             .unwrap_or_else(|_| {

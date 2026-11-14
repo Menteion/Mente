@@ -28,6 +28,86 @@ fn run(src: &str, call_text: &str) -> String {
     }
 }
 
+/// A run shows its observer each integer an expression gives, exact and with the expression's
+/// text, in the order of evaluation and up to the trap that ends the run; a run nobody
+/// observes gives the same result.
+#[test]
+fn test_an_observer_sees_each_integer_an_expression_gives() {
+    let src = "pub struct P {\n  a: u8\n}\npub fn f(x: u8, c: bool) -> u8 {\n  val y: u8 = x + 250\n  if c { y } else { 7 }\n}\npub fn g(x: u16, p: P) -> [2][1]u16 {\n  val q = P(a: p.a)\n  _ = q\n  [[x], [300]]\n}";
+    let text = format!("module m\n{}\n", src);
+    let m = module(src);
+    let seen = |call_text: &str| {
+        let (name, args) = parse_call(call_text).unwrap();
+        let mut values: Vec<(String, String)> = Vec::new();
+        let observed = call_observed(
+            &m,
+            &name,
+            args.clone(),
+            Limits::default(),
+            &mut |span: Span, x: Int| {
+                values.push((text[span.start..span.end].to_string(), x.to_string()));
+            },
+        );
+        let result = |r: Result<(Value, Vec<Value>), Stop>| match r {
+            Ok((v, _)) => v.to_string(),
+            Err(s) => s.to_string(),
+        };
+        let alone = result(call_leaving(&m, &name, args, Limits::default()));
+        assert_eq!(result(observed), alone, "{}", call_text);
+        (values, alone)
+    };
+    let pairs = |all: &[(&str, &str)]| -> Vec<(String, String)> {
+        all.iter()
+            .map(|(e, v)| (e.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        seen("f(1, true)"),
+        (
+            pairs(&[
+                ("x", "1"),
+                ("250", "250"),
+                ("x + 250", "251"),
+                ("y", "251"),
+                ("if c { y } else { 7 }", "251"),
+            ]),
+            "251".to_string()
+        )
+    );
+    assert_eq!(
+        seen("f(1, false)").0,
+        pairs(&[
+            ("x", "1"),
+            ("250", "250"),
+            ("x + 250", "251"),
+            ("7", "7"),
+            ("if c { y } else { 7 }", "7"),
+        ])
+    );
+    // The sum is seen as it is, 256, before the narrowing into `u8` that traps on it.
+    assert_eq!(
+        seen("f(6, true)"),
+        (
+            pairs(&[("x", "6"), ("250", "250"), ("x + 250", "256")]),
+            "trap[narrowing] at 6:15: 256 does not fit in `u8`".to_string()
+        )
+    );
+    // An array shows its integers, through the arrays nested in it; a struct shows none, its
+    // field having been shown where it was read.
+    assert_eq!(
+        seen("g(4, P(a: 9))").0,
+        pairs(&[
+            ("p.a", "9"),
+            ("x", "4"),
+            ("[x]", "4"),
+            ("300", "300"),
+            ("[300]", "300"),
+            ("[[x], [300]]", "4"),
+            ("[[x], [300]]", "300"),
+        ])
+    );
+}
+
 /// The kind of trap a call raises and where, or the value it returns.
 fn trapped(src: &str, call_text: &str) -> (String, u32, u32) {
     match run_with(src, call_text, Limits::default()) {

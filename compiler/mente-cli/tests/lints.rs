@@ -1013,7 +1013,7 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-interp/src/eval.rs",
-        "eval",
+        "value",
         "matches!",
         "matches!(op, BinaryOp::Shl | BinaryOp::Shr)",
         "a shift's amount takes no context type; every other operator's right operand does",
