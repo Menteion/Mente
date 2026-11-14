@@ -3972,6 +3972,7 @@ pub fn get(xs: [4]u8, i: usize[0..4]) -> u8 = xs[i]
 pub fn any(xs: [4]u8, i: usize) -> u8 = xs[i]
 pub fn half(x: u8) -> u8 = x / 2
 pub fn div(x: u8, y: u8) -> u8 = x / y
+pub fn sdiv(x: i8, y: i8) -> i8 = x / y
 pub fn sh(x: u8, k: u8[0..8]) -> u8 = x >> k
 pub fn shk(x: u8, k: u8) -> u8 = x >> k
 pub fn sum(a: u8[0..100], b: u8[0..100]) -> u8 = a + b
@@ -4000,8 +4001,15 @@ pub fn pass2(x: u8) -> u8 = take(x + 1)
             ("get", &[][..], &[index][..]),
             ("any", &[index], &[index]),
             ("half", &[], &["division-by-zero", "narrowing"]),
+            // An unsigned quotient lies within its dividend's type: a divisor that is zero
+            // traps first. A signed one may not, as -128 / -1 shows.
             (
                 "div",
+                &["division-by-zero"],
+                &["division-by-zero", "narrowing"],
+            ),
+            (
+                "sdiv",
                 &["division-by-zero", "narrowing"],
                 &["division-by-zero", "narrowing"],
             ),

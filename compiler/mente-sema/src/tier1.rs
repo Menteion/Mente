@@ -3836,7 +3836,15 @@ impl<'a> Fx<'a> {
                 operand,
             } => {
                 let v = self.eval(st, *operand);
-                bit_not(&v, int_of(&typing.exprs[operand.0 as usize]))
+                let t = int_of(&typing.exprs[operand.0 as usize]);
+                let not = bit_not(&v, t);
+                // The linear form holds of an operand within its type, which it is narrowed
+                // into first: where it may lie outside, the form bounds `~` only within the
+                // type.
+                match t {
+                    Some(ty) if !within(st, &v, ty) => clamp_to(not, t, st),
+                    Some(_) | None => not,
+                }
             }
             ExprKind::Unary { .. } => {
                 self.cond(st, e);
@@ -7581,6 +7589,12 @@ mod tests {
             "pub fn f(x: i8, k: u8) -> i16[-128..=127] = ~(x >> k)",
             // The scrutinee of a `match` is narrowed into its type, which Tier 1 proves.
             "pub fn f(p: u8) -> u8 {\n  match ~(18446744073709551615_u64 >> p) {\n    0 => 1\n    _ => 2\n  }\n}",
+            // A sum that may leave its type is narrowed before `~` applies, so its linear
+            // form bounds `~` only within the type.
+            "pub fn f(v: u8) -> u8 {\n  match ~(v + 255_u8) {\n    0 => 1\n    _ => 2\n  }\n}",
+            "pub fn f(v: u8) -> u16[0..=0] = ~(v + 255_u8)",
+            // One that stays within its type keeps its linear form: `~v` is `255 - v`.
+            "pub fn f(v: u8[3..=5]) -> u8[250..=252] = ~v",
         ] {
             assert_eq!(codes(f), NONE, "{}", f);
         }
