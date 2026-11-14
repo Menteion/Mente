@@ -728,17 +728,26 @@ mod tests {
                 .flat_map(|f| &f.obligations)
                 .filter(|o| o.proven)
                 .count();
-            (c.program, proven, again)
+            (c.program, proven, again, c.regenerated, c.claims)
         });
         let mut proven = 0;
         let mut again = 0;
+        let mut functions = 0;
+        let mut claims = Vec::new();
         let mut text = BTreeMap::<&str, String>::new();
-        for (p, proved, regenerated) in programs {
+        for (p, proved, regenerated, count, claimed) in programs {
             proven += proved;
             again += usize::from(regenerated);
+            functions += count;
+            claims.extend(claimed.into_iter().map(|c| (p.seed, c)));
             text.entry(group(p.mode)).or_default().push_str(&p.text);
         }
         assert!(again > 0, "no function of these seeds is generated again");
+        // These programs are held to the bars of every run.
+        assert_eq!(
+            generate::beyond_the_bars(90, functions, &claims),
+            Vec::<String>::new()
+        );
         assert!(proven >= 100, "Tier 1 proves only {} obligations", proven);
         for word in [
             "while ", "guard ", "break", "continue", "mut ", "if ", "[", "<<", "%",

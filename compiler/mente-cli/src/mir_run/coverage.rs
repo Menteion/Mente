@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mente_sema::check;
 use mente_sema::octagon::{INF, RELATIONAL_LIMIT};
-use mente_sema::types::INT_TYPES;
+use mente_sema::types::{Int, Ty, INT_TYPES};
 use mente_sema::wide::{self, Interval};
 use mente_sema::{CheckedFn, CheckedModule};
 use mente_syntax::tree::{
@@ -259,6 +259,15 @@ const EDGES: &[&str] = &[
 
 /// What a call's arguments are to two parameters its callee relates.
 const RELATIONS: &[&str] = &["call that relates two names"];
+
+/// The operations written to trap whenever they run, by what the checker's static ranges and
+/// types say of their operands: the check of each stays in MIR and in native code, since
+/// Tier 1 proves none of them, and the three paths must trap alike.
+const TRAPS: &[&str] = &[
+    "divisor that is always zero",
+    "index at its array's length",
+    "shift by its type's width or more",
+];
 
 /// What generated programs never hold, each with its reason.
 const NOT_GENERATED: &[(&str, &str)] = &[
@@ -614,6 +623,52 @@ fn computed_from(tree: &Tree, e: ExprId, past: &dyn Fn(ExprId) -> bool) -> bool 
             ExprKind::Unary { operand, .. } => computed_from(tree, *operand, past),
             _ => false,
         }
+}
+
+/// The rows of [`TRAPS`] a checked function reaches.
+fn reached_traps(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    // The one value an expression has, when its static range is that of a value never negative.
+    let value = |e: ExprId| match ranges[e.0 as usize] {
+        Some(Interval {
+            lo: (false, lo),
+            hi: (false, hi),
+        }) if lo == hi => Some(lo),
+        _ => None,
+    };
+    for e in &tree.exprs {
+        match &e.kind {
+            ExprKind::Binary {
+                op: BinaryOp::Div | BinaryOp::Rem,
+                rhs,
+                ..
+            } if value(*rhs) == Some(0) => {
+                seen.insert("divisor that is always zero".to_string());
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Shl | BinaryOp::Shr,
+                lhs,
+                rhs,
+            } => {
+                let width = match &f.typing.exprs[lhs.0 as usize] {
+                    Ty::Int(Int::One(t) | Int::Mixed(Some(t))) => Some(u128::from(t.bits)),
+                    _ => None,
+                };
+                if width.zip(value(*rhs)).is_some_and(|(w, k)| k >= w) {
+                    seen.insert("shift by its type's width or more".to_string());
+                }
+            }
+            ExprKind::Index { base, index } => {
+                if let Ty::Array(n, _) = &f.typing.exprs[base.0 as usize] {
+                    if value(*index) == Some(*n) {
+                        seen.insert("index at its array's length".to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The rows of [`EDGES`] a checked function reaches. A value lies past the domain when its
@@ -973,6 +1028,7 @@ fn grammar() -> BTreeSet<String> {
         VARIANTS,
         EDGES,
         RELATIONS,
+        TRAPS,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -1020,6 +1076,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             enums(text).iter().for_each(|e| reached_enum(e, &mut seen));
             for f in module.functions.iter().flatten() {
                 reached_edges(f, &mut seen);
+                reached_traps(f, &mut seen);
                 for wrong in reached_relations(module, f, &mut seen) {
                     problems.push(format!("seed {}: {}", seed, wrong));
                 }
@@ -1072,9 +1129,10 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
         println!("  `{}` {}: seeds {:?}", name, count, seeds[*name]);
     }
     println!(
-        "the edge of Tier 1's domain: {}",
+        "the edge of Tier 1's domain, and what is written to trap: {}",
         EDGES
             .iter()
+            .chain(TRAPS)
             .map(|name| format!("`{}` {}", name, seeds.get(*name).map_or(0, |s| s.len())))
             .collect::<Vec<_>>()
             .join(", ")
