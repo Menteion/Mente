@@ -144,6 +144,7 @@ Runs in full at the end: example 04's pool.
 - [ ] Monomorphised generics, traits with coherence, `dyn`, and closures with their capture modes.
 - [ ] Capability effects, effect variables, `handle` blocks, no global mutable state, and the per-module effect summary.
 - [ ] `extern "C"` with `with FFI`: checked inbound values, `RawPtr<T>` and the tagged-return wrappers.
+- [ ] What a `dyn` call and a call of an `extern` function count against the stack budget, which item 25 of `core-calculus.md` leaves to this milestone ([`stack-budget`](docs/design-review.md#stack-budget)).
 - [ ] The hermetic `comptime` interpreter under its step budget; the cost report adds `dyn` calls.
 
 Runs in full at the end: example 04.
@@ -154,6 +155,7 @@ Runs in full at the end: example 04.
 
 - [ ] IEEE floats in refinements (outward rounding, `NaN`), units with scales and `.to<U>()`, fixed point and `dec`, `sat` and `wrap` with their operators, and combined scalar types, bit-identical across the CI matrix.
 - [ ] **Engineering Guardrail #2**: every Mente-level optimisation completes in `MirRegionSoA` before lowering. `@branchless` with `E0403`, `@simd(lanes: N)` through Cranelift's 128-bit vectors, `@no_alloc`, `@max_stack`, and `@total` measures checked.
+- [ ] The compiler keeps its ceiling on a machine frame, 256 times the frame, for every function: a machine function is split where its spill area grows (`mir-and-codegen.md`, item 5).
 - [ ] Overflow checks merged within trap regions and hoisted out of loops by loop versioning; MIR loop optimisations, each rewrite rule proven by an SMT solver; vectorisation by contract, with the cost report's prescriptions.
 
 Runs in full at the end: example 01, and example 02's `integrate_cell`.
@@ -173,6 +175,7 @@ Runs in full at the end: `mn fmt`, in use; the internal preview, marked unstable
 **Decided first:** [`atomics-memory-ordering`](docs/design-review.md#atomics-memory-ordering). **Spike before it:** fiber stacks reserved and switched on Windows and Linux, with guard pages.
 
 - [ ] Fibers on reserved stacks that debuggers and profilers can walk, `parallel (...)`, and `parallel_for` over structural partitions.
+- [ ] The stack budget of each task, and the reservation of its stack, which item 25 of `core-calculus.md` leaves to this milestone ([`stack-budget`](docs/design-review.md#stack-budget), [`max-stack-unit`](docs/design-review.md#max-stack-unit)).
 - [ ] `Sched` with deterministic simulation (`SimClock`, `SimNet`, `SimSched`), the memory model, networking and HTTP.
 - [ ] The cost report adds atomic operations and cache lines shared between tasks.
 
