@@ -681,3 +681,22 @@ fn private_helper(x: u32) -> u32 = x
 
 #[cfg(test)]
 mod overflow_traps;
+
+/// A plant, never to merge: a function a test covers, whose mutants that test catches.
+pub fn plant_is_large(n: u32) -> bool {
+    n > 10
+}
+
+/// A plant, never to merge: a function no test covers, whose mutants are missed.
+pub fn plant_untested(n: u32) -> u32 {
+    n.wrapping_add(1)
+}
+
+#[cfg(test)]
+mod plant_tests {
+    #[test]
+    fn test_plant_is_large() {
+        assert!(super::plant_is_large(11));
+        assert!(!super::plant_is_large(10));
+    }
+}
