@@ -9,25 +9,43 @@
 # its overflow checks. A job's every required check is named in .github/required-checks.txt, and
 # every required job is named here.
 
+ci.yml#rust: node .github/scripts/build-time-code.mjs --before-toolchain
+ci.yml#rust: node .github/scripts/build-time-code.mjs
 ci.yml#rust: cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
 ci.yml#rust: node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"
 ci.yml#rust: cargo-nextest nextest run --locked --workspace --profile ci
 ci.yml#rust: cargo test --locked --workspace --doc -- --list > "$RUNNER_TEMP/doctests.txt" 2>&1
 ci.yml#rust: node .github/scripts/test-list.mjs doctests "$RUNNER_TEMP/doctests.txt"
 ci.yml#rust: /usr/bin/bash .github/scripts/tools.sh record
+ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh check
+ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 ci.yml#rust: cargo test --locked -p mente-cli --test gates
 ci.yml#rust: cargo run --locked --bin mn -- spec
 ci.yml#rust: cargo run --locked --bin mn -- test --mutate
 ci.yml#rust: cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+ci.yml#bench: node .github/scripts/build-time-code.mjs --before-toolchain
+ci.yml#bench: node .github/scripts/build-time-code.mjs
 ci.yml#bench: bash .github/scripts/overflow-proof.sh
 ci.yml#bench: export MENTE_BENCH_BASELINE="$RUNNER_TEMP/base-medians.txt" MENTE_BENCH_ENFORCE=1
+ci.yml#execution-paths: node .github/scripts/build-time-code.mjs --before-toolchain
+ci.yml#execution-paths: node .github/scripts/build-time-code.mjs
+ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh check
+ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 ci.yml#execution-paths: bash .github/scripts/overflow-proof.sh
 ci.yml#execution-paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
+ci.yml#debuggers: node .github/scripts/build-time-code.mjs --before-toolchain
+ci.yml#debuggers: node .github/scripts/build-time-code.mjs
 ci.yml#debuggers: bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn
+ci.yml#tier1-latency: node .github/scripts/build-time-code.mjs --before-toolchain
+ci.yml#tier1-latency: node .github/scripts/build-time-code.mjs
 ci.yml#tier1-latency: MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
 ci.yml#tier1-latency: bash .github/scripts/overflow-proof.sh
 ci.yml#docs: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
 ci.yml#docs: node .github/scripts/action-pins.mjs
+ci.yml#docs: node .github/scripts/build-time-code.mjs --before-toolchain
+ci.yml#docs: node .github/scripts/build-time-code.mjs
 ci.yml#docs: npm run verify:docs
 ci.yml#docs: "$RUNNER_TEMP/lint/actionlint" -color -shellcheck "$RUNNER_TEMP/lint/shellcheck" -pyflakes ""
 ci.yml#docs: npm run check:benchmark
@@ -36,28 +54,50 @@ ci.yml#docs: npm run test:harness
 
 commits.yml#commits: node .github/scripts/commits.mjs
 
-mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600
-mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs evidence mutants.out deleted/mutants.out > evidence.txt
+mutants.yml#in-diff: node .github/scripts/build-time-code.mjs --before-toolchain
+mutants.yml#in-diff: node .github/scripts/build-time-code.mjs
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh check
+mutants.yml#in-diff: git diff --text --no-ext-diff --no-textconv "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
+mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants"
+mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs evidence "$out" "$deleted_out" > evidence.txt
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
 
+generated.yml#paths: node .github/scripts/build-time-code.mjs --before-toolchain
+generated.yml#paths: node .github/scripts/build-time-code.mjs
+generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh check
+generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 generated.yml#paths: bash .github/scripts/overflow-proof.sh
 generated.yml#paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/generated.txt"
 generated.yml#paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/conformance.txt"
 
+smt.yml#z3: node .github/scripts/build-time-code.mjs --before-toolchain
+smt.yml#z3: node .github/scripts/build-time-code.mjs
 smt.yml#z3: bash .github/scripts/overflow-proof.sh
 smt.yml#z3: ./target/release/mn smt examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels --out "$RUNNER_TEMP/smt" | tee "$RUNNER_TEMP/export.txt"
 smt.yml#z3: xargs -a "$RUNNER_TEMP/queries.txt" -d '\n' -P "$(nproc)" -n 1 bash -c 'check "$1"' _ > "$RUNNER_TEMP/answers.txt"
 
+fuzz.yml#fuzz: node .github/scripts/build-time-code.mjs --before-toolchain
+fuzz.yml#fuzz: node .github/scripts/build-time-code.mjs
 fuzz.yml#fuzz: bash .github/scripts/overflow-proof.sh
 fuzz.yml#fuzz: target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out
 
+mir-mutants.yml#gate: node .github/scripts/build-time-code.mjs --before-toolchain
+mir-mutants.yml#gate: node .github/scripts/build-time-code.mjs
 mir-mutants.yml#gate: bash .github/scripts/overflow-proof.sh
 mir-mutants.yml#gate: ./target/release/mn test --mutate --reported examples > gate.txt
 
+perf.yml#kernels: node .github/scripts/build-time-code.mjs --before-toolchain
+perf.yml#kernels: node .github/scripts/build-time-code.mjs
 perf.yml#kernels: bash .github/scripts/overflow-proof.sh
 perf.yml#kernels: node --test perf/run.test.mjs
 perf.yml#kernels: node perf/run.mjs --mn "$RUNNER_TEMP/mn" --base-mn "$RUNNER_TEMP/mn-base" --base-tree ../base "${counters[@]}" --out "$RUNNER_TEMP/perf-results.json" --work "$RUNNER_TEMP/perf-work"
 
+harness.yml#fixtures: node .github/scripts/build-time-code.mjs --before-toolchain
+harness.yml#fixtures: node .github/scripts/build-time-code.mjs
 harness.yml#fixtures: bash .github/scripts/overflow-proof.sh
 harness.yml#fixtures: node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
 harness.yml#fixtures: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/document-out"

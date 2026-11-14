@@ -14,6 +14,12 @@
 # - Windows: a job object holding the step's shell and every process it starts after, each
 #   committing at most 8 GB and all of them together at most 12 GB (job-limits.ps1).
 #
+# On Linux the code of the change, every test executable and every binary `cargo run` starts,
+# also runs in a sandbox, apart from the tools that judge it: this script names the sandbox as
+# cargo's runner, the one runner it lets through (test-sandbox-env.sh; the job sets the sandbox up
+# and proves it before any such code runs, test-sandbox.sh). Windows has none yet
+# (docs/design-review.md, untrusted-test-isolation).
+#
 # First, nothing from outside the repository may change what the tests run. No cargo
 # configuration file may exist from here up or in CARGO_HOME: one can hold an alias, a runner for
 # the test binaries or an [env] table, in more spellings than a check could read, and the
@@ -60,6 +66,9 @@ case "$RUNNER_OS" in
     bash .github/scripts/memory-guard.sh &
     echo "$!" > "$limits_guard"
     unset limits_guard
+    # From here on cargo, nextest and cargo-mutants hand every executable they run to the sandbox;
+    # without one set up, the step fails.
+    . .github/scripts/test-sandbox-env.sh
     ;;
   Windows)
     pwsh -NoProfile -NonInteractive -File .github/scripts/job-limits.ps1 -ProcessId "$(cat "/proc/$$/winpid")" -ProcessBytes 8589934592 -JobBytes 12884901888

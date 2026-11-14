@@ -46,9 +46,16 @@ jobs:
       - name: Whether this change touches what the instrument watches
         id: watch
         run: node .github/scripts/watch.mjs mutants.yml
-      - name: Install the toolchain rust-toolchain.toml pins
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
         if: steps.watch.outputs.run != 'false'
-        run: rustup toolchain install
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       - name: Install cargo-mutants
         if: steps.watch.outputs.run != 'false'
         # Built from its crate, which cargo checks, never restored from a cache that another job of
@@ -62,15 +69,27 @@ jobs:
         # The steps after it run the change's tests, which could replace a tool the next step
         # runs; each checks the tools at its end (.github/scripts/tools.sh).
         run: /usr/bin/bash .github/scripts/tools.sh record
+      - name: The sandbox the code of the change runs in, proven before any of it runs
+        if: steps.watch.outputs.run != 'false'
+        # Every test executable of the baseline and of each mutant runs as a user of its own in a
+        # root that holds the workspace read-only and none of the tools, with no network and no
+        # sight of another process: cargo-mutants and nextest, and the outcomes and logs they
+        # write, are out of its reach. The canary proves it on this runner
+        # (.github/scripts/test-sandbox.sh).
+        run: |
+          /usr/bin/bash .github/scripts/test-sandbox.sh setup
+          /usr/bin/bash .github/scripts/test-sandbox.sh check
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: The diff and the lists the floor reads, before any code of the change runs
         if: steps.watch.outputs.run != 'false'
         env:
           SHARD: ${{ matrix.shard }}
         # Read before the tests run: one of them could move origin's refs, or rewrite the base's
         # settings, and bring the floor to 0. Listing mutants reads the sources and runs no code of
-        # the change.
+        # the change. The diff is read as text whatever .gitattributes says: a file it marks -diff
+        # or binary would show no line, and cargo-mutants would test none of its mutants.
         run: |
-          git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
+          git diff --text --no-ext-diff --no-textconv "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           cargo mutants --list --json > all-mutants.json
           cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
           # cargo-mutants' diff filter marks only the lines next to a deleted line; every mutant of
@@ -86,7 +105,7 @@ jobs:
             cargo mutants "${deleted[@]}" --list --json > deleted-mutants.json
           fi
           # The base's settings, so that a pull request cannot exclude what it changes.
-          if git show "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
+          if git show --no-textconv "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
             config=(--config base-mutants.toml)
           else
             config=(--no-config)
@@ -107,6 +126,7 @@ jobs:
           { echo "## Slowest tests without a mutant"; echo '```text'
             sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Mutate the lines this pull request changes
         if: steps.watch.outputs.run != 'false'
@@ -122,22 +142,26 @@ jobs:
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
           # minutes against the baseline's one or two, is not known to be caught, and fails the
           # job as a missed one does.
+          # cargo-mutants writes its outcomes and logs outside the workspace: inside it a test
+          # could read them, and tell which mutant it runs under.
           status=0
-          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 || status=$?
+          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
           # The mutants around deleted lines, read before the tests ran.
           deleted=()
           while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
           if [ "${#deleted[@]}" -gt 0 ]; then
             status=0
-            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output deleted || status=$?
+            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants-deleted" || status=$?
             case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
           fi
           failed=0
-          for out in mutants.out deleted/mutants.out; do
+          out=$RUNNER_TEMP/mutants/mutants.out
+          deleted_out=$RUNNER_TEMP/mutants-deleted/mutants.out
+          for dir in "$out" "$deleted_out"; do
             for outcome in missed timeout; do
-              if [ -s "$out/$outcome.txt" ]; then
-                { echo "## Mutants $outcome"; echo '```text'; cat "$out/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              if [ -s "$dir/$outcome.txt" ]; then
+                { echo "## Mutants $outcome"; echo '```text'; cat "$dir/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
                 failed=2
               fi
             done
@@ -147,14 +171,14 @@ jobs:
           # diff filter and under the base's .cargo/mutants.toml, so that a pull request cannot
           # exclude what it changes (.github/scripts/mutants-floor.mjs), the run tested some. A
           # diff of tests, comments or files outside the compiler holds no such mutant: floor 0.
-          tested=$(cat mutants.out/caught.txt mutants.out/missed.txt mutants.out/timeout.txt mutants.out/unviable.txt \
-            deleted/mutants.out/caught.txt deleted/mutants.out/missed.txt deleted/mutants.out/timeout.txt \
-            deleted/mutants.out/unviable.txt 2>/dev/null | grep -c . || true)
+          tested=$(cat "$out/caught.txt" "$out/missed.txt" "$out/timeout.txt" "$out/unviable.txt" \
+            "$deleted_out/caught.txt" "$deleted_out/missed.txt" "$deleted_out/timeout.txt" \
+            "$deleted_out/unviable.txt" 2>/dev/null | grep -c . || true)
           count "$tested" "the mutants tested"
-          # Every mutant counted caught had a test fail under nextest, and every one counted
-          # unviable a build the compiler refused: a stub in place of a tool, which exits at once,
-          # would otherwise make them all caught or unviable (.github/scripts/mutants-floor.mjs).
-          node .github/scripts/mutants-floor.mjs evidence mutants.out deleted/mutants.out > evidence.txt
+          # Every mutant counted caught had a test fail under nextest, which had handed its tests
+          # to the sandbox, and every one counted unviable a build the compiler refused: its own
+          # log shows it (.github/scripts/mutants-floor.mjs).
+          node .github/scripts/mutants-floor.mjs evidence "$out" "$deleted_out" > evidence.txt
           lacking=$(grep -c . evidence.txt || true)
           count "$lacking" "the mutants whose outcome their logs do not show"
           if [ "$lacking" -gt 0 ]; then
@@ -191,6 +215,11 @@ jobs:
               failed=1
             fi
           fi
+          # cargo ignored the sandbox as its runner if fewer commands ran there than mutants were
+          # caught: none, then. Each caught mutant's own log is the evidence above.
+          caught=$(cat "$out/caught.txt" "$deleted_out/caught.txt" 2>/dev/null | grep -c . || true)
+          count "$caught" "the mutants caught"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
           /usr/bin/bash .github/scripts/tools.sh verify
           exit "$failed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -198,6 +227,6 @@ jobs:
         with:
           name: mutants-in-diff-${{ matrix.shard }}
           path: |
-            mutants.out
-            deleted/mutants.out
+            ${{ runner.temp }}/mutants/mutants.out
+            ${{ runner.temp }}/mutants-deleted/mutants.out
           if-no-files-found: ignore

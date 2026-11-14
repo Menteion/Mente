@@ -26,13 +26,15 @@
 //   node .github/scripts/mutants-floor.mjs evidence <mutants.out>...
 //
 // `evidence` prints each mutant whose outcome its log does not show: caught without nextest's exit
-// for a failed run and a failed test, unviable without a failed build and a compiler's error. What
-// it stops, and what it does not: it catches a test tool that is missing or broken, and a stub
+// for a failed run, a failed test and nextest's own line, before the tests start, that it hands
+// them to the sandbox; unviable without a failed build and a compiler's error. What it stops, and
+// what it does not: it catches a test tool that is missing or broken, and a stub
 // left in its place that exits at once. It does not stop code of the change that sets out to
 // defeat it, which runs with the job's rights: a stub that prints a failing test and exits as
 // nextest does, logs or outcomes rewritten after the run, or this script rewritten before it runs.
-// Against that, the guard is the review of the change, until its code runs isolated from the
-// trusted steps (docs/design-review.md, untrusted-test-isolation).
+// Against that, the mutation runs' tests run in a sandbox, on Linux, where every mutation run is:
+// cargo-mutants and nextest write the outcomes and the logs outside it, where no test can
+// (.github/scripts/test-sandbox.sh; docs/design-review.md, untrusted-test-isolation).
 
 import fs from "node:fs";
 
@@ -59,6 +61,11 @@ export function parseDiff(diff) {
       closeHunk();
       file = null;
       continue;
+    }
+    // A file git wrote as binary has no lines here, so its mutants would count for none: the job
+    // reads the diff with --text, and a diff that still holds one is refused, not read as empty.
+    if (/^Binary files .* differ$/.test(text) || text === "GIT binary patch") {
+      throw new Error(`the diff holds a file git wrote as binary (${text}), whose changed lines the floor cannot count: read it with git diff --text --no-ext-diff --no-textconv`);
     }
     if (!hunk) {
       const target = /^\+\+\+ (?:b\/(.+)|\/dev\/null)$/.exec(text);
@@ -190,9 +197,19 @@ export function readList(text) {
 /// timeout, a leak that fails, or a signal or an abort.
 const FAILED_TEST = /^\s+(FAIL|TIMEOUT|LEAK-FAIL|SIG[A-Z]+|ABORT) \[/m;
 
+/// What nextest prints before a run whose test executables it hands to the sandbox
+/// (.github/scripts/test-sandbox.sh): its own line, for each mutant, in that mutant's log. The
+/// count of sandboxed commands at the step's end cannot tell one mutant's tests from another's.
+/// A test's own output lands in the same log, so the line counts only where nextest alone writes:
+/// before its line that starts the tests, and so before any failed test.
+const SANDBOX_RUNNER = /^\s*info: (?:for the \w+ platform, )?using target runner `[^`\n]*\/test-sandbox\.sh run`/m;
+/// nextest's line that starts the tests, after which a test's output may appear.
+const TESTS_START = /^\s*Starting \d+ tests? across /m;
+
 /// Why a run's outcomes do not show the work they claim, one message a mutant: a mutant counts as
-/// caught only when its tests ran and one failed, nextest exiting 100 with a failing test in the
-/// log, and as unviable only when its build failed with an error of the compiler. A stub in place of
+/// caught only when its tests ran in the sandbox and one failed, nextest exiting 100 with a failing
+/// test in the log after its line that names the sandbox as its runner, and as unviable only when
+/// its build failed with an error of the compiler. A stub in place of
 /// nextest or cargo, which exits at once, would otherwise make every mutant caught or unviable,
 /// and the floor count them all as tested. Times cannot tell: a caught mutant's tests took 0.15 s
 /// in the runs of #120. `readLog` reads a log by the path the outcome names.
@@ -208,6 +225,12 @@ export function evidence(outcomes, readLog) {
       const test = phase("Test");
       if (test?.process_status?.Failure !== 100) found.push(`${name}: caught, but its tests did not end as nextest ends a failed run (${JSON.stringify(test?.process_status ?? null)})`);
       else if (!FAILED_TEST.test(log)) found.push(`${name}: caught, but no test failed in its log`);
+      else {
+        const runner = log.search(SANDBOX_RUNNER);
+        const start = log.search(TESTS_START);
+        const before = runner >= 0 && runner < log.search(FAILED_TEST) && (start < 0 || runner < start);
+        if (!before) found.push(`${name}: caught, but its log does not show nextest handing its tests to the sandbox before they started`);
+      }
     } else {
       const build = phase("Build");
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);

@@ -37,9 +37,16 @@ jobs:
       - name: Whether this change touches what the instrument watches
         id: watch
         run: node .github/scripts/watch.mjs mir-mutants.yml
-      - name: Install the toolchain rust-toolchain.toml pins
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
         if: steps.watch.outputs.run != 'false'
-        run: rustup toolchain install
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
       - name: Overflow checks in this job's release build
         if: steps.watch.outputs.run != 'false'
         run: bash .github/scripts/overflow-proof.sh
