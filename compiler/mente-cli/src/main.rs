@@ -29,6 +29,8 @@ use mente_sema::check_module;
 use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
 
+#[path = "plant.inc"]
+mod plant;
 mod catalogue;
 mod fuzz;
 
