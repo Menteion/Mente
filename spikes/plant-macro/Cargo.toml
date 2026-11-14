@@ -7,3 +7,5 @@ description = "A plant, never to merge: a procedural macro in a listed member, i
 
 [lib]
 "proc\u002dmacro" = true
+test = false
+doctest = false
