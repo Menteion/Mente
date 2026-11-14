@@ -3704,13 +3704,21 @@ impl Gen {
                 let inner = Ty::Array(n, Box::new(Ty::Int(U8)));
                 let len = 1 + self.rng.below(3) as usize;
                 let k = self.rng.below(len as u64) as usize;
+                // The arrays of a type beside it share one machine type, as the elements of
+                // any array literal do (`E0222`): the array of no type holds no integer.
+                self.hulls.push(None);
                 let mut items = Vec::new();
                 for j in 0..len {
                     items.push(if j == k {
-                        self.no_type_array(n, &Ty::Int(U8))?
+                        self.no_type_array(n, &Ty::Int(U8))
                     } else {
-                        self.value(&inner, 1)
+                        Some(self.value(&inner, 1))
                     });
+                }
+                let hull = self.hulls.pop().flatten();
+                let items: Vec<E> = items.into_iter().collect::<Option<_>>()?;
+                if hull.is_some_and(|h| !h.fits()) {
+                    return None;
                 }
                 Some(S::Discard(E::Array(items)))
             }

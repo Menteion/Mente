@@ -513,6 +513,11 @@ impl Wide<'_> {
             if self.unfit[i.0 as usize] {
                 return false;
             }
+            // An element of no type leaves before the literal holds a value
+            // (`core-calculus.md`, item 6): it holds no integer, and the others are counted.
+            if self.typing.exprs[i.0 as usize].has_no_value() {
+                continue;
+            }
             match &self.tree.expr(i).kind {
                 ExprKind::Array(inner) => {
                     if !self.leaves(&inner.clone(), ranges) {
@@ -1208,8 +1213,24 @@ mod tests {
             "pub fn r(a: u64, b: u128) -> [2][1]u128 = [[a], [b]]",
             // A repeated value's range, not its type's: `a` lies within 0 to 3.
             "pub fn r(a: i32[0..4], b: u128) -> [2][1]u128 = [[b], [a; 1]]",
+            // An array among them that is no literal counts with its element type's range.
+            "pub fn r(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [[b], p]",
+            "pub fn r(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [p, [b]]",
+            "pub fn r(a: i64, b: u64) -> [3]i128 = [a, b, todo(\"x\")]",
         ] {
             assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
+        }
+        // Its element type's whole range, whatever it holds: an `i8` may be negative, and a
+        // `u128` of no refinement reaches above `i128`.
+        for unfit in [
+            "pub fn r(p: [1]i8, b: u128) -> [2][1]i128 = [[b], p]",
+            "pub fn r(p: [1]i8, b: u128) -> [2][1]i128 = [p, [b]]",
+            // An element of no type holds no integer: the others are counted all the same.
+            "pub fn r(a: i128, b: u128) -> [3]i128 = [a, b, todo(\"x\")]",
+            "pub fn r(a: i128, b: u128) -> [3][1]i128 = [[a], [b], [todo(\"x\")]]",
+            "pub fn r(a: i128, b: u128, c: bool) -> [3]i128 = [a, if c { return [0; 3] } else { return [1; 3] }, b]",
+        ] {
+            assert_eq!(codes(unfit), ["E0222"], "{}", unfit);
         }
     }
 

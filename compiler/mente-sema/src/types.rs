@@ -199,6 +199,17 @@ impl Ty {
         }
     }
 
+    /// Whether no value of this type exists: no type, which a value that leaves has, or an
+    /// array of at least one element of such a type (`core-calculus.md`, item 6). An array
+    /// type of no element has one value, `[]`, whatever its element type.
+    pub fn has_no_value(&self) -> bool {
+        match self {
+            Ty::Any => true,
+            Ty::Array(n, elem) => *n > 0 && elem.has_no_value(),
+            Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit => false,
+        }
+    }
+
     /// The type an unannotated binding takes: literals alone become `i64`.
     pub fn settled(&self) -> Ty {
         match self {

@@ -1,0 +1,23 @@
+// expect: pass
+module conformance
+// An array literal of integers of no one type keeps them exact, through the literals nested in
+// it, in one machine type until it lands. An array among its elements that is no literal counts
+// with its element type's range for each integer it holds, and is widened into that machine
+// type element by element: a refined `u128` beside an `[1]i8` fits `i8` together
+// (core-calculus.md, item 4).
+fn pair(a: i8, b: i8) -> [2]i8 = [a, b]
+
+pub fn after(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [[b], p]
+
+pub fn before(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [p, [b]]
+
+pub fn repeated(p: [2]i8, b: u128[35..=45], c: i16) -> [3][2]i16 = [[b; 2], p, [c, c]]
+
+pub fn deeper(p: [1][1]i8, b: u128[35..=45]) -> [2][1][1]i16 = [[[b]], p]
+
+pub fn called(a: i8, b: u128[35..=45]) -> [2][2]i8 = [[b, b], pair(a, a)]
+
+pub fn element(p: [2][1]i8, b: u128[35..=45], i: usize) -> [2][1]i8 = [[b], p[i]]
+
+// Each integer is narrowed where the literal lands: a negative one of `p` does not fit `u8`.
+pub fn lands(p: [1]i8, b: u128[35..=300]) -> [2][1]u8 = [[b], p]

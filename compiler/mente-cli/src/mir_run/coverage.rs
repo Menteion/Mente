@@ -780,8 +780,9 @@ fn grammar() -> BTreeSet<String> {
     all
 }
 
-/// Every generated program passes every check, so that the three paths run it and none is left
-/// out unseen: nothing refuses one but a narrowing Tier 1 proves always traps (`E0508`), whose
+/// Every generated program passes every check and lowers, so that the three paths run it and
+/// none is left out unseen: nothing refuses one but a narrowing Tier 1 proves always traps
+/// (`E0508`), whose
 /// function is generated again once the reference interpreter has run the claim
 /// ([`generate::checked`]), at most [`MAX_REGENERATED`] times over these seeds. At least
 /// [`MIN_SEEDS_PER_ROW`] of the programs reach each construct of M1's grammar but those
@@ -797,15 +798,24 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
     let programs = super::differential::parallel((0..SEEDS).collect(), |seed| {
         let c = generate::checked(seed);
         let mut seen = BTreeSet::new();
-        if c.module.is_some() {
+        let mut problems = c.problems;
+        if let Some(module) = &c.module {
             let text = &c.program.text;
             functions(text).iter().for_each(|f| reached(f, &mut seen));
             structs(text)
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
             enums(text).iter().for_each(|e| reached_enum(e, &mut seen));
+            // What the checker accepts, the lowering lowers: a program it refused would run
+            // on the reference interpreter alone.
+            if let Err(why) = mente_codegen::lower::lower(module) {
+                problems.push(format!(
+                    "seed {}: the checker accepts the program and the lowering refuses it: {}",
+                    seed, why
+                ));
+            }
         }
-        (seed, seen, c.regenerated, c.problems)
+        (seed, seen, c.regenerated, problems)
     });
     for (seed, seen, again, wrong) in programs {
         problems.extend(wrong);

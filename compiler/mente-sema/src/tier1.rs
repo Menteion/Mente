@@ -7593,8 +7593,11 @@ mod tests {
             // form bounds `~` only within the type.
             "pub fn f(v: u8) -> u8 {\n  match ~(v + 255_u8) {\n    0 => 1\n    _ => 2\n  }\n}",
             "pub fn f(v: u8) -> u16[0..=0] = ~(v + 255_u8)",
-            // One that stays within its type keeps its linear form: `~v` is `255 - v`.
+            // One that stays within its type keeps its linear form: `~v` is `255 - v`, and
+            // `-v - 1` in a signed type, which only the relation to `v` proves.
             "pub fn f(v: u8[3..=5]) -> u8[250..=252] = ~v",
+            "pub fn f(v: u8) -> u8\n  ensures result + v == 255\n= ~v",
+            "pub fn f(v: i8) -> i8\n  ensures result + v == -1\n= ~v",
         ] {
             assert_eq!(codes(f), NONE, "{}", f);
         }
