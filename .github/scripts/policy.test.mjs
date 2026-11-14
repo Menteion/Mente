@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 58;
+const FLOOR = 60;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -747,12 +747,14 @@ check("the mutation runs' settings name no command, no argument for cargo and no
   }
 });
 
-/// The attributes .gitattributes may set: line ends, and how GitHub counts languages. Every other
-/// is refused, those above all that hide a change from a diff, which the Mutants floor reads (H-1
-/// of the second review of 4e896ca: `compiler/** -diff` made git write "Binary files differ", and
-/// cargo-mutants read that as a diff with no line): `-diff`, `diff=`, `binary`, a macro, and the
-/// filters, merge drivers and export rules that make the tree another than the commit's.
-const GIT_ATTRIBUTES = [/^text$/, /^text=auto$/, /^eol=lf$/, /^linguist-language=[A-Za-z][\w+#-]*$/, /^linguist-(documentation|generated|vendored)(=(true|false))?$/];
+/// The attributes .gitattributes may set: line ends, and the language and documentation GitHub
+/// counts a file as. Every other is refused: `linguist-generated`, which folds a file's diff away on
+/// GitHub's review page; and above all those that hide a change from a diff, which the Mutants
+/// floor reads (H-1 of the second review of 4e896ca: `compiler/** -diff` made git write "Binary
+/// files differ", and cargo-mutants read that as a diff with no line): `-diff`, `diff=`, `binary`,
+/// a macro, and the filters, merge drivers and export rules that make the tree another than the
+/// commit's.
+const GIT_ATTRIBUTES = [/^text$/, /^text=auto$/, /^eol=lf$/, /^linguist-language=[A-Za-z][\w+#-]*$/, /^linguist-documentation=true$/];
 export function gitattributesProblems(text) {
   const found = [];
   for (const [k, raw] of String(text).split("\n").entries()) {
@@ -824,20 +826,72 @@ export function rustTokensText(text) {
   out.push(text.slice(from));
   return out.join("");
 }
-/// `mutants::skip` as cargo-mutants reads it, in its tokens: a space, a line or a comment between
-/// the words, a raw identifier, or under a cfg_attr. It takes a function out of every mutation
-/// run, the floor included.
-const MUTANTS_SKIP = /\b(?:r#)?mutants\s*::\s*(?:r#)?skip\b/;
+/// Rust's whitespace beyond ASCII (Pattern_White_Space): NEL, the left-to-right and right-to-left
+/// marks, and the line and paragraph separators. Rust and the parser cargo-mutants reads with take
+/// each for a space between tokens; JavaScript's \s knows only the last two. None may stand in a
+/// Rust source or in a file under compiler/ or spikes/.
+const RUST_SPACE_BEYOND_ASCII = new RegExp(`[${String.fromCharCode(0x85, 0x200e, 0x200f, 0x2028, 0x2029)}]`);
+/// `mutants::skip` as cargo-mutants 27.1.0 reads it, in its tokens: path segments `mutants` and
+/// `skip`, a leading `::` or not, alone or under a cfg_attr, with any space, line or comment
+/// between them, and raw identifiers. cargo-mutants has no option that disregards it, so the rule
+/// is here. It takes a function out of every mutation run, the floor included.
+const RUST_SPACE = `\\s${String.fromCharCode(0x85, 0x200e, 0x200f)}`;
+const MUTANTS_SKIP = new RegExp(`\\b(?:r#)?mutants[${RUST_SPACE}]*::[${RUST_SPACE}]*(?:r#)?skip\\b`);
 const namesMutantsSkip = (text) => MUTANTS_SKIP.test(rustTokensText(text));
+/// The attributes of a Rust source, each the text between `#[` or `#![` and its closing bracket, in
+/// the source's tokens (so no bracket in a string or a comment counts), in one pass.
+export function rustAttributes(text) {
+  const code = rustTokensText(text);
+  const found = [];
+  const open = /#\s*!?\s*\[/g;
+  for (let m = open.exec(code); m; m = open.exec(code)) {
+    let depth = 0;
+    let k = m.index + m[0].length - 1;
+    for (; k < code.length; k++) {
+      if (code[k] === "[") depth++;
+      else if (code[k] === "]" && --depth === 0) break;
+    }
+    found.push(code.slice(m.index + m[0].length, k));
+    open.lastIndex = Math.min(k + 1, code.length);
+    if (k >= code.length) break;
+  }
+  return found;
+}
+/// A `path = ...` in an attribute, alone or under a cfg_attr: the module it names is read from a
+/// file of any name, wherever it lies (cargo-mutants 27.1.0 refuses only a leading `/`), so a
+/// function put there escapes every rule that reads the sources by their names.
+const PATH_ATTRIBUTE = /(?<![\w#])(?:r#)?path\s*=/;
+const readsModuleFromPath = (text) => rustAttributes(text).some((a) => PATH_ATTRIBUTE.test(a));
 
-check("git reads every change as text, and no source takes a function out of the mutation runs", () => {
+check("git reads every change as text, and no source names mutants::skip or reads a module from a path of its own", () => {
   assert.deepEqual(gitattributesProblems(read(".gitattributes")), []);
   const nested = [...tracked()].filter((f) => f !== ".gitattributes" && path.posix.basename(f) === ".gitattributes");
   assert.deepEqual(nested, [], "a .gitattributes below the root, which the policy does not read");
-  const skipping = [...tracked()].filter((f) => f.endsWith(".rs") && namesMutantsSkip(read(f)));
-  assert.deepEqual(skipping, [], "these sources name mutants::skip, which takes a function out of every mutation run, the Mutants floor's included");
+  // Every Rust source of the repository, and every file under compiler/ and spikes/ whatever its
+  // name: with no #[path], cargo-mutants reads modules only from .rs files under a crate's src/,
+  // and a file of another name is read as text here, comments and all.
+  const problems = [];
+  for (const f of [...tracked()].filter((x) => x.endsWith(".rs") || x.startsWith("compiler/") || x.startsWith("spikes/"))) {
+    const text = read(f);
+    if (RUST_SPACE_BEYOND_ASCII.test(text)) problems.push(`${f}: a space of Rust's beyond ASCII (U+0085, U+200E, U+200F, U+2028 or U+2029)`);
+    if (f.endsWith(".rs") ? namesMutantsSkip(text) : MUTANTS_SKIP.test(text)) problems.push(`${f}: mutants::skip, which takes a function out of every mutation run, the Mutants floor's included`);
+    if (f.endsWith(".rs") && readsModuleFromPath(text)) problems.push(`${f}: a #[path] attribute, whose module could be a file of any name the rules here do not read`);
+  }
+  assert.deepEqual(problems, []);
+  // The plants of the third review of 980965e, H1: a module from a .inc file, and the spaces Rust
+  // reads that JavaScript's \s does not.
+  for (const plant of ['#[path = "plant.inc"] mod plant;', '#[cfg_attr(all(), path = "x.rs")]\nmod plant;', '#[ path="../../docs/x.rs" ]\nmod plant;', "#[r#path = \"x\"] mod plant;", '#[cfg_attr(miri, path = "a.inc")] pub mod plant;']) {
+    assert.ok(readsModuleFromPath(`fn f() {}\n${plant}\n`), `the #[path] rule lets through: ${plant}`);
+  }
+  for (const fine of ["let path = 1;", "fn f(path: &str) {}", '#[doc = "path = x"]\nfn f() {}', '#[serde(rename = "path")]\nstruct S;', "// #[path = \"x.inc\"]\nmod m;", "#[derive(Debug)]\nstruct Path { path: u8 }"]) {
+    assert.ok(!readsModuleFromPath(fine), `the #[path] rule refuses: ${fine}`);
+  }
+  for (const space of [0x85, 0x200e, 0x200f, 0x2028, 0x2029].map((c) => String.fromCharCode(c))) {
+    assert.ok(RUST_SPACE_BEYOND_ASCII.test(`#[cfg_attr(miri, mutants${space}::skip)]`));
+    assert.ok(namesMutantsSkip(`#[rustfmt::skip]\n#[cfg_attr(miri, mutants${space}::${space}skip)] fn f() {}`), `the mutants::skip rule lets through U+${space.codePointAt(0).toString(16)}`);
+  }
   // The plants of the second review of 4e896ca, H-1, and the other spellings.
-  for (const plant of ["compiler/** -diff", "*.rs binary", "*.rs diff=plain", "*.rs -text -diff", "*.rs !diff", "*.rs filter=lfs", "*.rs merge=ours", "* export-ignore", "[attr]hide -diff", "*.rs hide", '"compiler/a b.rs" text', "*.rs working-tree-encoding=UTF-16", "*.rs text eol=crlf", "  *.rs -diff", "*.rs", "*.rs text\r-diff"]) {
+  for (const plant of ["compiler/** -diff", "*.rs binary", "*.rs linguist-generated=true", "*.rs linguist-generated", "*.rs linguist-vendored", "*.rs diff=plain", "*.rs -text -diff", "*.rs !diff", "*.rs filter=lfs", "*.rs merge=ours", "* export-ignore", "[attr]hide -diff", "*.rs hide", '"compiler/a b.rs" text', "*.rs working-tree-encoding=UTF-16", "*.rs text eol=crlf", "  *.rs -diff", "*.rs", "*.rs text\r-diff"]) {
     assert.ok(gitattributesProblems(`* text=auto eol=lf\n${plant}\n`).length > 0, `the .gitattributes rule lets through: ${JSON.stringify(plant)}`);
   }
   assert.deepEqual(gitattributesProblems("# c\n\n* text=auto eol=lf\r\n*.mn text eol=lf linguist-language=Rust\nspec/*.md linguist-documentation=true\n"), []);
@@ -865,7 +919,22 @@ check("git reads every change as text, and no source takes a function out of the
   // many repetitions of "*//*").
   const started = Date.now();
   for (const bulk of [`mutants${"*//*".repeat(50000)}`, `mutants ${"/* ".repeat(50000)}`, `${"mutants ".repeat(50000)}::`, `"${"\\\\".repeat(50000)}`, "'".repeat(100000)]) namesMutantsSkip(bulk);
-  assert.ok(Date.now() - started < 2000, `the mutants::skip rule took ${Date.now() - started} ms over 1 MB of text`);
+  for (const bulk of ["#[".repeat(100000), `#[${"[".repeat(100000)}`, `${"#[a] ".repeat(50000)}`]) readsModuleFromPath(bulk);
+  assert.ok(Date.now() - started < 2000, `the mutants::skip and #[path] rules took ${Date.now() - started} ms over 1 MB of text`);
+});
+
+/// The settings clippy and rustfmt read: each looks for `clippy.toml` or `.clippy.toml`, and
+/// `rustfmt.toml` or `.rustfmt.toml`, from the crate's directory up, and takes the first it finds, so
+/// one beside a crate, or a dotted one at the root, would stand in for the root's (the third review
+/// of 980965e: an unowned `.clippy.toml` dropped the root's ban on RefCell, and the required clippy
+/// step passed). The root's clippy.toml is the one, and code-owned.
+const LINT_SETTINGS = /(^|\/)\.?(clippy|rustfmt)\.toml$/;
+
+check("no lint or format settings stand but the root's clippy.toml", () => {
+  const found = [...tracked()].filter((f) => LINT_SETTINGS.test(f) && f !== "clippy.toml");
+  assert.deepEqual(found, [], "a clippy or rustfmt settings file other than the root's clippy.toml, which clippy or rustfmt would read instead of it for the crates below it");
+  for (const f of [".clippy.toml", "compiler/mente-ast/clippy.toml", "compiler/mente-ast/.clippy.toml", "rustfmt.toml", ".rustfmt.toml", "compiler/mente-mir/rustfmt.toml"]) assert.match(f, LINT_SETTINGS, f);
+  for (const f of ["clippy.toml.md", "docs/clippy.md", "compiler/mente-ast/Cargo.toml"]) assert.doesNotMatch(f, LINT_SETTINGS, f);
 });
 
 /// The digest a pin holds: SHA-256 of the text, Windows line ends read as Unix ones.
@@ -896,16 +965,16 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "a5549d5ebdafac187312f37fd1959fad565373c475e00d5aaf687bb5d329fa11"],
+  [".github/scripts/test-sandbox.sh", "faa0e4e231bf442479ef06a531b74224dac70c83017e45cdcd5124d56be72315"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
   // Mutants floor, the watch, the actions' pins and the YAML reader the policy reads every
   // workflow with.
   [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
-  [".github/scripts/lib/build-time-code.mjs", "f84acc5ce66f0bbe631b091f7d325f640ff09cef9eb2bea8a0d9cc1cc8d3549f"],
+  [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "59b253a8f828a0ddf27c00e3959651edfe08fccf9489e546df81c558bd209dc6"],
+  [".github/scripts/lib/mutants-floor.mjs", "1cf1aa52eab217c47728f673f5d2c2c051457badff9bfae9d5457e2da60d1f4a"],
   [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
   [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -913,6 +982,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/yaml.test.mjs", "28d66346aa682539f28d3a0c6a093a51bfdd11f9f7e625139f596b7b3aa51be7"],
   [".github/scripts/lib/yaml.mjs", "7071d5d555fc3b8638066ea65d05b84bb05138e32191034ee82e85cc8698db99"],
   [".github/scripts/lib/commits.mjs", "b431601e5565185ee6a48db2995962ea70736ecef2ab76ea458a05fd23fc6c3e"],
+  [".github/scripts/commits.mjs", "967378f4f8253cbcc73b2539320c9bc99a1a79edc5277ad0c38903ddffcbd96f"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
 /// jobs, and the jobs that run the release tests through cargo alone. A rule that read their
@@ -924,11 +994,12 @@ const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 const PINNED_JOBS = new Map([
   ["ci.yml#rust", "b083cb0250a468f400630f2d429cd72dbaf8d80999fcb84a6ca952f4f665691b"],
-  ["mutants.yml#in-diff", "f3a7693ae9119106be63e634fc8c3888d48fd894b54712fef8bf6fe97db63a2b"],
+  ["mutants.yml#in-diff", "952264935c4350d0d345334be22bcc6e82455eb3a1556a078875f374f00ceb62"],
   ["mutants-full.yml#full", "96970c2b8c155d04957b5b14ce56f212aa35683afce0be1c5d22f0c7da5f8eff"],
   ["ci.yml#execution-paths", "e232905a2ee58528e2907a5777b050bc202ad96c6a1c73b41d178d4997fc7582"],
   ["generated.yml#paths", "7e0ebac7477ec80359e5121a211dd7476aea636051c4710275f549413b918580"],
-  ["ci.yml#docs", "57b4a3603a84e9f8686440912b7ff3ab48f0bfb4c3b1c9200f4dab6d14bb75fe"],
+  ["ci.yml#docs", "e03fda24b884d112cce1f4b7084e737cb83689de800b5a0fc5b9c6a823e68dfe"],
+  ["commits.yml#commits", "d7658c7e037b71c8394327a9a2067bd609c95e5f21c7c23b5a3c480834008da5"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1356,28 +1427,23 @@ const LEFT_OUTSIDE = new Map([
   ["harness.yml#fixtures", "its own sandbox confines agent code, not mn"],
 ]);
 /// GATE_ONLY: the required jobs that run no code of the change but the gate's own scripts under
-/// .github/, which the code owner reviews.
+/// .github/. Each is pinned whole, with every script it runs: an allowlist of exact steps, where a
+/// rule that read the steps for tools by their names let through every spelling it did not know
+/// (`sh -c`, a quoted name, a path to the tool, node's child_process; the third review of 980965e).
 const GATE_ONLY = new Map([["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"]]);
-/// Why a script could run code of the change though its job claims to run only the gate's own: a
-/// program it starts that builds or runs the change's code (cargo, rustc, npm, npx, a built binary,
-/// make), or any path outside .github/ that it names: a file or a directory of the repository, a
-/// path that climbs out with `..`, or a path written relative to where the step stands.
-export function gateOnlyProblems(script) {
-  const found = [];
-  const lines = logicalLines(script)
-    .map((l) => l.trim())
-    .filter((l) => l !== "" && !l.startsWith("#"));
-  for (const line of lines) {
-    if (/(^|[\s;&|(`$])(cargo|cargo-[\w-]+|rustc|rustup|npm|npx|pnpm|yarn|make|bun|deno)(\s|$)/.test(line)) found.push(`it starts a tool that builds or runs the change's code: ${line}`);
-    if (/(^|[^\w.-])target\//.test(line) || /(^|[\s;&|(=])\.\.?\//.test(line.replace(/\.\/\.github\//g, ""))) found.push(`it names a built binary or a path by a relative name: ${line}`);
-    for (const token of line.split(/[\s;|&()<>"'`=,{}]+/)) {
-      const t = token.replace(/^\.\//, "");
-      if (t === "" || t.startsWith("-") || t.startsWith("$") || t.startsWith("/")) continue;
-      const outside = !t.startsWith(".github/") || t.split("/").includes("..");
-      if (outside && (/^[\w.-]+\/[\w./-]*$/.test(t) || tracked().has(t) || isDir(t))) found.push(`it names ${t}, a path outside .github/: ${line}`);
-    }
-  }
-  return found;
+/// The labels a job may run on: each a literal, or a matrix value that is one.
+const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);
+/// The runners a job names: its literal label, or each value its matrix gives the key `runs-on`
+/// names; null when it names them otherwise (an expression, a list, a group).
+export function runnersOf(job) {
+  const on = job?.["runs-on"];
+  if (typeof on !== "string") return null;
+  const ref = /^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/.exec(on);
+  if (!ref) return /\$\{\{/.test(on) ? null : [on];
+  const matrix = job.strategy?.matrix;
+  if (!isPlain(matrix)) return null;
+  const values = Array.isArray(matrix[ref[1]]) ? matrix[ref[1]] : Array.isArray(matrix.include) ? matrix.include.map((c) => c?.[ref[1]]) : [];
+  return values.length > 0 && values.every((v) => typeof v === "string") ? values : null;
 }
 
 check("every required job on Linux runs the change's code in the sandbox, or says why it does not", () => {
@@ -1390,19 +1456,16 @@ check("every required job on Linux runs the change's code in the sandbox, or say
   for (const { file, id, job } of requiredJobs()) {
     const key = `${file}#${id}`;
     required.add(key);
-    const linux = /ubuntu-/.test(JSON.stringify([job["runs-on"], job.strategy?.matrix ?? null]));
+    const runners = runnersOf(job);
+    assert.ok(runners && runners.every((r) => RUNNERS.has(r)), `${key} runs on ${JSON.stringify(job["runs-on"])}, which is no literal of RUNNERS nor a matrix value that is one`);
+    const linux = runners.some((r) => r.startsWith("ubuntu-"));
     const holding = lists.filter(([, set]) => set.has(key)).map(([name]) => name);
     if (!linux) {
       assert.deepEqual(holding.filter((n) => n !== "SANDBOXED_JOBS"), [], `${key} runs on no Linux runner, and is classified for one in ${holding.join(", ")}`);
       continue;
     }
     assert.equal(holding.length, 1, `${key}, a required job on a Linux runner, is in ${holding.length === 0 ? "none" : holding.join(" and ")} of SANDBOXED_JOBS, LEFT_OUTSIDE and GATE_ONLY in .github/scripts/policy.test.mjs, not exactly one: it says, with its reason, whether its code of the change runs in the sandbox, outside it, or not at all`);
-    if (GATE_ONLY.has(key)) {
-      for (const s of steps(job)) {
-        if (String(s.uses ?? "") !== "" && !/^actions\/checkout@/.test(String(s.uses))) assert.fail(`${stepKey(file, id, s)}: a job of GATE_ONLY runs an action other than the checkout`);
-        if (typeof s.run === "string") assert.deepEqual(gateOnlyProblems(s.run), [], `${stepKey(file, id, s)}: a job of GATE_ONLY runs code of the change`);
-      }
-    }
+    if (GATE_ONLY.has(key)) assert.ok(PINNED_JOBS.has(key), `${key}, a job of GATE_ONLY, is not pinned whole: its exact steps are what it may run`);
   }
   for (const [name, set] of lists) {
     for (const key of set) assert.ok(required.has(key) || (name === "SANDBOXED_JOBS" && key === "mutants-full.yml#full"), `${name} names ${key}, which is no required job`);
@@ -1412,21 +1475,12 @@ check("every required job on Linux runs the change's code in the sandbox, or say
   // refuses the tracked file before any job runs.
   const underTarget = [...tracked()].filter((f) => f === "target" || f.startsWith("target/"));
   assert.deepEqual(underTarget, [], "files under target/ are tracked: the sandbox mounts the tests' own directory there, and a tracked link could aim it elsewhere");
-  // What a job of GATE_ONLY may run, and what it may not: the plants of the review of 4e896ca.
-  assert.deepEqual(gateOnlyProblems("node .github/scripts/commits.mjs\n"), []);
-  assert.deepEqual(gateOnlyProblems('echo "$PR_TITLE" | node .github/scripts/commits.mjs --stdin\n'), []);
-  for (const plant of [
-    "cargo build --locked --bin mn\ncd target\n./debug/mn spec\n",
-    "bash compiler/mente-cli/tests/debuggers/run-all.sh\n",
-    "npm run test:benchmark\n",
-    "node benchmark/check.mjs\n",
-    "npx --no-install spec-guard\n",
-    "cd compiler && sh run.sh\n",
-    "node .github/../benchmark/check.mjs\n",
-    "rustup run stable rustc x.rs\n",
-  ]) {
-    assert.ok(gateOnlyProblems(plant).length > 0, `the rule for GATE_ONLY lets through: ${plant}`);
-  }
+  // The runners a job names, as the classification reads them: the third review's P7c, a label
+  // spelled by an expression, is no runner at all.
+  assert.deepEqual(runnersOf({ "runs-on": "ubuntu-24.04" }), ["ubuntu-24.04"]);
+  assert.deepEqual(runnersOf({ "runs-on": "${{ matrix.os }}", strategy: { matrix: { include: [{ os: "ubuntu-24.04" }, { os: "windows-2025" }] } } }), ["ubuntu-24.04", "windows-2025"]);
+  for (const on of ["${{ format('{0}-24.04', 'ubuntu') }}", ["ubuntu-24.04"], { group: "x" }]) assert.equal(runnersOf({ "runs-on": on }), null, JSON.stringify(on));
+  assert.equal(runnersOf({ "runs-on": "${{ matrix.os }}", strategy: { matrix: "${{ fromJSON('[]') }}" } }), null);
 });
 
 check("no required job restores a cache, and no job caches nextest", () => {
@@ -1434,6 +1488,13 @@ check("no required job restores a cache, and no job caches nextest", () => {
   // pull request's scope, and a later run restores it.
   for (const { file, id, job } of requiredJobs()) {
     for (const s of steps(job)) assert.doesNotMatch(String(s.uses ?? ""), /^actions\/cache(\/restore)?@/, `${stepKey(file, id, s)}: a required job restores a cache another job could have written`);
+  }
+  // setup-node restores a cache of its own once package.json names a package manager, unless told
+  // not to (the third review of 980965e): every setup-node says no, and names no cache.
+  for (const { file, id, job } of allJobs()) {
+    for (const s of steps(job).filter((x) => /^actions\/setup-node@/.test(String(x.uses ?? "")))) {
+      assert.ok(isPlain(s.with) && s.with["package-manager-cache"] === false && !("cache" in s.with) && !("cache-dependency-path" in s.with), `${stepKey(file, id, s)}: setup-node may restore a cache another job could have written; give it package-manager-cache: false and no cache`);
+    }
   }
   for (const { file, id, job } of allJobs()) {
     for (const s of steps(job)) {
@@ -1451,7 +1512,7 @@ check("no required job restores a cache, and no job caches nextest", () => {
 /// the change's) and those that move where a tool reads its settings (HOME, XDG_*, TMPDIR) belong
 /// here too.
 const TOOL_ENV =
-  /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|BASH_ENV$|BASH_FUNC_|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_|NPM_CONFIG_|LD_|DYLD_|GLIBC_TUNABLES$|GCONV_|LOCPATH$|MALLOC_|GIT_|HOME$|XDG_|TMPDIR$|OPENSSL_|SSL_CERT_|CURL_CA_BUNDLE$|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$)/i;
+  /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|RUSTFMT|CLIPPY_|BASH_ENV$|BASH_FUNC_|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_|NPM_CONFIG_|LD_|DYLD_|GLIBC_TUNABLES$|GCONV_|LOCPATH$|MALLOC_|GIT_|HOME$|XDG_|TMPDIR$|OPENSSL_|SSL_CERT_|CURL_CA_BUNDLE$|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$)/i;
 const TOOL_ENV_ALLOWED = new Map([
   ["CARGO_TERM_COLOR", { value: "always", jobs: null }],
   ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
@@ -1484,7 +1545,7 @@ check("no required or pinned job sets a variable that changes how its tools run"
   for (const { file, doc, id, job } of allJobs().filter((j) => keys.has(`${j.file}#${j.id}`))) assert.deepEqual(toolEnvProblems(`${file}#${id}`, doc, job), []);
   for (const name of ["BASH_ENV", "npm_config_script_shell", "NODE_OPTIONS", "PATH", "Path", "cargo_target_x86_64_unknown_linux_gnu_runner", "RUSTC_WRAPPER", "RUSTUP_TOOLCHAIN"]) assert.match(name, TOOL_ENV, name);
   // The plants of the second review of 4e896ca: a variable of the Documentation job's.
-  for (const name of ["LD_AUDIT", "LD_PRELOAD", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_EXEC_PATH", "GLIBC_TUNABLES", "GCONV_PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR", "NODE_EXTRA_CA_CERTS", "BASH_FUNC_cargo%%", "OPENSSL_CONF", "SSL_CERT_FILE", "https_proxy", "ALL_PROXY"]) assert.match(name, TOOL_ENV, name);
+  for (const name of ["CLIPPY_CONF_DIR", "RUSTFMT", "LD_AUDIT", "LD_PRELOAD", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_EXEC_PATH", "GLIBC_TUNABLES", "GCONV_PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR", "NODE_EXTRA_CA_CERTS", "BASH_FUNC_cargo%%", "OPENSSL_CONF", "SSL_CERT_FILE", "https_proxy", "ALL_PROXY"]) assert.match(name, TOOL_ENV, name);
   for (const name of ["MENTE_GEN_PROGRAMS", "GITHUB_TOKEN", "ACTIONLINT_VERSION"]) assert.doesNotMatch(name, TOOL_ENV, name);
 });
 
@@ -1688,14 +1749,16 @@ check("as cargo reads the manifests and the lock, no package of the workspace ru
 const TOOLCHAIN_STEP = "node .github/scripts/build-time-code.mjs --before-toolchain\nrustup toolchain install\nnode .github/scripts/build-time-code.mjs\n";
 
 /// What may come before TOOLCHAIN_STEP, each step exactly, with no key beyond those named: the
-/// checkout, with no input but these; node, at the release the jobs use; the watch; and the gate's
-/// own steps that read nothing of the change's but the scripts the policy pins.
+/// checkout, with no input but these; node, at the release the jobs use and with no cache of its
+/// own, which setup-node would restore from the pull request's own scope once package.json named
+/// a package manager; the watch; and, each in the one job named, the gate's own steps that read
+/// nothing of the change's but the scripts the policy pins.
 const CHECKOUT_INPUTS = [{ "persist-credentials": false }, { "fetch-depth": 0, "persist-credentials": false }];
-const NODE_INPUTS = { "node-version": 24 };
+const NODE_INPUTS = { "node-version": 24, "package-manager-cache": false };
 const BEFORE_TOOLCHAIN = new Map([
-  ["node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs", "the policy, first in the Documentation job"],
-  ["node .github/scripts/action-pins.mjs", "the check of the actions' pins against their releases"],
-  ['echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"', "the harness's toolchain, put outside the home its sandbox hides"],
+  ["node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs", { job: "ci.yml#docs", why: "the policy, first in the Documentation job" }],
+  ["node .github/scripts/action-pins.mjs", { job: "ci.yml#docs", why: "the check of the actions' pins against their releases" }],
+  ['echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"', { job: "harness.yml#fixtures", why: "the harness's toolchain, put outside the home its sandbox hides" }],
 ]);
 const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const sameKeys = (o, keys) => isPlain(o) && JSON.stringify(Object.keys(o).sort()) === JSON.stringify([...keys].sort());
@@ -1745,24 +1808,27 @@ export function beforeToolchainProblems(file, id, doc, job) {
       found.push(`${where} runs an action other than the checkout and node: ${uses}`);
     } else if (s.id === "watch") {
       if (!stepKeysAre(s, ["name", "id", "run"]) || String(s.run).trim() !== `node .github/scripts/watch.mjs ${file}`) found.push(`${where} is not the watch exactly: ${JSON.stringify(s)}`);
-    } else if (!stepKeysAre(s, ["name", "run"]) || !BEFORE_TOOLCHAIN.has(String(s.run ?? "").trim())) {
-      found.push(`${where} is none of the steps BEFORE_TOOLCHAIN names, with its name and script alone: ${JSON.stringify(s)}`);
+    } else if (!stepKeysAre(s, ["name", "run"]) || BEFORE_TOOLCHAIN.get(String(s.run ?? "").trim())?.job !== key) {
+      found.push(`${where} is none of the steps BEFORE_TOOLCHAIN names for this job, with its name and script alone: ${JSON.stringify(s)}`);
     }
   }
   if (checkouts !== 1) found.push(`${key} checks out ${checkouts} times before the check, not once`);
   return found;
 }
 
-check("every job that builds checks, before anything of the workspace is built or installed, that nothing of the change can run where cargo builds", () => {
+check("every required or pinned job but those of GATE_ONLY checks, before anything of the workspace is built or installed, that nothing of the change can run where cargo builds", () => {
+  // Every such job carries the check, whatever its steps run: a rule that asked which jobs build,
+  // by the names of the tools in their scripts, missed a tool spelled otherwise (the third review
+  // of 980965e). A job of GATE_ONLY is pinned whole instead.
   const keys = new Set([...requiredJobs().map(({ file, id }) => `${file}#${id}`), ...PINNED_JOBS.keys()]);
-  let building = 0;
+  let checked = 0;
   for (const { file, doc, id, job } of allJobs().filter((j) => keys.has(`${j.file}#${j.id}`))) {
     const key = `${file}#${id}`;
     const all = steps(job);
     // No step of a required or pinned job runs elsewhere than the workspace's root.
     for (const s of all) assert.ok(!("working-directory" in s), `${stepKey(file, id, s)} runs in a directory of its own`);
-    if (!all.some((s) => /(^|[\s;&|(])(cargo|rustup|rustc)\s|overflow-proof\.sh|build-time-code\.mjs/m.test(String(s.run ?? "")))) continue;
-    building++;
+    if (GATE_ONLY.has(key)) continue;
+    checked++;
     assert.deepEqual(beforeToolchainProblems(file, id, doc, job), []);
     // After it, no step changes the toolchain, but in the base branch's own worktree, whose
     // rust-toolchain.toml is the base's (the performance jobs build the base's compiler there).
@@ -1774,7 +1840,7 @@ check("every job that builds checks, before anything of the workspace is built o
       }
     }
   }
-  assert.ok(building >= 14, `the policy reads the steps of ${building} jobs that build or read the manifests, not every one`);
+  assert.equal(checked, keys.size - GATE_ONLY.size, "a required or pinned job was left out of the check");
   // The plants of the second review of 4e896ca, on the Documentation job and on a Rust job: each
   // is refused by this rule, by TOOL_ENV or by the pin.
   const ci = workflows().find((w) => w.file === "ci.yml").doc;
@@ -1806,6 +1872,8 @@ check("every job that builds checks, before anything of the workspace is built o
       ["P6, LD_AUDIT on the job", (job) => (job.env = { ...job.env, LD_AUDIT: "./x.so" })],
       ["P6, GIT_CONFIG_COUNT on the workflow", (job, doc) => (doc.env = { ...doc.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "./x" })],
       ["a step of the change's before the check", (job) => job.steps.splice(1, 0, { name: "x", run: "bash ./x.sh" })],
+      ["a step allowed only in another job, before the check", (job) => job.steps.splice(1, 0, { name: "x", run: 'echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"' })],
+      ["setup-node with its own cache left on", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { "node-version": 24 } })],
       ["npm ci before the check", (job) => job.steps.splice(1, 0, { name: "x", run: "npm ci --ignore-scripts" })],
       ["an action before the check", (job) => job.steps.splice(1, 0, { uses: `someone/action@${"0".repeat(40)}` })],
       ["a second checkout", (job) => job.steps.splice(1, 0, clone(job.steps[0]))],
@@ -1870,8 +1938,8 @@ check("no library's doc comments hold an example rustdoc would compile", () => {
     for (const f of filesUnder(dir).filter((x) => x.endsWith(".rs"))) {
       const text = read(f);
       if (!tracked().has(`${dir}/src/lib.rs`) || !f.startsWith(`${dir}/src/`) || f === `${dir}/src/main.rs` || f.startsWith(`${dir}/src/bin/`)) continue;
-      // A library's module read from another path could be one these lines never read.
-      if (/^\s*#!?\[\s*path\b/m.test(text)) found.push(`${f}: a #[path] module`);
+      // A module read from another path, which these lines would never read, is refused in every
+      // crate by the check of `#[path]` above.
       found.push(...doctestBlocks(f, text));
       if (docAttribute.test(text)) found.push(`${f}: a doc attribute, whose text the policy does not read`);
       if (/^\s*\/\*[*!](?![*/])/m.test(text)) found.push(`${f}: a block doc comment, which the policy does not read`);
@@ -2119,6 +2187,68 @@ check("the required checks are listed once each", () => {
   assert.ok(names.length > 0);
   const twice = names.filter((n, k) => names.indexOf(n) !== k);
   assert.deepEqual(twice, [], `${REQUIRED_FILE} lists these twice`);
+});
+
+/// The jobs whose matrix a dispatch's input gives, each with its reason; every other matrix is a
+/// literal. Such a job's workflow runs on no pull request, push or queue, and its name's literal
+/// start is the start of no required check.
+const MATRIX_FROM_INPUTS = new Map([["mutants-full.yml#full", "the shards to run are the dispatch's choice"]]);
+/// Why a workflow's jobs could be named, run or set otherwise than the policy reads them: a name
+/// spelled by an expression other than a matrix value, a runner that is no literal of RUNNERS, a
+/// matrix, strategy or defaults holding an expression, an env or a step's inputs that are an
+/// expression as a whole. The policy reads each as written; GitHub would evaluate it (the third
+/// review of 980965e: `env: ${{ fromJSON(...) }}` set NODE_OPTIONS past TOOL_ENV, and a job named
+/// by format() reported a required check's name).
+export function expressionProblems(file, doc) {
+  const found = [];
+  const expression = (v) => /\$\{\{/.test(JSON.stringify(v ?? null));
+  const mapping = (where, v) => {
+    if (v !== undefined && !isPlain(v)) found.push(`${where} is an expression or no mapping: ${JSON.stringify(v)}`);
+  };
+  mapping(`${file}: env`, doc.env);
+  if (doc.defaults !== undefined && (!isPlain(doc.defaults) || expression(doc.defaults))) found.push(`${file}: defaults are or hold an expression`);
+  const runsOnPush = Object.keys(triggers(doc)).some((e) => REQUIRED_EVENTS.has(e));
+  for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+    const key = `${file}#${id}`;
+    const name = String(job?.name ?? id);
+    if (/\$\{\{/.test(name.replace(/\$\{\{\s*matrix\.[\w-]+\s*\}\}/g, ""))) found.push(`${key}: its name holds an expression other than a matrix value: ${name}`);
+    if (job?.strategy !== undefined && (!isPlain(job.strategy) || expression(job.strategy))) {
+      const prefix = name.split("${{")[0];
+      const allowed = MATRIX_FROM_INPUTS.has(key) && !runsOnPush && prefix.trim() !== "" && ![...requiredChecks()].some((c) => c.startsWith(prefix));
+      if (!allowed) found.push(`${key}: its strategy or matrix is or holds an expression, so the checks it reports and its runners cannot be read`);
+    }
+    const runners = runnersOf(job);
+    if (!MATRIX_FROM_INPUTS.has(key) && (!runners || !runners.every((r) => RUNNERS.has(r)))) found.push(`${key}: runs-on ${JSON.stringify(job?.["runs-on"])} is no literal of RUNNERS nor a matrix value that is one`);
+    mapping(`${key}: env`, job?.env);
+    if (job?.defaults !== undefined && (!isPlain(job.defaults) || expression(job.defaults))) found.push(`${key}: its defaults are or hold an expression`);
+    for (const s of steps(job ?? {})) {
+      mapping(`${stepKey(file, id, s)}: env`, s.env);
+      mapping(`${stepKey(file, id, s)}: with`, s.with);
+    }
+  }
+  return found;
+}
+
+check("no workflow names a job, its runners, its matrix, its defaults or a whole env by an expression", () => {
+  for (const { file, doc } of workflows()) assert.deepEqual(expressionProblems(file, doc), [], file);
+  // The plants of the third review of 980965e.
+  const job = (extra) => ({ name: "Rust (x86-64 Linux)", "runs-on": "ubuntu-24.04", steps: [{ run: "x" }], ...extra });
+  const doc = (jobs, extra = {}) => ({ on: { pull_request: null }, jobs, ...extra });
+  for (const [what, plant] of [
+    ["a name by format()", doc({ shadow: job({ name: "${{ format('Rust ({0})', 'x86-64 Linux') }}" }) })],
+    ["a matrix by fromJSON", doc({ shadow: job({ name: "Rust (${{ matrix.name }})", strategy: { matrix: "${{ fromJSON('{\"name\":[\"x86-64 Linux\"]}') }}" } }) })],
+    ["a matrix value by an expression", doc({ shadow: job({ name: "Rust (${{ matrix.name }})", strategy: { matrix: { name: ["${{ format('x86-64 Linux') }}"] } } }) })],
+    ["a runner by format()", doc({ extra: job({ "runs-on": "${{ format('{0}-24.04', 'ubuntu') }}" }) })],
+    ["a runner of another label", doc({ extra: job({ "runs-on": "self-hosted" }) })],
+    ["a job env by fromJSON", doc({ z3: job({ env: "${{ fromJSON('{\"NODE_OPTIONS\":\"--require ./x.js\"}') }}" }) })],
+    ["a workflow env by fromJSON", doc({ z3: job() }, { env: "${{ fromJSON('{}') }}" })],
+    ["a step env by fromJSON", doc({ z3: job({ steps: [{ run: "x", env: "${{ fromJSON('{}') }}" }] }) })],
+    ["a step's inputs by fromJSON", doc({ z3: job({ steps: [{ uses: "actions/checkout@x", with: "${{ fromJSON('{}') }}" }] }) })],
+    ["defaults by an expression", doc({ z3: job({ defaults: { run: { shell: "${{ 'bash' }}" } } }) })],
+  ]) {
+    assert.ok(expressionProblems("plant.yml", plant).length > 0, `the expression rule lets through ${what}`);
+  }
+  assert.deepEqual(expressionProblems("fine.yml", doc({ rust: job({ name: "Rust (${{ matrix.name }})", "runs-on": "${{ matrix.os }}", strategy: { matrix: { include: [{ name: "x86-64 Linux", os: "ubuntu-24.04" }] } }, env: { MENTE_X: "${{ matrix.name }}" } }) })), []);
 });
 
 check("no two jobs of any workflow report a check of the same name", () => {
@@ -2915,8 +3045,12 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   for (const binary of ["Binary files a/compiler/a/src/lib.rs and b/compiler/a/src/lib.rs differ", "GIT binary patch"]) {
     assert.throws(() => parseDiff(`diff --git a/compiler/a/src/lib.rs b/compiler/a/src/lib.rs\nindex 1..2 100644\n${binary}\n`), /git wrote as binary/, binary);
   }
+  // The third review of 980965e: a path git quotes is refused, and one with a space keyed without
+  // the tab git ends it with.
+  assert.throws(() => parseDiff('diff --git "a/compiler/a/src/\\303\\251.rs" "b/compiler/a/src/\\303\\251.rs"\n--- "a/compiler/a/src/\\303\\251.rs"\n+++ "b/compiler/a/src/\\303\\251.rs"\n@@ -1,1 +1,2 @@\n x\n+y\n'), /git quoted/);
+  assert.deepEqual([...parseDiff("diff --git a/compiler/a/src/a b.rs b/compiler/a/src/a b.rs\n--- a/compiler/a/src/a b.rs\t\n+++ b/compiler/a/src/a b.rs\t\n@@ -1,1 +1,2 @@\n x\n+y\n").added.keys()], ["compiler/a/src/a b.rs"]);
   const mutantsJob = steps(workflows().find((w) => w.file === "mutants.yml").doc.jobs["in-diff"]).map((s) => String(s.run ?? "")).join("\n");
-  assert.match(mutantsJob, /^\s*git diff --text --no-ext-diff --no-textconv "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > pr\.diff$/m, "the Mutants job reads the diff in a form .gitattributes can change");
+  assert.match(mutantsJob, /^\s*git diff --text --no-ext-diff --no-textconv --no-renames "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > pr\.diff$/m, "the Mutants job reads the diff in a form .gitattributes can change");
   assert.doesNotMatch(mutantsJob.replace(/git (diff|show) --(text --no-ext-diff --)?no-textconv /g, ""), /\bgit (diff|show|log -p)\b/, "the Mutants job reads a diff or a file without --no-textconv");
   const diff = [
     "diff --git a/compiler/a/src/lib.rs b/compiler/a/src/lib.rs",

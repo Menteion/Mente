@@ -63,6 +63,7 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         with:
           node-version: 24
+          package-manager-cache: false
       - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
         if: steps.watch.outputs.run != 'false'
         # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release

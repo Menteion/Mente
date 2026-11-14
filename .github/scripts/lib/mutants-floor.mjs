@@ -68,9 +68,13 @@ export function parseDiff(diff) {
       throw new Error(`the diff holds a file git wrote as binary (${text}), whose changed lines the floor cannot count: read it with git diff --text --no-ext-diff --no-textconv`);
     }
     if (!hunk) {
+      // A path git quotes, for a character outside plain ASCII or a quote, would be read as no
+      // file and its lines counted for none: refused, as a binary file is.
+      if (/^(\+\+\+|---) "/.test(text)) throw new Error(`the diff names a file git quoted (${text}), whose changed lines the floor would not count: name the file in plain characters`);
       const target = /^\+\+\+ (?:b\/(.+)|\/dev\/null)$/.exec(text);
       if (target) {
-        file = target[1] ?? null;
+        // git ends a path that holds a space with a tab.
+        file = target[1]?.replace(/\t$/, "") ?? null;
         continue;
       }
       if (text.startsWith("--- ")) continue;

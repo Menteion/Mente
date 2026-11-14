@@ -356,6 +356,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          package-manager-cache: false
       # Exactly a name and a command, first, and through node itself: before npm ci, so that no
       # install script or npm hook can change what it runs. The Rust jobs' test
       # test_the_documentation_job_runs_the_workflow_policy fails on any other key or order.
@@ -366,11 +367,12 @@ jobs:
         # tag names (.github/scripts/action-pins.mjs).
         run: node .github/scripts/action-pins.mjs
       - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
-        # The step every job that builds runs first, under one rule of the policy (TOOLCHAIN_STEP):
-        # rust-toolchain.toml names a release alone and no cargo configuration file is there; then
-        # cargo reads the manifests and the lock, and a package with code that runs at build time,
-        # or a crate not approved, fails the job (.github/scripts/build-time-code.mjs). This job
-        # builds nothing; here it runs after the policy and the actions' pins.
+        # The step every required job but Commits runs first, under one rule of the policy
+        # (TOOLCHAIN_STEP): rust-toolchain.toml names a release alone and no cargo configuration
+        # file is there; then cargo reads the manifests and the lock, and a package with code that
+        # runs at build time, or a crate not approved, fails the job
+        # (.github/scripts/build-time-code.mjs). This job builds nothing; here it runs after the
+        # policy and the actions' pins.
         run: |
           node .github/scripts/build-time-code.mjs --before-toolchain
           rustup toolchain install

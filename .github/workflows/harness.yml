@@ -44,6 +44,7 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         with:
           node-version: 24
+          package-manager-cache: false
       - name: Put the pinned Rust outside the home
         if: steps.watch.outputs.run != 'false'
         # So the sandbox, which gives the build HOME in its working directory, still finds the

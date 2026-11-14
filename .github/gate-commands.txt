@@ -58,7 +58,7 @@ mutants.yml#in-diff: node .github/scripts/build-time-code.mjs --before-toolchain
 mutants.yml#in-diff: node .github/scripts/build-time-code.mjs
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh check
-mutants.yml#in-diff: git diff --text --no-ext-diff --no-textconv "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
+mutants.yml#in-diff: git diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
 mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants"

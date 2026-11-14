@@ -36,7 +36,8 @@
 #   - no other program the kernel would start as root for it: `setup` moves aside keyutils'
 #     helper, /sbin/request-key, which a request for a key starts as root outside every namespace,
 #     and whose stock rules run a script on the request's own words and resolve names over the
-#     network;
+#     network; and it points the kernel's modprobe at a path that does not exist, which the first
+#     socket of a family not yet loaded, or an AF_ALG name, would start as root to load a module;
 #   - no user namespace: Ubuntu refuses one to an unprivileged process, but each AppArmor profile
 #     that grants one is a way around that, by a change of profile (aa-exec) or by starting a
 #     program it is attached to with a library preloaded; `setup` lets no process make one, root
@@ -262,6 +263,29 @@ through_profile() {
   return 1
 }
 
+# A protocol family whose module the kernel loads on the first socket of it, as the module's name
+# and socket(2)'s arguments: the first whose module this runner has and has not loaded yet.
+autoload_candidate() {
+  local entry name
+  for entry in atm:8:2:0 llc2:26:2:0 can:29:3:1 sctp:2:1:132; do
+    name=${entry%%:*}
+    if /usr/bin/grep -q "^$name " /proc/modules 2> /dev/null; then continue; fi
+    if ! /usr/sbin/modinfo -n "$name" > /dev/null 2>&1; then continue; fi
+    printf '%s\n' "$entry"
+    return 0
+  done
+  return 1
+}
+
+# Whether a socket of that family loads its module, which the kernel does by starting modprobe as
+# root, outside every namespace.
+autoloads() {
+  local name family type protocol
+  IFS=: read -r name family type protocol <<< "$1"
+  /usr/bin/perl -MSocket -e "socket(my \$s, $family, $type, $protocol)" > /dev/null 2>&1 || true
+  /usr/bin/grep -q "^$name " /proc/modules
+}
+
 # keyutils' helper, at its own path and at the one the kernel starts.
 request_key_helpers() {
   local helper
@@ -319,6 +343,11 @@ setup_as_root() {
   # profile is attached to. No job that runs the sandbox needs one.
   printf '0\n' > /proc/sys/user/max_user_namespaces
   if [ "$(< /proc/sys/user/max_user_namespaces)" != 0 ]; then fail "a process can still make a user namespace"; fi
+  # No module loaded at a process's asking: the kernel starts modprobe as root, outside every
+  # namespace, for the first socket of a family it has not loaded, or an AF_ALG name. It now names
+  # a path that does not exist, under this root-owned directory, so every such request fails.
+  printf '%s\n' "$home/modprobe-off" > /proc/sys/kernel/modprobe
+  if [ "$(< /proc/sys/kernel/modprobe)" != "$home/modprobe-off" ] || [ -e "$home/modprobe-off" ]; then fail "the kernel can still start modprobe for a process"; fi
   /usr/bin/mount -t tmpfs -o size=1m,mode=0755,nosuid,nodev tmpfs "$root"
   /usr/bin/mkdir -p "$root/usr" "$root/etc" "$root/dev" "$root/proc" "$root/tmp" "$root/.old" "$root$workspace"
   # /bin, /lib and the like, links into /usr on a runner.
@@ -346,7 +375,7 @@ setup_as_root() {
 }
 
 setup() {
-  local here workspace controls profile
+  local here workspace controls profile entry
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}: the tests run with the job's rights (docs/design-review.md, untrusted-test-isolation)."
     return 0
@@ -381,6 +410,13 @@ setup() {
   else
     echo "root-userns closed" >> "$controls"
   fi
+  if ! entry=$(autoload_candidate); then
+    echo "module-autoload absent" >> "$controls"
+  elif autoloads "$entry"; then
+    echo "module-autoload open (${entry%%:*})" >> "$controls"
+  else
+    echo "module-autoload closed (${entry%%:*})" >> "$controls"
+  fi
   /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace"
   : > "$log"
   echo "The sandbox of $workspace is at $root, for the user $uid."
@@ -396,6 +432,7 @@ env_lines() {
   esac
   if [ -n "$(request_key_helpers)" ]; then fail "a request for a key would start keyutils' helper as root again: $(request_key_helpers | /usr/bin/tr '\n' ' ')"; fi
   if [ "$(< /proc/sys/user/max_user_namespaces)" != 0 ]; then fail "a process could make a user namespace again"; fi
+  if [ "$(< /proc/sys/kernel/modprobe)" != "$home/modprobe-off" ] || [ -e "$home/modprobe-off" ]; then fail "a socket could have the kernel start modprobe as root again"; fi
   : > "$log"
   printf "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
   printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
@@ -525,6 +562,15 @@ probe() {
   # A request for a key the stock rules of keyutils instantiate: with the helper in place, the
   # kernel starts it as root outside every namespace, and the request succeeds.
   if /usr/bin/keyctl request2 user "debug:mente-probe-$BASHPID" probe @p > /dev/null 2>&1; then echo "request-key open"; else echo "request-key closed"; fi
+  # A socket of a family whose module is not loaded: with modprobe in place, the kernel starts it
+  # as root and loads the module.
+  if ! entry=$(autoload_candidate); then
+    echo "module-autoload untested"
+  elif autoloads "$entry"; then
+    echo "module-autoload open"
+  else
+    echo "module-autoload closed"
+  fi
   # What the tests need.
   if /usr/bin/grep -q '^\[workspace\]' Cargo.toml 2> /dev/null; then echo "read open"; else echo "read closed"; fi
   file=${TMPDIR:-/tmp}/test-sandbox-probe.$BASHPID
@@ -624,14 +670,14 @@ check() {
   # The routes setup closes for every process: closed after setup on both sides, and open, or
   # absent from this runner, in the controls setup took just before it closed them. A user
   # namespace is closed to root too, which shows the limit holds whatever way a process asks.
-  for route in user-namespace request-key; do
+  for route in user-namespace request-key module-autoload; do
     if [ "${outside[$route]:-}" != closed ]; then problem "setup left $route open to the runner's user: ${outside[$route]:-not reported}"; fi
     if [ "${in_sandbox[$route]:-}" != closed ]; then problem "the sandbox let the probe reach $route: ${in_sandbox[$route]:-not reported}"; fi
   done
-  for route in request-key apparmor-userns root-userns; do
+  for route in request-key apparmor-userns root-userns module-autoload; do
     state=$(/usr/bin/sed -n "s/^$route //p" "$RUNNER_TEMP/test-sandbox-controls" 2> /dev/null || true)
     case "$route $state" in
-      "root-userns open" | "request-key open" | "request-key absent" | "apparmor-userns open" | "apparmor-userns absent")
+      "root-userns open" | "request-key open" | "request-key absent" | "apparmor-userns open" | "apparmor-userns absent" | "module-autoload open ("*)
         echo "The control of $route, before setup closed it: $state." | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
         ;;
       *) problem "the control of $route, taken before setup closed it, is '${state:-missing}', so the runs after it prove nothing" ;;

@@ -22,9 +22,9 @@
 //   with a source is approved. This is read before cargo runs, so that cargo fetches from nowhere
 //   else.
 //
-// It runs in every job that builds, as its first step that reads the workspace after the watch, so
-// that a change whose build-time code would run fails there before any of it runs; and in the
-// Documentation job, which builds nothing, after the workflow policy.
+// It runs in every required job but Commits, as its first step that reads the workspace after the
+// watch, so that a change whose build-time code would run fails there before any of it runs; in
+// the Documentation job, which builds nothing, after the workflow policy.
 
 import fs from "node:fs";
 import path from "node:path";
