@@ -70,7 +70,7 @@ export function parseDiff(diff) {
     if (!hunk) {
       // A path git quotes, for a character outside plain ASCII or a quote, would be read as no
       // file and its lines counted for none: refused, as a binary file is.
-      if (/^(\+\+\+|---) "/.test(text)) throw new Error(`the diff names a file git quoted (${text}), whose changed lines the floor would not count: name the file in plain characters`);
+      if (/^(\+\+\+|---) "/.test(text)) throw new Error(`the diff names a file git quoted (${text}), whose changed lines the floor would not count: git quotes a path only for a quote, a backslash or a control character, which no file may hold`);
       const target = /^\+\+\+ (?:b\/(.+)|\/dev\/null)$/.exec(text);
       if (target) {
         // git ends a path that holds a space with a tab.

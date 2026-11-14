@@ -14,6 +14,10 @@
 /// action (`./`) is the repository's own, and pins nothing.
 export function pins(file, text) {
   const out = [];
+  // Lines are what GitHub's reader breaks them at, which includes characters this split does not
+  // know (NEL, U+0085): a workflow holding anything but printable ASCII, tab and LF is refused.
+  const odd = [...text].findIndex((c) => c !== "\t" && c !== "\n" && (c < " " || c > "~"));
+  if (odd >= 0) return [{ at: `${file}:${text.slice(0, odd).split("\n").length}`, unreadable: `a character outside printable ASCII, tab and LF (U+${text.codePointAt(odd).toString(16).toUpperCase().padStart(4, "0")})` }];
   for (const [k, line] of text.split(/\r?\n/).entries()) {
     if (!/(^|[\s{,])["']?uses["']?\s*:/.test(line.replace(/\s#.*$/, ""))) continue;
     const at = `${file}:${k + 1}`;

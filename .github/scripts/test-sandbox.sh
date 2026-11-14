@@ -263,27 +263,36 @@ through_profile() {
   return 1
 }
 
-# A protocol family whose module the kernel loads on the first socket of it, as the module's name
-# and socket(2)'s arguments: the first whose module this runner has and has not loaded yet.
+# A protocol family whose module the kernel loads on the first socket of it: the module's name,
+# socket(2)'s family, type and protocol, and the modules to unload after, comma-separated. The
+# first whose module this runner has as a file of its own and has not loaded yet.
 autoload_candidate() {
-  local entry name
-  for entry in atm:8:2:0 llc2:26:2:0 can:29:3:1 sctp:2:1:132; do
+  local entry name file
+  for entry in atm:8:2:0:atm llc2:26:2:0:llc2 can:29:3:1:can_raw,can sctp:2:1:132:sctp; do
     name=${entry%%:*}
     if /usr/bin/grep -q "^$name " /proc/modules 2> /dev/null; then continue; fi
-    if ! /usr/sbin/modinfo -n "$name" > /dev/null 2>&1; then continue; fi
+    file=$(/usr/sbin/modinfo -n "$name" 2> /dev/null) || continue
+    case "$file" in /*.ko | /*.ko.*) ;; *) continue ;; esac
     printf '%s\n' "$entry"
     return 0
   done
   return 1
 }
 
-# Whether a socket of that family loads its module, which the kernel does by starting modprobe as
-# root, outside every namespace.
-autoloads() {
-  local name family type protocol
-  IFS=: read -r name family type protocol <<< "$1"
-  /usr/bin/perl -MSocket -e "socket(my \$s, $family, $type, $protocol)" > /dev/null 2>&1 || true
-  /usr/bin/grep -q "^$name " /proc/modules
+# What a socket of that family does: `open` when it loads the module, which the kernel does by
+# starting modprobe as root outside every namespace; `closed` when the family is refused and the
+# module stays out; anything else is an error, a probe that could not ask included.
+autoload_state() {
+  local name family type protocol unload status=0 loaded=no
+  IFS=: read -r name family type protocol unload <<< "$1"
+  /usr/bin/perl -MSocket -MErrno -e 'socket(my $s, $ARGV[0], $ARGV[1], $ARGV[2]) and exit 0; exit(($!{EAFNOSUPPORT} || $!{EPROTONOSUPPORT} || $!{ESOCKTNOSUPPORT}) ? 3 : 4)' \
+    "$family" "$type" "$protocol" > /dev/null 2>&1 || status=$?
+  if /usr/bin/grep -q "^$name " /proc/modules; then loaded=yes; fi
+  case "$status:$loaded" in
+    0:yes) echo open ;;
+    3:no) echo closed ;;
+    *) echo "error-$status-$loaded" ;;
+  esac
 }
 
 # keyutils' helper, at its own path and at the one the kernel starts.
@@ -375,7 +384,7 @@ setup_as_root() {
 }
 
 setup() {
-  local here workspace controls profile entry
+  local here workspace controls profile entry state unload
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}: the tests run with the job's rights (docs/design-review.md, untrusted-test-isolation)."
     return 0
@@ -410,12 +419,18 @@ setup() {
   else
     echo "root-userns closed" >> "$controls"
   fi
+  # The module the control loads is unloaded again, so that the canary's runs after setup ask for
+  # that very module, and are compared with it by name.
   if ! entry=$(autoload_candidate); then
     echo "module-autoload absent" >> "$controls"
-  elif autoloads "$entry"; then
-    echo "module-autoload open (${entry%%:*})" >> "$controls"
   else
-    echo "module-autoload closed (${entry%%:*})" >> "$controls"
+    state=$(autoload_state "$entry")
+    unload=${entry##*:}
+    if [ "$state" = open ] && /usr/bin/sudo -n /usr/sbin/modprobe -r ${unload//,/ } > /dev/null 2>&1 && ! /usr/bin/grep -q "^${entry%%:*} " /proc/modules; then
+      echo "module-autoload open ${entry%%:*}" >> "$controls"
+    else
+      echo "module-autoload $state-not-unloaded ${entry%%:*}" >> "$controls"
+    fi
   fi
   /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace"
   : > "$log"
@@ -566,10 +581,8 @@ probe() {
   # as root and loads the module.
   if ! entry=$(autoload_candidate); then
     echo "module-autoload untested"
-  elif autoloads "$entry"; then
-    echo "module-autoload open"
   else
-    echo "module-autoload closed"
+    echo "module-autoload $(autoload_state "$entry") ${entry%%:*}"
   fi
   # What the tests need.
   if /usr/bin/grep -q '^\[workspace\]' Cargo.toml 2> /dev/null; then echo "read open"; else echo "read closed"; fi
@@ -597,7 +610,7 @@ probe_outlive() {
 # end, by SIGTERM as nextest stops a test and by SIGKILL, before the command has started or after,
 # ends the namespace. No crash in it starts the runner's core handler.
 check() {
-  local work marker decoy listener shm port tool args control confined route state failed=0 status wrapper start direct inside k started handled delay
+  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay
   declare -A outside in_sandbox
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
@@ -670,14 +683,19 @@ check() {
   # The routes setup closes for every process: closed after setup on both sides, and open, or
   # absent from this runner, in the controls setup took just before it closed them. A user
   # namespace is closed to root too, which shows the limit holds whatever way a process asks.
-  for route in user-namespace request-key module-autoload; do
+  for route in user-namespace request-key; do
     if [ "${outside[$route]:-}" != closed ]; then problem "setup left $route open to the runner's user: ${outside[$route]:-not reported}"; fi
     if [ "${in_sandbox[$route]:-}" != closed ]; then problem "the sandbox let the probe reach $route: ${in_sandbox[$route]:-not reported}"; fi
   done
+  # The module: the very one setup's control loaded and unloaded again, refused on both sides.
+  module=$(/usr/bin/sed -n "s/^module-autoload open //p" "$RUNNER_TEMP/test-sandbox-controls" 2> /dev/null || true)
+  if [ -z "$module" ] || [ "${outside[module-autoload]:-}" != "closed $module" ] || [ "${in_sandbox[module-autoload]:-}" != "closed $module" ]; then
+    problem "a socket could load a module, or the probe asked for another than setup's control: control ${module:-none}, the runner's user ${outside[module-autoload]:-not reported}, the sandbox ${in_sandbox[module-autoload]:-not reported}"
+  fi
   for route in request-key apparmor-userns root-userns module-autoload; do
     state=$(/usr/bin/sed -n "s/^$route //p" "$RUNNER_TEMP/test-sandbox-controls" 2> /dev/null || true)
     case "$route $state" in
-      "root-userns open" | "request-key open" | "request-key absent" | "apparmor-userns open" | "apparmor-userns absent" | "module-autoload open ("*)
+      "root-userns open" | "request-key open" | "request-key absent" | "apparmor-userns open" | "apparmor-userns absent" | "module-autoload open "*)
         echo "The control of $route, before setup closed it: $state." | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
         ;;
       *) problem "the control of $route, taken before setup closed it, is '${state:-missing}', so the runs after it prove nothing" ;;
