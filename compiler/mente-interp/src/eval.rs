@@ -14,7 +14,7 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
-use crate::{Int, Limits, Stop, Trap, TrapKind, Value};
+use crate::{Int, Limits, Observer, Stop, Trap, TrapKind, Value};
 
 /// How control leaves a statement other than by its end.
 enum Exit {
@@ -52,6 +52,15 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
         | Ty::Enum(_)
         | Ty::Unit
         | Ty::Any => None,
+    }
+}
+
+/// The integer type a value of type `ty` is made of, an array's through its elements: what an
+/// expression of that type gives the literals among its operands (`core-calculus.md`, item 5).
+fn leaf_int(ty: &Ty) -> Option<IntTy> {
+    match ty {
+        Ty::Array(_, elem) => leaf_int(elem),
+        Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => int_ty(ty),
     }
 }
 
@@ -117,15 +126,22 @@ pub(crate) struct Machine<'m> {
     limits: Limits,
     steps: u64,
     depth: usize,
+    /// What is shown each integer an expression gives, when a run is observed.
+    seen: Option<Observer<'m>>,
 }
 
 impl<'m> Machine<'m> {
-    pub(crate) fn new(module: &'m CheckedModule, limits: Limits) -> Machine<'m> {
+    pub(crate) fn new(
+        module: &'m CheckedModule,
+        limits: Limits,
+        seen: Option<Observer<'m>>,
+    ) -> Machine<'m> {
         Machine {
             module,
             limits,
             steps: 0,
             depth: 0,
+            seen,
         }
     }
 
@@ -271,7 +287,7 @@ impl<'m> Machine<'m> {
         let (result, ret_span) = match f.syntax.body {
             // An expression body leaves by `return` too, from a branch of an `if` or an arm of
             // a `match` in it, which ends this call alone.
-            Some(Body::Expr(e)) => match self.eval(frame, e, int_ty(&result_ty)) {
+            Some(Body::Expr(e)) => match self.eval(frame, e, None) {
                 Ok(v) => {
                     let span = tree.expr(e).span;
                     (self.narrow(frame, v, declared, &result_ty, span)?, span)
@@ -279,7 +295,7 @@ impl<'m> Machine<'m> {
                 Err(Exit::Return(v, span)) => (v, span),
                 Err(e) => return Err(e),
             },
-            Some(Body::Block(b)) => match self.block(frame, b) {
+            Some(Body::Block(b)) => match self.block(frame, b, None) {
                 Ok(v) => {
                     let span = tree
                         .block(b)
@@ -316,22 +332,24 @@ impl<'m> Machine<'m> {
         Ok((result, finals))
     }
 
-    /// The value of a block: its last statement's, when that is an expression.
-    fn block(&mut self, frame: &mut Frame<'m>, b: BlockId) -> Flow<Value> {
+    /// The value of a block: its last statement's, when that is an expression, whose literals
+    /// take `ctx` where nothing nearer gives them a type.
+    fn block(&mut self, frame: &mut Frame<'m>, b: BlockId, ctx: Option<IntTy>) -> Flow<Value> {
         let tree = &frame.f.syntax.tree;
+        let stmts = &tree.block(b).stmts;
         let mut last = Value::Unit;
-        for &s in &tree.block(b).stmts {
-            last = self.stmt(frame, s)?;
+        for (i, &s) in stmts.iter().enumerate() {
+            last = self.stmt(frame, s, if i + 1 == stmts.len() { ctx } else { None })?;
         }
         Ok(last)
     }
 
-    fn stmt(&mut self, frame: &mut Frame<'m>, s: StmtId) -> Flow<Value> {
+    fn stmt(&mut self, frame: &mut Frame<'m>, s: StmtId, ctx: Option<IntTy>) -> Flow<Value> {
         self.step()?;
         let f = frame.f;
         let tree = &f.syntax.tree;
         match &tree.stmt(s).kind {
-            StmtKind::Expr(e) => return self.eval(frame, *e, None),
+            StmtKind::Expr(e) => return self.eval(frame, *e, ctx),
             StmtKind::Discard(e) => {
                 self.eval(frame, *e, None)?;
             }
@@ -340,12 +358,14 @@ impl<'m> Machine<'m> {
                     return broken("a binding statement that declares no binding");
                 };
                 let plain = f.typing.bindings[id.0 as usize].clone();
-                let v = self.eval(frame, *init, int_ty(&plain))?;
+                let v = self.eval(frame, *init, None)?;
                 let declared = ty.map(|t| (tree, t));
                 let v = self.narrow(frame, v, declared, &plain, tree.expr(*init).span)?;
                 frame.slots[id.0 as usize] = Some(v);
             }
-            StmtKind::Assign { place, op, value } => self.assign(frame, *place, *op, *value)?,
+            StmtKind::Assign { place, op, value } => {
+                self.assign(frame, *place, *op, *value, tree.stmt(s).span)?
+            }
             StmtKind::While {
                 cond,
                 invariants,
@@ -354,7 +374,7 @@ impl<'m> Machine<'m> {
             } => self.while_loop(frame, *cond, invariants, decreases, *body)?,
             StmtKind::Guard { cond, otherwise } => {
                 if !self.cond(frame, *cond)? {
-                    self.block(frame, *otherwise)?;
+                    self.block(frame, *otherwise, None)?;
                 }
             }
             StmtKind::Return(value) => {
@@ -363,7 +383,7 @@ impl<'m> Machine<'m> {
                 };
                 let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
                 let span = tree.expr(*e).span;
-                let v = self.eval(frame, *e, int_ty(&result_ty))?;
+                let v = self.eval(frame, *e, None)?;
                 let declared = f.syntax.result.map(|t| (tree, t));
                 let v = self.narrow(frame, v, declared, &result_ty, span)?;
                 return Err(Exit::Return(v, span));
@@ -404,7 +424,7 @@ impl<'m> Machine<'m> {
                 }
                 before = Some(measure);
             }
-            match self.block(frame, body) {
+            match self.block(frame, body, None) {
                 Ok(_) | Err(Exit::Continue) => {}
                 Err(Exit::Break) => return Ok(()),
                 Err(e) => return Err(e),
@@ -432,6 +452,7 @@ impl<'m> Machine<'m> {
         place: ExprId,
         op: AssignOp,
         value: ExprId,
+        whole: Span,
     ) -> Flow<()> {
         let f = frame.f;
         let tree = &f.syntax.tree;
@@ -439,13 +460,41 @@ impl<'m> Machine<'m> {
         let plain = f.typing.exprs[place.0 as usize].clone();
         let declared = self.place_type(frame, &path)?;
         let new = match op {
-            AssignOp::Set => self.eval(frame, value, int_ty(&plain))?,
+            AssignOp::Set => self.eval(frame, value, None)?,
             AssignOp::Compound(op) => {
                 let current = self.read(frame, &path)?;
-                let rhs = self.eval(frame, value, int_ty(&plain))?;
+                // `x op= e` is `x = x op e` (item 6): `x` is the other operand of `e`,
+                // unless `e` is a shift's amount.
+                let other = match op {
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Rem
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor => int_ty(&plain),
+                    BinaryOp::Shl
+                    | BinaryOp::Shr
+                    | BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge => None,
+                };
+                let rhs = self.eval(frame, value, other)?;
                 let rt = f.typing.exprs[value.0 as usize].clone();
                 let operands = [(current, &plain, place), (rhs, &rt, value)];
-                self.arith(frame, op, operands, int_ty(&plain), tree.expr(value).span)?
+                let new = self.arith(frame, op, operands, int_ty(&plain), tree.expr(value).span)?;
+                // No expression of the program gives `x op e`: an observer is shown it with
+                // the span of the whole assignment, before it is narrowed into the place.
+                if let Some(seen) = self.seen.as_mut() {
+                    show(&new, whole, &mut **seen);
+                }
+                new
             }
         };
         let new = self.narrow(frame, new, declared, &plain, tree.expr(value).span)?;
@@ -651,12 +700,27 @@ impl<'m> Machine<'m> {
         }
     }
 
-    /// The value of `e`. `ctx` is the integer type of the place the value is narrowed into,
-    /// which literals alone take (`core-calculus.md`, item 5).
+    /// The value of `e`, whose integers an observer of the run is shown. `ctx` is the integer
+    /// type an expression around `e` gives the literals among its operands, which an
+    /// expression of literals alone takes; the place a value is narrowed into gives none
+    /// (`core-calculus.md`, item 5).
     fn eval(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
+        let v = self.value(frame, e, ctx)?;
+        if let Some(seen) = self.seen.as_mut() {
+            show(&v, frame.f.syntax.tree.expr(e).span, &mut **seen);
+        }
+        Ok(v)
+    }
+
+    /// [`Machine::eval`]'s value.
+    fn value(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
         let f = frame.f;
         let tree = &f.syntax.tree;
         let span = tree.expr(e).span;
+        // What this expression gives the literals among its operands, the branches of an `if`
+        // and the arms of a `match` included: its own type where it has one, since they are
+        // each other's other operands, and else the type it was given itself.
+        let here = leaf_int(&f.typing.exprs[e.0 as usize]).or(ctx);
         Ok(match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => Value::Int(Int::from_u128(*value)),
             ExprKind::Bool(b) => Value::Bool(*b),
@@ -675,7 +739,7 @@ impl<'m> Machine<'m> {
             ExprKind::Unary { op, operand } => match op {
                 UnaryOp::Not => Value::Bool(!self.cond(frame, *operand)?),
                 UnaryOp::Neg => {
-                    let x = self.int(frame, *operand, ctx)?.negate();
+                    let x = self.int(frame, *operand, here)?.negate();
                     // On an `i128` or `u128` operand, checked at the operator (`core-calculus.md`,
                     // item 4).
                     match int_ty(&f.typing.exprs[operand.0 as usize]).filter(|t| t.bits == 128) {
@@ -685,8 +749,8 @@ impl<'m> Machine<'m> {
                 }
                 UnaryOp::BitNot => {
                     let ty = &f.typing.exprs[operand.0 as usize];
-                    let t = int_ty(ty).or(ctx).unwrap_or(I64);
-                    let x = self.int(frame, *operand, ctx)?;
+                    let t = int_ty(ty).or(here).unwrap_or(I64);
+                    let x = self.int(frame, *operand, here)?;
                     let x = fit(x, t, tree.expr(*operand).span)?;
                     Value::Int(Int::from_bits(!x.to_bits(t), t))
                 }
@@ -714,11 +778,11 @@ impl<'m> Machine<'m> {
                 | BinaryOp::Div
                 | BinaryOp::Rem => {
                     let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
-                    let l = self.eval(frame, *lhs, ctx)?;
-                    let r = self.eval(frame, *rhs, if shift { None } else { ctx })?;
+                    let l = self.eval(frame, *lhs, here)?;
+                    let r = self.eval(frame, *rhs, if shift { None } else { here })?;
                     let lt = &f.typing.exprs[lhs.0 as usize];
                     let rt = &f.typing.exprs[rhs.0 as usize];
-                    self.arith(frame, *op, [(l, lt, *lhs), (r, rt, *rhs)], ctx, span)?
+                    self.arith(frame, *op, [(l, lt, *lhs), (r, rt, *rhs)], here, span)?
                 }
             },
             ExprKind::Index { base, index } => {
@@ -748,7 +812,7 @@ impl<'m> Machine<'m> {
                     let field = def.and_then(|d| d.field(&fi.name)).map(|(_, f)| f);
                     let fty = field.map_or(Ty::Any, |f| f.ty.clone());
                     let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, int_ty(&fty))?;
+                    let v = self.eval(frame, fi.value, None)?;
                     let at = tree.expr(fi.value).span;
                     let v = self.narrow(frame, v, declared, &fty, at)?;
                     values.push((fi.name.clone(), v));
@@ -775,7 +839,7 @@ impl<'m> Machine<'m> {
                     let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
                     let fty = field.map_or(Ty::Any, |f| f.ty.clone());
                     let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, int_ty(&fty))?;
+                    let v = self.eval(frame, fi.value, None)?;
                     let at = tree.expr(fi.value).span;
                     let v = self.narrow(frame, v, declared, &fty, at)?;
                     values.push((fi.name.clone(), v));
@@ -802,8 +866,8 @@ impl<'m> Machine<'m> {
                         continue;
                     }
                     return match arm.body {
-                        ArmBody::Expr(x) => self.eval(frame, x, ctx),
-                        ArmBody::Block(b) => self.block(frame, b),
+                        ArmBody::Expr(x) => self.eval(frame, x, here),
+                        ArmBody::Block(b) => self.block(frame, b, here),
                     };
                 }
                 // A `match` the checker passes is exhaustive.
@@ -816,18 +880,18 @@ impl<'m> Machine<'m> {
                 let Some(index) = f.resolution.calls[e.0 as usize] else {
                     return broken("a call that was never resolved");
                 };
-                let callee = self.function(index)?;
+                // A function without a body stops the run before its arguments are evaluated.
+                self.function(index)?;
                 let mut values = Vec::new();
                 let mut spans = Vec::new();
                 let mut places = Vec::new();
-                for (a, p) in args.iter().zip(&callee.syntax.params) {
+                for a in args {
                     if a.is_mut {
                         let path = self.place(frame, a.value)?;
                         values.push(self.read(frame, &path)?);
                         places.push(Some(path));
                     } else {
-                        let pt = Ty::of(&callee.syntax.tree, p.ty);
-                        values.push(self.eval(frame, a.value, int_ty(&pt))?);
+                        values.push(self.eval(frame, a.value, None)?);
                         places.push(None);
                     }
                     spans.push(tree.expr(a.value).span);
@@ -853,10 +917,9 @@ impl<'m> Machine<'m> {
                         return broken("an array literal whose type is not an array")
                     }
                 };
-                let elem = int_ty(elem_ty);
                 let mut values = Vec::new();
                 for &i in items {
-                    let v = self.eval(frame, i, elem.or(ctx))?;
+                    let v = self.eval(frame, i, here)?;
                     values.push(self.narrow_plain(v, elem_ty, span)?);
                 }
                 Value::Array(values)
@@ -865,7 +928,7 @@ impl<'m> Machine<'m> {
                 if *count > self.limits.max_array {
                     return Err(Exit::Stop(Stop::TooLarge(*count)));
                 }
-                let v = self.eval(frame, *value, ctx)?;
+                let v = self.eval(frame, *value, here)?;
                 let v = match &f.typing.exprs[e.0 as usize] {
                     Ty::Array(_, elem_ty) => self.narrow_plain(v, elem_ty, span)?,
                     Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
@@ -880,11 +943,11 @@ impl<'m> Machine<'m> {
                 otherwise,
             } => {
                 if self.cond(frame, *cond)? {
-                    self.block(frame, *then)?
+                    self.block(frame, *then, here)?
                 } else {
                     match otherwise {
-                        Some(Else::Block(b)) => self.block(frame, *b)?,
-                        Some(Else::If(i)) => self.eval(frame, *i, ctx)?,
+                        Some(Else::Block(b)) => self.block(frame, *b, here)?,
+                        Some(Else::If(i)) => self.eval(frame, *i, here)?,
                         None => Value::Unit,
                     }
                 }
@@ -1297,6 +1360,17 @@ impl<'m> Machine<'m> {
                 | None => return broken("a refinement bound that names no array"),
             },
         })
+    }
+}
+
+/// Shows `seen` each integer of `v`, the value of the expression at `span`: itself, or those
+/// of an array's elements, through the arrays nested in it. A struct's and a variant's fields
+/// were shown where they were built.
+fn show(v: &Value, span: Span, seen: &mut (dyn FnMut(Span, Int) + Send)) {
+    match v {
+        Value::Int(x) => seen(span, *x),
+        Value::Array(items) => items.iter().for_each(|i| show(i, span, seen)),
+        Value::Bool(_) | Value::Struct(..) | Value::Enum(..) | Value::Unit => {}
     }
 }
 

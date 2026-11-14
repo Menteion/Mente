@@ -335,6 +335,15 @@ impl Wide<'_> {
 
     fn compute(&mut self, e: ExprId) -> Option<Range> {
         let typed = self.typed(e).map(Range::of);
+        // A bit operation, a shift or `~` over literals alone works in the type its literals
+        // take, and its value lies within it (`core-calculus.md`, item 5).
+        let taken = self
+            .typing
+            .literals
+            .get(e.0 as usize)
+            .copied()
+            .flatten()
+            .map(|t| Range::of(t.ty));
         let span = self.tree.expr(e).span;
         match &self.tree.expr(e).kind {
             ExprKind::Int { value, .. } => Some(Range::point(Num::new(false, *value))),
@@ -351,8 +360,8 @@ impl Wide<'_> {
             ExprKind::Binary { op, lhs, rhs } => match Arith::of(*op) {
                 Some(op) => self.operation(span, Some(op), *lhs, Some(*rhs), None),
                 // A comparison or a logical operator gives a `bool`, and a bit operation stays in
-                // its operands' one type.
-                None => typed,
+                // its operands' one type, or in the one their literals take.
+                None => typed.or(taken),
             },
             ExprKind::Array(items) => {
                 self.array(span, e, items);
@@ -425,7 +434,7 @@ impl Wide<'_> {
             | ExprKind::Construct { .. }
             | ExprKind::Variant { .. }
             | ExprKind::Repeat { .. }
-            | ExprKind::Error => typed,
+            | ExprKind::Error => typed.or(taken),
         }
     }
 
@@ -512,6 +521,11 @@ impl Wide<'_> {
             let r = self.range(i);
             if self.unfit[i.0 as usize] {
                 return false;
+            }
+            // An element of no type leaves before the literal holds a value
+            // (`core-calculus.md`, item 6): it holds no integer, and the others are counted.
+            if self.typing.exprs[i.0 as usize].has_no_value() {
+                continue;
             }
             match &self.tree.expr(i).kind {
                 ExprKind::Array(inner) => {
@@ -1208,8 +1222,24 @@ mod tests {
             "pub fn r(a: u64, b: u128) -> [2][1]u128 = [[a], [b]]",
             // A repeated value's range, not its type's: `a` lies within 0 to 3.
             "pub fn r(a: i32[0..4], b: u128) -> [2][1]u128 = [[b], [a; 1]]",
+            // An array among them that is no literal counts with its element type's range.
+            "pub fn r(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [[b], p]",
+            "pub fn r(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [p, [b]]",
+            "pub fn r(a: i64, b: u64) -> [3]i128 = [a, b, todo(\"x\")]",
         ] {
             assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
+        }
+        // Its element type's whole range, whatever it holds: an `i8` may be negative, and a
+        // `u128` of no refinement reaches above `i128`.
+        for unfit in [
+            "pub fn r(p: [1]i8, b: u128) -> [2][1]i128 = [[b], p]",
+            "pub fn r(p: [1]i8, b: u128) -> [2][1]i128 = [p, [b]]",
+            // An element of no type holds no integer: the others are counted all the same.
+            "pub fn r(a: i128, b: u128) -> [3]i128 = [a, b, todo(\"x\")]",
+            "pub fn r(a: i128, b: u128) -> [3][1]i128 = [[a], [b], [todo(\"x\")]]",
+            "pub fn r(a: i128, b: u128, c: bool) -> [3]i128 = [a, if c { return [0; 3] } else { return [1; 3] }, b]",
+        ] {
+            assert_eq!(codes(unfit), ["E0222"], "{}", unfit);
         }
     }
 

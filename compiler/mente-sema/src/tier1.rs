@@ -26,6 +26,7 @@ use mente_syntax::tree::{
 };
 use mente_syntax::{Attr, Span};
 
+use crate::bounds;
 use crate::check::Typing;
 use crate::names::{BindingKind, Resolution};
 use crate::octagon::{Exact, Octagon, Term, BIG, INF, RELATIONAL_LIMIT};
@@ -148,6 +149,9 @@ pub struct Report {
     pub obligations: Vec<Obligation>,
     pub diagnostics: Vec<Diagnostic>,
     pub axioms: Vec<(Span, String)>,
+    /// How many variables the function has: Tier 1 relates their values up to
+    /// [`RELATIONAL_LIMIT`], and holds each one's bounds alone in a function of more.
+    pub variables: usize,
 }
 
 /// What a caller's check reads of a function: its parameters' and result's types with their
@@ -392,16 +396,6 @@ fn int_literal(value: u128) -> Val {
     i128::try_from(value).map_or(TOP, |v| lin(Vec::new(), v))
 }
 
-fn sat_add(a: i128, b: i128) -> i128 {
-    if a >= INF || b >= INF {
-        INF
-    } else if a <= -INF || b <= -INF {
-        -INF
-    } else {
-        (a + b).clamp(-INF, INF)
-    }
-}
-
 fn neg_terms(terms: &[Term]) -> Vec<Term> {
     terms.iter().map(|t| t.negated()).collect()
 }
@@ -430,7 +424,10 @@ fn negate(v: &Val) -> Val {
             num: (neg_terms(&num.0), -num.1),
             div: *div,
         },
-        Val::Itv(lo, hi) => Val::Itv(-hi, -lo),
+        Val::Itv(lo, hi) => {
+            let (lo, hi) = bounds::neg(INF, (*lo, *hi));
+            Val::Itv(lo, hi)
+        }
         other @ (Val::Arr(_) | Val::Other) => other.clone(),
     }
 }
@@ -442,28 +439,12 @@ fn as_const(v: &Val) -> Option<i128> {
     }
 }
 
-/// `a / d` rounded toward zero, for `d >= 1`, with the unbounded ends kept.
-fn trunc_div(a: i128, d: i128) -> i128 {
-    if a.abs() >= INF {
-        a
-    } else {
-        a / d
-    }
-}
-
-/// `a - a / d`, which grows with `a`: what division by `d` leaves of `a`.
-fn rest(a: i128, d: i128) -> i128 {
-    if a.abs() >= INF {
-        a
-    } else {
-        a - a / d
-    }
-}
-
+/// The bounds of `terms + c` in a state: the octagon's bound of the terms on each side, where
+/// it has one, as the domain holds it (`bounds.rs`).
 fn lin_interval(st: &Octagon, terms: &[Term], c: i128) -> (i128, i128) {
-    let hi = sat_add(st.upper(terms), c);
-    let lo = sat_add(-st.upper(&neg_terms(terms)), c);
-    (lo, hi)
+    let (above, below) = (st.upper(terms), st.upper(&neg_terms(terms)));
+    let lo = if below >= INF { -INF } else { -below };
+    bounds::add(INF, (lo, above), (c, c))
 }
 
 /// The bounds of a value in a state.
@@ -471,16 +452,17 @@ fn interval(st: &Octagon, v: &Val) -> (i128, i128) {
     match v {
         Val::Lin(t, c) => lin_interval(st, t, *c),
         Val::Quot { base, num, div } => {
-            let (blo, bhi) = lin_interval(st, &base.0, base.1);
-            let (nlo, nhi) = lin_interval(st, &num.0, num.1);
-            let mut lo = sat_add(blo, trunc_div(nlo, *div));
-            let mut hi = sat_add(bhi, trunc_div(nhi, *div));
+            let base_itv = lin_interval(st, &base.0, base.1);
+            let num_itv = lin_interval(st, &num.0, num.1);
+            let quotient = bounds::div(INF, num_itv, (*div, *div));
+            let mut both = bounds::add(INF, base_itv, quotient);
             if let Some(sum) = lin_add(&base.0, &num.0) {
-                let (slo, shi) = lin_interval(st, &sum, base.1 + num.1);
-                lo = lo.max(sat_add(slo, -rest(nhi, *div)));
-                hi = hi.min(sat_add(shi, -rest(nlo, *div)));
+                // `base + num / div` is `base + num` less what the division leaves of `num`.
+                let sum_itv = lin_interval(st, &sum, base.1 + num.1);
+                let left = bounds::neg(INF, bounds::rest(INF, num_itv, *div));
+                both = bounds::meet(INF, both, bounds::add(INF, sum_itv, left));
             }
-            (lo, hi)
+            both
         }
         Val::Itv(lo, hi) => (*lo, *hi),
         Val::Arr(_) | Val::Other => (-INF, INF),
@@ -525,18 +507,8 @@ fn add_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
         }
         _ => {}
     }
-    let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
-    Val::Itv(sat_add(a, c), sat_add(b, d))
-}
-
-/// A product of two bounds, the unbounded ends kept: a sentinel times a number of either sign
-/// saturates past it, and is clamped back.
-fn mul_bound(a: i128, b: i128) -> i128 {
-    a.saturating_mul(b).clamp(-INF, INF)
-}
-
-fn hull([p, q, r, s]: [i128; 4]) -> Val {
-    Val::Itv(p.min(q).min(r).min(s), p.max(q).max(r).max(s))
+    let (lo, hi) = bounds::add(INF, interval(st, l), interval(st, r));
+    Val::Itv(lo, hi)
 }
 
 fn mul_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
@@ -548,69 +520,30 @@ fn mul_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
             _ => {}
         }
     }
-    let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
-    hull([
-        mul_bound(a, c),
-        mul_bound(a, d),
-        mul_bound(b, c),
-        mul_bound(b, d),
-    ])
+    let (lo, hi) = bounds::mul(INF, interval(st, l), interval(st, r));
+    Val::Itv(lo, hi)
 }
 
 fn div_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
-    match as_const(r) {
-        Some(c) if c > 0 => {
-            if let Val::Lin(t, k) = l {
-                return Val::Quot {
-                    base: (Vec::new(), 0),
-                    num: (t.clone(), *k),
-                    div: c,
-                };
-            }
-            let (lo, hi) = interval(st, l);
-            return Val::Itv(trunc_div(lo, c), trunc_div(hi, c));
+    // A linear dividend over a positive constant keeps its form, which the facts of such a
+    // division need (`core-calculus.md`, item 8); any other goes by its bounds.
+    if let Some(c) = as_const(r).filter(|c| *c > 0) {
+        if let Val::Lin(t, k) = l {
+            return Val::Quot {
+                base: (Vec::new(), 0),
+                num: (t.clone(), *k),
+                div: c,
+            };
         }
-        _ => {}
     }
-    let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
-    // A divisor of no value, after a narrowing that always traps, gives a quotient of none.
-    if c > d {
-        return Val::Itv(c, d);
-    }
-    if c > 0 {
-        // A positive divisor keeps the dividend's sign; the quotient's ends come from the
-        // dividend's ends over the divisor's.
-        let lo = if a.abs() >= INF {
-            a
-        } else {
-            (a / c).min(a / d)
-        };
-        let hi = if b.abs() >= INF {
-            b
-        } else {
-            (b / c).max(b / d)
-        };
-        Val::Itv(lo, hi)
-    } else if d < 0 {
-        negate(&div_vals(st, l, &negate(r)))
-    } else {
-        // A divisor that may be zero is not zero where the division runs, so the quotient's
-        // magnitude is at most the dividend's.
-        let m = a.abs().max(b.abs());
-        Val::Itv(-m, m)
-    }
+    let (lo, hi) = bounds::div(INF, interval(st, l), interval(st, r));
+    Val::Itv(lo, hi)
 }
 
 /// The bounds of `x % y`: the sign of `x`, and a magnitude below `|y|` and at most `|x|`.
 /// A zero divisor traps, so `|y|` bounds the magnitude even when `y` may be zero.
 fn rem_interval(st: &Octagon, l: &Val, r: &Val) -> (i128, i128) {
-    let ((a, b), (c, d)) = (interval(st, l), interval(st, r));
-    let m = a.abs().max(b.abs());
-    let bound = (c.abs().max(d.abs()) - 1).min(m);
-    (
-        if a >= 0 { 0 } else { -bound },
-        if b <= 0 { 0 } else { bound },
-    )
+    bounds::rem(INF, interval(st, l), interval(st, r))
 }
 
 /// The range of an integer type; a 128-bit one reaches beyond the domain, so it is unbounded.
@@ -657,18 +590,17 @@ fn ones(v: i128) -> i128 {
 }
 
 fn shift_vals(st: &Octagon, op: BinaryOp, l: &Val, r: &Val, t: Option<IntTy>) -> Val {
-    let (lo, hi) = interval(st, l);
-    let k = as_const(r).filter(|k| (0..=120).contains(k));
-    let v = match (op, k) {
-        (BinaryOp::Shl, Some(k)) => Val::Itv(mul_bound(lo, 1 << k), mul_bound(hi, 1 << k)),
-        (BinaryOp::Shr, Some(k)) => Val::Itv(
-            if lo <= -INF { lo } else { lo >> k },
-            if hi >= INF { hi } else { hi >> k },
-        ),
-        (BinaryOp::Shr, None) => Val::Itv(lo.min(0), if hi >= 0 { hi } else { -1 }),
-        _ => TOP,
+    let a = interval(st, l);
+    let k = as_const(r)
+        .filter(|k| (0..=120).contains(k))
+        .and_then(|k| u32::try_from(k).ok());
+    let (lo, hi) = match (op, k) {
+        (BinaryOp::Shl, Some(k)) => bounds::shl(INF, a, k),
+        (BinaryOp::Shr, Some(k)) => bounds::shr(INF, a, k),
+        (BinaryOp::Shr, None) => bounds::shr_any(INF, a),
+        _ => (-INF, INF),
     };
-    clamp_to(v, t, st)
+    clamp_to(Val::Itv(lo, hi), t, st)
 }
 
 fn bits_vals(st: &Octagon, op: BinaryOp, l: &Val, r: &Val, t: Option<IntTy>) -> Val {
@@ -700,14 +632,82 @@ fn bits_vals(st: &Octagon, op: BinaryOp, l: &Val, r: &Val, t: Option<IntTy>) -> 
     clamp_to(v, t, st)
 }
 
-/// `~x`: `max - x` in an unsigned type, `-x - 1` in a signed one.
-fn bit_not(v: &Val, t: Option<IntTy>) -> Val {
-    match (v, t) {
-        (Val::Lin(terms, c), Some(t)) => {
-            let top = if t.signed { -1 } else { int_range(t).1 };
-            lin(neg_terms(terms), sat_add(top, -c))
+/// The literal `e` complements, with its value, when `e` is `~` of a literal without a suffix.
+fn complemented_literal(tree: &Tree, e: ExprId) -> Option<(ExprId, u128)> {
+    let operand = match &tree.expr(e).kind {
+        ExprKind::Unary {
+            op: UnaryOp::BitNot,
+            operand,
+        } => *operand,
+        ExprKind::Unary {
+            op: UnaryOp::Not | UnaryOp::Neg,
+            ..
         }
-        _ => TOP,
+        | ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => return None,
+    };
+    match &tree.expr(operand).kind {
+        ExprKind::Int {
+            value,
+            suffix: None,
+        } => Some((operand, *value)),
+        ExprKind::Int {
+            suffix: Some(_), ..
+        }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
+    }
+}
+
+/// `~x`: `max - x` in an unsigned type, `-x - 1` in a signed one. A value of no linear form
+/// gives one within the type, which `x` is narrowed into before `~` applies, so that no
+/// valuation of `~x` lies outside it.
+fn bit_not(v: &Val, t: Option<IntTy>) -> Val {
+    let Some(t) = t else {
+        return TOP;
+    };
+    match v {
+        Val::Lin(terms, c) => {
+            // `u128`'s greatest value lies beyond the domain, so its complement has no form.
+            let top = if t.signed { -1 } else { int_range(t).1 };
+            if top >= INF {
+                TOP
+            } else {
+                lin(neg_terms(terms), top - c)
+            }
+        }
+        Val::Quot { .. } | Val::Itv(..) | Val::Arr(_) | Val::Other => {
+            let (lo, hi) = int_range(t);
+            Val::Itv(lo, hi)
+        }
     }
 }
 
@@ -1081,7 +1081,7 @@ fn constrain_far(st: &mut Octagon, op: Rel, t: Term, k: i128, c: Exact) {
 /// octagon facts the sum allows.
 fn constrain_offset(st: &mut Octagon, x: usize, terms: &[Term], c: i128, lo: i128, hi: i128) {
     let xt = Term::pos(x);
-    let (low, high) = (sat_add(c, lo), sat_add(c, hi));
+    let (low, high) = bounds::add(INF, (c, c), (lo, hi));
     match terms {
         [t] => {
             st.add_lin(&[xt, t.negated()], high);
@@ -1090,13 +1090,14 @@ fn constrain_offset(st: &mut Octagon, x: usize, terms: &[Term], c: i128, lo: i12
         // No term, or two: each term against `x` by the other's bounds, then `x`'s own.
         _ => {
             for (k, t) in terms.iter().enumerate() {
-                let (olo, ohi) = lin_interval(st, &[terms[1 - k]], 0);
-                st.add_lin(&[xt, t.negated()], sat_add(high, ohi));
-                st.add_lin(&[xt.negated(), *t], -sat_add(low, olo));
+                let other = lin_interval(st, &[terms[1 - k]], 0);
+                let (olo, ohi) = bounds::add(INF, (low, high), other);
+                st.add_lin(&[xt, t.negated()], ohi);
+                st.add_lin(&[xt.negated(), *t], -olo);
             }
-            let (slo, shi) = lin_interval(st, terms, 0);
-            st.add_lin(&[xt], sat_add(high, shi));
-            st.add_lin(&[xt.negated()], -sat_add(low, slo));
+            let (slo, shi) = bounds::add(INF, (low, high), lin_interval(st, terms, 0));
+            st.add_lin(&[xt], shi);
+            st.add_lin(&[xt.negated()], -slo);
         }
     }
 }
@@ -1643,6 +1644,7 @@ fn run(
     let mut st = Octagon::new(fx.count);
     fx.entry(&mut st);
     fx.body(&mut st);
+    fx.report.variables = fx.count;
     (fx.report, fx.retries, fx.queries.unwrap_or_default())
 }
 
@@ -2905,24 +2907,12 @@ impl<'a> Fx<'a> {
                 copy_far(st, var, t, *c);
             }
             Val::Quot { base, num, div } => {
-                let (nlo, nhi) = lin_interval(st, &num.0, num.1);
-                constrain_offset(
-                    st,
-                    var,
-                    &base.0,
-                    base.1,
-                    trunc_div(nlo, *div),
-                    trunc_div(nhi, *div),
-                );
+                let num_itv = lin_interval(st, &num.0, num.1);
+                let (qlo, qhi) = bounds::div(INF, num_itv, (*div, *div));
+                constrain_offset(st, var, &base.0, base.1, qlo, qhi);
                 if let Some(sum) = lin_add(&base.0, &num.0) {
-                    constrain_offset(
-                        st,
-                        var,
-                        &sum,
-                        base.1 + num.1,
-                        -rest(nhi, *div),
-                        -rest(nlo, *div),
-                    );
+                    let (llo, lhi) = bounds::neg(INF, bounds::rest(INF, num_itv, *div));
+                    constrain_offset(st, var, &sum, base.1 + num.1, llo, lhi);
                 }
             }
             Val::Itv(lo, hi) => constrain_offset(st, var, &[], 0, *lo, *hi),
@@ -3080,7 +3070,8 @@ impl<'a> Fx<'a> {
                 if let Some(r) = refine {
                     lo = lo.max(interval(st, &r.lo).0);
                     let top = interval(st, &r.hi).1;
-                    hi = hi.min(if r.inclusive { top } else { sat_add(top, -1) });
+                    let below = bounds::add(INF, (top, top), (-1, -1)).1;
+                    hi = hi.min(if r.inclusive { top } else { below });
                 }
                 Val::Itv(lo, hi)
             }
@@ -3133,7 +3124,39 @@ impl<'a> Fx<'a> {
             t.name,
             t.range_text()
         );
+        let recorded = self.recording;
         self.emit("E0508", span, message, None, Anchor::Nowhere);
+        if let (true, Some(fix)) = (recorded, self.suffix_fix(span, t)) {
+            if let Some(d) = self.report.diagnostics.last_mut() {
+                d.fixes.push(fix);
+            }
+        }
+    }
+
+    /// The fix of an `E0508` whose value is `~` of a literal, such as `~3` narrowed into a
+    /// `u8`: the place gives a literal no type, so `~3` is -4, an `i64` (`core-calculus.md`,
+    /// item 5). The literal is written with the place's type, `~3_u8`, which keeps `~` in that
+    /// type and its value within it, so the narrowing fits. None for any other value, and where
+    /// the literal does not lie in the type, as in `~256` for a `u8`.
+    fn suffix_fix(&self, span: Span, t: IntTy) -> Option<Fix> {
+        let tree = self.tree;
+        let e = (0..tree.exprs.len())
+            .map(|i| ExprId(i as u32))
+            .find(|&e| tree.expr(e).span == span)?;
+        let literal = complemented_literal(tree, e).filter(|(_, value)| *value <= t.max())?;
+        let at = tree.expr(literal.0).span;
+        let replacement = format!("{}_{}", self.src.get(at.start..at.end)?, t.name);
+        Some(Fix {
+            message: format!(
+                "write the literal as `{}`, `{}`, so that `~` works in it",
+                t.name, replacement
+            ),
+            applicability: Applicability::MachineApplicable,
+            edits: vec![Edit {
+                span: at,
+                replacement,
+            }],
+        })
     }
 
     /// A value narrowed into a place of shape `shape`: its plain range may stay a run-time
@@ -3821,7 +3844,15 @@ impl<'a> Fx<'a> {
                 operand,
             } => {
                 let v = self.eval(st, *operand);
-                bit_not(&v, int_of(&typing.exprs[operand.0 as usize]))
+                let t = self.bits_of(*operand);
+                let not = bit_not(&v, t);
+                // The linear form holds of an operand within its type, which it is narrowed
+                // into first: where it may lie outside, the form bounds `~` only within the
+                // type.
+                match t {
+                    Some(ty) if !within(st, &v, ty) => clamp_to(not, t, st),
+                    Some(_) | None => not,
+                }
             }
             ExprKind::Unary { .. } => {
                 self.cond(st, e);
@@ -3934,6 +3965,13 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// The type a bit operation, a shift or `~` works in on the operand `e`: its own, or, for
+    /// an expression of literals alone, the one its literals take (`core-calculus.md`, item 5).
+    fn bits_of(&self, e: ExprId) -> Option<IntTy> {
+        let taken = self.typing.literals.get(e.0 as usize).copied().flatten();
+        int_of(&self.typing.exprs[e.0 as usize]).or(taken.map(|t| t.ty))
+    }
+
     fn binary(
         &mut self,
         st: &mut Octagon,
@@ -3947,6 +3985,8 @@ impl<'a> Fx<'a> {
         let (span, rspan) = (self.span(e), self.span(re));
         let v = match op {
             BinaryOp::Shl | BinaryOp::Shr => {
+                // The type the shift works in: its left operand's, or the one its literals take.
+                let lt = self.bits_of(le);
                 let (lo, hi) = interval(st, r);
                 let width = lt.map_or(0, |t| i128::from(t.bits));
                 let o = Obligation {
@@ -3964,7 +4004,7 @@ impl<'a> Fx<'a> {
                 return clamp_to(v, lt, st);
             }
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                let t = lt.or(rt);
+                let t = lt.or(rt).or(self.bits_of(le));
                 self.fits(st, l, t, self.span(le));
                 self.fits(st, r, t, rspan);
                 return bits_vals(st, op, l, r, t);
@@ -5944,6 +5984,10 @@ mod tests {
         // smaller, and bounds alone do not.
         assert_eq!(codes(&with(10)), NONE);
         assert_eq!(codes(&with(70)), ["E0507"]);
+        // The report says on which side of the limit a function lies.
+        assert!(report(&with(10)).variables <= RELATIONAL_LIMIT);
+        assert!(report(&with(70)).variables > RELATIONAL_LIMIT);
+        assert_eq!(report(&with(11)).variables, report(&with(10)).variables + 2);
         // Bounds alone still prove what bounds prove.
         assert_eq!(
             codes("pub fn g(v: u8) -> u8 = v\npub fn f(x: u8[0..10]) -> u8 {\n  _ = g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))\n  x + 1\n}"),
@@ -6994,13 +7038,24 @@ mod tests {
             obligations("pub fn f(x: u8, k: i8[-1..=3]) -> u8 = x >> k")[0],
             (Shift, false, false)
         );
+        // A literal shifted is an `i64`, whatever place it lands in (`core-calculus.md`,
+        // item 5): the amount lies within that type's width, and the value the shift narrows
+        // into it fits the place.
         assert_eq!(
             obligations("pub fn f(k: u8[0..8]) -> i64 = 1 << k"),
             [
-                (Shift, false, false),
+                (Shift, false, true),
                 (Range, false, false),
-                (Range, false, false)
+                (Range, false, true)
             ]
+        );
+        assert_eq!(
+            obligations("pub fn f(k: u8[0..=8]) -> u8 = 1 << k")[0],
+            (Shift, false, true)
+        );
+        assert_eq!(
+            obligations("pub fn f(k: u8[0..=64]) -> u8 = 1 << k")[0],
+            (Shift, false, false)
         );
         assert_eq!(
             obligations("pub fn f(x: u8[0..16]) -> u8 = x << 4"),
@@ -7522,6 +7577,299 @@ mod tests {
         );
     }
 
+    /// A bound past the domain's limit is weakened to the nearest the domain holds, and is never
+    /// read as no bound on the other side: a product of two values near 2^63 is at least
+    /// 2^125 or so, with no upper bound, so a quotient of it by any `u64` is at least 2^61, and
+    /// what it divides is not proven small; and less any `u128` it has no lower bound, so it
+    /// is not proven positive, nor outside `u64`. Each obligation these values enter stays a
+    /// run-time check, and no narrowing of them is said to trap always.
+    #[test]
+    fn test_a_bound_past_the_domain_is_never_read_as_none() {
+        let near = "9223372036854775808..=18446744073709551615";
+        let checks = |src: &str| -> Vec<(ObligationKind, bool)> {
+            assert_eq!(codes(src), NONE, "{}", src);
+            obligations(src)
+                .into_iter()
+                .map(|(kind, _, proven)| (kind, proven))
+                .collect()
+        };
+        // The index `n / (x * y / z)` may be anything up to 7: neither it nor its narrowing
+        // into `usize`... into `[1]u8`'s one element is proven.
+        let quotient = format!(
+            "pub fn t(x: u64[{near}], y: u64[{near}], z: u64, n: u64) -> u8 {{\n  val xs: [1]u8 = [9]\n  val j: usize = n / (x * y / z)\n  xs[j]\n}}"
+        );
+        assert!(
+            checks(&quotient).contains(&(ObligationKind::Index, false)),
+            "{:?}",
+            checks(&quotient)
+        );
+        // `x * y / z` may be 1, for `z` of 2^126: its narrowing into `u8` may not trap.
+        let narrowed =
+            format!("pub fn g2(x: u128[{near}], y: u128[{near}], z: u128) -> u8 = x * y / z");
+        assert!(
+            checks(&narrowed).contains(&(ObligationKind::Range, false)),
+            "{:?}",
+            checks(&narrowed)
+        );
+        // `x * y - z` may be zero or 44: the divisor is not proven non-zero, and the quotient's
+        // narrowing is not proven.
+        let difference = format!(
+            "pub fn h(x: u128[{near}], y: u128[{near}], z: u128, n: u128) -> u8 {{\n  val r: u8 = n / (x * y - z)\n  r\n}}"
+        );
+        let found = checks(&difference);
+        assert!(
+            found.contains(&(ObligationKind::Divisor, false)),
+            "{:?}",
+            found
+        );
+        assert!(
+            found.contains(&(ObligationKind::Range, false)),
+            "{:?}",
+            found
+        );
+        // `x * y - z` may fit `u64`: its narrowing does not always trap.
+        let fits = format!(
+            "pub fn fits(x: u128[{near}], y: u128[{near}], z: u128) -> u64 {{\n  val w: u64 = x * y - z\n  w\n}}"
+        );
+        assert!(
+            checks(&fits).contains(&(ObligationKind::Range, false)),
+            "{:?}",
+            checks(&fits)
+        );
+        // A remainder of two values of no bound has none either, so a quotient of it is not
+        // proven small.
+        let remainder = "pub fn r(x: i128, y: i128) -> i8[-1..=1] = x % y / 42535295865117307932921825928971026431";
+        assert_eq!(codes(remainder), ["E0502"], "{}", remainder);
+    }
+
+    /// A divisor that is zero traps, so where a division runs its divisor is not zero: one whose
+    /// range only touches zero, as an unsigned type's does, keeps the quotient on the dividend's
+    /// side of zero, or across it for a negative divisor. A valuation Tier 1 cannot rule out is
+    /// then no value outside the quotient's type, such as -1 for an unsigned one (Engineering
+    /// Guardrail #1). A divisor of either sign still gives a quotient of either.
+    #[test]
+    fn test_a_divisor_that_touches_zero_keeps_the_quotients_sign() {
+        for f in [
+            "pub fn f(x: u8[0..=9], y: usize) -> usize[0..=9] = x / y",
+            "pub fn f(x: i8[-9..=-1], y: u8) -> i8[-9..=0] = x / y",
+            "pub fn f(x: u8[0..=9], y: i16[-400..=0]) -> i16[-9..=0] = x / y",
+            "pub fn f(x: i8[-9..=-1], y: i16[-400..=0]) -> i16[0..=9] = x / y",
+            // The scrutinee of a `match` is narrowed into its type, which Tier 1 proves.
+            "pub fn f(p: usize) -> u32 {\n  match 9 / p {\n    0 => 1\n    _ => 2\n  }\n}",
+            // A divisor that is always zero always traps, and is checked without a crash.
+            "pub fn f(x: u8) -> u8 = x / 0",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        assert_eq!(
+            messages("pub fn f(x: u8[0..=9], y: usize) -> usize[0..=8] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is 9, outside `usize[0..=8]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: u8[0..=9], y: i16[-400..=0]) -> i16[-8..=0] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is -9, outside `i16[-8..=0]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: u8[0..=9], y: i8) -> i16[0..=9] = x / y"),
+            ["Tier 1 cannot rule out that `x / y` is -1, outside `i16[0..=9]`, the type of the result of `f`"]
+        );
+    }
+
+    /// A bit operation, a shift or `~` over literals alone works in the type its literals
+    /// take, the other operands' or `i64`, never the place's (`core-calculus.md`, item 5),
+    /// and Tier 1 follows it there: `~3` alone is -4, so a `match` reads it within `i64` and
+    /// a narrowing of it into a `u8` always traps (`E0508`); beside a `u8` it is 252; a
+    /// literal shifted is an `i64`, so `1 << 7` is 128 and fits a `u8`, and `1 << 8` into
+    /// a `u8` always traps where it lands.
+    #[test]
+    fn test_literals_under_a_bit_operation_have_the_type_they_take() {
+        for f in [
+            "pub fn f() -> u8 = match ~3 {\n  -4 => 1\n  _ => 2\n}",
+            "pub fn f() -> i64[-4..=-4] {\n  val m = ~3\n  m\n}",
+            "pub fn f() -> u8[252..=252] {\n  val m: u8 = ~3_u8\n  m\n}",
+            "pub fn f(a: u8) -> u16[0..=255] = a & ~3",
+            "pub fn f(a: u8[0..=3]) -> u16[252..=255] = a + ~3",
+            "pub fn f() -> u8[128..=128] = 1 << 7",
+            "pub fn f() -> u8 = -1 & 255",
+            "pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m &= ~1\n  m\n}",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        for f in [
+            "pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}",
+            "pub fn f() -> i8 = 1 << 7",
+            "pub fn f() -> u8 = 1 << 8",
+            "pub fn f() -> [2]u8 = [~3, 1]",
+            "fn mask(m: u8) -> u8 = m\npub fn f() -> u8 = mask(~3)",
+        ] {
+            assert_eq!(codes(f), ["E0508"], "{}", f);
+        }
+        assert_eq!(
+            messages("pub fn f() -> u8[0..=251] {\n  val m: u8 = ~3_u8\n  m\n}"),
+            ["Tier 1 cannot rule out `m = 252`, outside `u8[0..=251]`, the type of the result of `f`"]
+        );
+    }
+
+    /// An `E0508` of `~` of a literal offers, machine-applicable, the literal written with
+    /// the place's type, and once applied the module checks: `~3` into a `u8` becomes `~3_u8`,
+    /// at a binding, an argument, a field, an element, a result and an assignment, in a hex
+    /// literal too. No such fix is offered where the literal does not lie in the type, nor
+    /// for a value of another form, whose suffix would not keep it within the type.
+    #[test]
+    fn test_a_narrowing_of_literals_alone_is_fixed_by_their_suffix() {
+        let decls = "struct P {\n  m: u8\n}\nfn mask(m: u8) -> u8 = m\n";
+        for (f, fixed) in [
+            (
+                "pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}",
+                "val m: u8 = ~3_u8",
+            ),
+            ("pub fn f() -> u8 = mask(~3)", "mask(~3_u8)"),
+            ("pub fn f() -> u8 = P(m: ~3).m", "P(m: ~3_u8)"),
+            ("pub fn f() -> [2]u8 = [~3, 1]", "[~3_u8, 1]"),
+            ("pub fn f() -> u8 = ~0", "~0_u8"),
+            (
+                "pub fn f() -> u16 {\n  var m: u16 = 0\n  m = ~0x0F\n  m\n}",
+                "m = ~0x0F_u16",
+            ),
+            ("pub fn f() -> u8 = ~255", "~255_u8"),
+            ("pub fn f() -> i8 = ~127 - 1", ""),
+            ("pub fn f() -> u8 = ~256", ""),
+            ("pub fn f() -> i8 = ~-129", ""),
+            ("pub fn f() -> u8 = ~3 + 1", ""),
+            ("pub fn f() -> u8 = ~3_i8", ""),
+        ] {
+            let src = format!("{}{}", decls, f);
+            let text = module(&src);
+            let d = diagnostics(&src);
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            assert_eq!(d[0].code, "E0508", "{}", f);
+            if fixed.is_empty() {
+                assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
+                continue;
+            }
+            let fix = &d[0].fixes[0];
+            assert_eq!(fix.applicability, Applicability::MachineApplicable, "{}", f);
+            let applied = apply_fix(&text, fix).unwrap();
+            assert!(applied.contains(fixed), "{}: {}", f, applied);
+            assert!(
+                crate::check_program(&applied).is_ok(),
+                "{}: {:?}",
+                applied,
+                crate::check_program(&applied).err()
+            );
+        }
+        assert_eq!(
+            messages("pub fn f() -> u8 = ~3")[0],
+            "Tier 1 proves `~3` is at most -4 here, outside `u8` (0 to 255), so this narrowing always traps"
+        );
+        assert_eq!(
+            diagnostics("pub fn f() -> u8 = ~3")[0].fixes[0].message,
+            "write the literal as `u8`, `3_u8`, so that `~` works in it"
+        );
+    }
+
+    /// Where a division runs its divisor is at least 1 in magnitude, so the quotient is no
+    /// larger than its dividend: by a divisor whose range only touches zero it lies within the
+    /// dividend's bounds over the rest of that range, and the remainder below that range's
+    /// greatest magnitude; by one whose range crosses zero it lies between the dividend's
+    /// greatest magnitude and its negation. Each bound is the tightest: Tier 1 cannot rule out
+    /// the value at it.
+    #[test]
+    fn test_a_quotient_is_no_larger_than_its_dividend() {
+        for f in [
+            "pub fn f(x: u8[10..=20], y: u8[0..=3]) -> u8[3..=20] = x / y",
+            "pub fn f(x: i8[-20..=-10], y: i8[-3..=0]) -> i8[3..=20] = x / y",
+            "pub fn f(x: i8[-20..=-10], y: u8[0..=3]) -> i8[-20..=-3] = x / y",
+            "pub fn f(x: i8[-100..=100], y: i8[-3..=3]) -> i8[-100..=100] = x / y",
+            "pub fn f(x: i8[-100..=50], y: i8[-3..=3]) -> i8[-100..=100] = x / y",
+            "pub fn f(x: u8, y: u8[0..=8]) -> u8[0..=7] = x % y",
+            "pub fn f(x: i8[-128..=-1], y: i8[-8..=0]) -> i8[-7..=0] = x % y",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        for (f, e, v, t) in [
+            (
+                "pub fn f(x: u8[10..=20], y: u8[0..=3]) -> u8[4..=20] = x / y",
+                "x / y",
+                "3",
+                "u8[4..=20]",
+            ),
+            (
+                "pub fn f(x: u8[10..=20], y: u8[0..=3]) -> u8[3..=19] = x / y",
+                "x / y",
+                "20",
+                "u8[3..=19]",
+            ),
+            (
+                "pub fn f(x: i8[-20..=-10], y: i8[-3..=0]) -> i8[3..=19] = x / y",
+                "x / y",
+                "20",
+                "i8[3..=19]",
+            ),
+            (
+                "pub fn f(x: i8[-100..=50], y: i8[-3..=3]) -> i8[-100..=99] = x / y",
+                "x / y",
+                "100",
+                "i8[-100..=99]",
+            ),
+            (
+                "pub fn f(x: i8[-100..=50], y: i8[-3..=3]) -> i8[-99..=100] = x / y",
+                "x / y",
+                "-100",
+                "i8[-99..=100]",
+            ),
+            (
+                "pub fn f(x: u8, y: u8[0..=8]) -> u8[0..=6] = x % y",
+                "x % y",
+                "7",
+                "u8[0..=6]",
+            ),
+        ] {
+            assert_eq!(
+                messages(f),
+                [format!(
+                    "Tier 1 cannot rule out that `{}` is {}, outside `{}`, the type of the result of `f`",
+                    e, v, t
+                )],
+                "{}",
+                f
+            );
+        }
+    }
+
+    /// `~x` lies within the type of `x`, which `x` is narrowed into first, whatever Tier 1
+    /// knows of `x`: a value of no linear form, such as a shift's, still gives one within the
+    /// type, and no valuation of it lies outside, such as -1 for an unsigned type (Engineering
+    /// Guardrail #1).
+    #[test]
+    fn test_a_complement_lies_within_its_operands_type() {
+        for f in [
+            "pub fn f(x: u8, k: u8) -> u16[0..=255] = ~(x >> k)",
+            "pub fn f(x: i8, k: u8) -> i16[-128..=127] = ~(x >> k)",
+            // The scrutinee of a `match` is narrowed into its type, which Tier 1 proves.
+            "pub fn f(p: u8) -> u8 {\n  match ~(18446744073709551615_u64 >> p) {\n    0 => 1\n    _ => 2\n  }\n}",
+            // A sum that may leave its type is narrowed before `~` applies, so its linear
+            // form bounds `~` only within the type.
+            "pub fn f(v: u8) -> u8 {\n  match ~(v + 255_u8) {\n    0 => 1\n    _ => 2\n  }\n}",
+            "pub fn f(v: u8) -> u16[0..=0] = ~(v + 255_u8)",
+            // One that stays within its type keeps its linear form: `~v` is `255 - v`, and
+            // `-v - 1` in a signed type, which only the relation to `v` proves.
+            "pub fn f(v: u8[3..=5]) -> u8[250..=252] = ~v",
+            "pub fn f(v: u8) -> u8\n  ensures result + v == 255\n= ~v",
+            "pub fn f(v: i8) -> i8\n  ensures result + v == -1\n= ~v",
+        ] {
+            assert_eq!(codes(f), NONE, "{}", f);
+        }
+        assert_eq!(
+            messages("pub fn f(x: u8, k: u8) -> u16[0..=254] = ~(x >> k)"),
+            ["Tier 1 cannot rule out that `~(x >> k)` is 255, outside `u16[0..=254]`, the type of the result of `f`"]
+        );
+        assert_eq!(
+            messages("pub fn f(x: i8, k: u8) -> i16[-127..=127] = ~(x >> k)"),
+            ["Tier 1 cannot rule out that `~(x >> k)` is -128, outside `i16[-127..=127]`, the type of the result of `f`"]
+        );
+    }
+
     /// A loop's condition runs at the head of every round, so a binding or a struct it passes
     /// `mut` keeps only its type and refinement there; and a call in the condition, which the
     /// head reads as a candidate fact too, reports a failure once.
@@ -7678,41 +8026,6 @@ mod tests {
 
     #[test]
     fn test_pure_helpers_keep_their_bounds() {
-        assert_eq!(sat_add(INF, -5), INF);
-        assert_eq!(sat_add(-5, INF), INF);
-        assert_eq!(sat_add(-INF, 5), -INF);
-        assert_eq!(sat_add(5, -INF), -INF);
-        assert_eq!(sat_add(INF - 1, INF - 1), INF);
-        assert_eq!(sat_add(1 - INF, 1 - INF), -INF);
-        assert_eq!(sat_add(2, 3), 5);
-        assert_eq!(trunc_div(-7, 2), -3);
-        assert_eq!(trunc_div(INF, 2), INF);
-        assert_eq!(trunc_div(-INF, 2), -INF);
-        assert_eq!(rest(-7, 2), -4);
-        assert_eq!(rest(INF, 2), INF);
-        assert_eq!(rest(-INF, 2), -INF);
-        assert_eq!(mul_bound(0, INF), 0);
-        assert_eq!(mul_bound(INF, 0), 0);
-        assert_eq!(mul_bound(-INF, 2), -INF);
-        assert_eq!(mul_bound(3, -INF), -INF);
-        assert_eq!(mul_bound(-3, -INF), INF);
-        assert_eq!(mul_bound(i128::MAX / 8, 3), INF);
-        assert_eq!(mul_bound(-3, 4), -12);
-        assert_eq!(mul_bound(INF, INF), INF);
-        assert_eq!(mul_bound(-INF, INF), -INF);
-        assert_eq!(hull([3, -1, 7, 2]), Val::Itv(-1, 7));
-        assert_eq!(hull([-1, 3, 2, 7]), Val::Itv(-1, 7));
-        assert_eq!(hull([7, 2, -1, 3]), Val::Itv(-1, 7));
-        assert_eq!(hull([2, 7, 3, -1]), Val::Itv(-1, 7));
-        assert_eq!(ones(0), 0);
-        assert_eq!(ones(15), 15);
-        assert_eq!(ones(1), 1);
-        assert_eq!(ones(9), 15);
-        assert_eq!(ones(16), 31);
-        assert!(ones(INF) >= INF);
-        // Beyond the domain's bound, the mask stops at it.
-        assert_eq!(ones(INF + 5), INF);
-        assert_eq!(int_literal(u128::MAX), TOP);
         assert_eq!(lin(vec![], BIG), TOP);
         assert_eq!(lin(vec![], -BIG), TOP);
         assert_eq!(lin(vec![], BIG - 1), Val::Lin(vec![], BIG - 1));
@@ -7724,7 +8037,9 @@ mod tests {
         let u128_ = IntTy::named("u128").unwrap_or(crate::types::I64);
         assert_eq!(int_range(u128_), (0, INF));
         assert_eq!(int_range(u64_), (0, u64::MAX as i128));
-        assert_eq!(bit_not(&TOP, Some(u8_)), TOP);
+        assert_eq!(bit_not(&TOP, Some(u8_)), Val::Itv(0, 255));
+        assert_eq!(bit_not(&Val::Other, Some(u8_)), Val::Itv(0, 255));
+        assert_eq!(bit_not(&TOP, None), TOP);
         assert_eq!(bit_not(&Val::Lin(vec![], 1), None), TOP);
         assert_eq!(
             bit_not(&Val::Lin(vec![], 1), Some(u8_)),
@@ -8294,8 +8609,8 @@ mod tests {
         assert_eq!(
             details("pub fn f(k: u8[0..8]) -> i64 = 1 << k"),
             [
-                (Shift, String::new()),
-                (Range, "into its type".to_string()),
+                (Shift, "below 64".to_string()),
+                (Range, "into `i64`".to_string()),
                 (Range, "into `i64`".to_string()),
             ]
         );

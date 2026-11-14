@@ -28,14 +28,15 @@ pub const INF: i128 = i128::MAX / 4;
 /// which is sound, so that doubling a constant never overflows.
 pub const BIG: i128 = INF / 2;
 
-/// A sum of two bounds, kept within `[-INF, INF]`: at or beyond `INF` it is no bound, and below
-/// `-INF` it is raised to `-INF`, a weaker bound, which is sound and keeps every later sum of
-/// two bounds inside `i128`.
-fn add(a: i128, b: i128) -> i128 {
-    if a >= INF || b >= INF {
-        INF
+/// A sum of two upper bounds, kept within `[-inf, inf]`, the matrix's limit: at or beyond `inf`
+/// it is no bound, and below `-inf` it is raised to `-inf`, a weaker bound, which is sound and
+/// keeps every later sum of two bounds inside `i128`. Every entry of the matrix is an upper
+/// bound, so `inf` is always "none" and `-inf` always a value.
+fn add(inf: i128, a: i128, b: i128) -> i128 {
+    if a >= inf || b >= inf {
+        inf
     } else {
-        (a + b).clamp(-INF, INF)
+        (a + b).clamp(-inf, inf)
     }
 }
 
@@ -158,6 +159,9 @@ pub struct Octagon {
     /// Each variable's lower and upper bounds beyond the matrix's reach, kept exactly; none
     /// until one is added, so that an octagon stays small where no 128-bit bound arises.
     far: Option<Box<[FarBounds]>>,
+    /// The matrix's limit: an entry at it is no bound. [`INF`] for every octagon Tier 1
+    /// makes; a test makes one with a small limit, and takes every constant around it.
+    inf: i128,
 }
 
 /// A variable's lower and upper bounds beyond the matrix's reach.
@@ -168,6 +172,7 @@ type FarBounds = (Option<Exact>, Option<Exact>);
 impl PartialEq for Octagon {
     fn eq(&self, other: &Octagon) -> bool {
         self.n == other.n
+            && self.inf == other.inf
             && self.boxed == other.boxed
             && self.empty == other.empty
             && self.m == other.m
@@ -180,17 +185,23 @@ impl Eq for Octagon {}
 impl Octagon {
     /// The octagon of `n` unconstrained variables: a box past [`RELATIONAL_LIMIT`].
     pub fn new(n: usize) -> Octagon {
+        Octagon::within(n, INF)
+    }
+
+    /// [`Octagon::new`], with a matrix whose limit is `inf`.
+    pub fn within(n: usize, inf: i128) -> Octagon {
         let d = 2 * n;
         if n > RELATIONAL_LIMIT {
             return Octagon {
                 n,
-                m: vec![INF; d],
+                m: vec![inf; d],
                 boxed: true,
                 empty: false,
                 far: None,
+                inf,
             };
         }
-        let mut m = vec![INF; d * d];
+        let mut m = vec![inf; d * d];
         for k in 0..d {
             m[k * d + k] = 0;
         }
@@ -200,6 +211,7 @@ impl Octagon {
             boxed: false,
             empty: false,
             far: None,
+            inf,
         }
     }
 
@@ -255,8 +267,8 @@ impl Octagon {
     pub fn exact_bounds(&self, var: usize) -> (Option<Exact>, Option<Exact>) {
         let (lo, hi) = self.bounds(var);
         let (far_lo, far_hi) = self.far_of(var);
-        let lo = (lo > -INF).then(|| Exact::from_i128(lo));
-        let hi = (hi < INF).then(|| Exact::from_i128(hi));
+        let lo = (lo > -self.inf).then(|| Exact::from_i128(lo));
+        let hi = (hi < self.inf).then(|| Exact::from_i128(hi));
         let tighter = |a: Option<Exact>, b: Option<Exact>, upper: bool| match (a, b) {
             (Some(a), Some(b)) => Some(if upper { a.min(b) } else { a.max(b) }),
             (a, b) => a.or(b),
@@ -293,12 +305,12 @@ impl Octagon {
     /// A box's new bound `v` on twice node `a`'s term, tightened to an even number; a
     /// variable whose two bounds cross empties the box.
     fn bound_box(&mut self, a: usize, v: i128) {
-        if v >= INF || v >= self.m[a] {
+        if v >= self.inf || v >= self.m[a] {
             return;
         }
-        self.m[a] = (2 * floor_half(v)).max(-INF);
+        self.m[a] = (2 * floor_half(v)).max(-self.inf);
         let k = a & !1;
-        if add(self.m[k], self.m[k + 1]) < 0 {
+        if add(self.inf, self.m[k], self.m[k + 1]) < 0 {
             self.empty = true;
         }
     }
@@ -324,7 +336,7 @@ impl Octagon {
                 // `s + t <= c` and `-t <= u` give `s <= c + u`; with no `u`, the sum saturates
                 // at `INF`, no bound, which `bound_box` passes over.
                 for (a, b) in [(*s, *t), (*t, *s)] {
-                    let v = add(c, self.upper(&[b.negated()]));
+                    let v = add(self.inf, c, self.upper(&[b.negated()]));
                     self.bound_box(a.node(), 2 * v);
                 }
             }
@@ -372,9 +384,9 @@ impl Octagon {
         let into_i: Vec<i128> = (0..d).map(|k| self.at(k, i)).collect();
         let from_j: Vec<i128> = (0..d).map(|l| self.at(j, l)).collect();
         for (k, ki) in into_i.iter().enumerate() {
-            let a = add(*ki, c);
+            let a = add(self.inf, *ki, c);
             for (l, jl) in from_j.iter().enumerate() {
-                let v = add(a, *jl).min(self.at(k, l));
+                let v = add(self.inf, a, *jl).min(self.at(k, l));
                 self.put(k, l, v);
             }
         }
@@ -384,18 +396,18 @@ impl Octagon {
         let d = self.d();
         for k in 0..d {
             let v = self.at(k, k ^ 1);
-            if v < INF {
-                self.put(k, k ^ 1, (2 * floor_half(v)).max(-INF));
+            if v < self.inf {
+                self.put(k, k ^ 1, (2 * floor_half(v)).max(-self.inf));
             }
         }
         for i in 0..d {
             let ci = self.at(i, i ^ 1);
-            if ci >= INF {
+            if ci >= self.inf {
                 continue;
             }
             for j in 0..d {
                 let cj = self.at(j ^ 1, j);
-                if cj >= INF {
+                if cj >= self.inf {
                     continue;
                 }
                 // Both are below `INF` and at or above `-INF`, so their sum fits; it is not
@@ -412,10 +424,10 @@ impl Octagon {
     /// Adds `terms <= c`, for at most two terms; a longer sum is ignored, which is sound. A
     /// constant beyond [`BIG`] is weakened to no bound, or to `-BIG`.
     pub fn add_lin(&mut self, terms: &[Term], c: i128) {
-        if c >= BIG || self.empty {
+        if c >= (self.inf / 2) || self.empty {
             return;
         }
-        let c = c.max(-BIG);
+        let c = c.max(-(self.inf / 2));
         if self.boxed {
             self.add_box(terms, c);
         } else {
@@ -472,8 +484,8 @@ impl Octagon {
             [] => 0,
             [t] => {
                 let v = self.unary(t.node());
-                if v >= INF {
-                    INF
+                if v >= self.inf {
+                    self.inf
                 } else {
                     floor_half(v)
                 }
@@ -483,10 +495,10 @@ impl Octagon {
             [s, t] if self.boxed => match (s.var == t.var, s.neg == t.neg) {
                 (true, true) => self.unary(s.node()),
                 (true, false) => 0,
-                (false, _) => add(self.upper(&[*s]), self.upper(&[*t])),
+                (false, _) => add(self.inf, self.upper(&[*s]), self.upper(&[*t])),
             },
             [s, t] => self.at(t.node() ^ 1, s.node()),
-            _ => INF,
+            _ => self.inf,
         }
     }
 
@@ -499,7 +511,7 @@ impl Octagon {
     pub fn bounds(&self, var: usize) -> (i128, i128) {
         let hi = self.upper(&[Term::pos(var)]);
         let lo = self.upper(&[Term::pos(var).negated()]);
-        (if lo >= INF { -INF } else { -lo }, hi)
+        crate::bounds::held(self.inf, (if lo >= self.inf { -self.inf } else { -lo }, hi))
     }
 
     /// Forgets everything known about `var`.
@@ -508,16 +520,16 @@ impl Octagon {
             f[var] = (None, None);
         }
         if self.boxed {
-            self.m[2 * var] = INF;
-            self.m[2 * var + 1] = INF;
+            self.m[2 * var] = self.inf;
+            self.m[2 * var + 1] = self.inf;
             return;
         }
         let d = self.d();
         for node in [2 * var, 2 * var + 1] {
             for k in 0..d {
                 if k != node {
-                    self.put(node, k, INF);
-                    self.put(k, node, INF);
+                    self.put(node, k, self.inf);
+                    self.put(k, node, self.inf);
                 }
             }
         }
@@ -558,6 +570,7 @@ impl Octagon {
             boxed: self.boxed,
             empty: false,
             far,
+            inf: self.inf,
         }
     }
 
@@ -578,7 +591,7 @@ impl Octagon {
                 out.push((Vec::new(), -1));
             }
             for a in 0..d {
-                if self.m[a] < INF {
+                if self.m[a] < self.inf {
                     out.push((vec![term(a), term(a)], self.m[a]));
                 }
             }
@@ -594,7 +607,7 @@ impl Octagon {
                     if c < 0 {
                         out.push((Vec::new(), c));
                     }
-                } else if c < INF {
+                } else if c < self.inf {
                     // `V_j - V_i <= c`, and `-V_i` is the node `i ^ 1`.
                     out.push((vec![term(j), term(i ^ 1)], c));
                 }
@@ -615,7 +628,9 @@ impl Octagon {
                     // `tv + tw <= c` bounds `tv` by `c` less the least value of `tw`.
                     let c = self.upper(&[tv, tw]);
                     let least = if tw.neg { whi.map(Exact::negated) } else { wlo };
-                    let Some(b) = least.filter(|_| c < INF).and_then(|l| l.negated().plus(c))
+                    let Some(b) = least
+                        .filter(|_| c < self.inf)
+                        .and_then(|l| l.negated().plus(c))
                     else {
                         continue;
                     };
@@ -894,6 +909,95 @@ mod tests {
             <= c
     }
 
+    /// Around a small limit the octagon claims no more than exact arithmetic gives, as a matrix
+    /// and as a box. The constants lie on both sides of the limit and of half of it, where a
+    /// constraint is weakened, and the points reach past both. Every point that satisfies the
+    /// constraints added lies within every bound the octagon reports, of one term or of two,
+    /// and within each variable's bounds as intervals hold them; an octagon it calls empty has
+    /// no point; the join of two holds the points of both; and one that forgets a variable
+    /// holds every point with any value of it.
+    #[test]
+    fn test_the_octagon_is_sound_around_a_small_limit() {
+        const LIMIT: i128 = 8;
+        const WINDOW: i128 = 14;
+        let mut r = Rng(0x2545_f491_4f6c_dd1d);
+        let term = |var: usize, neg: bool| Term { var, neg };
+        let mut shapes: Vec<Vec<Term>> = Vec::new();
+        for a in [false, true] {
+            shapes.push(vec![term(0, a)]);
+            shapes.push(vec![term(1, a)]);
+            for b in [false, true] {
+                shapes.push(vec![term(0, a), term(1, b)]);
+                shapes.push(vec![term(1, a), term(0, b)]);
+            }
+        }
+        let points = |cs: &[(Vec<Term>, i128)]| -> Vec<[i128; 2]> {
+            (-WINDOW..=WINDOW)
+                .flat_map(|x| (-WINDOW..=WINDOW).map(move |y| [x, y]))
+                .filter(|p| cs.iter().all(|(t, c)| satisfies(p, t, *c)))
+                .collect()
+        };
+        let holds = |o: &Octagon, p: &[i128; 2]| -> bool {
+            shapes.iter().all(|t| {
+                let u = o.upper(t);
+                u >= LIMIT || satisfies(p, t, u)
+            }) && (0..2).all(|v| {
+                let (lo, hi) = o.bounds(v);
+                (lo == -LIMIT || p[v] >= lo) && (hi == LIMIT || p[v] <= hi)
+            })
+        };
+        for vars in [2, RELATIONAL_LIMIT + 1] {
+            let mut some = 0;
+            for _ in 0..600 {
+                let mut made = Vec::new();
+                for _ in 0..2 {
+                    let mut o = Octagon::within(vars, LIMIT);
+                    let mut cs = Vec::new();
+                    for _ in 0..(1 + r.below(4)) {
+                        let shape = shapes[r.below(shapes.len() as u64) as usize].clone();
+                        let c = r.below(25) as i128 - 12;
+                        o.add_lin(&shape, c);
+                        cs.push((shape, c));
+                    }
+                    let ps = points(&cs);
+                    if o.is_empty() {
+                        assert!(
+                            ps.is_empty(),
+                            "empty, though {:?} satisfies {:?}",
+                            ps[0],
+                            cs
+                        );
+                    }
+                    for p in &ps {
+                        assert!(holds(&o, p), "{:?} satisfies {:?}", p, cs);
+                    }
+                    made.push((o, cs, ps));
+                }
+                let (a, ca, pa) = &made[0];
+                let (b, cb, pb) = &made[1];
+                let joined = a.join(b);
+                for p in pa.iter().chain(pb) {
+                    assert!(
+                        !joined.is_empty() && holds(&joined, p),
+                        "{:?} is lost by the join of {:?} and {:?}",
+                        p,
+                        ca,
+                        cb
+                    );
+                }
+                let mut forgot = a.clone();
+                forgot.forget(0);
+                for p in pa {
+                    for x in -WINDOW..=WINDOW {
+                        assert!(holds(&forgot, &[x, p[1]]), "{:?} forgets x: {:?}", ca, p);
+                    }
+                }
+                some += usize::from(!pa.is_empty());
+            }
+            assert!(some > 120, "too few of the octagons hold a point: {}", some);
+        }
+    }
+
     /// Whether a matrix is tightly closed: every path no shorter than its edge, every unary
     /// bound even, and every edge no longer than the sum of its two unary bounds' halves.
     fn closed(o: &Octagon) -> bool {
@@ -901,7 +1005,7 @@ mod tests {
         let at = |i: usize, j: usize| o.at(i, j);
         (0..d).all(|i| {
             (0..d).all(|j| {
-                (0..d).all(|k| at(i, j) <= add(at(i, k), at(k, j)))
+                (0..d).all(|k| at(i, j) <= add(INF, at(i, k), at(k, j)))
                     && (at(i, i ^ 1) >= INF || at(i, i ^ 1) % 2 == 0)
                     && (at(i, i ^ 1) >= INF
                         || at(j ^ 1, j) >= INF

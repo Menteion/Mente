@@ -1,0 +1,79 @@
+// expect: pass
+module conformance
+// `x >> k` is `x / 2^k` rounded toward negative infinity, for every `k` below the width of
+// `x`'s type (core-calculus.md, item 4). A value of a 128-bit type that fits 64 bits, such as
+// a literal, may be kept in 64: a shift by 64 or more still gives 0, or -1 for a negative
+// value, and never the value shifted by the amount less 64.
+pub fn of_a_literal(k: u8) -> i128 = 5_i128 >> k
+
+pub fn of_an_unsigned_literal(k: u8) -> u128 = 5_u128 >> k
+
+pub fn of_a_negative_literal(k: u8) -> i128 = -5_i128 >> k
+
+pub fn of_the_greatest_64_bits(k: u8) -> u128 = 18446744073709551615_u128 >> k
+
+pub fn of_the_least_64_bits(k: u8) -> i128 = -9223372036854775808_i128 >> k
+
+// Two operands of 64 bits that only an `i128` holds together.
+pub fn of_two_types(a: u64, b: i64, k: u8) -> i128 = (a % 5 + b % 5) >> k
+
+pub fn of_a_product(a: u64, b: i64, k: u8) -> i128 = a % 3 * (b % 3) >> k
+
+pub fn into_a_narrow_type(k: u8) -> i16 = 16 * (5_i128 >> k)
+
+pub fn literal_by_63() -> i128 = of_a_literal(63)
+
+pub fn literal_by_64() -> i128 = of_a_literal(64)
+
+pub fn literal_by_65() -> i128 = of_a_literal(65)
+
+pub fn literal_by_127() -> i128 = of_a_literal(127)
+
+pub fn literal_by_1() -> i128 = of_a_literal(1)
+
+pub fn literal_by_the_width() -> i128 = of_a_literal(128)
+
+pub fn unsigned_literal_by_64() -> u128 = of_an_unsigned_literal(64)
+
+pub fn unsigned_literal_by_65() -> u128 = of_an_unsigned_literal(65)
+
+pub fn unsigned_literal_by_127() -> u128 = of_an_unsigned_literal(127)
+
+pub fn negative_literal_by_2() -> i128 = of_a_negative_literal(2)
+
+pub fn negative_literal_by_64() -> i128 = of_a_negative_literal(64)
+
+pub fn negative_literal_by_65() -> i128 = of_a_negative_literal(65)
+
+pub fn negative_literal_by_127() -> i128 = of_a_negative_literal(127)
+
+pub fn greatest_by_63() -> u128 = of_the_greatest_64_bits(63)
+
+pub fn greatest_by_64() -> u128 = of_the_greatest_64_bits(64)
+
+pub fn greatest_by_127() -> u128 = of_the_greatest_64_bits(127)
+
+pub fn least_by_63() -> i128 = of_the_least_64_bits(63)
+
+pub fn least_by_64() -> i128 = of_the_least_64_bits(64)
+
+pub fn least_by_127() -> i128 = of_the_least_64_bits(127)
+
+pub fn two_types_by_70() -> i128 = of_two_types(4, -9, 70)
+
+pub fn two_types_negative_by_70() -> i128 = of_two_types(0, -9, 70)
+
+pub fn two_types_by_1() -> i128 = of_two_types(4, 4, 1)
+
+pub fn product_by_100() -> i128 = of_a_product(2, -2, 100)
+
+pub fn narrow_by_65() -> i16 = into_a_narrow_type(65)
+
+pub fn narrow_by_1() -> i16 = into_a_narrow_type(1)
+
+pub fn written() -> i16 {
+  val v: i16 = 16 * (5_i128 >> 65)
+  v
+}
+
+pub fn written_unsigned() -> u128 = 340282366920938463463374607431768211455_u128 >> 100

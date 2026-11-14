@@ -8,10 +8,14 @@
 //! which the same macro writes, makes the test require that generated programs reach it, or
 //! that [`NOT_GENERATED`] give the reason they cannot.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mente_sema::check;
-use mente_sema::types::INT_TYPES;
+use mente_sema::literals::From;
+use mente_sema::octagon::{INF, RELATIONAL_LIMIT};
+use mente_sema::types::{Int, Ty, INT_TYPES};
+use mente_sema::wide::{self, Interval};
+use mente_sema::{CheckedFn, CheckedModule};
 use mente_syntax::tree::{
     Arg, ArmBody, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, EnumSyntax,
     ExprId, ExprKind, FieldSyntax, FnSyntax, Param, PatBinding, PatternKind, Payload, Refinement,
@@ -238,6 +242,49 @@ constructs!(body_kind, BODIES: Option<Body> {
     Some(Body::Block(_)) => "block body",
     Some(Body::Expr(_)) => "expression body",
 });
+
+/// What a function holds of the edge of Tier 1's domain
+/// (`ghost-contracts-and-totality.md`, item 4): a value whose static range lies wholly past
+/// the limit, of which Tier 1 holds only a bound weakened to the nearest it has, under the
+/// operations that carry that bound on, and the index and the narrowing computed from it.
+const EDGES: &[&str] = &[
+    "product past Tier 1's domain",
+    "quotient of a value past Tier 1's domain",
+    "quotient by a value past Tier 1's domain",
+    "difference with a value past Tier 1's domain",
+    "remainder with a value past Tier 1's domain",
+    "operand below Tier 1's domain",
+    "index computed from a value past Tier 1's domain",
+    "narrowing of a value computed from one past Tier 1's domain",
+];
+
+/// What a call's arguments are to two parameters its callee relates.
+const RELATIONS: &[&str] = &["call that relates two names"];
+
+/// The operations written to trap whenever they run, by what the checker's static ranges and
+/// types say of their operands: the check of each stays in MIR and in native code, since
+/// Tier 1 proves none of them, and the three paths must trap alike.
+const TRAPS: &[&str] = &[
+    "divisor that is always zero",
+    "index at its array's length",
+    "shift by its type's width or more",
+];
+
+/// Where a bit operation, a shift or `~` over literals alone takes the type it works in
+/// (`core-calculus.md`, item 5), by what the checker's table says of it: beside an operand
+/// of a type, which gives it; and alone, an `i64`, either narrowed into a place, which gives
+/// it none, or not.
+const LITERALS: &[&str] = &[
+    "bit operation on literals alone, beside an operand of a type",
+    "bit operation on literals alone, narrowed into a place",
+    "bit operation on literals alone, of no type but i64",
+];
+
+/// A right shift whose amount is valid for the type and reaches past the bits its value is
+/// kept in: a value of a 128-bit type whose static range fits 64 bits, shifted by 64 or more.
+/// Native code shifts within the width of the value it is given, and must still give 0, or -1
+/// for a negative value (`core-calculus.md`, item 4).
+const SHIFTS: &[&str] = &["right shift past the bits its value is kept in"];
 
 /// What generated programs never hold, each with its reason.
 const NOT_GENERATED: &[(&str, &str)] = &[
@@ -583,6 +630,301 @@ fn calls_with_mut(tree: &Tree, e: ExprId) -> bool {
     }
 }
 
+/// Whether `e` is a value `past` holds of, or arithmetic on one.
+fn computed_from(tree: &Tree, e: ExprId, past: &dyn Fn(ExprId) -> bool) -> bool {
+    past(e)
+        || match &tree.expr(e).kind {
+            ExprKind::Binary { lhs, rhs, .. } => {
+                computed_from(tree, *lhs, past) || computed_from(tree, *rhs, past)
+            }
+            ExprKind::Unary { operand, .. } => computed_from(tree, *operand, past),
+            _ => false,
+        }
+}
+
+/// The row of [`SHIFTS`], when a checked function reaches it.
+fn reached_shifts(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    // Whether a bound lies within 64 bits, of either sign.
+    let narrow = |(neg, mag): (bool, u128)| mag <= if neg { 1 << 63 } else { u128::from(u64::MAX) };
+    for e in &f.syntax.tree.exprs {
+        let ExprKind::Binary {
+            op: BinaryOp::Shr,
+            lhs,
+            rhs,
+        } = &e.kind
+        else {
+            continue;
+        };
+        let wide_type = matches!(
+            &f.typing.exprs[lhs.0 as usize],
+            Ty::Int(Int::One(t) | Int::Mixed(Some(t))) if t.bits == 128
+        );
+        let kept_narrow = ranges[lhs.0 as usize].is_some_and(|i| narrow(i.lo) && narrow(i.hi));
+        let far = matches!(
+            ranges[rhs.0 as usize],
+            Some(Interval { lo: (false, k), .. }) if k >= 64
+        );
+        if wide_type && kept_narrow && far {
+            seen.insert("right shift past the bits its value is kept in".to_string());
+        }
+    }
+}
+
+/// The rows of [`LITERALS`] a checked function reaches.
+fn reached_literals(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    for (k, e) in f.syntax.tree.exprs.iter().enumerate() {
+        let bits = match &e.kind {
+            ExprKind::Unary { op, .. } => *op == UnaryOp::BitNot,
+            ExprKind::Binary { op, .. } => matches!(
+                op,
+                BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+            ),
+            _ => false,
+        };
+        let Some(taken) = f.typing.literals.get(k).copied().flatten().filter(|_| bits) else {
+            continue;
+        };
+        let narrowed = matches!(f.typing.places[k], Some(Ty::Int(_)));
+        seen.insert(
+            match (taken.from, narrowed) {
+                (From::Operands, _) => {
+                    "bit operation on literals alone, beside an operand of a type"
+                }
+                (From::Alone, true) => "bit operation on literals alone, narrowed into a place",
+                (From::Alone, false) => "bit operation on literals alone, of no type but i64",
+            }
+            .to_string(),
+        );
+    }
+}
+
+/// The rows of [`TRAPS`] a checked function reaches.
+fn reached_traps(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    // The one value an expression has, when its static range is that of a value never negative.
+    let value = |e: ExprId| match ranges[e.0 as usize] {
+        Some(Interval {
+            lo: (false, lo),
+            hi: (false, hi),
+        }) if lo == hi => Some(lo),
+        _ => None,
+    };
+    for e in &tree.exprs {
+        match &e.kind {
+            ExprKind::Binary {
+                op: BinaryOp::Div | BinaryOp::Rem,
+                rhs,
+                ..
+            } if value(*rhs) == Some(0) => {
+                seen.insert("divisor that is always zero".to_string());
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Shl | BinaryOp::Shr,
+                lhs,
+                rhs,
+            } => {
+                let width = match &f.typing.exprs[lhs.0 as usize] {
+                    Ty::Int(Int::One(t) | Int::Mixed(Some(t))) => Some(u128::from(t.bits)),
+                    _ => None,
+                };
+                if width.zip(value(*rhs)).is_some_and(|(w, k)| k >= w) {
+                    seen.insert("shift by its type's width or more".to_string());
+                }
+            }
+            ExprKind::Index { base, index } => {
+                if let Ty::Array(n, _) = &f.typing.exprs[base.0 as usize] {
+                    if value(*index) == Some(*n) {
+                        seen.insert("index at its array's length".to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The rows of [`EDGES`] a checked function reaches. A value lies past the domain when its
+/// static range, as `E0222` computes it, lies wholly at or beyond the limit on one side of
+/// zero: no value of it is one Tier 1 holds exactly.
+fn reached_edges(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let limit = INF.unsigned_abs();
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    // 1 for a value wholly past the limit, -1 for one wholly below its negation, else 0.
+    let side = |e: ExprId| -> i8 {
+        match ranges[e.0 as usize] {
+            Some(Interval { lo: (false, m), .. }) if m >= limit => 1,
+            Some(Interval { hi: (true, m), .. }) if m >= limit => -1,
+            _ => 0,
+        }
+    };
+    let past = |e: ExprId| side(e) != 0;
+    let mut mark = |name: &str| {
+        seen.insert(name.to_string());
+    };
+    for (k, e) in tree.exprs.iter().enumerate() {
+        match &e.kind {
+            ExprKind::Binary { op, lhs, rhs } => {
+                let (l, r) = (side(*lhs), side(*rhs));
+                match op {
+                    BinaryOp::Mul if l == 0 && r == 0 && past(ExprId(k as u32)) => {
+                        mark("product past Tier 1's domain")
+                    }
+                    BinaryOp::Div => {
+                        if l != 0 {
+                            mark("quotient of a value past Tier 1's domain");
+                        }
+                        if r != 0 {
+                            mark("quotient by a value past Tier 1's domain");
+                        }
+                    }
+                    BinaryOp::Sub if l != 0 || r != 0 => {
+                        mark("difference with a value past Tier 1's domain")
+                    }
+                    BinaryOp::Rem if l != 0 || r != 0 => {
+                        mark("remainder with a value past Tier 1's domain")
+                    }
+                    _ => {}
+                }
+                if matches!(op, BinaryOp::Div | BinaryOp::Sub | BinaryOp::Rem) && (l < 0 || r < 0) {
+                    mark("operand below Tier 1's domain");
+                }
+            }
+            ExprKind::Index { index, .. } if computed_from(tree, *index, &past) => {
+                mark("index computed from a value past Tier 1's domain")
+            }
+            _ => {}
+        }
+    }
+    for s in &tree.stmts {
+        let value = match &s.kind {
+            StmtKind::Binding {
+                ty: Some(_), init, ..
+            } => Some(*init),
+            StmtKind::Assign { value, .. } => Some(*value),
+            _ => None,
+        };
+        // The value itself may fit its place: one wholly past the domain fits no type but a
+        // 128-bit one.
+        if value.is_some_and(|v| !past(v) && computed_from(tree, v, &past)) {
+            mark("narrowing of a value computed from one past Tier 1's domain");
+        }
+    }
+}
+
+/// The pairs of parameters `f` relates, each with whether it is by their sum: a `requires`
+/// of the form `a op b` or `a + b <= c`, and a refinement bound that names a parameter.
+fn related_parameters(f: &FnSyntax) -> Vec<(usize, usize, bool)> {
+    let tree = &f.tree;
+    let index = |name: &str| f.params.iter().position(|p| p.name == name);
+    let named = |e: ExprId| match &tree.expr(e).kind {
+        ExprKind::Name(n) => index(n),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    for c in &f.contracts {
+        let (ContractKind::Requires, ExprKind::Binary { lhs, rhs, .. }) =
+            (c.kind, &tree.expr(c.expr).kind)
+        else {
+            continue;
+        };
+        if let (Some(a), Some(b)) = (named(*lhs), named(*rhs)) {
+            out.push((a, b, false));
+        }
+        if let ExprKind::Binary {
+            op: BinaryOp::Add,
+            lhs: a,
+            rhs: b,
+        } = &tree.expr(*lhs).kind
+        {
+            if let (Some(a), Some(b)) = (named(*a), named(*b)) {
+                out.push((a, b, true));
+            }
+        }
+    }
+    for (k, p) in f.params.iter().enumerate() {
+        if let TypeKind::Int {
+            refinement: Some(Refinement { lo, hi, .. }),
+            ..
+        } = &tree.ty(p.ty).kind
+        {
+            for b in [lo, hi] {
+                if let Bound::Name(n) = b {
+                    out.extend(index(n).map(|i| (k, i, false)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The bindings an argument names, through the arithmetic it is written with.
+fn named_in(tree: &Tree, e: ExprId, out: &mut BTreeSet<String>) {
+    match &tree.expr(e).kind {
+        ExprKind::Name(n) => {
+            out.insert(n.clone());
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            named_in(tree, *lhs, out);
+            named_in(tree, *rhs, out);
+        }
+        ExprKind::Unary { operand, .. } => named_in(tree, *operand, out),
+        _ => {}
+    }
+}
+
+/// What the calls of `f` ask Tier 1 to relate: the row of [`RELATIONS`] for a call whose
+/// callee relates two parameters and whose arguments for them both name a binding; and, as
+/// the lines returned, the calls Tier 1 cannot prove. It relates two names only in a function
+/// of at most [`RELATIONAL_LIMIT`] variables, and holds each one's bounds alone in a function
+/// of more, where a `guard` on two names proves nothing of them at the call. And it holds no
+/// sum of a name with itself in any function.
+fn reached_relations(
+    module: &CheckedModule,
+    f: &CheckedFn,
+    seen: &mut BTreeSet<String>,
+) -> Vec<String> {
+    let tree = &f.syntax.tree;
+    let mut wrong = Vec::new();
+    for (i, e) in tree.exprs.iter().enumerate() {
+        let ExprKind::Call { args, .. } = &e.kind else {
+            continue;
+        };
+        let Some(callee) = f.resolution.calls[i].and_then(|c| module.functions[c].as_ref()) else {
+            continue;
+        };
+        for (a, b, sum) in related_parameters(&callee.syntax) {
+            let (mut first, mut second) = (BTreeSet::new(), BTreeSet::new());
+            named_in(tree, args[a].value, &mut first);
+            named_in(tree, args[b].value, &mut second);
+            if first.is_empty() || second.is_empty() {
+                continue;
+            }
+            seen.insert("call that relates two names".to_string());
+            if f.variables > RELATIONAL_LIMIT {
+                wrong.push(format!(
+                    "`{}`, of {} variables where Tier 1 relates {}, passes two names to \
+                     parameters `{}` relates",
+                    f.syntax.name, f.variables, RELATIONAL_LIMIT, callee.syntax.name
+                ));
+            }
+            if sum && !first.is_disjoint(&second) {
+                wrong.push(format!(
+                    "`{}` passes one name twice to parameters `{}` adds",
+                    f.syntax.name, callee.syntax.name
+                ));
+            }
+        }
+    }
+    wrong
+}
+
 /// The constructs a struct declaration holds.
 fn reached_struct(s: &StructSyntax, seen: &mut BTreeSet<String>) {
     let StructSyntax {
@@ -762,6 +1104,11 @@ fn grammar() -> BTreeSet<String> {
         BINDINGS,
         ARMS,
         VARIANTS,
+        EDGES,
+        RELATIONS,
+        TRAPS,
+        LITERALS,
+        SHIFTS,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -780,49 +1127,158 @@ fn grammar() -> BTreeSet<String> {
     all
 }
 
-/// The generated programs that pass every check, which the three paths run, reach every
-/// construct of M1's grammar but those [`NOT_GENERATED`] names, and those never.
+/// Every generated program passes every check and lowers, so that the three paths run it and
+/// none is left out unseen: nothing refuses one but a narrowing Tier 1 proves always traps
+/// (`E0508`), whose function is generated again once the reference interpreter has run the
+/// claim ([`generate::checked`]), within the bars every run of generated programs is held to
+/// ([`generate::beyond_the_bars`]). At least
+/// [`MIN_SEEDS_PER_ROW`] of the programs reach each construct of M1's grammar but those
+/// [`NOT_GENERATED`] names, which none reaches.
 #[test]
 fn test_generated_programs_reach_every_construct_of_the_grammar() {
     let grammar = grammar();
-    let mut seen = BTreeSet::new();
-    for seed in 0..SEEDS {
-        let p = generate::program(seed);
-        if mente_sema::check_program(&p.text).is_ok() {
-            functions(&p.text)
-                .iter()
-                .for_each(|f| reached(f, &mut seen));
-            structs(&p.text)
+    // The seeds whose program reaches each construct.
+    let mut seeds: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut problems = Vec::new();
+    let mut claims = Vec::new();
+    let mut regenerated = 0;
+    // Each seed's program is checked on its own, on as many threads as the machine has.
+    let programs = super::differential::parallel((0..SEEDS).collect(), |seed| {
+        let c = generate::checked(seed);
+        let mut seen = BTreeSet::new();
+        let mut problems = c.problems;
+        if let Some(module) = &c.module {
+            let text = &c.program.text;
+            functions(text).iter().for_each(|f| reached(f, &mut seen));
+            structs(text)
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
-            enums(&p.text)
-                .iter()
-                .for_each(|e| reached_enum(e, &mut seen));
+            enums(text).iter().for_each(|e| reached_enum(e, &mut seen));
+            for f in module.functions.iter().flatten() {
+                reached_edges(f, &mut seen);
+                reached_traps(f, &mut seen);
+                reached_literals(f, &mut seen);
+                reached_shifts(f, &mut seen);
+                for wrong in reached_relations(module, f, &mut seen) {
+                    problems.push(format!("seed {}: {}", seed, wrong));
+                }
+            }
+            // What the checker accepts, the lowering lowers: a program it refused would run
+            // on the reference interpreter alone.
+            if let Err(why) = mente_codegen::lower::lower(module) {
+                problems.push(format!(
+                    "seed {}: the checker accepts the program and the lowering refuses it: {}",
+                    seed, why
+                ));
+            }
+        }
+        (seed, seen, c.claims, c.regenerated, problems)
+    });
+    for (seed, seen, claimed, again, wrong) in programs {
+        problems.extend(wrong);
+        claims.extend(claimed.into_iter().map(|c| (seed, c)));
+        regenerated += again;
+        for name in seen {
+            seeds.entry(name).or_default().push(seed);
         }
     }
-    for name in &seen {
+    println!("{}", generate::claims_summary(regenerated, &claims));
+    problems.extend(generate::beyond_the_bars(SEEDS, regenerated, &claims));
+    assert!(
+        problems.is_empty(),
+        "generated programs the checker refuses, claims of Tier 1 a run contradicts, or more \
+         of them than a run may have:\n{}",
+        problems.join("\n")
+    );
+    for name in seeds.keys() {
         assert!(grammar.contains(name), "`{}` is not in the grammar", name);
     }
     for (name, reason) in NOT_GENERATED {
         assert!(grammar.contains(*name), "`{}` is not in the grammar", name);
         assert!(
-            !seen.contains(*name),
+            !seeds.contains_key(*name),
             "`{}` is generated now, though excluded because {}",
             name,
             reason
         );
     }
-    let missing: Vec<&String> = grammar
-        .iter()
-        .filter(|n| !seen.contains(*n) && NOT_GENERATED.iter().all(|(x, _)| x != n))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "no checked program of seeds 0 to {} reaches {:?}",
-        SEEDS - 1,
-        missing
+    // The rows the fewest programs reach, with their seeds, so that a row about to be lost
+    // shows before it is.
+    let mut least: Vec<(usize, &String)> = seeds.iter().map(|(n, s)| (s.len(), n)).collect();
+    least.sort();
+    println!("the constructs the fewest programs reach:");
+    for (count, name) in least.iter().take(RARE_ROWS_SHOWN) {
+        println!("  `{}` {}: seeds {:?}", name, count, seeds[*name]);
+    }
+    println!(
+        "the edge of Tier 1's domain, and what is written to trap: {}",
+        EDGES
+            .iter()
+            .chain(TRAPS)
+            .chain(LITERALS)
+            .chain(SHIFTS)
+            .map(|name| format!("`{}` {}", name, seeds.get(*name).map_or(0, |s| s.len())))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
+    let few = too_few(&grammar, &seeds, MIN_SEEDS_PER_ROW);
+    assert!(
+        few.is_empty(),
+        "fewer than {} of the programs of seeds 0 to {} reach each of these:\n{}",
+        MIN_SEEDS_PER_ROW,
+        SEEDS - 1,
+        few.join("\n")
+    );
+}
+
+/// The constructs of `grammar` that fewer than `bar` programs reach, each with the seeds
+/// that do, those [`NOT_GENERATED`] names aside. A construct one or two programs hold is lost
+/// by any change to the generator's choices, so each is asked of a few.
+fn too_few(
+    grammar: &BTreeSet<String>,
+    seeds: &BTreeMap<String, Vec<u64>>,
+    bar: usize,
+) -> Vec<String> {
+    grammar
+        .iter()
+        .filter(|n| NOT_GENERATED.iter().all(|(x, _)| x != n))
+        .filter_map(|n| {
+            let reach = seeds.get(n).map_or(&[][..], |s| s.as_slice());
+            (reach.len() < bar).then(|| format!("`{}` in seeds {:?}", n, reach))
+        })
+        .collect()
+}
+
+/// The bar asks a few programs of every row: at least three, so that no row hangs on one
+/// program or two, and a row below the bar is named with its seeds, one no program reaches
+/// included; what [`NOT_GENERATED`] excuses is not asked for.
+#[test]
+fn test_each_row_is_asked_of_at_least_three_programs() {
+    const { assert!(MIN_SEEDS_PER_ROW >= 3) };
+    let excused = NOT_GENERATED[0].0;
+    let grammar: BTreeSet<String> = ["val", "var", "while", excused]
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    let seeds: BTreeMap<String, Vec<u64>> = [("val", vec![4, 9, 30]), ("var", vec![7, 8])]
+        .into_iter()
+        .map(|(n, s)| (n.to_string(), s))
+        .collect();
+    assert_eq!(
+        too_few(&grammar, &seeds, 3),
+        ["`var` in seeds [7, 8]", "`while` in seeds []"]
+    );
+    assert_eq!(too_few(&grammar, &seeds, 2), ["`while` in seeds []"]);
+    assert_eq!(too_few(&grammar, &seeds, 0), [""; 0]);
+    assert_eq!(too_few(&grammar, &seeds, 4).len(), 3);
 }
 
 /// The seeds the test reads: the first programs of each mode.
 const SEEDS: u64 = 300;
+
+/// How many of the rows the fewest programs reach the test prints with their seeds.
+const RARE_ROWS_SHOWN: usize = 12;
+
+/// How many of those seeds' programs must reach each construct: a construct that hangs on one
+/// program or two is lost by any change to what the generator chooses at random.
+const MIN_SEEDS_PER_ROW: usize = 3;

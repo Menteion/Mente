@@ -1,0 +1,36 @@
+// expect: E0508 E0508 E0508 E0508 E0508 E0508 E0508
+module conformance
+// The place a value is narrowed into never gives a literal its type (core-calculus.md,
+// item 5): `~3` is -4, an `i64`, wherever it lands, and its narrowing into a `u8` always
+// traps. Each is an error whose fix writes the literal with the place's type, `~3_u8`.
+struct P {
+  m: u8
+}
+
+fn mask(m: u8) -> u8 = m
+
+pub fn bound() -> u8 {
+  val m: u8 = ~3
+  m
+}
+
+pub fn assigned(a: u16) -> u16 {
+  var m: u16 = a
+  m = ~0x0F
+  m
+}
+
+pub fn passed() -> u8 = mask(~3)
+
+pub fn field() -> u8 = P(m: ~3).m
+
+pub fn element() -> [2]u8 = [~3, 1]
+
+pub fn result() -> u64 = ~0
+
+pub fn returned(c: bool) -> u8 {
+  if c {
+    return ~3
+  }
+  0
+}
