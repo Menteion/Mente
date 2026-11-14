@@ -175,6 +175,8 @@ This file is the normative grammar of the language `core-calculus.md` defines ([
     guard         = "guard" ( expression | "val" identifier "=" expression ) "else" block ;
     if expression = "if" ( expression | "val" identifier "=" expression ) block [ "else" ( block | if expression ) ] ;
     discard       = "_" "=" [ "own" ] expression ;
+    statement     += ( "val" | "var" ) identifier [ ":" type ] "=" "own" expression    (* a binding that moves *)
+                   | place "=" "own" expression ;                                       (* an assignment that moves *)
     place         = identifier { "[" expression "]" | "." identifier } ;
     expression    += match | raise ;
     match         = "match" expression "{" arm { arm } "}" ;                (* one arm per line *)
@@ -190,8 +192,11 @@ This file is the normative grammar of the language `core-calculus.md` defines ([
     primary       += "none" | string literal | byte literal ;
     call          = identifier arguments ;
     arguments     = "(" [ argument { "," argument } [ "," ] ] ")" ;
-    argument      = [ "mut" | "own" ] expression | identifier ":" expression ;
+    argument      = [ "mut" | "own" ] expression | identifier ":" [ "own" ] expression ;
+    array         = "[" [ element { "," element } [ "," ] ] "]" | "[" expression ";" expression "]" ;
+    element       = [ "own" ] expression ;
     ```
+    - `own` stands wherever a value lands, as `core-calculus.md` has it (item 12; [`value-copy-cost`](../docs/design-review.md#value-copy-cost)): before a binding's initializer, the value of a plain assignment, a positional or a named argument, an element of an array literal, and a discard's value. What follows it is a whole local binding or an `own` parameter (item 20 there). A compound assignment and an array repeat take none.
     - Arguments are positional or named, never both in one list. A named list builds a struct, `Pair(i: 0, j: 1)`, or a variant's payload, `Shape.Rect(w: 3, h: 4)`; a function takes positional arguments.
     - `Implemented`: a call whose first argument is named builds a struct and one whose first is not calls a function, and a list that mixes the two is `E0111`; `a.name` reads a field; a place is a name followed by indexes and fields, after `mut` in an argument too.
       <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_structs_are_built_with_named_arguments_and_fields_are_places" min="1" reason="Named lists build structs, and places hold fields" --> The shapes `a.b` and `a.b(...)` are a field, a variant or a call on a receiver as name resolution finds `a`: a binding, an enum, or `List` and `String`, whose static calls are `List.new()`, `List.from(v)`, `String.new()` and `String.from(s)`. No binding is named like a type of its module, so `a` is never both.
