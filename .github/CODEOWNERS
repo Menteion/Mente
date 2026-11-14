@@ -46,8 +46,12 @@
 /benchmark/harness/toolchains.json @Dancraft3746
 
 # The gate tests of the compiler's own suite: the dependency policy, the lock's allowlist, English
-# text and the workflow policy's place in the Documentation job; and each crate's overflow test.
+# text and the workflow policy's place in the Documentation job; the lint that denies a fallback arm
+# in a walker, with the list of every site it excuses and why; the rule that a decided entry of the
+# register names what would reopen it; and each crate's overflow test.
 /compiler/mente-cli/tests/gates.rs @Dancraft3746
+/compiler/mente-cli/tests/lints.rs @Dancraft3746
+/compiler/mente-cli/tests/register.rs @Dancraft3746
 /compiler/*/src/overflow_traps.rs @Dancraft3746
 
 # Each crate's manifest, which decides what its tests are: one could drop the gate tests' target.

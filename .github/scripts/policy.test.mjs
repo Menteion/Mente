@@ -1054,6 +1054,8 @@ const GATE_FILES = [
   "/benchmark/harness/fixtures.ts",
   "/benchmark/harness/toolchains.json",
   "/compiler/mente-cli/tests/gates.rs",
+  "/compiler/mente-cli/tests/lints.rs",
+  "/compiler/mente-cli/tests/register.rs",
   "/compiler/*/src/overflow_traps.rs",
   "/compiler/*/Cargo.toml",
   "/spikes/*/Cargo.toml",
@@ -1097,6 +1099,8 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
     "benchmark/harness/probe.ts",
     "benchmark/harness/toolchains.json",
     "compiler/mente-cli/tests/gates.rs",
+    "compiler/mente-cli/tests/lints.rs",
+    "compiler/mente-cli/tests/register.rs",
     ...[...tracked()].filter((f) => /^compiler\/[^/]+\/src\/overflow_traps\.rs$/.test(f)),
     // Every workspace member's manifest, wherever the member is.
     ...[...workspace().values()].map(({ dir }) => `${dir}/Cargo.toml`),
