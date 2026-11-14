@@ -1,4 +1,4 @@
-// expect: E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233
+// expect: E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233 E0233
 module conformance
 // A comparison compares a literal operand in the type it takes from the other operand
 // (core-calculus.md, item 5), so a literal whose value lies outside that type would make the
@@ -48,3 +48,20 @@ pub fn in_a_loop(a: u8) -> u8 {
 pub fn in_a_clause(a: u8) -> u8
   requires a < 256
 = a
+
+// Wherever the literal sits in the operand: a branch, an arm, an element of an array literal it
+// indexes, and an expression over them, each value they may give.
+pub fn in_a_branch(a: u8, c: bool) -> bool = a == (if c { 300 } else { 1 })
+
+pub fn in_an_else_branch(a: u8, c: bool) -> bool = (if c { 1 } else { 256 }) > a
+
+pub fn in_an_arm(a: u8, k: u8) -> bool = a == (match k {
+  0 => -1
+  _ => 1
+})
+
+pub fn in_an_element(a: u8, k: usize[0..2]) -> bool = a == [300, 1][k]
+
+pub fn in_a_repeated_element(a: u8, k: usize[0..2]) -> bool = a == [300; 2][k]
+
+pub fn over_a_branch(a: u8, c: bool) -> bool = a == (if c { 300 } else { 1 }) + 0

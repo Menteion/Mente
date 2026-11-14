@@ -1,0 +1,35 @@
+// expect: E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234
+module conformance
+// An operation works in the type its literals take (core-calculus.md, items 4 and 5), and the
+// checker knows the value of every literal, so an operation over literals that traps does so
+// whenever it runs: each is an error where the module is checked.
+
+// Literals alone are an `i64`: a value shifted out of it, a literal outside it under `|`, a
+// shift by its width.
+pub fn shifted_out_of_i64() -> u64 = 1 << 63
+
+pub fn literal_outside_i64() -> u64 = 1 | 9223372036854775808
+
+pub fn shifted_by_the_width_of_i64() -> u128 = 1 << 64
+
+// Beside an operand of a type, the literals take it: a shift by its width, compared or added,
+// and `~` of a literal outside it.
+pub fn compared_shift(x: u8) -> bool = x < 1 << 8
+
+pub fn compared_wide_shift(x: u32) -> bool = x == 1 << 40
+
+pub fn complement_outside(x: u8) -> bool = x == ~256
+
+pub fn added_shift(a: u8) -> u16 = a + (1 << 8)
+
+pub fn shift_in_a_branch(a: u8, c: bool) -> u8 = a & (if c { 1 << 8 } else { 1 })
+
+// A literal an operator narrows into the type of the operand beside it.
+pub fn narrowed_by_and(a: u8) -> u8 = a & 256
+
+pub fn narrowed_by_or(a: u8) -> u8 = a | -1
+
+// A division and a remainder by zero.
+pub fn divided_by_zero() -> i64 = 7 / 0
+
+pub fn remainder_by_zero() -> i64 = 7 % (3 - 3)

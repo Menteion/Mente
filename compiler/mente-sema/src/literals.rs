@@ -91,7 +91,7 @@ impl Exact {
         }
     }
 
-    fn negated(self) -> Exact {
+    pub(crate) fn negated(self) -> Exact {
         Exact::new(!self.negative, self.magnitude)
     }
 
@@ -172,54 +172,8 @@ pub fn value(tree: &Tree, literals: &[Option<Taken>], e: ExprId) -> Option<Exact
         ExprKind::Unary {
             op: UnaryOp::BitNot,
             operand,
-        } => {
-            let t = ty()?;
-            let x = of(*operand).filter(|x| x.fits(t))?;
-            Some(Exact::of_bits(!x.bits(t), t))
-        }
-        ExprKind::Binary { op, lhs, rhs } => {
-            let (a, b) = (of(*lhs)?, of(*rhs)?);
-            match op {
-                BinaryOp::Add => a.plus(b),
-                BinaryOp::Sub => a.plus(b.negated()),
-                BinaryOp::Mul => a.times(b),
-                // Truncated toward zero, the remainder with the dividend's sign.
-                BinaryOp::Div => Some(Exact::new(
-                    a.negative != b.negative,
-                    a.magnitude.checked_div(b.magnitude)?,
-                )),
-                BinaryOp::Rem => Some(Exact::new(
-                    a.negative,
-                    a.magnitude.checked_rem(b.magnitude)?,
-                )),
-                BinaryOp::BitAnd => in_type(ty()?, a, b, |x, y| x & y),
-                BinaryOp::BitOr => in_type(ty()?, a, b, |x, y| x | y),
-                BinaryOp::BitXor => in_type(ty()?, a, b, |x, y| x ^ y),
-                BinaryOp::Shl | BinaryOp::Shr => {
-                    let t = ty()?;
-                    let k = u32::try_from(b.magnitude)
-                        .ok()
-                        .filter(|k| !b.negative && *k < t.bits)?;
-                    let x = a.filter_fits(t)?;
-                    if *op == BinaryOp::Shl {
-                        x.times(Exact::new(false, 1u128 << k)).filter(|v| v.fits(t))
-                    } else {
-                        // Rounded toward negative infinity.
-                        let q = x.magnitude >> k;
-                        let exact = q << k == x.magnitude;
-                        Some(Exact::new(x.negative, q + u128::from(x.negative && !exact)))
-                    }
-                }
-                BinaryOp::And
-                | BinaryOp::Or
-                | BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::Lt
-                | BinaryOp::Le
-                | BinaryOp::Gt
-                | BinaryOp::Ge => None,
-            }
-        }
+        } => complement(of(*operand)?, ty()?),
+        ExprKind::Binary { op, lhs, rhs } => apply(*op, of(*lhs)?, of(*rhs)?, ty()),
         ExprKind::Int {
             suffix: Some(_), ..
         }
@@ -240,6 +194,283 @@ pub fn value(tree: &Tree, literals: &[Option<Taken>], e: ExprId) -> Option<Exact
         | ExprKind::Repeat { .. }
         | ExprKind::If { .. }
         | ExprKind::Error => None,
+    }
+}
+
+/// Why an operation over literals traps in the type it works in: an operand outside that type,
+/// which it is narrowed into first; a shift by an amount not below the type's width; a shift
+/// whose value leaves the type; or a zero divisor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trap {
+    Outside(Exact),
+    ShiftAmount(Exact),
+    Shifted(Option<Exact>),
+    ZeroDivisor,
+}
+
+/// Why `e`, an operation of a function whose operands are expressions of literals alone of one
+/// value each, traps whenever it runs, in `t`, the type its literals take: `~`, `&`, `|`, `^`, a
+/// shift, a division or a remainder. None where it does not trap, where an operand has no one
+/// value, an operand of its own that traps included, and for an expression of any other kind;
+/// so of an expression of literals alone, only the innermost operation that traps is named.
+pub fn trap(tree: &Tree, literals: &[Option<Taken>], e: ExprId, t: IntTy) -> Option<Trap> {
+    let of = |x: ExprId| value(tree, literals, x);
+    let outside = |x: Exact| (!x.fits(t)).then_some(Trap::Outside(x));
+    match &tree.expr(e).kind {
+        ExprKind::Unary { op, operand } => match op {
+            UnaryOp::BitNot => outside(of(*operand)?),
+            UnaryOp::Neg | UnaryOp::Not => None,
+        },
+        ExprKind::Binary { op, lhs, rhs } => {
+            let (a, b) = (of(*lhs)?, of(*rhs)?);
+            match op {
+                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                    outside(a).or_else(|| outside(b))
+                }
+                BinaryOp::Shl | BinaryOp::Shr => {
+                    let width = Exact::new(false, u128::from(t.bits));
+                    let amount = b.negative || b.magnitude >= width.magnitude;
+                    if amount {
+                        return Some(Trap::ShiftAmount(b));
+                    }
+                    outside(a).or_else(|| {
+                        let shifted = apply(*op, a, b, Some(t));
+                        let k = 1u128 << b.magnitude;
+                        let exact = a.times(Exact::new(false, k));
+                        (*op == BinaryOp::Shl && shifted.is_none()).then_some(Trap::Shifted(exact))
+                    })
+                }
+                BinaryOp::Div | BinaryOp::Rem => (b.magnitude == 0).then_some(Trap::ZeroDivisor),
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => None,
+            }
+        }
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
+    }
+}
+
+/// The most values [`values`] keeps of one expression.
+const MOST_VALUES: usize = 64;
+
+/// The values `e`, an expression of literals alone of a function, may have, each exact, as
+/// [`value`] computes one: one for each branch of an `if`, each arm of a `match` and each
+/// element of an array literal it indexes, in each combination where they are operands. None
+/// where an operation traps, a value leaves 128 bits, there are more than [`MOST_VALUES`], and
+/// for an expression of any other kind.
+pub fn values(tree: &Tree, literals: &[Option<Taken>], e: ExprId) -> Option<Vec<Exact>> {
+    let ty = literals.get(e.0 as usize).copied().flatten().map(|t| t.ty);
+    let of = |x: ExprId| values(tree, literals, x);
+    let mut out: Vec<Exact> = Vec::new();
+    let mut add = |v: Exact| {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    };
+    match &tree.expr(e).kind {
+        ExprKind::Int { value, suffix } => match suffix {
+            None => add(Exact::new(false, *value)),
+            Some(_) => return None,
+        },
+        ExprKind::Unary { op, operand } => match op {
+            UnaryOp::Neg => of(*operand)?.into_iter().for_each(|x| add(x.negated())),
+            UnaryOp::BitNot => {
+                for x in of(*operand)? {
+                    add(complement(x, ty?)?);
+                }
+            }
+            UnaryOp::Not => return None,
+        },
+        ExprKind::Binary { op, lhs, rhs } => {
+            let (a, b) = (of(*lhs)?, of(*rhs)?);
+            if a.len() * b.len() > MOST_VALUES {
+                return None;
+            }
+            for x in &a {
+                for y in &b {
+                    add(apply(*op, *x, *y, ty)?);
+                }
+            }
+        }
+        ExprKind::If { .. } | ExprKind::Match { .. } | ExprKind::Index { .. } => {
+            for alt in alternatives(tree, e) {
+                if alt == e {
+                    return None;
+                }
+                of(alt)?.into_iter().for_each(&mut add);
+            }
+        }
+        ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Error => return None,
+    }
+    (out.len() <= MOST_VALUES).then_some(out)
+}
+
+/// The expressions whose value `e` takes: each branch's of an `if`, each arm's of a `match` and
+/// each element's of an array literal it indexes, through those nested in them, and `e` itself
+/// for an expression of any other kind. A branch that ends in no value, by `return` or a trap,
+/// gives none.
+pub fn alternatives(tree: &Tree, e: ExprId) -> Vec<ExprId> {
+    let mut out = Vec::new();
+    collect_alternatives(tree, e, &mut out);
+    out
+}
+
+fn collect_alternatives(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
+    let tail = |b: BlockId, out: &mut Vec<ExprId>| {
+        let Some(&s) = tree.block(b).stmts.last() else {
+            return;
+        };
+        match &tree.stmt(s).kind {
+            StmtKind::Expr(x) => collect_alternatives(tree, *x, out),
+            StmtKind::Binding { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Guard { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Discard(_) => {}
+        }
+    };
+    match &tree.expr(e).kind {
+        ExprKind::If {
+            then, otherwise, ..
+        } => {
+            tail(*then, out);
+            match otherwise {
+                Some(Else::Block(b)) => tail(*b, out),
+                Some(Else::If(i)) => collect_alternatives(tree, *i, out),
+                None => {}
+            }
+        }
+        ExprKind::Match { arms, .. } => {
+            for arm in arms {
+                match arm.body {
+                    ArmBody::Expr(x) => collect_alternatives(tree, x, out),
+                    ArmBody::Block(b) => tail(b, out),
+                }
+            }
+        }
+        ExprKind::Index { base, .. } => match &tree.expr(*base).kind {
+            ExprKind::Array(items) => {
+                for &i in items {
+                    collect_alternatives(tree, i, out);
+                }
+            }
+            ExprKind::Repeat { value, .. } => collect_alternatives(tree, *value, out),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => out.push(e),
+        },
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::Error => out.push(e),
+    }
+}
+
+/// `~x` in type `t`: none where `x` lies outside it, since it is narrowed into it first.
+fn complement(x: Exact, t: IntTy) -> Option<Exact> {
+    Some(Exact::of_bits(!x.filter_fits(t)?.bits(t), t))
+}
+
+/// `a op b` for the arithmetic, bit and shift operators: arithmetic exact, a bit operation and
+/// a shift in `t`, the type their literals take. None for any other operator, where an operation
+/// traps and where the value leaves 128 bits.
+pub(crate) fn apply(op: BinaryOp, a: Exact, b: Exact, t: Option<IntTy>) -> Option<Exact> {
+    match op {
+        BinaryOp::Add => a.plus(b),
+        BinaryOp::Sub => a.plus(b.negated()),
+        BinaryOp::Mul => a.times(b),
+        // Truncated toward zero, the remainder with the dividend's sign.
+        BinaryOp::Div => Some(Exact::new(
+            a.negative != b.negative,
+            a.magnitude.checked_div(b.magnitude)?,
+        )),
+        BinaryOp::Rem => Some(Exact::new(
+            a.negative,
+            a.magnitude.checked_rem(b.magnitude)?,
+        )),
+        BinaryOp::BitAnd => in_type(t?, a, b, |x, y| x & y),
+        BinaryOp::BitOr => in_type(t?, a, b, |x, y| x | y),
+        BinaryOp::BitXor => in_type(t?, a, b, |x, y| x ^ y),
+        BinaryOp::Shl | BinaryOp::Shr => {
+            let t = t?;
+            let k = u32::try_from(b.magnitude)
+                .ok()
+                .filter(|k| !b.negative && *k < t.bits)?;
+            let x = a.filter_fits(t)?;
+            if op == BinaryOp::Shl {
+                x.times(Exact::new(false, 1u128 << k)).filter(|v| v.fits(t))
+            } else {
+                // Rounded toward negative infinity.
+                let q = x.magnitude >> k;
+                let exact = q << k == x.magnitude;
+                Some(Exact::new(x.negative, q + u128::from(x.negative && !exact)))
+            }
+        }
+        BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge => None,
     }
 }
 
@@ -339,8 +570,10 @@ impl Walk<'_> {
                     self.expr(*rhs, None);
                 }
             },
+            // An array literal indexed gives its element's value, so its elements take what the
+            // indexing is given, as an `if`'s branches do; the index takes none.
             ExprKind::Index { base, index } => {
-                self.expr(*base, None);
+                self.expr(*base, here);
                 self.expr(*index, None);
             }
             ExprKind::Field { base, .. } => self.expr(*base, None),
@@ -459,9 +692,18 @@ mod tests {
     use super::*;
     use crate::wide;
 
+    /// The functions of a module, typed though the checker reports an error in them, as it does
+    /// an operation over literals that traps (`E0234`), whose values these tests read.
+    struct Typed {
+        functions: Vec<Option<crate::CheckedFn>>,
+    }
+
     /// The index, in the last function of `full`, of the first expression written `text`.
-    fn at(full: &str, text: &str) -> (crate::CheckedModule, usize) {
-        let m = crate::check_program_without_proofs(full).unwrap_or_else(|d| panic!("{:?}", d));
+    fn at(full: &str, text: &str) -> (Typed, usize) {
+        let module = mente_syntax::parse_module(full).unwrap_or_else(|d| panic!("{:?}", d));
+        let m = Typed {
+            functions: crate::bodies(full, &module, false).functions,
+        };
         let f = m
             .functions
             .last()
@@ -708,6 +950,19 @@ mod tests {
                 "u8",
                 From::Operands,
             ),
+            // An array literal indexed gives its elements what the indexing is given.
+            (
+                "pub fn f(a: u8, k: usize[0..2]) -> bool = a == [~3, 1][k]",
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8, c: bool) -> bool = a == (if c { ~3 } else { 1 })",
+                "~3",
+                "u8",
+                From::Operands,
+            ),
         ] {
             assert_eq!(of(src, text), Some((ty, from)), "`{}` in {}", text, src);
         }
@@ -717,6 +972,55 @@ mod tests {
             ("pub fn f(a: u8, b: u32) -> bool = a == b + 1", "b + 1"),
         ] {
             assert_eq!(of(src, text), None, "`{}` in {}", text, src);
+        }
+    }
+
+    /// The values an expression of literals alone may take: each branch's, arm's and indexed
+    /// element's, in each combination under an operator, in the type their literals take, here
+    /// a `u8`'s from the operand of the addition they stand in; none where an operand has a
+    /// type of its own.
+    #[test]
+    fn test_the_values_of_literals_alone_are_each_branchs_arms_and_elements() {
+        let values_of = |expr: &str| -> Option<Vec<(bool, u128)>> {
+            let full = format!(
+                "module m\npub fn f(a: u8, c: bool, k: usize[0..2]) -> u8 {{\n  _ = a + ({})\n  a\n}}\n",
+                expr
+            );
+            let (m, at) = at(&full, expr);
+            let f = m.functions.last().and_then(|f| f.as_ref())?;
+            let mut out: Vec<(bool, u128)> =
+                values(&f.syntax.tree, &f.typing.literals, ExprId(at as u32))?
+                    .into_iter()
+                    .map(|v| (v.negative, v.magnitude))
+                    .collect();
+            out.sort();
+            Some(out)
+        };
+        for (expr, expected) in [
+            (
+                "if c { 300 } else { 1 }",
+                Some(vec![(false, 1), (false, 300)]),
+            ),
+            (
+                "(if c { ~3 } else { 1 }) + 2",
+                Some(vec![(false, 3), (false, 254)]),
+            ),
+            (
+                "if c { 1 } else if k == 0 { -2 } else { 3 * 4 }",
+                Some(vec![(false, 1), (false, 12), (true, 2)]),
+            ),
+            (
+                "[~3, 1, 7][k]",
+                Some(vec![(false, 1), (false, 7), (false, 252)]),
+            ),
+            ("[~0; 2][k]", Some(vec![(false, 255)])),
+            (
+                "match a {\n    0 => 300\n    1 => {\n      ~3\n    }\n    _ => 2\n  }",
+                Some(vec![(false, 2), (false, 252), (false, 300)]),
+            ),
+            ("if c { a } else { 1 }", None),
+        ] {
+            assert_eq!(values_of(expr), expected, "`{}`", expr);
         }
     }
 

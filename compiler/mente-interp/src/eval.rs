@@ -803,8 +803,10 @@ impl<'m> Machine<'m> {
                     self.arith(frame, *op, [(l, lt, *lhs), (r, rt, *rhs)], here, span)?
                 }
             },
+            // An array literal indexed gives its element's value, so its elements take what
+            // the indexing is given; the index takes nothing (`core-calculus.md`, item 5).
             ExprKind::Index { base, index } => {
-                let b = self.eval(frame, *base, None)?;
+                let b = self.eval(frame, *base, here)?;
                 let i = self.int(frame, *index, None)?;
                 element(&b, i, span)?.clone()
             }

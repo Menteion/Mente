@@ -133,14 +133,6 @@ pub fn suffixed_shift() -> u64 = 1_u64 << 63
 
 pub fn suffixed_all() -> u128 = ~0_u128
 
-// A literal outside `i64`, or shifted past it, traps where the operation narrows it into
-// `i64`, before the value reaches its place.
-pub fn shifted_out_of_i64() -> u64 = 1 << 63
-
-pub fn literal_outside_i64() -> u64 = 1 | 9223372036854775808
-
-pub fn shifted_by_the_width_of_i64() -> u128 = 1 << 64
-
 pub fn beside_at_its_edges() -> u16 = beside_in_a_sum(0) + beside_in_a_sum(255)
 
 pub fn beside_two_types_at_their_edges() -> u32 = beside_two_types(0, 0) + beside_two_types(255, 65535)

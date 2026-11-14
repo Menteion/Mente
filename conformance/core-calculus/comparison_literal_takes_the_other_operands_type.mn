@@ -62,6 +62,25 @@ pub fn in_a_clause(a: u8) -> u8
   ensures result >= 0
 = a
 
+// An array literal indexed gives its elements the type the indexing takes, and a branch's
+// literal takes the other operand's type as a literal operand does.
+pub fn index_base(a: u8, k: usize[0..2]) -> bool = a == [~3, 1][k]
+
+pub fn in_a_branch(a: u8, c: bool) -> bool = a == (if c { ~3 } else { 1 })
+
+pub fn in_an_arm(a: u8, k: u8) -> bool = a == (match k {
+  0 => ~0
+  _ => 1
+})
+
+pub fn index_base_at_252() -> bool = index_base(252, 0)
+
+pub fn index_base_at_1() -> bool = index_base(1, 1)
+
+pub fn branch_at_252() -> bool = in_a_branch(252, true)
+
+pub fn arm_at_255() -> bool = in_an_arm(255, 0)
+
 pub fn complement_at_252() -> bool = complement(252)
 
 pub fn complement_at_4() -> bool = complement(4)

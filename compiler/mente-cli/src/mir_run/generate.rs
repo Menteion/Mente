@@ -2356,7 +2356,8 @@ impl Gen {
             _ => self.int_expr(inner, depth + 1),
         };
         let b = if matches!(op, Op::Div | Op::Rem) {
-            self.divisor(b)
+            let alone = a.cls == Cls::Lit;
+            self.divisor(b, alone)
         } else {
             b
         };
@@ -2625,7 +2626,8 @@ impl Gen {
             (other, product)
         };
         let y = if matches!(op, Op::Div | Op::Rem) {
-            self.divisor(y)
+            let alone = x.cls == Cls::Lit;
+            self.divisor(y, alone)
         } else {
             y
         };
@@ -2638,18 +2640,20 @@ impl Gen {
         } else {
             self.int_expr(Want::Any, depth + 1)
         };
-        let under = self.divisor(g);
+        let alone = over.cls == Cls::Lit;
+        let under = self.divisor(g, alone);
         Self::combined(*self.rng.pick(&[Op::Div, Op::Div, Op::Rem]), over, under)
     }
 
-    /// A divisor: one that is always zero becomes one most of the time, and a name is guarded
-    /// positive in the modes with guards.
-    fn divisor(&mut self, b: G) -> G {
+    /// A divisor: one that is always zero becomes one most of the time, and always beside a
+    /// dividend of literals alone, `alone`, since a division of literals alone by zero is an
+    /// error (`E0234`); a name is guarded positive in the modes with guards.
+    fn divisor(&mut self, b: G, alone: bool) -> G {
         // Zero as written, or as a run knows it: `16 % x` after `guard x <= 1`.
         let zero = b.r == R::point(Num::ZERO)
             || b.k == Some(Num::ZERO)
             || self.fact(&b.e) == Some(R::point(Num::ZERO));
-        if zero && !self.rng.chance(90) {
+        if zero && !(alone && b.cls == Cls::Lit) && !self.rng.chance(90) {
             self.zero_divisor = true;
             self.doomed = true;
             return b;
@@ -3662,7 +3666,9 @@ impl Gen {
                 // bounds alone, which prove a name against a literal and nothing of two
                 // names. And it holds no sum of a name with itself, `n + n`, in any function.
                 // So an argument related to a name is a literal in a function that may grow,
-                // and is another name than that one in a function that stays small.
+                // and is another name than that one in a function that stays small. This
+                // dodge waits on the register's `valuations-past-the-domain`, and goes when that
+                // entry closes.
                 let m = self.mark();
                 // Where two names may be related, a related argument is a name whenever one
                 // is in scope.
@@ -4594,7 +4600,7 @@ impl Gen {
                             .pick(&[Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Rem]);
                         let mut v = self.int_expr(Want::Any, 1);
                         if matches!(op, Op::Div | Op::Rem) {
-                            v = self.divisor(v);
+                            v = self.divisor(v, false);
                         }
                         let fits = t.bits == 128
                             || v.cls.wide().is_some()
@@ -5196,7 +5202,8 @@ impl Gen {
                     let op = *self.rng.pick(&[Op::Lt, Op::Le, Op::Gt, Op::Ge]);
                     // A bound Tier 1's domain holds, with room to double it: it proves no
                     // comparison with a constant at or beyond its limit, not even a literal's,
-                    // so no call could meet the clause.
+                    // so no call could meet the clause. This dodge waits on the register's
+                    // `valuations-past-the-domain`, and goes when that entry closes.
                     let reach = Num::new(false, (mente_sema::octagon::BIG / 4).unsigned_abs());
                     let c = self.value_in(R {
                         lo: ta.min().max(reach.negated()),
@@ -5860,14 +5867,20 @@ fn always_traps(
         // inside a later argument may give and narrow there again.
         let values = args.iter().map(|(_, v)| v.clone()).collect();
         let mut given: Vec<Int> = Vec::new();
+        // The place of the last value given, before the trap that may end the run.
+        let mut last: Option<(usize, usize)> = None;
         let end = mente_interp::call_observed(
             kept,
             name,
             values,
             limits,
             &mut |span: Span, x: Int, why: Shown| match why {
-                Shown::Given if (span.start, span.end) == watch => given.push(x),
+                Shown::Given if (span.start, span.end) == watch => {
+                    last = Some((span.start, span.end));
+                    given.push(x);
+                }
                 Shown::Given => {
+                    last = Some((span.start, span.end));
                     if body.contains(&span.start) && span.start <= watch.0 {
                         probe.progress = probe.progress.max(span.start);
                     }
@@ -5884,13 +5897,19 @@ fn always_traps(
             Err(stop) => stop.to_string(),
         };
         // An operation on a 128-bit operand is checked at its operator, so it traps there
-        // and gives no value: the trap holds the exact result it computed.
+        // and gives no value: the trap holds the exact result it computed. A compound
+        // assignment's operation traps at its right side, the diagnostic's span, though the
+        // value it would give is shown with the whole assignment's; it is that operation's
+        // trap only once the right side has given its value, since an operation of the right
+        // side's own traps at the same span before it gives one.
         if let Err(mente_interp::Stop::Trap(mente_interp::Trap {
             kind: mente_interp::TrapKind::Narrowing { value: Some(x), .. },
             span,
         })) = end
         {
-            if (span.start, span.end) == watch && probe.values.is_empty() {
+            let here = (span.start, span.end);
+            let compound = here == (at.start, at.end) && last == Some(here);
+            if (here == watch || compound) && probe.values.is_empty() {
                 probe.values.push(x);
             }
         }
@@ -6448,7 +6467,7 @@ mod tests {
         let (mut kept, mut replaced) = (0, 0);
         for _ in 0..600 {
             g.doomed = false;
-            let d = g.divisor(zero.clone());
+            let d = g.divisor(zero.clone(), false);
             let is = d.k == Some(Num::ZERO);
             assert_eq!(g.doomed, is, "{}", d.e.text());
             kept += usize::from(is);
@@ -6460,6 +6479,14 @@ mod tests {
             kept,
             replaced
         );
+        // Beside a dividend of literals alone a literal zero is always replaced: the division
+        // would be literals alone, and one by zero is an error (`E0234`).
+        for _ in 0..200 {
+            g.doomed = false;
+            let d = g.divisor(zero.clone(), true);
+            assert_eq!(d.k, Some(Num::small(1)), "{}", d.e.text());
+            assert!(!g.doomed);
+        }
         // A divisor a run knows to be zero is one too, though its static range is wider:
         // `16 % x` where a `guard` left `x` at most 1. Tier 1 knows it, and refuses a `match`
         // on a quotient by it.
@@ -6479,7 +6506,7 @@ mod tests {
         let (mut kept, mut replaced) = (0, 0);
         for _ in 0..600 {
             h.zero_divisor = false;
-            let d = h.divisor(known.clone());
+            let d = h.divisor(known.clone(), true);
             let is = d.e.text() == "16 % x";
             assert_eq!(h.zero_divisor, is, "{}", d.e.text());
             kept += usize::from(is);
@@ -7072,6 +7099,31 @@ mod tests {
             "{}",
             problems[0]
         );
+
+        // A compound assignment to a 128-bit place traps at its operator, at its right side:
+        // its claim reads the trap's value, and one planted wrong there is caught.
+        let compound =
+            written("pub fn f(p: u8) -> u128 {\n  var x: u128 = 0\n  x -= 1 + p\n  x\n}");
+        let (seen, problems) = claims(&compound);
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen.len(), 1, "{:?}", seen);
+        assert!(
+            seen[0].calls > 0 && seen[0].reached == seen[0].calls,
+            "{:?}",
+            seen[0]
+        );
+        let (_, problems) = claimed(&compound, "at most -1", "at most -2");
+        assert_eq!(problems.len(), 1, "{:?}", problems);
+        assert!(problems[0].ends_with("-1 is above -2"), "{}", problems[0]);
+        // A right side that is itself an operation on a 128-bit operand traps at the same span
+        // before it gives a value: its trap is not the compound assignment's (seed 9247).
+        let inner = written(
+            "pub fn f(p: u128, q: u16) -> u32 {\n  var v: u32 = 5\n  guard q > 0 else {\n    return 0\n  }\n  v *= -34 - p / q\n  v\n}",
+        );
+        let (seen, problems) = claims(&inner);
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(seen.len(), 1, "{:?}", seen);
+        assert_eq!(seen[0].reached, 0, "{:?}", seen[0]);
 
         let wide = written("pub fn f(x: u128) -> u128 {\n  var v = x\n  v = -4 - v\n  v\n}");
         let (seen, problems) = claims(&wide);

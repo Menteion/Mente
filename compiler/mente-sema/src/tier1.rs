@@ -28,6 +28,7 @@ use mente_syntax::{Attr, Span};
 
 use crate::bounds;
 use crate::check::Typing;
+use crate::literals;
 use crate::names::{BindingKind, Resolution};
 use crate::octagon::{Exact, Octagon, Term, BIG, INF, RELATIONAL_LIMIT};
 use crate::types::{Int, IntTy, Ty, I64, INT_TYPES, USIZE};
@@ -1201,15 +1202,20 @@ fn print(tree: &Tree, e: ExprId, subst: Subst) -> (String, u8) {
         },
         ExprKind::Bool(b) => b.to_string(),
         ExprKind::Name(n) => return subst(e, n).unwrap_or((n.clone(), p)),
-        ExprKind::Unary { op, operand } => match op {
-            UnaryOp::Not => format!("not {}", at(*operand, 3)),
-            UnaryOp::Neg => format!("-{}", at(*operand, 12)),
-            UnaryOp::BitNot => format!("~{}", at(*operand, 12)),
+        // An operand may be written whole in another function's terms ([`retyped`]).
+        ExprKind::Unary { op, operand } => match (subst(e, ""), op) {
+            (Some(t), _) => return t,
+            (None, UnaryOp::Not) => format!("not {}", at(*operand, 3)),
+            (None, UnaryOp::Neg) => format!("-{}", at(*operand, 12)),
+            (None, UnaryOp::BitNot) => format!("~{}", at(*operand, 12)),
         },
-        ExprKind::Binary { op, lhs, rhs } => {
-            let left = if p == 4 { p + 1 } else { p };
-            format!("{} {} {}", at(*lhs, left), op.symbol(), at(*rhs, p + 1))
-        }
+        ExprKind::Binary { op, lhs, rhs } => match subst(e, "") {
+            Some(t) => return t,
+            None => {
+                let left = if p == 4 { p + 1 } else { p };
+                format!("{} {} {}", at(*lhs, left), op.symbol(), at(*rhs, p + 1))
+            }
+        },
         ExprKind::Index { base, index } => format!("{}[{}]", at(*base, 12), at(*index, 0)),
         ExprKind::Field { base, name } => match subst(e, "") {
             // A field path may be replaced whole.
@@ -1409,24 +1415,37 @@ fn int_type(t: &Ty) -> Option<Int> {
     }
 }
 
-/// The literals the clause `e` of `tree` compares with an operand whose type, in the terms a
-/// `guard` writes the clause in, they lie outside, each with the smallest standard type that
-/// holds it. A compared literal takes the type of the other operand (`core-calculus.md`, item
-/// 5), and writing a clause in a caller's terms may change that type, which would make the
-/// guard an error (`E0233`): such a literal states its own type, and the guard compares it
-/// exactly, as the clause did. `leaf` gives the type of a name or a field path there, or none
-/// when it is not known; a literal beside an operand whose type is not known states its own.
-fn retyped(tree: &Tree, e: ExprId, leaf: &dyn Fn(ExprId) -> Option<Int>) -> Vec<(ExprId, IntTy)> {
+/// The value of a name a clause reads, when an expression of literals alone comes in as it,
+/// with the type of the parameter it comes in as.
+type LiteralIn<'s> = &'s dyn Fn(ExprId) -> Option<(literals::Exact, Option<IntTy>)>;
+
+/// The compared operands of the clause `e` of `tree` that a `guard` in the terms of a call or a
+/// return writes otherwise, each with its text. A compared literal takes the type of the other
+/// operand (`core-calculus.md`, item 5), and writing a clause in a caller's terms may change that
+/// type, which would make the guard an error (`E0233`): an operand that is an expression of
+/// literals alone once the arguments are put in, a literal written in the clause, one that
+/// comes in as an argument, or an arithmetic of them, is written as its value with a suffix
+/// where the type it would take does not hold it, so that the guard compares it exactly, as the
+/// clause did. The suffix is that of the parameter it comes in as, where that type holds it,
+/// and else that of the smallest standard type that does. `leaf` gives the type of a name or a
+/// field path there, or none when it is not known, beside which a literal states its own type;
+/// `literal` gives the value of a name an expression of literals alone comes in as.
+fn retyped(
+    tree: &Tree,
+    e: ExprId,
+    leaf: &dyn Fn(ExprId) -> Option<Int>,
+    literal: LiteralIn,
+) -> Vec<(ExprId, (String, u8))> {
     let mut out = Vec::new();
-    retyped_into(tree, e, leaf, &mut out);
+    retyped_into(tree, e, (leaf, literal), &mut out);
     out
 }
 
 fn retyped_into(
     tree: &Tree,
     e: ExprId,
-    leaf: &dyn Fn(ExprId) -> Option<Int>,
-    out: &mut Vec<(ExprId, IntTy)>,
+    (leaf, literal): (&dyn Fn(ExprId) -> Option<Int>, LiteralIn),
+    out: &mut Vec<(ExprId, (String, u8))>,
 ) {
     match &tree.expr(e).kind {
         ExprKind::Binary { op, lhs, rhs } => {
@@ -1451,22 +1470,28 @@ fn retyped_into(
                 | BinaryOp::Or => false,
             };
             if compares {
-                for (lit, other) in [(*lhs, *rhs), (*rhs, *lhs)] {
-                    let Some((at, v)) = plain_literal(tree, lit) else {
+                for (side, other) in [(*lhs, *rhs), (*rhs, *lhs)] {
+                    let Some((v, place)) = side_value(tree, side, literal) else {
                         continue;
                     };
                     let fits = operand_int(tree, other, leaf)
-                        .is_some_and(|t| exact_in(v, compared_type(&Ty::Int(t))));
-                    let holder = INT_TYPES.iter().find(|t| exact_in(v, **t));
-                    if let (false, Some(t)) = (fits, holder) {
-                        out.push((at, *t));
+                        .is_some_and(|t| v.fits(compared_type(&Ty::Int(t))));
+                    let suffix = place
+                        .filter(|t| v.fits(*t))
+                        .or_else(|| INT_TYPES.iter().copied().find(|t| v.fits(*t)));
+                    // A negated literal binds as a unary operator does, a plain one as a primary
+                    // expression ([`prec`]).
+                    if let (false, Some(t)) = (fits, suffix) {
+                        let sign = if v.negative { "-" } else { "" };
+                        let text = format!("{}{}_{}", sign, v.magnitude, t.name);
+                        out.push((side, (text, if v.negative { 11 } else { 12 })));
                     }
                 }
             }
-            retyped_into(tree, *lhs, leaf, out);
-            retyped_into(tree, *rhs, leaf, out);
+            retyped_into(tree, *lhs, (leaf, literal), out);
+            retyped_into(tree, *rhs, (leaf, literal), out);
         }
-        ExprKind::Unary { operand, .. } => retyped_into(tree, *operand, leaf, out),
+        ExprKind::Unary { operand, .. } => retyped_into(tree, *operand, (leaf, literal), out),
         ExprKind::Int { .. }
         | ExprKind::Bool(_)
         | ExprKind::Name(_)
@@ -1485,25 +1510,47 @@ fn retyped_into(
     }
 }
 
-/// The literal `e` is, with no suffix, alone or negated: the literal's own expression and the
-/// value.
-fn plain_literal(tree: &Tree, e: ExprId) -> Option<(ExprId, Exact)> {
+/// The value of `e`, an operand of a clause of `tree`, once the arguments are put in, when it
+/// is an expression of literals alone then: a literal of no suffix, one that comes in as an
+/// argument (`literal`), with the type of its parameter, and their negations and arithmetic,
+/// exact. None for any other operand, a bit operation or a shift of literals among them, whose
+/// value depends on the type it takes.
+fn side_value(
+    tree: &Tree,
+    e: ExprId,
+    literal: LiteralIn,
+) -> Option<(literals::Exact, Option<IntTy>)> {
     match &tree.expr(e).kind {
         ExprKind::Int { value, suffix } => match suffix {
-            None => Some((e, Exact::new(false, *value))),
+            None => Some((literals::Exact::new(false, *value), None)),
             Some(_) => None,
         },
         ExprKind::Unary { op, operand } => match op {
-            // The literal under the `-`, not one under two.
-            UnaryOp::Neg => plain_literal(tree, *operand)
-                .filter(|(at, _)| at == operand)
-                .map(|(at, v)| (at, v.negated())),
+            UnaryOp::Neg => side_value(tree, *operand, literal).map(|(v, t)| (v.negated(), t)),
             UnaryOp::Not | UnaryOp::BitNot => None,
         },
+        ExprKind::Binary { op, lhs, rhs } => match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
+                let (a, _) = side_value(tree, *lhs, literal)?;
+                let (b, _) = side_value(tree, *rhs, literal)?;
+                Some((literals::apply(*op, a, b, None)?, None))
+            }
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::And
+            | BinaryOp::Or => None,
+        },
+        ExprKind::Name(_) | ExprKind::Field { .. } => literal(e),
         ExprKind::Bool(_)
-        | ExprKind::Name(_)
-        | ExprKind::Binary { .. }
-        | ExprKind::Field { .. }
         | ExprKind::Index { .. }
         | ExprKind::Call { .. }
         | ExprKind::Construct { .. }
@@ -1571,30 +1618,12 @@ fn operand_int(tree: &Tree, e: ExprId, leaf: &dyn Fn(ExprId) -> Option<Int>) -> 
     }
 }
 
-/// The text of the literal `e` of `tree` when [`retyped`] gives it a type: its digits and the
-/// type's suffix.
-fn retyped_text(tree: &Tree, retyped: &[(ExprId, IntTy)], e: ExprId) -> Option<(String, u8)> {
-    let (_, t) = retyped.iter().find(|(at, _)| *at == e)?;
-    let kind = &tree.expr(e).kind;
-    match kind {
-        ExprKind::Int { value, .. } => Some((format!("{}_{}", value, t.name), prec(kind))),
-        ExprKind::Unary { .. }
-        | ExprKind::Bool(_)
-        | ExprKind::Name(_)
-        | ExprKind::Binary { .. }
-        | ExprKind::Field { .. }
-        | ExprKind::Index { .. }
-        | ExprKind::Call { .. }
-        | ExprKind::Construct { .. }
-        | ExprKind::Variant { .. }
-        | ExprKind::Array(_)
-        | ExprKind::Repeat { .. }
-        | ExprKind::Todo(_)
-        | ExprKind::Unreachable(_)
-        | ExprKind::If { .. }
-        | ExprKind::Match { .. }
-        | ExprKind::Error => None,
-    }
+/// The text [`retyped`] gives the operand `e`, if it gives one.
+fn retyped_text(retyped: &[(ExprId, (String, u8))], e: ExprId) -> Option<(String, u8)> {
+    retyped
+        .iter()
+        .find(|(at, _)| *at == e)
+        .map(|(_, t)| t.clone())
 }
 
 fn chain_of(tree: &Tree, e: ExprId) -> Option<(String, Vec<String>)> {
@@ -2352,6 +2381,17 @@ impl<'a> Fx<'a> {
                 .map_or(bound_text(b), |l| l.to_string()),
             Bound::Int { .. } => bound_text(b),
         };
+        // A bound that names a parameter an expression of literals alone is passed as is that
+        // value, exactly.
+        let exact = |b: &Bound| match b {
+            Bound::Name(n) => param(n).and_then(|k| args.get(k)).and_then(|a| {
+                let literal = self.typing.exprs[a.value.0 as usize] == Ty::Int(Int::Literal);
+                let v = literals::value(self.tree, &self.typing.literals, a.value)
+                    .filter(|_| literal)?;
+                Some(Exact::new(v.negative, v.magnitude))
+            }),
+            Bound::Int { .. } | Bound::Len(_) => bound_exact(b),
+        };
         match &tree.ty(t).kind {
             TypeKind::Int { name, refinement } => Shape::Int {
                 int: IntTy::named(name),
@@ -2364,8 +2404,8 @@ impl<'a> Fx<'a> {
                         hi_text: text(&r.hi),
                         text: tree.render_type(t),
                         declared: literal_refinement(name, r),
-                        lo_lit: bound_exact(&r.lo),
-                        hi_lit: bound_exact(&r.hi),
+                        lo_lit: exact(&r.lo),
+                        hi_lit: exact(&r.hi),
                     })
                 }),
             },
@@ -2719,6 +2759,17 @@ impl<'a> Fx<'a> {
             | ExprKind::If { .. }
             | ExprKind::Error => None,
         }
+    }
+
+    /// The value of `e` when it is an expression of literals alone of one value, as the checker
+    /// computes it in the type its literals take (`literals::value`), within the octagon's reach.
+    fn literal_value(&self, e: ExprId) -> Option<Val> {
+        if self.typing.exprs[e.0 as usize] != Ty::Int(Int::Literal) {
+            return None;
+        }
+        let v = literals::value(self.tree, &self.typing.literals, e)?;
+        let far = Exact::new(v.negative, v.magnitude).is_far();
+        (!far).then(|| bound_int(v.negative, v.magnitude))
     }
 
     /// `e` as a `guard` writes it, with the type a literal compared with it takes.
@@ -3385,7 +3436,13 @@ impl<'a> Fx<'a> {
     /// ([`strict-defaults`]).
     ///
     /// [`strict-defaults`]: ../../docs/design-review.md#strict-defaults
-    fn always_traps(&mut self, side: &str, t: IntTy, span: Span, what: &str) {
+    fn always_traps(
+        &mut self,
+        side: &str,
+        (t, refine): (IntTy, Option<&Refine>),
+        span: Span,
+        what: &str,
+    ) {
         let message = format!(
             "Tier 1 proves {} is {} here, outside `{}` ({}), so this narrowing always traps",
             what,
@@ -3395,7 +3452,7 @@ impl<'a> Fx<'a> {
         );
         let recorded = self.recording;
         self.emit("E0508", span, message, None, Anchor::Nowhere);
-        if let (true, Some(fix)) = (recorded, self.suffix_fix(span, t)) {
+        if let (true, Some(fix)) = (recorded, self.suffix_fix(span, t, refine)) {
             if let Some(d) = self.report.diagnostics.last_mut() {
                 d.fixes.push(fix);
             }
@@ -3406,13 +3463,31 @@ impl<'a> Fx<'a> {
     /// `u8`: the place gives a literal no type, so `~3` is -4, an `i64` (`core-calculus.md`,
     /// item 5). The literal is written with the place's type, `~3_u8`, which keeps `~` in that
     /// type and its value within it, so the narrowing fits. None for any other value, and where
-    /// the literal does not lie in the type, as in `~256` for a `u8`.
-    fn suffix_fix(&self, span: Span, t: IntTy) -> Option<Fix> {
+    /// the literal does not lie in the type, as in `~256` for a `u8`. A machine-applicable fix
+    /// is certain (`diagnostics.md`, item 4), so where the place is refined the fix is offered
+    /// only when its refinement holds the value the suffix gives, which is then the only one:
+    /// `~3_u8` is 252, outside `u8[0..10]`.
+    fn suffix_fix(&self, span: Span, t: IntTy, refine: Option<&Refine>) -> Option<Fix> {
         let tree = self.tree;
         let e = (0..tree.exprs.len())
             .map(|i| ExprId(i as u32))
             .find(|&e| tree.expr(e).span == span)?;
         let literal = complemented_literal(tree, e).filter(|(_, value)| *value <= t.max())?;
+        // `~x` in `t`: `max - x` unsigned, `-x - 1` signed.
+        let value = if t.signed {
+            Exact::new(true, literal.1 + 1)
+        } else {
+            Exact::new(false, t.max() - literal.1)
+        };
+        let held = refine.is_none_or(|r| match (r.lo_lit, r.hi_lit) {
+            (Some(lo), Some(hi)) => {
+                lo <= value && if r.inclusive { value <= hi } else { value < hi }
+            }
+            (None, _) | (_, None) => false,
+        });
+        if !held {
+            return None;
+        }
         let at = tree.expr(literal.0).span;
         let replacement = format!("{}_{}", self.src.get(at.start..at.end)?, t.name);
         Some(Fix {
@@ -3445,7 +3520,7 @@ impl<'a> Fx<'a> {
                     if let Some(side) = self.fits(st, v, Some(*t), span) {
                         // What follows a narrowing that always traps is never reached.
                         let shown = what.map_or("the value".to_string(), |w| format!("`{}`", w.0));
-                        self.always_traps(&side, *t, span, &shown);
+                        self.always_traps(&side, (*t, refine.as_deref()), span, &shown);
                         return;
                     }
                 }
@@ -3609,15 +3684,19 @@ impl<'a> Fx<'a> {
                 .declared
                 .as_ref()
                 .and_then(|(name, _)| INT_TYPES.iter().find(|t| t.name == name.as_str()));
-            let bound = |lit: Option<Exact>, text: &str| match lit
-                .filter(|c| !exact_in(*c, ty))
-                .and_then(|c| {
+            // The suffixed bound is written as its value, which an argument's text, `~3` or
+            // `100 + 200`, might not say once suffixed.
+            let bound = |lit: Option<Exact>, text: &str| {
+                let lit = lit.filter(|c| !exact_in(*c, ty));
+                let suffix = lit.and_then(|c| {
                     place
                         .filter(|t| exact_in(c, **t))
                         .or_else(|| INT_TYPES.iter().find(|t| exact_in(c, **t)))
-                }) {
-                Some(t) => format!("{}_{}", text, t.name),
-                None => text.to_string(),
+                });
+                match lit.zip(suffix) {
+                    Some((c, t)) => format!("{}_{}", c, t.name),
+                    None => text.to_string(),
+                }
             };
             let mut parts = Vec::new();
             if fail_low.is_some() {
@@ -3743,10 +3822,24 @@ impl<'a> Fx<'a> {
                 (Some(_), None) => None,
                 (None, _) => int_type(&self.typing.exprs[id.0 as usize]),
             };
-            let retyped = retyped(self.tree, c.expr, &leaf);
-            let subst = |id: ExprId, _: &str| {
-                retyped_text(self.tree, &retyped, id).or_else(|| read(id).map(|r| r.0))
+            // An expression of literals alone returned comes in as `result`, in its type.
+            let literal = |id: ExprId| {
+                let v = value?;
+                let (_, names) = field_chain(self.tree, self.resolution, id)?;
+                read(id).filter(|_| names.is_empty())?;
+                if self.typing.exprs[v.0 as usize] != Ty::Int(Int::Literal) {
+                    return None;
+                }
+                let x = literals::value(self.tree, &self.typing.literals, v)?;
+                let place = self
+                    .syntax
+                    .result
+                    .and_then(|t| int_of(&Ty::of(self.tree, t)));
+                Some((x, place))
             };
+            let retyped = retyped(self.tree, c.expr, &leaf, &literal);
+            let subst =
+                |id: ExprId, _: &str| retyped_text(&retyped, id).or_else(|| read(id).map(|r| r.0));
             let here = print(self.tree, c.expr, &subst).0;
             let followed = fragment_followed(self.tree, c.expr, &|id| {
                 read(id)
@@ -4065,6 +4158,9 @@ impl<'a> Fx<'a> {
             }
             _ => {
                 let v = self.eval(st, e);
+                // An expression of literals alone has one value, which Tier 1 narrows exactly,
+                // though its operations, `|` of a complement say, have no linear form.
+                let v = self.literal_value(e).unwrap_or(v);
                 let what = self.guarded(e);
                 // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one's
                 // value, whose variable is given anew where it is evaluated.
@@ -4558,7 +4654,7 @@ impl<'a> Fx<'a> {
         if settled {
             // Nothing to prove.
         } else if let Some(side) = self.fits(st, value, Some(t), span) {
-            self.always_traps(&side, t, span, &format!("`{}`", what.0));
+            self.always_traps(&side, (t, None), span, &format!("`{}`", what.0));
         } else if !within(st, value, t) {
             // A `guard` that repeats an `if` or a `match` tells Tier 1 nothing of this one.
             let control = kind.is_choice();
@@ -5126,9 +5222,24 @@ impl<'a> Fx<'a> {
                 let k = callee.params.iter().position(|p| p.name == *root)?;
                 self.reading_type(args.get(k)?.value, &names)
             };
-            let retyped = retyped(&callee.tree, clause.expr, &leaf);
+            // An expression of literals alone passed comes in as its parameter, in its type.
+            let literal = |id: ExprId| {
+                let (root, names) = chain_of(&callee.tree, id)?;
+                let k = callee
+                    .params
+                    .iter()
+                    .position(|p| p.name == *root)
+                    .filter(|_| names.is_empty())?;
+                let arg = args.get(k)?.value;
+                if self.typing.exprs[arg.0 as usize] != Ty::Int(Int::Literal) {
+                    return None;
+                }
+                let x = literals::value(self.tree, &self.typing.literals, arg)?;
+                Some((x, int_of(&Ty::of(&callee.tree, callee.params[k].ty))))
+            };
+            let retyped = retyped(&callee.tree, clause.expr, &leaf, &literal);
             let subst = |id: ExprId, _: &str| {
-                retyped_text(&callee.tree, &retyped, id).or_else(|| self.arg_text(callee, args, id))
+                retyped_text(&retyped, id).or_else(|| self.arg_text(callee, args, id))
             };
             let at_call = print(&callee.tree, clause.expr, &subst).0;
             let what = format!("`requires {}` of `{}`", text, callee.name);
@@ -8048,6 +8159,41 @@ fn needs(i: P) -> u16
 pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
                 "y > 300",
             ),
+            // A literal that comes in as an argument takes its parameter's type, on either
+            // side; an expression of literals alone in the clause is written as its value.
+            (
+                "fn g(a: u16, b: u16) -> u16\n  requires a < b\n= a\npub fn f(x: u8, y: u8) -> u16 = g(x + y, 300)",
+                "x + y < 300_u16",
+            ),
+            (
+                "fn g(a: u16, b: u16) -> u16\n  requires a < b\n= a\npub fn f(x: u8, y: u8) -> u16 = g(300, x + y)",
+                "300_u16 < x + y",
+            ),
+            (
+                "fn h(a: i16, b: i16) -> i16\n  requires a > b\n= a\npub fn f(x: u8, y: u8) -> i16 = h(x - y, -100)",
+                "x - y > -100_i16",
+            ),
+            (
+                "fn r(a: u16) -> u16\n  requires a <= 100 + 200\n= a\npub fn f(x: u8, y: u8) -> u16 = r(x + y)",
+                "x + y <= 300_u16",
+            ),
+            (
+                "fn s(a: i16) -> i16\n  requires a < 0 - 200\n= a\npub fn f(x: u8) -> i16 = s(x)",
+                "x < -200_i16",
+            ),
+            (
+                "pub fn f(x: u8, y: u8) -> u16\n  ensures result <= 100 + 200\n= x + y",
+                "x + y <= 300_u16",
+            ),
+            // A refinement's bound that names a parameter a literal is passed as is that value.
+            (
+                "fn take(n: u16, x: u16[0..n]) -> u16 = x\npub fn f(x: u8, y: u8) -> u16 = take(300, x + y)",
+                "x + y < 300_u16",
+            ),
+            (
+                "fn take(n: u16, x: u16[0..n]) -> u16 = x\npub fn f(x: u8, y: u8) -> u16 = take(100 + 200, x + y)",
+                "x + y < 300_u16",
+            ),
         ] {
             let text = module(f);
             let d = diagnostics(f);
@@ -8131,6 +8277,13 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
             ("pub fn f() -> i8 = ~-129", ""),
             ("pub fn f() -> u8 = ~3 + 1", ""),
             ("pub fn f() -> u8 = ~3_i8", ""),
+            // A refinement the suffix's value leaves gets no fix; one it lies in does.
+            ("pub fn f() -> u8[0..10] = ~3", ""),
+            // A value Tier 1 knows of literals alone, though `|` of a complement has no linear
+            // form, is narrowed as one.
+            ("pub fn f() -> u8 = ~3 | 1", ""),
+            ("pub fn f() -> u8[200..=255] = ~3", "~3_u8"),
+            ("pub fn f(n: u8) -> u8[0..n] = ~3", ""),
         ] {
             let src = format!("{}{}", decls, f);
             let text = module(&src);

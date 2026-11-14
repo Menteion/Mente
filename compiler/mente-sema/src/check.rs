@@ -142,6 +142,7 @@ pub fn check(
     c.bounds_have_their_types();
     c.typing.literals = literals::taken(f, &c.typing);
     c.compared_literals(f);
+    c.literal_traps();
     (c.typing, c.errors)
 }
 
@@ -293,10 +294,17 @@ impl Checker<'_> {
                 let Some(taken) = self.typing.literals[lit.0 as usize] else {
                     continue;
                 };
-                let Some(v) = literals::value(tree, &self.typing.literals, lit) else {
-                    continue;
-                };
-                if !v.fits(taken.ty) {
+                // Each value the operand may take, through its branches, arms and the elements
+                // of an array literal it indexes, is compared in that type.
+                let alternatives = literals::alternatives(tree, lit);
+                let whole = alternatives == [lit];
+                for alt in alternatives {
+                    let Some(values) = literals::values(tree, &self.typing.literals, alt) else {
+                        continue;
+                    };
+                    let Some(&v) = values.iter().find(|v| !v.fits(taken.ty)) else {
+                        continue;
+                    };
                     // Whether the other operand's values lie in its type, as a name's do, so
                     // that the comparison is constant; an exact sum's may leave it.
                     let ranges = ranges
@@ -308,23 +316,165 @@ impl Checker<'_> {
                         };
                         end(i.lo).fits(taken.ty) && end(i.hi).fits(taken.ty)
                     });
-                    self.compared_literal(e, (op, lit, other, left), (v, kept), taken.ty);
+                    let shape = (v, kept, whole, values.len() > 1);
+                    self.compared_literal(e, (op, alt, other, left), shape, taken.ty);
                 }
             }
         }
     }
 
-    /// Reports the literal operand `lit` of the comparison `e`, of value `v` outside `t`, on
-    /// the left of `other` where `left`. Where `kept`, `other`'s values lie in `t`, so the
-    /// comparison is constant and an ordering has a spelling in range that means the same;
-    /// otherwise the literal's own type compares it exactly, as before the rule.
+    /// `E0234` for each operation over literals that traps whenever it runs, in the type its
+    /// literals take (`core-calculus.md`, item 4): the innermost operation of an expression of
+    /// literals alone that traps, and a literal that an operator beside an operand of a type
+    /// narrows into that type, which does not hold it.
+    fn literal_traps(&mut self) {
+        let tree = self.tree;
+        for i in 0..tree.exprs.len() {
+            let e = ExprId(i as u32);
+            let Some(taken) = self.typing.literals[i] else {
+                continue;
+            };
+            if self.typing.exprs[i] != Ty::Int(Int::Literal) {
+                continue;
+            }
+            if let Some(trap) = literals::trap(tree, &self.typing.literals, e, taken.ty) {
+                self.literal_trap(e, trap, taken, None);
+            }
+        }
+        // A literal beside an operand of a type, which a bit operation narrows into it, or the
+        // value a shift of a typed amount shifts.
+        for i in 0..tree.exprs.len() {
+            let e = ExprId(i as u32);
+            if self.typing.exprs[i] == Ty::Int(Int::Literal) {
+                continue;
+            }
+            let (op, lhs, rhs) = match &tree.expr(e).kind {
+                ExprKind::Binary { op, lhs, rhs } => (*op, *lhs, *rhs),
+                ExprKind::Int { .. }
+                | ExprKind::Bool(_)
+                | ExprKind::Name(_)
+                | ExprKind::Todo(_)
+                | ExprKind::Unreachable(_)
+                | ExprKind::Unary { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Construct { .. }
+                | ExprKind::Variant { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::Array(_)
+                | ExprKind::Repeat { .. }
+                | ExprKind::If { .. }
+                | ExprKind::Error => continue,
+            };
+            let narrowed: &[ExprId] = match op {
+                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => &[lhs, rhs],
+                BinaryOp::Shl | BinaryOp::Shr => &[lhs],
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => &[],
+            };
+            for &x in narrowed {
+                let Some(taken) = self.typing.literals[x.0 as usize] else {
+                    continue;
+                };
+                let Some(v) = literals::value(tree, &self.typing.literals, x) else {
+                    continue;
+                };
+                if !v.fits(taken.ty) {
+                    self.literal_trap(x, literals::Trap::Outside(v), taken, Some(op));
+                }
+            }
+        }
+    }
+
+    /// Reports `e`, which traps for `trap` in `taken`'s type whenever it runs; `by`, the
+    /// operator beside an operand of a type that narrows `e`, a literal, into that type.
+    fn literal_trap(
+        &mut self,
+        e: ExprId,
+        trap: literals::Trap,
+        taken: literals::Taken,
+        by: Option<BinaryOp>,
+    ) {
+        let s = self.span(e);
+        let text = self.src.get(s.start..s.end).unwrap_or("").to_string();
+        let t = taken.ty;
+        let ty = format!("`{}` ({})", t.name, t.range_text());
+        let source = match taken.from {
+            literals::From::Operands => "the type its literals take from the operands around them",
+            literals::From::Alone => "the type of an expression of literals alone",
+        };
+        let shown =
+            |v: literals::Exact| format!("{}{}", if v.negative { "-" } else { "" }, v.magnitude);
+        let why = match (trap, by) {
+            (literals::Trap::Outside(v), Some(op)) => format!(
+                "`{}` lies outside {}, the type it takes from the operand beside it, which `{}` narrows it into",
+                shown(v),
+                ty,
+                op.symbol()
+            ),
+            (literals::Trap::Outside(v), None) => format!(
+                "`{}` works in {}, {}, and its operand {} lies outside it",
+                text,
+                ty,
+                source,
+                shown(v)
+            ),
+            (literals::Trap::ShiftAmount(k), _) => format!(
+                "`{}` shifts by {}, at or past the width of {}, {}",
+                text,
+                shown(k),
+                ty,
+                source
+            ),
+            (literals::Trap::Shifted(v), _) => format!(
+                "`{}` is {}, outside {}, {}",
+                text,
+                v.map_or("more than 128 bits hold".to_string(), shown),
+                ty,
+                source
+            ),
+            (literals::Trap::ZeroDivisor, _) => format!("`{}` divides by zero", text),
+        };
+        // A suffix gives a shift or a bit operation another type; nothing gives a divisor one.
+        let advice = match trap {
+            literals::Trap::ZeroDivisor => "",
+            literals::Trap::Outside(_)
+            | literals::Trap::ShiftAmount(_)
+            | literals::Trap::Shifted(_) => "; state the type it should work in with a suffix",
+        };
+        self.errors.push(Diagnostic::error(
+            "E0234",
+            s,
+            format!("{}, so it traps whenever it runs{}", why, advice),
+        ));
+    }
+
+    /// Reports `lit`, the literal operand of the comparison `e` or a branch, an arm or an
+    /// element of it, which may be `v`, outside `t`, on the left of `other` where `left`.
+    /// Where `kept`, `other`'s values lie in `t`. The comparison is constant only where
+    /// `lit` is the `whole` operand, of one value, not `many`: an ordering then has a spelling
+    /// in range that means the same. Beside an operand that may leave `t`, the literal's own type
+    /// compares it exactly, as before the rule.
     fn compared_literal(
         &mut self,
         e: ExprId,
         (op, lit, other, left): (BinaryOp, ExprId, ExprId, bool),
-        (v, kept): (literals::Exact, bool),
+        (v, kept, whole, many): (literals::Exact, bool, bool, bool),
         t: IntTy,
     ) {
+        let constant_here = kept && whole && !many;
         let text = |x: ExprId| {
             let s = self.span(x);
             self.src.get(s.start..s.end).unwrap_or("").to_string()
@@ -357,19 +507,41 @@ impl Checker<'_> {
         };
         let written = written_literal(self.tree, lit);
         // A literal is its value; an expression of literals alone is named with it.
-        let what = match written {
-            Some(_) => format!("`{}` lies", text(lit)),
-            None => format!(
-                "`{}` is {}{},",
+        let what = match (written, many) {
+            (Some(_), _) => format!("`{}` lies", text(lit)),
+            (None, many) => format!(
+                "`{}` {} {}{},",
                 text(lit),
+                if many { "may be" } else { "is" },
                 if v.negative { "-" } else { "" },
                 v.magnitude
             ),
         };
-        let constant = if kept {
-            format!(", so this comparison is always {}", always)
-        } else {
-            String::new()
+        // An equality beside an operand that stays in its type is constant, and a suffix would
+        // keep it so, silently: it has no fix, and its message asks for it to be rewritten.
+        let equality = match op {
+            BinaryOp::Eq | BinaryOp::Ne => true,
+            BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => false,
+        };
+        let constant = match (constant_here, equality) {
+            (true, true) => format!(", so this comparison is always {}; rewrite it", always),
+            (true, false) => format!(", so this comparison is always {}", always),
+            (false, _) => String::new(),
         };
         let mut d = Diagnostic::error(
             "E0233",
@@ -414,7 +586,7 @@ impl Checker<'_> {
                 _,
             ) => None,
         };
-        if let (true, Some((new, bound))) = (kept, bound) {
+        if let (true, Some((new, bound))) = (constant_here, bound) {
             let replacement = if left {
                 format!("{} {} {}", bound, turned(new).symbol(), text(other))
             } else {
@@ -432,9 +604,13 @@ impl Checker<'_> {
                 }],
             });
         }
-        // An equality has no spelling in range, nor an ordering beside an operand that may
-        // leave its type: the literal's own type compares it exactly.
-        let holder = INT_TYPES.iter().find(|u| v.fits(**u));
+        // An ordering beside an operand that may leave its type has no spelling in range, nor
+        // has an equality: the literal's own type compares it exactly, which only such an
+        // operand makes other than constant.
+        let holder = INT_TYPES
+            .iter()
+            .find(|u| v.fits(**u))
+            .filter(|_| !kept && !many);
         if let (None, Some(written), Some(holder)) = (&d.fixes.first(), written, holder) {
             let replacement = format!("{}_{}", text(written), holder.name);
             let shown = text(lit).replacen(&text(written), &replacement, 1);
@@ -3491,22 +3667,23 @@ mod tests {
     /// A comparison compares a literal operand in the type it takes (`core-calculus.md`, item
     /// 5), so one outside it is `E0233`, on either side, of every operator, in a clause too. The
     /// fix of an ordering spells it in range and is machine-applicable where the other operand
-    /// stays in its type; otherwise, and for an equality, the fix states the literal's type;
-    /// each makes the module check once applied. A literal within
+    /// stays in its type, and an equality there has none, since the comparison is constant and
+    /// a suffix would keep it so; beside an operand that may leave its type the fix states the
+    /// literal's type; each fix makes the module check once applied. A literal within
     /// its type, under arithmetic, beside a refinement or between operands of two types stands.
     #[test]
     fn test_a_compared_literal_outside_the_type_it_takes_is_e0233() {
         for (f, message, fixed, machine) in [
             (
                 "pub fn f(a: u8) -> bool = a == 300",
-                "`300` lies outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always false",
-                "a == 300_u16",
+                "`300` lies outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always false; rewrite it",
+                "",
                 false,
             ),
             (
                 "pub fn f(a: u8) -> bool = a != -1",
-                "`-1` lies outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always true",
-                "a != -1_i8",
+                "`-1` lies outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always true; rewrite it",
+                "",
                 false,
             ),
             (
@@ -3571,8 +3748,8 @@ mod tests {
             ),
             (
                 "pub fn f(a: u8) -> bool = 300 == a",
-                "`300` lies outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always false",
-                "300_u16 == a",
+                "`300` lies outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always false; rewrite it",
+                "",
                 false,
             ),
             (
@@ -3591,14 +3768,14 @@ mod tests {
             ),
             (
                 "pub fn f(a: u128) -> bool = a == -1",
-                "`-1` lies outside `u128` (0 to 340282366920938463463374607431768211455), the type it takes from `a`, the other operand, so this comparison is always false",
-                "a == -1_i8",
+                "`-1` lies outside `u128` (0 to 340282366920938463463374607431768211455), the type it takes from `a`, the other operand, so this comparison is always false; rewrite it",
+                "",
                 false,
             ),
             (
                 "pub fn f() -> bool = 3 == 9223372036854775808",
-                "`9223372036854775808` lies outside `i64` (-9223372036854775808 to 9223372036854775807), the type it takes as an expression of literals alone, so this comparison is always false",
-                "3 == 9223372036854775808_u64",
+                "`9223372036854775808` lies outside `i64` (-9223372036854775808 to 9223372036854775807), the type it takes as an expression of literals alone, so this comparison is always false; rewrite it",
+                "",
                 false,
             ),
             (
@@ -3611,6 +3788,10 @@ mod tests {
             let d = diagnostics(f);
             assert_eq!(d.len(), 1, "{}: {:?}", f, d);
             assert_eq!((d[0].code, d[0].message.as_str()), ("E0233", message), "{}", f);
+            if fixed.is_empty() {
+                assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
+                continue;
+            }
             let fix = &d[0].fixes[0];
             assert_eq!(
                 fix.applicability == Applicability::MachineApplicable,
@@ -3631,7 +3812,7 @@ mod tests {
         let d = diagnostics("pub fn f(a: u8) -> bool = a == 200 + 100");
         assert_eq!(
             d[0].message,
-            "`200 + 100` is 300, outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always false"
+            "`200 + 100` is 300, outside `u8` (0 to 255), the type it takes from `a`, the other operand, so this comparison is always false; rewrite it"
         );
         assert!(d[0].fixes.is_empty(), "{:?}", d[0].fixes);
         // No standard type holds the negation of `u128`'s greatest value.
@@ -3649,7 +3830,142 @@ mod tests {
             "pub fn f(a: u8, b: u32) -> bool = a == b + 1",
             "pub fn f(a: u8) -> bool = a == 300_u16",
             "pub fn f(a: i128, b: u128) -> bool = a == -1 and b == 340282366920938463463374607431768211455",
-            "pub fn f(a: u8) -> bool = a == ~256 or true",
+        ] {
+            assert_eq!(codes(f), Vec::<&str>::new(), "{}", f);
+        }
+    }
+
+    /// A literal takes the other operand's type wherever it sits in the operand of a comparison:
+    /// a branch of an `if`, an arm of a `match`, an element of an array literal it indexes, and
+    /// an expression over them, which may be each value its alternatives give. One outside that
+    /// type is `E0233` there too, with no claim that the comparison is constant and no fix beside
+    /// an operand that stays in its type; beside one that may leave it, the literal's type is the
+    /// fix. Alternatives within the type stand.
+    #[test]
+    fn test_a_compared_literal_in_a_branch_an_arm_or_an_element_is_e0233() {
+        let beside = "the type it takes from `a`, the other operand";
+        let sig = "pub fn f(a: u8, c: bool, k: usize[0..2], m: u8) -> bool";
+        for (body, message) in [
+            (
+                "a == (if c { 300 } else { 1 })",
+                "`300` lies outside `u8` (0 to 255)",
+            ),
+            (
+                "a == (if c { 1 } else { -1 })",
+                "`-1` lies outside `u8` (0 to 255)",
+            ),
+            (
+                "(if c { 256 } else { 1 }) > a",
+                "`256` lies outside `u8` (0 to 255)",
+            ),
+            (
+                "a == (if c { 1 } else if m == 0 { 300 } else { 2 })",
+                "`300` lies outside `u8` (0 to 255)",
+            ),
+            (
+                "a == (match m {\n  0 => 300\n  _ => 1\n})",
+                "`300` lies outside `u8` (0 to 255)",
+            ),
+            ("a == [300, 1][k]", "`300` lies outside `u8` (0 to 255)"),
+            ("a == [300; 2][k]", "`300` lies outside `u8` (0 to 255)"),
+            (
+                "a == (if c { 300 } else { 1 }) + 0",
+                "`(if c { 300 } else { 1 }) + 0` may be 300, outside `u8` (0 to 255)",
+            ),
+        ] {
+            let f = format!("{} = {}", sig, body);
+            let d = diagnostics(&f);
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            assert_eq!(d[0].code, "E0233", "{}", f);
+            assert_eq!(d[0].message, format!("{}, {}", message, beside), "{}", f);
+            assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
+        }
+        // Beside an exact sum, a branch's literal states its type and is compared exactly.
+        let f = "pub fn f(a: u8, b: u8, c: bool) -> bool = a + b == (if c { 300 } else { 1 })";
+        let d = diagnostics(f);
+        assert_eq!(d.len(), 1, "{:?}", d);
+        let applied = mente_syntax::diagnostics::apply_fix(&module(f), &d[0].fixes[0]).unwrap();
+        assert!(
+            applied.contains("if c { 300_u16 } else { 1 }"),
+            "{}",
+            applied
+        );
+        assert!(
+            check_source(&applied).is_ok(),
+            "{}: {:?}",
+            applied,
+            check_source(&applied).err()
+        );
+        for body in [
+            "a == [~3, 1][k]",
+            "a == (if c { 255 } else { 0 })",
+            "a == (if c { ~3 } else { 1 })",
+            "a == (match m {\n  0 => ~0\n  _ => 1\n})",
+        ] {
+            let f = format!("{} = {}", sig, body);
+            assert_eq!(codes(&f), Vec::<&str>::new(), "{}", f);
+        }
+    }
+
+    /// An operation over literals works in the type its literals take, and traps there whenever
+    /// it runs where it traps at all: a shift by its width, a shift out of the type, `~`, `&`,
+    /// `|` or `^` of a value outside it, a literal an operator narrows into the type of the
+    /// operand beside it, and a division by zero are each `E0234`, the innermost operation
+    /// only. Arithmetic stands, and so does an operation of a typed operand or of an operand of
+    /// more than one value.
+    #[test]
+    fn test_an_operation_over_literals_that_traps_is_e0234() {
+        let from = "the type its literals take from the operands around them";
+        let alone = "the type of an expression of literals alone";
+        let advice = "so it traps whenever it runs; state the type it should work in with a suffix";
+        for (f, message) in [
+            (
+                "pub fn f(x: u8) -> bool = x < 1 << 8",
+                format!("`1 << 8` shifts by 8, at or past the width of `u8` (0 to 255), {}, {}", from, advice),
+            ),
+            (
+                "pub fn f() -> u64 = 1 << 63",
+                format!("`1 << 63` is 9223372036854775808, outside `i64` (-9223372036854775808 to 9223372036854775807), {}, {}", alone, advice),
+            ),
+            (
+                "pub fn f() -> i64 = -1 << -1",
+                format!("`-1 << -1` shifts by -1, at or past the width of `i64` (-9223372036854775808 to 9223372036854775807), {}, {}", alone, advice),
+            ),
+            (
+                "pub fn f(x: u8) -> bool = x == ~256",
+                format!("`~256` works in `u8` (0 to 255), {}, and its operand 256 lies outside it, {}", from, advice),
+            ),
+            (
+                "pub fn f(a: u8) -> u8 = a ^ 300",
+                format!("`300` lies outside `u8` (0 to 255), the type it takes from the operand beside it, which `^` narrows it into, {}", advice),
+            ),
+            (
+                "pub fn f(a: u8) -> u16 = a + (300 << 0)",
+                format!("`300 << 0` works in `u8` (0 to 255), {}, and its operand 300 lies outside it, {}", from, advice),
+            ),
+            (
+                "pub fn f() -> i64 = 7 % (3 - 3)",
+                "`7 % (3 - 3)` divides by zero, so it traps whenever it runs".to_string(),
+            ),
+            (
+                "pub fn f(a: u8) -> u8 = a & (2 / 0 + 1)",
+                "`2 / 0` divides by zero, so it traps whenever it runs".to_string(),
+            ),
+        ] {
+            let d = diagnostics(f);
+            assert_eq!(d.len(), 1, "{}: {:?}", f, d);
+            assert_eq!((d[0].code, d[0].message.as_str()), ("E0234", message.as_str()), "{}", f);
+            assert!(d[0].fixes.is_empty(), "{}", f);
+        }
+        for f in [
+            "pub fn f(x: u8) -> bool = x < 1 << 7",
+            "pub fn f() -> u64 = 1_u64 << 63",
+            "pub fn f(a: u8) -> u8 = a & 255",
+            "pub fn f(a: u8) -> u16 = a + 300",
+            "pub fn f(a: u8) -> u8 = ~3 & a",
+            "pub fn f(x: u8, k: u8) -> u8 = x << k",
+            "pub fn f() -> i64 = 7 / 1",
+            "pub fn f(a: u8, c: bool) -> u8 = a & (1 << (if c { 7 } else { 1 }))",
         ] {
             assert_eq!(codes(f), Vec::<&str>::new(), "{}", f);
         }

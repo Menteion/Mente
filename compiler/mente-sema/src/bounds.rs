@@ -181,8 +181,10 @@ pub fn rem(inf: i128, a: Itv, b: Itv) -> Itv {
 /// `x * 2^k` for `x` in `a`, which `x << k` is before it is narrowed.
 pub fn shl(inf: i128, a: Itv, k: u32) -> Itv {
     let a = held(inf, a);
-    // A bound at the limit times `2^k` stays at or past it, no bound on its side.
-    let times = |x: i128| x.saturating_mul(1i128.checked_shl(k).unwrap_or(i128::MAX));
+    // A bound at the limit times `2^k` stays at or past it, no bound on its side. `2^127` is
+    // past `i128`, whose `1 << 127` is its least value, so from there the factor saturates.
+    let factor = if k < 127 { 1i128 << k } else { i128::MAX };
+    let times = |x: i128| x.saturating_mul(factor);
     (lower(inf, times(a.0)), upper(inf, times(a.1)))
 }
 
@@ -369,6 +371,11 @@ mod tests {
         // 16 - y for any y at or above 0 has no lower bound.
         let difference = add(INF, mul(INF, (4, 4), (4, 4)), neg(INF, (0, INF)));
         assert_eq!(difference, (-INF, INF));
+        // 2^127 is past any limit and past `i128`: a shift by 127 keeps its operand's sign.
+        assert_eq!(shl(INF, (1, 1), 127), (INF - 1, INF));
+        assert_eq!(shl(INF, (-1, -1), 127), (-INF, 1 - INF));
+        assert_eq!(shl(INF, (0, 0), 127), (0, 0));
+        assert_eq!(shl(INF, (1, 1), 126), (INF - 1, INF));
         // A sum of two unknown ends is unknown on that side, whatever the other operand.
         assert_eq!(add(INF, (INF, INF), (-INF, -INF)), (-INF, INF));
         // The exact rules inside the limit.

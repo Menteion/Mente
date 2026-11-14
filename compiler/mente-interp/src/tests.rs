@@ -437,6 +437,12 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
             "f(255, 254)",
             "true",
         ),
+        // An array literal indexed gives its elements the type the indexing takes.
+        (
+            "pub fn f(a: u8, k: usize[0..2]) -> bool = a == [~3, 1][k]",
+            "f(252, 0)",
+            "true",
+        ),
         (
             "pub fn f(xs: [8]u8) -> u8 = xs[~3 & 7]",
             "f([1, 2, 3, 4, 5, 6, 7, 8])",
@@ -464,22 +470,28 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
         assert_eq!(got, value, "{}", f);
     }
     // A literal outside `i64`, or shifted past it, traps where the operation narrows it into
-    // `i64`, before the value reaches its place.
-    for (f, trap) in [
-        ("pub fn f() -> u64 = 1 << 63", "narrowing"),
-        ("pub fn f() -> u64 = 1 | 9223372036854775808", "narrowing"),
-        ("pub fn f() -> u128 = 1 << 64", "shift-amount"),
-        ("pub fn f() -> u8 = ~3", "narrowing"),
-        ("pub fn f() -> u16 = 1 << 15", "none"),
+    // `i64`, before the value reaches its place: at run time where the checker cannot know
+    // it, by a shift amount of a type or an operand of more than one value; where it can, the
+    // operation is an error (`E0234`).
+    for (f, call, trap) in [
+        ("pub fn f(k: u32) -> u64 = 1 << k", "f(63)", "narrowing"),
+        (
+            "pub fn f(c: bool) -> u64 = 1 | (if c { 9223372036854775808 } else { 0 })",
+            "f(true)",
+            "narrowing",
+        ),
+        ("pub fn f(k: u32) -> u128 = 1 << k", "f(64)", "shift-amount"),
+        ("pub fn f() -> u8 = ~3", "f()", "narrowing"),
+        ("pub fn f() -> u16 = 1 << 15", "f()", "none"),
     ] {
-        let got = match run_with(f, "f()", Limits::default()) {
+        let got = match run_with(f, call, Limits::default()) {
             Ok(_) => "none".to_string(),
             Err(Stop::Trap(t)) => t.kind.name().to_string(),
             Err(other) => other.to_string(),
         };
         assert_eq!(got, trap, "{}", f);
     }
-    let shifted = run("pub fn f() -> u64 = 1 << 63", "f()");
+    let shifted = run("pub fn f(k: u32) -> u64 = 1 << k", "f(63)");
     assert!(shifted.contains("does not fit in `i64`"), "{}", shifted);
 }
 
@@ -989,8 +1001,8 @@ fn test_depth_counts_nested_calls_only() {
 fn test_each_ensures_clause_reads_its_own_result_and_elements_take_their_type() {
     let two = "pub fn inc(x: u8) -> u8\n  ensures result > x\n  ensures result >= x + 1\n= x + 1";
     assert_eq!(run(two, "inc(3)"), "4");
-    let shifted = "pub fn f(a: u8) -> [2]u8 = [a, 1 << 8]";
-    assert_eq!(kind(shifted, "f(1)"), "shift-amount");
+    let shifted = "pub fn f(a: u8, k: u32) -> [2]u8 = [a, 1 << k]";
+    assert_eq!(kind(shifted, "f(1, 8)"), "shift-amount");
     assert_eq!(super::stack_bytes(0), 1 << 20);
     assert_eq!(super::stack_bytes(2), (1 << 20) + 2 * (64 << 10));
     assert_eq!(Int::from_i128(0), Int::ZERO);
