@@ -75,87 +75,31 @@ pub fn add(inf: i128, a: Itv, b: Itv) -> Itv {
     (lo, hi)
 }
 
-/// `-x` for `x` in `a`.
+/// `-x` for `x` in `a`: a bound at the limit negated is the other side's limit, no bound
+/// there either.
 pub fn neg(inf: i128, a: Itv) -> Itv {
     let a = held(inf, a);
-    (
-        if a.1 == inf { -inf } else { -a.1 },
-        if a.0 == -inf { inf } else { -a.0 },
-    )
+    (-a.1, -a.0)
 }
 
-/// A bound as a product takes it: a value, or no bound on one side.
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
-enum End {
-    Below,
-    At(i128),
-    Above,
-}
-
-impl End {
-    fn negative(self) -> bool {
-        match self {
-            End::Below => true,
-            End::At(v) => v < 0,
-            End::Above => false,
-        }
-    }
-
-    /// The product of two ends: zero times anything is zero, a value times a value is their
-    /// product, kept within `i128`, and anything else is unbounded on the side its sign gives.
-    fn times(self, o: End) -> End {
-        match (self, o) {
-            (End::At(0), End::Below | End::At(_) | End::Above)
-            | (End::Below | End::At(_) | End::Above, End::At(0)) => End::At(0),
-            (End::At(p), End::At(q)) => End::At(p.saturating_mul(q)),
-            (End::Below | End::Above, End::Below | End::At(_) | End::Above)
-            | (End::At(_), End::Below | End::Above) => {
-                if self.negative() == o.negative() {
-                    End::Above
-                } else {
-                    End::Below
-                }
-            }
-        }
-    }
-}
-
-/// `x * y` for `x` in `a` and `y` in `b`.
+/// `x * y` for `x` in `a` and `y` in `b`: between the least and the greatest product of their
+/// bounds. A bound at the limit, no bound on its side, times any value but zero is at or past
+/// the limit on the side the signs give, which [`lower`] and [`upper`] read as no bound there,
+/// and times zero is zero, as every value times zero is; so it needs no case of its own.
 pub fn mul(inf: i128, a: Itv, b: Itv) -> Itv {
     let (a, b) = (held(inf, a), held(inf, b));
     if is_empty(a) || is_empty(b) {
         return (1, 0);
     }
-    let ends = |(lo, hi): Itv| {
-        [
-            if lo == -inf { End::Below } else { End::At(lo) },
-            if hi == inf { End::Above } else { End::At(hi) },
-        ]
-    };
-    let (mut least, mut most) = (End::Above, End::Below);
-    for p in ends(a) {
-        for q in ends(b) {
-            let v = p.times(q);
-            if v < least {
-                least = v;
-            }
-            if v > most {
-                most = v;
-            }
-        }
-    }
-    (
-        match least {
-            End::Below => -inf,
-            End::At(v) => lower(inf, v),
-            End::Above => inf - 1,
-        },
-        match most {
-            End::Above => inf,
-            End::At(v) => upper(inf, v),
-            End::Below => 1 - inf,
-        },
-    )
+    let products = [
+        a.0.saturating_mul(b.0),
+        a.0.saturating_mul(b.1),
+        a.1.saturating_mul(b.0),
+        a.1.saturating_mul(b.1),
+    ];
+    let least = products.iter().copied().min().unwrap_or(0);
+    let most = products.iter().copied().max().unwrap_or(0);
+    (lower(inf, least), upper(inf, most))
 }
 
 /// `x / y`, rounded toward zero, for `x` in `a` and `y` in `b`. A divisor that is zero traps, so
@@ -195,9 +139,9 @@ pub fn div(inf: i128, a: Itv, b: Itv) -> Itv {
         (lo, hi)
     } else if d < 0 {
         neg(inf, div(inf, a, neg(inf, (c, d))))
-    } else if a.0 == -inf || a.1 == inf {
-        (-inf, inf)
     } else {
+        // Between the dividend's greatest magnitude and its negation, no bound where that is
+        // the limit.
         let m = a.0.abs().max(a.1.abs());
         (-m, m)
     }
@@ -237,19 +181,9 @@ pub fn rem(inf: i128, a: Itv, b: Itv) -> Itv {
 /// `x * 2^k` for `x` in `a`, which `x << k` is before it is narrowed.
 pub fn shl(inf: i128, a: Itv, k: u32) -> Itv {
     let a = held(inf, a);
+    // A bound at the limit times `2^k` stays at or past it, no bound on its side.
     let times = |x: i128| x.saturating_mul(1i128.checked_shl(k).unwrap_or(i128::MAX));
-    (
-        if a.0 == -inf {
-            -inf
-        } else {
-            lower(inf, times(a.0))
-        },
-        if a.1 == inf {
-            inf
-        } else {
-            upper(inf, times(a.1))
-        },
-    )
+    (lower(inf, times(a.0)), upper(inf, times(a.1)))
 }
 
 /// `x >> k`, which rounds toward negative infinity, for `x` in `a`.
@@ -365,6 +299,15 @@ mod tests {
     fn test_binary_operations_hold_every_exact_result_around_the_limit() {
         sound("add", add, |x, y| Some(x + y));
         sound("mul", mul, |x, y| Some(x * y));
+        // A product with an operand of no value, after an operation that always traps, has
+        // none either.
+        for a in [(2, 3), (-INF, INF), (0, 0)] {
+            assert!(
+                is_empty(mul(INF, (1, 0), a)) && is_empty(mul(INF, a, (1, 0))),
+                "{:?}",
+                a
+            );
+        }
         sound("div", div, |x, y| (y != 0).then(|| x / y));
         sound("rem", rem, |x, y| (y != 0).then(|| x % y));
         sound("meet", meet, |x, y| (x == y).then_some(x));
@@ -397,6 +340,11 @@ mod tests {
                 check("shl", shl(INF, a, k), &|x| x * (1 << k));
                 check("shr", shr(INF, a, k), &|x| x >> k);
                 check("shr of any amount", shr_any(INF, a), &|x| x >> k);
+            }
+            // A shift right by the width of `i128` or more leaves the sign alone.
+            for k in [127, 128, 200] {
+                let floor = |x: i128| if x < 0 { -1 } else { 0 };
+                check("shr", shr(INF, a, k), &floor);
             }
             for d in 1..=4 {
                 check("rest", rest(INF, a, d), &|x| x - x / d);
