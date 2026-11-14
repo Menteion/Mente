@@ -359,10 +359,11 @@ check() {
   }
   # Whether a process whose command line starts with a name is alive.
   alive() { /usr/bin/pgrep -f "^$1" > /dev/null; }
-  # Up to five seconds for a condition.
+  # Up to a minute for a condition, which holds at once on a runner in good order: one whose disk
+  # was slow took over five seconds to start node, and failed the canary for nothing.
   within() {
     local k
-    for k in $(/usr/bin/seq 50); do
+    for k in $(/usr/bin/seq 600); do
       if "$@"; then return 0; fi
       /usr/bin/sleep 0.1
     done
@@ -382,6 +383,8 @@ check() {
   decoy=$!
   node -e 'require("net").createServer((s) => s.end()).listen(0, "127.0.0.1", function () { console.log(this.address().port); })' > "$work/port" &
   listener=$!
+  # Neither outlives the canary, however it ends.
+  trap 'kill "$decoy" "$listener" 2> /dev/null || true' EXIT
   if ! within test -s "$work/port"; then fail "the canary's listener did not start"; fi
   port=$(< "$work/port")
   args=(
@@ -419,7 +422,7 @@ check() {
 
   # A process left behind: the runner's user keeps it; the sandbox ends it and fails the command.
   /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives"
-  if ! alive "$marker-outlives"; then problem "the canary's process did not outlive its command as the runner's user, so its run in the sandbox proves nothing"; fi
+  if ! within alive "$marker-outlives"; then problem "the canary's process did not outlive its command as the runner's user, so its run in the sandbox proves nothing"; fi
   /usr/bin/pkill -f "^$marker-outlives" || true
   status=0
   /usr/bin/bash "$self" run /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives" 2> "$work/outlive.txt" || status=$?
