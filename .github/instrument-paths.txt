@@ -33,6 +33,7 @@ rust-toolchain.toml
 .github/scripts/tools.sh
 # The sandbox its tests run in.
 .github/scripts/test-sandbox.sh
+.github/scripts/test-sandbox-env.sh
 # The floor of work the job checks.
 .github/scripts/mutants-floor.mjs
 .github/scripts/lib/mutants-floor.mjs
@@ -47,6 +48,9 @@ conformance/**
 Cargo.toml
 Cargo.lock
 rust-toolchain.toml
+# The sandbox its tests run in.
+.github/scripts/test-sandbox.sh
+.github/scripts/test-sandbox-env.sh
 .github/workflows/generated.yml
 
 [fuzz.yml]

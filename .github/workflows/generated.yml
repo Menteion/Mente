@@ -74,19 +74,32 @@ jobs:
         run: |
           rustup toolchain install
           rustc --version
+      - name: The sandbox the code of the change runs in, proven before any of it runs
+        if: steps.watch.outputs.run != 'false'
+        # On Linux every test executable, with the native programs it builds and runs, runs apart
+        # from cargo and the runner's own files, and the canary proves it on this runner
+        # (.github/scripts/test-sandbox.sh).
+        run: |
+          /usr/bin/bash .github/scripts/test-sandbox.sh setup
+          /usr/bin/bash .github/scripts/test-sandbox.sh check
       - name: Build the comparison in release
         if: steps.watch.outputs.run != 'false'
         run: cargo test --release --locked -p mente-cli --no-run
       - name: Overflow checks in this job's release build
         if: steps.watch.outputs.run != 'false'
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          . .github/scripts/test-sandbox-env.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
       - name: Generated programs on the three paths
         if: steps.watch.outputs.run != 'false'
         run: |
+          . .github/scripts/test-sandbox-env.sh
           echo "Seeds $MENTE_GEN_FIRST_SEED ..= $(( MENTE_GEN_FIRST_SEED + MENTE_GEN_PROGRAMS - 1 ))" | tee -a "$GITHUB_STEP_SUMMARY"
           timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
             mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/generated.txt"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
           # The floor of work done: three in four of the programs asked for pass every check,
           # Tier 1 included, and so run on the three paths. About 88% did on 2026-11-12 (354 of
           # 400 on Linux, 133 of 150 on Windows); fewer means the generator, the checker or the
@@ -106,9 +119,11 @@ jobs:
           MENTE_GEN_CALLS: "64"
           MENTE_GEN_EXHAUSTIVE: "4096"
         run: |
+          . .github/scripts/test-sandbox-env.sh
           timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact \
             mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/conformance.txt"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
       - name: Summary
         if: always() && steps.watch.outputs.run != 'false'
         run: |

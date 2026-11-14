@@ -6,7 +6,7 @@
 #
 #   /usr/bin/bash .github/scripts/test-sandbox.sh setup    once a job, before any code of the change runs
 #   /usr/bin/bash .github/scripts/test-sandbox.sh check    the canary: proves the sandbox on this runner
-#   /usr/bin/bash .github/scripts/test-sandbox.sh env      what limits.sh evaluates: cargo's runner
+#   /usr/bin/bash .github/scripts/test-sandbox.sh env      what test-sandbox-env.sh evaluates: cargo's runner
 #   /usr/bin/bash .github/scripts/test-sandbox.sh ran [n]  at a step's end: n commands ran inside, 1 if not given
 #   /usr/bin/bash .github/scripts/test-sandbox.sh uid      the user the commands run as, for the memory guard
 #
@@ -26,7 +26,8 @@
 #     signal or trace none; it has no network interface but a loopback that is down; and when it
 #     ends, the kernel ends every process it started;
 #   - an environment of the variables cargo, nextest and the tests set (CARGO_*, NEXTEST*,
-#     MENTE_*, RUST*), and the limits on memory and file size of the shell that started it.
+#     MENTE_*, RUST*), and the limits on memory and file size of the shell that started it;
+#   - no core dump: a crash there starts no handler of the runner's, which would run as root.
 #
 # Two guards that a user of its own would switch off are kept. nextest stops a test past its time
 # by a signal, which the runner's user cannot send to another user's process: the wrapper stays the
@@ -156,10 +157,11 @@ inner() {
   fi
   workspace=$(< "$home/workspace")
   exec 8<&0 < /dev/null
-  /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=2g tmpfs "$root/tmp"
+  # Memory backs both, so they are bounded: four tests at once write at most 6 GB.
+  /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=1g tmpfs "$root/tmp"
   # Where cargo sends an integration test's own files (CARGO_TARGET_TMPDIR).
   if [ -d "$root$workspace/target/tmp" ]; then
-    /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=2g tmpfs "$root$workspace/target/tmp"
+    /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs "$root$workspace/target/tmp"
   fi
   /usr/bin/mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
   cd "$root"
@@ -170,6 +172,9 @@ inner() {
     exit 2
   fi
   ulimit -v "$vlimit" -f "$flimit"
+  # A core limit of one byte: the kernel then starts no core handler, which would run as root
+  # outside every namespace, on a crash of this code.
+  /usr/bin/prlimit --pid "$$" --core=1:1
   # When the wrapper ends or asks, every process here but this one ends, and so the command.
   {
     read -r -u 8 _ || true
@@ -254,7 +259,7 @@ ran() {
   case "$need" in
     '' | *[!0-9]*) fail "not a count of commands: '$need'" ;;
   esac
-  if [ ! -f "$log" ]; then fail "no record of the commands that ran in the sandbox: limits.sh starts it"; fi
+  if [ ! -f "$log" ]; then fail "no record of the commands that ran in the sandbox: test-sandbox-env.sh starts it"; fi
   count=$(/usr/bin/wc -l < "$log")
   if [ "$count" -lt "$need" ]; then
     fail "$count commands of this step ran in the sandbox, where at least $need run the code of the change: cargo, nextest or cargo-mutants did not hand them to it"
@@ -327,6 +332,7 @@ probe() {
   if cc --version > /dev/null 2>&1; then echo "linker open"; else echo "linker closed"; fi
   if [ "${MENTE_TEST_SANDBOX_PROBE:-}" = "${at[marker]}" ]; then echo "variables open"; else echo "variables closed"; fi
   echo "limits $(ulimit -v)/$(ulimit -f)"
+  echo "core-limit $(/usr/bin/prlimit --core --noheadings --raw --output SOFT,HARD | /usr/bin/tr ' ' /)"
 }
 
 # A process that outlives the command that started it, in a session of its own, holding none of
@@ -408,6 +414,8 @@ check() {
   done
   if [ "${in_sandbox[uid]:-}" != "$uid" ] || [ "${outside[uid]:-}" = "$uid" ]; then problem "the probe ran in the sandbox as the user ${in_sandbox[uid]:-not reported}, not $uid"; fi
   if [ "${in_sandbox[limits]:-}" != 6291456/1048576 ]; then problem "the sandbox ran the probe under the limits ${in_sandbox[limits]:-not reported}, not its caller's"; fi
+  if [ "${in_sandbox[core-limit]:-}" != 1/1 ]; then problem "a crash in the sandbox could start the runner's core handler: its core limit is ${in_sandbox[core-limit]:-not reported}, not one byte"; fi
+  echo "The runner's core handler, which no crash in the sandbox starts: $(< /proc/sys/kernel/core_pattern)"
 
   # A process left behind: the runner's user keeps it; the sandbox ends it and fails the command.
   /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives"

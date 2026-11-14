@@ -24,6 +24,9 @@ ci.yml#rust: cargo run --locked --bin mn -- test --mutate
 ci.yml#rust: cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
 ci.yml#bench: bash .github/scripts/overflow-proof.sh
 ci.yml#bench: export MENTE_BENCH_BASELINE="$RUNNER_TEMP/base-medians.txt" MENTE_BENCH_ENFORCE=1
+ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh check
+ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 ci.yml#execution-paths: bash .github/scripts/overflow-proof.sh
 ci.yml#execution-paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 ci.yml#debuggers: bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn
@@ -47,6 +50,9 @@ mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-pla
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs evidence mutants.out deleted/mutants.out > evidence.txt
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
 
+generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh check
+generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 generated.yml#paths: bash .github/scripts/overflow-proof.sh
 generated.yml#paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/generated.txt"
 generated.yml#paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/conformance.txt"

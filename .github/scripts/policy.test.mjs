@@ -578,14 +578,15 @@ export function jobDigest(doc, job) {
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
 const PINNED_FILES = new Map([
-  [".github/scripts/limits.sh", "550ede6b38c53a5b7ac2ddfa07e9a6ae27953c1c95249689be842546413c8046"],
+  [".github/scripts/limits.sh", "0483913373077fc67592e909ec772fcd684a0bba0e17cfd3b6e2ddb0f3639cd7"],
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "155098da067472218bd550c888ecca9fb2e3481ce66065880a0ec76c92f1ce33"],
+  [".github/scripts/test-sandbox.sh", "d990b74807118812d8d362a25ec48760c15953a1a0673ab9f2756cb191f4052f"],
+  [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
 ]);
 const PINNED_JOBS = new Map([
   ["ci.yml#rust", "83af07e0452ecc08842f7c6f818590a9d7031bcb509773481e0927b6d93993f4"],
@@ -789,43 +790,78 @@ check("tools.sh finds a tool replaced or added, and a step that sets the next on
 });
 
 /// The step that sets up the sandbox the code of a change runs in on Linux, and proves it on that
-/// runner with the canary, in every testing job: exactly this, with the check of the tools after
-/// the canary, whose probe makes and removes a file among them as the runner's user.
-const SANDBOX_STEP = "/usr/bin/bash .github/scripts/test-sandbox.sh setup\n/usr/bin/bash .github/scripts/test-sandbox.sh check\n/usr/bin/bash .github/scripts/tools.sh verify\n";
+/// runner with the canary: exactly these two commands, and, in a testing job, which records its
+/// tools, the check of the tools after the canary, whose probe makes and removes a file among them
+/// as the runner's user.
+const SANDBOX_SETUP = "/usr/bin/bash .github/scripts/test-sandbox.sh setup\n/usr/bin/bash .github/scripts/test-sandbox.sh check\n";
+const VERIFY_TOOLS = "/usr/bin/bash .github/scripts/tools.sh verify\n";
+/// The jobs whose code of the change runs in the sandbox on Linux, beside the testing jobs the
+/// policy pins whole: those that run their tests through cargo alone. A job that runs a built
+/// binary by its path, reads a file of the runner's from inside a test or measures is not one yet
+/// (docs/design-review.md, untrusted-test-isolation).
+const SANDBOXED_JOBS = ["ci.yml#execution-paths", "generated.yml#paths"];
+/// What names the sandbox as cargo's runner in a step, and starts the count of what ran in it: the
+/// testing jobs' limits, which source the second, or the second alone.
+const SANDBOX_SOURCES = [". .github/scripts/limits.sh", ". .github/scripts/test-sandbox-env.sh"];
 /// What a step that ran code of the change ends with, before the check of the tools: at least one
 /// command ran in the sandbox, or, after cargo-mutants, at least one for each mutant caught.
 const RAN = "/usr/bin/bash .github/scripts/test-sandbox.sh ran";
-/// Whether a line of a step runs code of the change: tests through nextest or cargo, nextest's
-/// list, which runs every test executable, a binary through `cargo run`, mutants. A build
-/// (`--no-run`) and a list of mutants or of doctests run none.
-const runsCode = (line) => /^(cargo-nextest nextest (run|list)\b|cargo nextest run\b|cargo run\b|cargo mutants (?!.*--list)|cargo test (?!.*(--no-run|--doc\b.*--list)))/.test(line);
+/// Whether a line of a step runs code of the change: tests through nextest or cargo, under
+/// `timeout` or not, nextest's list, which runs every test executable, a binary through
+/// `cargo run`, mutants, and the proof of the overflow checks, which runs a test of every crate. A
+/// build (`--no-run`) and a list of mutants or of doctests run none.
+const runsCode = (line) =>
+  /^(timeout \S+ )?(cargo-nextest nextest (run|list)\b|cargo nextest run\b|cargo run\b|cargo mutants (?!.*--list)|cargo test (?!.*(--no-run|--doc\b.*--list))|bash \.github\/scripts\/overflow-proof\.sh$)/.test(line);
+/// Whether a line starts code of the change in a form the rule above does not read, and so
+/// could start it unseen: cargo's test, run, nextest or mutants anywhere else in a line, the proof
+/// of the overflow checks with anything after it, or a built binary run by its path, which cargo's
+/// runner never sees.
+const runsCodeUnread = (line) =>
+  !runsCode(line) &&
+  !line.startsWith("#") &&
+  (/\bcargo(-nextest)? +(test|run|nextest|mutants)\b(?!.*(--no-run|--list))/.test(line) || /overflow-proof\.sh/.test(line) || /(^|[\s;&|(=])(\.\/)?target\/(debug|release)\/[\w./-]+/.test(line));
 
 check("on Linux the testing jobs prove the tests' sandbox first, and every step that runs code of the change ran it there", () => {
-  for (const key of PINNED_JOBS.keys()) {
+  for (const key of [...PINNED_JOBS.keys(), ...SANDBOXED_JOBS]) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    const all = steps(w.doc.jobs[id]);
-    // Right after the tools are recorded: before the tests are built, and so before any runs.
-    const record = all.findIndex((s) => String(s.run ?? "").trim() === "/usr/bin/bash .github/scripts/tools.sh record");
-    const sandbox = all[record + 1];
-    assert.ok(record >= 0 && sandbox?.run === SANDBOX_STEP, `${key}: the step after the record of the tools does not set up and prove the sandbox as SANDBOX_STEP in .github/scripts/policy.test.mjs reads it`);
-    assert.deepEqual(Object.keys(sandbox).filter((k) => k !== "if").sort(), ["name", "run"], `${stepKey(file, id, sandbox)} carries more than its name, its script and the watch's condition`);
+    assert.ok(w?.doc.jobs?.[id], `${file} has no job ${id}`);
+    const job = w.doc.jobs[id];
+    const all = steps(job);
+    const bash = (s) => {
+      const shell = s.shell ?? job.defaults?.run?.shell ?? w.doc.defaults?.run?.shell;
+      return shell === "bash" || (shell === undefined && /^ubuntu-/.test(String(job["runs-on"])));
+    };
+    // One step sets the sandbox up and proves it. In a testing job it is the step right after the
+    // tools are recorded, before the tests are built, and so before any runs.
+    const naming = all.flatMap((s, k) => (/test-sandbox\.sh (setup|check)\b/.test(String(s.run ?? "")) ? [k] : []));
+    assert.equal(naming.length, 1, `${key}: ${naming.length} steps set up or prove the sandbox, not one`);
+    const sandbox = all[naming[0]];
+    const where = stepKey(file, id, sandbox);
+    assert.equal(sandbox.run, PINNED_JOBS.has(key) ? SANDBOX_SETUP + VERIFY_TOOLS : SANDBOX_SETUP, `${where} does not set up and prove the sandbox as SANDBOX_SETUP in .github/scripts/policy.test.mjs reads it`);
+    assert.deepEqual(Object.keys(sandbox).filter((k) => k !== "if").sort(), ["name", "run"], `${where} carries more than its name, its script and the watch's condition`);
+    assert.ok(bash(sandbox), `${where} does not run in bash`);
+    if (PINNED_JOBS.has(key)) {
+      const record = all.findIndex((s) => String(s.run ?? "").trim() === "/usr/bin/bash .github/scripts/tools.sh record");
+      assert.ok(record >= 0 && naming[0] === record + 1, `${key}: the sandbox is not set up and proven right after the tools are recorded`);
+    }
     let running = 0;
     for (const [k, s] of all.entries()) {
       if (typeof s.run !== "string") continue;
       const lines = logicalLines(s.run).map((l) => l.trim());
+      for (const l of lines) assert.ok(!runsCodeUnread(l), `${stepKey(file, id, s)} starts code of the change in a form the policy does not read, which cargo's runner may never see: ${l}`);
       const runs = lines.flatMap((l, at) => (runsCode(l) ? [at] : []));
       if (runs.length === 0) continue;
       running++;
-      const where = stepKey(file, id, s);
-      assert.ok(k > record + 1, `${where} runs code of the change before the sandbox is set up and proven`);
-      // The limits name the sandbox as cargo's runner, and start the count of what ran in it.
-      const source = lines.indexOf(". .github/scripts/limits.sh");
-      assert.ok(source >= 0 && source < runs[0], `${where} runs code of the change before it sources limits.sh, and so outside the sandbox: ${lines[runs[0]]}`);
+      const step = stepKey(file, id, s);
+      assert.ok(k > naming[0], `${step} runs code of the change before the sandbox is set up and proven`);
+      const source = lines.findIndex((l) => SANDBOX_SOURCES.includes(l));
+      assert.ok(source >= 0 && source < runs[0], `${step} runs code of the change before it sources the limits or test-sandbox-env.sh, and so outside the sandbox: ${lines[runs[0]]}`);
+      assert.ok(bash(s), `${step} sources the sandbox's settings in a shell that is not bash`);
       const mutants = lines.some((l) => /^cargo mutants (?!.*--list)/.test(l));
       const ran = lines.flatMap((l, at) => (l === RAN || l.startsWith(`${RAN} `) ? [at] : []));
-      assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${where} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
-      assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${where} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
+      assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${step} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
+      assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
     }
     assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
   }
@@ -834,22 +870,56 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     ["cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > x", true],
     ["cargo nextest run --workspace 2>&1 | tee baseline.log", true],
     ["cargo test --locked -p mente-cli --test gates", true],
+    ["timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter", true],
     ["cargo run --locked --bin mn -- spec", true],
     ['cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place || status=$?', true],
+    ["bash .github/scripts/overflow-proof.sh", true],
     ["cargo test --locked --workspace --no-run", false],
     ["cargo test --locked --workspace --doc -- --list > x 2>&1", false],
     ["cargo mutants --in-diff pr.diff --list --json > diff-mutants.json", false],
     ["cargo fmt --all --check", false],
   ]) {
     assert.equal(runsCode(line), runs, line);
+    assert.ok(!runsCodeUnread(line), `a line the policy reads counts as unread: ${line}`);
   }
-  // limits.sh, which every such step sources, takes cargo's runner from the sandbox's script, and
-  // stops when there is no sandbox.
+  for (const [line, unread] of [
+    ["(cd ../base && timeout 15m cargo test --release --locked -p mente-cli -- --ignored x)", true],
+    ["MENTE_X=1 cargo test --locked", true],
+    ["if cargo-nextest nextest run; then echo passed; fi", true],
+    ["bash .github/scripts/overflow-proof.sh || true", true],
+    ["./target/release/mn smt examples --out x", true],
+    ["target/release/mn fuzz --seed 1", true],
+    ["status=0; target/debug/mn spec || status=$?", true],
+    ["mn=target/debug/mn", true],
+    ['cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"', false],
+    ["cargo clippy --all-targets --workspace --locked -- -D warnings", false],
+    ["# cargo test runs here", false],
+    ["rustup toolchain install", false],
+  ]) {
+    assert.equal(runsCodeUnread(line), unread, line);
+  }
+  // limits.sh sources test-sandbox-env.sh on Linux, last, and that file takes cargo's runner from
+  // the sandbox's script and stops when there is no sandbox.
   assert.match(
     read(".github/scripts/limits.sh").replace(/\r\n/g, "\n"),
-    /\n    if ! limits_sandbox=\$\(\/usr\/bin\/bash \.github\/scripts\/test-sandbox\.sh env\); then\n      echo "\$limits_sandbox"\n      exit 1\n    fi\n    eval "\$limits_sandbox"\n/,
-    "limits.sh does not take cargo's runner from test-sandbox.sh env on Linux, or goes on without it",
+    /\n  Linux\)\n(?:(?!\n    ;;\n)[\s\S])*\n    \. \.github\/scripts\/test-sandbox-env\.sh\n    ;;\n/,
+    "limits.sh does not source test-sandbox-env.sh on Linux",
   );
+  assert.match(
+    read(".github/scripts/test-sandbox-env.sh").replace(/\r\n/g, "\n"),
+    /\nif ! test_sandbox_env=\$\(\/usr\/bin\/bash \.github\/scripts\/test-sandbox\.sh env\); then\n  echo "\$test_sandbox_env"\n  exit 1\nfi\neval "\$test_sandbox_env"\n/,
+    "test-sandbox-env.sh does not take cargo's runner from test-sandbox.sh env, or goes on without it",
+  );
+  const sourced = (os_) => {
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/_RUNNER$/i.test(k))), RUNNER_OS: os_ };
+    const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", '. .github/scripts/test-sandbox-env.sh; echo "the step went on, its runner ${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER:-none}"'], { cwd: ROOT, encoding: "utf8", env, timeout: 30000 });
+    return { status: r.status, out: `${r.stdout}${r.stderr}` };
+  };
+  const stopped = sourced("Linux");
+  assert.equal(stopped.status, 1, `a step went on with no sandbox set up: ${stopped.out}`);
+  assert.match(stopped.out, /::error::the sandbox is not set up/);
+  assert.doesNotMatch(stopped.out, /the step went on/);
+  assert.deepEqual(sourced("Windows"), { status: 0, out: "the step went on, its runner none\n" }, "test-sandbox-env.sh changes a step on Windows, which has no sandbox");
   // What the script does on any machine: it names no runner where no sandbox is set up, it fails a
   // step whose tools ran nothing in the sandbox, and it refuses a command it could not hand over
   // whole. The sandbox itself is proven where it runs, by the canary.

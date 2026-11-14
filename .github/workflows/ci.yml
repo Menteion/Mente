@@ -232,18 +232,32 @@ jobs:
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # In bash on every runner: Windows' own shell finds its timeout.exe, which only waits.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
+      - name: The sandbox the code of the change runs in, proven before any of it runs
+        # On Linux every test executable runs apart from cargo and the runner's own files, and
+        # the canary proves it on this runner (.github/scripts/test-sandbox.sh).
+        run: |
+          /usr/bin/bash .github/scripts/test-sandbox.sh setup
+          /usr/bin/bash .github/scripts/test-sandbox.sh check
       - name: Overflow checks in this job's release build
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          . .github/scripts/test-sandbox-env.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
       - name: Compare
-        # In bash on every runner: Windows' own shell finds its timeout.exe, which only waits.
-        shell: bash
-        run: timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
+        run: |
+          . .github/scripts/test-sandbox-env.sh
+          timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
 
   debuggers:
     # Native code that `mn build` builds from a .mn program, stepped through by a scripted gdb
