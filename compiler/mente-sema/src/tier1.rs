@@ -3466,8 +3466,11 @@ impl<'a> Fx<'a> {
                 if let Some(r) = refine {
                     lo = lo.max(interval(st, &r.lo).0);
                     let top = interval(st, &r.hi).1;
-                    let below = bounds::add(INF, (top, top), (-1, -1)).1;
-                    hi = hi.min(if r.inclusive { top } else { below });
+                    hi = hi.min(if r.inclusive {
+                        top
+                    } else {
+                        bounds::below(INF, top)
+                    });
                 }
                 Val::Itv(lo, hi)
             }

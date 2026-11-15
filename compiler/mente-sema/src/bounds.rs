@@ -75,6 +75,17 @@ pub fn add(inf: i128, a: Itv, b: Itv) -> Itv {
     (lo, hi)
 }
 
+/// The upper bound of `x - 1` for `x` at most `hi`, as [`add`] gives it: one less, and no bound
+/// where `hi` is none. An exclusive end of a refinement is the inclusive one below it.
+pub fn below(inf: i128, hi: i128) -> i128 {
+    let hi = upper(inf, hi);
+    if hi == inf {
+        inf
+    } else {
+        upper(inf, hi - 1)
+    }
+}
+
 /// `-x` for `x` in `a`: a bound at the limit negated is the other side's limit, no bound
 /// there either.
 pub fn neg(inf: i128, a: Itv) -> Itv {
@@ -371,6 +382,15 @@ mod tests {
         // 16 - y for any y at or above 0 has no lower bound.
         let difference = add(INF, mul(INF, (4, 4), (4, 4)), neg(INF, (0, INF)));
         assert_eq!(difference, (-INF, INF));
+        // The inclusive end below an exclusive one: one less, none where there is none, and
+        // what `add` gives on that side.
+        assert_eq!(below(INF, 3), 2);
+        assert_eq!(below(INF, INF), INF);
+        assert_eq!(below(INF, 2 * INF), INF);
+        assert_eq!(below(INF, 1 - INF), 1 - INF);
+        for hi in [-INF, 1 - INF, -1, 0, 1, INF - 1, INF] {
+            assert_eq!(below(INF, hi), add(INF, (hi, hi), (-1, -1)).1, "{}", hi);
+        }
         // 2^127 is past any limit and past `i128`: a shift by 127 keeps its operand's sign.
         assert_eq!(shl(INF, (1, 1), 127), (INF - 1, INF));
         assert_eq!(shl(INF, (-1, -1), 127), (-INF, 1 - INF));
