@@ -338,7 +338,8 @@ impl Wide<'_> {
         // A bit operation, a shift or `~` over literals alone works in the type its literals
         // take (`core-calculus.md`, item 5): its range is its one value where the checker
         // knows it, as a literal's is, so that the order of the operands around it never
-        // changes whether their hull fits, and else the type's.
+        // changes whether their hull fits, and else the type's. A value outside the type is an
+        // operation that traps (`E0234`), and gives no value.
         let taken = self
             .typing
             .literals
@@ -347,8 +348,8 @@ impl Wide<'_> {
             .flatten()
             .map(
                 |t| match crate::literals::value(self.tree, &self.typing.literals, e) {
-                    Some(v) if v.fits(t.ty) => Range::point(Num::new(v.negative, v.magnitude)),
-                    Some(_) | None => Range::of(t.ty),
+                    Some(v) => Range::point(Num::new(v.negative, v.magnitude)),
+                    None => Range::of(t.ty),
                 },
             );
         let span = self.tree.expr(e).span;

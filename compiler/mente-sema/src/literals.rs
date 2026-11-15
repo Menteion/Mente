@@ -473,11 +473,9 @@ fn collect_alternatives(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
                     | ExprKind::Variant { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::If { .. }
-                    | ExprKind::Error => {
-                        if !out.contains(&e) {
-                            out.push(e);
-                        }
-                    }
+                    // A base that is no array literal, a branch that traps, is an alternative
+                    // of its own, of no value known, as such a branch of an `if` is.
+                    | ExprKind::Error => out.push(b),
                 }
             }
         }
@@ -1283,6 +1281,10 @@ mod tests {
                 Some(vec![(false, 2), (false, 252), (false, 300)]),
             ),
             ("if c { a } else { 1 }", None),
+            // A branch that traps gives no value known, whether it is the value or the array
+            // it is indexed from.
+            ("if c { 1 } else { todo(\"x\") }", None),
+            ("(if c { [1] } else { todo(\"x\") })[0]", None),
             // At most `MOST_VALUES` combinations are tried: eight by eight are, eight by nine
             // are not, however few their sums.
             (
