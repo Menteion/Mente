@@ -279,7 +279,10 @@ impl Count<'_> {
     /// Whether `e` is a `.len`: a field read of an array.
     fn is_len(&self, e: ExprId) -> bool {
         match &self.tree.expr(e).kind {
-            ExprKind::Field { base, .. } => matches!(self.ty(*base), Ty::Array(..)),
+            ExprKind::Field { base, .. } => match self.ty(*base) {
+                Ty::Array(..) => true,
+                Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => false,
+            },
             ExprKind::Int { .. }
             | ExprKind::Bool(_)
             | ExprKind::Name(_)
@@ -437,12 +440,21 @@ impl Count<'_> {
         let mut held = 0;
         let mut m = 0;
         for (i, &s) in stmts.iter().enumerate() {
-            if i + 1 == stmts.len() {
-                if let StmtKind::Expr(a) = self.tree.stmt(s).kind {
+            match self.tree.stmt(s).kind {
+                StmtKind::Expr(a) if i + 1 == stmts.len() => {
                     let x = self.eval(a, false);
                     m = m.max(held + x.m).max(held + x.t + v);
                     return (x.v, m);
                 }
+                StmtKind::Binding { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Guard { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Discard(_)
+                | StmtKind::Expr(_) => {}
             }
             m = m.max(held + self.stmt(s));
             held += self.binding_size(s);
