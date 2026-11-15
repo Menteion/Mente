@@ -23,7 +23,8 @@
 //!
 //! Not mutated: a cast, which only moves a value between types that hold it; a slot, an element
 //! address or a load, whose change reads other bytes of the same frame rather than another value
-//! the program computes; a call; and the terminators `jump`, `return` and `trap`, whose targets
+//! the program computes; a call; the count of a call's frame, `enter`, whose every change the
+//! verifier refuses, as [`unpaired`] shows; and the terminators `jump`, `return` and `trap`, whose targets
 //! and values the other families already reach through the instructions that compute them.
 //!
 //! A mutant is named by its function, its block, the instruction's index in that block or
@@ -389,10 +390,120 @@ fn inst_changes(f: &cfg::Function, v: NodeId) -> Vec<Candidate> {
         Op::Check { .. } => vec![(Family::Trap, "check-removed", Change::Remove)],
         Op::Store => vec![(Family::Memory, "store-removed", Change::Remove)],
         Op::Copy { .. } => vec![(Family::Memory, "copy-removed", Change::Remove)],
-        Op::Param | Op::Cast | Op::Slot { .. } | Op::Elem { .. } | Op::Load | Op::Call(_) => {
-            Vec::new()
+        Op::Param
+        | Op::Cast
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Call(_)
+        | Op::Enter { .. } => Vec::new(),
+    }
+}
+
+/// The callee whose frame the instruction `v` of `f` counts, where it is an [`Op::Enter`].
+fn counted(f: &cfg::Function, v: NodeId) -> Option<FuncId> {
+    match f.op(v) {
+        Op::Enter { callee, .. } => Some(*callee),
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Store
+        | Op::Copy { .. }
+        | Op::Call(_) => None,
+    }
+}
+
+/// The callee of the instruction `v` of `f`, where it is an [`Op::Call`].
+fn called(f: &cfg::Function, v: NodeId) -> Option<FuncId> {
+    match f.op(v) {
+        Op::Call(c) => Some(*c),
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Store
+        | Op::Copy { .. }
+        | Op::Enter { .. } => None,
+    }
+}
+
+/// Where the call of `callee` that an `Enter` at `block`, `at` opens stands: the first call of
+/// `callee` after it in its block, or else in a block after its own.
+fn its_call(f: &cfg::Function, block: usize, at: usize, callee: FuncId) -> Option<(usize, usize)> {
+    let is_call = |v: NodeId| called(f, v) == Some(callee);
+    let later = f.blocks[block].insts[at + 1..]
+        .iter()
+        .position(|&v| is_call(v))
+        .map(|i| (block, at + 1 + i));
+    later.or_else(|| {
+        f.blocks
+            .iter()
+            .enumerate()
+            .skip(block + 1)
+            .find_map(|(bi, b)| b.insts.iter().position(|&v| is_call(v)).map(|i| (bi, i)))
+    })
+}
+
+/// Each way a change could break the count of a call's frame (`core-calculus.md`, item 25): an
+/// [`Op::Enter`] of `m` dropped, doubled, or moved past its call, one module for each `Enter`
+/// and each way, named as a mutant is. The verifier refuses every one ([`cfg::verify`]): an
+/// uncounted call, a count left open at a return, a call before its count. They are not mutants
+/// of the gate, whose mutants verify: they show that the pairing is held by MIR's structure.
+pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
+    let mut out = Vec::new();
+    for (fi, f) in m.functions.iter().enumerate() {
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, &v) in b.insts.iter().enumerate() {
+                let Some(callee) = counted(f, v) else {
+                    continue;
+                };
+                let name = |what: &str| format!("{}/b{}.i{}/{}", f.name, bi, ii, what);
+                let mut dropped = m.clone();
+                dropped.functions[fi].blocks[bi].insts.remove(ii);
+                out.push((name("enter-dropped"), dropped));
+                let mut doubled = m.clone();
+                let g = &mut doubled.functions[fi];
+                let twin = NodeId(g.ops.len() as u32);
+                g.ops.push(g.ops[v.0 as usize].clone());
+                g.tys.push(g.tys[v.0 as usize]);
+                g.locs.push(g.locs[v.0 as usize]);
+                g.operands.push((g.pool.len() as u32, 0));
+                g.blocks[bi].insts.insert(ii + 1, twin);
+                out.push((name("enter-doubled"), doubled));
+                if let Some((cb, ci)) = its_call(f, bi, ii, callee) {
+                    let mut moved = m.clone();
+                    let g = &mut moved.functions[fi];
+                    g.blocks[cb].insts.insert(ci + 1, v);
+                    g.blocks[bi].insts.remove(ii);
+                    out.push((name("enter-moved"), moved));
+                }
+            }
         }
     }
+    out
 }
 
 /// `n + 1` when `up`, else `n - 1`, when its magnitude stays below 2^128.
@@ -418,10 +529,7 @@ mod tests {
             FuncId(0),
             args,
             &mut Memory::default(),
-            Limits {
-                max_depth: 100,
-                max_steps: 10_000,
-            },
+            Limits { max_steps: 10_000 },
         )
     }
 
@@ -461,9 +569,78 @@ mod tests {
         b.end(Term::Return(Some(s)));
         let m = Module {
             functions: vec![b.finish()],
+            budget: 1 << 20,
         };
         cfg::verify(&m).unwrap();
         m
+    }
+
+    /// `fn callee(x: u8) -> u8 = x`, of a frame of 100 bytes, and `fn caller(x: i64) -> u8`,
+    /// which counts it, narrows its argument with a check, and calls it, as the lowering does.
+    fn counted_call() -> Module {
+        let mut c = Builder::new("callee", &[Ty::Int(U8)], Some(Ty::Int(U8)));
+        let x = c.params(BlockId(0))[0];
+        c.end(Term::Return(Some(x)));
+        let mut callee = c.finish();
+        callee.frame = 100;
+        let mut b = Builder::new("caller", &[Ty::Int(I64)], Some(Ty::Int(U8)));
+        let x = b.params(BlockId(0))[0];
+        let deep = b.trap_site("stack-overflow", &["the call stack ran out"]);
+        b.inst(
+            Op::Enter {
+                callee: FuncId(0),
+                trap: deep,
+            },
+            Ty::Unit,
+            &[],
+        );
+        let max = b.int(I64, Num::from_i128(255));
+        let fits = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[x, max]);
+        let narrowing = b.trap_site("narrowing", &["out of range"]);
+        b.inst(Op::Check { trap: narrowing }, Ty::Unit, &[fits]);
+        let small = b.inst(Op::Cast, Ty::Int(U8), &[x]);
+        let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[small]);
+        b.end(Term::Return(Some(r)));
+        let m = Module {
+            functions: vec![callee, b.finish()],
+            budget: 1 << 20,
+        };
+        cfg::verify(&m).unwrap();
+        m
+    }
+
+    /// An `Enter` dropped, doubled, or moved past its call breaks the count of a call's frame,
+    /// and the verifier refuses each: a call no count opens, a count open at a return, a call
+    /// before its count. The original verifies and runs.
+    #[test]
+    fn test_the_verifier_refuses_every_count_out_of_its_pairing() {
+        let m = counted_call();
+        let all = unpaired(&m);
+        let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "caller/b0.i0/enter-dropped",
+                "caller/b0.i0/enter-doubled",
+                "caller/b0.i0/enter-moved"
+            ]
+        );
+        for (name, broken) in &all {
+            let why = cfg::verify(broken).unwrap_err();
+            let expected = match name.rsplit('/').next() {
+                Some("enter-doubled") => "returns with the count of a call of f0 open",
+                _ => "a call of f0 that no count of it opens",
+            };
+            assert!(why.contains(expected), "{}: {}", name, why);
+        }
+        let ran = cfg::run(
+            &m,
+            FuncId(1),
+            &[int(7)],
+            &mut Memory::default(),
+            Limits::default(),
+        );
+        assert_eq!(ran, Ok(int(7)));
     }
 
     fn named<'a>(m: &Module, all: &'a [Mutant], name: &str) -> &'a Mutant {
@@ -588,6 +765,7 @@ mod tests {
         }
         let m = Module {
             functions: vec![b.finish()],
+            budget: 1 << 20,
         };
         cfg::verify(&m).unwrap();
 
@@ -667,6 +845,7 @@ mod tests {
             b.end(Term::Return(Some(k)));
             let m = Module {
                 functions: vec![b.finish()],
+                budget: 1 << 20,
             };
             mutants(&m)
                 .iter()
@@ -722,6 +901,7 @@ mod tests {
         b.end(Term::Return(Some(r)));
         let m = Module {
             functions: vec![b.finish()],
+            budget: 1 << 20,
         };
         let all = mutants(&m);
         let id = named(&m, &all, "n/b0.i0/neg>id").apply(&m);

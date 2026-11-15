@@ -828,19 +828,18 @@ fn test_calls_recurse_until_the_stack_runs_out() {
         "pub fn fact(n: u64) -> u64 {\n  if n == 0 {\n    return 1\n  }\n  n * fact(n - 1)\n}";
     assert_eq!(run(fact, "fact(20)"), "2432902008176640000");
     assert_eq!(kind(fact, "fact(21)"), "narrowing");
-    let limits = Limits {
-        max_depth: 50,
-        ..Limits::default()
-    };
+    // `down` has a frame of 84 bytes (`core-calculus.md`, item 25): 12,483 calls fit the
+    // budget, and the 12,484th traps at the call, line 6, before anything of it runs.
     let down = "pub fn down(n: u32) -> u32 {\n  if n == 0 {\n    return 0\n  }\n  down(n - 1)\n}";
-    let deep = run_with(down, "down(100)", limits);
+    assert_eq!(module(down).frames[0].map(|f| f.bytes), Some(84));
+    let deep = run_with(down, "down(12483)", Limits::default());
     assert!(
         matches!(&deep, Err(Stop::Trap(t)) if t.kind == TrapKind::StackOverflow && t.span.line == 6),
         "{:?}",
         deep
     );
     assert_eq!(
-        run_with(down, "down(40)", limits),
+        run_with(down, "down(12482)", Limits::default()),
         Ok(Value::Int(Int::ZERO))
     );
     let args = "pub fn pick(a: u8, b: u8) -> u8 = b\npub fn f(x: u16) -> u8 = pick(1, x)";
@@ -1094,7 +1093,6 @@ fn test_calls_and_values_read_and_print_canonically() {
         Stop::TooLarge(5).to_string(),
         "an array of 5 elements is over the limit"
     );
-    assert_eq!(Limits::default().max_depth, 10_000);
 }
 
 #[test]
@@ -1139,43 +1137,40 @@ fn test_calls_from_outside_mark_mut_arguments_and_see_what_they_leave() {
     );
 }
 
+/// The stack in use is the sum of the frames of the calls that have begun and not returned
+/// (`core-calculus.md`, item 25): a recursion of frames of 128 bytes, the call's 64, a `u64`
+/// parameter, three `u64` bindings and the 32 bytes its last statement holds, fills the budget
+/// exactly with 8,192 calls, which run, and the 8,193rd traps; and calls one after another give
+/// their frames back, so twenty calls of a frame of 800,072 bytes run where two at once would not.
 #[test]
-fn test_depth_counts_nested_calls_only() {
-    let down = "pub fn down(n: u32) -> u32 {\n  if n == 0 {\n    return 0\n  }\n  down(n - 1)\n}";
-    let limits = Limits {
-        max_depth: 50,
-        ..Limits::default()
-    };
+fn test_the_budget_counts_the_frames_of_nested_calls_only() {
+    let fill = "pub fn r(n: u64) -> u64 {\n  val a = n\n  val b = a\n  val c = b\n  if c == 0 {\n    return 0\n  }\n  r(c - 1)\n}";
+    assert_eq!(module(fill).frames[0].map(|f| f.bytes), Some(128));
     assert_eq!(
-        run_with(down, "down(49)", limits),
+        run_with(fill, "r(8191)", Limits::default()),
         Ok(Value::Int(Int::ZERO))
     );
     assert!(matches!(
-        run_with(down, "down(50)", limits),
+        run_with(fill, "r(8192)", Limits::default()),
         Err(Stop::Trap(Trap {
             kind: TrapKind::StackOverflow,
             ..
         }))
     ));
-    // Calls one after another do not add up.
-    let many = "pub fn one() -> u32 = 1\npub fn many() -> u32 {\n  var total: u32 = 0\n  var i: u32 = 0\n  while i < 20 {\n    total += one()\n    i += 1\n  }\n  total\n}";
-    let shallow = Limits {
-        max_depth: 3,
-        ..Limits::default()
-    };
+    let many = "pub fn one() -> u32 {\n  val big: [400000]u8 = [0_u8; 400000]\n  _ = big\n  1\n}\npub fn many() -> u32 {\n  var total: u32 = 0\n  var i: u32 = 0\n  while i < 20 {\n    total += one()\n    i += 1\n  }\n  total\n}";
+    assert_eq!(module(many).frames[0].map(|f| f.bytes), Some(800_072));
     assert_eq!(
-        run_with(many, "many()", shallow),
+        run_with(many, "many()", Limits::default()),
         Ok(Value::Int(Int::from_u128(20)))
     );
-    assert_eq!(run(down, "down(5000)"), "0");
     // A call of a function without a body does not check (`E0224`), so no run meets one.
     // Only a call of a function by itself compares measures.
     let pair = "pub fn m(n: u8) -> u8\n  decreases n\n= n\npub fn caller(n: u8) -> u8\n  decreases n\n= m(n)";
     assert_eq!(run(pair, "caller(3)"), "3");
     let defaults = Limits::default();
     assert_eq!(
-        (defaults.max_depth, defaults.max_steps, defaults.max_array),
-        (10_000, 100_000_000, 1 << 24)
+        (defaults.max_steps, defaults.max_array),
+        (100_000_000, 1 << 24)
     );
 }
 
@@ -1185,8 +1180,6 @@ fn test_each_ensures_clause_reads_its_own_result_and_elements_take_their_type() 
     assert_eq!(run(two, "inc(3)"), "4");
     let shifted = "pub fn f(a: u8, k: u32) -> [2]u8 = [a, 1 << k]";
     assert_eq!(kind(shifted, "f(1, 8)"), "shift-amount");
-    assert_eq!(super::stack_bytes(0), 1 << 20);
-    assert_eq!(super::stack_bytes(2), (1 << 20) + 2 * (64 << 10));
     assert_eq!(Int::from_i128(0), Int::ZERO);
     assert_eq!(Int::from_i128(-3).to_string(), "-3");
 }
@@ -1733,10 +1726,7 @@ pub fn r(n: u8) -> u8
   r(n - 1) + 1
 }",
     );
-    let limits = Limits {
-        max_depth: 16,
-        ..Limits::default()
-    };
+    let limits = Limits::default();
     let calls: Vec<(&str, Vec<u128>)> = vec![
         ("f", vec![7, 1]),
         ("f", vec![6, 1]),
@@ -1768,4 +1758,218 @@ pub fn r(n: u8) -> u8
         out
     });
     assert_eq!(shared.ok(), Some(alone));
+}
+
+/// The source of a function `f` whose body nests `shape` as deep as the parser allows
+/// (`NESTING_LIMIT`): `shape(n)` writes it `n` levels deep, and the deepest that checks is taken.
+fn deepest(shape: &dyn Fn(usize) -> String) -> (String, usize) {
+    for n in (1..=mente_syntax::body::NESTING_LIMIT as usize).rev() {
+        let text = format!("module m\n{}\n", shape(n));
+        if mente_sema::check_program_without_proofs(&text).is_ok() {
+            return (text, n);
+        }
+    }
+    panic!("no depth of the shape checks");
+}
+
+/// A shape of a body nested `n` levels deep.
+type Shape = Box<dyn Fn(usize) -> String>;
+
+/// The shapes a step of the interpreter takes, each nested as deep as the parser allows, with a
+/// call that runs it: operators, `if`, `match`, calls, array literals read by index, `and`,
+/// unary `-`, and blocks with a binding.
+fn deep_shapes() -> Vec<(&'static str, String, usize, Vec<Value>)> {
+    let int = |x: u128| vec![Value::Int(Int::from_u128(x))];
+    let branches = |n: usize| "\n} else {\n  0\n}".repeat(n);
+    let shapes: Vec<(&'static str, Shape, Vec<Value>)> = vec![
+        (
+            "operators",
+            Box::new(|n| {
+                format!(
+                    "pub fn f(x: u64) -> u64 = {}x{}",
+                    "1 * (".repeat(n),
+                    ")".repeat(n)
+                )
+            }),
+            int(3),
+        ),
+        (
+            "if",
+            Box::new(move |n| {
+                format!(
+                    "pub fn f(c: bool) -> u64 = {}7{}",
+                    "if c {\n".repeat(n),
+                    branches(n)
+                )
+            }),
+            vec![Value::Bool(true)],
+        ),
+        (
+            "match",
+            Box::new(|n| {
+                format!(
+                    "pub fn f(k: u8) -> u64 = {}7{}",
+                    "match k {\n0 => ".repeat(n),
+                    "\n_ => 0\n}".repeat(n)
+                )
+            }),
+            int(0),
+        ),
+        (
+            "calls",
+            Box::new(|n| {
+                format!(
+                    "fn g(x: u64) -> u64 = x\npub fn f(x: u64) -> u64 = {}x{}",
+                    "g(".repeat(n),
+                    ")".repeat(n)
+                )
+            }),
+            int(3),
+        ),
+        (
+            "array literals",
+            Box::new(|n| {
+                format!(
+                    "pub fn f(x: u64) -> u64 = {}x{}{}",
+                    "[".repeat(n),
+                    "]".repeat(n),
+                    "[0]".repeat(n)
+                )
+            }),
+            int(3),
+        ),
+        (
+            "and",
+            Box::new(|n| {
+                format!(
+                    "pub fn f(c: bool) -> bool = {}c{}",
+                    "c and (".repeat(n),
+                    ")".repeat(n)
+                )
+            }),
+            vec![Value::Bool(true)],
+        ),
+        (
+            "unary minus",
+            Box::new(|n| {
+                format!(
+                    "pub fn f(x: i64) -> i64 = {}x{}",
+                    "-(".repeat(n),
+                    ")".repeat(n)
+                )
+            }),
+            int(3),
+        ),
+        (
+            "blocks",
+            Box::new(move |n| {
+                let open: String = (0..n)
+                    .map(|i| format!("if c {{\nval a{}: u64 = 1\n_ = a{}\n", i, i))
+                    .collect();
+                format!("pub fn f(c: bool) -> u64 = {}7{}", open, branches(n))
+            }),
+            vec![Value::Bool(true)],
+        ),
+    ];
+    shapes
+        .into_iter()
+        .map(|(name, shape, args)| {
+            let (text, n) = deepest(&*shape);
+            (name, text, n, args)
+        })
+        .collect()
+}
+
+/// No step of the interpreter, from one check of its host stack to the next, takes more than
+/// `host::STEP`, on any shape nested as deep as the parser allows: the margin each segment keeps
+/// is derived from it (`crate::host`), so a step that outgrows it fails here first.
+#[test]
+fn test_no_step_outgrows_the_host_step() {
+    // The checker reads code nested this deep, and drops its tree, on the stack `mn` gives its
+    // work, as the parser's own test of the limit does; the interpreter runs on its own threads
+    // (`crate::host`).
+    let widest = mente_threads::alone(None, Some(256 << 20), || {
+        let mut widest = (0, "");
+        for (name, text, n, args) in deep_shapes() {
+            let m = match mente_sema::check_program_without_proofs(&text) {
+                Ok(m) => m,
+                Err(d) => panic!("{} does not check: {:?}", name, d),
+            };
+            let (outcome, step) = deepest_step(&m, "f", args);
+            assert!(outcome.is_ok(), "{} {} deep: {:?}", name, n, outcome);
+            println!("{:16} {:3} levels: largest step {} bytes", name, n, step);
+            if step > widest.0 {
+                widest = (step, name);
+            }
+        }
+        widest
+    });
+    let widest = match widest {
+        Ok(Ok(w)) => w,
+        _ => panic!("the shapes did not run"),
+    };
+    println!(
+        "largest step: {} bytes, {}; the step allowed: {}",
+        widest.0,
+        widest.1,
+        host::STEP
+    );
+    assert!(
+        widest.0 <= host::STEP,
+        "a step of {} bytes ({}) outgrows host::STEP, {} bytes",
+        widest.0,
+        widest.1,
+        host::STEP
+    );
+}
+
+/// A recursion whose call stands in `k` nested `if`s: `q(n)` makes `n + 1` calls.
+fn nested_ifs(k: usize) -> String {
+    format!(
+        "pub fn q(n: u32) -> u32 = {}q(n - 1){}",
+        "if n > 0 {
+"
+        .repeat(k),
+        "
+} else {
+  0
+}"
+        .repeat(k)
+    )
+}
+
+/// The calls of `name`, the module's first function, that fit the budget, and that call's
+/// frame: the most a recursion of it makes before the next call traps (`core-calculus.md`, item
+/// 25).
+fn calls_that_fit(m: &CheckedModule) -> u128 {
+    let frame = m.frames[0].map_or(0, |f| f.bytes);
+    assert!(frame > 0);
+    mente_sema::frames::BUDGET / frame
+}
+
+/// A call nested in eight `if`s takes several times the host stack of a call nested in one,
+/// and its frame no more, so a thread sized per call ran out of host stack where item 25 counts
+/// on: the interpreter now runs it to the budget, on segments of its host stack, and traps at
+/// the call item 25 names (`crate::host`).
+#[test]
+fn test_a_recursion_through_nested_ifs_runs_to_the_budget() {
+    let src = nested_ifs(8);
+    let m = module(&src);
+    let fit = calls_that_fit(&m);
+    let last = Value::Int(Int::from_u128(fit - 1));
+    assert_eq!(
+        call(&m, "q", vec![last], Limits::default()),
+        Ok(Value::Int(Int::ZERO))
+    );
+    let over = call(
+        &m,
+        "q",
+        vec![Value::Int(Int::from_u128(fit))],
+        Limits::default(),
+    );
+    assert!(
+        matches!(&over, Err(Stop::Trap(t)) if t.kind == TrapKind::StackOverflow && t.span.line == 10),
+        "{:?}",
+        over
+    );
 }

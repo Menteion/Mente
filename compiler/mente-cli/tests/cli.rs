@@ -732,23 +732,23 @@ fn test_mn_dump_prints_canonical_forms() {
     fs::write(dir.join("d.mn"), "module t\npub fn f(x: u8) -> u8 = x\n").unwrap();
     let tokens = mn(&dir, &["dump", "--tokens", "d.mn"]);
     assert_eq!(tokens.status.code(), Some(0));
-    assert!(text(&tokens.stdout).starts_with("mente-dump 2 tokens\n1:1 Module module\n"));
+    assert!(text(&tokens.stdout).starts_with("mente-dump 3 tokens\n1:1 Module module\n"));
     let tree = mn(&dir, &["dump", "--tree", "d.mn"]);
     assert_eq!(
         text(&tree.stdout),
-        "mente-dump 2 tree\n(fn f ((x u8)) u8 () (= x))\n"
+        "mente-dump 3 tree\n(fn f ((x u8)) u8 () (= x))\n"
     );
     let typed = mn(&dir, &["dump", "--typed", "d.mn"]);
     assert_eq!(
         text(&typed.stdout),
-        "mente-dump 2 typed\n(fn f ((x u8)) u8 () (= x))\n  (binding x u8)\n  (expr 0 2:25 1 u8)\n"
+        "mente-dump 3 typed\n(fn f ((x u8)) u8 () (= x))\n  (binding x u8)\n  (expr 0 2:25 1 u8)\n"
     );
     assert_eq!(mn(&dir, &["dump", "--typed", "d.mn"]).stdout, typed.stdout);
     let mir = mn(&dir, &["dump", "--mir", "d.mn"]);
     assert_eq!(mir.status.code(), Some(0));
     let mir_text = text(&mir.stdout);
     assert!(
-        mir_text.starts_with("mente-dump 2 mir\nf0: fn f(u8) -> u8 {\nblock0(v0: u8):\n"),
+        mir_text.starts_with("mente-dump 3 mir\nf0: fn f(u8) -> u8 frame 66 {\nblock0(v0: u8):\n"),
         "{}",
         mir_text
     );
@@ -821,6 +821,34 @@ fn test_mn_check_lists_todos_and_trusted_clauses() {
 
 /// `mn view --checks` lists, for each function whose body checks, each run-time check Tier 1
 /// leaves, then how many it erased.
+/// `mn view --frames` gives each function with a body its frame against the stack budget and
+/// the parts item 25 of `core-calculus.md` sums, from the checker's count; a module that does not
+/// check is reported as `mn check` reports it, and a missing file is a usage error.
+#[test]
+fn test_mn_view_frames_gives_each_function_its_frame() {
+    let dir = scratch("frames");
+    fs::write(
+        dir.join("f.mn"),
+        "module m\npub fn down(n: u32) -> u32 {\n  if n == 0 {\n    return 0\n  }\n  down(n - 1)\n}\npub fn mix(a: u8, b: u32) -> u64 = a + b\n",
+    )
+    .unwrap();
+    fs::write(dir.join("broken.mn"), "module m\nlet x = 1\n").unwrap();
+    let run = mn(&dir, &["view", "--frames", "f.mn"]);
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    assert_eq!(
+        text(&run.stdout),
+        concat!(
+            "fn down: 84 bytes = 64 for the call + 4 for the parameters + 0 for decreases + 16 held at most\n",
+            "fn mix: 98 bytes = 64 for the call + 5 for the parameters + 0 for decreases + 29 held at most\n",
+        )
+    );
+    let broken = mn(&dir, &["view", "--frames", "broken.mn"]);
+    assert_eq!(broken.status.code(), Some(1));
+    assert!(text(&broken.stderr).contains("E0111"));
+    let missing = mn(&dir, &["view", "--frames", "missing.mn"]);
+    assert_eq!(missing.status.code(), Some(2));
+}
+
 #[test]
 fn test_mn_view_checks_lists_the_run_time_checks_tier1_leaves() {
     let dir = scratch("checks");

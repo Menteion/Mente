@@ -1261,6 +1261,17 @@ impl Gen {
             out.push_str(&text);
             functions.push((format!("f{}", k), start..out.len()));
         }
+        // Now and then a recursion the stack budget ends, from a random source of its own, so
+        // that the functions above stay as they are (`deep_recursion`).
+        let mut rng = stream(self.seed, count, 0);
+        if rng.chance(DEEP_CHANCE) {
+            for (name, text) in deep_recursion(&mut rng, count) {
+                out.push('\n');
+                let start = out.len();
+                out.push_str(&text);
+                functions.push((name, start..out.len()));
+            }
+        }
         (out, functions)
     }
 
@@ -5326,6 +5337,39 @@ impl Gen {
 }
 
 /// A field as its declaration writes it: `name: type`, with its refinement when it has one.
+/// How often, in percent, a program ends in a recursion the stack budget ends.
+const DEEP_CHANCE: u64 = 35;
+
+/// A recursion the stack budget ends, as functions `f{k}` and `f{k + 1}` with their texts: `f{k}`
+/// calls itself on `n - 1` inside one to eight wrappers, each an `if`, a `match` or an operator
+/// around what it wraps, and the public `f{k + 1}` calls it on a count no budget reaches. So a
+/// run of the program grows each path's host stack, through the shapes that take the most of it
+/// for the least frame, up to item 25's trap, which every path must raise at the same call
+/// (`core-calculus.md`, item 25): a path that ran out of host stack first, as the reference
+/// interpreter did on a thread sized per call, fails the comparison.
+fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
+    let name = format!("f{}", k);
+    let mut e = format!("if n > 0 {{\n  {}(n - 1)\n}} else {{\n  0\n}}", name);
+    for _ in 0..1 + rng.below(8) {
+        e = match rng.below(4) {
+            0 => format!("if n > 0 {{\n{}\n}} else {{\n  1\n}}", e),
+            1 => format!("match n {{\n  0 => 2\n  _ => {}\n}}", e),
+            2 => format!("({}) + 0", e),
+            _ => format!("0 | ({})", e),
+        };
+    }
+    vec![
+        (
+            name.clone(),
+            format!("fn {}(n: u32) -> u32 = {}\n", name, e),
+        ),
+        (
+            format!("f{}", k + 1),
+            format!("pub fn f{}() -> u32 = {}(4294967295)\n", k + 1, name),
+        ),
+    ]
+}
+
 fn field_text(f: &GField) -> String {
     let range = |r: R| match (f.exclusive, r.hi.add(Num::small(1))) {
         (true, Some(end)) => format!("[{}..{}]", r.lo, end),
@@ -5842,7 +5886,6 @@ fn always_traps(
     };
     out.seen = true;
     let limits = mente_interp::Limits {
-        max_depth: 64,
         max_steps: 200_000,
         ..mente_interp::Limits::default()
     };

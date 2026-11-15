@@ -1015,7 +1015,7 @@ pub struct ModuleFile {
 }
 
 /// The version of the canonical dumps, which rises when any dump's form changes.
-pub const DUMP_VERSION: u32 = 2;
+pub const DUMP_VERSION: u32 = 3;
 
 /// The canonical form of a module's tokens: a header line, then one token per line as
 /// `line:col Kind text`, the kind the name of its [`TokenKind`] variant and the text its source
@@ -2765,19 +2765,19 @@ mod tests {
     fn test_tokens_and_trees_dump_in_their_canonical_forms() {
         assert_eq!(
             dump_tokens("pub fn f() = a\\b"),
-            "mente-dump 2 tokens\n1:1 Pub pub\n1:5 Fn fn\n1:8 Ident f\n1:9 LParen (\n1:10 RParen )\n1:12 Eq =\n1:14 Ident a\n1:16 Ident b\n"
+            "mente-dump 3 tokens\n1:1 Pub pub\n1:5 Fn fn\n1:8 Ident f\n1:9 LParen (\n1:10 RParen )\n1:12 Eq =\n1:14 Ident a\n1:16 Ident b\n"
         );
         assert_eq!(
             dump_tokens("/// a\\b\nmodule m"),
-            "mente-dump 2 tokens\n1:1 DocComment /// a\\\\b\n2:1 Module module\n2:8 Ident m\n"
+            "mente-dump 3 tokens\n1:1 DocComment /// a\\\\b\n2:1 Module module\n2:8 Ident m\n"
         );
         assert_eq!(
             dump_tree("module m\npub fn f(mut x: u8, y: bool) -> u8\n  requires y\n  ensures result > 0\n  decreases x\n{\n  x\n}\npub fn g() = 1\npub fn h()\n"),
-            "mente-dump 2 tree\n(fn f ((mut x u8) (y bool)) u8 ((requires y) (ensures (> result 0)) (decreases x)) {x})\n(fn g () () () (= 1))\n"
+            "mente-dump 3 tree\n(fn f ((mut x u8) (y bool)) u8 ((requires y) (ensures (> result 0)) (decreases x)) {x})\n(fn g () () () (= 1))\n"
         );
         assert_eq!(
             dump_tree("module m\nlet x = 1\n"),
-            "mente-dump 2 tree\nerror 2:1 E0111\n"
+            "mente-dump 3 tree\nerror 2:1 E0111\n"
         );
         // A function nested too deep is reported, not rendered; one with another error in its
         // body is rendered, its error a node of its own.
@@ -2785,10 +2785,10 @@ mod tests {
             "module m\npub fn d(x: u8) -> u8 = x{}\n",
             " + 0".repeat(300)
         );
-        assert_eq!(dump_tree(&deep), "mente-dump 2 tree\nerror 2:25 E0127\n");
+        assert_eq!(dump_tree(&deep), "mente-dump 3 tree\nerror 2:25 E0127\n");
         assert_eq!(
             dump_tree("module m\npub fn d(x: u8) -> u8 = )\n"),
-            "mente-dump 2 tree\n(fn d ((x u8)) u8 () (= <error>))\n"
+            "mente-dump 3 tree\n(fn d ((x u8)) u8 () (= <error>))\n"
         );
     }
 

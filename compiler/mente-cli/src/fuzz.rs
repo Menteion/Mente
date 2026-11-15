@@ -83,9 +83,8 @@ const MAX_ARGUMENT_VALUES: usize = 256;
 
 /// The limits of every interpreted call: tight, since only a crash matters. The reference
 /// interpreter copies an array value at each assignment, so it gets fewer steps and smaller
-/// arrays.
+/// arrays. The stack is no limit of these: item 25's budget bounds every run alike.
 const MAX_STEPS: u64 = 100_000;
-const MAX_DEPTH: usize = 64;
 const REFERENCE_STEPS: u64 = 20_000;
 const REFERENCE_ARRAY: u128 = 256;
 
@@ -1494,7 +1493,6 @@ fn arg(s: &Scalar) -> native::Arg {
 /// did.
 fn interpret(module: &CheckedModule, functions: &[Function]) -> Option<String> {
     let limits = mente_interp::Limits {
-        max_depth: MAX_DEPTH,
         max_steps: REFERENCE_STEPS,
         max_array: REFERENCE_ARRAY,
     };
@@ -1531,7 +1529,6 @@ fn interpret(module: &CheckedModule, functions: &[Function]) -> Option<String> {
 /// Runs every edge call on MIR, and says how the MIR broke, if it did.
 fn run_mir(lowered: &Lowered, functions: &[Function]) -> Option<String> {
     let limits = cfg::Limits {
-        max_depth: MAX_DEPTH,
         max_steps: MAX_STEPS,
     };
     for f in functions {

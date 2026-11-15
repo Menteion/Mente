@@ -35,9 +35,9 @@ use super::generate::{self, CallPlan, Mode};
 use super::{native_within, reference_within, run_lowered, CallArgs, Printed};
 
 /// The reference interpreter's limits in a comparison: a generated call does a few thousand
-/// steps at most, far below MIR's own limit.
+/// steps at most, far below MIR's own limit. The stack is no limit of these: item 25's budget
+/// bounds every run alike.
 const STEPS: Limits = Limits {
-    max_depth: 10_000,
     max_steps: 1_000_000,
     max_array: 1 << 24,
 };
@@ -219,9 +219,15 @@ fn compare_module(
             finished.push((c, expected));
         }
     }
+    // A call the reference interpreter ends at the stack budget is compared on MIR, and not run
+    // natively: native code counts no frame yet, and its stack ends at the system's guard page
+    // (`core-calculus.md`, item 25, what the paths do not do yet).
+    let native: Vec<usize> = (0..finished.len())
+        .filter(|&k| trap_at(&finished[k].1).is_none_or(|(kind, _, _)| kind != "stack-overflow"))
+        .collect();
     let natively = match scratch {
-        Some(dir) if !finished.is_empty() => {
-            let list: Vec<CallArgs> = finished.iter().map(|(c, _)| (*c).clone()).collect();
+        Some(dir) if !native.is_empty() => {
+            let list: Vec<CallArgs> = native.iter().map(|&k| finished[k].0.clone()).collect();
             match native_within(&lowered, &list, dir, "program", Some(NATIVE_TIME)) {
                 Ok(all) => Some(all),
                 Err(e) => {
@@ -289,12 +295,16 @@ fn compare_module(
                 ),
             }
         }
-        if let Some(all) = &natively {
-            if all[k] != got {
+        let natively = natively
+            .as_ref()
+            .zip(native.iter().position(|&n| n == k))
+            .map(|(all, j)| &all[j]);
+        if let Some(printed) = natively {
+            if *printed != got {
                 finding(
                     Kind::Codegen,
                     &call,
-                    format!("MIR prints {}, native code {}", show(&got), show(&all[k])),
+                    format!("MIR prints {}, native code {}", show(&got), show(printed)),
                 );
             }
         }
@@ -870,6 +880,42 @@ mod tests {
         assert!(report.problems.is_empty(), "{}", report.summary());
         assert_eq!(report.accepted(), report.programs, "{}", report.summary());
         assert!(report.calls >= 60, "{}", report.summary());
+    }
+
+    /// Among the seeds the comparison above runs, the generator ends some programs in a recursion
+    /// the stack budget ends, through nested `if`s, `match`es and operators
+    /// (`generate::deep_recursion`): on each, the reference interpreter and MIR grow their host
+    /// stacks through those shapes and trap at the same call, item 25's (`core-calculus.md`). A
+    /// thread sized per call ran out of host stack on such a recursion before the budget did.
+    #[test]
+    fn test_generated_recursions_run_to_the_budget_on_both_interpreters() {
+        let mut deep = 0;
+        for seed in 0..9 {
+            let c = generate::checked(seed);
+            let Some(m) = &c.module else {
+                continue;
+            };
+            let Some((name, at)) = c.program.functions.last() else {
+                continue;
+            };
+            if !c.program.text[at.clone()].contains("(4294967295)") {
+                continue;
+            }
+            let reference = reference_within(m, name, Vec::new(), STEPS);
+            let mir = match lower::lower(m) {
+                Ok(l) => run_lowered(&l, name, Vec::new()),
+                Err(e) => panic!("seed {}: not lowered: {}", seed, e),
+            };
+            assert!(
+                trap_at(&reference).is_some_and(|(kind, _, _)| kind == "stack-overflow"),
+                "seed {}: {:?}",
+                seed,
+                reference
+            );
+            assert_eq!(reference, mir, "seed {}", seed);
+            deep += 1;
+        }
+        assert!(deep > 0, "no program of seeds 0 to 8 ends in a recursion");
     }
 
     /// Every conformance program that must pass, with generated arguments for its public

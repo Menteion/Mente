@@ -294,8 +294,19 @@ pub enum Op {
     Copy {
         bytes: u32,
     },
-    /// Calls a function of the module; the value is its result, or unit.
+    /// Calls a function of the module; the value is its result, or unit. Its [`Op::Enter`] has
+    /// counted the callee's frame, and the call gives those bytes back when it returns.
     Call(FuncId),
+    /// Counts the frame of `callee` against the run's stack budget, where the call is counted:
+    /// its arguments evaluated, none narrowed yet, the callee's checks not begun
+    /// (`core-calculus.md`, item 25). Traps at `trap` where the stack in use and that frame
+    /// together exceed the budget; otherwise the bytes are in use until the [`Op::Call`] of
+    /// `callee` it opens returns. Every path from an `Enter` reaches its call or a trap, and the
+    /// calls that a callee's checks make between them are each counted and returned within.
+    Enter {
+        callee: FuncId,
+        trap: TrapId,
+    },
 }
 
 /// How a block ends.
@@ -343,6 +354,9 @@ pub struct Function {
     pub name: String,
     pub params: Vec<Ty>,
     pub result: Option<Ty>,
+    /// The bytes a call of this function counts against the stack budget, the frame the checker
+    /// computed for it (`core-calculus.md`, item 25); 0 for an entry, which no program calls.
+    pub frame: u128,
     pub ops: Vec<Op>,
     pub tys: Vec<Ty>,
     /// Each value's operands, a range of `pool`.
@@ -419,6 +433,7 @@ impl Function {
             Op::Store => "store".into(),
             Op::Copy { bytes } => format!("copy {}", bytes),
             Op::Call(c) => format!("call f{}", c.0),
+            Op::Enter { callee, trap } => format!("enter f{} t{}", callee.0, trap.0),
         }
     }
 }
@@ -426,6 +441,9 @@ impl Function {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Module {
     pub functions: Vec<Function>,
+    /// The run's stack budget in bytes, which the lowering takes from the one the checker
+    /// defines (`core-calculus.md`, item 25): every [`Op::Enter`] counts against it.
+    pub budget: u128,
 }
 
 /// Builds a function one block at a time.
@@ -605,6 +623,84 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
             }
         }
     }
+    verify_frames(f)
+}
+
+/// Every call's frame is counted by an [`Op::Enter`] of its callee and given back by that call
+/// alone: along every path, a call closes the latest count not yet closed, of the same callee,
+/// so the counts of calls a callee's checks make nest within it; every path into a block
+/// arrives with the same counts open; and a function returns with none open. So no call goes
+/// uncounted, and no count can fall through to a return, or around a loop, without its call,
+/// which would leave its bytes in use (`core-calculus.md`, item 25).
+fn verify_frames(f: &Function) -> Result<(), String> {
+    let mut open_at: Vec<Option<Vec<FuncId>>> = vec![None; f.blocks.len()];
+    open_at[0] = Some(Vec::new());
+    let mut work = vec![BlockId(0)];
+    while let Some(b) = work.pop() {
+        let block = &f.blocks[b.0 as usize];
+        let mut open = open_at[b.0 as usize].clone().unwrap_or_default();
+        for &v in &block.insts {
+            match f.op(v) {
+                Op::Enter { callee, .. } => open.push(*callee),
+                Op::Call(c) => {
+                    if open.pop() != Some(*c) {
+                        return Err(format!(
+                            "v{} in block {}: a call of f{} that no count of it opens",
+                            v.0, b.0, c.0
+                        ));
+                    }
+                }
+                Op::Param
+                | Op::Int(_)
+                | Op::Bool(_)
+                | Op::Arith { .. }
+                | Op::Neg { .. }
+                | Op::Bits(_)
+                | Op::Not
+                | Op::Shl { .. }
+                | Op::Shr
+                | Op::Cmp(_)
+                | Op::Cast
+                | Op::Check { .. }
+                | Op::Slot { .. }
+                | Op::Elem { .. }
+                | Op::Load
+                | Op::Store
+                | Op::Copy { .. } => {}
+            }
+        }
+        let targets: Vec<BlockId> = match &block.term {
+            Term::Jump(t, _) => vec![*t],
+            Term::Branch {
+                then, otherwise, ..
+            } => vec![then.0, otherwise.0],
+            Term::Return(_) => {
+                if let Some(c) = open.last() {
+                    return Err(format!(
+                        "block {} returns with the count of a call of f{} open",
+                        b.0, c.0
+                    ));
+                }
+                Vec::new()
+            }
+            Term::Trap(_) => Vec::new(),
+        };
+        for t in targets {
+            match &open_at[t.0 as usize] {
+                None => {
+                    open_at[t.0 as usize] = Some(open.clone());
+                    work.push(t);
+                }
+                Some(seen) if *seen == open => {}
+                Some(_) => {
+                    return Err(format!(
+                        "block {} is entered with different counts of calls open",
+                        t.0
+                    ))
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -688,6 +784,12 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             let params = callee.params.iter().map(|p| Want::Is(*p)).collect();
             (Want::Is(callee.result.unwrap_or(Ty::Unit)), params, None)
         }
+        Op::Enter { callee, trap } => {
+            m.functions
+                .get(callee.0 as usize)
+                .ok_or("a count of a function that does not exist")?;
+            (Want::Is(Ty::Unit), vec![], Some((*trap, 0)))
+        }
     };
     let site = trap.is_none_or(|(t, values)| {
         f.traps
@@ -726,7 +828,6 @@ pub enum Stop {
     /// A trap, with the line the reference interpreter prints for it.
     Trap(String),
     OutOfSteps,
-    StackOverflow,
     /// The MIR broke one of its own rules: a lowering bug, never a program's fault.
     Broken(String),
 }
@@ -736,7 +837,6 @@ impl fmt::Display for Stop {
         match self {
             Stop::Trap(line) => write!(f, "{}", line),
             Stop::OutOfSteps => write!(f, "the run took more steps than its limit"),
-            Stop::StackOverflow => write!(f, "trap[stack-overflow]: the call stack ran out"),
             Stop::Broken(why) => write!(f, "broken MIR: {}", why),
         }
     }
@@ -857,25 +957,26 @@ struct Mark {
     slots: usize,
 }
 
-/// The resources a run may use.
+/// The resources a run may use. Its stack is no limit of these: the module's budget counts it
+/// (`Module::budget`).
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    pub max_depth: usize,
     pub max_steps: u64,
 }
 
 impl Default for Limits {
     fn default() -> Limits {
         Limits {
-            max_depth: 10_000,
             max_steps: 100_000_000,
         }
     }
 }
 
 /// Runs function `f` of `m` on `args`, with memory a caller has set up for its addresses. Calls
-/// keep their frames on a stack of the interpreter's own, so a deep recursion stops at
-/// `limits.max_depth` and never at the host's stack.
+/// keep their frames on a stack of the interpreter's own, so a deep recursion never reaches the
+/// host's stack: its [`Op::Enter`]s trap against the module's budget first. `f` itself is the
+/// run's entry, which no frame of the program counts; every call of a function of the program,
+/// the run's first among them, is counted by its `Enter`.
 pub fn run(
     m: &Module,
     f: FuncId,
@@ -900,6 +1001,7 @@ pub fn run_counting(
         memory,
         limits,
         steps: 0,
+        stack: 0,
     };
     let result = machine.run(f, args);
     (result, machine.steps)
@@ -910,6 +1012,8 @@ struct Machine<'a> {
     memory: &'a mut Memory,
     limits: Limits,
     steps: u64,
+    /// The bytes the frames of the calls counted and not returned sum to.
+    stack: u128,
 }
 
 /// A call in progress: its function, its values, where it stands, the memory it started at,
@@ -968,7 +1072,6 @@ impl<'m> Machine<'m> {
     fn run(&mut self, id: FuncId, args: &[Val]) -> Result<Val, Stop> {
         let mut stack = vec![self.frame(id, args.to_vec(), None)?];
         loop {
-            let depth = stack.len();
             let Some(top) = stack.last_mut() else {
                 return Err(broken("a return with no frame"));
             };
@@ -981,9 +1084,6 @@ impl<'m> Machine<'m> {
                     return Err(Stop::OutOfSteps);
                 }
                 if let Op::Call(c) = f.op(v) {
-                    if depth >= self.limits.max_depth {
-                        return Err(Stop::StackOverflow);
-                    }
                     let args = f.args(v).iter().map(|a| top.vals[a.0 as usize]).collect();
                     let callee = self.frame(*c, args, Some(v))?;
                     stack.push(callee);
@@ -1017,6 +1117,10 @@ impl<'m> Machine<'m> {
                 Term::Return(v) => {
                     let result = v.as_ref().map_or(Val::Unit, get);
                     let (mark, dest) = (top.mark, top.dest);
+                    // A call gives back the bytes its `Enter` counted; the entry counted none.
+                    if dest.is_some() {
+                        self.stack -= f.frame;
+                    }
                     stack.pop();
                     self.memory.release(mark);
                     match (stack.last_mut(), dest) {
@@ -1173,6 +1277,18 @@ impl<'m> Machine<'m> {
                 Val::Unit
             }
             Op::Call(_) => return Err(broken("a call outside the frame loop")),
+            Op::Enter { callee, trap: at } => {
+                let frame = self
+                    .m
+                    .functions
+                    .get(callee.0 as usize)
+                    .map_or(0, |c| c.frame);
+                if self.stack + frame > self.m.budget {
+                    return Err(trap(f, *at, &[]));
+                }
+                self.stack += frame;
+                Val::Unit
+            }
         })
     }
 }
@@ -1219,6 +1335,9 @@ impl fmt::Display for Function {
         write!(out, "fn {}({})", self.name, params.join(", "))?;
         if let Some(r) = self.result {
             write!(out, " -> {}", r)?;
+        }
+        if self.frame > 0 {
+            write!(out, " frame {}", self.frame)?;
         }
         writeln!(out, " {{")?;
         for (i, b) in self.blocks.iter().enumerate() {
@@ -1302,10 +1421,29 @@ mod tests {
         Val::Int(Num::from_i128(n))
     }
 
+    /// The budget of the modules these tests build.
+    const BUDGET: u128 = 1 << 20;
+
     fn module(functions: Vec<Function>) -> Module {
-        let m = Module { functions };
+        let m = Module {
+            functions,
+            budget: BUDGET,
+        };
         verify(&m).unwrap();
         m
+    }
+
+    /// Counts the frame of function `callee` where `b` stands, as the lowering does before a call.
+    fn enter(b: &mut Builder, callee: u32) {
+        let trap = b.trap_site("stack-overflow", &["the call stack ran out"]);
+        b.inst(
+            Op::Enter {
+                callee: FuncId(callee),
+                trap,
+            },
+            Ty::Unit,
+            &[],
+        );
     }
 
     fn run0(m: &Module, f: u32, args: &[Val]) -> Result<Val, Stop> {
@@ -1381,6 +1519,7 @@ mod tests {
     fn test_a_module_prints_each_function_numbered_as_calls_name_it() {
         let mut b = Builder::new("twice", &[Ty::Int(I64)], Some(Ty::Int(I64)));
         let n = b.params(BlockId(0))[0];
+        enter(&mut b, 0);
         let s = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[n]);
         b.end(Term::Return(Some(s)));
         let m = module(vec![sum(), b.finish()]);
@@ -1391,7 +1530,7 @@ mod tests {
         assert!(second.contains("= call f0 v0 @0:0\n"), "{}", second);
         // The same module prints the same text every time.
         assert_eq!(printed, m.to_string());
-        assert_eq!(Module { functions: vec![] }.to_string(), "");
+        assert_eq!(Module::default().to_string(), "");
     }
 
     #[test]
@@ -1476,6 +1615,7 @@ mod tests {
             b.end(Term::Return(Some(p)));
             Module {
                 functions: vec![b.finish()],
+                budget: BUDGET,
             }
         };
         let m = product(true);
@@ -1690,6 +1830,7 @@ mod tests {
             let v = m.int(U8, Num::from_i128(10 * i + 1));
             m.inst(Op::Store, Ty::Unit, &[at, v]);
         }
+        enter(&mut m, 0);
         m.inst(Op::Call(FuncId(0)), Ty::Unit, &[slot]);
         let copy = m.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
         m.inst(Op::Copy { bytes: 3 }, Ty::Unit, &[copy, slot]);
@@ -1726,20 +1867,81 @@ mod tests {
         assert_eq!(w % 16, 0);
     }
 
+    /// A recursion without end stops where its counts reach the budget, at the `Enter` whose frame
+    /// would pass it, as a trap at that call: frames of 64 bytes fill a budget of 2^20 with 16,384
+    /// calls, and the 16,385th traps. Calls one after another give their bytes back: a function
+    /// that makes two calls of a frame of more than half the budget runs. A run is also bounded
+    /// in steps.
     #[test]
     fn test_runs_stop_at_their_limits() {
         // `fn down(n: i64) -> i64 = down(n)`: recursion without end.
         let mut b = Builder::new("down", &[Ty::Int(I64)], Some(Ty::Int(I64)));
         let n = b.params(BlockId(0))[0];
+        b.at(3, 5);
+        enter(&mut b, 0);
         let r = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[n]);
         b.end(Term::Return(Some(r)));
-        let m = module(vec![b.finish()]);
-        assert_eq!(run0(&m, 0, &[int(1)]), Err(Stop::StackOverflow));
+        let mut down = b.finish();
+        down.frame = 64;
+        let m = module(vec![down]);
+        assert_eq!(
+            run0(&m, 0, &[int(1)]),
+            Err(Stop::Trap(
+                "trap[stack-overflow] at 3:5: the call stack ran out".to_string()
+            ))
+        );
+        // `fn count(n: i64) { if n == 0 { return }  count(n - 1) }`, of a frame of 64 bytes, run as
+        // the entry, which counts nothing: `count(k)` makes k calls, which fit while k * 64 is
+        // within the budget.
+        let mut b = Builder::new("count", &[Ty::Int(I64)], None);
+        let n = b.params(BlockId(0))[0];
+        let zero = b.int(I64, Num::ZERO);
+        let done = b.inst(Op::Cmp(CmpOp::Eq), Ty::Bool, &[n, zero]);
+        let stop = b.block(&[]);
+        let more = b.block(&[]);
+        b.end(Term::Branch {
+            cond: done,
+            then: (stop, vec![]),
+            otherwise: (more, vec![]),
+        });
+        b.switch(stop);
+        b.end(Term::Return(None));
+        b.switch(more);
+        let one = b.int(I64, Num::from_i128(1));
+        let less = b.inst(
+            Op::Arith {
+                op: ArithOp::Sub,
+                trap: None,
+            },
+            Ty::Int(I64),
+            &[n, one],
+        );
+        enter(&mut b, 0);
+        b.inst(Op::Call(FuncId(0)), Ty::Unit, &[less]);
+        b.end(Term::Return(None));
+        let mut count = b.finish();
+        count.frame = 64;
+        let m = module(vec![count]);
+        let fits = (BUDGET / 64) as i128;
+        assert_eq!(run0(&m, 0, &[int(fits)]), Ok(Val::Unit));
+        assert!(
+            matches!(run0(&m, 0, &[int(fits + 1)]), Err(Stop::Trap(t)) if t.starts_with("trap[stack-overflow]"))
+        );
+        // Two calls of a frame of more than half the budget, one after the other.
+        let mut big = Builder::new("big", &[], None);
+        big.end(Term::Return(None));
+        let mut big = big.finish();
+        big.frame = BUDGET / 2 + 1;
+        let mut b = Builder::new("twice", &[], None);
+        for _ in 0..2 {
+            enter(&mut b, 0);
+            b.inst(Op::Call(FuncId(0)), Ty::Unit, &[]);
+        }
+        b.end(Term::Return(None));
+        let m = module(vec![big, b.finish()]);
+        assert_eq!(run0(&m, 1, &[]), Ok(Val::Unit));
         let m = module(vec![sum()]);
-        let limits = Limits {
-            max_depth: 10,
-            max_steps: 100,
-        };
+        let limits = Limits { max_steps: 100 };
         assert_eq!(
             run(&m, FuncId(0), &[int(1000)], &mut Memory::default(), limits),
             Err(Stop::OutOfSteps)
@@ -1752,7 +1954,13 @@ mod tests {
 
     #[test]
     fn test_the_verifier_rejects_malformed_functions() {
-        let wrong = |f: Function| verify(&Module { functions: vec![f] }).unwrap_err();
+        let wrong = |f: Function| {
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+            })
+            .unwrap_err()
+        };
         // A jump with the wrong arguments.
         let mut f = sum();
         f.blocks[0].term = Term::Jump(BlockId(1), vec![]);
@@ -1812,7 +2020,12 @@ mod tests {
 
     #[test]
     fn test_the_verifier_checks_each_instruction_against_its_operation() {
-        let check = |f: Function| verify(&Module { functions: vec![f] });
+        let check = |f: Function| {
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+            })
+        };
         let add = |trap| Op::Arith {
             op: ArithOp::Add,
             trap,
@@ -1927,9 +2140,11 @@ mod tests {
         let caller = |ty: Ty, param: Ty| {
             let mut b = Builder::new("caller", &[param], None);
             let p = b.params(BlockId(0))[0];
+            enter(&mut b, 0);
             b.inst(Op::Call(FuncId(0)), ty, &[p]);
             Module {
                 functions: vec![callee.clone(), b.finish()],
+                budget: BUDGET,
             }
         };
         assert_eq!(verify(&caller(i, u)), Ok(()));
@@ -1939,9 +2154,12 @@ mod tests {
         let mut f = sum();
         let last = NodeId(f.ops.len() as u32);
         f.pool[0] = last;
-        assert!(verify(&Module { functions: vec![f] })
-            .unwrap_err()
-            .contains("does not exist"));
+        assert!(verify(&Module {
+            functions: vec![f],
+            budget: BUDGET,
+        })
+        .unwrap_err()
+        .contains("does not exist"));
     }
 
     /// A slot read before it is written holds the memory's fill, 0 unless another is asked
@@ -2037,10 +2255,7 @@ mod tests {
         b.inst(Op::Store, Ty::Unit, &[s, k]);
         b.end(Term::Return(None));
         let m = module(vec![b.finish()]);
-        let limited = |steps| Limits {
-            max_depth: 10,
-            max_steps: steps,
-        };
+        let limited = |steps| Limits { max_steps: steps };
         let mut memory = Memory::default();
         let before = memory.used();
         assert_eq!(

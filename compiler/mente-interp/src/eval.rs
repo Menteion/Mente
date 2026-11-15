@@ -4,17 +4,20 @@
 //! names each binding once (no shadowing), so a block needs no scope of its own. Control leaves
 //! a statement by an [`Exit`]: a `return`, a `break`, a `continue`, or a stop.
 
+use mente_sema::frames::BUDGET;
 use mente_sema::names::BindingId;
 use mente_sema::structs::Structs;
 use mente_sema::types::{Int as IntType, IntTy, Ty, I64};
 use mente_sema::{CheckedFn, CheckedModule};
 use mente_syntax::tree::{
-    ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId, ExprKind,
-    PatternKind, Payload, Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
+    Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId,
+    ExprKind, FieldInit, PatternKind, Payload, Refinement, StmtId, StmtKind, Tree, TypeId,
+    TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
-use std::rc::Rc;
+use std::sync::Arc;
 
+use crate::host::{self, Host};
 use crate::kinds::{kinds, Kind};
 use crate::{Int, Limits, Observer, Shown, Stop, Trap, TrapKind, Value};
 
@@ -163,7 +166,7 @@ struct Frame<'m> {
     /// The function's `decreases` measure at this call, for the recursive calls it makes.
     measure: Option<Vec<Int>>,
     /// The integer type of each of the function's expressions, as the interpreter derives it.
-    kinds: Rc<[Kind]>,
+    kinds: Arc<[Kind]>,
 }
 
 /// A step from a place's root binding: an index with the span of its indexing, or a field by its
@@ -181,11 +184,15 @@ pub(crate) struct Machine<'m> {
     module: &'m CheckedModule,
     limits: Limits,
     steps: u64,
-    depth: usize,
+    /// The bytes the frames of the calls that have begun and not returned sum to, against the
+    /// stack budget (`core-calculus.md`, item 25).
+    stack: u128,
+    /// Where the interpreter stands on the host's stack (`crate::host`).
+    host: Result<Host, &'static str>,
     /// What is shown each integer an expression gives, when a run is observed.
     seen: Option<Observer<'m>>,
     /// The kinds of each function's expressions, derived at its first call.
-    kinds: Vec<Option<Rc<[Kind]>>>,
+    kinds: Vec<Option<Arc<[Kind]>>>,
 }
 
 impl<'m> Machine<'m> {
@@ -198,7 +205,8 @@ impl<'m> Machine<'m> {
             module,
             limits,
             steps: 0,
-            depth: 0,
+            stack: 0,
+            host: Host::start(),
             seen,
             kinds: vec![None; module.functions.len()],
         }
@@ -210,6 +218,9 @@ impl<'m> Machine<'m> {
         name: &str,
         args: Vec<Value>,
     ) -> Result<(Value, Vec<Value>), Stop> {
+        if let Err(why) = self.host {
+            return Err(Stop::BadArguments(why.to_string()));
+        }
         let index = self
             .module
             .index(name)
@@ -250,12 +261,12 @@ impl<'m> Machine<'m> {
     }
 
     /// The kinds of the expressions of function `index`, `f`, derived once.
-    fn kinds(&mut self, index: usize, f: &CheckedFn) -> Rc<[Kind]> {
+    fn kinds(&mut self, index: usize, f: &CheckedFn) -> Arc<[Kind]> {
         match &self.kinds[index] {
-            Some(k) => Rc::clone(k),
+            Some(k) => Arc::clone(k),
             None => {
-                let k: Rc<[Kind]> = kinds(f).into();
-                self.kinds[index] = Some(Rc::clone(&k));
+                let k: Arc<[Kind]> = kinds(f).into();
+                self.kinds[index] = Some(Arc::clone(&k));
                 k
             }
         }
@@ -271,7 +282,10 @@ impl<'m> Machine<'m> {
 
     /// Runs function `index` on `args`, each narrowed into its parameter's type at the span in
     /// `spans`. Returns the result and the final value of every parameter, for the caller to
-    /// copy back into the places it passed as `mut`.
+    /// copy back into the places it passed as `mut`. The call is counted against the stack
+    /// budget first, its arguments evaluated and none narrowed yet, and traps at `at` where the
+    /// stack in use and its frame together exceed it; its frame is in use until it returns
+    /// (`core-calculus.md`, item 25).
     fn call(
         &mut self,
         index: usize,
@@ -281,7 +295,14 @@ impl<'m> Machine<'m> {
         caller: Option<(usize, Option<Vec<Int>>)>,
     ) -> Result<(Value, Vec<Value>), Stop> {
         let f = self.function(index)?;
-        if self.depth >= self.limits.max_depth {
+        let bytes = self
+            .module
+            .frames
+            .get(index)
+            .copied()
+            .flatten()
+            .map_or(0, |frame| frame.bytes);
+        if self.stack + bytes > BUDGET {
             return Err(Stop::Trap(Trap {
                 kind: TrapKind::StackOverflow,
                 span: at,
@@ -295,9 +316,9 @@ impl<'m> Machine<'m> {
             measure: None,
             kinds,
         };
-        self.depth += 1;
+        self.stack += bytes;
         let outcome = self.run(&mut frame, args, spans, at, caller);
-        self.depth -= 1;
+        self.stack -= bytes;
         match outcome {
             Ok(v) => Ok(v),
             Err(Exit::Stop(s)) => Err(s),
@@ -405,74 +426,154 @@ impl<'m> Machine<'m> {
         Ok((result, finals))
     }
 
+    /// Runs `step`, one step of the evaluation, here; or, where less than the margin is left of
+    /// this segment's host stack, on a new segment, a thread the step borrows the machine from and
+    /// this one waits for (`crate::host`). Every expression and every block is a step, so none
+    /// begins with less than the margin left, whatever the program's shape.
+    fn checked<T: Send>(&mut self, step: impl FnOnce(&mut Self) -> Flow<T> + Send) -> Flow<T> {
+        let at = host::here();
+        let host = match &mut self.host {
+            Ok(h) => h,
+            Err(why) => return Err(Exit::Stop(Stop::BadArguments(why.to_string()))),
+        };
+        if host.low(at) {
+            return self.segment(step);
+        }
+        let outer = host.enter(at);
+        let outcome = step(self);
+        if let Ok(h) = &mut self.host {
+            h.leave(outer);
+        }
+        outcome
+    }
+
+    /// Runs `step` on a new segment of the host stack, started through `mente_threads::alone`
+    /// with the stack of the one sizing rule, and waits for it.
+    fn segment<T: Send>(&mut self, step: impl FnOnce(&mut Self) -> Flow<T> + Send) -> Flow<T> {
+        let started = mente_threads::alone(None, Some(host::SEGMENT), || {
+            let outer = std::mem::replace(&mut self.host, Host::start());
+            let outcome = match self.host {
+                Ok(_) => step(self),
+                Err(why) => Err(Exit::Stop(Stop::BadArguments(why.to_string()))),
+            };
+            let inner = std::mem::replace(&mut self.host, outer);
+            if let (Ok(h), Ok(i)) = (&mut self.host, &inner) {
+                h.absorb(i);
+            }
+            outcome
+        });
+        match started {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => Err(Exit::Stop(Stop::BadArguments(
+                "the interpreter stopped unexpectedly".to_string(),
+            ))),
+            Err(e) => Err(Exit::Stop(Stop::BadArguments(format!(
+                "the interpreter could not start a segment of its stack: {}",
+                e
+            )))),
+        }
+    }
+
+    /// The largest step of the host stack between two checks this machine has taken.
+    #[cfg(test)]
+    pub(crate) fn deepest_step(&self) -> usize {
+        self.host.as_ref().map_or(0, Host::deepest)
+    }
+
     /// The value of a block: its last statement's, when that is an expression, whose literals
     /// take `ctx` where nothing nearer gives them a type.
     fn block(&mut self, frame: &mut Frame<'m>, b: BlockId, ctx: Kind) -> Flow<Value> {
-        let tree = &frame.f.syntax.tree;
-        let stmts = &tree.block(b).stmts;
-        let mut last = Value::Unit;
-        for (i, &s) in stmts.iter().enumerate() {
-            last = self.stmt(
-                frame,
-                s,
-                if i + 1 == stmts.len() {
-                    ctx
-                } else {
-                    Kind::Literal
-                },
-            )?;
-        }
-        Ok(last)
+        self.checked(|m| m.block_here(frame, b, ctx))
     }
 
+    /// [`Machine::block`], on this segment.
+    fn block_here(&mut self, frame: &mut Frame<'m>, b: BlockId, ctx: Kind) -> Flow<Value> {
+        let tree = &frame.f.syntax.tree;
+        let stmts = &tree.block(b).stmts;
+        let mut last = Ok(Value::Unit);
+        for (i, &s) in stmts.iter().enumerate() {
+            let ctx = if i + 1 == stmts.len() {
+                ctx
+            } else {
+                Kind::Literal
+            };
+            last = self.stmt(frame, s, ctx);
+            if last.is_err() {
+                break;
+            }
+        }
+        last
+    }
+
+    /// A statement, its value its expression's where it is one, and nothing otherwise. Each
+    /// kind runs in a method of its own and gives its outcome back as it is, so that a step's
+    /// host frame holds no other kind's locals (`Machine::value` says why).
     fn stmt(&mut self, frame: &mut Frame<'m>, s: StmtId, ctx: Kind) -> Flow<Value> {
         self.step()?;
-        let f = frame.f;
-        let tree = &f.syntax.tree;
+        let tree = &frame.f.syntax.tree;
+        let unit = |done: Flow<()>| done.map(|()| Value::Unit);
         match &tree.stmt(s).kind {
-            StmtKind::Expr(e) => return self.eval(frame, *e, ctx),
-            StmtKind::Discard(e) => {
-                self.eval(frame, *e, Kind::Literal)?;
-            }
-            StmtKind::Binding { ty, init, .. } => {
-                let Some(id) = f.resolution.stmts[s.0 as usize] else {
-                    return broken("a binding statement that declares no binding");
-                };
-                let plain = f.typing.bindings[id.0 as usize].clone();
-                let v = self.eval(frame, *init, Kind::Literal)?;
-                let declared = ty.map(|t| (tree, t));
-                let v = self.narrow(frame, v, declared, &plain, tree.expr(*init).span)?;
-                frame.slots[id.0 as usize] = Some(v);
-            }
+            StmtKind::Expr(e) => self.eval(frame, *e, ctx),
+            StmtKind::Discard(e) => unit(self.eval(frame, *e, Kind::Literal).map(drop)),
+            StmtKind::Binding { ty, init, .. } => unit(self.binding(frame, s, *ty, *init)),
             StmtKind::Assign { place, op, value } => {
-                self.assign(frame, *place, *op, *value, tree.stmt(s).span)?
+                unit(self.assign(frame, *place, *op, *value, tree.stmt(s).span))
             }
             StmtKind::While {
                 cond,
                 invariants,
                 decreases,
                 body,
-            } => self.while_loop(frame, *cond, invariants, decreases, *body)?,
-            StmtKind::Guard { cond, otherwise } => {
-                if !self.cond(frame, *cond)? {
-                    self.block(frame, *otherwise, Kind::Literal)?;
-                }
-            }
-            StmtKind::Return(value) => {
-                let Some(e) = value else {
-                    return Err(Exit::Return(Value::Unit, tree.stmt(s).span));
-                };
-                let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
-                let span = tree.expr(*e).span;
-                let v = self.eval(frame, *e, Kind::Literal)?;
-                let declared = f.syntax.result.map(|t| (tree, t));
-                let v = self.narrow(frame, v, declared, &result_ty, span)?;
-                return Err(Exit::Return(v, span));
-            }
-            StmtKind::Break => return Err(Exit::Break),
-            StmtKind::Continue => return Err(Exit::Continue),
+            } => unit(self.while_loop(frame, *cond, invariants, decreases, *body)),
+            StmtKind::Guard { cond, otherwise } => unit(self.guard(frame, *cond, *otherwise)),
+            StmtKind::Return(value) => self.leave(frame, s, *value),
+            StmtKind::Break => Err(Exit::Break),
+            StmtKind::Continue => Err(Exit::Continue),
         }
-        Ok(Value::Unit)
+    }
+
+    /// `guard cond else { otherwise }`.
+    fn guard(&mut self, frame: &mut Frame<'m>, cond: ExprId, otherwise: BlockId) -> Flow<()> {
+        if !self.cond(frame, cond)? {
+            self.block(frame, otherwise, Kind::Literal)?;
+        }
+        Ok(())
+    }
+
+    /// A binding statement: its initializer narrowed into the binding's type.
+    fn binding(
+        &mut self,
+        frame: &mut Frame<'m>,
+        s: StmtId,
+        ty: Option<TypeId>,
+        init: ExprId,
+    ) -> Flow<()> {
+        let f = frame.f;
+        let tree = &f.syntax.tree;
+        let Some(id) = f.resolution.stmts[s.0 as usize] else {
+            return broken("a binding statement that declares no binding");
+        };
+        let plain = f.typing.bindings[id.0 as usize].clone();
+        let v = self.eval(frame, init, Kind::Literal)?;
+        let declared = ty.map(|t| (tree, t));
+        let v = self.narrow(frame, v, declared, &plain, tree.expr(init).span)?;
+        frame.slots[id.0 as usize] = Some(v);
+        Ok(())
+    }
+
+    /// `return`, with its value narrowed into the function's result type.
+    fn leave(&mut self, frame: &mut Frame<'m>, s: StmtId, value: Option<ExprId>) -> Flow<Value> {
+        let f = frame.f;
+        let tree = &f.syntax.tree;
+        let Some(e) = value else {
+            return Err(Exit::Return(Value::Unit, tree.stmt(s).span));
+        };
+        let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
+        let span = tree.expr(e).span;
+        let v = self.eval(frame, e, Kind::Literal)?;
+        let declared = f.syntax.result.map(|t| (tree, t));
+        let v = self.narrow(frame, v, declared, &result_ty, span)?;
+        Err(Exit::Return(v, span))
     }
 
     fn while_loop(
@@ -814,19 +915,33 @@ impl<'m> Machine<'m> {
         ctx: Kind,
         member: bool,
     ) -> Flow<Value> {
-        let v = self.value(frame, e, ctx, member)?;
-        if let Some(seen) = self.seen.as_mut() {
+        self.checked(|m| m.eval_here(frame, e, ctx, member))
+    }
+
+    /// [`Machine::eval_as`], on this segment.
+    fn eval_here(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        ctx: Kind,
+        member: bool,
+    ) -> Flow<Value> {
+        let v = self.value(frame, e, ctx, member);
+        if let (Ok(v), Some(seen)) = (&v, self.seen.as_mut()) {
             show(
-                &v,
+                v,
                 frame.f.syntax.tree.expr(e).span,
                 Shown::Given,
                 &mut **seen,
             );
         }
-        Ok(v)
+        v
     }
 
-    /// [`Machine::eval`]'s value.
+    /// [`Machine::eval`]'s value. Each construct of more than a line evaluates in a method of its
+    /// own, so that a step's host frame holds the locals of the construct it evaluates and no
+    /// other's: a build without optimisation keeps a slot for every local of a function, and a
+    /// step of a deep nesting would otherwise hold every construct's (`crate::host`).
     fn value(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Kind, member: bool) -> Flow<Value> {
         let f = frame.f;
         let tree = &f.syntax.tree;
@@ -835,271 +950,385 @@ impl<'m> Machine<'m> {
         // and the arms of a `match` included: within the operators of one expression, the type
         // of all its operands, which it was given; elsewhere its own type where it has one,
         // since they are each other's other operands, and else the type it was given itself.
-        let kinds = Rc::clone(&frame.kinds);
-        let joined = joins(tree, &kinds, e);
+        let joined = joins(tree, &frame.kinds, e);
         let here = if member && joined {
             ctx
         } else {
-            match kinds[e.0 as usize] {
+            match frame.kinds[e.0 as usize] {
                 own @ Kind::Typed(_) => own,
                 Kind::Literal | Kind::Other => ctx,
             }
         };
-        Ok(match &tree.expr(e).kind {
-            ExprKind::Int { value, .. } => Value::Int(Int::from_u128(*value)),
-            ExprKind::Bool(b) => Value::Bool(*b),
-            ExprKind::Name(_) => {
-                match f.resolution.names[e.0 as usize]
-                    .and_then(|id| frame.slots[id.0 as usize].clone())
-                {
-                    Some(v) => v,
-                    None => return broken("a name without a value"),
-                }
-            }
-            ExprKind::Todo(reason) => return trap(TrapKind::Todo(reason.clone()), span),
-            ExprKind::Unreachable(reason) => {
-                return trap(TrapKind::Unreachable(reason.clone()), span)
-            }
-            ExprKind::Unary { op, operand } => match op {
-                UnaryOp::Not => Value::Bool(!self.cond(frame, *operand)?),
-                UnaryOp::Neg => {
-                    let x = self.int_as(frame, *operand, here, joined)?.negate();
-                    // On an `i128` or `u128` operand, checked at the operator (`core-calculus.md`,
-                    // item 4).
-                    match kinds[operand.0 as usize].ty().filter(|t| t.bits == 128) {
-                        Some(t) => Value::Int(fit(x, t, span)?),
-                        None => Value::Int(x),
-                    }
-                }
-                UnaryOp::BitNot => {
-                    let t = match kinds[operand.0 as usize] {
-                        Kind::Typed(Some(t)) => t,
-                        Kind::Literal => {
-                            worked_in(here, "`~` of literals among integers no type holds")?
-                        }
-                        // `E0212`: no type is chosen for integers no standard type holds.
-                        Kind::Typed(None) | Kind::Other => {
-                            return broken("`~` of integers no standard type holds")
-                        }
-                    };
-                    let x = self.int_as(frame, *operand, here, joined)?;
-                    let x = fit(x, t, tree.expr(*operand).span)?;
-                    Value::Int(Int::from_bits(!x.to_bits(t), t))
-                }
+        match &tree.expr(e).kind {
+            ExprKind::Int { value, .. } => Ok(Value::Int(Int::from_u128(*value))),
+            ExprKind::Bool(b) => Ok(Value::Bool(*b)),
+            ExprKind::Name(_) => match f.resolution.names[e.0 as usize]
+                .and_then(|id| frame.slots[id.0 as usize].clone())
+            {
+                Some(v) => Ok(v),
+                None => broken("a name without a value"),
             },
-            ExprKind::Binary { op, lhs, rhs } => match op {
-                BinaryOp::And => Value::Bool(self.cond(frame, *lhs)? && self.cond(frame, *rhs)?),
-                BinaryOp::Or => Value::Bool(self.cond(frame, *lhs)? || self.cond(frame, *rhs)?),
-                BinaryOp::Eq | BinaryOp::Ne => {
-                    let (left, right) = self.compared(frame, (*lhs, *rhs));
-                    let l = self.eval(frame, *lhs, left)?;
-                    let r = self.eval(frame, *rhs, right)?;
-                    Value::Bool((l == r) == (*op == BinaryOp::Eq))
-                }
-                BinaryOp::Lt => self.compare(frame, (*lhs, *rhs), |l, r| l < r)?,
-                BinaryOp::Le => self.compare(frame, (*lhs, *rhs), |l, r| l <= r)?,
-                BinaryOp::Gt => self.compare(frame, (*lhs, *rhs), |l, r| l > r)?,
-                BinaryOp::Ge => self.compare(frame, (*lhs, *rhs), |l, r| l >= r)?,
-                BinaryOp::BitOr
-                | BinaryOp::BitXor
-                | BinaryOp::BitAnd
-                | BinaryOp::Shl
-                | BinaryOp::Shr
-                | BinaryOp::Add
-                | BinaryOp::Sub
-                | BinaryOp::Mul
-                | BinaryOp::Div
-                | BinaryOp::Rem => {
-                    let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
-                    let l = self.eval_as(frame, *lhs, here, joined)?;
-                    let r = if shift {
-                        self.eval(frame, *rhs, Kind::Literal)?
-                    } else {
-                        self.eval_as(frame, *rhs, here, joined)?
-                    };
-                    let lt = kinds[lhs.0 as usize].ty();
-                    let rt = kinds[rhs.0 as usize].ty();
-                    self.arith(frame, *op, [(l, lt, *lhs), (r, rt, *rhs)], here, span)?
-                }
-            },
+            ExprKind::Todo(reason) => trap(TrapKind::Todo(reason.clone()), span),
+            ExprKind::Unreachable(reason) => trap(TrapKind::Unreachable(reason.clone()), span),
+            ExprKind::Unary { op, operand } => {
+                self.unary(frame, *op, *operand, (here, joined), span)
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                // A shift's amount takes no context type; every other operator's right operand
+                // does.
+                let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
+                self.binary(frame, (*op, shift), (*lhs, *rhs), (here, joined), span)
+            }
             // An array literal indexed gives its element's value, so its elements take what
             // the indexing is given; the index takes nothing (`core-calculus.md`, item 5).
-            ExprKind::Index { base, index } => {
-                let b = self.eval(frame, *base, here)?;
-                let i = self.int(frame, *index, Kind::Literal)?;
-                element(&b, i, span)?.clone()
-            }
-            // The base is a value first, as an index's is, so that a field read through an
-            // index reads the value the base had when it was evaluated, its indexes evaluated,
-            // and each checked, from left to right (`core-calculus.md`, items 10 and 12).
-            ExprKind::Field { base, name } => match self.eval(frame, *base, Kind::Literal)? {
-                Value::Array(items) => Value::Int(Int::from_u128(items.len() as u128)),
-                Value::Struct(_, fields) => match fields.into_iter().find(|(n, _)| n == name) {
-                    Some((_, v)) => v,
-                    None => return broken("a field its struct value does not hold"),
-                },
-                Value::Int(_) | Value::Bool(_) | Value::Enum(..) | Value::Unit => {
-                    return broken("a field read of a value that is neither an array nor a struct")
-                }
-            },
-            // Each value is narrowed into its field's type and refinement where it lands, in the
-            // order written, which is the declaration's (`core-calculus.md`, item 13).
-            ExprKind::Construct { name, fields } => {
-                let def = self.module.structs.get(name);
-                let mut values = Vec::new();
-                for fi in fields {
-                    let field = def.and_then(|d| d.field(&fi.name)).map(|(_, f)| f);
-                    let fty = field.map_or(Ty::Any, |f| f.ty.clone());
-                    let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, Kind::Literal)?;
-                    let at = tree.expr(fi.value).span;
-                    let v = self.narrow(frame, v, declared, &fty, at)?;
-                    values.push((fi.name.clone(), v));
-                }
-                Value::Struct(name.clone(), values)
-            }
-            // A variant's payload is built as a struct is (`core-calculus.md`, item 14).
+            ExprKind::Index { base, index } => self.index(frame, (*base, *index), here, span),
+            ExprKind::Field { base, name } => self.field(frame, *base, name),
+            ExprKind::Construct { name, fields } => self.construct(frame, name, fields),
             ExprKind::Variant {
                 enum_name,
                 name,
                 payload,
                 ..
-            } => {
-                let def = self.module.structs.get_enum(enum_name);
-                let variant = def.and_then(|d| d.variant(name)).map(|(_, v)| v);
-                let mut values = Vec::new();
-                let fields: &[mente_syntax::tree::FieldInit] = match payload {
-                    Payload::Named(fields) => fields,
-                    Payload::None => &[],
-                    // A variant built by position is `E0226`.
-                    Payload::Positional(_) => return broken("a variant built by position"),
-                };
-                for fi in fields {
-                    let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
-                    let fty = field.map_or(Ty::Any, |f| f.ty.clone());
-                    let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, Kind::Literal)?;
-                    let at = tree.expr(fi.value).span;
-                    let v = self.narrow(frame, v, declared, &fty, at)?;
-                    values.push((fi.name.clone(), v));
-                }
-                Value::Enum(enum_name.clone(), name.clone(), values)
-            }
+            } => self.variant(frame, enum_name, name, payload),
             ExprKind::Match { scrutinee, arms } => {
-                let v = self.eval(frame, *scrutinee, Kind::Literal)?;
-                // An integer scrutinee is narrowed into its type, which the arms cover
-                // ([`match-scrutinee-narrowing`]); literals alone are an `i64`.
-                let read = match &f.typing.exprs[scrutinee.0 as usize] {
-                    // Literals alone are an `i64`; integers no type holds are `E0212`, never
-                    // read in a type chosen for them.
-                    Ty::Int(_) => match kinds[scrutinee.0 as usize] {
-                        Kind::Literal => Ty::Int(IntType::One(I64)),
-                        Kind::Typed(Some(t)) => Ty::Int(IntType::One(t)),
-                        Kind::Typed(None) | Kind::Other => {
-                            return broken("a scrutinee of integers no standard type holds")
-                        }
-                    },
-                    t @ (Ty::Bool
-                    | Ty::Array(..)
-                    | Ty::Struct(_)
-                    | Ty::Enum(_)
-                    | Ty::Unit
-                    | Ty::Any) => t.clone(),
-                };
-                let v = self.narrow_plain(v, &read, tree.expr(*scrutinee).span)?;
-                for (k, arm) in arms.iter().enumerate() {
-                    if !self.matches(frame, e, k, &arm.pattern.kind, &v)? {
-                        continue;
-                    }
-                    return match arm.body {
-                        ArmBody::Expr(x) => self.eval(frame, x, here),
-                        ArmBody::Block(b) => self.block(frame, b, here),
-                    };
-                }
-                // A `match` the checker passes is exhaustive.
-                return trap(
-                    TrapKind::Unreachable("no arm of this `match` matches".into()),
-                    span,
-                );
+                self.match_value(frame, e, *scrutinee, arms, here, span)
             }
-            ExprKind::Call { args, .. } => {
-                let Some(index) = f.resolution.calls[e.0 as usize] else {
-                    return broken("a call that was never resolved");
-                };
-                // A function without a body stops the run before its arguments are evaluated.
-                self.function(index)?;
-                let mut values = Vec::new();
-                let mut spans = Vec::new();
-                let mut places = Vec::new();
-                for a in args {
-                    if a.is_mut {
-                        let path = self.place(frame, a.value)?;
-                        values.push(self.read(frame, &path)?);
-                        places.push(Some(path));
-                    } else {
-                        values.push(self.eval(frame, a.value, Kind::Literal)?);
-                        places.push(None);
-                    }
-                    spans.push(tree.expr(a.value).span);
-                }
-                let caller = Some((frame.index, frame.measure.clone()));
-                let (result, finals) = self.call(index, values, &spans, span, caller)?;
-                for (place, v) in places.into_iter().zip(finals) {
-                    if let Some(path) = place {
-                        // The value a `mut` parameter hands back enters the place's refinement.
-                        let declared = self.place_type(frame, &path)?;
-                        self.refined(frame, &v, declared, span)?;
-                        self.write(frame, &path, v)?;
-                    }
-                }
-                result
-            }
-            // Each element is narrowed into the literal's element type, at the literal
-            // (`core-calculus.md`, item 4).
-            ExprKind::Array(items) => {
-                let elem_ty = match &f.typing.exprs[e.0 as usize] {
-                    Ty::Array(_, elem) => elem.as_ref(),
-                    Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
-                        return broken("an array literal whose type is not an array")
-                    }
-                };
-                let mut values = Vec::new();
-                for &i in items {
-                    let v = self.eval(frame, i, here)?;
-                    values.push(self.narrow_plain(v, elem_ty, span)?);
-                }
-                Value::Array(values)
-            }
-            ExprKind::Repeat { value, count } => {
-                if *count > self.limits.max_array {
-                    return Err(Exit::Stop(Stop::TooLarge(*count)));
-                }
-                let v = self.eval(frame, *value, here)?;
-                let v = match &f.typing.exprs[e.0 as usize] {
-                    Ty::Array(_, elem_ty) => self.narrow_plain(v, elem_ty, span)?,
-                    Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
-                        return broken("an array literal whose type is not an array")
-                    }
-                };
-                Value::Array(vec![v; *count as usize])
-            }
+            ExprKind::Call { args, .. } => self.call_value(frame, e, args, span),
+            ExprKind::Array(items) => self.array(frame, e, items, here, span),
+            ExprKind::Repeat { value, count } => self.repeat(frame, e, *value, *count, here, span),
             ExprKind::If {
                 cond,
                 then,
                 otherwise,
-            } => {
-                if self.cond(frame, *cond)? {
-                    self.block(frame, *then, here)?
-                } else {
-                    match otherwise {
-                        Some(Else::Block(b)) => self.block(frame, *b, here)?,
-                        Some(Else::If(i)) => self.eval(frame, *i, here)?,
-                        None => Value::Unit,
-                    }
+            } => self.if_value(frame, *cond, *then, otherwise.as_ref(), here),
+            ExprKind::Error => Ok(Value::Unit),
+        }
+    }
+
+    /// An `if`: the branch its condition picks gives its value, which takes `here`.
+    fn if_value(
+        &mut self,
+        frame: &mut Frame<'m>,
+        cond: ExprId,
+        then: BlockId,
+        otherwise: Option<&Else>,
+        here: Kind,
+    ) -> Flow<Value> {
+        if self.cond(frame, cond)? {
+            self.block(frame, then, here)
+        } else {
+            match otherwise {
+                Some(Else::Block(b)) => self.block(frame, *b, here),
+                Some(Else::If(i)) => self.eval(frame, *i, here),
+                None => Ok(Value::Unit),
+            }
+        }
+    }
+
+    /// An element read `base[index]`.
+    fn index(
+        &mut self,
+        frame: &mut Frame<'m>,
+        (base, index): (ExprId, ExprId),
+        here: Kind,
+        span: Span,
+    ) -> Flow<Value> {
+        let b = self.eval(frame, base, here)?;
+        let i = self.int(frame, index, Kind::Literal)?;
+        Ok(element(&b, i, span)?.clone())
+    }
+
+    /// A unary operator's value, its operand's literals taking `here` within one expression
+    /// where `joined`.
+    fn unary(
+        &mut self,
+        frame: &mut Frame<'m>,
+        op: UnaryOp,
+        operand: ExprId,
+        (here, joined): (Kind, bool),
+        span: Span,
+    ) -> Flow<Value> {
+        let kind = frame.kinds[operand.0 as usize];
+        Ok(match op {
+            UnaryOp::Not => Value::Bool(!self.cond(frame, operand)?),
+            UnaryOp::Neg => {
+                let x = self.int_as(frame, operand, here, joined)?.negate();
+                // On an `i128` or `u128` operand, checked at the operator (`core-calculus.md`,
+                // item 4).
+                match kind.ty().filter(|t| t.bits == 128) {
+                    Some(t) => Value::Int(fit(x, t, span)?),
+                    None => Value::Int(x),
                 }
             }
-            ExprKind::Error => Value::Unit,
+            UnaryOp::BitNot => {
+                let t = match kind {
+                    Kind::Typed(Some(t)) => t,
+                    Kind::Literal => {
+                        worked_in(here, "`~` of literals among integers no type holds")?
+                    }
+                    // `E0212`: no type is chosen for integers no standard type holds.
+                    Kind::Typed(None) | Kind::Other => {
+                        return broken("`~` of integers no standard type holds")
+                    }
+                };
+                let x = self.int_as(frame, operand, here, joined)?;
+                let x = fit(x, t, frame.f.syntax.tree.expr(operand).span)?;
+                Value::Int(Int::from_bits(!x.to_bits(t), t))
+            }
         })
+    }
+
+    /// A binary operator's value, its operands' literals taking `here` within one expression
+    /// where `joined`.
+    fn binary(
+        &mut self,
+        frame: &mut Frame<'m>,
+        (op, shift): (BinaryOp, bool),
+        (lhs, rhs): (ExprId, ExprId),
+        (here, joined): (Kind, bool),
+        span: Span,
+    ) -> Flow<Value> {
+        Ok(match op {
+            BinaryOp::And => Value::Bool(self.cond(frame, lhs)? && self.cond(frame, rhs)?),
+            BinaryOp::Or => Value::Bool(self.cond(frame, lhs)? || self.cond(frame, rhs)?),
+            BinaryOp::Eq | BinaryOp::Ne => {
+                let (left, right) = self.compared(frame, (lhs, rhs));
+                let l = self.eval(frame, lhs, left)?;
+                let r = self.eval(frame, rhs, right)?;
+                Value::Bool((l == r) == (op == BinaryOp::Eq))
+            }
+            BinaryOp::Lt => self.compare(frame, (lhs, rhs), |l, r| l < r)?,
+            BinaryOp::Le => self.compare(frame, (lhs, rhs), |l, r| l <= r)?,
+            BinaryOp::Gt => self.compare(frame, (lhs, rhs), |l, r| l > r)?,
+            BinaryOp::Ge => self.compare(frame, (lhs, rhs), |l, r| l >= r)?,
+            BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::BitAnd
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem => {
+                let l = self.eval_as(frame, lhs, here, joined)?;
+                let r = if shift {
+                    self.eval(frame, rhs, Kind::Literal)?
+                } else {
+                    self.eval_as(frame, rhs, here, joined)?
+                };
+                let lt = frame.kinds[lhs.0 as usize].ty();
+                let rt = frame.kinds[rhs.0 as usize].ty();
+                self.arith(frame, op, [(l, lt, lhs), (r, rt, rhs)], here, span)?
+            }
+        })
+    }
+
+    /// A field read `base.name`. The base is a value first, as an index's is, so that a field
+    /// read through an index reads the value the base had when it was evaluated, its indexes
+    /// evaluated, and each checked, from left to right (`core-calculus.md`, items 10 and 12).
+    fn field(&mut self, frame: &mut Frame<'m>, base: ExprId, name: &str) -> Flow<Value> {
+        match self.eval(frame, base, Kind::Literal)? {
+            Value::Array(items) => Ok(Value::Int(Int::from_u128(items.len() as u128))),
+            Value::Struct(_, fields) => match fields.into_iter().find(|(n, _)| n == name) {
+                Some((_, v)) => Ok(v),
+                None => broken("a field its struct value does not hold"),
+            },
+            Value::Int(_) | Value::Bool(_) | Value::Enum(..) | Value::Unit => {
+                broken("a field read of a value that is neither an array nor a struct")
+            }
+        }
+    }
+
+    /// A struct built: each value is narrowed into its field's type and refinement where it
+    /// lands, in the order written, which is the declaration's (`core-calculus.md`, item 13).
+    fn construct(
+        &mut self,
+        frame: &mut Frame<'m>,
+        name: &str,
+        fields: &[FieldInit],
+    ) -> Flow<Value> {
+        let tree = &frame.f.syntax.tree;
+        let def = self.module.structs.get(name);
+        let mut values = Vec::new();
+        for fi in fields {
+            let field = def.and_then(|d| d.field(&fi.name)).map(|(_, f)| f);
+            let fty = field.map_or(Ty::Any, |f| f.ty.clone());
+            let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
+            let v = self.eval(frame, fi.value, Kind::Literal)?;
+            let at = tree.expr(fi.value).span;
+            let v = self.narrow(frame, v, declared, &fty, at)?;
+            values.push((fi.name.clone(), v));
+        }
+        Ok(Value::Struct(name.to_string(), values))
+    }
+
+    /// A variant built: its payload is built as a struct is (`core-calculus.md`, item 14).
+    fn variant(
+        &mut self,
+        frame: &mut Frame<'m>,
+        enum_name: &str,
+        name: &str,
+        payload: &Payload,
+    ) -> Flow<Value> {
+        let tree = &frame.f.syntax.tree;
+        let def = self.module.structs.get_enum(enum_name);
+        let variant = def.and_then(|d| d.variant(name)).map(|(_, v)| v);
+        let mut values = Vec::new();
+        let fields: &[FieldInit] = match payload {
+            Payload::Named(fields) => fields,
+            Payload::None => &[],
+            // A variant built by position is `E0226`.
+            Payload::Positional(_) => return broken("a variant built by position"),
+        };
+        for fi in fields {
+            let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
+            let fty = field.map_or(Ty::Any, |f| f.ty.clone());
+            let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
+            let v = self.eval(frame, fi.value, Kind::Literal)?;
+            let at = tree.expr(fi.value).span;
+            let v = self.narrow(frame, v, declared, &fty, at)?;
+            values.push((fi.name.clone(), v));
+        }
+        Ok(Value::Enum(enum_name.to_string(), name.to_string(), values))
+    }
+
+    /// The `match` at `e`: the arm whose pattern matches gives its value, which takes `here`.
+    fn match_value(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        scrutinee: ExprId,
+        arms: &[Arm],
+        here: Kind,
+        span: Span,
+    ) -> Flow<Value> {
+        let f = frame.f;
+        let tree = &f.syntax.tree;
+        let v = self.eval(frame, scrutinee, Kind::Literal)?;
+        // An integer scrutinee is narrowed into its type, which the arms cover
+        // ([`match-scrutinee-narrowing`]); literals alone are an `i64`.
+        let read = match &f.typing.exprs[scrutinee.0 as usize] {
+            // Literals alone are an `i64`; integers no type holds are `E0212`, never read in a
+            // type chosen for them.
+            Ty::Int(_) => match frame.kinds[scrutinee.0 as usize] {
+                Kind::Literal => Ty::Int(IntType::One(I64)),
+                Kind::Typed(Some(t)) => Ty::Int(IntType::One(t)),
+                Kind::Typed(None) | Kind::Other => {
+                    return broken("a scrutinee of integers no standard type holds")
+                }
+            },
+            t @ (Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any) => {
+                t.clone()
+            }
+        };
+        let v = self.narrow_plain(v, &read, tree.expr(scrutinee).span)?;
+        for (k, arm) in arms.iter().enumerate() {
+            if !self.matches(frame, e, k, &arm.pattern.kind, &v)? {
+                continue;
+            }
+            return match arm.body {
+                ArmBody::Expr(x) => self.eval(frame, x, here),
+                ArmBody::Block(b) => self.block(frame, b, here),
+            };
+        }
+        // A `match` the checker passes is exhaustive.
+        trap(
+            TrapKind::Unreachable("no arm of this `match` matches".into()),
+            span,
+        )
+    }
+
+    /// The call at `e`: its arguments evaluated, a `mut` one read from its place, then the call,
+    /// then each `mut` place takes back what the callee left.
+    fn call_value(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        args: &[Arg],
+        span: Span,
+    ) -> Flow<Value> {
+        let f = frame.f;
+        let tree = &f.syntax.tree;
+        let Some(index) = f.resolution.calls[e.0 as usize] else {
+            return broken("a call that was never resolved");
+        };
+        // A function without a body stops the run before its arguments are evaluated.
+        self.function(index)?;
+        let mut values = Vec::new();
+        let mut spans = Vec::new();
+        let mut places = Vec::new();
+        for a in args {
+            if a.is_mut {
+                let path = self.place(frame, a.value)?;
+                values.push(self.read(frame, &path)?);
+                places.push(Some(path));
+            } else {
+                values.push(self.eval(frame, a.value, Kind::Literal)?);
+                places.push(None);
+            }
+            spans.push(tree.expr(a.value).span);
+        }
+        let caller = Some((frame.index, frame.measure.clone()));
+        let (result, finals) = self.call(index, values, &spans, span, caller)?;
+        for (place, v) in places.into_iter().zip(finals) {
+            if let Some(path) = place {
+                // The value a `mut` parameter hands back enters the place's refinement.
+                let declared = self.place_type(frame, &path)?;
+                self.refined(frame, &v, declared, span)?;
+                self.write(frame, &path, v)?;
+            }
+        }
+        Ok(result)
+    }
+
+    /// The array literal at `e`: each element is narrowed into the literal's element type, at
+    /// the literal (`core-calculus.md`, item 4).
+    fn array(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        items: &[ExprId],
+        here: Kind,
+        span: Span,
+    ) -> Flow<Value> {
+        let f = frame.f;
+        let elem_ty = match &f.typing.exprs[e.0 as usize] {
+            Ty::Array(_, elem) => elem.as_ref(),
+            Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                return broken("an array literal whose type is not an array")
+            }
+        };
+        let mut values = Vec::new();
+        for &i in items {
+            let v = self.eval(frame, i, here)?;
+            values.push(self.narrow_plain(v, elem_ty, span)?);
+        }
+        Ok(Value::Array(values))
+    }
+
+    /// The repeat `[value; count]` at `e`.
+    fn repeat(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        value: ExprId,
+        count: u128,
+        here: Kind,
+        span: Span,
+    ) -> Flow<Value> {
+        if count > self.limits.max_array {
+            return Err(Exit::Stop(Stop::TooLarge(count)));
+        }
+        let f = frame.f;
+        let v = self.eval(frame, value, here)?;
+        let v = match &f.typing.exprs[e.0 as usize] {
+            Ty::Array(_, elem_ty) => self.narrow_plain(v, elem_ty, span)?,
+            Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                return broken("an array literal whose type is not an array")
+            }
+        };
+        Ok(Value::Array(vec![v; count as usize]))
     }
 
     /// Whether pattern `p`, of arm `k` of the `match` at `m`, matches `v`; when it does, its

@@ -3,6 +3,7 @@
 //! Commands:
 //! - `mn view --spec <file.mn>` : Instant `<0.1ms` Holographic Spec Blueprint projection & dual hash report.
 //! - `mn view --checks <file.mn>`: Each run-time check Tier 1 leaves, function by function.
+//! - `mn view --frames <file.mn>`: Each function's frame against the stack budget, and its parts.
 //! - `mn run <file.mn> [--call "f(args)"] [--mir | --native]`: Runs a call on the reference
 //!   interpreter, with `--mir` through MIR, or with `--native` as native code, and prints the
 //!   result or the trap.
@@ -95,6 +96,7 @@ fn print_help() {
     println!("Usage:");
     println!("  mn view --spec <file.mn>     Project Holographic Spec Blueprint (strips bodies, computes spec_hash/body_hash)");
     println!("  mn view --checks <file.mn>   List each run-time check Tier 1 leaves, and count those it erased");
+    println!("  mn view --frames <file.mn>   Give each function's frame against the stack budget, and its parts");
     println!("  mn check [--json] [file.mn | dir]");
     println!("  mn check --watch <file.mn> [--rounds N]");
     println!(
@@ -153,7 +155,11 @@ fn cmd_dump(args: &[String]) {
                 process::exit(2);
             }
             Ok(module) => match mente_codegen::lower::lower(&module) {
-                Ok(lowered) => format!("mente-dump 2 mir\n{}", lowered.module),
+                Ok(lowered) => format!(
+                    "mente-dump {} mir\n{}",
+                    mente_syntax::DUMP_VERSION,
+                    lowered.module
+                ),
                 Err(e) => {
                     eprintln!("error: not lowered: {}", e);
                     process::exit(1);
@@ -478,6 +484,10 @@ fn cmd_view(args: &[String]) {
         cmd_view_checks(args);
         return;
     }
+    if args.iter().any(|a| a == "--frames") {
+        cmd_view_frames(args);
+        return;
+    }
     let path_str = args
         .iter()
         .find(|a| !a.starts_with('-'))
@@ -524,6 +534,32 @@ fn cmd_view_checks(args: &[String]) {
         process::exit(1);
     }
     print!("{}", run_time_checks(&src));
+}
+
+/// `mn view --frames <file.mn>`: for each function with a body, the bytes a call of it counts
+/// against the stack budget and the parts they sum (`core-calculus.md`, item 25), as the checker
+/// computes them for every execution path to read.
+fn cmd_view_frames(args: &[String]) {
+    let Some(path) = args.iter().find(|a| !a.starts_with('-')) else {
+        eprintln!("Usage: mn view --frames <file.mn>");
+        process::exit(2);
+    };
+    let src = match fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("error: cannot read `{}`: {}", path, e);
+            process::exit(2);
+        }
+    };
+    match mente_sema::check_program(&src) {
+        Ok(m) => print!("{}", mente_sema::frames::report(&m)),
+        Err(diagnostics) => {
+            for d in &diagnostics {
+                eprint!("{}", render_text(d, path, &src));
+            }
+            process::exit(1);
+        }
+    }
 }
 
 /// The run-time checks Tier 1 leaves in a module, in the form `mn view --checks` prints.

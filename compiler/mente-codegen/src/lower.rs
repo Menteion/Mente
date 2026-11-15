@@ -489,12 +489,18 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
             None => None,
         });
     }
-    let mut module = cfg::Module::default();
+    // The budget and each function's frame are the checker's (`core-calculus.md`, item 25); an
+    // entry, which no program calls, counts none.
+    let mut module = cfg::Module {
+        functions: Vec::new(),
+        budget: mente_sema::frames::BUDGET,
+    };
     for (i, f) in m.functions.iter().enumerate() {
         if let Some(f) = f {
-            let lowered = Lower::new(m, &sigs, &shapes, i, false)?
+            let mut lowered = Lower::new(m, &sigs, &shapes, i, false)?
                 .function()
                 .map_err(|e| format!("fn {}: {}", f.syntax.name, e))?;
+            lowered.frame = m.frames.get(i).copied().flatten().map_or(0, |f| f.bytes);
             module.functions.push(lowered);
         }
     }
@@ -3118,11 +3124,12 @@ impl<'a> Lower<'a> {
 
     // -- calls -----------------------------------------------------------------------------
 
-    /// Calls function `index` with `args`, as the reference interpreter does: each argument
-    /// narrowed into its parameter's type at its own span, the parameters' refinements checked,
-    /// then the callee's `requires` and its `decreases` measure, at `at`; for a `recursive`
-    /// call, the measure must be smaller than this function's. After the call, a `mut` place
-    /// is checked against its declared refinement.
+    /// Calls function `index` with `args`, as the reference interpreter does: the call counted
+    /// against the stack budget first, where its arguments are evaluated and none is narrowed yet
+    /// (`core-calculus.md`, item 25); then each argument narrowed into its parameter's type at its
+    /// own span, the parameters' refinements checked, then the callee's `requires` and its
+    /// `decreases` measure, at `at`; for a `recursive` call, the measure must be smaller than
+    /// this function's. After the call, a `mut` place is checked against its declared refinement.
     fn call(
         &mut self,
         index: usize,
@@ -3132,6 +3139,20 @@ impl<'a> Lower<'a> {
         recursive: bool,
     ) -> Result<V, String> {
         let sig = self.sig_of(index)?;
+        // The call is counted here, and its frame is in use while its checks run and until it
+        // returns; a call those checks make is counted and returned within (`Op::Enter`).
+        self.at(at);
+        let deep = self
+            .b
+            .trap_site("stack-overflow", &["the call stack ran out"]);
+        self.inst(
+            Op::Enter {
+                callee: sig.func,
+                trap: deep,
+            },
+            Ty::Unit,
+            &[],
+        );
         let mut callee = Scope::new(self.m, index)?;
         // Each argument narrowed into its parameter's type, at its own span.
         let mut values = Vec::new();
@@ -4044,7 +4065,8 @@ pub fn on_u128() -> u128 = -0_u128
                 | Op::Load
                 | Op::Store
                 | Op::Copy { .. }
-                | Op::Call(_) => None,
+                | Op::Call(_)
+                | Op::Enter { .. } => None,
             })
             .collect();
         kinds.sort();

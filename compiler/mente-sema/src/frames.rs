@@ -32,6 +32,10 @@ use crate::CheckedFn;
 /// The bytes every call counts for itself (item 25).
 pub const CALL: u128 = 64;
 
+/// A run's stack budget, in bytes: the most the frames of the calls that have begun and not
+/// returned may sum to, the same on every execution path and for every program (item 25).
+pub const BUDGET: u128 = 1_048_576;
+
 /// A function's frame, in bytes, and its parts as item 25 sums them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame {

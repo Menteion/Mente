@@ -971,6 +971,9 @@ impl Translate {
                 e.b.call_memcpy(config, args[0], args[1], n);
                 return Ok(None);
             }
+            // Native code counts no frame yet: its stack ends at the system's guard page
+            // (`core-calculus.md`, item 25, what the paths do not do yet).
+            Op::Enter { .. } => return Ok(None),
             Op::Call(c) => {
                 let callee = &ids[c.0 as usize];
                 let fref = writer.module_mut().declare_func_in_func(*callee, e.b.func);
@@ -1124,7 +1127,8 @@ fn constant(f: &cfg::Function, v: NodeId) -> Option<Num> {
         | Op::Load
         | Op::Store
         | Op::Copy { .. }
-        | Op::Call(_) => None,
+        | Op::Call(_)
+        | Op::Enter { .. } => None,
     }
 }
 
