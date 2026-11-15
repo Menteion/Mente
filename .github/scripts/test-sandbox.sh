@@ -9,7 +9,9 @@
 #                                                          measures what it costs a process
 #   /usr/bin/bash .github/scripts/test-sandbox.sh env      what test-sandbox-env.sh evaluates: cargo's runner
 #   /usr/bin/bash .github/scripts/test-sandbox.sh ran [n]  at a step's end: n commands ran inside, 1 if not given,
-#                                                          and the sandbox has added under a tenth to the job
+#                                                          and what the sandbox has cost the job so far
+#   /usr/bin/bash .github/scripts/test-sandbox.sh bound    after the job's last `ran`: the sandbox added under a
+#                                                          tenth to the job
 #   /usr/bin/bash .github/scripts/test-sandbox.sh uid      the user the commands run as, for the memory guard
 #
 # How a command gets inside: `env` names this script as cargo's runner for the host's target
@@ -335,17 +337,31 @@ read_cost() {
   done
 }
 
-# The time the sandbox has added to the job so far against a tenth of the job's time without it,
-# the bound the decision on the sandbox signed (docs/design-review.md, untrusted-test-isolation):
-# reported, and past the bound the step fails, so that more tests, or a dearer sandbox, cannot cross
-# it unseen. The job's time is counted from setup, which leaves out what ran before it, so the share
-# is if anything too high.
-bound() {
-  local total share
+# The time the sandbox has added to the job so far, in `share`, per mille of the job's time since
+# setup without it, and one line that says so. The job's time is counted from setup, which leaves
+# out what ran before it, so the share is if anything too high.
+share_of_job() {
+  local total
   total=$(($(now) - start))
   if [ "$total" -le "$added" ]; then fail "the sandbox's estimated cost, $(seconds "$added") s, is no less than the job's time since setup, $(seconds "$total") s"; fi
   share=$((1000 * added / (total - added)))
-  echo "The sandbox has added an estimated $(seconds "$added") s to the $(seconds "$total") s since setup: $((share / 10)).$((share % 10))% of the time without it, against a bound of 10%." | /usr/bin/tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  said="The sandbox has added an estimated $(seconds "$added") s to the $(seconds "$total") s since setup: $((share / 10)).$((share % 10))% of the time without it, against a bound of 10% for the whole job."
+}
+
+# At the end of the job's last step that runs code of the change, after its `ran`: what the sandbox
+# added to the whole job, against a tenth of the job's time without it, the bound the decision on
+# the sandbox signed (docs/design-review.md, untrusted-test-isolation). Past it the step fails, so
+# that more tests, or a dearer sandbox, cannot cross the bound unseen. It is held once, for the
+# whole job: early in a job the canary's fixed cost outweighs the time so far.
+bound() {
+  local start serial parallel added share said
+  if [ "${RUNNER_OS:-}" != Linux ]; then
+    echo "No sandbox on ${RUNNER_OS:-this machine}."
+    return 0
+  fi
+  read_cost
+  share_of_job
+  echo "$said" | /usr/bin/tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
   if [ "$share" -gt 100 ]; then
     fail "the sandbox has added more than a tenth to this job's time, the bound its decision signed (docs/design-review.md, untrusted-test-isolation): make it cheaper, or reopen the decision"
   fi
@@ -537,9 +553,10 @@ env_lines() {
 # code that had already run outside the sandbox could write them itself. Then what the step's
 # commands cost: each at the cost the canary measured for processes started as many at once as the
 # runner has cores, as nextest runs the tests, and one more at the cost of a process started alone,
-# for a step whose one command ran by itself; added to the job's, and held to the bound.
+# for a step whose one command ran by itself; added to the job's, and reported. `bound` holds the
+# whole job's to a tenth, at its end.
 ran() {
-  local need=${1:-1} count start serial parallel added
+  local need=${1:-1} count start serial parallel added share said
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
     return 0
@@ -556,7 +573,8 @@ ran() {
   read_cost
   added=$((added + count * parallel + serial))
   printf 'start %s\nserial %s\nparallel %s\nadded %s\n' "$start" "$serial" "$parallel" "$added" > "$cost"
-  bound
+  share_of_job
+  echo "$said"
 }
 
 # What a command can reach, one line a route: run by the canary once as the runner's user and
@@ -910,6 +928,7 @@ case "${1:-}" in
   env) env_lines ;;
   uid) echo "$uid" ;;
   ran) ran "${2:-}" ;;
+  bound) bound ;;
   probe)
     shift
     probe "$@"
@@ -917,7 +936,7 @@ case "${1:-}" in
   probe-outlive) probe_outlive "$2" ;;
   check) check ;;
   *)
-    echo "usage: /usr/bin/bash .github/scripts/test-sandbox.sh setup|check|env|ran [n]"
+    echo "usage: /usr/bin/bash .github/scripts/test-sandbox.sh setup|check|env|ran [n]|bound"
     exit 2
     ;;
 esac

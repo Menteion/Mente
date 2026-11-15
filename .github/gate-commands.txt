@@ -20,6 +20,7 @@ ci.yml#rust: /usr/bin/bash .github/scripts/tools.sh record
 ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh check
 ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh ran
+ci.yml#rust: /usr/bin/bash .github/scripts/test-sandbox.sh bound
 ci.yml#rust: cargo test --locked -p mente-cli --test gates
 ci.yml#rust: cargo run --locked --bin mn -- spec
 ci.yml#rust: cargo run --locked --bin mn -- test --mutate
@@ -33,6 +34,7 @@ ci.yml#execution-paths: node .github/scripts/build-time-code.mjs
 ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh check
 ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh ran
+ci.yml#execution-paths: /usr/bin/bash .github/scripts/test-sandbox.sh bound
 ci.yml#execution-paths: bash .github/scripts/overflow-proof.sh
 ci.yml#execution-paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
 ci.yml#debuggers: node .github/scripts/build-time-code.mjs --before-toolchain
@@ -61,6 +63,7 @@ mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh check
 mutants.yml#in-diff: git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
+mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh bound
 mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --cap-lints=true --timeout 600 --output "$RUNNER_TEMP/mutants"
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs evidence "$out" "$deleted_out" > evidence.txt
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
@@ -70,6 +73,7 @@ generated.yml#paths: node .github/scripts/build-time-code.mjs
 generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh check
 generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh ran
+generated.yml#paths: /usr/bin/bash .github/scripts/test-sandbox.sh bound
 generated.yml#paths: bash .github/scripts/overflow-proof.sh
 generated.yml#paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::generated_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/generated.txt"
 generated.yml#paths: timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture --exact mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths 2>&1 | tee "$RUNNER_TEMP/conformance.txt"

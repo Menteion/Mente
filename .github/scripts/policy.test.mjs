@@ -1106,7 +1106,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "02933b8cf0a3ae583f364b9a4f1838dfbc112a1d18e4e69eea4774066b2138fe"],
+  [".github/scripts/test-sandbox.sh", "5f02ed8230c1ac0afd0ea9d2bcd2416dde0d464d8593a57731a00e9a0dbfd23e"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
@@ -1134,11 +1134,11 @@ const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "b083cb0250a468f400630f2d429cd72dbaf8d80999fcb84a6ca952f4f665691b"],
-  ["mutants.yml#in-diff", "9e76c8b721aab5909ab8629dd825023babd9173e29300d25c051e8d82549dfba"],
-  ["mutants-full.yml#full", "6cd0ce06ce573e34c0d4523533c0d6fb9b3807ae22895190f01779d2db294633"],
-  ["ci.yml#execution-paths", "e232905a2ee58528e2907a5777b050bc202ad96c6a1c73b41d178d4997fc7582"],
-  ["generated.yml#paths", "7e0ebac7477ec80359e5121a211dd7476aea636051c4710275f549413b918580"],
+  ["ci.yml#rust", "afa6240a3eb9c6f83a919ef426a4b00387df971d35cad31e57ea067033136f09"],
+  ["mutants.yml#in-diff", "5aae18ff8d59d99b2d72c88678085823eaeed5d58f2406741cbe25e973b6d520"],
+  ["mutants-full.yml#full", "0d184575c02e8bcac5d9510ef4b3aa970c06558d4d412c9f1ff51e55d2412ebe"],
+  ["ci.yml#execution-paths", "f4c5c623a9443338d74342e3737fc3bc3d34dddda6e6464cd16810ba4fbe049a"],
+  ["generated.yml#paths", "87b837a2c40b53ea062dfe92020f8f1b75df4609a6e9aab44668ea0d85ce6379"],
   ["ci.yml#docs", "e03fda24b884d112cce1f4b7084e737cb83689de800b5a0fc5b9c6a823e68dfe"],
   ["commits.yml#commits", "d7658c7e037b71c8394327a9a2067bd609c95e5f21c7c23b5a3c480834008da5"],
   ["benchmark.yml#bench", "0ec886abf29ddf2b448ab3dd62bb06ad9761e3d5ea3424e36541b4ec30ace0dc"],
@@ -1366,6 +1366,9 @@ const SANDBOX_SOURCES = [". .github/scripts/limits.sh", ". .github/scripts/test-
 /// What a step that ran code of the change ends with, before the check of the tools: at least one
 /// command ran in the sandbox, or, after cargo-mutants, at least one for each mutant caught.
 const RAN = "/usr/bin/bash .github/scripts/test-sandbox.sh ran";
+/// What the job's last step that runs code of the change holds right after its `ran`: the sandbox
+/// added under a tenth to the job's time.
+const BOUND = "/usr/bin/bash .github/scripts/test-sandbox.sh bound";
 /// cargo-mutants' cap of every lint at a warning, for each build it makes (`--cap-lints=warn` in
 /// the flags it gives rustc), as one argument of its line.
 const MUTANTS_CAP = / --cap-lints=true(?=\s|$)/;
@@ -1420,13 +1423,20 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       assert.ok(record >= 0 && naming[0] === record + 1, `${key}: the sandbox is not set up and proven right after the tools are recorded`);
     }
     let running = 0;
+    // Where the job's bound is held: the lines of every step, and the last step that runs code.
+    const bounds = [];
+    let last = null;
     for (const [k, s] of all.entries()) {
       if (typeof s.run !== "string") continue;
       const lines = logicalLines(s.run).map((l) => l.trim());
       for (const l of lines) assert.ok(!runsCodeUnread(l), `${stepKey(file, id, s)} starts code of the change in a form the policy does not read, which cargo's runner may never see: ${l}`);
+      lines.forEach((l, at) => {
+        if (/test-sandbox\.sh bound\b/.test(l)) bounds.push({ k, at, l });
+      });
       const runs = lines.flatMap((l, at) => (runsCode(l) ? [at] : []));
       if (runs.length === 0) continue;
       running++;
+      last = { k, lines };
       const step = stepKey(file, id, s);
       assert.ok(k > naming[0], `${step} runs code of the change before the sandbox is set up and proven`);
       const source = lines.findIndex((l) => SANDBOX_SOURCES.includes(l));
@@ -1442,6 +1452,13 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
     }
     assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
+    // The bound on what the sandbox adds to the job is held once, for the whole job: right after
+    // the `ran` of its last step that runs code, when every sandboxed command has been counted.
+    const ranAt = last.lines.findIndex((l) => l === RAN || l.startsWith(`${RAN} `));
+    assert.ok(
+      bounds.length === 1 && bounds[0].k === last.k && bounds[0].l === BOUND && bounds[0].at === ranAt + 1,
+      `${key} does not hold the sandbox's bound once, as \`${BOUND}\` right after the \`ran\` of its last step that runs code`,
+    );
   }
   for (const line of ['cargo mutants --in-diff pr.diff --in-place --timeout 600 || status=$?', "cargo mutants --in-place --cap-lints=false", "cargo mutants --in-place --cap-lints=trueish"]) assert.doesNotMatch(line, MUTANTS_CAP, line);
   for (const line of ['cargo mutants --in-place --cap-lints=true --timeout 600 || status=$?', "cargo mutants --in-place --cap-lints=true"]) assert.match(line, MUTANTS_CAP, line);
@@ -1564,18 +1581,24 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     assert.equal(run(["ran", "3"], "Linux").status, 1, "fewer commands in the sandbox than mutants caught passes");
     costs(3_000_000);
     assert.equal(run(["ran", "many"], "Linux").status, 1, "a count that is no number passes");
-    // The bound: more than a tenth of the job's time without the sandbox fails the step, and so do a
-    // record that is missing or not whole.
+    // `ran` reports the share so far, whatever it is; `bound`, at the job's end, fails past a tenth
+    // of the job's time without the sandbox, and on a record that is missing or not whole.
     costs(9_500_000);
-    const over = run(["ran"], "Linux");
+    const so = run(["ran"], "Linux");
+    assert.equal(so.status, 0, `ran holds the job's share before its end: ${so.out}`);
+    assert.match(so.out, /The sandbox has added an estimated 9\.5 s to the 10\d\.\d s since setup: 10\.\d% /);
+    const over = run(["bound"], "Linux");
     assert.equal(over.status, 1, `a sandbox that added more than a tenth to the job passes: ${over.out}`);
     assert.match(over.out, /::error::the sandbox has added more than a tenth to this job's time/);
     costs(8_000_000);
-    assert.equal(run(["ran"], "Linux").status, 0, "a sandbox that added under a tenth to the job fails");
-    fs.writeFileSync(cost, "start 1\nserial 20000\nadded 0\n");
-    assert.match(run(["ran"], "Linux").out, /::error::the record of what the sandbox costs this job is not whole/);
-    fs.rmSync(cost);
-    assert.match(run(["ran"], "Linux").out, /::error::no record of what the sandbox costs this job/);
+    assert.equal(run(["bound"], "Linux").status, 0, "a sandbox that added under a tenth to the job fails");
+    assert.equal(run(["bound"], "Windows", path.join(dir, "none")).status, 0, "Windows, which has no sandbox, fails the bound");
+    for (const sub of ["ran", "bound"]) {
+      fs.writeFileSync(cost, "start 1\nserial 20000\nadded 0\n");
+      assert.match(run([sub], "Linux").out, /::error::the record of what the sandbox costs this job is not whole/, sub);
+      fs.rmSync(cost);
+      assert.match(run([sub], "Linux").out, /::error::no record of what the sandbox costs this job/, sub);
+    }
     assert.equal(run(["ran"], "Windows", path.join(dir, "none")).status, 0, "Windows, which has no sandbox, fails the check that a command ran in it");
     assert.equal(run(["run", "A=b"], "Linux").status, 2, "a command that env would read as a variable is handed over");
     assert.equal(run(["run"], "Linux").status, 2);

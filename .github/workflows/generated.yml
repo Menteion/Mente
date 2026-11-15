@@ -129,6 +129,7 @@ jobs:
             mir_run::differential::tests::conformance_programs_run_alike_on_the_three_paths \
             2>&1 | tee "$RUNNER_TEMP/conformance.txt"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/test-sandbox.sh bound
       - name: Summary
         if: always() && steps.watch.outputs.run != 'false'
         run: |
