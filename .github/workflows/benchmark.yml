@@ -78,6 +78,10 @@ jobs:
     name: Agent benchmark
     needs: build
     runs-on: ubuntu-24.04
+    # The API key and the held-out token live only in this environment, whose deployment branches
+    # are main alone: no other ref, and no pull request, runs with them
+    # (docs/design-review.md, trust-from-structure).
+    environment: benchmark
     timeout-minutes: 360
     env:
       # Whether the secret exists, never the secret itself.

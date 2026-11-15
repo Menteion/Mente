@@ -133,20 +133,45 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
   return { ...env, ...extra };
 }
 
+/** The benchmark's sandbox, the repository's own: the one confinement of what runs beside a secret. */
+export const SANDBOX = join(REPOSITORY, "benchmark", "harness", "sandbox.sh");
+
+/** Whether two paths name the same file, the case of a Windows path aside. */
+const samePath = (a: string, b: string) => (process.platform === "win32" ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b));
+
+/**
+ * Whether a command is one the harness may start while a secret is in reach: the benchmark's own
+ * sandbox, whatever it runs inside, as `sandboxed(...)` gives it; or a toolchain's probe of its
+ * version or sysroot, with exactly those arguments, which runs outside the sandbox because the
+ * rustup proxy may write to RUSTUP_HOME. Nothing else: not mn, not a shell, not another script
+ * than SANDBOX (the review of b2be87b: refusing mn by its name let `bash -c "$mn ..."` and a copy
+ * of mn under another name through).
+ */
+export function namedCommand(cmd: string, args: string[]): boolean {
+  if (cmd === "bash") return args.length >= 3 && samePath(args[0], SANDBOX);
+  const tool = /(?:^|[\\/])(rustc|odin)(?:\.exe)?$/.exec(cmd)?.[1];
+  const probe = args.join(" ");
+  return (tool === "rustc" && (probe === "--version" || probe === "--print sysroot")) || (tool === "odin" && probe === "version");
+}
+
+/** Whether a secret is in this process's reach: a variable whose name looks like one, set. */
+const secretInReach = () => Object.entries(process.env).some(([name, value]) => SECRET_NAME.test(name) && value);
+
 /**
  * Runs a command to its end, or kills it at the time limit: the one place the harness of a job
  * that holds the key starts a process (the policy holds the other modules to it). Whatever
- * environment it is given, no variable that could hold a secret reaches the child. And `mn`
- * itself, code of the branch, never starts directly while this process holds such a variable:
- * only through the sandbox, `sandboxed(...)` (the final review of PR 137 found it run directly).
+ * environment it is given, no variable that could hold a secret reaches the child. And while this
+ * process holds such a variable, it starts only a named command, `namedCommand`: so `mn`, code of
+ * the branch, and the agents' programs run only through the sandbox (the final review of PR 137
+ * found mn run directly, and the review of b2be87b mn run by a shell).
  */
 export function runProcess(
   cmd: string,
   args: string[],
   opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number },
 ): Promise<Proc> {
-  if (/(^|[\\/])mn(\.exe)?$/.test(cmd) && Object.entries(process.env).some(([name, value]) => SECRET_NAME.test(name) && value)) {
-    return Promise.reject(new Error("mn would run outside the sandbox beside a secret"));
+  if (secretInReach() && !namedCommand(cmd, args)) {
+    return Promise.reject(new Error(`${cmd} is no command the harness starts beside a secret: only the benchmark's sandbox and the toolchains' probes are`));
   }
   const env = Object.fromEntries(Object.entries(opts.env ?? childEnv()).filter(([name]) => !SECRET_NAME.test(name)));
   return new Promise((done) => {

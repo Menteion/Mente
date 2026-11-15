@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 61;
+const FLOOR = 63;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1106,7 +1106,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "1b8cbfec63010bcac1aad029348db345bd6f77e5c30e98a594008ea68ce1d45a"],
+  [".github/scripts/test-sandbox.sh", "40dc7451844575343f8cba3be76569cb03e303fbd1e0a1820f7ffc0e432b61af"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
@@ -1135,15 +1135,15 @@ const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 const PINNED_JOBS = new Map([
   ["ci.yml#rust", "b083cb0250a468f400630f2d429cd72dbaf8d80999fcb84a6ca952f4f665691b"],
-  ["mutants.yml#in-diff", "0586b6363327b786b4ca5cc8c283e0db25037f13273bae1c461eeafe1f1b15ee"],
-  ["mutants-full.yml#full", "96970c2b8c155d04957b5b14ce56f212aa35683afce0be1c5d22f0c7da5f8eff"],
+  ["mutants.yml#in-diff", "9e76c8b721aab5909ab8629dd825023babd9173e29300d25c051e8d82549dfba"],
+  ["mutants-full.yml#full", "6cd0ce06ce573e34c0d4523533c0d6fb9b3807ae22895190f01779d2db294633"],
   ["ci.yml#execution-paths", "e232905a2ee58528e2907a5777b050bc202ad96c6a1c73b41d178d4997fc7582"],
   ["generated.yml#paths", "7e0ebac7477ec80359e5121a211dd7476aea636051c4710275f549413b918580"],
   ["ci.yml#docs", "e03fda24b884d112cce1f4b7084e737cb83689de800b5a0fc5b9c6a823e68dfe"],
   ["commits.yml#commits", "d7658c7e037b71c8394327a9a2067bd609c95e5f21c7c23b5a3c480834008da5"],
-  ["benchmark.yml#bench", "d15ab557df2839ee2a9f1e40584b59372e79665e8cb89fb234dc29be31bc7aaa"],
-  ["prelim.yml#prelim", "86d491cd9625aae611f5bc1300be0040b218c608af87768758693d32708191dd"],
-  ["probe.yml#write", "7377f1325ab19255dbb778b59c17300c8730e172eb9c7c0078884d2b422a26e5"],
+  ["benchmark.yml#bench", "0ec886abf29ddf2b448ab3dd62bb06ad9761e3d5ea3424e36541b4ec30ace0dc"],
+  ["prelim.yml#prelim", "a5426a213a12ba37e55189773f7c1c171b11665771a891f726697603a50ea483"],
+  ["probe.yml#write", "0721d07ad2a918dbbb9ca700e48559820b625a9d8b881e9a8da7f3bbc452406d"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1366,6 +1366,9 @@ const SANDBOX_SOURCES = [". .github/scripts/limits.sh", ". .github/scripts/test-
 /// What a step that ran code of the change ends with, before the check of the tools: at least one
 /// command ran in the sandbox, or, after cargo-mutants, at least one for each mutant caught.
 const RAN = "/usr/bin/bash .github/scripts/test-sandbox.sh ran";
+/// cargo-mutants' cap of every lint at a warning, for each build it makes (`--cap-lints=warn` in
+/// the flags it gives rustc), as one argument of its line.
+const MUTANTS_CAP = / --cap-lints=true(?=\s|$)/;
 /// Whether a line of a step runs code of the change: tests through nextest or cargo, under
 /// `timeout` or not, nextest's list, which runs every test executable, a binary through
 /// `cargo run`, mutants, and the proof of the overflow checks, which runs a test of every crate. A
@@ -1389,7 +1392,7 @@ const runsCodeUnread = (line) => {
   if (cargo && !(runsCode(line) || BUILDS_ONLY.test(line))) return true;
   if (cargo && /\s--config[\s=]/.test(line)) return true;
   if (/overflow-proof\.sh/.test(line) && !runsCode(line)) return true;
-  return /(^|[^\w.-])target\//.test(line) || /CARGO_TARGET_|_RUNNER\b|test-sandbox-runs\.log/.test(line);
+  return /(^|[^\w.-])target\//.test(line) || /CARGO_TARGET_|_RUNNER\b|test-sandbox-(runs\.log|cost)\b/.test(line);
 };
 
 check("on Linux the testing jobs prove the tests' sandbox first, and every step that runs code of the change ran it there", () => {
@@ -1430,12 +1433,18 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       assert.ok(source >= 0 && source < runs[0], `${step} runs code of the change before it sources the limits or test-sandbox-env.sh, and so outside the sandbox: ${lines[runs[0]]}`);
       assert.ok(bash(s), `${step} sources the sandbox's settings in a shell that is not bash`);
       const mutants = lines.some((l) => /^cargo mutants (?!.*--list)/.test(l));
+      // Every run of mutants caps the lints at warnings, so that a lint the change denies cannot
+      // make a mutant fail to build, and count as unviable, not missed: the floor bounds no share
+      // of those (docs/design-review.md, untrusted-test-isolation).
+      for (const l of lines.filter((x) => /^cargo mutants (?!.*--list)/.test(x))) assert.match(l, MUTANTS_CAP, `${step} runs mutants without capping the lints a change could deny: ${l}`);
       const ran = lines.flatMap((l, at) => (l === RAN || l.startsWith(`${RAN} `) ? [at] : []));
       assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${step} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
       assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
     }
     assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
   }
+  for (const line of ['cargo mutants --in-diff pr.diff --in-place --timeout 600 || status=$?', "cargo mutants --in-place --cap-lints=false", "cargo mutants --in-place --cap-lints=trueish"]) assert.doesNotMatch(line, MUTANTS_CAP, line);
+  for (const line of ['cargo mutants --in-place --cap-lints=true --timeout 600 || status=$?', "cargo mutants --in-place --cap-lints=true"]) assert.match(line, MUTANTS_CAP, line);
   for (const [line, runs] of [
     ["cargo-nextest nextest run --locked --workspace --profile ci", true],
     ["cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > x", true],
@@ -1472,6 +1481,7 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     ["timeout 15m cargo test --config \"target.x86_64-unknown-linux-gnu.runner='env'\" --release --locked -p mente-cli", true],
     ["unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER", true],
     ['echo x >> "$RUNNER_TEMP/test-sandbox-runs.log"', true],
+    ['echo "added 0" >> "$RUNNER_TEMP/test-sandbox-cost"', true],
     ['if git show --no-textconv "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then', false],
     ['cargo mutants --list --json "${config[@]}" > base-all-mutants.json', false],
     ['node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"', false],
@@ -1533,14 +1543,39 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     assert.deepEqual(run(["env"], "Windows"), { status: 0, out: "" }, "test-sandbox.sh env names a runner on Windows, which has no sandbox");
     assert.match(run(["ran"], "Linux").out, /::error::no record of the commands that ran in the sandbox/);
     const log = path.join(dir, "test-sandbox-runs.log");
+    // What the sandbox has cost a job: begun 100 s ago, 20 ms a process alone and 2 ms each at once,
+    // and 3 s added so far. Each `ran` adds to it, so each case writes it afresh.
+    const cost = path.join(dir, "test-sandbox-cost");
+    const costs = (added, start = (Date.now() - 100_000) * 1000) => fs.writeFileSync(cost, `start ${start}\nserial 20000\nparallel 2000\nadded ${added}\n`);
     fs.writeFileSync(log, "");
+    costs(3_000_000);
     assert.equal(run(["ran"], "Linux").status, 1, "a step whose tools ran nothing in the sandbox passes");
+    costs(3_000_000);
     assert.equal(run(["ran", "0"], "Linux").status, 0);
     fs.writeFileSync(log, "target/debug/deps/a\ntarget/debug/deps/b\n");
-    assert.equal(run(["ran"], "Linux").status, 0, `two commands in the sandbox are refused: ${run(["ran"], "Linux").out}`);
+    costs(3_000_000);
+    const two = run(["ran"], "Linux");
+    assert.equal(two.status, 0, `two commands in the sandbox are refused: ${two.out}`);
+    // Two commands added 2 ms each and one 20 ms alone.
+    assert.match(fs.readFileSync(cost, "utf8"), /^added 3024000$/m, "ran does not add each command's cost to the job's");
+    costs(3_000_000);
     assert.equal(run(["ran", "2"], "Linux").status, 0);
+    costs(3_000_000);
     assert.equal(run(["ran", "3"], "Linux").status, 1, "fewer commands in the sandbox than mutants caught passes");
+    costs(3_000_000);
     assert.equal(run(["ran", "many"], "Linux").status, 1, "a count that is no number passes");
+    // The bound: more than a tenth of the job's time without the sandbox fails the step, and so do a
+    // record that is missing or not whole.
+    costs(9_500_000);
+    const over = run(["ran"], "Linux");
+    assert.equal(over.status, 1, `a sandbox that added more than a tenth to the job passes: ${over.out}`);
+    assert.match(over.out, /::error::the sandbox has added more than a tenth to this job's time/);
+    costs(8_000_000);
+    assert.equal(run(["ran"], "Linux").status, 0, "a sandbox that added under a tenth to the job fails");
+    fs.writeFileSync(cost, "start 1\nserial 20000\nadded 0\n");
+    assert.match(run(["ran"], "Linux").out, /::error::the record of what the sandbox costs this job is not whole/);
+    fs.rmSync(cost);
+    assert.match(run(["ran"], "Linux").out, /::error::no record of what the sandbox costs this job/);
     assert.equal(run(["ran"], "Windows", path.join(dir, "none")).status, 0, "Windows, which has no sandbox, fails the check that a command ran in it");
     assert.equal(run(["run", "A=b"], "Linux").status, 2, "a command that env would read as a variable is handed over");
     assert.equal(run(["run"], "Linux").status, 2);
@@ -2200,65 +2235,434 @@ const holdsSecret = (value) =>
     return /\bsecrets\b/i.test(rest) && !/^\$\{\{\s*secrets\.\w+\s*[!=]=\s*''\s*\}\}\s*$/i.test(rest);
   });
 
-/// The loads of code a module of a secret job may make that the closure of what it runs cannot
-/// follow, each with the files it loads, which must be owned: none but the corpus checker's, which
-/// loads reference.mjs from the corpus and from the held-out set, whose own the private repository
-/// holds at the commit corpus.lock names. Every other computed `import(` or `require(`, and every
-/// `createRequire`, `new Worker`, `eval`, `new Function`, `vm` or `dlopen`, is refused (the review of
-/// 35bbe0f: check.mjs loaded an unowned reference.mjs beside the held-out set by a computed path).
+/// A JavaScript or TypeScript module as tokens, its comments dropped: identifiers, string literals
+/// with their values, template literals (an interpolation's code read as code), regular expression
+/// literals, numbers and single punctuators, each with its line. A rule over a module reads these,
+/// not its text, so that a comment, a string or a regular expression holds no import and no name
+/// of it, and spacing changes nothing (the review of b2be87b: `import/**/(x)`, `import"x"` and
+/// `from"x"` past the regular expressions before). A literal or a comment that does not close is
+/// marked `bad`, so that a misread `/` hides nothing from a rule that refuses those.
+export function jsTokens(text) {
+  const out = [];
+  const n = text.length;
+  const starts = [0];
+  for (let i = 0; i < n; i++) if (text[i] === "\n") starts.push(i + 1);
+  const lineOf = (at) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= at) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+  const push = (t, v, at, extra = {}) => out.push({ t, v, line: lineOf(at), ...extra });
+  let k = text.startsWith("#!") ? Math.max(text.indexOf("\n"), 0) : 0;
+  let depth = 0;
+  const resume = [];
+  const regexAllowed = () => {
+    const p = out[out.length - 1];
+    if (!p) return true;
+    if (p.t === "punct") return !/^[)\]}]$/.test(p.v);
+    if (p.t === "tpl") return Boolean(p.open);
+    if (p.t === "id") return /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/.test(p.v);
+    return false;
+  };
+  const template = (at) => {
+    let v = "";
+    while (k < n) {
+      const c = text[k];
+      if (c === "\\") {
+        v += text.slice(k, k + 2);
+        k += 2;
+      } else if (c === "`") {
+        k++;
+        push("tpl", v, at);
+        return;
+      } else if (c === "$" && text[k + 1] === "{") {
+        k += 2;
+        push("tpl", v, at, { open: true });
+        resume.push(depth);
+        depth = 0;
+        return;
+      } else {
+        v += c;
+        k++;
+      }
+    }
+    push("tpl", v, at, { bad: true });
+  };
+  while (k < n) {
+    const c = text[k];
+    const at = k;
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      k++;
+    } else if (c === "/" && text[k + 1] === "/") {
+      const e = text.indexOf("\n", k);
+      k = e < 0 ? n : e;
+    } else if (c === "/" && text[k + 1] === "*") {
+      const e = text.indexOf("*/", k + 2);
+      if (e < 0) push("punct", "/*", at, { bad: true });
+      k = e < 0 ? n : e + 2;
+    } else if (c === '"' || c === "'") {
+      let j = k + 1;
+      let v = "";
+      while (j < n && text[j] !== c && text[j] !== "\n") {
+        if (text[j] === "\\") {
+          v += text.slice(j, j + 2);
+          j += 2;
+        } else v += text[j++];
+      }
+      push("str", unescapeJs(v), at, text[j] === c ? {} : { bad: true });
+      k = j + 1;
+    } else if (c === "`") {
+      k++;
+      template(at);
+    } else if (c === "}" && depth === 0 && resume.length > 0) {
+      depth = resume.pop();
+      k++;
+      template(at);
+    } else if (c === "/" && regexAllowed()) {
+      let j = k + 1;
+      let inClass = false;
+      while (j < n && text[j] !== "\n" && (text[j] !== "/" || inClass)) {
+        if (text[j] === "\\") j++;
+        else if (text[j] === "[") inClass = true;
+        else if (text[j] === "]") inClass = false;
+        j++;
+      }
+      const closed = text[j] === "/";
+      j++;
+      while (j < n && /[a-z]/i.test(text[j])) j++;
+      push("re", text.slice(k, j), at, closed ? {} : { bad: true });
+      k = j;
+    } else if (/[A-Za-z_$]/.test(c)) {
+      let j = k + 1;
+      while (j < n && /[\w$]/.test(text[j])) j++;
+      push("id", text.slice(k, j), at);
+      k = j;
+    } else if (/[0-9]/.test(c)) {
+      let j = k + 1;
+      while (j < n && /[\w.]/.test(text[j])) j++;
+      push("num", text.slice(k, j), at);
+      k = j;
+    } else {
+      if (c === "{") depth++;
+      if (c === "}") depth--;
+      push("punct", c, at);
+      k++;
+    }
+  }
+  return out;
+}
+
+/// A string literal's value from its source between the quotes: the escapes that spell a character
+/// read as that character, so that `"ev\x61l"` is "eval".
+function unescapeJs(raw) {
+  const simple = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", 0: "\0" };
+  return raw.replace(/\\(u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|\n|.)/g, (_, e, cp, u, x) => {
+    const hex = cp ?? u ?? x;
+    if (hex !== undefined) return String.fromCodePoint(parseInt(hex, 16));
+    if (e === "\n") return "";
+    return simple[e] ?? e;
+  });
+}
+
+/// The specifiers a module's tokens import: each static import, `export ... from` and literal
+/// `import("...")`, with its line and whether it is dynamic; and the lines of every `import` the
+/// reading cannot follow (a computed `import(`, a form it does not know). The closure of what a
+/// job runs follows these, and the rule for a secret job's modules refuses the rest.
+export function jsImports(toks) {
+  const specifiers = [];
+  const unreadable = [];
+  const at = (j) => toks[j] ?? { t: "end", v: "" };
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.t !== "id" || at(i - 1).v === ".") continue;
+    if (t.v === "import") {
+      if (at(i + 1).v === "." && at(i + 2).v === "meta") continue;
+      if (at(i + 1).t === "str") {
+        specifiers.push({ v: at(i + 1).v, line: t.line, dynamic: false });
+        continue;
+      }
+      if (at(i + 1).v === "(") {
+        if (at(i + 2).t === "str" && at(i + 3).v === ")") specifiers.push({ v: at(i + 2).v, line: t.line, dynamic: true });
+        else unreadable.push(t.line);
+        continue;
+      }
+      // `import` [`type`] (name | `{` names `}` | `*` `as` name) [`,` (`{` names `}` | `*` `as` name)] `from` "specifier"
+      let j = i + 1;
+      if (at(j).v === "type" && at(j + 1).v !== "from" && at(j + 1).v !== ",") j++;
+      for (let part = 0; part < 2; part++) {
+        if (at(j).t === "id" && at(j).v !== "from") j++;
+        else if (at(j).v === "*" && at(j + 1).v === "as" && at(j + 2).t === "id") j += 3;
+        else if (at(j).v === "{") {
+          j++;
+          while (at(j).t === "id" || at(j).v === ",") j++;
+          if (at(j).v !== "}") break;
+          j++;
+        } else break;
+        if (at(j).v !== ",") break;
+        j++;
+      }
+      if (at(j).v === "from" && at(j + 1).t === "str") specifiers.push({ v: at(j + 1).v, line: t.line, dynamic: false });
+      else unreadable.push(t.line);
+    } else if (t.v === "export") {
+      // `export` [`type`] (`*` [`as` name] | `{` names `}`) `from` "specifier"
+      let j = i + 1;
+      if (at(j).v === "type") j++;
+      if (at(j).v === "*") {
+        j++;
+        if (at(j).v === "as") j += 2;
+      } else if (at(j).v === "{") {
+        j++;
+        while (at(j).t === "id" || at(j).v === ",") j++;
+        if (at(j).v !== "}") continue;
+        j++;
+      } else continue;
+      if (at(j).v === "from" && at(j + 1).t === "str") specifiers.push({ v: at(j + 1).v, line: t.line, dynamic: false });
+      else if (at(j).v === "from") unreadable.push(t.line);
+    }
+  }
+  return { specifiers, unreadable };
+}
+
+/// The one computed load a module of a secret job may make, by its exact line, once, with the files
+/// it loads, which must be owned: the corpus checker's, which loads reference.mjs from the corpus
+/// and from the held-out set, whose own the private repository holds at the commit corpus.lock
+/// names (the review of 35bbe0f: check.mjs loaded an unowned reference.mjs beside the held-out set
+/// by a computed path).
 const COMPUTED_LOADS = new Map([
   ["benchmark/check.mjs", { line: '  const reference = (await import(pathToFileURL(path.join(dir, "reference.mjs")).href)).tasks;', loads: ["benchmark/reference.mjs"] }],
 ]);
-/// The modules of a secret job that may start a process, each with its one import of
-/// child_process and how its calls read: the harness's runProcess and the preliminary run's
-/// mnSync, one call each, and the corpus checker's git. No other module of those jobs names
-/// child_process (the review of 35bbe0f: `execSync as sh` in tasks.ts ran mn beside the key).
+/// The modules of node a module of a secret job may import, each by `node:`; child_process only in
+/// SPAWNERS. None of them loads or runs code: no module, vm, worker_threads or child_process here.
+const NODE_MODULES = new Set(["node:fs", "node:path", "node:url", "node:crypto"]);
+/// The modules of a secret job that may start a process: each by its exact import of
+/// child_process, and every use of what it imports a call on a line named or counted, so that what
+/// they start is read where they start it: the harness's runProcess and the preliminary run's
+/// mnSync, one call each, and the corpus checker's git, whose two calls are named whole, arguments
+/// and all (the review of b2be87b: `git -c core.pager=...` would have run anything). No other module
+/// of those jobs imports child_process (the review of 35bbe0f: `execSync as sh` in tasks.ts ran mn
+/// beside the key).
 const SPAWNERS = new Map([
-  ["benchmark/harness/build.ts", { line: 'import { spawn } from "node:child_process";', calls: /\bspawn\s*\(/g, exactly: 1 }],
-  ["benchmark/harness/prelim.ts", { line: 'import { spawnSync } from "node:child_process";', calls: /\bspawnSync\s*\(/g, exactly: 1 }],
-  ["benchmark/check.mjs", { line: 'import { execFileSync } from "node:child_process";', calls: /\bexecFileSync\s*\((?!\s*"git")/g, exactly: 0 }],
+  ["benchmark/harness/build.ts", { line: 'import { spawn } from "node:child_process";', word: "spawn", calls: 1 }],
+  ["benchmark/harness/prelim.ts", { line: 'import { spawnSync } from "node:child_process";', word: "spawnSync", calls: 1 }],
+  [
+    "benchmark/check.mjs",
+    {
+      line: 'import { execFileSync } from "node:child_process";',
+      word: "execFileSync",
+      calls: ['function git(dir, ...args) { return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim(); }'],
+      through: { word: "git", calls: ['    const dirty = git(heldOutDir, "status", "--porcelain");', '    const commit = git(heldOutDir, "rev-parse", "HEAD");'] },
+    },
+  ],
 ]);
-/// What a module of a secret job does that the policy refuses: a load it cannot follow, or a
-/// process started outside SPAWNERS.
-export function secretModuleProblems(file, text) {
-  const found = [];
-  // A named computed load is its one exact line, once; the rest of the module is read as any other
-  // (the review of b2be87b: the whole of check.mjs was exempt, a second load and a moved one too).
-  const named = COMPUTED_LOADS.get(file);
+/// The names a module of a secret job may not use, each a way to run or load code that a reading
+/// of its imports does not see, or a way to reach one: eval and Function, the loaders and their
+/// hooks, the native loaders, workers, WebAssembly, and the objects that reach any global by a
+/// computed name.
+const REFUSED_NAMES = new Set([
+  "eval",
+  "Function",
+  "AsyncFunction",
+  "require",
+  "createRequire",
+  "register",
+  "_load",
+  "getBuiltinModule",
+  "binding",
+  "_linkedBinding",
+  "dlopen",
+  "Worker",
+  "WebAssembly",
+  "globalThis",
+  "global",
+  "Reflect",
+  "Proxy",
+  "getPrototypeOf",
+  "__proto__",
+]);
+
+/// A module of a secret job, read as an allowlist over its tokens. Its imports are static, each of
+/// a relative literal that is a file of the repository or of NODE_MODULES (child_process only in
+/// SPAWNERS, used as named there); it uses none of REFUSED_NAMES, as a name or a string,
+/// `constructor` only to define a class's, no computed member whose key joins a string to
+/// anything, and no `process[`; every literal and comment closes, and nothing outside printable
+/// ASCII, tab and LF, and no backslash outside a literal (an escaped name), appears. The one
+/// computed load allowed is COMPUTED_LOADS's line. Returns the problems and the files its relative
+/// imports name. These rules are a reading aid for the code owner, whose review holds what they do
+/// not list (docs/design-review.md, trust-from-structure).
+/// The keywords after which `[` opens an array, not a computed member.
+const KEYWORDS = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await|extends)$/;
+export function readSecretModule(file, text) {
+  const problems = [];
+  const imports = [];
   const lines = text.split("\n");
-  if (named && lines.filter((l) => l === named.line).length !== 1) found.push(`${file}: its named load is not the one line \`${named.line.trim()}\`, once`);
-  const rest = named ? lines.filter((l) => l !== named.line).join("\n") : text;
-  for (const m of rest.matchAll(/\b(import|require)\s*\(\s*([^)]*?)\s*\)/g)) {
-    if (!/^(['"])[^'"\\]*\1$|^`[^`$\\]*`$/.test(m[2])) found.push(`${file}: ${m[1]}(${m[2]}), a load whose target the policy cannot read`);
+  const named = COMPUTED_LOADS.get(file);
+  if (named && lines.filter((l) => l === named.line).length !== 1) problems.push(`${file}: its named load is not the one line \`${named.line.trim()}\`, once`);
+  if (/[^\t\n -~]/.test(text)) problems.push(`${file}: a character outside printable ASCII, tab and LF`);
+  // The named load's line is read as blank, keeping every other line's number.
+  const toks = jsTokens(named ? lines.map((l) => (l === named.line ? "" : l)).join("\n") : text);
+  const where = (t) => `${file}:${t.line}`;
+  const prior = (i) => toks[i - 1] ?? { t: "start", v: "" };
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.bad) problems.push(`${where(t)}: a literal or a comment that does not close`);
+    if (t.t === "punct" && t.v === "\\") problems.push(`${where(t)}: a backslash outside a literal, as in an escaped name`);
+    if ((t.t === "id" || t.t === "str" || t.t === "tpl") && REFUSED_NAMES.has(t.v)) problems.push(`${where(t)}: ${t.v}, a way to run or load code that a reading of its imports does not see`);
+    if ((t.t === "str" || t.t === "tpl") && t.v === "constructor") problems.push(`${where(t)}: "constructor", the way to Function`);
+    if (t.t === "id" && t.v === "constructor" && !(toks[i + 1]?.v === "(" && /^[{};]$/.test(prior(i).v) && prior(i).t === "punct")) problems.push(`${where(t)}: constructor, other than defining a class's, the way to Function`);
+    if (t.t === "id" && t.v === "process" && toks[i + 1]?.v === "[") problems.push(`${where(t)}: process[...], a member by a computed name`);
+    // A computed member, `x[...]` after a name, a call or another member, whose key joins a
+    // string to anything: `f["constr" + "uctor"]`.
+    if (t.t === "punct" && t.v === "[" && ((prior(i).t === "id" && !KEYWORDS.test(prior(i).v)) || /^[)\]]$/.test(prior(i).v))) {
+      let j = i + 1;
+      let nest = 0;
+      const key = [];
+      for (; j < toks.length && !(nest === 0 && toks[j].v === "]"); j++) {
+        if (/^[[({]$/.test(toks[j].v)) nest++;
+        if (/^[\])}]$/.test(toks[j].v)) nest--;
+        key.push(toks[j]);
+      }
+      if (key.length > 1 && key.some((x) => x.t === "str" || x.t === "tpl")) problems.push(`${where(t)}: a computed member whose key joins a string to something else`);
+    }
   }
-  for (const m of text.matchAll(/\bcreateRequire\b|\bnew\s+Worker\b|\beval\s*\(|\bnew\s+Function\b|["'](?:node:)?vm["']|\bdlopen\b/g)) found.push(`${file}: ${m[0]}, a way to run code the policy cannot read`);
+  const read = jsImports(toks);
+  for (const line of read.unreadable) problems.push(`${file}:${line}: an import the policy cannot read as a static import of a literal`);
+  for (const s of read.specifiers) {
+    if (s.dynamic) problems.push(`${file}:${s.line}: import("${s.v}"), a load at run time, not a static import`);
+    else if (/^\.{1,2}\//.test(s.v)) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), s.v));
+      imports.push(target);
+      if (!tracked().has(target)) problems.push(`${file}:${s.line}: imports ${s.v}, which is no file of the repository`);
+    } else if (s.v === "node:child_process") {
+      if (!SPAWNERS.has(file)) problems.push(`${file}:${s.line}: imports child_process, which only the modules of SPAWNERS may`);
+    } else if (!NODE_MODULES.has(s.v)) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a relative file nor one of NODE_MODULES`);
+  }
   const spawner = SPAWNERS.get(file);
-  const names = (text.match(/child_process/g) ?? []).length;
-  if (!spawner && names > 0) found.push(`${file}: names child_process, which only the modules of SPAWNERS may`);
   if (spawner) {
-    if (names !== 1 || !text.split("\n").includes(spawner.line)) found.push(`${file}: its import of child_process is not \`${spawner.line}\` alone`);
-    const calls = (text.match(spawner.calls) ?? []).length;
-    if (calls !== spawner.exactly) found.push(`${file}: ${calls} calls of ${spawner.calls.source}, not ${spawner.exactly}`);
+    const lineNo = (line) => lines.flatMap((l, k) => (l === line ? [k + 1] : []));
+    const importAt = lineNo(spawner.line);
+    if (importAt.length !== 1 || (text.match(/child_process/g) ?? []).length !== 1) problems.push(`${file}: its import of child_process is not \`${spawner.line}\` alone`);
+    // Every use of a name is the import (or the function's definition), and each call where it is
+    // named or as many as counted, each a call.
+    const uses = (word, definedAt, calls) => {
+      const found = toks.filter((t) => t.t === "id" && t.v === word && prior(toks.indexOf(t)).v !== ".");
+      const rest = found.filter((t) => !definedAt.includes(t.line));
+      const callAt = typeof calls === "number" ? null : calls.map(lineNo);
+      const isCall = (t) => toks[toks.indexOf(t) + 1]?.v === "(";
+      const ok =
+        found.length - rest.length === definedAt.length &&
+        rest.every(isCall) &&
+        (callAt === null ? rest.length === calls : callAt.every((at) => at.length === 1) && rest.length === callAt.length && rest.every((t) => callAt.some((at) => at[0] === t.line)));
+      if (!ok) problems.push(`${file}: its uses of ${word} are not ${typeof calls === "number" ? `its import and ${calls} call` : `its import and the named calls: ${calls.map((l) => l.trim()).join(" ")}`}`);
+    };
+    uses(spawner.word, importAt, spawner.calls);
+    if (spawner.through) uses(spawner.through.word, lineNo(spawner.calls[0]), spawner.through.calls);
   }
-  return found;
+  return { problems, imports };
 }
+export const secretModuleProblems = (file, text) => readSecretModule(file, text).problems;
 
 /// Every job that holds a secret, each with the job of its workflow that builds mn for it (or none)
-/// and whether it runs agent code. Each is pinned whole, and every file it runs, with every module
-/// those import, is the code owner's in CODEOWNERS; it builds nothing, since mn comes from a job
-/// without the secret, which carries the build-time check first (the fourth review of PR 137 found
-/// the build in the job that later held the key). What runs beside the secret is then the harness
-/// of the ref the run is on, which the code owner has read only on main, and mn, code of that ref,
-/// which only the benchmark's own sandbox confines. The secrets are the repository's, so a
-/// dispatch on another branch runs that branch's harness and workflow with them, and so does the
-/// run of a pull request from this repository that changes a workflow, before any review: the
-/// environment `benchmark`, for main alone, is the follow-up. The rules below are a reading aid
-/// for the code owner, whose review holds what they do not list.
+/// and whether it runs agent code. Each names the environment `benchmark`, the one place the
+/// secrets are, whose deployment branches are main alone: a dispatch on another ref, or the run of
+/// a pull request, never reaches them, so what runs beside them is code the code owner has merged
+/// (docs/design-review.md, trust-from-structure). Each is pinned whole, and every file it runs,
+/// with every module those import, is the code owner's in CODEOWNERS; it builds nothing, since mn
+/// comes from a job without the secret, which carries the build-time check first (the fourth
+/// review of PR 137 found the build in the job that later held the key), and mn, which agents
+/// write, runs only in the benchmark's own sandbox. The rules below are a reading aid for the code
+/// owner, whose review holds what they do not list.
 const SECRET_JOBS = new Map([
   ["benchmark.yml#bench", { builtBy: "build", agents: true }],
   ["prelim.yml#prelim", { builtBy: "build", agents: true }],
   ["probe.yml#write", { builtBy: null, agents: false }],
 ]);
+/// The environment that holds the secrets.
+const SECRET_ENVIRONMENT = "benchmark";
+
+/// The other jobs that name an environment, each with its name: the Pages deployment, whose
+/// environment holds no secret.
+const OTHER_ENVIRONMENTS = new Map([["pages.yml#deploy", "github-pages"]]);
+
+/// What is wrong with a job's environment: a job of SECRET_JOBS names SECRET_ENVIRONMENT, as a
+/// literal string, a job of OTHER_ENVIRONMENTS names its own, and no other job names any, so that
+/// the secrets reach no job the policy does not hold as one of SECRET_JOBS.
+export function environmentProblems(key, job) {
+  if (SECRET_JOBS.has(key)) return job.environment === SECRET_ENVIRONMENT ? [] : [`${key} holds a secret and does not name the environment ${SECRET_ENVIRONMENT} as a literal string`];
+  const other = OTHER_ENVIRONMENTS.get(key);
+  const name = typeof job.environment === "object" && job.environment !== null ? job.environment.name : job.environment;
+  if (other !== undefined) return name === other ? [] : [`${key} does not name the environment ${other}, the one OTHER_ENVIRONMENTS gives it`];
+  return "environment" in job ? [`${key} names an environment, which only the jobs of SECRET_JOBS and OTHER_ENVIRONMENTS do`] : [];
+}
+
+check("every job that holds a secret names the environment benchmark, for main alone, and no other job names it", () => {
+  for (const { file, id, job } of allJobs()) assert.deepEqual(environmentProblems(`${file}#${id}`, job), []);
+  for (const [key, job] of [
+    ["benchmark.yml#bench", {}],
+    ["benchmark.yml#bench", { environment: { name: SECRET_ENVIRONMENT } }],
+    ["prelim.yml#prelim", { environment: "${{ inputs.environment }}" }],
+    ["benchmark.yml#build", { environment: SECRET_ENVIRONMENT }],
+    ["ci.yml#test", { environment: "staging" }],
+    ["pages.yml#deploy", { environment: { name: SECRET_ENVIRONMENT } }],
+  ]) {
+    assert.ok(environmentProblems(key, job).length > 0, `the environment rule lets through ${key}: ${JSON.stringify(job)}`);
+  }
+});
+
+/// The names a secret may be handed over as, read from the harness that leaves them out of every
+/// child's environment, so that the two cannot drift: one definition, in build.ts.
+const SECRET_NAME = (() => {
+  const m = /^const SECRET_NAME = \/(.+)\/i;$/m.exec(read("benchmark/harness/build.ts"));
+  assert.ok(m, "benchmark/harness/build.ts defines no SECRET_NAME as a case-blind regular expression");
+  return new RegExp(m[1], "i");
+})();
+
+/// Where a job holds a secret other than as the value of a step's or the job's environment
+/// variable, or of a step's action input, whose name SECRET_NAME matches: a secret in a script, in
+/// the workflow's env, under a name that does not look like one (the review of b2be87b: a `*_PAT`
+/// would reach a child of the harness, which leaves out only names that look like a secret's).
+export function secretPlaceProblems(key, doc, job) {
+  const at = [];
+  const walk = (v, where) => {
+    if (typeof v === "string") {
+      if (holdsSecret(v)) at.push(where);
+    } else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${where}[${i}]`));
+    else if (v !== null && typeof v === "object") {
+      for (const [k, x] of Object.entries(v)) {
+        if (holdsSecret(k)) at.push(`${where}.<a key>`);
+        walk(x, `${where}.${k}`);
+      }
+    }
+  };
+  walk(doc.env ?? {}, "workflow.env");
+  walk(job, "job");
+  return at
+    .filter((where) => {
+      const m = /^job(?:\.steps\[\d+\]\.(?:env|with)|\.env)\.([A-Za-z_][\w-]*)$/.exec(where);
+      return !m || !SECRET_NAME.test(m[1]);
+    })
+    .map((where) => `${key}: a secret at ${where}, not the value of an environment variable or an action input whose name matches ${SECRET_NAME}`);
+}
+
+check("every secret is the value of an environment variable or an action input whose name looks like a secret's", () => {
+  for (const { file, doc, id, job } of allJobs()) assert.deepEqual(secretPlaceProblems(`${file}#${id}`, doc, job), []);
+  const s = "${{ secrets.ANTHROPIC_API_KEY }}";
+  for (const [doc, job] of [
+    [{}, { steps: [{ env: { BENCH_PAT: s } }] }],
+    [{}, { env: { HELD_OUT: s } }],
+    [{}, { steps: [{ uses: "actions/checkout@0", with: { ref: s } }] }],
+    [{}, { steps: [{ run: `export ANTHROPIC_API_KEY=${s}` }] }],
+    [{ env: { ANTHROPIC_API_KEY: s } }, { steps: [] }],
+    [{}, { steps: [{ if: "${{ secrets.ANTHROPIC_API_KEY == 'x' }}", run: "true" }] }],
+  ]) {
+    assert.ok(secretPlaceProblems("x.yml#y", doc, job).length > 0, `a secret in the wrong place let through: ${JSON.stringify({ doc, job })}`);
+  }
+  assert.deepEqual(secretPlaceProblems("x.yml#y", {}, { env: { HAS: "${{ secrets.A != '' }}" }, steps: [{ env: { ANTHROPIC_API_KEY: s } }, { uses: "actions/checkout@0", with: { token: s } }] }), []);
+});
 
 check("every job that holds a secret is pinned whole, takes mn from a job that checks it first, and runs agent code only in its proven sandbox", () => {
   const found = new Set();
@@ -2322,10 +2726,50 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     ["benchmark/check.mjs", 'import { execFileSync } from "node:child_process";\nexecFileSync("node", ["x.mjs"]);'],
     ["benchmark/harness/report.ts", "new Worker(file);"],
     ["benchmark/harness/report.ts", "eval(code);"],
+    // The review of b2be87b, run and on paper: a loader's hook, a computed import behind a
+    // comment, a built-in module by a computed name, Function and eval by other routes, an import
+    // with no space, the loader's internals, a worker by another name, a native binding, and
+    // specifiers neither relative nor of NODE_MODULES.
+    ["benchmark/harness/api.ts", 'import { register } from "node:module";\nregister("../../docs/hooks.mjs", import.meta.url);'],
+    ["benchmark/harness/api.ts", 'register("../../docs/hooks.mjs", import.meta.url);'],
+    ["benchmark/harness/api.ts", "const m = await import/**/(process.env.X);"],
+    ["benchmark/harness/api.ts", 'process.getBuiltinModule("child_" + "process").spawnSync(mn, ["test"], { env: process.env });'],
+    ["benchmark/harness/api.ts", "Function(code)();"],
+    ["benchmark/harness/api.ts", "(0, eval)(code);"],
+    ["benchmark/harness/api.ts", 'import"../../docs/leak2.mjs";'],
+    ["benchmark/harness/api.ts", 'import { x } from"../../docs/leak2.mjs";'],
+    ["benchmark/harness/api.ts", "M._load(path, null, false);"],
+    ["benchmark/harness/api.ts", "const vm = await import(`node:vm`);"],
+    ["benchmark/harness/api.ts", 'import { Worker as W } from "node:worker_threads";\nnew W(code, { eval: true });'],
+    ["benchmark/harness/api.ts", 'process.binding("spawn_sync");'],
+    ["benchmark/harness/api.ts", 'import { x } from "/home/runner/x.mjs";'],
+    ["benchmark/harness/api.ts", 'import { x } from "file:///home/runner/x.mjs";'],
+    ["benchmark/harness/api.ts", 'import { runInThisContext } from"node:vm";'],
+    ["benchmark/harness/api.ts", 'import * as fs from "fs";'],
+    // And the routes to Function and to a computed global that a name alone does not show.
+    ["benchmark/harness/api.ts", 'const f = (() => {})["constr" + "uctor"];'],
+    ["benchmark/harness/api.ts", "const f = (() => {}).constructor;"],
+    ["benchmark/harness/api.ts", "const { constructor: F } = Object.getPrototypeOf(async () => {});"],
+    ["benchmark/harness/api.ts", 'const g = process["getBuiltinModule"];'],
+    ["benchmark/harness/api.ts", 'const g = process[name];'],
+    ["benchmark/harness/api.ts", "\\u0065val(code);"],
+    ["benchmark/harness/api.ts", 'const e = "ev\\x61l";'],
+    ["benchmark/harness/api.ts", `const e = "${String.fromCharCode(0x435)}val";`],
+    ["benchmark/harness/api.ts", "const s = 'unclosed;\nimport(x);"],
+    ["benchmark/harness/api.ts", 'const y = await import("./y.ts");'],
+    // A spawner past its named uses: an alias of what it imports, or the checker's git with other
+    // arguments, or by another name.
+    ["benchmark/harness/build.ts", 'import { spawn } from "node:child_process";\nconst s = spawn;\ns(mn, b);'],
+    ["benchmark/harness/prelim.ts", 'import { spawnSync } from "node:child_process";\nconst r = [spawnSync][0](mn, b);'],
   ]) {
     assert.ok(secretModuleProblems(file, text).length > 0, `the rule for a secret job's modules lets through, in ${file}: ${text}`);
   }
-  assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./x.ts";\nconst y = await import("./y.ts");'), []);
+  // The reading follows an import however it is spaced, and a comment or a string holds none.
+  assert.deepEqual(
+    jsImports(jsTokens('import"./a.mjs";import{b}from"./b.mjs";export*from"./c.mjs";// import "./d.mjs"\nconst s = "import \'./e.mjs\'";')).specifiers.map((s) => s.v),
+    ["./a.mjs", "./b.mjs", "./c.mjs"],
+  );
+  assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./tasks.ts";\nimport fs from "node:fs";\n// eval(code)\nconst s = "rpn-eval";\nclass A {\n  constructor(t) { this.t = t; }\n}\nconst v = xs[i] + m["k"];'), []);
   // The review of b2be87b: a `}}` inside a quoted string of the expression, and the named load of
   // check.mjs moved or joined by another.
   for (const held of ["${{ '}}' && secrets.ANTHROPIC_API_KEY }}", "${{ format('{0}}}', secrets.ANTHROPIC_API_KEY) }}", "${{ secrets.A != '' }} ${{ secrets.B }}"]) {
@@ -2336,6 +2780,18 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
   assert.deepEqual(secretModuleProblems("benchmark/check.mjs", checker), []);
   for (const plant of [checker.replace(named, named.replace('path.join(dir, "reference.mjs")', 'path.join(dir, "tasks", "reference.mjs")')), `${checker}\nconst extra = await import(process.env.BENCH_EXTRA ?? "node:os");\n`, `${checker}\n${named}\n`]) {
     assert.ok(secretModuleProblems("benchmark/check.mjs", plant).length > 0, "the named load of check.mjs lets through a moved or a second load");
+  }
+  // The checker's git, held to its two named calls: other arguments (`-c core.pager=...` runs
+  // anything), a third call, an alias, or a named call moved into a string.
+  const dirty = '    const dirty = git(heldOutDir, "status", "--porcelain");';
+  for (const plant of [
+    checker.replace(dirty, '    const dirty = git(heldOutDir, "-c", "core.pager=sh -c id", "log");'),
+    `${checker}\ngit(".", "-c", "core.fsmonitor=id", "status");\n`,
+    `${checker}\nconst g = git;\ng(".", "status");\n`,
+    checker.replace(dirty, `    const dirty = \`\n${dirty}\n\`;\n    const g = git;`),
+    checker.replace('return execFileSync("git", ["-C", dir, ...args]', 'return execFileSync("sh", ["-c", ...args]'),
+  ]) {
+    assert.ok(secretModuleProblems("benchmark/check.mjs", plant).length > 0, "the checker's git lets through a call it does not name");
   }
 });
 
@@ -2986,8 +3442,10 @@ export function repoPaths(texts) {
     if (out.has(file)) return;
     out.add(file);
     if (!/\.(mjs|cjs|js|ts)$/.test(file)) return;
-    for (const m of read(file).matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*|^\s*import\s+)["'](\.{1,2}\/[^"']+)["']/gm)) {
-      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), m[1]));
+    // Read from its tokens, so that no spacing or comment hides an import from the closure (the
+    // review of b2be87b: `import"../../docs/leak2.mjs"` was past the regular expression before).
+    for (const { v } of jsImports(jsTokens(read(file))).specifiers.filter((s) => /^\.{1,2}\//.test(s.v))) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), v));
       if (files.has(target)) addScript(target);
     }
   };

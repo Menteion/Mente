@@ -64,6 +64,10 @@ jobs:
     name: Preliminary run
     needs: build
     runs-on: ubuntu-24.04
+    # The API key and the held-out token live only in this environment, whose deployment branches
+    # are main alone: no other ref, and no pull request, runs with them
+    # (docs/design-review.md, trust-from-structure).
+    environment: benchmark
     env:
       # Every agent program runs through this, with least privilege.
       SANDBOX: benchmark/harness/sandbox.sh

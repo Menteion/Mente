@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { callCost, KNOWN_MODELS, parseModels, requestBody, reserve, settle, worstCost, type Budget } from "./api.ts";
 import {
   REPOSITORY,
+  SANDBOX,
   caseResult,
   checkOutside,
   childEnv,
@@ -17,6 +18,7 @@ import {
   hiddenPaths,
   insideAny,
   menteCaseResult,
+  namedCommand,
   printedOutcome,
   runProcess,
   sandboxed,
@@ -641,17 +643,48 @@ test("no process that runs beside the key starts mn but through the sandbox", as
   for (const plant of ['runProcess(mn, ["explain", code])', 'spawnSync(tools.mn, ["check"])', "spawn( mn, args)"]) assert.match(plant, direct, plant);
   // And by what runs, not how it is spelled (the review of 35bbe0f: `const c = tools.mn` and an
   // environment of `process.env` got past the spelling): runProcess, the harness's one way to
-  // start a process, starts mn itself only while no secret is in reach, and gives no child a
-  // variable that could hold one, whatever environment it is handed.
+  // start a process, starts only a named command while a secret is in reach, the benchmark's
+  // sandbox or a toolchain's probe; and the review of b2be87b: a shell running mn, a copy of mn
+  // under another name, and another script given to bash got past a refusal of mn by its name.
+  const refused: [string, string[]][] = [
+    [tools.mn, ["explain", "E0001"]],
+    [join("target", "release", "mn.exe"), []],
+    ["bash", ["-c", 'mn explain "$1"', "x", "E0001"]],
+    ["bash", [join(REPOSITORY, "benchmark", "harness", "leak.sh"), "/tmp", "mn", "explain"]],
+    ["bash", [SANDBOX]],
+    [process.execPath, ["-e", "console.log(1)"]],
+    [join("bin", "rustc"), ["-o", "x", "main.rs"]],
+    [join("bin", "rustc"), ["--version", "--print", "sysroot"]],
+    [join("copy", "rustc"), ["--print", "cfg"]],
+    ["odin", ["run", "."]],
+  ];
+  for (const [c, a] of refused) assert.ok(!namedCommand(c, a), `${c} ${a.join(" ")} is taken for a named command`);
+  const named: [string, string[]][] = [
+    sandboxed(SANDBOX, ".", tools.mn, ["explain", "E0001"], [REPOSITORY]),
+    sandboxed(join("benchmark", "harness", "sandbox.sh"), ".", "rustc", ["-o", "main", "main.rs"]),
+    [join("toolchain", "bin", "rustc"), ["--version"]],
+    [join("toolchain", "bin", "rustc.exe"), ["--print", "sysroot"]],
+    ["odin", ["version"]],
+  ];
+  for (const [c, a] of named) assert.ok(namedCommand(c, a), `${c} ${a.join(" ")} is not taken for a named command`);
   process.env.BENCH_TEST_API_KEY = "secret";
   try {
-    const c = tools.mn;
-    await assert.rejects(runProcess(c, ["explain", "E0001"], { env: process.env, timeoutMs: 5000 }), /outside the sandbox beside a secret/);
-    await assert.rejects(runProcess(join("target", "release", "mn.exe"), [], { timeoutMs: 5000 }), /outside the sandbox beside a secret/);
-    const p = await runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_API_KEY ?? 'none')"], { env: { ...process.env }, timeoutMs: 30_000 });
-    assert.equal(p.stdout.trim(), "none");
+    for (const [c, a] of refused) await assert.rejects(runProcess(c, a, { env: process.env, timeoutMs: 5000 }), /no command the harness starts beside a secret/);
+    // A named one starts, here a probe of a rustc that is not there, and fails as a process.
+    const p = await runProcess(join(REPOSITORY, "target", "no-such-toolchain", "rustc"), ["--version"], { env: { ...process.env }, timeoutMs: 30_000 });
+    assert.equal(p.status, null);
   } finally {
     delete process.env.BENCH_TEST_API_KEY;
+  }
+  // With no secret in reach, any command runs, and no child is given a variable that could hold
+  // one, whatever environment it is handed.
+  const held = Object.entries(process.env).filter(([name]) => /key|token|secret|password|credential/i.test(name));
+  for (const [name] of held) delete process.env[name];
+  try {
+    const p = await runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_TOKEN ?? 'none')"], { env: { ...process.env, BENCH_TEST_TOKEN: "" }, timeoutMs: 30_000 });
+    assert.equal(p.stdout.trim(), "none");
+  } finally {
+    for (const [name, value] of held) process.env[name] = value;
   }
 });
 

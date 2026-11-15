@@ -30,6 +30,10 @@ jobs:
   write:
     name: Probe, the agents write
     runs-on: ubuntu-24.04
+    # The API key and the held-out token live only in this environment, whose deployment branches
+    # are main alone: no other ref, and no pull request, runs with them
+    # (docs/design-review.md, trust-from-structure).
+    environment: benchmark
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
