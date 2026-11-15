@@ -1,0 +1,49 @@
+// expect: pass
+// frame: measured 100
+// frame: bounded 121
+// frame: countdown 105
+// frame: measures 116
+// frame: lexical 125
+module conformance
+// Item 25's clauses: each `decreases` clause of a function counts 16 bytes, its measure on
+// entry, for the whole call; a `requires` clause is evaluated on entry, before the body holds
+// anything; the `ensures` clause that holds the most is added to the most the body holds; and
+// a loop with `decreases` clauses holds 16 bytes for each and 1 for the loop while it runs.
+// `measured` is private: the three execution paths are compared on public functions, and
+// native code does not count its stack yet.
+fn measured(n: u32) -> u32
+  decreases n
+{
+  if n == 0 {
+    return 0
+  }
+  measured(n - 1)
+}
+
+pub fn bounded(a: u64, b: u64) -> u64
+  requires a < 100 and b < 100
+  ensures result < 200
+= a + b
+
+pub fn countdown(n: u32) -> u32 {
+  var i = n
+  while i > 0 decreases i {
+    val d = 1_u32
+    i -= d
+  }
+  i
+}
+
+pub fn measures(n: u32, m: u32) -> u32
+  decreases n
+  decreases m
+= 0
+
+pub fn lexical(n0: u32, m0: u32) -> u32 {
+  var n = n0
+  val m = m0
+  while n > 0 and m > 0 decreases n decreases m {
+    n -= 1
+  }
+  n
+}

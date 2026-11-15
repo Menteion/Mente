@@ -1,0 +1,73 @@
+// expect: pass
+// frame: element 8096
+// frame: bases 992
+// frame: inner 192
+// frame: copy 9212
+// frame: arguments 10072
+// frame: length 8088
+// frame: itself 1104
+// frame: reread 104
+// frame: nested 1097
+module conformance
+// Item 25's rule of a value kept: an operand that reads a place of a plain type other than an
+// integer or `bool` holds its type's size where a later operand writes its root, and a base is
+// kept against an index that writes its root, each to the end of the statement. A write at
+// any depth of a later operand keeps; a read of the root keeps nothing, nor does a read whose
+// own index writes its root, which keeps only its base.
+fn bump(mut xs: [1000]u64) -> usize {
+  xs[0] = 1_u64
+  0_usize
+}
+
+fn bump2(mut xs: [10][10]u64) -> usize {
+  xs[0][0] = 1_u64
+  0_usize
+}
+
+fn bump3(mut xs: [10][100]u8) -> usize {
+  xs[0][0] = 1_u8
+  0_usize
+}
+
+fn wide64() -> [1000]u64 = [0_u64; 1000]
+
+fn wipe(mut xs: [10][100]u8, w: [1000]u64) -> u64 = 0_u64
+
+fn two(a: [100]u8, n: u64) -> u64 = n
+
+fn small() -> [1000]u8 = [0_u8; 1000]
+
+fn f(a: [1000]u8, b: [1000]u8) -> u64 = 0_u64
+
+fn pick(w: [1000]u64) -> usize = 0_usize
+
+fn total100(a: [100]u8) -> u64 = 0_u64
+
+fn keep_two(a: [1000]u8, n: u64) -> u64 = n
+
+fn scribble(mut xs: [1000]u8) -> u64 {
+  xs[0] = 1_u8
+  0_u64
+}
+
+pub fn element(mut xs: [1000]u64) -> u64 = xs[bump(mut xs)]
+
+pub fn bases(mut xs: [10][10]u64) -> u64 = xs[bump2(mut xs)][bump2(mut xs)]
+
+pub fn inner(mut xs: [10][10]u64, i: usize) -> u64 = xs[i][bump2(mut xs)]
+
+pub fn copy(mut xs: [10][100]u8) -> u64 = two(xs[bump3(mut xs)], wipe(mut xs, wide64()))
+
+pub fn arguments() -> u64 = f(wide64(), small())
+
+pub fn length(rows: [4][8]u8) -> usize = rows[pick(wide64())].len
+
+pub fn itself(mut xs: [10][100]u8) -> u64 = total100(xs[bump3(mut xs)])
+
+pub fn reread(xs: [100]u8) -> u64 = two(xs, total100(xs))
+
+pub fn nested(c: bool, mut xs: [1000]u8) -> u64 = keep_two(xs, if c {
+  scribble(mut xs)
+} else {
+  0_u64
+})

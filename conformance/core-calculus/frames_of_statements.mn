@@ -1,0 +1,90 @@
+// expect: pass
+// frame: binding 104
+// frame: refined 88
+// frame: narrowed 132
+// frame: discard 80
+// frame: compound 112
+// frame: element 116
+// frame: mixed 92
+// frame: rounds 112
+// frame: shifted 78
+// frame: placed 8089
+module conformance
+// Item 25: a binding is held from its own statement, beside its initializer, to the end of
+// its block; whatever else a statement holds ends with it; a value narrowed into another type
+// is held beside the value it was; `_ = e` is a binding of `e`'s type; `p op= e` is
+// `p = p op e`, a shift working in the type of `p`; the indexes of an assigned place are held
+// before its value is evaluated; and a loop's rounds do not add up.
+fn make() -> [4]u8 = [1_u8, 2_u8, 3_u8, 4_u8]
+
+fn g() -> u64 = 1_u64
+
+fn f(x: u64) -> u64 = x
+
+fn h(mut ys: [2]u32) -> u32 = ys[0]
+
+fn wide64() -> [1000]u64 = [0_u64; 1000]
+
+fn pick(w: [1000]u64) -> usize = 0_usize
+
+pub fn binding(n: u64) -> u64 {
+  val a = n + 1
+  a
+}
+
+pub fn refined(n: u64[0..10]) -> u64 {
+  val a: u64[0..10] = n
+  a
+}
+
+pub fn narrowed() -> u64 {
+  val a: [4]u64 = make()
+  a[0]
+}
+
+pub fn discard() {
+  _ = g()
+}
+
+pub fn compound(x0: u64) -> u64 {
+  var x = x0
+  x += f(x)
+  x
+}
+
+pub fn element(i: usize) -> u32 {
+  var xs: [2]u32 = [1_u32, 2_u32]
+  var ys: [2]u32 = [3_u32, 4_u32]
+  xs[i] += h(mut ys)
+  xs[0]
+}
+
+pub fn mixed(x0: u8, e: u32) -> u8 {
+  var x = x0
+  x += e
+  x
+}
+
+pub fn rounds(n: u64) -> u64 {
+  var i: u64 = 0
+  while i < n {
+    i += f(i)
+  }
+  i
+}
+
+pub fn shifted(x0: u8, k: u32) -> u8
+  requires k < 8
+{
+  var x = x0
+  x <<= k
+  x
+}
+
+pub fn placed(c: bool, mut xs: [4]u8) {
+  xs[if c {
+    pick(wide64())
+  } else {
+    pick(wide64())
+  }] = 1
+}
