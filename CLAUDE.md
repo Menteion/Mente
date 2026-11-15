@@ -48,38 +48,45 @@ This file is the switchboard, not the rulebook.
 
 ---
 
-## Verification Commands (Must Pass Before Every Commit)
+## Verification (Quick Checks Before Every Push, the Rest on CI)
+
+The required checks of `.github/required-checks.txt` are the gate: CI runs every command below on each push, on x86-64 Linux, AArch64 Linux and Windows, with pinned tools and a record, again in the merge queue and on `main`. Locally, before a push, run only the quick checks (Norman, 2026-11-15): a full local run repeats CI's work on the laptop and gates nothing.
 
 ```powershell
-# 1. Run all unit & integration tests across the 7 compiler crates (including spec assertions)
-cargo test
+# Before every push, locally (half the laptop's cores: CARGO_BUILD_JOBS=8, RUST_TEST_THREADS=8)
+cargo fmt --all --check
+cargo clippy --all-targets --workspace -- -D warnings
 
-# 2. Check spec/*.md front matter and run every @assert-* directive (rejects directives that cannot fail)
+# The tests the change adds or changes: each seen to fail without the fix and to pass with it
+cargo test -p <crate> <filter>
+
+# When spec/*.md, docs or other documents change: the @assert-* directives and the pinned @spec-family checks (`npm ci` once first)
 cargo run --bin mn -- spec
-
-# 3. Check that each example reports exactly what its .expected file lists, then run the demo MIR region and its mutation gate
-cargo run --bin mn -- test --mutate
-
-# 4. Inspect Holographic Spec Blueprint projection (strips bodies, shows spec_hash/body_hash)
-cargo run --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
-
-# 5. Run the pinned @spec-family checks: directives, prove, claims, the spec graph and briefs (`npm ci` once first)
 npm run verify:docs
 
-# 7. Check the agent-benchmark corpus against its references and its lock, and test the checker
+# When .github/ or the benchmark corpus changes: the workflow policy, and the corpus against its references and its lock
+npm run test:ci
 npm run check:benchmark
 npm run test:benchmark
+```
 
-# 8. Check the workflow policy: the required checks of .github/required-checks.txt, the instruments' path lists, pinned actions, milestone tags
+```powershell
+# On CI (ci.yml and the other required workflows), not locally
+cargo test                                  # in CI: cargo nextest run --profile ci
+cargo run --bin mn -- spec
+cargo run --bin mn -- test --mutate         # each example against its .expected, then the demo MIR region and its mutation gate
+cargo run --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
+npm run verify:docs
+npm run check:benchmark
+npm run test:benchmark
 npm run test:ci
-
-# 6. Check the format and the lints (rustfmt, then clippy with warnings as errors)
 cargo fmt --all --check
 cargo clippy --all-targets --workspace -- -D warnings
 ```
 
-- In CI the tests run through `cargo nextest run --profile ci`, under the time limits of `.config/nextest.toml` and the memory limits of `.github/scripts/limits.sh`; locally `cargo test` stays the command.
-- **Heavy jobs run on GitHub Actions.** Locally run only the commands above. `cargo-mutants`, `mn fuzz` beyond a smoke run, generated-program comparisons at scale, benchmarks and the latency protocols run on GitHub Actions through `workflow_dispatch` on the working branch.
+- Push each round once, with all of it: every push runs every required workflow, Mutants included, and a later push cancels the earlier runs.
+- In CI the tests run through `cargo nextest run --profile ci`, under the time limits of `.config/nextest.toml` and the memory limits of `.github/scripts/limits.sh`.
+- **Heavy jobs run on GitHub Actions.** `cargo-mutants`, `mn fuzz` beyond a smoke run, generated-program comparisons at scale, benchmarks and the latency protocols run on GitHub Actions through `workflow_dispatch` on the working branch.
 - **Merging.** `main` takes changes only through its merge queue, one pull request at a time as a merge commit, behind the required checks of `.github/required-checks.txt`. A pull request is enqueued at its head SHA only once every check of that head has finished green, Mutants included; a run cancelled by a later push counts as not run. The queue then runs the required checks on the merged result, so a branch needs no merge of `main` to be tested against it. Never enable auto-merge.
 - **Worktrees.** A session's worktree and branch are removed (`git worktree remove`, then the branch) when its pull request merges or the session is archived; nothing stays under `.claude/worktrees` or `.wt`.
 
