@@ -861,8 +861,12 @@ check() {
   # What the sandbox costs a process, which each step's `ran` counts against the bound: started
   # alone, the median of 20 differences, each between a process in the sandbox and one as the
   # runner's user; and started as many at once as the runner has cores, as nextest runs the tests,
-  # the median of three rounds, each the time a batch of 6 processes on every core took in the
-  # sandbox less the time it took as the runner's user, a process's share of it.
+  # the median of seven rounds, each the time a batch of 4 processes on every core took in the
+  # sandbox less the time it took as the runner's user, a process's share of it. Every step of the
+  # job counts its commands at that cost, so one sample made noisy by a busy moment of the runner
+  # would move the whole job's estimate: a median of seven short rounds sets aside up to three such
+  # moments, where one of three set aside one (the final pass of ad38011 found a sample 2.4 times
+  # the usual enough to take the x86-64 Rust job past the bound).
   cores=$(/usr/bin/nproc)
   costs=()
   for k in $(/usr/bin/seq 20); do
@@ -875,7 +879,7 @@ check() {
     costs+=("$((inside - direct))")
   done
   serial=$(printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 10p)
-  # A batch: on each core, 6 processes one after another, in the sandbox or not; its time.
+  # A batch: on each core, 4 processes one after another, in the sandbox or not; its time.
   # A batch fails when any process of any lane failed: each lane stops at its first failure, and
   # each lane's own status is waited for, not only the last one's.
   batch() {
@@ -883,9 +887,9 @@ check() {
     begin=$(now)
     for core in $(/usr/bin/seq "$cores"); do
       if [ "$1" = inside ]; then
-        (for k in 1 2 3 4 5 6; do /usr/bin/bash "$self" run /usr/bin/true || exit 1; done) &
+        (for k in 1 2 3 4; do /usr/bin/bash "$self" run /usr/bin/true || exit 1; done) &
       else
-        (for k in 1 2 3 4 5 6; do /usr/bin/true || exit 1; done) &
+        (for k in 1 2 3 4; do /usr/bin/true || exit 1; done) &
       fi
       pids+=("$!")
     done
@@ -894,22 +898,22 @@ check() {
     echo $(($(now) - begin))
   }
   costs=()
-  for k in 1 2 3; do
+  for k in 1 2 3 4 5 6 7; do
     if ! inside=$(batch inside) || ! direct=$(batch direct); then
       problem "a process of the canary's batches failed, so it could not measure what the sandbox costs a process"
       costs=()
       break
     fi
-    costs+=("$(((inside - direct) / (6 * cores)))")
+    costs+=("$(((inside - direct) / (4 * cores)))")
   done
-  parallel=$(printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 2p)
+  parallel=$(printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 4p)
   # A cost of 0 or less is no measurement: every process in the sandbox costs more than one out of it.
   case "$serial:$parallel" in
     *-* | :* | *: | *[!0-9:]* | 0:* | *:0) problem "the canary could not measure what the sandbox costs a process: alone $serial us, $cores at once $parallel us" ;;
   esac
   {
     echo
-    echo "A process started and ended in the sandbox costs $((serial / 1000)).$(printf '%03d' $((serial % 1000))) ms more than as the runner's user when it is started alone, the median of 20, and $((parallel / 1000)).$(printf '%03d' $((parallel % 1000))) ms when $cores are started at once, the median of three rounds."
+    echo "A process started and ended in the sandbox costs $((serial / 1000)).$(printf '%03d' $((serial % 1000))) ms more than as the runner's user when it is started alone, the median of 20, and $((parallel / 1000)).$(printf '%03d' $((parallel % 1000))) ms when $cores are started at once, the median of seven rounds."
   } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
 
   # The probe crashed two processes in the sandbox, one at a core limit it had lowered to 0. The

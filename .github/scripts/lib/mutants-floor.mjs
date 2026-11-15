@@ -211,18 +211,48 @@ const SANDBOX_RUNNER = /^\s*info: (?:for the \w+ platform, )?using target runner
 /// nextest's line that starts the tests, after which a test's output may appear.
 const TESTS_START = /^\s*Starting \d+ tests? across /m;
 
-/// Each error the compiler printed in a log, with its primary location (`-->`) when it gave one; the
-/// summaries cargo and rustc print after the errors are none. The log's colours are gone.
+/// Each error the compiler printed in a log: its primary location (`-->`) when it gave one, the
+/// columns its primary label (`^`) underlines on that line, and the locations of the notes that
+/// follow it (`note: inside \`f\`` for a constant's evaluation). Each is read within the error's own
+/// block, up to the next line that starts another error or a warning, so that an error with no
+/// location takes none of the next one's (the final pass of ad38011). The summaries cargo and rustc
+/// print after the errors are none. The log's colours are gone.
 export function compilerErrors(log) {
   const lines = String(log).split("\n");
   const out = [];
+  const starts = (l) => /^(error|warning)(\[[A-Z]\d{4}\])?: /.test(l);
+  const where = (l) => /^\s*--> (.+):(\d+):(\d+)$/.exec(l);
   lines.forEach((l, i) => {
     if (!/^error(\[E\d{4}\])?: /.test(l) || /^error: (could not compile|aborting due to)/.test(l)) return;
-    const at = lines
-      .slice(i + 1, i + 4)
-      .map((x) => /^\s*--> (.+):(\d+):(\d+)$/.exec(x))
-      .find(Boolean);
-    out.push(at ? { text: l, file: at[1], line: Number(at[2]), column: Number(at[3]) } : { text: l, file: null, line: 0, column: 0 });
+    let end = i + 1;
+    while (end < lines.length && !starts(lines[end])) end++;
+    const block = lines.slice(i + 1, end);
+    const first = block.findIndex((x, k) => k < 3 && where(x));
+    if (first < 0) {
+      out.push({ text: l, file: null, line: 0, column: 0, end: 0, notes: [] });
+      return;
+    }
+    const at = where(block[first]);
+    const e = { text: l, file: at[1], line: Number(at[2]), column: Number(at[3]), end: Number(at[3]), notes: [] };
+    // The source line rustc quotes, `<line> | <text>`, and under it the labels: the primary's `^`
+    // columns, counted from the text's first column.
+    for (let k = first + 1; k + 1 < block.length && k <= first + 3; k++) {
+      const quoted = new RegExp(`^\\s*${e.line} \\| `).exec(block[k]);
+      const under = /^\s*\| (.*)$/.exec(block[k + 1]);
+      if (!quoted || !under) continue;
+      const carets = [...under[1]].flatMap((c, n) => (c === "^" ? [n + 1] : []));
+      if (carets.length > 0) {
+        e.column = Math.min(e.column, carets[0]);
+        e.end = Math.max(e.end, carets[carets.length - 1]);
+      }
+      break;
+    }
+    block.forEach((x, k) => {
+      if (!/^\s*(= )?note: /.test(x)) return;
+      const n = block.slice(k + 1, k + 4).map(where).find(Boolean);
+      if (n) e.notes.push({ file: n[1], line: Number(n[2]), column: Number(n[3]) });
+    });
+    out.push(e);
   });
   return out;
 }
@@ -316,7 +346,16 @@ export function evidence(outcomes, readLog) {
       const errors = compilerErrors(log);
       const file = o.scenario.Mutant.file;
       const regions = changedRegions(o.diff_path ? strip(readLog(o.diff_path)) : "");
-      const inside = (e) => e.file === file && regions.some((r) => inRegion(e, r));
+      // An error is the mutant's when the columns its primary label covers meet the mutant's
+      // change, as `x -= y`'s E0368 does from the expression's start, or when one of its notes lies
+      // in it, as a constant's E0080 does when it names the function the mutant changed.
+      const meets = (e, r) => {
+        if (e.line < r.from.line || e.line > r.to.line) return false;
+        const from = e.line === r.from.line ? r.from.column : 1;
+        const to = e.line === r.to.line ? r.to.column : Infinity;
+        return e.column <= to && e.end >= from;
+      };
+      const inside = (e) => (e.file === file && regions.some((r) => meets(e, r))) || e.notes.some((n) => n.file === file && regions.some((r) => inRegion(n, r)));
       const outside = errors.find((e) => !inside(e));
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);
       else if (errors.length === 0) found.push(`${name}: unviable, but no error of the compiler is in its log`);

@@ -1109,7 +1109,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "21d632f65f5362a6566ed1b8808acda0bd8b215275039b6c38452491616dcd30"],
+  [".github/scripts/test-sandbox.sh", "02a8f1312275c5146ddf7950f9d933dab304c5b4470de0ffef792240ffa522d1"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
@@ -1118,7 +1118,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
   [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "9fbd2b2cbcdf9de87f553c4095c75ef305bb82bec1a2c155b6b2ec1344967e4d"],
+  [".github/scripts/lib/mutants-floor.mjs", "fcca482ee8596f453b9500d7b68193efc1508fc555dd0d38687fd658ef600955"],
   [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
   [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -1142,7 +1142,7 @@ const PINNED_JOBS = new Map([
   ["mutants-full.yml#full", "6d6ddb4109fd94e5b7811abc6635d9d40b29575fa75054fbab47fc7a9fd1df5d"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
-  ["ci.yml#docs", "52f1152492be7285403e08a4c47fd0123deaa65ec389f3547ebbab2308964fb8"],
+  ["ci.yml#docs", "728d28193b3dc09676ca7a597df6d2316b575ac7cfeae6023d14d9985d3f75ea"],
   ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
   ["benchmark.yml#bench", "a0c1f4a01a77bdca6c4244bdcb8a1d7823ecab6bbbf7af255e5558549748e387"],
   ["prelim.yml#prelim", "62295b08cf45f0ec24d0ae0e64280033dd717043a3a91b426d44db1f04184da8"],
@@ -2499,7 +2499,12 @@ export function jsImports(toks) {
       } else if (at(j).v === "{") {
         j++;
         while (at(j).t === "id" || at(j).v === ",") j++;
-        if (at(j).v !== "}") continue;
+        // A list the reading does not understand, a name written as a string among them, fails
+        // closed (the final pass of ad38011: `export { "q" as w } from "..."` read as nothing).
+        if (at(j).v !== "}") {
+          unreadable.push(t.line);
+          continue;
+        }
         j++;
       } else continue;
       if (at(j).v === "from" && at(j + 1).t === "str") specifiers.push({ v: at(j + 1).v, line: t.line, dynamic: false });
@@ -2714,6 +2719,9 @@ export function readSecretModule(file, text) {
     } else if (!NODE_MODULES.has(s.v)) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a relative file nor one of NODE_MODULES`);
   }
   const spawner = SPAWNERS.get(file);
+  // No module but SPAWNERS names child_process at all, in any form the reading does not take for
+  // an import of it.
+  if (!spawner && text.includes("child_process")) problems.push(`${file}: names child_process, which only the modules of SPAWNERS may`);
   if (spawner) {
     const lineNo = (line) => lines.flatMap((l, k) => (l === line ? [k + 1] : []));
     const importAt = lineNo(spawner.line);
@@ -2812,9 +2820,18 @@ const LEAK_STEP = {
   run: 'if [ "$KEY_LEAKED" != false ] || [ "$HELD_OUT_LEAKED" != false ]; then echo "::error::a secret of the benchmark is set outside the environment benchmark"; exit 1; fi',
 };
 
+/// The required job that runs LEAK_STEP on every pull request, so that a secret of the benchmark
+/// set again at the repository's or the organization's level is seen at once, not at the next
+/// dispatch of a secret workflow (the final pass of ad38011).
+const LEAK_CHECKED = "ci.yml#docs";
+
 check("every workflow that holds a secret job starts by a dispatch alone, with a token that only reads", () => {
   const holding = new Set([...SECRET_JOBS.keys()].map((k) => k.split("#")[0]));
   for (const { file, doc } of workflows()) if (holding.has(file)) assert.deepEqual(secretWorkflowProblems(file, doc), []);
+  const [leakFile, leakJob] = LEAK_CHECKED.split("#");
+  const checked = workflows().find((x) => x.file === leakFile)?.doc.jobs?.[leakJob];
+  assert.equal(steps(checked).filter((s) => JSON.stringify(s) === JSON.stringify(LEAK_STEP)).length, 1, `${LEAK_CHECKED} does not run LEAK_STEP once, on every pull request`);
+  assert.ok(requiredJobs().some(({ file, id }) => `${file}#${id}` === LEAK_CHECKED), `${LEAK_CHECKED}, which checks on every pull request that no secret leaked, is no required job`);
   const base = { on: { workflow_dispatch: { inputs: { runs: { default: "1" } } } }, permissions: { contents: "read" }, jobs: { write: { "runs-on": "ubuntu-24.04" }, check: { steps: [{ uses: "actions/checkout@0" }, LEAK_STEP] } } };
   assert.deepEqual(secretWorkflowProblems("probe.yml", base), []);
   for (const check of [{ steps: [] }, { steps: [{ ...LEAK_STEP, run: "true" }] }, { steps: [{ ...LEAK_STEP, env: { KEY_LEAKED: LEAK_STEP.env.KEY_LEAKED } }] }, { steps: [LEAK_STEP, LEAK_STEP] }]) {
@@ -2902,9 +2919,28 @@ export function secretPlaceProblems(key, doc, job) {
   walk(doc.env ?? {}, "workflow.env");
   walk(job, "job");
   const value = (where) => where.replace(/^job/, "").split(/\.|\[(\d+)\]/).filter(Boolean).reduce((v, k) => v?.[k], job);
+  // An expression that reads a secret-named variable back out of the environment, or the whole
+  // environment, hands the secret on as `secrets.` would: in an action's input, an artifact's
+  // name, a script's output (the final pass of ad38011: `${{ env.ANTHROPIC_API_KEY }}` in a
+  // cache's key).
+  const fromEnv = [];
+  const read = (v, where) => {
+    if (typeof v === "string") {
+      const k = v.indexOf("${{");
+      if (k < 0) return;
+      for (const m of v.slice(k).matchAll(/(?<![.\w])env\b\s*(?:\.\s*([A-Za-z_][\w-]*)|\[\s*['"]([^'"]*)['"]\s*\]|(?![\w.[]))/gi)) {
+        const name = m[1] ?? m[2];
+        if (name === undefined || SECRET_NAME.test(name)) fromEnv.push(`${key}: ${where} reads ${name === undefined ? "the whole environment" : `${name}`} out of the environment in an expression`);
+      }
+    } else if (Array.isArray(v)) v.forEach((x, i) => read(x, `${where}[${i}]`));
+    else if (v !== null && typeof v === "object") for (const [k, x] of Object.entries(v)) read(x, `${where}.${k}`);
+  };
+  read(doc.env ?? {}, "workflow.env");
+  read(job, "job");
   return at
     .filter((where) => {
-      const env = /^job(?:\.steps\[\d+\])?\.env\.([A-Za-z_][\w-]*)$/.exec(where);
+      // Only a step's own environment, which no other step of the job inherits.
+      const env = /^job\.steps\[\d+\]\.env\.([A-Za-z_][\w-]*)$/.exec(where);
       if (env) return !(SECRET_NAME.test(env[1]) && SECRET_VALUE.test(String(value(where))));
       const input = /^job\.steps\[(\d+)\]\.with\.([A-Za-z_][\w-]*)$/.exec(where);
       if (input) {
@@ -2913,7 +2949,8 @@ export function secretPlaceProblems(key, doc, job) {
       }
       return true;
     })
-    .map((where) => `${key}: a secret at ${where}, not the whole value of an environment variable whose name matches ${SECRET_NAME} or of an input of SECRET_INPUTS`);
+    .map((where) => `${key}: a secret at ${where}, not the whole value of a step's environment variable whose name matches ${SECRET_NAME} or of an input of SECRET_INPUTS`)
+    .concat(fromEnv);
 }
 
 check("every secret is the value of an environment variable or an action input whose name looks like a secret's", () => {
@@ -2934,10 +2971,15 @@ check("every secret is the value of an environment variable or an action input w
     [{}, { steps: [{ env: { ANTHROPIC_API_KEY: "${{ format('{0}', secrets.ANTHROPIC_API_KEY) }}" } }] }],
     [{}, { steps: [{ env: { ANTHROPIC_API_KEY: `x${s}` } }] }],
     [{}, { steps: [{ uses: "actions/checkout@0", with: { token: "${{ secrets.A || github.token }}" } }] }],
+    // The final pass of ad38011: the secret in the job's env, read back by `env.`.
+    [{}, { env: { ANTHROPIC_API_KEY: s }, steps: [] }],
+    [{}, { steps: [{ uses: "actions/cache@0", with: { key: "${{ env.ANTHROPIC_API_KEY }}" } }] }],
+    [{}, { steps: [{ uses: "actions/upload-artifact@0", with: { name: "x-${{ env['MENTE_BENCH_HELDOUT_TOKEN'] }}" } }] }],
+    [{}, { steps: [{ run: "echo ${{ toJSON(env) }} >> $GITHUB_OUTPUT" }] }],
   ]) {
     assert.ok(secretPlaceProblems("x.yml#y", doc, job).length > 0, `a secret in the wrong place let through: ${JSON.stringify({ doc, job })}`);
   }
-  assert.deepEqual(secretPlaceProblems("x.yml#y", {}, { env: { HAS: "${{ secrets.A != '' }}" }, steps: [{ env: { ANTHROPIC_API_KEY: s } }, { uses: "actions/checkout@0", with: { token: s } }] }), []);
+  assert.deepEqual(secretPlaceProblems("x.yml#y", {}, { env: { HAS: "${{ secrets.A != '' }}" }, steps: [{ env: { ANTHROPIC_API_KEY: s } }, { uses: "actions/checkout@0", with: { token: s } }, { uses: "actions/cache@0", with: { key: "x-${{ env.MDBOOK_VERSION }}-${{ inputs.env }}" } }] }), []);
   // SECRET_NAME is read from tokens, defined once (the review of 41a54b6: the first match of a
   // regular expression could have been a comment).
   assert.equal(String(secretNameOf("// const SECRET_NAME = /x/i;\nconst SECRET_NAME = /key|token/i;")), "/key|token/i");
@@ -3070,6 +3112,10 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     ["benchmark/harness/api.ts", "const [, r] = arguments;"],
     ["benchmark/harness/api.ts", "module.require(name);"],
     ["benchmark/harness/api.ts", "exports.x = 1;"],
+    // The final pass of ad38011: a name written as a string in an export's list.
+    ["benchmark/harness/api.ts", 'export { default as z, "q" as w } from "node:child_process";'],
+    ["benchmark/harness/api.ts", 'export { "x" as y } from "../../docs/leak.mjs";'],
+    ["benchmark/harness/api.ts", 'const m = "child_process";'],
     // And the computed accesses the reading missed: a computed key in a pattern, an object or a
     // class, a keyword as a property's or a method's name, and an expression's non-null `!`.
     ["benchmark/harness/api.ts", "const { [k]: F } = Array.of;"],
@@ -4303,9 +4349,28 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     // change's own constant assertion, whose error lies on the merged line past the replacement.
     outcome("unviable, by an assertion merged onto the changed line", "Unviable", [build({ Failure: 101 })], located(5, 87).replace("E0277", "E0080"), MERGED),
   ];
-  // On that merged line, an error inside the replacement is the mutant's own.
-  const merged = [outcome("unviable, inside the merged replacement", "Unviable", [build({ Failure: 101 })], located(5, 17), MERGED)];
-  assert.deepEqual(evidence({ outcomes: merged }, logs(merged)), []);
+  // On that merged line, an error inside the replacement is the mutant's own. And the final pass of
+  // ad38011: rustc 1.97.1 puts E0368 (`x -= y`) at the expression's start, before the operator the
+  // mutant changed, its `^` label covering the operator; and a constant's E0080 at the constant
+  // that calls the function, with a note inside the function the mutant changed. Both are the
+  // mutant's own.
+  const OPERATOR = "@@ -12,1 +12,1 @@\n-        x += y;\n+        x -= y;\n";
+  const ASSIGN = "error[E0368]: binary assignment operation `-=` cannot be applied to type `Foo`\n  --> compiler/x/src/lib.rs:12:9\n   |\n12 |         x -= y;\n   |         -^^^^^\n   |         |\n   |         cannot use `-=` on type `Foo`\n";
+  const CONSTANT = "error[E0080]: evaluation of constant value failed\n  --> compiler/x/src/lib.rs:40:15\n   |\n40 | const X: Foo = f();\n   |                ^^^ evaluation of `X` failed inside this call\n   |\nnote: inside `f`\n  --> compiler/x/src/lib.rs:12:9\n   |\n12 |         Default::default()\n   |         ^^^^^^^^^^^^^^^^^^ the failure occurred here\n";
+  const own = [
+    outcome("unviable, inside the merged replacement", "Unviable", [build({ Failure: 101 })], located(5, 17), MERGED),
+    outcome("unviable, E0368 from the expression's start", "Unviable", [build({ Failure: 101 })], ASSIGN, OPERATOR),
+    outcome("unviable, E0080 at the calling constant", "Unviable", [build({ Failure: 101 })], CONSTANT, DIFF),
+  ];
+  assert.deepEqual(evidence({ outcomes: own }, logs(own)), []);
+  // But a note outside the change, an error with no location before one inside it, and an
+  // operator's error whose label misses the change, stay the change's.
+  const notOwn = [
+    outcome("unviable, a note outside the change", "Unviable", [build({ Failure: 101 })], CONSTANT.replace("lib.rs:12:9", "lib.rs:30:9"), DIFF),
+    outcome("unviable, an error with no location before one inside", "Unviable", [build({ Failure: 101 })], `error: something else\n${located(12, 9)}`, DIFF),
+    outcome("unviable, an operator's label beside the change", "Unviable", [build({ Failure: 101 })], ASSIGN, "@@ -12,1 +12,1 @@\n-        x += y; z += 1;\n+        x += y; z -= 1;\n"),
+  ];
+  assert.deepEqual(evidence({ outcomes: notOwn }, logs(notOwn)).map((p) => p.split(":")[0]), notOwn.map((o) => o.scenario.Mutant.name));
   assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
 });
 

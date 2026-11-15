@@ -381,6 +381,13 @@ jobs:
           node .github/scripts/build-time-code.mjs
       # No package's install script runs: none is needed, and one could write the environment of
       # the steps after it.
+      - name: No secret of the benchmark outside its environment
+        # On every pull request: a secret this job sees is a repository's or an organization's, which
+        # must not exist, since both live in the environment benchmark alone, for main alone.
+        env:
+          KEY_LEAKED: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HELD_OUT_LEAKED: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}
+        run: if [ "$KEY_LEAKED" != false ] || [ "$HELD_OUT_LEAKED" != false ]; then echo "::error::a secret of the benchmark is set outside the environment benchmark"; exit 1; fi
       - run: npm ci --ignore-scripts
       - run: npm run verify:docs
       - name: Install actionlint and shellcheck, pinned and checksummed
