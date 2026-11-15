@@ -110,6 +110,7 @@ Integers, `bool`, fixed-size arrays `[N]T`, functions with scalar parameter mode
   - `mutable-value-semantics.md` item 3 says "only whole local bindings and `own` parameters move", without the whole error a `catch` arm binds.
   - Item 20 of `core-calculus.md` says "a binding moved on any path is dead where the paths join" with no word for a plain binding, whose move is a copy that leaves it usable (item 12).
   - `p?.xs.len`, `p?.xs[a..b]` and `p?.a.b` read as `p?.xs[i]` does, left to right, and are not named.
+  - `main`'s rule refuses a view made of a view that no binding holds, as `pick(xs[..], ys[..])[1..]` and `s.bytes()[0..4]`. Narrowing it to a view made directly of an owning value that no binding holds would be safe, by the reading of the review of pull request 136 at 1a792f9, and would relax a rule of `main`.
   - `raise` standing as an argument or an initializer, as in `use2(mk(), raise E.X(..))`, has no equation in item 25 of `core-calculus.md`.
   - `regions-and-pools.md` item 6 refuses two unrelated provenances stored into the same long-lived struct field, where item 17 of `core-calculus.md` gives a `var` holder the union of its sources: `var s = P(a: xs[..])  s.a = ys[..]`.
 - [ ] What the review of pull request 120 left, each fix with a test seen to fail without it:
