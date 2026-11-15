@@ -155,8 +155,8 @@ async function main(): Promise<void> {
       const cost = costOf(reply.usage, PRICE_INPUT, PRICE_OUTPUT);
       record.spent += cost;
       const name = `${task.id}-${run}`;
-      const module = `module probe\n\n${extractProgram(reply.text)}`;
-      writeFileSync(join(out, `${name}.mn`), module);
+      const source = `module probe\n\n${extractProgram(reply.text)}`;
+      writeFileSync(join(out, `${name}.mn`), source);
       writeFileSync(join(out, `${name}.reply.md`), reply.text);
       record.programs.push({
         task: task.id,

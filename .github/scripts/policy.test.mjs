@@ -1109,7 +1109,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "e329ec5e3cba06075736d7af50f747698bbbc0e0015e04d0007a12eb1e736770"],
+  [".github/scripts/test-sandbox.sh", "21d632f65f5362a6566ed1b8808acda0bd8b215275039b6c38452491616dcd30"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
@@ -1118,7 +1118,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
   [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "911f3391e7918face17e3621b9293d48d801f6a47eb9a20fbf819a38fb5c1aa6"],
+  [".github/scripts/lib/mutants-floor.mjs", "9fbd2b2cbcdf9de87f553c4095c75ef305bb82bec1a2c155b6b2ec1344967e4d"],
   [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
   [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -2568,7 +2568,15 @@ const REFUSED_NAMES = new Set([
   "defineProperty",
   "defineProperties",
   "__proto__",
+  "arguments",
+  "module",
+  "exports",
 ]);
+/// What node runs as a module, by a file's name: what the closure of a job reads for imports.
+const JS_MODULE = /\.(mjs|cjs|js|ts|mts|cts|jsx|tsx)$/;
+/// The modules a secret job may run or import: ES modules alone, which the root package.json's
+/// `"type": "module"` makes of `.js` and `.ts` as of `.mjs`.
+const SECRET_MODULE = /\.(mjs|js|ts)$/;
 /// The members of `process` a module of a secret job may name, each only as `process.<member>`:
 /// its arguments, its environment, its end and its platform. The rest of `process` loads or runs
 /// code a reading of the module does not see (`getBuiltinModule`, `binding`, `dlopen`, `execve`,
@@ -2584,42 +2592,67 @@ const OWN_TEXT = [
   "// The one way a module of a job that holds a secret reads or writes a member by a computed key",
   "// (docs/design-review.md, untrusted-test-isolation). It reads only an object's own property and",
   "// defines only an own property, so that no key, however it is made, reaches what a prototype",
-  "// holds: `constructor`, and through it Function, above all. The workflow policy refuses every",
+  "// holds: `constructor`, and through it Function, above all. The key becomes a property key once,",
+  "// and that one is both checked and used: a key whose `toString` answers otherwise the second time",
+  "// would otherwise pass the check as one name and read another. The workflow policy refuses every",
   "// other computed member access in those modules, and holds this file's text.",
+  "",
+  "/** A key as the property key it names, made once. */",
+  "const keyOf = (key) => (typeof key === \"symbol\" ? key : String(key));",
   "",
   "/** The own property `key` of `object`, or undefined: never one its prototypes hold. */",
   "export function own(object, key) {",
-  "  return object !== null && object !== undefined && Object.hasOwn(Object(object), key) ? object[key] : undefined;",
+  "  const k = keyOf(key);",
+  "  return object !== null && object !== undefined && Object.hasOwn(Object(object), k) ? object[k] : undefined;",
   "}",
   "",
   "/** Defines `key` as an own property of `object`, whatever its prototypes hold, and returns `value`. */",
   "export function setOwn(object, key, value) {",
-  "  Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });",
+  "  Object.defineProperty(object, keyOf(key), { value, writable: true, enumerable: true, configurable: true });",
   "  return value;",
   "}",
   "",
 ].join("\n");
 /// The keywords after which `[` opens an array or a pattern, not a computed member.
 const KEYWORDS = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await|extends|const|let|var)$/;
-/// Whether the `[` at `i` reads a member by a computed key: after a name, a literal, a call, a
-/// parenthesized expression, another member, `?.` or a block's or an object's `}`; not after a
-/// keyword, an operator or `(`, where it opens an array or a pattern, nor right after the
-/// condition of `if`, `while`, `for`, `switch`, `catch` or `with`, where it starts a statement.
+/// Whether the `[` at `i` reads a member by a computed key, or names one: after a name, a
+/// literal, a call, a parenthesized expression, another member, `?.`, a block's or an object's
+/// `}`, or an expression's non-null `!`; after a keyword that is a property's name (`Array.of[k]`,
+/// `m.delete[k]`) or a method's (`o.catch(x)[k]`); and as the computed key of an object, a
+/// pattern or a class (`{ [k]: v }`, `const { [k]: f } = x`, `[k]() {}`), which a `]` followed by
+/// `:` or `(` shows. Not after a keyword, an operator or `(`, where it opens an array or a
+/// pattern, nor right after the condition of `if`, `while`, `for`, `switch`, `catch` or
+/// `with`, where it starts a statement. A reading of tokens, this narrows what can be spelled and
+/// stays a reading aid: no reading decides what arbitrary code does.
 export function computedAccessAt(toks, i) {
   const t = toks[i];
   if (!(t?.t === "punct" && t.v === "[") || toks[i + 1]?.v === "]") return false;
   const p = toks[i - 1];
   if (!p) return false;
-  if (p.t === "id") return !KEYWORDS.test(p.v);
+  const afterDot = (j) => toks[j - 1]?.t === "punct" && toks[j - 1].v === ".";
+  const endsExpression = (x, j) => x && ((x.t === "id" && (!KEYWORDS.test(x.v) || afterDot(j))) || x.t === "str" || x.t === "num" || (x.t === "tpl" && !x.open) || (x.t === "punct" && /^[)\]]$/.test(x.v)));
+  // A computed key: `[...]` followed by `:` (a property or a pattern's) or `(` (a method's).
+  let close = i + 1;
+  for (let depth = 0; close < toks.length; close++) {
+    if (toks[close].t === "punct" && /^[[({]$/.test(toks[close].v)) depth++;
+    if (toks[close].t === "punct" && /^[\])}]$/.test(toks[close].v) && depth-- === 0) break;
+  }
+  if (toks[close + 1]?.t === "punct" && /^[:(]$/.test(toks[close + 1].v) && p.t === "punct" && /^[{,;}]$/.test(p.v)) return true;
+  if (p.t === "id") return !KEYWORDS.test(p.v) || afterDot(i - 1);
   if (p.t === "str" || p.t === "num" || p.t === "re" || (p.t === "tpl" && !p.open)) return true;
   if (p.t !== "punct") return false;
   if (p.v === "]" || p.v === "}") return true;
   if (p.v === "." && toks[i - 2]?.v === "?") return true;
+  if (p.v === "!") return endsExpression(toks[i - 2], i - 2);
   if (p.v === ")") {
     let depth = 0;
     for (let j = i - 1; j >= 0; j--) {
       if (toks[j].t === "punct" && toks[j].v === ")") depth++;
-      if (toks[j].t === "punct" && toks[j].v === "(" && --depth === 0) return !/^(if|while|for|switch|catch|with)$/.test(toks[j - 1]?.t === "id" ? toks[j - 1].v : "");
+      if (toks[j].t === "punct" && toks[j].v === "(" && --depth === 0) {
+        const q = toks[j - 1];
+        const control = q?.t === "id" && /^(if|while|for|switch|catch|with)$/.test(q.v) && !afterDot(j - 1);
+        return !control;
+      }
     }
   }
   return false;
@@ -2640,6 +2673,9 @@ export function readSecretModule(file, text) {
   // OWN_FILE is held by its whole text, which no rule below need read.
   if (file === OWN_FILE) return { problems: text === OWN_TEXT ? [] : [`${file}: its text is not the one the policy holds (OWN_TEXT)`], imports: [] };
   const problems = [];
+  // An ES module alone: `.cjs` and `.cts` are CommonJS, whose `arguments`, `require` and
+  // `module` load any module by a computed name (the re-check of da58409).
+  if (!SECRET_MODULE.test(file)) problems.push(`${file}: no .mjs, .js or .ts module, which the package's "type": "module" makes ES modules`);
   const imports = [];
   const lines = text.split("\n");
   const named = COMPUTED_LOADS.get(file);
@@ -2672,6 +2708,7 @@ export function readSecretModule(file, text) {
       const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), s.v));
       imports.push(target);
       if (!tracked().has(target)) problems.push(`${file}:${s.line}: imports ${s.v}, which is no file of the repository`);
+      if (!SECRET_MODULE.test(target)) problems.push(`${file}:${s.line}: imports ${s.v}, which is no .mjs, .js or .ts module`);
     } else if (s.v === "node:child_process") {
       if (!SPAWNERS.has(file)) problems.push(`${file}:${s.line}: imports child_process, which only the modules of SPAWNERS may`);
     } else if (!NODE_MODULES.has(s.v)) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a relative file nor one of NODE_MODULES`);
@@ -2932,7 +2969,7 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     assert.deepEqual(unowned, [], `${key} holds a secret and runs files .github/CODEOWNERS does not give its owner`);
     // And each module of it loads only what that closure follows, and starts processes only in
     // SPAWNERS.
-    assert.deepEqual(runs.filter((f) => /\.(mjs|cjs|js|ts)$/.test(f)).flatMap((f) => secretModuleProblems(f, read(f))), [], `${key} holds a secret, and a module it runs loads code or starts a process the policy cannot read`);
+    assert.deepEqual(runs.filter((f) => JS_MODULE.test(f) || runs.some((g) => JS_MODULE.test(g) && readSecretModule(g, read(g)).imports.includes(f))).flatMap((f) => secretModuleProblems(f, read(f))), [], `${key} holds a secret, and a module it runs loads code or starts a process the policy cannot read`);
     // And every node it starts generates no code from strings, which no spelling of a module gets
     // past: eval, Function and its kin, reached by any route, throw.
     for (const s of all.filter((x) => typeof x.run === "string")) {
@@ -3024,6 +3061,26 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     ["benchmark/harness/api.ts", "obj[k] = v;"],
     ["benchmark/harness/api.ts", "Object.defineProperty(Object.prototype, \"shell\", { value: \"/bin/sh\" });"],
     ["benchmark/own.mjs", 'export const own = (o, k) => o[k];\n'],
+    // The re-check of da58409: a module of another kind, imported or run, and CommonJS's names.
+    ["benchmark/harness/api.ts", 'import { x } from "./tasks.cts";'],
+    ["benchmark/harness/api.ts", 'import { x } from "../reference.cjs";'],
+    ["benchmark/harness/api.ts", 'import data from "./pins.json" with { type: "json" };'],
+    ["benchmark/harness/leak.cjs", "const [, r] = arguments;\nr(\"node:child_\" + \"process\");"],
+    ["benchmark/harness/leak.cts", "export const x = 1;"],
+    ["benchmark/harness/api.ts", "const [, r] = arguments;"],
+    ["benchmark/harness/api.ts", "module.require(name);"],
+    ["benchmark/harness/api.ts", "exports.x = 1;"],
+    // And the computed accesses the reading missed: a computed key in a pattern, an object or a
+    // class, a keyword as a property's or a method's name, and an expression's non-null `!`.
+    ["benchmark/harness/api.ts", "const { [k]: F } = Array.of;"],
+    ["benchmark/harness/api.ts", "const o = { [k]: 1 };"],
+    ["benchmark/harness/api.ts", "const o = { a: 1, [k]: 2 };"],
+    ["benchmark/harness/api.ts", "class A {\n  x = 1;\n  [k]() {}\n}"],
+    ["benchmark/harness/api.ts", "const f = Array.of[k];"],
+    ["benchmark/harness/api.ts", "const f = m.delete[k];"],
+    ["benchmark/harness/api.ts", "const f = o.catch(x)[k];"],
+    ["benchmark/harness/api.ts", "const f = o?.for[k];"],
+    ["benchmark/harness/api.ts", "const f = g![k];"],
     // A spawner past its named uses: an alias of what it imports, or the checker's git with other
     // arguments, or by another name.
     ["benchmark/harness/build.ts", 'import { spawn } from "node:child_process";\nconst s = spawn;\ns(mn, b);'],
@@ -3036,7 +3093,7 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     jsImports(jsTokens('import"./a.mjs";import{b}from"./b.mjs";export*from"./c.mjs";// import "./d.mjs"\nconst s = "import \'./e.mjs\'";')).specifiers.map((s) => s.v),
     ["./a.mjs", "./b.mjs", "./c.mjs"],
   );
-  assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./tasks.ts";\nimport fs from "node:fs";\n// eval(code)\nconst s = "rpn-eval";\nclass A {\n  constructor(t) { this.t = t; }\n}\nconst v = own(xs, i) + own(m, "k") + process.env.HOME + process.argv.length;\nconst [a, b] = xs;\nlet [c] = ys;\nfor (const [k, w] of zs) if (k) [a, b] = [b, a];\nconst t: string[] = [];'), []);
+  assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./tasks.ts";\nimport fs from "node:fs";\n// eval(code)\nconst s = "rpn-eval";\nclass A {\n  constructor(t) { this.t = t; }\n}\nconst v = own(xs, i) + own(m, "k") + process.env.HOME + process.argv.length;\nconst [a, b] = xs;\nlet [c] = ys;\nfor (const [k, w] of zs) if (k) [a, b] = [b, a];\nconst t: string[] = [];\nf(a, [b, c]);\nconst n = ![x].length;\nconst o = { a: [1, 2], b };\nx = 1;\n[a, b] = [b, a];'), []);
   assert.deepEqual(secretModuleProblems("benchmark/own.mjs", read("benchmark/own.mjs")), [], "benchmark/own.mjs is not the text the policy holds");
   // The review of b2be87b: a `}}` inside a quoted string of the expression, and the named load of
   // check.mjs moved or joined by another.
@@ -3708,15 +3765,18 @@ function cratesBuilt(texts, crates) {
 export function repoPaths(texts) {
   const files = tracked();
   const out = new Set();
-  const addScript = (file) => {
+  // A file a script names is read for imports when it is a module by its name; a file a module
+  // imports is read whatever its name, so that the closure misses no module of another kind (the
+  // re-check of da58409: a `.cts` imported by a module of a secret job was never read).
+  const addScript = (file, imported = false) => {
     if (out.has(file)) return;
     out.add(file);
-    if (!/\.(mjs|cjs|js|ts)$/.test(file)) return;
+    if (!imported && !JS_MODULE.test(file)) return;
     // Read from its tokens, so that no spacing or comment hides an import from the closure (the
     // review of b2be87b: `import"../../docs/leak2.mjs"` was past the regular expression before).
     for (const { v } of jsImports(jsTokens(read(file))).specifiers.filter((s) => /^\.{1,2}\//.test(s.v))) {
       const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), v));
-      if (files.has(target)) addScript(target);
+      if (files.has(target)) addScript(target, true);
     }
   };
   for (const text of texts) {
@@ -4201,6 +4261,9 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   // A mutant's diff as cargo-mutants writes it: line 12 of lib.rs, `0` replaced by
   // `Default::default()`, columns 9 to 26 of the new line.
   const DIFF = "--- compiler/x/src/lib.rs\n+++ replace f -> Foo with Default::default()\n@@ -11,3 +11,3 @@\n fn f() -> Foo {\n-        0\n+        Default::default()\n }\n";
+  // Two lines of lib.rs merged into one, at line 5 of the new file: the replacement at columns 17 to
+  // 69, then the change's `} const _: () = assert!(marker());`, its `assert!` at column 87.
+  const MERGED = "--- compiler/x/src/lib.rs\n+++ replace f -> Foo with Default::default()\n@@ -5,2 +5,1 @@\n-fn f() -> Foo { foo()\n-} const _: () = assert!(marker());\n+fn f() -> Foo { Default::default() /* ~ changed by cargo-mutants ~ */ } const _: () = assert!(marker());\n";
   const located = (line, column, file = "compiler/x/src/lib.rs") => `\x1b[0m\x1b[1m\x1b[38;5;9merror[E0277]\x1b[0m: the trait bound \`Foo: Default\` is not satisfied\n\x1b[0m   \x1b[0m\x1b[38;5;12m--> \x1b[0m${file}:${line}:${column}\n`;
   const build = (status) => ({ phase: "Build", duration: 2.8, process_status: status });
   const test = (status) => ({ phase: "Test", duration: 0.15, process_status: status });
@@ -4236,7 +4299,13 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     outcome("unviable, one error inside and one outside", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}${located(40, 15)}`, DIFF),
     outcome("unviable, an error with no location", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}error: linking with \`cc\` failed\n`, DIFF),
     outcome("unviable, no diff", "Unviable", [build({ Failure: 101 })], located(12, 9)),
+    // The re-check of da58409: two lines the mutant merged into one, the second ending in the
+    // change's own constant assertion, whose error lies on the merged line past the replacement.
+    outcome("unviable, by an assertion merged onto the changed line", "Unviable", [build({ Failure: 101 })], located(5, 87).replace("E0277", "E0080"), MERGED),
   ];
+  // On that merged line, an error inside the replacement is the mutant's own.
+  const merged = [outcome("unviable, inside the merged replacement", "Unviable", [build({ Failure: 101 })], located(5, 17), MERGED)];
+  assert.deepEqual(evidence({ outcomes: merged }, logs(merged)), []);
   assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
 });
 

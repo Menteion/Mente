@@ -145,8 +145,10 @@ inner() {
       echo "test-sandbox: $workspace/target/tmp is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere" >&2
       exit 2
     fi
-    # On the directory `cd -P` reached, not on its name resolved once more.
-    /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs "$PWD"
+    # On the very directory `cd -P` reached, this shell's working directory, which mount's own
+    # /proc/self/cwd names and the kernel follows (-c: mount resolves no path itself), not on its
+    # name resolved once more, where a link put in its place since would lead elsewhere.
+    /usr/bin/mount -c -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs /proc/self/cwd
   fi
   /usr/bin/mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
   cd "$root"

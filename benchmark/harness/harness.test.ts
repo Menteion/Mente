@@ -48,6 +48,7 @@ import {
 } from "./languages.ts";
 import { failureText, feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
 import { median, summarize, type RunRecord } from "./report.ts";
+import { own, setOwn } from "../own.mjs";
 import {
   costOf,
   extractProgram,
@@ -700,6 +701,28 @@ test("no process that runs beside the key starts mn but through the sandbox", as
     delete process.env.BENCH_TEST_API_KEY;
     for (const [name, value] of held) process.env[name] = value;
   }
+});
+
+test("own and setOwn reach only own properties, whatever the key makes of itself", () => {
+  // The re-check of da58409: a key whose toString answered "a" first and "__proto__" after passed
+  // the check of an own "a" and then read Object.prototype, which setOwn then wrote.
+  const turning = () => {
+    let calls = 0;
+    return { toString: () => (calls++ === 0 ? "a" : "__proto__") };
+  };
+  assert.equal(own({ a: 1 }, turning()), 1);
+  assert.equal(own({}, turning()), undefined);
+  assert.equal(own({ a: 1 }, "__proto__"), undefined);
+  assert.equal(own(() => 0, "constructor"), undefined);
+  assert.equal(own([5, 6], 1), 6);
+  assert.equal(own("ab", 1), "b");
+  assert.equal(own(null, "a"), undefined);
+  const target = { a: 1 };
+  setOwn(target, turning(), 2);
+  assert.equal(target.a, 2);
+  setOwn(target, "__proto__", { shell: "/bin/sh" });
+  assert.equal(Object.getPrototypeOf(target), Object.prototype, "setOwn changed a prototype");
+  assert.equal(({} as Record<string, unknown>).shell, undefined, "setOwn polluted Object.prototype");
 });
 
 test("the processes the harness starts, the agent's programs among them, see no secret", () => {

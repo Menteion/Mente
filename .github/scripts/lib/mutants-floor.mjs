@@ -227,24 +227,36 @@ export function compilerErrors(log) {
   return out;
 }
 
-/// What a mutant's own diff changed in the mutated file, one region an added line: its number in
-/// the new file and the columns, from and to, where it differs from the one line it replaced, or
-/// the whole line when a hunk replaces more than one line, or none, at once.
+/// What a mutant's own diff changed in the mutated file, one region a hunk's run of changed
+/// lines: from the first column where its first added line differs from the first line it
+/// replaced, to the last column where its last added line differs from the last line it replaced,
+/// each `{ line, column }` in the new file. A run that only adds lines changed all of them; one
+/// that only removes lines changed none. The ends are found whatever the run's line counts, so that
+/// no unchanged text the mutant joined to a changed line counts as changed (the re-check of
+/// da58409: two lines merged into one, the second ending in a constant assertion of the change's).
 export function changedRegions(diff) {
   const out = [];
   let line = 0;
   let removed = [];
   let added = [];
   const flush = () => {
-    if (removed.length === 1 && added.length === 1) {
-      const [a] = removed;
-      const { at, text: b } = added[0];
-      let p = 0;
-      while (p < a.length && p < b.length && a[p] === b[p]) p++;
-      let s = 0;
-      while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
-      out.push({ line: at, from: p + 1, to: Math.max(p + 1, b.length - s) });
-    } else for (const { at, text } of added) out.push({ line: at, from: 1, to: text.length + 1 });
+    if (added.length > 0) {
+      const first = added[0];
+      const last = added[added.length - 1];
+      if (removed.length === 0) out.push({ from: { line: first.at, column: 1 }, to: { line: last.at, column: last.text.length + 1 } });
+      else {
+        const a = removed[0];
+        const z = removed[removed.length - 1];
+        let p = 0;
+        while (p < a.length && p < first.text.length && a[p] === first.text[p]) p++;
+        // On a single changed line the suffix may not reach back into the prefix.
+        const room = added.length === 1 && removed.length === 1 ? Math.min(a.length, last.text.length) - p : added.length === 1 ? last.text.length - p : last.text.length;
+        let s = 0;
+        while (s < room && s < z.length && z[z.length - 1 - s] === last.text[last.text.length - 1 - s]) s++;
+        const toColumn = Math.max(last.text.length - s, 1);
+        out.push({ from: { line: first.at, column: p + 1 }, to: { line: last.at, column: added.length === 1 ? Math.max(toColumn, p + 1) : toColumn } });
+      }
+    }
     removed = [];
     added = [];
   };
@@ -266,6 +278,10 @@ export function changedRegions(diff) {
   flush();
   return out;
 }
+
+/// Whether a place, `{ line, column }`, lies in a region, ends included.
+export const inRegion = (at, r) =>
+  (at.line > r.from.line || (at.line === r.from.line && at.column >= r.from.column)) && (at.line < r.to.line || (at.line === r.to.line && at.column <= r.to.column));
 
 /// Why a run's outcomes do not show the work they claim, one message a mutant: a mutant counts as
 /// caught only when its tests ran in the sandbox and one failed, nextest exiting 100 with a failing
@@ -300,7 +316,7 @@ export function evidence(outcomes, readLog) {
       const errors = compilerErrors(log);
       const file = o.scenario.Mutant.file;
       const regions = changedRegions(o.diff_path ? strip(readLog(o.diff_path)) : "");
-      const inside = (e) => e.file === file && regions.some((r) => r.line === e.line && e.column >= r.from && e.column <= r.to);
+      const inside = (e) => e.file === file && regions.some((r) => inRegion(e, r));
       const outside = errors.find((e) => !inside(e));
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);
       else if (errors.length === 0) found.push(`${name}: unviable, but no error of the compiler is in its log`);
