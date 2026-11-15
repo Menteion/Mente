@@ -11,6 +11,7 @@
 // frame: field_of_call 67
 // frame: field_read 73
 // frame: length_of_call 76
+// frame: length_of_place 96
 module conformance
 // Item 25's frame: 64 bytes for the call, what the parameters count, and the most the body
 // holds at once. A frame that holds nothing is 64; `down` does not divide the budget; an
@@ -72,3 +73,6 @@ pub fn field_of_call() -> u8 = mk_two().a
 pub fn field_read(t: Two) -> u8 = t.a
 
 pub fn length_of_call() -> usize = make4().len
+
+// A `.len` of a place reads no element: it holds its `usize`, as a field read of that type does.
+pub fn length_of_place(xs: [1000]u8) -> usize = xs.len + 1

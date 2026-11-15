@@ -139,9 +139,9 @@
 == core-calculus/field_the_struct_lacks.mn ==
 {"version":1,"diagnostics":[{"code":"E0215","severity":"error","message":"`Pair` has no field `frist`; did you mean `first`?","primary":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"related":[],"fixes":[{"message":"write `first`","applicability":"suggestion","edits":[{"span":{"file":"field_the_struct_lacks.mn","start":112,"end":117,"line":8,"column":31},"replacement":"first"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/frames_of_branches.mn ==
-{"version":1,"diagnostics":[],"todos":[{"reason":"r","span":{"file":"frames_of_branches.mn","start":2611,"end":2620,"line":108,"column":44}},{"reason":"r","span":{"file":"frames_of_branches.mn","start":2868,"end":2877,"line":116,"column":12}}],"trusted":[]}
+{"version":1,"diagnostics":[],"todos":[{"reason":"r","span":{"file":"frames_of_branches.mn","start":2663,"end":2672,"line":113,"column":44}},{"reason":"r","span":{"file":"frames_of_branches.mn","start":2920,"end":2929,"line":121,"column":12}}],"trusted":[]}
 == core-calculus/frames_of_calls_and_parameters.mn ==
-{"version":1,"diagnostics":[],"todos":[{"reason":"r","span":{"file":"frames_of_calls_and_parameters.mn","start":1008,"end":1017,"line":46,"column":3}}],"trusted":[]}
+{"version":1,"diagnostics":[],"todos":[{"reason":"r","span":{"file":"frames_of_calls_and_parameters.mn","start":1037,"end":1046,"line":47,"column":3}}],"trusted":[]}
 == core-calculus/frames_of_clauses.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/frames_of_statements.mn ==

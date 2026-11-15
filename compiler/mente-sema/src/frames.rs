@@ -238,36 +238,12 @@ impl Count<'_> {
         }
     }
 
-    /// Whether `e` is a `.len`: a field read of an array.
-    fn is_len(&self, e: ExprId) -> bool {
-        match &self.tree.expr(e).kind {
-            ExprKind::Field { base, .. } => match self.ty(*base) {
-                Ty::Array(..) => true,
-                Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => false,
-            },
-            ExprKind::Int { .. }
-            | ExprKind::Bool(_)
-            | ExprKind::Name(_)
-            | ExprKind::Todo(_)
-            | ExprKind::Unreachable(_)
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Construct { .. }
-            | ExprKind::Variant { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::Array(_)
-            | ExprKind::Repeat { .. }
-            | ExprKind::If { .. }
-            | ExprKind::Error => false,
-        }
-    }
-
     /// Whether `e` is a place read: a name, or a field or an element read whose base is a
-    /// place, `.len` aside.
+    /// place. A `.len` is one too: item 25's row for it is a field read's, its operands its
+    /// place's indexes and the bases kept, or its base where that is no place, and its value a
+    /// `usize`, 8 bytes, the size of its type.
     fn is_place_read(&self, e: ExprId) -> bool {
-        crate::check::is_place(self.tree, e) && !self.is_len(e)
+        crate::check::is_place(self.tree, e)
     }
 
     /// The indexes of a place, in the order they are evaluated, and the sizes of the bases a
@@ -445,15 +421,7 @@ impl Count<'_> {
                 }
             }
             ExprKind::Field { base, .. } => {
-                if self.is_len(e) {
-                    if crate::check::is_place(self.tree, *base) {
-                        let (idx, k) = self.place_parts(*base, true);
-                        let ops: Vec<_> = idx.into_iter().map(|i| (i, false)).collect();
-                        self.operands(&ops, 8, k, false)
-                    } else {
-                        self.operands(&[(*base, false)], 8, 0, false)
-                    }
-                } else if self.is_place_read(e) {
+                if self.is_place_read(e) {
                     self.place_read(e, kept)
                 } else {
                     self.operands(&[(*base, false)], self.vsize(e), 0, false)

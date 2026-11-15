@@ -12,6 +12,7 @@
 // frame: after 1076
 // frame: ac 99
 // frame: un 67
+// frame: paused 2073
 module conformance
 // Item 25: of the branches of an `if` or the arms of a `match` only the one that holds the
 // most counts; a condition, and the left operand of `and`, is a statement of its own; what a
@@ -33,6 +34,10 @@ fn wide() -> [1000]u8 = [2_u8; 1000]
 fn get() -> Msg = Msg.Empty(pad: 0_u8)
 
 fn take_flag(c: bool, w: [1000]u8) -> u64 = 0_u64
+
+fn pause(n: u64) {
+  _ = n
+}
 
 fn fill(mut t: [1000]u8) {
   t[0] = 1_u8
@@ -115,4 +120,13 @@ pub fn ac(a: bool, x: u64, y: u64) -> bool = a and x < y
 pub fn un(a: bool) {
   if a and todo("r") {
   }
+}
+
+// A branch's block runs its earlier statements, an expression statement among them, each a
+// statement of its own, before its last expression makes the value the `if` makes its own from.
+pub fn paused(c: bool, xs: [1000]u8) -> [1000]u8 = if c {
+  pause(1_u64)
+  wide()
+} else {
+  xs
 }
