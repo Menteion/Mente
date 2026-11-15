@@ -1,0 +1,28 @@
+// expect: pass
+module conformance
+// Tier 1 holds bounds up to about 2^125. A bound past that is weakened to the nearest it holds
+// and is never read as no bound on the other side, so nothing is proven from one: the checks
+// on the values below stay in MIR and in native code, which trap where the reference
+// interpreter does (ghost-contracts-and-totality.md, item 4).
+//
+// `x * y` is at least 2^126. Its quotient by `z` may be as small as 2^62, so `n` over it
+// reaches 7: the index is checked.
+pub fn quotient(x: u64[9223372036854775808..=18446744073709551615], y: u64[9223372036854775808..=18446744073709551615], z: u64, n: u64) -> u8 {
+  val xs: [1]u8 = [9]
+  val j: usize = n / (x * y / z)
+  xs[j]
+}
+
+// `x * y - z` is zero for `z` of 2^126, and 1 just below it: the divisor and the narrowing of
+// the quotient are checked.
+pub fn difference(x: u128[9223372036854775808..=18446744073709551615], y: u128[9223372036854775808..=18446744073709551615], z: u128, n: u128) -> u8 {
+  val r: u8 = n / (x * y - z)
+  r
+}
+
+// The calls the comparison's arguments may miss: each at the edge that was proven wrongly.
+pub fn quotient_at_the_edge() -> u8 = quotient(9223372036854775808, 9223372036854775808, 18446744073709551615, 18446744073709551615)
+
+pub fn difference_of_one() -> u8 = difference(9223372036854775808, 9223372036854775808, 85070591730234615865843651857942052863, 300)
+
+pub fn difference_of_none() -> u8 = difference(9223372036854775808, 9223372036854775808, 85070591730234615865843651857942052864, 300)

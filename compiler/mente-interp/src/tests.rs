@@ -28,6 +28,174 @@ fn run(src: &str, call_text: &str) -> String {
     }
 }
 
+/// A run shows its observer each integer an expression gives, exact and with the expression's
+/// text, in the order of evaluation and up to the trap that ends the run, and the value a
+/// compound assignment computes, with the assignment's text, before it is narrowed into its
+/// place; a run nobody observes gives the same result. What a narrowing point narrows is
+/// shown too, and left out here.
+#[test]
+fn test_an_observer_sees_each_integer_an_expression_gives() {
+    let src = "pub struct P {\n  a: u8\n}\npub fn f(x: u8, c: bool) -> u8 {\n  val y: u8 = x + 250\n  if c { y } else { 7 }\n}\npub fn g(x: u16, p: P) -> [2][1]u16 {\n  val q = P(a: p.a)\n  _ = q\n  [[x], [300]]\n}\npub fn h(x: u8) -> u8 {\n  var v: u8 = x\n  v += 250\n  v = 3\n  v\n}";
+    let text = format!("module m\n{}\n", src);
+    let m = module(src);
+    let seen = |call_text: &str| {
+        let (name, args) = parse_call(call_text).unwrap();
+        let mut values: Vec<(String, String)> = Vec::new();
+        let observed = call_observed(
+            &m,
+            &name,
+            args.clone(),
+            Limits::default(),
+            &mut |span: Span, x: Int, why: Shown| {
+                if why == Shown::Given {
+                    values.push((text[span.start..span.end].to_string(), x.to_string()));
+                }
+            },
+        );
+        let result = |r: Result<(Value, Vec<Value>), Stop>| match r {
+            Ok((v, _)) => v.to_string(),
+            Err(s) => s.to_string(),
+        };
+        let alone = result(call_leaving(&m, &name, args, Limits::default()));
+        assert_eq!(result(observed), alone, "{}", call_text);
+        (values, alone)
+    };
+    let pairs = |all: &[(&str, &str)]| -> Vec<(String, String)> {
+        all.iter()
+            .map(|(e, v)| (e.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        seen("f(1, true)"),
+        (
+            pairs(&[
+                ("x", "1"),
+                ("250", "250"),
+                ("x + 250", "251"),
+                ("y", "251"),
+                ("if c { y } else { 7 }", "251"),
+            ]),
+            "251".to_string()
+        )
+    );
+    // A compound assignment shows its right side, then the sum, and a plain one its value
+    // alone; the sum that does not fit its place is shown before the trap.
+    assert_eq!(
+        seen("h(5)"),
+        (
+            pairs(&[
+                ("x", "5"),
+                ("250", "250"),
+                ("v += 250", "255"),
+                ("3", "3"),
+                ("v", "3"),
+            ]),
+            "3".to_string()
+        )
+    );
+    assert_eq!(
+        seen("h(6)").0,
+        pairs(&[("x", "6"), ("250", "250"), ("v += 250", "256")])
+    );
+    assert_eq!(
+        seen("f(1, false)").0,
+        pairs(&[
+            ("x", "1"),
+            ("250", "250"),
+            ("x + 250", "251"),
+            ("7", "7"),
+            ("if c { y } else { 7 }", "7"),
+        ])
+    );
+    // The sum is seen as it is, 256, before the narrowing into `u8` that traps on it.
+    assert_eq!(
+        seen("f(6, true)"),
+        (
+            pairs(&[("x", "6"), ("250", "250"), ("x + 250", "256")]),
+            "trap[narrowing] at 6:15: 256 does not fit in `u8`".to_string()
+        )
+    );
+    // An array shows its integers, through the arrays nested in it; a struct shows none, its
+    // field having been shown where it was read.
+    assert_eq!(
+        seen("g(4, P(a: 9))").0,
+        pairs(&[
+            ("p.a", "9"),
+            ("x", "4"),
+            ("[x]", "4"),
+            ("300", "300"),
+            ("[300]", "300"),
+            ("[[x], [300]]", "4"),
+            ("[[x], [300]]", "300"),
+        ])
+    );
+}
+
+/// A run shows its observer each integer a narrowing point narrows, with the text the
+/// narrowing traps at, as it enters the type: a binding's initializer, each argument, a
+/// result and each element of an array literal. A call's arguments are all evaluated before
+/// the first is narrowed, so a later argument's value is given and never narrowed when an
+/// earlier one's narrowing traps (`core-calculus.md`, item 7). The arguments a run starts with enter at the function's name.
+#[test]
+fn test_an_observer_sees_each_integer_a_narrowing_point_narrows() {
+    let src = "fn g(x: i8, y: i8) -> i8 = y\npub fn f(a: i32) -> i8 {\n  val v: u8 = 3\n  _ = v\n  g(a + 1, a)\n}\npub fn e(a: u8) -> [2]u16 = [a, 30]";
+    let text = format!("module m\n{}\n", src);
+    let m = module(src);
+    let seen = |call_text: &str| {
+        let (name, args) = parse_call(call_text).unwrap();
+        let mut given: Vec<String> = Vec::new();
+        let mut narrowed: Vec<(String, String)> = Vec::new();
+        let _ = call_observed(
+            &m,
+            &name,
+            args,
+            Limits::default(),
+            &mut |span: Span, x: Int, why: Shown| {
+                let at = text[span.start..span.end].to_string();
+                match why {
+                    Shown::Given => given.push(at),
+                    Shown::Narrowed => narrowed.push((at, x.to_string())),
+                }
+            },
+        );
+        (given, narrowed)
+    };
+    let pairs = |all: &[(&str, &str)]| -> Vec<(String, String)> {
+        all.iter()
+            .map(|(e, v)| (e.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        seen("f(5)").1,
+        pairs(&[
+            ("f", "5"),
+            ("3", "3"),
+            ("a + 1", "6"),
+            ("a", "5"),
+            ("y", "5"),
+            ("g(a + 1, a)", "5"),
+        ])
+    );
+    // `a` is given, and its narrowing is never reached: the first argument's traps.
+    let (given, narrowed) = seen("f(200)");
+    assert!(given.iter().any(|g| g == "a + 1"), "{:?}", given);
+    assert_eq!(given.last().map(String::as_str), Some("a"), "{:?}", given);
+    assert_eq!(
+        narrowed,
+        pairs(&[("f", "200"), ("3", "3"), ("a + 1", "201")])
+    );
+    assert_eq!(
+        seen("e(7)").1,
+        pairs(&[
+            ("e", "7"),
+            ("[a, 30]", "7"),
+            ("[a, 30]", "30"),
+            ("[a, 30]", "7"),
+            ("[a, 30]", "30"),
+        ])
+    );
+}
+
 /// The kind of trap a call raises and where, or the value it returns.
 fn trapped(src: &str, call_text: &str) -> (String, u32, u32) {
     match run_with(src, call_text, Limits::default()) {
@@ -167,6 +335,348 @@ fn test_array_literal_elements_are_narrowed_into_its_element_type() {
     );
 }
 
+/// A bit operation, a shift or `~` over literals alone works in the type its literals take
+/// (`core-calculus.md`, item 5): the other operands', through arithmetic, the branches of an
+/// `if`, the arms of a `match` and the elements of an array, and `x`'s in `x op= e`;
+/// otherwise `i64`, whatever place the value is narrowed into, where the `i64` value is then
+/// narrowed as any value is.
+#[test]
+fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
+    let decls = "struct P {\n  m: u8\n}\nfn mask(m: u8) -> u8 = m\n";
+    for (f, call, value) in [
+        // The other operands, though the place is wider.
+        ("pub fn f(a: u8) -> u8 = a & ~3", "f(255)", "252"),
+        ("pub fn f(a: u8) -> u16 = a & ~3", "f(255)", "252"),
+        ("pub fn f(a: u8) -> u16 = a + ~3", "f(1)", "253"),
+        ("pub fn f(a: u8) -> u16 = (1 + ~3) + a", "f(1)", "254"),
+        (
+            "pub fn f(a: u8, b: u16) -> u32 = a + b + ~3",
+            "f(1, 1)",
+            "65534",
+        ),
+        (
+            "pub fn f(a: u8, c: bool) -> u16 = if c { ~3 } else { a }",
+            "f(1, true)",
+            "252",
+        ),
+        (
+            "pub fn f(a: u8) -> u16 = match a {\n  0 => {\n    ~3\n  }\n  _ => a\n}",
+            "f(0)",
+            "252",
+        ),
+        ("pub fn f(a: u8) -> [2]u16 = [~3, a]", "f(7)", "[252, 7]"),
+        (
+            "pub fn f(a: u8) -> [2][1]u16 = [[~3], [a]]",
+            "f(7)",
+            "[[252], [7]]",
+        ),
+        (
+            "pub fn f(c: bool, xs: [1]u8) -> [1]u8 = if c { [~3] } else { xs }",
+            "f(true, [0])",
+            "[252]",
+        ),
+        ("pub fn f(a: i128) -> i128 = a ^ ~0", "f(5)", "-6"),
+        (
+            "pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m &= ~1\n  m\n}",
+            "f(255)",
+            "254",
+        ),
+        (
+            "pub fn f(a: u16) -> u16 {\n  var m: u16 = a\n  m ^= ~0\n  m\n}",
+            "f(1)",
+            "65534",
+        ),
+        (
+            "pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m |= ~3\n  m\n}",
+            "f(0)",
+            "252",
+        ),
+        // `x op= e` is `x = x op e`: under arithmetic `e`'s literals take the type of `x` and
+        // of every operand of `e`; a shift's amount takes none.
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += a + ~3\n  m\n}",
+            "f(0, 1)",
+            "4294967293",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m -= a - ~3\n  m\n}",
+            "f(0, 1)",
+            "4294967291",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m *= a + ~3\n  m\n}",
+            "f(1, 1)",
+            "4294967293",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m /= a + ~3\n  m\n}",
+            "f(4294967295, 1)",
+            "1",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m %= a + ~3\n  m\n}",
+            "f(4294967295, 1)",
+            "2",
+        ),
+        (
+            "pub fn f(m0: u32) -> u32 {\n  var m = m0\n  m += ~3\n  m\n}",
+            "f(0)",
+            "4294967292",
+        ),
+        (
+            "pub fn f(m0: u64, a: u8, b: u32) -> u64 {\n  var m = m0\n  m += a + ~3 + b\n  m\n}",
+            "f(0, 1, 2)",
+            "18446744073709551615",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += (a & ~3) + ~3\n  m\n}",
+            "f(0, 3)",
+            "4294967292",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += (a & ~3) + ~3\n  m\n}",
+            "f(0, 4)",
+            "trap",
+        ),
+        (
+            "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m <<= ~0 & 3\n  m\n}",
+            "f(1)",
+            "8",
+        ),
+        (
+            "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m >>= ~0 & 3\n  m\n}",
+            "f(16)",
+            "2",
+        ),
+        // No other operand: an `i64`, narrowed where it lands.
+        (
+            "pub fn f() -> u8 {\n  val m: u8 = 3 & 5\n  m\n}",
+            "f()",
+            "1",
+        ),
+        (
+            "pub fn f() -> u16 {\n  val m: u16 = 1 + ~3\n  m\n}",
+            "f()",
+            "trap",
+        ),
+        (
+            "pub fn f() -> u8 {\n  val m: u8 = -1 & 255\n  m\n}",
+            "f()",
+            "255",
+        ),
+        ("pub fn f() -> u8 = mask(1 << 7)", "f()", "128"),
+        ("pub fn f() -> i8 = P(m: ~3).m", "f()", "trap"),
+        (
+            "pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { ~3 } else { 4 }\n  m\n}",
+            "f(true)",
+            "trap",
+        ),
+        (
+            "pub fn f(c: bool) -> u8 {\n  val m: u8 = if c { ~3 } else { 4 }\n  m\n}",
+            "f(false)",
+            "4",
+        ),
+        ("pub fn f() -> i8 = ~127", "f()", "-128"),
+        ("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "f()", "-4"),
+        (
+            "pub fn f() -> i64 {\n  val xs = [~3, 1]\n  xs[0]\n}",
+            "f()",
+            "-4",
+        ),
+        // A comparison gives a literal the other operand's type: `~3` is 252 beside a `u8`,
+        // on either side, and literals alone compared are `i64`s.
+        ("pub fn f(a: u8) -> bool = a == ~3", "f(252)", "true"),
+        ("pub fn f(a: u8) -> bool = a == ~3", "f(4)", "false"),
+        ("pub fn f(a: u8) -> bool = ~3 != a", "f(252)", "false"),
+        ("pub fn f(a: u8) -> bool = a < ~3", "f(251)", "true"),
+        ("pub fn f(a: u8) -> bool = ~3 <= a", "f(252)", "true"),
+        ("pub fn f(a: u8) -> bool = a > ~3", "f(252)", "false"),
+        ("pub fn f(a: u8) -> bool = ~3 >= a", "f(253)", "false"),
+        ("pub fn f(a: i8) -> bool = a == ~3", "f(-4)", "true"),
+        ("pub fn f() -> bool = ~3 == -4", "f()", "true"),
+        (
+            "pub fn f(a: u8, b: u32) -> bool = a == b + 1",
+            "f(255, 254)",
+            "true",
+        ),
+        // A literal takes the type of every operand of its expression, whatever their order.
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + ~3 + b",
+            "f(1, 2)",
+            "4294967295",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + b + ~3",
+            "f(1, 2)",
+            "4294967295",
+        ),
+        (
+            "pub fn f(a: u8, c: i8) -> i16 = a + ~3 + c",
+            "f(1, 2)",
+            "-1",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = (a & ~3) + b",
+            "f(255, 2)",
+            "254",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + (~3 & 7) + b",
+            "f(1, 2)",
+            "7",
+        ),
+        // An array literal indexed gives its elements the type the indexing takes.
+        (
+            "pub fn f(a: u8, k: usize[0..2]) -> bool = a == [~3, 1][k]",
+            "f(252, 0)",
+            "true",
+        ),
+        (
+            "pub fn f(xs: [8]u8) -> u8 = xs[~3 & 7]",
+            "f([1, 2, 3, 4, 5, 6, 7, 8])",
+            "5",
+        ),
+        ("pub fn f(a: u8) -> u8 = a << (~3 & 1)", "f(9)", "9"),
+        (
+            "pub fn f() -> u8 = match ~3 {\n  -4 => 1\n  _ => 2\n}",
+            "f()",
+            "1",
+        ),
+        ("pub fn f() -> u8 = ~3_u8", "f()", "252"),
+        (
+            "pub fn f() -> u64 = 1_u64 << 63",
+            "f()",
+            "9223372036854775808",
+        ),
+    ] {
+        let src = format!("{}{}", decls, f);
+        let got = match run_with(&src, call, Limits::default()) {
+            Ok(v) => v.to_string(),
+            Err(Stop::Trap(_)) => "trap".to_string(),
+            Err(other) => other.to_string(),
+        };
+        assert_eq!(got, value, "{}", f);
+    }
+    // A literal outside `i64`, or shifted past it, traps where the operation narrows it into
+    // `i64`, before the value reaches its place: at run time where the checker cannot know
+    // it, by a shift amount of a type or an operand of more than one value; where it can, the
+    // operation is an error (`E0234`).
+    for (f, call, trap) in [
+        ("pub fn f(k: u32) -> u64 = 1 << k", "f(63)", "narrowing"),
+        (
+            "pub fn f(c: bool) -> u64 = 1 | (if c { 9223372036854775808 } else { 0 })",
+            "f(true)",
+            "narrowing",
+        ),
+        ("pub fn f(k: u32) -> u128 = 1 << k", "f(64)", "shift-amount"),
+        ("pub fn f() -> u8 = ~3", "f()", "narrowing"),
+        ("pub fn f() -> u16 = 1 << 15", "f()", "none"),
+    ] {
+        let got = match run_with(f, call, Limits::default()) {
+            Ok(_) => "none".to_string(),
+            Err(Stop::Trap(t)) => t.kind.name().to_string(),
+            Err(other) => other.to_string(),
+        };
+        assert_eq!(got, trap, "{}", f);
+    }
+    let shifted = run("pub fn f(k: u32) -> u64 = 1 << k", "f(63)");
+    assert!(shifted.contains("does not fit in `i64`"), "{}", shifted);
+}
+
+/// The interpreter derives the type of an expression of operators from the types of its leaves
+/// with a join of its own, and never reads the checker's, so that comparing the paths checks
+/// the type the checker gives it, which MIR and native code read (`core-calculus.md`, item 5):
+/// with the checker's type of every operator, branch, arm and indexed element replaced by a
+/// wrong one, each literal still takes the type of every operand of its expression.
+#[test]
+fn test_the_interpreter_derives_the_type_of_an_expression_of_operators_itself() {
+    use mente_sema::types::{Int as IntType, IntTy, Ty};
+    use mente_syntax::tree::{ExprId, ExprKind};
+    let wrong = Ty::Int(IntType::One(IntTy::named("u64").expect("a standard type")));
+    for (f, call, value) in [
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + ~3 + b",
+            "f(1, 2)",
+            "4294967295",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> bool = a + b == ~3",
+            "f(0, 4294967292)",
+            "true",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += a + ~3\n  m\n}",
+            "f(0, 1)",
+            "4294967293",
+        ),
+        ("pub fn f(a: u8) -> u8 = a & (~3 | 1)", "f(255)", "253"),
+        ("pub fn f(a: u8) -> u8 = a & (~3 + 1)", "f(255)", "253"),
+        (
+            "pub fn f(a: u8, c: bool) -> u64 = if c { a } else { ~3 }",
+            "f(0, false)",
+            "252",
+        ),
+        (
+            "pub fn f(a: u8, k: u8) -> u64 = match k {
+  0 => a
+  _ => ~3
+}",
+            "f(0, 1)",
+            "252",
+        ),
+        (
+            "pub fn f(xs: [2]u8, k: usize[0..2]) -> bool = xs[k] == ~3",
+            "f([252, 0], 0)",
+            "true",
+        ),
+        // Through an `else if`, and through arms that are blocks.
+        (
+            "pub fn f(a: u8, c: bool, d: bool) -> u64 = if c { ~3 } else if d { a } else { 1 }",
+            "f(0, true, false)",
+            "252",
+        ),
+        (
+            "pub fn f(a: u8, k: u8) -> u64 = match k {\n  0 => {\n    a\n  }\n  _ => {\n    ~3\n  }\n}",
+            "f(0, 1)",
+            "252",
+        ),
+    ] {
+        let mut m = module(f);
+        for func in m.functions.iter_mut().flatten() {
+            let tree = &func.syntax.tree;
+            for (i, ty) in func.typing.exprs.iter_mut().enumerate() {
+                match tree.expr(ExprId(i as u32)).kind {
+                    ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::If { .. } => *ty = wrong.clone(),
+                    ExprKind::Int { .. }
+                    | ExprKind::Bool(_)
+                    | ExprKind::Name(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Field { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Construct { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::Array(_)
+                    | ExprKind::Repeat { .. }
+                    | ExprKind::Error => {}
+                }
+            }
+        }
+        let Some((name, args)) = parse_call(call) else {
+            panic!("not a call: {}", call);
+        };
+        let got = match self::call(&m, &name, args, Limits::default()) {
+            Ok(v) => v.to_string(),
+            Err(s) => s.to_string(),
+        };
+        assert_eq!(got, value, "{}", f);
+    }
+}
+
 #[test]
 fn test_bits_and_shifts_work_in_their_type() {
     let not = "pub fn not8(x: u8) -> u8 = ~x";
@@ -200,10 +710,19 @@ fn test_bits_and_shifts_work_in_their_type() {
     assert_eq!(run(shr, "shr(-8, 1)"), "-4");
     assert_eq!(run(shr, "shr(-7, 1)"), "-4");
     assert_eq!(kind(shr, "shr(8, -1)"), "shift-amount");
-    let lit = "pub fn lit() -> u8 {\n  val m: u8 = 1 << 7\n  val k: u8 = ~0\n  m - 1 + k - 255\n}";
+    // Literals alone are an `i64`, whatever place they land in (`core-calculus.md`, item 5):
+    // `1 << 7` is 128, `~0` is -1 unless a suffix states `u8`, and `1 << 8` is 256, which the
+    // binding narrows.
+    let lit =
+        "pub fn lit() -> u8 {\n  val m: u8 = 1 << 7\n  val k: u8 = ~0_u8\n  m - 1 + k - 255\n}";
     assert_eq!(run(lit, "lit()"), "127");
+    let minus = "pub fn minus() -> u8 {\n  val k: u8 = ~0\n  k\n}";
+    assert_eq!(
+        run(minus, "minus()"),
+        "trap[narrowing] at 3:15: -1 does not fit in `u8`"
+    );
     let too_far = "pub fn far() -> u8 {\n  val m: u8 = 1 << 8\n  m\n}";
-    assert_eq!(kind(too_far, "far()"), "shift-amount");
+    assert_eq!(kind(too_far, "far()"), "narrowing");
     let wide = "pub fn wide(k: u8) -> i64 = 1 << k";
     assert_eq!(run(wide, "wide(40)"), "1099511627776");
     let huge = "pub fn huge(x: u128) -> u128 = x << 127";
@@ -664,8 +1183,8 @@ fn test_depth_counts_nested_calls_only() {
 fn test_each_ensures_clause_reads_its_own_result_and_elements_take_their_type() {
     let two = "pub fn inc(x: u8) -> u8\n  ensures result > x\n  ensures result >= x + 1\n= x + 1";
     assert_eq!(run(two, "inc(3)"), "4");
-    let shifted = "pub fn f(a: u8) -> [2]u8 = [a, 1 << 8]";
-    assert_eq!(kind(shifted, "f(1)"), "shift-amount");
+    let shifted = "pub fn f(a: u8, k: u32) -> [2]u8 = [a, 1 << k]";
+    assert_eq!(kind(shifted, "f(1, 8)"), "shift-amount");
     assert_eq!(super::stack_bytes(0), 1 << 20);
     assert_eq!(super::stack_bytes(2), (1 << 20) + 2 * (64 << 10));
     assert_eq!(Int::from_i128(0), Int::ZERO);
@@ -1160,4 +1679,93 @@ fn test_a_pattern_or_a_place_the_checks_rule_out_stops_the_run() {
             }
         },
     );
+}
+
+/// A literal whose value depends on its type, beside integers no standard type holds, is never
+/// worked in a type chosen for it: the interpreter, which derives that its context has no type,
+/// stops, as the checker refuses it (`E0212`). The literal's suffix is planted away here, since no
+/// checked program holds one.
+#[test]
+fn test_no_type_is_chosen_for_a_literal_beside_integers_no_type_holds() {
+    use mente_sema::types::{Int as IntType, Ty};
+    use mente_syntax::tree::{ExprId, ExprKind};
+    let mut m = module("pub fn f(a: u128, c: i8) -> bool = a + c == ~3_i128");
+    let f = m.functions[0].as_mut().expect("a function");
+    let tree = &f.syntax.tree;
+    for i in 0..tree.exprs.len() {
+        if let ExprKind::Unary { operand, .. } = tree.expr(ExprId(i as u32)).kind {
+            f.typing.exprs[i] = Ty::Int(IntType::Literal);
+            f.typing.exprs[operand.0 as usize] = Ty::Int(IntType::Literal);
+        }
+    }
+    let got = call(
+        &m,
+        "f",
+        vec![Value::Int(Int::from_u128(1)), Value::Int(Int::from_u128(2))],
+        Limits::default(),
+    );
+    assert!(
+        matches!(&got, Err(Stop::Broken(why)) if why.contains("no type holds")),
+        "{:?}",
+        got
+    );
+}
+
+/// Calls on one shared thread give what a call on a thread of its own gives, its value, the
+/// final values of its parameters, its trap and every integer it shows its observer, one call
+/// after another on the same thread, a trap and a recursion of the interpreted program included.
+#[test]
+fn test_calls_on_one_thread_give_what_a_call_of_its_own_gives() {
+    let m = module(
+        "pub fn f(x: u32, y: u32) -> u8 {
+  guard x == 7 else {
+    return 0
+  }
+  val z: u8 = y + 3
+  z
+}
+pub fn r(n: u8) -> u8
+  decreases n
+{
+  if n == 0 {
+    return 0
+  }
+  r(n - 1) + 1
+}",
+    );
+    let limits = Limits {
+        max_depth: 16,
+        ..Limits::default()
+    };
+    let calls: Vec<(&str, Vec<u128>)> = vec![
+        ("f", vec![7, 1]),
+        ("f", vec![6, 1]),
+        ("f", vec![7, 300]),
+        ("r", vec![10]),
+        ("r", vec![20]),
+        ("f", vec![7, 2]),
+    ];
+    let args = |a: &[u128]| {
+        a.iter()
+            .map(|&x| Value::Int(Int::from_u128(x)))
+            .collect::<Vec<_>>()
+    };
+    let mut alone = Vec::new();
+    for (name, a) in &calls {
+        let mut shown = Vec::new();
+        let mut seen = |span: Span, x: Int, why: Shown| shown.push((span.start, x, why));
+        let end = call_observed(&m, name, args(a), limits, &mut seen);
+        alone.push((format!("{:?}", end), shown));
+    }
+    let shared = with_calls(&m, limits, |c| {
+        let mut out = Vec::new();
+        for (name, a) in &calls {
+            let mut shown = Vec::new();
+            let mut seen = |span: Span, x: Int, why: Shown| shown.push((span.start, x, why));
+            let end = c.observed(name, args(a), &mut seen);
+            out.push((format!("{:?}", end), shown));
+        }
+        out
+    });
+    assert_eq!(shared.ok(), Some(alone));
 }

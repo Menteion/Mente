@@ -1,0 +1,95 @@
+// expect: pass
+module conformance
+// `x op= e` is `x = x op e` (core-calculus.md, item 5). Under arithmetic `e`'s operands are
+// operands of that expression with `x`, so a literal in `e` takes the type of `x` and of every
+// operand of `e` that has one: with a `u32` `m` and a `u8` `a`, `m += a + ~3` adds
+// `a + 4294967292`, as `m = m + (a + ~3)` does. A bit operation inside `e` with an operand of a
+// type works in that type; a compound bit operation gives its literal operand `x`'s type; a
+// shift's amount takes none. Each pair is a `u32` and a `u8`, or one `u8`, so that a run samples
+// the calls of the first and makes all 256 of the second.
+pub fn add(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m += a + ~3
+  m
+}
+
+pub fn add_spelled_out(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m = m + (a + ~3)
+  m
+}
+
+pub fn subtract(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m -= a - ~3
+  m
+}
+
+pub fn multiply(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m *= a + ~3
+  m
+}
+
+pub fn divide(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m /= a + ~3
+  m
+}
+
+pub fn remainder(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m %= a + ~3
+  m
+}
+
+pub fn literal_alone(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m += ~3 + a
+  m
+}
+
+// A value wider than its place gives its literals its own type: `~3` is 2^64 - 4 here, which
+// leaves 5 modulo 7 where 2^32 - 4 leaves 0.
+pub fn wider_value(m0: u32, a: u8, b: u64) -> u32 {
+  var m = m0
+  m += (a + ~3 + b) % 7
+  m
+}
+
+// `a & ~3` works in `u8`; the second `~3` takes the type of the place and the value.
+pub fn typed_mask(m0: u32, a: u8) -> u32 {
+  var m = m0
+  m += (a & ~3) + ~3
+  m
+}
+
+pub fn bit_and(m0: u8) -> u8 {
+  var m = m0
+  m &= ~3
+  m
+}
+
+pub fn bit_or(m0: u8) -> u8 {
+  var m = m0
+  m |= ~3
+  m
+}
+
+pub fn bit_xor(m0: u8) -> u8 {
+  var m = m0
+  m ^= ~3
+  m
+}
+
+pub fn shift_left(m0: u8) -> u8 {
+  var m = m0
+  m <<= ~0 & 3
+  m
+}
+
+pub fn shift_right(m0: u8) -> u8 {
+  var m = m0
+  m >>= ~0 & 3
+  m
+}

@@ -618,17 +618,21 @@ fn reaches_never(steps: &[Step]) -> bool {
         .is_some_and(|s| matches!(s, Step::Index(V::Never, _, _)))
 }
 
-/// Whether no value of type `t` exists: no type, which a value that leaves has, or an array of
-/// at least one element of such a type (`core-calculus.md`, item 6). An array type of no
-/// element has one value, `[]`, whatever its element type; an expression of that type may
-/// still leave, as a repeat of no copies of a value that leaves does when it evaluates that
-/// value, which `V::Never` tells where it happens.
-fn no_value(t: &SemaTy) -> bool {
-    match t {
-        SemaTy::Any => true,
-        SemaTy::Array(n, elem) => *n > 0 && no_value(elem),
-        SemaTy::Int(_) | SemaTy::Bool | SemaTy::Struct(_) | SemaTy::Enum(_) | SemaTy::Unit => false,
+/// What an array of `shape` holds at the end of the arrays nested in it; `shape` itself when it
+/// is no array.
+fn leaf_shape(shape: Shape) -> Shape {
+    match shape {
+        Shape::Array(_, inner) => leaf_shape(*inner),
+        Shape::Int(_) | Shape::Bool | Shape::Struct(_) | Shape::Enum(_) | Shape::Unit => shape,
     }
+}
+
+/// Whether no value of type `t` exists (`Ty::has_no_value`). An expression of an array type
+/// of no element, which has the value `[]`, may still leave, as a repeat of no copies of a
+/// value that leaves does when it evaluates that value, which `V::Never` tells where it
+/// happens.
+fn no_value(t: &SemaTy) -> bool {
+    t.has_no_value()
 }
 
 /// One function's lowering.
@@ -1898,8 +1902,6 @@ impl<'a> Lower<'a> {
                 return Ok(());
             }
             ExprKind::Repeat { value, .. } => return self.leaf_hull(*value, hull),
-            // An array of another kind among them has a type of its own, which joins the
-            // others' in a standard type or makes the literal `E0222` (`wide.rs`): never here.
             ExprKind::Int { .. }
             | ExprKind::Bool(_)
             | ExprKind::Name(_)
@@ -1915,9 +1917,20 @@ impl<'a> Lower<'a> {
             | ExprKind::Match { .. }
             | ExprKind::If { .. }
             | ExprKind::Error => {
-                let r = self
-                    .interval(e)
-                    .ok_or("an element without a static range")?;
+                // An array among them that is no literal counts with its element type's range,
+                // for each integer it holds (`core-calculus.md`, item 4; `wide.rs`, `leaves`).
+                let r = match &self.s.f.typing.exprs[e.0 as usize] {
+                    ty @ SemaTy::Array(..) => {
+                        Self::place_interval(&leaf_shape(Shape::of(ty, self.shapes)?))
+                    }
+                    SemaTy::Int(_)
+                    | SemaTy::Bool
+                    | SemaTy::Struct(_)
+                    | SemaTy::Enum(_)
+                    | SemaTy::Unit
+                    | SemaTy::Any => self.interval(e),
+                }
+                .ok_or("an element without a static range")?;
                 (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1))
             }
         };
@@ -2124,7 +2137,7 @@ impl<'a> Lower<'a> {
                 },
                 UnaryOp::Neg => self.negate(e, *operand, span)?,
                 UnaryOp::BitNot => {
-                    let t = self.int_of(*operand).unwrap_or(I64);
+                    let t = self.worked_in(self.int_of(*operand), *operand, "`~`")?;
                     let v = self.expr(*operand)?;
                     let Some((x, from)) = v.int_node("an operand of `~`")? else {
                         return Ok(V::Never);
@@ -2570,6 +2583,32 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// The type the literals of `e`, an expression of literals alone, take from the checker's
+    /// table: the type a bit operation, a shift or `~` over them works in (`core-calculus.md`,
+    /// item 5). None beside integers no standard type holds, where they take none and their
+    /// value is exact.
+    fn taken(&self, e: ExprId) -> Option<SemaIntTy> {
+        let all = &self.s.f.typing.literals;
+        let t = all.get(e.0 as usize).copied().flatten()?;
+        match t.from {
+            mente_sema::literals::From::Operands | mente_sema::literals::From::Alone => Some(t.ty),
+            mente_sema::literals::From::Unheld => None,
+        }
+    }
+
+    /// The type an operation of `what` on `e` works in: its operand's, or what its literals
+    /// take; one that has none is `E0212`, and no type is chosen for it.
+    fn worked_in(
+        &self,
+        typed: Option<SemaIntTy>,
+        e: ExprId,
+        what: &str,
+    ) -> Result<SemaIntTy, String> {
+        typed
+            .or(self.taken(e))
+            .ok_or_else(|| format!("{} of integers no standard type holds together", what))
+    }
+
     /// The integer type of an expression, as the interpreter's operations take it.
     fn int_of(&self, e: ExprId) -> Option<SemaIntTy> {
         match &self.s.f.typing.exprs[e.0 as usize] {
@@ -2936,7 +2975,7 @@ impl<'a> Lower<'a> {
         self.at(span);
         match op {
             BinaryOp::Shl | BinaryOp::Shr => {
-                let t = lt.unwrap_or(I64);
+                let t = self.worked_in(lt, le, "a shift")?;
                 let w = mir(t);
                 // The amount lies within the type's width, unless Tier 1 proves it does.
                 if !self.proven(
@@ -2970,7 +3009,7 @@ impl<'a> Lower<'a> {
                 }
             }
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                let t = lt.or(rt).unwrap_or(I64);
+                let t = self.worked_in(lt.or(rt).or(self.taken(le)), re, "a bit operation")?;
                 let (ls, rs) = (tree.expr(le).span, tree.expr(re).span);
                 let x = self.narrow_int(a, ta, t, ls, Some(ls));
                 let y = self.narrow_int(b, tb, t, rs, Some(rs));
@@ -3252,6 +3291,39 @@ mod tests {
         assert!(Shape::of(&SemaTy::Any, &Shapes::default()).is_err());
     }
 
+    /// A literal that takes no type, beside integers no standard type holds, is never lowered in
+    /// a type chosen for it: `~` of one is refused, as the checker refuses it (`E0212`). The
+    /// checker's table is planted here, since no checked program holds one.
+    #[test]
+    fn test_no_type_is_chosen_for_a_literal_that_takes_none() {
+        let mut m = mente_sema::check_program(
+            "module m\npub fn f(a: u128, c: i8) -> bool = a + c == ~3_i128\n",
+        )
+        .unwrap();
+        let f = m.functions[0].as_mut().unwrap();
+        let tree = &f.syntax.tree;
+        let complement = (0..tree.exprs.len())
+            .map(|i| ExprId(i as u32))
+            .find(|&e| matches!(tree.expr(e).kind, ExprKind::Unary { .. }))
+            .unwrap();
+        let ExprKind::Unary { operand, .. } = tree.expr(complement).kind else {
+            unreachable!()
+        };
+        for e in [complement, operand] {
+            f.typing.exprs[e.0 as usize] = SemaTy::Int(SemaInt::Literal);
+            f.typing.literals[e.0 as usize] = Some(mente_sema::literals::Taken {
+                ty: SemaIntTy::named("i64").unwrap(),
+                from: mente_sema::literals::From::Unheld,
+            });
+        }
+        let refused = lower(&m).err().unwrap_or_default();
+        assert!(
+            refused.contains("of integers no standard type holds together"),
+            "{}",
+            refused
+        );
+    }
+
     /// An array literal of integers of no standard type together keeps its elements exact, in
     /// the machine type that holds them all, and narrows them only where it lands.
     #[test]
@@ -3276,6 +3348,23 @@ pub fn repeated() -> [2][2]u64 = [[0, 12960978670946228878]; 2]
         for f in ["arg", "nested", "repeated"] {
             assert_eq!(checks(&lowered, f), Vec::<String>::new(), "{}", f);
         }
+        // An array among the elements that is no literal counts with its element type's range:
+        // a `u128` within 35 to 45 beside an `[1]i8` lies within -128 to 127 with it, and is
+        // kept in `i64`, eight bytes an integer. Where the literal lands, the `u128`'s range
+        // fits the element type and needs no check, and the array's integers are narrowed.
+        let src = "module m
+fn one(a: i8) -> [1]i8 = [a]
+pub fn name(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [[b], p]
+pub fn first(p: [1]i8, b: u128[35..=45]) -> [2][1]i8 = [p, [b]]
+pub fn call(a: i8, b: u128[35..=45]) -> [2][1]i8 = [[b], one(a)]
+pub fn lands(p: [1]i8, b: u128[35..=45]) -> [2][1]u8 = [[b], p]
+";
+        let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        for f in ["name", "first", "call", "lands"] {
+            assert_eq!(checks(&lowered, f), ["narrowing"], "{}", f);
+        }
+        let text = lowered.module.to_string();
+        assert!(text.contains("slot 16"), "{}", text);
     }
 
     /// An expression of no type gives no value: a `todo` body, and an `if` whose branches all
@@ -3972,6 +4061,7 @@ pub fn get(xs: [4]u8, i: usize[0..4]) -> u8 = xs[i]
 pub fn any(xs: [4]u8, i: usize) -> u8 = xs[i]
 pub fn half(x: u8) -> u8 = x / 2
 pub fn div(x: u8, y: u8) -> u8 = x / y
+pub fn sdiv(x: i8, y: i8) -> i8 = x / y
 pub fn sh(x: u8, k: u8[0..8]) -> u8 = x >> k
 pub fn shk(x: u8, k: u8) -> u8 = x >> k
 pub fn sum(a: u8[0..100], b: u8[0..100]) -> u8 = a + b
@@ -4000,8 +4090,15 @@ pub fn pass2(x: u8) -> u8 = take(x + 1)
             ("get", &[][..], &[index][..]),
             ("any", &[index], &[index]),
             ("half", &[], &["division-by-zero", "narrowing"]),
+            // An unsigned quotient lies within its dividend's type: a divisor that is zero
+            // traps first. A signed one may not, as -128 / -1 shows.
             (
                 "div",
+                &["division-by-zero"],
+                &["division-by-zero", "narrowing"],
+            ),
+            (
+                "sdiv",
                 &["division-by-zero", "narrowing"],
                 &["division-by-zero", "narrowing"],
             ),

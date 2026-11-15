@@ -20,6 +20,7 @@
 
 mod eval;
 pub mod int;
+mod kinds;
 
 use std::fmt;
 
@@ -277,10 +278,95 @@ pub fn call_leaving(
     args: Vec<Value>,
     limits: Limits,
 ) -> Result<(Value, Vec<Value>), Stop> {
+    run(module, name, args, limits, None)
+}
+
+/// What a run shows of its values: each integer an expression gives, an array's elements
+/// included, with the expression's span, as it is evaluated; the value a compound assignment
+/// computes, `x op e`, which no expression gives, with the span of the assignment; and each
+/// integer a narrowing point narrows, with the span the narrowing traps at, as it enters the
+/// type and before it is checked there ([`Shown`]).
+pub type Observer<'a> = &'a mut (dyn FnMut(Span, Int, Shown) + Send);
+
+/// Why a run shows its observer an integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// An expression gave it, or a compound assignment computed it.
+    Given,
+    /// A narrowing point narrows it (`core-calculus.md`, item 4). A value is not always
+    /// narrowed as soon as it is given: a call's arguments are all evaluated before the first
+    /// is narrowed, so a later argument's value may never reach its narrowing.
+    Narrowed,
+}
+
+/// Calls the function `name` like [`call_leaving`], showing `seen` each integer an expression
+/// gives, exact, before it is narrowed anywhere, and each integer a narrowing point narrows,
+/// in the order of the run and up to the trap that ends it. A claim about the values a
+/// narrowing takes, such as Tier 1's that it always traps (`E0508`), is checked against them.
+pub fn call_observed<'m>(
+    module: &'m CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+    limits: Limits,
+    seen: Observer<'m>,
+) -> Result<(Value, Vec<Value>), Stop> {
+    run(module, name, args, limits, Some(seen))
+}
+
+/// Calls of one module that share one thread: [`with_calls`] hands them to a closure that runs
+/// on a thread with a stack deep enough for `limits.max_depth` calls, and each call runs there,
+/// without a thread of its own. A thread costs more than a short call, on Windows many times
+/// more, so a check that makes hundreds of calls of a function makes them here.
+pub struct Calls<'m> {
+    module: &'m CheckedModule,
+    limits: Limits,
+}
+
+impl<'m> Calls<'m> {
+    /// [`call_observed`], on this thread.
+    pub fn observed<'s>(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        seen: Observer<'s>,
+    ) -> Result<(Value, Vec<Value>), Stop>
+    where
+        'm: 's,
+    {
+        eval::Machine::new(self.module, self.limits, Some(seen)).enter(name, args)
+    }
+}
+
+/// Runs `f` on one thread of the interpreter's, with [`Calls`] of `module` within `limits`;
+/// `Err` when the thread cannot start or stops unexpectedly.
+pub fn with_calls<'m, R: Send>(
+    module: &'m CheckedModule,
+    limits: Limits,
+    f: impl FnOnce(&mut Calls<'m>) -> R + Send,
+) -> Result<R, Stop> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(stack_bytes(limits.max_depth))
-            .spawn_scoped(s, || eval::Machine::new(module, limits).enter(name, args))
+            .spawn_scoped(s, || f(&mut Calls { module, limits }))
+            .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
+            .join()
+            .map_err(|_| Stop::BadArguments("the interpreter stopped unexpectedly".to_string()))
+    })
+}
+
+fn run<'m>(
+    module: &'m CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+    limits: Limits,
+    seen: Option<Observer<'m>>,
+) -> Result<(Value, Vec<Value>), Stop> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(stack_bytes(limits.max_depth))
+            .spawn_scoped(s, || {
+                eval::Machine::new(module, limits, seen).enter(name, args)
+            })
             .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
             .join()
             .unwrap_or_else(|_| {

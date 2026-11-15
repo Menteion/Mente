@@ -1013,7 +1013,7 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-interp/src/eval.rs",
-        "eval",
+        "value",
         "matches!",
         "matches!(op, BinaryOp::Shl | BinaryOp::Shr)",
         "a shift's amount takes no context type; every other operator's right operand does",
@@ -1390,13 +1390,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "matches!",
         "matches!(c, Cond::And(..))",
         "`and` and `or` are the two conditions this arm takes; the test tells them apart",
-    ),
-    (
-        "mente-sema/src/tier1.rs",
-        "bit_not",
-        "wildcard arm",
-        "match (v, t) { _ }",
-        "Tier 1 knows nothing of `~x` for any other value or an unknown type, which is sound",
     ),
     (
         "mente-sema/src/tier1.rs",
