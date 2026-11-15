@@ -18,6 +18,7 @@ import {
   insideAny,
   menteCaseResult,
   printedOutcome,
+  runProcess,
   sandboxed,
   trapText,
   verdictOf,
@@ -638,6 +639,20 @@ test("no process that runs beside the key starts mn but through the sandbox", as
     assert.doesNotMatch(text, direct, `${file} starts mn directly, outside the sandbox`);
   }
   for (const plant of ['runProcess(mn, ["explain", code])', 'spawnSync(tools.mn, ["check"])', "spawn( mn, args)"]) assert.match(plant, direct, plant);
+  // And by what runs, not how it is spelled (the review of 35bbe0f: `const c = tools.mn` and an
+  // environment of `process.env` got past the spelling): runProcess, the harness's one way to
+  // start a process, starts mn itself only while no secret is in reach, and gives no child a
+  // variable that could hold one, whatever environment it is handed.
+  process.env.BENCH_TEST_API_KEY = "secret";
+  try {
+    const c = tools.mn;
+    await assert.rejects(runProcess(c, ["explain", "E0001"], { env: process.env, timeoutMs: 5000 }), /outside the sandbox beside a secret/);
+    await assert.rejects(runProcess(join("target", "release", "mn.exe"), [], { timeoutMs: 5000 }), /outside the sandbox beside a secret/);
+    const p = await runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_API_KEY ?? 'none')"], { env: { ...process.env }, timeoutMs: 30_000 });
+    assert.equal(p.stdout.trim(), "none");
+  } finally {
+    delete process.env.BENCH_TEST_API_KEY;
+  }
 });
 
 test("the processes the harness starts, the agent's programs among them, see no secret", () => {
