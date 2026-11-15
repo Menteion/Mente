@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="site/assets/mente-logo-dark.svg">
+    <img src="site/assets/mente-logo.svg" alt="Mente: an octagon, for the octagon domain Tier 1 proves in, stamped with an M" width="128">
+  </picture>
+</p>
+
 # Mente (`mn`)
 
 **The design of a universal, statically verified, hardware-sympathetic programming language (`.mn`), with an early prototype compiler and its own structure-of-arrays intermediate representation (`MIR`).**

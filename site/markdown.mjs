@@ -337,12 +337,16 @@ export function rewriteLinks(body, context) {
 /** Mente's logo, its light version and its dark one, in `site/assets` and at the book's root. */
 export const LOGO_FILES = ['mente-logo.svg', 'mente-logo-dark.svg'];
 
+/** The mark README.md opens with for GitHub: a centred paragraph holding a `<picture>` whose
+ *  sources name the files under `site/assets/`, which the built site does not hold at that path. */
+const README_MARK = /^<p align="center">\n {2}<picture>\n[\s\S]*?\n {2}<\/picture>\n<\/p>\n\n/;
+
 /** Puts Mente's logo at the top of a page at the book's root, both versions, of which the site's
- *  CSS (`logo.css`) shows the one that suits mdBook's theme. */
+ *  CSS (`logo.css`) shows the one that suits mdBook's theme, in place of the README's own mark. */
 export function withLogo(body) {
   const [light, dark] = LOGO_FILES;
   const img = (file, cls) => `<img class="${cls}" src="${file}" alt="Mente" width="128" height="128">`;
-  return `<p class="site-logo">${img(light, 'site-logo-light')}${img(dark, 'site-logo-dark')}</p>\n\n${body}`;
+  return `<p class="site-logo">${img(light, 'site-logo-light')}${img(dark, 'site-logo-dark')}</p>\n\n${body.replace(README_MARK, '')}`;
 }
 
 /** Inserts `block` after the page's first level-one heading, or at its top if it has none. */
