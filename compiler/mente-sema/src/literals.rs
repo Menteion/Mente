@@ -1019,6 +1019,16 @@ mod tests {
                 Some(vec![(false, 2), (false, 252), (false, 300)]),
             ),
             ("if c { a } else { 1 }", None),
+            // At most `MOST_VALUES` combinations are tried: eight by eight are, eight by nine
+            // are not, however few their sums.
+            (
+                "[0, 1, 2, 3, 4, 5, 6, 7][k] + [0, 1, 2, 3, 4, 5, 6, 7][k]",
+                Some((0..=14).map(|v| (false, v)).collect()),
+            ),
+            (
+                "[0, 1, 2, 3, 4, 5, 6, 7][k] + [0, 1, 2, 3, 4, 5, 6, 7, 8][k]",
+                None,
+            ),
         ] {
             assert_eq!(values_of(expr), expected, "`{}`", expr);
         }

@@ -8407,6 +8407,8 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
             // whose bound is a name gets a suggestion.
             ("pub fn f() -> u8[0..10] = ~3", "", false),
             ("pub fn f() -> u8[200..=255] = ~3", "~3_u8", true),
+            ("pub fn f() -> u8[0..252] = ~3", "", false),
+            ("pub fn f() -> u8[0..253] = ~3", "~3_u8", true),
             ("pub fn f(n: u8) -> u8[0..n] = ~3", "~3_u8", false),
         ] {
             let src = format!("{}{}", decls, f);
