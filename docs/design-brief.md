@@ -311,7 +311,7 @@ These are why the design scored 4 rather than 5. Each problem with a key is an e
 
 **Before every commit**
 
-- Run the four verification commands in `CLAUDE.md`.
+- Run the quick checks of the verification section of `CLAUDE.md`: format, lints, the tests the change adds or changes (each seen to fail without it), and the documentation, policy or corpus checks when those change. CI runs the rest, and its required checks are the gate.
 - Keep repository text in English (`test_repository_text_is_english`).
 - Do not write counts of files, directives or tests into documents.
 

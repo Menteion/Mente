@@ -55,6 +55,10 @@ filter = """
 | (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite))
 | (package(mente-cli) & test(=test_mn_test_mutate_runs_the_demo_gate))
 | (package(mente-cli) & test(=test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds))
+| (package(mente-cli) & test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_generated_programs_of_seeds_0_to_29_are_well_typed_and_replayable))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_generated_programs_of_seeds_30_to_59_are_well_typed_and_replayable))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_generated_programs_of_seeds_60_to_89_are_well_typed_and_replayable))
 """
 test-group = "all-cores"
 threads-required = "num-test-threads"

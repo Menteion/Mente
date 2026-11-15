@@ -351,7 +351,18 @@ fn compare_source(
             })
         }
     };
-    Ok(guarded(|| {
+    Ok(compare_proved(src, &proved, seed, plan, scratch))
+}
+
+/// [`compare_source`] for a program that passes every check, whose checked module is `proved`.
+fn compare_proved(
+    src: &str,
+    proved: &CheckedModule,
+    seed: u64,
+    plan: CallPlan,
+    scratch: Option<&Path>,
+) -> Outcome {
+    guarded(|| {
         let kept = match mente_sema::check_program_without_proofs(src) {
             Ok(m) => m,
             Err(d) => {
@@ -365,9 +376,9 @@ fn compare_source(
                 }
             }
         };
-        let calls = generate::calls(src, &proved, seed, plan);
-        compare_module(&proved, &kept, &calls, scratch)
-    }))
+        let calls = generate::calls(src, proved, seed, plan);
+        compare_module(proved, &kept, &calls, scratch)
+    })
 }
 
 /// A folder of its own for each comparison, since tests run side by side in one process.
@@ -394,6 +405,13 @@ struct Report {
     unproven: u64,
     /// Each program with findings: its name, its text and what was found.
     failures: Vec<(String, String, Vec<Finding>)>,
+    /// How many functions were generated again for a narrowing Tier 1 proved always traps
+    /// (`E0508`), and each such claim with its seed and what the reference interpreter saw
+    /// of it.
+    regenerated: usize,
+    claims: Vec<(u64, generate::AlwaysTraps)>,
+    /// What no generated program may show (`generate::Checked::problems`).
+    problems: Vec<String>,
 }
 
 impl Report {
@@ -454,6 +472,13 @@ impl Report {
                 rejected.join(", ")
             ));
         }
+        if self.regenerated > 0 {
+            s.push('\n');
+            s.push_str(&generate::claims_summary(self.regenerated, &self.claims));
+        }
+        for p in &self.problems {
+            s.push_str(&format!("\nproblem: {}", p));
+        }
         s.push_str(&format!(
             "\n{} calls compared on the reference interpreter, MIR with every check, MIR without \
              the checks Tier 1 proved, and native code; {} of them trap; {} more left out, \
@@ -504,30 +529,44 @@ fn group(mode: Mode) -> &'static str {
     }
 }
 
-/// Generates the programs of seeds `first .. first + count` and compares each, building native
-/// code when `natively`.
+/// Generates the programs of seeds `first .. first + count`, each made to pass every check
+/// (`generate::checked`), and compares each, building native code when `natively`.
 fn run_generated(first: u64, count: u64, plan: CallPlan, natively: bool) -> Report {
     let dir = natively.then(|| scratch("generated"));
     let outcomes = parallel((first..first + count).collect(), |seed| {
-        let p = generate::program(seed);
+        let c = generate::checked(seed);
         let own = dir.as_ref().map(|d| d.join(format!("g{}", seed)));
         if let Some(d) = &own {
             fs::create_dir_all(d).unwrap();
         }
-        let r = compare_source(&p.text, seed, plan, own.as_deref());
+        let text = &c.program.text;
+        let r = match &c.module {
+            Some(proved) => Ok(compare_proved(text, proved, seed, plan, own.as_deref())),
+            // A program the checker still refuses is counted with its codes.
+            None => compare_source(text, seed, plan, own.as_deref()),
+        };
         if let Some(d) = &own {
             fs::remove_dir_all(d).ok();
         }
-        (p, r)
+        (c, r)
     });
     if let Some(d) = &dir {
         fs::remove_dir_all(d).ok();
     }
     let mut report = Report::default();
-    for (p, r) in outcomes {
+    for (c, r) in outcomes {
+        let p = &c.program;
         let name = format!("seed {} ({})", p.seed, group(p.mode));
         report.add(name, group(p.mode), &p.text, r);
+        report.regenerated += c.regenerated;
+        report.problems.extend(c.problems);
+        report
+            .claims
+            .extend(c.claims.into_iter().map(|a| (p.seed, a)));
     }
+    // Whatever its size, a run is held to the bars of its claims.
+    let beyond = generate::beyond_the_bars(count, report.regenerated, &report.claims);
+    report.problems.extend(beyond);
     report
 }
 
@@ -636,34 +675,86 @@ mod tests {
         exhaustive: 64,
     };
 
-    /// The programs of the first seeds of each mode: each seed gives the same text every time,
-    /// most pass every check, Tier 1 included, and together they reach what each mode adds.
-    #[test]
-    fn test_generated_programs_are_well_typed_and_replayable() {
-        let mut accepted = BTreeMap::new();
+    /// The programs of `seeds`, the first of each mode: each seed gives the same text every
+    /// time, a program with a function generated again the same one from its seed and the
+    /// attempt each function is at, every one passes every check, Tier 1 included, and together
+    /// they are held to the bars of every run. The first ninety seeds are checked in three parts
+    /// of thirty, ten of each mode, so that each part stays within half a test's time limit on
+    /// the slowest runner: a seed whose function Tier 1 refuses is checked twice, and a few take
+    /// a second or more in a debug build. That some seed has a function generated again, and so
+    /// a program replayed from its attempts, the coverage test asserts over its own seeds.
+    fn well_typed_and_replayable(seeds: std::ops::Range<u64>) {
+        let count = seeds.end - seeds.start;
+        // Each seed on its own, on as many threads as the machine has: the program that checks,
+        // what Tier 1 proves of it, and whether the same text comes of the seed again.
+        let programs = parallel(seeds.collect(), |seed| {
+            let c = generate::checked(seed);
+            let first = generate::program(seed).text;
+            assert_eq!(first, generate::program(seed).text, "seed {}", seed);
+            if c.regenerated > 0 {
+                let text = &c.program.text;
+                assert_eq!(
+                    *text,
+                    generate::generated(seed, &c.attempts).text,
+                    "seed {}",
+                    seed
+                );
+                assert_ne!(*text, first, "seed {}", seed);
+            }
+            assert!(c.problems.is_empty(), "seed {}: {:?}", seed, c.problems);
+            let Some(m) = &c.module else {
+                panic!("seed {} does not check", seed);
+            };
+            let proven = m
+                .functions
+                .iter()
+                .flatten()
+                .flat_map(|f| &f.obligations)
+                .filter(|o| o.proven)
+                .count();
+            (c.program.seed, proven, c.regenerated, c.claims)
+        });
         let mut proven = 0;
+        let mut functions = 0;
+        let mut claims = Vec::new();
+        for (seed, proved, count, claimed) in programs {
+            proven += proved;
+            functions += count;
+            claims.extend(claimed.into_iter().map(|c| (seed, c)));
+        }
+        // These programs are held to the bars of every run.
+        assert_eq!(
+            generate::beyond_the_bars(count, functions, &claims),
+            Vec::<String>::new()
+        );
+        assert!(proven >= 100, "Tier 1 proves only {} obligations", proven);
+    }
+
+    #[test]
+    fn test_generated_programs_of_seeds_0_to_29_are_well_typed_and_replayable() {
+        well_typed_and_replayable(0..30);
+    }
+
+    #[test]
+    fn test_generated_programs_of_seeds_30_to_59_are_well_typed_and_replayable() {
+        well_typed_and_replayable(30..60);
+    }
+
+    #[test]
+    fn test_generated_programs_of_seeds_60_to_89_are_well_typed_and_replayable() {
+        well_typed_and_replayable(60..90);
+    }
+
+    /// Together the first programs of seeds 0 to 89, thirty of each mode, reach what each mode
+    /// adds: a plain program its statements and operators, a refined one its contracts and
+    /// refinements, which no plain program has. Generating them takes a fraction of a second.
+    #[test]
+    fn test_generated_programs_of_each_mode_hold_what_it_adds() {
         let mut text = BTreeMap::<&str, String>::new();
         for seed in 0..90 {
             let p = generate::program(seed);
-            assert_eq!(p.text, generate::program(seed).text, "seed {}", seed);
-            let entry: &mut (u32, u32) = accepted.entry(group(p.mode)).or_default();
-            entry.1 += 1;
-            if let Ok(m) = mente_sema::check_program(&p.text) {
-                entry.0 += 1;
-                proven += m
-                    .functions
-                    .iter()
-                    .flatten()
-                    .flat_map(|f| &f.obligations)
-                    .filter(|o| o.proven)
-                    .count();
-            }
             text.entry(group(p.mode)).or_default().push_str(&p.text);
         }
-        for (mode, (ok, all)) in &accepted {
-            assert!(ok * 10 >= all * 6, "{}: only {} of {} check", mode, ok, all);
-        }
-        assert!(proven >= 100, "Tier 1 proves only {} obligations", proven);
         for word in [
             "while ", "guard ", "break", "continue", "mut ", "if ", "[", "<<", "%",
         ] {
@@ -776,7 +867,8 @@ mod tests {
         let report = run_generated(0, 9, FEW, true);
         println!("{}", report.summary());
         assert!(report.failures.is_empty(), "{}", report.failures());
-        assert!(report.accepted() >= 5, "{}", report.summary());
+        assert!(report.problems.is_empty(), "{}", report.summary());
+        assert_eq!(report.accepted(), report.programs, "{}", report.summary());
         assert!(report.calls >= 60, "{}", report.summary());
     }
 
@@ -936,9 +1028,12 @@ mod tests {
             "replay one with MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1\n{}",
             report.failures()
         );
+        // No program is left out: each passes every check, a function Tier 1 refused for a
+        // narrowing that always traps having been generated again, and nothing else refuses
+        // one.
         assert!(
-            report.accepted() * 2 >= report.programs,
-            "fewer than half the programs check:\n{}",
+            report.problems.is_empty() && report.accepted() == report.programs,
+            "a generated program does not check, or a run contradicts a claim of Tier 1:\n{}",
             report.summary()
         );
     }
@@ -1004,7 +1099,7 @@ mod tests {
         let seed = env_or("MENTE_GEN_FIRST_SEED", 0);
         let src = match std::env::var("MENTE_GEN_FILE") {
             Ok(path) => fs::read_to_string(path).unwrap(),
-            Err(_) => generate::program(seed).text,
+            Err(_) => generate::checked(seed).program.text,
         };
         let plan = CallPlan {
             random: env_or("MENTE_GEN_CALLS", 12) as usize,

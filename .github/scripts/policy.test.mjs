@@ -494,6 +494,10 @@ const ALL_CORES_TESTS = [
   ["mente-cli", "mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite"],
   ["mente-cli", "test_mn_test_mutate_runs_the_demo_gate"],
   ["mente-cli", "test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds"],
+  ["mente-cli", "mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar"],
+  ["mente-cli", "mir_run::differential::tests::test_generated_programs_of_seeds_0_to_29_are_well_typed_and_replayable"],
+  ["mente-cli", "mir_run::differential::tests::test_generated_programs_of_seeds_30_to_59_are_well_typed_and_replayable"],
+  ["mente-cli", "mir_run::differential::tests::test_generated_programs_of_seeds_60_to_89_are_well_typed_and_replayable"],
 ];
 /// The crate whose functions alone start threads (clippy.toml's disallowed-methods), and which
 /// alone does not inherit the workspace's lints.

@@ -208,6 +208,12 @@ test('the logo goes above the first page, in its light version and its dark one'
   assert.match(block, /<img class="site-logo-light" src="mente-logo\.svg" alt="Mente"/);
   assert.match(block, /<img class="site-logo-dark" src="mente-logo-dark\.svg" alt="Mente"/);
   assert.deepEqual(LOGO_FILES, ['mente-logo.svg', 'mente-logo-dark.svg']);
+  // README.md's own mark, for GitHub, gives way to the site's: one logo, no path the site lacks.
+  const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  assert.match(readme, /^<p align="center">\n {2}<picture>/);
+  const site = withLogo(readme);
+  assert.equal(site.match(/<p class="site-logo">/g).length, 1);
+  assert.ok(!site.includes('<picture>') && !site.includes('site/assets/'), site.slice(0, 400));
 });
 
 test('the dark logo and the favicon are the light logo\'s mark, and the CSS picks one by theme', () => {

@@ -873,6 +873,45 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 = match c {\n  Cell.Held(n: n) => {\n    c = Cell.Empty\n    n\n  }\n  Cell.Empty => 0\n}\n",
         "module m\npub enum Cell {\n  Empty\n  Held(n: u8)\n}\npub fn f(mut c: Cell) -> u8 {\n  val k = match c {\n    Cell.Held(n: n) => n\n    Cell.Empty => 0\n  }\n  c = Cell.Empty\n  k\n}\n",
     ),
+    emitted(
+        "E0233",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A compared literal outside the type it takes",
+        "A literal takes the type of the other operand of the operation it stands in, a \
+         comparison included, and literals alone are an `i64`. A comparison compares a literal \
+         operand in that type, and one whose value lies outside it is an error: with `a: u8`, \
+         `a == 300` would be always false and `a < 256` always true, and `a + b <= 300` for \
+         two `u8`s is an error too, though the exact sum may reach 510. Beside an operand that \
+         stays in its type, as a name does, the comparison is constant: an ordering is \
+         spelled in range, `a <= 255`, which says the same over the type and is \
+         machine-applicable, and an equality has no fix and is to be rewritten, since a suffix \
+         would keep it constant. Beside an operand that may leave its type, the fix states \
+         the literal's type, `a + b <= 300_u16`, so that it is compared exactly, as two \
+         operands of different types are. A literal under arithmetic stands, since arithmetic is exact: `a + 300` is \
+         no error.",
+        "module m\npub fn f(a: u8) -> bool = a < 256\n",
+        "module m\npub fn f(a: u8) -> bool = a <= 255\n",
+    ),
+    emitted(
+        "E0234",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "An operation over literals that traps whenever it runs",
+        "An operation works in the type its literals take, the other operand's, or `i64` for \
+         literals alone, and the checker knows the value of every literal, so an operation \
+         over them that traps does so whenever it runs, and is an error where the module is \
+         checked: a shift by an amount at or past the type's width, `x < 1 << 8` for a `u8` \
+         `x`; a shift whose value leaves the type, `1 << 63`; `~`, `&`, `|` or `^` of a value \
+         outside the type, `~256` beside a `u8`, or a literal an operator narrows into the type \
+         of the operand beside it, `a & 256` for a `u8` `a`; and a division or a remainder by \
+         zero. Arithmetic is exact and stands. Write the value the operation should have, \
+         which is then checked where it lands: `x < 256` is `E0233`, a comparison that is \
+         always true. A suffix stating a wider type, `x < 1_u16 << 8`, would keep the \
+         operation and leave such a comparison constant and silent, so none is suggested.",
+        "module m\npub fn f(x: u8) -> bool = x < 1 << 8\n",
+        "module m\npub fn f(x: u8) -> bool = x < 1 << 7\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

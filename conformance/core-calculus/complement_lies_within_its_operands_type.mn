@@ -1,0 +1,215 @@
+// expect: pass
+module conformance
+// `~x` works on its operand's bits in the operand's type, so its value lies within that type
+// whatever the operand is: Tier 1 proves the narrowing of `~x` into that type, and MIR and
+// native code leave that check out. The narrowing of the operand itself, at the `~`, stays
+// wherever the operand may leave its type (core-calculus.md, items 4 and 8). Each function
+// below is one form of operand, and the calls after them are its edges. Two operands are 16
+// bits wide, where the rule is the same as for 8, so that a comparison takes random arguments
+// rather than every pair.
+pub fn of_difference(a: u16, b: u16) -> u16 = ~(a - b)
+
+pub fn of_sum(a: u16, b: u16) -> u16 = ~(a + b)
+
+pub fn of_product(a: u16, b: u16) -> u16 = ~(a * b)
+
+pub fn of_negation(a: i8) -> i8 = ~(-a)
+
+pub fn of_unsigned_negation(a: u8) -> u8 = ~(-a)
+
+pub fn of_quotient(a: i16, b: i16) -> i16 = ~(a / b)
+
+pub fn of_remainder(a: i16, b: i16) -> i16 = ~(a % b)
+
+pub fn of_shift_left(a: u16, k: u16) -> u16 = ~(a << k)
+
+pub fn of_shift_right(a: i16, k: u16) -> i16 = ~(a >> k)
+
+pub fn of_and(a: u16, b: u16) -> u16 = ~(a & b)
+
+pub fn of_or(a: i16, b: i16) -> i16 = ~(a | b)
+
+pub fn of_xor(a: i16, b: i16) -> i16 = ~(a ^ b)
+
+pub fn of_complement(a: i8) -> i8 = ~(~a)
+
+pub fn of_an_element(xs: [2]u8, i: usize) -> u8 = ~xs[i]
+
+pub fn of_a_call(a: u16, b: u16) -> u16 = ~of_sum(a, b)
+
+// The value lies within the operand's type, which a refinement of all of it states.
+pub fn into_all_of_its_type(a: u16, b: u16) -> u16[0..=65535] = ~(a - b)
+
+pub fn into_all_of_a_signed_type(a: i16, b: i16) -> i16[-32768..=32767] = ~(a * b)
+
+// A name within its type gives more: `~v` is 255 less `v`, and -1 less a signed `v`.
+pub fn exactly(v: u8) -> u8
+  ensures result + v == 255
+= ~v
+
+pub fn exactly_signed(v: i8) -> i8
+  ensures result + v == -1
+= ~v
+
+pub fn of_a_range(v: u8[16..=31]) -> u8[224..=239] = ~v
+
+// A narrower type than the operand's is checked as before, and a wider one holds it.
+pub fn into_a_narrower_type(a: u16, b: u16) -> u8 = ~(a - b)
+
+pub fn into_a_wider_type(a: u16, b: u16) -> u32 = ~(a + b)
+
+pub fn into_a_signed_type(a: u16, b: u16) -> i16 = ~(a & b)
+
+// The complement of an operand that left its type is never reached: the binding after it, the
+// index and the divisor it would have been are not either.
+pub fn then_an_index(xs: [256]u8, a: u8, b: u8) -> u8 = xs[~(a + b)]
+
+pub fn then_a_divisor(a: u16, b: u16) -> u16 = 65535 / ~(a - b)
+
+pub fn in_a_loop(a: u16, b: u16) -> u16 {
+  var m: u16 = a
+  var i: u8 = 0
+  while i < 3
+    decreases 3 - i
+  {
+    m = ~(m - b)
+    i += 1
+  }
+  m
+}
+
+pub fn difference_of_none() -> u16 = of_difference(0, 0)
+
+pub fn difference_of_all() -> u16 = of_difference(65535, 0)
+
+pub fn difference_below_zero() -> u16 = of_difference(0, 1)
+
+pub fn difference_far_below_zero() -> u16 = of_difference(0, 65535)
+
+pub fn sum_of_none() -> u16 = of_sum(0, 0)
+
+pub fn sum_at_the_limit() -> u16 = of_sum(65535, 0)
+
+pub fn sum_past_the_limit() -> u16 = of_sum(65535, 1)
+
+pub fn sum_far_past_the_limit() -> u16 = of_sum(65535, 65535)
+
+pub fn product_of_none() -> u16 = of_product(0, 65535)
+
+pub fn product_at_the_limit() -> u16 = of_product(255, 257)
+
+pub fn product_past_the_limit() -> u16 = of_product(256, 256)
+
+pub fn product_far_past_the_limit() -> u16 = of_product(65535, 65535)
+
+pub fn negation_of_the_least() -> i8 = of_negation(-128)
+
+pub fn negation_next_to_the_least() -> i8 = of_negation(-127)
+
+pub fn negation_of_the_greatest() -> i8 = of_negation(127)
+
+pub fn negation_of_none() -> i8 = of_negation(0)
+
+pub fn unsigned_negation_of_none() -> u8 = of_unsigned_negation(0)
+
+pub fn unsigned_negation_of_one() -> u8 = of_unsigned_negation(1)
+
+pub fn quotient_past_the_limit() -> i16 = of_quotient(-32768, -1)
+
+pub fn quotient_at_the_least() -> i16 = of_quotient(-32768, 1)
+
+pub fn quotient_at_the_greatest() -> i16 = of_quotient(32767, 1)
+
+pub fn quotient_by_none() -> i16 = of_quotient(1, 0)
+
+pub fn remainder_at_the_least() -> i16 = of_remainder(-32768, -1)
+
+pub fn remainder_of_the_greatest() -> i16 = of_remainder(32767, -32768)
+
+pub fn remainder_by_none() -> i16 = of_remainder(-32768, 0)
+
+pub fn shift_into_the_top_bit() -> u16 = of_shift_left(1, 15)
+
+pub fn shift_past_the_limit() -> u16 = of_shift_left(65535, 1)
+
+pub fn shift_by_the_width() -> u16 = of_shift_left(1, 16)
+
+pub fn shift_of_none() -> u16 = of_shift_left(0, 15)
+
+pub fn shift_right_of_the_least() -> i16 = of_shift_right(-32768, 15)
+
+pub fn shift_right_of_the_greatest() -> i16 = of_shift_right(32767, 15)
+
+pub fn shift_right_by_none() -> i16 = of_shift_right(-32768, 0)
+
+pub fn shift_right_by_the_width() -> i16 = of_shift_right(-1, 16)
+
+pub fn and_of_all() -> u16 = of_and(65535, 65535)
+
+pub fn and_of_none() -> u16 = of_and(0, 65535)
+
+pub fn or_of_the_limits() -> i16 = of_or(-32768, 32767)
+
+pub fn or_of_none() -> i16 = of_or(0, 0)
+
+pub fn xor_of_the_limits() -> i16 = of_xor(-32768, 32767)
+
+pub fn xor_of_the_least_twice() -> i16 = of_xor(-32768, -32768)
+
+pub fn complement_twice_of_the_least() -> i8 = of_complement(-128)
+
+pub fn complement_twice_of_the_greatest() -> i8 = of_complement(127)
+
+pub fn element_of_all() -> u8 = of_an_element([255, 0], 0)
+
+pub fn element_of_none() -> u8 = of_an_element([255, 0], 1)
+
+pub fn element_past_the_end() -> u8 = of_an_element([255, 0], 2)
+
+pub fn call_at_the_limit() -> u16 = of_a_call(65535, 0)
+
+pub fn call_past_the_limit() -> u16 = of_a_call(65535, 1)
+
+pub fn all_of_its_type_at_zero() -> u16 = into_all_of_its_type(65535, 0)
+
+pub fn all_of_its_type_below_zero() -> u16 = into_all_of_its_type(0, 1)
+
+pub fn all_of_a_signed_type_at_the_least() -> i16 = into_all_of_a_signed_type(32767, 1)
+
+pub fn all_of_a_signed_type_at_the_greatest() -> i16 = into_all_of_a_signed_type(-32768, 1)
+
+pub fn all_of_a_signed_type_past_the_limit() -> i16 = into_all_of_a_signed_type(-32768, -1)
+
+pub fn exactly_of_the_limits() -> u8 = exactly(0) - exactly(255)
+
+pub fn exactly_signed_of_the_limits() -> i8 = exactly_signed(-128) + exactly_signed(127)
+
+pub fn range_at_its_ends() -> u8 = of_a_range(16) - of_a_range(31)
+
+pub fn narrower_that_fits() -> u8 = into_a_narrower_type(65535, 255)
+
+pub fn narrower_that_does_not() -> u8 = into_a_narrower_type(65535, 256)
+
+pub fn narrower_of_none() -> u8 = into_a_narrower_type(0, 0)
+
+pub fn wider_at_the_limit() -> u32 = into_a_wider_type(0, 0)
+
+pub fn wider_past_the_limit() -> u32 = into_a_wider_type(32768, 32768)
+
+pub fn signed_that_fits() -> i16 = into_a_signed_type(65535, 32768)
+
+pub fn signed_that_does_not() -> i16 = into_a_signed_type(32767, 32767)
+
+pub fn index_at_the_end() -> u8 = then_an_index([7; 256], 0, 0)
+
+pub fn index_never_reached() -> u8 = then_an_index([7; 256], 255, 1)
+
+pub fn divisor_of_none() -> u16 = then_a_divisor(65535, 0)
+
+pub fn divisor_of_one() -> u16 = then_a_divisor(65534, 0)
+
+pub fn divisor_never_reached() -> u16 = then_a_divisor(0, 1)
+
+pub fn loop_that_ends() -> u16 = in_a_loop(65535, 0)
+
+pub fn loop_that_traps() -> u16 = in_a_loop(0, 1)

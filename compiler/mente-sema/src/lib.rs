@@ -12,8 +12,10 @@
 // classifier by nature keeps `#[expect]`, with the reason every variant belongs in its arm.
 #![deny(clippy::wildcard_enum_match_arm)]
 
+pub mod bounds;
 pub mod check;
 pub mod incremental;
+pub mod literals;
 pub mod names;
 pub mod octagon;
 pub mod structs;
@@ -147,6 +149,9 @@ pub struct CheckedFn {
     /// Every obligation Tier 1 recorded in the function, proven or not; none when the module
     /// was checked without it.
     pub obligations: Vec<tier1::Obligation>,
+    /// How many variables Tier 1 gave the function (`tier1::Report`); 0 when the module was
+    /// checked without it.
+    pub variables: usize,
 }
 
 /// A module that passed every check, with its functions in order: those with a body checked,
@@ -330,6 +335,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                 found.extend(typed);
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
+                let mut variables = 0;
                 if prove && found.is_empty() {
                     let f = tier1::Function {
                         syntax,
@@ -345,11 +351,12 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                     };
                     found.extend(report.diagnostics.iter().cloned());
                     obligations = report.obligations.clone();
+                    variables = report.variables;
                     reports.push((p.name.clone(), report));
                     discharged.push(written);
                 }
                 errors.extend(found);
-                Some((resolution, typing, obligations))
+                Some((resolution, typing, obligations, variables))
             }
             _ => None,
         };
@@ -360,11 +367,12 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .into_iter()
         .zip(checked)
         .map(|(p, done)| match (p.syntax, done) {
-            (Some(syntax), Some((resolution, typing, obligations))) => Some(CheckedFn {
+            (Some(syntax), Some((resolution, typing, obligations, variables))) => Some(CheckedFn {
                 syntax,
                 resolution,
                 typing,
                 obligations,
+                variables,
             }),
             _ => None,
         })

@@ -1,0 +1,67 @@
+// expect: pass
+module conformance
+// A literal takes the type of every operand that has one of the arithmetic or bit expression
+// it stands in, the smallest standard type that holds them all (core-calculus.md, item 5), so
+// the order of the operands never changes its value; the expression ends at a comparison, a
+// call's argument, a narrowing point, a branch's value, an index, and a bit operation with an
+// operand of a type.
+fn id(x: i64) -> i64 = x
+
+// The order: a `u8` and a `u32` give `~3` the type `u32` in each spelling.
+pub fn sum_then_complement(a: u8, b: u32) -> u64 = a + b + ~3
+
+pub fn complement_between(a: u8, b: u32) -> u64 = a + ~3 + b
+
+pub fn complement_first(a: u8, b: u32) -> u64 = ~3 + a + b
+
+// A negative literal, which arithmetic leaves exact, in each spelling.
+pub fn negative_between(a: u8, b: u32) -> i64 = a + -1 + b
+
+pub fn negative_last(a: u8, b: u32) -> i64 = a + b + -1
+
+// Operands of one type, and of two that a signed type holds; each pair of 16 bits, so that a
+// run samples its calls rather than making all of them.
+pub fn one_type(a: u16, b: u16) -> u32 = a + ~3 + b
+
+pub fn signed_pair(a: u16, c: i16) -> i32 = a + ~3 + c
+
+pub fn signed_pair_turned(a: u16, c: i16) -> i32 = c + a + ~3
+
+pub fn signed_mask(a: u16, c: i16) -> i32 = a + (-1 & 255) + c
+
+// A bit operation of literals alone takes the whole expression's type; one with an operand of a
+// type works in that type.
+pub fn literal_mask(a: u8, b: u32) -> u64 = a + (~3 & 7) + b
+
+pub fn typed_mask(a: u8, b: u32) -> u64 = (a & ~3) + b
+
+// The boundaries: a comparison's side, a call's argument, a narrowing point, a branch's value
+// and an index.
+pub fn compared_side(a: u8, b: u32) -> bool = a + ~3 == b
+
+pub fn argument(a: u8, b: u32) -> i64 = a + id(~3) + b
+
+pub fn bound(a: u8, b: u32) -> i64 {
+  val m: i64 = ~3
+  a + m + b
+}
+
+pub fn branch(a: u8, b: u32, c: bool) -> u64 = a + (if c { ~3 } else { 0 }) + b
+
+pub fn indexed(a: u8, b: u32, k: usize[0..2]) -> u64 = a + [~3, 1][k] + b
+
+pub fn index_operand(xs: [8]u8, b: u32) -> u64 = xs[~3 & 7] + b
+
+pub fn order_at_0() -> [3]u64 = [sum_then_complement(0, 0), complement_between(0, 0), complement_first(0, 0)]
+
+pub fn order_at_the_limits() -> [3]u64 = [sum_then_complement(255, 4294967295), complement_between(255, 4294967295), complement_first(255, 4294967295)]
+
+pub fn negatives() -> [2]i64 = [negative_between(0, 0), negative_last(255, 1)]
+
+pub fn types() -> [4]i64 = [signed_pair(1, 2), signed_pair_turned(1, 2), signed_mask(0, -32768), one_type(1, 2)]
+
+pub fn masks() -> [2]u64 = [literal_mask(1, 2), typed_mask(255, 2)]
+
+pub fn boundaries() -> [5]i64 = [argument(1, 2), bound(1, 2), branch(1, 2, true), indexed(1, 2, 0), index_operand([1, 2, 3, 4, 5, 6, 7, 8], 2)]
+
+pub fn compared() -> [2]bool = [compared_side(0, 252), compared_side(0, 4294967292)]
