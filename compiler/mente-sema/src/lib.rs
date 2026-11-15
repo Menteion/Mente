@@ -14,6 +14,7 @@
 
 pub mod bounds;
 pub mod check;
+pub mod frames;
 pub mod incremental;
 pub mod literals;
 pub mod names;
@@ -162,6 +163,10 @@ pub struct CheckedModule {
     pub functions: Vec<Option<CheckedFn>>,
     /// The module's structs, with their fields and layouts.
     pub structs: structs::Structs,
+    /// For each function, as `functions` has them, its frame: the bytes a call of it counts
+    /// against the stack budget (`core-calculus.md`, item 25), computed once here for every
+    /// execution path to read.
+    pub frames: Vec<Option<frames::Frame>>,
 }
 
 impl CheckedModule {
@@ -188,6 +193,10 @@ fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
     let b = bodies(src, &module, prove);
     let (functions, body_errors, structs) = (b.functions, b.errors, b.structs);
     combine(verify_module_with(&module, &structs), body_errors)?;
+    let frames = functions
+        .iter()
+        .map(|f| f.as_ref().map(|f| frames::frame(f, &structs)))
+        .collect();
     Ok(CheckedModule {
         names: module
             .items
@@ -204,6 +213,7 @@ fn program(src: &str, prove: bool) -> Result<CheckedModule, Vec<Diagnostic>> {
             .collect(),
         functions,
         structs,
+        frames,
     })
 }
 

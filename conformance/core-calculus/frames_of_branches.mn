@@ -1,0 +1,132 @@
+// expect: pass
+// frame: pick 2065
+// frame: both 68
+// frame: keep 2081
+// frame: tail 1089
+// frame: arm 2090
+// frame: chain 3074
+// frame: ladder 3066
+// frame: first 2081
+// frame: scrutinee 106
+// frame: unfinished 67
+// frame: after 1076
+// frame: ac 99
+// frame: un 67
+// frame: paused 2073
+module conformance
+// Item 25: of the branches of an `if` or the arms of a `match` only the one that holds the
+// most counts; a condition, and the left operand of `and`, is a statement of its own; what a
+// branch's block makes and consumes in its last expression ends with the block, while an arm
+// written as an expression keeps it to the end of the statement; an `else if` is
+// `else { if ... }`, so a chain holds no more for its length; and a scrutinee is held beside
+// its arm and the value made from it.
+pub enum Msg {
+  Empty(pad: u8)
+  Big(data: [1000]u8)
+}
+
+fn m1() -> [1000]u8 = [1_u8; 1000]
+
+fn make() -> [1000]u8 = [0_u8; 1000]
+
+fn wide() -> [1000]u8 = [2_u8; 1000]
+
+fn get() -> Msg = Msg.Empty(pad: 0_u8)
+
+fn take_flag(c: bool, w: [1000]u8) -> u64 = 0_u64
+
+fn pause(n: u64) {
+  _ = n
+}
+
+fn fill(mut t: [1000]u8) {
+  t[0] = 1_u8
+}
+
+fn sum(xs: [1000]u8) -> u64 = 0_u64
+
+fn pair(a: u64, b: [1000]u8) -> u64 = a
+
+fn pair2(a: [1000]u8, b: [1000]u8) -> u64 = 0_u64
+
+pub fn pick(c: bool) -> [1000]u8 = if c {
+  m1()
+} else {
+  m1()
+}
+
+pub fn both(a: bool, b: bool) -> bool = a and b
+
+pub fn keep(c: bool, xs: [1000]u8) -> [1000]u8 = if c {
+  var t = xs
+  fill(mut t)
+  t
+} else {
+  xs
+}
+
+pub fn tail(c: bool) -> u64 = pair(if c {
+  sum(make())
+} else {
+  0_u64
+}, wide())
+
+pub fn arm(k: u8) -> u64 = pair(match k {
+  0 => sum(make())
+  _ => 0_u64
+}, wide())
+
+pub fn chain(a: bool, b: bool) -> u64 = pair2(if a {
+  m1()
+} else if b {
+  m1()
+} else {
+  m1()
+}, wide())
+
+// Alone, a chain holds what one link of two branches holds, and the value the outer `if` makes
+// from the inner one's: 3,000 bytes, however many links it has.
+pub fn ladder(a: bool, b: bool) -> [1000]u8 = if a {
+  m1()
+} else if b {
+  m1()
+} else {
+  m1()
+}
+
+pub fn first(m0: [1000]u8) -> [1000]u8 = match get() {
+  Msg.Empty(pad: _) => m0
+  Msg.Big(data: d) => d
+}
+
+// The sum is of no one type and is not narrowed for the count: a scrutinee enters its own type.
+// The `requires` clause, which holds 9 bytes on entry, lets Tier 1 prove the sum a `u32`.
+pub fn scrutinee(a: u8, b: u32) -> u64
+  requires b < 100
+= match a + b {
+  0 => 1_u64
+  _ => 2_u64
+}
+
+// `a and b` is `if a { b } else { false }`: its `else` holds 2, the `false` and the value,
+// more than a `b` that holds nothing; and the value it gives is held as an operand's is.
+pub fn unfinished(a: bool) -> bool = a and todo("r")
+
+pub fn after(a: bool, b: bool) -> u64 = take_flag(a and b, wide())
+
+pub fn ac(a: bool, x: u64, y: u64) -> bool = a and x < y
+
+// As a condition, a statement of its own, `a and todo("r")` holds the 2 of its `else`.
+pub fn un(a: bool) {
+  if a and todo("r") {
+  }
+}
+
+// A branch's block runs its earlier statements, an expression statement among them, each a
+// statement of its own, before its last expression makes the value the `if` makes its own from.
+pub fn paused(c: bool, xs: [1000]u8) -> [1000]u8 = if c {
+  pause(1_u64)
+  wide()
+} else {
+  xs
+}

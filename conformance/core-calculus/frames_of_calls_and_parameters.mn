@@ -1,0 +1,78 @@
+// expect: pass
+// frame: spin 64
+// frame: down 84
+// frame: fact 120
+// frame: mix 98
+// frame: later 64
+// frame: params 96
+// frame: walk 100
+// frame: reset 81
+// frame: element_of_call 77
+// frame: field_of_call 67
+// frame: field_read 73
+// frame: length_of_call 76
+// frame: length_of_place 96
+module conformance
+// Item 25's frame: 64 bytes for the call, what the parameters count, and the most the body
+// holds at once. A frame that holds nothing is 64; `down` does not divide the budget; an
+// integer of no one type holds 16 before it lands; an aggregate parameter counts 8, an
+// address, whatever its size. The recursions are private: the three execution paths are
+// compared on public functions, and native code does not count its stack yet.
+pub struct Two {
+  a: u8
+  b: u8
+}
+
+fn spin() {
+  spin()
+}
+
+fn down(n: u32) -> u32 {
+  if n == 0 {
+    return 0
+  }
+  down(n - 1)
+}
+
+fn fact(n: u64) -> u64 {
+  if n == 0 {
+    return 1
+  }
+  n * fact(n - 1)
+}
+
+pub fn mix(a: u8, b: u32) -> u64 = a + b
+
+pub fn later() -> u64 {
+  todo("r")
+}
+
+pub fn params(a: [16]u8, b: [17]u8, c: Two) -> u64 = 0_u64
+
+fn walk(xs: [1000]u8, n: u32) -> u32 {
+  if n == 0 {
+    return 0
+  }
+  walk(xs, n - 1)
+}
+
+// A `mut` parameter counts 8 bytes, whatever its type; a read of a value that is no place
+// holds that value, its index and what it reads.
+pub fn reset(mut n: u8) {
+  n = 0
+}
+
+fn make4() -> [4]u8 = [1_u8, 2_u8, 3_u8, 4_u8]
+
+fn mk_two() -> Two = Two(a: 1_u8, b: 2_u8)
+
+pub fn element_of_call() -> u8 = make4()[1]
+
+pub fn field_of_call() -> u8 = mk_two().a
+
+pub fn field_read(t: Two) -> u8 = t.a
+
+pub fn length_of_call() -> usize = make4().len
+
+// A `.len` of a place reads no element: it holds its `usize`, as a field read of that type does.
+pub fn length_of_place(xs: [1000]u8) -> usize = xs.len + 1

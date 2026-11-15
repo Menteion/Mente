@@ -1,0 +1,2557 @@
+# The programs of the reviews of pull request 136, the stack budget, and their frames
+#
+# Each program the fourteen reviews of `core-calculus.md` item 25 used, with what it waits on.
+# `waits: none` marks a program the checker runs today: its source follows `---`, and
+# `frames:` states the frame item 25 gives each function named, which the test
+# `test_review_programs_give_the_frames_they_state` in `compiler/mente-sema/tests/frames.rs`
+# holds the checker to. Every figure here is derived from item 25's equations by hand, or by
+# the reviews' scripts written before the checker counted, never by the checker, which this
+# list judges (Norman's decision `executable-rule-models`, 2026-11-15); a new entry's frames
+# are derived the same way. A program that waits names the construct it needs (`?T`,
+# `T ! E`, views, `List<T>`, `String`, `own`); the pull request that brings the construct
+# gives it its source and its frames. `refused` marks a program the reviews settled as an
+# error, which has no frame; the constructs after it are what it needs to be refused, and the
+# pull request that brings them makes it a conformance program that fails. No two entries
+# hold the same program. `outcome` and `was` are the reviews' readings: in rounds 1 to 10,
+# figures of the count as it stood before the amendment of 2026-11-15 (A').
+
+== 1.1
+round: 1 H1; 2 sound
+probe: Is `v` a binding, a projection, or is `make()` an initializer
+program: `guard val v = make()`, and the same in `if val` (no types given)
+outcome: accepted, no figure: the review gave no types. It counts as the `match` it translates to, the scrutinee held while the rest of the block runs (text: "`match`, `if val`, `guard val`"; item 24). Typed instance: row 4.5
+was: three readings
+waits: ?T
+
+== 1.2
+round: 1 H1
+probe: A call of type `T ! E` had no size
+program: `val x = f()!`, with round 2's types `f() -> u64 ! E`, `E` of one byte
+outcome: accepted: holds 33, the binding's 8 and the 25 of `f()!` (list/own, by `M = size(T) + m'(e)`; the 25 is text: "`catch`, `!`")
+was: undecided
+waits: T ! E
+
+== 1.3
+round: 1 H1; 2 sound
+probe: What a projection holds
+program: `p?.name`
+outcome: accepted: holds 8, an address or none, where it is read in place (text: table, row "A projection"). Where it lands in a binding, `val n = p?.name` with `name: String`, item 15 refuses it as item 12's implicit copy
+was: undecided
+waits: ?T
+
+== 1.4
+round: 1 H1; 2 M3
+probe: A view made, and whether its bounds are operands
+program: `xs[a..b]`, `xs` a place, `a` and `b` of `u64`
+outcome: accepted: holds 32, the two bounds and the view's 16 (list/own; rule in text: table, row "A view made")
+was: 32 or 16
+waits: views
+
+== 1.5
+round: 1 H1; 2 sound
+probe: Its count
+program: a string literal
+outcome: accepted: holds 16, a `str` (text: table, row "A string literal")
+was: undecided
+waits: views
+
+== 1.6
+round: 1 H1; 2 sound
+probe: Its count
+program: `none`
+outcome: accepted: holds the size of the `?T` it lands in, and nothing beside `==` or `!=` or as the argument of a read-only parameter passed as an address or none (text: table, row "`none`"). Typed instances: rows 4.7 and 6.15
+was: undecided
+waits: ?T
+
+== 1.7
+round: 1 H1
+probe: Whether the 24-byte `String` counts, since operations "count nothing"
+program: `take(String.from(s))`, `s: str`
+outcome: accepted: holds 32, 8 for `s` and 24 for the `String`, with `take` giving nothing or a `u64` (list/own; rule in text: table, row of a call: "An operation opens no frame; its value is held as any value is")
+was: 0 or 24
+waits: String, views
+
+== 1.8
+round: 1 H1; 2 sound
+probe: Source tree or kernel
+program: `_ = g()`, `g() -> u64`
+outcome: accepted: holds 16, a binding of 8 and the value (list/own, by the stated `_ = e ... so M = size(T) + m(e)`; text: "A block" has the rule)
+was: 0 as written, 8 as its translation
+waits: none
+frames: f 80
+---
+module programs
+fn g() -> u64 = 1_u64
+
+pub fn f() {
+  _ = g()
+}
+
+== 1.9
+round: 1 H1
+probe: The conversion row named only arrays
+program: `f(big)` into a read-only `p: ?Big`
+outcome: accepted: where `?Big` is over 16 bytes the argument is passed where it lies, and the call holds 16 with a `u64` result, as `use(xs)` of row 5.2 does (text: "A projection"; `mutable-value-semantics.md`, item 1). The review gave `Big` no size
+was: undecided
+waits: ?T
+
+== 1.10
+round: 1 H2
+probe: A copy item 12 requires and no part counted
+program: `fn bump(mut xs: [1000000]u8) -> u8 { xs[0] = 9 1 }` / `fn two(xs: [1000000]u8, k: u8) -> u8 = xs[0] + k` / `fn keeps(mut xs: [1000000]u8) -> u8 = two(xs, bump(mut xs))`
+outcome: accepted: `two(xs, bump(mut xs))` holds 1,000,009, `xs` being a value kept, and `keeps` has a frame of 1,000,081, under the budget (list/own; rule in text: "A value kept", and the conformance list names `two(xs, bump(mut xs))`). The frames of `bump` and `two` were not computed
+was: `keeps` counted 72
+waits: none
+frames: keeps 1000082 bump 81 two 84
+note: A' gave keeps 1,000,081: under the amendment `bump`'s value lives to the end of the statement.
+---
+module programs
+fn bump(mut xs: [1000000]u8) -> u8 {
+  xs[0] = 9_u8
+  1_u8
+}
+
+fn two(xs: [1000000]u8, k: u8) -> u8 = xs[0] + k
+
+pub fn keeps(mut xs: [1000000]u8) -> u8 = two(xs, bump(mut xs))
+
+== 1.11
+round: 1 H2; 2 M3; 4, 5, 6 reproduced
+probe: An initializer converted into its binding
+program: `val a: [N]u64 = make8()`; round 2 has `val a: [4]u64 = make8()`; the text spells it `val a: [4]u64 = make()` with `make() -> [4]u8`
+outcome: accepted: holds 68, the binding's 32, the call's 4 and the 32 it is narrowed into (text: "A block")
+was: uncounted; then 68 or 64
+waits: none
+frames: f 132
+---
+module programs
+fn make() -> [4]u8 = [1_u8, 2_u8, 3_u8, 4_u8]
+
+pub fn f() -> u64 {
+  val a: [4]u64 = make()
+  a[0]
+}
+
+== 1.12
+round: 1 H3
+probe: Recursion with the data, in no declared call
+program: `struct Node { kids: List<Node> }`, freed, cloned or printed
+outcome: not determined: item 25 leaves it open (text: "Left open", entry `recursive-data-descent`). There is no call, so no frame to count
+was: a million levels uncounted
+waits: List<T>, String
+
+== 1.13
+round: 1 M6
+probe: Whether a proven clause's call runs and can trap
+program: `@prove fn need(x: u32) -> u32 requires pos(x)` (no body given)
+outcome: accepted, no figure: the review gave no body and no `pos`. The clause's call is counted in `need`'s frame on every path, proven or not (text: the bullet "A clause is evaluated where it is written", and the conformance list's "a call inside a callee's `requires` clause"). With `pos(x: u32) -> bool` the clause holds 5 (list/own)
+was: the review saw `stack-overflow` at the clause's call on the interpreters only
+waits: no program text
+
+== 1.14
+round: 1 LOW; 2 M5, sound; 5, 6 reproduced
+probe: A figure for the run's first call against one under `main`
+program: `fn spin() { spin() }`
+outcome: accepted: frame 64; 16,384 calls open, traps at its 16,385th; called from a `main` that holds nothing it traps at its 16,384th (text: conformance list)
+was: one figure for both
+waits: none
+frames: spin 64
+---
+module programs
+pub fn spin() {
+  spin()
+}
+
+== 2.1
+round: 2 H1, M6; 4 reproduced
+probe: A field kept against a later field's `mut` call
+program: `use(Pair(a: xs, b: pick(mut xs, make4000())))`, `xs: [1000]u8`; the text spells it `use(Pair(a: xs, b: pick(mut xs, make())))`, `make()` of 4,000 bytes
+outcome: accepted: holds 5,009 where `pick` gives one byte, which the review's 4,017 implies (list/own). The text states only that the field `a` holds 1,000 while `b` is evaluated (text: "A value kept"). The fourth reviewer's script takes `pick` as giving `[4000]u8`, and then it holds 10,000 (list/R4). See Notes
+was: 4,017 counted, 5,009 held
+waits: none
+frames: f 6090
+note: The reviews typed `pick`'s result two ways; here it gives a `u8`.
+---
+module programs
+pub struct Pair {
+  a: [1000]u8
+  b: u8
+}
+
+fn make() -> [4000]u8 = [0_u8; 4000]
+
+fn pick(mut xs: [1000]u8, big: [4000]u8) -> u8 = 1_u8
+
+fn use(p: Pair) -> u64 = 0_u64
+
+pub fn f(mut xs: [1000]u8) -> u64 = use(Pair(a: xs, b: pick(mut xs, make())))
+
+== 2.2
+round: 2 H1
+probe: The same gap in every operand list
+program: (no program text) an array literal's element, a variant's payload and the left operand of `==` on arrays, each before a later operand's `mut` call
+outcome: accepted, no figure: no program was given. The rule of a value kept names each list (text: "A value kept", conformance list). An array literal with types: row 4.20
+was: uncounted
+waits: no program text
+
+== 2.3
+round: 2 M2; 4, 5, 6 reproduced
+probe: Owning temporaries ended too early
+program: `total(make()) + total(make())`, `make() -> [100]String`
+outcome: accepted: holds 4,824 (text: "An owning value no binding holds")
+was: 2,416 or 4,816
+waits: String
+
+== 2.4
+round: 2 M3; 4, 5, 6 reproduced
+probe: A binding beside its initializer's operands
+program: `val a = n + 1`, `n: u64`
+outcome: accepted: holds 32 (text: "A block")
+was: 32 or 24
+waits: none
+frames: f 104
+---
+module programs
+pub fn f(n: u64) -> u64 {
+  val a = n + 1
+  a
+}
+
+== 2.5
+round: 2 M3
+probe: The same
+program: (no program text) three nested `val`s with `[100]u8` and `[300]u8` branches
+outcome: not determined: the program is not in the review as relayed
+was: 667 or 666
+waits: no program text
+
+== 2.6
+round: 2 M3; 4, 5, 6 reproduced
+probe: "twice" for the statement or in sequence
+program: `x += f(x)`, `f(u64) -> u64`
+outcome: accepted: holds 24 (text: "An assignment")
+was: 32 or 24
+waits: none
+frames: g 112
+---
+module programs
+fn f(x: u64) -> u64 = x
+
+pub fn g(x0: u64) -> u64 {
+  var x = x0
+  x += f(x)
+  x
+}
+
+== 2.7
+round: 2 M3; 3 L1; 4, 5, 6 reproduced
+probe: The same, and the types of the example
+program: `xs[i] += f(mut ys)`, `xs` of `u32` elements, `i: usize`, `f` giving a `u32`
+outcome: accepted: holds 24 (text: "An assignment"). With `f` giving a `u64`, the variant round 3 asked about, the equations give 36, the sum being of no one type (list/own)
+was: 28, 24 or 20; round 3: 28 with a `u64`
+waits: none
+frames: g 116
+---
+module programs
+fn f(mut ys: [2]u32) -> u32 = ys[0]
+
+pub fn g(i: usize) -> u32 {
+  var xs: [2]u32 = [1_u32, 2_u32]
+  var ys: [2]u32 = [3_u32, 4_u32]
+  xs[i] += f(mut ys)
+  xs[0]
+}
+
+== 2.8
+round: 2 M3; 4, 5, 6 reproduced
+probe: An `if`'s value beside its branch's
+program: `if c { m1() } else { m2() }` of `[1000]u8`
+outcome: accepted: holds 2,000 (text: "`if`, `and`, `or`, `guard`")
+was: 2,000 or 1,000
+waits: none
+frames: f 2065
+---
+module programs
+fn m1() -> [1000]u8 = [1_u8; 1000]
+
+fn m2() -> [1000]u8 = [2_u8; 1000]
+
+pub fn f(c: bool) -> [1000]u8 = if c {
+  m1()
+} else {
+  m2()
+}
+
+== 2.9
+round: 2 M3; 4, 5, 6 reproduced
+probe: `catch` had no entry under what is held at once
+program: `f()!`, `f() -> u64 ! E`, `E` of one byte
+outcome: accepted: holds 25, the call 17 (text: "`catch`, `!`")
+was: 25 or 17
+waits: T ! E
+
+== 2.10
+round: 2 L8; 4, 5, 6 reproduced
+probe: 8 or 16 bytes a call for a large value passed down
+program: `walk(xs: [1000]u8, n: u32)`, which passes `xs` on; the scripts give it `down`'s body with `xs` as a second argument
+outcome: accepted: frame 96 (text: conformance list)
+was: 96, against a stated "8 bytes a call"
+waits: none
+frames: walk 100
+---
+module programs
+pub fn walk(xs: [1000]u8, n: u32) -> u32 {
+  if n == 0 {
+    return 0
+  }
+  walk(xs, n - 1)
+}
+
+== 2.11
+round: 2 L8, sound; 4, 5, 6 reproduced
+probe: The stated depth figures
+program: `fn down(n: u32) -> u32 { if n == 0 { return 0 } down(n - 1) }`
+outcome: accepted: frame 80, its last statement 12, its condition 9; 13,107 calls open, traps at the 13,108th (text: the paragraph "So `fn down` ..." and conformance list)
+was: 80
+waits: none
+frames: down 84
+---
+module programs
+pub fn down(n: u32) -> u32 {
+  if n == 0 {
+    return 0
+  }
+  down(n - 1)
+}
+
+== 2.12
+round: 2 L11
+probe: What a parameter counts
+program: a read-only parameter `[16]u8`, one `[17]u8`, and one that is a 2-byte struct
+outcome: accepted: each counts 8 (text: the bullet "A parameter counts what crosses the call")
+was: 16, 8 and 2
+waits: none
+frames: f 96
+---
+module programs
+pub struct Two {
+  a: u8
+  b: u8
+}
+
+pub fn f(a: [16]u8, b: [17]u8, c: Two) -> u64 = 0_u64
+
+== 2.13
+round: 2 sound; 4, 5, 6 reproduced
+probe: Confirmed
+program: `fn fact(n: u64) -> u64 { if n == 0 { return 1 } n * fact(n - 1) }`
+outcome: accepted: frame 104, `n * fact(n - 1)` holds 32; 10,082 calls open, traps at the 10,083rd (text: the paragraph "So `fn down` ..." and conformance list)
+was: 104, the 10,083rd call
+waits: none
+frames: fact 120
+---
+module programs
+pub fn fact(n: u64) -> u64 {
+  if n == 0 {
+    return 1
+  }
+  n * fact(n - 1)
+}
+
+== 2.14
+round: 2 sound; 4, 5, 6 reproduced
+probe: Confirmed
+program: `g(h(a / 2), h(a / 3), h(a / 4))`, all `u64`
+outcome: accepted: holds 40 (text: "An expression")
+was: 40
+waits: none
+frames: f 176
+---
+module programs
+fn h(x: u64) -> u64 = x
+
+fn g(a: u64, b: u64, c: u64) -> u64 = a
+
+pub fn f(a: u64) -> u64 = g(h(a / 2), h(a / 3), h(a / 4))
+
+== 2.15
+round: 2 sound
+probe: Confirmed
+program: (no program text) "the enum `match`, the `while`, `requires`/`ensures`"
+outcome: accepted, no figure: no program was given
+was: sound
+waits: no program text
+
+== 3.1
+round: 3 H1; 4, 5, 6 reproduced
+probe: A block's value as an address into a binding that has ended
+program: `fn pick(c: bool, xs: [1000]u8) -> [1000]u8 {` / ` if c { var t = xs fill(mut t) t } else { xs }` / `}`
+outcome: accepted: the `if` holds 2,008 (text: "`if`, `and`, `or`, `guard`"); frame 2,081 (list/R4)
+was: 1,081 or 2,081
+waits: none
+frames: pick 2081
+---
+module programs
+fn fill(mut t: [1000]u8) {
+  t[0] = 1_u8
+}
+
+pub fn pick(c: bool, xs: [1000]u8) -> [1000]u8 {
+  if c {
+    var t = xs
+    fill(mut t)
+    t
+  } else {
+    xs
+  }
+}
+
+== 3.2
+round: 3 H2; 4, 5, 6 reproduced
+probe: A scrutinee held while the `match`'s value is made
+program: `enum Msg { Empty(pad: u8), Big(data: [1000]u8) }` / `fn first(m0: [1000]u8) -> [1000]u8 {` / ` match get() { Msg.Empty(pad: _) => m0 Msg.Big(data: d) => d }` / `}`, `get() -> Msg`
+outcome: accepted: the `match` holds 2,009 (text: "`match`, `if val`, `guard val`"); frame 2,081 (list/R4)
+was: 1,081 or 2,081
+waits: none
+frames: first 2081
+---
+module programs
+pub enum Msg {
+  Empty(pad: u8)
+  Big(data: [1000]u8)
+}
+
+fn get() -> Msg = Msg.Empty(pad: 0_u8)
+
+pub fn first(m0: [1000]u8) -> [1000]u8 {
+  match get() {
+    Msg.Empty(pad: _) => m0
+    Msg.Big(data: d) => d
+  }
+}
+
+== 3.3
+round: 3 M1; 4 reproduced
+probe: An owning temporary in a condition
+program: `while total(make()) > i { val b = fill() i += use(b) }`, `make() -> [100]String`, `fill() -> [4000]u8`, in `fn () { var i: u64 = 0 ... }` as the fourth reviewer's script has it
+outcome: accepted: the loop holds 8,000 and its condition 2,417; frame 8,072 (list/R4; rule in text: "An owning value no binding holds", a condition ends as a statement does)
+was: 8,072 or 10,472
+waits: String
+
+== 3.4
+round: 3 M1; 4, 5, 6 reproduced
+probe: The same in each side of `and`
+program: `total(make()) > 0 and total(make()) > 1`
+outcome: accepted: holds 2,417 (text: "An owning value no binding holds")
+was: 4,817 or 2,417
+waits: String
+
+== 3.5
+round: 3 M2; 4, 5, 6 reproduced
+probe: Where a call's arguments are narrowed
+program: `f(wide(), make())`, `wide() -> [1000]u64` into `a: [1000]u8`, `make() -> [1000]u8`
+outcome: accepted: holds 10,000 (text: "A call"); frame 10,064 as the body of a function of no parameters (list/R4)
+was: 9,064, 10,064 or 10,072
+waits: none
+frames: g 10072
+---
+module programs
+fn wide() -> [1000]u64 = [0_u64; 1000]
+
+fn make() -> [1000]u8 = [0_u8; 1000]
+
+fn f(a: [1000]u8, b: [1000]u8) -> u64 = 0_u64
+
+pub fn g() -> u64 = f(wide(), make())
+
+== 3.6
+round: 3 M3; 4 finding 9; 4, 5, 6 reproduced
+probe: An operator on two integer types
+program: `fn mix(a: u8, b: u32) -> u64 { a + b }`
+outcome: accepted: frame 93; `a + b` holds 21, and 24 where it is narrowed into a `u64` (text: the paragraph "So `fn down` ..." and "An expression")
+was: 93, 82 or 81
+waits: none
+frames: mix 98
+---
+module programs
+pub fn mix(a: u8, b: u32) -> u64 {
+  a + b
+}
+
+== 3.7
+round: 3 M4; 4, 5, 6 reproduced
+probe: An arm's value beside the `catch`'s
+program: `f() catch { E.Bad => big() }`, `f() -> [1000]u8 ! E`, `big() -> [1000]u8`
+outcome: accepted: holds 3,009 (text: "`catch`, `!`"); frame 3,073 as the body of a function of no parameters (list/R4)
+was: 2,073 or 3,073
+waits: T ! E
+
+== 3.8
+round: 3 M5; 5 M2; 4, 5, 6 reproduced
+probe: What a projection is as a read-only argument
+program: `use(p?.big)`, `big: [1000]u8`; round 5 has `p: ?Pair`
+outcome: accepted: holds 16, the address and the call's value (text: "A projection"; `mutable-value-semantics.md`, item 1); frame 88 with `p` its one read-only parameter (list/R5)
+was: frame 88 with a 1,001-byte temporary uncounted (round 3); 1,009 held, as the text of round 4 stated; 16 stated and 1,009 argued (round 5)
+waits: ?T
+
+== 3.9
+round: 3 L2; 4, 5, 6 reproduced
+probe: A base that "holds nothing" and is kept
+program: `xs[bump(mut xs)]`, `xs: [1000]u64`
+outcome: accepted: holds 8,016 (text: "A value kept")
+was: 16 or 8,016
+waits: none
+frames: g 8096
+---
+module programs
+fn bump(mut xs: [1000]u64) -> usize {
+  xs[0] = 1_u64
+  0_usize
+}
+
+pub fn g(mut xs: [1000]u64) -> u64 = xs[bump(mut xs)]
+
+== 3.10
+round: 3 L3; 4, 5, 6 reproduced
+probe: Whether a refinement is another integer type
+program: `val a: u64[0..10] = n`, `n: u64`
+outcome: accepted: holds 16 (text: "A block")
+was: 16 or 24
+waits: none
+frames: f 88
+---
+module programs
+pub fn f(n: u64[0..10]) -> u64 {
+  val a: u64[0..10] = n
+  a
+}
+
+== 3.11
+round: 3 L4; 4, 5, 6 reproduced
+probe: Whether `todo`'s reason is an operand
+program: `fn f() -> u64 { todo("r") }`
+outcome: accepted: frame 64 (text: the paragraph "So `fn down` ...")
+was: 64 or 80
+waits: none
+frames: f 64
+---
+module programs
+pub fn f() -> u64 {
+  todo("r")
+}
+
+== 3.12
+round: 3 LOW, last
+probe: Why a view is left out of the kept rule
+program: `f(xs[..], g(mut xs))`
+outcome: refused: item 17, the freeze of a view no binding holds. Item 25 names the program as an error (text: "A value kept"). Item 17 states no error code for it
+was: an error, unstated in the item
+waits: refused, views
+
+== 4.1
+round: 4 finding 1, script A17; 5, 6 reproduced
+probe: `l(e)` through an arm
+program: `fn g(k: u8) -> u64 { pair(match k { 0 => total(make()) _ => 0 }, wide()) }`, `make() -> [100]String`, `wide() -> [1000]u8`
+outcome: accepted: the call holds 2,409 (text: "An owning value no binding holds"); frame 2,474 (list/R5)
+was: 2,482 or 3,481
+waits: String
+
+== 4.2
+round: 4 finding 1, script A2; 5 reproduced
+probe: The same through a block branch
+program: `pair(if c { total(make()) } else { 0 }, wide())`, in `fn g(c: bool) -> u64` as the scripts have it, `wide() -> [1000]u8`
+outcome: accepted: holds 2,408; frame 2,473 (list/R5; rule in text: "An owning value no binding holds", a branch ends as a statement does)
+was: 2,481 or 3,481
+waits: String
+
+== 4.3
+round: 4 finding 2, script A4; 5, 6 reproduced
+probe: A `?.` chain had no row
+program: `struct Outer { a: Inner }`, `struct Inner { big: [1000]u8 }` / `fn g(p: ?Outer) -> u64 { if val x = p?.a?.big { use(x) } else { 0 } }`, `use(x: [1000]u8) -> u64`
+outcome: accepted: frame 96 (text: "A projection")
+was: 1,089 or 96
+waits: ?T
+
+== 4.4
+round: 4 finding 3, script A14; 5, 6 reproduced
+probe: `p?.f` as a value kept
+program: `var p = p0 use2(p?.big, wipe(mut p, wide()))`, `wide() -> [1000]u64`, `p0` a read-only parameter of 1,001 bytes as the scripts have it
+outcome: accepted: the call holds 9,017, its first argument 1,001 (text: "A value kept"); frame 10,090 (list/R5)
+was: 9,097 or 10,090
+waits: ?T
+
+== 4.5
+round: 4 finding 4, script A13; 5, 6 reproduced
+probe: `guard val` against its translation
+program: `fn g() -> [1000]u8 { guard val v = find() else { unreachable("x") } v }`, `find() -> ?[1000]u8`
+outcome: accepted: frame 2,073 (text: "`match`, `if val`, `guard val`")
+was: 1,073 or 2,073
+waits: ?T, views
+
+== 4.6
+round: 4 finding 5, script A15; 5, 6 reproduced
+probe: `.len` of an indexed place named no index
+program: `fn g(rows: [4][8]u8) -> usize { rows[pick(wide())].len }`, `wide() -> [1000]u64`
+outcome: accepted: holds 8,008 (text: "`.len` and a view"); frame 8,080 (list/R5)
+was: 80 or 8,080
+waits: none
+frames: g 8088
+---
+module programs
+fn wide() -> [1000]u64 = [0_u64; 1000]
+
+fn pick(w: [1000]u64) -> usize = 0_usize
+
+pub fn g(rows: [4][8]u8) -> usize {
+  rows[pick(wide())].len
+}
+
+== 4.7
+round: 4 finding 6, script A16; 5, 6 reproduced
+probe: `none` beside `==`
+program: `if xs == none { 1 } else { 0 }`, `xs: ?[1000]u8`
+outcome: accepted: holds 16, the comparison 9 (text: "`if`, `and`, `or`, `guard`"); frame 88 with `xs` its one read-only parameter (list/R5)
+was: 1,082 or 88
+waits: ?T
+
+== 4.8
+round: 4 finding 8
+probe: The freeze of an unbound view against item 12's boundary
+program: `while n(xs[..]) > 0 { mut xs.pop() }`
+outcome: accepted, no figure: no types were given. Item 17 names the program: `xs` is frozen for the condition and not for the body
+was: refused, by the older reading of item 17
+waits: views
+
+== 4.9
+round: 4 finding 9; 5, 6 reproduced
+probe: `c(s)` for a scrutinee of no one type
+program: `match a + b { 0 => 1 _ => 2 }`, `a: u8`, `b: u32`
+outcome: accepted: holds 32 (text: "`match`, `if val`, `guard val`")
+was: 21 or 32
+waits: none
+frames: f 106
+---
+module programs
+pub fn f(a: u8, b: u32) -> u64 {
+  match a + b {
+    0 => 1_u64
+    _ => 2_u64
+  }
+}
+
+== 4.10
+round: 4 finding 11, script A18; 5, 6 reproduced
+probe: The equation against item 12 to the letter
+program: `x and ok(make())`, `x: bool`, `make() -> [100]String`
+outcome: accepted: holds 2,401 (text: "An owning value no binding holds")
+was: 2,402 or 2,401
+waits: String
+
+== 4.11
+round: 3 L5 and 4 finding 7 raise the case without a program; 6 confirmed calls it "the `mut` form"
+probe: A later operand that writes an owning place
+program: `two(xs, bump(mut xs))`, `xs` a `List` (the program is the text's)
+outcome: refused: item 20, "An owning place a later operand would change", which names it. Its error code "comes with `List<T>` and `String`"
+was: open
+waits: refused, List<T>
+
+== 4.12
+round: 4 script A1
+probe: A `match` in an operand list, in a `return`
+program: `return sum2(wide(), match k { 0 => a _ => b })`; in the script `k: u8`, `a` and `b` read-only `[1000]u8` parameters, `wide() -> [1000]u8`, `sum2` giving a `u64`
+outcome: accepted: holds 2,009; frame 2,090 (list/R4)
+was: 2,090
+waits: none
+frames: f 2098
+---
+module programs
+fn wide() -> [1000]u8 = [2_u8; 1000]
+
+fn sum2(x: [1000]u8, y: [1000]u8) -> u64 = 0_u64
+
+pub fn f(k: u8, a: [1000]u8, b: [1000]u8) -> u64 {
+  return sum2(wide(), match k {
+    0 => a
+    _ => b
+  })
+}
+
+== 4.13
+round: 4 script A3
+probe: A `catch` in a `catch` arm
+program: (script model only: "nested catch") a `catch` whose arm is another `catch` whose arm calls `big()`; each call under a `catch` gives `[1000]u8 ! E`, `big() -> [1000]u8`
+outcome: accepted: holds 4,018; frame 4,082 in a function of no parameters (list/R4)
+was: 4,082
+waits: T ! E, views
+
+== 4.14
+round: 4 script A5
+probe: `guard val`, then a loop that reads its name
+program: `guard val v = make() else { return 0 } var i while i < 10 decreases 10 - i { i += use(v) } i`; in the script `make()` gives a `?T` of 1,001 bytes, `i: u64`, and the function has 8 bytes of parameters it does not name
+outcome: accepted: the body holds 1,050; frame 1,122 with the script's 8 bytes of parameters (list/R4, the tree rebuilt as the `match` the `guard val` is)
+was: 1,122
+waits: ?T
+
+== 4.15
+round: 4 script A6
+probe: A compound assignment in an arm
+program: (script model only: "compound assignment in a match arm") a `u64` `var x`; a `match` statement on a `u8` whose arms are `{ x += f(x) }` and `{ x += 1 }`; then `x`; parameters of 1 and 8 bytes
+outcome: accepted: the body holds 33; frame 106 (list/R4)
+was: 106
+waits: none
+frames: g 114
+---
+module programs
+fn f(x: u64) -> u64 = x
+
+pub fn g(k: u8, x0: u64) -> u64 {
+  var x = x0
+  match k {
+    0 => {
+      x += f(x)
+    }
+    _ => {
+      x += 1_u64
+    }
+  }
+  x
+}
+
+== 4.16
+round: 4 script A7
+probe: Clauses that call with large values
+program: (script model only: "clauses with aggregate arguments") a function of one `u64` parameter `n`; a `requires` clause that calls a `bool` function on `wide()`, here `[1000]u8`; an `ensures` clause that compares a `u64` with `total(make())`; body `n - 1`
+outcome: accepted: frame 2,513; the `requires` clause holds 1,001, and the `ensures` clause 2,417 on top of the body's 24 (list/R4)
+was: 2,513
+waits: none
+frames: f 1073
+note: The reviewer's program was a script model only; this one has its shape: a `requires` clause that calls a function on a large value.
+---
+module programs
+fn wide() -> [1000]u8 = [2_u8; 1000]
+
+fn ok(w: [1000]u8) -> bool = true
+
+pub fn f(n: u64) -> u64
+  requires ok(wide())
+  ensures result > 0_u64
+= n + 1
+
+== 4.17
+round: 4 script A8
+probe: A `raise` of a value built in a `catch` arm
+program: `f() catch { e => raise AppError.Parse(cause: e, where: here()) }`; in the script `f() -> u64 ! E`, `AppError.Parse` of 102 bytes, `here() -> [100]u8`
+outcome: accepted: holds 227; frame 291 in a function of no parameters (list/R4)
+was: 291
+waits: T ! E
+
+== 4.18
+round: 4 script A9
+probe: A range with a call in each bound
+program: `use(xs[lo(a)..hi(b)])`; in the script 24 bytes of parameters, `xs`, `a: u64` and `b: u64`, and `lo`, `hi` and `use` giving `u64`
+outcome: accepted: holds 32; frame 120 (list/R4)
+was: 120
+waits: views
+
+== 4.19
+round: 4 script A10
+probe: A receiver that is a call's result
+program: `val c = names().clone()`; `names()` gives an owning value of 24 bytes
+outcome: accepted: holds 72; frame 136 in a function of no parameters (list/R4)
+was: 136
+waits: String
+
+== 4.20
+round: 4 script A11
+probe: An array literal with an element kept
+program: `val ys: [3][1000]u8 = [xs, fresh(mut xs), xs]`; in the script `xs` is a `[1000]u8` binding made from the one parameter, and `fresh(mut xs) -> [1000]u8`
+outcome: accepted: the statement holds 8,008; frame 9,080 (list/R4)
+was: 9,080
+waits: none
+frames: f 9088
+---
+module programs
+fn fresh(mut xs: [1000]u8) -> [1000]u8 = xs
+
+pub fn f(x0: [1000]u8) -> u8 {
+  var xs = x0
+  val ys: [3][1000]u8 = [xs, fresh(mut xs), xs]
+  ys[0][0]
+}
+
+== 4.21
+round: 4 script A12
+probe: An `invariant` and a `decreases` that call
+program: `while i < n invariant ok(wide()) decreases left(n, i) { i += 1 }`; in the script `wide() -> [1000]u8`, `ok` giving a `bool`, `left` a `u64`, `n` a `u64` parameter, `var i: u64` before the loop and `i` after it
+outcome: accepted: the loop holds 1,018; frame 1,098 (list/R4)
+was: 1,098
+waits: none
+frames: f 1098
+---
+module programs
+fn wide() -> [1000]u8 = [2_u8; 1000]
+
+fn ok(w: [1000]u8) -> bool = true
+
+fn left(n: u64, i: u64) -> u64 = n - i
+
+pub fn f(n: u64) -> u64 {
+  var i: u64 = 0_u64
+  while i < n
+    invariant ok(wide())
+    decreases left(n, i) {
+    i += 1_u64
+  }
+  i
+}
+
+== 4.22
+round: 4 script A19
+probe: A chain of `else if`
+program: (script model only: "else-if chain of [1000]u8 calls") `if .. { m1() } else if .. { m2() } else { m3() }`, each call giving `[1000]u8`
+outcome: accepted: holds 2,000 (list/R4)
+was: 2,000
+waits: none
+frames: f 3066
+---
+module programs
+fn m1() -> [1000]u8 = [1_u8; 1000]
+
+fn m2() -> [1000]u8 = [2_u8; 1000]
+
+fn m3() -> [1000]u8 = [3_u8; 1000]
+
+pub fn f(a: bool, b: bool) -> [1000]u8 = if a {
+  m1()
+} else if b {
+  m2()
+} else {
+  m3()
+}
+
+== 4.23
+round: 4 script A20
+probe: `!` against its translation
+program: `big() catch { e => raise e }` beside `big()!`, `big() -> [1000]u8 ! E`
+outcome: accepted: each holds 2,009 (list/R4; the conformance list asks one count of each elaboration beside its translation)
+was: 2,009 each
+waits: T ! E
+
+== 4.24
+round: 4, 5, 6 reproduced
+probe: A worked count
+program: `n + 1`, `n: u64`
+outcome: accepted: holds 24 (text: "An expression")
+was: 24
+waits: none
+frames: f 96
+---
+module programs
+pub fn f(n: u64) -> u64 = n + 1
+
+== 4.25
+round: 4, 5, 6 reproduced
+probe: A worked count
+program: `a and b`, two names
+outcome: accepted: holds 2 (text: "`if`, `and`, `or`, `guard`")
+was: 2
+waits: none
+frames: f 68
+---
+module programs
+pub fn f(a: bool, b: bool) -> bool = a and b
+
+== 4.26
+round: 4, 5, 6 reproduced
+probe: A recursion that fills the budget exactly
+program: (no source text) "a function of 128 bytes": a `u64` parameter, four `u64` bindings, and a last statement that holds 24
+outcome: accepted: frame 128; 8,192 calls open, traps at the 8,193rd (text: conformance list)
+was: 128
+waits: none
+frames: f 128
+note: No source was given; this one is item 25's description: a `u64` parameter, four `u64` bindings and a last statement that holds 24.
+---
+module programs
+pub fn f(n: u64) -> u64 {
+  val a = n
+  val b = a
+  val c = b
+  val d = c
+  d + 1
+}
+
+== 5.1
+round: 5 M1; 6 says it is closed
+probe: "may change" omitted `own`
+program: `two(xs, eat(own xs))`, `xs` a `List`
+outcome: refused: item 20, "An owning place a later operand would change", which names it. Its error code "comes with `List<T>` and `String`"
+was: accepted, counted 24
+waits: refused, own, List<T>
+
+== 5.2
+round: 5 M2, script "finding 12"; 6 reproduced
+probe: Two conventions for one parameter
+program: `use(xs)`, `xs: [1000]u8`, into the read-only parameter `x: ?[1000]u8` that row 3.8 passes `p?.big` into
+outcome: accepted: holds 16 (text: "A projection"; `mutable-value-semantics.md`, item 1)
+was: 1,009
+waits: ?T
+
+== 5.3
+round: 5 M3, script A2b; 6 reproduced
+probe: A base kept under a projection
+program: `fn a(mut ps: [4]?Outer) -> u64 { use(ps[bump(mut ps)]?.a?.big) }`
+outcome: accepted: the call holds 4,020 (text: "A value kept"); frame 4,092 (run7)
+was: 88 or 4,092
+waits: ?T
+
+== 5.4
+round: 5 M3, script A5b; 6 reproduced
+probe: A base kept under `.len`
+program: `fn b(mut vs: [1000][]u8) -> usize { vs[bump(mut vs)].len }`
+outcome: accepted: holds 16,016 (text: "A value kept"); frame 16,088 (run7)
+was: 88 or 16,088
+waits: views
+
+== 5.5
+round: 5 L1; 9a B3
+probe: Named a projection, though nothing indexes a `?[N]T`
+program: `p?.xs[i]`
+outcome: refused: `E0203` (item 15), see 9.12
+was: a projection in the table
+waits: refused, ?T
+
+== 5.6
+round: 5 L3; 6 reproduced
+probe: `o(s)` of a `catch`'s call
+program: `len(f()!) + len(g()!)`, `f() -> String ! E`, `g` alike, `E` of one byte
+outcome: accepted: holds 89 (text: "An owning value no binding holds")
+was: 89 or 138
+waits: T ! E, String
+
+== 5.7
+round: 5 L4; 6 reproduced, confirmed
+probe: Two counts for one meaning
+program: `x += e`, `x: u8`, `e: u32`, beside `x = x + e`
+outcome: accepted: each holds 21 (text: "An assignment")
+was: 6 and 21
+waits: none
+frames: f 92 g 92
+---
+module programs
+pub fn f(x0: u8, e: u32) -> u8 {
+  var x = x0
+  x += e
+  x
+}
+
+pub fn g(x0: u8, e: u32) -> u8 {
+  var x = x0
+  x = x + e
+  x
+}
+
+== 5.8
+round: 5 program 1, script A1
+probe: An owning value in a nested branch in an operand list
+program: `pair(if c { match k { 0 => total(make()) _ => 0 } } else { total(make()) + total(make()) }, wide())`, in `fn a1(c: bool, k: u8) -> u64`, `wide() -> [1000]u8`
+outcome: accepted: holds 4,824; frame 4,890 (list/R5)
+was: 4,890
+waits: String
+
+== 5.9
+round: 5 program 2, script A2
+probe: A `?.` chain as a value kept
+program: `fn a2(p0: ?Outer) -> u64 { var p = p0 use2(p?.a?.big, wipe(mut p, wide())) }`
+outcome: accepted: frame 10,090, the call holding 9,017 as in row 4.4 (list/R5)
+was: 10,090
+waits: ?T
+
+== 5.10
+round: 5 program 3, script A3
+probe: `guard val` in a loop body
+program: `fn a3(mut q: Queue) -> u64 { var n: u64 = 0` / ` while n < 10 decreases 10 - n { guard val v = next(mut q) else { break } n += weigh(v) } n }`, `next(mut q)` giving a `?T` of 1,001 bytes, `weigh` a `u64`
+outcome: accepted: frame 1,122 (list/R5)
+was: 1,122
+waits: ?T
+
+== 5.11
+round: 5 program 4, script A4
+probe: A `catch` arm that raises
+program: `fn a4() -> [1000]u8 ! AppError { read() catch { e => raise AppError.Io(cause: e, at: here()) } }`, `read() -> [1000]u8 ! IoError`, `IoError` of 1 byte, `AppError.Io(cause: IoError, at: [100]u8)` of 102 bytes, `here() -> [100]u8`
+outcome: accepted: holds 2,009; frame 2,073 (list/R5)
+was: 2,073
+waits: T ! E
+
+== 5.12
+round: 5 program 5, script A5
+probe: `.len` of a view of an indexed place
+program: `fn a5(rows: [4][8]u8) -> usize { rows[pick(wide())][..].len }`, `wide() -> [1000]u64`
+outcome: accepted: holds 8,008; frame 8,080 (list/R5)
+was: 8,080
+waits: views
+
+== 5.13
+round: 5 program 6, script A6
+probe: A `match` whose scrutinee is an `and`
+program: `fn a6(x: bool) -> u64 { match x and ok(make()) { true => 1 false => 0 } }`
+outcome: accepted: holds 2,401; frame 2,466 (list/R5)
+was: 2,466
+waits: String
+
+== 5.14
+round: 5 script A1b
+probe: An owning value that is the branch's own value, twice in a sum
+program: `total2(if c { make() } else { make() }) + total2(if c { make() } else { make() })`, `make() -> [100]String`, `total2` giving a `u64`, one `bool` parameter `c`
+outcome: accepted: holds 7,208; frame 7,273 (list/R5)
+was: 7,273
+waits: String
+
+== 5.15
+round: 5, 6 reproduced
+probe: A worked count
+program: `val q: ?[1000]u8 = p?.big`
+outcome: accepted: holds 2,010 (text: "A projection")
+was: 2,010
+waits: ?T
+
+== 5.16
+round: 5, 6 reproduced
+probe: A worked call count
+program: (no source text) mutual recursion through frames of 80 and 96 bytes, begun in the smaller
+outcome: accepted: 11,915 calls open, the 11,916th traps (text: conformance list)
+was: 11,915
+waits: no program text
+
+== 6.1
+round: 6 H1
+probe: `own` in a discard, not an argument
+program: `fn two(a: List<u64>, n: u64) -> u64` / `fn f(c: bool) -> u64 {` / ` val xs: List<u64> = List.new()` / ` two(xs, if c { _ = own xs 1 } else { _ = own xs 0 })` / `}`
+outcome: refused: item 20, "An owning place a later operand would change", which names it. Its error code "comes with `List<T>` and `String`"
+was: accepted by one reading: use after free
+waits: refused, own, List<T>
+
+== 6.2
+round: 6 H1
+probe: `own` in an initializer
+program: the same `f` with `val b = own xs` in each branch in place of the discard
+outcome: refused: item 20, the same claim, which names it
+was: accepted by one reading
+waits: refused, own
+
+== 6.3
+round: 6 H1
+probe: The same read through a projection
+program: `use2(p?.name, if c { _ = own p 1 } else { _ = own p 0 })`
+outcome: refused: item 20, the same claim, which names it
+was: accepted by one reading
+waits: refused, own, ?T
+
+== 6.4
+round: 6 script O1
+probe: An initializer in one branch and a discard in the other
+program: `two(xs, if c { val b = own xs n(b) } else { _ = own xs 0 })`, `xs: List<u64>`
+outcome: refused: item 20, the same claim, by its words: the later operand holds a move of `xs`. The text names the two forms in rows 6.1 and 6.2, not this mix
+was: 48 "if it is not refused"
+waits: refused, own, List<T>
+
+== 6.5
+round: 6 M1, script C1
+probe: An error an arm matches by variant
+program: `enum E { Bad(msg: String) }`, of 32 bytes, `f() -> u64 ! E`, `g` alike: / `(f() catch { E.Bad(msg: m) => len(m) }) + (g() catch { E.Bad(msg: m) => len(m) })`
+outcome: accepted: holds 72 (text: "An owning value no binding holds")
+was: 72 or 120
+waits: T ! E, String
+
+== 6.6
+round: 6 L1, script K1
+probe: Two bases kept in one read
+program: `fn n2(mut xs: [10][10]u64) -> u64 { xs[bump(mut xs)][bump(mut xs)] }`
+outcome: accepted: holds 904 (text: "A value kept"); frame 976 (run7)
+was: 976 or 896
+waits: none
+frames: n2 992
+---
+module programs
+fn bump(mut xs: [10][10]u64) -> usize {
+  xs[0][0] = 1_u64
+  0_usize
+}
+
+pub fn n2(mut xs: [10][10]u64) -> u64 {
+  xs[bump(mut xs)][bump(mut xs)]
+}
+
+== 6.7
+round: 6 L1, script K2
+probe: A read with a base kept that is itself kept
+program: `fn t(mut xs: [10][100]u8) -> u64 { two(xs[bump(mut xs)], wipe(mut xs, wide())) }`
+outcome: accepted: the call holds 8,116 (text: "A value kept"); frame 8,188 (run7)
+was: 8,188 or 9,188
+waits: none
+frames: t 9212
+---
+module programs
+fn bump(mut xs: [10][100]u8) -> usize {
+  xs[0][0] = 1_u8
+  0_usize
+}
+
+fn wide() -> [1000]u64 = [0_u64; 1000]
+
+fn wipe(mut xs: [10][100]u8, w: [1000]u64) -> u64 = 0_u64
+
+fn two(a: [100]u8, n: u64) -> u64 = n
+
+pub fn t(mut xs: [10][100]u8) -> u64 {
+  two(xs[bump(mut xs)], wipe(mut xs, wide()))
+}
+
+== 6.8
+round: 6 L1, script K3
+probe: The same with a projection
+program: `use2(ps[bump(mut ps)]?.a?.big, wipe(mut ps, wide()))`, in `fn t3(mut ps: [4]?Outer) -> u64` as the script has it
+outcome: accepted: holds 9,017 (text: "A value kept"); frame 9,089 (run7)
+was: 9,089 or 13,093
+waits: ?T
+
+== 6.9
+round: 6 L2
+probe: A view of a place with a base kept
+program: `fn v(mut xs: [10][100]u8) -> usize { n(xs[bump(mut xs)][..]) }`
+outcome: refused: item 17's freeze. Item 25 names `n(xs[bump(mut xs)][..])` as an error (text: "A value kept", and the table's row "A view made")
+was: no legal program, the review said
+waits: refused, views
+
+== 6.10
+round: 6 L2, script K4
+probe: The same where the element is itself a view
+program: `vs[bump(mut vs)][..]`, `vs: [1000][]u8`; the script has `fn t4(mut vs: [1000][]u8) -> usize { n(vs[bump(mut vs)][..]) }`
+outcome: refused: item 17's freeze, by the table's row "A view made": "an index or a bound that writes it is an error". `frames7.js` throws on it. The text does not name this program
+was: frame 16,096
+waits: refused, views
+
+== 6.11
+round: 6 L3, script P7
+probe: A projection into a `?U` of 16 bytes or less
+program: `fn g(p: ?Pair) -> u64 { use(p?.n) }`, `Pair { n: u64, big: [1000]u8 }`, `use(x: ?u64)`
+outcome: accepted: holds 24, frame 96 (text: "A projection")
+was: 24 and 96, or 16 and 88
+waits: ?T
+
+== 6.12
+round: 6 L4, script P10
+probe: An argument item 4 would narrow before it enters a `?T`
+program: `use128(n)`, `n: u64`, into `x: ?u128`
+outcome: refused: item 15 of `core-calculus.md`, the claim "A value enters a `?T` only where its type is `T`" (register entry `optional-from-exact-type`, decided 2026-11-15; commit `f1b7241`). The error's code "comes with `?T`"
+was: 16, or 24
+waits: refused, ?T
+
+== 6.13
+round: 6 L4, script P11
+probe: The same for an array
+program: `use(ws)`, `ws: [1000]u64`, into `x: ?[1000]u8`
+outcome: refused: item 15 of `core-calculus.md`, the same claim (`optional-from-exact-type`, decided 2026-11-15)
+was: 16, or 1,008
+waits: refused, ?T
+
+== 6.14
+round: the register entry, not a review message; listed at the coordinator's word
+probe: The same at a binding
+program: `val y: ?u64 = n`, `n: u32`
+outcome: refused: item 15 of `core-calculus.md`, the same claim (`optional-from-exact-type`, decided 2026-11-15)
+was: open
+waits: refused, ?T
+
+== 6.15
+round: 6 confirmed, script P1
+probe: One count for each argument shape of a read-only `?T`
+program: `use(none)`, `use(x: ?[1000]u8) -> u64`
+outcome: accepted: holds 8 (list/R6; rule in text: table, row "`none`")
+was: 8
+waits: ?T
+
+== 6.16
+round: 6 confirmed, script P2
+probe: The same
+program: `use(q)`, `q: ?[1000]u8` a place
+outcome: accepted: holds 16 (list/R6)
+was: 16
+waits: ?T
+
+== 6.17
+round: 6 confirmed, script P3
+probe: The same
+program: `use(make())`, `make() -> [1000]u8`
+outcome: accepted: holds 1,008 (list/R6)
+was: 1,008
+waits: ?T
+
+== 6.18
+round: 6 confirmed, script P4
+probe: The same
+program: `use(find())`, `find() -> ?[1000]u8`
+outcome: accepted: holds 1,009 (list/R6)
+was: 1,009
+waits: ?T
+
+== 6.19
+round: 6 confirmed, script P5
+probe: The same
+program: `use(if c { xs } else { ys })`, `xs` and `ys` places of `[1000]u8`
+outcome: accepted: holds 1,008 (list/R6)
+was: 1,008
+waits: ?T
+
+== 6.20
+round: 6 script P6; 7 L9
+probe: A projection as a branch's value
+program: `use(if c { p?.big } else { q?.big })`
+outcome: accepted: holds 1,009 (text: "A projection", since the seventh round; run7)
+was: 1,009, unstated
+waits: ?T
+
+== 6.21
+round: 6 script P8
+probe: A `T` into a `?T` of 16 bytes or less
+program: `use(n)`, `n: u64`, into `x: ?u64`
+outcome: accepted: holds 24 (list/R6; rule in text: table, row "A value narrowed")
+was: 24
+waits: ?T
+
+== 6.22
+round: 6 script P9
+probe: A `?T` place of 16 bytes or less
+program: `use(q)`, `q: ?u64` a place
+outcome: accepted: holds 16 (list/R6)
+was: 16
+waits: ?T
+
+== 6.23
+round: 6 confirmed
+probe: The ABI of a read-only `?T` is complete
+program: (no program text) a read-only `?T` argument where `T` has a niche, a `??T`, a `?` of a view, a `?String`, a `?List`, and a `?T` of 16 bytes exactly
+outcome: accepted, no figure: no programs were given. The convention is `mutable-value-semantics.md`, item 1
+was: complete
+waits: no program text
+
+== 6.24
+round: 6 confirmed, script C3
+probe: One count and one evaluation
+program: `xs[f()] += e`, `u32` elements, `f() -> usize`, `e: u32`, beside `xs[f()] = xs[f()] + e`
+outcome: accepted: each holds 20; the compound form evaluates `f()` once (list/R6; rule in text: "An assignment")
+was: 20
+waits: none
+frames: a 96 b 104
+---
+module programs
+fn f() -> usize = 0_usize
+
+pub fn a(e: u32) -> u32 {
+  var xs: [2]u32 = [1_u32, 2_u32]
+  xs[f()] += e
+  xs[0]
+}
+
+pub fn b(e: u32) -> u32 {
+  var xs: [2]u32 = [1_u32, 2_u32]
+  xs[f()] = xs[f()] + e
+  xs[0]
+}
+
+== 6.25
+round: 6 script C4
+probe: The two forms' counts
+program: `xs[i] += 1`, `u8` elements, `i: usize`, beside `xs[i] = xs[i] + 1`
+outcome: accepted: holds 11, and the plain form 17 (list/R6)
+was: 11 and 17
+waits: none
+frames: a 85 b 93
+---
+module programs
+pub fn a(i: usize) -> u8 {
+  var xs: [2]u8 = [1_u8, 2_u8]
+  xs[i] += 1
+  xs[0]
+}
+
+pub fn b(i: usize) -> u8 {
+  var xs: [2]u8 = [1_u8, 2_u8]
+  xs[i] = xs[i] + 1
+  xs[0]
+}
+
+== 6.26
+round: 6 script C5
+probe: A compound assignment whose index writes its root
+program: `xs[bump(mut xs)] += 1`, `xs: [1000]u64`
+outcome: accepted: holds 32 (list/R6)
+was: 32
+waits: none
+frames: f 112
+note: Round 6 gave 32 held; by the equations the index `bump(mut xs)` holds 16, the address its `mut` argument passes and the call's value, as item 25 has it for `xs[bump(mut xs)]`, so the statement holds 40: the index, the value read, the `1` and the sum.
+---
+module programs
+fn bump(mut xs: [1000]u64) -> usize {
+  xs[0] = 1_u64
+  0_usize
+}
+
+pub fn f(mut xs: [1000]u64) -> u64 {
+  xs[bump(mut xs)] += 1
+  xs[0]
+}
+
+== 6.27
+round: 5 L3 asks for `o(own a)`; 6 script C2
+probe: What a moved argument holds
+program: `eat(own a)`, `eat` giving a `u64`
+outcome: accepted: holds 16 (list/R6; rule in text: table, row "`own a`", and the legend's `o`, which is 0 for `own a`)
+was: unstated; 16
+waits: own
+
+== 6.28
+round: 6 confirmed
+probe: No over-rejection
+program: `len(xs) + eat(own xs)`, `xs` a `List`
+outcome: accepted: it stands (text: conformance list names it); holds 24 with `u64` results (list/own)
+was: stands
+waits: own, List<T>
+
+== 6.29
+round: 6 confirmed
+probe: No over-rejection
+program: `two(xs.clone(), eat(own xs))`, `xs` a `List`
+outcome: accepted: it stands (text: conformance list names it); holds 40 with `u64` results (list/own)
+was: stands
+waits: own, List<T>, String
+
+== 6.30
+round: 6 confirmed
+probe: No over-rejection
+program: `two(xs.len, eat(own xs))`, `xs` a `List`
+outcome: accepted: it stands, as the sixth review found at d87d1aa. The text does not name it; by item 20's words `.len` gives an integer and reads no owning place that is kept. Holds 24 with `u64` results (list/own)
+was: stands
+waits: own, List<T>
+
+== 6.31
+round: 6 confirmed
+probe: No over-rejection
+program: `xs[0] + f(mut xs)`, `xs: List<u64>`
+outcome: accepted: it stands, as the sixth review found at d87d1aa. The text does not name it; the operand read is an integer element. Holds 24 with a `u64` result (list/own)
+was: stands
+waits: List<T>
+
+== 6.32
+round: 6 confirmed
+probe: A move inside a branch that returns
+program: `two(xs, if c { return eat(own xs) } else { 0 })`, `xs` a `List`
+outcome: refused: item 20, "An owning place a later operand would change", by its words: the later operand holds `own xs`, a move "written in it at any depth". The text does not name this program; its near miss that stands is `two(xs, if c { return xs } else { 0 })`
+was: refused
+waits: refused, own, List<T>
+
+== 6.33
+round: 6 script K1b; 7 L8, which gave its source
+probe: The inner base kept alone
+program: `xs[i][bump(mut xs)]`, `mut xs: [10][10]u64`, `i` of 8 bytes, the two its only parameters
+outcome: accepted: frame 184 (run7)
+was: 184
+waits: none
+frames: h 192
+---
+module programs
+fn bump(mut xs: [10][10]u64) -> usize {
+  xs[0][0] = 1_u64
+  0_usize
+}
+
+pub fn h(mut xs: [10][10]u64, i: usize) -> u64 {
+  xs[i][bump(mut xs)]
+}
+
+== 6.34
+round: 6 script K5
+probe: A projection with a base kept that lands in a binding
+program: `val q: ?[1000]u8 = ps[bump(mut ps)]?.a?.big`, `ps: [4]?Outer`
+outcome: accepted: holds 6,014 (run7, where it is marked "not stated")
+was: 6,014
+waits: ?T
+
+== 6.35
+round: 6 script K6
+probe: An element of a view whose index gives it another window
+program: `v[bump(mut v)]`, `mut v: []u64`
+outcome: accepted: holds 32 (run7, where it is marked "not stated")
+was: 32
+waits: views
+
+== 6.36
+round: 6 reproduced
+probe: `main`'s own frame
+program: (no source text) a `main` whose frame is 600,000 bytes, which calls a function whose frame is 600,000
+outcome: accepted: the module checks, and the call traps `stack-overflow`, though each frame alone fits (text: conformance list)
+was: traps
+waits: no program text
+
+== 7.1
+round: 7 H1
+probe: A plain part of an owning root, read by address, then the root moved
+program: `fn eat(own xs: List<[100]u8>) -> u64 { 0 }` / `fn two(a: [100]u8, n: u64) -> u64 { n }` / `fn f(own xs: List<[100]u8>) -> u64 { two(xs[0], eat(own xs)) }`
+outcome: accepted: holds 116, frame 204 (text: "A value kept"; run7). The element is kept against the move of `xs`
+was: 24, frame 112, reading freed memory
+waits: own, List<T>
+
+== 7.2
+round: 7 H1
+probe: The same part kept against a write
+program: `two(xs[0], bump(mut xs))`, `xs: List<[100]u8>`, `bump(mut xs: List<[100]u8>) -> u64`
+outcome: accepted: holds 116 (rule in text: "A value kept"; the same tree as 7.1 with a `mut` argument)
+was: 116
+waits: List<T>
+
+== 7.3
+round: 7 H1
+probe: An integer read is never refused
+program: `xs[0] + eat(own xs)`, `xs: List<u64>`, `eat(own xs: List<u64>) -> u64`
+outcome: accepted: holds 24 (text: item 20 names it; run7)
+was: stands
+waits: own, List<T>
+
+== 7.4
+round: 7 H1
+probe: A base against an index that moves its root
+program: `xs[0][eat(own xs)]`, `xs: List<[10]u64>`, `eat` giving a `usize`
+outcome: accepted: holds 96 (text: "A value kept"; run7); frame 184 in a function whose one parameter is `own xs` (run7 tree, not stated)
+was: the same gap
+waits: own, List<T>
+
+== 7.5
+round: 7 H1
+probe: The left operand of `==` on arrays
+program: `xs[0] == take(own xs)`, `xs: List<[100]u8>`, `take(own xs: List<[100]u8>) -> [100]u8`
+outcome: accepted: holds 208 (text: "A value kept"; run7)
+was: the same gap
+waits: own, List<T>
+
+== 7.6
+round: 7 M1
+probe: An arm's value that reads the error in place, against the moment the error is freed
+program: `enum E { Bad(items: List<[100]u8>) }` / `fn f() -> [100]u8 ! E` / `fn g() -> [100]u8 { f() catch { E.Bad(items: xs) => xs[0] } }`
+outcome: accepted: holds 248 (text: "`catch`, `!`"; run7), frame 312 (run7 tree, not stated); the error is freed once the `catch`'s value is made (items 12 and 16)
+was: 248, freed before or after
+waits: T ! E, List<T>
+
+== 7.7
+round: 7 M1
+probe: A block's binding that the block's value reads in place
+program: `val y = { val xs = make() xs[0] }`, `make() -> List<[100]u8>`
+outcome: accepted, no figure: `xs` is freed once `y`'s value is made (item 12)
+was: freed, then read
+waits: List<T>
+
+== 7.8
+round: 7 M2
+probe: An optional inside the place's type
+program: `val a: [2]?u64 = ws`, `ws: [2]u64`
+outcome: refused: item 15, the array lands and its elements do not; the fix writes `[ws[0], ws[1]]`
+was: refused or 72
+waits: refused, ?T
+
+== 7.9
+round: 7 M2
+probe: The same, with elements of another type
+program: `val a: [2]?u64 = ws`, `ws: [2]u32`
+outcome: refused: item 15
+was: refused or narrowed
+waits: refused, ?T
+
+== 7.10
+round: 7 M2
+probe: A `?S` whose representation is not the place's (1 byte against 2)
+program: `val y: ?u8 = x`, `x: ?u8[0..10]`
+outcome: refused: item 15; the fix reaches the present value with `guard val` first
+was: 10 or 12
+waits: refused, ?T
+
+== 7.11
+round: 7 M2
+probe: A refinement inside `T`'s range
+program: `val y: ?u8[0..10] = v`, `v: u8[0..5]`
+outcome: accepted, no figure: it is a `T` (item 15)
+was: unsaid
+waits: ?T
+
+== 7.12
+round: 7 M2
+probe: An array of refined elements
+program: `use(a)`, `a: [4]u8[0..10]`, a read-only `x: ?[4]u8`
+outcome: accepted, no figure: a refinement of `T` on the same representation, needing no check, is a `T` (item 15; Norman confirmed it on 2026-11-15)
+was: unsaid
+waits: ?T
+
+== 7.13
+round: 7 M2
+probe: A printed value read back
+program: `mn run --call "f(5)"`, `f(x: ?u8)`
+outcome: accepted, no figure: `--call` reads the printed form of a `?u8` (items 15 and 23), a present `5`
+was: unsaid
+waits: ?T, views
+
+== 7.14
+round: 7 M3
+probe: A `T` not yet checked against `T`
+program: `val y: ?u8 = a + b`, `a, b: u8`, each 200
+outcome: accepted: narrowed into `u8` where it lands, so it traps where the sum is 256, then made present (item 15, decided 2026-11-15)
+was: unchecked
+waits: ?T
+
+== 7.15
+round: 7 M3
+probe: The same
+program: `val y: ?u8 = x + 1`, `x: u8`
+outcome: accepted: the same, trapping where `x` is 255 (item 15)
+was: unchecked
+waits: ?T
+
+== 7.16
+round: 7 M3
+probe: The same, a unary minus
+program: `val y: ?i8 = -x`, `x: i8`
+outcome: accepted: the same, trapping where `x` is -128 (item 15)
+was: unchecked
+waits: ?T
+
+== 7.17
+round: 7 M3
+probe: The same, a body's last expression
+program: `fn g(a: u8, b: u8) -> ?u8 { a + b }`
+outcome: accepted: the same (item 15 names it)
+was: unchecked
+waits: ?T
+
+== 7.18
+round: 7 M3
+probe: A bare literal outside `i64`
+program: `val b: ?i64 = 9223372036854775808`
+outcome: refused: `E0508`, a narrowing that always traps (item 15, item 8)
+was: unchecked
+waits: refused, ?T
+
+== 7.19
+round: 7 L2
+probe: Frozen, with any element counting for an index
+program: `match xs[i] { Shape.Rect(w: w, h: _) => { xs[j] = Shape.Dot w } ... }`
+outcome: refused: `E0232` (item 14, the `Implemented` claim; the definition of frozen now says the same)
+was: no write by the definition
+waits: refused
+
+== 7.20
+round: 7 L4
+probe: An owning value as a branch's value
+program: `val s = if c { t } else { u }`, `t` and `u` `String`s
+outcome: refused: item 12's implicit copy, whose one fix is `.clone()`; whether it may move is open (`branch-move`)
+was: fix `own` that cannot be written
+waits: refused, String
+
+== 7.21
+round: 7 L4
+probe: The same, through the body's last expression
+program: `fn pick(own a: String, own b: String, c: bool) -> String { if c { a } else { b } }`
+outcome: refused: item 12, the same; open (`branch-move`)
+was: the same
+waits: refused, own, String
+
+== 7.22
+round: 7 L4
+probe: A block's own owning binding as its last expression
+program: `val s = { val t = make() t }`, `make() -> String`
+outcome: open: register `branch-move`
+was: unsaid
+waits: String
+
+== 7.23
+round: 7 L5
+probe: A pattern's name moved out
+program: `fn f(own opt: ?String) -> String { guard val v = opt else { return String.new() } v }`
+outcome: refused: item 12's implicit copy (item 20 says a new name never moves), whose fix is `v.clone()`; taking a payload by value is open (`pattern-payload-move`)
+was: a double free if `v` moved
+waits: refused, own, String, ?T
+
+== 7.24
+round: 7 L5
+probe: The same, with the word
+program: `own v` in an arm, `v` a pattern's name
+outcome: refused: item 20
+was: the same
+waits: refused, own
+
+== 7.25
+round: 7 L6
+probe: A move of a plain root in a frozen arm
+program: `match arr[0] { 0 => keep(own arr) _ => 0 }`, `arr: [10]u64`
+outcome: refused: item 14's freeze, which counts the move though it copies (meant, as `view-source-freeze` has it)
+was: refused, unexplained
+waits: refused, own
+
+== 7.27
+round: 7, gap on main
+probe: A part of a binding written after its value moved
+program: `s.name = consume(own s)`, `s` a `var` struct whose field `name` is a `String`
+outcome: refused: item 20, a part of a moved binding is not written until the whole is assigned
+was: a double free
+waits: refused, own, String
+
+== 7.28
+round: 7, gap on main
+probe: The same, in two statements
+program: `_ = consume(own s)`, then `s.name = String.from("x")`
+outcome: refused: item 20
+was: the same
+waits: refused, own, String, views
+
+== 7.29
+round: 7, open question 1
+probe: How a place's type reaches a branch
+program: `val y: ?u8 = if c { x } else { none }`, `x: u8`
+outcome: open: register `branch-place-type`
+was: unsaid
+waits: ?T
+
+== 7.30
+round: 7, open question 1
+probe: The same, through a returned value
+program: `fn f(xs: [4]u8, c: bool) -> ?u8 { if c { xs[0] } else { none } }`
+outcome: open: register `branch-place-type`
+was: unsaid
+waits: ?T
+
+== 8.1
+round: 8a N1
+probe: A view of a branch's own binding given as its value, then passed
+program: `n(if c { val t = mk() t[..] } else { ys[..] })`, `mk() -> List<u8>`, `n(v: []u8) -> u64`
+outcome: refused: `E0310` (item 17), though it is only an argument
+was: accepted, reading freed memory
+waits: refused, List<T>, views
+
+== 8.2
+round: 8a N1
+probe: A view of an arm's error given as its value
+program: `n(f(s) catch { E.Bad(items: xs) => xs[..] })`, `f(s: []u8) -> []u8 ! E`, `enum E { Bad(items: List<u8>) }`
+outcome: accepted, no figure: the error or the scrutinee lives to the end of the statement (item 12, as amended on 2026-11-15)
+was: the same
+waits: T ! E, List<T>, views
+
+== 8.3
+round: 8a N1
+probe: The same, stored
+program: `val v = if c { val t = mk() t[..] } else { ys[..] }`
+outcome: refused: `E0310` (item 17)
+was: refused
+waits: refused, views
+
+== 8.4
+round: 8a N1, class
+probe: A view of a local returned
+program: `fn f() -> []u8 { val t = mk() t[..] }`
+outcome: refused: `E0310` (item 17: returned, its sources may only be parameters)
+was: refused
+waits: refused, views
+
+== 8.5
+round: 8a N1, class
+probe: A view inside a struct or a `?T` given as a branch's value
+program: `n2(if c { val t = mk() Pair(v: t[..]) } else { q })`, and the same with a `?[]u8`
+outcome: refused: `E0310` (item 17, "a value that holds one")
+was: unsaid
+waits: refused, ?T, views
+
+== 8.6
+round: 8a N1, class
+probe: A view passed on inside the arm, not given as its value
+program: `f(s) catch { E.Bad(items: xs) => n(xs[..]) }`
+outcome: accepted, no figure: it outlives nothing (item 17)
+was: unsaid
+waits: T ! E, views
+
+== 8.7
+round: 8a N2
+probe: An arm that leaves, returning a value read from the error
+program: `fn g() -> [100]u8 { f() catch { E.Bad(items: xs) => return xs[0] } }`
+outcome: accepted, no figure: the element is copied out, then the error freed as the arm leaves (items 12 and 16)
+was: never freed, or freed unordered
+waits: T ! E
+
+== 8.8
+round: 8a N2
+probe: The same, by `break`
+program: the same arm ending in `break` inside a loop
+outcome: accepted, no figure: freed as the arm leaves
+was: the same
+waits: T ! E, List<T>
+
+== 8.9
+round: 8a N2
+probe: The same, by `raise`
+program: the same arm ending in `raise E2.X(..)`
+outcome: accepted, no figure: the raised value is made, then the error freed
+was: the same
+waits: T ! E, views
+
+== 8.10
+round: 8a N2
+probe: A block's binding read by `return`
+program: `fn g() -> [100]u8 { val t = mk() return t[0] }`, `mk() -> List<[100]u8>`
+outcome: accepted, no figure: the element is copied out before `t` is freed (item 12)
+was: unordered
+waits: List<T>
+
+== 8.11
+round: 8a N3
+probe: A move in a `catch` arm against the success path
+program: `val n = f() catch { E.Bad => { _ = own s 0 } }`, then `s` used or freed
+outcome: refused: item 20, the success path is a branch with nowhere to discard
+was: a run-time flag needed
+waits: refused, own, T ! E
+
+== 8.12
+round: 8a N3
+probe: A move in an arm that leaves
+program: the same arm ending in `return 0`
+outcome: accepted, no figure (item 20)
+was: unsaid
+waits: T ! E, List<T>
+
+== 8.13
+round: 8a N4
+probe: An array literal of literals into a `?[N]T`
+program: `val a: ?[2]u8 = [1, 2]`
+outcome: refused: item 15, a `[2]i64`; the fix writes `[1_u8, 2_u8]`
+was: either, by two sentences
+waits: refused, ?T
+
+== 8.14
+round: 8a N4
+probe: The same into a `[2]u8`
+program: `val a: [2]u8 = [1, 2]`
+outcome: accepted, as it was (item 4)
+was: stands
+waits: none
+frames: f 100
+note: The literals are `i64`s, the place giving them no type (item 5): the binding's 2 bytes, the two elements, the `[2]i64` they build and the 2 bytes it is narrowed into hold 36.
+---
+module programs
+pub fn f() -> u8 {
+  val a: [2]u8 = [1, 2]
+  a[0]
+}
+
+== 8.15
+round: 8a L-a
+probe: An `own` argument of the whole error an arm binds
+program: `f() catch { e => consume(own e) }`
+outcome: accepted, no figure (item 20 names it)
+was: refused by the letter
+waits: own, T ! E
+
+== 8.16
+round: 8a L-b
+probe: An owning `?U` of 16 bytes or less
+program: `use(p?.e)`, field `e: [0]String`, a read-only `x: ?[0]String`
+outcome: accepted, no figure: passed as an address or none (`mutable-value-semantics.md`, item 1), so nothing owning is copied
+was: an implicit copy
+waits: String, ?T
+
+== 8.17
+round: 8a L-d
+probe: A printed value read back into a refined `?T`
+program: `mn run --call "f(5)"`, `f(x: ?u8[0..10])`
+outcome: accepted, no figure: a `u8[0..10]`, checked against `0..10`, then made present (item 15)
+was: an error by the letter
+waits: ?T, views
+
+== 8.18
+round: 8a L-e, 8b low 2
+probe: A branch block's own binding as its last expression
+program: `val s = if c { val t = make() t } else { u.clone() }`, `String`s
+outcome: refused: item 12's implicit copy today; whether it may move is open (`branch-move`)
+was: did not parse as written
+waits: refused, String
+
+== 8.19
+round: 8a confirmed
+probe: A compound assignment whose value moves its root
+program: `xs[0] += eat(own xs)`, `xs: List<u64>`
+outcome: refused: item 20, a part of a moved binding is written
+was: refused
+waits: refused, own, List<T>
+
+== 8.20
+round: 8a confirmed
+probe: An index that moves the root of the place assigned
+program: `xs[eat(own xs)] = 5`
+outcome: refused: item 20, the same
+was: refused
+waits: refused, own
+
+== 8.21
+round: 8a confirmed
+probe: A part of a struct written after its move
+program: `s.l[0] = take(own s)`
+outcome: refused: item 20, the same
+was: refused
+waits: refused, own
+
+== 8.22
+round: 8a confirmed
+probe: A `mut` argument beside a nested move of its root
+program: `f(mut xs[0], eat(own xs))`
+outcome: refused: item 20, the root of a `mut` argument appears in no other argument, at any depth of it
+was: refused
+waits: refused, own
+
+== 8.23
+round: 8b H-a
+probe: A sibling element of a `List` written in a frozen arm
+program: `enum Slot { Full(items: List<u8>), Empty }` / `fn f(mut xs: List<Slot>, i: usize, j: usize) -> u8 { match xs[i] { Slot.Full(items: ys) => { xs[j] = Slot.Empty ys[0] } Slot.Empty => 0 } }`
+outcome: refused: item 14's freeze, any element of what is indexed counting for the one an index names (`E0232` once the `List` is implemented)
+was: accepted, reading freed memory where `i == j`
+waits: refused, List<T>
+
+== 8.24
+round: 8b H-a
+probe: The same under `guard val`
+program: `guard val v = xs[i] else { ... } xs[j] = none use(v)`, `xs: List<?String>`
+outcome: refused: items 14 and 15
+was: the same
+waits: refused, List<T>, String, ?T
+
+== 8.25
+round: 8b H-a
+probe: The same under a view's freeze
+program: `val v = xss[i][..] xss[j] = List.new() v[0]`, `xss: List<List<u8>>`
+outcome: refused: item 17's freeze, with the same clause
+was: the same
+waits: refused, List<T>, views
+
+== 8.26
+round: 8b M-a
+probe: What a literal index holds while a later index is evaluated
+program: `fn f(own xs: List<[10]u64>) -> u64 { xs[0][eat(own xs)] }`
+outcome: accepted: holds 104, frame 192 (text: "A value kept"; run7)
+was: 96, read two ways
+waits: own, List<T>
+
+== 8.27
+round: 8b M-b
+probe: A `?S` of one representation with the place
+program: `fn f(a: ?[4]u8[0..10]) -> ?[4]u8 { a }`
+outcome: refused: item 15, a `?S` other than the place's `?T` does not enter, whatever its representation (Norman, 2026-11-15); the fix unwraps with `guard val` first
+was: unsaid
+waits: refused, ?T
+
+== 8.28
+round: 8b M-b
+probe: The same, both with niche 0
+program: `fn g(a: ?u8[1..5]) -> ?u8[1..10] { a }`
+outcome: refused: item 15, a `?S` other than the place's `?T` does not enter, whatever its representation (Norman, 2026-11-15); the fix unwraps with `guard val` first
+was: unsaid
+waits: refused, ?T
+
+== 8.29
+round: 8b M-b
+probe: One byte each, `none` 5 against 10
+program: `?u8[0..5]` into `?u8[0..10]`
+outcome: refused: item 15, a `?S` other than the place's `?T` does not enter, whatever its representation (Norman, 2026-11-15); the fix unwraps with `guard val` first
+was: unsaid
+waits: refused, ?T
+
+== 8.30
+round: 8b low 1
+probe: A `?U` made from a projection as a `catch` arm's value
+program: `f() catch { E.Bad(o: p) => p?.a }`
+outcome: accepted, no figure (item 15 names `catch`)
+was: left out
+waits: T ! E, ?T
+
+== 8.31
+round: 8b low 5
+probe: A binding live on one path, dead on the other, at the join
+program: `_ = consume(own t) if c { t = make() }`
+outcome: accepted, no figure: the value assigned is freed at the end of its path, before the join (item 20)
+was: leaked or freed unsaid
+waits: own
+
+== 8.32
+round: 8b low 5
+probe: The same at a loop's exits
+program: a loop that a `break` leaves just after a move, the binding live on its other exit
+outcome: accepted, no figure: the same (item 20)
+was: the same
+waits: own
+
+== 8.33
+round: 8b low 7
+probe: A projection kept, then passed into a small `?U`
+program: `use2(p?.n, bump(mut p))`, `x: ?u64`
+outcome: accepted: holds 32 (text: the projection's row; run7)
+was: 32 or 40
+waits: ?T
+
+== 9.1
+round: 9a O1
+probe: A view of a local inside a raised error
+program: `enum E2 { Wrap(v: []u8) }`, `mk() -> List<u8>` / `fn h() -> u8 ! E2 { val t = mk() raise E2.Wrap(v: t[..]) }`
+outcome: refused: `E0310` (item 17: raised, its sources may only be parameters)
+was: accepted by the list of cases
+waits: refused, T ! E, List<T>, views
+
+== 9.2
+round: 9a O1
+probe: A view of an arm's error inside a raised error
+program: `fn g(s: []u8) -> u8 ! E2 { f(s) catch { E.Bad(items: xs) => raise E2.Wrap(v: xs[..]) } }`
+outcome: refused: `E0310` (item 17)
+was: the same
+waits: refused, T ! E, views
+
+== 9.3
+round: 9a O2
+probe: A view through a binding that only holds a view
+program: `n(if c { val w = ys[..] w[1..] } else { ys[..] })`, `ys: List<u8>` a parameter
+outcome: accepted, no figure: the source is `ys` (item 17)
+was: refused by the direct reading
+waits: List<T>, views
+
+== 9.4
+round: 9a O2
+probe: A view through a pattern's projection
+program: `n(match opt { none => ys[..] v => v[..] })`, `opt: ?List<u8>` a parameter
+outcome: accepted, no figure: the source is `opt` (item 17)
+was: the same
+waits: List<T>, ?T, views
+
+== 9.5
+round: 9a O2
+probe: The same through `if val`
+program: `n(if val v = opt { v[..] } else { ys[..] })`
+outcome: accepted, no figure (item 17)
+was: the same
+waits: ?T, views
+
+== 9.6
+round: 9a O2
+probe: A view of a string literal
+program: `n(if c { val s = "abc" s[1..] } else { ys[..] })`
+outcome: refused: item 6, the branches are a `str` and a `[]u8`; a view of a string literal alone outlives nothing (items 17 and 18)
+was: refused by the direct reading
+waits: refused, views
+
+== 9.7
+round: 9a O3
+probe: A move in an arm that leaves, beside arms that reach the join
+program: `val n = f() catch { E.A => { _ = own s return 1 } E.B => 0 }`
+outcome: accepted, no figure (item 20: only the branches that reach the join must agree)
+was: refused by the branch rule
+waits: own, T ! E
+
+== 9.8
+round: 9a O3
+probe: A move in the one arm that reaches the join
+program: `match k { 0 => { _ = own s 1 } _ => return 0 }`
+outcome: accepted, no figure (item 20)
+was: the same
+waits: own
+
+== 9.9
+round: 9a L3
+probe: A block as an expression
+program: `val s = { val t = make() t }`
+outcome: refused: it does not parse, the grammar has no block expression (`grammar.md`, items 7 and 12)
+was: an error with no fix stated
+waits: refused
+
+== 9.10
+round: 9a B1, on main
+probe: A `mut` view parameter that stores a view of a shorter-lived argument
+program: `fn keep(mut out: []u8, src: []u8) { out = src }` / caller: `var w = ys[..] if c { val t = mk() keep(mut w, t[..]) } w[0]`
+outcome: open: register `mut-view-store`
+was: accepted, reading freed memory
+waits: views
+
+== 9.11
+round: 9a B2
+probe: An owning value of 16 bytes or less
+program: a read-only `struct S { a: [0]String, n: u64 }` argument
+outcome: accepted, no figure: passed by its address (`mutable-value-semantics.md`, item 1)
+was: copied in registers
+waits: String
+
+== 9.12
+round: 9a B3, 9b
+probe: An index of a `?[4]u8`
+program: `p?.xs[i]`, `xs: [4]u8`
+outcome: refused: `E0203`, item 15 names it, with the `guard val` fix
+was: not determined
+waits: refused, ?T
+
+== 9.13
+round: 9b O1
+probe: A view of an owning scrutinee no binding holds, given out of its branch
+program: `enum M { A(items: List<u8>), B }` / `n(if c { match mkmsg() { M.A(items: xs) => xs[..] M.B => ys[..] } } else { ys[..] })`
+outcome: accepted, no figure: the error or the scrutinee lives to the end of the statement (item 12, as amended on 2026-11-15)
+was: accepted, reading freed memory
+waits: List<T>, views
+
+== 9.14
+round: 9b O1
+probe: A view of a plain scrutinee held only until the `match`'s value is made
+program: `n(match get() { Msg.Empty(pad: _) => ys[..] Msg.Big(data: d) => d[..] }, wide())`, `Msg` plain
+outcome: accepted, no figure: the error or the scrutinee lives to the end of the statement (item 12, as amended on 2026-11-15)
+was: accepted, its stack reused
+waits: views
+
+== 9.15
+round: 9b O1
+probe: A view of a `guard val`'s scrutinee given out of its block
+program: `n(if c { guard val v = find() else { return 0 } v[..] } else { ys[..] })`
+outcome: refused: `E0310` (item 17)
+was: accepted
+waits: refused, ?T, views
+
+== 9.16
+round: 9b O2
+probe: A binding live on one path, read in place by that path's value
+program: `_ = consume(own u) val row = if c { u = make() u[0] } else { zeros }`, `u: List<[100]u8>`
+outcome: accepted, no figure: `u` is freed once the `if`'s value is made (item 20)
+was: freed before or after
+waits: own, List<T>
+
+== 9.17
+round: 9b O3
+probe: A view through a binding that only holds a view
+program: `n(if c { val v = ys[..] v[1..2] } else { ys[..] })`, `ys` a parameter
+outcome: accepted, no figure (item 17)
+was: refused by the letter
+waits: views
+
+== 9.18
+round: 9b O4
+probe: A value that takes its type from its place, into a `?T`
+program: `val l: ?List<u8> = List.new()`
+outcome: open: register `optional-place-type`
+was: unsaid
+waits: List<T>, ?T
+
+== 9.19
+round: 9b O4
+probe: The same, assigned
+program: `cache = List.new()`, `cache: ?List<u8>`
+outcome: open: register `optional-place-type`
+was: unsaid
+waits: List<T>, ?T
+
+== 9.20
+round: 9b O4
+probe: A repeat into a `?T`
+program: `val a: ?[4]u8 = [0; 4]`
+outcome: open: register `optional-place-type`
+was: unsaid
+waits: ?T
+
+== 9.21
+round: 9b O5
+probe: An owning projection as a branch's value
+program: `use(if c { p?.name } else { q?.name })`, `name: String`
+outcome: refused: item 12's implicit copy (item 15)
+was: accepted, freeing a buffer `p` holds
+waits: refused, String, ?T
+
+== 9.22
+round: 9b low 4
+probe: A view that is an `if`'s value, then its source written
+program: `two(if c { xs[..] } else { ys[..] }, grow(mut xs))`
+outcome: refused: item 17's freeze for the statement
+was: unsaid
+waits: refused, views
+
+== 9.23
+round: 9b low 3
+probe: The fix for a `?S` in a binding
+program: `var y: ?u8 = none if val v = a { y = v }`, `a: ?u8[0..10]`
+outcome: accepted, no figure (item 15 names it)
+was: one line by the letter
+waits: ?T
+
+== 9.24
+round: 9b B2
+probe: An owning value no binding holds, when its statement is left
+program: `match mkmsg() { M.A(items: xs) => { return xs[0] } M.B => ... }`
+outcome: not determined: the order of its freeing against the returned value is not stated; seen and left (PR body)
+was: unsaid
+waits: List<T>
+
+== 9.25
+round: 9b B3
+probe: A move in a branch that leaves
+program: `if c { return eat(own t) } len(t)`
+outcome: accepted, no figure: a branch that leaves does not reach the join (item 20)
+was: refused by the letter
+waits: own
+
+== 9.26
+round: 9b B6
+probe: A small owning value that is no optional
+program: `enum E { A(xs: [0]String), B }` passed read-only
+outcome: accepted, no figure: passed by its address (`mutable-value-semantics.md`, item 1)
+was: copied in registers
+waits: String
+
+== 9.27
+round: 9b B7
+probe: A move written before an argument that leaves
+program: `g(own s, f()!)`
+outcome: not determined: seen and left (PR body)
+was: unsaid
+waits: own, T ! E
+
+== 10.1
+round: 10a H1
+probe: A view of a binding freed at the end of its path (item 20)
+program: `var u = mk() _ = consume(own u)` / `val w = if c { u = mk() u[..] } else { ys[..] } n(w)`
+outcome: refused: `E0310`, the owner's life ending where item 20 says
+was: accepted by the list of release points
+waits: refused, own, views
+
+== 10.2
+round: 10a M1
+probe: A view through a binding whose value holds views alone
+program: `struct P { a: []u8 }` / `n(if c { val p = P(a: ys[..]) p.a } else { ys[..] })`
+outcome: accepted, no figure: the chain passes through `p` to `ys` (item 17)
+was: either reading
+waits: views
+
+== 10.3
+round: 10a M1
+probe: The same through a `?[]u8`
+program: `n(if c { val o = maybe(ys) if val v = o { v } else { ys[..] } } else { ys[..] })`, `maybe(ys) -> ?[]u8`
+outcome: accepted, no figure (item 17)
+was: either reading
+waits: ?T, views
+
+== 10.4
+round: 10a M2
+probe: A view kept in a `var` past the round of its owner
+program: `var w: []u8 = ys[..] while c { val t = mk() w = t[..] use(w) } 0`
+outcome: refused: `E0310`, live in item 20's sense whether or not it is read again
+was: accepted by a dataflow reading
+waits: refused, views
+
+== 10.5
+round: 10a M3
+probe: The source of a view inside a caught error
+program: `w = x` inside an arm `E2.Wrap(v: x) => ...`, `enum E2 { Wrap(v: []u8) }`
+outcome: open: register `error-view-provenance`
+was: decided by a sentence the PR wrote
+waits: T ! E, views
+
+== 10.6
+round: 10b H1
+probe: A view holder that is a `match`'s value, then its source written
+program: `struct Tok { text: []u8 }`, `xs` a `var List<u8>` / `two(match k { 0 => Tok(text: xs[..]) _ => t0 }, grow(mut xs))`
+outcome: refused: the freeze of item 17, while the holder is live
+was: accepted, reading freed memory
+waits: refused, List<T>, views
+
+== 10.7
+round: 10b M1
+probe: A returned string literal
+program: `fn greet() -> str { "hi" }`
+outcome: accepted, no figure: its source nothing frees (items 17 and 18)
+was: `E0310` by the letter
+waits: views
+
+== 10.8
+round: 10b M1
+probe: A raised string literal
+program: `raise E.Bad(msg: "bad digit")`
+outcome: accepted, no figure (item 17)
+was: the same
+waits: T ! E, views
+
+== 10.9
+round: 10b M2
+probe: A view assigned while a view made from it lives
+program: `var w1 = xs[..] val w2 = w1[1..] w1 = ys`
+outcome: accepted, no figure: the source of both is `xs`, and `w1` is passed through (item 17)
+was: refused by one of two definitions
+waits: views
+
+== 10.10
+round: 10b L5
+probe: A move on a path that leaves, inside an arm that reaches the join
+program: `match k { 0 => { if c { _ = own s return 0 } 1 } _ => 2 }`
+outcome: accepted, no figure: a move on a path that leaves counts for no branch (item 20)
+was: either, by the meaning of moves
+waits: own
+
+== 10.11
+round: 10b before
+probe: A move in an `if` without `else`
+program: `if c { _ = own s }`, no `else`
+outcome: refused: the empty path is a branch that neither moves nor discards `s` (item 20)
+was: unsaid
+waits: refused, own
+
+== 11.1
+round: 11 liveness H1
+probe: A view of a local plain array returned
+program: `fn f() -> []u8 { val a: [3]u8 = [1, 2, 3] a[..] }`
+outcome: refused: `E0310`, the array a source of a view made of its elements (item 17)
+was: accepted, a plain owner never ending
+waits: refused, views
+
+== 11.2
+round: 11 liveness H1
+probe: A view of a plain scrutinee used within its statement
+program: `n(if val v = getp() { v[..] } else { ys[..] }, wide())`, `getp() -> ?[4]u8`
+outcome: accepted, no figure: the scrutinee lives to the end of the statement (item 12)
+was: two readings
+waits: ?T, views
+
+== 11.3
+round: 11 H2
+probe: A view of a `List`'s elements, then a push
+program: `var l: List<[]u8> = List.new() mut l.push(ys[..]) val w = l[..] mut l.push(ys[..]) w[0][0]`
+outcome: refused: the freeze, `l` a source of `w` (item 17)
+was: accepted, the list passed through
+waits: refused, List<T>, views
+
+== 11.4
+round: 11 H2
+probe: The same for an array
+program: `var a: [1][]u8 = [ys[..]] val w = a[..] a[0] = zs[..] w[0]`
+outcome: refused: the freeze (item 17)
+was: the same
+waits: refused, views
+
+== 11.5
+round: 11 H2
+probe: A view of a branch's array kept past it
+program: `var o: [][]u8 = base[..] if c { val arr = [ys[..], ys[..]] o = arr[..] } o[0][0]`
+outcome: refused: `E0310` (item 17)
+was: the same
+waits: refused, views
+
+== 11.6
+round: 11 H2
+probe: A view of an owner parameter's elements returned
+program: `fn all(l: List<[]u8>) -> [][]u8 { l[..] }`
+outcome: refused: `E0310`, an owner parameter is no source (item 17, `regions-and-pools.md` item 1)
+was: accepted, the caller keeping only the elements' sources
+waits: refused, List<T>, views
+
+== 11.7
+round: 11 H3
+probe: A view of a binding item 20 frees at the end of its path
+program: `var w: []u8 = ys[..] var t = mk() _ = consume(own t) if c { t = mk() w = t[..] } w[0]`
+outcome: refused: `E0310` (item 17, live naming item 20)
+was: accepted
+waits: refused, own, views
+
+== 11.8
+round: 11 freeze H3
+probe: A plain view moved, then its source written
+program: `val w = xs[..] _ = own w mut xs.clear() w[0]`
+outcome: refused: the freeze, `w` live when moved (item 17)
+was: accepted
+waits: refused, own, views
+
+== 11.9
+round: 11 M1
+probe: A `mut` parameter given a window into a local
+program: `fn f(mut v: []u8) { val t = mk() v = t[..] }`
+outcome: refused: `E0310` (item 17)
+was: accepted
+waits: refused, views
+
+== 11.10
+round: 11 freeze H2
+probe: A push into a `var` holder of a window into a shorter-lived binding
+program: `var l: List<[]u8> = List.new() if c { val t = mk() mut l.push(t[..]) } l[0][0]`
+outcome: refused: `E0310`, a push included (item 17)
+was: accepted by the pointer sentence
+waits: refused, List<T>, views
+
+== 11.11
+round: 11 M
+probe: A `var` view's sources over its life
+program: `var w = ys[..] if c { val t = mk() w = t[..] n(w) w = ys[..] } n(w)`
+outcome: refused: `E0310`, by the union (item 17)
+was: accepted by the last value
+waits: refused, views
+
+== 11.12
+round: 11 M
+probe: The same, against the freeze
+program: `var w = xs[..] w = ys[..] mut xs.push(1) w[0]`
+outcome: refused: the freeze, by the union (item 17)
+was: the same
+waits: refused, views
+
+== 11.13
+round: 11 before
+probe: A view-holder parameter with an owning part
+program: `struct Q { buf: List<u8>, w: []u8 }`, `fn first(p: Q) -> []u8 { p.buf[..] }`, `val v = first(Q(buf: mk(), w: ys[..]))`
+outcome: open: register `view-holder-parameter`
+was: accepted, `v` dangling
+waits: List<T>, views
+
+== 12.1
+round: 12, decision
+probe: A view of a block's binding consumed in its last expression
+program: `val k = if c { val t = mk() n(t[..]) } else { 0 }`
+outcome: accepted, no figure: the tail rule (item 12, Norman, 2026-11-15)
+was: refused by the letter
+waits: views
+
+== 12.2
+round: 12 lives M1
+probe: The same in a body's last expression
+program: `fn f() -> u64 { val t = mk() len(t[..]) }`
+outcome: accepted: frame 112 (item 12)
+was: refused by the letter
+waits: views
+
+== 12.3
+round: 12 H1
+probe: A view's bound that writes the place it is made of
+program: `n(ll[0][0..wipe(mut ll)])`, `var ll: List<List<u8>>`, `wipe(mut l: List<List<u8>>) -> usize`
+outcome: refused: the freeze from where its bounds are evaluated (item 17)
+was: accepted, reading freed memory
+waits: refused, List<T>, views
+
+== 12.4
+round: 12 H2
+probe: A raised view of a scrutinee
+program: `fn h(ys: []u8) -> u8 ! E2 { raise E2.Wrap(v: match mkmsg() { M.A(items: xs) => xs[..] M.B => ys[..] }) }`
+outcome: refused: `E0310`, a raised view live past every owner (item 17)
+was: accepted
+waits: refused, T ! E, views
+
+== 12.5
+round: 12 H3
+probe: A view through a pattern's name, against `main`'s rule
+program: `n(if val v = getp() { v[..] } else { ys[..] }, wide())`
+outcome: accepted, no figure: the rule is read by syntax, a pattern's name being no value no binding holds (item 17)
+was: two readings
+waits: ?T, views
+
+== 12.6
+round: 12 M
+probe: A view of a `guard val`'s scrutinee
+program: `guard val v = mkopt() else { return 0 } n(v[..])`
+outcome: accepted, no figure: Live defers to item 12 (item 17)
+was: two readings
+waits: ?T, views
+
+== 12.7
+round: 12 M
+probe: A `guard val` in a branch's block
+program: `fn h(c: bool) -> u64 { pair(if c { guard val v = find() else { return 0 } v[0] } else { 0_u8 }, wide()) }`
+outcome: accepted: frame 1,076 by the equations (run13, not stated); the translation's scrutinee ends with the block, as item 15 says
+was: 2,086 or 1,085
+waits: ?T
+
+== 12.8
+round: 12 M
+probe: A view through a pattern's name of view type
+program: `fn f(opt: ?[]u8, ys: []u8) -> []u8 { if val v = opt { v[1..] } else { ys } }`
+outcome: accepted, no figure: a view's sources alone (item 17)
+was: two readings
+waits: ?T, views
+
+== 12.9
+round: 12 M
+probe: An owning value no binding holds that moves
+program: `eat(make())`, `eat(own x: List<u8>)`
+outcome: accepted, no figure: not freed again by its caller (item 12)
+was: freed twice by the letter
+waits: own, List<T>
+
+== 12.10
+round: 12 L
+probe: A store into a part of a `var` holder
+program: `var a: [1][]u8 = [xs[..]] a[0] = ys[..] mut xs.push(1)`
+outcome: refused: the freeze, the union counting stores (item 17)
+was: unsaid
+waits: refused, views
+
+== 12.11
+round: 12 L
+probe: A view in an `if` condition
+program: `if n(xs[..]) > 0 { mut xs.pop() }`
+outcome: accepted, no figure: the condition is a statement of its own (item 12)
+was: refused
+waits: views
+
+== 12.12
+round: 12 before
+probe: An `ensures` clause reading an `own` parameter
+program: `@checked fn f(own xs: List<u8>) -> u64 ensures result == xs.len { xs.len }`
+outcome: accepted, no figure: the clause is evaluated before what ends at the return is freed (item 12)
+was: unordered
+waits: own, List<T>
+
+== 12.13
+round: 12 before
+probe: `raise` as an argument
+program: `use2(mk(), raise E.X(..))`
+outcome: not determined: no equation; `ROADMAP.md`'s list
+was: unsaid
+waits: T ! E, views
+
+== 12.14
+round: 12 before
+probe: Two provenances in one field
+program: `var s = P(a: xs[..]) s.a = ys[..]`
+outcome: not determined: `regions-and-pools.md` item 6 against item 17's union; `ROADMAP.md`'s list
+was: refused or the union
+waits: views
+
+== 12.15
+round: 12 before
+probe: A `String` moved out of a list through a view
+program: `val m = (ll[..])[0]`, `ll: List<String>`
+outcome: open: register `view-element-move`
+was: a move out of an owner
+waits: List<T>, String, views
+
+== 13.1
+round: 13 M1
+probe: A view of a scrutinee in a branch block's tail
+program: `n(if c { if val v = getl() { v[..] } else { ys[..] } } else { ys[..] })`
+outcome: refused: `E0310`, the scrutinee ending with the block (item 12's tail rule)
+was: two lives
+waits: refused, ?T, views
+
+== 13.2
+round: 13 M1
+probe: The same for a `match` and a `catch`
+program: the same with a tail `match mkmsg() {...}` or `f() catch { E.Bad(items: xs) => xs[..] }`
+outcome: refused: `E0310` (item 12)
+was: the same
+waits: refused, T ! E, views
+
+== 13.3
+round: 13 M2
+probe: A view of a view, then the view assigned
+program: `var w = ys[..] val h = w[0..1] w = zs[..] n(h)`
+outcome: accepted, no figure: `h`'s sources are the bytes behind `ys` (item 17)
+was: refused by the freeze
+waits: views
+
+== 13.4
+round: 13 M2
+probe: The slice cursor
+program: `val head = rest[0..1] rest = rest[1..]`
+outcome: accepted, no figure (item 17)
+was: the same
+waits: views
+
+== 13.5
+round: 13 L1
+probe: A view in the left operand of `and`
+program: `n(xs[..]) > 0 and grow(mut xs)`
+outcome: accepted, no figure: that operand is a statement of its own (item 12)
+was: refused by the source
+waits: views
+
+== 13.6
+round: 13 L2
+probe: A block's owning value that moves
+program: `val s = if c { mk() } else { mk2() }`, `String`s
+outcome: accepted, no figure: it moves into `s` (item 12)
+was: freed by the letter
+waits: String
+
+== 13.7
+round: 13 before
+probe: A view made of a view no binding holds
+program: `pick(xs[..], ys[..])[1..]`, `s.bytes()[0..4]`
+outcome: refused: `main`'s rule (item 17); narrowing it is a line of `ROADMAP.md`'s list
+was: refused
+waits: refused, views
+
+== 14.1
+round: 14 H1
+probe: An `else if` chain
+program: `pair(if a { m1() } else if b { m2() } else { m3() }, wide())`, all `[1000]u8`
+outcome: accepted: holds 3,008, whatever the chain's length (text: "`if`, `and`, `or`, `guard`"; run13)
+was: 4,008, growing with each link
+waits: none
+frames: f 3074
+---
+module programs
+fn m1() -> [1000]u8 = [1_u8; 1000]
+
+fn m2() -> [1000]u8 = [2_u8; 1000]
+
+fn m3() -> [1000]u8 = [3_u8; 1000]
+
+fn wide() -> [1000]u8 = [4_u8; 1000]
+
+fn pair(a: [1000]u8, b: [1000]u8) -> u64 = 0_u64
+
+pub fn f(a: bool, b: bool) -> u64 = pair(if a {
+  m1()
+} else if b {
+  m2()
+} else {
+  m3()
+}, wide())
+
+== 14.2
+round: 14 H1
+probe: A view of a scrutinee in an `else if`
+program: `n(if c { ys[..] } else if val v = getl() { v[..] } else { ys[..] })`
+outcome: refused: `E0310`, the `if val` being the last expression of the `else` block (item 12)
+was: two readings
+waits: refused, ?T, views
+
+== 14.3
+round: 14 L1
+probe: A later operand writing a view's place after the view is made
+program: `n2(w[0..1], adv(mut w))` and `n2(vs[0][0..1], wipe(mut vs))`
+outcome: decided by item 17: the place is frozen until the view is made, then its sources
+was: two readings
+waits: views
+
+== 14.4
+round: 14 L2
+probe: A view in the right operand of `and`
+program: `two(c and n(xs[..]) > 0, grow(mut xs))`
+outcome: accepted, no figure: the operand is the last expression of a branch block (item 12)
+was: refused by the letter
+waits: views
+
+== 14.5
+round: 14 L3
+probe: The order at a block's end
+program: `var w = ys[..] guard val v = mkopt() else { return 0 } w = v[..] n(w)`
+outcome: accepted, no figure: the order is no difference of life (item 12)
+was: refused by strict order
+waits: ?T, views
+
+== 14.6
+round: 14 before
+probe: A `mut` view parameter given a window into an argument that lives on
+program: `fn tie(mut v: []u8, xs: List<u8>) { v = xs[..] }`, then `var w = ys[..] tie(mut w, xs) mut xs.push(1) w[0]`
+outcome: open: register `mut-view-store`
+was: accepted
+waits: List<T>, views
+
+== 14.7
+round: 14 before
+probe: The sources of what `pop` gives
+program: `var w = ys[..] if c { val t = mk() var l: List<[]u8> = List.new() mut l.push(t[..]) if val v = mut l.pop() { w = v } } n(w)`
+outcome: open: register `view-element-move`
+was: accepted
+waits: List<T>, ?T, views
