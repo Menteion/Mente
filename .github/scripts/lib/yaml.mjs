@@ -8,7 +8,12 @@
 
 /// Parses `text` and returns its value: objects, arrays, strings, numbers, booleans and null.
 export function parseYaml(text) {
-  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split(/\r?\n/);
+  // Only printable ASCII, tab and LF (a CR before an LF aside): GitHub's reader breaks lines at
+  // characters this one does not (NEL, U+0085, and the line separators), so a comment here could
+  // be a key there (the fourth review of PR 137).
+  const odd = [...text].findIndex((c, k) => c !== "\t" && c !== "\n" && !(c === "\r" && text[k + 1] === "\n") && (c < " " || c > "~"));
+  if (odd >= 0) throw new Error(`line ${text.slice(0, odd).split("\n").length}: a character outside printable ASCII, tab and LF: U+${text.codePointAt(odd).toString(16).toUpperCase().padStart(4, "0")}`);
+  const lines = text.split(/\r?\n/);
   let i = 0;
 
   const fail = (message, at = i) => {

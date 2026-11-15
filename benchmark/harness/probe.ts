@@ -16,9 +16,9 @@
 // model, its parameters, every prompt and reply and the tokens used, and stops before a call
 // that could take its spending past the budget, in US dollars.
 
-import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { runProcess } from "./build.ts";
 import {
   costOf,
   extractProgram,
@@ -88,9 +88,12 @@ async function ask(apiKey: string, system: string, user: string): Promise<Reply>
   }
 }
 
-/** What `mn check --json` reports for a module, one `line:column code message` each. */
-function check(mn: string, file: string): string[] {
-  const run = spawnSync(mn, ["check", "--json", file], { encoding: "utf8" });
+/**
+ * What `mn check --json` reports for a module, one `line:column code message` each, through the
+ * harness's one way to start a process, which keeps every secret from it.
+ */
+async function check(mn: string, file: string): Promise<string[]> {
+  const run = await runProcess(mn, ["check", "--json", file], { timeoutMs: 120_000 });
   const doc = JSON.parse(run.stdout);
   return doc.diagnostics.map(
     (d: { code: string; message: string; primary: { line: number; column: number } }) =>
@@ -99,11 +102,11 @@ function check(mn: string, file: string): string[] {
 }
 
 /** The second job: `mn check` on every program the first wrote, with no key in reach. */
-function checkPrograms(dir: string, mn: string): void {
+async function checkPrograms(dir: string, mn: string): Promise<void> {
   if (process.env.ANTHROPIC_API_KEY) throw new Error("--check runs agent-written programs: run it without ANTHROPIC_API_KEY");
   const record = JSON.parse(readFileSync(join(dir, "results.json"), "utf8"));
   for (const p of record.programs) {
-    p.diagnostics = p.stop_reason === "refusal" ? [] : check(mn, join(dir, p.file));
+    p.diagnostics = p.stop_reason === "refusal" ? [] : await check(mn, join(dir, p.file));
     console.log(`${p.file}: ${p.diagnostics.length} diagnostics`);
   }
   writeFileSync(join(dir, "results.json"), JSON.stringify(record, null, 2));

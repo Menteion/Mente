@@ -15,8 +15,9 @@
 # defeat it, which runs with the job's rights, and on GitHub's runners with sudo: a process that
 # swaps a tool and restores it between two checks, a write to this script, its record or .git
 # before they run, a stub that answers as the tool would, or a toolchain or a stub earlier on the
-# path that the record already holds. Against that, the guard is the review of the change, until
-# its code runs isolated from the trusted steps (docs/design-review.md, untrusted-test-isolation).
+# path that the record already holds. Against that, on Linux, that code runs in a sandbox, where it
+# can write none of these (.github/scripts/test-sandbox.sh); on Windows the guard is still the
+# review of the change (docs/design-review.md, untrusted-test-isolation).
 # The workflow policy (.github/scripts/policy.test.mjs) pins this script and the steps that run
 # it, and runs it against a changed tool.
 set -euo pipefail

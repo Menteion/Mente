@@ -13,10 +13,12 @@ import {
   checkOutside,
   childEnv,
   cleanOutput,
+  failureClass,
   hiddenPaths,
   insideAny,
   menteCaseResult,
   printedOutcome,
+  runProcess,
   sandboxed,
   trapText,
   verdictOf,
@@ -622,6 +624,35 @@ test("an output directory inside a path the sandbox hides is refused", () => {
   // Without a sandbox nothing is hidden, so any output will do.
   assert.doesNotThrow(() => checkOutside(join(REPOSITORY, "bench-out"), { ...tools, sandbox: "" }));
   assert.ok(existsSync(join(REPOSITORY, "benchmark", "README.md")), "REPOSITORY is this repository's root");
+});
+
+test("no process that runs beside the key starts mn but through the sandbox", async () => {
+  // The final review of PR 137: failureClass ran `mn explain` directly, as the runner's user,
+  // beside the process that holds the key. mn is code of the branch; the sandbox is its only cage.
+  const tools = { mn: "mn", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "", hide: [], cover: "" };
+  await assert.rejects(failureClass(tools, "E0001"), /outside the sandbox/);
+  // Every module a job that holds the key runs starts mn only through `sandboxed(...)`: no spawn
+  // takes mn as its command.
+  const direct = /\b(?:runProcess|spawnSync|spawn|execFileSync|execFile|execSync|exec)\(\s*(?:tools\.mn|mn)\b/;
+  for (const file of ["bench.ts", "build.ts", "prelim.ts"]) {
+    const text = readFileSync(join(REPOSITORY, "benchmark", "harness", file), "utf8");
+    assert.doesNotMatch(text, direct, `${file} starts mn directly, outside the sandbox`);
+  }
+  for (const plant of ['runProcess(mn, ["explain", code])', 'spawnSync(tools.mn, ["check"])', "spawn( mn, args)"]) assert.match(plant, direct, plant);
+  // And by what runs, not how it is spelled (the review of 35bbe0f: `const c = tools.mn` and an
+  // environment of `process.env` got past the spelling): runProcess, the harness's one way to
+  // start a process, starts mn itself only while no secret is in reach, and gives no child a
+  // variable that could hold one, whatever environment it is handed.
+  process.env.BENCH_TEST_API_KEY = "secret";
+  try {
+    const c = tools.mn;
+    await assert.rejects(runProcess(c, ["explain", "E0001"], { env: process.env, timeoutMs: 5000 }), /outside the sandbox beside a secret/);
+    await assert.rejects(runProcess(join("target", "release", "mn.exe"), [], { timeoutMs: 5000 }), /outside the sandbox beside a secret/);
+    const p = await runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_API_KEY ?? 'none')"], { env: { ...process.env }, timeoutMs: 30_000 });
+    assert.equal(p.stdout.trim(), "none");
+  } finally {
+    delete process.env.BENCH_TEST_API_KEY;
+  }
 });
 
 test("the processes the harness starts, the agent's programs among them, see no secret", () => {

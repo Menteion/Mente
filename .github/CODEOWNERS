@@ -32,18 +32,15 @@
 /perf/run.mjs @Dancraft3746
 /perf/lib.mjs @Dancraft3746
 
-# The benchmark corpus's lock and its checker, the sandbox agent-written code runs in and its
-# proof, the scripts that run agent code beside the API key, and the toolchains they pin.
+# The benchmark corpus's lock, its checker and the reference solutions it loads beside the
+# held-out set; and the harness, whole: the sandbox agent-written code runs in and its proof,
+# every script and module the jobs that hold the API key or the held-out set run (the reviews of
+# PR 137 found the toolchains' installer, five modules and reference.mjs outside this list), and
+# the toolchains they pin.
 /benchmark/check.mjs @Dancraft3746
 /benchmark/corpus.lock @Dancraft3746
-/benchmark/harness/sandbox.sh @Dancraft3746
-/benchmark/harness/sandbox-check.ts @Dancraft3746
-/benchmark/harness/build.ts @Dancraft3746
-/benchmark/harness/bench.ts @Dancraft3746
-/benchmark/harness/prelim.ts @Dancraft3746
-/benchmark/harness/probe.ts @Dancraft3746
-/benchmark/harness/fixtures.ts @Dancraft3746
-/benchmark/harness/toolchains.json @Dancraft3746
+/benchmark/reference.mjs @Dancraft3746
+/benchmark/harness/ @Dancraft3746
 
 # The gate tests of the compiler's own suite: the dependency policy, the lock's allowlist, English
 # text and the workflow policy's place in the Documentation job; the lint that denies a fallback arm
@@ -57,3 +54,7 @@
 # Each crate's manifest, which decides what its tests are: one could drop the gate tests' target.
 /compiler/*/Cargo.toml @Dancraft3746
 /spikes/*/Cargo.toml @Dancraft3746
+
+# How git reads the tree: a file it marks -diff or binary shows no line in a diff, and the
+# Mutants job would test none of its mutants.
+/.gitattributes @Dancraft3746
