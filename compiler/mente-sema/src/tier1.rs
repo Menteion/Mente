@@ -688,6 +688,82 @@ fn complemented_literal(tree: &Tree, e: ExprId) -> Option<(ExprId, u128)> {
     }
 }
 
+/// The operations and the literals of `e`, an expression of literals alone, put in `out`, where
+/// it is made of operators and literals of no suffix alone; none for any other.
+fn operator_literals(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) -> Option<()> {
+    out.push(e);
+    match &tree.expr(e).kind {
+        ExprKind::Int { suffix, .. } => match suffix {
+            None => Some(()),
+            Some(_) => None,
+        },
+        ExprKind::Unary { op, operand } => match op {
+            UnaryOp::Neg | UnaryOp::BitNot => operator_literals(tree, *operand, out),
+            UnaryOp::Not => None,
+        },
+        ExprKind::Binary { op, lhs, rhs } => match op {
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => {
+                operator_literals(tree, *lhs, out)?;
+                operator_literals(tree, *rhs, out)
+            }
+            BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => None,
+        },
+        ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
+    }
+}
+
+/// Whether `e` is a literal of no suffix.
+fn literal_leaf(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Int { suffix, .. } => suffix.is_none(),
+        ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => false,
+    }
+}
+
 /// `~x`: `max - x` in an unsigned type, `-x - 1` in a signed one. A value of no linear form
 /// gives one within the type, which `x` is narrowed into before `~` applies, so that no
 /// valuation of `~x` lies outside it.
@@ -3459,43 +3535,84 @@ impl<'a> Fx<'a> {
         }
     }
 
-    /// The fix of an `E0508` whose value is `~` of a literal, such as `~3` narrowed into a
-    /// `u8`: the place gives a literal no type, so `~3` is -4, an `i64` (`core-calculus.md`,
-    /// item 5). The literal is written with the place's type, `~3_u8`, which keeps `~` in that
-    /// type and its value within it, so the narrowing fits. None for any other value, and where
-    /// the literal does not lie in the type, as in `~256` for a `u8`. A machine-applicable fix
-    /// is certain (`diagnostics.md`, item 4), so where the place is refined the fix is offered
-    /// only when its refinement holds the value the suffix gives, which is then the only one:
-    /// `~3_u8` is 252, outside `u8[0..10]`.
+    /// The fix of an `E0508` whose value is an expression of literals alone, such as `~3` or
+    /// `~3 | 1` narrowed into a `u8`: the place gives a literal no type, so `~3` is -4, an `i64`
+    /// (`core-calculus.md`, item 5). Its first literal is written with the place's type,
+    /// `~3_u8`, which gives the expression that type and, where its value then lies in the
+    /// type, a value the narrowing fits. None where the expression would trap in that type or
+    /// leave it, as `~256` and `~127_i8 - 1` do, or where the place's refinement does not hold
+    /// the value it gives, as `u8[0..10]` does not hold `~3_u8`, 252. A machine-applicable fix
+    /// is certain (`diagnostics.md`, item 4): `~` of a literal, into a place of no refinement or
+    /// of one whose literal bounds hold the value, has that one repair; any other expression,
+    /// and a refinement whose bounds are names, which may not hold it, get a suggestion.
     fn suffix_fix(&self, span: Span, t: IntTy, refine: Option<&Refine>) -> Option<Fix> {
         let tree = self.tree;
         let e = (0..tree.exprs.len())
             .map(|i| ExprId(i as u32))
             .find(|&e| tree.expr(e).span == span)?;
-        let literal = complemented_literal(tree, e).filter(|(_, value)| *value <= t.max())?;
-        // `~x` in `t`: `max - x` unsigned, `-x - 1` signed.
-        let value = if t.signed {
-            Exact::new(true, literal.1 + 1)
-        } else {
-            Exact::new(false, t.max() - literal.1)
-        };
-        let held = refine.is_none_or(|r| match (r.lo_lit, r.hi_lit) {
-            (Some(lo), Some(hi)) => {
-                lo <= value && if r.inclusive { value <= hi } else { value < hi }
-            }
-            (None, _) | (_, None) => false,
-        });
-        if !held {
+        if self.typing.exprs[e.0 as usize] != Ty::Int(Int::Literal) {
             return None;
         }
-        let at = tree.expr(literal.0).span;
+        // Its operations and literals, through operators alone; the first literal in the text
+        // takes the suffix.
+        let mut nodes = Vec::new();
+        operator_literals(tree, e, &mut nodes)?;
+        let first = nodes
+            .iter()
+            .copied()
+            .filter(|&x| literal_leaf(tree, x))
+            .min_by_key(|&x| tree.expr(x).span.start)?;
+        // The value once its literals take `t`.
+        let mut taken = self.typing.literals.clone();
+        for &x in &nodes {
+            taken[x.0 as usize] = Some(literals::Taken {
+                ty: t,
+                from: literals::From::Operands,
+            });
+        }
+        let v = literals::value(tree, &taken, e).filter(|v| v.fits(t))?;
+        let value = Exact::new(v.negative, v.magnitude);
+        let held = match refine {
+            None => Some(true),
+            Some(r) => match (r.lo_lit, r.hi_lit) {
+                (Some(lo), Some(hi)) => {
+                    Some(lo <= value && if r.inclusive { value <= hi } else { value < hi })
+                }
+                (None, _) | (_, None) => None,
+            },
+        };
+        if held == Some(false) {
+            return None;
+        }
+        let complemented = complemented_literal(tree, e).is_some();
+        let at = tree.expr(first).span;
         let replacement = format!("{}_{}", self.src.get(at.start..at.end)?, t.name);
+        let (message, applicability) = if complemented && held == Some(true) {
+            (
+                format!(
+                    "write the literal as `{}`, `{}`, so that `~` works in it",
+                    t.name, replacement
+                ),
+                Applicability::MachineApplicable,
+            )
+        } else {
+            let shown = format!(
+                "{}{}{}",
+                self.src.get(span.start..at.start)?,
+                replacement,
+                self.src.get(at.end..span.end)?
+            );
+            (
+                format!(
+                    "state the place's type on its first literal, `{}`, so that it works in `{}`",
+                    shown, t.name
+                ),
+                Applicability::Suggestion,
+            )
+        };
         Some(Fix {
-            message: format!(
-                "write the literal as `{}`, `{}`, so that `~` works in it",
-                t.name, replacement
-            ),
-            applicability: Applicability::MachineApplicable,
+            message,
+            applicability,
             edits: vec![Edit {
                 span: at,
                 replacement,
@@ -8258,32 +8375,39 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
     #[test]
     fn test_a_narrowing_of_literals_alone_is_fixed_by_their_suffix() {
         let decls = "struct P {\n  m: u8\n}\nfn mask(m: u8) -> u8 = m\n";
-        for (f, fixed) in [
+        // Each case, the text its fix writes, none where it has no fix, and whether the fix is
+        // machine-applicable; a suggestion repairs the narrowing, and a refinement whose bounds
+        // are names may leave an obligation to Tier 1.
+        for (f, fixed, machine) in [
             (
                 "pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}",
                 "val m: u8 = ~3_u8",
+                true,
             ),
-            ("pub fn f() -> u8 = mask(~3)", "mask(~3_u8)"),
-            ("pub fn f() -> u8 = P(m: ~3).m", "P(m: ~3_u8)"),
-            ("pub fn f() -> [2]u8 = [~3, 1]", "[~3_u8, 1]"),
-            ("pub fn f() -> u8 = ~0", "~0_u8"),
+            ("pub fn f() -> u8 = mask(~3)", "mask(~3_u8)", true),
+            ("pub fn f() -> u8 = P(m: ~3).m", "P(m: ~3_u8)", true),
+            ("pub fn f() -> [2]u8 = [~3, 1]", "[~3_u8, 1]", true),
+            ("pub fn f() -> u8 = ~0", "~0_u8", true),
             (
                 "pub fn f() -> u16 {\n  var m: u16 = 0\n  m = ~0x0F\n  m\n}",
                 "m = ~0x0F_u16",
+                true,
             ),
-            ("pub fn f() -> u8 = ~255", "~255_u8"),
-            ("pub fn f() -> i8 = ~127 - 1", ""),
-            ("pub fn f() -> u8 = ~256", ""),
-            ("pub fn f() -> i8 = ~-129", ""),
-            ("pub fn f() -> u8 = ~3 + 1", ""),
-            ("pub fn f() -> u8 = ~3_i8", ""),
-            // A refinement the suffix's value leaves gets no fix; one it lies in does.
-            ("pub fn f() -> u8[0..10] = ~3", ""),
-            // A value Tier 1 knows of literals alone, though `|` of a complement has no linear
-            // form, is narrowed as one.
-            ("pub fn f() -> u8 = ~3 | 1", ""),
-            ("pub fn f() -> u8[200..=255] = ~3", "~3_u8"),
-            ("pub fn f(n: u8) -> u8[0..n] = ~3", ""),
+            ("pub fn f() -> u8 = ~255", "~255_u8", true),
+            ("pub fn f() -> i8 = ~127 - 1", "", false),
+            ("pub fn f() -> u8 = ~256", "", false),
+            ("pub fn f() -> i8 = ~-129", "", false),
+            ("pub fn f() -> u8 = ~3_i8", "", false),
+            // Any other expression of literals alone gets a suggestion, which a value Tier 1
+            // knows of literals alone, though `|` of a complement has no linear form, needs.
+            ("pub fn f() -> u8 = ~3 + 1", "~3_u8 + 1", false),
+            ("pub fn f() -> u8 = ~3 | 1", "~3_u8 | 1", false),
+            ("pub fn f() -> u8 = -1 + 0", "", false),
+            // A refinement the suffix's value leaves gets no fix; one it lies in does, and one
+            // whose bound is a name gets a suggestion.
+            ("pub fn f() -> u8[0..10] = ~3", "", false),
+            ("pub fn f() -> u8[200..=255] = ~3", "~3_u8", true),
+            ("pub fn f(n: u8) -> u8[0..n] = ~3", "~3_u8", false),
         ] {
             let src = format!("{}{}", decls, f);
             let text = module(&src);
@@ -8295,14 +8419,20 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
                 continue;
             }
             let fix = &d[0].fixes[0];
-            assert_eq!(fix.applicability, Applicability::MachineApplicable, "{}", f);
+            let expected = if machine {
+                Applicability::MachineApplicable
+            } else {
+                Applicability::Suggestion
+            };
+            assert_eq!(fix.applicability, expected, "{}", f);
             let applied = apply_fix(&text, fix).unwrap();
             assert!(applied.contains(fixed), "{}: {}", f, applied);
+            let left = crate::check_program(&applied).err().unwrap_or_default();
             assert!(
-                crate::check_program(&applied).is_ok(),
+                left.iter().all(|d| d.code != "E0508") && (left.is_empty() || !machine),
                 "{}: {:?}",
                 applied,
-                crate::check_program(&applied).err()
+                left
             );
         }
         assert_eq!(
