@@ -502,13 +502,17 @@ const ALL_CORES_TESTS = [
 /// The crate whose functions alone start threads (clippy.toml's disallowed-methods), and which
 /// alone does not inherit the workspace's lints.
 const THREADS_CRATE = "mente-threads";
-/// What clippy.toml bans outside it: the core count, and every safe way std starts a thread.
+/// What clippy.toml bans outside it: the core count, every safe way std starts a thread, and the
+/// ways a test could hide from its check the variables the check reads.
 const THREAD_BANS = [
   "std::thread::available_parallelism",
   "std::thread::Scope::spawn",
   "std::thread::spawn",
   "std::thread::Builder::spawn",
   "std::thread::Builder::spawn_scoped",
+  "std::env::set_var",
+  "std::env::remove_var",
+  "std::process::Command::env_clear",
 ];
 /// Where the tests read the group's name: mente-threads fails a test outside the group named
 /// there, so a group renamed in .config/nextest.toml and here alone would fail every test of the
@@ -985,6 +989,11 @@ check("git reads every change as text, and no source names mutants::skip, an att
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.replace(/\s+#.*$/, "").trim();
       if (line === "" || line.startsWith("#")) continue;
+      // An array of tables, `[[bin]]` say, ends a lint table as a table does.
+      if (/^\[\[[^\]]+\]\]$/.test(line)) {
+        current = null;
+        continue;
+      }
       const header = /^\[([^\]]+)\]$/.exec(line);
       if (header) {
         current = header[1].startsWith(prefix) ? [header[1].slice(prefix.length), {}] : null;
@@ -1015,7 +1024,7 @@ check("git reads every change as text, and no source names mutants::skip, an att
   assert.deepEqual(threadsLints, expected, `${THREADS_CRATE}'s lints are not the workspace's with disallowed_methods denied`);
   // The methods clippy.toml bans outside mente-threads: every way std starts a thread, and the
   // core count. A ban removed, which no #[expect] in mente-threads may notice, fails here.
-  const clippy = read("clippy.toml");
+  const clippy = read("clippy.toml").split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join("\n");
   const bans = clippy.slice(clippy.indexOf("disallowed-methods = ["), clippy.indexOf("]", clippy.indexOf("disallowed-methods = [") + 22));
   assert.deepEqual([...bans.matchAll(/path = "([^"]+)"/g)].map((m) => m[1]).sort(), [...THREAD_BANS].sort(), "clippy.toml's disallowed-methods are not THREAD_BANS");
   for (const space of [0x85, 0x200e, 0x200f, 0x2028, 0x2029].map((c) => String.fromCharCode(c))) {

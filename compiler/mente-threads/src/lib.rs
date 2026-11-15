@@ -22,6 +22,15 @@
 //! `std::thread::spawn` and the `spawn` methods of `std::thread::Builder` and `std::thread::Scope`,
 //! and the workspace forbids that lint (Cargo.toml), so that no `allow`, `expect` or lint group can
 //! lower it in any other crate; this crate alone denies it, and names each use with `#[expect]`.
+//! clippy.toml also bans `std::env::set_var`, `std::env::remove_var` and
+//! `std::process::Command::env_clear`, which could hide from a test, or from an `mn` it starts,
+//! the variables the group check reads.
+//!
+//! The check runs in every build of `mn`, not only in tests: under any nextest run, its own or
+//! another project's, `mn fuzz --jobs 2` or `mn test --mutate` over several programs panics with
+//! the message below unless the test that started it is in a group named `all-cores`; outside
+//! nextest it never fires. It counts threads, not processes: a test that starts several child
+//! processes before waiting for any runs work at once without it, which no test does today.
 
 use std::io::{BufRead, BufReader, Read};
 use std::process::{ChildStderr, ChildStdout};

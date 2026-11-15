@@ -18,4 +18,7 @@ disallowed-methods = [
   { path = "std::thread::spawn", reason = "use mente_threads: alone for a thread the caller waits for, or a reader of a pipe" },
   { path = "std::thread::Builder::spawn", reason = "use mente_threads::alone, which waits for the thread" },
   { path = "std::thread::Builder::spawn_scoped", reason = "use mente_threads::alone, which waits for the thread" },
+  { path = "std::env::set_var", reason = "a test that changes its own environment can hide NEXTEST or NEXTEST_TEST_GROUP from mente_threads' check, and races the tests beside it; pass the variable to a child process instead" },
+  { path = "std::env::remove_var", reason = "a test that changes its own environment can hide NEXTEST or NEXTEST_TEST_GROUP from mente_threads' check, and races the tests beside it" },
+  { path = "std::process::Command::env_clear", reason = "a child mn started with no environment loses NEXTEST and NEXTEST_TEST_GROUP, and with them mente_threads' check; remove the one variable it must not see" },
 ]
