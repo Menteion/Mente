@@ -437,6 +437,32 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
             "f(255, 254)",
             "true",
         ),
+        // A literal takes the type of every operand of its expression, whatever their order.
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + ~3 + b",
+            "f(1, 2)",
+            "4294967295",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + b + ~3",
+            "f(1, 2)",
+            "4294967295",
+        ),
+        (
+            "pub fn f(a: u8, c: i8) -> i16 = a + ~3 + c",
+            "f(1, 2)",
+            "-1",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = (a & ~3) + b",
+            "f(255, 2)",
+            "254",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + (~3 & 7) + b",
+            "f(1, 2)",
+            "7",
+        ),
         // An array literal indexed gives its elements the type the indexing takes.
         (
             "pub fn f(a: u8, k: usize[0..2]) -> bool = a == [~3, 1][k]",

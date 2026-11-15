@@ -1,4 +1,4 @@
-// expect: E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234
+// expect: E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234
 module conformance
 // An operation works in the type its literals take (core-calculus.md, items 4 and 5), and the
 // checker knows the value of every literal, so an operation over literals that traps does so
@@ -33,3 +33,7 @@ pub fn narrowed_by_or(a: u8) -> u8 = a | -1
 pub fn divided_by_zero() -> i64 = 7 / 0
 
 pub fn remainder_by_zero() -> i64 = 7 % (3 - 3)
+
+// A literal takes the type of every operand of its expression: beside a `u8` and a `u32`, `-1`
+// under `&` is narrowed into `u32`, which does not hold it.
+pub fn negative_beside_two_types(a: u8, b: u32) -> u64 = a + (-1 & 255) + b

@@ -64,6 +64,55 @@ fn leaf_int(ty: &Ty) -> Option<IntTy> {
     }
 }
 
+/// Whether `e` is an operator of one expression with its operands, whose literals take the type
+/// of every operand of that expression that has one (`core-calculus.md`, item 5): arithmetic,
+/// unary `-`, and `~`, a bit operation or a shift of literals alone; and a literal. A bit
+/// operation or a shift with an operand of a type works in that type, so the expression of its
+/// literals ends there, as it does at a comparison, a call's argument, a narrowing point, a
+/// branch's value and an index. Derived here from the tree as the checker derives it, so that
+/// the comparison of the paths checks the checker's table.
+fn joins(tree: &Tree, exprs: &[Ty], e: ExprId) -> bool {
+    let untyped = exprs[e.0 as usize] == Ty::Int(IntType::Literal);
+    match &tree.expr(e).kind {
+        ExprKind::Int { .. } => true,
+        ExprKind::Unary { op, .. } => match op {
+            UnaryOp::Neg => true,
+            UnaryOp::BitNot => untyped,
+            UnaryOp::Not => false,
+        },
+        ExprKind::Binary { op, .. } => match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => true,
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => untyped,
+            BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => false,
+        },
+        ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => false,
+    }
+}
+
 /// Whether `v` has the shape of a value of type `ty`: an integer, a `bool`, an array of its
 /// length whose elements have its element's shape, or a struct of its name whose fields are
 /// named as its declaration names them, in order, each of its field's shape, or a variant of an
@@ -702,7 +751,18 @@ impl<'m> Machine<'m> {
     }
 
     fn int(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Int> {
-        match self.eval(frame, e, ctx)? {
+        self.int_as(frame, e, ctx, false)
+    }
+
+    /// [`Machine::int`], of an operand of an operator of one expression where `member`.
+    fn int_as(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        ctx: Option<IntTy>,
+        member: bool,
+    ) -> Flow<Int> {
+        match self.eval_as(frame, e, ctx, member)? {
             Value::Int(i) => Ok(i),
             Value::Bool(_)
             | Value::Array(_)
@@ -717,7 +777,20 @@ impl<'m> Machine<'m> {
     /// expression of literals alone takes; the place a value is narrowed into gives none
     /// (`core-calculus.md`, item 5).
     fn eval(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
-        let v = self.value(frame, e, ctx)?;
+        self.eval_as(frame, e, ctx, false)
+    }
+
+    /// [`Machine::eval`] of `e`, an operand of an operator of one expression where `member`:
+    /// `ctx` is then the type of every operand of that expression that has one, which its
+    /// literals take whatever the order of the operands (`core-calculus.md`, item 5).
+    fn eval_as(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        ctx: Option<IntTy>,
+        member: bool,
+    ) -> Flow<Value> {
+        let v = self.value(frame, e, ctx, member)?;
         if let Some(seen) = self.seen.as_mut() {
             show(
                 &v,
@@ -730,14 +803,26 @@ impl<'m> Machine<'m> {
     }
 
     /// [`Machine::eval`]'s value.
-    fn value(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
+    fn value(
+        &mut self,
+        frame: &mut Frame<'m>,
+        e: ExprId,
+        ctx: Option<IntTy>,
+        member: bool,
+    ) -> Flow<Value> {
         let f = frame.f;
         let tree = &f.syntax.tree;
         let span = tree.expr(e).span;
         // What this expression gives the literals among its operands, the branches of an `if`
-        // and the arms of a `match` included: its own type where it has one, since they are
-        // each other's other operands, and else the type it was given itself.
-        let here = leaf_int(&f.typing.exprs[e.0 as usize]).or(ctx);
+        // and the arms of a `match` included: within the operators of one expression, the type
+        // of all its operands, which it was given; elsewhere its own type where it has one,
+        // since they are each other's other operands, and else the type it was given itself.
+        let joined = joins(tree, &f.typing.exprs, e);
+        let here = if member && joined {
+            ctx
+        } else {
+            leaf_int(&f.typing.exprs[e.0 as usize]).or(ctx)
+        };
         Ok(match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => Value::Int(Int::from_u128(*value)),
             ExprKind::Bool(b) => Value::Bool(*b),
@@ -756,7 +841,7 @@ impl<'m> Machine<'m> {
             ExprKind::Unary { op, operand } => match op {
                 UnaryOp::Not => Value::Bool(!self.cond(frame, *operand)?),
                 UnaryOp::Neg => {
-                    let x = self.int(frame, *operand, here)?.negate();
+                    let x = self.int_as(frame, *operand, here, joined)?.negate();
                     // On an `i128` or `u128` operand, checked at the operator (`core-calculus.md`,
                     // item 4).
                     match int_ty(&f.typing.exprs[operand.0 as usize]).filter(|t| t.bits == 128) {
@@ -767,7 +852,7 @@ impl<'m> Machine<'m> {
                 UnaryOp::BitNot => {
                     let ty = &f.typing.exprs[operand.0 as usize];
                     let t = int_ty(ty).or(here).unwrap_or(I64);
-                    let x = self.int(frame, *operand, here)?;
+                    let x = self.int_as(frame, *operand, here, joined)?;
                     let x = fit(x, t, tree.expr(*operand).span)?;
                     Value::Int(Int::from_bits(!x.to_bits(t), t))
                 }
@@ -796,8 +881,12 @@ impl<'m> Machine<'m> {
                 | BinaryOp::Div
                 | BinaryOp::Rem => {
                     let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
-                    let l = self.eval(frame, *lhs, here)?;
-                    let r = self.eval(frame, *rhs, if shift { None } else { here })?;
+                    let l = self.eval_as(frame, *lhs, here, joined)?;
+                    let r = if shift {
+                        self.eval(frame, *rhs, None)?
+                    } else {
+                        self.eval_as(frame, *rhs, here, joined)?
+                    };
                     let lt = &f.typing.exprs[lhs.0 as usize];
                     let rt = &f.typing.exprs[rhs.0 as usize];
                     self.arith(frame, *op, [(l, lt, *lhs), (r, rt, *rhs)], here, span)?

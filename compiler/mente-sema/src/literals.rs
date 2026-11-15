@@ -147,6 +147,55 @@ impl Exact {
     }
 }
 
+/// Whether `e`, of a function whose expressions have the types `exprs`, is an operator of one
+/// expression with its operands, whose literals take the type of every operand of that
+/// expression that has one (`core-calculus.md`, item 5): arithmetic, unary `-`, and `~`, a bit
+/// operation or a shift of literals, which have no type of their own; and a literal. A bit
+/// operation or a shift with an operand of a type works in that type, so the expression of its
+/// literals ends there; so does it at a comparison, a call's argument, a narrowing point, a
+/// branch's value and an index.
+fn joins(tree: &Tree, exprs: &[Ty], e: ExprId) -> bool {
+    let untyped = exprs[e.0 as usize] == Ty::Int(Int::Literal);
+    match &tree.expr(e).kind {
+        ExprKind::Int { .. } => true,
+        ExprKind::Unary { op, .. } => match op {
+            UnaryOp::Neg => true,
+            UnaryOp::BitNot => untyped,
+            UnaryOp::Not => false,
+        },
+        ExprKind::Binary { op, .. } => match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => true,
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => untyped,
+            BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => false,
+        },
+        ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => false,
+    }
+}
+
 /// The bits of type `t`.
 fn mask(t: IntTy) -> u128 {
     u128::MAX >> (128 - t.bits)
@@ -498,11 +547,26 @@ impl Walk<'_> {
     /// Walks `e`. `around` is the integer type the expression around it gives its literals,
     /// where it gives one.
     fn expr(&mut self, e: ExprId, around: Option<IntTy>) {
+        self.walk(e, around, false);
+    }
+
+    /// Walks `e`, an operand of an operator of one expression where `member`: its literals
+    /// then take `around`, the type of every operand of that expression that has one
+    /// ([`joins`]), not the type of `e` alone, so that the order of the operands never
+    /// changes a literal's value (`core-calculus.md`, item 5).
+    fn walk(&mut self, e: ExprId, around: Option<IntTy>, member: bool) {
         let tree = self.tree;
         let own = &self.typing.exprs[e.0 as usize];
-        // What this expression gives the literals among its operands: its own type where it has
-        // one, since they are each other's other operands, and else what it was given.
-        let here = leaf(own).or(around);
+        // What this expression gives the literals among its operands: within one expression the
+        // type of all its operands, which the expression around it was given; elsewhere its own
+        // type where it has one, since they are each other's other operands, and else what it
+        // was given.
+        let joined = joins(tree, &self.typing.exprs, e);
+        let here = if member && joined {
+            around
+        } else {
+            leaf(own).or(around)
+        };
         match own {
             Ty::Int(Int::Literal) => {
                 let taken = match here {
@@ -534,7 +598,7 @@ impl Walk<'_> {
             | ExprKind::Error => {}
             ExprKind::Unary { op, operand } => match op {
                 UnaryOp::Not => self.expr(*operand, None),
-                UnaryOp::Neg | UnaryOp::BitNot => self.expr(*operand, here),
+                UnaryOp::Neg | UnaryOp::BitNot => self.walk(*operand, here, joined),
             },
             ExprKind::Binary { op, lhs, rhs } => match op {
                 BinaryOp::Add
@@ -545,12 +609,12 @@ impl Walk<'_> {
                 | BinaryOp::BitAnd
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor => {
-                    self.expr(*lhs, here);
-                    self.expr(*rhs, here);
+                    self.walk(*lhs, here, joined);
+                    self.walk(*rhs, here, joined);
                 }
                 // A shift's amount is a count, of no type but its own.
                 BinaryOp::Shl | BinaryOp::Shr => {
-                    self.expr(*lhs, here);
+                    self.walk(*lhs, here, joined);
                     self.expr(*rhs, None);
                 }
                 // A comparison gives each operand the other's type.
@@ -884,6 +948,79 @@ mod tests {
             ("pub fn f() -> [2]u8 = [~3, 1]", "[~3, 1]"),
         ] {
             assert_eq!(of(src, text), None, "`{}` in {}", text, src);
+        }
+    }
+
+    /// A literal takes the type of every operand that has one of the arithmetic or bit
+    /// expression it stands in, whatever their order: `~3` beside a `u8` and a `u32` is a `u32`
+    /// in each spelling, and beside a `u8` and an `i8` an `i16`. The expression ends at a bit
+    /// operation with an operand of a type, at a comparison's side, at a call's argument and at
+    /// a branch's value, which take their own; a branch of literals alone takes what the `if`
+    /// is given.
+    #[test]
+    fn test_a_literal_takes_the_type_of_every_operand_of_its_expression() {
+        let two = "pub fn f(a: u8, b: u32, c: bool, k: usize[0..2]) -> u64";
+        for (src, text, ty, from) in [
+            (format!("{} = a + ~3 + b", two), "~3", "u32", From::Operands),
+            (format!("{} = a + b + ~3", two), "~3", "u32", From::Operands),
+            (format!("{} = ~3 + a + b", two), "~3", "u32", From::Operands),
+            (
+                format!("{} = a * (b - ~3)", two),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8, c: i8) -> i16 = a + ~3 + c".to_string(),
+                "~3",
+                "i16",
+                From::Operands,
+            ),
+            (
+                format!("{} = a + (~3 & 7) + b", two),
+                "~3 & 7",
+                "u32",
+                From::Operands,
+            ),
+            (
+                format!("{} = (a & ~3) + b", two),
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            (
+                format!("{} = a + (if c {{ ~3 }} else {{ 0 }}) + b", two),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (
+                format!("{} = a + (if c {{ a + ~3 }} else {{ 0 }}) + b", two),
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            (
+                format!("{} = a + [~3, 1][k] + b", two),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (
+                "pub fn f(a: u8, b: u32) -> bool = a + ~3 == b".to_string(),
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            (
+                "fn id(x: i64) -> i64 = x\npub fn f(a: u8, b: u32) -> i64 = a + id(~3) + b"
+                    .to_string(),
+                "~3",
+                "i64",
+                From::Alone,
+            ),
+        ] {
+            assert_eq!(of(&src, text), Some((ty, from)), "`{}` in {}", text, src);
         }
     }
 

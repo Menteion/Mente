@@ -3944,6 +3944,10 @@ mod tests {
                 format!("`300 << 0` works in `u8` (0 to 255), {}, and its operand 300 lies outside it, {}", from, advice),
             ),
             (
+                "pub fn f(a: u8, b: u32) -> u64 = a + (-1 & 255) + b",
+                format!("`-1 & 255` works in `u32` (0 to 4294967295), {}, and its operand -1 lies outside it, {}", from, advice),
+            ),
+            (
                 "pub fn f() -> i64 = 7 % (3 - 3)",
                 "`7 % (3 - 3)` divides by zero, so it traps whenever it runs".to_string(),
             ),

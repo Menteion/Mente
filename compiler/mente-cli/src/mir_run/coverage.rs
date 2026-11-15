@@ -280,6 +280,11 @@ const LITERALS: &[&str] = &[
     "bit operation on literals alone, of no type but i64",
 ];
 
+/// A literal whose type comes from an operand beyond the operation it stands in, by what the
+/// checker's table says of it (`core-calculus.md`, item 5): it takes the type of every operand of
+/// its expression, so beside `a` in `a + 3 + b` it takes the type that holds `a`'s and `b`'s.
+const EXPRESSIONS: &[&str] = &["literal that takes a type from beyond its own operation"];
+
 /// What a comparison's operands are, by what the checker's table says of its literals
 /// (`core-calculus.md`, item 5): a literal takes the type of the other operand, on the right
 /// or on the left; two expressions of literals alone are each an `i64`; and operands of two
@@ -715,6 +720,37 @@ fn reached_literals(f: &CheckedFn, seen: &mut BTreeSet<String>) {
 }
 
 /// The rows of [`COMPARISONS`] a checked function reaches.
+/// The row of [`EXPRESSIONS`] a checked function reaches: an operand of an arithmetic operation
+/// that is literals alone and takes another type than the operation's own.
+fn reached_expressions(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let typed = |e: ExprId| match &f.typing.exprs[e.0 as usize] {
+        Ty::Int(Int::One(t) | Int::Mixed(Some(t))) => Some(*t),
+        _ => None,
+    };
+    for (k, e) in f.syntax.tree.exprs.iter().enumerate() {
+        let ExprKind::Binary { op, lhs, rhs } = &e.kind else {
+            continue;
+        };
+        if !matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
+        ) {
+            continue;
+        }
+        let own = typed(ExprId(k as u32));
+        for x in [*lhs, *rhs] {
+            let taken = f.typing.literals.get(x.0 as usize).copied().flatten();
+            if let (Some(t), Some(own)) = (taken, own) {
+                if t.from == From::Operands && t.ty != own {
+                    seen.insert(
+                        "literal that takes a type from beyond its own operation".to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn reached_comparisons(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     let taken = |e: ExprId| f.typing.literals.get(e.0 as usize).copied().flatten();
     let typed = |e: ExprId| match &f.typing.exprs[e.0 as usize] {
@@ -1161,6 +1197,7 @@ fn grammar() -> BTreeSet<String> {
         TRAPS,
         LITERALS,
         COMPARISONS,
+        EXPRESSIONS,
         SHIFTS,
         &["array of arrays"],
     ];
@@ -1213,6 +1250,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 reached_traps(f, &mut seen);
                 reached_literals(f, &mut seen);
                 reached_comparisons(f, &mut seen);
+                reached_expressions(f, &mut seen);
                 reached_shifts(f, &mut seen);
                 for wrong in reached_relations(module, f, &mut seen) {
                     problems.push(format!("seed {}: {}", seed, wrong));
