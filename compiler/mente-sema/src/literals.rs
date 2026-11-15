@@ -76,6 +76,19 @@ fn leaf(t: &Ty) -> Option<IntTy> {
     }
 }
 
+/// The integer type of an operation on operands of types `a` and `b`, as `leaf` gives it: the
+/// type of them all where both are integers, else `a`'s.
+fn joined(a: &Ty, b: &Ty) -> Option<IntTy> {
+    let int = |t: &Ty| match t {
+        Ty::Int(i) => Some(*i),
+        Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
+    };
+    match int(a).zip(int(b)) {
+        Some((x, y)) => leaf(&Ty::Int(x.join(y))),
+        None => leaf(a),
+    }
+}
+
 /// An exact integer: whether it is negative, and its magnitude.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exact {
@@ -151,8 +164,8 @@ impl Exact {
 /// expression with its operands, whose literals take the type of every operand of that
 /// expression that has one (`core-calculus.md`, item 5): arithmetic, unary `-`, and `~`, a bit
 /// operation or a shift of literals, which have no type of their own; and a literal. A bit
-/// operation or a shift with an operand of a type works in that type, so the expression of its
-/// literals ends there; so does it at a comparison, a call's argument, a narrowing point, a
+/// operation with an operand of a type, or a shift whose shifted operand has one, works in that
+/// type, so the expression of its literals ends there; so does it at a comparison, a call's argument, a narrowing point, a
 /// branch's value and an index.
 fn joins(tree: &Tree, exprs: &[Ty], e: ExprId) -> bool {
     let untyped = exprs[e.0 as usize] == Ty::Int(Int::Literal);
@@ -387,7 +400,8 @@ pub fn values(tree: &Tree, literals: &[Option<Taken>], e: ExprId) -> Option<Vec<
 }
 
 /// The expressions whose value `e` takes: each branch's of an `if`, each arm's of a `match` and
-/// each element's of an array literal it indexes, through those nested in them, and `e` itself
+/// each element's of an array literal it indexes, at every level of indexing and through those
+/// nested in them, and `e` itself
 /// for an expression of any other kind. A branch that ends in no value, by `return` or a trap,
 /// gives none.
 pub fn alternatives(tree: &Tree, e: ExprId) -> Vec<ExprId> {
@@ -432,29 +446,41 @@ fn collect_alternatives(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
                 }
             }
         }
-        ExprKind::Index { base, .. } => match &tree.expr(*base).kind {
-            ExprKind::Array(items) => {
-                for &i in items {
-                    collect_alternatives(tree, i, out);
+        // The arrays the base may be, through its own indexing, branches and arms, give their
+        // elements: `[[300, 1], [1, 1]][k][j]` may be each of the four.
+        ExprKind::Index { base, .. } => {
+            let mut arrays = Vec::new();
+            collect_alternatives(tree, *base, &mut arrays);
+            for b in arrays {
+                match &tree.expr(b).kind {
+                    ExprKind::Array(items) => {
+                        for &i in items {
+                            collect_alternatives(tree, i, out);
+                        }
+                    }
+                    ExprKind::Repeat { value, .. } => collect_alternatives(tree, *value, out),
+                    ExprKind::Int { .. }
+                    | ExprKind::Bool(_)
+                    | ExprKind::Name(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Construct { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::If { .. }
+                    | ExprKind::Error => {
+                        if !out.contains(&e) {
+                            out.push(e);
+                        }
+                    }
                 }
             }
-            ExprKind::Repeat { value, .. } => collect_alternatives(tree, *value, out),
-            ExprKind::Int { .. }
-            | ExprKind::Bool(_)
-            | ExprKind::Name(_)
-            | ExprKind::Todo(_)
-            | ExprKind::Unreachable(_)
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Field { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Construct { .. }
-            | ExprKind::Variant { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::If { .. }
-            | ExprKind::Error => out.push(e),
-        },
+        }
         ExprKind::Int { .. }
         | ExprKind::Bool(_)
         | ExprKind::Name(_)
@@ -714,13 +740,37 @@ impl Walk<'_> {
             StmtKind::Binding { init, .. } => self.expr(*init, None),
             StmtKind::Assign { place, op, value } => {
                 self.expr(*place, None);
-                // `x op= e` is `x = x op e` (item 6): `x` is the other operand of `e`, unless
-                // `e` is a shift's amount.
-                let other = match op {
-                    AssignOp::Compound(BinaryOp::Shl | BinaryOp::Shr) | AssignOp::Set => None,
-                    AssignOp::Compound(_) => leaf(&self.typing.exprs[place.0 as usize]),
+                // `x op= e` is `x = x op e` (item 6): under arithmetic `e`'s operands are
+                // operands of that expression with `x`, whose literals take the type of them
+                // all; a bit operation works in `x`'s type, which its literal operand takes;
+                // and a shift's amount takes none.
+                let ty = |x: ExprId| &self.typing.exprs[x.0 as usize];
+                let (around, member) = match op {
+                    AssignOp::Compound(
+                        BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Rem,
+                    ) => (joined(ty(*place), ty(*value)), true),
+                    AssignOp::Compound(BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) => {
+                        (leaf(ty(*place)), false)
+                    }
+                    AssignOp::Compound(
+                        BinaryOp::Shl
+                        | BinaryOp::Shr
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                        | BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::Lt
+                        | BinaryOp::Le
+                        | BinaryOp::Gt
+                        | BinaryOp::Ge,
+                    )
+                    | AssignOp::Set => (None, false),
                 };
-                self.expr(*value, other);
+                self.walk(*value, around, member);
             }
             StmtKind::While {
                 cond,
@@ -1024,6 +1074,83 @@ mod tests {
         }
     }
 
+    /// `x op= e` is `x = x op e`, for every compound operator: under arithmetic `e`'s literals
+    /// take the type of `x` and of every operand of `e` that has one, wider than `x`'s too; a
+    /// bit operation of `e` with an operand of a type works in that type; a compound bit
+    /// operation gives its literal operand `x`'s type; and a shift's amount takes none.
+    #[test]
+    fn test_a_compound_assignment_gives_its_value_the_type_of_its_place_and_operands() {
+        let body = |params: &str, place: &str, stmt: &str| {
+            format!(
+                "pub fn f({}) -> {} {{\n  var m = m0\n  {}\n  m\n}}",
+                params, place, stmt
+            )
+        };
+        let narrow = "m0: u32, a: u8";
+        for (src, text, ty, from) in [
+            (
+                body(narrow, "u32", "m += a + ~3"),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (
+                body(narrow, "u32", "m -= a - ~3"),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (
+                body(narrow, "u32", "m *= a * ~3"),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (
+                body(narrow, "u32", "m /= a + ~3"),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (
+                body(narrow, "u32", "m %= a + ~3"),
+                "~3",
+                "u32",
+                From::Operands,
+            ),
+            (body(narrow, "u32", "m += ~3"), "~3", "u32", From::Operands),
+            (
+                body("m0: u32, a: u8, b: u64", "u64", "m += a + ~3 + b"),
+                "~3",
+                "u64",
+                From::Operands,
+            ),
+            (
+                body(narrow, "u32", "m += (a & ~3) + 1"),
+                "~3",
+                "u8",
+                From::Operands,
+            ),
+            (body("m0: u8", "u8", "m &= ~3"), "~3", "u8", From::Operands),
+            (body("m0: u8", "u8", "m |= ~3"), "~3", "u8", From::Operands),
+            (body("m0: u8", "u8", "m ^= ~3"), "~3", "u8", From::Operands),
+            (
+                body("m0: u8", "u8", "m <<= ~0 & 3"),
+                "~0 & 3",
+                "i64",
+                From::Alone,
+            ),
+            (
+                body("m0: u8", "u8", "m >>= ~0 & 3"),
+                "~0 & 3",
+                "i64",
+                From::Alone,
+            ),
+        ] {
+            assert_eq!(of(&src, text), Some((ty, from)), "`{}` in {}", text, src);
+        }
+    }
+
     /// A comparison gives each operand's literals the other operand's type, on either side,
     /// through the expression the literals stand in; two
     /// expressions of literals alone compared are each an `i64`, and so are the literals of a
@@ -1263,32 +1390,50 @@ mod tests {
         );
     }
 
-    /// The static range of a bit operation over literals alone is that of the type its
-    /// literals take, so that an operation beside it computes in a machine type that holds
-    /// its value (`E0222`), and an array literal that holds it has a range to keep it in.
+    /// The static range of a bit operation over literals alone is its value, computed in the
+    /// type its literals take, as a literal's is, and that type's range where it may have more
+    /// than one; so an operation beside it computes in a machine type that holds its value
+    /// (`E0222`), and an array literal that holds it has a range to keep it in.
     #[test]
-    fn test_a_bit_operation_on_literals_has_the_range_of_the_type_they_take() {
+    fn test_a_bit_operation_on_literals_has_its_value_or_the_range_of_their_type() {
         let range = |src: &str, text: &str| {
             let full = format!("module m\n{}\n", src);
             let (m, at) = at(&full, text);
             let f = m.functions.last().and_then(|f| f.as_ref())?;
             wide::intervals(&f.syntax, &f.resolution, &f.typing)[at].map(|i| (i.lo, i.hi))
         };
-        let u8_ = Some(((false, 0), (false, 255)));
-        assert_eq!(range("pub fn f(a: u8) -> u16 = a + ~3", "~3"), u8_);
+        let point =
+            |negative: bool, magnitude: u128| Some(((negative, magnitude), (negative, magnitude)));
+        assert_eq!(
+            range("pub fn f(a: u8) -> u16 = a + ~3", "~3"),
+            point(false, 252)
+        );
         assert_eq!(
             range("pub fn f(a: u8) -> u16 = a + ~3", "a + ~3"),
-            Some(((false, 0), (false, 510)))
+            Some(((false, 252), (false, 507)))
         );
-        assert_eq!(range("pub fn f(a: u8) -> [2]u8 = [~3, a]", "~3"), u8_);
+        assert_eq!(
+            range("pub fn f(a: u8) -> [2]u8 = [~3, a]", "~3"),
+            point(false, 252)
+        );
         // A place gives none: these are `i64`s narrowed where they land.
-        let i64_ = Some(((true, 1 << 63), (false, (1 << 63) - 1)));
-        assert_eq!(range("pub fn f() -> [2]u8 = [~3, 1]", "~3"), i64_);
-        assert_eq!(range("pub fn f() -> u8 = 1 << 7", "1 << 7"), i64_);
-        assert_eq!(range("pub fn f() -> u8 = 3 & 5", "3 & 5"), i64_);
+        assert_eq!(range("pub fn f() -> [2]u8 = [~3, 1]", "~3"), point(true, 4));
+        assert_eq!(
+            range("pub fn f() -> u8 = 1 << 7", "1 << 7"),
+            point(false, 128)
+        );
+        assert_eq!(range("pub fn f() -> u8 = 3 & 5", "3 & 5"), point(false, 1));
         assert_eq!(
             range("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "~3"),
-            Some(((true, 1 << 63), (false, (1 << 63) - 1)))
+            point(true, 4)
+        );
+        // More than one value: the range of the type.
+        assert_eq!(
+            range(
+                "pub fn f(a: u8, k: usize[0..2]) -> u16 = a + [~3, 1][k]",
+                "[~3, 1][k]"
+            ),
+            Some(((false, 0), (false, 255)))
         );
     }
 }

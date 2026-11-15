@@ -905,8 +905,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
          `x`; a shift whose value leaves the type, `1 << 63`; `~`, `&`, `|` or `^` of a value \
          outside the type, `~256` beside a `u8`, or a literal an operator narrows into the type \
          of the operand beside it, `a & 256` for a `u8` `a`; and a division or a remainder by \
-         zero. Arithmetic is exact and stands. State the type the operation should work in \
-         with a suffix, `1_u16 << 8`, or write the value it should have.",
+         zero. Arithmetic is exact and stands. Write the value the operation should have, \
+         which is then checked where it lands: `x < 256` is `E0233`, a comparison that is \
+         always true. A suffix stating a wider type, `x < 1_u16 << 8`, would keep the \
+         operation and leave such a comparison constant and silent, so none is suggested.",
         "module m\npub fn f(x: u8) -> bool = x < 1 << 8\n",
         "module m\npub fn f(x: u8) -> bool = x < 1 << 7\n",
     ),

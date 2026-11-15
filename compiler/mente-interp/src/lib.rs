@@ -20,6 +20,7 @@
 
 mod eval;
 pub mod int;
+mod kinds;
 
 use std::fmt;
 

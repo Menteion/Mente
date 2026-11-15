@@ -1,4 +1,4 @@
-// expect: E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234
+// expect: E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234
 module conformance
 // An operation works in the type its literals take (core-calculus.md, items 4 and 5), and the
 // checker knows the value of every literal, so an operation over literals that traps does so
@@ -28,6 +28,20 @@ pub fn shift_in_a_branch(a: u8, c: bool) -> u8 = a & (if c { 1 << 8 } else { 1 }
 pub fn narrowed_by_and(a: u8) -> u8 = a & 256
 
 pub fn narrowed_by_or(a: u8) -> u8 = a | -1
+
+// `x op= e` is `x = x op e`: a compound bit operation narrows its literal value into the
+// place's type.
+pub fn compound_and(m0: u8) -> u8 {
+  var m = m0
+  m &= 256
+  m
+}
+
+pub fn compound_or(m0: u8) -> u8 {
+  var m = m0
+  m |= -1
+  m
+}
 
 // A division and a remainder by zero.
 pub fn divided_by_zero() -> i64 = 7 / 0

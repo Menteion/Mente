@@ -386,6 +386,68 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
             "f(1)",
             "65534",
         ),
+        (
+            "pub fn f(a: u8) -> u8 {\n  var m: u8 = a\n  m |= ~3\n  m\n}",
+            "f(0)",
+            "252",
+        ),
+        // `x op= e` is `x = x op e`: under arithmetic `e`'s literals take the type of `x` and
+        // of every operand of `e`; a shift's amount takes none.
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += a + ~3\n  m\n}",
+            "f(0, 1)",
+            "4294967293",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m -= a - ~3\n  m\n}",
+            "f(0, 1)",
+            "4294967291",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m *= a + ~3\n  m\n}",
+            "f(1, 1)",
+            "4294967293",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m /= a + ~3\n  m\n}",
+            "f(4294967295, 1)",
+            "1",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m %= a + ~3\n  m\n}",
+            "f(4294967295, 1)",
+            "2",
+        ),
+        (
+            "pub fn f(m0: u32) -> u32 {\n  var m = m0\n  m += ~3\n  m\n}",
+            "f(0)",
+            "4294967292",
+        ),
+        (
+            "pub fn f(m0: u64, a: u8, b: u32) -> u64 {\n  var m = m0\n  m += a + ~3 + b\n  m\n}",
+            "f(0, 1, 2)",
+            "18446744073709551615",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += (a & ~3) + ~3\n  m\n}",
+            "f(0, 3)",
+            "4294967292",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += (a & ~3) + ~3\n  m\n}",
+            "f(0, 4)",
+            "trap",
+        ),
+        (
+            "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m <<= ~0 & 3\n  m\n}",
+            "f(1)",
+            "8",
+        ),
+        (
+            "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m >>= ~0 & 3\n  m\n}",
+            "f(16)",
+            "2",
+        ),
         // No other operand: an `i64`, narrowed where it lands.
         (
             "pub fn f() -> u8 {\n  val m: u8 = 3 & 5\n  m\n}",
@@ -519,6 +581,70 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
     }
     let shifted = run("pub fn f(k: u32) -> u64 = 1 << k", "f(63)");
     assert!(shifted.contains("does not fit in `i64`"), "{}", shifted);
+}
+
+/// The interpreter derives the type of an expression of operators from the types of its leaves
+/// with a join of its own, and never reads the checker's, so that comparing the paths checks
+/// the type the checker gives it, which MIR and native code read (`core-calculus.md`, item 5):
+/// with the checker's type of every operator replaced by a wrong one, each literal still takes
+/// the type of every operand of its expression.
+#[test]
+fn test_the_interpreter_derives_the_type_of_an_expression_of_operators_itself() {
+    use mente_sema::types::{Int as IntType, IntTy, Ty};
+    use mente_syntax::tree::{ExprId, ExprKind};
+    let wrong = Ty::Int(IntType::One(IntTy::named("u64").expect("a standard type")));
+    for (f, call, value) in [
+        (
+            "pub fn f(a: u8, b: u32) -> u64 = a + ~3 + b",
+            "f(1, 2)",
+            "4294967295",
+        ),
+        (
+            "pub fn f(a: u8, b: u32) -> bool = a + b == ~3",
+            "f(0, 4294967292)",
+            "true",
+        ),
+        (
+            "pub fn f(m0: u32, a: u8) -> u32 {\n  var m = m0\n  m += a + ~3\n  m\n}",
+            "f(0, 1)",
+            "4294967293",
+        ),
+        ("pub fn f(a: u8) -> u8 = a & (~3 | 1)", "f(255)", "253"),
+        ("pub fn f(a: u8) -> u8 = a & (~3 + 1)", "f(255)", "253"),
+    ] {
+        let mut m = module(f);
+        for func in m.functions.iter_mut().flatten() {
+            let tree = &func.syntax.tree;
+            for (i, ty) in func.typing.exprs.iter_mut().enumerate() {
+                match tree.expr(ExprId(i as u32)).kind {
+                    ExprKind::Unary { .. } | ExprKind::Binary { .. } => *ty = wrong.clone(),
+                    ExprKind::Int { .. }
+                    | ExprKind::Bool(_)
+                    | ExprKind::Name(_)
+                    | ExprKind::Todo(_)
+                    | ExprKind::Unreachable(_)
+                    | ExprKind::Index { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Construct { .. }
+                    | ExprKind::Variant { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::Array(_)
+                    | ExprKind::Repeat { .. }
+                    | ExprKind::If { .. }
+                    | ExprKind::Error => {}
+                }
+            }
+        }
+        let Some((name, args)) = parse_call(call) else {
+            panic!("not a call: {}", call);
+        };
+        let got = match self::call(&m, &name, args, Limits::default()) {
+            Ok(v) => v.to_string(),
+            Err(s) => s.to_string(),
+        };
+        assert_eq!(got, value, "{}", f);
+    }
 }
 
 #[test]

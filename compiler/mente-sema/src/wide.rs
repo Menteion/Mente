@@ -336,14 +336,21 @@ impl Wide<'_> {
     fn compute(&mut self, e: ExprId) -> Option<Range> {
         let typed = self.typed(e).map(Range::of);
         // A bit operation, a shift or `~` over literals alone works in the type its literals
-        // take, and its value lies within it (`core-calculus.md`, item 5).
+        // take (`core-calculus.md`, item 5): its range is its one value where the checker
+        // knows it, as a literal's is, so that the order of the operands around it never
+        // changes whether their hull fits, and else the type's.
         let taken = self
             .typing
             .literals
             .get(e.0 as usize)
             .copied()
             .flatten()
-            .map(|t| Range::of(t.ty));
+            .map(
+                |t| match crate::literals::value(self.tree, &self.typing.literals, e) {
+                    Some(v) if v.fits(t.ty) => Range::point(Num::new(v.negative, v.magnitude)),
+                    Some(_) | None => Range::of(t.ty),
+                },
+            );
         let span = self.tree.expr(e).span;
         match &self.tree.expr(e).kind {
             ExprKind::Int { value, .. } => Some(Range::point(Num::new(false, *value))),
@@ -1267,6 +1274,30 @@ mod tests {
             "pub fn f(a: u64, b: u64, c: u64) -> u128 = a * b * c / c",
             // A shift narrows into its operand's type, whatever the amount.
             "pub fn f(a: u64, b: u64) -> u128 = (a << 1) * b * b",
+        ] {
+            assert_eq!(codes(wide), ["E0222"], "{}", wide);
+        }
+    }
+
+    /// A bit operation, a shift or `~` over literals alone has its one value as its range where
+    /// the checker knows it, as a literal does, so that the order of the operands around it never
+    /// changes whether their hull fits; one of more than one value has the range of the type its
+    /// literals take.
+    #[test]
+    fn test_a_bit_operation_over_literals_has_its_value_as_its_range() {
+        for ok in [
+            "pub fn f(a: u64, c: i64) -> i128 = a + ~3 + c",
+            "pub fn f(a: u64, c: i64) -> i128 = a + c + ~3",
+            "pub fn f(a: u8, b: i128) -> i128 = a + ~3 + b",
+            "pub fn f(a: u8, b: i128) -> i128 = a + b + ~3",
+            "pub fn f(a: u64, b: u64) -> u128 = a * b * (1 << 0)",
+            "pub fn f(a: u64, b: u64) -> u128 = a * b * (~0 & 1)",
+        ] {
+            assert!(codes(ok).is_empty(), "{}: {:?}", ok, codes(ok));
+        }
+        for wide in [
+            "pub fn f(a: u64, b: u64) -> u128 = a * b * (1 << 2)",
+            "pub fn f(a: u64, b: u64, k: usize[0..2]) -> u128 = a * b * [~0 & 1, 1][k]",
         ] {
             assert_eq!(codes(wide), ["E0222"], "{}", wide);
         }

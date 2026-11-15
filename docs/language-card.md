@@ -62,7 +62,7 @@ pub fn total(a: [4]u32) -> u32 {
 - `[N]T` is an array of `N` values of type `T`; `N` is an integer literal. `a.len` is `N`. `[0; 8]` is eight zeros; `[1, 2, 3]` lists the elements.
 - An array is a value: binding, passing and returning it copies it. Two names never share one.
 - A refined type narrows an integer type: `u8[0..10]` holds 0 to 9, `i32[-5..=5]` holds -5 to 5. A bound is an integer literal, a `val` or read-only parameter, or `name.len`.
-- A literal takes the type of the operands around it that have one, the smallest that holds them all, a comparison's other side included, and literals alone make an `i64`, wherever the value lands: for a `u8` `a`, `a & ~3` is `a & 252` and `a == 300` is an error, but `val m: u8 = ~3` is -4, an error too. `~3_u8` and `300_u16` state the type.
+- A literal takes the type of the typed operands of its arithmetic expression, the smallest type holding them all, in any order; literals alone make an `i64`, wherever the value lands: `a + ~3 + b` (`a: u8`, `b: u32`) adds 4294967292. A bit operation or shift on a typed operand works in its type and ends the expression: `(a & ~3) + b` adds `a & 252`. A comparison gives a literal the other side's type: `a == 300` is an error. `val m: u8 = ~3` is -4, also an error; `~3_u8` states the type.
 
 ## Integer arithmetic
 

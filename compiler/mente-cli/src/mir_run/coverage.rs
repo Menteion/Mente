@@ -283,7 +283,10 @@ const LITERALS: &[&str] = &[
 /// A literal whose type comes from an operand beyond the operation it stands in, by what the
 /// checker's table says of it (`core-calculus.md`, item 5): it takes the type of every operand of
 /// its expression, so beside `a` in `a + 3 + b` it takes the type that holds `a`'s and `b`'s.
-const EXPRESSIONS: &[&str] = &["literal that takes a type from beyond its own operation"];
+const EXPRESSIONS: &[&str] = &[
+    "literal that takes a type from beyond its own operation",
+    "literal of a compound assignment that takes its place's wider type",
+];
 
 /// What a comparison's operands are, by what the checker's table says of its literals
 /// (`core-calculus.md`, item 5): a literal takes the type of the other operand, on the right
@@ -719,9 +722,11 @@ fn reached_literals(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     }
 }
 
-/// The rows of [`COMPARISONS`] a checked function reaches.
-/// The row of [`EXPRESSIONS`] a checked function reaches: an operand of an arithmetic operation
-/// that is literals alone and takes another type than the operation's own.
+/// The rows of [`EXPRESSIONS`] a checked function reaches: an operand of an arithmetic operation
+/// that is literals alone and takes another type than the operation's own; and a literal in the
+/// value of an arithmetic compound assignment, `m += a + ~3` with a `u32` `m` and a `u8` `a`,
+/// that takes the type of the place and the value together where that is wider than the
+/// value's own.
 fn reached_expressions(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     let typed = |e: ExprId| match &f.typing.exprs[e.0 as usize] {
         Ty::Int(Int::One(t) | Int::Mixed(Some(t))) => Some(*t),
@@ -749,8 +754,51 @@ fn reached_expressions(f: &CheckedFn, seen: &mut BTreeSet<String>) {
             }
         }
     }
+    let tree = &f.syntax.tree;
+    for s in &tree.stmts {
+        let StmtKind::Assign {
+            place,
+            op: AssignOp::Compound(op),
+            value,
+        } = &s.kind
+        else {
+            continue;
+        };
+        if !matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
+        ) {
+            continue;
+        }
+        let int = |e: &ExprId| match &f.typing.exprs[e.0 as usize] {
+            Ty::Int(i) => Some(*i),
+            _ => None,
+        };
+        let (Some(at), Some(own)) = (int(place), int(value)) else {
+            continue;
+        };
+        let holder = |i: Int| match i {
+            Int::One(t) | Int::Mixed(Some(t)) => Some(t),
+            Int::Literal | Int::Mixed(None) => None,
+        };
+        let (Some(wide), Some(own)) = (holder(at.join(own)), holder(own)) else {
+            continue;
+        };
+        let span = tree.expr(*value).span;
+        let widened = tree.exprs.iter().enumerate().any(|(k, x)| {
+            span.start <= x.span.start
+                && x.span.end <= span.end
+                && f.typing.literals[k].is_some_and(|t| t.from == From::Operands && t.ty == wide)
+        });
+        if wide != own && widened {
+            seen.insert(
+                "literal of a compound assignment that takes its place's wider type".to_string(),
+            );
+        }
+    }
 }
 
+/// The rows of [`COMPARISONS`] a checked function reaches.
 fn reached_comparisons(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     let taken = |e: ExprId| f.typing.literals.get(e.0 as usize).copied().flatten();
     let typed = |e: ExprId| match &f.typing.exprs[e.0 as usize] {

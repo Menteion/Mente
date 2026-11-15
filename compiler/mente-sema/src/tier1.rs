@@ -3538,6 +3538,24 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// Whether the narrowing of `v` into `t` always traps, which is then reported as `what`,
+    /// with a fix that keeps `refine`, the place's refinement, in view.
+    fn always_traps_into(
+        &mut self,
+        st: &Octagon,
+        v: &Val,
+        (t, refine): (IntTy, Option<&Refine>),
+        span: Span,
+        what: Option<&Guarded>,
+    ) -> bool {
+        let Some(side) = self.fits(st, v, Some(t), span) else {
+            return false;
+        };
+        let shown = what.map_or("the value".to_string(), |w| format!("`{}`", w.0));
+        self.always_traps(&side, (t, refine), span, &shown);
+        true
+    }
+
     /// The fix of an `E0508` whose value is an expression of literals alone, such as `~3` or
     /// `~3 | 1` narrowed into a `u8`: the place gives a literal no type, so `~3` is -4, an `i64`
     /// (`core-calculus.md`, item 5). Its first literal is written with the place's type,
@@ -3637,10 +3655,8 @@ impl<'a> Fx<'a> {
         match shape {
             Shape::Int { int, refine } => {
                 if let Some(t) = int {
-                    if let Some(side) = self.fits(st, v, Some(*t), span) {
-                        // What follows a narrowing that always traps is never reached.
-                        let shown = what.map_or("the value".to_string(), |w| format!("`{}`", w.0));
-                        self.always_traps(&side, (*t, refine.as_deref()), span, &shown);
+                    // What follows a narrowing that always traps is never reached.
+                    if self.always_traps_into(st, v, (*t, refine.as_deref()), span, what.as_ref()) {
                         return;
                     }
                 }
@@ -5240,6 +5256,46 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// Makes `v`, the value `eval` gave argument `e`, its one value where `e` is literals
+    /// alone, as a result's is ([`Self::eval_into`]). Apart from [`Self::call`], whose frame
+    /// every nested call stacks, so that it stays small.
+    #[inline(never)]
+    fn literal_into(&self, e: ExprId, v: &mut Val) {
+        if let Some(x) = self.literal_value(e) {
+            *v = x;
+        }
+    }
+
+    /// Narrows argument `k` of a call, of value `v`, into its parameter's plain type, of type
+    /// `t`, which it returns: one that always traps is reported as its expression, with a fix
+    /// that keeps the parameter's refinement in view, as a result's, a binding's, a field's and
+    /// an element's do. Apart from [`Self::call`], whose frame every nested call stacks.
+    #[inline(never)]
+    fn argument_plain(
+        &mut self,
+        st: &Octagon,
+        (c, site, args): (&Callee, &CallSite, &[Arg]),
+        (k, t): (usize, TypeId),
+        v: &Val,
+    ) -> Shape {
+        let plain = Shape::plain(&Ty::of(&c.syntax.tree, t));
+        let at = self.span(args[k].value);
+        let what = self.guarded(args[k].value);
+        match &plain {
+            Shape::Int { int: Some(int), .. } => {
+                let refine = match self.callee_shape(c, site, args, t) {
+                    Shape::Int { refine, .. } => refine,
+                    Shape::Array(..) | Shape::Struct(_) | Shape::Other => None,
+                };
+                self.always_traps_into(st, v, (*int, refine.as_deref()), at, Some(&what));
+            }
+            Shape::Int { int: None, .. } | Shape::Array(..) | Shape::Struct(_) | Shape::Other => {
+                self.narrow(st, v, &plain, (at, Tag::None), "", Some(what));
+            }
+        }
+        plain
+    }
+
     fn call(&mut self, st: &mut Octagon, e: ExprId, args: &[Arg]) -> Val {
         let known = match &self.sites[e.0 as usize] {
             Site::Call(site) => self
@@ -5270,7 +5326,8 @@ impl<'a> Fx<'a> {
         // later argument comes before an earlier argument's ...
         let mut vals = Vec::new();
         for (k, a) in args.iter().enumerate() {
-            let v = self.eval(st, a.value);
+            let mut v = self.eval(st, a.value);
+            self.literal_into(a.value, &mut v);
             match site.ins.get(k).copied().flatten() {
                 Some(var) => {
                     self.assign(st, var, &v);
@@ -5281,16 +5338,8 @@ impl<'a> Fx<'a> {
             self.arg_paths(st, &site, k, a.value);
         }
         // ... then each enters its parameter's plain type, left to right ...
-        for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
-            let plain = Shape::plain(&Ty::of(&callee.tree, p.ty));
-            self.narrow(
-                st,
-                &vals[k],
-                &plain,
-                (self.span(a.value), Tag::None),
-                "",
-                None,
-            );
+        for (k, p) in callee.params.iter().enumerate().take(args.len()) {
+            let plain = self.argument_plain(st, (&c, &site, args), (k, p.ty), &vals[k]);
             if let Some(var) = site.ins[k] {
                 self.facts(st, var, &plain);
             }
@@ -8413,6 +8462,25 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
             ("pub fn f() -> u8[0..252] = ~3", "", false),
             ("pub fn f() -> u8[0..253] = ~3", "~3_u8", true),
             ("pub fn f(n: u8) -> u8[0..n] = ~3", "~3_u8", false),
+            // An argument keeps its parameter's refinement in view, as a result does.
+            (
+                "fn take(x: u8[0..10]) -> u8 = x
+pub fn f() -> u8 = take(~3)",
+                "",
+                false,
+            ),
+            (
+                "fn take(x: u8[200..=255]) -> u8 = x
+pub fn f() -> u8 = take(~3)",
+                "take(~3_u8)",
+                true,
+            ),
+            (
+                "fn take(n: u8, x: u8[0..n]) -> u8 = x
+pub fn f(n: u8) -> u8 = take(n, ~3)",
+                "take(n, ~3_u8)",
+                false,
+            ),
         ] {
             let src = format!("{}{}", decls, f);
             let text = module(&src);
@@ -8443,6 +8511,11 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
         assert_eq!(
             messages("pub fn f() -> u8 = ~3")[0],
             "Tier 1 proves `~3` is at most -4 here, outside `u8` (0 to 255), so this narrowing always traps"
+        );
+        // An argument names its expression.
+        assert_eq!(
+            messages(&format!("{}pub fn f() -> u8 = mask(~3 | 1)", decls))[0],
+            "Tier 1 proves `~3 | 1` is at most -3 here, outside `u8` (0 to 255), so this narrowing always traps"
         );
         assert_eq!(
             diagnostics("pub fn f() -> u8 = ~3")[0].fixes[0].message,

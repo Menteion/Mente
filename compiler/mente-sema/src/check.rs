@@ -396,6 +396,58 @@ impl Checker<'_> {
                 }
             }
         }
+        // `x op= e` is `x = x op e` (item 6): a compound bit operation narrows a value of
+        // literals alone into `x`'s type, as `x op e` does.
+        for s in &tree.stmts {
+            let (op, value) = match &s.kind {
+                StmtKind::Assign {
+                    op: AssignOp::Compound(op),
+                    value,
+                    ..
+                } => (*op, *value),
+                StmtKind::Assign {
+                    op: AssignOp::Set, ..
+                }
+                | StmtKind::Binding { .. }
+                | StmtKind::Expr(_)
+                | StmtKind::Discard(_)
+                | StmtKind::While { .. }
+                | StmtKind::Guard { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Break
+                | StmtKind::Continue => continue,
+            };
+            match op {
+                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {}
+                BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Rem
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => continue,
+            }
+            if self.typing.exprs[value.0 as usize] != Ty::Int(Int::Literal) {
+                continue;
+            }
+            let Some(taken) = self.typing.literals[value.0 as usize] else {
+                continue;
+            };
+            let Some(v) = literals::value(tree, &self.typing.literals, value) else {
+                continue;
+            };
+            if !v.fits(taken.ty) {
+                self.literal_trap(value, literals::Trap::Outside(v), taken, Some(op));
+            }
+        }
     }
 
     /// Reports `e`, which traps for `trap` in `taken`'s type whenever it runs; `by`, the
@@ -447,17 +499,23 @@ impl Checker<'_> {
             ),
             (literals::Trap::ZeroDivisor, _) => format!("`{}` divides by zero", text),
         };
-        // A suffix gives a shift or a bit operation another type; nothing gives a divisor one.
-        let advice = match trap {
-            literals::Trap::ZeroDivisor => "",
-            literals::Trap::Outside(_)
-            | literals::Trap::ShiftAmount(_)
-            | literals::Trap::Shifted(_) => "; state the type it should work in with a suffix",
+        // The value meant, written out, is checked where it lands, as any literal is: `x < 256`
+        // for a `u8` `x` is `E0233`. No suffix is suggested: one stating a wider type,
+        // `x < 1_u16 << 8`, would keep the operation and leave such a comparison constant and
+        // silent (`core-calculus.md`, item 5).
+        let advice = match (trap, by) {
+            (literals::Trap::Outside(_), Some(_)) => "rewrite the operand as a value of that type",
+            (literals::Trap::ZeroDivisor, _) => "rewrite it",
+            (literals::Trap::Outside(_), None)
+            | (literals::Trap::ShiftAmount(_), _)
+            | (literals::Trap::Shifted(_), _) => {
+                "rewrite it as the value it should have, which is then checked where it lands"
+            }
         };
         self.errors.push(Diagnostic::error(
             "E0234",
             s,
-            format!("{}, so it traps whenever it runs{}", why, advice),
+            format!("{}, so it traps whenever it runs; {}", why, advice),
         ));
     }
 
@@ -3868,6 +3926,19 @@ mod tests {
             ),
             ("a == [300, 1][k]", "`300` lies outside `u8` (0 to 255)"),
             ("a == [300; 2][k]", "`300` lies outside `u8` (0 to 255)"),
+            // At every level of indexing, and through a branch that gives an array.
+            (
+                "a == [[300, 1], [1, 1]][k][k]",
+                "`300` lies outside `u8` (0 to 255)",
+            ),
+            (
+                "a == [[1, 1], [1; 2], [[1, -1], [1, 1]][k]][k][k]",
+                "`-1` lies outside `u8` (0 to 255)",
+            ),
+            (
+                "a == (if c { [256] } else { [1] })[0]",
+                "`256` lies outside `u8` (0 to 255)",
+            ),
             (
                 "a == (if c { 300 } else { 1 }) + 0",
                 "`(if c { 300 } else { 1 }) + 0` may be 300, outside `u8` (0 to 255)",
@@ -3917,7 +3988,8 @@ mod tests {
     fn test_an_operation_over_literals_that_traps_is_e0234() {
         let from = "the type its literals take from the operands around them";
         let alone = "the type of an expression of literals alone";
-        let advice = "so it traps whenever it runs; state the type it should work in with a suffix";
+        let advice = "so it traps whenever it runs; rewrite it as the value it should have, which is then checked where it lands";
+        let operand = "so it traps whenever it runs; rewrite the operand as a value of that type";
         for (f, message) in [
             (
                 "pub fn f(x: u8) -> bool = x < 1 << 8",
@@ -3937,7 +4009,21 @@ mod tests {
             ),
             (
                 "pub fn f(a: u8) -> u8 = a ^ 300",
-                format!("`300` lies outside `u8` (0 to 255), the type it takes from the operand beside it, which `^` narrows it into, {}", advice),
+                format!("`300` lies outside `u8` (0 to 255), the type it takes from the operand beside it, which `^` narrows it into, {}", operand),
+            ),
+            // `x op= e` is `x = x op e`: a compound bit operation narrows its literal value
+            // into the place's type.
+            (
+                "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m &= 256\n  m\n}",
+                format!("`256` lies outside `u8` (0 to 255), the type it takes from the operand beside it, which `&` narrows it into, {}", operand),
+            ),
+            (
+                "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m |= -1\n  m\n}",
+                format!("`-1` lies outside `u8` (0 to 255), the type it takes from the operand beside it, which `|` narrows it into, {}", operand),
+            ),
+            (
+                "pub fn f(m0: u16) -> u16 {\n  var m = m0\n  m ^= 1 << 16\n  m\n}",
+                format!("`1 << 16` shifts by 16, at or past the width of `u16` (0 to 65535), {}, {}", from, advice),
             ),
             (
                 "pub fn f(a: u8) -> u16 = a + (300 << 0)",
@@ -3949,11 +4035,11 @@ mod tests {
             ),
             (
                 "pub fn f() -> i64 = 7 % (3 - 3)",
-                "`7 % (3 - 3)` divides by zero, so it traps whenever it runs".to_string(),
+                "`7 % (3 - 3)` divides by zero, so it traps whenever it runs; rewrite it".to_string(),
             ),
             (
                 "pub fn f(a: u8) -> u8 = a & (2 / 0 + 1)",
-                "`2 / 0` divides by zero, so it traps whenever it runs".to_string(),
+                "`2 / 0` divides by zero, so it traps whenever it runs; rewrite it".to_string(),
             ),
         ] {
             let d = diagnostics(f);
@@ -3970,6 +4056,8 @@ mod tests {
             "pub fn f(x: u8, k: u8) -> u8 = x << k",
             "pub fn f() -> i64 = 7 / 1",
             "pub fn f(a: u8, c: bool) -> u8 = a & (1 << (if c { 7 } else { 1 }))",
+            "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m &= 255\n  m ^= ~3\n  m\n}",
+            "pub fn f(m0: u8) -> u8 {\n  var m = m0\n  m %= 300\n  m\n}",
         ] {
             assert_eq!(codes(f), Vec::<&str>::new(), "{}", f);
         }
