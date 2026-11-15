@@ -1061,27 +1061,16 @@ impl Phases {
     /// as it happens.
     pub fn run(&self, case: &Case, sink: &mut (dyn FnMut(Event) + Send)) {
         install_hook();
-        let not_started = std::thread::scope(|s| {
-            let spawned = std::thread::Builder::new()
-                .name(PHASE_THREAD.to_string())
-                .stack_size(self.stack)
-                .spawn_scoped(s, || {
-                    let mut run = Run {
-                        budget: self.budget,
-                        thorough: case.thorough,
-                        sink: &mut *sink,
-                    };
-                    self.all(&case.text, case.edit, &mut run);
-                });
-            match spawned {
-                Ok(handle) => {
-                    // Every phase catches its own panic, so the thread ends normally.
-                    let _ = handle.join();
-                    None
-                }
-                Err(e) => Some(e.to_string()),
-            }
+        let spawned = mente_threads::alone(Some(PHASE_THREAD), Some(self.stack), || {
+            let mut run = Run {
+                budget: self.budget,
+                thorough: case.thorough,
+                sink: &mut *sink,
+            };
+            self.all(&case.text, case.edit, &mut run);
         });
+        // Every phase catches its own panic, so the thread ends normally.
+        let not_started = spawned.err().map(|e| e.to_string());
         if let Some(e) = not_started {
             sink(Event::Failure(Failure {
                 phase: "start".into(),
@@ -1768,35 +1757,16 @@ impl Worker {
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| format!("cannot start the worker {}: {}", self.exe.display(), e))?;
-            let (Some(stdin), Some(stdout), Some(mut stderr)) =
+            let (Some(stdin), Some(stdout), Some(stderr)) =
                 (child.stdin.take(), child.stdout.take(), child.stderr.take())
             else {
                 return Err("the worker has no pipes".into());
             };
-            let (tx, lines) = mpsc::channel();
-            std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
-                    if tx.send(line).is_err() {
-                        break;
-                    }
-                }
-            });
+            let lines = mente_threads::lines_beside(stdout);
+            // A worker keeps its panics quiet, and the fuzzer clears this before each case, so it
+            // holds little more than a crash's last words.
             let tail = Arc::new(Mutex::new(String::new()));
-            let keep = Arc::clone(&tail);
-            let stderr_reader = std::thread::spawn(move || {
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = stderr.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    // A worker keeps its panics quiet, and the fuzzer clears this before each
-                    // case, so it holds little more than a crash's last words.
-                    if let Ok(mut t) = keep.lock() {
-                        t.push_str(&String::from_utf8_lossy(&buf[..n]));
-                    }
-                }
-            });
+            let stderr_reader = mente_threads::append_beside(stderr, Arc::clone(&tail));
             self.restarts += 1;
             self.live = Some(Live {
                 child,
@@ -2550,7 +2520,7 @@ fn fuzz(exe: &Path, opts: &Options, seeds: &[String]) -> i32 {
         }
     );
     let results: Vec<Result<(Tally, usize), String>> =
-        crate::cores::concurrently(opts.jobs, |job| {
+        mente_threads::concurrently(opts.jobs, |job| {
             let mut worker = Worker::new(exe.to_path_buf(), &opts.phases);
             campaign(job, opts, seeds, &mut worker, &known, deadline).map(|t| (t, worker.restarts))
         })
@@ -3535,23 +3505,20 @@ mod tests {
     #[test]
     fn test_each_caught_panic_keeps_its_own_message() {
         install_hook();
-        let failures = std::thread::Builder::new()
-            .name(PHASE_THREAD.to_string())
-            .spawn(|| {
-                let mut events = Vec::new();
-                let mut sink = |e| events.push(e);
-                let mut run = Run {
-                    budget: Duration::from_secs(60),
-                    thorough: false,
-                    sink: &mut sink,
-                };
-                run.phase("first", || panic!("the first panic"));
-                run.phase("second", || panic!("the second panic"));
-                events
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        let failures = mente_threads::alone(Some(PHASE_THREAD), None, || {
+            let mut events = Vec::new();
+            let mut sink = |e| events.push(e);
+            let mut run = Run {
+                budget: Duration::from_secs(60),
+                thorough: false,
+                sink: &mut sink,
+            };
+            run.phase("first", || panic!("the first panic"));
+            run.phase("second", || panic!("the second panic"));
+            events
+        })
+        .unwrap()
+        .unwrap();
         let messages: Vec<String> = failures
             .into_iter()
             .filter_map(|e| match e {

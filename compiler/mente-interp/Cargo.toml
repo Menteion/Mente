@@ -8,6 +8,7 @@ description = "Mente reference interpreter: runs checked M1 programs over the ty
 [dependencies]
 mente-syntax = { path = "../mente-syntax" }
 mente-sema = { path = "../mente-sema" }
+mente-threads = { path = "../mente-threads" }
 
 [lints]
 workspace = true

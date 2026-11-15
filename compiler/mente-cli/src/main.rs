@@ -30,7 +30,6 @@ use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, 
 use mente_syntax::parse_module;
 
 mod catalogue;
-mod cores;
 mod fuzz;
 
 /// The language card of the language version this compiler implements, which ships with it
@@ -52,9 +51,9 @@ mod mir_run;
 const STACK: usize = 256 << 20;
 
 fn main() {
-    match std::thread::Builder::new().stack_size(STACK).spawn(run) {
+    match mente_threads::alone(None, Some(STACK), run) {
         Ok(work) => {
-            if work.join().is_err() {
+            if work.is_err() {
                 process::exit(101);
             }
         }

@@ -3886,19 +3886,16 @@ _ == b"
     #[test]
     fn test_code_nested_past_the_limit_is_rejected() {
         let codes = |src: String| {
-            std::thread::Builder::new()
-                .stack_size(256 << 20)
-                .spawn(move || {
-                    let m = crate::parse_module(&src).unwrap();
-                    crate::parse_bodies(&src, &m)
-                        .into_iter()
-                        .flat_map(|p| p.errors)
-                        .map(|d| d.code)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap()
-                .join()
-                .unwrap()
+            mente_threads::alone(None, Some(256 << 20), move || {
+                let m = crate::parse_module(&src).unwrap();
+                crate::parse_bodies(&src, &m)
+                    .into_iter()
+                    .flat_map(|p| p.errors)
+                    .map(|d| d.code)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+            .unwrap()
         };
         let r = |s: &str, n: usize| s.repeat(n);
         let f = |body: String| format!("module m\npub fn d(x: i32) -> i32 = {}\n", body);
@@ -3960,19 +3957,16 @@ _ == b"
         // A struct's field type nested past the limit is reported once, and one within it is
         // read.
         let struct_codes = |src: String| {
-            std::thread::Builder::new()
-                .stack_size(256 << 20)
-                .spawn(move || {
-                    let m = crate::parse_module(&src).unwrap();
-                    crate::parse_structs(&src, &m)
-                        .into_iter()
-                        .flat_map(|p| p.errors)
-                        .map(|d| d.code)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap()
-                .join()
-                .unwrap()
+            mente_threads::alone(None, Some(256 << 20), move || {
+                let m = crate::parse_module(&src).unwrap();
+                crate::parse_structs(&src, &m)
+                    .into_iter()
+                    .flat_map(|p| p.errors)
+                    .map(|d| d.code)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+            .unwrap()
         };
         let deep = |n: usize| format!("module m\nstruct S {{\n  a: {}u8\n}}\n", r("[1]", n));
         assert_eq!(struct_codes(deep(300)), ["E0127"]);

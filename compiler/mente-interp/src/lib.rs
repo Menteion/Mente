@@ -277,17 +277,14 @@ pub fn call_leaving(
     args: Vec<Value>,
     limits: Limits,
 ) -> Result<(Value, Vec<Value>), Stop> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(stack_bytes(limits.max_depth))
-            .spawn_scoped(s, || eval::Machine::new(module, limits).enter(name, args))
-            .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
-            .join()
-            .unwrap_or_else(|_| {
-                Err(Stop::BadArguments(
-                    "the interpreter stopped unexpectedly".to_string(),
-                ))
-            })
+    mente_threads::alone(None, Some(stack_bytes(limits.max_depth)), || {
+        eval::Machine::new(module, limits).enter(name, args)
+    })
+    .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
+    .unwrap_or_else(|_| {
+        Err(Stop::BadArguments(
+            "the interpreter stopped unexpectedly".to_string(),
+        ))
     })
 }
 

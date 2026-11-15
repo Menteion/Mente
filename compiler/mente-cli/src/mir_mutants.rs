@@ -129,8 +129,8 @@ struct Prepared {
 /// programs' order.
 pub fn run_programs(programs: &[Program]) -> Vec<ProgramRun> {
     let next = AtomicUsize::new(0);
-    let workers = crate::cores::threads_for(programs.len());
-    let mut found: Vec<(usize, ProgramRun)> = crate::cores::concurrently(workers, |_| {
+    let workers = mente_threads::threads_for(programs.len());
+    let mut found: Vec<(usize, ProgramRun)> = mente_threads::concurrently(workers, |_| {
         let mut mine = Vec::new();
         loop {
             let k = next.fetch_add(1, Ordering::Relaxed);

@@ -483,10 +483,10 @@ const SLOW_TESTS = [
   ["mente-interp", "tests::test_a_program_tier1_proves_never_trips_its_checks"],
   ["mente-cli", "mir_run::tests::test_native_code_runs_each_construct_as_the_reference_interpreter_does"],
 ];
-/// The tests that run work on more than one thread at once (compiler/mente-cli/src/cores.rs),
+/// The tests that run work on more than one thread at once (compiler/mente-threads),
 /// which the override of the group `all-cores` runs alone, each taking every test thread, so that
-/// none starves the tests beside it of time; under nextest, cores.rs fails any other test that
-/// does. Each by its package and its whole path.
+/// none starves the tests beside it of time; under nextest, mente-threads fails any other test
+/// that does. Each by its package and its whole path.
 const ALL_CORES_TESTS = [
   ["mente-cli", "mir_mutants::tests::test_the_command_passes_or_fails_on_the_corpus_it_finds"],
   ["mente-cli", "mir_mutants::tests::test_the_corpus_passes_the_gate"],
@@ -495,9 +495,13 @@ const ALL_CORES_TESTS = [
   ["mente-cli", "test_mn_test_mutate_runs_the_demo_gate"],
   ["mente-cli", "test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds"],
 ];
-/// Where the tests read the group's name: cores.rs fails a test outside the group named there, so
-/// a group renamed in .config/nextest.toml and here alone would fail every test of the group.
-const CORES_GROUP = ["compiler/mente-cli/src/cores.rs", 'pub const GROUP: &str = "all-cores";'];
+/// The crate whose functions alone start threads (clippy.toml's disallowed-methods), and which
+/// alone does not inherit the workspace's lints.
+const THREADS_CRATE = "mente-threads";
+/// Where the tests read the group's name: mente-threads fails a test outside the group named
+/// there, so a group renamed in .config/nextest.toml and here alone would fail every test of the
+/// group.
+const CORES_GROUP = ["compiler/mente-threads/src/lib.rs", 'pub const GROUP: &str = "all-cores";'];
 
 /// The tests an override's filter names, each as [package, path]: `(package(name) & test(=path))`
 /// joined by `|`. The package keeps a test of the same path in another crate out, and the exact
@@ -963,7 +967,37 @@ check("git reads every change as text, and no source names mutants::skip, an att
   // cargo-mutants also skips an `unsafe fn`: no member may write one, since each inherits the
   // workspace's lints and the workspace forbids unsafe code.
   assert.match(read("Cargo.toml"), /^\[workspace\.lints\.rust\]\n(?:#.*\n)*unsafe_code = "forbid"$/m, "the workspace no longer forbids unsafe code, whose functions cargo-mutants skips");
-  for (const [name, { dir }] of workspace()) assert.match(read(`${dir}/Cargo.toml`), /^\[lints\]\nworkspace = true$/m, `${name} does not inherit the workspace's lints, which forbid unsafe code`);
+  for (const [name, { dir }] of workspace()) {
+    if (name === THREADS_CRATE) continue;
+    assert.match(read(`${dir}/Cargo.toml`), /^\[lints\]\nworkspace = true$/m, `${name} does not inherit the workspace's lints, which forbid unsafe code and clippy's disallowed_methods`);
+  }
+  // The one crate that may start threads holds the workspace's lints as its own, but for
+  // disallowed_methods, which it denies where the workspace forbids it.
+  const lintTables = (text, prefix) => {
+    const tables = [];
+    let current = null;
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.replace(/\s+#.*$/, "").trim();
+      if (line === "" || line.startsWith("#")) continue;
+      const header = /^\[([^\]]+)\]$/.exec(line);
+      if (header) {
+        current = header[1].startsWith(prefix) ? [header[1].slice(prefix.length), {}] : null;
+        if (current) tables.push(current);
+        continue;
+      }
+      const entry = /^([a-z][a-z0-9_-]*) = (.+)$/.exec(line);
+      if (current) {
+        assert.ok(entry, `a line of [${prefix}${current[0]}] the policy does not read: ${raw}`);
+        current[1][entry[1]] = entry[2];
+      }
+    }
+    return tables;
+  };
+  const workspaceLints = lintTables(read("Cargo.toml"), "workspace.lints.");
+  const threadsLints = lintTables(read(`compiler/${THREADS_CRATE}/Cargo.toml`), "lints.");
+  const expected = workspaceLints.map(([group, keys]) => [group, group === "clippy" ? { ...keys, disallowed_methods: '"deny"' } : keys]);
+  assert.equal(Object.fromEntries(workspaceLints).clippy?.disallowed_methods, '"forbid"', "the workspace no longer forbids clippy's disallowed_methods, which keeps threads to mente-threads");
+  assert.deepEqual(threadsLints, expected, `${THREADS_CRATE}'s lints are not the workspace's with disallowed_methods denied`);
   for (const space of [0x85, 0x200e, 0x200f, 0x2028, 0x2029].map((c) => String.fromCharCode(c))) {
     assert.ok(RUST_SPACE_BEYOND_ASCII.test(`#[cfg_attr(miri, mutants${space}::skip)]`));
     assert.ok(namesMutantsSkip(`#[rustfmt::skip]\n#[cfg_attr(miri, mutants${space}::${space}skip)] fn f() {}`), `the mutants::skip rule lets through U+${space.codePointAt(0).toString(16)}`);

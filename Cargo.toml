@@ -8,6 +8,7 @@ members = [
     "compiler/mente-codegen",
     "compiler/mente-cli",
     "compiler/mente-interp",
+    "compiler/mente-threads",
     "spikes/tier1-latency",
 ]
 # Workspaces of their own, with the external crates Norman approved for them (their README.md).
@@ -39,3 +40,6 @@ expect_used = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+# Threads start, and the core count is read, only in compiler/mente-threads (clippy.toml): forbidden,
+# so that no `allow`, `expect` or lint group lowers it in any crate but that one, which denies it.
+disallowed_methods = "forbid"

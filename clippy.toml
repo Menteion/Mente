@@ -9,9 +9,13 @@ disallowed-types = [
   { path = "std::cell::UnsafeCell", reason = "Mente has no interior mutability; pass the value as mut" },
 ]
 
-# Work on more than one thread at once goes through compiler/mente-cli/src/cores.rs, which fails a test
-# that nextest runs beside others unless .config/nextest.toml puts it in the group that runs alone.
+# Threads start only in compiler/mente-threads, which fails a test that runs work on more than one
+# thread at once beside others unless .config/nextest.toml puts it in the group that runs alone. The
+# workspace forbids this lint (Cargo.toml), so no `allow` lowers it outside that crate.
 disallowed-methods = [
-  { path = "std::thread::available_parallelism", reason = "ask crate::cores::threads_for, which keeps a test that uses every core to the nextest group that runs alone" },
-  { path = "std::thread::Scope::spawn", reason = "use crate::cores::concurrently or crate::cores::parallel, which keep a test that runs threads at once to the nextest group that runs alone" },
+  { path = "std::thread::available_parallelism", reason = "ask mente_threads::threads_for, which keeps a test that uses every core to the nextest group that runs alone" },
+  { path = "std::thread::Scope::spawn", reason = "use mente_threads::concurrently or mente_threads::parallel, which keep a test that runs threads at once to the nextest group that runs alone" },
+  { path = "std::thread::spawn", reason = "use mente_threads: alone for a thread the caller waits for, or a reader of a pipe" },
+  { path = "std::thread::Builder::spawn", reason = "use mente_threads::alone, which waits for the thread" },
+  { path = "std::thread::Builder::spawn_scoped", reason = "use mente_threads::alone, which waits for the thread" },
 ]

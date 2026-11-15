@@ -199,13 +199,7 @@ fn run_for(
     // Each pipe is read on a thread of its own, so that a program printing more than a pipe
     // holds is not stopped in its write while this waits for it to end.
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut p) = pipe {
-                p.read_to_end(&mut bytes).ok();
-            }
-            bytes
-        })
+        mente_threads::read_to_end_beside(pipe.unwrap_or_else(|| Box::new(std::io::empty())))
     };
     let stdout = drain(
         child

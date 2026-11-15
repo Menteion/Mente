@@ -24,7 +24,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::cores::parallel;
+use mente_threads::parallel;
 
 use mente_codegen::lower;
 use mente_interp::{Limits, Stop};
