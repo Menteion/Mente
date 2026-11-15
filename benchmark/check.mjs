@@ -19,6 +19,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { own, setOwn } from "./own.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LOCK = path.join(HERE, "corpus.lock");
@@ -34,25 +35,25 @@ export function tokenize(text) {
   const out = [];
   let i = 0;
   const valueEnd = () => {
-    const last = out[out.length - 1];
+    const last = own(out, out.length - 1);
     return last && (last.k === "num" || (last.k === "ident" && last.v !== "in") || last.k === "str" || last.v === ")" || last.v === "]");
   };
   while (i < text.length) {
-    const c = text[i];
+    const c = own(text, i);
     if (c === " " || c === "\t") { i++; continue; }
     if (c === '"') {
       let s = "";
       i++;
       for (;;) {
         if (i >= text.length) throw new Error(`unterminated string in: ${text}`);
-        const d = text[i];
+        const d = own(text, i);
         if (d === '"') { i++; break; }
         if (d === "\n") throw new Error(`a line break inside a string in: ${text}`);
         if (d === "\\") {
-          const e = text[i + 1];
+          const e = own(text, i + 1);
           const map = { '"': '"', "\\": "\\", n: "\n", t: "\t", r: "\r" };
           if (!(e in map)) throw new Error(`unknown escape \\${e} in: ${text}`);
-          s += map[e];
+          s += own(map, e);
           i += 2;
           continue;
         }
@@ -64,13 +65,13 @@ export function tokenize(text) {
     }
     const num = /^-?[0-9][0-9_]*(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(i));
     if (num && (c !== "-" || !valueEnd())) {
-      const raw = num[0].replaceAll("_", "");
-      out.push(num[1] || num[2] ? { k: "num", v: Number(raw), float: true } : { k: "num", v: BigInt(raw) });
-      i += num[0].length;
+      const raw = own(num, 0).replaceAll("_", "");
+      out.push(own(num, 1) || own(num, 2) ? { k: "num", v: Number(raw), float: true } : { k: "num", v: BigInt(raw) });
+      i += own(num, 0).length;
       continue;
     }
     const id = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i));
-    if (id) { out.push({ k: "ident", v: id[0] }); i += id[0].length; continue; }
+    if (id) { out.push({ k: "ident", v: own(id, 0) }); i += own(id, 0).length; continue; }
     const p = PUNCT.find((q) => text.startsWith(q, i));
     if (!p) throw new Error(`unexpected character '${c}' in: ${text}`);
     out.push({ k: "punct", v: p });
@@ -81,10 +82,10 @@ export function tokenize(text) {
 
 class Cursor {
   constructor(text) { this.text = text; this.t = tokenize(text); this.i = 0; }
-  peek(o = 0) { return this.t[this.i + o]; }
+  peek(o = 0) { return own(this.t, this.i + o); }
   at(v, o = 0) { const t = this.peek(o); return t !== undefined && (t.k === "punct" || t.k === "ident") && t.v === v; }
   done() { return this.i >= this.t.length; }
-  next() { const t = this.t[this.i++]; if (!t) throw new Error(`unexpected end of: ${this.text}`); return t; }
+  next() { const t = own(this.t, this.i++); if (!t) throw new Error(`unexpected end of: ${this.text}`); return t; }
   eat(v) { if (this.at(v)) { this.i++; return true; } return false; }
   expect(v) { if (!this.eat(v)) throw new Error(`expected '${v}' at token ${this.i} of: ${this.text}`); }
   ident() { const t = this.next(); if (t.k !== "ident") throw new Error(`expected a name at token ${this.i - 1} of: ${this.text}`); return t.v; }
@@ -115,7 +116,7 @@ function parseValueAt(c) {
       const k = c.ident();
       if (k in r) throw new Error(`field ${k} given twice in: ${c.text}`);
       c.expect(":");
-      r[k] = parseValueAt(c);
+      setOwn(r, k, parseValueAt(c));
       if (!c.at("}")) c.expect(",");
     }
     return r;
@@ -174,15 +175,15 @@ export function equal(actual, expected) {
   if (typeof expected !== typeof actual) return false;
   if (expected === null || typeof expected !== "object") return actual === expected;
   if (actual === null) return false;
-  if (Array.isArray(expected)) return Array.isArray(actual) && actual.length === expected.length && expected.every((x, i) => equal(actual[i], x));
+  if (Array.isArray(expected)) return Array.isArray(actual) && actual.length === expected.length && expected.every((x, i) => equal(own(actual, i), x));
   if ("$q" in expected) return "$q" in actual && actual.$q === expected.$q;
   if ("$" in expected) {
     if (actual.$ !== expected.$) return false;
     const a = actual.args ?? [], e = expected.args ?? [];
-    return a.length === e.length && e.every((x, i) => equal(a[i], x));
+    return a.length === e.length && e.every((x, i) => equal(own(a, i), x));
   }
   const ka = Object.keys(actual), ke = Object.keys(expected);
-  return ka.length === ke.length && ke.every((k) => k in actual && equal(actual[k], expected[k]));
+  return ka.length === ke.length && ke.every((k) => k in actual && equal(own(actual, k), own(expected, k)));
 }
 
 // ---------------------------------------------------------------- types
@@ -193,8 +194,8 @@ function intType(name, inLayout) {
   if (name === "usize") return { k: "int", name, lo: 0n, hi: 2n ** 64n - 1n };
   const m = INT_RE.exec(name) ?? (inLayout ? /^(u)([1-9][0-9]?)$/.exec(name) : null);
   if (!m) return null;
-  const bits = BigInt(m[2]);
-  return m[1] === "u" ? { k: "int", name, lo: 0n, hi: 2n ** bits - 1n } : { k: "int", name, lo: -(2n ** (bits - 1n)), hi: 2n ** (bits - 1n) - 1n };
+  const bits = BigInt(own(m, 2));
+  return own(m, 1) === "u" ? { k: "int", name, lo: 0n, hi: 2n ** bits - 1n } : { k: "int", name, lo: -(2n ** (bits - 1n)), hi: 2n ** (bits - 1n) - 1n };
 }
 
 function parseBound(c) {
@@ -286,10 +287,10 @@ export function parseDecls(lines) {
       const fields = {};
       while (!c.eat("}")) {
         const f = c.ident(); c.expect(":");
-        fields[f] = parseType(c, new Set(), layout);
+        setOwn(fields, f, parseType(c, new Set(), layout));
         c.eat(",");
       }
-      decls[name] = { kind: "record", fields, layout: spec };
+      setOwn(decls, name, { kind: "record", fields, layout: spec });
     } else if (kind === "enum") {
       if (layout) throw new Error("an enum has no layout");
       c.expect("{");
@@ -298,10 +299,10 @@ export function parseDecls(lines) {
         const v = c.ident();
         const args = [];
         if (c.eat("(")) { while (!c.eat(")")) { args.push(parseType(c, new Set())); if (!c.at(")")) c.expect(","); } }
-        variants[v] = args;
+        setOwn(variants, v, args);
         if (!c.at("}")) c.expect(",");
       }
-      decls[name] = { kind: "enum", variants };
+      setOwn(decls, name, { kind: "enum", variants });
     } else throw new Error(`unknown declaration ${kind}`);
   }
   return decls;
@@ -337,7 +338,7 @@ export function parseSignature(lines) {
   const clauses = rest.map((l) => {
     const m = /^(requires|ensures) (.+)$/.exec(l.trim());
     if (!m) throw new Error(`a signature line after the first must be requires or ensures: ${l}`);
-    return { kind: m[1], expr: m[2] };
+    return { kind: own(m, 1), expr: own(m, 2) };
   });
   return { name, generics, params, ret, uses, clauses, text: lines.join("\n") };
 }
@@ -345,7 +346,7 @@ export function parseSignature(lines) {
 function substitute(t, env) {
   if (t.k === "generic") return env.get(t.name) ?? t;
   const out = { ...t };
-  for (const key of ["elem", "ok", "err", "key", "val"]) if (t[key]) out[key] = substitute(t[key], env);
+  for (const key of ["elem", "ok", "err", "key", "val"]) if (own(t, key)) setOwn(out, key, substitute(own(t, key), env));
   return out;
 }
 
@@ -382,26 +383,26 @@ export function checkValue(v, t, decls, where) {
       return;
     case "option":
       if (!v || v.$ === undefined || !((v.$ === "none" && v.args === undefined) || (v.$ === "some" && v.args?.length === 1))) fail("is not none or some(v)");
-      if (v.$ === "some") checkValue(v.args[0], t.elem, decls, `${where}.some`);
+      if (v.$ === "some") checkValue(own(v.args, 0), t.elem, decls, `${where}.some`);
       return;
     case "result":
       if (!v || (v.$ !== "ok" && v.$ !== "err") || v.args?.length !== 1) fail("is not ok(v) or err(e)");
-      checkValue(v.args[0], v.$ === "ok" ? t.ok : t.err, decls, `${where}.${v.$}`);
+      checkValue(own(v.args, 0), v.$ === "ok" ? t.ok : t.err, decls, `${where}.${v.$}`);
       return;
     case "named": {
-      const d = decls[t.name] ?? BUILTIN_DECLS[t.name];
+      const d = own(decls, t.name) ?? own(BUILTIN_DECLS, t.name);
       if (!d) throw new Error(`${where}: type ${t.name} is not declared`);
       if (d.kind === "record") {
         if (!v || typeof v !== "object" || Array.isArray(v) || "$" in v) fail(`is not a ${t.name} record`);
         const want = Object.keys(d.fields), got = Object.keys(v);
         if (want.join() !== got.join()) fail(`does not have the fields ${want.join(", ")} in order`);
-        for (const f of want) checkValue(v[f], d.fields[f], decls, `${where}.${f}`);
+        for (const f of want) checkValue(own(v, f), own(d.fields, f), decls, `${where}.${f}`);
       } else {
         if (!v || typeof v !== "object" || !(v.$ in d.variants)) fail(`is not a variant of ${t.name}`);
         const args = v.args ?? [];
-        const want = d.variants[v.$];
+        const want = own(d.variants, v.$);
         if (args.length !== want.length || (want.length === 0 && v.args !== undefined)) fail(`does not match ${v.$}'s fields`);
-        args.forEach((x, i) => checkValue(x, want[i], decls, `${where}.${v.$}`));
+        args.forEach((x, i) => checkValue(x, own(want, i), decls, `${where}.${v.$}`));
       }
       return;
     }
@@ -475,7 +476,7 @@ export function parseTests(lines) {
     if (line.startsWith("given ")) { givens.push(parseGiven(line)); continue; }
     if (line.startsWith("then ")) {
       if (tests.length === 0 || givens.length) throw new Error(`a then line must follow a call: ${line}`);
-      tests[tests.length - 1].thens.push(parseThen(line));
+      own(tests, tests.length - 1).thens.push(parseThen(line));
       continue;
     }
     tests.push({ givens, call: parseCall(line), thens: [] });
@@ -497,21 +498,21 @@ export function makeContext(givens) {
   const take = (target, key, fallback) => {
     const q = queues.get(`${target} ${key}`);
     if (!q) return { r: structuredClone(fallback), after: 0n };
-    return structuredClone(q.length > 1 ? q.shift() : q[0]);
+    return structuredClone(q.length > 1 ? q.shift() : own(q, 0));
   };
   return {
     log,
     net: {
-      get(url) { log["Net.get"].push(url); return take("Net.get", url, NOT_FOUND).r; },
-      getTimed(url) { log["Net.get"].push(url); return take("Net.get", url, NOT_FOUND); },
-      post(url, body) { log["Net.post"].push({ url, body }); return take("Net.post", url, { $: "ok", args: [null] }).r; },
+      get(url) { own(log, "Net.get").push(url); return take("Net.get", url, NOT_FOUND).r; },
+      getTimed(url) { own(log, "Net.get").push(url); return take("Net.get", url, NOT_FOUND); },
+      post(url, body) { own(log, "Net.post").push({ url, body }); return take("Net.post", url, { $: "ok", args: [null] }).r; },
     },
     clock: {
       now_ms() { return now; },
-      sleep_ms(ms) { log["Clock.sleep_ms"].push(ms); now += ms; },
+      sleep_ms(ms) { own(log, "Clock.sleep_ms").push(ms); now += ms; },
     },
     fs: {
-      read_text(p) { log["Fs.read_text"].push(p); return take("Fs.read_text", p, NOT_FOUND).r; },
+      read_text(p) { own(log, "Fs.read_text").push(p); return take("Fs.read_text", p, NOT_FOUND).r; },
     },
   };
 }
@@ -543,29 +544,29 @@ export function readTask(file) {
   const m = /^---\n([\s\S]*?)\n---\n/.exec(text);
   if (!m) throw new Error(`${where}: no front matter`);
   const meta = {};
-  for (const line of m[1].split("\n")) {
+  for (const line of own(m, 1).split("\n")) {
     const kv = /^([a-z]+): (.+)$/.exec(line);
     if (!kv) throw new Error(`${where}: bad front matter line: ${line}`);
-    meta[kv[1]] = kv[2];
+    setOwn(meta, own(kv, 1), own(kv, 2));
   }
-  const body = text.slice(m[0].length);
+  const body = text.slice(own(m, 0).length);
   const sections = {};
   let current = null;
   for (const line of body.split("\n")) {
     const h = /^## (.+)$/.exec(line);
     if (h) {
-      current = h[1];
+      current = own(h, 1);
       if (current in sections) throw new Error(`${where}: section ${current} twice`);
-      sections[current] = [];
+      setOwn(sections, current, []);
       continue;
     }
-    if (current) sections[current].push(line);
+    if (current) own(sections, current).push(line);
   }
-  const block = (name) => (sections[name] ?? []).filter((l) => l.startsWith("    ")).map((l) => l.slice(4));
+  const block = (name) => (own(sections, name) ?? []).filter((l) => l.startsWith("    ")).map((l) => l.slice(4));
   return { file, where, text, meta, sections, block };
 }
 
-const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const has = (o, k) => Object.hasOwn(o, k);
 
 function usesNonCore(sig, decls) {
   if (sig.clauses.length) return true;
@@ -575,13 +576,13 @@ function usesNonCore(sig, decls) {
     if (t.k === "int" && t.ref) return true;
     if (t.k === "f64" && t.unit) return true;
     if (t.k === "fixed" || t.layout) return true;
-    if (t.k === "named" && !seen.has(t.name) && decls[t.name]) {
+    if (t.k === "named" && !seen.has(t.name) && own(decls, t.name)) {
       seen.add(t.name);
-      const d = decls[t.name];
+      const d = own(decls, t.name);
       if (d.layout) return true;
       return Object.values(d.kind === "record" ? d.fields : d.variants).flat().some(walk);
     }
-    return ["elem", "ok", "err", "key", "val"].some((k) => walk(t[k]));
+    return ["elem", "ok", "err", "key", "val"].some((k) => walk(own(t, k)));
   };
   return sig.params.some((p) => walk(p.type)) || walk(sig.ret);
 }
@@ -612,11 +613,11 @@ export function checkTask(task, reference, expectedSet) {
   }
 
   if (meta.kind === "adversarial") {
-    for (const s of ["Probe", "Caught when", "Missed when"]) if (sections[s].join("").trim() === "") throw new Error(`${where}: ## ${s} is empty`);
+    for (const s of ["Probe", "Caught when", "Missed when"]) if (own(sections, s).join("").trim() === "") throw new Error(`${where}: ## ${s} is empty`);
     return { meta, tests: 0 };
   }
 
-  const fn = reference[id];
+  const fn = own(reference, id);
   if (typeof fn !== "function") throw new Error(`${where}: no reference solution for ${id}`);
   let count = 0;
   for (const section of ["Examples", "Hidden tests"]) {
@@ -627,26 +628,26 @@ export function checkTask(task, reference, expectedSet) {
       const at = `${where}, ${section}: ${call.text}`;
       if (call.name !== sig.name) throw new Error(`${at}: calls ${call.name}, not ${sig.name}`);
       if (call.typeArgs.length !== sig.generics.size) throw new Error(`${at}: needs ${sig.generics.size} type arguments`);
-      const env = new Map([...sig.generics.keys()].map((g, i) => [g, call.typeArgs[i]]));
+      const env = new Map([...sig.generics.keys()].map((g, i) => [g, own(call.typeArgs, i)]));
       if (call.args.length !== sig.params.length) throw new Error(`${at}: takes ${sig.params.length} arguments`);
       sig.params.forEach((p, i) => {
-        if (call.args[i].mut !== p.mut) throw new Error(`${at}: argument ${p.name} must ${p.mut ? "" : "not "}be marked mut`);
-        checkValue(call.args[i].value, substitute(p.type, env), decls, `${at}, ${p.name}`);
+        if (own(call.args, i).mut !== p.mut) throw new Error(`${at}: argument ${p.name} must ${p.mut ? "" : "not "}be marked mut`);
+        checkValue(own(call.args, i).value, substitute(p.type, env), decls, `${at}, ${p.name}`);
       });
       const ret = substitute(sig.ret, env);
       if (ret.k === "unit" ? has(call, "expect") : !has(call, "expect")) throw new Error(`${at}: ${ret.k === "unit" ? "returns nothing, so takes no ==" : "needs == expected"}`);
       if (has(call, "expect")) checkValue(call.expect, ret, decls, `${at}, result`);
       const muts = sig.params.map((p, i) => [p, i]).filter(([p]) => p.mut);
       if ((call.leaves?.length ?? 0) !== muts.length) throw new Error(`${at}: needs leaves with ${muts.length} values`);
-      muts.forEach(([p], j) => checkValue(call.leaves[j], substitute(p.type, env), decls, `${at}, leaves ${p.name}`));
-      for (const g of test.givens) if (!sig.uses.includes(g.target.split(".")[0])) throw new Error(`${at}: given ${g.target}, but the function does not use ${g.target.split(".")[0]}`);
+      muts.forEach(([p], j) => checkValue(own(call.leaves, j), substitute(p.type, env), decls, `${at}, leaves ${p.name}`));
+      for (const g of test.givens) if (!sig.uses.includes(own(g.target.split("."), 0))) throw new Error(`${at}: given ${g.target}, but the function does not use ${own(g.target.split("."), 0)}`);
 
       const out = runCall(fn, test);
       if (has(call, "expect") && !equal(out.result, call.expect)) throw new Error(`${at}: the reference returns ${printValue(out.result)}`);
-      muts.forEach(([p, i], j) => { if (!equal(out.args[i], call.leaves[j])) throw new Error(`${at}: the reference leaves ${p.name} = ${printValue(out.args[i])}`); });
+      muts.forEach(([p, i], j) => { if (!equal(own(out.args, i), own(call.leaves, j))) throw new Error(`${at}: the reference leaves ${p.name} = ${printValue(own(out.args, i))}`); });
       for (const th of test.thens) {
         if (th.harness) continue;
-        const got = out.log[th.target];
+        const got = own(out.log, th.target);
         if (!(th.anyOrder ? sameMultiset(got, th.calls) : equal(got, th.calls))) throw new Error(`${at}: the reference makes ${th.target} calls ${printValue(got)}`);
       }
       count++;
@@ -662,9 +663,9 @@ function readComposition() {
   const sec = /\n## Composition\n([\s\S]*?)(\n## |$)/.exec(text);
   if (!sec) throw new Error("README.md has no ## Composition section");
   const rows = {};
-  for (const line of sec[1].split("\n")) {
+  for (const line of own(sec, 1).split("\n")) {
     const m = /^\| (M[1-9]) \| ([0-9]+) \| ([0-9]+) \| ([0-9]+) \|$/.exec(line);
-    if (m) rows[m[1]] = { tuning: Number(m[2]), heldOut: Number(m[3]), adversarial: Number(m[4]) };
+    if (m) setOwn(rows, own(m, 1), { tuning: Number(own(m, 2)), heldOut: Number(own(m, 3)), adversarial: Number(own(m, 4)) });
   }
   if (Object.keys(rows).length === 0) throw new Error("README.md's composition table has no rows");
   return rows;
@@ -672,14 +673,14 @@ function readComposition() {
 
 function countBy(items, key) {
   const out = {};
-  for (const x of items) out[key(x)] = (out[key(x)] ?? 0) + 1;
+  for (const x of items) setOwn(out, key(x), (own(out, key(x)) ?? 0) + 1);
   return out;
 }
 
 function compareCounts(label, got, rows, field) {
   for (const ms of new Set([...Object.keys(rows), ...Object.keys(got)])) {
-    const want = rows[ms]?.[field] ?? 0;
-    if ((got[ms] ?? 0) !== want) throw new Error(`composition: ${label} has ${got[ms] ?? 0} tasks for ${ms}, README.md says ${want}`);
+    const want = own(own(rows, ms), field) ?? 0;
+    if ((own(got, ms) ?? 0) !== want) throw new Error(`composition: ${label} has ${own(got, ms) ?? 0} tasks for ${ms}, README.md says ${want}`);
   }
 }
 
@@ -693,9 +694,9 @@ function readLock() {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
     const f = line.split(" ");
-    if (f[0] === "task" && f.length === 6) lock.tasks.push(line);
-    else if (f[0] === "held-out" && f.length === 3) lock.heldOut = { repo: f[1], commit: f[2] };
-    else if (f[0] === "held-out-task" && f.length === 3) lock.heldOutTasks.push(line);
+    if (own(f, 0) === "task" && f.length === 6) lock.tasks.push(line);
+    else if (own(f, 0) === "held-out" && f.length === 3) lock.heldOut = { repo: own(f, 1), commit: own(f, 2) };
+    else if (own(f, 0) === "held-out-task" && f.length === 3) lock.heldOutTasks.push(line);
     else throw new Error(`corpus.lock: bad line: ${line}`);
   }
   return lock;
@@ -715,7 +716,7 @@ function writeLock(taskLines, heldOut, heldOutLines) {
   fs.writeFileSync(LOCK, text);
 }
 
-function git(dir, ...args) { return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim(); }
+function git(dir, ...args) { return execFileSync(process.platform === "win32" ? "git" : "/usr/bin/git", ["-C", dir, ...args], { encoding: "utf8" }).trim(); }
 
 async function loadTasks(dir, set) {
   const tdir = path.join(dir, "tasks");
@@ -733,8 +734,8 @@ async function main() {
   const argv = process.argv.slice(2);
   const bless = argv.includes("--bless");
   const hi = argv.indexOf("--held-out");
-  const heldOutDir = hi >= 0 ? path.resolve(argv[hi + 1] ?? "") : null;
-  if (hi >= 0 && !argv[hi + 1]) throw new Error("--held-out needs a directory");
+  const heldOutDir = hi >= 0 ? path.resolve(own(argv, hi + 1) ?? "") : null;
+  if (hi >= 0 && !own(argv, hi + 1)) throw new Error("--held-out needs a directory");
 
   const rows = readComposition();
   const pub = await loadTasks(HERE, "public");
@@ -763,15 +764,15 @@ async function main() {
     }
   }
   if (!heldOut) throw new Error("corpus.lock names no held-out commit; bless it with --held-out <dir>");
-  compareCounts("the held-out set", countBy(heldOutLines, (l) => l.split(" ")[1]), rows, "heldOut");
+  compareCounts("the held-out set", countBy(heldOutLines, (l) => own(l.split(" "), 1)), rows, "heldOut");
 
   if (bless) {
     writeLock(taskLines, heldOut, [...heldOutLines].sort());
     console.log("corpus.lock rewritten");
   } else {
     const want = new Set(taskLines), got = new Set(lock.tasks);
-    const changed = [...want].filter((l) => !got.has(l)).map((l) => l.split(" ")[1]);
-    const gone = [...got].filter((l) => !want.has(l)).map((l) => l.split(" ")[1]).filter((id) => !changed.includes(id));
+    const changed = [...want].filter((l) => !got.has(l)).map((l) => own(l.split(" "), 1));
+    const gone = [...got].filter((l) => !want.has(l)).map((l) => own(l.split(" "), 1)).filter((id) => !changed.includes(id));
     if (changed.length || gone.length) {
       throw new Error(`corpus.lock does not match the tasks (changed or new: ${changed.join(", ") || "none"}; removed: ${gone.join(", ") || "none"}). ` +
         "A change to the corpus follows README.md, \"Changing the corpus\"; then run `npm run check:benchmark -- --bless`.");

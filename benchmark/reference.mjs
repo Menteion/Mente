@@ -8,6 +8,8 @@
 // harness's stand-ins for the effects, README.md "Effects"), then the
 // arguments; a `mut` argument is changed in place.
 
+import { own, setOwn } from "./own.mjs";
+
 const some = (v) => ({ $: "some", args: [v] });
 const none = { $: "none" };
 const ok = (v) => ({ $: "ok", args: [v] });
@@ -54,7 +56,7 @@ export const tasks = {
   },
 
   "max-subarray-sum"(_, a) {
-    let best = a[0], here = a[0];
+    let best = own(a, 0), here = own(a, 0);
     for (const x of a.slice(1)) {
       here = here + x > x ? here + x : x;
       if (here > best) best = here;
@@ -68,9 +70,9 @@ export const tasks = {
     const composite = new Array(m).fill(false);
     let count = 0n;
     for (let i = 2; i < m; i++) {
-      if (composite[i]) continue;
+      if (own(composite, i)) continue;
       count++;
-      for (let j = i * i; j < m; j += i) composite[j] = true;
+      for (let j = i * i; j < m; j += i) setOwn(composite, j, true);
     }
     return count;
   },
@@ -81,7 +83,7 @@ export const tasks = {
 
   "index-of-max"(_, a) {
     let best = 0;
-    for (let i = 1; i < a.length; i++) if (a[i] > a[best]) best = i;
+    for (let i = 1; i < a.length; i++) if (own(a, i) > own(a, best)) best = i;
     return BigInt(best);
   },
 
@@ -102,12 +104,12 @@ export const tasks = {
 
   spiral(_, m) {
     const out = [];
-    let [top, bottom, left, right] = [0, m.length - 1, 0, m[0].length - 1];
+    let [top, bottom, left, right] = [0, m.length - 1, 0, own(m, 0).length - 1];
     while (top <= bottom && left <= right) {
-      for (let c = left; c <= right; c++) out.push(m[top][c]);
-      for (let r = top + 1; r <= bottom; r++) out.push(m[r][right]);
-      if (top < bottom) for (let c = right - 1; c >= left; c--) out.push(m[bottom][c]);
-      if (left < right) for (let r = bottom - 1; r > top; r--) out.push(m[r][left]);
+      for (let c = left; c <= right; c++) out.push(own(own(m, top), c));
+      for (let r = top + 1; r <= bottom; r++) out.push(own(own(m, r), right));
+      if (top < bottom) for (let c = right - 1; c >= left; c--) out.push(own(own(m, bottom), c));
+      if (left < right) for (let r = bottom - 1; r > top; r--) out.push(own(own(m, r), left));
       [top, bottom, left, right] = [top + 1, bottom - 1, left + 1, right - 1];
     }
     return out;
@@ -126,14 +128,16 @@ export const tasks = {
 
   "next-permutation"(_, a) {
     let i = a.length - 2;
-    while (i >= 0 && a[i] >= a[i + 1]) i--;
+    while (i >= 0 && own(a, i) >= own(a, i + 1)) i--;
     if (i < 0) {
       a.reverse();
       return false;
     }
     let j = a.length - 1;
-    while (a[j] <= a[i]) j--;
-    [a[i], a[j]] = [a[j], a[i]];
+    while (own(a, j) <= own(a, i)) j--;
+    const swapped = own(a, i);
+    setOwn(a, i, own(a, j));
+    setOwn(a, j, swapped);
     const rest = a.splice(i + 1).reverse();
     a.push(...rest);
     return true;
@@ -148,7 +152,7 @@ export const tasks = {
   "merge-unique"(_, a, b, out) {
     const all = [...new Set([...a, ...b])].sort(cmp);
     all.forEach((v, k) => {
-      out[k] = v;
+      setOwn(out, k, v);
     });
     return BigInt(all.length);
   },
@@ -191,11 +195,11 @@ export const tasks = {
     }
     if (stack.length === 0) return err(tag("StackUnderflow"));
     if (stack.length > 1) return err(tag("Leftover"));
-    return ok(stack[0]);
+    return ok(own(stack, 0));
   },
 
   "two-sum"(_, xs, target) {
-    for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) if (xs[i] + xs[j] === target) return some({ i: BigInt(i), j: BigInt(j) });
+    for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) if (own(xs, i) + own(xs, j) === target) return some({ i: BigInt(i), j: BigInt(j) });
     return none;
   },
 
@@ -203,8 +207,8 @@ export const tasks = {
     let out = "";
     for (let i = 0; i < s.length; ) {
       let j = i;
-      while (j < s.length && s[j] === s[i]) j++;
-      out += s[i] + String(j - i);
+      while (j < s.length && own(s, j) === own(s, i)) j++;
+      out += own(s, i) + String(j - i);
       i = j;
     }
     return out;
@@ -213,15 +217,15 @@ export const tasks = {
   "merge-sorted"(_, a, b) {
     const out = [];
     let i = 0, j = 0;
-    while (i < a.length && j < b.length) out.push(a[i] <= b[j] ? a[i++] : b[j++]);
+    while (i < a.length && j < b.length) out.push(own(a, i) <= own(b, j) ? own(a, i++) : own(b, j++));
     return [...out, ...a.slice(i), ...b.slice(j)];
   },
 
   "apply-ops"(_, balance, ops) {
     for (let k = 0; k < ops.length; k++) {
-      const amount = ops[k].args[0];
+      const amount = own(own(ops, k).args, 0);
       if (amount <= 0n) return err(tag("NonPositiveAmount", BigInt(k)));
-      if (ops[k].$ === "Deposit") balance += amount;
+      if (own(ops, k).$ === "Deposit") balance += amount;
       else if (amount > balance) return err(tag("Overdraft", BigInt(k)));
       else balance -= amount;
     }
@@ -246,11 +250,11 @@ export const tasks = {
 
   "decode-header"(_, b) {
     return {
-      version: b[0] >> 4n,
-      flags: b[0] & 15n,
-      kind: b[1],
-      length: b[2] | (b[3] << 8n),
-      id: b[4] | (b[5] << 8n) | (b[6] << 16n) | (b[7] << 24n),
+      version: own(b, 0) >> 4n,
+      flags: own(b, 0) & 15n,
+      kind: own(b, 1),
+      length: own(b, 2) | (own(b, 3) << 8n),
+      id: own(b, 4) | (own(b, 5) << 8n) | (own(b, 6) << 16n) | (own(b, 7) << 24n),
     };
   },
 
@@ -267,9 +271,9 @@ export const tasks = {
       return [p, v];
     };
     for (let k = 0; k < ps.length; k++) {
-      const [x, vx] = axis(ps[k].x, ps[k].vx);
-      const [y, vy] = axis(ps[k].y, ps[k].vy);
-      ps[k] = { x, y, vx, vy };
+      const [x, vx] = axis(own(ps, k).x, own(ps, k).vx);
+      const [y, vy] = axis(own(ps, k).y, own(ps, k).vy);
+      setOwn(ps, k, { x, y, vx, vy });
     }
   },
 
@@ -280,7 +284,7 @@ export const tasks = {
     for (const u of urls) {
       const r = ctx.net.get(u);
       if (r.$ === "err") return r;
-      out.push(utf8Length(r.args[0]));
+      out.push(utf8Length(own(r.args, 0)));
     }
     return ok(out);
   },
@@ -288,14 +292,14 @@ export const tasks = {
   "retry-get"(ctx, url, attempts) {
     for (let k = 1n; ; k++) {
       const r = ctx.net.get(url);
-      if (r.$ === "ok" || r.args[0].$ === "NotFound" || k === attempts) return r;
+      if (r.$ === "ok" || own(r.args, 0).$ === "NotFound" || k === attempts) return r;
       ctx.clock.sleep_ms(100n * 2n ** (k - 1n));
     }
   },
 
   "dedup-sorted"(_, xs) {
     const out = [];
-    for (const x of xs) if (out.length === 0 || !deepEqual(out[out.length - 1], x)) out.push(x);
+    for (const x of xs) if (out.length === 0 || !deepEqual(own(out, out.length - 1), x)) out.push(x);
     return out;
   },
 
@@ -326,7 +330,7 @@ export const tasks = {
   "count-lines"(ctx, p) {
     const r = ctx.fs.read_text(p);
     if (r.$ === "err") return r;
-    const s = r.args[0];
+    const s = own(r.args, 0);
     if (s === "") return ok(0n);
     const newlines = BigInt(s.split("\n").length - 1);
     return ok(s.endsWith("\n") ? newlines : newlines + 1n);
@@ -338,21 +342,21 @@ export const tasks = {
       const k = w.toLowerCase();
       counts.set(k, (counts.get(k) ?? 0n) + 1n);
     }
-    return [...counts].sort((a, b) => cmp(b[1], a[1]) || cmp(a[0], b[0])).map(([word, count]) => ({ word, count }));
+    return [...counts].sort((a, b) => cmp(own(b, 1), own(a, 1)) || cmp(own(a, 0), own(b, 0))).map(([word, count]) => ({ word, count }));
   },
 
   "csv-column-sum"(ctx, p, column) {
     const r = ctx.fs.read_text(p);
-    if (r.$ === "err") return err(tag("Io", r.args[0]));
-    const lines = r.args[0].split("\n");
-    if (lines[lines.length - 1] === "") lines.pop();
+    if (r.$ === "err") return err(tag("Io", own(r.args, 0)));
+    const lines = own(r.args, 0).split("\n");
+    if (own(lines, lines.length - 1) === "") lines.pop();
     if (lines.length === 0) return err(tag("MissingColumn"));
-    const idx = lines[0].split(",").indexOf(column);
+    const idx = own(lines, 0).split(",").indexOf(column);
     if (idx < 0) return err(tag("MissingColumn"));
     let sum = 0n;
     for (let k = 1; k < lines.length; k++) {
-      if (lines[k] === "") continue;
-      const field = lines[k].split(",")[idx];
+      if (own(lines, k) === "") continue;
+      const field = own(own(lines, k).split(","), idx);
       if (field === undefined || !/^-?[0-9]+$/.test(field)) return err(tag("BadNumber", BigInt(k + 1)));
       sum += BigInt(field);
       if (!inI64(BigInt(field)) || !inI64(sum)) return err(tag("Overflow"));
@@ -369,7 +373,7 @@ export const tasks = {
   "first-ok"(ctx, urls, timeout) {
     const arrivals = urls.map((u, i) => ({ ...ctx.net.getTimed(u), i }));
     const oks = arrivals.filter((a) => a.r.$ === "ok").sort((a, b) => cmp(a.after, b.after) || a.i - b.i);
-    if (oks.length && oks[0].after <= timeout) return ok(oks[0].r.args[0]);
+    if (oks.length && own(oks, 0).after <= timeout) return ok(own(own(oks, 0).r.args, 0));
     const lastFailure = arrivals.reduce((m, a) => (a.after > m ? a.after : m), 0n);
     if (oks.length === 0 && lastFailure <= timeout) return err(tag("AllFailed"));
     return err(tag("TimedOut"));

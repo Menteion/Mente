@@ -27,7 +27,8 @@
 //
 // `evidence` prints each mutant whose outcome its log does not show: caught without nextest's exit
 // for a failed run, a failed test and nextest's own line, before the tests start, that it hands
-// them to the sandbox; unviable without a failed build and a compiler's error. What it stops, and
+// them to the sandbox; unviable without a failed build whose compiler errors each lie inside the
+// mutant's own change, the lines and columns its diff changed. What it stops, and
 // what it does not: it catches a test tool that is missing or broken, and a stub
 // left in its place that exits at once. It does not stop code of the change that sets out to
 // defeat it, which runs with the job's rights: a stub that prints a failing test and exits as
@@ -210,10 +211,69 @@ const SANDBOX_RUNNER = /^\s*info: (?:for the \w+ platform, )?using target runner
 /// nextest's line that starts the tests, after which a test's output may appear.
 const TESTS_START = /^\s*Starting \d+ tests? across /m;
 
+/// Each error the compiler printed in a log, with its primary location (`-->`) when it gave one; the
+/// summaries cargo and rustc print after the errors are none. The log's colours are gone.
+export function compilerErrors(log) {
+  const lines = String(log).split("\n");
+  const out = [];
+  lines.forEach((l, i) => {
+    if (!/^error(\[E\d{4}\])?: /.test(l) || /^error: (could not compile|aborting due to)/.test(l)) return;
+    const at = lines
+      .slice(i + 1, i + 4)
+      .map((x) => /^\s*--> (.+):(\d+):(\d+)$/.exec(x))
+      .find(Boolean);
+    out.push(at ? { text: l, file: at[1], line: Number(at[2]), column: Number(at[3]) } : { text: l, file: null, line: 0, column: 0 });
+  });
+  return out;
+}
+
+/// What a mutant's own diff changed in the mutated file, one region an added line: its number in
+/// the new file and the columns, from and to, where it differs from the one line it replaced, or
+/// the whole line when a hunk replaces more than one line, or none, at once.
+export function changedRegions(diff) {
+  const out = [];
+  let line = 0;
+  let removed = [];
+  let added = [];
+  const flush = () => {
+    if (removed.length === 1 && added.length === 1) {
+      const [a] = removed;
+      const { at, text: b } = added[0];
+      let p = 0;
+      while (p < a.length && p < b.length && a[p] === b[p]) p++;
+      let s = 0;
+      while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+      out.push({ line: at, from: p + 1, to: Math.max(p + 1, b.length - s) });
+    } else for (const { at, text } of added) out.push({ line: at, from: 1, to: text.length + 1 });
+    removed = [];
+    added = [];
+  };
+  for (const l of String(diff).split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (hunk) {
+      flush();
+      line = Number(hunk[1]);
+    } else if (line === 0) continue;
+    else if (l.startsWith("-")) removed.push(l.slice(1));
+    else if (l.startsWith("+")) {
+      added.push({ at: line, text: l.slice(1) });
+      line++;
+    } else {
+      flush();
+      if (l.startsWith(" ")) line++;
+    }
+  }
+  flush();
+  return out;
+}
+
 /// Why a run's outcomes do not show the work they claim, one message a mutant: a mutant counts as
 /// caught only when its tests ran in the sandbox and one failed, nextest exiting 100 with a failing
 /// test in the log after its line that names the sandbox as its runner, and as unviable only when
-/// its build failed with an error of the compiler. A stub in place of
+/// its build failed with errors of the compiler that each lie inside the mutant's own change, the
+/// lines and columns its diff changed: an error elsewhere is the change's, not the mutant's (the
+/// review of 41a54b6: a `const _: () = assert!(...)` over `include_str!` of the mutated file failed
+/// every mutant of it with a real E0080, and the floor counted them all as tested). A stub in place of
 /// nextest or cargo, which exits at once, would otherwise make every mutant caught or unviable,
 /// and the floor count them all as tested. Times cannot tell: a caught mutant's tests took 0.15 s
 /// in the runs of #120. `readLog` reads a log by the path the outcome names.
@@ -237,8 +297,14 @@ export function evidence(outcomes, readLog) {
       }
     } else {
       const build = phase("Build");
+      const errors = compilerErrors(log);
+      const file = o.scenario.Mutant.file;
+      const regions = changedRegions(o.diff_path ? strip(readLog(o.diff_path)) : "");
+      const inside = (e) => e.file === file && regions.some((r) => r.line === e.line && e.column >= r.from && e.column <= r.to);
+      const outside = errors.find((e) => !inside(e));
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);
-      else if (!/^error(\[E\d+\])?:/m.test(log)) found.push(`${name}: unviable, but no error of the compiler is in its log`);
+      else if (errors.length === 0) found.push(`${name}: unviable, but no error of the compiler is in its log`);
+      else if (outside) found.push(`${name}: unviable, but an error of the compiler lies outside the mutant's own change: ${outside.text}${outside.file ? ` at ${outside.file}:${outside.line}:${outside.column}` : ", with no location"}`);
     }
   }
   return found;

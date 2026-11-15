@@ -20,6 +20,7 @@ import {
   type Signature,
 } from "./languages.ts";
 import { feedbackPrompt, parseCase, systemPrompt, userPrompt, type Case, type CaseResult, type Task } from "./tasks.ts";
+import { own } from "../own.mjs";
 
 export interface Pins {
   rust: string;
@@ -81,7 +82,7 @@ export function failureText(sig: Signature, r: CaseResult): string {
   if (want.value !== null && got.value !== want.value) parts.push(`it returned ${got.value}, expected ${want.value}`);
   const muts = sig.params.filter((p) => p.mut);
   want.leaves.forEach((w, i) => {
-    if (got.leaves[i] !== w) parts.push(`it left \`${muts[i]?.name}\` as ${got.leaves[i] ?? "nothing"}, expected ${w}`);
+    if (own(got.leaves, i) !== w) parts.push(`it left \`${own(muts, i)?.name}\` as ${own(got.leaves, i) ?? "nothing"}, expected ${w}`);
   });
   return parts.length > 0 ? parts.join("; ") : `it gave ${r.got}, expected ${r.expected}`;
 }
@@ -97,7 +98,7 @@ export function feedbackFor(lang: Lang, sig: Signature, diagnostics: string[], r
     results.forEach((r, i) => lines.push(r.pass ? `PASS example ${i + 1}` : `FAIL example ${i + 1}: ${failureText(sig, r)}`));
     lines.push("```");
   }
-  lines.push("", `Revise the ${NOUN[lang]} and reply with all of it, with exactly the same signature, in one \`\`\`${lang} block.`);
+  lines.push("", `Revise the ${own(NOUN, lang)} and reply with all of it, with exactly the same signature, in one \`\`\`${lang} block.`);
   return lines.join("\n");
 }
 

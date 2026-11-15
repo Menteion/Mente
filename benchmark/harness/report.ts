@@ -7,6 +7,7 @@
 
 import type { Verdict } from "./build.ts";
 import type { Lang } from "./languages.ts";
+import { own, setOwn } from "../own.mjs";
 
 export interface ProgramClasses {
   /** The failure classes of one program, distinct; empty when it passed what it was run on. */
@@ -63,11 +64,11 @@ export function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  return sorted.length % 2 === 1 ? own(sorted, mid) : (own(sorted, mid - 1) + own(sorted, mid)) / 2;
 }
 
 function count(into: Record<string, number>, classes: string[]): void {
-  for (const c of classes) into[c] = (into[c] ?? 0) + 1;
+  for (const c of classes) setOwn(into, c, (own(into, c) ?? 0) + 1);
 }
 
 function rate(part: number, whole: number): number | null {
@@ -99,8 +100,8 @@ export function stats(runs: RunRecord[], runsPerTask: number): Stats {
   };
   for (const r of runs) {
     if (r.programs.length === 0) continue;
-    count(s.first_program_failures, r.programs[0].classes);
-    if (!r.solved) count(s.last_program_failures, r.programs[r.programs.length - 1].classes);
+    count(s.first_program_failures, own(r.programs, 0).classes);
+    if (!r.solved) count(s.last_program_failures, own(r.programs, r.programs.length - 1).classes);
     r.programs.forEach((p, i) => {
       count(s.every_program_failures, p.classes);
       if (i < r.programs.length - 1) count(s.repairs_by_class, p.classes);

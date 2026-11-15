@@ -65,6 +65,7 @@ import { LANGUAGES, odinProgram, parseSignature, rustProgram, type Lang, type Si
 import { feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
 import { summarize, type RunRecord } from "./report.ts";
 import { extractProgram, parseCase, parseTask, type Case, type CaseResult, type Task } from "./tasks.ts";
+import { own, setOwn } from "../own.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAX_REPAIRS = 10;
@@ -74,7 +75,7 @@ const DOCUMENTS: Partial<Record<Lang, string>> = { mente: "docs/language-card.md
 
 function option(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
-  return at > 0 && at + 1 < process.argv.length ? process.argv[at + 1] : fallback;
+  return at > 0 && at + 1 < process.argv.length ? own(process.argv, at + 1) : fallback;
 }
 
 function readTasks(dir: string): Task[] {
@@ -86,7 +87,7 @@ function readTasks(dir: string): Task[] {
 
 /** Whether a task's front matter marks it retired, which keeps it out of every later score. */
 function retired(dir: string, task: Task): boolean {
-  return /^retired:/m.test(readFileSync(join(dir, `${task.id}.md`), "utf8").split(/\n---\n/)[0]);
+  return /^retired:/m.test(readFileSync(own(join(dir, `${task.id}.md`), "utf8").split(/\n---\n/), 0));
 }
 
 interface Spec {
@@ -147,11 +148,11 @@ interface Detailed extends RunRecord {
 
 /** One run of one task in one language with one model, or null when the budget stopped it. */
 async function runOne(ctx: Context, spec: Spec): Promise<Detailed | null> {
-  const system = ctx.systems[spec.lang] ?? "";
+  const system = own(ctx.systems, spec.lang) ?? "";
   const dir = join(ctx.out, spec.set === "public" ? "runs" : "held-out", spec.name);
   mkdirSync(dir, { recursive: true });
   const messages: Message[] = [{ role: "user", content: userPromptFor(spec.task, spec.lang) }];
-  writeFileSync(join(dir, "prompt.md"), String(messages[0].content));
+  writeFileSync(join(dir, "prompt.md"), String(own(messages, 0).content));
   const solve = spec.task.kind === "solve";
   const attempts: object[] = [];
   const programs: { classes: string[] }[] = [];
@@ -209,7 +210,7 @@ async function runOne(ctx: Context, spec: Spec): Promise<Detailed | null> {
     solved = scoring.ok && !todo && results.every((r) => r.pass);
     failed = results.filter((r) => !r.pass);
     const classes = await classesOf(spec.lang, scoring, results, ctx.tools);
-    programs[programs.length - 1] = { classes: todo && classes.length === 0 ? ["todo"] : classes };
+    setOwn(programs, programs.length - 1, { classes: todo && classes.length === 0 ? ["todo"] : classes });
   } else {
     const probing = await buildProgram(spec.lang, join(dir, "probe"), program, spec.sig, spec.probe, ctx.tools);
     const results = probing.ok ? await runCases(probing, spec.sig, spec.probe, ctx.tools) : [];
@@ -303,11 +304,11 @@ async function main(): Promise<void> {
   const systems: Partial<Record<Lang, string>> = {};
   const documents: Record<string, { path: string; sha256: string; characters: number } | null> = {};
   for (const lang of languages) {
-    const path = DOCUMENTS[lang];
+    const path = own(DOCUMENTS, lang);
     if (path && !existsSync(path)) throw new Error(`the ${lang} agent's document ${path} is missing`);
     const doc = path ? withoutFrontMatter(readFileSync(path, "utf8")) : "";
-    systems[lang] = systemPromptFor(lang, doc, { rust: pins.rust.toolchain, odin: pins.odin.release });
-    documents[lang] = path ? { path, sha256: sha256(readFileSync(path, "utf8")), characters: doc.length } : null;
+    setOwn(systems, lang, systemPromptFor(lang, doc, { rust: pins.rust.toolchain, odin: pins.odin.release }));
+    setOwn(documents, lang, path ? { path, sha256: sha256(readFileSync(path, "utf8")), characters: doc.length } : null);
   }
 
   // The tasks: the milestone's public solve and adversarial tasks, then its held-out solve tasks.
@@ -386,7 +387,7 @@ async function main(): Promise<void> {
       fallback: "none: every program comes from the model named, and a refusal is recorded as one",
       prompt_caching: "the system prompt and the conversation, 5-minute entries; it changes the cost, not the prompts",
       toolchains: versions,
-      build_modes: Object.fromEntries(languages.map((l) => [l, BUILD_MODES[l]])),
+      build_modes: Object.fromEntries(languages.map((l) => [l, own(BUILD_MODES, l)])),
       documents,
       system_prompts: systems,
       budget: budget.limit,
@@ -409,7 +410,7 @@ async function main(): Promise<void> {
   let next = 0;
   const worker = async () => {
     while (!budget.stopped && next < specs.length) {
-      const spec = specs[next++];
+      const spec = own(specs, next++);
       try {
         const record = await runOne(ctx, spec);
         if (!record) break;
@@ -423,7 +424,7 @@ async function main(): Promise<void> {
       } catch (e) {
         const message = (e as Error).message;
         // A held-out run's error names only the API status, never the task.
-        failure = spec.set === "public" ? `${spec.name}: ${message}` : `a held-out run failed: ${/the API answered \d+/.exec(message)?.[0] ?? (e as Error).name}`;
+        failure = spec.set === "public" ? `${spec.name}: ${message}` : `a held-out run failed: ${own(/the API answered \d+/.exec(message), 0) ?? (e as Error).name}`;
         budget.stopped = true;
       }
     }

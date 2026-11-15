@@ -38,6 +38,7 @@ import {
   type CaseResult,
   type Task,
 } from "./tasks.ts";
+import { own } from "../own.mjs";
 
 const API_VERSION = "2026-10-21";
 const MAX_TOKENS = 16000;
@@ -52,7 +53,7 @@ const MODELS = [
 
 function option(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
-  return at > 0 && at + 1 < process.argv.length ? process.argv[at + 1] : fallback;
+  return at > 0 && at + 1 < process.argv.length ? own(process.argv, at + 1) : fallback;
 }
 
 /** The public tasks of `dir`, in the order of their ids. */
@@ -153,7 +154,7 @@ const classes = new Map<string, string>();
 function failureClass(mn: string, code: string): string {
   if (!classes.has(code)) {
     const text = mnSync(mn, ["explain", code]).stdout ?? "";
-    classes.set(code, /Failure class: ([^.]+)\./.exec(text)?.[1] ?? "unknown");
+    classes.set(code, own(/Failure class: ([^.]+)\./.exec(text), 1) ?? "unknown");
   }
   return classes.get(code) ?? "unknown";
 }

@@ -57,6 +57,12 @@ if env | grep -Ei '^(CARGO_ALIAS_|NEXTEST_|CARGO_TARGET_[A-Z0-9_]*_(RUNNER|LINKE
   exit 1
 fi
 unset limits_home limits_found limits_dir limits_file limits_up
+# The mutation runs build with every lint capped at a warning, so that a lint the change denies
+# cannot make a mutant fail to build and count as unviable, not missed. The baseline gets the same
+# flags as every mutant, which cargo-mutants passes through as they are, so that the first mutant
+# reuses the baseline's build instead of rebuilding everything. No other run gets them: they would
+# undo the Rust jobs' `-D warnings`.
+if [ "${NEXTEST_PROFILE:-}" = mutants ]; then export CARGO_ENCODED_RUSTFLAGS=--cap-lints=warn; fi
 case "$RUNNER_OS" in
   Linux)
     ulimit -v 8388608 -f 2097152

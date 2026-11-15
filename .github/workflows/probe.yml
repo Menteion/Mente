@@ -47,7 +47,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RUNS: ${{ inputs.runs }}
           BUDGET: ${{ inputs.budget }}
-        run: node benchmark/harness/probe.ts --runs "$RUNS" --budget "$BUDGET" --out probe-out
+        run: node --disallow-code-generation-from-strings benchmark/harness/probe.ts --runs "$RUNS" --budget "$BUDGET" --out probe-out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -62,6 +62,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: No secret of the benchmark outside its environment
+        # This job names no environment, so a secret it sees is a repository's or an
+        # organization's: both must live in the environment benchmark alone, for main alone.
+        env:
+          KEY_LEAKED: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HELD_OUT_LEAKED: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}
+        run: if [ "$KEY_LEAKED" != false ] || [ "$HELD_OUT_LEAKED" != false ]; then echo "::error::a secret of the benchmark is set outside the environment benchmark"; exit 1; fi
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install
       - name: Build mn

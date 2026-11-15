@@ -99,7 +99,7 @@ jobs:
           # cargo-mutants writes its outcomes and logs outside the workspace: inside it a test
           # could read them, and tell which mutant it runs under.
           out=$RUNNER_TEMP/mutants/mutants.out
-          cargo mutants "${only[@]}" --shard "$SHARD/16" --in-place --no-shuffle --baseline=skip --cap-lints=true --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
+          cargo mutants "${only[@]}" --shard "$SHARD/16" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
           # missed and 3 when one timed out. A mutant that loops without end fails the test
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten

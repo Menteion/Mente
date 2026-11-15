@@ -65,6 +65,13 @@ jobs:
           node .github/scripts/build-time-code.mjs --before-toolchain
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
+      - name: No secret of the benchmark outside its environment
+        # This job names no environment, so a secret it sees is a repository's or an
+        # organization's: both must live in the environment benchmark alone, for main alone.
+        env:
+          KEY_LEAKED: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HELD_OUT_LEAKED: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}
+        run: if [ "$KEY_LEAKED" != false ] || [ "$HELD_OUT_LEAKED" != false ]; then echo "::error::a secret of the benchmark is set outside the environment benchmark"; exit 1; fi
       - name: Build mn
         run: cargo build --locked --release --bin mn
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -117,7 +124,7 @@ jobs:
         # stops the run (benchmark/harness/sandbox-check.ts).
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
+        run: node --disallow-code-generation-from-strings benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
       - name: Find the held-out commit corpus.lock names
         id: lock
         if: env.HAS_HELD_OUT == 'true'
@@ -134,7 +141,7 @@ jobs:
       - name: Check the held-out set against corpus.lock
         if: env.HAS_HELD_OUT == 'true'
         # The checker's messages could name held-out tasks, so only its verdict reaches the log.
-        run: node benchmark/check.mjs --held-out held-out-set > /dev/null 2>&1 || { echo "the held-out set does not match corpus.lock"; exit 1; }
+        run: node --disallow-code-generation-from-strings benchmark/check.mjs --held-out held-out-set > /dev/null 2>&1 || { echo "the held-out set does not match corpus.lock"; exit 1; }
       - name: Run
         timeout-minutes: 340
         env:
@@ -151,7 +158,7 @@ jobs:
           if [ "$HAS_HELD_OUT" = true ]; then held_out=(--held-out held-out-set); fi
           # The output lies outside the workspace, which the sandbox hides, since every build's
           # working directory is inside it.
-          node benchmark/harness/bench.ts --budget "$BUDGET" --models "$MODELS" --languages "$LANGUAGES" \
+          node --disallow-code-generation-from-strings benchmark/harness/bench.ts --budget "$BUDGET" --models "$MODELS" --languages "$LANGUAGES" \
             --milestone "$MILESTONE" --runs "$RUNS" --tasks "$TASKS" --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" \
             --sandbox "$SANDBOX" "${held_out[@]}" --out "$RUNNER_TEMP/bench-out"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

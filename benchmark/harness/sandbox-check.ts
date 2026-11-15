@@ -35,15 +35,16 @@ import {
   rustcInSysroot,
   sandboxed,
 } from "./build.ts";
+import { own } from "../own.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MARKER = "BENCH-DRIVER-MARKER-7f3a91c2";
 const ROUTES = ["env", "proc", "file", "net", "ws", "held", "run", "write", "work"] as const;
-type Route = (typeof ROUTES)[number];
+type Route = typeof ROUTES extends readonly (infer R)[] ? R : never;
 
 function option(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
-  return at > 0 && at + 1 < process.argv.length ? process.argv[at + 1] : fallback;
+  return at > 0 && at + 1 < process.argv.length ? own(process.argv, at + 1) : fallback;
 }
 
 interface Run {
@@ -121,7 +122,7 @@ async function main(): Promise<void> {
       const env = childEnv({ BENCH_CANARY_NEEDLE: MARKER, BENCH_CANARY_ENV: "set" });
       const p = await runProcess(cmd, args, { cwd: rustDir, env, timeoutMs: RUN_TIMEOUT_MS });
       const printed = Object.fromEntries(p.stdout.trim().split(/\s+/).map((kv) => kv.split("=")));
-      const flags = Object.fromEntries(ROUTES.map((r) => [r, printed[r] === "true"])) as Record<Route, boolean>;
+      const flags = Object.fromEntries(ROUTES.map((r) => [r, own(printed, r) === "true"])) as Record<Route, boolean>;
       return { flags, ran: ROUTES.every((r) => r in printed), status: p.status, raw: p.stdout.trim(), stderr: p.stderr.trim() };
     };
 
@@ -135,13 +136,13 @@ async function main(): Promise<void> {
     // Unconfined, every route is open, or the canary proves nothing.
     if (control.ran) {
       for (const route of ROUTES) {
-        if (!control.flags[route]) failures.push(`the control canary could not reach ${route}, so its sandboxed run proves nothing: ${control.raw}`);
+        if (!own(control.flags, route)) failures.push(`the control canary could not reach ${route}, so its sandboxed run proves nothing: ${control.raw}`);
       }
     }
     // Confined, every route is closed but the canary's own directory, which builds write into.
     if (confined.ran) {
       for (const route of ROUTES) {
-        const open = confined.flags[route];
+        const open = own(confined.flags, route);
         if (route === "work" ? !open : open) {
           failures.push(route === "work" ? `the sandbox kept the canary from writing its own directory: ${confined.raw}` : `the sandbox let the canary reach ${route}: ${confined.raw} ${confined.stderr}`);
         }

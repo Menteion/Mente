@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { callCost, KNOWN_MODELS, parseModels, requestBody, reserve, settle, worstCost, type Budget } from "./api.ts";
 import {
+  BASH,
   REPOSITORY,
   SANDBOX,
   caseResult,
@@ -595,16 +596,16 @@ test("a command is wrapped in the sandbox when one is set, with every path made 
   assert.deepEqual(sandboxed("", "out/w", "rustc", ["-o", "x", "main.rs"]), ["rustc", ["-o", "x", "main.rs"]]);
   assert.deepEqual(sandboxed("", "out/w", "target/release/mn", ["check"]), [resolve("target/release/mn"), ["check"]]);
   assert.deepEqual(sandboxed("benchmark/harness/sandbox.sh", "out/w", "rustc", ["-o", "x", "main.rs"]), [
-    "bash",
+    BASH,
     [resolve("benchmark/harness/sandbox.sh"), resolve("out/w"), "rustc", "-o", "x", "main.rs"],
   ]);
   assert.deepEqual(sandboxed("sb.sh", "out/w", "out/w/main", ["0"]), [
-    "bash",
+    BASH,
     [resolve("sb.sh"), resolve("out/w"), resolve("out/w/main"), "0"],
   ]);
   // The paths to hide go first, each after --hide, made absolute.
   assert.deepEqual(sandboxed("sb.sh", "/t/w", "odin", ["build", "."], ["repo", "held"]), [
-    "bash",
+    BASH,
     [resolve("sb.sh"), "--hide", resolve("repo"), "--hide", resolve("held"), resolve("/t/w"), "odin", "build", "."],
   ]);
   assert.deepEqual(sandboxed("", "/t/w", "odin", ["build"], ["repo"]), ["odin", ["build"]]);
@@ -649,9 +650,11 @@ test("no process that runs beside the key starts mn but through the sandbox", as
   const refused: [string, string[]][] = [
     [tools.mn, ["explain", "E0001"]],
     [join("target", "release", "mn.exe"), []],
-    ["bash", ["-c", 'mn explain "$1"', "x", "E0001"]],
-    ["bash", [join(REPOSITORY, "benchmark", "harness", "leak.sh"), "/tmp", "mn", "explain"]],
-    ["bash", [SANDBOX]],
+    [BASH, ["-c", 'mn explain "$1"', "x", "E0001"]],
+    [BASH, [join(REPOSITORY, "benchmark", "harness", "leak.sh"), "/tmp", "mn", "explain"]],
+    [BASH, [SANDBOX]],
+    // The review of 41a54b6: bash found through PATH, where ~/.local/bin comes first.
+    ["bash", [SANDBOX, ".", tools.mn, "explain", "E0001"]],
     [process.execPath, ["-e", "console.log(1)"]],
     [join("bin", "rustc"), ["-o", "x", "main.rs"]],
     [join("bin", "rustc"), ["--version", "--print", "sysroot"]],
@@ -676,14 +679,25 @@ test("no process that runs beside the key starts mn but through the sandbox", as
   } finally {
     delete process.env.BENCH_TEST_API_KEY;
   }
-  // With no secret in reach, any command runs, and no child is given a variable that could hold
-  // one, whatever environment it is handed.
+  // A copy of build.ts loaded afresh, which records whether a secret was in reach as it loaded.
+  let loads = 0;
+  const fresh = async () => (await import(`./build.ts?load=${++loads}`)) as typeof import("./build.ts");
   const held = Object.entries(process.env).filter(([name]) => /key|token|secret|password|credential/i.test(name));
   for (const [name] of held) delete process.env[name];
   try {
-    const p = await runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_TOKEN ?? 'none')"], { env: { ...process.env, BENCH_TEST_TOKEN: "" }, timeoutMs: 30_000 });
+    // A secret in reach as the module loaded binds it after the secret leaves the environment,
+    // where it stays in memory (the review of 41a54b6: `delete process.env.ANTHROPIC_API_KEY`).
+    process.env.BENCH_TEST_API_KEY = "secret";
+    const loadedBeside = await fresh();
+    delete process.env.BENCH_TEST_API_KEY;
+    await assert.rejects(loadedBeside.runProcess(process.execPath, ["-e", "1"], { timeoutMs: 5000 }), /no command the harness starts beside a secret/);
+    // With no secret in reach, then or now, any command runs, and no child is given a variable
+    // that could hold one, whatever environment it is handed.
+    const loadedAlone = await fresh();
+    const p = await loadedAlone.runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_TOKEN ?? 'none')"], { env: { ...process.env, BENCH_TEST_TOKEN: "" }, timeoutMs: 30_000 });
     assert.equal(p.stdout.trim(), "none");
   } finally {
+    delete process.env.BENCH_TEST_API_KEY;
     for (const [name, value] of held) process.env[name] = value;
   }
 });

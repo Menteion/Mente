@@ -6,6 +6,8 @@
 // run: integer types, `bool`, `[N]T`, `mut` parameters, `T in a..b` refinements, and
 // `requires` / `ensures` lines.
 
+import { own, setOwn } from "../own.mjs";
+
 export interface Task {
   id: string;
   milestone: string;
@@ -46,12 +48,12 @@ export function parseTask(text: string): Task {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text.replace(/\r\n/g, "\n"));
   if (!match) throw new Error("a task starts with front matter between --- lines");
   const front: Record<string, string> = {};
-  for (const line of match[1].split("\n")) {
+  for (const line of own(match, 1).split("\n")) {
     const kv = /^(\w+):\s*(.*)$/.exec(line);
-    if (kv) front[kv[1]] = kv[2].trim();
+    if (kv) setOwn(front, own(kv, 1), own(kv, 2).trim());
   }
-  const body = match[2];
-  const title = (/^# (.+)$/m.exec(body) ?? ["", ""])[1].trim();
+  const body = own(match, 2);
+  const title = own((/^# (.+)$/m.exec(body) ?? ["", ""]), 1).trim();
   return {
     id: front.id ?? "",
     milestone: front.milestone ?? "",
@@ -64,14 +66,14 @@ export function parseTask(text: string): Task {
     signature: indented(section(body, "Signature")),
     examples: indented(section(body, "Examples")),
     hidden: indented(section(body, "Hidden tests")),
-    probe: probeCalls(section(body, "Probe").join("\n"), indented(section(body, "Signature"))[0] ?? ""),
+    probe: probeCalls(section(body, "Probe").join("\n"), own(indented(section(body, "Signature")), 0) ?? ""),
   };
 }
 
 /** The calls of the task's own function that a probe names in backticks. */
 function probeCalls(probe: string, signature: string): string[] {
-  const name = /^(\w+)/.exec(signature)?.[1] ?? "";
-  return [...probe.matchAll(/`(\w+\([^`]*\))`/g)].map((m) => m[1]).filter((call) => call.startsWith(`${name}(`));
+  const name = own(/^(\w+)/.exec(signature), 1) ?? "";
+  return [...probe.matchAll(/`(\w+\([^`]*\))`/g)].map((m) => own(m, 1)).filter((call) => call.startsWith(`${name}(`));
 }
 
 /** The lines of a `## name` section, up to the next heading of that level. */
@@ -92,7 +94,7 @@ function indented(lines: string[]): string[] {
 /** A neutral type as Mente writes it: `T in a..b` becomes `T[a..b]`. */
 export function menteType(neutral: string): string {
   const refined = /^(\w+) in (-?\w+)(\.\.=?)(-?\w+)$/.exec(neutral.trim());
-  if (refined) return `${refined[1]}[${refined[2]}${refined[3]}${refined[4]}]`;
+  if (refined) return `${own(refined, 1)}[${own(refined, 2)}${own(refined, 3)}${own(refined, 4)}]`;
   const t = neutral.trim();
   if (!/^(\[\d+\])*(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|usize|bool)$/.test(t)) {
     throw new Error(`\`${t}\` is not a type M1 has`);
@@ -102,17 +104,17 @@ export function menteType(neutral: string): string {
 
 /** A task's neutral signature as a Mente function header with its contracts. */
 export function menteSignature(neutral: string[]): string {
-  const head = /^(\w+)\((.*)\)(?:\s*->\s*(.+))?$/.exec(neutral[0] ?? "");
-  if (!head) throw new Error(`not a signature: ${neutral[0]}`);
-  const params = head[2].trim() === ""
+  const head = /^(\w+)\((.*)\)(?:\s*->\s*(.+))?$/.exec(own(neutral, 0) ?? "");
+  if (!head) throw new Error(`not a signature: ${own(neutral, 0)}`);
+  const params = own(head, 2).trim() === ""
     ? []
-    : head[2].split(",").map((p) => {
+    : own(head, 2).split(",").map((p) => {
         const param = /^\s*(mut\s+)?(\w+):\s*(.+)$/.exec(p);
         if (!param) throw new Error(`not a parameter: ${p}`);
-        return `${param[1] ? "mut " : ""}${param[2]}: ${menteType(param[3])}`;
+        return `${own(param, 1) ? "mut " : ""}${own(param, 2)}: ${menteType(own(param, 3))}`;
       });
-  const result = head[3] ? ` -> ${menteType(head[3])}` : "";
-  const lines = [`pub fn ${head[1]}(${params.join(", ")})${result}`];
+  const result = own(head, 3) ? ` -> ${menteType(own(head, 3))}` : "";
+  const lines = [`pub fn ${own(head, 1)}(${params.join(", ")})${result}`];
   for (const clause of neutral.slice(1)) {
     if (!/^(requires|ensures) /.test(clause)) throw new Error(`not a contract: ${clause}`);
     lines.push(`  ${clause}`);
@@ -123,7 +125,7 @@ export function menteSignature(neutral: string[]): string {
 /** The program in an agent's reply: its first fenced block, or the whole reply. */
 export function extractProgram(reply: string): string {
   const fenced = /```[a-z]*\n([\s\S]*?)```/.exec(reply);
-  return (fenced ? fenced[1] : reply).trim() + "\n";
+  return (fenced ? own(fenced, 1) : reply).trim() + "\n";
 }
 
 export interface Usage {
@@ -218,7 +220,7 @@ export function outcome(c: Case, status: number | null, stdout: string, stderr: 
     .filter((l) => l.startsWith("leaves "))
     .map((l) => l.slice("leaves ".length))
     .join(", ");
-  const result = lines[0] ?? "";
+  const result = own(lines, 0) ?? "";
   if (c.value && c.leaves) return `${result} leaves ${left}`;
   return c.leaves ? left : result;
 }

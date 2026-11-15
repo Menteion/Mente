@@ -147,14 +147,14 @@ jobs:
           # cargo-mutants writes its outcomes and logs outside the workspace: inside it a test
           # could read them, and tell which mutant it runs under.
           status=0
-          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --cap-lints=true --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
+          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
           # The mutants around deleted lines, read before the tests ran.
           deleted=()
           while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
           if [ "${#deleted[@]}" -gt 0 ]; then
             status=0
-            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --cap-lints=true --timeout 600 --output "$RUNNER_TEMP/mutants-deleted" || status=$?
+            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants-deleted" || status=$?
             case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
           fi
           failed=0

@@ -145,7 +145,8 @@ inner() {
       echo "test-sandbox: $workspace/target/tmp is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere" >&2
       exit 2
     fi
-    /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs "$dir"
+    # On the directory `cd -P` reached, not on its name resolved once more.
+    /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs "$PWD"
   fi
   /usr/bin/mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
   cd "$root"
@@ -337,11 +338,10 @@ read_cost() {
   done
 }
 
-# The time the sandbox has added to the job so far, in `share`, per mille of the job's time since
-# setup without it, and one line that says so. The job's time is counted from setup, which leaves
-# out what ran before it, so the share is if anything too high.
+# The job's time since setup, in `total`, and the time the sandbox has added to it, in `share`, per
+# mille of the time without it, and one line, in `said`, that says so. The job's time is counted
+# from setup, which leaves out what ran before it, so the share is if anything too high.
 share_of_job() {
-  local total
   total=$(($(now) - start))
   if [ "$total" -le "$added" ]; then fail "the sandbox's estimated cost, $(seconds "$added") s, is no less than the job's time since setup, $(seconds "$total") s"; fi
   share=$((1000 * added / (total - added)))
@@ -354,7 +354,7 @@ share_of_job() {
 # that more tests, or a dearer sandbox, cannot cross the bound unseen. It is held once, for the
 # whole job: early in a job the canary's fixed cost outweighs the time so far.
 bound() {
-  local start serial parallel added share said
+  local start serial parallel added share said total
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
     return 0
@@ -362,9 +362,17 @@ bound() {
   read_cost
   share_of_job
   echo "$said" | /usr/bin/tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-  if [ "$share" -gt 100 ]; then
+  # More than a tenth of the time without the sandbox: added / (total - added) > 1/10, in whole
+  # microseconds, so that no rounding of the share lets 10.09% through.
+  if [ $((11 * added)) -gt "$total" ]; then
     fail "the sandbox has added more than a tenth to this job's time, the bound its decision signed (docs/design-review.md, untrusted-test-isolation): make it cheaper, or reopen the decision"
   fi
+}
+
+# Whether the .git of a directory is the one setup covered in the sandbox, by device and inode, or
+# both are absent.
+same_git() {
+  [ "$(< "$home/git")" = "$(/usr/bin/stat -c '%d:%i' -- "$1/.git" 2> /dev/null)" ]
 }
 
 # Whether a mount is read-only.
@@ -538,8 +546,7 @@ env_lines() {
   if [ "$(< /proc/sys/kernel/modprobe)" != "$home/modprobe-off" ] || [ -e "$home/modprobe-off" ]; then fail "a socket could have the kernel start modprobe as root again"; fi
   # The .git setup covered is still the workspace's: one made again since would be in sight of the
   # tests, beside the empty one, which covers the old.
-  workspace=$(< "$home/workspace")
-  if [ "$(< "$home/git")" != "$(/usr/bin/stat -c '%d:%i' -- "$workspace/.git" 2> /dev/null)" ]; then
+  if ! same_git "$(< "$home/workspace")"; then
     fail "the workspace's .git is not the one setup covered in the sandbox: it was made again after setup, or removed"
   fi
   : > "$log"
@@ -556,7 +563,7 @@ env_lines() {
 # for a step whose one command ran by itself; added to the job's, and reported. `bound` holds the
 # whole job's to a tenth, at its end.
 ran() {
-  local need=${1:-1} count start serial parallel added share said
+  local need=${1:-1} count start serial parallel added share said total
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
     return 0
@@ -867,29 +874,36 @@ check() {
   done
   serial=$(printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 10p)
   # A batch: on each core, 6 processes one after another, in the sandbox or not; its time.
+  # A batch fails when any process of any lane failed: each lane stops at its first failure, and
+  # each lane's own status is waited for, not only the last one's.
   batch() {
-    local core pids=() begin
+    local core pids=() begin pid failed=0
     begin=$(now)
     for core in $(/usr/bin/seq "$cores"); do
       if [ "$1" = inside ]; then
-        (for k in 1 2 3 4 5 6; do /usr/bin/bash "$self" run /usr/bin/true; done) &
+        (for k in 1 2 3 4 5 6; do /usr/bin/bash "$self" run /usr/bin/true || exit 1; done) &
       else
-        (for k in 1 2 3 4 5 6; do /usr/bin/true; done) &
+        (for k in 1 2 3 4 5 6; do /usr/bin/true || exit 1; done) &
       fi
       pids+=("$!")
     done
-    wait "${pids[@]}"
+    for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+    if [ "$failed" != 0 ]; then return 1; fi
     echo $(($(now) - begin))
   }
   costs=()
   for k in 1 2 3; do
-    inside=$(batch inside)
-    direct=$(batch direct)
+    if ! inside=$(batch inside) || ! direct=$(batch direct); then
+      problem "a process of the canary's batches failed, so it could not measure what the sandbox costs a process"
+      costs=()
+      break
+    fi
     costs+=("$(((inside - direct) / (6 * cores)))")
   done
   parallel=$(printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 2p)
+  # A cost of 0 or less is no measurement: every process in the sandbox costs more than one out of it.
   case "$serial:$parallel" in
-    *-* | :* | *: | *[!0-9:]*) problem "the canary could not measure what the sandbox costs a process: alone $serial us, $cores at once $parallel us" ;;
+    *-* | :* | *: | *[!0-9:]* | 0:* | *:0) problem "the canary could not measure what the sandbox costs a process: alone $serial us, $cores at once $parallel us" ;;
   esac
   {
     echo
@@ -907,6 +921,12 @@ check() {
   elif [ -n "$handled" ]; then
     problem "a crash of the canary started the runner's core handler: $handled"
   fi
+
+  # The check each step's `env` makes, that the workspace's .git is still the one setup covered:
+  # true of the workspace, false of a directory whose .git is another.
+  /usr/bin/mkdir -p "$work/other/.git"
+  if ! same_git "$(< "$home/workspace")"; then problem "the workspace's .git is not the one setup covered in the sandbox"; fi
+  if same_git "$work/other"; then problem "the check of .git takes another directory's .git for the one setup covered"; fi
 
   kill "$decoy" "$listener" 2> /dev/null || true
   /usr/bin/ipcrm -m "$shm" 2> /dev/null || true

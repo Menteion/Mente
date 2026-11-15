@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 63;
+const FLOOR = 65;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1091,7 +1091,10 @@ export function jobDigest(doc, job) {
       : v !== null && typeof v === "object"
         ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, k === "uses" ? String(v[k]).replace(/@[0-9a-f]{40}$/, "@pinned") : canon(v[k])]))
         : v;
-  return digest(JSON.stringify(canon({ env: doc.env ?? null, defaults: doc.defaults ?? null, job })));
+  // The workflow's triggers and its token's permissions too: what starts a pinned job, and with what
+  // rights, is part of it (the review of 41a54b6: an `issue_comment:` trigger and `contents: write`
+  // added to probe.yml left every pin as it was).
+  return digest(JSON.stringify(canon({ on: triggers(doc), permissions: doc.permissions ?? null, env: doc.env ?? null, defaults: doc.defaults ?? null, job })));
 }
 
 /// What the tests run under, pinned whole: the scripts the testing jobs run, by their digests, and
@@ -1099,14 +1102,14 @@ export function jobDigest(doc, job) {
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
 const PINNED_FILES = new Map([
-  [".github/scripts/limits.sh", "0483913373077fc67592e909ec772fcd684a0bba0e17cfd3b6e2ddb0f3639cd7"],
+  [".github/scripts/limits.sh", "ff5fb294d3365b4c5240a4b9f86042d3c9d2767e0c6e5e1fa0adceea359fdee9"],
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "5f02ed8230c1ac0afd0ea9d2bcd2416dde0d464d8593a57731a00e9a0dbfd23e"],
+  [".github/scripts/test-sandbox.sh", "e329ec5e3cba06075736d7af50f747698bbbc0e0015e04d0007a12eb1e736770"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
@@ -1115,7 +1118,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
   [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "be2d497a16ffc418f25c7580c7aceed7ff263a487603c88fc99299ca1d4aff7d"],
+  [".github/scripts/lib/mutants-floor.mjs", "911f3391e7918face17e3621b9293d48d801f6a47eb9a20fbf819a38fb5c1aa6"],
   [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
   [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -1134,16 +1137,16 @@ const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "afa6240a3eb9c6f83a919ef426a4b00387df971d35cad31e57ea067033136f09"],
-  ["mutants.yml#in-diff", "5aae18ff8d59d99b2d72c88678085823eaeed5d58f2406741cbe25e973b6d520"],
-  ["mutants-full.yml#full", "0d184575c02e8bcac5d9510ef4b3aa970c06558d4d412c9f1ff51e55d2412ebe"],
-  ["ci.yml#execution-paths", "f4c5c623a9443338d74342e3737fc3bc3d34dddda6e6464cd16810ba4fbe049a"],
-  ["generated.yml#paths", "87b837a2c40b53ea062dfe92020f8f1b75df4609a6e9aab44668ea0d85ce6379"],
-  ["ci.yml#docs", "e03fda24b884d112cce1f4b7084e737cb83689de800b5a0fc5b9c6a823e68dfe"],
-  ["commits.yml#commits", "d7658c7e037b71c8394327a9a2067bd609c95e5f21c7c23b5a3c480834008da5"],
-  ["benchmark.yml#bench", "0ec886abf29ddf2b448ab3dd62bb06ad9761e3d5ea3424e36541b4ec30ace0dc"],
-  ["prelim.yml#prelim", "a5426a213a12ba37e55189773f7c1c171b11665771a891f726697603a50ea483"],
-  ["probe.yml#write", "0721d07ad2a918dbbb9ca700e48559820b625a9d8b881e9a8da7f3bbc452406d"],
+  ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
+  ["mutants.yml#in-diff", "eac5aa8c9df5c5cbe2d8b6a286ebc0790435e0f9f09851c40b8a9f663a88f7ba"],
+  ["mutants-full.yml#full", "6d6ddb4109fd94e5b7811abc6635d9d40b29575fa75054fbab47fc7a9fd1df5d"],
+  ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
+  ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
+  ["ci.yml#docs", "52f1152492be7285403e08a4c47fd0123deaa65ec389f3547ebbab2308964fb8"],
+  ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
+  ["benchmark.yml#bench", "a0c1f4a01a77bdca6c4244bdcb8a1d7823ecab6bbbf7af255e5558549748e387"],
+  ["prelim.yml#prelim", "62295b08cf45f0ec24d0ae0e64280033dd717043a3a91b426d44db1f04184da8"],
+  ["probe.yml#write", "47b3f2429c6583a911517db869de4cc614911d0bba55ee5bcd37802a986b4a4f"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1294,6 +1297,17 @@ check("limits.sh refuses an alias, a runner or a compiler from outside the repos
     assert.match(run({}), /defines no limits for Elsewhere/, "limits.sh refuses a clean environment");
     assert.match(run({ NEXTEST_PROFILE: "mutants" }), /defines no limits for Elsewhere/, "the mutation runs' profile is refused");
     assert.match(run({ RUSTFLAGS: "-D warnings" }), /defines no limits for Elsewhere/, "the Rust jobs' flags are refused");
+    // Under the mutation runs' profile, and only there, every build caps the lints at warnings; a
+    // cap already in the environment is refused, which could undo the Rust jobs' `-D warnings`.
+    const flags = (vars) => {
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CARGO_|NEXTEST_|RUSTC|RUSTDOC)/i.test(k)));
+      const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", 'trap \'echo "flags=[${CARGO_ENCODED_RUSTFLAGS-unset}]"\' EXIT; . .github/scripts/limits.sh'], { cwd: ROOT, encoding: "utf8", env: { ...env, ...vars, CARGO_HOME: home.replace(/\\/g, "/"), RUNNER_OS: "Elsewhere" }, timeout: 30000 });
+      return /flags=\[([^\]]*)\]/.exec(r.stdout)?.[1];
+    };
+    assert.equal(flags({ NEXTEST_PROFILE: "mutants" }), "--cap-lints=warn", "limits.sh does not cap the lints of a mutation run");
+    assert.equal(flags({}), "unset", "limits.sh caps the lints outside a mutation run");
+    assert.equal(flags({ RUSTFLAGS: "-D warnings" }), "unset", "limits.sh caps the lints of the Rust jobs");
+    assert.match(run({ NEXTEST_PROFILE: "mutants", CARGO_ENCODED_RUSTFLAGS: "--cap-lints=warn" }), /would change what the tests run/, "a cap of the lints in the environment passes");
     for (const vars of [
       { RUSTFLAGS: "-C overflow-checks=off" },
       { rustflags: "--cap-lints allow" },
@@ -1369,9 +1383,29 @@ const RAN = "/usr/bin/bash .github/scripts/test-sandbox.sh ran";
 /// What the job's last step that runs code of the change holds right after its `ran`: the sandbox
 /// added under a tenth to the job's time.
 const BOUND = "/usr/bin/bash .github/scripts/test-sandbox.sh bound";
-/// cargo-mutants' cap of every lint at a warning, for each build it makes (`--cap-lints=warn` in
-/// the flags it gives rustc), as one argument of its line.
-const MUTANTS_CAP = / --cap-lints=true(?=\s|$)/;
+/// What is wrong with where a sandboxed job holds its bound: once, as BOUND, right after the `ran`
+/// of its last step that runs code of the change, when every sandboxed command has been counted;
+/// held earlier, the canary's fixed cost would outweigh the time so far.
+export function boundPlacementProblems(key, jobSteps) {
+  const bounds = [];
+  let last = null;
+  jobSteps.forEach((s, k) => {
+    if (typeof s.run !== "string") return;
+    const lines = logicalLines(s.run).map((l) => l.trim());
+    lines.forEach((l, at) => {
+      if (/test-sandbox\.sh bound\b/.test(l)) bounds.push({ k, at, l });
+    });
+    if (lines.some((l) => runsCode(l))) last = { k, lines };
+  });
+  if (last === null) return [`${key} runs no code of the change, so it holds no bound`];
+  const ranAt = last.lines.findIndex((l) => l === RAN || l.startsWith(`${RAN} `));
+  const held = bounds.length === 1 && bounds[0].k === last.k && bounds[0].l === BOUND && ranAt >= 0 && bounds[0].at === ranAt + 1;
+  return held ? [] : [`${key} does not hold the sandbox's bound once, as \`${BOUND}\` right after the \`ran\` of its last step that runs code`];
+}
+/// A cap of the lints of cargo-mutants' own, on its line: the mutation runs take theirs from
+/// limits.sh, for the baseline and every mutant alike, and a second cap would change the flags of
+/// every mutant's build from the baseline's, which would then rebuild everything.
+const MUTANTS_CAP = /\s--cap-lints\b/;
 /// Whether a line of a step runs code of the change: tests through nextest or cargo, under
 /// `timeout` or not, nextest's list, which runs every test executable, a binary through
 /// `cargo run`, mutants, and the proof of the overflow checks, which runs a test of every crate. A
@@ -1423,20 +1457,13 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       assert.ok(record >= 0 && naming[0] === record + 1, `${key}: the sandbox is not set up and proven right after the tools are recorded`);
     }
     let running = 0;
-    // Where the job's bound is held: the lines of every step, and the last step that runs code.
-    const bounds = [];
-    let last = null;
     for (const [k, s] of all.entries()) {
       if (typeof s.run !== "string") continue;
       const lines = logicalLines(s.run).map((l) => l.trim());
       for (const l of lines) assert.ok(!runsCodeUnread(l), `${stepKey(file, id, s)} starts code of the change in a form the policy does not read, which cargo's runner may never see: ${l}`);
-      lines.forEach((l, at) => {
-        if (/test-sandbox\.sh bound\b/.test(l)) bounds.push({ k, at, l });
-      });
       const runs = lines.flatMap((l, at) => (runsCode(l) ? [at] : []));
       if (runs.length === 0) continue;
       running++;
-      last = { k, lines };
       const step = stepKey(file, id, s);
       assert.ok(k > naming[0], `${step} runs code of the change before the sandbox is set up and proven`);
       const source = lines.findIndex((l) => SANDBOX_SOURCES.includes(l));
@@ -1444,24 +1471,40 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       assert.ok(bash(s), `${step} sources the sandbox's settings in a shell that is not bash`);
       const mutants = lines.some((l) => /^cargo mutants (?!.*--list)/.test(l));
       // Every run of mutants caps the lints at warnings, so that a lint the change denies cannot
-      // make a mutant fail to build, and count as unviable, not missed: the floor bounds no share
-      // of those (docs/design-review.md, untrusted-test-isolation).
-      for (const l of lines.filter((x) => /^cargo mutants (?!.*--list)/.test(x))) assert.match(l, MUTANTS_CAP, `${step} runs mutants without capping the lints a change could deny: ${l}`);
+      // make a mutant fail to build, and count as unviable, not missed: limits.sh exports the cap
+      // under the mutation runs' profile, for the baseline and every mutant alike, so the step
+      // sources limits.sh, the workflow sets that profile, and cargo-mutants adds no cap of its
+      // own (docs/design-review.md, untrusted-test-isolation).
+      if (mutants) {
+        assert.ok(lines.includes(". .github/scripts/limits.sh"), `${step} runs mutants without sourcing limits.sh, which caps the lints`);
+        assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs mutants outside the mutation runs' profile, under which limits.sh caps the lints`);
+        for (const l of lines.filter((x) => /^cargo mutants (?!.*--list)/.test(x))) assert.doesNotMatch(l, MUTANTS_CAP, `${step} gives cargo-mutants a cap of the lints of its own, beside limits.sh's: ${l}`);
+      }
       const ran = lines.flatMap((l, at) => (l === RAN || l.startsWith(`${RAN} `) ? [at] : []));
       assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${step} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
       assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
     }
     assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
-    // The bound on what the sandbox adds to the job is held once, for the whole job: right after
-    // the `ran` of its last step that runs code, when every sandboxed command has been counted.
-    const ranAt = last.lines.findIndex((l) => l === RAN || l.startsWith(`${RAN} `));
-    assert.ok(
-      bounds.length === 1 && bounds[0].k === last.k && bounds[0].l === BOUND && bounds[0].at === ranAt + 1,
-      `${key} does not hold the sandbox's bound once, as \`${BOUND}\` right after the \`ran\` of its last step that runs code`,
-    );
+    assert.deepEqual(boundPlacementProblems(key, all), []);
   }
-  for (const line of ['cargo mutants --in-diff pr.diff --in-place --timeout 600 || status=$?', "cargo mutants --in-place --cap-lints=false", "cargo mutants --in-place --cap-lints=trueish"]) assert.doesNotMatch(line, MUTANTS_CAP, line);
-  for (const line of ['cargo mutants --in-place --cap-lints=true --timeout 600 || status=$?', "cargo mutants --in-place --cap-lints=true"]) assert.match(line, MUTANTS_CAP, line);
+  // The planted cases: the bound missing, twice, spelled otherwise, before the `ran`, after the
+  // check of the tools, or in a step before the last that runs code.
+  const tests = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci";
+  const last = { run: `${tests}\n${RAN}\n${BOUND}\n${VERIFY_TOOLS}` };
+  const earlier = { run: `${tests}\n${RAN}\n${VERIFY_TOOLS}` };
+  assert.deepEqual(boundPlacementProblems("x.yml#y", [earlier, last]), []);
+  for (const [what, list] of [
+    ["no bound", [earlier, { run: `${tests}\n${RAN}\n${VERIFY_TOOLS}` }]],
+    ["two bounds", [{ run: `${tests}\n${RAN}\n${BOUND}` }, last]],
+    ["a bound with an argument", [earlier, { run: `${tests}\n${RAN}\n${BOUND} 0` }]],
+    ["a bound before the ran", [earlier, { run: `${tests}\n${BOUND}\n${RAN}` }]],
+    ["a bound after the check of the tools", [earlier, { run: `${tests}\n${RAN}\n${VERIFY_TOOLS}${BOUND}` }]],
+    ["a bound in an earlier step", [{ run: `${tests}\n${RAN}\n${BOUND}` }, earlier]],
+  ]) {
+    assert.ok(boundPlacementProblems("x.yml#y", list).length > 0, `the bound's place lets through ${what}`);
+  }
+  for (const line of ['cargo mutants --in-place --cap-lints=true --timeout 600 || status=$?', "cargo mutants --in-place --cap-lints=false", "cargo mutants --cap-lints true"]) assert.match(line, MUTANTS_CAP, line);
+  assert.doesNotMatch('cargo mutants --in-diff pr.diff --in-place --timeout 600 || status=$?', MUTANTS_CAP);
   for (const [line, runs] of [
     ["cargo-nextest nextest run --locked --workspace --profile ci", true],
     ["cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > x", true],
@@ -1570,11 +1613,15 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     costs(3_000_000);
     assert.equal(run(["ran", "0"], "Linux").status, 0);
     fs.writeFileSync(log, "target/debug/deps/a\ntarget/debug/deps/b\n");
-    costs(3_000_000);
+    const began = (Date.now() - 100_000) * 1000;
+    costs(3_000_000, began);
     const two = run(["ran"], "Linux");
     assert.equal(two.status, 0, `two commands in the sandbox are refused: ${two.out}`);
-    // Two commands added 2 ms each and one 20 ms alone.
-    assert.match(fs.readFileSync(cost, "utf8"), /^added 3024000$/m, "ran does not add each command's cost to the job's");
+    // Two commands added 2 ms each and one 20 ms alone, and the rest of the record kept as it was
+    // (the review of 41a54b6: a start left out of it made the job's time the epoch's, and the share
+    // nothing).
+    assert.equal(fs.readFileSync(cost, "utf8"), `start ${began}\nserial 20000\nparallel 2000\nadded 3024000\n`, "ran does not add each command's cost to the job's, or loses the rest of the record");
+    assert.match(two.out, /The sandbox has added an estimated 3\.0 s to the 10\d\.\d s since setup: 3\.\d% /);
     costs(3_000_000);
     assert.equal(run(["ran", "2"], "Linux").status, 0);
     costs(3_000_000);
@@ -1592,6 +1639,17 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     assert.match(over.out, /::error::the sandbox has added more than a tenth to this job's time/);
     costs(8_000_000);
     assert.equal(run(["bound"], "Linux").status, 0, "a sandbox that added under a tenth to the job fails");
+    // Close to the bound, over a job of 1000 s, where the milliseconds the script takes to start
+    // move the share by a few thousandths of a point: 10.05% fails, which a share rounded down to
+    // per mille would let through (the review of 41a54b6), and 9.95% passes.
+    const thousand = (Date.now() - 1_000_000) * 1000;
+    costs(91_320_000, thousand);
+    assert.equal(run(["bound"], "Linux").status, 1, "a sandbox that added 10.05% to the job passes");
+    costs(90_500_000, thousand);
+    assert.equal(run(["bound"], "Linux").status, 0, "a sandbox that added 9.95% to the job fails");
+    // An estimate no less than the whole time since setup is no estimate.
+    costs(20_000_000, (Date.now() - 10_000) * 1000);
+    assert.match(run(["bound"], "Linux").out, /::error::the sandbox's estimated cost, 20\.0 s, is no less than the job's time since setup/);
     assert.equal(run(["bound"], "Windows", path.join(dir, "none")).status, 0, "Windows, which has no sandbox, fails the bound");
     for (const sub of ["ran", "bound"]) {
       fs.writeFileSync(cost, "start 1\nserial 20000\nadded 0\n");
@@ -2477,7 +2535,7 @@ const SPAWNERS = new Map([
     {
       line: 'import { execFileSync } from "node:child_process";',
       word: "execFileSync",
-      calls: ['function git(dir, ...args) { return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim(); }'],
+      calls: ['function git(dir, ...args) { return execFileSync(process.platform === "win32" ? "git" : "/usr/bin/git", ["-C", dir, ...args], { encoding: "utf8" }).trim(); }'],
       through: { word: "git", calls: ['    const dirty = git(heldOutDir, "status", "--porcelain");', '    const commit = git(heldOutDir, "rev-parse", "HEAD");'] },
     },
   ],
@@ -2505,21 +2563,82 @@ const REFUSED_NAMES = new Set([
   "Reflect",
   "Proxy",
   "getPrototypeOf",
+  "setPrototypeOf",
+  "prototype",
+  "defineProperty",
+  "defineProperties",
   "__proto__",
 ]);
+/// The members of `process` a module of a secret job may name, each only as `process.<member>`:
+/// its arguments, its environment, its end and its platform. The rest of `process` loads or runs
+/// code a reading of the module does not see (`getBuiltinModule`, `binding`, `dlopen`, `execve`,
+/// the review of 41a54b6), and `process` by any other spelling, an alias or a computed member,
+/// would reach them.
+const PROCESS_MEMBERS = new Set(["argv", "env", "exit", "platform"]);
+/// The one module through which the modules of a secret job read or write a member by a computed
+/// key, by its text: it reads only an object's own property and defines only an own property, so
+/// that no key, however it is made, reaches what a prototype holds (`constructor`, and through it
+/// Function). Every other computed member access in those modules is refused.
+const OWN_FILE = "benchmark/own.mjs";
+const OWN_TEXT = [
+  "// The one way a module of a job that holds a secret reads or writes a member by a computed key",
+  "// (docs/design-review.md, untrusted-test-isolation). It reads only an object's own property and",
+  "// defines only an own property, so that no key, however it is made, reaches what a prototype",
+  "// holds: `constructor`, and through it Function, above all. The workflow policy refuses every",
+  "// other computed member access in those modules, and holds this file's text.",
+  "",
+  "/** The own property `key` of `object`, or undefined: never one its prototypes hold. */",
+  "export function own(object, key) {",
+  "  return object !== null && object !== undefined && Object.hasOwn(Object(object), key) ? object[key] : undefined;",
+  "}",
+  "",
+  "/** Defines `key` as an own property of `object`, whatever its prototypes hold, and returns `value`. */",
+  "export function setOwn(object, key, value) {",
+  "  Object.defineProperty(object, key, { value, writable: true, enumerable: true, configurable: true });",
+  "  return value;",
+  "}",
+  "",
+].join("\n");
+/// The keywords after which `[` opens an array or a pattern, not a computed member.
+const KEYWORDS = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await|extends|const|let|var)$/;
+/// Whether the `[` at `i` reads a member by a computed key: after a name, a literal, a call, a
+/// parenthesized expression, another member, `?.` or a block's or an object's `}`; not after a
+/// keyword, an operator or `(`, where it opens an array or a pattern, nor right after the
+/// condition of `if`, `while`, `for`, `switch`, `catch` or `with`, where it starts a statement.
+export function computedAccessAt(toks, i) {
+  const t = toks[i];
+  if (!(t?.t === "punct" && t.v === "[") || toks[i + 1]?.v === "]") return false;
+  const p = toks[i - 1];
+  if (!p) return false;
+  if (p.t === "id") return !KEYWORDS.test(p.v);
+  if (p.t === "str" || p.t === "num" || p.t === "re" || (p.t === "tpl" && !p.open)) return true;
+  if (p.t !== "punct") return false;
+  if (p.v === "]" || p.v === "}") return true;
+  if (p.v === "." && toks[i - 2]?.v === "?") return true;
+  if (p.v === ")") {
+    let depth = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      if (toks[j].t === "punct" && toks[j].v === ")") depth++;
+      if (toks[j].t === "punct" && toks[j].v === "(" && --depth === 0) return !/^(if|while|for|switch|catch|with)$/.test(toks[j - 1]?.t === "id" ? toks[j - 1].v : "");
+    }
+  }
+  return false;
+}
 
 /// A module of a secret job, read as an allowlist over its tokens. Its imports are static, each of
 /// a relative literal that is a file of the repository or of NODE_MODULES (child_process only in
 /// SPAWNERS, used as named there); it uses none of REFUSED_NAMES, as a name or a string,
-/// `constructor` only to define a class's, no computed member whose key joins a string to
-/// anything, and no `process[`; every literal and comment closes, and nothing outside printable
-/// ASCII, tab and LF, and no backslash outside a literal (an escaped name), appears. The one
-/// computed load allowed is COMPUTED_LOADS's line. Returns the problems and the files its relative
-/// imports name. These rules are a reading aid for the code owner, whose review holds what they do
-/// not list (docs/design-review.md, trust-from-structure).
-/// The keywords after which `[` opens an array, not a computed member.
-const KEYWORDS = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await|extends)$/;
+/// `constructor` only to define a class's, `process` only as `process.<member>` of
+/// PROCESS_MEMBERS, and no computed member access, which only OWN_FILE makes; every literal and
+/// comment closes, and nothing outside printable ASCII, tab and LF, and no backslash outside a
+/// literal (an escaped name), appears. The one computed load allowed is COMPUTED_LOADS's line.
+/// Returns the problems and the files its relative imports name. These rules narrow what such a
+/// module can spell; they cannot decide what arbitrary code does, so the code owner's review holds
+/// what they do not list (docs/design-review.md, trust-from-structure), and each node of a secret
+/// job runs with code generation from strings disallowed, which no spelling gets past.
 export function readSecretModule(file, text) {
+  // OWN_FILE is held by its whole text, which no rule below need read.
+  if (file === OWN_FILE) return { problems: text === OWN_TEXT ? [] : [`${file}: its text is not the one the policy holds (OWN_TEXT)`], imports: [] };
   const problems = [];
   const imports = [];
   const lines = text.split("\n");
@@ -2537,20 +2656,13 @@ export function readSecretModule(file, text) {
     if ((t.t === "id" || t.t === "str" || t.t === "tpl") && REFUSED_NAMES.has(t.v)) problems.push(`${where(t)}: ${t.v}, a way to run or load code that a reading of its imports does not see`);
     if ((t.t === "str" || t.t === "tpl") && t.v === "constructor") problems.push(`${where(t)}: "constructor", the way to Function`);
     if (t.t === "id" && t.v === "constructor" && !(toks[i + 1]?.v === "(" && /^[{};]$/.test(prior(i).v) && prior(i).t === "punct")) problems.push(`${where(t)}: constructor, other than defining a class's, the way to Function`);
-    if (t.t === "id" && t.v === "process" && toks[i + 1]?.v === "[") problems.push(`${where(t)}: process[...], a member by a computed name`);
-    // A computed member, `x[...]` after a name, a call or another member, whose key joins a
-    // string to anything: `f["constr" + "uctor"]`.
-    if (t.t === "punct" && t.v === "[" && ((prior(i).t === "id" && !KEYWORDS.test(prior(i).v)) || /^[)\]]$/.test(prior(i).v))) {
-      let j = i + 1;
-      let nest = 0;
-      const key = [];
-      for (; j < toks.length && !(nest === 0 && toks[j].v === "]"); j++) {
-        if (/^[[({]$/.test(toks[j].v)) nest++;
-        if (/^[\])}]$/.test(toks[j].v)) nest--;
-        key.push(toks[j]);
-      }
-      if (key.length > 1 && key.some((x) => x.t === "str" || x.t === "tpl")) problems.push(`${where(t)}: a computed member whose key joins a string to something else`);
+    if (t.t === "id" && t.v === "process" && prior(i).v !== "." && !(toks[i + 1]?.v === "." && toks[i + 2]?.t === "id" && PROCESS_MEMBERS.has(toks[i + 2].v))) {
+      problems.push(`${where(t)}: process other than as process.${[...PROCESS_MEMBERS].join(", process.")}`);
     }
+    // Every computed member access, whatever its key: OWN_FILE's `own` and `setOwn` read and
+    // write only own properties (the review of 41a54b6: `(() => 0)["constr" + "uctor"]` and
+    // `p["getBuilt" + "inModule"]` after `const p = process`).
+    if (computedAccessAt(toks, i)) problems.push(`${where(t)}: a member read by a computed key, which only ${OWN_FILE}'s own() and setOwn() do`);
   }
   const read = jsImports(toks);
   for (const line of read.unreadable) problems.push(`${file}:${line}: an import the policy cannot read as a static import of a literal`);
@@ -2606,6 +2718,18 @@ const SECRET_JOBS = new Map([
 ]);
 /// The environment that holds the secrets.
 const SECRET_ENVIRONMENT = "benchmark";
+/// A node a job of SECRET_JOBS starts without disallowing code generation from strings.
+const NODE_WITHOUT_GUARD = /(^|[\s;&|(])node\s+(?!--disallow-code-generation-from-strings\s)/;
+
+check("node refuses to generate code from strings under the flag the secret jobs run it with", () => {
+  for (const code of ["Function('return 1')()", "(() => 0)['constr' + 'uctor']('return 1')()", "eval('1')", "(async () => {}).constructor('return 1')()"]) {
+    const r = spawnSync(process.execPath, ["--disallow-code-generation-from-strings", "-e", code], { encoding: "utf8" });
+    assert.notEqual(r.status, 0, `node ran ${code} under --disallow-code-generation-from-strings`);
+    assert.match(r.stderr, /Code generation from strings disallowed/, code);
+  }
+  for (const line of ["node benchmark/harness/bench.ts", "x && node -e 1", "(node x.mjs)"]) assert.match(line, NODE_WITHOUT_GUARD, line);
+  assert.doesNotMatch("node --disallow-code-generation-from-strings benchmark/harness/bench.ts --budget 1", NODE_WITHOUT_GUARD);
+});
 
 /// The other jobs that name an environment, each with its name: the Pages deployment, whose
 /// environment holds no secret.
@@ -2621,6 +2745,63 @@ export function environmentProblems(key, job) {
   if (other !== undefined) return name === other ? [] : [`${key} does not name the environment ${other}, the one OTHER_ENVIRONMENTS gives it`];
   return "environment" in job ? [`${key} names an environment, which only the jobs of SECRET_JOBS and OTHER_ENVIRONMENTS do`] : [];
 }
+
+/// What is wrong with how a workflow that holds a job of SECRET_JOBS starts and what its token may
+/// do: it starts by a dispatch alone, which only someone with write access can make, and its token
+/// reads the repository's contents and nothing more, at the workflow's level and in no job's
+/// override. Any other trigger would start the job with ref main, which the environment admits:
+/// `issue_comment` on any user's comment, `push` on every merge, `schedule` unasked (the review of
+/// 41a54b6 found `issue_comment:` and `contents: write` in probe.yml passing every check).
+export function secretWorkflowProblems(file, doc) {
+  const found = [];
+  const on = Object.keys(triggers(doc));
+  if (on.length !== 1 || on[0] !== "workflow_dispatch") found.push(`${file} holds a secret job and starts on ${on.join(", ") || "nothing"}, not on workflow_dispatch alone`);
+  if (!isPlain(doc.permissions) || Object.keys(doc.permissions).length !== 1 || doc.permissions.contents !== "read") found.push(`${file} holds a secret job and its token's permissions are not exactly contents: read`);
+  for (const [id, job] of Object.entries(doc.jobs ?? {})) if (isPlain(job) && "permissions" in job) found.push(`${file}#${id} sets permissions of its own in a workflow that holds a secret job`);
+  // Every other job of it names no environment, so a secret it could see is a repository's or an
+  // organization's, which must not exist: each carries LEAK_STEP, which fails then.
+  for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+    if (SECRET_JOBS.has(`${file}#${id}`)) continue;
+    const leak = steps(job).filter((s) => JSON.stringify(s) === JSON.stringify(LEAK_STEP)).length;
+    if (leak !== 1) found.push(`${file}#${id} names no environment and does not check, once, as LEAK_STEP, that no secret of the benchmark is set outside it`);
+  }
+  return found;
+}
+/// The step that fails when a secret of the benchmark is set outside its environment, as a
+/// repository's or an organization's secret of the same name (the review of 41a54b6).
+const LEAK_STEP = {
+  name: "No secret of the benchmark outside its environment",
+  env: { KEY_LEAKED: "${{ secrets.ANTHROPIC_API_KEY != '' }}", HELD_OUT_LEAKED: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}" },
+  run: 'if [ "$KEY_LEAKED" != false ] || [ "$HELD_OUT_LEAKED" != false ]; then echo "::error::a secret of the benchmark is set outside the environment benchmark"; exit 1; fi',
+};
+
+check("every workflow that holds a secret job starts by a dispatch alone, with a token that only reads", () => {
+  const holding = new Set([...SECRET_JOBS.keys()].map((k) => k.split("#")[0]));
+  for (const { file, doc } of workflows()) if (holding.has(file)) assert.deepEqual(secretWorkflowProblems(file, doc), []);
+  const base = { on: { workflow_dispatch: { inputs: { runs: { default: "1" } } } }, permissions: { contents: "read" }, jobs: { write: { "runs-on": "ubuntu-24.04" }, check: { steps: [{ uses: "actions/checkout@0" }, LEAK_STEP] } } };
+  assert.deepEqual(secretWorkflowProblems("probe.yml", base), []);
+  for (const check of [{ steps: [] }, { steps: [{ ...LEAK_STEP, run: "true" }] }, { steps: [{ ...LEAK_STEP, env: { KEY_LEAKED: LEAK_STEP.env.KEY_LEAKED } }] }, { steps: [LEAK_STEP, LEAK_STEP] }]) {
+    assert.ok(secretWorkflowProblems("probe.yml", { ...base, jobs: { ...base.jobs, check } }).length > 0, `a job without the leak check passes: ${JSON.stringify(check)}`);
+  }
+  // The leak check reads as no secret held: only the test whether one is set.
+  assert.ok(!holdsSecret(LEAK_STEP));
+  for (const [what, doc] of [
+    ["issue_comment", { ...base, on: { ...base.on, issue_comment: { types: ["created"] } } }],
+    ["push to main", { ...base, on: { ...base.on, push: { branches: ["main"] } } }],
+    ["schedule", { ...base, on: { ...base.on, schedule: [{ cron: "0 0 * * *" }] } }],
+    ["workflow_call", { ...base, on: { ...base.on, workflow_call: null } }],
+    ["repository_dispatch", { ...base, on: { ...base.on, repository_dispatch: null } }],
+    ["pull_request", { ...base, on: "pull_request" }],
+    ["a list of triggers", { ...base, on: ["workflow_dispatch", "push"] }],
+    ["contents: write", { ...base, permissions: { contents: "write" } }],
+    ["write-all", { ...base, permissions: "write-all" }],
+    ["id-token beside contents", { ...base, permissions: { contents: "read", "id-token": "write" } }],
+    ["no permissions", { ...base, permissions: undefined }],
+    ["a job's own permissions", { ...base, jobs: { write: { "runs-on": "ubuntu-24.04", permissions: { contents: "write" } } } }],
+  ]) {
+    assert.ok(secretWorkflowProblems("probe.yml", doc).length > 0, `a secret workflow with ${what} passes`);
+  }
+});
 
 check("every job that holds a secret names the environment benchmark, for main alone, and no other job names it", () => {
   for (const { file, id, job } of allJobs()) assert.deepEqual(environmentProblems(`${file}#${id}`, job), []);
@@ -2638,11 +2819,31 @@ check("every job that holds a secret names the environment benchmark, for main a
 
 /// The names a secret may be handed over as, read from the harness that leaves them out of every
 /// child's environment, so that the two cannot drift: one definition, in build.ts.
+/// It is read from build.ts's tokens, so that a comment or a string naming it is none, and it must
+/// be defined there exactly once, as `const SECRET_NAME = /.../i;`.
+export function secretNameOf(text) {
+  const toks = jsTokens(text);
+  const found = toks.flatMap((x, i) =>
+    x.t === "id" && x.v === "const" && toks[i + 1]?.v === "SECRET_NAME" && toks[i + 2]?.v === "=" && toks[i + 3]?.t === "re" && toks[i + 4]?.v === ";" ? [toks[i + 3].v] : [],
+  );
+  const defined = toks.filter((x, i) => x.t === "id" && x.v === "SECRET_NAME" && /^(const|let|var|function|class)$/.test(toks[i - 1]?.v ?? "")).length;
+  if (found.length !== 1 || defined !== 1) return null;
+  const m = /^\/(.+)\/i$/.exec(found[0]);
+  return m ? new RegExp(m[1], "i") : null;
+}
 const SECRET_NAME = (() => {
-  const m = /^const SECRET_NAME = \/(.+)\/i;$/m.exec(read("benchmark/harness/build.ts"));
-  assert.ok(m, "benchmark/harness/build.ts defines no SECRET_NAME as a case-blind regular expression");
-  return new RegExp(m[1], "i");
+  const name = secretNameOf(read("benchmark/harness/build.ts"));
+  assert.ok(name, "benchmark/harness/build.ts does not define SECRET_NAME exactly once, as a case-blind regular expression");
+  return name;
 })();
+/// The action inputs a secret may be handed to, each an action by its repository and the input:
+/// the checkout's token, which it keeps from the logs and from what it writes. Any other input of
+/// any action may show it, as `actions/cache`'s key does in the list of caches (the review of
+/// 41a54b6).
+const SECRET_INPUTS = new Set(["actions/checkout#token"]);
+/// The one form a secret is handed over in: the whole value, the secret alone, so that no
+/// expression turns it into something no name or mask follows (`format('{0}', secrets.X)`).
+const SECRET_VALUE = /^\$\{\{ secrets\.[A-Z][A-Z0-9_]* \}\}$/;
 
 /// Where a job holds a secret other than as the value of a step's or the job's environment
 /// variable, or of a step's action input, whose name SECRET_NAME matches: a secret in a script, in
@@ -2663,12 +2864,19 @@ export function secretPlaceProblems(key, doc, job) {
   };
   walk(doc.env ?? {}, "workflow.env");
   walk(job, "job");
+  const value = (where) => where.replace(/^job/, "").split(/\.|\[(\d+)\]/).filter(Boolean).reduce((v, k) => v?.[k], job);
   return at
     .filter((where) => {
-      const m = /^job(?:\.steps\[\d+\]\.(?:env|with)|\.env)\.([A-Za-z_][\w-]*)$/.exec(where);
-      return !m || !SECRET_NAME.test(m[1]);
+      const env = /^job(?:\.steps\[\d+\])?\.env\.([A-Za-z_][\w-]*)$/.exec(where);
+      if (env) return !(SECRET_NAME.test(env[1]) && SECRET_VALUE.test(String(value(where))));
+      const input = /^job\.steps\[(\d+)\]\.with\.([A-Za-z_][\w-]*)$/.exec(where);
+      if (input) {
+        const action = String(steps(job)[Number(input[1])]?.uses ?? "").replace(/@.*$/, "");
+        return !(SECRET_INPUTS.has(`${action}#${input[2]}`) && SECRET_VALUE.test(String(value(where))));
+      }
+      return true;
     })
-    .map((where) => `${key}: a secret at ${where}, not the value of an environment variable or an action input whose name matches ${SECRET_NAME}`);
+    .map((where) => `${key}: a secret at ${where}, not the whole value of an environment variable whose name matches ${SECRET_NAME} or of an input of SECRET_INPUTS`);
 }
 
 check("every secret is the value of an environment variable or an action input whose name looks like a secret's", () => {
@@ -2681,10 +2889,24 @@ check("every secret is the value of an environment variable or an action input w
     [{}, { steps: [{ run: `export ANTHROPIC_API_KEY=${s}` }] }],
     [{ env: { ANTHROPIC_API_KEY: s } }, { steps: [] }],
     [{}, { steps: [{ if: "${{ secrets.ANTHROPIC_API_KEY == 'x' }}", run: "true" }] }],
+    // The review of 41a54b6: an input of another action, or of the checkout but its token, and a
+    // secret turned by an expression.
+    [{}, { steps: [{ uses: "actions/cache@0", with: { path: "x", key: s } }] }],
+    [{}, { steps: [{ uses: "actions/checkout@0", with: { "ssh-key": s } }] }],
+    [{}, { steps: [{ uses: "someone/checkout@0", with: { token: s } }] }],
+    [{}, { steps: [{ env: { ANTHROPIC_API_KEY: "${{ format('{0}', secrets.ANTHROPIC_API_KEY) }}" } }] }],
+    [{}, { steps: [{ env: { ANTHROPIC_API_KEY: `x${s}` } }] }],
+    [{}, { steps: [{ uses: "actions/checkout@0", with: { token: "${{ secrets.A || github.token }}" } }] }],
   ]) {
     assert.ok(secretPlaceProblems("x.yml#y", doc, job).length > 0, `a secret in the wrong place let through: ${JSON.stringify({ doc, job })}`);
   }
   assert.deepEqual(secretPlaceProblems("x.yml#y", {}, { env: { HAS: "${{ secrets.A != '' }}" }, steps: [{ env: { ANTHROPIC_API_KEY: s } }, { uses: "actions/checkout@0", with: { token: s } }] }), []);
+  // SECRET_NAME is read from tokens, defined once (the review of 41a54b6: the first match of a
+  // regular expression could have been a comment).
+  assert.equal(String(secretNameOf("// const SECRET_NAME = /x/i;\nconst SECRET_NAME = /key|token/i;")), "/key|token/i");
+  for (const text of ["const SECRET_NAME = /key/;", "const SECRET_NAME = /a/i;\nconst SECRET_NAME = /b/i;", "const SECRET_NAME = new RegExp('key', 'i');", '"const SECRET_NAME = /key/i;"', "const SECRET_NAME = /key/i;\nfunction SECRET_NAME() {}"]) {
+    assert.equal(secretNameOf(text), null, `SECRET_NAME read from: ${text}`);
+  }
 });
 
 check("every job that holds a secret is pinned whole, takes mn from a job that checks it first, and runs agent code only in its proven sandbox", () => {
@@ -2711,6 +2933,11 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     // And each module of it loads only what that closure follows, and starts processes only in
     // SPAWNERS.
     assert.deepEqual(runs.filter((f) => /\.(mjs|cjs|js|ts)$/.test(f)).flatMap((f) => secretModuleProblems(f, read(f))), [], `${key} holds a secret, and a module it runs loads code or starts a process the policy cannot read`);
+    // And every node it starts generates no code from strings, which no spelling of a module gets
+    // past: eval, Function and its kin, reached by any route, throw.
+    for (const s of all.filter((x) => typeof x.run === "string")) {
+      for (const l of logicalLines(s.run)) assert.doesNotMatch(l, NODE_WITHOUT_GUARD, `${stepKey(file, id, s)} starts node without --disallow-code-generation-from-strings: ${l}`);
+    }
     if (held.builtBy !== null) {
       assert.ok([job.needs].flat().includes(held.builtBy), `${key} does not need ${held.builtBy}, the job that builds mn for it`);
       const builder = doc.jobs?.[held.builtBy];
@@ -2780,6 +3007,23 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     ["benchmark/harness/api.ts", `const e = "${String.fromCharCode(0x435)}val";`],
     ["benchmark/harness/api.ts", "const s = 'unclosed;\nimport(x);"],
     ["benchmark/harness/api.ts", 'const y = await import("./y.ts");'],
+    // The review of 41a54b6: process past its allowed members, aliased or destructured, and a
+    // member by any computed key, a plain one included.
+    ["benchmark/harness/api.ts", 'process.execve("/bin/sh", ["sh", "-c", "id"], process.env);'],
+    ["benchmark/harness/api.ts", 'const p = process;\np["getBuilt" + "inModule"]("node:child_" + "process");'],
+    ["benchmark/harness/api.ts", "const { [k]: g } = process;"],
+    ["benchmark/harness/api.ts", "const { env, getBuiltinModule: g } = process;"],
+    ["benchmark/harness/api.ts", "f(process);"],
+    ["benchmark/harness/api.ts", "process?.env;"],
+    ["benchmark/harness/api.ts", '(() => 0)["constr" + "uctor"]("return 1")();'],
+    ["benchmark/harness/api.ts", "const v = xs[i];"],
+    ["benchmark/harness/api.ts", "const v = f(x)[0];"],
+    ["benchmark/harness/api.ts", "const v = x?.[k];"],
+    ["benchmark/harness/api.ts", 'const v = "abc"[k];'],
+    ["benchmark/harness/api.ts", "const v = (a || b)[k];"],
+    ["benchmark/harness/api.ts", "obj[k] = v;"],
+    ["benchmark/harness/api.ts", "Object.defineProperty(Object.prototype, \"shell\", { value: \"/bin/sh\" });"],
+    ["benchmark/own.mjs", 'export const own = (o, k) => o[k];\n'],
     // A spawner past its named uses: an alias of what it imports, or the checker's git with other
     // arguments, or by another name.
     ["benchmark/harness/build.ts", 'import { spawn } from "node:child_process";\nconst s = spawn;\ns(mn, b);'],
@@ -2792,7 +3036,8 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     jsImports(jsTokens('import"./a.mjs";import{b}from"./b.mjs";export*from"./c.mjs";// import "./d.mjs"\nconst s = "import \'./e.mjs\'";')).specifiers.map((s) => s.v),
     ["./a.mjs", "./b.mjs", "./c.mjs"],
   );
-  assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./tasks.ts";\nimport fs from "node:fs";\n// eval(code)\nconst s = "rpn-eval";\nclass A {\n  constructor(t) { this.t = t; }\n}\nconst v = xs[i] + m["k"];'), []);
+  assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./tasks.ts";\nimport fs from "node:fs";\n// eval(code)\nconst s = "rpn-eval";\nclass A {\n  constructor(t) { this.t = t; }\n}\nconst v = own(xs, i) + own(m, "k") + process.env.HOME + process.argv.length;\nconst [a, b] = xs;\nlet [c] = ys;\nfor (const [k, w] of zs) if (k) [a, b] = [b, a];\nconst t: string[] = [];'), []);
+  assert.deepEqual(secretModuleProblems("benchmark/own.mjs", read("benchmark/own.mjs")), [], "benchmark/own.mjs is not the text the policy holds");
   // The review of b2be87b: a `}}` inside a quoted string of the expression, and the named load of
   // check.mjs moved or joined by another.
   for (const held of ["${{ '}}' && secrets.ANTHROPIC_API_KEY }}", "${{ format('{0}}}', secrets.ANTHROPIC_API_KEY) }}", "${{ secrets.A != '' }} ${{ secrets.B }}"]) {
@@ -2812,7 +3057,8 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     `${checker}\ngit(".", "-c", "core.fsmonitor=id", "status");\n`,
     `${checker}\nconst g = git;\ng(".", "status");\n`,
     checker.replace(dirty, `    const dirty = \`\n${dirty}\n\`;\n    const g = git;`),
-    checker.replace('return execFileSync("git", ["-C", dir, ...args]', 'return execFileSync("sh", ["-c", ...args]'),
+    checker.replace('"/usr/bin/git", ["-C", dir, ...args]', '"/bin/sh", ["-c", ...args]'),
+    checker.replace('"/usr/bin/git", ["-C"', '"git", ["-C"'),
   ]) {
     assert.ok(secretModuleProblems("benchmark/check.mjs", plant).length > 0, "the checker's git lets through a call it does not name");
   }
@@ -2852,6 +3098,7 @@ const GATE_FILES = [
   "/benchmark/check.mjs",
   "/benchmark/corpus.lock",
   "/benchmark/reference.mjs",
+  "/benchmark/own.mjs",
   "/benchmark/harness/",
   "/compiler/mente-cli/tests/gates.rs",
   "/compiler/mente-cli/tests/lints.rs",
@@ -3950,7 +4197,11 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   // caught mutant's tests ended as nextest ends a failed run, a test failing in its log; an
   // unviable one's build failed with an error of the compiler. A stub that exits at once shows
   // neither.
-  const outcome = (name, summary, phases, log) => ({ scenario: { Mutant: { name } }, summary, log_path: `log/${name}.log`, phase_results: phases, log });
+  const outcome = (name, summary, phases, log, diff = "") => ({ scenario: { Mutant: { name, file: "compiler/x/src/lib.rs" } }, summary, log_path: `log/${name}.log`, diff_path: `diff/${name}.diff`, phase_results: phases, log, diff });
+  // A mutant's diff as cargo-mutants writes it: line 12 of lib.rs, `0` replaced by
+  // `Default::default()`, columns 9 to 26 of the new line.
+  const DIFF = "--- compiler/x/src/lib.rs\n+++ replace f -> Foo with Default::default()\n@@ -11,3 +11,3 @@\n fn f() -> Foo {\n-        0\n+        Default::default()\n }\n";
+  const located = (line, column, file = "compiler/x/src/lib.rs") => `\x1b[0m\x1b[1m\x1b[38;5;9merror[E0277]\x1b[0m: the trait bound \`Foo: Default\` is not satisfied\n\x1b[0m   \x1b[0m\x1b[38;5;12m--> \x1b[0m${file}:${line}:${column}\n`;
   const build = (status) => ({ phase: "Build", duration: 2.8, process_status: status });
   const test = (status) => ({ phase: "Test", duration: 0.15, process_status: status });
   const FAILED = "\x1b[1;31m        FAIL\x1b[0m [   0.004s] mente-syntax tests::x\n";
@@ -3960,11 +4211,12 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const real = [
     outcome("caught", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${SANDBOXED}${FAILED}*** result: Failure(100)\n`),
     outcome("timeout", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}        TIMEOUT [  40.104s] mente-cli::bin/mn x\n`),
-    outcome("unviable", "Unviable", [build({ Failure: 101 })], "\x1b[0m\x1b[1m\x1b[38;5;9merror[E0277]\x1b[0m: the trait bound\n"),
+    outcome("unviable", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}error: could not compile \`x\` (lib) due to 1 previous error\n`, DIFF),
+    outcome("unviable, inside a line it rewrote whole", "Unviable", [build({ Failure: 101 })], located(13, 3), "@@ -12,2 +12,3 @@\n-    a\n-    b\n+    c\n+    d\n+    e\n"),
     outcome("missed", "MissedMutant", [build("Success"), test("Success")], ""),
     { scenario: "Baseline", summary: "Success", phase_results: [], log_path: "log/baseline.log", log: "" },
   ];
-  const logs = (list) => (p) => list.find((o) => o.log_path === p)?.log ?? "";
+  const logs = (list) => (p) => list.find((o) => o.log_path === p)?.log ?? list.find((o) => o.diff_path === p)?.diff ?? "";
   assert.deepEqual(evidence({ outcomes: real }, logs(real)), []);
   const stubbed = [
     outcome("caught by a stub", "CaughtMutant", [build("Success"), test({ Failure: 1 })], "*** cargo nextest run\n*** result: Failure(1)\n"),
@@ -3976,6 +4228,14 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     outcome("caught, the runner's line after the failure", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${FAILED}${SANDBOXED}`),
     outcome("unviable, built", "Unviable", [build("Success")], "error[E0277]: x\n"),
     outcome("unviable, no error", "Unviable", [build({ Failure: 101 })], "*** result: Failure(101)\n"),
+    // The review of 41a54b6: an error of the change's own, a const assert over the mutated file's
+    // text, fails every mutant of it; and errors beside the change, on its line or in another file.
+    outcome("unviable, by a const assert elsewhere", "Unviable", [build({ Failure: 101 })], located(40, 15).replace("E0277", "E0080"), DIFF),
+    outcome("unviable, beside the change on its line", "Unviable", [build({ Failure: 101 })], located(12, 30), DIFF),
+    outcome("unviable, in another file", "Unviable", [build({ Failure: 101 })], located(12, 9, "compiler/x/src/other.rs"), DIFF),
+    outcome("unviable, one error inside and one outside", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}${located(40, 15)}`, DIFF),
+    outcome("unviable, an error with no location", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}error: linking with \`cc\` failed\n`, DIFF),
+    outcome("unviable, no diff", "Unviable", [build({ Failure: 101 })], located(12, 9)),
   ];
   assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
 });
