@@ -223,9 +223,14 @@ const TESTS_START = /^\s*Starting \d+ tests? across /m;
 export function compilerErrors(log) {
   const out = [];
   for (const line of String(log).split("\n")) {
-    if (!line.startsWith('{"reason":"compiler-message"')) continue;
+    // Every line that holds a compiler message anywhere counts: one that does not start with it, or
+    // does not parse whole, is an error no change can claim. cargo-mutants writes a build's stdout
+    // and stderr into one log, and a long JSON line can come in two writes, with another line's text
+    // before it (the review of 47f423d: `   Compiling{"reason":"compiler-message",...}` went unread).
+    if (!/"reason"\s*:\s*"compiler-message"/.test(line)) continue;
     let m;
     try {
+      if (!line.startsWith('{"reason":"compiler-message"')) throw new Error("not at the start of its line");
       m = JSON.parse(line).message;
     } catch {
       out.push({ text: "a compiler message the reading cannot parse", primary: [], children: [] });
@@ -251,13 +256,23 @@ export function spanSites(span) {
   return out;
 }
 
-/// Whether a span of rustc's, its columns 1-based and its end exclusive, meets a region of
-/// changedRegions, its ends included.
+/// A span of rustc's as its first and last places, its columns 1-based and its end exclusive.
+const spanEnds = (span) => [
+  [span.line_start, span.column_start],
+  [span.line_end, Math.max(span.column_end - 1, span.column_start)],
+];
+const notAfter = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
+
+/// Whether a span meets a region of changedRegions, its ends included.
 export function spanMeets(span, region) {
-  const from = [span.line_start, span.column_start];
-  const to = [span.line_end, Math.max(span.column_end - 1, span.column_start)];
-  const before = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
-  return before(from, [region.to.line, region.to.column]) && before([region.from.line, region.from.column], to);
+  const [from, to] = spanEnds(span);
+  return notAfter(from, [region.to.line, region.to.column]) && notAfter([region.from.line, region.from.column], to);
+}
+
+/// Whether a span lies wholly inside a region of changedRegions.
+export function spanWithin(span, region) {
+  const [from, to] = spanEnds(span);
+  return notAfter([region.from.line, region.from.column], from) && notAfter(to, [region.to.line, region.to.column]);
 }
 
 /// What a mutant's own diff changed in the mutated file, one region a hunk's run of changed
@@ -347,7 +362,12 @@ export function evidence(outcomes, readLog) {
       const regions = changedRegions(o.diff_path ? strip(readLog(o.diff_path)) : "");
       // An error is the mutant's when one of its primary spans, or a span of one of its own
       // children, meets the mutant's change, at the span or at a call site of a macro it came from.
-      const meets = (s) => spanSites(s).some((x) => String(x.file_name).replace(/\\/g, "/") === file && regions.some((r) => spanMeets(x, r)));
+      // A span itself meets the change by touching it; the call site of a macro it came from only
+      // by lying wholly inside it: a macro called around the change could hold the change's own
+      // check, whose error would then reach the change through the call (the review of 47f423d:
+      // `checked!(a - b)` with a constant assertion inside `checked!`).
+      const sameFile = (x) => String(x.file_name).replace(/\\/g, "/") === file;
+      const meets = (s) => spanSites(s).some((x, k) => sameFile(x) && regions.some((r) => (k === 0 ? spanMeets(x, r) : spanWithin(x, r))));
       const inside = (e) => e.primary.some(meets) || e.children.some(meets);
       const outside = errors.find((e) => !inside(e));
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);

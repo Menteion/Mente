@@ -1118,7 +1118,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
   [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "cd5af1e87bbdea90edc2a882088625d93f1418f92cfa08f9aa419fcc80d61a99"],
+  [".github/scripts/lib/mutants-floor.mjs", "20e30ecfcbb91626c8f3ed22f6709d52afc7ca34cf7dd5c6433728a09108babb"],
   [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
   [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -4384,6 +4384,9 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     outcome("unviable, an error the reading cannot parse", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0277", [span(12, 9, 27)])}{"reason":"compiler-message","message":{\n`, DIFF),
     outcome("unviable, no diff", "Unviable", [build({ Failure: 101 })], diagnostic("E0277", [span(12, 9, 27)])),
     outcome("unviable, a note outside the change", "Unviable", [build({ Failure: 101 })], diagnostic("E0080", [span(40, 15, 18)], [span(30, 9, 27)]), DIFF),
+    // The review of 47f423d: an error outside the change, after another line's text on its line, as
+    // a log interleaves a build's two streams; it counts, as an error no change can claim.
+    outcome("unviable, an error after another line's text", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0277", [span(12, 9, 27)])}   Compiling${diagnostic("E0080", [span(40, 15, 22)])}`, DIFF),
     // A note of its own, not the error's, in the change: the review of 75e5eeb.
     outcome("unviable, a separate note in the change", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0080", [span(3, 64, 70)])}${diagnostic(null, [span(12, 9, 27)], [], "note")}`, DIFF),
   ];
@@ -4391,9 +4394,19 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   // And the review of 75e5eeb's reproductions, from rustc 1.97.1's own diagnostics over the mutated
   // files (.github/scripts/fixtures/): a long merged line whose assertion is the change's, refused;
   // `x -= y` indented 32 spaces, the mutant's own, accepted; and a constant that fails once the
-  // mutant's marker is in the file, whose separate note lies at the mutant's line, refused.
+  // mutant's marker is in the file, whose separate note lies at the mutant's line, refused. And the
+  // review of 47f423d's: the change's own assertion inside a macro called around the change,
+  // refused; and an error on the mutant's own tokens through three macros, accepted.
+  // And end to end, on the tool's own output: one real cargo-mutants 27.1.0 run over a tiny crate,
+  // its outcomes, logs and diffs as it wrote them. One mutant fails to build by its own error and
+  // counts; four fail by the file's own assertion, which fails once the marker is in it, and are
+  // refused (the review of 47f423d).
+  const e2e = ".github/scripts/fixtures/cargo-mutants-27.1.0";
+  const ran = JSON.parse(read(`${e2e}/crate.json`));
+  const refused = evidence(JSON.parse(read(`${e2e}/outcomes.json`)), (p) => read(`${e2e}/${p}`)).map((p) => p.slice(0, p.indexOf(": unviable")));
+  assert.deepEqual(refused.sort(), [...ran.expect.refused].sort(), "the floor reads a real cargo-mutants run otherwise than its fixture expects");
   const fixtures = JSON.parse(read(".github/scripts/fixtures/unviable-rustc-1.97.1.json"));
-  assert.deepEqual(Object.keys(fixtures.cases), ["merged-assertion", "operator-indented", "erroneous-constant"]);
+  assert.deepEqual(Object.keys(fixtures.cases), ["merged-assertion", "operator-indented", "erroneous-constant", "macro-check", "macro-three-levels"]);
   for (const [id, c] of Object.entries(fixtures.cases)) {
     const one = [outcome(id, "Unviable", [build({ Failure: 101 })], `*** cargo nextest run --no-run\n${c.log}*** result: Failure(101)\n`, c.diff, c.file)];
     assert.equal(evidence({ outcomes: one }, logs(one)).length, c.expect === "refused" ? 1 : 0, `${id}, from real rustc output, is not ${c.expect}: ${c.why}`);

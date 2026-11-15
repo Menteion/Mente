@@ -1,0 +1,19 @@
+{
+  "how": "cargo +1.97.1 mutants --test-tool=cargo -j1 --no-shuffle --baseline=skip --timeout 120 --exclude-re has_marker --cargo-arg=--message-format=json, cargo-mutants 27.1.0 on Windows; the CI runs take nextest's --cargo-message-format=json, which forwards the same cargo JSON. The local user's paths are replaced, nothing else.",
+  "expect": {
+    "accepted": [
+      "src/lib.rs:5:5: replace f -> Foo with Default::default()"
+    ],
+    "refused": [
+      "src/g.rs:8:5: replace g -> u8 with 0",
+      "src/g.rs:8:5: replace g -> u8 with 1",
+      "src/g.rs:8:7: replace + with - in g",
+      "src/g.rs:8:7: replace + with * in g"
+    ]
+  },
+  "files": {
+    "Cargo.toml": "[package]\nname = \"floor_e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    "src/lib.rs": "// A type with no Default: the mutant that returns Default::default() fails to build on its own.\npub struct Foo(u8);\n\npub fn f(x: u8) -> Foo {\n    Foo(x)\n}\n\npub mod g;\n",
+    "src/g.rs": "// A file whose own constant assertion fails once cargo-mutants' marker is in it: every mutant of\n// this file fails to build, by the file's error, not the mutant's.\nconst MARK: [u8; 10] = [b'-', b'm', b'u', b't', b'a', b'n', b't', b's', b' ', b'~'];\nconst fn has_marker(s: &str) -> bool { let b = s.as_bytes(); let mut i = 0; while i + MARK.len() <= b.len() { let mut j = 0; while j < MARK.len() && b[i + j] == MARK[j] { j += 1; } if j == MARK.len() { return true; } i += 1; } false }\nconst _: () = assert!(!has_marker(include_str!(\"g.rs\")));\n\npub fn g(a: u8) -> u8 {\n    a + 1\n}\n"
+  }
+}
