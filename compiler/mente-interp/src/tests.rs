@@ -631,8 +631,8 @@ fn test_the_interpreter_derives_the_type_of_an_expression_of_operators_itself() 
         ),
         // Through an `else if`, and through arms that are blocks.
         (
-            "pub fn f(a: u8, c: bool, d: bool) -> u64 = if c { a } else if d { 1 } else { ~3 }",
-            "f(0, false, false)",
+            "pub fn f(a: u8, c: bool, d: bool) -> u64 = if c { ~3 } else if d { a } else { 1 }",
+            "f(0, true, false)",
             "252",
         ),
         (
@@ -1678,6 +1678,36 @@ fn test_a_pattern_or_a_place_the_checks_rule_out_stops_the_run() {
                 arms[0].pattern.kind = PatternKind::Bool(true);
             }
         },
+    );
+}
+
+/// A literal whose value depends on its type, beside integers no standard type holds, is never
+/// worked in a type chosen for it: the interpreter, which derives that its context has no type,
+/// stops, as the checker refuses it (`E0212`). The literal's suffix is planted away here, since no
+/// checked program holds one.
+#[test]
+fn test_no_type_is_chosen_for_a_literal_beside_integers_no_type_holds() {
+    use mente_sema::types::{Int as IntType, Ty};
+    use mente_syntax::tree::{ExprId, ExprKind};
+    let mut m = module("pub fn f(a: u128, c: i8) -> bool = a + c == ~3_i128");
+    let f = m.functions[0].as_mut().expect("a function");
+    let tree = &f.syntax.tree;
+    for i in 0..tree.exprs.len() {
+        if let ExprKind::Unary { operand, .. } = tree.expr(ExprId(i as u32)).kind {
+            f.typing.exprs[i] = Ty::Int(IntType::Literal);
+            f.typing.exprs[operand.0 as usize] = Ty::Int(IntType::Literal);
+        }
+    }
+    let got = call(
+        &m,
+        "f",
+        vec![Value::Int(Int::from_u128(1)), Value::Int(Int::from_u128(2))],
+        Limits::default(),
+    );
+    assert!(
+        matches!(&got, Err(Stop::Broken(why)) if why.contains("no type holds")),
+        "{:?}",
+        got
     );
 }
 

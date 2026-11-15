@@ -290,13 +290,15 @@ const EXPRESSIONS: &[&str] = &[
 
 /// What a comparison's operands are, by what the checker's table says of its literals
 /// (`core-calculus.md`, item 5): a literal takes the type of the other operand, on the right
-/// or on the left; two expressions of literals alone are each an `i64`; and operands of two
-/// types, a suffixed literal among them, are compared exactly.
+/// or on the left; two expressions of literals alone are each an `i64`; operands of two
+/// types, a suffixed literal among them, are compared exactly; and so is a literal beside
+/// integers no standard type holds together, which takes no type.
 const COMPARISONS: &[&str] = &[
     "literal compared with an operand of a type",
     "literal on the left of a comparison",
     "literals alone compared",
     "operands of two types compared",
+    "literal compared exactly beside integers no type holds",
 ];
 
 /// A right shift whose amount is valid for the type and reaches past the bits its value is
@@ -821,6 +823,9 @@ fn reached_comparisons(f: &CheckedFn, seen: &mut BTreeSet<String>) {
         }
         let mut reach = |name: &str| seen.insert(name.to_string());
         match (taken(*lhs), taken(*rhs)) {
+            (Some(l), None) | (None, Some(l)) if l.from == From::Unheld => {
+                reach("literal compared exactly beside integers no type holds");
+            }
             (Some(l), Some(r)) if l.from == From::Alone && r.from == From::Alone => {
                 reach("literals alone compared");
             }

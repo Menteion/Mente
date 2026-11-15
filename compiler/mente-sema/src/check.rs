@@ -340,12 +340,26 @@ impl Checker<'_> {
             let Some(taken) = self.typing.literals[i] else {
                 continue;
             };
-            if self.typing.exprs[i] != Ty::Int(Int::Literal) || taken.from == literals::From::Unheld
-            {
+            if self.typing.exprs[i] != Ty::Int(Int::Literal) {
                 continue;
             }
-            if let Some(trap) = literals::trap(tree, &self.typing.literals, e, taken.ty) {
-                self.literal_trap(e, trap, taken, None);
+            // Beside integers no standard type holds a literal takes no type, so only a division
+            // or a remainder by zero, which traps in every type, is known to trap; an operation
+            // whose value depends on a type is `E0212` there ([`Self::unheld_literals`]).
+            let unheld = taken.from == literals::From::Unheld;
+            match literals::trap(tree, &self.typing.literals, e, taken.ty) {
+                Some(trap @ literals::Trap::ZeroDivisor) => self.literal_trap(e, trap, taken, None),
+                Some(
+                    trap @ (literals::Trap::Outside(_)
+                    | literals::Trap::ShiftAmount(_)
+                    | literals::Trap::Shifted(_)),
+                ) if !unheld => self.literal_trap(e, trap, taken, None),
+                Some(
+                    literals::Trap::Outside(_)
+                    | literals::Trap::ShiftAmount(_)
+                    | literals::Trap::Shifted(_),
+                )
+                | None => {}
             }
         }
         // A literal beside an operand of a type, which a bit operation narrows into it, or the
@@ -500,6 +514,7 @@ impl Checker<'_> {
         let source = match taken.from {
             literals::From::Operands => "the type its literals take from the operands around them",
             literals::From::Alone => "the type of an expression of literals alone",
+            // Not read: among them only a zero divisor is reported, whose message names no type.
             literals::From::Unheld => {
                 "no type, since no standard type holds the operands around it"
             }
@@ -3760,8 +3775,23 @@ fn works_in_a_type(tree: &Tree, e: ExprId) -> bool {
 }
 
 /// Whether an operand of the operators of `e`, through `-`, arithmetic and the operations
-/// [`works_in_a_type`] names, a shift's amount aside, holds such an operation.
+/// [`works_in_a_type`] names, a shift's amount aside, and through the values of the branches,
+/// arms and indexed elements among them, holds such an operation.
 fn below_works_in_a_type(tree: &Tree, e: ExprId) -> bool {
+    let tail = |b: BlockId| {
+        let s = *tree.block(b).stmts.last()?;
+        match &tree.stmt(s).kind {
+            StmtKind::Expr(x) => Some(*x),
+            StmtKind::Binding { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Guard { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Discard(_) => None,
+        }
+    };
     let operands: Vec<ExprId> = match &tree.expr(e).kind {
         ExprKind::Unary { op, operand } => match op {
             UnaryOp::BitNot | UnaryOp::Neg => vec![*operand],
@@ -3786,20 +3816,36 @@ fn below_works_in_a_type(tree: &Tree, e: ExprId) -> bool {
             | BinaryOp::Gt
             | BinaryOp::Ge => vec![],
         },
+        ExprKind::If {
+            then, otherwise, ..
+        } => {
+            let mut values: Vec<ExprId> = tail(*then).into_iter().collect();
+            match otherwise {
+                Some(Else::Block(b)) => values.extend(tail(*b)),
+                Some(Else::If(i)) => values.push(*i),
+                None => {}
+            }
+            values
+        }
+        ExprKind::Match { arms, .. } => arms
+            .iter()
+            .filter_map(|arm| match arm.body {
+                ArmBody::Expr(x) => Some(x),
+                ArmBody::Block(b) => tail(b),
+            })
+            .collect(),
+        ExprKind::Index { base, .. } => vec![*base],
+        ExprKind::Array(items) => items.clone(),
+        ExprKind::Repeat { value, .. } => vec![*value],
         ExprKind::Int { .. }
         | ExprKind::Bool(_)
         | ExprKind::Name(_)
         | ExprKind::Todo(_)
         | ExprKind::Unreachable(_)
-        | ExprKind::Index { .. }
         | ExprKind::Field { .. }
         | ExprKind::Call { .. }
         | ExprKind::Construct { .. }
         | ExprKind::Variant { .. }
-        | ExprKind::Match { .. }
-        | ExprKind::Array(_)
-        | ExprKind::Repeat { .. }
-        | ExprKind::If { .. }
         | ExprKind::Error => vec![],
     };
     operands
@@ -4201,6 +4247,15 @@ mod tests {
             (
                 "pub fn f(a: u8) -> u8 = a & (2 / 0 + 1)",
                 "`2 / 0` divides by zero, so it traps whenever it runs; rewrite it".to_string(),
+            ),
+            // A zero divisor traps in every type, among integers no standard type holds too.
+            (
+                "pub fn f(a: u128, c: i8) -> bool = a + c == 7 / (3 - 3)",
+                "`7 / (3 - 3)` divides by zero, so it traps whenever it runs; rewrite it".to_string(),
+            ),
+            (
+                "pub fn f(a: u128, c: i8) -> i128 = a + (7 % 0) + c",
+                "`7 % 0` divides by zero, so it traps whenever it runs; rewrite it".to_string(),
             ),
         ] {
             let d = diagnostics(f);
@@ -4928,6 +4983,9 @@ pub fn f(mut p: Pair) {
             "pub fn f(a: u128, c: i8) -> i128 = a + (1 << 2) + c",
             "pub fn f(a: u128, c: i8) -> i128 = a + (~(1 << 2) & 7) + c",
             "pub fn f(a: u128, c: i8, q: bool) -> i128 = a + (if q { ~3 } else { 1 }) + c",
+            // Reported once, at the innermost operation, through a branch too.
+            "pub fn f(a: u128, c: i8, q: bool) -> i128 = a + ~(if q { 1 << 2 } else { 3 }) + c",
+            "pub fn f(a: u128, c: i8, k: usize[0..2]) -> i128 = a + ~[1 << 2, 3][k] + c",
         ] {
             assert_eq!(codes(f), ["E0212"], "{}", f);
         }

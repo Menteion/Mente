@@ -439,9 +439,10 @@ fn reads_pattern(e: &E) -> bool {
 /// The suffix a compared literal of value `n` beside an operand of class `other` is written
 /// with: none when `n` lies in the type it takes from `other` (`core-calculus.md`, item 5),
 /// and otherwise that of the smallest type that holds it, as the checker's fix of an equality
-/// writes it, so that the literal is compared exactly rather than rejected (`E0233`).
+/// writes it, so that the literal is compared exactly rather than rejected (`E0233`). Beside
+/// integers no standard type holds, which give a literal no type, it is compared exactly as it is.
 fn suffix_beside(n: Num, other: Cls) -> Option<IntT> {
-    if Gen::taken(other).range().holds(n) {
+    if Gen::taken(other).is_none_or(|t| t.range().holds(n)) {
         return None;
     }
     BY_SIZE.iter().copied().find(|t| t.range().holds(n))
@@ -2453,12 +2454,41 @@ impl Gen {
     }
 
     /// The type the literals of an operand take beside one of class `cls` in a comparison or an
-    /// operation (`core-calculus.md`, item 5): its type, or `i64` where it has none.
-    fn taken(cls: Cls) -> IntT {
+    /// operation (`core-calculus.md`, item 5): its type, or `i64` where it has none; none
+    /// beside integers no standard type holds, which give a literal no type (`E0212` for one
+    /// whose value depends on a type).
+    fn taken(cls: Cls) -> Option<IntT> {
         match cls {
-            Cls::One(t) | Cls::Mixed(Some(t)) => t,
-            Cls::Lit | Cls::Mixed(None) => I64,
+            Cls::One(t) | Cls::Mixed(Some(t)) => Some(t),
+            Cls::Lit => Some(I64),
+            Cls::Mixed(None) => None,
         }
+    }
+
+    /// A literal operand to compare with `a`, or none for another expression: a value in the
+    /// type `a` gives its literals and in `a`'s range where they meet, and now and then
+    /// literals alone under a bit operation in that type. Beside integers no standard type holds,
+    /// which give a literal no type, only a plain value of `a`'s range, compared exactly: a bit
+    /// operation there would be `E0212`.
+    fn literal_beside(&mut self, a: &G) -> Option<G> {
+        if self.rng.chance(50) {
+            let range = match Self::taken(a.cls) {
+                Some(t) => a.r.meet(t.range()).unwrap_or(t.range()),
+                None => a.r,
+            };
+            let n = self.value_in(range);
+            return Some(G {
+                e: self.literal(n, None),
+                cls: Cls::Lit,
+                r: R::point(n),
+                k: Some(n),
+            });
+        }
+        if self.rng.chance(8) {
+            // Literals alone under a bit operation, in the type of the operand beside.
+            return Self::taken(a.cls).map(|t| self.literal_bits(t));
+        }
+        None
     }
 
     /// The operand `x` of a comparison beside `other`: itself, or, when it is literals alone
@@ -2466,7 +2496,10 @@ impl Gen {
     /// since a compared literal outside it is an error (`E0233`). A literal value that is not
     /// known is replaced too.
     fn compared(&mut self, x: G, other: &G) -> G {
-        let t = Self::taken(other.cls);
+        // Beside integers no standard type holds a literal is compared exactly.
+        let Some(t) = Self::taken(other.cls) else {
+            return x;
+        };
         if x.cls != Cls::Lit || x.k.is_some_and(|v| t.range().holds(v)) {
             return x;
         }
@@ -3120,20 +3153,9 @@ impl Gen {
                     .rng
                     .pick(&[Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge]);
                 let a = self.int_expr(Want::Any, depth + 1);
-                let b = if self.rng.chance(50) {
-                    let within = a.r.meet(Self::taken(a.cls).range());
-                    let n = self.value_in(within.unwrap_or(Self::taken(a.cls).range()));
-                    G {
-                        e: self.literal(n, None),
-                        cls: Cls::Lit,
-                        r: R::point(n),
-                        k: Some(n),
-                    }
-                } else if self.rng.chance(8) {
-                    // Literals alone under a bit operation, in the type of the operand beside.
-                    self.literal_bits(Self::taken(a.cls))
-                } else {
-                    self.int_expr(Want::Any, depth + 1)
+                let b = match self.literal_beside(&a) {
+                    Some(b) => b,
+                    None => self.int_expr(Want::Any, depth + 1),
                 };
                 // `compared` keeps an operand's class, so `b` is compared beside `a`'s.
                 let a = self.compared(a, &b);
@@ -7076,6 +7098,54 @@ mod tests {
             "{}",
             problems[0]
         );
+    }
+
+    /// Beside integers no standard type holds, a literal compared is a plain value, compared
+    /// exactly, never literals under a bit operation, which take no type there (`E0212`);
+    /// beside a type both kinds are written.
+    #[test]
+    fn test_a_literal_beside_integers_no_type_holds_does_not_depend_on_a_type() {
+        let mut g = Gen::new(0, Mode::Plain);
+        let wide = R {
+            lo: Num::small(-128),
+            hi: Num::new(false, u128::MAX),
+        };
+        let unheld = G {
+            e: E::Name("s".to_string()),
+            cls: Cls::Mixed(None),
+            r: wide,
+            k: None,
+        };
+        let typed = G {
+            cls: Cls::One(IntT::named("u8").unwrap()),
+            r: IntT::named("u8").unwrap().range(),
+            ..unheld.clone()
+        };
+        // A bit operation, a shift or `~` anywhere in a literal.
+        fn works_in_a_type(e: &E) -> bool {
+            match e {
+                E::BitNot(_) => true,
+                E::Bin(op, a, b) => {
+                    matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr)
+                        || works_in_a_type(a)
+                        || works_in_a_type(b)
+                }
+                E::Neg(x) => works_in_a_type(x),
+                _ => false,
+            }
+        }
+        let (mut plain, mut bits) = (0, 0);
+        for _ in 0..2000 {
+            if let Some(b) = g.literal_beside(&unheld) {
+                assert!(!works_in_a_type(&b.e), "{:?}", b.e);
+                plain += 1;
+            }
+            if let Some(b) = g.literal_beside(&typed) {
+                bits += usize::from(works_in_a_type(&b.e));
+            }
+        }
+        // Both kinds are written, the one that depends on a type only beside a type.
+        assert!(plain > 0 && bits > 0, "{} {}", plain, bits);
     }
 
     /// The calls are searched for one that reaches the value: a narrowing behind a `guard`

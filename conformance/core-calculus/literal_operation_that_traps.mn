@@ -1,4 +1,4 @@
-// expect: E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234
+// expect: E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234 E0234
 module conformance
 // An operation works in the type its literals take (core-calculus.md, items 4 and 5), and the
 // checker knows the value of every literal, so an operation over literals that traps does so
@@ -47,6 +47,10 @@ pub fn compound_or(m0: u8) -> u8 {
 pub fn divided_by_zero() -> i64 = 7 / 0
 
 pub fn remainder_by_zero() -> i64 = 7 % (3 - 3)
+
+// A zero divisor traps in every type, so it is an error among integers no standard type holds
+// together too, where a literal takes no type.
+pub fn divided_by_zero_among_unheld(a: u128, c: i8) -> bool = a + c == 7 / (3 - 3)
 
 // A literal takes the type of every operand of its expression: beside a `u8` and a `u32`, `-1`
 // under `&` is narrowed into `u32`, which does not hold it.

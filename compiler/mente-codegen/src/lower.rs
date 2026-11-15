@@ -2583,11 +2583,10 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// The integer type of an expression, as the interpreter's operations take it.
-    /// The type the literals of `e` take, when `e` is an expression of literals alone: the
-    /// type a bit operation, a shift or `~` over it works in (`core-calculus.md`, item 5).
-    /// The type the literals of `e` take, from the checker's table; none where they take none,
-    /// beside integers no standard type holds, whose value is then exact.
+    /// The type the literals of `e`, an expression of literals alone, take from the checker's
+    /// table: the type a bit operation, a shift or `~` over them works in (`core-calculus.md`,
+    /// item 5). None beside integers no standard type holds, where they take none and their
+    /// value is exact.
     fn taken(&self, e: ExprId) -> Option<SemaIntTy> {
         let all = &self.s.f.typing.literals;
         let t = all.get(e.0 as usize).copied().flatten()?;
@@ -2610,6 +2609,7 @@ impl<'a> Lower<'a> {
             .ok_or_else(|| format!("{} of integers no standard type holds together", what))
     }
 
+    /// The integer type of an expression, as the interpreter's operations take it.
     fn int_of(&self, e: ExprId) -> Option<SemaIntTy> {
         match &self.s.f.typing.exprs[e.0 as usize] {
             SemaTy::Int(i) => int_ty(i),
@@ -3289,6 +3289,39 @@ mod tests {
             Ok(Shape::Array(2, Box::new(Shape::Bool)))
         );
         assert!(Shape::of(&SemaTy::Any, &Shapes::default()).is_err());
+    }
+
+    /// A literal that takes no type, beside integers no standard type holds, is never lowered in
+    /// a type chosen for it: `~` of one is refused, as the checker refuses it (`E0212`). The
+    /// checker's table is planted here, since no checked program holds one.
+    #[test]
+    fn test_no_type_is_chosen_for_a_literal_that_takes_none() {
+        let mut m = mente_sema::check_program(
+            "module m\npub fn f(a: u128, c: i8) -> bool = a + c == ~3_i128\n",
+        )
+        .unwrap();
+        let f = m.functions[0].as_mut().unwrap();
+        let tree = &f.syntax.tree;
+        let complement = (0..tree.exprs.len())
+            .map(|i| ExprId(i as u32))
+            .find(|&e| matches!(tree.expr(e).kind, ExprKind::Unary { .. }))
+            .unwrap();
+        let ExprKind::Unary { operand, .. } = tree.expr(complement).kind else {
+            unreachable!()
+        };
+        for e in [complement, operand] {
+            f.typing.exprs[e.0 as usize] = SemaTy::Int(SemaInt::Literal);
+            f.typing.literals[e.0 as usize] = Some(mente_sema::literals::Taken {
+                ty: SemaIntTy::named("i64").unwrap(),
+                from: mente_sema::literals::From::Unheld,
+            });
+        }
+        let refused = lower(&m).err().unwrap_or_default();
+        assert!(
+            refused.contains("of integers no standard type holds together"),
+            "{}",
+            refused
+        );
     }
 
     /// An array literal of integers of no standard type together keeps its elements exact, in
