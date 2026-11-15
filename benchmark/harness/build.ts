@@ -342,13 +342,22 @@ export function dropExecutable(build: Build): void {
   }
 }
 
-/** The failure class `mn explain` gives each code, asked once per code. */
+/**
+ * The failure class `mn explain` gives each code, asked once per code: through the sandbox, as
+ * every other run of `mn`, which is code of the branch and runs beside the process that holds the
+ * key (the final review of PR 137 found this one run directly), in an empty directory of its own
+ * in the output directory. With no sandbox it refuses to run.
+ */
 const classes = new Map<string, Promise<string>>();
-export function failureClass(mn: string, code: string): Promise<string> {
+export function failureClass(tools: Tools, code: string): Promise<string> {
+  if (!tools.sandbox) return Promise.reject(new Error("mn explain would run outside the sandbox"));
   if (!classes.has(code)) {
+    const dir = resolve(tools.cover || ".", "explain");
+    mkdirSync(dir, { recursive: true });
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["explain", code], hiddenPaths(tools));
     classes.set(
       code,
-      runProcess(mn, ["explain", code], { timeoutMs: 30_000 }).then((p) => /Failure class: ([^.]+)\./.exec(p.stdout)?.[1] ?? "unknown"),
+      runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: 30_000 }).then((p) => /Failure class: ([^.]+)\./.exec(p.stdout)?.[1] ?? "unknown"),
     );
   }
   return classes.get(code) ?? Promise.resolve("unknown");

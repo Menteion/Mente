@@ -134,7 +134,7 @@ async function call(ctx: Context, spec: Spec, system: string, messages: Message[
 async function classesOf(lang: Lang, build: Build, results: CaseResult[], tools: Tools): Promise<string[]> {
   if (!build.ok) {
     if (lang !== "mente") return ["build failure"];
-    return [...new Set(await Promise.all(build.codes.map((c) => failureClass(tools.mn, c))))];
+    return [...new Set(await Promise.all(build.codes.map((c) => failureClass(tools, c))))];
   }
   return [...new Set(results.filter((r) => !r.pass).map((r) => r.fault ?? "wrong result"))];
 }

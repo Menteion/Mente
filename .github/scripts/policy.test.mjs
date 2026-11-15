@@ -2077,14 +2077,20 @@ check("every measured benchmark run proves its sandbox first", () => {
 
 /// Whether a value hands a secret over: an expression naming `secrets.` other than a test of
 /// whether one is set.
+/// Whether a value, a string or anything in a step or a job, holds a secret: an expression that
+/// names `secrets` in any form (`secrets.X`, `secrets['X']`, `toJSON(secrets)`), but the test
+/// whether one is empty, which yields no secret. The final review of PR 137 found a secret named
+/// without a dot read as none.
 const holdsSecret = (value) =>
-  [...String(value).matchAll(/\$\{\{([\s\S]*?)\}\}/g)].some(([, e]) => /\bsecrets\./.test(e) && !/^\s*secrets\.\w+\s*[!=]=\s*''\s*$/.test(e));
+  [...(typeof value === "string" ? value : JSON.stringify(value ?? null)).matchAll(/\$\{\{([\s\S]*?)\}\}/g)].some(([, e]) => /\bsecrets\b/.test(e) && !/^\s*secrets\.\w+\s*[!=]=\s*''\s*$/.test(e));
 
 /// Every job that holds a secret, each with the job of its workflow that builds mn for it (or none)
-/// and whether it runs agent code. Each is pinned whole, so what it runs is the code owner's to
-/// read, and builds nothing: mn comes from a job without the secret, which carries the build-time
-/// check first, so that no code of the branch the check has not seen shares a machine with the
-/// secret (the fourth review of PR 137 found the build in the job that later held the key).
+/// and whether it runs agent code. Each is pinned whole, and every file it runs, with every module
+/// those import, is the code owner's in CODEOWNERS; it builds nothing, since mn comes from a job
+/// without the secret, which carries the build-time check first (the fourth review of PR 137 found
+/// the build in the job that later held the key). What runs beside the secret is then the harness
+/// of the dispatched ref, which the code owner reads, and mn, code of the branch, which only the
+/// benchmark's own sandbox confines.
 const SECRET_JOBS = new Map([
   ["benchmark.yml#bench", { builtBy: "build", agents: true }],
   ["prelim.yml#prelim", { builtBy: "build", agents: true }],
@@ -2093,35 +2099,46 @@ const SECRET_JOBS = new Map([
 
 check("every job that holds a secret is pinned whole, takes mn from a job that checks it first, and runs agent code only in its proven sandbox", () => {
   const found = new Set();
-  const holds = (m) => isPlain(m) && Object.values(m).some(holdsSecret);
+  const holds = (v) => holdsSecret(v);
   for (const { file, doc, id, job } of allJobs()) {
     const key = `${file}#${id}`;
     const all = steps(job);
-    const wide = holds(doc.env) || holds(job.env);
-    const secretAt = all.findIndex((s) => wide || holds(s.env) || holds(s.with));
+    // The workflow's env, anything of the job but its steps, and a job that passes secrets on.
+    const wide = holds(doc.env) || holds({ ...job, steps: null }) || "secrets" in job;
+    const secretAt = wide ? 0 : all.findIndex((s) => holds(s));
     if (secretAt < 0) continue;
     found.add(key);
     const held = SECRET_JOBS.get(key);
     assert.ok(held, `${key} holds a secret and is not in SECRET_JOBS: name the job that builds mn for it, if any`);
     assert.ok(PINNED_JOBS.has(key), `${key} holds a secret and is not pinned whole`);
+    // Every file it runs, and every module those import, is the code owner's: the pin holds the
+    // job's steps, and CODEOWNERS what they run (the final review of PR 137 found the toolchains'
+    // installer and five modules of the process that holds the key in neither).
+    const unowned = [...repoPaths(scriptTexts(doc, job))].filter((f) => !GATE_FILES.some((p) => owns(p, f)));
+    assert.deepEqual(unowned, [], `${key} holds a secret and runs files .github/CODEOWNERS does not give its owner`);
     if (held.builtBy !== null) {
       assert.ok([job.needs].flat().includes(held.builtBy), `${key} does not need ${held.builtBy}, the job that builds mn for it`);
       const builder = doc.jobs?.[held.builtBy];
       assert.ok(builder, `${file} has no job ${held.builtBy}`);
       assert.deepEqual(beforeToolchainProblems(file, held.builtBy, doc, builder), [], `${file}#${held.builtBy} builds mn for a job that holds a secret without the build-time check first`);
-      assert.ok(!holds(builder.env) && !steps(builder).some((s) => holds(s.env) || holds(s.with)), `${file}#${held.builtBy}, which builds mn, holds a secret`);
+      assert.ok(!holds(builder) && !("secrets" in builder), `${file}#${held.builtBy}, which builds mn, holds a secret`);
       assert.ok(all.some((s) => /^actions\/download-artifact@/.test(String(s.uses ?? ""))), `${key} takes no artifact from ${held.builtBy}`);
     }
     if (held.agents) {
       const check = all.findIndex((s) => /benchmark\/harness\/sandbox-check\.ts/.test(String(s.run ?? "")));
       assert.ok(check >= 0 && check < secretAt, `${key}: runs agent code, but sandbox-check.ts does not run before the secret is in reach`);
       for (const k of ["if", "continue-on-error"]) assert.ok(!(k in all[check]), `${key}: the sandbox check carries ${k}:`);
-      for (const s of all.slice(secretAt).filter((x) => (holds(x.env) || holds(x.with)) && typeof x.run === "string")) {
+      for (const s of all.slice(secretAt).filter((x) => holds(x) && typeof x.run === "string")) {
         assert.match(s.run, /--sandbox "\$SANDBOX"/, `${key}, step "${s.name}": holds a secret and runs nothing through the sandbox`);
       }
     }
   }
   assert.deepEqual([...SECRET_JOBS.keys()].filter((k) => !found.has(k)), [], "SECRET_JOBS names jobs that hold no secret");
+  // The final review's plants, and the other spellings of a secret.
+  for (const held of ["${{ secrets.ANTHROPIC_API_KEY }}", "${{ secrets['ANTHROPIC_API_KEY'] }}", "${{ toJSON(secrets) }}", "${{ secrets.A || 'x' }}", "${{ fromJSON(toJSON(secrets)).A }}", { env: { K: "${{ secrets['K'] }}" } }]) {
+    assert.ok(holdsSecret(held), `a secret read as none: ${JSON.stringify(held)}`);
+  }
+  for (const none of ["${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}", "${{ github.token }}", "secrets", "${{ env.SECRETS_DIR }}"]) assert.ok(!holdsSecret(none), `no secret read as one: ${none}`);
 });
 
 check("the Documentation job lints every workflow with actionlint and shellcheck, both pinned by checksum", () => {
@@ -2157,14 +2174,7 @@ const GATE_FILES = [
   "/perf/lib.mjs",
   "/benchmark/check.mjs",
   "/benchmark/corpus.lock",
-  "/benchmark/harness/sandbox.sh",
-  "/benchmark/harness/sandbox-check.ts",
-  "/benchmark/harness/build.ts",
-  "/benchmark/harness/bench.ts",
-  "/benchmark/harness/prelim.ts",
-  "/benchmark/harness/probe.ts",
-  "/benchmark/harness/fixtures.ts",
-  "/benchmark/harness/toolchains.json",
+  "/benchmark/harness/",
   "/compiler/mente-cli/tests/gates.rs",
   "/compiler/mente-cli/tests/lints.rs",
   "/compiler/mente-cli/tests/register.rs",
@@ -2204,13 +2214,8 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
     "perf/run.mjs",
     "perf/lib.mjs",
     "benchmark/check.mjs",
-    "benchmark/harness/sandbox.sh",
-    "benchmark/harness/sandbox-check.ts",
-    "benchmark/harness/build.ts",
-    "benchmark/harness/bench.ts",
-    "benchmark/harness/prelim.ts",
-    "benchmark/harness/probe.ts",
-    "benchmark/harness/toolchains.json",
+    // The harness whole: every script and module the jobs that hold a secret run.
+    ...filesUnder("benchmark/harness"),
     "compiler/mente-cli/tests/gates.rs",
     "compiler/mente-cli/tests/lints.rs",
     "compiler/mente-cli/tests/register.rs",

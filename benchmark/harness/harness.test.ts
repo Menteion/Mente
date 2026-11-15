@@ -13,6 +13,7 @@ import {
   checkOutside,
   childEnv,
   cleanOutput,
+  failureClass,
   hiddenPaths,
   insideAny,
   menteCaseResult,
@@ -622,6 +623,21 @@ test("an output directory inside a path the sandbox hides is refused", () => {
   // Without a sandbox nothing is hidden, so any output will do.
   assert.doesNotThrow(() => checkOutside(join(REPOSITORY, "bench-out"), { ...tools, sandbox: "" }));
   assert.ok(existsSync(join(REPOSITORY, "benchmark", "README.md")), "REPOSITORY is this repository's root");
+});
+
+test("no process that runs beside the key starts mn but through the sandbox", async () => {
+  // The final review of PR 137: failureClass ran `mn explain` directly, as the runner's user,
+  // beside the process that holds the key. mn is code of the branch; the sandbox is its only cage.
+  const tools = { mn: "mn", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "", hide: [], cover: "" };
+  await assert.rejects(failureClass(tools, "E0001"), /outside the sandbox/);
+  // Every module a job that holds the key runs starts mn only through `sandboxed(...)`: no spawn
+  // takes mn as its command.
+  const direct = /\b(?:runProcess|spawnSync|spawn|execFileSync|execFile|execSync|exec)\(\s*(?:tools\.mn|mn)\b/;
+  for (const file of ["bench.ts", "build.ts", "prelim.ts"]) {
+    const text = readFileSync(join(REPOSITORY, "benchmark", "harness", file), "utf8");
+    assert.doesNotMatch(text, direct, `${file} starts mn directly, outside the sandbox`);
+  }
+  for (const plant of ['runProcess(mn, ["explain", code])', 'spawnSync(tools.mn, ["check"])', "spawn( mn, args)"]) assert.match(plant, direct, plant);
 });
 
 test("the processes the harness starts, the agent's programs among them, see no secret", () => {
