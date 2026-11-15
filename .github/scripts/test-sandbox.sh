@@ -417,7 +417,7 @@ setup_as_root() {
   done
   # The workspace's .git, empty and read-only in the sandbox, so that the history is out of a
   # test's sight (a test can still tell a mutant by other signs, which the file's header names).
-  # Mounted once, here, where no code of the change has run: checkout made it, a directory of its
+  # Mounted once, below, where no code of the change has run: checkout made it, a directory of its
   # own, which must be that very directory, no link and nothing under a link. The device and inode
   # it covers are kept, and each step's `env` checks that the workspace's .git is still that one.
   if [ -e "$workspace/.git" ] || [ -L "$workspace/.git" ]; then
@@ -425,7 +425,6 @@ setup_as_root() {
       fail "$workspace/.git is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere"
     fi
     /usr/bin/stat -c '%d:%i' -- "$workspace/.git" > "$home/git"
-    /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,mode=0555,size=4k tmpfs "$root$workspace/.git"
   else
     : > "$home/git"
   fi
@@ -438,12 +437,21 @@ setup_as_root() {
   /usr/bin/ln -s /proc/self/fd/1 "$root/dev/stdout"
   /usr/bin/ln -s /proc/self/fd/2 "$root/dev/stderr"
   /usr/bin/mount -o remount,ro,nosuid,nodev "$root"
-  # Nothing mounted later on the runner's own tree shows up in the sandbox's.
+  # Nothing mounted later on the runner's own tree shows up in the sandbox's, and nothing mounted on
+  # the sandbox's shows up in the runner's: the workspace's bind shares its mounts with the
+  # workspace itself until it is private.
   /usr/bin/mount --make-rprivate "$root"
+  # Only now the empty .git, so that it covers the sandbox's view of the workspace alone: mounted
+  # before, it would also have covered the runner's own .git, and with it the history every later
+  # step reads.
+  if [ -s "$home/git" ]; then
+    /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,mode=0555,size=4k tmpfs "$root$workspace/.git"
+    if /usr/bin/findmnt -n -M "$workspace/.git" > /dev/null; then fail "the sandbox's empty .git covers the runner's own $workspace/.git too"; fi
+    if ! read_only "$root$workspace/.git"; then fail "$root$workspace/.git of the sandbox is not read-only"; fi
+  fi
   for dir in "$root" "$root/usr" "$root/etc" "$root$workspace"; do
     if ! read_only "$dir"; then fail "$dir of the sandbox is not read-only"; fi
   done
-  if [ -s "$home/git" ] && ! read_only "$root$workspace/.git"; then fail "$root$workspace/.git of the sandbox is not read-only"; fi
 }
 
 setup() {
