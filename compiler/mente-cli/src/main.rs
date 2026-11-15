@@ -51,9 +51,9 @@ mod mir_run;
 const STACK: usize = 256 << 20;
 
 fn main() {
-    match std::thread::Builder::new().stack_size(STACK).spawn(run) {
+    match mente_threads::alone(None, Some(STACK), run) {
         Ok(work) => {
-            if work.join().is_err() {
+            if work.is_err() {
                 process::exit(101);
             }
         }

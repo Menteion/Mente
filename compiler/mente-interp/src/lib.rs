@@ -344,14 +344,11 @@ pub fn with_calls<'m, R: Send>(
     limits: Limits,
     f: impl FnOnce(&mut Calls<'m>) -> R + Send,
 ) -> Result<R, Stop> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(stack_bytes(limits.max_depth))
-            .spawn_scoped(s, || f(&mut Calls { module, limits }))
-            .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
-            .join()
-            .map_err(|_| Stop::BadArguments("the interpreter stopped unexpectedly".to_string()))
+    mente_threads::alone(None, Some(stack_bytes(limits.max_depth)), || {
+        f(&mut Calls { module, limits })
     })
+    .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
+    .map_err(|_| Stop::BadArguments("the interpreter stopped unexpectedly".to_string()))
 }
 
 fn run<'m>(
@@ -361,19 +358,14 @@ fn run<'m>(
     limits: Limits,
     seen: Option<Observer<'m>>,
 ) -> Result<(Value, Vec<Value>), Stop> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(stack_bytes(limits.max_depth))
-            .spawn_scoped(s, || {
-                eval::Machine::new(module, limits, seen).enter(name, args)
-            })
-            .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
-            .join()
-            .unwrap_or_else(|_| {
-                Err(Stop::BadArguments(
-                    "the interpreter stopped unexpectedly".to_string(),
-                ))
-            })
+    mente_threads::alone(None, Some(stack_bytes(limits.max_depth)), || {
+        eval::Machine::new(module, limits, seen).enter(name, args)
+    })
+    .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
+    .unwrap_or_else(|_| {
+        Err(Stop::BadArguments(
+            "the interpreter stopped unexpectedly".to_string(),
+        ))
     })
 }
 

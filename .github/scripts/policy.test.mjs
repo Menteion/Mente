@@ -36,7 +36,7 @@ import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
 import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
-import { doctestProblems, problems as testListProblems, slowTests } from "./lib/test-list.mjs";
+import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
 
@@ -440,14 +440,25 @@ export function tomlSubset(text, file) {
   return tables;
 }
 
-/// What .config/nextest.toml may hold, table by table, with the keys each must set. To give nextest
-/// another table (a JUnit report for ci, a test group), add it here with its keys in the same pull
-/// request, where review sees what the table changes.
+/// What .config/nextest.toml may hold, table by table, with the keys each must set: one set, or
+/// for the overrides one set for each kind of override. To give nextest another table (a JUnit
+/// report for ci, another test group), add it here with its keys in the same pull request, where
+/// review sees what the table changes.
 const NEXTEST_TABLES = new Map([
   ["profile.default", { array: false, keys: ["leak-timeout", "slow-timeout"] }],
-  ["profile.default.overrides", { array: true, keys: ["filter", "slow-timeout"] }],
+  [
+    "profile.default.overrides",
+    {
+      array: true,
+      kinds: new Map([
+        ["slow", ["filter", "slow-timeout"]],
+        ["all-cores", ["filter", "test-group", "threads-required"]],
+      ]),
+    },
+  ],
   ["profile.ci", { array: false, keys: ["fail-fast"] }],
   ["profile.mutants", { array: false, keys: ["fail-fast"] }],
+  ["test-groups", { array: false, keys: ["all-cores"] }],
 ]);
 /// The limits, as .config/nextest.toml must state them, spaces aside: nextest reads them there, and
 /// the policy holds this copy, so that a changed limit is a change to the policy too. A slow-timeout
@@ -458,6 +469,9 @@ const NEXTEST_VALUES = new Map([
   ["profile.default.overrides/slow-timeout", '{ period = "60s", terminate-after = 3 }'],
   ["profile.ci/fail-fast", "false"],
   ["profile.mutants/fail-fast", "true"],
+  ["profile.default.overrides/test-group", '"all-cores"'],
+  ["profile.default.overrides/threads-required", '"num-test-threads"'],
+  ["test-groups/all-cores", "{ max-threads = 1 }"],
 ]);
 /// The tests the overrides give their longer limit, each by its package and its whole path: more
 /// time for another test is a change to the policy too.
@@ -469,6 +483,41 @@ const SLOW_TESTS = [
   ["mente-interp", "tests::test_a_program_tier1_proves_never_trips_its_checks"],
   ["mente-cli", "mir_run::tests::test_native_code_runs_each_construct_as_the_reference_interpreter_does"],
 ];
+/// The tests that run work on more than one thread at once (compiler/mente-threads),
+/// which the override of the group `all-cores` runs alone, each taking every test thread, so that
+/// none starves the tests beside it of time; under nextest, mente-threads fails any other test
+/// that does. Each by its package and its whole path.
+const ALL_CORES_TESTS = [
+  ["mente-cli", "mir_mutants::tests::test_the_command_passes_or_fails_on_the_corpus_it_finds"],
+  ["mente-cli", "mir_mutants::tests::test_the_corpus_passes_the_gate"],
+  ["mente-cli", "mir_run::differential::tests::test_three_paths_agree_on_generated_programs"],
+  ["mente-cli", "mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite"],
+  ["mente-cli", "test_mn_test_mutate_runs_the_demo_gate"],
+  ["mente-cli", "test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds"],
+  ["mente-cli", "mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar"],
+  ["mente-cli", "mir_run::differential::tests::test_generated_programs_of_seeds_0_to_29_are_well_typed_and_replayable"],
+  ["mente-cli", "mir_run::differential::tests::test_generated_programs_of_seeds_30_to_59_are_well_typed_and_replayable"],
+  ["mente-cli", "mir_run::differential::tests::test_generated_programs_of_seeds_60_to_89_are_well_typed_and_replayable"],
+];
+/// The crate whose functions alone start threads (clippy.toml's disallowed-methods), and which
+/// alone does not inherit the workspace's lints.
+const THREADS_CRATE = "mente-threads";
+/// What clippy.toml bans outside it: the core count, every safe way std starts a thread, and the
+/// ways a test could hide from its check the variables the check reads.
+const THREAD_BANS = [
+  "std::thread::available_parallelism",
+  "std::thread::Scope::spawn",
+  "std::thread::spawn",
+  "std::thread::Builder::spawn",
+  "std::thread::Builder::spawn_scoped",
+  "std::env::set_var",
+  "std::env::remove_var",
+  "std::process::Command::env_clear",
+];
+/// Where the tests read the group's name: mente-threads fails a test outside the group named
+/// there, so a group renamed in .config/nextest.toml and here alone would fail every test of the
+/// group.
+const CORES_GROUP = ["compiler/mente-threads/src/lib.rs", 'pub const GROUP: &str = "all-cores";'];
 
 /// The tests an override's filter names, each as [package, path]: `(package(name) & test(=path))`
 /// joined by `|`. The package keeps a test of the same path in another crate out, and the exact
@@ -535,21 +584,33 @@ export function testsAt(dir, testPath, files) {
 
 check("the tests run under the limits the policy holds, and every test given more time runs", () => {
   const tables = tomlSubset(read(".config/nextest.toml"), ".config/nextest.toml");
+  const kindOf = new Map();
   for (const t of tables) {
     const allowed = NEXTEST_TABLES.get(t.name);
     const shown = t.array ? `[[${t.name}]]` : `[${t.name}]`;
     assert.ok(allowed && allowed.array === t.array, `.config/nextest.toml has ${shown}: to give nextest another table, add it to NEXTEST_TABLES in .github/scripts/policy.test.mjs with the keys it may hold`);
-    assert.deepEqual([...t.keys.keys()].sort(), [...allowed.keys].sort(), `${shown} sets ${[...t.keys.keys()].join(", ") || "nothing"}, not ${allowed.keys.join(", ")}`);
+    const sets = allowed.kinds ?? new Map([["", allowed.keys]]);
+    const keys = [...t.keys.keys()].sort().join(", ");
+    const kind = [...sets].find(([, k]) => [...k].sort().join(", ") === keys);
+    assert.ok(kind, `${shown} sets ${keys || "nothing"}, not ${[...sets.values()].map((k) => k.join(", ")).join(" or ")}`);
+    kindOf.set(t, kind[0]);
     for (const [key, value] of t.keys) {
       const held = NEXTEST_VALUES.get(`${t.name}/${key}`);
       if (held === undefined) continue;
       assert.equal(value.replace(/\s+/g, ""), held.replace(/\s+/g, ""), `${shown} ${key} = ${value}, where the policy holds ${held}: a limit changes in NEXTEST_VALUES too`);
     }
   }
-  for (const name of ["profile.default", "profile.ci", "profile.mutants"]) assert.ok(tables.some((t) => t.name === name), `.config/nextest.toml has no [${name}]`);
-  const named = tables.filter((t) => t.array).flatMap((t) => filterTests(t.keys.get("filter")));
+  for (const name of ["profile.default", "profile.ci", "profile.mutants", "test-groups"]) assert.ok(tables.some((t) => t.name === name), `.config/nextest.toml has no [${name}]`);
+  const namedBy = (kind) => tables.filter((t) => t.array && kindOf.get(t) === kind).flatMap((t) => filterTests(t.keys.get("filter")));
   const shown = (list) => list.map(([p, t]) => `${p} ${t}`).sort();
-  assert.deepEqual(shown(named), shown(SLOW_TESTS), "the overrides give their longer limit to other tests than SLOW_TESTS, or one twice: more time for a test is a change to the policy too");
+  assert.deepEqual(shown(namedBy("slow")), shown(SLOW_TESTS), "the overrides give their longer limit to other tests than SLOW_TESTS, or one twice: more time for a test is a change to the policy too");
+  assert.deepEqual(shown(namedBy("all-cores")), shown(ALL_CORES_TESTS), "the overrides run alone other tests than ALL_CORES_TESTS, or one twice: a test that uses every core is a change to the policy too");
+  const named = [...namedBy("slow"), ...namedBy("all-cores")];
+  const [coresFile, groupLine] = CORES_GROUP;
+  const groupName = /"([^"]*)"/.exec(NEXTEST_VALUES.get("profile.default.overrides/test-group"))[1];
+  const groupLines = read(coresFile).split(/\r?\n/).filter((l) => l === groupLine);
+  assert.equal(groupLines.length, 1, `${coresFile} does not hold ${groupLine} once: the group its tests are held to is the group .config/nextest.toml names`);
+  assert.equal(groupLine, `pub const GROUP: &str = "${groupName}";`, "CORES_GROUP names another group than the override's test-group");
   const crates = workspace();
   for (const [pkg, testPath] of named) {
     const crate = crates.get(pkg);
@@ -922,7 +983,50 @@ check("git reads every change as text, and no source names mutants::skip, an att
   // cargo-mutants also skips an `unsafe fn`: no member may write one, since each inherits the
   // workspace's lints and the workspace forbids unsafe code.
   assert.match(read("Cargo.toml"), /^\[workspace\.lints\.rust\]\n(?:#.*\n)*unsafe_code = "forbid"$/m, "the workspace no longer forbids unsafe code, whose functions cargo-mutants skips");
-  for (const [name, { dir }] of workspace()) assert.match(read(`${dir}/Cargo.toml`), /^\[lints\]\nworkspace = true$/m, `${name} does not inherit the workspace's lints, which forbid unsafe code`);
+  const lintTables = (text, prefix) => {
+    const tables = [];
+    let current = null;
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.replace(/\s+#.*$/, "").trim();
+      if (line === "" || line.startsWith("#")) continue;
+      // An array of tables, `[[bin]]` say, ends a lint table as a table does.
+      if (/^\[\[[^\]]+\]\]$/.test(line)) {
+        current = null;
+        continue;
+      }
+      const header = /^\[([^\]]+)\]$/.exec(line);
+      if (header) {
+        current = header[1].startsWith(prefix) ? [header[1].slice(prefix.length), {}] : null;
+        if (current) tables.push(current);
+        continue;
+      }
+      const entry = /^([a-z][a-z0-9_-]*) = (.+)$/.exec(line);
+      if (current) {
+        assert.ok(entry, `a line of [${prefix}${current[0]}] the policy does not read: ${raw}`);
+        current[1][entry[1]] = entry[2];
+      }
+    }
+    return tables;
+  };
+  // Each member's lints, read as tables, not matched as text: a `"""` string could hold a decoy.
+  for (const [name, { dir }] of workspace()) {
+    const manifest = read(`${dir}/Cargo.toml`);
+    assert.ok(!/"""|'''/.test(manifest), `${dir}/Cargo.toml holds a multi-line string, which the policy does not read`);
+    if (name === THREADS_CRATE) continue;
+    assert.deepEqual(lintTables(manifest, "lints"), [["", { workspace: "true" }]], `${name} does not inherit the workspace's lints, and only them, which forbid unsafe code and clippy's disallowed_methods`);
+  }
+  // The one crate that may start threads holds the workspace's lints as its own, but for
+  // disallowed_methods, which it denies where the workspace forbids it.
+  const workspaceLints = lintTables(read("Cargo.toml"), "workspace.lints.");
+  const threadsLints = lintTables(read(`compiler/${THREADS_CRATE}/Cargo.toml`), "lints.");
+  const expected = workspaceLints.map(([group, keys]) => [group, group === "clippy" ? { ...keys, disallowed_methods: '"deny"' } : keys]);
+  assert.equal(Object.fromEntries(workspaceLints).clippy?.disallowed_methods, '"forbid"', "the workspace no longer forbids clippy's disallowed_methods, which keeps threads to mente-threads");
+  assert.deepEqual(threadsLints, expected, `${THREADS_CRATE}'s lints are not the workspace's with disallowed_methods denied`);
+  // The methods clippy.toml bans outside mente-threads: every way std starts a thread, and the
+  // core count. A ban removed, which no #[expect] in mente-threads may notice, fails here.
+  const clippy = read("clippy.toml").split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join("\n");
+  const bans = clippy.slice(clippy.indexOf("disallowed-methods = ["), clippy.indexOf("]", clippy.indexOf("disallowed-methods = [") + 22));
+  assert.deepEqual([...bans.matchAll(/path = "([^"]+)"/g)].map((m) => m[1]).sort(), [...THREAD_BANS].sort(), "clippy.toml's disallowed-methods are not THREAD_BANS");
   for (const space of [0x85, 0x200e, 0x200f, 0x2028, 0x2029].map((c) => String.fromCharCode(c))) {
     assert.ok(RUST_SPACE_BEYOND_ASCII.test(`#[cfg_attr(miri, mutants${space}::skip)]`));
     assert.ok(namesMutantsSkip(`#[rustfmt::skip]\n#[cfg_attr(miri, mutants${space}::${space}skip)] fn f() {}`), `the mutants::skip rule lets through U+${space.codePointAt(0).toString(16)}`);
@@ -1000,7 +1104,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
-  [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
+  [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
   [".github/scripts/test-sandbox.sh", "1b8cbfec63010bcac1aad029348db345bd6f77e5c30e98a594008ea68ce1d45a"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
@@ -2008,7 +2112,7 @@ check("the list of tests is read as nextest writes it", () => {
   assert.equal(testListProblems(list([["a", "a", [["m::slow", true], ["m::later", true]]], ["b", "b::it", [["slow", false]]]]), "a m::later\na m::slow\n", toml).length, 1, "a slow test that is ignored");
   assert.equal(testListProblems(list([["a", "a", [["m::later", true]]], ["b", "b::it", [["slow", false]]]]), "a m::later\n", toml).length, 1, "a slow test compiled out");
   assert.equal(testListProblems(list([]), "", "").length, 1, "an empty list");
-  assert.deepEqual(slowTests(read(".config/nextest.toml")).sort(), SLOW_TESTS.map(([p, t]) => `${p} ${t}`).sort(), "lib/test-list.mjs reads the override's tests as the policy does");
+  assert.deepEqual(overrideTests(read(".config/nextest.toml")).sort(), [...SLOW_TESTS, ...ALL_CORES_TESTS].map(([p, t]) => `${p} ${t}`).sort(), "lib/test-list.mjs reads the overrides' tests as the policy does");
   // The doctests' list, as `cargo test --doc -- --list` prints it.
   const none = "   Doc-tests mente_ast\n0 tests, 0 benchmarks\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n";
   assert.deepEqual(doctestProblems(none), []);
@@ -2274,6 +2378,7 @@ const GATE_FILES = [
   "/compiler/mente-cli/tests/lints.rs",
   "/compiler/mente-cli/tests/register.rs",
   "/compiler/*/src/overflow_traps.rs",
+  "/compiler/mente-threads/",
   "/compiler/*/Cargo.toml",
   "/spikes/*/Cargo.toml",
   "/.gitattributes",

@@ -1,0 +1,23 @@
+[package]
+name = "mente-threads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The one place the workspace starts threads: work spread over every core held to the nextest group that runs alone, a thread with a larger stack that the caller waits for, and readers of a child's pipes"
+
+[dependencies]
+
+# The workspace's lints, with one difference: the workspace forbids clippy's disallowed_methods,
+# so that no `allow` anywhere else can start a thread or read the core count, and this crate,
+# whose functions are the only ones that may, denies it and names each use with `#[expect]`.
+# .github/scripts/policy.test.mjs holds this table equal to the workspace's but for that line.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+disallowed_methods = "deny"

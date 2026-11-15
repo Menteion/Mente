@@ -318,6 +318,7 @@ dependencies = [
  "mente-mir",
  "mente-sema",
  "mente-syntax",
+ "mente-threads",
 ]
 
 [[package]]
@@ -342,6 +343,7 @@ version = "0.1.0"
 dependencies = [
  "mente-sema",
  "mente-syntax",
+ "mente-threads",
 ]
 
 [[package]]
@@ -359,6 +361,13 @@ dependencies = [
 
 [[package]]
 name = "mente-syntax"
+version = "0.1.0"
+dependencies = [
+ "mente-threads",
+]
+
+[[package]]
+name = "mente-threads"
 version = "0.1.0"
 
 [[package]]

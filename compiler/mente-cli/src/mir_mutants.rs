@@ -129,42 +129,32 @@ struct Prepared {
 /// programs' order.
 pub fn run_programs(programs: &[Program]) -> Vec<ProgramRun> {
     let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(programs.len().max(1));
-    let mut found: Vec<(usize, ProgramRun)> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                s.spawn(|| {
-                    let mut mine = Vec::new();
-                    loop {
-                        let k = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(p) = programs.get(k) else {
-                            return mine;
-                        };
-                        mine.push((k, run_program(p)));
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| {
-                h.join().unwrap_or_else(|_| {
-                    vec![(
-                        usize::MAX,
-                        ProgramRun {
-                            name: "a worker".into(),
-                            gated: true,
-                            problems: vec!["a worker thread stopped unexpectedly".into()],
-                            ..ProgramRun::default()
-                        },
-                    )]
-                })
-            })
-            .collect()
-    });
+    let workers = mente_threads::threads_for(programs.len());
+    let mut found: Vec<(usize, ProgramRun)> = mente_threads::concurrently(workers, |_| {
+        let mut mine = Vec::new();
+        loop {
+            let k = next.fetch_add(1, Ordering::Relaxed);
+            let Some(p) = programs.get(k) else {
+                return mine;
+            };
+            mine.push((k, run_program(p)));
+        }
+    })
+    .into_iter()
+    .flat_map(|joined| {
+        joined.unwrap_or_else(|_| {
+            vec![(
+                usize::MAX,
+                ProgramRun {
+                    name: "a worker".into(),
+                    gated: true,
+                    problems: vec!["a worker thread stopped unexpectedly".into()],
+                    ..ProgramRun::default()
+                },
+            )]
+        })
+    })
+    .collect();
     found.sort_by_key(|(k, _)| *k);
     found.into_iter().map(|(_, r)| r).collect()
 }

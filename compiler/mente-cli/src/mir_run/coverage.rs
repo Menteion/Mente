@@ -1291,7 +1291,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
     let mut claims = Vec::new();
     let mut regenerated = 0;
     // Each seed's program is checked on its own, on as many threads as the machine has.
-    let programs = super::differential::parallel((0..SEEDS).collect(), |seed| {
+    let programs = mente_threads::parallel((0..SEEDS).collect(), |seed| {
         let c = generate::checked(seed);
         let mut seen = BTreeSet::new();
         let mut problems = c.problems;
