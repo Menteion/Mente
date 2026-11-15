@@ -629,6 +629,17 @@ fn test_the_interpreter_derives_the_type_of_an_expression_of_operators_itself() 
             "f([252, 0], 0)",
             "true",
         ),
+        // Through an `else if`, and through arms that are blocks.
+        (
+            "pub fn f(a: u8, c: bool, d: bool) -> u64 = if c { a } else if d { 1 } else { ~3 }",
+            "f(0, false, false)",
+            "252",
+        ),
+        (
+            "pub fn f(a: u8, k: u8) -> u64 = match k {\n  0 => {\n    a\n  }\n  _ => {\n    ~3\n  }\n}",
+            "f(0, 1)",
+            "252",
+        ),
     ] {
         let mut m = module(f);
         for func in m.functions.iter_mut().flatten() {
@@ -1668,4 +1679,63 @@ fn test_a_pattern_or_a_place_the_checks_rule_out_stops_the_run() {
             }
         },
     );
+}
+
+/// Calls on one shared thread give what a call on a thread of its own gives, its value, the
+/// final values of its parameters, its trap and every integer it shows its observer, one call
+/// after another on the same thread, a trap and a recursion of the interpreted program included.
+#[test]
+fn test_calls_on_one_thread_give_what_a_call_of_its_own_gives() {
+    let m = module(
+        "pub fn f(x: u32, y: u32) -> u8 {
+  guard x == 7 else {
+    return 0
+  }
+  val z: u8 = y + 3
+  z
+}
+pub fn r(n: u8) -> u8
+  decreases n
+{
+  if n == 0 {
+    return 0
+  }
+  r(n - 1) + 1
+}",
+    );
+    let limits = Limits {
+        max_depth: 16,
+        ..Limits::default()
+    };
+    let calls: Vec<(&str, Vec<u128>)> = vec![
+        ("f", vec![7, 1]),
+        ("f", vec![6, 1]),
+        ("f", vec![7, 300]),
+        ("r", vec![10]),
+        ("r", vec![20]),
+        ("f", vec![7, 2]),
+    ];
+    let args = |a: &[u128]| {
+        a.iter()
+            .map(|&x| Value::Int(Int::from_u128(x)))
+            .collect::<Vec<_>>()
+    };
+    let mut alone = Vec::new();
+    for (name, a) in &calls {
+        let mut shown = Vec::new();
+        let mut seen = |span: Span, x: Int, why: Shown| shown.push((span.start, x, why));
+        let end = call_observed(&m, name, args(a), limits, &mut seen);
+        alone.push((format!("{:?}", end), shown));
+    }
+    let shared = with_calls(&m, limits, |c| {
+        let mut out = Vec::new();
+        for (name, a) in &calls {
+            let mut shown = Vec::new();
+            let mut seen = |span: Span, x: Int, why: Shown| shown.push((span.start, x, why));
+            let end = c.observed(name, args(a), &mut seen);
+            out.push((format!("{:?}", end), shown));
+        }
+        out
+    });
+    assert_eq!(shared.ok(), Some(alone));
 }

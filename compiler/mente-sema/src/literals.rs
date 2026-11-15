@@ -33,6 +33,34 @@ pub enum From {
     Operands,
     /// None: the type is `i64`.
     Alone,
+    /// None, though the operands around it have types: no standard type holds them together,
+    /// a `u128` and an `i8` say. The literal's value is exact where it does not depend on a
+    /// type, and `E0212` where it does, under `~`, a bit operation or a shift; `ty` is then
+    /// `i64` only as a placeholder, which no execution path reads (`core-calculus.md`, item 5).
+    Unheld,
+}
+
+/// What the expression around a literal gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Around {
+    /// No type: literals alone.
+    Nothing,
+    /// The type of the operands around it.
+    Type(IntTy),
+    /// Operands of types no standard type holds together.
+    Unheld,
+}
+
+/// What an expression of type `t` gives the literals among its operands, an array's through its
+/// elements: its type, or that no type holds its integers; none for literals alone or a type of
+/// no integers.
+fn around(t: &Ty) -> Option<Around> {
+    match t {
+        Ty::Int(Int::One(t)) | Ty::Int(Int::Mixed(Some(t))) => Some(Around::Type(*t)),
+        Ty::Int(Int::Mixed(None)) => Some(Around::Unheld),
+        Ty::Array(_, elem) => around(elem),
+        Ty::Int(Int::Literal) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
+    }
 }
 
 /// The type the literals of an expression of literals alone take, and where from.
@@ -51,42 +79,28 @@ pub fn taken(f: &FnSyntax, typing: &Typing) -> Vec<Option<Taken>> {
         out: vec![None; f.tree.exprs.len()],
     };
     for c in &f.contracts {
-        w.expr(c.expr, None);
+        w.expr(c.expr, Around::Nothing);
     }
     match f.body {
-        Some(Body::Expr(e)) => w.expr(e, None),
-        Some(Body::Block(b)) => w.block(b, None),
+        Some(Body::Expr(e)) => w.expr(e, Around::Nothing),
+        Some(Body::Block(b)) => w.block(b, Around::Nothing),
         None => {}
     }
     w.out
 }
 
-/// The integer type a value of type `t` is made of, an array's through its elements: its one
-/// type, or the type that holds a mix; none for literals alone or a type of no integers.
-fn leaf(t: &Ty) -> Option<IntTy> {
-    match t {
-        Ty::Int(Int::One(t)) | Ty::Int(Int::Mixed(Some(t))) => Some(*t),
-        Ty::Array(_, elem) => leaf(elem),
-        Ty::Int(Int::Literal | Int::Mixed(None))
-        | Ty::Bool
-        | Ty::Struct(_)
-        | Ty::Enum(_)
-        | Ty::Unit
-        | Ty::Any => None,
-    }
-}
-
-/// The integer type of an operation on operands of types `a` and `b`, as `leaf` gives it: the
-/// type of them all where both are integers, else `a`'s.
-fn joined(a: &Ty, b: &Ty) -> Option<IntTy> {
+/// What an operation on operands of types `a` and `b` gives its literals, as [`around`] says:
+/// the type of them all where both are integers, else `a`'s.
+fn joined(a: &Ty, b: &Ty) -> Around {
     let int = |t: &Ty| match t {
         Ty::Int(i) => Some(*i),
         Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
     };
-    match int(a).zip(int(b)) {
-        Some((x, y)) => leaf(&Ty::Int(x.join(y))),
-        None => leaf(a),
-    }
+    let t = match int(a).zip(int(b)) {
+        Some((x, y)) => around(&Ty::Int(x.join(y))),
+        None => around(a),
+    };
+    t.unwrap_or(Around::Nothing)
 }
 
 /// An exact integer: whether it is negative, and its magnitude.
@@ -570,7 +584,7 @@ struct Walk<'a> {
 impl Walk<'_> {
     /// Walks `e`. `around` is the integer type the expression around it gives its literals,
     /// where it gives one.
-    fn expr(&mut self, e: ExprId, around: Option<IntTy>) {
+    fn expr(&mut self, e: ExprId, around: Around) {
         self.walk(e, around, false);
     }
 
@@ -578,7 +592,7 @@ impl Walk<'_> {
     /// then take `around`, the type of every operand of that expression that has one
     /// ([`joins`]), not the type of `e` alone, so that the order of the operands never
     /// changes a literal's value (`core-calculus.md`, item 5).
-    fn walk(&mut self, e: ExprId, around: Option<IntTy>, member: bool) {
+    fn walk(&mut self, e: ExprId, around: Around, member: bool) {
         let tree = self.tree;
         let own = &self.typing.exprs[e.0 as usize];
         // What this expression gives the literals among its operands: within one expression the
@@ -589,18 +603,22 @@ impl Walk<'_> {
         let here = if member && joined {
             around
         } else {
-            leaf(own).or(around)
+            self::around(own).unwrap_or(around)
         };
         match own {
             Ty::Int(Int::Literal) => {
                 let taken = match here {
-                    Some(ty) => Taken {
+                    Around::Type(ty) => Taken {
                         ty,
                         from: From::Operands,
                     },
-                    None => Taken {
+                    Around::Nothing => Taken {
                         ty: I64,
                         from: From::Alone,
+                    },
+                    Around::Unheld => Taken {
+                        ty: I64,
+                        from: From::Unheld,
                     },
                 };
                 self.out[e.0 as usize] = Some(taken);
@@ -621,7 +639,7 @@ impl Walk<'_> {
             | ExprKind::Unreachable(_)
             | ExprKind::Error => {}
             ExprKind::Unary { op, operand } => match op {
-                UnaryOp::Not => self.expr(*operand, None),
+                UnaryOp::Not => self.expr(*operand, Around::Nothing),
                 UnaryOp::Neg | UnaryOp::BitNot => self.walk(*operand, here, joined),
             },
             ExprKind::Binary { op, lhs, rhs } => match op {
@@ -639,7 +657,7 @@ impl Walk<'_> {
                 // A shift's amount is a count, of no type but its own.
                 BinaryOp::Shl | BinaryOp::Shr => {
                     self.walk(*lhs, here, joined);
-                    self.expr(*rhs, None);
+                    self.expr(*rhs, Around::Nothing);
                 }
                 // A comparison gives each operand the other's type.
                 BinaryOp::Eq
@@ -648,50 +666,52 @@ impl Walk<'_> {
                 | BinaryOp::Le
                 | BinaryOp::Gt
                 | BinaryOp::Ge => {
-                    let ty = |x: &ExprId| leaf(&self.typing.exprs[x.0 as usize]);
+                    let ty = |x: &ExprId| {
+                        self::around(&self.typing.exprs[x.0 as usize]).unwrap_or(Around::Nothing)
+                    };
                     let (left, right) = (ty(rhs), ty(lhs));
                     self.expr(*lhs, left);
                     self.expr(*rhs, right);
                 }
                 BinaryOp::And | BinaryOp::Or => {
-                    self.expr(*lhs, None);
-                    self.expr(*rhs, None);
+                    self.expr(*lhs, Around::Nothing);
+                    self.expr(*rhs, Around::Nothing);
                 }
             },
             // An array literal indexed gives its element's value, so its elements take what the
             // indexing is given, as an `if`'s branches do; the index takes none.
             ExprKind::Index { base, index } => {
                 self.expr(*base, here);
-                self.expr(*index, None);
+                self.expr(*index, Around::Nothing);
             }
-            ExprKind::Field { base, .. } => self.expr(*base, None),
+            ExprKind::Field { base, .. } => self.expr(*base, Around::Nothing),
             // An argument and a field's value are each narrowed into a place of their own,
             // which gives their literals no type.
             ExprKind::Call { args, .. } => {
                 for a in args {
-                    self.expr(a.value, None);
+                    self.expr(a.value, Around::Nothing);
                 }
             }
             ExprKind::Construct { fields, .. } => {
                 for f in fields {
-                    self.expr(f.value, None);
+                    self.expr(f.value, Around::Nothing);
                 }
             }
             ExprKind::Variant { payload, .. } => match payload {
                 Payload::None => {}
                 Payload::Named(fields) => {
                     for f in fields {
-                        self.expr(f.value, None);
+                        self.expr(f.value, Around::Nothing);
                     }
                 }
                 Payload::Positional(args) => {
                     for a in args {
-                        self.expr(a.value, None);
+                        self.expr(a.value, Around::Nothing);
                     }
                 }
             },
             ExprKind::Match { scrutinee, arms } => {
-                self.expr(*scrutinee, None);
+                self.expr(*scrutinee, Around::Nothing);
                 for arm in arms {
                     match arm.body {
                         ArmBody::Expr(x) => self.expr(x, here),
@@ -711,7 +731,7 @@ impl Walk<'_> {
                 then,
                 otherwise,
             } => {
-                self.expr(*cond, None);
+                self.expr(*cond, Around::Nothing);
                 self.block(*then, here);
                 match otherwise {
                     Some(Else::Block(b)) => self.block(*b, here),
@@ -724,20 +744,20 @@ impl Walk<'_> {
 
     /// Walks a block whose value, its last statement's when that is an expression, takes
     /// `around`.
-    fn block(&mut self, b: BlockId, around: Option<IntTy>) {
+    fn block(&mut self, b: BlockId, around: Around) {
         let stmts = &self.tree.block(b).stmts;
         for (i, &s) in stmts.iter().enumerate() {
             let last = i + 1 == stmts.len();
-            self.stmt(s, if last { around } else { None });
+            self.stmt(s, if last { around } else { Around::Nothing });
         }
     }
 
-    fn stmt(&mut self, s: StmtId, around: Option<IntTy>) {
+    fn stmt(&mut self, s: StmtId, around: Around) {
         let tree = self.tree;
         match &tree.stmt(s).kind {
-            StmtKind::Binding { init, .. } => self.expr(*init, None),
+            StmtKind::Binding { init, .. } => self.expr(*init, Around::Nothing),
             StmtKind::Assign { place, op, value } => {
-                self.expr(*place, None);
+                self.expr(*place, Around::Nothing);
                 // `x op= e` is `x = x op e` (item 6): under arithmetic `e`'s operands are
                 // operands of that expression with `x`, whose literals take the type of them
                 // all; a bit operation works in `x`'s type, which its literal operand takes;
@@ -752,7 +772,7 @@ impl Walk<'_> {
                         | BinaryOp::Rem,
                     ) => (joined(ty(*place), ty(*value)), true),
                     AssignOp::Compound(BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) => {
-                        (leaf(ty(*place)), false)
+                        (self::around(ty(*place)).unwrap_or(Around::Nothing), false)
                     }
                     AssignOp::Compound(
                         BinaryOp::Shl
@@ -766,7 +786,7 @@ impl Walk<'_> {
                         | BinaryOp::Gt
                         | BinaryOp::Ge,
                     )
-                    | AssignOp::Set => (None, false),
+                    | AssignOp::Set => (Around::Nothing, false),
                 };
                 self.walk(*value, around, member);
             }
@@ -776,23 +796,23 @@ impl Walk<'_> {
                 decreases,
                 body,
             } => {
-                self.expr(*cond, None);
+                self.expr(*cond, Around::Nothing);
                 for &i in invariants.iter().chain(decreases) {
-                    self.expr(i, None);
+                    self.expr(i, Around::Nothing);
                 }
-                self.block(*body, None);
+                self.block(*body, Around::Nothing);
             }
             StmtKind::Guard { cond, otherwise } => {
-                self.expr(*cond, None);
-                self.block(*otherwise, None);
+                self.expr(*cond, Around::Nothing);
+                self.block(*otherwise, Around::Nothing);
             }
             StmtKind::Return(value) => {
                 if let Some(e) = value {
-                    self.expr(*e, None);
+                    self.expr(*e, Around::Nothing);
                 }
             }
             StmtKind::Break | StmtKind::Continue => {}
-            StmtKind::Discard(e) => self.expr(*e, None),
+            StmtKind::Discard(e) => self.expr(*e, Around::Nothing),
             // The value of a block is its last statement's.
             StmtKind::Expr(e) => self.expr(*e, around),
         }
@@ -1069,6 +1089,20 @@ mod tests {
             ),
         ] {
             assert_eq!(of(&src, text), Some((ty, from)), "`{}` in {}", text, src);
+        }
+        // Operands no standard type holds together give their literals none.
+        for (src, text) in [
+            ("pub fn f(a: u128, c: i8) -> i128 = a + ~3 + c", "~3"),
+            ("pub fn f(a: u128, c: i8) -> bool = a + c == ~3", "~3"),
+            ("pub fn f(a: u128, c: i8) -> bool = a + c == 300", "300"),
+        ] {
+            assert_eq!(
+                of(src, text).map(|t| t.1),
+                Some(From::Unheld),
+                "`{}` in {}",
+                text,
+                src
+            );
         }
     }
 

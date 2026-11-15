@@ -1,4 +1,4 @@
-// expect: E0212 E0212 E0212
+// expect: E0212 E0212 E0212 E0212 E0212
 module conformance
 // A `u128` and an `i8` have no standard type that holds them both, so their sum has no type
 // (core-calculus.md, items 4 and 5). Exact arithmetic over it stands, but an operation that needs
@@ -11,3 +11,11 @@ pub fn scrutinee(a: u128, c: i8) -> u8 = match a + c {
 pub fn complement(a: u128, c: i8) -> i128 = ~(a + c)
 
 pub fn shifted(a: u128, c: i8) -> i128 = (a + c) << 1
+
+// A literal whose value depends on the type it works in takes none among them; one whose value
+// does not, `300`, is compared exactly.
+pub fn complement_compared(a: u128, c: i8) -> bool = a + c == ~3
+
+pub fn shift_among(a: u128, c: i8) -> i128 = a + (1 << 2) + c
+
+pub fn plain_compared(a: u128, c: i8) -> bool = a + c == 300

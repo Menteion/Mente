@@ -143,6 +143,7 @@ pub fn check(
     c.typing.literals = literals::taken(f, &c.typing);
     c.compared_literals(f);
     c.literal_traps();
+    c.unheld_literals();
     (c.typing, c.errors)
 }
 
@@ -294,6 +295,11 @@ impl Checker<'_> {
                 let Some(taken) = self.typing.literals[lit.0 as usize] else {
                     continue;
                 };
+                // Beside integers no standard type holds, a literal takes no type and is compared
+                // exactly; one whose value depends on a type is `E0212` ([`Self::unheld_literals`]).
+                if taken.from == literals::From::Unheld {
+                    continue;
+                }
                 // Each value the operand may take, through its branches, arms and the elements
                 // of an array literal it indexes, is compared in that type.
                 let alternatives = literals::alternatives(tree, lit);
@@ -334,7 +340,8 @@ impl Checker<'_> {
             let Some(taken) = self.typing.literals[i] else {
                 continue;
             };
-            if self.typing.exprs[i] != Ty::Int(Int::Literal) {
+            if self.typing.exprs[i] != Ty::Int(Int::Literal) || taken.from == literals::From::Unheld
+            {
                 continue;
             }
             if let Some(trap) = literals::trap(tree, &self.typing.literals, e, taken.ty) {
@@ -450,6 +457,33 @@ impl Checker<'_> {
         }
     }
 
+    /// `E0212` for each operation over literals whose value depends on the type it works in, `~`,
+    /// a bit operation or a shift, among operands that no standard type holds together, as in
+    /// `a + c == ~3` for a `u128` `a` and an `i8` `c`: it takes no type there, and none is
+    /// chosen for it, `i64` least of all. Each is reported at its innermost such operation; a
+    /// literal whose value does not depend on a type, `300` or `1 + 2`, stands exact
+    /// (`core-calculus.md`, item 5).
+    fn unheld_literals(&mut self) {
+        let tree = self.tree;
+        for i in 0..tree.exprs.len() {
+            let e = ExprId(i as u32);
+            let unheld = self.typing.literals[i].is_some_and(|t| t.from == literals::From::Unheld);
+            if !unheld || !works_in_a_type(tree, e) || below_works_in_a_type(tree, e) {
+                continue;
+            }
+            let s = self.span(e);
+            let text = self.src.get(s.start..s.end).unwrap_or("").to_string();
+            self.errors.push(Diagnostic::error(
+                "E0212",
+                s,
+                format!(
+                    "`{}` works in a type, but the operands around it have types that no standard type holds together, so it has none; state the type it should work in with a suffix on its literal",
+                    text
+                ),
+            ));
+        }
+    }
+
     /// Reports `e`, which traps for `trap` in `taken`'s type whenever it runs; `by`, the
     /// operator beside an operand of a type that narrows `e`, a literal, into that type.
     fn literal_trap(
@@ -466,6 +500,9 @@ impl Checker<'_> {
         let source = match taken.from {
             literals::From::Operands => "the type its literals take from the operands around them",
             literals::From::Alone => "the type of an expression of literals alone",
+            literals::From::Unheld => {
+                "no type, since no standard type holds the operands around it"
+            }
         };
         let shown =
             |v: literals::Exact| format!("{}{}", if v.negative { "-" } else { "" }, v.magnitude);
@@ -3676,6 +3713,100 @@ fn else_leaves(tree: &Tree, o: Else) -> bool {
     }
 }
 
+/// Whether `e` is an operation whose value depends on the type it works in: `~`, a bit
+/// operation or a shift.
+fn works_in_a_type(tree: &Tree, e: ExprId) -> bool {
+    match &tree.expr(e).kind {
+        ExprKind::Unary { op, .. } => match op {
+            UnaryOp::BitNot => true,
+            UnaryOp::Neg | UnaryOp::Not => false,
+        },
+        ExprKind::Binary { op, .. } => match op {
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => true,
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => false,
+        },
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => false,
+    }
+}
+
+/// Whether an operand of the operators of `e`, through `-`, arithmetic and the operations
+/// [`works_in_a_type`] names, a shift's amount aside, holds such an operation.
+fn below_works_in_a_type(tree: &Tree, e: ExprId) -> bool {
+    let operands: Vec<ExprId> = match &tree.expr(e).kind {
+        ExprKind::Unary { op, operand } => match op {
+            UnaryOp::BitNot | UnaryOp::Neg => vec![*operand],
+            UnaryOp::Not => vec![],
+        },
+        ExprKind::Binary { op, lhs, rhs } => match op {
+            BinaryOp::Shl | BinaryOp::Shr => vec![*lhs],
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem => vec![*lhs, *rhs],
+            BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => vec![],
+        },
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => vec![],
+    };
+    operands
+        .into_iter()
+        .any(|x| works_in_a_type(tree, x) || below_works_in_a_type(tree, x))
+}
+
 #[cfg(test)]
 mod tests {
     use mente_syntax::diagnostics::Diagnostic;
@@ -4791,13 +4922,28 @@ pub fn f(mut p: Pair) {
             "pub fn f(a: u128, c: i8) -> i128 = ~(a + c)",
             "pub fn f(a: u128, c: i8) -> i128 = (a + c) << 1",
             "pub fn f(a: u128, c: i8) -> i128 = (a + c) >> 1",
+            // A literal whose value depends on the type it works in takes none there.
+            "pub fn f(a: u128, c: i8) -> bool = a + c == ~3",
+            "pub fn f(a: u128, c: i8) -> i128 = a + ~3 + c",
+            "pub fn f(a: u128, c: i8) -> i128 = a + (1 << 2) + c",
+            "pub fn f(a: u128, c: i8) -> i128 = a + (~(1 << 2) & 7) + c",
+            "pub fn f(a: u128, c: i8, q: bool) -> i128 = a + (if q { ~3 } else { 1 }) + c",
         ] {
             assert_eq!(codes(f), ["E0212"], "{}", f);
         }
+        let d = diagnostics("pub fn f(a: u128, c: i8) -> i128 = a + (~(1 << 2) & 7) + c");
+        assert_eq!(
+            d[0].message,
+            "`1 << 2` works in a type, but the operands around it have types that no standard type holds together, so it has none; state the type it should work in with a suffix on its literal"
+        );
         for f in [
             "pub fn f(a: u128, c: i8) -> i128 = a + c",
             "pub fn f(a: u8, c: i8) -> u8 = match a + c {\n  0 => 1\n  _ => 2\n}",
             "pub fn f(a: u128, c: u8) -> u128 = (a + c) << 1",
+            // A literal whose value does not depend on a type stands exact.
+            "pub fn f(a: u128, c: i8) -> bool = a + c == 300",
+            "pub fn f(a: u128, c: i8) -> i128 = a + (1 + 2) + c",
+            "pub fn f(a: u128, c: i8) -> bool = a + c == 1180591620717411303424",
         ] {
             assert_eq!(codes(f), Vec::<&str>::new(), "{}", f);
         }

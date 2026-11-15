@@ -3564,8 +3564,10 @@ impl<'a> Fx<'a> {
     /// leave it, as `~256` and `~127_i8 - 1` do, or where the place's refinement does not hold
     /// the value it gives, as `u8[0..10]` does not hold `~3_u8`, 252. A machine-applicable fix
     /// is certain (`diagnostics.md`, item 4): `~` of a literal, into a place of no refinement or
-    /// of one whose literal bounds hold the value, has that one repair; any other expression,
-    /// and a refinement whose bounds are names, which may not hold it, get a suggestion.
+    /// of one whose literal bounds hold the value, has that one repair. Any other expression, and
+    /// a refinement whose bounds are names, get none: a suggestion Tier 1 cannot show checks,
+    /// such as `~(1_u8 << 1) - 1` into `u8[0..=252]`, which it cannot rule out at -1 and 253,
+    /// is not offered (Norman's decision on self-verifying fixes, 2026-11-15).
     fn suffix_fix(&self, span: Span, t: IntTy, refine: Option<&Refine>) -> Option<Fix> {
         let tree = self.tree;
         let e = (0..tree.exprs.len())
@@ -3608,32 +3610,15 @@ impl<'a> Fx<'a> {
         let complemented = complemented_literal(tree, e).is_some();
         let at = tree.expr(first).span;
         let replacement = format!("{}_{}", self.src.get(at.start..at.end)?, t.name);
-        let (message, applicability) = if complemented && held == Some(true) {
-            (
-                format!(
-                    "write the literal as `{}`, `{}`, so that `~` works in it",
-                    t.name, replacement
-                ),
-                Applicability::MachineApplicable,
-            )
-        } else {
-            let shown = format!(
-                "{}{}{}",
-                self.src.get(span.start..at.start)?,
-                replacement,
-                self.src.get(at.end..span.end)?
-            );
-            (
-                format!(
-                    "state the place's type on its first literal, `{}`, so that it works in `{}`",
-                    shown, t.name
-                ),
-                Applicability::Suggestion,
-            )
-        };
+        if !complemented || held != Some(true) {
+            return None;
+        }
         Some(Fix {
-            message,
-            applicability,
+            message: format!(
+                "write the literal as `{}`, `{}`, so that `~` works in it",
+                t.name, replacement
+            ),
+            applicability: Applicability::MachineApplicable,
             edits: vec![Edit {
                 span: at,
                 replacement,
@@ -5280,28 +5265,21 @@ impl<'a> Fx<'a> {
     ) -> Shape {
         let plain = Shape::plain(&Ty::of(&c.syntax.tree, t));
         let at = self.span(args[k].value);
-        let what = self.guarded(args[k].value);
         match &plain {
+            // The text and the refinement a report needs are found only for a narrowing that
+            // always traps: Tier 1 narrows every argument of every call it visits.
             Shape::Int { int: Some(int), .. } => {
-                let refine = match self.callee_shape(c, site, args, t) {
-                    Shape::Int { refine, .. } => refine,
-                    Shape::Array(..) | Shape::Struct(_) | Shape::Other => None,
-                };
-                let recorded = self.recording;
-                let traps =
-                    self.always_traps_into(st, v, (*int, refine.as_deref()), at, Some(&what));
-                // Only a fix known to check is offered here, a machine-applicable one: a
-                // suggestion such as `take(~(1_u8 << 1) - 1)` into `u8[0..=252]` leaves an
-                // obligation Tier 1 cannot discharge (Norman's decision on self-verifying fixes,
-                // 2026-11-15).
-                if let (true, true, Some(d)) = (recorded, traps, self.report.diagnostics.last_mut())
-                {
-                    d.fixes
-                        .retain(|f| f.applicability == Applicability::MachineApplicable);
+                if let Some(side) = self.fits(st, v, Some(*int), at) {
+                    let refine = match self.callee_shape(c, site, args, t) {
+                        Shape::Int { refine, .. } => refine,
+                        Shape::Array(..) | Shape::Struct(_) | Shape::Other => None,
+                    };
+                    let shown = format!("`{}`", self.guarded(args[k].value).0);
+                    self.always_traps(&side, (*int, refine.as_deref()), at, &shown);
                 }
             }
             Shape::Int { int: None, .. } | Shape::Array(..) | Shape::Struct(_) | Shape::Other => {
-                self.narrow(st, v, &plain, (at, Tag::None), "", Some(what));
+                self.narrow(st, v, &plain, (at, Tag::None), "", None);
             }
         }
         plain
@@ -8365,6 +8343,16 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
                 "pub fn f(x: u8, y: u8) -> u16\n  ensures result <= 100 + 200\n= x + y",
                 "x + y <= 300_u16",
             ),
+            // A returned value of literals alone comes in as `result`, in the result's type;
+            // one of a type is written as it stands.
+            (
+                "pub fn f(x: u8) -> u16\n  ensures result < x + 100\n= 100 + 200",
+                "300_u16 < x + 100",
+            ),
+            (
+                "pub fn f(x: u8) -> u16\n  ensures result < x + 100\n= x + 200",
+                "x + 200 < x + 100",
+            ),
             // A refinement's bound that names a parameter a literal is passed as is that value.
             (
                 "fn take(n: u16, x: u16[0..n]) -> u16 = x\npub fn f(x: u8, y: u8) -> u16 = take(300, x + y)",
@@ -8439,8 +8427,9 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
     fn test_a_narrowing_of_literals_alone_is_fixed_by_their_suffix() {
         let decls = "struct P {\n  m: u8\n}\nfn mask(m: u8) -> u8 = m\n";
         // Each case, the text its fix writes, none where it has no fix, and whether the fix is
-        // machine-applicable; a suggestion repairs the narrowing, and a refinement whose bounds
-        // are names may leave an obligation to Tier 1.
+        // machine-applicable. Only a fix known to check is offered, a machine-applicable one; a
+        // suggestion Tier 1 could not show checks is not (Norman's decision on self-verifying
+        // fixes, 2026-11-15).
         for (f, fixed, machine) in [
             (
                 "pub fn f() -> u8 {\n  val m: u8 = ~3\n  m\n}",
@@ -8461,18 +8450,27 @@ pub fn f(x: u8, y: u16) -> u16 = needs(P(a: x, b: y))",
             ("pub fn f() -> u8 = ~256", "", false),
             ("pub fn f() -> i8 = ~-129", "", false),
             ("pub fn f() -> u8 = ~3_i8", "", false),
-            // Any other expression of literals alone gets a suggestion, which a value Tier 1
-            // knows of literals alone, though `|` of a complement has no linear form, needs.
-            ("pub fn f() -> u8 = ~3 + 1", "~3_u8 + 1", false),
-            ("pub fn f() -> u8 = ~3 | 1", "~3_u8 | 1", false),
+            // Any other expression of literals alone gets none, at a result, a binding and an
+            // argument alike: `~(1_u8 << 1) - 1` is 252 and still fails in `u8[0..=252]`.
+            ("pub fn f() -> u8 = ~3 + 1", "", false),
+            ("pub fn f() -> u8 = ~3 | 1", "", false),
             ("pub fn f() -> u8 = -1 + 0", "", false),
-            // A refinement the suffix's value leaves gets no fix; one it lies in does, and one
-            // whose bound is a name gets a suggestion.
+            ("pub fn f() -> u8[0..=252] = ~(1 << 1) - 1", "", false),
+            (
+                "pub fn f() -> u8 {
+  val m: u8[0..=252] = ~(1 << 1) - 1
+  m
+}",
+                "",
+                false,
+            ),
+            // A refinement the suffix's value leaves gets no fix, nor one whose bound is a name;
+            // one it lies in does.
             ("pub fn f() -> u8[0..10] = ~3", "", false),
             ("pub fn f() -> u8[200..=255] = ~3", "~3_u8", true),
             ("pub fn f() -> u8[0..252] = ~3", "", false),
             ("pub fn f() -> u8[0..253] = ~3", "~3_u8", true),
-            ("pub fn f(n: u8) -> u8[0..n] = ~3", "~3_u8", false),
+            ("pub fn f(n: u8) -> u8[0..n] = ~3", "", false),
             // An argument keeps its parameter's refinement in view, as a result does.
             (
                 "fn take(x: u8[0..10]) -> u8 = x

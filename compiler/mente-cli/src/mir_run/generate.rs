@@ -5838,101 +5838,114 @@ fn always_traps(
     } else {
         CLAIM_SEARCH
     };
-    let mut best: Option<(Vec<(bool, Value)>, Probe)> = None;
-    loop {
-        let args = match (first.pop(), &best) {
-            (Some(args), _) => args,
-            (None, Some((base, _))) if search > 0 => {
-                search -= 1;
-                match changed(&params, base, &literals, &mut rng) {
-                    Some(args) => args,
-                    None => continue,
-                }
-            }
-            (None, _) => break,
-        };
-        out.calls += 1;
-        let mut probe = Probe {
-            values: Vec::new(),
-            progress: 0,
-            end: String::new(),
-        };
-        // The run's end, a value or a trap, says nothing of the claim: what the value was
-        // before it does, where its narrowing is reached. A value is given before it is
-        // narrowed, and not always just before: a call narrows its arguments once all are
-        // evaluated, so an argument's value never reaches its narrowing when an earlier
-        // argument's traps, and the claim, which takes the earlier narrowing as a fact, says
-        // nothing of it. So a value given at the watched place counts once a narrowing whose
-        // place holds the diagnostic's narrows it, the latest given first, since a call
-        // inside a later argument may give and narrow there again.
-        let values = args.iter().map(|(_, v)| v.clone()).collect();
-        let mut given: Vec<Int> = Vec::new();
-        // The place of the last value given, before the trap that may end the run.
-        let mut last: Option<(usize, usize)> = None;
-        let end = mente_interp::call_observed(
-            kept,
-            name,
-            values,
-            limits,
-            &mut |span: Span, x: Int, why: Shown| match why {
-                Shown::Given if (span.start, span.end) == watch => {
-                    last = Some((span.start, span.end));
-                    given.push(x);
-                }
-                Shown::Given => {
-                    last = Some((span.start, span.end));
-                    if body.contains(&span.start) && span.start <= watch.0 {
-                        probe.progress = probe.progress.max(span.start);
+    // Every call of the search runs on one thread of the interpreter's: a thread of its own
+    // for each would cost more than the call, on Windows many times more.
+    let searched = mente_interp::with_calls(kept, limits, |calls| {
+        let mut best: Option<(Vec<(bool, Value)>, Probe)> = None;
+        loop {
+            let args = match (first.pop(), &best) {
+                (Some(args), _) => args,
+                (None, Some((base, _))) if search > 0 => {
+                    search -= 1;
+                    match changed(&params, base, &literals, &mut rng) {
+                        Some(args) => args,
+                        None => continue,
                     }
                 }
-                Shown::Narrowed => {
-                    if span.start <= at.start && at.end <= span.end {
-                        probe.values.extend(given.pop());
-                    }
-                }
-            },
-        );
-        probe.end = match &end {
-            Ok(_) => "it returns".to_string(),
-            Err(stop) => stop.to_string(),
-        };
-        // An operation on a 128-bit operand is checked at its operator, so it traps there
-        // and gives no value: the trap holds the exact result it computed. A compound
-        // assignment's operation traps at its right side, the diagnostic's span, though the
-        // value it would give is shown with the whole assignment's; it is that operation's
-        // trap only once the right side has given its value, since an operation of the right
-        // side's own traps at the same span before it gives one.
-        if let Err(mente_interp::Stop::Trap(mente_interp::Trap {
-            kind: mente_interp::TrapKind::Narrowing { value: Some(x), .. },
-            span,
-        })) = end
-        {
-            let here = (span.start, span.end);
-            let compound = here == (at.start, at.end) && last == Some(here);
-            if (here == watch || compound) && probe.values.is_empty() {
-                probe.values.push(x);
-            }
-        }
-        if !probe.values.is_empty() {
-            out.reached += 1;
-        }
-        if let Some(why) = probe.values.iter().find_map(|x| claim.broken_by(*x)) {
-            let text: Vec<String> = args
-                .iter()
-                .map(|(is_mut, v)| format!("{}{}", if *is_mut { "mut " } else { "" }, v))
-                .collect();
-            problems.push(wrong(&format!(
-                "in the call {}({}): {}",
+                (None, _) => break,
+            };
+            out.calls += 1;
+            let mut probe = Probe {
+                values: Vec::new(),
+                progress: 0,
+                end: String::new(),
+            };
+            // The run's end, a value or a trap, says nothing of the claim: what the value was
+            // before it does, where its narrowing is reached. A value is given before it is
+            // narrowed, and not always just before: a call narrows its arguments once all are
+            // evaluated, so an argument's value never reaches its narrowing when an earlier
+            // argument's traps, and the claim, which takes the earlier narrowing as a fact, says
+            // nothing of it. So a value given at the watched place counts once a narrowing whose
+            // place holds the diagnostic's narrows it, the latest given first, since a call
+            // inside a later argument may give and narrow there again.
+            let values = args.iter().map(|(_, v)| v.clone()).collect();
+            let mut given: Vec<Int> = Vec::new();
+            // The place of the last value given, before the trap that may end the run.
+            let mut last: Option<(usize, usize)> = None;
+            let end = calls.observed(
                 name,
-                text.join(", "),
-                why
+                values,
+                &mut |span: Span, x: Int, why: Shown| match why {
+                    Shown::Given if (span.start, span.end) == watch => {
+                        last = Some((span.start, span.end));
+                        given.push(x);
+                    }
+                    Shown::Given => {
+                        last = Some((span.start, span.end));
+                        if body.contains(&span.start) && span.start <= watch.0 {
+                            probe.progress = probe.progress.max(span.start);
+                        }
+                    }
+                    Shown::Narrowed => {
+                        if span.start <= at.start && at.end <= span.end {
+                            probe.values.extend(given.pop());
+                        }
+                    }
+                },
+            );
+            probe.end = match &end {
+                Ok(_) => "it returns".to_string(),
+                Err(stop) => stop.to_string(),
+            };
+            // An operation on a 128-bit operand is checked at its operator, so it traps there
+            // and gives no value: the trap holds the exact result it computed. A compound
+            // assignment's operation traps at its right side, the diagnostic's span, though the
+            // value it would give is shown with the whole assignment's; it is that operation's
+            // trap only once the right side has given its value, since an operation of the right
+            // side's own traps at the same span before it gives one.
+            if let Err(mente_interp::Stop::Trap(mente_interp::Trap {
+                kind: mente_interp::TrapKind::Narrowing { value: Some(x), .. },
+                span,
+            })) = end
+            {
+                let here = (span.start, span.end);
+                let compound = here == (at.start, at.end) && last == Some(here);
+                if (here == watch || compound) && probe.values.is_empty() {
+                    probe.values.push(x);
+                }
+            }
+            if !probe.values.is_empty() {
+                out.reached += 1;
+            }
+            if let Some(why) = probe.values.iter().find_map(|x| claim.broken_by(*x)) {
+                let text: Vec<String> = args
+                    .iter()
+                    .map(|(is_mut, v)| format!("{}{}", if *is_mut { "mut " } else { "" }, v))
+                    .collect();
+                problems.push(wrong(&format!(
+                    "in the call {}({}): {}",
+                    name,
+                    text.join(", "),
+                    why
+                )));
+                break;
+            }
+            if best.as_ref().is_none_or(|(_, b)| probe.serves(b, &claim)) {
+                best = Some((args, probe));
+            }
+        }
+        best
+    });
+    let best = match searched {
+        Ok(best) => best,
+        Err(stop) => {
+            problems.push(wrong(&format!(
+                "the reference interpreter stopped checking it: {}",
+                stop
             )));
-            break;
+            None
         }
-        if best.as_ref().is_none_or(|(_, b)| probe.serves(b, &claim)) {
-            best = Some((args, probe));
-        }
-    }
+    };
     if let Some((_, p)) = &best {
         out.nearest = p.nearest(&claim).map(|x| x.to_string());
         out.furthest = p.end.clone();

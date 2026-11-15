@@ -57,6 +57,17 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
     }
 }
 
+/// The type literals work in under `~`, a bit operation or a shift, in context `ctx`: its
+/// type, or `i64` for literals alone. Integers that no standard type holds give none, which
+/// `E0212` rejects; none is chosen for them here (`core-calculus.md`, item 5).
+fn worked_in(ctx: Kind, what: &str) -> Flow<IntTy> {
+    match ctx {
+        Kind::Typed(Some(t)) => Ok(t),
+        Kind::Literal | Kind::Other => Ok(I64),
+        Kind::Typed(None) => broken(what),
+    }
+}
+
 /// Whether `e` is an operator of one expression with its operands, whose literals take the type
 /// of every operand of that expression that has one (`core-calculus.md`, item 5): arithmetic,
 /// unary `-`, and `~`, a bit operation or a shift of literals alone; and a literal. A bit
@@ -349,7 +360,7 @@ impl<'m> Machine<'m> {
         let (result, ret_span) = match f.syntax.body {
             // An expression body leaves by `return` too, from a branch of an `if` or an arm of
             // a `match` in it, which ends this call alone.
-            Some(Body::Expr(e)) => match self.eval(frame, e, None) {
+            Some(Body::Expr(e)) => match self.eval(frame, e, Kind::Literal) {
                 Ok(v) => {
                     let span = tree.expr(e).span;
                     (self.narrow(frame, v, declared, &result_ty, span)?, span)
@@ -357,7 +368,7 @@ impl<'m> Machine<'m> {
                 Err(Exit::Return(v, span)) => (v, span),
                 Err(e) => return Err(e),
             },
-            Some(Body::Block(b)) => match self.block(frame, b, None) {
+            Some(Body::Block(b)) => match self.block(frame, b, Kind::Literal) {
                 Ok(v) => {
                     let span = tree
                         .block(b)
@@ -396,31 +407,39 @@ impl<'m> Machine<'m> {
 
     /// The value of a block: its last statement's, when that is an expression, whose literals
     /// take `ctx` where nothing nearer gives them a type.
-    fn block(&mut self, frame: &mut Frame<'m>, b: BlockId, ctx: Option<IntTy>) -> Flow<Value> {
+    fn block(&mut self, frame: &mut Frame<'m>, b: BlockId, ctx: Kind) -> Flow<Value> {
         let tree = &frame.f.syntax.tree;
         let stmts = &tree.block(b).stmts;
         let mut last = Value::Unit;
         for (i, &s) in stmts.iter().enumerate() {
-            last = self.stmt(frame, s, if i + 1 == stmts.len() { ctx } else { None })?;
+            last = self.stmt(
+                frame,
+                s,
+                if i + 1 == stmts.len() {
+                    ctx
+                } else {
+                    Kind::Literal
+                },
+            )?;
         }
         Ok(last)
     }
 
-    fn stmt(&mut self, frame: &mut Frame<'m>, s: StmtId, ctx: Option<IntTy>) -> Flow<Value> {
+    fn stmt(&mut self, frame: &mut Frame<'m>, s: StmtId, ctx: Kind) -> Flow<Value> {
         self.step()?;
         let f = frame.f;
         let tree = &f.syntax.tree;
         match &tree.stmt(s).kind {
             StmtKind::Expr(e) => return self.eval(frame, *e, ctx),
             StmtKind::Discard(e) => {
-                self.eval(frame, *e, None)?;
+                self.eval(frame, *e, Kind::Literal)?;
             }
             StmtKind::Binding { ty, init, .. } => {
                 let Some(id) = f.resolution.stmts[s.0 as usize] else {
                     return broken("a binding statement that declares no binding");
                 };
                 let plain = f.typing.bindings[id.0 as usize].clone();
-                let v = self.eval(frame, *init, None)?;
+                let v = self.eval(frame, *init, Kind::Literal)?;
                 let declared = ty.map(|t| (tree, t));
                 let v = self.narrow(frame, v, declared, &plain, tree.expr(*init).span)?;
                 frame.slots[id.0 as usize] = Some(v);
@@ -436,7 +455,7 @@ impl<'m> Machine<'m> {
             } => self.while_loop(frame, *cond, invariants, decreases, *body)?,
             StmtKind::Guard { cond, otherwise } => {
                 if !self.cond(frame, *cond)? {
-                    self.block(frame, *otherwise, None)?;
+                    self.block(frame, *otherwise, Kind::Literal)?;
                 }
             }
             StmtKind::Return(value) => {
@@ -445,7 +464,7 @@ impl<'m> Machine<'m> {
                 };
                 let result_ty = f.syntax.result.map_or(Ty::Unit, |t| Ty::of(tree, t));
                 let span = tree.expr(*e).span;
-                let v = self.eval(frame, *e, None)?;
+                let v = self.eval(frame, *e, Kind::Literal)?;
                 let declared = f.syntax.result.map(|t| (tree, t));
                 let v = self.narrow(frame, v, declared, &result_ty, span)?;
                 return Err(Exit::Return(v, span));
@@ -486,7 +505,7 @@ impl<'m> Machine<'m> {
                 }
                 before = Some(measure);
             }
-            match self.block(frame, body, None) {
+            match self.block(frame, body, Kind::Literal) {
                 Ok(_) | Err(Exit::Continue) => {}
                 Err(Exit::Break) => return Ok(()),
                 Err(e) => return Err(e),
@@ -499,7 +518,7 @@ impl<'m> Machine<'m> {
         let tree = &frame.f.syntax.tree;
         let mut values = Vec::new();
         for &e in exprs {
-            let v = self.int(frame, e, None)?;
+            let v = self.int(frame, e, Kind::Literal)?;
             if v.is_negative() {
                 return trap(TrapKind::Decreases(tree.render_expr(e)), tree.expr(e).span);
             }
@@ -522,7 +541,7 @@ impl<'m> Machine<'m> {
         let plain = f.typing.exprs[place.0 as usize].clone();
         let declared = self.place_type(frame, &path)?;
         let new = match op {
-            AssignOp::Set => self.eval(frame, value, None)?,
+            AssignOp::Set => self.eval(frame, value, Kind::Literal)?,
             AssignOp::Compound(op) => {
                 let current = self.read(frame, &path)?;
                 // `x op= e` is `x = x op e` (item 6): under arithmetic `e`'s operands are
@@ -535,9 +554,9 @@ impl<'m> Machine<'m> {
                     | BinaryOp::Sub
                     | BinaryOp::Mul
                     | BinaryOp::Div
-                    | BinaryOp::Rem => (Kind::of(&plain).join(rt).ty(), true),
+                    | BinaryOp::Rem => (Kind::of(&plain).join(rt), true),
                     BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                        (int_ty(&plain), false)
+                        (Kind::of(&plain), false)
                     }
                     BinaryOp::Shl
                     | BinaryOp::Shr
@@ -548,7 +567,7 @@ impl<'m> Machine<'m> {
                     | BinaryOp::Lt
                     | BinaryOp::Le
                     | BinaryOp::Gt
-                    | BinaryOp::Ge => (None, false),
+                    | BinaryOp::Ge => (Kind::Literal, false),
                 };
                 let rhs = self.eval_as(frame, value, other, member)?;
                 let operands = [(current, int_ty(&plain), place), (rhs, rt.ty(), value)];
@@ -571,7 +590,7 @@ impl<'m> Machine<'m> {
         match &f.syntax.tree.expr(e).kind {
             ExprKind::Index { base, index } => {
                 let (root, mut steps) = self.place(frame, *base)?;
-                let i = self.int(frame, *index, None)?;
+                let i = self.int(frame, *index, Kind::Literal)?;
                 steps.push(Step::Index(i, f.syntax.tree.expr(e).span));
                 Ok((root, steps))
             }
@@ -738,7 +757,7 @@ impl<'m> Machine<'m> {
     }
 
     fn cond(&mut self, frame: &mut Frame<'m>, e: ExprId) -> Flow<bool> {
-        Ok(self.eval(frame, e, None)? == Value::Bool(true))
+        Ok(self.eval(frame, e, Kind::Literal)? == Value::Bool(true))
     }
 
     /// An order comparison of two integers, the left operand evaluated first.
@@ -756,27 +775,17 @@ impl<'m> Machine<'m> {
 
     /// What each operand of a comparison gives the literals of the other: its type, an
     /// array's through its elements (`core-calculus.md`, item 5).
-    fn compared(
-        &self,
-        frame: &Frame<'m>,
-        (lhs, rhs): (ExprId, ExprId),
-    ) -> (Option<IntTy>, Option<IntTy>) {
-        let ty = |e: ExprId| frame.kinds[e.0 as usize].ty();
+    fn compared(&self, frame: &Frame<'m>, (lhs, rhs): (ExprId, ExprId)) -> (Kind, Kind) {
+        let ty = |e: ExprId| frame.kinds[e.0 as usize];
         (ty(rhs), ty(lhs))
     }
 
-    fn int(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Int> {
+    fn int(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Kind) -> Flow<Int> {
         self.int_as(frame, e, ctx, false)
     }
 
     /// [`Machine::int`], of an operand of an operator of one expression where `member`.
-    fn int_as(
-        &mut self,
-        frame: &mut Frame<'m>,
-        e: ExprId,
-        ctx: Option<IntTy>,
-        member: bool,
-    ) -> Flow<Int> {
+    fn int_as(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Kind, member: bool) -> Flow<Int> {
         match self.eval_as(frame, e, ctx, member)? {
             Value::Int(i) => Ok(i),
             Value::Bool(_)
@@ -791,7 +800,7 @@ impl<'m> Machine<'m> {
     /// type an expression around `e` gives the literals among its operands, which an
     /// expression of literals alone takes; the place a value is narrowed into gives none
     /// (`core-calculus.md`, item 5).
-    fn eval(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Option<IntTy>) -> Flow<Value> {
+    fn eval(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Kind) -> Flow<Value> {
         self.eval_as(frame, e, ctx, false)
     }
 
@@ -802,7 +811,7 @@ impl<'m> Machine<'m> {
         &mut self,
         frame: &mut Frame<'m>,
         e: ExprId,
-        ctx: Option<IntTy>,
+        ctx: Kind,
         member: bool,
     ) -> Flow<Value> {
         let v = self.value(frame, e, ctx, member)?;
@@ -818,13 +827,7 @@ impl<'m> Machine<'m> {
     }
 
     /// [`Machine::eval`]'s value.
-    fn value(
-        &mut self,
-        frame: &mut Frame<'m>,
-        e: ExprId,
-        ctx: Option<IntTy>,
-        member: bool,
-    ) -> Flow<Value> {
+    fn value(&mut self, frame: &mut Frame<'m>, e: ExprId, ctx: Kind, member: bool) -> Flow<Value> {
         let f = frame.f;
         let tree = &f.syntax.tree;
         let span = tree.expr(e).span;
@@ -837,7 +840,10 @@ impl<'m> Machine<'m> {
         let here = if member && joined {
             ctx
         } else {
-            kinds[e.0 as usize].ty().or(ctx)
+            match kinds[e.0 as usize] {
+                own @ Kind::Typed(_) => own,
+                Kind::Literal | Kind::Other => ctx,
+            }
         };
         Ok(match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => Value::Int(Int::from_u128(*value)),
@@ -868,7 +874,9 @@ impl<'m> Machine<'m> {
                 UnaryOp::BitNot => {
                     let t = match kinds[operand.0 as usize] {
                         Kind::Typed(Some(t)) => t,
-                        Kind::Literal => here.unwrap_or(I64),
+                        Kind::Literal => {
+                            worked_in(here, "`~` of literals among integers no type holds")?
+                        }
                         // `E0212`: no type is chosen for integers no standard type holds.
                         Kind::Typed(None) | Kind::Other => {
                             return broken("`~` of integers no standard type holds")
@@ -905,7 +913,7 @@ impl<'m> Machine<'m> {
                     let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
                     let l = self.eval_as(frame, *lhs, here, joined)?;
                     let r = if shift {
-                        self.eval(frame, *rhs, None)?
+                        self.eval(frame, *rhs, Kind::Literal)?
                     } else {
                         self.eval_as(frame, *rhs, here, joined)?
                     };
@@ -918,13 +926,13 @@ impl<'m> Machine<'m> {
             // the indexing is given; the index takes nothing (`core-calculus.md`, item 5).
             ExprKind::Index { base, index } => {
                 let b = self.eval(frame, *base, here)?;
-                let i = self.int(frame, *index, None)?;
+                let i = self.int(frame, *index, Kind::Literal)?;
                 element(&b, i, span)?.clone()
             }
             // The base is a value first, as an index's is, so that a field read through an
             // index reads the value the base had when it was evaluated, its indexes evaluated,
             // and each checked, from left to right (`core-calculus.md`, items 10 and 12).
-            ExprKind::Field { base, name } => match self.eval(frame, *base, None)? {
+            ExprKind::Field { base, name } => match self.eval(frame, *base, Kind::Literal)? {
                 Value::Array(items) => Value::Int(Int::from_u128(items.len() as u128)),
                 Value::Struct(_, fields) => match fields.into_iter().find(|(n, _)| n == name) {
                     Some((_, v)) => v,
@@ -943,7 +951,7 @@ impl<'m> Machine<'m> {
                     let field = def.and_then(|d| d.field(&fi.name)).map(|(_, f)| f);
                     let fty = field.map_or(Ty::Any, |f| f.ty.clone());
                     let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, None)?;
+                    let v = self.eval(frame, fi.value, Kind::Literal)?;
                     let at = tree.expr(fi.value).span;
                     let v = self.narrow(frame, v, declared, &fty, at)?;
                     values.push((fi.name.clone(), v));
@@ -970,7 +978,7 @@ impl<'m> Machine<'m> {
                     let field = variant.and_then(|v| v.field(&fi.name)).map(|(_, f)| f);
                     let fty = field.map_or(Ty::Any, |f| f.ty.clone());
                     let declared = def.zip(field).map(|(d, f)| (d.tree(), f.decl));
-                    let v = self.eval(frame, fi.value, None)?;
+                    let v = self.eval(frame, fi.value, Kind::Literal)?;
                     let at = tree.expr(fi.value).span;
                     let v = self.narrow(frame, v, declared, &fty, at)?;
                     values.push((fi.name.clone(), v));
@@ -978,7 +986,7 @@ impl<'m> Machine<'m> {
                 Value::Enum(enum_name.clone(), name.clone(), values)
             }
             ExprKind::Match { scrutinee, arms } => {
-                let v = self.eval(frame, *scrutinee, None)?;
+                let v = self.eval(frame, *scrutinee, Kind::Literal)?;
                 // An integer scrutinee is narrowed into its type, which the arms cover
                 // ([`match-scrutinee-narrowing`]); literals alone are an `i64`.
                 let read = match &f.typing.exprs[scrutinee.0 as usize] {
@@ -1029,7 +1037,7 @@ impl<'m> Machine<'m> {
                         values.push(self.read(frame, &path)?);
                         places.push(Some(path));
                     } else {
-                        values.push(self.eval(frame, a.value, None)?);
+                        values.push(self.eval(frame, a.value, Kind::Literal)?);
                         places.push(None);
                     }
                     spans.push(tree.expr(a.value).span);
@@ -1161,7 +1169,7 @@ impl<'m> Machine<'m> {
         frame: &mut Frame<'m>,
         op: BinaryOp,
         [(l, lt, le), (r, rt, re)]: [(Value, Option<IntTy>, ExprId); 2],
-        ctx: Option<IntTy>,
+        ctx: Kind,
         span: Span,
     ) -> Flow<Value> {
         let tree = &frame.f.syntax.tree;
@@ -1171,14 +1179,23 @@ impl<'m> Machine<'m> {
         // A bit operation works on the operands' bits in one type: either operand's, or the
         // place's.
         let bits = |on: fn(u128, u128) -> u128| -> Flow<Value> {
-            let t = lt.or(rt).or(ctx).unwrap_or(I64);
+            let t = match lt.or(rt) {
+                Some(t) => t,
+                None => worked_in(
+                    ctx,
+                    "a bit operation of literals among integers no type holds",
+                )?,
+            };
             let x = fit(a, t, tree.expr(le).span)?.to_bits(t);
             let y = fit(b, t, tree.expr(re).span)?.to_bits(t);
             Ok(Value::Int(Int::from_bits(on(x, y), t)))
         };
         let result = match op {
             BinaryOp::Shl | BinaryOp::Shr => {
-                let t = lt.or(ctx).unwrap_or(I64);
+                let t = match lt {
+                    Some(t) => t,
+                    None => worked_in(ctx, "a shift of literals among integers no type holds")?,
+                };
                 let k = match b.to_u128() {
                     Some(k) if k < u128::from(t.bits) => k as u32,
                     _ => {

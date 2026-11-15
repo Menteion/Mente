@@ -313,6 +313,47 @@ pub fn call_observed<'m>(
     run(module, name, args, limits, Some(seen))
 }
 
+/// Calls of one module that share one thread: [`with_calls`] hands them to a closure that runs
+/// on a thread with a stack deep enough for `limits.max_depth` calls, and each call runs there,
+/// without a thread of its own. A thread costs more than a short call, on Windows many times
+/// more, so a check that makes hundreds of calls of a function makes them here.
+pub struct Calls<'m> {
+    module: &'m CheckedModule,
+    limits: Limits,
+}
+
+impl<'m> Calls<'m> {
+    /// [`call_observed`], on this thread.
+    pub fn observed<'s>(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        seen: Observer<'s>,
+    ) -> Result<(Value, Vec<Value>), Stop>
+    where
+        'm: 's,
+    {
+        eval::Machine::new(self.module, self.limits, Some(seen)).enter(name, args)
+    }
+}
+
+/// Runs `f` on one thread of the interpreter's, with [`Calls`] of `module` within `limits`;
+/// `Err` when the thread cannot start or stops unexpectedly.
+pub fn with_calls<'m, R: Send>(
+    module: &'m CheckedModule,
+    limits: Limits,
+    f: impl FnOnce(&mut Calls<'m>) -> R + Send,
+) -> Result<R, Stop> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(stack_bytes(limits.max_depth))
+            .spawn_scoped(s, || f(&mut Calls { module, limits }))
+            .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
+            .join()
+            .map_err(|_| Stop::BadArguments("the interpreter stopped unexpectedly".to_string()))
+    })
+}
+
 fn run<'m>(
     module: &'m CheckedModule,
     name: &str,

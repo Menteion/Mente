@@ -716,6 +716,10 @@ fn reached_literals(f: &CheckedFn, seen: &mut BTreeSet<String>) {
                 }
                 (From::Alone, true) => "bit operation on literals alone, narrowed into a place",
                 (From::Alone, false) => "bit operation on literals alone, of no type but i64",
+                // `E0212`: no checked program holds one.
+                (From::Unheld, _) => {
+                    "bit operation on literals alone, among integers no type holds"
+                }
             }
             .to_string(),
         );
