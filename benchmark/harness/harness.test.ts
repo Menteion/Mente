@@ -8,7 +8,9 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { callCost, KNOWN_MODELS, parseModels, requestBody, reserve, settle, worstCost, type Budget } from "./api.ts";
 import {
+  BASH,
   REPOSITORY,
+  SANDBOX,
   caseResult,
   checkOutside,
   childEnv,
@@ -17,6 +19,7 @@ import {
   hiddenPaths,
   insideAny,
   menteCaseResult,
+  namedCommand,
   printedOutcome,
   runProcess,
   sandboxed,
@@ -45,6 +48,7 @@ import {
 } from "./languages.ts";
 import { failureText, feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
 import { median, summarize, type RunRecord } from "./report.ts";
+import { own, setOwn } from "../own.mjs";
 import {
   costOf,
   extractProgram,
@@ -593,16 +597,16 @@ test("a command is wrapped in the sandbox when one is set, with every path made 
   assert.deepEqual(sandboxed("", "out/w", "rustc", ["-o", "x", "main.rs"]), ["rustc", ["-o", "x", "main.rs"]]);
   assert.deepEqual(sandboxed("", "out/w", "target/release/mn", ["check"]), [resolve("target/release/mn"), ["check"]]);
   assert.deepEqual(sandboxed("benchmark/harness/sandbox.sh", "out/w", "rustc", ["-o", "x", "main.rs"]), [
-    "bash",
+    BASH,
     [resolve("benchmark/harness/sandbox.sh"), resolve("out/w"), "rustc", "-o", "x", "main.rs"],
   ]);
   assert.deepEqual(sandboxed("sb.sh", "out/w", "out/w/main", ["0"]), [
-    "bash",
+    BASH,
     [resolve("sb.sh"), resolve("out/w"), resolve("out/w/main"), "0"],
   ]);
   // The paths to hide go first, each after --hide, made absolute.
   assert.deepEqual(sandboxed("sb.sh", "/t/w", "odin", ["build", "."], ["repo", "held"]), [
-    "bash",
+    BASH,
     [resolve("sb.sh"), "--hide", resolve("repo"), "--hide", resolve("held"), resolve("/t/w"), "odin", "build", "."],
   ]);
   assert.deepEqual(sandboxed("", "/t/w", "odin", ["build"], ["repo"]), ["odin", ["build"]]);
@@ -641,18 +645,84 @@ test("no process that runs beside the key starts mn but through the sandbox", as
   for (const plant of ['runProcess(mn, ["explain", code])', 'spawnSync(tools.mn, ["check"])', "spawn( mn, args)"]) assert.match(plant, direct, plant);
   // And by what runs, not how it is spelled (the review of 35bbe0f: `const c = tools.mn` and an
   // environment of `process.env` got past the spelling): runProcess, the harness's one way to
-  // start a process, starts mn itself only while no secret is in reach, and gives no child a
-  // variable that could hold one, whatever environment it is handed.
+  // start a process, starts only a named command while a secret is in reach, the benchmark's
+  // sandbox or a toolchain's probe; and the review of b2be87b: a shell running mn, a copy of mn
+  // under another name, and another script given to bash got past a refusal of mn by its name.
+  const refused: [string, string[]][] = [
+    [tools.mn, ["explain", "E0001"]],
+    [join("target", "release", "mn.exe"), []],
+    [BASH, ["-c", 'mn explain "$1"', "x", "E0001"]],
+    [BASH, [join(REPOSITORY, "benchmark", "harness", "leak.sh"), "/tmp", "mn", "explain"]],
+    [BASH, [SANDBOX]],
+    // The review of 41a54b6: bash found through PATH, where ~/.local/bin comes first.
+    ["bash", [SANDBOX, ".", tools.mn, "explain", "E0001"]],
+    [process.execPath, ["-e", "console.log(1)"]],
+    [join("bin", "rustc"), ["-o", "x", "main.rs"]],
+    [join("bin", "rustc"), ["--version", "--print", "sysroot"]],
+    [join("copy", "rustc"), ["--print", "cfg"]],
+    ["odin", ["run", "."]],
+  ];
+  for (const [c, a] of refused) assert.ok(!namedCommand(c, a), `${c} ${a.join(" ")} is taken for a named command`);
+  const named: [string, string[]][] = [
+    sandboxed(SANDBOX, ".", tools.mn, ["explain", "E0001"], [REPOSITORY]),
+    sandboxed(join("benchmark", "harness", "sandbox.sh"), ".", "rustc", ["-o", "main", "main.rs"]),
+    [join("toolchain", "bin", "rustc"), ["--version"]],
+    [join("toolchain", "bin", "rustc.exe"), ["--print", "sysroot"]],
+    ["odin", ["version"]],
+  ];
+  for (const [c, a] of named) assert.ok(namedCommand(c, a), `${c} ${a.join(" ")} is not taken for a named command`);
   process.env.BENCH_TEST_API_KEY = "secret";
   try {
-    const c = tools.mn;
-    await assert.rejects(runProcess(c, ["explain", "E0001"], { env: process.env, timeoutMs: 5000 }), /outside the sandbox beside a secret/);
-    await assert.rejects(runProcess(join("target", "release", "mn.exe"), [], { timeoutMs: 5000 }), /outside the sandbox beside a secret/);
-    const p = await runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_API_KEY ?? 'none')"], { env: { ...process.env }, timeoutMs: 30_000 });
-    assert.equal(p.stdout.trim(), "none");
+    for (const [c, a] of refused) await assert.rejects(runProcess(c, a, { env: process.env, timeoutMs: 5000 }), /no command the harness starts beside a secret/);
+    // A named one starts, here a probe of a rustc that is not there, and fails as a process.
+    const p = await runProcess(join(REPOSITORY, "target", "no-such-toolchain", "rustc"), ["--version"], { env: { ...process.env }, timeoutMs: 30_000 });
+    assert.equal(p.status, null);
   } finally {
     delete process.env.BENCH_TEST_API_KEY;
   }
+  // A copy of build.ts loaded afresh, which records whether a secret was in reach as it loaded.
+  let loads = 0;
+  const fresh = async () => (await import(`./build.ts?load=${++loads}`)) as typeof import("./build.ts");
+  const held = Object.entries(process.env).filter(([name]) => /key|token|secret|password|credential/i.test(name));
+  for (const [name] of held) delete process.env[name];
+  try {
+    // A secret in reach as the module loaded binds it after the secret leaves the environment,
+    // where it stays in memory (the review of 41a54b6: `delete process.env.ANTHROPIC_API_KEY`).
+    process.env.BENCH_TEST_API_KEY = "secret";
+    const loadedBeside = await fresh();
+    delete process.env.BENCH_TEST_API_KEY;
+    await assert.rejects(loadedBeside.runProcess(process.execPath, ["-e", "1"], { timeoutMs: 5000 }), /no command the harness starts beside a secret/);
+    // With no secret in reach, then or now, any command runs, and no child is given a variable
+    // that could hold one, whatever environment it is handed.
+    const loadedAlone = await fresh();
+    const p = await loadedAlone.runProcess(process.execPath, ["-e", "console.log(process.env.BENCH_TEST_TOKEN ?? 'none')"], { env: { ...process.env, BENCH_TEST_TOKEN: "" }, timeoutMs: 30_000 });
+    assert.equal(p.stdout.trim(), "none");
+  } finally {
+    delete process.env.BENCH_TEST_API_KEY;
+    for (const [name, value] of held) process.env[name] = value;
+  }
+});
+
+test("own and setOwn reach only own properties, whatever the key makes of itself", () => {
+  // The re-check of da58409: a key whose toString answered "a" first and "__proto__" after passed
+  // the check of an own "a" and then read Object.prototype, which setOwn then wrote.
+  const turning = () => {
+    let calls = 0;
+    return { toString: () => (calls++ === 0 ? "a" : "__proto__") };
+  };
+  assert.equal(own({ a: 1 }, turning()), 1);
+  assert.equal(own({}, turning()), undefined);
+  assert.equal(own({ a: 1 }, "__proto__"), undefined);
+  assert.equal(own(() => 0, "constructor"), undefined);
+  assert.equal(own([5, 6], 1), 6);
+  assert.equal(own("ab", 1), "b");
+  assert.equal(own(null, "a"), undefined);
+  const target = { a: 1 };
+  setOwn(target, turning(), 2);
+  assert.equal(target.a, 2);
+  setOwn(target, "__proto__", { shell: "/bin/sh" });
+  assert.equal(Object.getPrototypeOf(target), Object.prototype, "setOwn changed a prototype");
+  assert.equal(({} as Record<string, unknown>).shell, undefined, "setOwn polluted Object.prototype");
 });
 
 test("the processes the harness starts, the agent's programs among them, see no secret", () => {

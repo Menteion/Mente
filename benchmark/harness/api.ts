@@ -9,6 +9,8 @@
 // run of a language, so each later call reads it from the cache. Caching changes what a call
 // costs, never what the model is shown.
 
+import { own } from "../own.mjs";
+
 export const API_VERSION = "2026-10-21";
 export const MAX_TOKENS = 16000;
 /** A cache write's price, as a multiple of the input price, for 5-minute entries. */
@@ -43,8 +45,8 @@ export function parseModels(list: string): Model[] {
     .filter((m) => m !== "")
     .map((m) => {
       const priced = /^([\w.-]+)@([\d.]+)\/([\d.]+)\/([\d.]+)$/.exec(m);
-      if (priced) return { id: priced[1], input: Number(priced[2]), output: Number(priced[3]), cacheRead: Number(priced[4]) };
-      const known = KNOWN_MODELS[m];
+      if (priced) return { id: own(priced, 1), input: Number(own(priced, 2)), output: Number(own(priced, 3)), cacheRead: Number(own(priced, 4)) };
+      const known = own(KNOWN_MODELS, m);
       if (!known) throw new Error(`no prices for ${m}; name it as ${m}@<input>/<output>/<cache read> in dollars per million tokens`);
       return known;
     });

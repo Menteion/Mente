@@ -1,0 +1,13 @@
+--- src/g.rs
++++ replace + with * in g
+@@ -1,9 +1,9 @@
+ // A file whose own constant assertion fails once cargo-mutants' marker is in it: every mutant of
+ // this file fails to build, by the file's error, not the mutant's.
+ const MARK: [u8; 10] = [b'-', b'm', b'u', b't', b'a', b'n', b't', b's', b' ', b'~'];
+ const fn has_marker(s: &str) -> bool { let b = s.as_bytes(); let mut i = 0; while i + MARK.len() <= b.len() { let mut j = 0; while j < MARK.len() && b[i + j] == MARK[j] { j += 1; } if j == MARK.len() { return true; } i += 1; } false }
+ const _: () = assert!(!has_marker(include_str!("g.rs")));
+ 
+ pub fn g(a: u8) -> u8 {
+-    a + 1
++    a * /* ~ changed by cargo-mutants ~ */ 1
+ }

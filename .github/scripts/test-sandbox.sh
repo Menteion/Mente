@@ -5,9 +5,13 @@
 # the runner's user with sudo, and could fake every later step of its job.
 #
 #   /usr/bin/bash .github/scripts/test-sandbox.sh setup    once a job, before any code of the change runs
-#   /usr/bin/bash .github/scripts/test-sandbox.sh check    the canary: proves the sandbox on this runner
+#   /usr/bin/bash .github/scripts/test-sandbox.sh check    the canary: proves the sandbox on this runner, and
+#                                                          measures what it costs a process
 #   /usr/bin/bash .github/scripts/test-sandbox.sh env      what test-sandbox-env.sh evaluates: cargo's runner
-#   /usr/bin/bash .github/scripts/test-sandbox.sh ran [n]  at a step's end: n commands ran inside, 1 if not given
+#   /usr/bin/bash .github/scripts/test-sandbox.sh ran [n]  at a step's end: n commands ran inside, 1 if not given,
+#                                                          and what the sandbox has cost the job so far
+#   /usr/bin/bash .github/scripts/test-sandbox.sh bound    after the job's last `ran`: the sandbox added under a
+#                                                          tenth to the job
 #   /usr/bin/bash .github/scripts/test-sandbox.sh uid      the user the commands run as, for the memory guard
 #
 # How a command gets inside: `env` names this script as cargo's runner for the host's target
@@ -69,6 +73,10 @@ uid=4242424
 gid=4242424
 # Each command that ran inside, one a line, where no command inside can reach it.
 log=${RUNNER_TEMP:-/nonexistent}/test-sandbox-runs.log
+# What the sandbox costs this job, in microseconds, one `name value` a line: when setup began, what
+# a process costs started alone and started as many at once as the runner has cores, and the time
+# the sandbox has added to the job so far, which the canary begins and each step's `ran` adds to.
+cost=${RUNNER_TEMP:-/nonexistent}/test-sandbox-cost
 
 fail() {
   echo "::error::$1"
@@ -117,29 +125,31 @@ inner() {
     echo "test-sandbox: not the first process of a namespace of its own" >&2
     exit 2
   fi
-  workspace=$(< "$home/workspace")
+  # Each program this process starts is a cost of every test, so what the shell does itself it
+  # does here: `read`, not `$(< ...)`, and `cd -P`, not realpath.
+  read -r workspace < "$home/workspace"
   exec 8<&0 < /dev/null
   # Memory backs the temporary filesystems, so they are bounded: four tests at once write at most
   # 6 GB.
   /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=1g tmpfs "$root/tmp"
-  # Root mounts over two directories of the workspace, whose files are the change's own: where
-  # cargo sends an integration test's files (CARGO_TARGET_TMPDIR), which the test may write, and
-  # .git, which it may not read, so that the history is out of its sight (a test can still tell a
-  # mutant by other signs, which the file's header names). Each must be that very directory, no
-  # link and nothing under a link, or root would mount wherever the change aimed it, over a
-  # directory of /usr or /etc.
-  # These two are every path under the workspace that root resolves before it changes root.
-  for dir in "$workspace/target/tmp" "$workspace/.git"; do
-    if [ ! -e "$root$dir" ] && [ ! -L "$root$dir" ]; then continue; fi
-    if [ ! -d "$root$dir" ] || [ "$(/usr/bin/realpath -e -- "$root$dir")" != "$root$dir" ]; then
-      echo "test-sandbox: $dir is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere" >&2
+  # Root mounts over one directory of the workspace, whose files are the change's own: where cargo
+  # sends an integration test's files (CARGO_TARGET_TMPDIR), which the test may write. It must be
+  # that very directory, no link and nothing under a link, or root would mount wherever the change
+  # aimed it, over a directory of /usr or /etc: `cd -P` resolves every link on the way, so the
+  # directory it reaches is the one named only if there is none. It is the one path under the
+  # workspace that root resolves before it changes root; `.git`, which a test may not read, setup
+  # covered once, before any code of the change ran.
+  dir=$root$workspace/target/tmp
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    if [ ! -d "$dir" ] || ! cd -P -- "$dir" 2> /dev/null || [ "$PWD" != "$dir" ]; then
+      echo "test-sandbox: $workspace/target/tmp is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere" >&2
       exit 2
     fi
-    case "$dir" in
-      */.git) /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,mode=0555,size=4k tmpfs "$root$dir" ;;
-      *) /usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs "$root$dir" ;;
-    esac
-  done
+    # On the very directory `cd -P` reached, this shell's working directory, which mount's own
+    # /proc/self/cwd names and the kernel follows (-c: mount resolves no path itself), not on its
+    # name resolved once more, where a link put in its place since would lead elsewhere.
+    /usr/bin/mount -c -t tmpfs -o nosuid,nodev,mode=1777,size=512m tmpfs /proc/self/cwd
+  fi
   /usr/bin/mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
   cd "$root"
   /usr/sbin/pivot_root . .old
@@ -303,6 +313,70 @@ request_key_helpers() {
   done
 }
 
+# The time now, in microseconds since the epoch, from the shell itself.
+now() { printf '%s\n' "${EPOCHREALTIME//[!0-9]/}"; }
+
+# Microseconds as seconds with one decimal.
+seconds() { printf '%d.%d' $(($1 / 1000000)) $(($1 / 100000 % 10)); }
+
+# The record of what the sandbox costs this job, read into `start`, `serial`, `parallel` and
+# `added`, each a count of microseconds, or the step fails.
+read_cost() {
+  local key value
+  start='' serial='' parallel='' added=''
+  if [ ! -f "$cost" ]; then fail "no record of what the sandbox costs this job: test-sandbox.sh setup and check make it"; fi
+  while read -r key value; do
+    case "$key" in
+      start) start=$value ;;
+      serial) serial=$value ;;
+      parallel) parallel=$value ;;
+      added) added=$value ;;
+    esac
+  done < "$cost"
+  for value in "$start" "$serial" "$parallel" "$added"; do
+    case "$value" in
+      '' | *[!0-9]*) fail "the record of what the sandbox costs this job is not whole: $(/usr/bin/tr '\n' ' ' < "$cost")" ;;
+    esac
+  done
+}
+
+# The job's time since setup, in `total`, and the time the sandbox has added to it, in `share`, per
+# mille of the time without it, and one line, in `said`, that says so. The job's time is counted
+# from setup, which leaves out what ran before it, so the share is if anything too high.
+share_of_job() {
+  total=$(($(now) - start))
+  if [ "$total" -le "$added" ]; then fail "the sandbox's estimated cost, $(seconds "$added") s, is no less than the job's time since setup, $(seconds "$total") s"; fi
+  share=$((1000 * added / (total - added)))
+  said="The sandbox has added an estimated $(seconds "$added") s to the $(seconds "$total") s since setup: $((share / 10)).$((share % 10))% of the time without it, against a bound of 10% for the whole job."
+}
+
+# At the end of the job's last step that runs code of the change, after its `ran`: what the sandbox
+# added to the whole job, against a tenth of the job's time without it, the bound the decision on
+# the sandbox signed (docs/design-review.md, untrusted-test-isolation). Past it the step fails, so
+# that more tests, or a dearer sandbox, cannot cross the bound unseen. It is held once, for the
+# whole job: early in a job the canary's fixed cost outweighs the time so far.
+bound() {
+  local start serial parallel added share said total
+  if [ "${RUNNER_OS:-}" != Linux ]; then
+    echo "No sandbox on ${RUNNER_OS:-this machine}."
+    return 0
+  fi
+  read_cost
+  share_of_job
+  echo "$said" | /usr/bin/tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  # More than a tenth of the time without the sandbox: added / (total - added) > 1/10, in whole
+  # microseconds, so that no rounding of the share lets 10.09% through.
+  if [ $((11 * added)) -gt "$total" ]; then
+    fail "the sandbox has added more than a tenth to this job's time, the bound its decision signed (docs/design-review.md, untrusted-test-isolation): make it cheaper, or reopen the decision"
+  fi
+}
+
+# Whether the .git of a directory is the one setup covered in the sandbox, by device and inode, or
+# both are absent.
+same_git() {
+  [ "$(< "$home/git")" = "$(/usr/bin/stat -c '%d:%i' -- "$1/.git" 2> /dev/null)" ]
+}
+
 # Whether a mount is read-only.
 read_only() {
   case ",$(/usr/bin/findmnt -n -o VFS-OPTIONS -M "$1")," in
@@ -367,6 +441,19 @@ setup_as_root() {
     /usr/bin/mount --bind "$dir" "$root$dir"
     /usr/bin/mount -o remount,bind,ro,nosuid,nodev "$root$dir"
   done
+  # The workspace's .git, empty and read-only in the sandbox, so that the history is out of a
+  # test's sight (a test can still tell a mutant by other signs, which the file's header names).
+  # Mounted once, below, where no code of the change has run: checkout made it, a directory of its
+  # own, which must be that very directory, no link and nothing under a link. The device and inode
+  # it covers are kept, and each step's `env` checks that the workspace's .git is still that one.
+  if [ -e "$workspace/.git" ] || [ -L "$workspace/.git" ]; then
+    if [ ! -d "$workspace/.git" ] || [ "$(/usr/bin/realpath -e -- "$workspace/.git")" != "$workspace/.git" ]; then
+      fail "$workspace/.git is a link, lies under one or is no directory: root mounts nothing through a path the change can aim elsewhere"
+    fi
+    /usr/bin/stat -c '%d:%i' -- "$workspace/.git" > "$home/git"
+  else
+    : > "$home/git"
+  fi
   for node in null zero full random urandom; do
     : > "$root/dev/$node"
     /usr/bin/mount --bind "/dev/$node" "$root/dev/$node"
@@ -376,8 +463,18 @@ setup_as_root() {
   /usr/bin/ln -s /proc/self/fd/1 "$root/dev/stdout"
   /usr/bin/ln -s /proc/self/fd/2 "$root/dev/stderr"
   /usr/bin/mount -o remount,ro,nosuid,nodev "$root"
-  # Nothing mounted later on the runner's own tree shows up in the sandbox's.
+  # Nothing mounted later on the runner's own tree shows up in the sandbox's, and nothing mounted on
+  # the sandbox's shows up in the runner's: the workspace's bind shares its mounts with the
+  # workspace itself until it is private.
   /usr/bin/mount --make-rprivate "$root"
+  # Only now the empty .git, so that it covers the sandbox's view of the workspace alone: mounted
+  # before, it would also have covered the runner's own .git, and with it the history every later
+  # step reads.
+  if [ -s "$home/git" ]; then
+    /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,mode=0555,size=4k tmpfs "$root$workspace/.git"
+    if /usr/bin/findmnt -n -M "$workspace/.git" > /dev/null; then fail "the sandbox's empty .git covers the runner's own $workspace/.git too"; fi
+    if ! read_only "$root$workspace/.git"; then fail "$root$workspace/.git of the sandbox is not read-only"; fi
+  fi
   for dir in "$root" "$root/usr" "$root/etc" "$root$workspace"; do
     if ! read_only "$dir"; then fail "$dir of the sandbox is not read-only"; fi
   done
@@ -390,6 +487,7 @@ setup() {
     return 0
   fi
   if [ -L "$0" ]; then fail "$0 is a link: root copies and runs the workspace's own file, not what a link names"; fi
+  printf 'start %s\n' "$(now)" > "$cost"
   here=$(/usr/bin/dirname "$(/usr/bin/realpath "$0")")
   workspace=$(/usr/bin/realpath "$GITHUB_WORKSPACE")
   # The controls of the routes setup closes for every process, taken just before it closes them:
@@ -448,6 +546,11 @@ env_lines() {
   if [ -n "$(request_key_helpers)" ]; then fail "a request for a key would start keyutils' helper as root again: $(request_key_helpers | /usr/bin/tr '\n' ' ')"; fi
   if [ "$(< /proc/sys/user/max_user_namespaces)" != 0 ]; then fail "a process could make a user namespace again"; fi
   if [ "$(< /proc/sys/kernel/modprobe)" != "$home/modprobe-off" ] || [ -e "$home/modprobe-off" ]; then fail "a socket could have the kernel start modprobe as root again"; fi
+  # The .git setup covered is still the workspace's: one made again since would be in sight of the
+  # tests, beside the empty one, which covers the old.
+  if ! same_git "$(< "$home/workspace")"; then
+    fail "the workspace's .git is not the one setup covered in the sandbox: it was made again after setup, or removed"
+  fi
   : > "$log"
   printf "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
   printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
@@ -456,9 +559,13 @@ env_lines() {
 # Whether the step's tools handed commands to the sandbox at all: it fails a step in which cargo
 # ignored the runner, as it would for a target spelled wrong or after a change of a tool. It is
 # no proof for each command: it counts the wrapper's lines, tests and nextest's lists alike, and
-# code that had already run outside the sandbox could write them itself.
+# code that had already run outside the sandbox could write them itself. Then what the step's
+# commands cost: each at the cost the canary measured for processes started as many at once as the
+# runner has cores, as nextest runs the tests, and one more at the cost of a process started alone,
+# for a step whose one command ran by itself; added to the job's, and reported. `bound` holds the
+# whole job's to a tenth, at its end.
 ran() {
-  local need=${1:-1} count
+  local need=${1:-1} count start serial parallel added share said total
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
     return 0
@@ -472,6 +579,11 @@ ran() {
     fail "$count commands of this step ran in the sandbox, where at least $need run the code of the change: cargo, nextest or cargo-mutants did not hand them to it"
   fi
   echo "Commands of this step that ran in the sandbox: $count"
+  read_cost
+  added=$((added + count * parallel + serial))
+  printf 'start %s\nserial %s\nparallel %s\nadded %s\n' "$start" "$serial" "$parallel" "$added" > "$cost"
+  share_of_job
+  echo "$said"
 }
 
 # What a command can reach, one line a route: run by the canary once as the runner's user and
@@ -610,7 +722,7 @@ probe_outlive() {
 # end, by SIGTERM as nextest stops a test and by SIGKILL, before the command has started or after,
 # ends the namespace. No crash in it starts the runner's core handler.
 check() {
-  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay
+  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay cores costs serial parallel began
   declare -A outside in_sandbox
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
@@ -746,16 +858,62 @@ check() {
     /usr/bin/sudo -n /usr/bin/pkill -KILL -f "$marker-early" || true
   fi
 
-  # What the sandbox costs a process.
-  start=$(/usr/bin/date +%s%N)
-  for k in $(/usr/bin/seq 20); do /usr/bin/true; done
-  direct=$((($(/usr/bin/date +%s%N) - start) / 20000))
-  start=$(/usr/bin/date +%s%N)
-  for k in $(/usr/bin/seq 20); do /usr/bin/bash "$self" run /usr/bin/true; done
-  inside=$((($(/usr/bin/date +%s%N) - start) / 20000))
+  # What the sandbox costs a process, which each step's `ran` counts against the bound: started
+  # alone, the median of 20 differences, each between a process in the sandbox and one as the
+  # runner's user; and started as many at once as the runner has cores, as nextest runs the tests,
+  # the median of seven rounds, each the time a batch of 4 processes on every core took in the
+  # sandbox less the time it took as the runner's user, a process's share of it. Every step of the
+  # job counts its commands at that cost, so one sample made noisy by a busy moment of the runner
+  # would move the whole job's estimate: a median of seven short rounds sets aside up to three such
+  # moments, where one of three set aside one (the final pass of ad38011 found a sample 2.4 times
+  # the usual enough to take the x86-64 Rust job past the bound).
+  cores=$(/usr/bin/nproc)
+  costs=()
+  for k in $(/usr/bin/seq 20); do
+    start=$(now)
+    /usr/bin/true
+    direct=$(($(now) - start))
+    start=$(now)
+    /usr/bin/bash "$self" run /usr/bin/true
+    inside=$(($(now) - start))
+    costs+=("$((inside - direct))")
+  done
+  serial=$(printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 10p)
+  # A batch: on each core, 4 processes one after another, in the sandbox or not; its time.
+  # A batch fails when any process of any lane failed: each lane stops at its first failure, and
+  # each lane's own status is waited for, not only the last one's.
+  batch() {
+    local core pids=() begin pid failed=0
+    begin=$(now)
+    for core in $(/usr/bin/seq "$cores"); do
+      if [ "$1" = inside ]; then
+        (for k in 1 2 3 4; do /usr/bin/bash "$self" run /usr/bin/true || exit 1; done) &
+      else
+        (for k in 1 2 3 4; do /usr/bin/true || exit 1; done) &
+      fi
+      pids+=("$!")
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+    if [ "$failed" != 0 ]; then return 1; fi
+    echo $(($(now) - begin))
+  }
+  costs=()
+  for k in 1 2 3 4 5 6 7; do
+    if ! inside=$(batch inside) || ! direct=$(batch direct); then
+      problem "a process of the canary's batches failed, so it could not measure what the sandbox costs a process"
+      costs=()
+      break
+    fi
+    costs+=("$(((inside - direct) / (4 * cores)))")
+  done
+  parallel=$(printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 4p)
+  # A cost of 0 or less is no measurement: every process in the sandbox costs more than one out of it.
+  case "$serial:$parallel" in
+    *-* | :* | *: | *[!0-9:]* | 0:* | *:0) problem "the canary could not measure what the sandbox costs a process: alone $serial us, $cores at once $parallel us" ;;
+  esac
   {
     echo
-    echo "A process started and ended, mean of 20: $((direct / 1000)).$(printf '%03d' $((direct % 1000))) ms as the runner's user, $((inside / 1000)).$(printf '%03d' $((inside % 1000))) ms in the sandbox."
+    echo "A process started and ended in the sandbox costs $((serial / 1000)).$(printf '%03d' $((serial % 1000))) ms more than as the runner's user when it is started alone, the median of 20, and $((parallel / 1000)).$(printf '%03d' $((parallel % 1000))) ms when $cores are started at once, the median of seven rounds."
   } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
 
   # The probe crashed two processes in the sandbox, one at a core limit it had lowered to 0. The
@@ -770,10 +928,22 @@ check() {
     problem "a crash of the canary started the runner's core handler: $handled"
   fi
 
+  # The check each step's `env` makes, that the workspace's .git is still the one setup covered:
+  # true of the workspace, false of a directory whose .git is another.
+  /usr/bin/mkdir -p "$work/other/.git"
+  if ! same_git "$(< "$home/workspace")"; then problem "the workspace's .git is not the one setup covered in the sandbox"; fi
+  if same_git "$work/other"; then problem "the check of .git takes another directory's .git for the one setup covered"; fi
+
   kill "$decoy" "$listener" 2> /dev/null || true
   /usr/bin/ipcrm -m "$shm" 2> /dev/null || true
   /usr/bin/rm -rf "$work" target/test-sandbox-probe
   if [ "$failed" != 0 ]; then exit 1; fi
+  # What the sandbox has cost the job so far: setup and the canary, all of it the sandbox's.
+  began=$(/usr/bin/sed -n 's/^start //p' "$cost" 2> /dev/null || true)
+  case "$began" in
+    '' | *[!0-9]*) fail "setup recorded no time it began: test-sandbox.sh setup runs first" ;;
+  esac
+  printf 'start %s\nserial %s\nparallel %s\nadded %s\n' "$began" "$serial" "$parallel" "$(($(now) - began))" > "$cost"
   echo "The sandbox denies the tests every route the canary tries, and gives them what they need."
 }
 
@@ -784,6 +954,7 @@ case "${1:-}" in
   env) env_lines ;;
   uid) echo "$uid" ;;
   ran) ran "${2:-}" ;;
+  bound) bound ;;
   probe)
     shift
     probe "$@"
@@ -791,7 +962,7 @@ case "${1:-}" in
   probe-outlive) probe_outlive "$2" ;;
   check) check ;;
   *)
-    echo "usage: /usr/bin/bash .github/scripts/test-sandbox.sh setup|check|env|ran [n]"
+    echo "usage: /usr/bin/bash .github/scripts/test-sandbox.sh setup|check|env|ran [n]|bound"
     exit 2
     ;;
 esac

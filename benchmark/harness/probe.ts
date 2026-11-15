@@ -27,6 +27,7 @@ import {
   userPrompt,
   type Task,
 } from "./tasks.ts";
+import { own } from "../own.mjs";
 
 const MODEL = "claude-sonnet-5-5";
 const API_VERSION = "2026-10-21";
@@ -37,7 +38,7 @@ const PRICE_OUTPUT = 10;
 
 function option(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
-  return at > 0 && at + 1 < process.argv.length ? process.argv[at + 1] : fallback;
+  return at > 0 && at + 1 < process.argv.length ? own(process.argv, at + 1) : fallback;
 }
 
 /** The public M1 solve tasks, in the order of their ids. */
@@ -154,8 +155,8 @@ async function main(): Promise<void> {
       const cost = costOf(reply.usage, PRICE_INPUT, PRICE_OUTPUT);
       record.spent += cost;
       const name = `${task.id}-${run}`;
-      const module = `module probe\n\n${extractProgram(reply.text)}`;
-      writeFileSync(join(out, `${name}.mn`), module);
+      const source = `module probe\n\n${extractProgram(reply.text)}`;
+      writeFileSync(join(out, `${name}.mn`), source);
       writeFileSync(join(out, `${name}.reply.md`), reply.text);
       record.programs.push({
         task: task.id,

@@ -14,6 +14,7 @@
 // results); a later value form throws until the harness writes it.
 
 import type { Case } from "./tasks.ts";
+import { own } from "../own.mjs";
 
 export type Lang = "mente" | "rust" | "odin";
 
@@ -95,9 +96,9 @@ export function splitTop(text: string): string[] {
   let depth = 0;
   let start = 0;
   for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
+    const ch = own(text, i);
     if (ch === '"') {
-      for (i++; i < text.length && text[i] !== '"'; i++) if (text[i] === "\\") i++;
+      for (i++; i < text.length && own(text, i) !== '"'; i++) if (own(text, i) === "\\") i++;
     } else if ("([{<".includes(ch)) depth++;
     else if (")]}>".includes(ch)) depth--;
     else if (ch === "," && depth === 0) {
@@ -112,19 +113,19 @@ export function splitTop(text: string): string[] {
 function parseRange(text: string): Range {
   const m = /^(.+?)(\.\.=?)(.+)$/.exec(text.trim());
   if (!m) throw new Error(`\`${text}\` is not a range`);
-  return { lo: m[1].trim(), hi: m[3].trim(), inclusive: m[2] === "..=" };
+  return { lo: own(m, 1).trim(), hi: own(m, 3).trim(), inclusive: own(m, 2) === "..=" };
 }
 
 /** Reads a neutral type. */
 export function parseType(text: string): Type {
   const t = text.trim();
   const refined = /^(\w+) in (.+)$/.exec(t);
-  if (refined && INTEGERS.includes(refined[1])) {
-    return { kind: "int", name: refined[1], range: parseRange(refined[2]) };
+  if (refined && INTEGERS.includes(own(refined, 1))) {
+    return { kind: "int", name: own(refined, 1), range: parseRange(own(refined, 2)) };
   }
-  if (refined && refined[1] === "f64") return { kind: "f64", unit: refined[2].trim() };
+  if (refined && own(refined, 1) === "f64") return { kind: "f64", unit: own(refined, 2).trim() };
   const array = /^\[(\d+)\](.+)$/.exec(t);
-  if (array) return { kind: "array", len: Number(array[1]), elem: parseType(array[2]) };
+  if (array) return { kind: "array", len: Number(own(array, 1)), elem: parseType(own(array, 2)) };
   if (t === "()") return { kind: "unit" };
   if (INTEGERS.includes(t)) return { kind: "int", name: t };
   if (t === "bool") return { kind: "bool" };
@@ -132,25 +133,25 @@ export function parseType(text: string): Type {
   if (t === "f64") return { kind: "f64" };
   const applied = /^(\w+)<(.*)>(\s+layout soa)?$/.exec(t);
   if (applied) {
-    const args = splitTop(applied[2]);
+    const args = splitTop(own(applied, 2));
     const one = (kind: string): Type => {
       if (args.length !== 1) throw new Error(`\`${t}\`: ${kind} takes one type`);
-      return parseType(args[0]);
+      return parseType(own(args, 0));
     };
-    if (applied[3] && applied[1] !== "list") throw new Error(`\`${t}\`: only a list has a layout`);
-    switch (applied[1]) {
+    if (own(applied, 3) && own(applied, 1) !== "list") throw new Error(`\`${t}\`: only a list has a layout`);
+    switch (own(applied, 1)) {
       case "slice":
         return { kind: "slice", elem: one("slice") };
       case "list":
-        return { kind: "list", elem: one("list"), soa: Boolean(applied[3]) };
+        return { kind: "list", elem: one("list"), soa: Boolean(own(applied, 3)) };
       case "option":
         return { kind: "option", elem: one("option") };
       case "result":
         if (args.length !== 2) throw new Error(`\`${t}\`: result takes two types`);
-        return { kind: "result", ok: parseType(args[0]), err: parseType(args[1]) };
+        return { kind: "result", ok: parseType(own(args, 0)), err: parseType(own(args, 1)) };
       case "fixed":
         if (args.length !== 2 || !args.every((a) => /^\d+$/.test(a))) throw new Error(`\`${t}\`: fixed takes two bit counts`);
-        return { kind: "fixed", int: Number(args[0]), frac: Number(args[1]) };
+        return { kind: "fixed", int: Number(own(args, 0)), frac: Number(own(args, 1)) };
     }
   }
   if (/^[A-Z]\w*$/.test(t)) return { kind: "named", name: t };
@@ -159,21 +160,21 @@ export function parseType(text: string): Type {
 
 /** Reads a task's neutral signature: its header line, then its `requires` and `ensures` lines. */
 export function parseSignature(lines: string[]): Signature {
-  const head = (lines[0] ?? "").trim();
+  const head = (own(lines, 0) ?? "").trim();
   const start = /^(\w+)(?:<([^>]*)>)?\(/.exec(head);
   if (!start) throw new Error(`not a signature: ${head}`);
-  let i = start[0].length;
+  let i = own(start, 0).length;
   for (let depth = 1; depth > 0; i++) {
     if (i >= head.length) throw new Error(`not a signature: ${head}`);
-    if (head[i] === "(") depth++;
-    else if (head[i] === ")") depth--;
+    if (own(head, i) === "(") depth++;
+    else if (own(head, i) === ")") depth--;
   }
-  const inner = head.slice(start[0].length, i - 1);
+  const inner = head.slice(own(start, 0).length, i - 1);
   let rest = head.slice(i).trim();
   let effects: string[] = [];
   const uses = /(?:^|\s)uses\s+(.+)$/.exec(rest);
   if (uses) {
-    effects = uses[1].split(",").map((e) => e.trim());
+    effects = own(uses, 1).split(",").map((e) => e.trim());
     rest = rest.slice(0, uses.index).trim();
   }
   let result: Type | null = null;
@@ -182,21 +183,21 @@ export function parseSignature(lines: string[]): Signature {
   const params = splitTop(inner).map((p) => {
     const m = /^(mut\s+)?(\w+):\s*(.+)$/.exec(p);
     if (!m) throw new Error(`not a parameter: ${p}`);
-    return { name: m[2], mut: Boolean(m[1]), type: parseType(m[3]) };
+    return { name: own(m, 2), mut: Boolean(own(m, 1)), type: parseType(own(m, 3)) };
   });
-  const generics = splitTop(start[2] ?? "").map((g) => {
+  const generics = splitTop(own(start, 2) ?? "").map((g) => {
     const m = /^(\w+)(?::\s*(\w+))?$/.exec(g);
     if (!m) throw new Error(`not a type parameter: ${g}`);
-    return { name: m[1], bound: m[2] ?? "" };
+    return { name: own(m, 1), bound: own(m, 2) ?? "" };
   });
   const requires: string[] = [];
   const ensures: string[] = [];
   for (const line of lines.slice(1)) {
     const m = /^(requires|ensures)\s+(.+)$/.exec(line.trim());
     if (!m) throw new Error(`not a contract: ${line}`);
-    (m[1] === "requires" ? requires : ensures).push(m[2]);
+    (own(m, 1) === "requires" ? requires : ensures).push(own(m, 2));
   }
-  return { name: start[1], generics, params, result, effects, requires, ensures };
+  return { name: own(start, 1), generics, params, result, effects, requires, ensures };
 }
 
 /** Reads a task's `## Types`: records, enums and layout records, one or more lines each. */
@@ -207,30 +208,30 @@ export function parseTypes(lines: string[]): Decl[] {
   for (const line of lines) {
     if (line.trim() === "") continue;
     if (depth === 0) groups.push([line]);
-    else groups[groups.length - 1].push(line);
+    else own(groups, groups.length - 1).push(line);
     depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
   }
   return groups.map((group): Decl => {
     const text = group.join("\n").trim();
     const layout = /^layout record (\w+)/.exec(text);
-    if (layout) return { kind: "layout", name: layout[1], lines: group };
+    if (layout) return { kind: "layout", name: own(layout, 1), lines: group };
     const record = /^record (\w+)\s*\{([\s\S]*)\}$/.exec(text);
     if (record) {
-      const fields = splitTop(record[2]).map((f) => {
+      const fields = splitTop(own(record, 2)).map((f) => {
         const m = /^(\w+):\s*(.+)$/.exec(f);
         if (!m) throw new Error(`not a field: ${f}`);
-        return { name: m[1], type: parseType(m[2]) };
+        return { name: own(m, 1), type: parseType(own(m, 2)) };
       });
-      return { kind: "record", name: record[1], fields };
+      return { kind: "record", name: own(record, 1), fields };
     }
     const en = /^enum (\w+)\s*\{([\s\S]*)\}$/.exec(text);
     if (en) {
-      const variants = splitTop(en[2]).map((v) => {
+      const variants = splitTop(own(en, 2)).map((v) => {
         const m = /^(\w+)(?:\((.*)\))?$/.exec(v);
         if (!m) throw new Error(`not a variant: ${v}`);
-        return { name: m[1], fields: splitTop(m[2] ?? "").map(parseType) };
+        return { name: own(m, 1), fields: splitTop(own(m, 2) ?? "").map(parseType) };
       });
-      return { kind: "enum", name: en[1], variants };
+      return { kind: "enum", name: own(en, 1), variants };
     }
     throw new Error(`not a declaration: ${text}`);
   });
@@ -242,12 +243,12 @@ interface Cursor {
 }
 
 function skipSpace(c: Cursor): void {
-  while (c.i < c.s.length && /\s/.test(c.s[c.i])) c.i++;
+  while (c.i < c.s.length && /\s/.test(own(c.s, c.i))) c.i++;
 }
 
 function expect(c: Cursor, ch: string): void {
   skipSpace(c);
-  if (c.s[c.i] !== ch) throw new Error(`expected \`${ch}\` at ${c.i} in \`${c.s}\``);
+  if (own(c.s, c.i) !== ch) throw new Error(`expected \`${ch}\` at ${c.i} in \`${c.s}\``);
   c.i++;
 }
 
@@ -255,14 +256,14 @@ function expect(c: Cursor, ch: string): void {
 function valuesUntil(c: Cursor, close: string): Value[] {
   const items: Value[] = [];
   skipSpace(c);
-  if (c.s[c.i] === close) {
+  if (own(c.s, c.i) === close) {
     c.i++;
     return items;
   }
   for (;;) {
     items.push(valueAt(c));
     skipSpace(c);
-    if (c.s[c.i] === ",") c.i++;
+    if (own(c.s, c.i) === ",") c.i++;
     else {
       expect(c, close);
       return items;
@@ -285,7 +286,7 @@ function valueAt(c: Cursor): Value {
     c.i++;
     const fields: { name: string; value: Value }[] = [];
     skipSpace(c);
-    if (c.s[c.i] === "}") {
+    if (own(c.s, c.i) === "}") {
       c.i++;
       return { kind: "record", fields };
     }
@@ -293,11 +294,11 @@ function valueAt(c: Cursor): Value {
       skipSpace(c);
       const name = /^\w+/.exec(c.s.slice(c.i));
       if (!name) throw new Error(`expected a field name at ${c.i} in \`${c.s}\``);
-      c.i += name[0].length;
+      c.i += own(name, 0).length;
       expect(c, ":");
-      fields.push({ name: name[0], value: valueAt(c) });
+      fields.push({ name: own(name, 0), value: valueAt(c) });
       skipSpace(c);
-      if (c.s[c.i] === ",") c.i++;
+      if (own(c.s, c.i) === ",") c.i++;
       else {
         expect(c, "}");
         return { kind: "record", fields };
@@ -306,32 +307,32 @@ function valueAt(c: Cursor): Value {
   }
   if (rest.startsWith('"')) {
     let value = "";
-    for (c.i++; c.s[c.i] !== '"'; c.i++) {
+    for (c.i++; own(c.s, c.i) !== '"'; c.i++) {
       if (c.i >= c.s.length) throw new Error(`an unclosed string in \`${c.s}\``);
-      if (c.s[c.i] === "\\") {
+      if (own(c.s, c.i) === "\\") {
         c.i++;
         const escaped: Record<string, string> = { '"': '"', "\\": "\\", n: "\n", t: "\t", r: "\r" };
-        if (!(c.s[c.i] in escaped)) throw new Error(`the escape \\${c.s[c.i]} in \`${c.s}\``);
-        value += escaped[c.s[c.i]];
-      } else value += c.s[c.i];
+        if (!(own(c.s, c.i) in escaped)) throw new Error(`the escape \\${own(c.s, c.i)} in \`${c.s}\``);
+        value += own(escaped, own(c.s, c.i));
+      } else value += own(c.s, c.i);
     }
     c.i++;
     return { kind: "string", value };
   }
   const number = /^-?\d+(\.\d+)?([eE][+-]?\d+)?/.exec(rest);
   if (number) {
-    c.i += number[0].length;
-    return number[1] || number[2] ? { kind: "float", text: number[0] } : { kind: "int", text: number[0] };
+    c.i += own(number, 0).length;
+    return own(number, 1) || own(number, 2) ? { kind: "float", text: own(number, 0) } : { kind: "int", text: own(number, 0) };
   }
   const word = /^[A-Za-z_]\w*/.exec(rest);
   if (word) {
-    c.i += word[0].length;
-    if (word[0] === "true" || word[0] === "false") return { kind: "bool", value: word[0] === "true" };
-    if (c.s[c.i] === "(") {
+    c.i += own(word, 0).length;
+    if (own(word, 0) === "true" || own(word, 0) === "false") return { kind: "bool", value: own(word, 0) === "true" };
+    if (own(c.s, c.i) === "(") {
       c.i++;
-      return { kind: "variant", name: word[0], args: valuesUntil(c, ")") };
+      return { kind: "variant", name: own(word, 0), args: valuesUntil(c, ")") };
     }
-    return { kind: "variant", name: word[0], args: [] };
+    return { kind: "variant", name: own(word, 0), args: [] };
   }
   throw new Error(`not a value at ${c.i} in \`${c.s}\``);
 }
@@ -349,11 +350,11 @@ export function parseValue(text: string): Value {
 export function parseCall(text: string): Call {
   const m = /^(\w+)(?:<([^>]*)>)?\(([\s\S]*)\)$/.exec(text.trim());
   if (!m) throw new Error(`not a call: ${text}`);
-  const args = splitTop(m[3]).map((a) => {
+  const args = splitTop(own(m, 3)).map((a) => {
     const marked = /^mut\s+([\s\S]+)$/.exec(a);
-    return { mut: Boolean(marked), value: parseValue(marked ? marked[1] : a) };
+    return { mut: Boolean(marked), value: parseValue(marked ? own(marked, 1) : a) };
   });
-  return { name: m[1], typeArgs: splitTop(m[2] ?? ""), args };
+  return { name: own(m, 1), typeArgs: splitTop(own(m, 2) ?? ""), args };
 }
 
 /** A case's expected result and what each `mut` argument must hold afterwards, as written. */
@@ -602,7 +603,7 @@ function checkCall(sig: Signature, call: Call): void {
     throw new Error(`\`${sig.name}\` takes ${sig.params.length} arguments, not ${call.args.length}`);
   }
   call.args.forEach((a, i) => {
-    if (a.mut !== sig.params[i].mut) throw new Error(`argument ${i + 1} of \`${sig.name}\` is ${sig.params[i].mut ? "" : "not "}mut`);
+    if (a.mut !== own(sig.params, i).mut) throw new Error(`argument ${i + 1} of \`${sig.name}\` is ${own(sig.params, i).mut ? "" : "not "}mut`);
   });
 }
 
@@ -615,7 +616,7 @@ export function rustExample(sig: Signature, c: Case): string[] {
   checkCall(sig, call);
   const lines: string[] = [];
   const args = call.args.map((a, i) => {
-    const p = sig.params[i];
+    const p = own(sig.params, i);
     if (!p.mut) return rustLiteral(a.value, p.type);
     lines.push(`let mut ${p.name} = ${rustLiteral(a.value, p.type)};`);
     return `&mut ${p.name}`;
@@ -626,7 +627,7 @@ export function rustExample(sig: Signature, c: Case): string[] {
   if (expected.value !== null) lines.push(`assert_eq!(${expr}, ${rustLiteral(parseValue(expected.value), resultType)});`);
   else lines.push(`${expr};`);
   const muts = sig.params.filter((p) => p.mut);
-  expected.leaves.forEach((w, i) => lines.push(`assert_eq!(${muts[i].name}, ${rustLiteral(parseValue(w), muts[i].type)});`));
+  expected.leaves.forEach((w, i) => lines.push(`assert_eq!(${own(muts, i).name}, ${rustLiteral(parseValue(w), own(muts, i).type)});`));
   return lines;
 }
 
@@ -636,7 +637,7 @@ export function odinExample(sig: Signature, c: Case): string[] {
   checkCall(sig, call);
   const lines: string[] = [];
   const args = call.args.map((a, i) => {
-    const p = sig.params[i];
+    const p = own(sig.params, i);
     if (!p.mut) return odinLiteral(a.value, p.type);
     lines.push(`${p.name} := ${odinLiteral(a.value, p.type)}`);
     return `&${p.name}`;
@@ -648,7 +649,7 @@ export function odinExample(sig: Signature, c: Case): string[] {
     lines.push(`assert(${expr} == ${odinLiteral(parseValue(expected.value), sig.result)})`);
   } else lines.push(expr);
   const muts = sig.params.filter((p) => p.mut);
-  expected.leaves.forEach((w, i) => lines.push(`assert(${muts[i].name} == ${odinLiteral(parseValue(w), muts[i].type)})`));
+  expected.leaves.forEach((w, i) => lines.push(`assert(${own(muts, i).name} == ${odinLiteral(parseValue(w), own(muts, i).type)})`));
   return lines;
 }
 
@@ -705,7 +706,7 @@ function rustCase(sig: Signature, c: Case): string[] {
   checkCall(sig, call);
   const lines: string[] = [];
   const args = call.args.map((a, i) => {
-    const p = sig.params[i];
+    const p = own(sig.params, i);
     const literal = rustLiteral(a.value, p.type);
     if (p.mut) {
       lines.push(`let mut bench_arg${i}: ${rustType(p.type, "owned")} = ${literal};`);
@@ -772,7 +773,7 @@ function odinCase(sig: Signature, c: Case): string[] {
   checkCall(sig, call);
   const lines: string[] = [];
   const args = call.args.map((a, i) => {
-    const p = sig.params[i];
+    const p = own(sig.params, i);
     lines.push(`bench_arg${i}: ${odinType(p.type)} = ${odinLiteral(a.value, p.type, false)}`);
     return p.mut ? `&bench_arg${i}` : `bench_arg${i}`;
   });
@@ -827,7 +828,7 @@ export function odinProgram(sig: Signature, cases: Case[]): string {
 export function printedParts(stdout: string): { result: string; leaves: string[] } {
   const lines = stdout.trim().split(/\r?\n/);
   return {
-    result: lines[0] ?? "",
+    result: own(lines, 0) ?? "",
     leaves: lines.filter((l) => l.startsWith("leaves ")).map((l) => l.slice("leaves ".length)),
   };
 }

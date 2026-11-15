@@ -22,7 +22,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { REPOSITORY, childEnv, insideAny, sandboxed } from "./build.ts";
+import { REPOSITORY, childEnv, insideAny, namedCommand, sandboxed } from "./build.ts";
 import {
   costOf,
   extractProgram,
@@ -38,6 +38,7 @@ import {
   type CaseResult,
   type Task,
 } from "./tasks.ts";
+import { own } from "../own.mjs";
 
 const API_VERSION = "2026-10-21";
 const MAX_TOKENS = 16000;
@@ -52,7 +53,7 @@ const MODELS = [
 
 function option(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
-  return at > 0 && at + 1 < process.argv.length ? process.argv[at + 1] : fallback;
+  return at > 0 && at + 1 < process.argv.length ? own(process.argv, at + 1) : fallback;
 }
 
 /** The public tasks of `dir`, in the order of their ids. */
@@ -109,10 +110,14 @@ interface Reported {
 /** The sandbox and the directory every `mn` call runs in, set once by main(). */
 const confined = { sandbox: "", workdir: "" };
 
-/** Runs `mn` on an agent's program: through the sandbox, with no secret in its environment. */
+/**
+ * Runs `mn` on an agent's program: through the benchmark's own sandbox, the one command this
+ * process starts beside the key (`namedCommand`), with no secret in its environment.
+ */
 function mnSync(mn: string, args: string[], timeout?: number) {
   if (!confined.sandbox) throw new Error("an agent's program would run outside the sandbox");
   const [cmd, argv] = sandboxed(confined.sandbox, confined.workdir, mn, args);
+  if (!namedCommand(cmd, argv)) throw new Error(`${confined.sandbox} is not the benchmark's sandbox, benchmark/harness/sandbox.sh`);
   return spawnSync(cmd, argv, { encoding: "utf8", cwd: confined.workdir, env: childEnv(), ...(timeout ? { timeout } : {}) });
 }
 
@@ -149,7 +154,7 @@ const classes = new Map<string, string>();
 function failureClass(mn: string, code: string): string {
   if (!classes.has(code)) {
     const text = mnSync(mn, ["explain", code]).stdout ?? "";
-    classes.set(code, /Failure class: ([^.]+)\./.exec(text)?.[1] ?? "unknown");
+    classes.set(code, own(/Failure class: ([^.]+)\./.exec(text), 1) ?? "unknown");
   }
   return classes.get(code) ?? "unknown";
 }

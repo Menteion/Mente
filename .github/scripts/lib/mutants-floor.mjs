@@ -27,7 +27,9 @@
 //
 // `evidence` prints each mutant whose outcome its log does not show: caught without nextest's exit
 // for a failed run, a failed test and nextest's own line, before the tests start, that it hands
-// them to the sandbox; unviable without a failed build and a compiler's error. What it stops, and
+// them to the sandbox; unviable without a failed build whose every error, read from rustc's JSON
+// diagnostics in the log, has a span inside the mutant's own change, the lines and columns its
+// diff changed. What it stops, and
 // what it does not: it catches a test tool that is missing or broken, and a stub
 // left in its place that exits at once. It does not stop code of the change that sets out to
 // defeat it, which runs with the job's rights: a stub that prints a failing test and exits as
@@ -210,10 +212,128 @@ const SANDBOX_RUNNER = /^\s*info: (?:for the \w+ platform, )?using target runner
 /// nextest's line that starts the tests, after which a test's output may appear.
 const TESTS_START = /^\s*Starting \d+ tests? across /m;
 
+/// Each error rustc reported in a log, from the JSON diagnostics cargo forwards there (each run of
+/// mutants passes `--cargo-arg=--cargo-message-format=json`, which the policy requires): one
+/// `compiler-message` line each, as rustc structures it, never its rendering for people. Each error
+/// keeps its primary spans and the spans of its own children, the notes and helps rustc attaches to
+/// it; a separate note, such as "erroneous constant encountered", is a message of its own, no
+/// error's (the review of 75e5eeb: a rendering cut at the left, shifted by a label, or read across a
+/// blank line, put an error where it was not). rustc's summary, "aborting due to ...", is none. A
+/// line the reading cannot parse counts as an error no change can claim.
+export function compilerErrors(log) {
+  const out = [];
+  for (const line of String(log).split("\n")) {
+    // Every line that holds a compiler message anywhere counts: one that does not start with it, or
+    // does not parse whole, is an error no change can claim. cargo-mutants writes a build's stdout
+    // and stderr into one log, and a long JSON line can come in two writes, with another line's text
+    // before it (the review of 47f423d: `   Compiling{"reason":"compiler-message",...}` went unread).
+    if (!/"reason"\s*:\s*"compiler-message"/.test(line)) continue;
+    let m;
+    try {
+      if (!line.startsWith('{"reason":"compiler-message"')) throw new Error("not at the start of its line");
+      m = JSON.parse(line).message;
+    } catch {
+      out.push({ text: "a compiler message the reading cannot parse", primary: [], children: [] });
+      continue;
+    }
+    if (m?.level !== "error") continue;
+    const spans = Array.isArray(m.spans) ? m.spans : [];
+    if (spans.length === 0 && /^aborting due to/.test(String(m.message))) continue;
+    out.push({
+      text: `error${m.code?.code ? `[${m.code.code}]` : ""}: ${m.message}`,
+      primary: spans.filter((s) => s?.is_primary),
+      children: (Array.isArray(m.children) ? m.children : []).flatMap((c) => (Array.isArray(c?.spans) ? c.spans : [])),
+    });
+  }
+  return out;
+}
+
+/// The places a span stands for in the source: the span, and the call site of each macro it was
+/// expanded from, outward, so that an error inside `assert!` is read where `assert!` is called.
+export function spanSites(span) {
+  const out = [];
+  for (let s = span, k = 0; s && k < 64; s = s.expansion?.span, k++) out.push(s);
+  return out;
+}
+
+/// A span of rustc's as its first and last places, its columns 1-based and its end exclusive.
+const spanEnds = (span) => [
+  [span.line_start, span.column_start],
+  [span.line_end, Math.max(span.column_end - 1, span.column_start)],
+];
+const notAfter = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
+
+/// Whether a span meets a region of changedRegions, its ends included.
+export function spanMeets(span, region) {
+  const [from, to] = spanEnds(span);
+  return notAfter(from, [region.to.line, region.to.column]) && notAfter([region.from.line, region.from.column], to);
+}
+
+/// Whether a span lies wholly inside a region of changedRegions.
+export function spanWithin(span, region) {
+  const [from, to] = spanEnds(span);
+  return notAfter([region.from.line, region.from.column], from) && notAfter(to, [region.to.line, region.to.column]);
+}
+
+/// What a mutant's own diff changed in the mutated file, one region a hunk's run of changed
+/// lines: from the first column where its first added line differs from the first line it
+/// replaced, to the last column where its last added line differs from the last line it replaced,
+/// each `{ line, column }` in the new file. A run that only adds lines changed all of them; one
+/// that only removes lines changed none. The ends are found whatever the run's line counts, so that
+/// no unchanged text the mutant joined to a changed line counts as changed (the re-check of
+/// da58409: two lines merged into one, the second ending in a constant assertion of the change's).
+export function changedRegions(diff) {
+  const out = [];
+  let line = 0;
+  let removed = [];
+  let added = [];
+  const flush = () => {
+    if (added.length > 0) {
+      const first = added[0];
+      const last = added[added.length - 1];
+      if (removed.length === 0) out.push({ from: { line: first.at, column: 1 }, to: { line: last.at, column: last.text.length + 1 } });
+      else {
+        const a = removed[0];
+        const z = removed[removed.length - 1];
+        let p = 0;
+        while (p < a.length && p < first.text.length && a[p] === first.text[p]) p++;
+        // On a single changed line the suffix may not reach back into the prefix.
+        const room = added.length === 1 && removed.length === 1 ? Math.min(a.length, last.text.length) - p : added.length === 1 ? last.text.length - p : last.text.length;
+        let s = 0;
+        while (s < room && s < z.length && z[z.length - 1 - s] === last.text[last.text.length - 1 - s]) s++;
+        const toColumn = Math.max(last.text.length - s, 1);
+        out.push({ from: { line: first.at, column: p + 1 }, to: { line: last.at, column: added.length === 1 ? Math.max(toColumn, p + 1) : toColumn } });
+      }
+    }
+    removed = [];
+    added = [];
+  };
+  for (const l of String(diff).split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (hunk) {
+      flush();
+      line = Number(hunk[1]);
+    } else if (line === 0) continue;
+    else if (l.startsWith("-")) removed.push(l.slice(1));
+    else if (l.startsWith("+")) {
+      added.push({ at: line, text: l.slice(1) });
+      line++;
+    } else {
+      flush();
+      if (l.startsWith(" ")) line++;
+    }
+  }
+  flush();
+  return out;
+}
+
 /// Why a run's outcomes do not show the work they claim, one message a mutant: a mutant counts as
 /// caught only when its tests ran in the sandbox and one failed, nextest exiting 100 with a failing
 /// test in the log after its line that names the sandbox as its runner, and as unviable only when
-/// its build failed with an error of the compiler. A stub in place of
+/// its build failed with errors of the compiler that each lie inside the mutant's own change, the
+/// lines and columns its diff changed: an error elsewhere is the change's, not the mutant's (the
+/// review of 41a54b6: a `const _: () = assert!(...)` over `include_str!` of the mutated file failed
+/// every mutant of it with a real E0080, and the floor counted them all as tested). A stub in place of
 /// nextest or cargo, which exits at once, would otherwise make every mutant caught or unviable,
 /// and the floor count them all as tested. Times cannot tell: a caught mutant's tests took 0.15 s
 /// in the runs of #120. `readLog` reads a log by the path the outcome names.
@@ -237,8 +357,25 @@ export function evidence(outcomes, readLog) {
       }
     } else {
       const build = phase("Build");
+      const errors = compilerErrors(log);
+      const file = o.scenario.Mutant.file;
+      const regions = changedRegions(o.diff_path ? strip(readLog(o.diff_path)) : "");
+      // An error is the mutant's when one of its primary spans, or a span of one of its own
+      // children, meets the mutant's change, at the span or at a call site of a macro it came from.
+      // A span itself meets the change by touching it; the call site of a macro it came from only
+      // by lying wholly inside it: a macro called around the change could hold the change's own
+      // check, whose error would then reach the change through the call (the review of 47f423d:
+      // `checked!(a - b)` with a constant assertion inside `checked!`).
+      const sameFile = (x) => String(x.file_name).replace(/\\/g, "/") === file;
+      const meets = (s) => spanSites(s).some((x, k) => sameFile(x) && regions.some((r) => (k === 0 ? spanMeets(x, r) : spanWithin(x, r))));
+      const inside = (e) => e.primary.some(meets) || e.children.some(meets);
+      const outside = errors.find((e) => !inside(e));
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);
-      else if (!/^error(\[E\d+\])?:/m.test(log)) found.push(`${name}: unviable, but no error of the compiler is in its log`);
+      else if (errors.length === 0) found.push(`${name}: unviable, but no error of the compiler is in its log, as JSON diagnostics`);
+      else if (outside) {
+        const at = outside.primary[0] ? spanSites(outside.primary[0]).map((s) => `${s.file_name}:${s.line_start}:${s.column_start}`).join(" <= ") : "no location";
+        found.push(`${name}: unviable, but an error of the compiler lies outside the mutant's own change: ${outside.text} at ${at}`);
+      }
     }
   }
   return found;

@@ -1,0 +1,12 @@
+--- src/lib.rs
++++ replace f -> Foo with Default::default()
+@@ -1,8 +1,8 @@
+ // A type with no Default: the mutant that returns Default::default() fails to build on its own.
+ pub struct Foo(u8);
+ 
+ pub fn f(x: u8) -> Foo {
+-    Foo(x)
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub mod g;

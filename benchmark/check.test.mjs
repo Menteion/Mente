@@ -15,7 +15,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 function copy() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-benchmark-"));
-  for (const f of ["README.md", "check.mjs", "reference.mjs", "corpus.lock"]) fs.copyFileSync(path.join(HERE, f), path.join(dir, f));
+  for (const f of ["README.md", "check.mjs", "own.mjs", "reference.mjs", "corpus.lock"]) fs.copyFileSync(path.join(HERE, f), path.join(dir, f));
   fs.cpSync(path.join(HERE, "tasks"), path.join(dir, "tasks"), { recursive: true });
   return dir;
 }
