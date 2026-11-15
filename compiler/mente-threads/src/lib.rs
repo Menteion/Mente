@@ -14,8 +14,9 @@
 //!
 //! The other threads this crate starts cannot run work beside their caller: [`alone`] runs a
 //! closure on a thread with a stack of the size asked and waits for it, and the readers
-//! ([`read_to_end_beside`], [`lines_beside`], [`append_beside`]) take no closure, only a pipe to
-//! read.
+//! ([`read_to_end_beside`], [`lines_beside`], [`append_beside`]) take no closure, only a child
+//! process's standard output or error ([`Pipe`], which no other type can implement), so the
+//! only work they do is waiting for its bytes.
 //!
 //! Clippy's `disallowed-methods` (clippy.toml) bans `std::thread::available_parallelism`,
 //! `std::thread::spawn` and the `spawn` methods of `std::thread::Builder` and `std::thread::Scope`,
@@ -23,12 +24,26 @@
 //! lower it in any other crate; this crate alone denies it, and names each use with `#[expect]`.
 
 use std::io::{BufRead, BufReader, Read};
+use std::process::{ChildStderr, ChildStdout};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// The test group of `.config/nextest.toml` whose tests run alone, given every core.
 pub const GROUP: &str = "all-cores";
+
+/// A child process's standard output or error, the only things the readers read: a type whose
+/// `read` did work would run that work beside the caller, so no other type may implement this.
+pub trait Pipe: sealed::Sealed + Read + Send + 'static {}
+
+impl Pipe for ChildStdout {}
+impl Pipe for ChildStderr {}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for std::process::ChildStdout {}
+    impl Sealed for std::process::ChildStderr {}
+}
 
 /// How many threads `items` pieces of work spread over every core run on: one for each core the
 /// machine has (1 if it does not say), no more than the items, and at least one. More than one
@@ -128,7 +143,7 @@ pub fn alone<T: Send>(
     clippy::disallowed_methods,
     reason = "the one place that starts a reader of a pipe"
 )]
-pub fn read_to_end_beside(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+pub fn read_to_end_beside(mut pipe: impl Pipe) -> JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
         pipe.read_to_end(&mut bytes).ok();
@@ -143,7 +158,7 @@ pub fn read_to_end_beside(mut pipe: impl Read + Send + 'static) -> JoinHandle<Ve
     clippy::disallowed_methods,
     reason = "the one place that starts a reader of a pipe"
 )]
-pub fn lines_beside(pipe: impl Read + Send + 'static) -> Receiver<String> {
+pub fn lines_beside(pipe: impl Pipe) -> Receiver<String> {
     let (tx, lines) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(pipe).lines() {
@@ -162,10 +177,7 @@ pub fn lines_beside(pipe: impl Read + Send + 'static) -> Receiver<String> {
     clippy::disallowed_methods,
     reason = "the one place that starts a reader of a pipe"
 )]
-pub fn append_beside(
-    mut pipe: impl Read + Send + 'static,
-    tail: Arc<Mutex<String>>,
-) -> JoinHandle<()> {
+pub fn append_beside(mut pipe: impl Pipe, tail: Arc<Mutex<String>>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         while let Ok(n) = pipe.read(&mut buf) {
@@ -289,19 +301,41 @@ mod tests {
         assert_eq!(alone(None, None, || 5).unwrap().unwrap(), 5);
     }
 
+    /// This test binary run as a child: `--list` prints its tests to standard output, and an
+    /// option it does not know prints an error to standard error.
+    fn child(arg: &str) -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(arg)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
     #[test]
     fn test_the_readers_give_what_the_pipe_held() {
-        let bytes = read_to_end_beside(std::io::Cursor::new(b"one\ntwo\n".to_vec()));
-        assert_eq!(bytes.join().unwrap(), b"one\ntwo\n");
-        let lines: Vec<String> = lines_beside(std::io::Cursor::new(b"a\nb\nc".to_vec()))
-            .iter()
-            .collect();
-        assert_eq!(lines, vec!["a", "b", "c"]);
+        let name = "test_the_readers_give_what_the_pipe_held";
+        let mut listed = child("--list");
+        let bytes = read_to_end_beside(listed.stdout.take().unwrap());
+        let bytes = String::from_utf8(bytes.join().unwrap()).unwrap();
+        listed.wait().unwrap();
+        assert!(bytes.contains(name), "{}", bytes);
+        let mut listed = child("--list");
+        let lines: Vec<String> = lines_beside(listed.stdout.take().unwrap()).iter().collect();
+        listed.wait().unwrap();
+        assert!(lines.iter().any(|l| l.contains(name)), "{:?}", lines);
+        let mut refused = child("--no-such-option-here");
         let tail = Arc::new(Mutex::new(String::from(">")));
-        append_beside(std::io::Cursor::new(b"xy".to_vec()), Arc::clone(&tail))
+        append_beside(refused.stderr.take().unwrap(), Arc::clone(&tail))
             .join()
             .unwrap();
-        assert_eq!(*tail.lock().unwrap(), ">xy");
+        refused.wait().unwrap();
+        let tail = tail.lock().unwrap();
+        assert!(
+            tail.starts_with('>') && tail.contains("no-such-option-here"),
+            "{}",
+            tail
+        );
     }
 }
 

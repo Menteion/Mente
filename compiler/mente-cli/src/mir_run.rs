@@ -183,7 +183,6 @@ fn run_for(
     k: usize,
     limit: Option<std::time::Duration>,
 ) -> Result<Option<std::process::Output>, String> {
-    use std::io::Read;
     use std::process::{Command, Stdio};
     let fail = |e: std::io::Error| format!("{}: {}", exe.display(), e);
     let mut command = Command::new(exe);
@@ -198,21 +197,8 @@ fn run_for(
         .map_err(fail)?;
     // Each pipe is read on a thread of its own, so that a program printing more than a pipe
     // holds is not stopped in its write while this waits for it to end.
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        mente_threads::read_to_end_beside(pipe.unwrap_or_else(|| Box::new(std::io::empty())))
-    };
-    let stdout = drain(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let stderr = drain(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
+    let stdout = child.stdout.take().map(mente_threads::read_to_end_beside);
+    let stderr = child.stderr.take().map(mente_threads::read_to_end_beside);
     // A millisecond at a time, at most `limit` of them; sleeping can only make the wait longer.
     let mut status = None;
     for _ in 0..limit.as_millis() {
@@ -226,8 +212,8 @@ fn run_for(
         child.kill().ok();
         child.wait().ok();
     }
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
+    let stdout = stdout.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
     Ok(status.map(|status| std::process::Output {
         status,
         stdout,

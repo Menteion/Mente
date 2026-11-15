@@ -498,6 +498,14 @@ const ALL_CORES_TESTS = [
 /// The crate whose functions alone start threads (clippy.toml's disallowed-methods), and which
 /// alone does not inherit the workspace's lints.
 const THREADS_CRATE = "mente-threads";
+/// What clippy.toml bans outside it: the core count, and every safe way std starts a thread.
+const THREAD_BANS = [
+  "std::thread::available_parallelism",
+  "std::thread::Scope::spawn",
+  "std::thread::spawn",
+  "std::thread::Builder::spawn",
+  "std::thread::Builder::spawn_scoped",
+];
 /// Where the tests read the group's name: mente-threads fails a test outside the group named
 /// there, so a group renamed in .config/nextest.toml and here alone would fail every test of the
 /// group.
@@ -967,12 +975,6 @@ check("git reads every change as text, and no source names mutants::skip, an att
   // cargo-mutants also skips an `unsafe fn`: no member may write one, since each inherits the
   // workspace's lints and the workspace forbids unsafe code.
   assert.match(read("Cargo.toml"), /^\[workspace\.lints\.rust\]\n(?:#.*\n)*unsafe_code = "forbid"$/m, "the workspace no longer forbids unsafe code, whose functions cargo-mutants skips");
-  for (const [name, { dir }] of workspace()) {
-    if (name === THREADS_CRATE) continue;
-    assert.match(read(`${dir}/Cargo.toml`), /^\[lints\]\nworkspace = true$/m, `${name} does not inherit the workspace's lints, which forbid unsafe code and clippy's disallowed_methods`);
-  }
-  // The one crate that may start threads holds the workspace's lints as its own, but for
-  // disallowed_methods, which it denies where the workspace forbids it.
   const lintTables = (text, prefix) => {
     const tables = [];
     let current = null;
@@ -993,11 +995,25 @@ check("git reads every change as text, and no source names mutants::skip, an att
     }
     return tables;
   };
+  // Each member's lints, read as tables, not matched as text: a `"""` string could hold a decoy.
+  for (const [name, { dir }] of workspace()) {
+    const manifest = read(`${dir}/Cargo.toml`);
+    assert.ok(!/"""|'''/.test(manifest), `${dir}/Cargo.toml holds a multi-line string, which the policy does not read`);
+    if (name === THREADS_CRATE) continue;
+    assert.deepEqual(lintTables(manifest, "lints"), [["", { workspace: "true" }]], `${name} does not inherit the workspace's lints, and only them, which forbid unsafe code and clippy's disallowed_methods`);
+  }
+  // The one crate that may start threads holds the workspace's lints as its own, but for
+  // disallowed_methods, which it denies where the workspace forbids it.
   const workspaceLints = lintTables(read("Cargo.toml"), "workspace.lints.");
   const threadsLints = lintTables(read(`compiler/${THREADS_CRATE}/Cargo.toml`), "lints.");
   const expected = workspaceLints.map(([group, keys]) => [group, group === "clippy" ? { ...keys, disallowed_methods: '"deny"' } : keys]);
   assert.equal(Object.fromEntries(workspaceLints).clippy?.disallowed_methods, '"forbid"', "the workspace no longer forbids clippy's disallowed_methods, which keeps threads to mente-threads");
   assert.deepEqual(threadsLints, expected, `${THREADS_CRATE}'s lints are not the workspace's with disallowed_methods denied`);
+  // The methods clippy.toml bans outside mente-threads: every way std starts a thread, and the
+  // core count. A ban removed, which no #[expect] in mente-threads may notice, fails here.
+  const clippy = read("clippy.toml");
+  const bans = clippy.slice(clippy.indexOf("disallowed-methods = ["), clippy.indexOf("]", clippy.indexOf("disallowed-methods = [") + 22));
+  assert.deepEqual([...bans.matchAll(/path = "([^"]+)"/g)].map((m) => m[1]).sort(), [...THREAD_BANS].sort(), "clippy.toml's disallowed-methods are not THREAD_BANS");
   for (const space of [0x85, 0x200e, 0x200f, 0x2028, 0x2029].map((c) => String.fromCharCode(c))) {
     assert.ok(RUST_SPACE_BEYOND_ASCII.test(`#[cfg_attr(miri, mutants${space}::skip)]`));
     assert.ok(namesMutantsSkip(`#[rustfmt::skip]\n#[cfg_attr(miri, mutants${space}::${space}skip)] fn f() {}`), `the mutants::skip rule lets through U+${space.codePointAt(0).toString(16)}`);
@@ -2349,6 +2365,7 @@ const GATE_FILES = [
   "/compiler/mente-cli/tests/lints.rs",
   "/compiler/mente-cli/tests/register.rs",
   "/compiler/*/src/overflow_traps.rs",
+  "/compiler/mente-threads/",
   "/compiler/*/Cargo.toml",
   "/spikes/*/Cargo.toml",
   "/.gitattributes",
