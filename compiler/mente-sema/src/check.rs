@@ -76,6 +76,10 @@ pub struct Typing {
     /// For each expression whose type is that of literals alone, the type its literals take
     /// (`core-calculus.md`, item 5; [`literals::taken`]).
     pub literals: Vec<Option<Taken>>,
+    /// For each expression whose type is an array of literals alone, at any depth, as an array
+    /// literal, a repeat, or a branch or an element read that gives one, the type those literals
+    /// take (`core-calculus.md`, item 5; [`literals::taken`]).
+    pub arrays: Vec<Option<Taken>>,
     /// For each expression that is the value `e` of a compound assignment `p op= e`, the type
     /// of `p op e`, the operator's value, which then lands in `p` (`core-calculus.md`, item 6).
     pub compounds: Vec<Option<Ty>>,
@@ -114,6 +118,7 @@ pub fn check(
             bindings,
             places: vec![None; tree.exprs.len()],
             literals: Vec::new(),
+            arrays: Vec::new(),
             compounds: vec![None; tree.exprs.len()],
         },
         negated: negated_literals(tree),
@@ -144,7 +149,9 @@ pub fn check(
     }
     c.arrays_in_one_piece();
     c.bounds_have_their_types();
-    c.typing.literals = literals::taken(f, &c.typing);
+    let table = literals::taken(f, &c.typing);
+    c.typing.literals = table.literals;
+    c.typing.arrays = table.arrays;
     c.compared_literals(f);
     c.literal_traps();
     c.unheld_literals();

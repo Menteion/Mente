@@ -15,6 +15,12 @@
 // frame: hundred 880
 // frame: small_elements 88
 // frame: built 76
+// frame: tf 88
+// frame: tg 152
+// frame: th 113
+// frame: uh2 131
+// frame: uh3 211
+// frame: joined 114
 module conformance
 // Item 25: a binding is held from its own statement, beside its initializer, to the end of
 // its block; whatever else a statement holds ends with it; a value narrowed into another type
@@ -22,8 +28,10 @@ module conformance
 // `p = p op e`, a shift working in the type of `p`; the indexes of an assigned place are held
 // before its value is evaluated; and a loop's rounds do not add up. A literal has the type it
 // takes from its other operands, `i64` alone, and an array of literals the type its elements
-// take, so a literal that takes `i64` is no narrowing into `i64`; and a field built is
-// narrowed into its type.
+// take, so a literal that takes `i64` is no narrowing into `i64`, whatever else stands among the
+// elements; a literal no standard type holds is of no one type, and holds 16 bytes, as do the
+// elements of an array of a `u8` and a `u32` before it lands; and a field built is narrowed
+// into its type.
 fn make() -> [4]u8 = [1_u8, 2_u8, 3_u8, 4_u8]
 
 fn g() -> u64 = 1_u64
@@ -117,3 +125,19 @@ pub fn hundred() -> u64 = takes64([0; 100])
 pub fn small_elements(a: u8, k: usize) -> u8 = a + [1, 2][k]
 
 pub fn built() -> P = P(a: 1)
+
+pub fn tf() -> [2]i64 = [todo("x"), 1]
+
+pub fn tg() -> [2][2]i64 = [[todo("x"), 1], [2, 3]]
+
+pub fn th(c: bool) -> [2]i64 = if c {
+  [todo("x"), 1]
+} else {
+  [2, 3]
+}
+
+pub fn uh2(a: u128[0..10], b: i8) -> bool = a + b == 1
+
+pub fn uh3(a: u128[0..10], b: i8, k: usize) -> bool = a + b == [1, 2][k]
+
+pub fn joined(a: u8, b: u32) -> [2]u32 = [a, b]

@@ -12,8 +12,8 @@
 //! statement, `m(e)`, the most it holds at once, and `v(e)`, what its value holds.
 //!
 //! Every type it sizes is one the checker settled: an expression's, a binding's, the literal
-//! table's for literals and arrays of them, and the type of `p op e` in `p op= e`. It derives
-//! none of its own.
+//! table's for literals and for arrays of them, and the type of `p op e` in `p op= e`. It
+//! derives none of its own.
 //!
 //! [`stack-budget`]: ../../docs/design-review.md#stack-budget
 
@@ -165,69 +165,31 @@ impl Count<'_> {
     }
 
     /// The type `e`'s value has, as the checker settled it, which the module never derives on
-    /// its own (item 5): a literal's type is the one its literals take in the checker's table,
-    /// and an array of literals, an array literal's, a repeat's, or a branch's or an element's
-    /// that is one, has the type its elements take there, as each other's operands. A literal
-    /// no standard type holds keeps the type of literals alone, of no one type.
+    /// its own (item 5): a literal's, or an array of literals', with the type the checker's
+    /// literal table gives those literals. A literal no standard type holds keeps the type of
+    /// literals alone, of no one type.
     fn value_ty(&self, e: ExprId) -> Ty {
-        self.settled(self.ty(e), e)
-    }
-
-    /// `t`, the type of `e`'s value or of a part of it, with each type of literals alone the
-    /// one the literals of `e` take. The elements of an array are those of each array its value
-    /// may be ([`literals::alternatives`], which the table itself reads); any one of them gives
-    /// the type they all take.
-    fn settled(&self, t: &Ty, e: ExprId) -> Ty {
-        match t {
-            Ty::Int(Int::Literal) => match self.typing.literals[e.0 as usize] {
-                Some(Taken {
-                    ty,
-                    from: literals::From::Operands | literals::From::Alone,
-                }) => Ty::int(ty),
-                Some(Taken {
-                    from: literals::From::Unheld,
-                    ..
-                })
-                | None => t.clone(),
-            },
-            Ty::Array(n, elem) => {
-                let element = literals::alternatives(self.tree, e)
-                    .into_iter()
-                    .find_map(|a| self.first_element(a));
-                Ty::Array(
-                    *n,
-                    Box::new(element.map_or_else(|| (**elem).clone(), |x| self.settled(elem, x))),
-                )
-            }
+        let t = self.ty(e);
+        let table = match t {
+            Ty::Int(Int::Literal) => &self.typing.literals,
+            Ty::Array(..) => &self.typing.arrays,
             Ty::Int(Int::One(_) | Int::Mixed(_))
             | Ty::Bool
             | Ty::Struct(_)
             | Ty::Enum(_)
             | Ty::Unit
-            | Ty::Any => t.clone(),
-        }
-    }
-
-    /// The first element of an array literal, or a repeat's value.
-    fn first_element(&self, a: ExprId) -> Option<ExprId> {
-        match &self.tree.expr(a).kind {
-            ExprKind::Array(items) => items.first().copied(),
-            ExprKind::Repeat { value, .. } => Some(*value),
-            ExprKind::Int { .. }
-            | ExprKind::Bool(_)
-            | ExprKind::Name(_)
-            | ExprKind::Todo(_)
-            | ExprKind::Unreachable(_)
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Field { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Construct { .. }
-            | ExprKind::Variant { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::If { .. }
-            | ExprKind::Error => None,
+            | Ty::Any => return t.clone(),
+        };
+        match table[e.0 as usize] {
+            Some(Taken {
+                ty,
+                from: literals::From::Operands | literals::From::Alone,
+            }) => t.with_int(ty),
+            Some(Taken {
+                from: literals::From::Unheld,
+                ..
+            })
+            | None => t.clone(),
         }
     }
 

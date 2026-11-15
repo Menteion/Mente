@@ -70,13 +70,22 @@ pub struct Taken {
     pub from: From,
 }
 
-/// For each expression of `f`, by its index, the type its literals take when its own type is
-/// that of literals alone, and `None` for an expression of any other type.
-pub fn taken(f: &FnSyntax, typing: &Typing) -> Vec<Option<Taken>> {
+/// The literal table of a function: for each expression, by its index, the type its literals
+/// take where its own type is that of literals alone (`literals`), or an array of them at any
+/// depth, as an array literal, a repeat, or a branch or an element read that gives one
+/// (`arrays`); `None` for an expression of any other type.
+pub struct Table {
+    pub literals: Vec<Option<Taken>>,
+    pub arrays: Vec<Option<Taken>>,
+}
+
+/// The literal table of `f`.
+pub fn taken(f: &FnSyntax, typing: &Typing) -> Table {
     let mut w = Walk {
         tree: &f.tree,
         typing,
         out: vec![None; f.tree.exprs.len()],
+        arrays: vec![None; f.tree.exprs.len()],
     };
     for c in &f.contracts {
         w.expr(c.expr, Around::Nothing);
@@ -86,7 +95,24 @@ pub fn taken(f: &FnSyntax, typing: &Typing) -> Vec<Option<Taken>> {
         Some(Body::Block(b)) => w.block(b, Around::Nothing),
         None => {}
     }
-    w.out
+    Table {
+        literals: w.out,
+        arrays: w.arrays,
+    }
+}
+
+/// Whether `t` is the type of literals alone, or an array of them at any depth.
+fn of_literals(t: &Ty) -> bool {
+    match t {
+        Ty::Int(Int::Literal) => true,
+        Ty::Array(_, e) => of_literals(e),
+        Ty::Int(Int::One(_) | Int::Mixed(_))
+        | Ty::Bool
+        | Ty::Struct(_)
+        | Ty::Enum(_)
+        | Ty::Unit
+        | Ty::Any => false,
+    }
 }
 
 /// What an operation on operands of types `a` and `b` gives its literals, as [`around`] says:
@@ -579,6 +605,7 @@ struct Walk<'a> {
     tree: &'a Tree,
     typing: &'a Typing,
     out: Vec<Option<Taken>>,
+    arrays: Vec<Option<Taken>>,
 }
 
 impl Walk<'_> {
@@ -605,24 +632,25 @@ impl Walk<'_> {
         } else {
             self::around(own).unwrap_or(around)
         };
+        let taken = match here {
+            Around::Type(ty) => Taken {
+                ty,
+                from: From::Operands,
+            },
+            Around::Nothing => Taken {
+                ty: I64,
+                from: From::Alone,
+            },
+            Around::Unheld => Taken {
+                ty: I64,
+                from: From::Unheld,
+            },
+        };
+        // An array of literals gives its elements what it is given, at every depth, so its
+        // literals take that type, whichever element they stand in.
         match own {
-            Ty::Int(Int::Literal) => {
-                let taken = match here {
-                    Around::Type(ty) => Taken {
-                        ty,
-                        from: From::Operands,
-                    },
-                    Around::Nothing => Taken {
-                        ty: I64,
-                        from: From::Alone,
-                    },
-                    Around::Unheld => Taken {
-                        ty: I64,
-                        from: From::Unheld,
-                    },
-                };
-                self.out[e.0 as usize] = Some(taken);
-            }
+            Ty::Int(Int::Literal) => self.out[e.0 as usize] = Some(taken),
+            Ty::Array(..) if of_literals(own) => self.arrays[e.0 as usize] = Some(taken),
             Ty::Int(Int::One(_) | Int::Mixed(_))
             | Ty::Bool
             | Ty::Array(..)
