@@ -10,6 +10,7 @@
 // frame: scrutinee 106
 // frame: unfinished 67
 // frame: after 1076
+// frame: ac 99
 module conformance
 // Item 25: of the branches of an `if` or the arms of a `match` only the one that holds the
 // most counts; a condition, and the left operand of `and`, is a statement of its own; what a
@@ -106,3 +107,5 @@ pub fn scrutinee(a: u8, b: u32) -> u64
 pub fn unfinished(a: bool) -> bool = a and todo("r")
 
 pub fn after(a: bool, b: bool) -> u64 = take_flag(a and b, wide())
+
+pub fn ac(a: bool, x: u64, y: u64) -> bool = a and x < y

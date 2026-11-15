@@ -9,12 +9,21 @@
 // frame: rounds 112
 // frame: shifted 78
 // frame: placed 8089
+// frame: repeated 560072
+// frame: pair64 96
+// frame: grid 160
+// frame: hundred 880
+// frame: small_elements 88
+// frame: built 76
 module conformance
 // Item 25: a binding is held from its own statement, beside its initializer, to the end of
 // its block; whatever else a statement holds ends with it; a value narrowed into another type
 // is held beside the value it was; `_ = e` is a binding of `e`'s type; `p op= e` is
 // `p = p op e`, a shift working in the type of `p`; the indexes of an assigned place are held
-// before its value is evaluated; and a loop's rounds do not add up.
+// before its value is evaluated; and a loop's rounds do not add up. A literal has the type it
+// takes from its other operands, `i64` alone, and an array of literals the type its elements
+// take, so a literal that takes `i64` is no narrowing into `i64`; and a field built is
+// narrowed into its type.
 fn make() -> [4]u8 = [1_u8, 2_u8, 3_u8, 4_u8]
 
 fn g() -> u64 = 1_u64
@@ -26,6 +35,12 @@ fn h(mut ys: [2]u32) -> u32 = ys[0]
 fn wide64() -> [1000]u64 = [0_u64; 1000]
 
 fn pick(w: [1000]u64) -> usize = 0_usize
+
+fn takes64(xs: [100]i64) -> u64 = 0_u64
+
+pub struct P {
+  a: u16
+}
 
 pub fn binding(n: u64) -> u64 {
   val a = n + 1
@@ -88,3 +103,17 @@ pub fn placed(c: bool, mut xs: [4]u8) {
     pick(wide64())
   }] = 1
 }
+
+// Private: the three execution paths are compared on public functions, and native code would
+// hold this value more than once on a stack it does not count yet.
+fn repeated() -> [70000]i64 = [0; 70000]
+
+pub fn pair64() -> [2]i64 = [1, 2]
+
+pub fn grid() -> [2][2]i64 = [[1, 2], [3, 4]]
+
+pub fn hundred() -> u64 = takes64([0; 100])
+
+pub fn small_elements(a: u8, k: usize) -> u8 = a + [1, 2][k]
+
+pub fn built() -> P = P(a: 1)

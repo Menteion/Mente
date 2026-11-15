@@ -11,6 +11,10 @@
 //! the checked tree: [`Ev`] carries `t(e)`, what an expression leaves held to the end of its
 //! statement, `m(e)`, the most it holds at once, and `v(e)`, what its value holds.
 //!
+//! Every type it sizes is one the checker settled: an expression's, a binding's, the literal
+//! table's for literals and arrays of them, and the type of `p op e` in `p op= e`. It derives
+//! none of its own.
+//!
 //! [`stack-budget`]: ../../docs/design-review.md#stack-budget
 
 use mente_syntax::tree::{
@@ -19,9 +23,10 @@ use mente_syntax::tree::{
 };
 
 use crate::check::Typing;
+use crate::literals::{self, Taken};
 use crate::names::{BindingId, Resolution};
 use crate::structs::Structs;
-use crate::types::{Int, IntTy, Ty, I64};
+use crate::types::{Int, IntTy, Ty};
 use crate::CheckedFn;
 
 /// The bytes every call counts for itself (item 25).
@@ -95,7 +100,7 @@ pub fn frame(f: &CheckedFn, structs: &Structs) -> Frame {
     let post = clauses(&[ContractKind::Ensures]);
     let body = match f.syntax.body {
         Some(Body::Block(b)) => c.block(b),
-        Some(Body::Expr(e)) => c.landed(e).m,
+        Some(Body::Expr(e)) => c.landed(e),
         None => 0,
     };
     let held = pre.max(body + post);
@@ -145,12 +150,13 @@ impl Count<'_> {
         &self.typing.exprs[e.0 as usize]
     }
 
-    /// The size of a value of `t` (item 21), an integer of no one type counting 16 (item 25).
+    /// The size of a value of `t` (item 21). An integer of no one type counts 16 (item 25): a
+    /// mixed one before it lands, and a literal no standard type holds, which keeps the type of
+    /// literals alone ([`Count::value_ty`]).
     fn size(&self, t: &Ty) -> u128 {
         match t {
             Ty::Int(Int::One(i)) => bytes(*i),
-            Ty::Int(Int::Mixed(_)) => 16,
-            Ty::Int(Int::Literal) => bytes(I64),
+            Ty::Int(Int::Mixed(_) | Int::Literal) => 16,
             Ty::Bool => 1,
             Ty::Array(n, elem) => n.saturating_mul(self.size(elem)),
             Ty::Struct(_) | Ty::Enum(_) => self.structs.layout_of(t).map_or(0, |(s, _)| s),
@@ -158,21 +164,70 @@ impl Count<'_> {
         }
     }
 
-    /// The type `e`'s value has, a literal's being the one it takes (item 5).
+    /// The type `e`'s value has, as the checker settled it, which the module never derives on
+    /// its own (item 5): a literal's type is the one its literals take in the checker's table,
+    /// and an array of literals, an array literal's, a repeat's, or a branch's or an element's
+    /// that is one, has the type its elements take there, as each other's operands. A literal
+    /// no standard type holds keeps the type of literals alone, of no one type.
     fn value_ty(&self, e: ExprId) -> Ty {
-        match self.ty(e) {
-            Ty::Int(Int::Literal) => Ty::int(
-                self.typing.literals[e.0 as usize]
-                    .map(|t| t.ty)
-                    .unwrap_or(I64),
-            ),
-            t @ (Ty::Int(Int::One(_) | Int::Mixed(_))
+        self.settled(self.ty(e), e)
+    }
+
+    /// `t`, the type of `e`'s value or of a part of it, with each type of literals alone the
+    /// one the literals of `e` take. The elements of an array are those of each array its value
+    /// may be ([`literals::alternatives`], which the table itself reads); any one of them gives
+    /// the type they all take.
+    fn settled(&self, t: &Ty, e: ExprId) -> Ty {
+        match t {
+            Ty::Int(Int::Literal) => match self.typing.literals[e.0 as usize] {
+                Some(Taken {
+                    ty,
+                    from: literals::From::Operands | literals::From::Alone,
+                }) => Ty::int(ty),
+                Some(Taken {
+                    from: literals::From::Unheld,
+                    ..
+                })
+                | None => t.clone(),
+            },
+            Ty::Array(n, elem) => {
+                let element = literals::alternatives(self.tree, e)
+                    .into_iter()
+                    .find_map(|a| self.first_element(a));
+                Ty::Array(
+                    *n,
+                    Box::new(element.map_or_else(|| (**elem).clone(), |x| self.settled(elem, x))),
+                )
+            }
+            Ty::Int(Int::One(_) | Int::Mixed(_))
             | Ty::Bool
-            | Ty::Array(..)
             | Ty::Struct(_)
             | Ty::Enum(_)
             | Ty::Unit
-            | Ty::Any) => t.clone(),
+            | Ty::Any => t.clone(),
+        }
+    }
+
+    /// The first element of an array literal, or a repeat's value.
+    fn first_element(&self, a: ExprId) -> Option<ExprId> {
+        match &self.tree.expr(a).kind {
+            ExprKind::Array(items) => items.first().copied(),
+            ExprKind::Repeat { value, .. } => Some(*value),
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Error => None,
         }
     }
 
@@ -191,15 +246,12 @@ impl Count<'_> {
         }
     }
 
-    /// `e`, then the value it is narrowed into: `t'(e)` and `m'(e)`.
-    fn landed(&self, e: ExprId) -> Ev {
+    /// `m'(e)`: `e`, then the value it is narrowed into. Every caller reads only this; what
+    /// stays held after it, `t'(e)`, is summed where it is an operand ([`Count::operands`],
+    /// [`Count::call`]).
+    fn landed(&self, e: ExprId) -> u128 {
         let x = self.eval(e, false);
-        let c = self.c(e);
-        Ev {
-            t: x.t + c,
-            m: x.m.max(x.t + c),
-            v: x.v,
-        }
+        x.m.max(x.t + self.c(e))
     }
 
     /// The binding at the root of a place.
@@ -306,9 +358,10 @@ impl Count<'_> {
         let mut m = 0;
         for &(e, kept) in ops {
             let x = self.eval(e, kept);
+            // The narrowed value stays held, so the list's own `t`, its last term, covers
+            // the moment it is made.
             let (t, mx) = if land {
-                let c = self.c(e);
-                (x.t + c, x.m.max(x.t + c))
+                (x.t + self.c(e), x.m)
             } else {
                 (x.t, x.m)
             };
@@ -397,10 +450,11 @@ impl Count<'_> {
         (0, m)
     }
 
-    /// A branch or an arm that is an expression.
-    fn branch_expr(&self, a: ExprId, v: u128) -> (u128, u128) {
+    /// An arm that is an expression: `t(A) = t(a)`, and `m(A)` is `m(a)`, its `t(a) + v` being
+    /// within the `match`'s own `t`, since `a`'s values stay held while the value is made.
+    fn branch_expr(&self, a: ExprId) -> (u128, u128) {
         let x = self.eval(a, false);
-        (x.t, x.m.max(x.t + v))
+        (x.t, x.m)
     }
 
     /// One expression, as an operand, kept or not.
@@ -477,7 +531,7 @@ impl Count<'_> {
                 let (mut t_arms, mut m) = (0, s.m);
                 for arm in arms {
                     let (ta, ma) = match arm.body {
-                        ArmBody::Expr(a) => self.branch_expr(a, v),
+                        ArmBody::Expr(a) => self.branch_expr(a),
                         ArmBody::Block(b) => self.branch_block(b, v),
                     };
                     t_arms = t_arms.max(ta);
@@ -533,7 +587,7 @@ impl Count<'_> {
     /// `M(s)`: the most a statement holds while it runs.
     fn stmt(&self, s: StmtId) -> u128 {
         match &self.tree.stmt(s).kind {
-            StmtKind::Binding { init, .. } => self.binding_size(s) + self.landed(*init).m,
+            StmtKind::Binding { init, .. } => self.binding_size(s) + self.landed(*init),
             StmtKind::Assign { place, op, value } => {
                 let (idx, _) = self.place_parts(*place, false);
                 let mut held = 0;
@@ -544,8 +598,8 @@ impl Count<'_> {
                     held += x.t;
                 }
                 let x = match op {
-                    AssignOp::Set => self.landed(*value).m,
-                    AssignOp::Compound(op) => self.compound(*op, *place, *value),
+                    AssignOp::Set => self.landed(*value),
+                    AssignOp::Compound(_) => self.compound(*place, *value),
                 };
                 m.max(held + x)
             }
@@ -572,34 +626,28 @@ impl Count<'_> {
             StmtKind::Guard { cond, otherwise } => {
                 self.eval(*cond, false).m.max(self.block(*otherwise))
             }
-            StmtKind::Return(Some(e)) => self.landed(*e).m,
+            StmtKind::Return(Some(e)) => self.landed(*e),
             StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => 0,
             StmtKind::Discard(e) => self.vsize(*e) + self.eval(*e, false).m,
             // The value a body gives, its last expression, lands as a returned value (item
             // 25); an expression that gives no value lands nowhere.
-            StmtKind::Expr(e) => self.landed(*e).m,
+            StmtKind::Expr(e) => self.landed(*e),
         }
     }
 
     /// `m'(x)` of `p op= e`, `p = p op e` with the indexes of `p` evaluated once (item 6): the
-    /// value read from `p`, then `e`; the operator's value, which then lands in `p`. A shift
-    /// works in `p`'s type, whatever its amount's.
-    fn compound(&self, op: BinaryOp, place: ExprId, value: ExprId) -> u128 {
-        let p = self.ty(place).clone();
-        let read = self.size(&p);
+    /// value read from `p`, then `e`; the operator's value, of the type the checker gave `p op e`,
+    /// which then lands in `p`.
+    fn compound(&self, place: ExprId, value: ExprId) -> u128 {
+        let p = self.ty(place);
+        let read = self.size(p);
         let e = self.eval(value, false);
-        let shift = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
-        let op = match (&p, self.value_ty(value)) {
-            _ if shift => p.clone(),
-            // A literal `e` has taken `p`'s type (item 5), so it is the first case.
-            (Ty::Int(Int::One(a)), Ty::Int(Int::One(b))) if *a == b => p.clone(),
-            (Ty::Int(_), Ty::Int(_)) => Ty::Int(Int::Mixed(None)),
-            (other, _) => other.clone(),
-        };
-        let v = self.size(&op);
-        let c = if narrows(&op, &p) { read } else { 0 };
-        let t = read + e.t + v;
-        (read + e.m).max(t + c)
+        let (v, c) = self.typing.compounds[value.0 as usize]
+            .as_ref()
+            .map_or((0, 0), |op| {
+                (self.size(op), if narrows(op, p) { read } else { 0 })
+            });
+        (read + e.m).max(read + e.t + v + c)
     }
 
     /// `M(B)` of a block that is a body, a loop's body, a `guard`'s `else` or a branch of no

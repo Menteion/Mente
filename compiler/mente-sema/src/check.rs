@@ -76,6 +76,9 @@ pub struct Typing {
     /// For each expression whose type is that of literals alone, the type its literals take
     /// (`core-calculus.md`, item 5; [`literals::taken`]).
     pub literals: Vec<Option<Taken>>,
+    /// For each expression that is the value `e` of a compound assignment `p op= e`, the type
+    /// of `p op e`, the operator's value, which then lands in `p` (`core-calculus.md`, item 6).
+    pub compounds: Vec<Option<Ty>>,
 }
 
 /// Checks the types of `f`, whose names `resolution` binds. `signatures` holds, for each
@@ -111,6 +114,7 @@ pub fn check(
             bindings,
             places: vec![None; tree.exprs.len()],
             literals: Vec::new(),
+            compounds: vec![None; tree.exprs.len()],
         },
         negated: negated_literals(tree),
         src,
@@ -2120,6 +2124,7 @@ impl Checker<'_> {
                 let found = self.value(value);
                 let computed = self.binary(value, op, (place, &target), (value, &found));
                 self.check_ty(value, &computed, &target, "in this assignment");
+                self.typing.compounds[value.0 as usize] = Some(computed);
             }
         }
     }

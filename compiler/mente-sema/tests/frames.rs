@@ -2,7 +2,8 @@
 //! figures the conformance programs state in `// frame: <function> <bytes>` lines and the
 //! figures of the review programs of `conformance/core-calculus/stack-budget-programs.txt`,
 //! which stand as the model of the item: a disagreement is settled in the spec, the list and
-//! the code together.
+//! the code together. Every figure they state is derived from the item by hand, or by scripts
+//! written before this module, never by the module they judge.
 
 // A failed setup step here is a failed test.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -98,10 +99,11 @@ fn test_the_report_gives_each_function_its_frame_and_its_parts() {
     );
 }
 
-/// One program of the list: its key, what it waits on (`none` where it runs today), the frames
-/// it states, and its source.
+/// One program of the list: its key, the program as the reviews wrote it, what it waits on
+/// (`none` where it runs today), the frames it states, and its source.
 struct Program {
     key: String,
+    program: String,
     waits: String,
     frames: Vec<(String, u128)>,
     source: String,
@@ -124,6 +126,7 @@ fn programs() -> Vec<Program> {
                 .unwrap_or_else(|| panic!("{} has no `{}` line", key, name.trim_end()))
         };
         out.push(Program {
+            program: field("program: "),
             waits: field("waits: "),
             frames: stated(&lines, "frames: "),
             source: source.trim_end_matches("\n==").to_string(),
@@ -137,6 +140,19 @@ fn programs() -> Vec<Program> {
 fn test_review_programs_give_the_frames_they_state() {
     let programs = programs();
     assert!(!programs.is_empty(), "the list holds no program");
+    // No two entries hold the same program, as written or as a source: one entry, whose rounds
+    // name every review that used it, holds each.
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+    for p in &programs {
+        for held in [p.program.as_str(), p.source.trim()] {
+            if held.is_empty() {
+                continue;
+            }
+            if let Some(first) = seen.insert(held, &p.key) {
+                panic!("{} and {} hold the same program", first, p.key);
+            }
+        }
+    }
     let mut failures = Vec::new();
     let mut ran = 0;
     for p in &programs {

@@ -2,14 +2,18 @@
 #
 # Each program the fourteen reviews of `core-calculus.md` item 25 used, with what it waits on.
 # `waits: none` marks a program the checker runs today: its source follows `---`, and
-# `frames:` states, by item 25, the frame of each function named, which the test
+# `frames:` states the frame item 25 gives each function named, which the test
 # `test_review_programs_give_the_frames_they_state` in `compiler/mente-sema/tests/frames.rs`
-# checks. A program that waits names the construct it needs (`?T`, `T ! E`, views, `List<T>`,
-# `String`, `own`); the pull request that brings the construct gives it its source and
-# frames. `refused` marks a program the reviews settled as an error, which has no frame; the
-# constructs after it are what it needs to be refused, and the pull request that brings them
-# makes it a conformance program that fails. `outcome` and `was` are the reviews' readings, the figures of rounds 1 to 10 under
-# the count as it stood before the amendment of 2026-11-15 (A').
+# holds the checker to. Every figure here is derived from item 25's equations by hand, or by
+# the reviews' scripts written before the checker counted, never by the checker, which this
+# list judges (Norman's decision `executable-rule-models`, 2026-11-15); a new entry's frames
+# are derived the same way. A program that waits names the construct it needs (`?T`,
+# `T ! E`, views, `List<T>`, `String`, `own`); the pull request that brings the construct
+# gives it its source and its frames. `refused` marks a program the reviews settled as an
+# error, which has no frame; the constructs after it are what it needs to be refused, and the
+# pull request that brings them makes it a conformance program that fails. No two entries
+# hold the same program. `outcome` and `was` are the reviews' readings: in rounds 1 to 10,
+# figures of the count as it stood before the amendment of 2026-11-15 (A').
 
 == 1.1
 round: 1 H1; 2 sound
@@ -1346,7 +1350,7 @@ was: refused
 waits: refused, own, List<T>
 
 == 6.33
-round: 6 script K1b
+round: 6 script K1b; 7 L8, which gave its source
 probe: The inner base kept alone
 program: `xs[i][bump(mut xs)]`, `mut xs: [10][10]u64`, `i` of 8 bytes, the two its only parameters
 outcome: accepted: frame 184 (run7)
@@ -1587,25 +1591,6 @@ program: `match arr[0] { 0 => keep(own arr) _ => 0 }`, `arr: [10]u64`
 outcome: refused: item 14's freeze, which counts the move though it copies (meant, as `view-source-freeze` has it)
 was: refused, unexplained
 waits: refused, own
-
-== 7.26
-round: 7 L8
-probe: The program of the frame 184
-program: `fn h(mut xs: [10][10]u64, i: usize) -> u64 { xs[i][bump(mut xs)] }`
-outcome: accepted: frame 184 (run7, "review K1b")
-was: 184
-waits: none
-frames: h 192
----
-module programs
-fn bump(mut xs: [10][10]u64) -> usize {
-  xs[0][0] = 1_u64
-  0_usize
-}
-
-pub fn h(mut xs: [10][10]u64, i: usize) -> u64 {
-  xs[i][bump(mut xs)]
-}
 
 == 7.27
 round: 7, gap on main
