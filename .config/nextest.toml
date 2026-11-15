@@ -41,12 +41,12 @@ filter = """
 """
 slow-timeout = { period = "60s", terminate-after = 3 }
 
-# The tests that spread their work over every core (compiler/mente-cli/src/cores.rs). Beside the
-# test nextest runs on each core, such a test puts twice as many threads as cores on the machine,
+# The tests that run work on more than one thread at once (compiler/mente-cli/src/cores.rs). Beside
+# the test nextest runs on each core, such a test puts more threads than cores on the machine,
 # and the time the tests next to it get depends on what else runs: on a runner with four cores
 # their times, and the limits above, measure the schedule, not the test. So each runs alone,
 # taking every test thread, in a group of its own, which nextest names to the test; cores.rs fails
-# a test outside the group that asks for every core, so a new one cannot run beside others.
+# a test outside the group that runs such work, so a new one cannot run beside others.
 [[profile.default.overrides]]
 filter = """
 (package(mente-cli) & test(=mir_mutants::tests::test_the_command_passes_or_fails_on_the_corpus_it_finds))
@@ -54,6 +54,7 @@ filter = """
 | (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_generated_programs))
 | (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite))
 | (package(mente-cli) & test(=test_mn_test_mutate_runs_the_demo_gate))
+| (package(mente-cli) & test(=test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds))
 """
 test-group = "all-cores"
 threads-required = "num-test-threads"

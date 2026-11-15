@@ -23,7 +23,8 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+
+use crate::cores::parallel;
 
 use mente_codegen::lower;
 use mente_interp::{Limits, Stop};
@@ -376,29 +377,6 @@ fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mente-{}-{}-{}", tag, std::process::id(), run));
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// `f` on every item, on as many threads as the machine has, the results in order.
-fn parallel<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync) -> Vec<U> {
-    let workers = crate::cores::threads_for(items.len());
-    let next = AtomicUsize::new(0);
-    let items: Vec<Mutex<Option<T>>> = items.into_iter().map(|t| Mutex::new(Some(t))).collect();
-    let results: Vec<Mutex<Option<U>>> = (0..items.len()).map(|_| Mutex::new(None)).collect();
-    std::thread::scope(|s| {
-        for _ in 0..workers {
-            s.spawn(|| loop {
-                let k = next.fetch_add(1, Ordering::Relaxed);
-                let Some(slot) = items.get(k) else { break };
-                let item = slot.lock().unwrap().take().unwrap();
-                let r = f(item);
-                *results[k].lock().unwrap() = Some(r);
-            });
-        }
-    });
-    results
-        .into_iter()
-        .map(|m| m.into_inner().unwrap().unwrap())
-        .collect()
 }
 
 /// What a run over many programs found.

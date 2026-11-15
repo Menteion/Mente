@@ -105,6 +105,94 @@ fn test_exhaustive_crates_deny_wildcard_arms() {
     assert_eq!(wildcard_arm_violations("k", with, &allowed).len(), 1);
 }
 
+/// The one file that reads the machine's core count and starts threads that run at once
+/// (compiler/mente-cli/src/cores.rs), which fails a test nextest runs beside others unless
+/// `.config/nextest.toml` runs it alone.
+const CORES_RS: &str = "mente-cli/src/cores.rs";
+
+/// The names that reach the core count, or silence clippy's ban on it and on
+/// `std::thread::Scope::spawn` (clippy.toml): `clippy::style` and `clippy::all` hold
+/// `disallowed_methods`. Code anywhere but cores.rs that names one is a way around cores.rs that
+/// clippy may not see, under a `cfg` its build leaves out or an `allow`.
+const CORE_COUNT_NAMES: [&str; 4] = [
+    "available_parallelism",
+    "disallowed_methods",
+    "clippy::style",
+    "clippy::all",
+];
+
+fn core_count_violations(sources: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (path, text) in sources {
+        if path == CORES_RS {
+            continue;
+        }
+        for (n, line) in code_only(text).lines().enumerate() {
+            for name in CORE_COUNT_NAMES {
+                if line.contains(name) {
+                    found.push(format!(
+                        "{}:{}: names `{}`: work on more than one thread at once goes through {} (threads_for, concurrently, parallel)",
+                        path,
+                        n + 1,
+                        name,
+                        CORES_RS
+                    ));
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn test_only_cores_rs_reads_the_core_count_or_silences_its_ban() {
+    let all = sources(&compiler());
+    assert!(
+        all.iter().any(|(p, _)| p == CORES_RS),
+        "{} is not where the scan looks",
+        CORES_RS
+    );
+    let found = core_count_violations(&all);
+    assert!(
+        found.is_empty(),
+        "{}",
+        found.join(
+            "
+"
+        )
+    );
+    // The check itself: each name in code elsewhere is found, under a cfg or in a list of lints;
+    // the same names in cores.rs, in a comment or in a string are not.
+    let planted = |code: &str| vec![("mente-sema/src/a.rs".to_string(), code.to_string())];
+    for code in [
+        "#[cfg(windows)]
+fn n() -> usize { std::thread::available_parallelism().map_or(1, |n| n.get()) }
+",
+        "#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+fn f() {}
+",
+        "#![allow(clippy::style)]
+",
+        "#[expect(clippy::all, reason = \"r\")]
+fn f() {}
+",
+    ] {
+        assert_eq!(core_count_violations(&planted(code)).len(), 1, "{}", code);
+    }
+    let quiet = "// available_parallelism
+const S: &str = \"clippy::disallowed_methods\";
+";
+    assert!(core_count_violations(&planted(quiet)).is_empty());
+    let cores = vec![(
+        CORES_RS.to_string(),
+        "#[expect(clippy::disallowed_methods, reason = \"r\")]
+fn f() {}
+"
+        .to_string(),
+    )];
+    assert!(core_count_violations(&cores).is_empty());
+}
+
 // -------------------------------------------------------------------------------------------
 // What the lint does not see
 // -------------------------------------------------------------------------------------------

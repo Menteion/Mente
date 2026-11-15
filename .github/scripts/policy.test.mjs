@@ -483,17 +483,21 @@ const SLOW_TESTS = [
   ["mente-interp", "tests::test_a_program_tier1_proves_never_trips_its_checks"],
   ["mente-cli", "mir_run::tests::test_native_code_runs_each_construct_as_the_reference_interpreter_does"],
 ];
-/// The tests that spread their work over every core (compiler/mente-cli/src/cores.rs), which the
-/// override of the group `all-cores` runs alone, each taking every test thread, so that none
-/// starves the tests beside it of time; under nextest, cores.rs fails any other test that does.
-/// Each by its package and its whole path.
+/// The tests that run work on more than one thread at once (compiler/mente-cli/src/cores.rs),
+/// which the override of the group `all-cores` runs alone, each taking every test thread, so that
+/// none starves the tests beside it of time; under nextest, cores.rs fails any other test that
+/// does. Each by its package and its whole path.
 const ALL_CORES_TESTS = [
   ["mente-cli", "mir_mutants::tests::test_the_command_passes_or_fails_on_the_corpus_it_finds"],
   ["mente-cli", "mir_mutants::tests::test_the_corpus_passes_the_gate"],
   ["mente-cli", "mir_run::differential::tests::test_three_paths_agree_on_generated_programs"],
   ["mente-cli", "mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite"],
   ["mente-cli", "test_mn_test_mutate_runs_the_demo_gate"],
+  ["mente-cli", "test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds"],
 ];
+/// Where the tests read the group's name: cores.rs fails a test outside the group named there, so
+/// a group renamed in .config/nextest.toml and here alone would fail every test of the group.
+const CORES_GROUP = ["compiler/mente-cli/src/cores.rs", 'pub const GROUP: &str = "all-cores";'];
 
 /// The tests an override's filter names, each as [package, path]: `(package(name) & test(=path))`
 /// joined by `|`. The package keeps a test of the same path in another crate out, and the exact
@@ -582,6 +586,11 @@ check("the tests run under the limits the policy holds, and every test given mor
   assert.deepEqual(shown(namedBy("slow")), shown(SLOW_TESTS), "the overrides give their longer limit to other tests than SLOW_TESTS, or one twice: more time for a test is a change to the policy too");
   assert.deepEqual(shown(namedBy("all-cores")), shown(ALL_CORES_TESTS), "the overrides run alone other tests than ALL_CORES_TESTS, or one twice: a test that uses every core is a change to the policy too");
   const named = [...namedBy("slow"), ...namedBy("all-cores")];
+  const [coresFile, groupLine] = CORES_GROUP;
+  const groupName = /"([^"]*)"/.exec(NEXTEST_VALUES.get("profile.default.overrides/test-group"))[1];
+  const groupLines = read(coresFile).split(/\r?\n/).filter((l) => l === groupLine);
+  assert.equal(groupLines.length, 1, `${coresFile} does not hold ${groupLine} once: the group its tests are held to is the group .config/nextest.toml names`);
+  assert.equal(groupLine, `pub const GROUP: &str = "${groupName}";`, "CORES_GROUP names another group than the override's test-group");
   const crates = workspace();
   for (const [pkg, testPath] of named) {
     const crate = crates.get(pkg);

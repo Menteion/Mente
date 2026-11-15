@@ -2549,25 +2549,14 @@ fn fuzz(exe: &Path, opts: &Options, seeds: &[String]) -> i32 {
             None => format!("{} s", opts.seconds),
         }
     );
-    let results: Vec<Result<(Tally, usize), String>> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..opts.jobs)
-            .map(|job| {
-                let known = &known;
-                s.spawn(move || {
-                    let mut worker = Worker::new(exe.to_path_buf(), &opts.phases);
-                    campaign(job, opts, seeds, &mut worker, known, deadline)
-                        .map(|t| (t, worker.restarts))
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| {
-                h.join()
-                    .unwrap_or_else(|_| Err("a job panicked".to_string()))
-            })
-            .collect()
-    });
+    let results: Vec<Result<(Tally, usize), String>> =
+        crate::cores::concurrently(opts.jobs, |job| {
+            let mut worker = Worker::new(exe.to_path_buf(), &opts.phases);
+            campaign(job, opts, seeds, &mut worker, &known, deadline).map(|t| (t, worker.restarts))
+        })
+        .into_iter()
+        .map(|joined| joined.unwrap_or_else(|_| Err("a job panicked".to_string())))
+        .collect();
     let mut total = Tally::default();
     let mut restarts = 0;
     for r in results {
