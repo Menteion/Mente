@@ -53,21 +53,10 @@ This file is the switchboard, not the rulebook.
 The required checks of `.github/required-checks.txt` are the gate: CI runs every command below on each push, on x86-64 Linux, AArch64 Linux and Windows, with pinned tools and a record, again in the merge queue and on `main`. Locally, before a push, run only the quick checks (Norman, 2026-11-15): a full local run repeats CI's work on the laptop and gates nothing.
 
 ```powershell
-# Before every push, locally (half the laptop's cores: CARGO_BUILD_JOBS=8, RUST_TEST_THREADS=8)
-cargo fmt --all --check
-cargo clippy --all-targets --workspace -- -D warnings
-
-# The tests the change adds or changes: each seen to fail without the fix and to pass with it
-cargo test -p <crate> <filter>
-
-# When spec/*.md, docs or other documents change: the @assert-* directives and the pinned @spec-family checks (`npm ci` once first)
-cargo run --bin mn -- spec
-npm run verify:docs
-
-# When .github/ or the benchmark corpus changes: the workflow policy, and the corpus against its references and its lock
-npm run test:ci
-npm run check:benchmark
-npm run test:benchmark
+# Before every push, locally: the checks the changed files call for (tools/quick.mjs holds which),
+# at half the laptop's cores, and the tests the change adds or changes, each seen to fail
+# without the fix and to pass with it (`npm ci` once first)
+node tools/quick.mjs -- -p <crate> <filter>
 ```
 
 ```powershell
