@@ -165,8 +165,8 @@ impl Exact {
 /// expression that has one (`core-calculus.md`, item 5): arithmetic, unary `-`, and `~`, a bit
 /// operation or a shift of literals, which have no type of their own; and a literal. A bit
 /// operation with an operand of a type, or a shift whose shifted operand has one, works in that
-/// type, so the expression of its literals ends there; so does it at a comparison, a call's argument, a narrowing point, a
-/// branch's value and an index.
+/// type, so the expression of its literals ends there; so does it at a comparison, a call's
+/// argument, a narrowing point, a branch's value and an index.
 fn joins(tree: &Tree, exprs: &[Ty], e: ExprId) -> bool {
     let untyped = exprs[e.0 as usize] == Ty::Int(Int::Literal);
     match &tree.expr(e).kind {
@@ -1393,8 +1393,8 @@ mod tests {
     }
 
     /// The static range of a bit operation over literals alone is its value, computed in the
-    /// type its literals take, as a literal's is, and that type's range where it may have more
-    /// than one; so an operation beside it computes in a machine type that holds its value
+    /// type its literals take, as a literal's is, and the hull of its values where it may have
+    /// more than one; so an operation beside it computes in a machine type that holds its value
     /// (`E0222`), and an array literal that holds it has a range to keep it in.
     #[test]
     fn test_a_bit_operation_on_literals_has_its_value_or_the_range_of_their_type() {
@@ -1429,13 +1429,13 @@ mod tests {
             range("pub fn f() -> i64 {\n  val m = ~3\n  m\n}", "~3"),
             point(true, 4)
         );
-        // More than one value: the range of the type.
+        // More than one value: their hull.
         assert_eq!(
             range(
                 "pub fn f(a: u8, k: usize[0..2]) -> u16 = a + [~3, 1][k]",
                 "[~3, 1][k]"
             ),
-            Some(((false, 0), (false, 255)))
+            Some(((false, 1), (false, 252)))
         );
     }
 }

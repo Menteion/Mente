@@ -586,8 +586,8 @@ fn test_literals_under_a_bit_operation_take_their_operands_type_only() {
 /// The interpreter derives the type of an expression of operators from the types of its leaves
 /// with a join of its own, and never reads the checker's, so that comparing the paths checks
 /// the type the checker gives it, which MIR and native code read (`core-calculus.md`, item 5):
-/// with the checker's type of every operator replaced by a wrong one, each literal still takes
-/// the type of every operand of its expression.
+/// with the checker's type of every operator, branch, arm and indexed element replaced by a
+/// wrong one, each literal still takes the type of every operand of its expression.
 #[test]
 fn test_the_interpreter_derives_the_type_of_an_expression_of_operators_itself() {
     use mente_sema::types::{Int as IntType, IntTy, Ty};
@@ -611,27 +611,46 @@ fn test_the_interpreter_derives_the_type_of_an_expression_of_operators_itself() 
         ),
         ("pub fn f(a: u8) -> u8 = a & (~3 | 1)", "f(255)", "253"),
         ("pub fn f(a: u8) -> u8 = a & (~3 + 1)", "f(255)", "253"),
+        (
+            "pub fn f(a: u8, c: bool) -> u64 = if c { a } else { ~3 }",
+            "f(0, false)",
+            "252",
+        ),
+        (
+            "pub fn f(a: u8, k: u8) -> u64 = match k {
+  0 => a
+  _ => ~3
+}",
+            "f(0, 1)",
+            "252",
+        ),
+        (
+            "pub fn f(xs: [2]u8, k: usize[0..2]) -> bool = xs[k] == ~3",
+            "f([252, 0], 0)",
+            "true",
+        ),
     ] {
         let mut m = module(f);
         for func in m.functions.iter_mut().flatten() {
             let tree = &func.syntax.tree;
             for (i, ty) in func.typing.exprs.iter_mut().enumerate() {
                 match tree.expr(ExprId(i as u32)).kind {
-                    ExprKind::Unary { .. } | ExprKind::Binary { .. } => *ty = wrong.clone(),
+                    ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::If { .. } => *ty = wrong.clone(),
                     ExprKind::Int { .. }
                     | ExprKind::Bool(_)
                     | ExprKind::Name(_)
                     | ExprKind::Todo(_)
                     | ExprKind::Unreachable(_)
-                    | ExprKind::Index { .. }
                     | ExprKind::Field { .. }
                     | ExprKind::Call { .. }
                     | ExprKind::Construct { .. }
                     | ExprKind::Variant { .. }
-                    | ExprKind::Match { .. }
                     | ExprKind::Array(_)
                     | ExprKind::Repeat { .. }
-                    | ExprKind::If { .. }
                     | ExprKind::Error => {}
                 }
             }

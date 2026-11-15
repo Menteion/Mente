@@ -5287,7 +5287,18 @@ impl<'a> Fx<'a> {
                     Shape::Int { refine, .. } => refine,
                     Shape::Array(..) | Shape::Struct(_) | Shape::Other => None,
                 };
-                self.always_traps_into(st, v, (*int, refine.as_deref()), at, Some(&what));
+                let recorded = self.recording;
+                let traps =
+                    self.always_traps_into(st, v, (*int, refine.as_deref()), at, Some(&what));
+                // Only a fix known to check is offered here, a machine-applicable one: a
+                // suggestion such as `take(~(1_u8 << 1) - 1)` into `u8[0..=252]` leaves an
+                // obligation Tier 1 cannot discharge (Norman's decision on self-verifying fixes,
+                // 2026-11-15).
+                if let (true, true, Some(d)) = (recorded, traps, self.report.diagnostics.last_mut())
+                {
+                    d.fixes
+                        .retain(|f| f.applicability == Applicability::MachineApplicable);
+                }
             }
             Shape::Int { int: None, .. } | Shape::Array(..) | Shape::Struct(_) | Shape::Other => {
                 self.narrow(st, v, &plain, (at, Tag::None), "", Some(what));
@@ -8475,10 +8486,17 @@ pub fn f() -> u8 = take(~3)",
                 "take(~3_u8)",
                 true,
             ),
+            // An argument gets only a fix known to check, a machine-applicable one.
             (
                 "fn take(n: u8, x: u8[0..n]) -> u8 = x
 pub fn f(n: u8) -> u8 = take(n, ~3)",
-                "take(n, ~3_u8)",
+                "",
+                false,
+            ),
+            (
+                "fn take(x: u8[0..=252]) -> u8 = x
+pub fn f() -> u8 = take(~(1 << 1) - 1)",
+                "",
                 false,
             ),
         ] {

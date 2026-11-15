@@ -3,15 +3,17 @@
 //!
 //! The checker gives every expression a type, and MIR and native code read it, among them the
 //! type of an expression of operators, which its literals take. The interpreter reads from the
-//! checker only the types of the leaves of such an expression, the names, calls, fields, indexed
-//! elements, branches and literals among its operands, a suffixed literal's included, and
-//! derives the type of every operator over them here, with a join of its own taken from the
-//! ranges of the types; so a slip in the checker's join, or in which operators make one
+//! checker only the types of the leaves of such an expression, the names, calls, fields and
+//! literals among its operands, a suffixed literal's included, and derives the type of every
+//! operator, branch, arm and indexed element over them here, with a join of its own taken from
+//! the ranges of the types; so a slip in the checker's join, or in which operators make one
 //! expression, shows as a difference when the paths are compared.
 
 use mente_sema::types::{Int as IntType, IntTy, Ty, INT_TYPES};
 use mente_sema::CheckedFn;
-use mente_syntax::tree::{BinaryOp, ExprId, ExprKind, Tree, UnaryOp};
+use mente_syntax::tree::{
+    ArmBody, BinaryOp, BlockId, Else, ExprId, ExprKind, StmtKind, Tree, UnaryOp,
+};
 
 /// The integer type of an expression as derived here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,22 +122,57 @@ fn kind(tree: &Tree, exprs: &[Ty], e: ExprId, out: &mut [Option<Kind>]) -> Kind 
         // The elements of an array literal make its element type, each the others' operand.
         ExprKind::Array(items) => items.iter().fold(Kind::Literal, |k, &i| k.join(of(i))),
         ExprKind::Repeat { value, .. } => of(*value),
+        // An element read from an array has the array's element kind.
+        ExprKind::Index { base, .. } => of(*base),
+        // The branches and the arms give each other their kinds, a branch that ends in no value
+        // none; an `if` without `else` gives no integer.
+        ExprKind::If {
+            then, otherwise, ..
+        } => {
+            let first = tail(tree, *then).map_or(Kind::Literal, &mut of);
+            match otherwise {
+                Some(Else::Block(b)) => first.join(tail(tree, *b).map_or(Kind::Literal, &mut of)),
+                Some(Else::If(i)) => first.join(of(*i)),
+                None => Kind::Other,
+            }
+        }
+        ExprKind::Match { arms, .. } => arms.iter().fold(Kind::Literal, |k, arm| {
+            let body = match arm.body {
+                ArmBody::Expr(x) => Some(x),
+                ArmBody::Block(b) => tail(tree, b),
+            };
+            k.join(body.map_or(Kind::Literal, &mut of))
+        }),
         ExprKind::Int { .. }
         | ExprKind::Bool(_)
         | ExprKind::Name(_)
         | ExprKind::Todo(_)
         | ExprKind::Unreachable(_)
-        | ExprKind::Index { .. }
         | ExprKind::Field { .. }
         | ExprKind::Call { .. }
         | ExprKind::Construct { .. }
         | ExprKind::Variant { .. }
-        | ExprKind::Match { .. }
-        | ExprKind::If { .. }
         | ExprKind::Error => Kind::of(&exprs[e.0 as usize]),
     };
     out[e.0 as usize] = Some(k);
     k
+}
+
+/// The expression whose value block `b` gives, its last statement's; none where it ends in no
+/// value.
+fn tail(tree: &Tree, b: BlockId) -> Option<ExprId> {
+    let s = *tree.block(b).stmts.last()?;
+    match &tree.stmt(s).kind {
+        StmtKind::Expr(x) => Some(*x),
+        StmtKind::Binding { .. }
+        | StmtKind::Assign { .. }
+        | StmtKind::While { .. }
+        | StmtKind::Guard { .. }
+        | StmtKind::Return(_)
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Discard(_) => None,
+    }
 }
 
 #[cfg(test)]

@@ -61,8 +61,8 @@ fn int_ty(ty: &Ty) -> Option<IntTy> {
 /// of every operand of that expression that has one (`core-calculus.md`, item 5): arithmetic,
 /// unary `-`, and `~`, a bit operation or a shift of literals alone; and a literal. A bit
 /// operation with an operand of a type, or a shift whose shifted operand has one, works in that
-/// type, so the expression of its literals ends there, as it does at a comparison, a call's argument, a narrowing point, a
-/// branch's value and an index. Derived here from the tree and the interpreter's own kinds, as
+/// type, so the expression of its literals ends there, as it does at a comparison, a call's
+/// argument, a narrowing point, a branch's value and an index. Derived here from the tree and the interpreter's own kinds, as
 /// the checker derives it from its types, so that the comparison of the paths checks the
 /// checker's table.
 fn joins(tree: &Tree, kinds: &[Kind], e: ExprId) -> bool {
@@ -866,7 +866,14 @@ impl<'m> Machine<'m> {
                     }
                 }
                 UnaryOp::BitNot => {
-                    let t = kinds[operand.0 as usize].ty().or(here).unwrap_or(I64);
+                    let t = match kinds[operand.0 as usize] {
+                        Kind::Typed(Some(t)) => t,
+                        Kind::Literal => here.unwrap_or(I64),
+                        // `E0212`: no type is chosen for integers no standard type holds.
+                        Kind::Typed(None) | Kind::Other => {
+                            return broken("`~` of integers no standard type holds")
+                        }
+                    };
                     let x = self.int_as(frame, *operand, here, joined)?;
                     let x = fit(x, t, tree.expr(*operand).span)?;
                     Value::Int(Int::from_bits(!x.to_bits(t), t))
@@ -975,9 +982,15 @@ impl<'m> Machine<'m> {
                 // An integer scrutinee is narrowed into its type, which the arms cover
                 // ([`match-scrutinee-narrowing`]); literals alone are an `i64`.
                 let read = match &f.typing.exprs[scrutinee.0 as usize] {
-                    Ty::Int(_) => Ty::Int(IntType::One(
-                        kinds[scrutinee.0 as usize].ty().unwrap_or(I64),
-                    )),
+                    // Literals alone are an `i64`; integers no type holds are `E0212`, never
+                    // read in a type chosen for them.
+                    Ty::Int(_) => match kinds[scrutinee.0 as usize] {
+                        Kind::Literal => Ty::Int(IntType::One(I64)),
+                        Kind::Typed(Some(t)) => Ty::Int(IntType::One(t)),
+                        Kind::Typed(None) | Kind::Other => {
+                            return broken("a scrutinee of integers no standard type holds")
+                        }
+                    },
                     t @ (Ty::Bool
                     | Ty::Array(..)
                     | Ty::Struct(_)

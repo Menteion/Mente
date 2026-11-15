@@ -336,22 +336,24 @@ impl Wide<'_> {
     fn compute(&mut self, e: ExprId) -> Option<Range> {
         let typed = self.typed(e).map(Range::of);
         // A bit operation, a shift or `~` over literals alone works in the type its literals
-        // take (`core-calculus.md`, item 5): its range is its one value where the checker
-        // knows it, as a literal's is, so that the order of the operands around it never
-        // changes whether their hull fits, and else the type's. A value outside the type is an
-        // operation that traps (`E0234`), and gives no value.
+        // take (`core-calculus.md`, item 5): its range is the hull of the values the checker
+        // knows it may take, a branch's, an arm's or an indexed element's each, as a literal's is
+        // its value, so that the order of the operands around it never changes whether their
+        // hull fits; and else the type's. A value outside the type is an operation that traps
+        // (`E0234`), and gives no value.
         let taken = self
             .typing
             .literals
             .get(e.0 as usize)
             .copied()
             .flatten()
-            .map(
-                |t| match crate::literals::value(self.tree, &self.typing.literals, e) {
-                    Some(v) => Range::point(Num::new(v.negative, v.magnitude)),
-                    None => Range::of(t.ty),
-                },
-            );
+            .map(|t| {
+                let point =
+                    |v: crate::literals::Exact| Range::point(Num::new(v.negative, v.magnitude));
+                crate::literals::values(self.tree, &self.typing.literals, e)
+                    .and_then(|values| values.into_iter().map(point).reduce(Range::hull))
+                    .unwrap_or_else(|| Range::of(t.ty))
+            });
         let span = self.tree.expr(e).span;
         match &self.tree.expr(e).kind {
             ExprKind::Int { value, .. } => Some(Range::point(Num::new(false, *value))),
@@ -1282,10 +1284,26 @@ mod tests {
 
     /// A bit operation, a shift or `~` over literals alone has its one value as its range where
     /// the checker knows it, as a literal does, so that the order of the operands around it never
-    /// changes whether their hull fits; one of more than one value has the range of the type its
-    /// literals take.
+    /// changes whether their hull fits; one of more than one value has the hull of its values.
     #[test]
     fn test_a_bit_operation_over_literals_has_its_value_as_its_range() {
+        // Several values: their hull, in either order.
+        let sig = "pub fn f(a: u64, c: i64, k: usize[0..2], q: bool) -> i128";
+        for operand in [
+            "[-4, 1][k]",
+            "[~3, 1][k]",
+            "[~3; 2][k]",
+            "~(if q { 3 } else { 4 })",
+        ] {
+            for body in [
+                format!("a + {} + c", operand),
+                format!("a + c + {}", operand),
+                format!("{} + a + c", operand),
+            ] {
+                let f = format!("{} = {}", sig, body);
+                assert!(codes(&f).is_empty(), "{}: {:?}", f, codes(&f));
+            }
+        }
         for ok in [
             "pub fn f(a: u64, c: i64) -> i128 = a + ~3 + c",
             "pub fn f(a: u64, c: i64) -> i128 = a + c + ~3",
@@ -1298,7 +1316,7 @@ mod tests {
         }
         for wide in [
             "pub fn f(a: u64, b: u64) -> u128 = a * b * (1 << 2)",
-            "pub fn f(a: u64, b: u64, k: usize[0..2]) -> u128 = a * b * [~0 & 1, 1][k]",
+            "pub fn f(a: u64, b: u64, k: usize[0..2]) -> u128 = a * b * [~0 & 2, 1][k]",
         ] {
             assert_eq!(codes(wide), ["E0222"], "{}", wide);
         }

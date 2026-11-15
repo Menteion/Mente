@@ -1,0 +1,13 @@
+// expect: E0212 E0212 E0212
+module conformance
+// A `u128` and an `i8` have no standard type that holds them both, so their sum has no type
+// (core-calculus.md, items 4 and 5). Exact arithmetic over it stands, but an operation that needs
+// one type is an error, as `val k = a + c` is: no type is chosen for it, `i64` least of all.
+pub fn scrutinee(a: u128, c: i8) -> u8 = match a + c {
+  0 => 1
+  _ => 2
+}
+
+pub fn complement(a: u128, c: i8) -> i128 = ~(a + c)
+
+pub fn shifted(a: u128, c: i8) -> i128 = (a + c) << 1

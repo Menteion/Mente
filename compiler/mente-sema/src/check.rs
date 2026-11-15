@@ -1005,7 +1005,12 @@ impl Checker<'_> {
                     &format!("as the operand of `{}`", symbol),
                 );
                 match found {
-                    Ty::Int(_) => found,
+                    Ty::Int(i) => {
+                        if op == UnaryOp::BitNot {
+                            self.one_type_needed(operand, i, "`~` works on the bits of one type");
+                        }
+                        found
+                    }
                     Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
                         Ty::Any
                     }
@@ -1075,9 +1080,13 @@ impl Checker<'_> {
                 self.int_operand(r, rt, &place);
                 Ty::Bool
             }
-            BinaryOp::Shl | BinaryOp::Shr => self
-                .int_operands((l, lt), (r, rt), &place)
-                .map_or(Ty::Any, |(a, _)| Ty::Int(a)),
+            BinaryOp::Shl | BinaryOp::Shr => match self.int_operands((l, lt), (r, rt), &place) {
+                Some((a, _)) => {
+                    self.one_type_needed(l, a, "a shift works in the type of its shifted operand");
+                    Ty::Int(a)
+                }
+                None => Ty::Any,
+            },
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                 let Some((a, b)) = self.int_operands((l, lt), (r, rt), &place) else {
                     return Ty::Any;
@@ -1997,6 +2006,26 @@ impl Checker<'_> {
         }
     }
 
+    /// `E0212` for `e`, of integer type `i`, where `why` needs one type: integers of different
+    /// types that no standard type holds have none, as `val k = a + c` has none for a `u128` and
+    /// an `i8`, and none is chosen for them (`core-calculus.md`, items 4 and 5).
+    fn one_type_needed(&mut self, e: ExprId, i: Int, why: &str) {
+        match i {
+            Int::Mixed(None) => {
+                let span = self.tree.expr(e).span;
+                self.errors.push(Diagnostic::error(
+                    "E0212",
+                    span,
+                    format!(
+                        "this is computed from integers of different types that no standard type holds together, and {}; split the computation",
+                        why
+                    ),
+                ));
+            }
+            Int::Literal | Int::One(_) | Int::Mixed(Some(_)) => {}
+        }
+    }
+
     /// `E0212`, with the type that holds every operand as the suggestion.
     fn mixed_binding(&mut self, name: &str, name_span: Span, found: &Ty, holder: Option<IntTy>) {
         let message = match holder {
@@ -2341,6 +2370,7 @@ impl<'a> Checker<'a> {
             },
             Ty::Bool => Read::Bool,
             Ty::Int(i) => {
+                self.one_type_needed(scrutinee, *i, "a scrutinee is narrowed into its type");
                 let (lo, hi, text) = self.int_read(scrutinee, *i);
                 Read::Int(lo, hi, text)
             }
@@ -4751,6 +4781,28 @@ pub fn f(mut p: Pair) {
         assert_eq!(messages("pub fn f(c: bool) {\n  val x = { c }\n}").len(), 1);
     }
 
+    /// An operation that needs one type, over integers of different types that no standard type
+    /// holds, is `E0212` as such a binding is: a `match`'s scrutinee, `~` and a shift's shifted
+    /// operand. No type is chosen for them, `i64` least of all; exact arithmetic over them stands.
+    #[test]
+    fn test_an_operation_needing_one_type_over_integers_no_type_holds_is_e0212() {
+        for f in [
+            "pub fn f(a: u128, c: i8) -> u8 = match a + c {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(a: u128, c: i8) -> i128 = ~(a + c)",
+            "pub fn f(a: u128, c: i8) -> i128 = (a + c) << 1",
+            "pub fn f(a: u128, c: i8) -> i128 = (a + c) >> 1",
+        ] {
+            assert_eq!(codes(f), ["E0212"], "{}", f);
+        }
+        for f in [
+            "pub fn f(a: u128, c: i8) -> i128 = a + c",
+            "pub fn f(a: u8, c: i8) -> u8 = match a + c {\n  0 => 1\n  _ => 2\n}",
+            "pub fn f(a: u128, c: u8) -> u128 = (a + c) << 1",
+        ] {
+            assert_eq!(codes(f), Vec::<&str>::new(), "{}", f);
+        }
+    }
+
     #[test]
     fn test_unannotated_bindings_of_mixed_integers_state_their_type() {
         let d = diagnostics("pub fn f(a: u8, b: u32) {\n  val total = a + b\n}");
@@ -5583,11 +5635,12 @@ pub enum Light {
             "pub struct Sk {\n  k: u8[0..3]\n}\npub fn f(s: Sk) -> u8 = match s.k {\n  0 => 1\n  1 => 2\n  2 => 3\n}"
         )
         .is_empty());
-        // The arms of a scrutinee of no one 128-bit type, which `wide.rs` reports, are read
-        // over both `i128`'s and `u128`'s values, a negative literal included.
+        // A scrutinee of integers no standard type holds together has no type to be narrowed
+        // into, and is `E0212`; its arms are still read over both `i128`'s and `u128`'s values,
+        // a negative literal included, and draw nothing more.
         assert_eq!(
             codes("pub fn f(a: i128, b: u128) -> u8 = match a + b {\n  -1 => 1\n  _ => 2\n}"),
-            NONE
+            ["E0212"]
         );
         // E0230's fix removes the line of an arm that stands alone on it, spaces after the arm
         // included, and only the arm where the line holds more; the module then checks.

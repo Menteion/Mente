@@ -16824,6 +16824,7 @@ block0(v0: u8):
   return v1
 t0: unreachable @3:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/one_type_needed_over_integers_no_type_holds.mn == (exit 2)
 == conformance/core-calculus/operand_read_before_a_later_operand_changes_it.mn == (exit 2)
 == conformance/core-calculus/operand_that_leaves.mn ==
 mente-dump 2 mir
