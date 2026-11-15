@@ -82,6 +82,22 @@ fn test_conformance_programs_give_the_frames_they_state() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// `mn view --frames` prints each function with a body, its frame and the parts of it, in the
+/// module's order; a function declared without a body has no frame and no line.
+#[test]
+fn test_the_report_gives_each_function_its_frame_and_its_parts() {
+    let src = "module conformance\n\
+               fn declared(n: u64) -> u64\n\n\
+               fn measured(n: u32) -> u32\n  decreases n\n{\n  if n == 0 {\n    return 0\n  }\n  measured(n - 1)\n}\n\n\
+               pub fn mix(a: u8, b: u32) -> u64 = a + b\n";
+    let module = mente_sema::check_program_without_proofs(src).unwrap();
+    assert_eq!(
+        mente_sema::frames::report(&module),
+        "fn measured: 100 bytes = 64 for the call + 4 for the parameters + 16 for decreases + 16 held at most\n\
+         fn mix: 98 bytes = 64 for the call + 5 for the parameters + 0 for decreases + 29 held at most\n"
+    );
+}
+
 /// One program of the list: its key, what it waits on (`none` where it runs today), the frames
 /// it states, and its source.
 struct Program {

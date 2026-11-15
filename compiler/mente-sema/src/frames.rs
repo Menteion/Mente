@@ -40,6 +40,21 @@ pub struct Frame {
     pub held: u128,
 }
 
+/// Each frame of a module as `mn view --frames` prints it: a line for each function with a
+/// body, in the module's order, with the bytes a call of it counts and the parts item 25 sums.
+pub fn report(module: &crate::CheckedModule) -> String {
+    let mut out = String::new();
+    for (name, f) in module.names.iter().zip(&module.frames) {
+        if let Some(f) = f {
+            out.push_str(&format!(
+                "fn {}: {} bytes = {} for the call + {} for the parameters + {} for decreases + {} held at most\n",
+                name, f.bytes, CALL, f.params, f.decreases, f.held
+            ));
+        }
+    }
+    out
+}
+
 /// The frame of `f`, whose types `structs` lays out.
 pub fn frame(f: &CheckedFn, structs: &Structs) -> Frame {
     let c = Count {
