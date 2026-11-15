@@ -118,6 +118,9 @@ export interface Proc {
 
 const OUTPUT_CAP = 1_000_000;
 
+/** A variable's name that could hold a secret: no process the harness starts is given one. */
+const SECRET_NAME = /key|token|secret|password|credential/i;
+
 /**
  * The environment of every process the harness starts, the agent's programs among them: this
  * one's without any variable whose name looks like a secret, such as ANTHROPIC_API_KEY.
@@ -125,22 +128,32 @@ const OUTPUT_CAP = 1_000_000;
 export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(process.env)) {
-    if (!/key|token|secret|password|credential/i.test(name)) env[name] = value;
+    if (!SECRET_NAME.test(name)) env[name] = value;
   }
   return { ...env, ...extra };
 }
 
-/** Runs a command to its end, or kills it at the time limit. */
+/**
+ * Runs a command to its end, or kills it at the time limit: the one place the harness of a job
+ * that holds the key starts a process (the policy holds the other modules to it). Whatever
+ * environment it is given, no variable that could hold a secret reaches the child. And `mn`
+ * itself, code of the branch, never starts directly while this process holds such a variable:
+ * only through the sandbox, `sandboxed(...)` (the final review of PR 137 found it run directly).
+ */
 export function runProcess(
   cmd: string,
   args: string[],
   opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number },
 ): Promise<Proc> {
+  if (/(^|[\\/])mn(\.exe)?$/.test(cmd) && Object.entries(process.env).some(([name, value]) => SECRET_NAME.test(name) && value)) {
+    return Promise.reject(new Error("mn would run outside the sandbox beside a secret"));
+  }
+  const env = Object.fromEntries(Object.entries(opts.env ?? childEnv()).filter(([name]) => !SECRET_NAME.test(name)));
   return new Promise((done) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? childEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.on("data", (d) => {
       if (stdout.length < OUTPUT_CAP) stdout += d;
     });
@@ -342,13 +355,22 @@ export function dropExecutable(build: Build): void {
   }
 }
 
-/** The failure class `mn explain` gives each code, asked once per code. */
+/**
+ * The failure class `mn explain` gives each code, asked once per code: through the sandbox, as
+ * every other run of `mn`, which is code of the branch and runs beside the process that holds the
+ * key (the final review of PR 137 found this one run directly), in an empty directory of its own
+ * in the output directory. With no sandbox it refuses to run.
+ */
 const classes = new Map<string, Promise<string>>();
-export function failureClass(mn: string, code: string): Promise<string> {
+export function failureClass(tools: Tools, code: string): Promise<string> {
+  if (!tools.sandbox) return Promise.reject(new Error("mn explain would run outside the sandbox"));
   if (!classes.has(code)) {
+    const dir = resolve(tools.cover || ".", "explain");
+    mkdirSync(dir, { recursive: true });
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["explain", code], hiddenPaths(tools));
     classes.set(
       code,
-      runProcess(mn, ["explain", code], { timeoutMs: 30_000 }).then((p) => /Failure class: ([^.]+)\./.exec(p.stdout)?.[1] ?? "unknown"),
+      runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: 30_000 }).then((p) => /Failure class: ([^.]+)\./.exec(p.stdout)?.[1] ?? "unknown"),
     );
   }
   return classes.get(code) ?? Promise.resolve("unknown");

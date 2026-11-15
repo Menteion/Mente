@@ -18,6 +18,8 @@
 //   runs on `pull_request_target` or `workflow_run`, no `run:` script and no `script:` input holds
 //   an expression, overflow checks stay on in every build, and a measured benchmark run proves its
 //   sandbox before any agent code runs.
+// - On Linux the testing jobs set up and prove the sandbox the code of a change runs in before any
+//   of it runs, and every step that runs it checks that it ran there.
 // - Every milestone ROADMAP.md marks done on the base has its tag, and every instrument
 //   docs/design-brief.md section 7.7 schedules for a finished milestone has its checks required.
 
@@ -36,6 +38,7 @@ import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullR
 import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 import { doctestProblems, problems as testListProblems, slowTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
+import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 52;
+const FLOOR = 61;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -168,6 +171,24 @@ const stepKey = (file, id, s) => `${file}#${id}#${s.name ?? s.uses ?? String(s.r
 const hasWatch = (job) => steps(job).some((s) => s.id === "watch" || /watch\.mjs/.test(String(s.run ?? "")));
 
 // ------------------------------------------------------------------- safety of every workflow
+
+check("every file under .github/ holds only printable ASCII, tab and LF", () => {
+  // The first check, before any rule reads a workflow: GitHub's YAML reader breaks a line at NEL
+  // (U+0085) and the line separators, where JavaScript's `.` and the readers here did not, so a
+  // comment here was a step there, with no pin moved (the fourth review of PR 137). Every gate file
+  // is ASCII today; anything else is refused, not read.
+  const odd = [];
+  for (const f of [...tracked()].filter((x) => x.startsWith(".github/"))) {
+    const bytes = fs.readFileSync(path.join(ROOT, f));
+    const k = bytes.findIndex((b) => b !== 0x09 && b !== 0x0a && (b < 0x20 || b > 0x7e));
+    if (k >= 0) odd.push(`${f}: byte 0x${bytes[k].toString(16)} at offset ${k}`);
+  }
+  assert.deepEqual(odd, [], "files under .github/ hold bytes outside printable ASCII, tab and LF");
+  // The readers refuse such a character too, so that no later reading can depend on this check.
+  const nel = String.fromCharCode(0x85);
+  assert.throws(() => parseYaml(`jobs:\n  a:\n    steps:\n      - run: x\n      # x${nel}        continue-on-error: true\n`), /outside printable ASCII/);
+  assert.match(actionPins("w.yml", `      # x${nel}      - uses: someone/action@main\n`)[0].unreadable, /outside printable ASCII/);
+});
 
 check("no workflow runs on pull_request_target or workflow_run", () => {
   for (const { file, doc } of workflows()) {
@@ -316,11 +337,46 @@ check("every compiler crate proves its overflow checks in a release build", () =
     const has = filesUnder(`${dir}/src`).some((f) => f.endsWith(".rs") && read(f).includes("fn test_arithmetic_overflow_panics_in_this_crate"));
     assert.ok(has, `${dir} has no test_arithmetic_overflow_panics_in_this_crate (src/overflow_traps.rs)`);
   }
-  // The proof every release-building required job runs: every crate's test in release, counted.
+  // The proof every release-building required job runs: every crate's test in release, each
+  // crate's run on its own, counted.
   const proof = read(".github/scripts/overflow-proof.sh");
-  assert.match(proof, /cargo test --release --locked --workspace --lib --bins -- --exact "\$test"/);
+  assert.match(proof, /cargo test --release --locked -p "\$name" "\$\{targets\[@\]\}" -- --exact "\$test" > "\$log" 2>&1 \|\| status=\$\?/);
   assert.match(proof, /test=overflow_traps::test_arithmetic_overflow_panics_in_this_crate/);
   assert.match(proof, /if \[ "\$expected" -eq 0 \] \|\| \[ "\$passed" -ne "\$expected" \]; then/);
+  // What it reads, with a stand-in for cargo that prints, for the package it is asked for, the
+  // lines given: a crate that prints the passing test twice does not vouch for one that shows
+  // none, as it did while every crate's output was counted together.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "overflow-proof-"));
+  try {
+    for (const c of ["a", "b"]) {
+      fs.mkdirSync(path.join(dir, "compiler", c, "src"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "compiler", c, "Cargo.toml"), `[package]\nname = "mente-${c}"\n`);
+      fs.writeFileSync(path.join(dir, "compiler", c, "src", "lib.rs"), "mod overflow_traps;\n");
+      fs.writeFileSync(path.join(dir, "compiler", c, "src", "overflow_traps.rs"), "#[test]\nfn test_arithmetic_overflow_panics_in_this_crate() {}\n");
+    }
+    fs.mkdirSync(path.join(dir, "bin"));
+    const OK = "test overflow_traps::test_arithmetic_overflow_panics_in_this_crate ... ok";
+    const proofWith = (printed, status = 0) => {
+      const arms = Object.entries(printed).map(([pkg, lines]) => `  ${pkg}) printf '%s\\n' ${lines.map((l) => `'${l}'`).join(" ")} 'test result: ok.' ;;\n`);
+      const stub = path.join(dir, "bin", "cargo");
+      fs.writeFileSync(stub, `#!/usr/bin/env bash\nwhile [ "$#" -gt 0 ] && [ "$1" != -p ]; do shift; done\ncase "\${2:-}" in\n${arms.join("")}esac\nexit ${status}\n`);
+      fs.chmodSync(stub, 0o755);
+      const env = { ...process.env, PATH: `${path.join(dir, "bin")}${path.delimiter}${process.env.PATH}`, RUNNER_TEMP: dir.replace(/\\/g, "/"), GITHUB_STEP_SUMMARY: "" };
+      const r = spawnSync(bashPath(), [path.join(ROOT, ".github/scripts/overflow-proof.sh").replace(/\\/g, "/")], { cwd: dir, encoding: "utf8", env, timeout: 30000 });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    const both = proofWith({ "mente-a": [OK], "mente-b": [OK] });
+    assert.equal(both.status, 0, `the proof refuses two crates that each show their test: ${both.out}`);
+    assert.match(both.out, /Crates whose release build traps on an overflow: 2 of 2/);
+    const vouched = proofWith({ "mente-a": [OK, OK], "mente-b": [] });
+    assert.equal(vouched.status, 1, `one crate vouches for another: ${vouched.out}`);
+    assert.match(vouched.out, /::error::mente-a does not show its own overflow test passing, once/);
+    assert.match(vouched.out, /::error::mente-b does not show its own overflow test passing, once/);
+    assert.equal(proofWith({ "mente-a": [OK], "mente-b": [] }).status, 1, "a crate without its test passes");
+    assert.equal(proofWith({ "mente-a": [OK], "mente-b": [OK] }, 101).status, 1, "a crate whose tests failed passes");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /// A line of the TOML subset the policy reads, without its trailing comment and the whitespace
@@ -555,6 +611,369 @@ check("the toolchain is the release rust-toolchain.toml pins, from rustup, with 
   assert.equal(keys.get("profile"), '"minimal"', "rust-toolchain.toml's profile changed");
 });
 
+/// .cargo/mutants.toml, as the few forms the policy reads: a bare key at the start of a line, then
+/// `true`, `false`, one string, or a list of strings over one line or several, with comments. A
+/// string is literal ('...') or holds no escape ("..."). Anything else is an error rather than a
+/// line skipped: a quoted or dotted key, a table, an escape, which could each spell a key or a
+/// value otherwise to cargo-mutants than to this.
+export function mutantsSettings(text, file = ".cargo/mutants.toml") {
+  const settings = new Map();
+  let k = 0;
+  const fail = (why) => {
+    throw new Error(`${file}:${text.slice(0, k).split("\n").length}: ${why}`);
+  };
+  // A carriage return ends a line only before a line feed; alone, TOML refuses it or reads it as a
+  // line's end, where this reader would read a space.
+  k = text.search(/\r(?!\n)/);
+  if (k >= 0) fail("a carriage return that does not end its line");
+  k = 0;
+  const skip = (lines) => {
+    for (;;) {
+      const c = text[k];
+      if (c === " " || c === "\t" || c === "\r" || (lines && c === "\n")) k++;
+      else if (c === "#") while (k < text.length && text[k] !== "\n") k++;
+      else return;
+    }
+  };
+  const string = () => {
+    const quote = text[k];
+    const end = text.indexOf(quote, k + 1);
+    const line = text.indexOf("\n", k + 1);
+    if (end < 0 || (line >= 0 && line < end)) fail("a string that does not close on its line");
+    const body = text.slice(k + 1, end);
+    if (quote === '"' && body.includes("\\")) fail("a string with an escape, which could spell anything");
+    k = end + 1;
+    return body;
+  };
+  for (;;) {
+    skip(true);
+    if (k >= text.length) break;
+    if (k > 0 && text[k - 1] !== "\n") fail("a key that does not start its line");
+    const key = /^[a-z][a-z0-9_]*(?= = )/.exec(text.slice(k, k + 100))?.[0];
+    if (!key) fail("not a bare key and its value");
+    if (settings.has(key)) fail(`${key} twice`);
+    k += key.length + 3;
+    let value;
+    if (text[k] === "[") {
+      k++;
+      value = [];
+      for (;;) {
+        skip(true);
+        if (text[k] === "]") {
+          k++;
+          break;
+        }
+        if (text[k] !== "'" && text[k] !== '"') fail(`${key} holds something other than strings`);
+        value.push(string());
+        skip(true);
+        if (text[k] === ",") k++;
+        else if (text[k] !== "]") fail(`${key}: a list that does not go on with , or end with ]`);
+      }
+    } else if (text[k] === "'" || text[k] === '"') {
+      value = string();
+    } else {
+      const word = /^(true|false)(?![\w.-])/.exec(text.slice(k, k + 8))?.[1];
+      if (!word) fail(`${key} is neither true, false, a string nor a list of strings`);
+      value = word === "true";
+      k += word.length;
+    }
+    skip(false);
+    if (k < text.length && text[k] !== "\n") fail(`more after the value of ${key}`);
+    settings.set(key, value);
+  }
+  return settings;
+}
+
+const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string");
+/// What .cargo/mutants.toml may set, each key with what its value must be. cargo-mutants reads the
+/// file of the change in every mutation run, outside the tests' sandbox, and other keys of it hand
+/// cargo or nextest whatever arguments they hold (`additional_cargo_args`,
+/// `additional_cargo_test_args`): a wrapper around rustc, a runner, or another nextest
+/// configuration, whose setup scripts are no test executables and so never reach the sandbox.
+/// These four choose the tests and the mutants, and name no command, no argument and no file. To
+/// give cargo-mutants another setting, add its key here with its reason, where review sees it.
+const MUTANTS_KEYS = new Map([
+  // Every mutant runs against the whole workspace's tests.
+  ["test_workspace", (v) => v === true],
+  // Through nextest, whose limits and whose runner, the sandbox, the policy holds.
+  ["test_tool", (v) => v === "nextest"],
+  // The files and the mutants left out, each with its reason in the file.
+  ["exclude_globs", strings],
+  ["exclude_re", strings],
+]);
+
+/// Why a .cargo/mutants.toml could take a command of the change past the sandbox, or run the
+/// mutants' tests otherwise than through nextest over the whole workspace.
+export function mutantsSettingsProblems(text) {
+  let settings;
+  try {
+    settings = mutantsSettings(text);
+  } catch (e) {
+    return [e.message];
+  }
+  const found = [];
+  for (const [key, value] of settings) {
+    const allowed = MUTANTS_KEYS.get(key);
+    if (!allowed) found.push(`.cargo/mutants.toml sets ${key}, which MUTANTS_KEYS in .github/scripts/policy.test.mjs does not hold: cargo-mutants reads this file outside the tests' sandbox, and a key of it can hand cargo or nextest a wrapper, a runner or another configuration`);
+    else if (!allowed(value)) found.push(`.cargo/mutants.toml: ${key} = ${JSON.stringify(value)} is not a value the policy holds for it`);
+  }
+  for (const key of ["test_workspace", "test_tool"]) {
+    if (!settings.has(key)) found.push(`.cargo/mutants.toml does not set ${key}, on which the mutation runs' limits and sandbox stand`);
+  }
+  return found;
+}
+
+check("the mutation runs' settings name no command, no argument for cargo and no other file", () => {
+  assert.deepEqual(mutantsSettingsProblems(read(".cargo/mutants.toml")), []);
+  const base = 'test_workspace = true\ntest_tool = "nextest"\n';
+  assert.deepEqual(mutantsSettingsProblems(`# c\n${base}exclude_globs = ["spikes/**"] # why\nexclude_re = [\n  # one\n  'a, [b] # \\(c\\)$',\n  "d",\n]\n`), []);
+  assert.deepEqual(mutantsSettings("exclude_re = [\n  'a, [b] # \\(c\\)$', # why\n  \"d\"\n]\n").get("exclude_re"), ["a, [b] # \\(c\\)$", "d"]);
+  // The plants of the review of pull request 137, and the other keys and spellings that name a
+  // command, an argument or a file.
+  for (const plant of [
+    'additional_cargo_test_args = ["--config-file", "compiler/mente-cli/tests/nextest-plant.toml"]\n',
+    "additional_cargo_args = [\"--config\", \"build.rustc-wrapper='w.sh'\"]\n",
+    'additional_cargo_args = ["--config", "target.x86_64-unknown-linux-gnu.runner=\'env\'"]\n',
+    '"additional_cargo_args" = ["--all-features"]\n',
+    "'additional_cargo_args' = ['--all-features']\n",
+    '"\\u0061dditional_cargo_args" = ["--all-features"]\n',
+    'output = "/tmp/elsewhere"\n',
+    'profile = "plant"\n',
+    'features = ["plant"]\n',
+    "all_features = true\n",
+    "timeout_multiplier = 0.1\n",
+    "minimum_test_timeout = 0\n",
+    'error_values = ["x"]\n',
+    'examine_globs = ["none/**"]\n',
+    "skip_calls = ['f']\n",
+    "[package]\n",
+    "tool.test = true\n",
+    'exclude_re = ["a\\\\u0062"]\n',
+    'exclude_globs = ["a", 1]\n',
+    'exclude_globs = "spikes/**"\n',
+    "exclude_globs = ['a'] 'b'\n",
+    "  exclude_globs = ['a']\nexclude_globs = ['b']\n",
+    // L-4 of the second review of 4e896ca: a carriage return alone, which this reader took for a
+    // space and TOML refuses or reads as a line's end.
+    "exclude_globs = ['a']\rexclude_re = ['b']\n",
+    "exclude_globs = ['a'] # c\rexclude_re = ['b']\n",
+  ]) {
+    assert.ok(mutantsSettingsProblems(`${base}${plant}`).length > 0, `the settings' reader lets through: ${plant}`);
+  }
+  for (const text of ['test_workspace = false\ntest_tool = "nextest"\n', 'test_workspace = true\ntest_tool = "cargo"\n', "test_workspace = true\n", 'test_tool = "nextest"\n', `${base}${base}`]) {
+    assert.ok(mutantsSettingsProblems(text).length > 0, `the settings' reader lets through: ${text}`);
+  }
+});
+
+/// The attributes .gitattributes may set: line ends, and the language and documentation GitHub
+/// counts a file as. Every other is refused: `linguist-generated`, which folds a file's diff away on
+/// GitHub's review page; and above all those that hide a change from a diff, which the Mutants
+/// floor reads (H-1 of the second review of 4e896ca: `compiler/** -diff` made git write "Binary
+/// files differ", and cargo-mutants read that as a diff with no line): `-diff`, `diff=`, `binary`,
+/// a macro, and the filters, merge drivers and export rules that make the tree another than the
+/// commit's.
+const GIT_ATTRIBUTES = [/^text$/, /^text=auto$/, /^eol=lf$/, /^linguist-language=[A-Za-z][\w+#-]*$/, /^linguist-documentation=true$/];
+export function gitattributesProblems(text) {
+  const found = [];
+  for (const [k, raw] of String(text).split("\n").entries()) {
+    const line = raw.replace(/\r$/, "");
+    const where = `.gitattributes:${k + 1}`;
+    if (line.includes("\r")) found.push(`${where}: a carriage return inside a line`);
+    if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    if (/^\s/.test(line)) found.push(`${where}: a line that does not start with its pattern`);
+    const [pattern, ...attributes] = line.trim().split(/\s+/);
+    if (/^["[!]/.test(pattern)) found.push(`${where}: a quoted pattern, a macro or a negation: ${pattern}`);
+    if (attributes.length === 0) found.push(`${where}: a pattern with no attribute`);
+    for (const a of attributes) if (!GIT_ATTRIBUTES.some((re) => re.test(a))) found.push(`${where}: ${a}, an attribute GIT_ATTRIBUTES in .github/scripts/policy.test.mjs does not allow; -diff, diff=, binary, filter=, merge= and export-ignore hide a change from a diff or make the tree another than the commit's`);
+  }
+  return found;
+}
+/// A Rust source as its tokens read, for a rule over them: each comment, nested block comments
+/// too, made one space, and each string, raw string or character literal made `""`. One pass, so
+/// that no text makes a rule over it slow, and no `"/*"` in a string hides the code after it.
+export function rustTokensText(text) {
+  const out = [];
+  const n = text.length;
+  const raw = /[bc]?r(#*)"/y;
+  let k = 0;
+  let from = 0;
+  const cut = (to, put) => {
+    out.push(text.slice(from, k), put);
+    k = to;
+    from = to;
+  };
+  while (k < n) {
+    const c = text[k];
+    raw.lastIndex = k;
+    const rawMatch = /[bcr]/.test(c) && !/\w/.test(text[k - 1] ?? "") ? raw.exec(text) : null;
+    if (c === "/" && text[k + 1] === "/") {
+      const end = text.indexOf("\n", k);
+      cut(end < 0 ? n : end, " ");
+    } else if (c === "/" && text[k + 1] === "*") {
+      let depth = 0;
+      let j = k;
+      while (j < n) {
+        if (text[j] === "/" && text[j + 1] === "*") {
+          depth++;
+          j += 2;
+        } else if (text[j] === "*" && text[j + 1] === "/") {
+          depth--;
+          j += 2;
+          if (depth === 0) break;
+        } else j++;
+      }
+      cut(Math.min(j, n), " ");
+    } else if (rawMatch) {
+      const close = `"${rawMatch[1]}`;
+      const end = text.indexOf(close, k + rawMatch[0].length);
+      cut(end < 0 ? n : end + close.length, '""');
+    } else if (c === '"') {
+      let j = k + 1;
+      while (j < n && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      cut(Math.min(j + 1, n), '""');
+    } else if (c === "'" && text[k + 1] === "\\") {
+      let j = k + 3;
+      while (j < n && text[j] !== "'" && text[j] !== "\n") j++;
+      cut(Math.min(j + 1, n), '""');
+    } else if (c === "'" && k + 1 < n && text[k + 1] !== "\n") {
+      const width = text.codePointAt(k + 1) > 0xffff ? 2 : 1;
+      if (text[k + 1 + width] === "'") cut(k + 2 + width, '""');
+      else k++;
+    } else k++;
+  }
+  out.push(text.slice(from));
+  return out.join("");
+}
+/// Rust's whitespace beyond ASCII (Pattern_White_Space): NEL, the left-to-right and right-to-left
+/// marks, and the line and paragraph separators. Rust and the parser cargo-mutants reads with take
+/// each for a space between tokens; JavaScript's \s knows only the last two. None may stand in a
+/// Rust source or in a file under compiler/ or spikes/.
+const RUST_SPACE_BEYOND_ASCII = new RegExp(`[${String.fromCharCode(0x85, 0x200e, 0x200f, 0x2028, 0x2029)}]`);
+/// `mutants::skip` as cargo-mutants 27.1.0 reads it, in its tokens: path segments `mutants` and
+/// `skip`, a leading `::` or not, alone or under a cfg_attr, with any space, line or comment
+/// between them, and raw identifiers. cargo-mutants has no option that disregards it, so the rule
+/// is here. It takes a function out of every mutation run, the floor included.
+const RUST_SPACE = `\\s${String.fromCharCode(0x85, 0x200e, 0x200f)}`;
+const MUTANTS_SKIP = new RegExp(`\\b(?:r#)?mutants[${RUST_SPACE}]*::[${RUST_SPACE}]*(?:r#)?skip\\b`);
+const namesMutantsSkip = (text) => MUTANTS_SKIP.test(rustTokensText(text));
+/// The attributes of a Rust source, each the text between `#[` or `#![` and its closing bracket, in
+/// the source's tokens (so no bracket in a string or a comment counts), in one pass.
+export function rustAttributes(text) {
+  const code = rustTokensText(text);
+  const found = [];
+  const open = /#\s*!?\s*\[/g;
+  for (let m = open.exec(code); m; m = open.exec(code)) {
+    let depth = 0;
+    let k = m.index + m[0].length - 1;
+    for (; k < code.length; k++) {
+      if (code[k] === "[") depth++;
+      else if (code[k] === "]" && --depth === 0) break;
+    }
+    found.push(code.slice(m.index + m[0].length, k));
+    open.lastIndex = Math.min(k + 1, code.length);
+    if (k >= code.length) break;
+  }
+  return found;
+}
+/// A `path = ...` in an attribute, alone or under a cfg_attr: the module it names is read from a
+/// file of any name, wherever it lies (cargo-mutants 27.1.0 refuses only a leading `/`), so a
+/// function put there escapes every rule that reads the sources by their names.
+const PATH_ATTRIBUTE = /(?<![\w#])(?:r#)?path\s*=/;
+const readsModuleFromPath = (text) => rustAttributes(text).some((a) => PATH_ATTRIBUTE.test(a));
+/// An attribute whose path ends in `test` with segments before it (`rust_analyzer::test`,
+/// `miri::test`, `::test`): cargo-mutants 27.1.0 skips any item whose attribute path ends in `test`
+/// (`attr_is_test`), as it skips `mutants::skip`, and clippy and rustfmt let some of them through (the
+/// fourth review of PR 137: `#[rust_analyzer::test]` took 13 listed mutants to 0). The bare `#[test]`
+/// marks a test, which no non-test code can call.
+const TEST_SUFFIX = /::\s*(?:r#)?test(?!\w)(?!\s*::)/;
+const skipsAsTest = (text) => rustAttributes(text).some((a) => TEST_SUFFIX.test(a));
+
+check("git reads every change as text, and no source names mutants::skip, an attribute that ends in ::test, or a module path of its own", () => {
+  assert.deepEqual(gitattributesProblems(read(".gitattributes")), []);
+  const nested = [...tracked()].filter((f) => f !== ".gitattributes" && path.posix.basename(f) === ".gitattributes");
+  assert.deepEqual(nested, [], "a .gitattributes below the root, which the policy does not read");
+  // Every Rust source of the repository, and every file under compiler/ and spikes/ whatever its
+  // name: with no #[path], cargo-mutants reads modules only from .rs files under a crate's src/,
+  // and a file of another name is read as text here, comments and all.
+  const problems = [];
+  for (const f of [...tracked()].filter((x) => x.endsWith(".rs") || x.startsWith("compiler/") || x.startsWith("spikes/"))) {
+    const text = read(f);
+    if (RUST_SPACE_BEYOND_ASCII.test(text)) problems.push(`${f}: a space of Rust's beyond ASCII (U+0085, U+200E, U+200F, U+2028 or U+2029)`);
+    if (f.endsWith(".rs") ? namesMutantsSkip(text) : MUTANTS_SKIP.test(text)) problems.push(`${f}: mutants::skip, which takes a function out of every mutation run, the Mutants floor's included`);
+    if (f.endsWith(".rs") && readsModuleFromPath(text)) problems.push(`${f}: a #[path] attribute, whose module could be a file of any name the rules here do not read`);
+    if (f.endsWith(".rs") && skipsAsTest(text)) problems.push(`${f}: an attribute whose path ends in ::test, which cargo-mutants reads as a test and skips`);
+  }
+  assert.deepEqual(problems, []);
+  // The plants of the third review of 980965e, H1: a module from a .inc file, and the spaces Rust
+  // reads that JavaScript's \s does not.
+  for (const plant of ['#[path = "plant.inc"] mod plant;', '#[cfg_attr(all(), path = "x.rs")]\nmod plant;', '#[ path="../../docs/x.rs" ]\nmod plant;', "#[r#path = \"x\"] mod plant;", '#[cfg_attr(miri, path = "a.inc")] pub mod plant;']) {
+    assert.ok(readsModuleFromPath(`fn f() {}\n${plant}\n`), `the #[path] rule lets through: ${plant}`);
+  }
+  for (const fine of ["let path = 1;", "fn f(path: &str) {}", '#[doc = "path = x"]\nfn f() {}', '#[serde(rename = "path")]\nstruct S;', "// #[path = \"x.inc\"]\nmod m;", "#[derive(Debug)]\nstruct Path { path: u8 }"]) {
+    assert.ok(!readsModuleFromPath(fine), `the #[path] rule refuses: ${fine}`);
+  }
+  // The fourth review's plants: attributes cargo-mutants reads as a test, and so skips.
+  for (const plant of ["#[rust_analyzer::test]", "#[miri::test]", "#[rustfmt::test]", "#[::test]", "#[a::b::test]", "#[tokio :: test]", "#[cfg_attr(miri, rust_analyzer::test)]", "#[rust_analyzer /* c */ :: test]"]) {
+    assert.ok(skipsAsTest(`${plant}\npub fn f() -> u8 { 1 }\n`), `the ::test rule lets through: ${plant}`);
+  }
+  for (const fine of ["#[test]\nfn t() {}", "#[cfg(test)]\nmod tests {}", '#[serde(rename = "a::test")]\nstruct S;', "#[test_case::x]\nfn f() {}", "#[a::testing]\nfn f() {}", "#[a::test::b]\nfn f() {}", "// #[rust_analyzer::test]\nfn f() {}"]) {
+    assert.ok(!skipsAsTest(fine), `the ::test rule refuses: ${fine}`);
+  }
+  // cargo-mutants also skips an `unsafe fn`: no member may write one, since each inherits the
+  // workspace's lints and the workspace forbids unsafe code.
+  assert.match(read("Cargo.toml"), /^\[workspace\.lints\.rust\]\n(?:#.*\n)*unsafe_code = "forbid"$/m, "the workspace no longer forbids unsafe code, whose functions cargo-mutants skips");
+  for (const [name, { dir }] of workspace()) assert.match(read(`${dir}/Cargo.toml`), /^\[lints\]\nworkspace = true$/m, `${name} does not inherit the workspace's lints, which forbid unsafe code`);
+  for (const space of [0x85, 0x200e, 0x200f, 0x2028, 0x2029].map((c) => String.fromCharCode(c))) {
+    assert.ok(RUST_SPACE_BEYOND_ASCII.test(`#[cfg_attr(miri, mutants${space}::skip)]`));
+    assert.ok(namesMutantsSkip(`#[rustfmt::skip]\n#[cfg_attr(miri, mutants${space}::${space}skip)] fn f() {}`), `the mutants::skip rule lets through U+${space.codePointAt(0).toString(16)}`);
+  }
+  // The plants of the second review of 4e896ca, H-1, and the other spellings.
+  for (const plant of ["compiler/** -diff", "*.rs binary", "*.rs linguist-generated=true", "*.rs linguist-generated", "*.rs linguist-vendored", "*.rs diff=plain", "*.rs -text -diff", "*.rs !diff", "*.rs filter=lfs", "*.rs merge=ours", "* export-ignore", "[attr]hide -diff", "*.rs hide", '"compiler/a b.rs" text', "*.rs working-tree-encoding=UTF-16", "*.rs text eol=crlf", "  *.rs -diff", "*.rs", "*.rs text\r-diff"]) {
+    assert.ok(gitattributesProblems(`* text=auto eol=lf\n${plant}\n`).length > 0, `the .gitattributes rule lets through: ${JSON.stringify(plant)}`);
+  }
+  assert.deepEqual(gitattributesProblems("# c\n\n* text=auto eol=lf\r\n*.mn text eol=lf linguist-language=Rust\nspec/*.md linguist-documentation=true\n"), []);
+  for (const plant of [
+    "#[mutants::skip]",
+    "#[mutants :: skip]",
+    "#[cfg_attr(test, mutants::skip)]",
+    "#[mutants/* c */::/* d */skip]",
+    "#[mutants/* a /* nested */ b */::skip]",
+    "#[mutants // c\n::skip]",
+    "#[::mutants::skip]",
+    "#[r#mutants::r#skip]",
+    // A string that opens a comment, or closes one, hides nothing after it.
+    'const A: &str = "/*";\n#[mutants::skip]\nconst B: &str = "*/";',
+    "const A: char = '\"';\n#[mutants::skip]\nconst B: &str = \"\";",
+    'const A: &str = r#"/*"#;\n#[mutants::skip]',
+    "fn f<'a>(x: &'a str) {}\n#[mutants::skip]",
+  ]) {
+    assert.ok(namesMutantsSkip(`fn f() {}\n${plant}\nfn g() {}\n`), `the mutants::skip rule lets through: ${plant}`);
+  }
+  for (const fine of ["mir_mutants::command(&root)", "mutants_skip", "mutants::skipped_count", "// #[mutants::skip]", "/* #[mutants::skip] */", 'const S: &str = "#[mutants::skip]";', 'const S: &str = r##"#[mutants::skip]"##;']) {
+    assert.ok(!namesMutantsSkip(fine), `the mutants::skip rule refuses: ${fine}`);
+  }
+  // In time linear in the text, whatever it holds (CodeQL found the first pattern backtracking on
+  // many repetitions of "*//*").
+  const started = Date.now();
+  for (const bulk of [`mutants${"*//*".repeat(50000)}`, `mutants ${"/* ".repeat(50000)}`, `${"mutants ".repeat(50000)}::`, `"${"\\\\".repeat(50000)}`, "'".repeat(100000)]) namesMutantsSkip(bulk);
+  for (const bulk of ["#[".repeat(100000), `#[${"[".repeat(100000)}`, `${"#[a] ".repeat(50000)}`]) readsModuleFromPath(bulk);
+  assert.ok(Date.now() - started < 2000, `the mutants::skip and #[path] rules took ${Date.now() - started} ms over 1 MB of text`);
+});
+
+/// The settings clippy and rustfmt read: each looks for `clippy.toml` or `.clippy.toml`, and
+/// `rustfmt.toml` or `.rustfmt.toml`, from the crate's directory up, and takes the first it finds, so
+/// one beside a crate, or a dotted one at the root, would stand in for the root's (the third review
+/// of 980965e: an unowned `.clippy.toml` dropped the root's ban on RefCell, and the required clippy
+/// step passed). The root's clippy.toml is the one, and code-owned.
+const LINT_SETTINGS = /(^|\/)\.?(clippy|rustfmt)\.toml$/;
+
+check("no lint or format settings stand but the root's clippy.toml", () => {
+  const found = [...tracked()].filter((f) => LINT_SETTINGS.test(f) && f !== "clippy.toml");
+  assert.deepEqual(found, [], "a clippy or rustfmt settings file other than the root's clippy.toml, which clippy or rustfmt would read instead of it for the crates below it");
+  for (const f of [".clippy.toml", "compiler/mente-ast/clippy.toml", "compiler/mente-ast/.clippy.toml", "rustfmt.toml", ".rustfmt.toml", "compiler/mente-mir/rustfmt.toml"]) assert.match(f, LINT_SETTINGS, f);
+  for (const f of ["clippy.toml.md", "docs/clippy.md", "compiler/mente-ast/Cargo.toml"]) assert.doesNotMatch(f, LINT_SETTINGS, f);
+});
+
 /// The digest a pin holds: SHA-256 of the text, Windows line ends read as Unix ones.
 const digest = (text) => crypto.createHash("sha256").update(String(text).replace(/\r\n/g, "\n")).digest("hex");
 
@@ -576,23 +995,63 @@ export function jobDigest(doc, job) {
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
 const PINNED_FILES = new Map([
-  [".github/scripts/limits.sh", "ac31047e639bbd2d2777c8bcc44fbce038ed40407dbf45d484ee5018ab7468aa"],
-  [".github/scripts/memory-guard.sh", "2803d3fdd012923cd6c276c23db0af506596193b42b332903f5b4127f67fcfc1"],
+  [".github/scripts/limits.sh", "0483913373077fc67592e909ec772fcd684a0bba0e17cfd3b6e2ddb0f3639cd7"],
+  [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "d9962ae89d0b3f082585ee29169c19d0718158e81d4c95df5ee5a00b1e66796f"],
-  [".github/scripts/tools.sh", "56b749faa873ee690ebdc2ea0c14223aecbf016af10957f96697e2fe5c4448d0"],
+  [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
+  [".github/scripts/test-sandbox.sh", "1b8cbfec63010bcac1aad029348db345bd6f77e5c30e98a594008ea68ce1d45a"],
+  [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
+  [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
+  // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
+  // Mutants floor, the watch, the actions' pins and the YAML reader the policy reads every
+  // workflow with.
+  [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
+  [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
+  [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
+  [".github/scripts/lib/mutants-floor.mjs", "be2d497a16ffc418f25c7580c7aceed7ff263a487603c88fc99299ca1d4aff7d"],
+  [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
+  [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
+  [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
+  [".github/scripts/lib/action-pins.mjs", "f08a9cec14bea0adb5a077a2dc33a52b668868bcd6cc15de2691c57ad8e837dc"],
+  [".github/scripts/yaml.test.mjs", "4dc4626a1c6ecb74f5c82f82d3994e6d477d30a7ac63b5e25b2b702665f9eab3"],
+  [".github/scripts/lib/yaml.mjs", "ee62bc138d9f19d920de7c2224bdd22b09b821369f40bec8c528b5c54fca3dce"],
+  [".github/scripts/lib/commits.mjs", "b431601e5565185ee6a48db2995962ea70736ecef2ab76ea458a05fd23fc6c3e"],
+  [".github/scripts/commits.mjs", "967378f4f8253cbcc73b2539320c9bc99a1a79edc5277ad0c38903ddffcbd96f"],
 ]);
+/// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
+/// jobs, and the jobs that run the release tests through cargo alone. A rule that read their
+/// steps line by line and no further let through a runner unset after its source, a check inside
+/// `if false`, and cargo's shorter spellings (`cargo t`).
+const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#full", "ci.yml#execution-paths", "generated.yml#paths"];
+/// The jobs pinned whole: the sandboxed ones, and the Documentation job, which runs the policy and
+/// the build-time check before anything else of the change, so that a step put before them, an
+/// input of its checkout, or a variable of the job is a change to a gate review sees.
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "7be20495b5948c94fc565601cbb78d03c7e101d2a53bf200881b7d9b5c84ec68"],
-  ["mutants.yml#in-diff", "f94088be2f2995f9ba495dba6ff5034d7195da6cf065a52a7a1fa0b1d07e3f61"],
-  ["mutants-full.yml#full", "c797756d65bd634b69a294a75eec9ec4d6b1b4638805decb9878905c02317d32"],
+  ["ci.yml#rust", "b083cb0250a468f400630f2d429cd72dbaf8d80999fcb84a6ca952f4f665691b"],
+  ["mutants.yml#in-diff", "0586b6363327b786b4ca5cc8c283e0db25037f13273bae1c461eeafe1f1b15ee"],
+  ["mutants-full.yml#full", "96970c2b8c155d04957b5b14ce56f212aa35683afce0be1c5d22f0c7da5f8eff"],
+  ["ci.yml#execution-paths", "e232905a2ee58528e2907a5777b050bc202ad96c6a1c73b41d178d4997fc7582"],
+  ["generated.yml#paths", "7e0ebac7477ec80359e5121a211dd7476aea636051c4710275f549413b918580"],
+  ["ci.yml#docs", "e03fda24b884d112cce1f4b7084e737cb83689de800b5a0fc5b9c6a823e68dfe"],
+  ["commits.yml#commits", "d7658c7e037b71c8394327a9a2067bd609c95e5f21c7c23b5a3c480834008da5"],
+  ["benchmark.yml#bench", "d15ab557df2839ee2a9f1e40584b59372e79665e8cb89fb234dc29be31bc7aaa"],
+  ["prelim.yml#prelim", "86d491cd9625aae611f5bc1300be0040b218c608af87768758693d32708191dd"],
+  ["probe.yml#write", "7377f1325ab19255dbb778b59c17300c8730e172eb9c7c0078884d2b422a26e5"],
 ]);
+/// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
+/// other script a pinned job runs is pinned here.
+const POLICY = ".github/scripts/policy.test.mjs";
+/// The pinned jobs that run the workspace's tests through nextest, under the shared limits, and
+/// record their tools: the required Rust jobs and the mutation runs.
+const TESTING_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#full"];
 /// The step of the required Rust jobs that runs the tests: the shared limits first, then nextest's
 /// own binary under the ci profile, with nothing after either that could filter, retry or forgive a
-/// failure, and nothing on the step but its name and this script.
-const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/tools.sh verify\n";
+/// failure, then the check that the tests ran in the sandbox, and nothing on the step but its name
+/// and this script.
+const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/test-sandbox.sh ran\n/usr/bin/bash .github/scripts/tools.sh verify\n";
 
 /// The shell and PowerShell scripts under .github/scripts a text names by path.
 const namedScripts = (text) => [...String(text).matchAll(/\.github\/scripts\/[\w./-]+\.(?:sh|ps1)\b/g)].map((m) => m[0]);
@@ -611,12 +1070,18 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
     if (now !== held) changed.push(`${key}: ${now}`);
   }
   assert.deepEqual(changed, [], "gates the policy pins changed; their digests now are the ones listed, which PINNED_FILES and PINNED_JOBS in .github/scripts/policy.test.mjs take in the same pull request");
-  // Every script a pinned job runs is pinned, and so is every script a pinned script runs in turn.
+  // Every script a pinned job runs is pinned, and so is every script a pinned script runs in turn,
+  // and every module a pinned module imports; the policy alone is held by its owner. A pinned job
+  // that runs the change's code outside the sandbox (LEFT_OUTSIDE) is read up to its check that
+  // nothing of the change can run where cargo builds: what it runs after that is the change's own.
   const pending = [];
   for (const key of PINNED_JOBS.keys()) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    for (const f of repoPaths(scriptTexts(w.doc, w.doc.jobs[id]))) if (/^\.github\/scripts\/[^/]+\.(sh|ps1)$/.test(f)) pending.push([key, f]);
+    const job = w.doc.jobs[id];
+    const read = LEFT_OUTSIDE.has(key) ? { ...job, steps: steps(job).slice(0, steps(job).findIndex((s) => s.run === TOOLCHAIN_STEP) + 1) } : job;
+    assert.ok(steps(read).length > 0, `${key} is read nowhere`);
+    for (const f of repoPaths(scriptTexts(w.doc, read))) if (/^\.github\/scripts\/[\w/-]+\.(sh|ps1|mjs)$/.test(f) && f !== POLICY) pending.push([key, f]);
   }
   for (const f of PINNED_FILES.keys()) pending.push(["PINNED_FILES", f]);
   const seen = new Set();
@@ -648,7 +1113,8 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
 });
 
 check("the tests run through the pinned nextest under the shared limits, which no setting can lift", () => {
-  for (const key of PINNED_JOBS.keys()) {
+  for (const key of TESTING_JOBS) {
+    assert.ok(PINNED_JOBS.has(key), `${key}, a testing job, is not pinned`);
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
     const job = w.doc.jobs[id];
@@ -691,7 +1157,7 @@ check("the tests run through the pinned nextest under the shared limits, which n
   assert.equal(tests[0].run, NEXTEST_STEP, "the Rust jobs' tests do not run as NEXTEST_STEP in .github/scripts/policy.test.mjs reads them: the limits, then nextest under the ci profile; a change to the step changes NEXTEST_STEP too");
   assert.deepEqual(Object.keys(tests[0]).sort(), ["name", "run"], "the Rust jobs' step of the tests carries more than its name and script");
   // The mutation runs: their tests under the mutants profile, inside the same limits.
-  for (const key of [...PINNED_JOBS.keys()].filter((k) => !k.startsWith("ci.yml#"))) {
+  for (const key of TESTING_JOBS.filter((k) => !k.startsWith("ci.yml#"))) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
     assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
@@ -784,11 +1250,291 @@ check("tools.sh finds a tool replaced or added, and a step that sets the next on
   }
 });
 
+/// The step that sets up the sandbox the code of a change runs in on Linux, and proves it on that
+/// runner with the canary: exactly these two commands, and, in a testing job, which records its
+/// tools, the check of the tools after the canary, whose probe makes and removes a file among them
+/// as the runner's user.
+const SANDBOX_SETUP = "/usr/bin/bash .github/scripts/test-sandbox.sh setup\n/usr/bin/bash .github/scripts/test-sandbox.sh check\n";
+const VERIFY_TOOLS = "/usr/bin/bash .github/scripts/tools.sh verify\n";
+/// What names the sandbox as cargo's runner in a step, and starts the count of what ran in it: the
+/// testing jobs' limits, which source the second, or the second alone.
+const SANDBOX_SOURCES = [". .github/scripts/limits.sh", ". .github/scripts/test-sandbox-env.sh"];
+/// What a step that ran code of the change ends with, before the check of the tools: at least one
+/// command ran in the sandbox, or, after cargo-mutants, at least one for each mutant caught.
+const RAN = "/usr/bin/bash .github/scripts/test-sandbox.sh ran";
+/// Whether a line of a step runs code of the change: tests through nextest or cargo, under
+/// `timeout` or not, nextest's list, which runs every test executable, a binary through
+/// `cargo run`, mutants, and the proof of the overflow checks, which runs a test of every crate. A
+/// build (`--no-run`) and a list of mutants or of doctests run none.
+const runsCode = (line) =>
+  /^(timeout \S+ )?(cargo-nextest nextest (run|list)\b|cargo nextest run\b|cargo run\b|cargo mutants (?!.*--list)|cargo test (?!.*(--no-run|--doc\b.*--list))|bash \.github\/scripts\/overflow-proof\.sh$)/.test(line);
+/// The lines of cargo that run no code of the change: the formatter, the lints, the install of
+/// cargo-mutants, a build of the tests, and the lists of doctests and of mutants.
+const BUILDS_ONLY = /^cargo (fmt|clippy|install cargo-mutants|test [^|;&]*--no-run|test [^|;&]*--doc -- --list|mutants [^|;&]*--list)\b/;
+/// Whether a line of a pinned job could start code of the change in a form the policy does not
+/// read. The pin holds every line of these jobs, and a pin is rewritten only with the code
+/// owner's approval; this rule names, for that review, the commonest ways past the sandbox: cargo
+/// in any form but those above (its shorter spellings `cargo t` and `cargo r`, `cargo bench`, an
+/// option before its subcommand, a command after a variable or inside another), a `--config` on
+/// cargo's own line, which can name a runner or a wrapper, the proof of the overflow checks with
+/// anything after it, a path into target/, where the built binaries are, cargo's runner named or
+/// unset, and the count of sandboxed commands written by hand.
+const runsCodeUnread = (line) => {
+  if (line.startsWith("#")) return false;
+  const cargo = /(^|[\s;&|(])cargo(-nextest)?\s/.test(line);
+  if (cargo && !(runsCode(line) || BUILDS_ONLY.test(line))) return true;
+  if (cargo && /\s--config[\s=]/.test(line)) return true;
+  if (/overflow-proof\.sh/.test(line) && !runsCode(line)) return true;
+  return /(^|[^\w.-])target\//.test(line) || /CARGO_TARGET_|_RUNNER\b|test-sandbox-runs\.log/.test(line);
+};
+
+check("on Linux the testing jobs prove the tests' sandbox first, and every step that runs code of the change ran it there", () => {
+  for (const key of SANDBOXED_JOBS) {
+    const [file, id] = key.split("#");
+    const w = workflows().find((x) => x.file === file);
+    assert.ok(w?.doc.jobs?.[id], `${file} has no job ${id}`);
+    const job = w.doc.jobs[id];
+    const all = steps(job);
+    const bash = (s) => {
+      const shell = s.shell ?? job.defaults?.run?.shell ?? w.doc.defaults?.run?.shell;
+      return shell === "bash" || (shell === undefined && /^ubuntu-/.test(String(job["runs-on"])));
+    };
+    // One step sets the sandbox up and proves it. In a testing job it is the step right after the
+    // tools are recorded, before the tests are built, and so before any runs.
+    const naming = all.flatMap((s, k) => (/test-sandbox\.sh (setup|check)\b/.test(String(s.run ?? "")) ? [k] : []));
+    assert.equal(naming.length, 1, `${key}: ${naming.length} steps set up or prove the sandbox, not one`);
+    const sandbox = all[naming[0]];
+    const where = stepKey(file, id, sandbox);
+    assert.equal(sandbox.run, TESTING_JOBS.includes(key) ? SANDBOX_SETUP + VERIFY_TOOLS : SANDBOX_SETUP, `${where} does not set up and prove the sandbox as SANDBOX_SETUP in .github/scripts/policy.test.mjs reads it`);
+    assert.deepEqual(Object.keys(sandbox).filter((k) => k !== "if").sort(), ["name", "run"], `${where} carries more than its name, its script and the watch's condition`);
+    assert.ok(bash(sandbox), `${where} does not run in bash`);
+    if (TESTING_JOBS.includes(key)) {
+      const record = all.findIndex((s) => String(s.run ?? "").trim() === "/usr/bin/bash .github/scripts/tools.sh record");
+      assert.ok(record >= 0 && naming[0] === record + 1, `${key}: the sandbox is not set up and proven right after the tools are recorded`);
+    }
+    let running = 0;
+    for (const [k, s] of all.entries()) {
+      if (typeof s.run !== "string") continue;
+      const lines = logicalLines(s.run).map((l) => l.trim());
+      for (const l of lines) assert.ok(!runsCodeUnread(l), `${stepKey(file, id, s)} starts code of the change in a form the policy does not read, which cargo's runner may never see: ${l}`);
+      const runs = lines.flatMap((l, at) => (runsCode(l) ? [at] : []));
+      if (runs.length === 0) continue;
+      running++;
+      const step = stepKey(file, id, s);
+      assert.ok(k > naming[0], `${step} runs code of the change before the sandbox is set up and proven`);
+      const source = lines.findIndex((l) => SANDBOX_SOURCES.includes(l));
+      assert.ok(source >= 0 && source < runs[0], `${step} runs code of the change before it sources the limits or test-sandbox-env.sh, and so outside the sandbox: ${lines[runs[0]]}`);
+      assert.ok(bash(s), `${step} sources the sandbox's settings in a shell that is not bash`);
+      const mutants = lines.some((l) => /^cargo mutants (?!.*--list)/.test(l));
+      const ran = lines.flatMap((l, at) => (l === RAN || l.startsWith(`${RAN} `) ? [at] : []));
+      assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${step} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
+      assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
+    }
+    assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
+  }
+  for (const [line, runs] of [
+    ["cargo-nextest nextest run --locked --workspace --profile ci", true],
+    ["cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > x", true],
+    ["cargo nextest run --workspace 2>&1 | tee baseline.log", true],
+    ["cargo test --locked -p mente-cli --test gates", true],
+    ["timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter", true],
+    ["cargo run --locked --bin mn -- spec", true],
+    ['cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place || status=$?', true],
+    ["bash .github/scripts/overflow-proof.sh", true],
+    ["cargo test --locked --workspace --no-run", false],
+    ["cargo test --locked --workspace --doc -- --list > x 2>&1", false],
+    ["cargo mutants --in-diff pr.diff --list --json > diff-mutants.json", false],
+    ["cargo fmt --all --check", false],
+  ]) {
+    assert.equal(runsCode(line), runs, line);
+    assert.ok(!runsCodeUnread(line), `a line the policy reads counts as unread: ${line}`);
+  }
+  for (const [line, unread] of [
+    ["(cd ../base && timeout 15m cargo test --release --locked -p mente-cli -- --ignored x)", true],
+    ["MENTE_X=1 cargo test --locked", true],
+    ["if cargo-nextest nextest run; then echo passed; fi", true],
+    ["bash .github/scripts/overflow-proof.sh || true", true],
+    ["./target/release/mn smt examples --out x", true],
+    ["target/release/mn fuzz --seed 1", true],
+    ["status=0; target/debug/mn spec || status=$?", true],
+    ["mn=target/debug/mn", true],
+    ["cargo t --release -p mente-cli", true],
+    ["cargo --locked test --release -p mente-cli", true],
+    ["cargo bench --locked", true],
+    ["cargo r --locked --bin mn -- spec", true],
+    ['cargo build --release --locked && "./target/release/mn" spec', true],
+    ['"$PWD/target/release/mn" spec', true],
+    ["cd target/release && ./mn spec", true],
+    ["timeout 15m cargo test --config \"target.x86_64-unknown-linux-gnu.runner='env'\" --release --locked -p mente-cli", true],
+    ["unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER", true],
+    ['echo x >> "$RUNNER_TEMP/test-sandbox-runs.log"', true],
+    ['if git show --no-textconv "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then', false],
+    ['cargo mutants --list --json "${config[@]}" > base-all-mutants.json', false],
+    ['node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"', false],
+    ['cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"', false],
+    ['cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"', false],
+    ["cargo clippy --all-targets --workspace --locked -- -D warnings", false],
+    ["# cargo test runs here", false],
+    ["rustup toolchain install", false],
+  ]) {
+    assert.equal(runsCodeUnread(line), unread, line);
+  }
+  // limits.sh sources test-sandbox-env.sh on Linux, last, and that file takes cargo's runner from
+  // the sandbox's script and stops when there is no sandbox.
+  assert.match(
+    read(".github/scripts/limits.sh").replace(/\r\n/g, "\n"),
+    /\n  Linux\)\n(?:(?!\n    ;;\n)[\s\S])*\n    \. \.github\/scripts\/test-sandbox-env\.sh\n    ;;\n/,
+    "limits.sh does not source test-sandbox-env.sh on Linux",
+  );
+  assert.match(
+    read(".github/scripts/test-sandbox-env.sh").replace(/\r\n/g, "\n"),
+    /\nif ! test_sandbox_env=\$\(\/usr\/bin\/bash \.github\/scripts\/test-sandbox\.sh env\); then\n  echo "\$test_sandbox_env"\n  exit 1\nfi\neval "\$test_sandbox_env"\n/,
+    "test-sandbox-env.sh does not take cargo's runner from test-sandbox.sh env, or goes on without it",
+  );
+  const sourced = (os_) => {
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/_RUNNER$/i.test(k))), RUNNER_OS: os_ };
+    const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", '. .github/scripts/test-sandbox-env.sh; echo "the step went on, its runner ${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER:-none}"'], { cwd: ROOT, encoding: "utf8", env, timeout: 30000 });
+    return { status: r.status, out: `${r.stdout}${r.stderr}` };
+  };
+  const stopped = sourced("Linux");
+  assert.equal(stopped.status, 1, `a step went on with no sandbox set up: ${stopped.out}`);
+  assert.match(stopped.out, /::error::the sandbox is not set up/);
+  assert.doesNotMatch(stopped.out, /the step went on/);
+  assert.deepEqual(sourced("Windows"), { status: 0, out: "the step went on, its runner none\n" }, "test-sandbox-env.sh changes a step on Windows, which has no sandbox");
+  // A trap on EXIT runs when the script ends, after every function has returned and its local
+  // variables are gone. One that reads them then fails, under `set -u`, a canary that had passed,
+  // as the first such trap did on every runner. So in the pinned scripts a trap on EXIT names what
+  // it needs when it is set, in double quotes.
+  const lateExitTrap = /^\s*trap '[^'\n]*\$[^'\n]*' EXIT\b/m;
+  for (const f of [...PINNED_FILES.keys()].filter((f) => f.endsWith(".sh"))) {
+    assert.doesNotMatch(read(f), lateExitTrap, `${f} sets a trap on EXIT that reads its variables only when the script ends, where a function's are gone`);
+  }
+  assert.match(`  trap 'kill "$decoy" "$listener" 2> /dev/null || true' EXIT`, lateExitTrap);
+  assert.doesNotMatch('  trap "kill $decoy $listener 2> /dev/null || true" EXIT', lateExitTrap);
+  assert.doesNotMatch("  trap 'signal=15' TERM", lateExitTrap);
+  // What the script does on any machine: it names no runner where no sandbox is set up, it fails a
+  // step whose tools ran nothing in the sandbox, and it refuses a command it could not hand over
+  // whole. The sandbox itself is proven where it runs, by the canary.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "test-sandbox-"));
+  try {
+    const run = (args, os_, temp = dir) => {
+      const env = { ...process.env, RUNNER_OS: os_, RUNNER_TEMP: temp.replace(/\\/g, "/") };
+      const r = spawnSync(bashPath(), [".github/scripts/test-sandbox.sh", ...args], { cwd: ROOT, encoding: "utf8", env, timeout: 30000 });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    const unset = run(["env"], "Linux");
+    assert.equal(unset.status, 1, `test-sandbox.sh env names a runner with no sandbox set up: ${unset.out}`);
+    assert.match(unset.out, /::error::the sandbox is not set up/);
+    assert.doesNotMatch(unset.out, /RUNNER=/, "test-sandbox.sh env names a runner with no sandbox set up");
+    assert.deepEqual(run(["env"], "Windows"), { status: 0, out: "" }, "test-sandbox.sh env names a runner on Windows, which has no sandbox");
+    assert.match(run(["ran"], "Linux").out, /::error::no record of the commands that ran in the sandbox/);
+    const log = path.join(dir, "test-sandbox-runs.log");
+    fs.writeFileSync(log, "");
+    assert.equal(run(["ran"], "Linux").status, 1, "a step whose tools ran nothing in the sandbox passes");
+    assert.equal(run(["ran", "0"], "Linux").status, 0);
+    fs.writeFileSync(log, "target/debug/deps/a\ntarget/debug/deps/b\n");
+    assert.equal(run(["ran"], "Linux").status, 0, `two commands in the sandbox are refused: ${run(["ran"], "Linux").out}`);
+    assert.equal(run(["ran", "2"], "Linux").status, 0);
+    assert.equal(run(["ran", "3"], "Linux").status, 1, "fewer commands in the sandbox than mutants caught passes");
+    assert.equal(run(["ran", "many"], "Linux").status, 1, "a count that is no number passes");
+    assert.equal(run(["ran"], "Windows", path.join(dir, "none")).status, 0, "Windows, which has no sandbox, fails the check that a command ran in it");
+    assert.equal(run(["run", "A=b"], "Linux").status, 2, "a command that env would read as a variable is handed over");
+    assert.equal(run(["run"], "Linux").status, 2);
+    assert.equal(run(["nothing"], "Linux").status, 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/// Every required job that runs on a Linux runner is in exactly one of three lists, each with its
+/// reason: SANDBOXED_JOBS, whose code of the change runs in the sandbox; LEFT_OUTSIDE, which runs code
+/// of the change outside it; and GATE_ONLY, which runs none but the gate's own scripts. A job in
+/// none of them fails the check below, so that a job that leaves the sandboxed ones, or a required job
+/// added later, is classified where review sees it, not by a pattern of what its steps run.
+///
+/// LEFT_OUTSIDE: in each, the change's own code produces the evidence its step reads, so a sandbox
+/// would keep that code from the runner but not from its own result; what bringing each in would
+/// take is in ROADMAP.md, M2, the guards of the audit.
+const LEFT_OUTSIDE = new Map([
+  ["ci.yml#bench", "its tests read the base branch's medians from a file of the runner's and write the job's summary"],
+  ["ci.yml#tier1-latency", "its test writes the job's summary"],
+  ["ci.yml#debuggers", "a script of the change drives the debugger over the binary it built"],
+  ["ci.yml#docs", "it runs the change's own node code: the benchmark's checker and its tests, the harness's tests and the documentation tools"],
+  ["smt.yml#z3", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
+  ["fuzz.yml#fuzz", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
+  ["mir-mutants.yml#gate", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
+  ["perf.yml#kernels", "it measures mn and its kernels through perf, with the base branch's compiler beside the change's"],
+  ["harness.yml#fixtures", "its own sandbox confines agent code, not mn"],
+]);
+/// GATE_ONLY: the required jobs that run no code of the change but the gate's own scripts under
+/// .github/. Each is pinned whole, with every script it runs: an allowlist of exact steps, where a
+/// rule that read the steps for tools by their names let through every spelling it did not know
+/// (`sh -c`, a quoted name, a path to the tool, node's child_process; the third review of 980965e).
+const GATE_ONLY = new Map([["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"]]);
+/// The labels a job may run on: each a literal, or a matrix value that is one.
+const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);
+/// The runners a job names: its literal label, or each value its matrix gives the key `runs-on`
+/// names; null when it names them otherwise (an expression, a list, a group).
+export function runnersOf(job) {
+  const on = job?.["runs-on"];
+  if (typeof on !== "string") return null;
+  const ref = /^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/.exec(on);
+  if (!ref) return /\$\{\{/.test(on) ? null : [on];
+  const matrix = job.strategy?.matrix;
+  if (!isPlain(matrix)) return null;
+  const values = Array.isArray(matrix[ref[1]]) ? matrix[ref[1]] : Array.isArray(matrix.include) ? matrix.include.map((c) => c?.[ref[1]]) : [];
+  return values.length > 0 && values.every((v) => typeof v === "string") ? values : null;
+}
+
+check("every required job on Linux runs the change's code in the sandbox, or says why it does not", () => {
+  const lists = [
+    ["SANDBOXED_JOBS", new Set(SANDBOXED_JOBS)],
+    ["LEFT_OUTSIDE", new Set(LEFT_OUTSIDE.keys())],
+    ["GATE_ONLY", new Set(GATE_ONLY.keys())],
+  ];
+  const required = new Set();
+  for (const { file, id, job } of requiredJobs()) {
+    const key = `${file}#${id}`;
+    required.add(key);
+    const runners = runnersOf(job);
+    assert.ok(runners && runners.every((r) => RUNNERS.has(r)), `${key} runs on ${JSON.stringify(job["runs-on"])}, which is no literal of RUNNERS nor a matrix value that is one`);
+    const linux = runners.some((r) => r.startsWith("ubuntu-"));
+    const holding = lists.filter(([, set]) => set.has(key)).map(([name]) => name);
+    if (!linux) {
+      assert.deepEqual(holding.filter((n) => n !== "SANDBOXED_JOBS"), [], `${key} runs on no Linux runner, and is classified for one in ${holding.join(", ")}`);
+      continue;
+    }
+    assert.equal(holding.length, 1, `${key}, a required job on a Linux runner, is in ${holding.length === 0 ? "none" : holding.join(" and ")} of SANDBOXED_JOBS, LEFT_OUTSIDE and GATE_ONLY in .github/scripts/policy.test.mjs, not exactly one: it says, with its reason, whether its code of the change runs in the sandbox, outside it, or not at all`);
+    if (GATE_ONLY.has(key)) assert.ok(PINNED_JOBS.has(key), `${key}, a job of GATE_ONLY, is not pinned whole: its exact steps are what it may run`);
+  }
+  for (const [name, set] of lists) {
+    for (const key of set) assert.ok(required.has(key) || (name === "SANDBOXED_JOBS" && key === "mutants-full.yml#full"), `${name} names ${key}, which is no required job`);
+  }
+  // Nothing of the change lies under target/, where the tests are built: root mounts the tests'
+  // own directory there, and refuses to through a link the change tracks (test-sandbox.sh); this
+  // refuses the tracked file before any job runs.
+  const underTarget = [...tracked()].filter((f) => f === "target" || f.startsWith("target/"));
+  assert.deepEqual(underTarget, [], "files under target/ are tracked: the sandbox mounts the tests' own directory there, and a tracked link could aim it elsewhere");
+  // The runners a job names, as the classification reads them: the third review's P7c, a label
+  // spelled by an expression, is no runner at all.
+  assert.deepEqual(runnersOf({ "runs-on": "ubuntu-24.04" }), ["ubuntu-24.04"]);
+  assert.deepEqual(runnersOf({ "runs-on": "${{ matrix.os }}", strategy: { matrix: { include: [{ os: "ubuntu-24.04" }, { os: "windows-2025" }] } } }), ["ubuntu-24.04", "windows-2025"]);
+  for (const on of ["${{ format('{0}-24.04', 'ubuntu') }}", ["ubuntu-24.04"], { group: "x" }]) assert.equal(runnersOf({ "runs-on": on }), null, JSON.stringify(on));
+  assert.equal(runnersOf({ "runs-on": "${{ matrix.os }}", strategy: { matrix: "${{ fromJSON('[]') }}" } }), null);
+});
+
 check("no required job restores a cache, and no job caches nextest", () => {
   // Another job of the same pull request, pinned or not, can save any entry under any key in the
   // pull request's scope, and a later run restores it.
   for (const { file, id, job } of requiredJobs()) {
     for (const s of steps(job)) assert.doesNotMatch(String(s.uses ?? ""), /^actions\/cache(\/restore)?@/, `${stepKey(file, id, s)}: a required job restores a cache another job could have written`);
+  }
+  // setup-node restores a cache of its own once package.json names a package manager, unless told
+  // not to (the third review of 980965e): every setup-node says no, and names no cache.
+  for (const { file, id, job } of allJobs()) {
+    for (const s of steps(job).filter((x) => /^actions\/setup-node@/.test(String(x.uses ?? "")))) {
+      assert.ok(isPlain(s.with) && s.with["package-manager-cache"] === false && !("cache" in s.with) && !("cache-dependency-path" in s.with), `${stepKey(file, id, s)}: setup-node may restore a cache another job could have written; give it package-manager-cache: false and no cache`);
+    }
   }
   for (const { file, id, job } of allJobs()) {
     for (const s of steps(job)) {
@@ -800,7 +1546,13 @@ check("no required job restores a cache, and no job caches nextest", () => {
 /// The variables that change how cargo, rustc, rustup, nextest, the shell, node or npm run what a
 /// job checks, in any case; and those of them a required or pinned job may set, each with the one
 /// value it may take (null: any) and the jobs that may set it (null: any job).
-const TOOL_ENV = /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|BASH_ENV$|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_OPTIONS$|NODE_PATH$|NPM_CONFIG_|LD_PRELOAD$|LD_LIBRARY_PATH$)/i;
+/// The dynamic loader's (LD_AUDIT, LD_PRELOAD, GLIBC_TUNABLES, GCONV_PATH), git's
+/// (GIT_CONFIG_COUNT and its pairs run a command on checkout or diff), OpenSSL's (a configuration
+/// loads a module), those that send rustup's download elsewhere (a proxy, with a certificate of
+/// the change's) and those that move where a tool reads its settings (HOME, XDG_*, TMPDIR) belong
+/// here too.
+const TOOL_ENV =
+  /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|RUSTFMT|CLIPPY_|BASH_ENV$|BASH_FUNC_|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_|NPM_CONFIG_|LD_|DYLD_|GLIBC_TUNABLES$|GCONV_|LOCPATH$|MALLOC_|GIT_|HOME$|XDG_|TMPDIR$|OPENSSL_|SSL_CERT_|CURL_CA_BUNDLE$|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$)/i;
 const TOOL_ENV_ALLOWED = new Map([
   ["CARGO_TERM_COLOR", { value: "always", jobs: null }],
   ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
@@ -813,27 +1565,36 @@ const TOOL_ENV_ALLOWED = new Map([
   ["RUSTFLAGS", { value: "-D warnings", jobs: ["ci.yml#rust"] }],
 ]);
 
-check("no required or pinned job sets a variable that changes how its tools run", () => {
-  const keys = new Set([...requiredJobs().map((j) => `${j.file}#${j.id}`), ...PINNED_JOBS.keys()]);
-  for (const { file, doc, id, job } of allJobs().filter((j) => keys.has(`${j.file}#${j.id}`))) {
-    for (const env of [doc.env, job.env, ...steps(job).map((s) => s.env)].filter(Boolean)) {
-      for (const [name, value] of Object.entries(env)) {
-        if (!TOOL_ENV.test(name)) continue;
-        const held = TOOL_ENV_ALLOWED.get(name);
-        const allowed = held !== undefined && (held.value === null || held.value === String(value)) && (held.jobs === null || held.jobs.includes(`${file}#${id}`));
-        assert.ok(allowed, `${file}#${id} sets ${name}=${value}, which changes how cargo, rustc, nextest, the shell or node run what the job checks; TOOL_ENV_ALLOWED names the jobs that may set it, and its value`);
-      }
+/// The variables of TOOL_ENV a job sets, in the workflow, the job or a step, that TOOL_ENV_ALLOWED
+/// does not hold for it.
+function toolEnvProblems(key, doc, job) {
+  const found = [];
+  for (const env of [doc.env, job.env, ...steps(job).map((s) => s.env)].filter(Boolean)) {
+    for (const [name, value] of Object.entries(env)) {
+      if (!TOOL_ENV.test(name)) continue;
+      const held = TOOL_ENV_ALLOWED.get(name);
+      const allowed = held !== undefined && (held.value === null || held.value === String(value)) && (held.jobs === null || held.jobs.includes(key));
+      if (!allowed) found.push(`${key} sets ${name}=${value}, which changes how cargo, rustc, nextest, the shell, git, node or the loader run what the job checks; TOOL_ENV_ALLOWED names the jobs that may set it, and its value`);
     }
   }
+  return found;
+}
+
+check("no required or pinned job sets a variable that changes how its tools run", () => {
+  const keys = new Set([...requiredJobs().map((j) => `${j.file}#${j.id}`), ...PINNED_JOBS.keys()]);
+  for (const { file, doc, id, job } of allJobs().filter((j) => keys.has(`${j.file}#${j.id}`))) assert.deepEqual(toolEnvProblems(`${file}#${id}`, doc, job), []);
   for (const name of ["BASH_ENV", "npm_config_script_shell", "NODE_OPTIONS", "PATH", "Path", "cargo_target_x86_64_unknown_linux_gnu_runner", "RUSTC_WRAPPER", "RUSTUP_TOOLCHAIN"]) assert.match(name, TOOL_ENV, name);
-  assert.doesNotMatch("MENTE_GEN_PROGRAMS", TOOL_ENV);
+  // The plants of the second review of 4e896ca: a variable of the Documentation job's.
+  for (const name of ["CLIPPY_CONF_DIR", "RUSTFMT", "LD_AUDIT", "LD_PRELOAD", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_EXEC_PATH", "GLIBC_TUNABLES", "GCONV_PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR", "NODE_EXTRA_CA_CERTS", "BASH_FUNC_cargo%%", "OPENSSL_CONF", "SSL_CERT_FILE", "https_proxy", "ALL_PROXY"]) assert.match(name, TOOL_ENV, name);
+  for (const name of ["MENTE_GEN_PROGRAMS", "GITHUB_TOKEN", "ACTIONLINT_VERSION"]) assert.doesNotMatch(name, TOOL_ENV, name);
 });
 
-/// The workspace members that may run code at build time, a build script or a procedural macro,
-/// each with its reason. That code runs before any limit of the tests, with the job's rights.
-const BUILD_TIME_CODE = new Map([]);
 /// A manifest's `build =` that names a script, the key bare or quoted, and any mention of a
-/// procedural macro, `proc-macro = true` or a `crate-type` of one, comments aside.
+/// procedural macro, `proc-macro = true` or a `crate-type` of one, comments aside. This reads the
+/// listed members' text, and so sees the plain spellings at once, with no toolchain. It does not
+/// hold: a key written with a TOML escape reads as another key here and as `build` to cargo, and a
+/// package only a path names is no listed member. What holds is cargo's own reading, in the check
+/// after this one.
 const buildScriptKey = /^\s*["']?build["']?\s*=(?!\s*false\b)/m;
 const procMacro = /proc[-_]macro(?![\w-])/;
 /// A doc attribute in any spelling, plain, spaced or under a cfg_attr.
@@ -846,12 +1607,330 @@ check("no workspace member runs code at build time", () => {
     if (tracked().has(`${dir}/build.rs`)) has.push("a build.rs");
     if (buildScriptKey.test(manifest)) has.push("a build script `build =` names");
     if (procMacro.test(manifest.replace(/#.*$/gm, ""))) has.push("a procedural macro");
-    if (has.length > 0) assert.ok(BUILD_TIME_CODE.has(name), `${name} has ${has.join(" and ")}, code that runs at build time, before the tests' limits and with the job's rights: BUILD_TIME_CODE in .github/scripts/policy.test.mjs names the members allowed one`);
+    if (has.length > 0) assert.ok(BUILD_TIME_CODE.has(name), `${name} has ${has.join(" and ")}, code that runs at build time, before the tests' limits and with the job's rights: BUILD_TIME_CODE in .github/scripts/lib/build-time-code.mjs names the members allowed one`);
   }
   for (const m of ['build = "x.rs"', '"build" = "x.rs"', "'build' = 'x.rs'"]) assert.match(m, buildScriptKey, m);
   assert.doesNotMatch("build = false", buildScriptKey);
   for (const m of ["proc-macro = true", 'crate-type = ["proc-macro"]', "proc_macro = true"]) assert.match(m, procMacro, m);
   for (const m of ['proc-macro2 = "1"', "proc_macro2 = { workspace = true }"]) assert.doesNotMatch(m, procMacro, m);
+});
+
+check("as cargo reads the manifests and the lock, no package of the workspace runs code at build time and every other crate is approved", () => {
+  // Where the reading runs, and what may come before it, is the rule of the check after this one,
+  // the same for every job that carries it, the Documentation job's too.
+  // What the reading refuses, on what cargo reports: the plants of the review of pull request
+  // 137, each of which the reader of the manifests' text lets through.
+  const member = (name, dir, kinds = ["lib"]) => ({ name, version: "0.1.0", source: null, manifest_path: path.join("/w", dir, "Cargo.toml"), targets: kinds.map((k) => ({ kind: [k] })) });
+  const crate = (name, source = CRATES_IO, kinds = ["lib"]) => ({ name, version: "1.0.0", source, manifest_path: `/home/.cargo/registry/src/x/${name}-1.0.0/Cargo.toml`, targets: kinds.map((k) => ({ kind: [k] })) });
+  const lockOf = (packages) => packages.map((p) => ({ name: p.name, version: p.version, source: p.source }));
+  const found = (packages, listed = ["compiler/a", "compiler/b"]) => metadataProblems({ workspace_root: path.join("/w"), packages }, { listed, lock: lockOf(packages) });
+  const own = [member("mente-a", "compiler/a"), member("mente-b", "compiler/b", ["bin"])];
+  assert.deepEqual(found([...own, crate("serde_derive", CRATES_IO, ["proc-macro"]), crate("libc", CRATES_IO, ["lib", "custom-build"])]), [], "an approved crate's own build script or macro is refused");
+  assert.match(found([member("mente-a", "compiler/a", ["lib", "custom-build"]), own[1]])[0], /mente-a \(compiler\/a\) has a build script/);
+  assert.match(found([member("mente-a", "compiler/a", ["proc-macro"]), own[1]])[0], /mente-a \(compiler\/a\) has a procedural macro/);
+  const unlisted = found([...own, member("helper", "compiler/b/helper", ["lib", "custom-build"])]);
+  assert.equal(unlisted.length, 2, unlisted.join("\n"));
+  assert.match(unlisted[0], /cargo builds helper from compiler\/b\/helper, which the members of Cargo\.toml do not list/);
+  assert.match(found([...own, crate("forked", "git+https://example.invalid/x#abc")])[0], /forked comes from git\+https/);
+  assert.match(found(own, ["compiler/a", "compiler/b", "compiler/c"])[0], /lists the member compiler\/c, which cargo does not read/);
+  assert.match(metadataProblems({ workspace_root: path.join("/w"), packages: [...own, crate("unlocked")] }, { listed: ["compiler/a", "compiler/b"], lock: lockOf(own) })[0], /cargo would build unlocked 1\.0\.0, which Cargo\.lock does not hold/);
+  // The lock, read as the lines cargo writes: a name written with an escape, a source that is not
+  // crates.io and a table cargo does not write stop cargo from being run on it at all.
+  const approved = approvedCrates("# c\ntop: top\nleaf: top\n");
+  assert.deepEqual([...approved], ["top", "leaf"]);
+  assert.throws(() => approvedCrates("top\n"), /not "<crate>: <dependency>"/);
+  const lock = (extra) => `# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = "mente-a"\nversion = "0.1.0"\ndependencies = [\n "top",\n "leaf 2.0.0",\n "leaf 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",\n]\n\n[[package]]\nname = "top"\nversion = "1.0.0"\nsource = "${CRATES_IO}"\nchecksum = "${"a".repeat(64)}"\n${extra}`;
+  assert.deepEqual(lockProblems(lock(""), approved), { unreadable: [], unapproved: [] });
+  assert.equal(lockPackages(lock("")).packages.length, 2);
+  const other = lockProblems(lock(`\n[[package]]\nname = "other"\nversion = "1.0.0"\nsource = "${CRATES_IO}"\n`), approved);
+  assert.equal(other.unreadable.length, 0);
+  assert.match(other.unapproved[0], /Cargo\.lock holds other, which \.config\/approved-crates\.txt does not list/);
+  for (const [extra, why] of [
+    ['\n[[package]]\nname = "le\\u0061f"\nversion = "2.0.0"\n', /not a line cargo writes/],
+    ['\n[[package]]\n"name" = "leaf"\nversion = "2.0.0"\n', /not a line cargo writes/],
+    ['\n[[package]]\nname = "leaf"\nversion = "2.0.0"\nsource = "git+https://example.invalid/leaf#abc"\n', /leaf comes from git\+https/],
+    ['\n[[package]]\nname = "leaf"\nversion = "2.0.0"\nsource = "registry+https://example.invalid/index"\n', /not crates\.io/],
+    ['\n[[patch.unused]]\nname = "leaf"\nversion = "2.0.0"\n', /not a line cargo writes/],
+    ['\n[metadata]\n"checksum leaf" = "x"\n', /not a line cargo writes/],
+    ['\n[[package]]\nname = "leaf"\nname = "top"\nversion = "2.0.0"\n', /not a line cargo writes/],
+    ['\n[[package]]\nversion = "2.0.0"\n', /without its name/],
+  ]) {
+    const got = lockProblems(lock(extra), approved).unreadable;
+    assert.ok(got.length > 0 && why.test(got.join("\n")), `the lock's reader lets through, or misnames: ${JSON.stringify(extra)} -> ${got.join(" | ")}`);
+  }
+  // The repository's own lock and members read clean, and its approved list reads as a list.
+  assert.deepEqual(lockProblems(read("Cargo.lock"), approvedCrates(read(".config/approved-crates.txt"))), { unreadable: [], unapproved: [] });
+  assert.deepEqual(listedMembers(read("Cargo.toml")), [...workspace().values()].map((c) => c.dir));
+  assert.throws(() => listedMembers('[workspace]\nmembers = ["compiler/*"]\n'), /is a glob/);
+  // The CLI itself, with a stand-in for cargo: it runs cargo only on a lock it can read, and
+  // reports what cargo read.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "build-time-"));
+  try {
+    fs.mkdirSync(path.join(dir, ".config"));
+    fs.writeFileSync(path.join(dir, ".config", "approved-crates.txt"), "top: top\n");
+    fs.writeFileSync(path.join(dir, "Cargo.toml"), '[workspace]\nmembers = ["compiler/a"]\n');
+    const report = (packages) => () => JSON.stringify({ workspace_root: dir, packages });
+    const a = (kinds) => ({ name: "mente-a", version: "0.1.0", source: null, manifest_path: path.join(dir, "compiler", "a", "Cargo.toml"), targets: kinds.map((k) => ({ kind: [k] })) });
+    // The toolchain's check runs first, in a tree of its own: a cargo home with nothing in it, and a
+    // walk up that stops at this directory, so that a configuration of the machine running the
+    // policy does not count.
+    fs.mkdirSync(path.join(dir, "home"));
+    const toolchain = { cargoHome: path.join(dir, "home"), tracked: [], top: dir };
+    const run = (metadata, options = {}) => buildTimeCode(dir, metadata, { toolchain, ...options });
+    fs.writeFileSync(path.join(dir, "rust-toolchain.toml"), '# c\n[toolchain]\nchannel = "1.97.1"\ncomponents = ["clippy", "rustfmt"]\nprofile = "minimal"\n');
+    fs.writeFileSync(path.join(dir, "Cargo.lock"), lock(""));
+    const clean = run(report([a(["lib"]), crate("top")]));
+    assert.deepEqual(clean.problems, []);
+    assert.match(clean.summary, /cargo reads 1 packages of the workspace.* and 1 crates of crates\.io/);
+    assert.equal(run(report([a(["lib", "custom-build"]), crate("top")])).problems.length, 1);
+    assert.deepEqual(run(() => assert.fail("cargo runs before the toolchain is installed"), { beforeToolchain: true }).problems, []);
+    fs.writeFileSync(path.join(dir, "Cargo.lock"), lock('\n[[package]]\nname = "leaf"\nversion = "2.0.0"\nsource = "git+https://example.invalid/leaf#abc"\n'));
+    const unread = run(() => assert.fail("cargo runs on a lock that names another source"));
+    assert.match(unread.problems[0], /leaf comes from git\+https/);
+    fs.writeFileSync(path.join(dir, "Cargo.lock"), lock(""));
+    // What the toolchain's check refuses before rustup or cargo runs, cargo itself never asked.
+    const valid = fs.readFileSync(path.join(dir, "rust-toolchain.toml"), "utf8");
+    const refused = (why) => {
+      const r = run(() => assert.fail(`cargo runs though ${why}`), {});
+      assert.ok(r.problems.length > 0, `the toolchain's check lets through ${why}`);
+    };
+    for (const [text, why] of [
+      [`${valid}path = "/tmp/toolchain"\n`, "a path toolchain"],
+      [`${valid}targets = ["wasm32-unknown-unknown"]\n`, "another target"],
+      [valid.replace('"1.97.1"', '"stable"'), "a channel that is no release"],
+      [valid.replace('profile = "minimal"', 'profile = "default"'), "another profile"],
+      [`${valid}channel = "1.97.1"\n`, "a channel twice"],
+      [valid.replace("[toolchain]\n", ""), "no table"],
+      [valid.replace("[toolchain]", '"toolchain"'), "a table spelled otherwise"],
+    ]) {
+      fs.writeFileSync(path.join(dir, "rust-toolchain.toml"), text);
+      refused(why);
+    }
+    fs.writeFileSync(path.join(dir, "rust-toolchain.toml"), valid);
+    for (const [file, why] of [
+      [path.join(dir, "rust-toolchain"), "a rust-toolchain file beside rust-toolchain.toml"],
+      [path.join(dir, ".cargo", "config.toml"), "a cargo configuration file in the workspace"],
+      [path.join(dir, "home", "config"), "a cargo configuration file in CARGO_HOME"],
+    ]) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "x\n");
+      refused(why);
+      fs.rmSync(file);
+    }
+    const nested = path.join(dir, "inner");
+    fs.mkdirSync(path.join(dir, ".cargo"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".cargo", "config"), "x\n");
+    for (const f of ["rust-toolchain.toml", ".config/approved-crates.txt", "Cargo.toml", "Cargo.lock"]) {
+      fs.mkdirSync(path.dirname(path.join(nested, f)), { recursive: true });
+      fs.copyFileSync(path.join(dir, f), path.join(nested, f));
+    }
+    assert.ok(toolchainProblems(nested, { ...toolchain }).some((p) => /\.cargo[\\/]config: a cargo configuration file/.test(p)), "the toolchain's check does not walk up to a configuration above the workspace");
+    fs.rmSync(path.join(dir, ".cargo"), { recursive: true });
+    assert.ok(toolchainProblems(dir, { ...toolchain, tracked: ["compiler/x/.cargo/config.toml"] }).length > 0, "the toolchain's check lets through a tracked configuration deeper in the tree");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // The CLI's exit, which the jobs read (L-5 of the second review of 4e896ca): a line and 1 for a
+  // problem or an error, 0 for none. It runs in a directory under target/, which the repository
+  // ignores and above which no cargo configuration lies, with a cargo home of its own.
+  fs.mkdirSync(path.join(ROOT, "target"), { recursive: true });
+  const cli = fs.mkdtempSync(path.join(ROOT, "target", "build-time-cli-"));
+  try {
+    fs.mkdirSync(path.join(cli, "home"));
+    fs.mkdirSync(path.join(cli, ".config"));
+    fs.writeFileSync(path.join(cli, ".config", "approved-crates.txt"), "top: top\n");
+    fs.writeFileSync(path.join(cli, "Cargo.toml"), '[workspace]\nmembers = ["compiler/a"]\n');
+    const toolchainText = '[toolchain]\nchannel = "1.97.1"\ncomponents = ["clippy", "rustfmt"]\nprofile = "minimal"\n';
+    const lockText = `# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = "leaf"\nversion = "2.0.0"\nsource = "git+https://example.invalid/leaf#abc"\n`;
+    fs.writeFileSync(path.join(cli, "Cargo.lock"), lockText);
+    const run = (...args) => spawnSync(process.execPath, [path.join(ROOT, ".github/scripts/build-time-code.mjs"), ...args], { cwd: cli, encoding: "utf8", env: { ...process.env, CARGO_HOME: path.join(cli, "home") } });
+    // A checkout below a cargo configuration of the machine's, which cargo would read too, fails
+    // the check by design; there the clean case shows that failure instead.
+    const above = [];
+    for (let d = path.dirname(cli); ; d = path.dirname(d)) {
+      for (const name of ["config", "config.toml"]) if (fs.existsSync(path.join(d, ".cargo", name))) above.push(path.join(d, ".cargo", name));
+      if (path.dirname(d) === d) break;
+    }
+    const missingToolchain = run("--before-toolchain");
+    assert.equal(missingToolchain.status, 1, "the CLI does not fail when rust-toolchain.toml is missing");
+    assert.match(missingToolchain.stderr, /^error: /m);
+    fs.writeFileSync(path.join(cli, "rust-toolchain.toml"), toolchainText);
+    const clean = run("--before-toolchain");
+    if (above.length === 0) {
+      assert.equal(clean.status, 0, `${clean.stdout}${clean.stderr}`);
+      assert.match(clean.stdout, /names a release alone/);
+    } else {
+      assert.equal(clean.status, 1, `the CLI passes below ${above[0]}`);
+      assert.ok(clean.stdout.includes(`::error::${above[0]}: a cargo configuration file`), clean.stdout);
+    }
+    fs.writeFileSync(path.join(cli, "rust-toolchain.toml"), toolchainText.replace('"1.97.1"', '"stable"'));
+    const channel = run("--before-toolchain");
+    assert.equal(channel.status, 1, "the CLI does not fail on a channel that is no release");
+    assert.match(channel.stdout, /^::error::rust-toolchain\.toml:2: /m);
+    fs.writeFileSync(path.join(cli, "rust-toolchain.toml"), toolchainText);
+    fs.mkdirSync(path.join(cli, ".cargo"));
+    fs.writeFileSync(path.join(cli, ".cargo", "config.toml"), "x\n");
+    assert.equal(run("--before-toolchain").status, 1, "the CLI does not fail on a cargo configuration file");
+    fs.rmSync(path.join(cli, ".cargo"), { recursive: true });
+    // Without the flag, past the toolchain's check: a lock that names another source fails before
+    // cargo is asked anything.
+    const lockRun = run();
+    assert.equal(lockRun.status, 1, "the CLI does not fail on a lock that names another source");
+    if (above.length === 0) assert.match(lockRun.stdout, /^::error::.*leaf comes from git\+https/m);
+  } finally {
+    fs.rmSync(cli, { recursive: true, force: true });
+  }
+});
+
+/// The toolchain step of every job that builds: before rustup or cargo reads anything of the
+/// workspace, the check that rust-toolchain.toml names a release alone and no cargo configuration
+/// is there; then the toolchain; then cargo's reading of the manifests and the lock. So a change
+/// whose code would run where cargo builds fails each such job before any of it is built.
+const TOOLCHAIN_STEP = "node .github/scripts/build-time-code.mjs --before-toolchain\nrustup toolchain install\nnode .github/scripts/build-time-code.mjs\n";
+
+/// What may come before TOOLCHAIN_STEP, each step exactly, with no key beyond those named: the
+/// checkout, with no input but these; node, at the release the jobs use and with no cache of its
+/// own, which setup-node would restore from the pull request's own scope once package.json named
+/// a package manager; the watch; and, each in the one job named, the gate's own steps that read
+/// nothing of the change's but the scripts the policy pins.
+const CHECKOUT_INPUTS = [{ "persist-credentials": false }, { "fetch-depth": 0, "persist-credentials": false }];
+const NODE_INPUTS = { "node-version": 24, "package-manager-cache": false };
+const BEFORE_TOOLCHAIN = new Map([
+  ["node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs", { job: "ci.yml#docs", why: "the policy, first in the Documentation job" }],
+  ["node .github/scripts/action-pins.mjs", { job: "ci.yml#docs", why: "the check of the actions' pins against their releases" }],
+  ['echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"', { job: "harness.yml#fixtures", why: "the harness's toolchain, put outside the home its sandbox hides" }],
+]);
+const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const sameKeys = (o, keys) => isPlain(o) && JSON.stringify(Object.keys(o).sort()) === JSON.stringify([...keys].sort());
+/// Whether a step holds these keys and no other, the watch's condition aside.
+const stepKeysAre = (s, keys) => sameKeys(Object.fromEntries(Object.entries(s).filter(([k]) => k !== "if")), keys);
+
+/// The one rule for every job that carries TOOLCHAIN_STEP: up to and with it, every step is one
+/// the rule names, exactly, with no key beyond its own (no working-directory, env, shell,
+/// continue-on-error or timeout), and the job and its workflow set no defaults but the shell and
+/// run in no container of their own. A variable of the job or the workflow is the rule of
+/// TOOL_ENV; a pinned job is held whole besides. The plants of the second review of 4e896ca, P1 to
+/// P6, are this rule's fixtures.
+export function beforeToolchainProblems(file, id, doc, job) {
+  const key = `${file}#${id}`;
+  const found = [];
+  const all = Array.isArray(job?.steps) ? job.steps : [];
+  const at = all.findIndex((s) => s.run === TOOLCHAIN_STEP);
+  if (at < 0) return [`${key}: none of its steps is TOOLCHAIN_STEP in .github/scripts/policy.test.mjs, the check that nothing of the change can run where cargo builds, before rustup installs the toolchain`];
+  if (all.filter((s) => s.run === TOOLCHAIN_STEP).length !== 1) found.push(`${key} installs the toolchain more than once`);
+  for (const [where, defaults] of [
+    ["the workflow", doc?.defaults],
+    ["the job", job.defaults],
+  ]) {
+    if (defaults === undefined) continue;
+    if (!(sameKeys(defaults, ["run"]) && sameKeys(defaults.run, ["shell"]) && SHELLS.has(defaults.run.shell))) found.push(`${key}: ${where} sets defaults beyond the shell: ${JSON.stringify(defaults)}`);
+  }
+  for (const k of ["container", "services"]) if (k in job) found.push(`${key} runs in or beside a ${k} of its own`);
+  const watched = all.slice(0, at).some((s) => s.id === "watch");
+  const condition = (s) => s.if === undefined || (watched && WATCH_FORMS.includes(normalize(s.if)));
+  let checkouts = 0;
+  for (const [k, s] of all.slice(0, at + 1).entries()) {
+    const where = `${stepKey(file, id, s)}, up to the check that nothing of the change can run where cargo builds,`;
+    if (!condition(s)) found.push(`${where} runs under a condition other than the watch's: ${s.if}`);
+    const keys = Object.keys(s).filter((x) => x !== "if");
+    const uses = String(s.uses ?? "");
+    if (k === at) {
+      if (!stepKeysAre(s, ["name", "run"])) found.push(`${where} carries more than its name, its script and the watch's condition: ${keys.join(", ")}`);
+    } else if (/^actions\/checkout@[0-9a-f]{40}$/.test(uses)) {
+      checkouts++;
+      if (k !== 0) found.push(`${where} checks out after another step`);
+      if (!stepKeysAre(s, ["uses", "with"]) || !CHECKOUT_INPUTS.some((w) => sameKeys(s.with, Object.keys(w)) && Object.keys(w).every((x) => s.with[x] === w[x]))) {
+        found.push(`${where} checks out with ${JSON.stringify(s.with ?? null)} or more keys than its inputs (${keys.join(", ")}), not one of CHECKOUT_INPUTS`);
+      }
+    } else if (/^actions\/setup-node@[0-9a-f]{40}$/.test(uses)) {
+      if (!stepKeysAre(s, ["uses", "with"]) || JSON.stringify(s.with) !== JSON.stringify(NODE_INPUTS)) found.push(`${where} sets node up with ${JSON.stringify(s.with ?? null)} or more keys (${keys.join(", ")}), not NODE_INPUTS`);
+    } else if (s.uses !== undefined) {
+      found.push(`${where} runs an action other than the checkout and node: ${uses}`);
+    } else if (s.id === "watch") {
+      if (!stepKeysAre(s, ["name", "id", "run"]) || String(s.run).trim() !== `node .github/scripts/watch.mjs ${file}`) found.push(`${where} is not the watch exactly: ${JSON.stringify(s)}`);
+    } else if (!stepKeysAre(s, ["name", "run"]) || BEFORE_TOOLCHAIN.get(String(s.run ?? "").trim())?.job !== key) {
+      found.push(`${where} is none of the steps BEFORE_TOOLCHAIN names for this job, with its name and script alone: ${JSON.stringify(s)}`);
+    }
+  }
+  if (checkouts !== 1) found.push(`${key} checks out ${checkouts} times before the check, not once`);
+  return found;
+}
+
+check("every required or pinned job but those of GATE_ONLY and SECRET_JOBS checks, before anything of the workspace is built or installed, that nothing of the change can run where cargo builds", () => {
+  // Every such job carries the check, whatever its steps run: a rule that asked which jobs build,
+  // by the names of the tools in their scripts, missed a tool spelled otherwise (the third review
+  // of 980965e). A job of GATE_ONLY is pinned whole instead.
+  const keys = new Set([...requiredJobs().map(({ file, id }) => `${file}#${id}`), ...PINNED_JOBS.keys()]);
+  let checked = 0;
+  for (const { file, doc, id, job } of allJobs().filter((j) => keys.has(`${j.file}#${j.id}`))) {
+    const key = `${file}#${id}`;
+    const all = steps(job);
+    // No step of a required or pinned job runs elsewhere than the workspace's root.
+    for (const s of all) assert.ok(!("working-directory" in s), `${stepKey(file, id, s)} runs in a directory of its own`);
+    if (GATE_ONLY.has(key) || SECRET_JOBS.has(key)) continue;
+    checked++;
+    assert.deepEqual(beforeToolchainProblems(file, id, doc, job), []);
+    // After it, no step changes the toolchain, but in the base branch's own worktree, whose
+    // rust-toolchain.toml is the base's (the performance jobs build the base's compiler there).
+    const at = all.findIndex((s) => s.run === TOOLCHAIN_STEP);
+    for (const s of all.slice(at + 1)) {
+      for (const line of logicalLines(s.run ?? "").map((l) => l.trim())) {
+        if (/^\(cd \.\.\/base && /.test(line)) continue;
+        assert.doesNotMatch(line, /\brustup\s+(toolchain|default|override|component|target)\b/, `${stepKey(file, id, s)} changes the toolchain after the check: ${line}`);
+      }
+    }
+  }
+  assert.equal(checked, keys.size - GATE_ONLY.size - SECRET_JOBS.size, "a required or pinned job was left out of the check");
+  // The plants of the second review of 4e896ca, on the Documentation job and on a Rust job: each
+  // is refused by this rule, by TOOL_ENV or by the pin.
+  const ci = workflows().find((w) => w.file === "ci.yml").doc;
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  const index = (job, test) => job.steps.findIndex(test);
+  for (const id of ["docs", "rust"]) {
+    const plant = (change) => {
+      const doc = clone(ci);
+      const job = doc.jobs[id];
+      change(job, doc);
+      return [...beforeToolchainProblems("ci.yml", id, doc, job), ...toolEnvProblems(`ci.yml#${id}`, doc, job), ...(jobDigest(doc, job) === PINNED_JOBS.get(`ci.yml#${id}`) ? [] : ["the pin"])];
+    };
+    const ruled = (change) => {
+      const doc = clone(ci);
+      change(doc.jobs[id], doc);
+      return [...beforeToolchainProblems("ci.yml", id, doc, doc.jobs[id]), ...toolEnvProblems(`ci.yml#${id}`, doc, doc.jobs[id])];
+    };
+    const toolchain = (job) => job.steps[index(job, (s) => s.run === TOOLCHAIN_STEP)];
+    for (const [name, change] of [
+      ["P1, working-directory on the toolchain step", (job) => (toolchain(job)["working-directory"] = "compiler")],
+      ["P2, a variable on the toolchain step", (job) => (toolchain(job).env = { MENTE_X: "1" })],
+      ["P2, a shell on the toolchain step", (job) => (toolchain(job).shell = "sh")],
+      ["P3, setup-node with an input more", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { "node-version": 24, cache: "npm" } })],
+      ["P3, the checkout with a path", (job) => (job.steps[0].with = { ...job.steps[0].with, path: "elsewhere" })],
+      ["P3, the checkout of another repository", (job) => (job.steps[0].with = { ...job.steps[0].with, repository: "someone/else" })],
+      ["P4, a job default of a working directory", (job) => (job.defaults = { run: { shell: "bash", "working-directory": "compiler" } })],
+      ["P4, a workflow default of a working directory", (job, doc) => (doc.defaults = { run: { "working-directory": "compiler" } })],
+      ["P5, the checkout of main", (job) => (job.steps[0].with = { ...job.steps[0].with, ref: "main" })],
+      ["P6, LD_AUDIT on the job", (job) => (job.env = { ...job.env, LD_AUDIT: "./x.so" })],
+      ["P6, GIT_CONFIG_COUNT on the workflow", (job, doc) => (doc.env = { ...doc.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "./x" })],
+      ["a step of the change's before the check", (job) => job.steps.splice(1, 0, { name: "x", run: "bash ./x.sh" })],
+      ["a step allowed only in another job, before the check", (job) => job.steps.splice(1, 0, { name: "x", run: 'echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"' })],
+      ["setup-node with its own cache left on", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { "node-version": 24 } })],
+      ["npm ci before the check", (job) => job.steps.splice(1, 0, { name: "x", run: "npm ci --ignore-scripts" })],
+      ["an action before the check", (job) => job.steps.splice(1, 0, { uses: `someone/action@${"0".repeat(40)}` })],
+      ["a second checkout", (job) => job.steps.splice(1, 0, clone(job.steps[0]))],
+      ["the toolchain step under if: false", (job) => (toolchain(job).if = "false")],
+      ["the toolchain step allowed to fail", (job) => (toolchain(job)["continue-on-error"] = true)],
+      ["a container", (job) => (job.container = "someone/image")],
+      ["the policy step with a variable", (job) => {
+        const s = job.steps.find((x) => BEFORE_TOOLCHAIN.has(String(x.run ?? "").trim()));
+        if (s) s.env = { MENTE_X: "1" };
+        else toolchain(job).env = { MENTE_X: "1" };
+      }],
+    ]) {
+      assert.ok(ruled(change).length > 0, `ci.yml#${id}: the rule lets through ${name}`);
+      assert.ok(plant(change).length > 0, `ci.yml#${id}: nothing refuses ${name}`);
+    }
+    assert.deepEqual(ruled(() => {}), [], `ci.yml#${id}: the rule refuses the job as it is`);
+  }
 });
 
 /// The code blocks of a library's doc comments rustdoc lists as doctests, as `file:line`: a fenced
@@ -899,8 +1978,8 @@ check("no library's doc comments hold an example rustdoc would compile", () => {
     for (const f of filesUnder(dir).filter((x) => x.endsWith(".rs"))) {
       const text = read(f);
       if (!tracked().has(`${dir}/src/lib.rs`) || !f.startsWith(`${dir}/src/`) || f === `${dir}/src/main.rs` || f.startsWith(`${dir}/src/bin/`)) continue;
-      // A library's module read from another path could be one these lines never read.
-      if (/^\s*#!?\[\s*path\b/m.test(text)) found.push(`${f}: a #[path] module`);
+      // A module read from another path, which these lines would never read, is refused in every
+      // crate by the check of `#[path]` above.
       found.push(...doctestBlocks(f, text));
       if (docAttribute.test(text)) found.push(`${f}: a doc attribute, whose text the policy does not read`);
       if (/^\s*\/\*[*!](?![*/])/m.test(text)) found.push(`${f}: a block doc comment, which the policy does not read`);
@@ -960,12 +2039,21 @@ check("the memory guard goes on when the process it would stop is already gone",
     // No clock decides: the guard either goes on through all five, and the subshell says so after
     // it, or stops at the first failed `kill`.
     const ROUNDS = 5;
-    const script = `rounds=0; sleep() { rounds=$((rounds + 1)); [ "$rounds" -le ${ROUNDS} ]; }; ps() { echo "999999 1"; }; (. .github/scripts/memory-guard.sh "$1"; echo "the guard went on through $((rounds - 1)) rounds")`;
+    // `sudo` stands in too, and says what it was asked: the guard stops through it a process of
+    // the sandbox's user, which the runner's user cannot stop, and no other.
+    const guard = (owner) =>
+      `rounds=0; sleep() { rounds=$((rounds + 1)); [ "$rounds" -le ${ROUNDS} ]; }; ps() { case "$*" in *uid=*) echo " ${owner}" ;; *) echo "999999 1" ;; esac; }; sudo() { echo "sudo $*"; }; (. .github/scripts/memory-guard.sh "$1"; echo "the guard went on through $((rounds - 1)) rounds")`;
+    const script = guard("1001");
     const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", script, "guard", meminfo.replace(/\\/g, "/")], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
     const rounds = (String(r.stdout).match(/^memory guard: 1 MB available, stopping /gm) ?? []).length;
     assert.equal(rounds, ROUNDS, `the guard stopped after ${rounds} of ${ROUNDS} rounds: ${r.error ?? ""}${r.stdout}${r.stderr}`);
     assert.match(String(r.stdout), new RegExp(`^the guard went on through ${ROUNDS} rounds$`, "m"), `the guard did not go on after its rounds: ${r.stdout}${r.stderr}`);
     assert.equal(r.status, 0, `the guard's shell failed: ${r.error ?? ""}${r.stderr}`);
+    assert.doesNotMatch(String(r.stdout), /^sudo /m, "the guard stops through sudo a process that is not the sandbox's");
+    const uid = spawnSync(bashPath(), [".github/scripts/test-sandbox.sh", "uid"], { cwd: ROOT, encoding: "utf8", timeout: 30000 }).stdout.trim();
+    assert.match(uid, /^\d+$/, "test-sandbox.sh names no user for the tests");
+    const s = spawnSync(bashPath(), ["-eo", "pipefail", "-c", guard(uid), "guard", meminfo.replace(/\\/g, "/")], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
+    assert.equal((String(s.stdout).match(/^sudo -n kill -9 999999$/gm) ?? []).length, ROUNDS, `the guard does not stop a process of the sandbox's user through sudo: ${s.error ?? ""}${s.stdout}${s.stderr}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -989,27 +2077,162 @@ check("every measured benchmark run proves its sandbox first", () => {
 
 /// Whether a value hands a secret over: an expression naming `secrets.` other than a test of
 /// whether one is set.
+/// Whether a value, a string or anything in a step or a job, holds a secret: an expression that
+/// names `secrets` in any form (`secrets.X`, `secrets['X']`, `toJSON(secrets)`), but the test
+/// whether one is empty, which yields no secret. The final review of PR 137 found a secret named
+/// without a dot read as none.
+/// Every string of a value, keys and values, as written: a JSON string of it would turn a tab or a
+/// line break inside an expression into `\t` or `\n`, past `\b` (the review of 35bbe0f).
+const stringsOf = (v) => (typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(stringsOf) : v !== null && typeof v === "object" ? [...Object.keys(v), ...Object.values(v).flatMap(stringsOf)] : []);
+/// GitHub reads a context's name in any case: `SECRETS.X` is a secret too.
+/// It reads from a string's first `${{` to its end, not to the first `}}`, which GitHub skips
+/// inside a quoted string of the expression (the review of b2be87b: `'}}'` ended it early); the
+/// one exception is a string that is the emptiness test and nothing more.
 const holdsSecret = (value) =>
-  [...String(value).matchAll(/\$\{\{([\s\S]*?)\}\}/g)].some(([, e]) => /\bsecrets\./.test(e) && !/^\s*secrets\.\w+\s*[!=]=\s*''\s*$/.test(e));
+  stringsOf(value).some((s) => {
+    const k = s.indexOf("${{");
+    if (k < 0) return false;
+    const rest = s.slice(k);
+    return /\bsecrets\b/i.test(rest) && !/^\$\{\{\s*secrets\.\w+\s*[!=]=\s*''\s*\}\}\s*$/i.test(rest);
+  });
 
-check("a job that holds a secret runs agent code only in its proven sandbox", () => {
-  const crates = workspace();
-  let guarded = 0;
+/// The loads of code a module of a secret job may make that the closure of what it runs cannot
+/// follow, each with the files it loads, which must be owned: none but the corpus checker's, which
+/// loads reference.mjs from the corpus and from the held-out set, whose own the private repository
+/// holds at the commit corpus.lock names. Every other computed `import(` or `require(`, and every
+/// `createRequire`, `new Worker`, `eval`, `new Function`, `vm` or `dlopen`, is refused (the review of
+/// 35bbe0f: check.mjs loaded an unowned reference.mjs beside the held-out set by a computed path).
+const COMPUTED_LOADS = new Map([
+  ["benchmark/check.mjs", { line: '  const reference = (await import(pathToFileURL(path.join(dir, "reference.mjs")).href)).tasks;', loads: ["benchmark/reference.mjs"] }],
+]);
+/// The modules of a secret job that may start a process, each with its one import of
+/// child_process and how its calls read: the harness's runProcess and the preliminary run's
+/// mnSync, one call each, and the corpus checker's git. No other module of those jobs names
+/// child_process (the review of 35bbe0f: `execSync as sh` in tasks.ts ran mn beside the key).
+const SPAWNERS = new Map([
+  ["benchmark/harness/build.ts", { line: 'import { spawn } from "node:child_process";', calls: /\bspawn\s*\(/g, exactly: 1 }],
+  ["benchmark/harness/prelim.ts", { line: 'import { spawnSync } from "node:child_process";', calls: /\bspawnSync\s*\(/g, exactly: 1 }],
+  ["benchmark/check.mjs", { line: 'import { execFileSync } from "node:child_process";', calls: /\bexecFileSync\s*\((?!\s*"git")/g, exactly: 0 }],
+]);
+/// What a module of a secret job does that the policy refuses: a load it cannot follow, or a
+/// process started outside SPAWNERS.
+export function secretModuleProblems(file, text) {
+  const found = [];
+  // A named computed load is its one exact line, once; the rest of the module is read as any other
+  // (the review of b2be87b: the whole of check.mjs was exempt, a second load and a moved one too).
+  const named = COMPUTED_LOADS.get(file);
+  const lines = text.split("\n");
+  if (named && lines.filter((l) => l === named.line).length !== 1) found.push(`${file}: its named load is not the one line \`${named.line.trim()}\`, once`);
+  const rest = named ? lines.filter((l) => l !== named.line).join("\n") : text;
+  for (const m of rest.matchAll(/\b(import|require)\s*\(\s*([^)]*?)\s*\)/g)) {
+    if (!/^(['"])[^'"\\]*\1$|^`[^`$\\]*`$/.test(m[2])) found.push(`${file}: ${m[1]}(${m[2]}), a load whose target the policy cannot read`);
+  }
+  for (const m of text.matchAll(/\bcreateRequire\b|\bnew\s+Worker\b|\beval\s*\(|\bnew\s+Function\b|["'](?:node:)?vm["']|\bdlopen\b/g)) found.push(`${file}: ${m[0]}, a way to run code the policy cannot read`);
+  const spawner = SPAWNERS.get(file);
+  const names = (text.match(/child_process/g) ?? []).length;
+  if (!spawner && names > 0) found.push(`${file}: names child_process, which only the modules of SPAWNERS may`);
+  if (spawner) {
+    if (names !== 1 || !text.split("\n").includes(spawner.line)) found.push(`${file}: its import of child_process is not \`${spawner.line}\` alone`);
+    const calls = (text.match(spawner.calls) ?? []).length;
+    if (calls !== spawner.exactly) found.push(`${file}: ${calls} calls of ${spawner.calls.source}, not ${spawner.exactly}`);
+  }
+  return found;
+}
+
+/// Every job that holds a secret, each with the job of its workflow that builds mn for it (or none)
+/// and whether it runs agent code. Each is pinned whole, and every file it runs, with every module
+/// those import, is the code owner's in CODEOWNERS; it builds nothing, since mn comes from a job
+/// without the secret, which carries the build-time check first (the fourth review of PR 137 found
+/// the build in the job that later held the key). What runs beside the secret is then the harness
+/// of the ref the run is on, which the code owner has read only on main, and mn, code of that ref,
+/// which only the benchmark's own sandbox confines. The secrets are the repository's, so a
+/// dispatch on another branch runs that branch's harness and workflow with them, and so does the
+/// run of a pull request from this repository that changes a workflow, before any review: the
+/// environment `benchmark`, for main alone, is the follow-up. The rules below are a reading aid
+/// for the code owner, whose review holds what they do not list.
+const SECRET_JOBS = new Map([
+  ["benchmark.yml#bench", { builtBy: "build", agents: true }],
+  ["prelim.yml#prelim", { builtBy: "build", agents: true }],
+  ["probe.yml#write", { builtBy: null, agents: false }],
+]);
+
+check("every job that holds a secret is pinned whole, takes mn from a job that checks it first, and runs agent code only in its proven sandbox", () => {
+  const found = new Set();
+  const holds = (v) => holdsSecret(v);
   for (const { file, doc, id, job } of allJobs()) {
+    const key = `${file}#${id}`;
     const all = steps(job);
-    const wide = [doc.env, job.env].some((env) => env && Object.values(env).some(holdsSecret));
-    const secretAt = all.findIndex((s) => wide || [s.env, s.with].some((m) => m && Object.values(m).some(holdsSecret)));
-    if (secretAt < 0 || !cratesBuilt(scriptTexts(doc, job), crates).names.has("mente-cli")) continue;
-    guarded++;
-    const where = `${file}, job ${id}`;
-    const check = all.findIndex((s) => /benchmark\/harness\/sandbox-check\.ts/.test(String(s.run ?? "")));
-    assert.ok(check >= 0 && check < secretAt, `${where}: holds a secret and builds mn, but sandbox-check.ts does not run before the secret is in reach`);
-    for (const key of ["if", "continue-on-error"]) assert.ok(!(key in all[check]), `${where}: the sandbox check carries ${key}:`);
-    for (const s of all.slice(secretAt).filter((s) => [s.env, s.with].some((m) => m && Object.values(m).some(holdsSecret)) && typeof s.run === "string")) {
-      assert.match(s.run, /--sandbox "\$SANDBOX"/, `${where}, step "${s.name}": holds a secret and runs nothing through the sandbox`);
+    // The workflow's env, anything of the job but its steps, and a job that passes secrets on.
+    const wide = holds(doc.env) || holds({ ...job, steps: null }) || "secrets" in job;
+    const secretAt = wide ? 0 : all.findIndex((s) => holds(s));
+    if (secretAt < 0) continue;
+    found.add(key);
+    const held = SECRET_JOBS.get(key);
+    assert.ok(held, `${key} holds a secret and is not in SECRET_JOBS: name the job that builds mn for it, if any`);
+    assert.ok(PINNED_JOBS.has(key), `${key} holds a secret and is not pinned whole`);
+    // Every file it runs, and every module those import, is the code owner's: the pin holds the
+    // job's steps, and CODEOWNERS what they run (the final review of PR 137 found the toolchains'
+    // installer and five modules of the process that holds the key in neither).
+    const runs = [...repoPaths(scriptTexts(doc, job))];
+    const loaded = runs.flatMap((f) => COMPUTED_LOADS.get(f)?.loads ?? []);
+    const unowned = [...runs, ...loaded].filter((f) => !GATE_FILES.some((p) => owns(p, f)));
+    assert.deepEqual(unowned, [], `${key} holds a secret and runs files .github/CODEOWNERS does not give its owner`);
+    // And each module of it loads only what that closure follows, and starts processes only in
+    // SPAWNERS.
+    assert.deepEqual(runs.filter((f) => /\.(mjs|cjs|js|ts)$/.test(f)).flatMap((f) => secretModuleProblems(f, read(f))), [], `${key} holds a secret, and a module it runs loads code or starts a process the policy cannot read`);
+    if (held.builtBy !== null) {
+      assert.ok([job.needs].flat().includes(held.builtBy), `${key} does not need ${held.builtBy}, the job that builds mn for it`);
+      const builder = doc.jobs?.[held.builtBy];
+      assert.ok(builder, `${file} has no job ${held.builtBy}`);
+      assert.deepEqual(beforeToolchainProblems(file, held.builtBy, doc, builder), [], `${file}#${held.builtBy} builds mn for a job that holds a secret without the build-time check first`);
+      assert.ok(!holds(builder) && !("secrets" in builder), `${file}#${held.builtBy}, which builds mn, holds a secret`);
+      assert.ok(all.some((s) => /^actions\/download-artifact@/.test(String(s.uses ?? ""))), `${key} takes no artifact from ${held.builtBy}`);
+    }
+    if (held.agents) {
+      const check = all.findIndex((s) => /benchmark\/harness\/sandbox-check\.ts/.test(String(s.run ?? "")));
+      assert.ok(check >= 0 && check < secretAt, `${key}: runs agent code, but sandbox-check.ts does not run before the secret is in reach`);
+      for (const k of ["if", "continue-on-error"]) assert.ok(!(k in all[check]), `${key}: the sandbox check carries ${k}:`);
+      for (const s of all.slice(secretAt).filter((x) => holds(x) && typeof x.run === "string")) {
+        assert.match(s.run, /--sandbox "\$SANDBOX"/, `${key}, step "${s.name}": holds a secret and runs nothing through the sandbox`);
+      }
     }
   }
-  assert.ok(guarded >= 2, "the benchmark and the preliminary runs hold the key beside mn");
+  assert.deepEqual([...SECRET_JOBS.keys()].filter((k) => !found.has(k)), [], "SECRET_JOBS names jobs that hold no secret");
+  // The final review's plants, and the other spellings of a secret.
+  for (const held of ["${{ secrets.ANTHROPIC_API_KEY }}", "${{ secrets['ANTHROPIC_API_KEY'] }}", "${{ toJSON(secrets) }}", "${{ secrets.A || 'x' }}", "${{ fromJSON(toJSON(secrets)).A }}", { env: { K: "${{ secrets['K'] }}" } }]) {
+    assert.ok(holdsSecret(held), `a secret read as none: ${JSON.stringify(held)}`);
+  }
+  for (const none of ["${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}", "${{ github.token }}", "secrets", "${{ env.SECRETS_DIR }}"]) assert.ok(!holdsSecret(none), `no secret read as one: ${none}`);
+  // The review of 35bbe0f: a tab or a line break inside the expression, and the context in another case.
+  for (const held of ["${{\tsecrets.ANTHROPIC_API_KEY }}", "${{\n  secrets.ANTHROPIC_API_KEY\n}}", "${{ SECRETS.A }}", "${{ Secrets['A'] }}", { steps: [{ env: { K: "${{\tsecrets.K }}" } }] }]) {
+    assert.ok(holdsSecret(held), `a secret read as none: ${JSON.stringify(held)}`);
+  }
+  // And the modules: a load the policy cannot follow, or a process started outside SPAWNERS.
+  for (const [file, text] of [
+    ["benchmark/harness/api.ts", 'const m = await import(new URL("../" + "reference.mjs", import.meta.url));'],
+    ["benchmark/harness/api.ts", "const r = createRequire(import.meta.url);"],
+    ["benchmark/harness/tasks.ts", 'import { execSync as sh } from "child_process";\nsh(`${mn} explain ${code}`);'],
+    ["benchmark/harness/tasks.ts", 'const cp = await import("node:child_process");'],
+    ["benchmark/harness/build.ts", 'import { spawn, execSync } from "node:child_process";\nspawn(c, a);'],
+    ["benchmark/harness/build.ts", 'import { spawn } from "node:child_process";\nspawn(c, a);\nspawn(mn, b);'],
+    ["benchmark/check.mjs", 'import { execFileSync } from "node:child_process";\nexecFileSync("node", ["x.mjs"]);'],
+    ["benchmark/harness/report.ts", "new Worker(file);"],
+    ["benchmark/harness/report.ts", "eval(code);"],
+  ]) {
+    assert.ok(secretModuleProblems(file, text).length > 0, `the rule for a secret job's modules lets through, in ${file}: ${text}`);
+  }
+  assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./x.ts";\nconst y = await import("./y.ts");'), []);
+  // The review of b2be87b: a `}}` inside a quoted string of the expression, and the named load of
+  // check.mjs moved or joined by another.
+  for (const held of ["${{ '}}' && secrets.ANTHROPIC_API_KEY }}", "${{ format('{0}}}', secrets.ANTHROPIC_API_KEY) }}", "${{ secrets.A != '' }} ${{ secrets.B }}"]) {
+    assert.ok(holdsSecret(held), `a secret read as none: ${held}`);
+  }
+  const checker = read("benchmark/check.mjs");
+  const named = COMPUTED_LOADS.get("benchmark/check.mjs").line;
+  assert.deepEqual(secretModuleProblems("benchmark/check.mjs", checker), []);
+  for (const plant of [checker.replace(named, named.replace('path.join(dir, "reference.mjs")', 'path.join(dir, "tasks", "reference.mjs")')), `${checker}\nconst extra = await import(process.env.BENCH_EXTRA ?? "node:os");\n`, `${checker}\n${named}\n`]) {
+    assert.ok(secretModuleProblems("benchmark/check.mjs", plant).length > 0, "the named load of check.mjs lets through a moved or a second load");
+  }
 });
 
 check("the Documentation job lints every workflow with actionlint and shellcheck, both pinned by checksum", () => {
@@ -1045,20 +2268,15 @@ const GATE_FILES = [
   "/perf/lib.mjs",
   "/benchmark/check.mjs",
   "/benchmark/corpus.lock",
-  "/benchmark/harness/sandbox.sh",
-  "/benchmark/harness/sandbox-check.ts",
-  "/benchmark/harness/build.ts",
-  "/benchmark/harness/bench.ts",
-  "/benchmark/harness/prelim.ts",
-  "/benchmark/harness/probe.ts",
-  "/benchmark/harness/fixtures.ts",
-  "/benchmark/harness/toolchains.json",
+  "/benchmark/reference.mjs",
+  "/benchmark/harness/",
   "/compiler/mente-cli/tests/gates.rs",
   "/compiler/mente-cli/tests/lints.rs",
   "/compiler/mente-cli/tests/register.rs",
   "/compiler/*/src/overflow_traps.rs",
   "/compiler/*/Cargo.toml",
   "/spikes/*/Cargo.toml",
+  "/.gitattributes",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
@@ -1091,13 +2309,10 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
     "perf/run.mjs",
     "perf/lib.mjs",
     "benchmark/check.mjs",
-    "benchmark/harness/sandbox.sh",
-    "benchmark/harness/sandbox-check.ts",
-    "benchmark/harness/build.ts",
-    "benchmark/harness/bench.ts",
-    "benchmark/harness/prelim.ts",
-    "benchmark/harness/probe.ts",
-    "benchmark/harness/toolchains.json",
+    // The reference solutions the corpus checker loads beside the held-out set.
+    "benchmark/reference.mjs",
+    // The harness whole: every script and module the jobs that hold a secret run.
+    ...filesUnder("benchmark/harness"),
     "compiler/mente-cli/tests/gates.rs",
     "compiler/mente-cli/tests/lints.rs",
     "compiler/mente-cli/tests/register.rs",
@@ -1138,6 +2353,108 @@ check("the required checks are listed once each", () => {
   assert.ok(names.length > 0);
   const twice = names.filter((n, k) => names.indexOf(n) !== k);
   assert.deepEqual(twice, [], `${REQUIRED_FILE} lists these twice`);
+});
+
+/// The jobs whose matrix a dispatch's input gives, each with its reason; every other matrix is a
+/// literal. Such a job's workflow runs on no pull request, push or queue, and its name's literal
+/// start is the start of no required check.
+const MATRIX_FROM_INPUTS = new Map([["mutants-full.yml#full", "the shards to run are the dispatch's choice"]]);
+/// Why a workflow's jobs could be named, run or set otherwise than the policy reads them: a name
+/// spelled by an expression other than a matrix value, a runner that is no literal of RUNNERS, a
+/// matrix, strategy or defaults holding an expression, an env or a step's inputs that are an
+/// expression as a whole. The policy reads each as written; GitHub would evaluate it (the third
+/// review of 980965e: `env: ${{ fromJSON(...) }}` set NODE_OPTIONS past TOOL_ENV, and a job named
+/// by format() reported a required check's name).
+/// The values a matrix gives a key in every combination, or null when some combination lacks the key
+/// or the matrix is no literal; and whether a value renders in a name as the policy reads it: an
+/// integer, or a word that starts with a letter and is none YAML or GitHub reads otherwise (the
+/// fourth review of PR 137: `matrix.Name` for a key `name`, a key absent, `~` and `0.0` each rendered
+/// otherwise than the policy read them).
+export function matrixValuesOf(matrix, key) {
+  if (!isPlain(matrix)) return null;
+  if (Array.isArray(matrix[key])) return matrix[key];
+  if (key in matrix && key !== "include" && key !== "exclude") return null;
+  const include = matrix.include;
+  if (!Array.isArray(include) || include.length === 0 || Object.keys(matrix).some((k) => k !== "include")) return null;
+  return include.every((c) => isPlain(c) && Object.hasOwn(c, key)) ? include.map((c) => c[key]) : null;
+}
+const YAML_WORDS = /^(null|true|false|yes|no|on|off|y|n)$/i;
+export const plainNameValue = (v) => (typeof v === "number" && Number.isInteger(v) && v >= 0) || (typeof v === "string" && /^[A-Za-z][A-Za-z0-9 _.,()+/-]*$/.test(v) && !YAML_WORDS.test(v));
+export function expressionProblems(file, doc) {
+  const found = [];
+  const expression = (v) => /\$\{\{/.test(JSON.stringify(v ?? null));
+  const mapping = (where, v) => {
+    if (v !== undefined && !isPlain(v)) found.push(`${where} is an expression or no mapping: ${JSON.stringify(v)}`);
+  };
+  mapping(`${file}: env`, doc.env);
+  if (doc.defaults !== undefined && (!isPlain(doc.defaults) || expression(doc.defaults))) found.push(`${file}: defaults are or hold an expression`);
+  const runsOnPush = Object.keys(triggers(doc)).some((e) => REQUIRED_EVENTS.has(e));
+  for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+    const key = `${file}#${id}`;
+    const name = String(job?.name ?? id);
+    if (/\$\{\{/.test(name.replace(/\$\{\{\s*matrix\.[\w-]+\s*\}\}/g, ""))) found.push(`${key}: its name holds an expression other than a matrix value: ${name}`);
+    if (!MATRIX_FROM_INPUTS.has(key)) {
+      const matrix = job?.strategy?.matrix;
+      for (const [, ref] of name.matchAll(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/g)) {
+        const values = matrixValuesOf(matrix, ref);
+        if (!values) found.push(`${key}: its name names matrix.${ref}, which its matrix does not give, in that very spelling, to every combination`);
+        else if (!values.every(plainNameValue)) found.push(`${key}: its name names matrix.${ref}, whose values ${JSON.stringify(values)} GitHub could render otherwise than the policy reads them`);
+      }
+      if (isPlain(matrix)) {
+        const keys = [...Object.keys(matrix), ...(Array.isArray(matrix.include) ? matrix.include.flatMap((c) => (isPlain(c) ? Object.keys(c) : [])) : [])];
+        const byCase = new Map();
+        for (const k of keys) {
+          const held = byCase.get(k.toLowerCase());
+          if (held !== undefined && held !== k) found.push(`${key}: its matrix holds the keys ${held} and ${k}, which GitHub reads as one`);
+          byCase.set(k.toLowerCase(), k);
+        }
+      }
+    }
+    if (job?.strategy !== undefined && (!isPlain(job.strategy) || expression(job.strategy))) {
+      const prefix = name.split("${{")[0];
+      const allowed = MATRIX_FROM_INPUTS.has(key) && !runsOnPush && prefix.trim() !== "" && ![...requiredChecks()].some((c) => c.startsWith(prefix));
+      if (!allowed) found.push(`${key}: its strategy or matrix is or holds an expression, so the checks it reports and its runners cannot be read`);
+    }
+    const runners = runnersOf(job);
+    if (!MATRIX_FROM_INPUTS.has(key) && (!runners || !runners.every((r) => RUNNERS.has(r)))) found.push(`${key}: runs-on ${JSON.stringify(job?.["runs-on"])} is no literal of RUNNERS nor a matrix value that is one`);
+    mapping(`${key}: env`, job?.env);
+    if (job?.defaults !== undefined && (!isPlain(job.defaults) || expression(job.defaults))) found.push(`${key}: its defaults are or hold an expression`);
+    for (const s of steps(job ?? {})) {
+      mapping(`${stepKey(file, id, s)}: env`, s.env);
+      mapping(`${stepKey(file, id, s)}: with`, s.with);
+    }
+  }
+  return found;
+}
+
+check("no workflow names a job, its runners, its matrix, its defaults or a whole env by an expression", () => {
+  for (const { file, doc } of workflows()) assert.deepEqual(expressionProblems(file, doc), [], file);
+  // The plants of the third review of 980965e.
+  const job = (extra) => ({ name: "Rust (x86-64 Linux)", "runs-on": "ubuntu-24.04", steps: [{ run: "x" }], ...extra });
+  const doc = (jobs, extra = {}) => ({ on: { pull_request: null }, jobs, ...extra });
+  for (const [what, plant] of [
+    ["a name by format()", doc({ shadow: job({ name: "${{ format('Rust ({0})', 'x86-64 Linux') }}" }) })],
+    ["a matrix by fromJSON", doc({ shadow: job({ name: "Rust (${{ matrix.name }})", strategy: { matrix: "${{ fromJSON('{\"name\":[\"x86-64 Linux\"]}') }}" } }) })],
+    ["a matrix value by an expression", doc({ shadow: job({ name: "Rust (${{ matrix.name }})", strategy: { matrix: { name: ["${{ format('x86-64 Linux') }}"] } } }) })],
+    ["a runner by format()", doc({ extra: job({ "runs-on": "${{ format('{0}-24.04', 'ubuntu') }}" }) })],
+    ["a runner of another label", doc({ extra: job({ "runs-on": "self-hosted" }) })],
+    ["a job env by fromJSON", doc({ z3: job({ env: "${{ fromJSON('{\"NODE_OPTIONS\":\"--require ./x.js\"}') }}" }) })],
+    ["a workflow env by fromJSON", doc({ z3: job() }, { env: "${{ fromJSON('{}') }}" })],
+    ["a step env by fromJSON", doc({ z3: job({ steps: [{ run: "x", env: "${{ fromJSON('{}') }}" }] }) })],
+    ["a step's inputs by fromJSON", doc({ z3: job({ steps: [{ uses: "actions/checkout@x", with: "${{ fromJSON('{}') }}" }] }) })],
+    ["defaults by an expression", doc({ z3: job({ defaults: { run: { shell: "${{ 'bash' }}" } } }) })],
+    // The fourth review's plants: names GitHub renders otherwise than the policy reads them.
+    ["a matrix key named in another case", doc({ shadow: job({ name: "Rust (${{ matrix.Name }})", strategy: { matrix: { name: ["x86-64 Linux"] } } }) })],
+    ["a matrix key absent", doc({ shadow: job({ name: "Documentation${{ matrix.nope }}", strategy: { matrix: { os: ["ubuntu-24.04"] } } }) })],
+    ["a null matrix value", doc({ shadow: job({ name: "Fuzz${{ matrix.x }}", strategy: { matrix: { x: [null] } } }) })],
+    ["a matrix value written as a float", doc({ shadow: job({ name: "Mutants in the diff (shard ${{ matrix.s }} of 4)", strategy: { matrix: { s: ["0.0"] } } }) })],
+    ["a matrix value YAML reads as a word", doc({ shadow: job({ name: "Fuzz ${{ matrix.x }}", strategy: { matrix: { x: ["Null"] } } }) })],
+    ["a key in some include entries only", doc({ shadow: job({ name: "Rust (${{ matrix.name }})", strategy: { matrix: { include: [{ name: "x86-64 Linux" }, { os: "ubuntu-24.04" }] } } }) })],
+    ["two keys GitHub reads as one", doc({ shadow: job({ name: "Rust (${{ matrix.name }})", strategy: { matrix: { name: ["a"], Name: ["b"] } } }) })],
+  ]) {
+    assert.ok(expressionProblems("plant.yml", plant).length > 0, `the expression rule lets through ${what}`);
+  }
+  assert.deepEqual(expressionProblems("fine.yml", doc({ rust: job({ name: "Rust (${{ matrix.name }})", "runs-on": "${{ matrix.os }}", strategy: { matrix: { include: [{ name: "x86-64 Linux", os: "ubuntu-24.04" }] } }, env: { MENTE_X: "${{ matrix.name }}" } }) })), []);
 });
 
 check("no two jobs of any workflow report a check of the same name", () => {
@@ -1207,6 +2524,21 @@ export function gateLineProblems(script, command, pipefail, nested = false) {
   const lines = logicalLines(text);
   const holding = lines.flatMap((l, k) => (l.trim() === command || l.trim() === `${command} || status=$?` ? [[l, k]] : []));
   if (holding.length === 0) found.push(`no line of the script is exactly ${command}`);
+  // Before the command, nothing that could end the script, or change how it ends, while the step
+  // still passed: an exit with no failing literal, return, exec, a trap, a kill, eval, builtin or
+  // command (which run any word), a source of anything but the shared limits, an alias or shopt,
+  // or a function named as the command's first word (the fourth review of PR 137: `exit 0` before
+  // a gate command passed).
+  const first = holding.length > 0 ? holding[0][1] : lines.length;
+  const word = command.split(/\s+/)[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const start = String.raw`(?:^|[;&|({]\s*|\b(?:then|do|else|elif|if|while|until)\s+|!\s+)`;
+  for (const line of lines.slice(0, first).map((l) => l.trim())) {
+    if (line === "" || line.startsWith("#")) continue;
+    if (new RegExp(`${start}exit(?!\\s+[1-9][0-9]*\\s*(?:[;&|)}]|$))\\b`).test(line)) found.push(`it may exit before ${command}: ${line}`);
+    if (new RegExp(`${start}(return|exec|trap|kill|eval|builtin|command|source|alias|shopt|enable)\\b`).test(line)) found.push(`it runs a word that could end or bend the script before ${command}: ${line}`);
+    if (new RegExp(`${start}\\.\\s`).test(line) && !SANDBOX_SOURCES.includes(line)) found.push(`it sources a script before ${command}: ${line}`);
+    if (new RegExp(`(?:^|[;&|({]\\s*)(?:function\\s+${word}\\b|${word}\\s*\\(\\s*\\))`).test(line)) found.push(`it defines a function named ${command.split(/\s+/)[0]} before it`);
+  }
   for (const [line, k] of holding) {
     if (line.trim() !== command && !lines.slice(k + 1).some((l) => /\bexit "\$status"/.test(l))) found.push(`keeps the status of ${command} and never exits with it`);
     if (!nested && /^\s/.test(line)) found.push(`${command} is nested in a compound command`);
@@ -1233,7 +2565,11 @@ check("every required job runs the commands it exists for, in steps that cannot 
       for (const s of runs) {
         const where = `${stepKey(file, id, s)}, which runs ${command}`;
         assert.ok(!("continue-on-error" in s), `${where}, may fail quietly`);
-        const pipefail = [s.shell, job.defaults?.run?.shell, doc.defaults?.run?.shell].find((x) => x !== undefined) === "bash";
+        const shell = [s.shell, job.defaults?.run?.shell, doc.defaults?.run?.shell].find((x) => x !== undefined);
+        // bash, named or the default of a Linux runner: pwsh ends with the last native command's
+        // code, so a line after the gate command could decide the step (the fourth review).
+        assert.ok(shell === "bash" || (shell === undefined && (runnersOf(job) ?? []).every((r) => r.startsWith("ubuntu-"))), `${where}, runs in ${shell ?? "the runner's default shell"}, not bash`);
+        const pipefail = shell === "bash";
         assert.deepEqual(gateLineProblems(s.run, command, pipefail, NESTED_GATES.has(`${key}: ${command}`)), [], `${where}: its failure could pass the step`);
         const condition = normalize(s.if ?? "");
         const allowed = hasWatch(job) ? WATCH_FORMS.includes(condition) : !("if" in s);
@@ -1260,8 +2596,29 @@ check("every required job runs the commands it exists for, in steps that cannot 
     "set +o errexit\ngate --x\n",
     "gate --x \\\n  --more || true\n",
     "status=0\ngate --x || status=$?\necho done\n",
+    // The fourth review's plants, and the other words that end or bend a script before the command.
+    "exit 0\ngate --x\n",
+    "exit\ngate --x\n",
+    'exit "$ok"\ngate --x\n',
+    "if true; then exit 0; fi\ngate --x\n",
+    "true && exit\ngate --x\n",
+    "trap 'exit 0' EXIT\ngate --x\n",
+    "exec true\ngate --x\n",
+    "return 0\ngate --x\n",
+    "kill -9 $$\ngate --x\n",
+    'eval "exit 0"\ngate --x\n',
+    "builtin exit 0\ngate --x\n",
+    "command exit 0\ngate --x\n",
+    "source ./x.sh\ngate --x\n",
+    ". ./x.sh\ngate --x\n",
+    "alias gate=true\ngate --x\n",
+    "gate() { true; }\ngate --x\n",
+    "function gate { :; }\ngate --x\n",
   ]) {
     assert.ok(verdict(script), `the line rule lets through: ${script}`);
+  }
+  for (const script of ["if [ -z \"$x\" ]; then echo none; exit 1; fi\ngate --x\n", ". .github/scripts/limits.sh\ngate --x\n", "count() { :; }\ngate --x\n", "echo exit\ngate --x\n"]) {
+    assert.ok(!verdict(script), `the line rule refuses: ${script}`);
   }
   assert.ok(verdict("gate --x | tee log\n", "gate --x | tee log", false), "a pipe in a shell without pipefail");
   assert.ok(verdict("set +o pipefail\ngate --x | tee log\n", "gate --x | tee log"), "pipefail turned off");
@@ -1441,13 +2798,11 @@ check("every instrument workflow decides at its first step, and every later step
 
 /// The workspace's members, each with the members it depends on by path.
 function workspace() {
-  const root = read("Cargo.toml");
-  // Every member, in either quote, comments aside; a glob is refused, since cargo would expand it
-  // to members this list never names.
-  const list = (/members\s*=\s*\[([\s\S]*?)\]/.exec(root)?.[1] ?? "").replace(/#.*$/gm, "");
-  const members = [...list.matchAll(/"([^"]+)"|'([^']+)'/g)].map((m) => m[1] ?? m[2]);
+  // Every member the root manifest lists, in either quote, comments aside; a glob is refused,
+  // since cargo would expand it to members this list never names (lib/build-time-code.mjs, which
+  // also holds the list against the packages cargo itself reads).
+  const members = listedMembers(read("Cargo.toml"));
   assert.ok(members.length > 0, "Cargo.toml lists no workspace members");
-  for (const m of members) assert.doesNotMatch(m, /[*?[]/, `Cargo.toml's workspace member ${m} is a glob`);
   const crates = new Map();
   for (const dir of members) {
     const manifest = read(`${dir}/Cargo.toml`);
@@ -1681,7 +3036,7 @@ check("no script a required job runs can skip its own main", () => {
     for (const f of repoPaths(scriptTexts(doc, job))) if (/\.(mjs|cjs|js|ts)$/.test(f) && !f.endsWith(".test.mjs")) scripts.add(f);
   }
   for (const f of scripts) assert.doesNotMatch(read(f), guard, `${f} runs main() only when the path it was started by matches its own`);
-  for (const cli of [".github/scripts/watch.mjs", ".github/scripts/commits.mjs", ".github/scripts/mutants-floor.mjs", ".github/scripts/test-list.mjs", ".github/scripts/action-pins.mjs", "perf/run.mjs"]) {
+  for (const cli of [".github/scripts/watch.mjs", ".github/scripts/commits.mjs", ".github/scripts/mutants-floor.mjs", ".github/scripts/test-list.mjs", ".github/scripts/action-pins.mjs", ".github/scripts/build-time-code.mjs", "perf/run.mjs"]) {
     assert.match(read(cli), /^\s*(?!\/\/).*\bmain\(/m, `${cli} does not call main() at its top level`);
   }
   assert.ok(scripts.has("benchmark/check.mjs") && scripts.has("perf/lib.mjs") && scripts.has(".github/scripts/lib/test-list.mjs"), "the scripts of the required jobs are read");
@@ -1931,6 +3286,20 @@ check("the Commits check rejects the code points test_repository_text_is_english
 // ------------------------------------------------------------------------------ floors of work
 
 check("the Mutants floor counts what the diff changes, as cargo-mutants marks it", () => {
+  // H-1 of the second review of 4e896ca: a file git writes as binary is refused, not read as a
+  // file with no changed line, and the job reads the diff as text whatever .gitattributes says.
+  for (const binary of ["Binary files a/compiler/a/src/lib.rs and b/compiler/a/src/lib.rs differ", "GIT binary patch"]) {
+    assert.throws(() => parseDiff(`diff --git a/compiler/a/src/lib.rs b/compiler/a/src/lib.rs\nindex 1..2 100644\n${binary}\n`), /git wrote as binary/, binary);
+  }
+  // The third review of 980965e: a path git quotes is refused, and one with a space keyed without
+  // the tab git ends it with.
+  assert.throws(() => parseDiff('diff --git "a/compiler/a/src/\\303\\251.rs" "b/compiler/a/src/\\303\\251.rs"\n--- "a/compiler/a/src/\\303\\251.rs"\n+++ "b/compiler/a/src/\\303\\251.rs"\n@@ -1,1 +1,2 @@\n x\n+y\n'), /git quoted/);
+  assert.deepEqual([...parseDiff("diff --git a/compiler/a/src/a b.rs b/compiler/a/src/a b.rs\n--- a/compiler/a/src/a b.rs\t\n+++ b/compiler/a/src/a b.rs\t\n@@ -1,1 +1,2 @@\n x\n+y\n").added.keys()], ["compiler/a/src/a b.rs"]);
+  const mutantsJob = steps(workflows().find((w) => w.file === "mutants.yml").doc.jobs["in-diff"]).map((s) => String(s.run ?? "")).join("\n");
+  // With quotePath off, git quotes only a path holding a quote, a backslash or a control character,
+  // which the floor refuses; a path in any other script stays as it is (the fourth review).
+  assert.match(mutantsJob, /^\s*git -c core\.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > pr\.diff$/m, "the Mutants job reads the diff in a form .gitattributes or the path's characters can change");
+  assert.doesNotMatch(mutantsJob.replace(/git (?:-c core\.quotePath=false )?(diff|show) --(text --no-ext-diff --)?no-textconv /g, ""), /\bgit (?:-c \S+ )*(diff|show|log -p)\b/, "the Mutants job reads a diff or a file without --no-textconv");
   const diff = [
     "diff --git a/compiler/a/src/lib.rs b/compiler/a/src/lib.rs",
     "index 1..2 100644",
@@ -1999,9 +3368,12 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const build = (status) => ({ phase: "Build", duration: 2.8, process_status: status });
   const test = (status) => ({ phase: "Test", duration: 0.15, process_status: status });
   const FAILED = "\x1b[1;31m        FAIL\x1b[0m [   0.004s] mente-syntax tests::x\n";
+  // nextest's own line, in each mutant's log, that it hands the test executables to the sandbox
+  // (the form of the logs of pull requests 139 and 140, coloured as nextest writes it).
+  const SANDBOXED = "\x1b[1minfo\x1b[0m: using target runner `\x1b[1m/usr/bin/bash /opt/mente-test-sandbox/test-sandbox.sh run\x1b[0m` defined by environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`\n";
   const real = [
-    outcome("caught", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${FAILED}*** result: Failure(100)\n`),
-    outcome("timeout", "CaughtMutant", [build("Success"), test({ Failure: 100 })], "        TIMEOUT [  40.104s] mente-cli::bin/mn x\n"),
+    outcome("caught", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${SANDBOXED}${FAILED}*** result: Failure(100)\n`),
+    outcome("timeout", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}        TIMEOUT [  40.104s] mente-cli::bin/mn x\n`),
     outcome("unviable", "Unviable", [build({ Failure: 101 })], "\x1b[0m\x1b[1m\x1b[38;5;9merror[E0277]\x1b[0m: the trait bound\n"),
     outcome("missed", "MissedMutant", [build("Success"), test("Success")], ""),
     { scenario: "Baseline", summary: "Success", phase_results: [], log_path: "log/baseline.log", log: "" },
@@ -2011,7 +3383,11 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const stubbed = [
     outcome("caught by a stub", "CaughtMutant", [build("Success"), test({ Failure: 1 })], "*** cargo nextest run\n*** result: Failure(1)\n"),
     outcome("caught, a failing line but not nextest's exit", "CaughtMutant", [build("Success"), test({ Failure: 1 })], FAILED),
-    outcome("caught, no test failed", "CaughtMutant", [build("Success"), test({ Failure: 100 })], "error: no tests to run\n"),
+    outcome("caught, no test failed", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}error: no tests to run\n`),
+    outcome("caught, by tests that ran outside the sandbox", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${FAILED}*** result: Failure(100)\n`),
+    outcome("caught, by tests another runner took", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`env\` defined by \`--config\`\n${FAILED}`),
+    outcome("caught, the runner's line printed by a test", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `    Starting 3 tests across 1 binary\n${SANDBOXED}${FAILED}`),
+    outcome("caught, the runner's line after the failure", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${FAILED}${SANDBOXED}`),
     outcome("unviable, built", "Unviable", [build("Success")], "error[E0277]: x\n"),
     outcome("unviable, no error", "Unviable", [build({ Failure: 101 })], "*** result: Failure(101)\n"),
   ];

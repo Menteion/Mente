@@ -57,6 +57,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          package-manager-cache: false
       - name: Test the site generator and its link check
         run: npm run test:site
       - name: Install the toolchain rust-toolchain.toml pins

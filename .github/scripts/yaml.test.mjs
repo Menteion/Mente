@@ -77,3 +77,13 @@ test("what the subset leaves out is refused, not misread", () => {
     assert.throws(() => parseYaml(bad), /line \d+/, JSON.stringify(bad));
   }
 });
+
+test("a character GitHub's reader could break a line at, or any other outside printable ASCII, is refused", () => {
+  // The fourth review of PR 137: NEL (U+0085) in a comment hid a step from this reader and from
+  // every pin, while GitHub's reader broke the line there and read the step.
+  for (const c of [0x85, 0x2028, 0x2029, 0xa0, 0x200e, 0xfeff, 0x0d, 0x0b, 0x0c, 0x7f, 0x1b]) {
+    const ch = String.fromCharCode(c);
+    assert.throws(() => parseYaml(`a: 1\n# x${ch}b: 2\n`), /line 2: a character outside printable ASCII/, `U+${c.toString(16)}`);
+  }
+  assert.deepEqual(parseYaml("a: 1\r\nb: 2\r\n"), { a: 1, b: 2 });
+});
