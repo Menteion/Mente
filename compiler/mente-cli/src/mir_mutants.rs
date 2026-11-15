@@ -129,10 +129,7 @@ struct Prepared {
 /// programs' order.
 pub fn run_programs(programs: &[Program]) -> Vec<ProgramRun> {
     let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(programs.len().max(1));
+    let workers = crate::cores::threads_for(programs.len());
     let mut found: Vec<(usize, ProgramRun)> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {

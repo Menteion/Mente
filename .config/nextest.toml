@@ -5,8 +5,9 @@
 # that outgrows its limit fails a required check, not only a mutation run's first pass. The two
 # differ only in whether the first failure stops the run. The workflow policy test
 # (.github/scripts/policy.test.mjs) reads every line of this file and holds its own copy of each
-# limit and of the tests the override names, so that a change to a limit, or more time for another
-# test, is a change to the policy too. Every test the override names must be a test that runs.
+# limit and of the tests each override names, so that a change to a limit, more time for another
+# test, or another test run alone, is a change to the policy too. Every test an override names
+# must be a test that runs.
 
 [profile.default]
 # A test that loops without end is stopped and fails, instead of holding the job, or, under a
@@ -39,6 +40,27 @@ filter = """
 | (package(mente-cli) & test(=mir_run::tests::test_native_code_runs_each_construct_as_the_reference_interpreter_does))
 """
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The tests that spread their work over every core (compiler/mente-cli/src/cores.rs). Beside the
+# test nextest runs on each core, such a test puts twice as many threads as cores on the machine,
+# and the time the tests next to it get depends on what else runs: on a runner with four cores
+# their times, and the limits above, measure the schedule, not the test. So each runs alone,
+# taking every test thread, in a group of its own, which nextest names to the test; cores.rs fails
+# a test outside the group that asks for every core, so a new one cannot run beside others.
+[[profile.default.overrides]]
+filter = """
+(package(mente-cli) & test(=mir_mutants::tests::test_the_command_passes_or_fails_on_the_corpus_it_finds))
+| (package(mente-cli) & test(=mir_mutants::tests::test_the_corpus_passes_the_gate))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_generated_programs))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite))
+| (package(mente-cli) & test(=test_mn_test_mutate_runs_the_demo_gate))
+"""
+test-group = "all-cores"
+threads-required = "num-test-threads"
+
+[test-groups]
+# One test at a time; threads-required above makes each run with no other test besides.
+all-cores = { max-threads = 1 }
 
 [profile.ci]
 # Every failure of the run, not only the first.

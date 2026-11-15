@@ -8,3 +8,9 @@ disallowed-types = [
   { path = "std::cell::RefCell", reason = "Mente has no interior mutability; pass the value as mut" },
   { path = "std::cell::UnsafeCell", reason = "Mente has no interior mutability; pass the value as mut" },
 ]
+
+# Work spread over every core gets the count from compiler/mente-cli/src/cores.rs, which fails a test
+# that nextest runs beside others unless .config/nextest.toml puts it in the group that runs alone.
+disallowed-methods = [
+  { path = "std::thread::available_parallelism", reason = "ask crate::cores::threads_for, which keeps a test that uses every core to the nextest group that runs alone" },
+]

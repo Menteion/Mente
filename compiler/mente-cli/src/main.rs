@@ -30,6 +30,7 @@ use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, 
 use mente_syntax::parse_module;
 
 mod catalogue;
+mod cores;
 mod fuzz;
 
 /// The language card of the language version this compiler implements, which ships with it

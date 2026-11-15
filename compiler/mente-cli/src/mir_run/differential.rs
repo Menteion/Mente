@@ -380,9 +380,7 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// `f` on every item, on as many threads as the machine has, the results in order.
 fn parallel<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync) -> Vec<U> {
-    let workers = std::thread::available_parallelism()
-        .map_or(2, |n| n.get())
-        .min(items.len().max(1));
+    let workers = crate::cores::threads_for(items.len());
     let next = AtomicUsize::new(0);
     let items: Vec<Mutex<Option<T>>> = items.into_iter().map(|t| Mutex::new(Some(t))).collect();
     let results: Vec<Mutex<Option<U>>> = (0..items.len()).map(|_| Mutex::new(None)).collect();

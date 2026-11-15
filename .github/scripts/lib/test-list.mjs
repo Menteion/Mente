@@ -1,9 +1,10 @@
 // Checks the tests nextest lists against what the repository says of them: the ignored tests are
-// exactly those of .config/ignored-tests.txt, and every test .config/nextest.toml gives its longer
-// limit is listed once, in its package, and not ignored. The required Rust jobs run it on every
-// runner over `cargo-nextest nextest list --run-ignored all --message-format json`, so that a test
-// cannot be ignored, in any spelling libtest reads, or stop being one, or be compiled out on a
-// platform while it keeps a longer limit, without a change to a file review sees.
+// exactly those of .config/ignored-tests.txt, and every test an override of .config/nextest.toml
+// names, for a longer limit or to run alone, is listed once, in its package, and not ignored. The
+// required Rust jobs run it on every runner over `cargo-nextest nextest list --run-ignored all
+// --message-format json`, so that a test cannot be ignored, in any spelling libtest reads, or stop
+// being one, or be compiled out on a platform while an override names it, without a change to a
+// file review sees.
 
 /// The tests of a nextest list, as `<package> <test path>` with whether each is ignored.
 export function listedTests(list) {
@@ -25,7 +26,7 @@ export function readLines(text) {
 }
 
 /// The tests .config/nextest.toml's overrides name, as `<package> <test path>`.
-export function slowTests(nextestToml) {
+export function overrideTests(nextestToml) {
   return [...nextestToml.matchAll(/\(package\(([a-z][a-z0-9_-]*)\) & test\(=([^)]*)\)\)/g)].map((m) => `${m[1]} ${m[2]}`);
 }
 
@@ -38,10 +39,10 @@ export function problems(list, ignoredText, nextestToml) {
   const expected = new Set(readLines(ignoredText));
   for (const t of ignored) if (!expected.has(t)) found.push(`${t} is ignored, and .config/ignored-tests.txt does not list it`);
   for (const t of expected) if (!ignored.has(t)) found.push(`${t} is listed in .config/ignored-tests.txt, and nextest does not list it as ignored`);
-  for (const slow of slowTests(nextestToml)) {
+  for (const slow of overrideTests(nextestToml)) {
     const matches = tests.filter((t) => t.test === slow);
-    if (matches.length !== 1) found.push(`${slow}, given a longer limit in .config/nextest.toml, is listed ${matches.length} times, not once`);
-    else if (matches[0].ignored) found.push(`${slow}, given a longer limit in .config/nextest.toml, is ignored`);
+    if (matches.length !== 1) found.push(`${slow}, named in an override of .config/nextest.toml, is listed ${matches.length} times, not once`);
+    else if (matches[0].ignored) found.push(`${slow}, named in an override of .config/nextest.toml, is ignored`);
   }
   return found;
 }
@@ -51,7 +52,7 @@ export function main(args, read) {
   let found;
   if (command === "nextest" && listFile) {
     found = problems(JSON.parse(read(listFile)), read(".config/ignored-tests.txt"), read(".config/nextest.toml"));
-    if (found.length === 0) console.log("The ignored tests are those .config/ignored-tests.txt lists, and every test given a longer limit runs.");
+    if (found.length === 0) console.log("The ignored tests are those .config/ignored-tests.txt lists, and every test an override names runs.");
   } else if (command === "doctests" && listFile) {
     found = doctestProblems(read(listFile));
     if (found.length === 0) console.log("No library holds a doc example rustdoc would compile.");
