@@ -2085,8 +2085,16 @@ check("every measured benchmark run proves its sandbox first", () => {
 /// line break inside an expression into `\t` or `\n`, past `\b` (the review of 35bbe0f).
 const stringsOf = (v) => (typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(stringsOf) : v !== null && typeof v === "object" ? [...Object.keys(v), ...Object.values(v).flatMap(stringsOf)] : []);
 /// GitHub reads a context's name in any case: `SECRETS.X` is a secret too.
+/// It reads from a string's first `${{` to its end, not to the first `}}`, which GitHub skips
+/// inside a quoted string of the expression (the review of b2be87b: `'}}'` ended it early); the
+/// one exception is a string that is the emptiness test and nothing more.
 const holdsSecret = (value) =>
-  stringsOf(value).some((s) => [...s.matchAll(/\$\{\{([\s\S]*?)\}\}/g)].some(([, e]) => /\bsecrets\b/i.test(e) && !/^\s*secrets\.\w+\s*[!=]=\s*''\s*$/i.test(e)));
+  stringsOf(value).some((s) => {
+    const k = s.indexOf("${{");
+    if (k < 0) return false;
+    const rest = s.slice(k);
+    return /\bsecrets\b/i.test(rest) && !/^\$\{\{\s*secrets\.\w+\s*[!=]=\s*''\s*\}\}\s*$/i.test(rest);
+  });
 
 /// The loads of code a module of a secret job may make that the closure of what it runs cannot
 /// follow, each with the files it loads, which must be owned: none but the corpus checker's, which
@@ -2094,7 +2102,9 @@ const holdsSecret = (value) =>
 /// holds at the commit corpus.lock names. Every other computed `import(` or `require(`, and every
 /// `createRequire`, `new Worker`, `eval`, `new Function`, `vm` or `dlopen`, is refused (the review of
 /// 35bbe0f: check.mjs loaded an unowned reference.mjs beside the held-out set by a computed path).
-const COMPUTED_LOADS = new Map([["benchmark/check.mjs", ["benchmark/reference.mjs"]]]);
+const COMPUTED_LOADS = new Map([
+  ["benchmark/check.mjs", { line: '  const reference = (await import(pathToFileURL(path.join(dir, "reference.mjs")).href)).tasks;', loads: ["benchmark/reference.mjs"] }],
+]);
 /// The modules of a secret job that may start a process, each with its one import of
 /// child_process and how its calls read: the harness's runProcess and the preliminary run's
 /// mnSync, one call each, and the corpus checker's git. No other module of those jobs names
@@ -2108,8 +2118,14 @@ const SPAWNERS = new Map([
 /// process started outside SPAWNERS.
 export function secretModuleProblems(file, text) {
   const found = [];
-  for (const m of text.matchAll(/\b(import|require)\s*\(\s*([^)]*?)\s*\)/g)) {
-    if (!/^(['"])[^'"\\]*\1$|^`[^`$\\]*`$/.test(m[2]) && !COMPUTED_LOADS.has(file)) found.push(`${file}: ${m[1]}(${m[2]}), a load whose target the policy cannot read`);
+  // A named computed load is its one exact line, once; the rest of the module is read as any other
+  // (the review of b2be87b: the whole of check.mjs was exempt, a second load and a moved one too).
+  const named = COMPUTED_LOADS.get(file);
+  const lines = text.split("\n");
+  if (named && lines.filter((l) => l === named.line).length !== 1) found.push(`${file}: its named load is not the one line \`${named.line.trim()}\`, once`);
+  const rest = named ? lines.filter((l) => l !== named.line).join("\n") : text;
+  for (const m of rest.matchAll(/\b(import|require)\s*\(\s*([^)]*?)\s*\)/g)) {
+    if (!/^(['"])[^'"\\]*\1$|^`[^`$\\]*`$/.test(m[2])) found.push(`${file}: ${m[1]}(${m[2]}), a load whose target the policy cannot read`);
   }
   for (const m of text.matchAll(/\bcreateRequire\b|\bnew\s+Worker\b|\beval\s*\(|\bnew\s+Function\b|["'](?:node:)?vm["']|\bdlopen\b/g)) found.push(`${file}: ${m[0]}, a way to run code the policy cannot read`);
   const spawner = SPAWNERS.get(file);
@@ -2130,8 +2146,10 @@ export function secretModuleProblems(file, text) {
 /// the build in the job that later held the key). What runs beside the secret is then the harness
 /// of the ref the run is on, which the code owner has read only on main, and mn, code of that ref,
 /// which only the benchmark's own sandbox confines. The secrets are the repository's, so a
-/// dispatch on another branch runs that branch's harness with them: an environment for main alone
-/// is the follow-up.
+/// dispatch on another branch runs that branch's harness and workflow with them, and so does the
+/// run of a pull request from this repository that changes a workflow, before any review: the
+/// environment `benchmark`, for main alone, is the follow-up. The rules below are a reading aid
+/// for the code owner, whose review holds what they do not list.
 const SECRET_JOBS = new Map([
   ["benchmark.yml#bench", { builtBy: "build", agents: true }],
   ["prelim.yml#prelim", { builtBy: "build", agents: true }],
@@ -2156,7 +2174,7 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     // job's steps, and CODEOWNERS what they run (the final review of PR 137 found the toolchains'
     // installer and five modules of the process that holds the key in neither).
     const runs = [...repoPaths(scriptTexts(doc, job))];
-    const loaded = runs.flatMap((f) => COMPUTED_LOADS.get(f) ?? []);
+    const loaded = runs.flatMap((f) => COMPUTED_LOADS.get(f)?.loads ?? []);
     const unowned = [...runs, ...loaded].filter((f) => !GATE_FILES.some((p) => owns(p, f)));
     assert.deepEqual(unowned, [], `${key} holds a secret and runs files .github/CODEOWNERS does not give its owner`);
     // And each module of it loads only what that closure follows, and starts processes only in
@@ -2204,6 +2222,17 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     assert.ok(secretModuleProblems(file, text).length > 0, `the rule for a secret job's modules lets through, in ${file}: ${text}`);
   }
   assert.deepEqual(secretModuleProblems("benchmark/harness/api.ts", 'import { x } from "./x.ts";\nconst y = await import("./y.ts");'), []);
+  // The review of b2be87b: a `}}` inside a quoted string of the expression, and the named load of
+  // check.mjs moved or joined by another.
+  for (const held of ["${{ '}}' && secrets.ANTHROPIC_API_KEY }}", "${{ format('{0}}}', secrets.ANTHROPIC_API_KEY) }}", "${{ secrets.A != '' }} ${{ secrets.B }}"]) {
+    assert.ok(holdsSecret(held), `a secret read as none: ${held}`);
+  }
+  const checker = read("benchmark/check.mjs");
+  const named = COMPUTED_LOADS.get("benchmark/check.mjs").line;
+  assert.deepEqual(secretModuleProblems("benchmark/check.mjs", checker), []);
+  for (const plant of [checker.replace(named, named.replace('path.join(dir, "reference.mjs")', 'path.join(dir, "tasks", "reference.mjs")')), `${checker}\nconst extra = await import(process.env.BENCH_EXTRA ?? "node:os");\n`, `${checker}\n${named}\n`]) {
+    assert.ok(secretModuleProblems("benchmark/check.mjs", plant).length > 0, "the named load of check.mjs lets through a moved or a second load");
+  }
 });
 
 check("the Documentation job lints every workflow with actionlint and shellcheck, both pinned by checksum", () => {
