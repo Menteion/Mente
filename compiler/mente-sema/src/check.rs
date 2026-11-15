@@ -4986,6 +4986,11 @@ pub fn f(mut p: Pair) {
             // Reported once, at the innermost operation, through a branch too.
             "pub fn f(a: u128, c: i8, q: bool) -> i128 = a + ~(if q { 1 << 2 } else { 3 }) + c",
             "pub fn f(a: u128, c: i8, k: usize[0..2]) -> i128 = a + ~[1 << 2, 3][k] + c",
+            // An operation that would trap in a type is `E0212` alone there, not `E0234` too:
+            // it has no type to trap in.
+            "pub fn f(a: u128, c: i8) -> bool = a + c == 1 << 100",
+            "pub fn f(a: u128, c: i8) -> i128 = a + (1 << 63) + c",
+            "pub fn f(a: u128, c: i8) -> bool = a + c == ~(1 << 70)",
         ] {
             assert_eq!(codes(f), ["E0212"], "{}", f);
         }
