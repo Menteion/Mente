@@ -1118,7 +1118,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
   [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "fcca482ee8596f453b9500d7b68193efc1508fc555dd0d38687fd658ef600955"],
+  [".github/scripts/lib/mutants-floor.mjs", "cd5af1e87bbdea90edc2a882088625d93f1418f92cfa08f9aa419fcc80d61a99"],
   [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
   [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -1138,8 +1138,8 @@ const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 const PINNED_JOBS = new Map([
   ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
-  ["mutants.yml#in-diff", "eac5aa8c9df5c5cbe2d8b6a286ebc0790435e0f9f09851c40b8a9f663a88f7ba"],
-  ["mutants-full.yml#full", "6d6ddb4109fd94e5b7811abc6635d9d40b29575fa75054fbab47fc7a9fd1df5d"],
+  ["mutants.yml#in-diff", "6b54eaf7d853b04bf84a06306bee5d6d0195bf17477bd7e2c6be4ceeaf9526ad"],
+  ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "728d28193b3dc09676ca7a597df6d2316b575ac7cfeae6023d14d9985d3f75ea"],
@@ -1406,6 +1406,10 @@ export function boundPlacementProblems(key, jobSteps) {
 /// limits.sh, for the baseline and every mutant alike, and a second cap would change the flags of
 /// every mutant's build from the baseline's, which would then rebuild everything.
 const MUTANTS_CAP = /\s--cap-lints\b/;
+/// The argument, on each line that runs mutants, by which cargo-mutants has nextest forward cargo's
+/// JSON messages, rustc's diagnostics among them, into each mutant's build log, where the floor reads
+/// them (the review of 75e5eeb: rustc's rendering for people placed an error where it was not).
+const MUTANTS_JSON = " --cargo-arg=--cargo-message-format=json ";
 /// Whether a line of a step runs code of the change: tests through nextest or cargo, under
 /// `timeout` or not, nextest's list, which runs every test executable, a binary through
 /// `cargo run`, mutants, and the proof of the overflow checks, which runs a test of every crate. A
@@ -1478,7 +1482,12 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       if (mutants) {
         assert.ok(lines.includes(". .github/scripts/limits.sh"), `${step} runs mutants without sourcing limits.sh, which caps the lints`);
         assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs mutants outside the mutation runs' profile, under which limits.sh caps the lints`);
-        for (const l of lines.filter((x) => /^cargo mutants (?!.*--list)/.test(x))) assert.doesNotMatch(l, MUTANTS_CAP, `${step} gives cargo-mutants a cap of the lints of its own, beside limits.sh's: ${l}`);
+        for (const l of lines.filter((x) => /^cargo mutants (?!.*--list)/.test(x))) {
+          assert.doesNotMatch(l, MUTANTS_CAP, `${step} gives cargo-mutants a cap of the lints of its own, beside limits.sh's: ${l}`);
+          // The floor's evidence reads rustc's JSON diagnostics in each mutant's build log, which
+          // nextest forwards only when told to (.github/scripts/lib/mutants-floor.mjs).
+          assert.equal(l.split(MUTANTS_JSON).length, 2, `${step} runs mutants without forwarding rustc's JSON diagnostics to their logs, once: ${l}`);
+        }
       }
       const ran = lines.flatMap((l, at) => (l === RAN || l.startsWith(`${RAN} `) ? [at] : []));
       assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${step} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
@@ -2721,11 +2730,17 @@ export function readSecretModule(file, text) {
   const spawner = SPAWNERS.get(file);
   // No module but SPAWNERS names child_process at all, in any form the reading does not take for
   // an import of it.
-  if (!spawner && text.includes("child_process")) problems.push(`${file}: names child_process, which only the modules of SPAWNERS may`);
+  // Read as the rest is read, decoded: the text, and every literal's value, an escape in it spelled
+  // out (the review of 75e5eeb: a second import of `"node:child_process"` counted as none in
+  // the text).
+  const naming = toks.filter((x) => (x.t === "str" || x.t === "tpl") && x.v.includes("child_process"));
+  if (!spawner && (text.includes("child_process") || naming.length > 0)) problems.push(`${file}: names child_process, which only the modules of SPAWNERS may`);
   if (spawner) {
     const lineNo = (line) => lines.flatMap((l, k) => (l === line ? [k + 1] : []));
     const importAt = lineNo(spawner.line);
-    if (importAt.length !== 1 || (text.match(/child_process/g) ?? []).length !== 1) problems.push(`${file}: its import of child_process is not \`${spawner.line}\` alone`);
+    const imported = read.specifiers.filter((s) => s.v === "node:child_process");
+    const alone = importAt.length === 1 && imported.length === 1 && imported[0].line === importAt[0] && naming.length === 1 && (text.match(/child_process/g) ?? []).length === 1;
+    if (!alone) problems.push(`${file}: its import of child_process is not \`${spawner.line}\` alone, once, decoded`);
     // Every use of a name is the import (or the function's definition), and each call where it is
     // named or as many as counted, each a call.
     const uses = (word, definedAt, calls) => {
@@ -2928,9 +2943,15 @@ export function secretPlaceProblems(key, doc, job) {
     if (typeof v === "string") {
       const k = v.indexOf("${{");
       if (k < 0) return;
-      for (const m of v.slice(k).matchAll(/(?<![.\w])env\b\s*(?:\.\s*([A-Za-z_][\w-]*)|\[\s*['"]([^'"]*)['"]\s*\]|(?![\w.[]))/gi)) {
-        const name = m[1] ?? m[2];
-        if (name === undefined || SECRET_NAME.test(name)) fromEnv.push(`${key}: ${where} reads ${name === undefined ? "the whole environment" : `${name}`} out of the environment in an expression`);
+      // Allowed, not refused: every `env` of an expression must be `env.<name>` or `env['<name>']`
+      // with a name that is no secret's; anything else, `env.*`, `env[<expression>]` or `env`
+      // alone, counts as reading the whole environment (the review of 75e5eeb: `join(env.*, '-')`
+      // and `env[format(...)]` matched none of the forms refused before).
+      const text = v.slice(k);
+      for (const m of text.matchAll(/(?<![.\w])env\b/gi)) {
+        const after = text.slice(m.index + m[0].length);
+        const named = /^\s*\.\s*([A-Za-z_][\w-]*)(?![\w-]*\s*[([*])/.exec(after) ?? /^\s*\[\s*'([A-Za-z_][\w-]*)'\s*\]/.exec(after);
+        if (!named || SECRET_NAME.test(named[1])) fromEnv.push(`${key}: ${where} reads ${named ? named[1] : "the whole environment"} out of the environment in an expression`);
       }
     } else if (Array.isArray(v)) v.forEach((x, i) => read(x, `${where}[${i}]`));
     else if (v !== null && typeof v === "object") for (const [k, x] of Object.entries(v)) read(x, `${where}.${k}`);
@@ -2976,6 +2997,11 @@ check("every secret is the value of an environment variable or an action input w
     [{}, { steps: [{ uses: "actions/cache@0", with: { key: "${{ env.ANTHROPIC_API_KEY }}" } }] }],
     [{}, { steps: [{ uses: "actions/upload-artifact@0", with: { name: "x-${{ env['MENTE_BENCH_HELDOUT_TOKEN'] }}" } }] }],
     [{}, { steps: [{ run: "echo ${{ toJSON(env) }} >> $GITHUB_OUTPUT" }] }],
+    // The review of 75e5eeb: the whole environment by a filter or a computed name.
+    [{}, { steps: [{ uses: "actions/cache@0", with: { key: "${{ join(env.*, '-') }}" } }] }],
+    [{}, { steps: [{ uses: "actions/cache@0", with: { key: "${{ toJSON(env.*) }}" } }] }],
+    [{}, { steps: [{ uses: "actions/cache@0", with: { key: "${{ env[format('{0}_API_KEY', 'ANTHROPIC')] }}" } }] }],
+    [{}, { steps: [{ uses: "actions/cache@0", with: { key: "${{ env[matrix.k] }}" } }] }],
   ]) {
     assert.ok(secretPlaceProblems("x.yml#y", doc, job).length > 0, `a secret in the wrong place let through: ${JSON.stringify({ doc, job })}`);
   }
@@ -3112,6 +3138,9 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     ["benchmark/harness/api.ts", "const [, r] = arguments;"],
     ["benchmark/harness/api.ts", "module.require(name);"],
     ["benchmark/harness/api.ts", "exports.x = 1;"],
+    // The review of 75e5eeb: a second import of child_process with an escape in its path.
+    ["benchmark/harness/build.ts", `${read("benchmark/harness/build.ts")}\nimport { execSync } from "node:child\\u005fprocess";\nexport const sh = (c) => execSync(c);\n`],
+    ["benchmark/harness/api.ts", 'const m = "node:child\\u005fprocess";'],
     // The final pass of ad38011: a name written as a string in an export's list.
     ["benchmark/harness/api.ts", 'export { default as z, "q" as w } from "node:child_process";'],
     ["benchmark/harness/api.ts", 'export { "x" as y } from "../../docs/leak.mjs";'],
@@ -4303,14 +4332,16 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   // caught mutant's tests ended as nextest ends a failed run, a test failing in its log; an
   // unviable one's build failed with an error of the compiler. A stub that exits at once shows
   // neither.
-  const outcome = (name, summary, phases, log, diff = "") => ({ scenario: { Mutant: { name, file: "compiler/x/src/lib.rs" } }, summary, log_path: `log/${name}.log`, diff_path: `diff/${name}.diff`, phase_results: phases, log, diff });
+  const outcome = (name, summary, phases, log, diff = "", file = "compiler/x/src/lib.rs") => ({ scenario: { Mutant: { name, file } }, summary, log_path: `log/${name}.log`, diff_path: `diff/${name}.diff`, phase_results: phases, log, diff });
   // A mutant's diff as cargo-mutants writes it: line 12 of lib.rs, `0` replaced by
   // `Default::default()`, columns 9 to 26 of the new line.
   const DIFF = "--- compiler/x/src/lib.rs\n+++ replace f -> Foo with Default::default()\n@@ -11,3 +11,3 @@\n fn f() -> Foo {\n-        0\n+        Default::default()\n }\n";
-  // Two lines of lib.rs merged into one, at line 5 of the new file: the replacement at columns 17 to
-  // 69, then the change's `} const _: () = assert!(marker());`, its `assert!` at column 87.
-  const MERGED = "--- compiler/x/src/lib.rs\n+++ replace f -> Foo with Default::default()\n@@ -5,2 +5,1 @@\n-fn f() -> Foo { foo()\n-} const _: () = assert!(marker());\n+fn f() -> Foo { Default::default() /* ~ changed by cargo-mutants ~ */ } const _: () = assert!(marker());\n";
-  const located = (line, column, file = "compiler/x/src/lib.rs") => `\x1b[0m\x1b[1m\x1b[38;5;9merror[E0277]\x1b[0m: the trait bound \`Foo: Default\` is not satisfied\n\x1b[0m   \x1b[0m\x1b[38;5;12m--> \x1b[0m${file}:${line}:${column}\n`;
+  // An error as cargo forwards rustc's JSON diagnostic into a mutant's build log: its primary span
+  // (line, first column, last column exclusive), and the spans of its children, as rustc
+  // structures them; a span may come from a macro, whose call site is its expansion.
+  const span = (line, from, to, file = "compiler/x/src/lib.rs", expansion = undefined) => ({ file_name: file, line_start: line, column_start: from, line_end: line, column_end: to, is_primary: true, ...(expansion ? { expansion: { span: expansion, macro_decl_name: "assert!" } } : {}) });
+  const diagnostic = (code, spans, children = [], level = "error") => `${JSON.stringify({ reason: "compiler-message", message: { message: `a diagnostic ${code}`, code: code ? { code } : null, level, spans, children: children.map((s) => ({ message: "note", level: "note", spans: [s], children: [] })) } })}\n`;
+  const aborting = `${JSON.stringify({ reason: "compiler-message", message: { message: "aborting due to 1 previous error", code: null, level: "error", spans: [], children: [] } })}\n`;
   const build = (status) => ({ phase: "Build", duration: 2.8, process_status: status });
   const test = (status) => ({ phase: "Test", duration: 0.15, process_status: status });
   const FAILED = "\x1b[1;31m        FAIL\x1b[0m [   0.004s] mente-syntax tests::x\n";
@@ -4320,8 +4351,10 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const real = [
     outcome("caught", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${SANDBOXED}${FAILED}*** result: Failure(100)\n`),
     outcome("timeout", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}        TIMEOUT [  40.104s] mente-cli::bin/mn x\n`),
-    outcome("unviable", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}error: could not compile \`x\` (lib) due to 1 previous error\n`, DIFF),
-    outcome("unviable, inside a line it rewrote whole", "Unviable", [build({ Failure: 101 })], located(13, 3), "@@ -12,2 +12,3 @@\n-    a\n-    b\n+    c\n+    d\n+    e\n"),
+    outcome("unviable", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0277", [span(12, 9, 27)])}${aborting}`, DIFF),
+    outcome("unviable, inside lines it rewrote whole", "Unviable", [build({ Failure: 101 })], diagnostic("E0308", [span(13, 3, 9)]), "@@ -12,2 +12,3 @@\n-    a\n-    b\n+    c\n+    d\n+    e\n"),
+    outcome("unviable, from a macro called in the change", "Unviable", [build({ Failure: 101 })], diagnostic("E0277", [span(62, 9, 73, "/rustc/x/library/core/src/panic.rs", span(12, 9, 27))]), DIFF),
+    outcome("unviable, a constant's error with its own note in the change", "Unviable", [build({ Failure: 101 })], diagnostic("E0080", [span(40, 15, 18)], [span(12, 9, 27)]), DIFF),
     outcome("missed", "MissedMutant", [build("Success"), test("Success")], ""),
     { scenario: "Baseline", summary: "Success", phase_results: [], log_path: "log/baseline.log", log: "" },
   ];
@@ -4335,42 +4368,36 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     outcome("caught, by tests another runner took", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`env\` defined by \`--config\`\n${FAILED}`),
     outcome("caught, the runner's line printed by a test", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `    Starting 3 tests across 1 binary\n${SANDBOXED}${FAILED}`),
     outcome("caught, the runner's line after the failure", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${FAILED}${SANDBOXED}`),
-    outcome("unviable, built", "Unviable", [build("Success")], "error[E0277]: x\n"),
-    outcome("unviable, no error", "Unviable", [build({ Failure: 101 })], "*** result: Failure(101)\n"),
-    // The review of 41a54b6: an error of the change's own, a const assert over the mutated file's
-    // text, fails every mutant of it; and errors beside the change, on its line or in another file.
-    outcome("unviable, by a const assert elsewhere", "Unviable", [build({ Failure: 101 })], located(40, 15).replace("E0277", "E0080"), DIFF),
-    outcome("unviable, beside the change on its line", "Unviable", [build({ Failure: 101 })], located(12, 30), DIFF),
-    outcome("unviable, in another file", "Unviable", [build({ Failure: 101 })], located(12, 9, "compiler/x/src/other.rs"), DIFF),
-    outcome("unviable, one error inside and one outside", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}${located(40, 15)}`, DIFF),
-    outcome("unviable, an error with no location", "Unviable", [build({ Failure: 101 })], `${located(12, 9)}error: linking with \`cc\` failed\n`, DIFF),
-    outcome("unviable, no diff", "Unviable", [build({ Failure: 101 })], located(12, 9)),
-    // The re-check of da58409: two lines the mutant merged into one, the second ending in the
-    // change's own constant assertion, whose error lies on the merged line past the replacement.
-    outcome("unviable, by an assertion merged onto the changed line", "Unviable", [build({ Failure: 101 })], located(5, 87).replace("E0277", "E0080"), MERGED),
+    outcome("unviable, built", "Unviable", [build("Success")], diagnostic("E0277", [span(12, 9, 27)]), DIFF),
+    outcome("unviable, no error", "Unviable", [build({ Failure: 101 })], "*** result: Failure(101)\n", DIFF),
+    // An error only as rendered for people, with no JSON diagnostic: the runs pass the flag that
+    // forwards them, and a log without one shows no error the reading can place.
+    outcome("unviable, only a rendering", "Unviable", [build({ Failure: 101 })], "error[E0277]: the trait bound `Foo: Default` is not satisfied\n  --> compiler/x/src/lib.rs:12:9\n", DIFF),
+    // The reviews of 41a54b6 and da58409: an error of the change's own, a constant assertion over the
+    // mutated file's text, fails every mutant of it; and errors beside the change, on its line, in
+    // another file, after one inside, with no location, or with no diff to place it.
+    outcome("unviable, by a const assert elsewhere", "Unviable", [build({ Failure: 101 })], diagnostic("E0080", [span(62, 9, 73, "/rustc/x/library/core/src/panic.rs", span(40, 15, 22))]), DIFF),
+    outcome("unviable, beside the change on its line", "Unviable", [build({ Failure: 101 })], diagnostic("E0277", [span(12, 30, 34)]), DIFF),
+    outcome("unviable, in another file", "Unviable", [build({ Failure: 101 })], diagnostic("E0277", [span(12, 9, 27, "compiler/x/src/other.rs")]), DIFF),
+    outcome("unviable, one error inside and one outside", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0277", [span(12, 9, 27)])}${diagnostic("E0080", [span(40, 15, 22)])}`, DIFF),
+    outcome("unviable, an error with no location", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0277", [span(12, 9, 27)])}${diagnostic(null, [])}`, DIFF),
+    outcome("unviable, an error the reading cannot parse", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0277", [span(12, 9, 27)])}{"reason":"compiler-message","message":{\n`, DIFF),
+    outcome("unviable, no diff", "Unviable", [build({ Failure: 101 })], diagnostic("E0277", [span(12, 9, 27)])),
+    outcome("unviable, a note outside the change", "Unviable", [build({ Failure: 101 })], diagnostic("E0080", [span(40, 15, 18)], [span(30, 9, 27)]), DIFF),
+    // A note of its own, not the error's, in the change: the review of 75e5eeb.
+    outcome("unviable, a separate note in the change", "Unviable", [build({ Failure: 101 })], `${diagnostic("E0080", [span(3, 64, 70)])}${diagnostic(null, [span(12, 9, 27)], [], "note")}`, DIFF),
   ];
-  // On that merged line, an error inside the replacement is the mutant's own. And the final pass of
-  // ad38011: rustc 1.97.1 puts E0368 (`x -= y`) at the expression's start, before the operator the
-  // mutant changed, its `^` label covering the operator; and a constant's E0080 at the constant
-  // that calls the function, with a note inside the function the mutant changed. Both are the
-  // mutant's own.
-  const OPERATOR = "@@ -12,1 +12,1 @@\n-        x += y;\n+        x -= y;\n";
-  const ASSIGN = "error[E0368]: binary assignment operation `-=` cannot be applied to type `Foo`\n  --> compiler/x/src/lib.rs:12:9\n   |\n12 |         x -= y;\n   |         -^^^^^\n   |         |\n   |         cannot use `-=` on type `Foo`\n";
-  const CONSTANT = "error[E0080]: evaluation of constant value failed\n  --> compiler/x/src/lib.rs:40:15\n   |\n40 | const X: Foo = f();\n   |                ^^^ evaluation of `X` failed inside this call\n   |\nnote: inside `f`\n  --> compiler/x/src/lib.rs:12:9\n   |\n12 |         Default::default()\n   |         ^^^^^^^^^^^^^^^^^^ the failure occurred here\n";
-  const own = [
-    outcome("unviable, inside the merged replacement", "Unviable", [build({ Failure: 101 })], located(5, 17), MERGED),
-    outcome("unviable, E0368 from the expression's start", "Unviable", [build({ Failure: 101 })], ASSIGN, OPERATOR),
-    outcome("unviable, E0080 at the calling constant", "Unviable", [build({ Failure: 101 })], CONSTANT, DIFF),
-  ];
-  assert.deepEqual(evidence({ outcomes: own }, logs(own)), []);
-  // But a note outside the change, an error with no location before one inside it, and an
-  // operator's error whose label misses the change, stay the change's.
-  const notOwn = [
-    outcome("unviable, a note outside the change", "Unviable", [build({ Failure: 101 })], CONSTANT.replace("lib.rs:12:9", "lib.rs:30:9"), DIFF),
-    outcome("unviable, an error with no location before one inside", "Unviable", [build({ Failure: 101 })], `error: something else\n${located(12, 9)}`, DIFF),
-    outcome("unviable, an operator's label beside the change", "Unviable", [build({ Failure: 101 })], ASSIGN, "@@ -12,1 +12,1 @@\n-        x += y; z += 1;\n+        x += y; z -= 1;\n"),
-  ];
-  assert.deepEqual(evidence({ outcomes: notOwn }, logs(notOwn)).map((p) => p.split(":")[0]), notOwn.map((o) => o.scenario.Mutant.name));
+  assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
+  // And the review of 75e5eeb's reproductions, from rustc 1.97.1's own diagnostics over the mutated
+  // files (.github/scripts/fixtures/): a long merged line whose assertion is the change's, refused;
+  // `x -= y` indented 32 spaces, the mutant's own, accepted; and a constant that fails once the
+  // mutant's marker is in the file, whose separate note lies at the mutant's line, refused.
+  const fixtures = JSON.parse(read(".github/scripts/fixtures/unviable-rustc-1.97.1.json"));
+  assert.deepEqual(Object.keys(fixtures.cases), ["merged-assertion", "operator-indented", "erroneous-constant"]);
+  for (const [id, c] of Object.entries(fixtures.cases)) {
+    const one = [outcome(id, "Unviable", [build({ Failure: 101 })], `*** cargo nextest run --no-run\n${c.log}*** result: Failure(101)\n`, c.diff, c.file)];
+    assert.equal(evidence({ outcomes: one }, logs(one)).length, c.expect === "refused" ? 1 : 0, `${id}, from real rustc output, is not ${c.expect}: ${c.why}`);
+  }
   assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
 });
 

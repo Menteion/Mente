@@ -27,8 +27,9 @@
 //
 // `evidence` prints each mutant whose outcome its log does not show: caught without nextest's exit
 // for a failed run, a failed test and nextest's own line, before the tests start, that it hands
-// them to the sandbox; unviable without a failed build whose compiler errors each lie inside the
-// mutant's own change, the lines and columns its diff changed. What it stops, and
+// them to the sandbox; unviable without a failed build whose every error, read from rustc's JSON
+// diagnostics in the log, has a span inside the mutant's own change, the lines and columns its
+// diff changed. What it stops, and
 // what it does not: it catches a test tool that is missing or broken, and a stub
 // left in its place that exits at once. It does not stop code of the change that sets out to
 // defeat it, which runs with the job's rights: a stub that prints a failing test and exits as
@@ -211,50 +212,52 @@ const SANDBOX_RUNNER = /^\s*info: (?:for the \w+ platform, )?using target runner
 /// nextest's line that starts the tests, after which a test's output may appear.
 const TESTS_START = /^\s*Starting \d+ tests? across /m;
 
-/// Each error the compiler printed in a log: its primary location (`-->`) when it gave one, the
-/// columns its primary label (`^`) underlines on that line, and the locations of the notes that
-/// follow it (`note: inside \`f\`` for a constant's evaluation). Each is read within the error's own
-/// block, up to the next line that starts another error or a warning, so that an error with no
-/// location takes none of the next one's (the final pass of ad38011). The summaries cargo and rustc
-/// print after the errors are none. The log's colours are gone.
+/// Each error rustc reported in a log, from the JSON diagnostics cargo forwards there (each run of
+/// mutants passes `--cargo-arg=--cargo-message-format=json`, which the policy requires): one
+/// `compiler-message` line each, as rustc structures it, never its rendering for people. Each error
+/// keeps its primary spans and the spans of its own children, the notes and helps rustc attaches to
+/// it; a separate note, such as "erroneous constant encountered", is a message of its own, no
+/// error's (the review of 75e5eeb: a rendering cut at the left, shifted by a label, or read across a
+/// blank line, put an error where it was not). rustc's summary, "aborting due to ...", is none. A
+/// line the reading cannot parse counts as an error no change can claim.
 export function compilerErrors(log) {
-  const lines = String(log).split("\n");
   const out = [];
-  const starts = (l) => /^(error|warning)(\[[A-Z]\d{4}\])?: /.test(l);
-  const where = (l) => /^\s*--> (.+):(\d+):(\d+)$/.exec(l);
-  lines.forEach((l, i) => {
-    if (!/^error(\[E\d{4}\])?: /.test(l) || /^error: (could not compile|aborting due to)/.test(l)) return;
-    let end = i + 1;
-    while (end < lines.length && !starts(lines[end])) end++;
-    const block = lines.slice(i + 1, end);
-    const first = block.findIndex((x, k) => k < 3 && where(x));
-    if (first < 0) {
-      out.push({ text: l, file: null, line: 0, column: 0, end: 0, notes: [] });
-      return;
+  for (const line of String(log).split("\n")) {
+    if (!line.startsWith('{"reason":"compiler-message"')) continue;
+    let m;
+    try {
+      m = JSON.parse(line).message;
+    } catch {
+      out.push({ text: "a compiler message the reading cannot parse", primary: [], children: [] });
+      continue;
     }
-    const at = where(block[first]);
-    const e = { text: l, file: at[1], line: Number(at[2]), column: Number(at[3]), end: Number(at[3]), notes: [] };
-    // The source line rustc quotes, `<line> | <text>`, and under it the labels: the primary's `^`
-    // columns, counted from the text's first column.
-    for (let k = first + 1; k + 1 < block.length && k <= first + 3; k++) {
-      const quoted = new RegExp(`^\\s*${e.line} \\| `).exec(block[k]);
-      const under = /^\s*\| (.*)$/.exec(block[k + 1]);
-      if (!quoted || !under) continue;
-      const carets = [...under[1]].flatMap((c, n) => (c === "^" ? [n + 1] : []));
-      if (carets.length > 0) {
-        e.column = Math.min(e.column, carets[0]);
-        e.end = Math.max(e.end, carets[carets.length - 1]);
-      }
-      break;
-    }
-    block.forEach((x, k) => {
-      if (!/^\s*(= )?note: /.test(x)) return;
-      const n = block.slice(k + 1, k + 4).map(where).find(Boolean);
-      if (n) e.notes.push({ file: n[1], line: Number(n[2]), column: Number(n[3]) });
+    if (m?.level !== "error") continue;
+    const spans = Array.isArray(m.spans) ? m.spans : [];
+    if (spans.length === 0 && /^aborting due to/.test(String(m.message))) continue;
+    out.push({
+      text: `error${m.code?.code ? `[${m.code.code}]` : ""}: ${m.message}`,
+      primary: spans.filter((s) => s?.is_primary),
+      children: (Array.isArray(m.children) ? m.children : []).flatMap((c) => (Array.isArray(c?.spans) ? c.spans : [])),
     });
-    out.push(e);
-  });
+  }
   return out;
+}
+
+/// The places a span stands for in the source: the span, and the call site of each macro it was
+/// expanded from, outward, so that an error inside `assert!` is read where `assert!` is called.
+export function spanSites(span) {
+  const out = [];
+  for (let s = span, k = 0; s && k < 64; s = s.expansion?.span, k++) out.push(s);
+  return out;
+}
+
+/// Whether a span of rustc's, its columns 1-based and its end exclusive, meets a region of
+/// changedRegions, its ends included.
+export function spanMeets(span, region) {
+  const from = [span.line_start, span.column_start];
+  const to = [span.line_end, Math.max(span.column_end - 1, span.column_start)];
+  const before = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
+  return before(from, [region.to.line, region.to.column]) && before([region.from.line, region.from.column], to);
 }
 
 /// What a mutant's own diff changed in the mutated file, one region a hunk's run of changed
@@ -309,10 +312,6 @@ export function changedRegions(diff) {
   return out;
 }
 
-/// Whether a place, `{ line, column }`, lies in a region, ends included.
-export const inRegion = (at, r) =>
-  (at.line > r.from.line || (at.line === r.from.line && at.column >= r.from.column)) && (at.line < r.to.line || (at.line === r.to.line && at.column <= r.to.column));
-
 /// Why a run's outcomes do not show the work they claim, one message a mutant: a mutant counts as
 /// caught only when its tests ran in the sandbox and one failed, nextest exiting 100 with a failing
 /// test in the log after its line that names the sandbox as its runner, and as unviable only when
@@ -346,20 +345,17 @@ export function evidence(outcomes, readLog) {
       const errors = compilerErrors(log);
       const file = o.scenario.Mutant.file;
       const regions = changedRegions(o.diff_path ? strip(readLog(o.diff_path)) : "");
-      // An error is the mutant's when the columns its primary label covers meet the mutant's
-      // change, as `x -= y`'s E0368 does from the expression's start, or when one of its notes lies
-      // in it, as a constant's E0080 does when it names the function the mutant changed.
-      const meets = (e, r) => {
-        if (e.line < r.from.line || e.line > r.to.line) return false;
-        const from = e.line === r.from.line ? r.from.column : 1;
-        const to = e.line === r.to.line ? r.to.column : Infinity;
-        return e.column <= to && e.end >= from;
-      };
-      const inside = (e) => (e.file === file && regions.some((r) => meets(e, r))) || e.notes.some((n) => n.file === file && regions.some((r) => inRegion(n, r)));
+      // An error is the mutant's when one of its primary spans, or a span of one of its own
+      // children, meets the mutant's change, at the span or at a call site of a macro it came from.
+      const meets = (s) => spanSites(s).some((x) => String(x.file_name).replace(/\\/g, "/") === file && regions.some((r) => spanMeets(x, r)));
+      const inside = (e) => e.primary.some(meets) || e.children.some(meets);
       const outside = errors.find((e) => !inside(e));
       if (!build || build.process_status === "Success" || phase("Test")) found.push(`${name}: unviable, but its build did not fail`);
-      else if (errors.length === 0) found.push(`${name}: unviable, but no error of the compiler is in its log`);
-      else if (outside) found.push(`${name}: unviable, but an error of the compiler lies outside the mutant's own change: ${outside.text}${outside.file ? ` at ${outside.file}:${outside.line}:${outside.column}` : ", with no location"}`);
+      else if (errors.length === 0) found.push(`${name}: unviable, but no error of the compiler is in its log, as JSON diagnostics`);
+      else if (outside) {
+        const at = outside.primary[0] ? spanSites(outside.primary[0]).map((s) => `${s.file_name}:${s.line_start}:${s.column_start}`).join(" <= ") : "no location";
+        found.push(`${name}: unviable, but an error of the compiler lies outside the mutant's own change: ${outside.text} at ${at}`);
+      }
     }
   }
   return found;

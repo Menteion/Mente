@@ -64,7 +64,7 @@ mutants.yml#in-diff: git -c core.quotePath=false diff --text --no-ext-diff --no-
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
 mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh bound
-mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --timeout 600 --output "$RUNNER_TEMP/mutants"
+mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants"
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs evidence "$out" "$deleted_out" > evidence.txt
 mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
 
