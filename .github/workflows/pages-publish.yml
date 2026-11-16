@@ -1,21 +1,26 @@
-# The documentation site's publication (docs/design-review.md, `docs-site`): a milestone tag (`m*`)
-# builds the site as pages.yml does, as the edition the tag names, and publishes it to GitHub Pages,
-# marked pre-release and unstable. A run by hand builds the site of the branch it is started on and
-# publishes it only when started on a milestone tag. It holds no required job: pages.yml's "Build the
-# site" is the check of every pull request, and this workflow runs on events a required job may not.
-# Every action is pinned to a full commit SHA, as in ci.yml.
+# The documentation site's publication (docs/design-review.md, `docs-site`): a milestone's edition,
+# built from its tag and published to GitHub Pages, marked pre-release and unstable. It runs only by
+# hand, from main, with the tag as its input (Norman, 2026-11-17): a tag push would run the workflow
+# as the tagged commit holds it, which could drop any check, so the definition always comes from
+# main. The build checks out the tag only once .github/scripts/publish-tag.sh has proven its commit
+# in main's history, and the github-pages environment admits main alone. It holds no required job:
+# pages.yml's "Build the site" is the check of every pull request. Every action is pinned to a full
+# commit SHA, as in ci.yml.
 name: Publish the site
 
 on:
-  push:
-    tags: ["m*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "The milestone tag to publish, such as m1"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: pages-publish-${{ github.ref }}
+  group: pages-publish
   cancel-in-progress: false
 
 env:
@@ -24,12 +29,18 @@ env:
 jobs:
   build:
     name: Build the site to publish
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: The tag, once its commit is proven in main's history
+        env:
+          TAG: ${{ inputs.tag }}
+        run: bash .github/scripts/publish-tag.sh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.22.1
@@ -47,29 +58,23 @@ jobs:
         run: cargo build --locked --bin mn
       - name: Build the site and check every link
         env:
-          # A milestone tag names the edition; anything else is an unreleased build of its commit.
-          SITE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          SITE_REF: ${{ github.sha }}
+          # The milestone tag names the edition.
+          SITE_TAG: ${{ inputs.tag }}
         run: node site/build.mjs --mn target/debug/mn --mdbook "$HOME/.local/mdbook/mdbook"
       - name: Upload the site for GitHub Pages
-        if: github.ref_type == 'tag'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: target/site/book
 
   deploy:
-    # Only a milestone tag publishes, and only one on a commit of main: anyone who can push could
-    # tag a pull request's head, which main never took (the review of 7ba7a5c). The github-pages
-    # environment must allow the tag (a deployment tag rule `m*`), since by default it admits only
-    # the default branch. The only job of any workflow whose token may write Pages or an OIDC token
-    # (.github/scripts/policy.test.mjs).
+    # The github-pages environment admits main alone, as this job's own condition does. The only job
+    # of any workflow whose token may write Pages or an OIDC token (.github/scripts/policy.test.mjs).
     name: Publish to GitHub Pages
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'm')
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: read
       pages: write
       id-token: write
     concurrency:
@@ -79,11 +84,5 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: The tagged commit is in main's history
-        run: bash .github/scripts/commit-on-main.sh "$GITHUB_SHA"
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

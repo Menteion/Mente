@@ -730,10 +730,12 @@ check("the collector reads the repository it is in, and runs no program git's co
   }
 });
 
-check("the Pages deployment publishes only a tag on a commit of main", () => {
-  // .github/scripts/commit-on-main.sh, which the deployment runs before it publishes (the review
-  // of 7ba7a5c): a milestone tag on a pull request's head, which main never took, is refused; a tag
-  // on main's head or on an older commit of main, lightweight or annotated, passes.
+check("the site is published only from a milestone tag on a commit of main", () => {
+  // .github/scripts/commit-on-main.sh (the review of 7ba7a5c): a milestone tag on a pull request's
+  // head, which main never took, is refused; a tag on main's head or on an older commit of main,
+  // lightweight or annotated, passes. And .github/scripts/publish-tag.sh, which pages-publish.yml
+  // runs before anything of the tag (Norman, 2026-11-17): it checks out a tag on main, and refuses a
+  // tag outside main, a name of another shape and none, leaving the checkout where it was.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-on-main-"));
   try {
     const sh = testGit(dir);
@@ -772,6 +774,41 @@ check("the Pages deployment publishes only a tag on a commit of main", () => {
     assert.equal(run("m404").status, 1);
     assert.equal(run().status, 2);
     assert.equal(run("").status, 2);
+    // publish-tag.sh, run as the workflow runs it: from the repository's root, with the scripts at
+    // their paths there, and the tag in TAG alone.
+    fs.mkdirSync(path.join(dir, ".github", "scripts"), { recursive: true });
+    for (const s of ["commit-on-main.sh", "publish-tag.sh"]) fs.copyFileSync(path.join(HERE, s), path.join(dir, ".github", "scripts", s));
+    const publish = (tag) => {
+      const env = { ...GIT_TEST_ENV };
+      if (tag !== undefined) env.TAG = tag;
+      return spawnSync(bashPath(), [".github/scripts/publish-tag.sh"], { cwd: dir, encoding: "utf8", env, timeout: 30000 });
+    };
+    for (const [tag, at] of [
+      ["m1", head],
+      ["m0", older],
+    ]) {
+      const r = publish(tag);
+      assert.equal(r.status, 0, `${tag}: ${r.stdout}${r.stderr}`);
+      assert.equal(sh("rev-parse", "HEAD"), at, `${tag} is not what is checked out`);
+    }
+    const before = sh("rev-parse", "HEAD");
+    for (const [tag, refusal] of [
+      ["m9", /is not in main's history/],
+      ["m404", /names no commit/],
+      ["m1; touch pwned", /no milestone's name/],
+      ["$(touch pwned)", /no milestone's name/],
+      ["main", /no milestone's name/],
+      ["refs/tags/m1", /no milestone's name/],
+      ["m1\n", /no milestone's name/],
+      ["", /no milestone's name/],
+      [undefined, /no milestone's name/],
+    ]) {
+      const r = publish(tag);
+      assert.equal(r.status, 1, `${JSON.stringify(tag)}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, refusal, JSON.stringify(tag));
+      assert.equal(sh("rev-parse", "HEAD"), before, `${JSON.stringify(tag)} moved the checkout`);
+    }
+    assert.ok(!fs.existsSync(path.join(dir, "pwned")), "a tag's name ran as a command");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

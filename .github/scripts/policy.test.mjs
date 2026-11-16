@@ -44,7 +44,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 67;
+const FLOOR = 68;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1275,6 +1275,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
+  [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "3d07a1f8e70f54dc72e3b5adb67386ed08b194bdd3d856773c0a7605e01f025a"],
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
@@ -1286,7 +1287,7 @@ const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "16ebaf3b6414af2b1f0e08a002f90217a3a178015b78760b7a5e75a728b4f64f"],
+  [".github/scripts/policy-run.test.mjs", "b815a61ffc6348449e6cf9b6d2cd4ab15a3adaf95bc7fd0eceeffdfb9065e4a7"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -1353,8 +1354,8 @@ const PINNED_JOBS = new Map([
   ["probe.yml#write", "0830c255940ceb132a7f00e0426efe6de5c4d1287edb351e8cffd93311c51b34"],
   // The site's publication: the build of a milestone tag, and its deployment, which proves the tag
   // on main first (the review of 7ba7a5c).
-  ["pages-publish.yml#build", "2f9e4711fd8b17b1f3c0d0bad4c7ad13cd98511f8f0d84d390546823aaf2d981"],
-  ["pages-publish.yml#deploy", "977b6a501f7de3c08d912c3bbf9bf5ec2b6f1f11d42bb371147780de47ee640c"],
+  ["pages-publish.yml#build", "576f730be30b3daf87b6eb04b0675d7defc124d744250f0578f5ec7a66445593"],
+  ["pages-publish.yml#deploy", "b0a09fe1825e5389c6fe19cd0cdeda6da5b086b8937b345588c037fa19b3ce2b"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1753,7 +1754,7 @@ const LEFT_OUTSIDE = new Map([
 /// (`sh -c`, a quoted name, a path to the tool, node's child_process; the third review of 980965e).
 const GATE_ONLY = new Map([
   ["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"],
-  [PAGES_DEPLOY_JOB, "it runs .github/scripts/commit-on-main.sh alone, then deploys the site the build job made"],
+  [PAGES_DEPLOY_JOB, "it deploys the site its build job made from a tag the build proved in main's history, and runs nothing else"],
 ]);
 /// The labels a job may run on: each a literal, or a matrix value that is one.
 const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);
@@ -2037,6 +2038,7 @@ const NODE_INPUTS = { "node-version": PERMISSION.node, "package-manager-cache": 
 /// reader's (policy-runtime-judge), as BEFORE_TOOLCHAIN reads a step's script, trimmed.
 const POLICY_RUN = "node .github/scripts/policy-collect.mjs\nnode --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs";
 const BEFORE_TOOLCHAIN = new Map([
+  ["bash .github/scripts/publish-tag.sh", { job: "pages-publish.yml#build", env: { TAG: "${{ inputs.tag }}" }, why: "the milestone tag the run was given, checked out once its commit is proven in main's history, before anything of it runs" }],
   [POLICY_RUN, { job: "ci.yml#docs", why: "the policy, first in the Documentation job: its collector, then its tests" }],
   ["node .github/scripts/action-pins.mjs", { job: "ci.yml#docs", why: "the check of the actions' pins against their releases" }],
   ['echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"', { job: "harness.yml#fixtures", why: "the harness's toolchain, put outside the home its sandbox hides" }],
@@ -2089,8 +2091,12 @@ export function beforeToolchainProblems(file, id, doc, job) {
       found.push(`${where} runs an action other than the checkout and node: ${uses}`);
     } else if (s.id === "watch") {
       if (!stepKeysAre(s, ["name", "id", "run"]) || String(s.run).trim() !== `node .github/scripts/watch.mjs ${file}`) found.push(`${where} is not the watch exactly: ${JSON.stringify(s)}`);
-    } else if (!stepKeysAre(s, ["name", "run"]) || BEFORE_TOOLCHAIN.get(String(s.run ?? "").trim())?.job !== key) {
-      found.push(`${where} is none of the steps BEFORE_TOOLCHAIN names for this job, with its name and script alone: ${JSON.stringify(s)}`);
+    } else {
+      // A step of BEFORE_TOOLCHAIN: its name and script alone, or with exactly the variables its
+      // entry names, when it names any.
+      const allowed = BEFORE_TOOLCHAIN.get(String(s.run ?? "").trim());
+      const keysOk = allowed?.env === undefined ? stepKeysAre(s, ["name", "run"]) : stepKeysAre(s, ["name", "env", "run"]) && JSON.stringify(s.env) === JSON.stringify(allowed.env);
+      if (!keysOk || allowed?.job !== key) found.push(`${where} is none of the steps BEFORE_TOOLCHAIN names for this job, with its name, its script and the variables its entry names alone: ${JSON.stringify(s)}`);
     }
   }
   if (checkouts !== 1) found.push(`${key} checks out ${checkouts} times before the check, not once`);
@@ -3891,6 +3897,69 @@ check("every job that runs on pull requests or on a branch other than main is a 
   const byHand = jobs.map((j) => (j.file === "spike-tier1.yml" ? { ...j, on: { workflow_dispatch: null } } : j));
   assert.ok(refused(byHand).includes("spike-tier1.yml#measure is in ADVISORY_JOBS, and runs on no pull request and no branch other than main"), "a listed job that runs on no pull request passes");
   assert.ok(refused(jobs, required, new Map([...ADVISORY_JOBS, ["gone.yml#j", "x"]])).includes("ADVISORY_JOBS names gone.yml#j, which is no job"), "a listed name of no job passes");
+});
+
+/// What is wrong with how pages-publish.yml publishes the site (Norman, 2026-11-17): it runs by hand
+/// alone, with a required `tag` as its one input, and every job runs only from main, so that its
+/// definition is always main's. A push of a tag would run the workflow as the tagged commit holds
+/// it, which could drop the check that the tag is on main.
+export function publishProblems(doc) {
+  const found = [];
+  const on = triggers(doc);
+  const events = Object.keys(on);
+  if (events.length !== 1 || events[0] !== "workflow_dispatch") found.push(`pages-publish.yml runs on ${events.join(", ") || "nothing"}, not by hand alone`);
+  const inputs = on.workflow_dispatch?.inputs;
+  if (!isPlain(inputs) || !sameKeys(inputs, ["tag"]) || inputs.tag?.required !== true || inputs.tag?.type !== "string") found.push("pages-publish.yml takes other inputs than one required string, tag");
+  const jobs = isPlain(doc.jobs) ? Object.entries(doc.jobs) : [];
+  if (jobs.length === 0) found.push("pages-publish.yml has no job");
+  for (const [id, job] of jobs) {
+    if (normalize(String(job?.if ?? "")) !== "github.ref == 'refs/heads/main'") found.push(`pages-publish.yml, job ${id}, runs from refs other than main: if: ${job?.if ?? "(none)"}`);
+  }
+  return found;
+}
+
+check("the site is published only by hand, from main's own definition, of a tag on main", () => {
+  const doc = workflows().find((w) => w.file === "pages-publish.yml").doc;
+  assert.deepEqual(publishProblems(doc), []);
+  // The tag is proven on main before anything of it is checked out, and only then.
+  const build = steps(doc.jobs.build);
+  assert.equal(build[1]?.run, "bash .github/scripts/publish-tag.sh", "the build's step after the checkout is not the tag's proof");
+  assert.match(read(".github/scripts/publish-tag.sh"), /\n"\$BASH" \.github\/scripts\/commit-on-main\.sh "refs\/tags\/\$tag"\ngit -c advice\.detachedHead=false checkout --quiet --detach "refs\/tags\/\$tag"\n/, "publish-tag.sh checks out the tag other than right after proving it on main");
+  // Planted: a push of tags, beside the run by hand or alone; any push; a schedule; no input, an
+  // optional one, or one more; and a job that runs from another ref, or from any.
+  const clone = () => JSON.parse(JSON.stringify(doc));
+  const planted = (change) => {
+    const d = clone();
+    change(d);
+    return publishProblems(d).length > 0;
+  };
+  for (const [what, change] of [
+    ["a push of tags beside the run by hand", (d) => (d.on.push = { tags: ["m*"] })],
+    ["a push of tags alone", (d) => (d.on = { push: { tags: ["m*"] } })],
+    ["a push to main", (d) => (d.on.push = { branches: ["main"] })],
+    ["a schedule", (d) => (d.on.schedule = [{ cron: "0 0 * * 1" }])],
+    ["no input", (d) => delete d.on.workflow_dispatch.inputs],
+    ["an optional tag", (d) => (d.on.workflow_dispatch.inputs.tag.required = false)],
+    ["an input more", (d) => (d.on.workflow_dispatch.inputs.ref = { required: false, type: "string" })],
+    ["a build from any ref", (d) => delete d.jobs.build.if],
+    ["a deployment from a tag", (d) => (d.jobs.deploy.if = "github.ref_type == 'tag'")],
+    ["a job more, from any ref", (d) => (d.jobs.extra = { "runs-on": "ubuntu-24.04", steps: [] })],
+  ]) {
+    assert.ok(planted(change), `${what} passes`);
+  }
+  // The tag's step carries its one variable, exactly, before the toolchain: planted, a variable
+  // more, another value, and none.
+  assert.deepEqual(beforeToolchainProblems("pages-publish.yml", "build", doc, doc.jobs.build), []);
+  for (const [what, env] of [
+    ["a variable more", { TAG: "${{ inputs.tag }}", BASH_ENV: "./x.sh" }],
+    ["another value", { TAG: "${{ github.event.inputs.tag }}" }],
+    ["none", undefined],
+  ]) {
+    const d = clone();
+    if (env === undefined) delete d.jobs.build.steps[1].env;
+    else d.jobs.build.steps[1].env = env;
+    assert.ok(beforeToolchainProblems("pages-publish.yml", "build", d, d.jobs.build).length > 0, `the tag's step with ${what} passes`);
+  }
 });
 
 check("a workflow that holds a required job runs only on pull requests, the queue and main", () => {
