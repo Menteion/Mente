@@ -92,7 +92,7 @@
       "**Archived {date}.**",
       "{summary}",
       "Merged in pull request {pr}.",
-      "Recorded at commit `{commit}`: {diffstat}.",
+      "Recorded at commit `{commit}`.",
       "{links}",
       "The body below describes the tree before execution and is not maintained."
     ],
