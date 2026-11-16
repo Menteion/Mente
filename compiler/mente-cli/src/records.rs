@@ -79,13 +79,13 @@ pub const SHARED: &[Shared] = &[
     },
     Shared {
         file: "docs/STATUS.md",
-        records: "the status of the work, a row a field and a row a crate",
-        why: "it is the one page every session reads first, so it stays one page; a row changes with the work it describes, and two changes in flight that touch one row are two changes to one fact",
+        records: "the implementation status of each mechanism, a row each",
+        why: "spec-graph reads it as a ledger, one file (`.spec-graph.json`); it becomes a kind when spec-graph reads a ledger kept one file an entry, which the feature asked of the tools' owner for the register would cover",
     },
     Shared {
         file: "ROADMAP.md",
-        records: "the stages and milestones, each a list item under its heading, and the measurement protocols",
-        why: "spec-graph reads each Target claim's protocol under the heading `Measurement protocols` of this one file (`.spec-graph.json`), and the register's test reads a decided entry's place in the plan from its list items",
+        records: "the milestones' checklists and the measurement protocols",
+        why: "spec-graph reads its checklists and each Target claim's protocol from this one file (`.spec-graph.json`); it becomes a kind when spec-graph reads them kept one file each, which the same feature asked of the tools' owner would cover",
     },
     Shared {
         file: "docs/milestone-reviews.md",
