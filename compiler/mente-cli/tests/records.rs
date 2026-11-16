@@ -2,7 +2,8 @@
 //! number: CLAUDE.md's invariant 1 forbids `DEC-XXX` numbers in the specs, and Norman extended it
 //! on 2026-11-17 to every kind of record. A number carries no meaning, needs an allocation that
 //! races between changes in flight, and suggests an order the records do not have; a key, as the
-//! register's entries have, does none of that.
+//! register's entries have, does none of that. The specification's directory is held to the same
+//! form: files named by a key, with no numeric prefix, no subdirectory and no pictograph.
 //!
 //! The rule is held by structure (Norman decided, 2026-11-17): a record's name is its file's name
 //! or its register entry's key, and the one key rule, `records::is_key`, refuses a number there; a
@@ -256,4 +257,122 @@ fn test_front_matter_reads_every_case_of_its_fixtures() {
     ] {
         assert!(expand(bad).is_err(), "{}", bad);
     }
+}
+
+/// Whether `c` is a pictograph: an emoji, a symbol of the emoji blocks, a dingbat, or the selector
+/// that asks for a character's emoji form.
+fn pictograph(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0xFE0F
+    )
+}
+
+/// Each way the specification's directory breaks its layout (CLAUDE.md, invariant 1): an entry
+/// that is no file, which a subdirectory is; a file that is not `README.md` and is no `<key>.md`,
+/// so no numeric prefix, `00_core.md`, and no other kind of file; and a line that holds a
+/// pictograph, which a decorative warning header is, by its file and line.
+fn spec_layout(dir: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return vec![format!("{}: no directory", dir.display())];
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if !path.is_file() {
+            problems.push(format!(
+                "{}: a subdirectory, which spec/ holds none of",
+                name
+            ));
+            continue;
+        }
+        let keyed = name.strip_suffix(".md").is_some_and(records::is_key);
+        if name != "README.md" && !keyed {
+            problems.push(format!(
+                "{}: no spec, which is a file `<key>.md` whose key is lowercase words joined by hyphens, with no number before it",
+                name
+            ));
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        for (n, line) in text.lines().enumerate() {
+            if line.chars().any(pictograph) {
+                problems.push(format!(
+                    "{}:{}: a pictograph, which no spec holds",
+                    name,
+                    n + 1
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// The specification's directory holds only `README.md` and files named by a key, with no
+/// subdirectory, no numeric prefix and no pictograph (CLAUDE.md, invariant 1).
+#[test]
+fn test_the_specs_are_files_named_by_a_key_with_no_pictograph() {
+    let problems = spec_layout(&root().join("spec"));
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The layout refuses each way a spec breaks it, and accepts a spec of the right shape.
+#[test]
+fn test_the_spec_layout_refuses_each_way_a_spec_breaks_it() {
+    let good = "# Regions\n\nA region holds its values.\n";
+    let planted = |name: &str, files: &[(&str, &str)]| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("spec-layout")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (path, text) in files {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        dir
+    };
+    let dir = planted(
+        "good",
+        &[("README.md", good), ("regions-and-pools.md", good)],
+    );
+    assert_eq!(spec_layout(&dir), Vec::<String>::new());
+    for (name, path, text, problem) in [
+        ("prefix", "00_core.md", good, "00_core.md: no spec"),
+        ("digits", "00-core.md", good, "00-core.md: no spec"),
+        ("other-kind", "regions.txt", good, "regions.txt: no spec"),
+        (
+            "subdirectory",
+            "old/regions.md",
+            good,
+            "old: a subdirectory",
+        ),
+        (
+            "warning",
+            "regions.md",
+            "# \u{26A0}\u{FE0F} Warning\n",
+            "regions.md:1: a pictograph",
+        ),
+        (
+            "emoji",
+            "regions.md",
+            "# Regions\n\nFast \u{1F680}\n",
+            "regions.md:3: a pictograph",
+        ),
+        (
+            "star",
+            "regions.md",
+            "## \u{2B50} Note\n",
+            "regions.md:1: a pictograph",
+        ),
+    ] {
+        let dir = planted(name, &[("README.md", good), (path, text)]);
+        let found = spec_layout(&dir);
+        assert_eq!(found.len(), 1, "{}: {:?}", name, found);
+        assert!(found[0].starts_with(problem), "{}: {:?}", name, found);
+    }
+    let arrows = planted("arrows", &[("README.md", "# A \u{2192} B, x \u{2264} y\n")]);
+    assert_eq!(spec_layout(&arrows), Vec::<String>::new());
 }

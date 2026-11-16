@@ -12,7 +12,8 @@ This file is the switchboard, not the rulebook.
 ## Non-Negotiable Architectural Invariants
 
 1. **Single-decision atomic specs (`spec/*.md`)**:
-   - Never re-introduce numeric filename prefixes (`00_`..`08_`), nested subdirectories inside `spec/`, `DEC-XXX` numbers or a record of any kind named by a number, or decorative emoji warning headers. Prefixes, subdirectories and emoji headers are held by review only.
+   - Never re-introduce numeric filename prefixes (`00_`..`08_`), nested subdirectories inside `spec/`, `DEC-XXX` numbers or a record of any kind named by a number, or decorative emoji warning headers.
+     <!-- @assert-count target="compiler/mente-cli/tests/records.rs" symbol="fn test_the_specs_are_files_named_by_a_key_with_no_pictograph" min="1" reason="spec/ holds only README.md and files named by a key, with no subdirectory, numeric prefix or pictograph" -->
      <!-- @assert-count target="compiler/mente-cli/tests/records.rs" symbol="fn test_no_document_names_a_record_by_a_number" min="1" reason="No document names a record by a number" -->
    - A claim is a list item that starts with its one maturity label written as code: `Implemented`, `Specified`, `Target` or `Hypothesis`. A label inside a sentence or in parentheses is not a claim, and `spec-guard claims` does not read it; write it as a claim. One claim carries one label.
      <!-- @assert-count target="package.json" symbol="spec-guard claims" min="1" reason="spec-guard claims reads every claim's label" -->
@@ -27,7 +28,7 @@ This file is the switchboard, not the rulebook.
    - `<!-- @assert-present -->`, `<!-- @assert-count -->` and `<!-- @assert-absence -->` directives still pin the structural facts a spec states, such as files that exist and spellings the examples must or must not use.
      <!-- @assert-count target="compiler/mente-cli/src/main.rs" symbol="fn test_all_spec_assertions_and_graph_pass" min="1" reason="Every directive holds" -->
      <!-- @assert-count target="compiler/mente-cli/src/main.rs" symbol="fn test_spec_directives_that_cannot_fail_are_rejected" min="1" reason="A directive that cannot fail is refused" -->
-   - Do not write counts of files, directives or tests into documents; `mn spec` and `cargo test` print them. Held by review only.
+   - Do not write counts of files, directives or tests into documents; `mn spec` and `cargo test` print them. Held by review only: a check for numerals would flag the numbers prose rightly holds, such as dates, versions and the limits a rule states.
 2. **Forbidden language anti-patterns in `.mn` code**:
    - Never write `let` or `let mut` (use `val` and `var`).
      <!-- @assert-count target="compiler/mente-syntax/src/body.rs" symbol="fn test_other_languages_idioms_name_the_mente_spelling" min="1" reason="let, let mut, references, await, unwrap and turbofish are refused with their Mente spelling" -->
