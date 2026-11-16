@@ -9,9 +9,10 @@ Each case is a file `<key>.txt`, its name a key by the rule of `records.rs`, mad
 3. For an accepted case, one line `value <name> <text>` for each field, in order: the string the field is read as, written after one space to the end of the line. An empty string is the line `value <name>` alone.
 4. `input`.
 
-The rest of the file, after the line `input`, is the case's input, byte for byte, but for two spellings. `.gitattributes` makes git keep every text file's line ends LF, and the policy allows no file git does not read as text, so a carriage return cannot be kept in a file here. So:
+The rest of the file, after the line `input`, is the case's input, byte for byte, but for three spellings. `.gitattributes` makes git keep every text file's line ends LF, and the policy allows no file git does not read as text, so a carriage return cannot be kept in a file here, nor a control character be seen. So:
 
 - `{CR}` stands for a carriage return, U+000D;
-- `{TAB}` stands for a tab, U+0009, so that a tab can be seen.
+- `{TAB}` stands for a tab, U+0009, so that a tab can be seen;
+- `{U+` four to six hexadecimal digits, in capitals, `}` stands for that code point, `{U+0085}` for the next-line character.
 
-A reader expands both before it reads the input. Nothing else in a case is read: no line may stand between the header's lines, and a field's text holds no tab and no line end.
+A reader expands each before it reads the input. Nothing else in a case is read: no line may stand between the header's lines, and a field's text holds no tab and no line end.

@@ -32,9 +32,13 @@ pub fn is_day(day: &str) -> bool {
 /// Whether `key` is a record's key, as the register's entries are named: lowercase words of
 /// letters and digits joined by single hyphens, `guard-per-problem` or `bench-retired-misplaced-paren`.
 /// Every word starts with a letter, so that no key is a number in a key's dress: not `esc-001`,
-/// `adr-0258` or `esc-001a`. Since a key names a file, it is no name Windows reserves.
+/// `adr-0258` or `esc-001a`. Since a key names a file, it is no name Windows reserves, not
+/// `readme`, which a directory's description is named, and at most [`KEY_LENGTH`] characters, so
+/// that its file's path fits every file system the repository is checked out on.
 pub fn is_key(key: &str) -> bool {
     !reserved(key)
+        && key != "readme"
+        && key.len() <= KEY_LENGTH
         && key.split('-').all(|word| {
             word.starts_with(|c: char| c.is_ascii_lowercase())
                 && word
@@ -42,6 +46,9 @@ pub fn is_key(key: &str) -> bool {
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         })
 }
+
+/// The most characters a key may hold.
+pub const KEY_LENGTH: usize = 100;
 
 /// Whether Windows reserves `name` for a device, whatever extension follows it, so that no file of
 /// that name can be made or checked out there: `con`, `prn`, `aux`, `nul`, and `com` or `lpt`
@@ -60,17 +67,23 @@ fn reserved(name: &str) -> bool {
 /// starts with no YAML indicator, holds no `: ` and no ` #`, and is none of YAML's other scalars,
 /// a null, a boolean, a number or a timestamp; or a value in single quotes, where `''` stands for
 /// one quote. A field named `date` holds a day, `YYYY-MM-DD`, plain, which YAML reads as a date. No
-/// tab and no carriage return stands anywhere in the file, since YAML reads either otherwise than
-/// as written. What follows the front matter is the record's prose, free.
+/// character YAML reads otherwise than as written, or refuses, stands anywhere in the file: no
+/// control character but the line feed (so no tab and no carriage return), no DEL, no next line
+/// (U+0085), no line or paragraph separator (U+2028, U+2029) and no U+FFFE. What follows the front
+/// matter is the record's prose, free.
 ///
 /// The cases of `src/front-matter/` hold this behaviour as data, one file a case, so that every
 /// reader of the form is tested against the same cases (`tests/records.rs`); the `README.md` there
 /// gives a case's form.
 pub fn front_matter(text: &str, fields: &[&str]) -> Result<Vec<String>, String> {
-    if text.contains(['\t', '\r']) {
-        return Err(
-            "a tab or a carriage return, which YAML reads otherwise than as written".to_string(),
-        );
+    let unread = |c: char| {
+        (c.is_control() && c != '\n') || matches!(c, '\u{2028}' | '\u{2029}' | '\u{FFFE}')
+    };
+    if let Some(c) = text.chars().find(|&c| unread(c)) {
+        return Err(format!(
+            "a tab, a carriage return or another character YAML reads otherwise than as written: U+{:04X}",
+            u32::from(c)
+        ));
     }
     let rest = text
         .strip_prefix("---\n")
@@ -116,7 +129,7 @@ pub fn front_matter(text: &str, fields: &[&str]) -> Result<Vec<String>, String> 
 }
 
 /// Whether YAML reads the plain `value` as a timestamp: four digits, `-`, one or two, `-`, one or
-/// two, and then nothing, or a `T`, a `t` or a space before a digit.
+/// two, and then nothing, or a `T`, a `t` or a run of spaces or tabs before a digit.
 fn timestamp(value: &str) -> bool {
     let mut parts = value.splitn(3, '-');
     let (Some(year), Some(month), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
@@ -131,8 +144,13 @@ fn timestamp(value: &str) -> bool {
         && digits(month, &[1, 2])
         && digits(&day, &[1, 2])
         && (after.is_empty()
-            || (after.starts_with(['T', 't', ' '])
-                && after[1..].starts_with(|c: char| c.is_ascii_digit())))
+            || after
+                .strip_prefix(['T', 't'])
+                .or_else(|| {
+                    let spaced = after.trim_start_matches([' ', '\t']);
+                    (spaced.len() < after.len()).then_some(spaced)
+                })
+                .is_some_and(|time| time.starts_with(|c: char| c.is_ascii_digit())))
 }
 
 /// The string a YAML reader reads in `value`, if it reads a string this reader agrees on.

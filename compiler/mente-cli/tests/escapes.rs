@@ -21,7 +21,7 @@ fn file(day: &str, area: &str, missed: &str, guard: &str) -> String {
     )
 }
 
-const LINT: &str = "fn test_exhaustive_crates_deny_wildcard_arms";
+const LINT: &str = "fn test_exhaustive_crates_deny_wildcard_arms in mente-cli";
 
 /// A fresh directory of this test binary's own, named `name`, holding `files`.
 fn planted(name: &str, files: &[(&str, &str)]) -> io::Result<PathBuf> {
@@ -104,7 +104,13 @@ fn test_a_file_is_refused_for_each_rule_of_its_front_matter() {
     let escape = escapes::parse("walker-hid", &good).unwrap();
     assert_eq!(escape.date, (2026, 11, 14));
     assert_eq!(escape.pull, 129);
-    assert_eq!(escape.guard, escapes::Guard::Test(LINT[3..].to_string()));
+    assert_eq!(
+        escape.guard,
+        escapes::Guard::Test {
+            name: "test_exhaustive_crates_deny_wildcard_arms".to_string(),
+            package: "mente-cli".to_string(),
+        }
+    );
     let with_prose = format!("{}\n# The walker\n\nIt hid --- the operands.\n", good);
     assert!(escapes::parse("walker-hid", &with_prose).is_ok());
     let quoted = file(
@@ -174,7 +180,7 @@ fn test_a_file_is_refused_for_each_rule_of_its_front_matter() {
             good.replace("pull/129", "pull/0129"),
             "no pull request's address",
         ),
-        (good.replace("\n", "\r\n"), "a tab or a carriage return"),
+        (good.replace("\n", "\r\n"), "a tab, a carriage return"),
         (
             good.replace("pull/129", "pull/+129"),
             "no pull request's address",
@@ -322,7 +328,7 @@ fn test_mn_escapes_counts_and_checks_the_record() {
         "2026-11-14",
         "parser",
         "No lint.",
-        "fn test_declared_nowhere",
+        "fn test_declared_nowhere in mente-cli",
     );
     let dir = planted(
         "cli-record",

@@ -11,7 +11,7 @@ A file starts with a front matter of five fields, each on one line `name: value`
 - **area**: where the bug was. It is one of `checker`, `Tier 1`, `interpreter`, `MIR`, `native`, `generator`, `local checks`, `policy` and `harness`, the list `compiler/mente-cli/src/escapes.rs` holds.
 - **missed-by**: the instrument that should have caught it, and what it lacked.
 - **guard**: what now catches the class, in one of four forms, each found in what its runner runs:
-  - a Rust test, `fn test_name`, that nextest lists and does not ignore;
+  - a Rust test of a package, `fn test_name in mente-interp`, that nextest runs; the package is named, since one test's name may stand in two crates;
   - a check of the workflow policy, `policy check "name"`, that the policy's run ran;
   - a Node test, `node test "name"`, that a Node run ran;
   - a quick check before a push, `quick check "name"`, by its name in `tools/quick-checks.json`.
@@ -25,7 +25,7 @@ A file starts with a front matter of five fields, each on one line `name: value`
 - Each escape says what missed it.
 - Each guard is of one of the four forms.
 
-Whether each guard runs is what the runners run, not what the sources spell: `mn evidence` reads nextest's list of the tests from each runner and the reports of the Node runs, and fails a guard that no runner runs, an ignored or skipped test included (`compiler/mente-cli/src/evidence.rs`). It checks every test an `@assert-count` names as evidence the same way.
+Whether each guard runs is what the runners run, not what the sources spell. `mn evidence` reads the tools' own output, in JSON: nextest's list of the tests from each runner, as CI's profile takes them; our reporter's report of each Node run, `tools/evidence-reporter.mjs`; and spec-guard's report of the directives it runs. It fails a guard that no runner runs, an ignored, filtered, skipped or left-to-do test included, and every test an `@assert-count` names as evidence that nextest does not run from exactly its target file (`compiler/mente-cli/src/evidence.rs`).
 
 That each fix merged is a fact of the history, which the Commits check reads: there each fixing commit is to carry its escape's key in a trailer, `Escaped: <key>`. That rule belongs to the Commits check's own pull request; the escapes recorded before it name their fix by its pull request alone.
 

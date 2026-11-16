@@ -407,9 +407,14 @@ fn test_a_key_is_lowercase_words_joined_by_hyphens() {
         "com0",
         "com1",
         "lpt9",
+        "readme",
     ] {
         assert!(!records::is_key(key), "{}", key);
     }
+    let longest = format!("a{}", "b".repeat(records::KEY_LENGTH - 1));
+    assert!(records::is_key(&longest));
+    assert!(!records::is_key(&format!("{}c", longest)));
+    assert!(records::is_key("readme-of-escapes"));
 }
 
 /// A day is a day of the calendar written `YYYY-MM-DD`: each length of month, February of a leap
@@ -486,11 +491,31 @@ fn case(text: &str) -> Result<Case, String> {
             extra
         ));
     }
-    Ok((
-        fields,
-        values,
-        input.replace("{CR}", "\r").replace("{TAB}", "\t"),
-    ))
+    Ok((fields, values, expand(input)?))
+}
+
+/// A case's input with its spellings expanded: `{CR}`, `{TAB}` and `{U+hhhh}`, four to six
+/// hexadecimal digits in capitals naming a code point.
+fn expand(input: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = input.replace("{CR}", "\r").replace("{TAB}", "\t");
+    while let Some(at) = rest.find("{U+") {
+        out.push_str(&rest[..at]);
+        let close = rest[at..].find('}').ok_or("a `{U+` that does not close")?;
+        let hex = &rest[at + 3..at + close];
+        let ok = (4..=6).contains(&hex.len())
+            && hex
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c));
+        let c = ok
+            .then(|| u32::from_str_radix(hex, 16).ok().and_then(char::from_u32))
+            .flatten()
+            .ok_or_else(|| format!("{{U+{}}}: no code point in the case's spelling", hex))?;
+        out.push(c);
+        rest = rest[at + close + 1..].to_string();
+    }
+    out.push_str(&rest);
+    Ok(out)
 }
 
 /// Every case of `src/front-matter/` is read by `records::front_matter` as the case says: its
@@ -562,4 +587,18 @@ fn test_front_matter_reads_every_case_of_its_fixtures() {
             "---\r\n\t\n".to_string()
         ))
     );
+    assert_eq!(
+        expand("a{U+0085}b{U+2028}{U+10FFFF}"),
+        Ok("a\u{85}b\u{2028}\u{10FFFF}".to_string())
+    );
+    for bad in [
+        "{U+85}",
+        "{U+00e9}",
+        "{U+1100000}",
+        "{U+110000}",
+        "{U+D800}",
+        "{U+0085",
+    ] {
+        assert!(expand(bad).is_err(), "{}", bad);
+    }
 }

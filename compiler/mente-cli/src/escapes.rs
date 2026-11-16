@@ -38,8 +38,9 @@ pub const PULLS: &str = "https://github.com/Menteion/Mente/pull/";
 /// (`evidence.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Guard {
-    /// A Rust test, `fn test_...`, that nextest lists and does not ignore.
-    Test(String),
+    /// A Rust test of a package, `fn test_... in mente-interp`, that nextest runs. The package is
+    /// named, since one test's name may stand in two crates.
+    Test { name: String, package: String },
     /// A check of the workflow policy, `check("...")`, that the policy's run ran.
     Policy(String),
     /// A Node test, `test("...")`, that a Node run ran.
@@ -113,7 +114,7 @@ pub fn parse(key: &str, text: &str) -> Result<Escape, String> {
         area: value(2).to_string(),
         missed: value(3).to_string(),
         guard: guard_of(value(4)).ok_or(
-            "a guard that is none of `fn test_...`, `policy check \"...\"`, `node test \"...\"`, `quick check \"...\"`",
+            "a guard that is none of `fn test_... in <package>`, `policy check \"...\"`, `node test \"...\"`, `quick check \"...\"`",
         )?,
     })
 }
@@ -146,10 +147,18 @@ fn guard_of(text: &str) -> Option<Guard> {
             .strip_suffix('"')?;
         (!name.is_empty() && !name.contains('"')).then(|| name.to_string())
     };
-    if let Some(name) = text.strip_prefix("fn ") {
+    if let Some(rest) = text.strip_prefix("fn ") {
+        let (name, package) = rest.split_once(" in ")?;
         let ok = name.starts_with("test_")
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        return ok.then(|| Guard::Test(name.to_string()));
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && package.starts_with("mente-")
+            && package
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        return ok.then(|| Guard::Test {
+            name: name.to_string(),
+            package: package.to_string(),
+        });
     }
     quoted("policy check ")
         .map(Guard::Policy)

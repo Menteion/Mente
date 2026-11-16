@@ -19,8 +19,8 @@
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
 //! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes/` per week and per area;
 //!   `--check` checks each escape as its test does.
-//! - `mn evidence --nextest F [--junit F]...`: Checks every guard of the escaped bugs and every test an
-//!   `@assert-count` names as evidence against nextest's list and the Node runs' reports.
+//! - `mn evidence --spec-guard F --nextest F... [--node F]...`: Checks every guard of the escaped bugs
+//!   and every test an `@assert-count` names as evidence against what the runners run.
 
 use std::env;
 use std::fs;
@@ -123,7 +123,7 @@ fn print_help() {
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
     println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes/ per week and per area; --check checks each escape");
-    println!("  mn evidence --nextest F... [--junit F]...  Check each escape's guard and each test named as evidence against the tests the runners run");
+    println!("  mn evidence --spec-guard F --nextest F... [--node F]...  Check each escape's guard and each test named as evidence against the tests the runners run");
     println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
     println!("                               Fuzz every phase of the compiler, and minimize each crash found");
 }
@@ -1297,31 +1297,38 @@ fn cmd_escapes(args: &[String]) {
     }
 }
 
-/// `mn evidence --nextest <file>... [--junit <file>]...`: every guard of the record of escaped bugs,
-/// and every test an `@assert-count` names as evidence in the documents spec-guard reads, checked
-/// against what the runners run: nextest's list from each runner, a test listed on any of them
-/// counting, since a test may be compiled on one platform only, and the reports of the Node runs in
-/// JUnit's form (`evidence.rs`). Run from the repository's root. A list that cannot be read fails the check.
+/// `mn evidence --spec-guard <file> --nextest <file>... [--node <file>]...`: every guard of the
+/// record of escaped bugs, and every test an `@assert-count` names as evidence, checked against
+/// what the runners run (`evidence.rs`). The directives are spec-guard's own report of them; the
+/// Rust tests are nextest's list from each runner, a test listed on any of them counting, since a
+/// test may be compiled on one platform only; the Node tests are our reporter's report of each
+/// run. Run from the repository's root. A list that cannot be read fails the check.
 fn cmd_evidence(args: &[String]) {
     fn usage() -> ! {
         eprintln!(
-            "Usage: mn evidence --nextest <file>... [--junit <file>]...\n  nextest's list, from each runner: {} > <file>\n  a Node run's report: {}",
+            "Usage: mn evidence --spec-guard <file> --nextest <file>... [--node <file>]...\n  spec-guard's report: {} > <file>\n  nextest's list, from each runner: {} > <file>\n  a Node run's report: {}",
+            evidence::SPEC_GUARD,
             evidence::NEXTEST,
             evidence::NODE
         );
         process::exit(1);
     }
+    let mut spec_guard = None;
     let mut nextest = Vec::new();
-    let mut junit = Vec::new();
+    let mut node = Vec::new();
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
         let Some(file) = rest.next() else { usage() };
         match flag.as_str() {
+            "--spec-guard" if spec_guard.is_none() => spec_guard = Some(file),
             "--nextest" => nextest.push(file),
-            "--junit" => junit.push(file),
+            "--node" => node.push(file),
             _ => usage(),
         }
     }
+    let Some(spec_guard) = spec_guard else {
+        usage()
+    };
     if nextest.is_empty() {
         usage();
     }
@@ -1332,46 +1339,27 @@ fn cmd_evidence(args: &[String]) {
         }
         process::exit(1);
     };
-    let read = |path: &Path| {
-        fs::read_to_string(path).map_err(|e| vec![format!("{}: {}", path.display(), e)])
-    };
+    fn load<T>(file: &str, parse: fn(&str) -> Result<T, String>) -> Result<T, Vec<String>> {
+        fs::read_to_string(file)
+            .map_err(|e| format!("{}: {}", file, e))
+            .and_then(|t| parse(&t).map_err(|e| format!("{}: {}", file, e)))
+            .map_err(|e| vec![e])
+    }
+    let named = load(spec_guard, evidence::spec_guard).unwrap_or_else(|p| fail(p));
     let mut runs = evidence::Runs::default();
     for file in nextest {
-        match read(Path::new(file))
-            .and_then(|t| evidence::nextest(&t).map_err(|e| vec![format!("{}: {}", file, e)]))
-        {
-            Ok(tests) => runs.rust.extend(tests),
-            Err(p) => fail(p),
-        }
+        runs.rust
+            .extend(load(file, evidence::nextest).unwrap_or_else(|p| fail(p)));
     }
-    for file in junit {
-        match read(Path::new(file))
-            .and_then(|t| evidence::junit(&t).map_err(|e| vec![format!("{}: {}", file, e)]))
-        {
-            Ok(tests) => runs.node.extend(tests),
-            Err(p) => fail(p),
-        }
+    for file in node {
+        runs.node
+            .extend(load(file, evidence::node_report).unwrap_or_else(|p| fail(p)));
     }
     let quick = root.join("tools/quick-checks.json");
-    match read(&quick).and_then(|t| {
-        evidence::quick_checks(&t).map_err(|e| vec![format!("tools/quick-checks.json: {}", e)])
-    }) {
-        Ok(names) => runs.quick = names,
-        Err(p) => fail(p),
-    }
-    let rows = match escapes::read(&root.join(escapes::RECORD)) {
-        Ok(rows) => rows,
-        Err(p) => fail(p),
-    };
-    let mut documents = Vec::new();
-    for path in evidence::documents(&root) {
-        match read(&root.join(&path)) {
-            Ok(text) => documents.push((path, text)),
-            Err(p) => fail(p),
-        }
-    }
+    runs.quick = load(&quick.to_string_lossy(), evidence::quick_checks).unwrap_or_else(|p| fail(p));
+    let rows = escapes::read(&root.join(escapes::RECORD)).unwrap_or_else(|p| fail(p));
     let mut problems = evidence::guards(&rows, &runs);
-    problems.extend(evidence::evidence(&documents, &runs));
+    problems.extend(evidence::evidence(&root, &named, &runs));
     if !problems.is_empty() {
         fail(problems);
     }
