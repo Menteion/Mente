@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
-import { Broker, httpPost, lineReader, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
+import { Broker, httpPost, LOG_LINE_MAX, lineReader, logLine, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
 import { BrokerBroken, BrokerRefused, connectBroker } from "./brokered.ts";
 import {
   BASH,
@@ -1305,7 +1305,7 @@ test("the broker prices every usage the API has answered it with, at what its to
   for (const { from, model, usage } of REAL_USAGE) {
     const price = limits.models.get(model) as Price;
     assert.ok(price, `${from}: no price for ${model}`);
-    assert.equal(unpricedField(usage, limits), "", `${from}: the broker cannot price it`);
+    assert.equal(unpricedField(usage, limits), null, `${from}: the broker cannot price it`);
     const n = (k: string) => Number(usage[k] ?? 0);
     const prompt = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
     const factor = price.longPrompt !== undefined && prompt > price.longPrompt.above ? price.longPrompt.factor : 1;
@@ -1317,16 +1317,22 @@ test("the broker prices every usage the API has answered it with, at what its to
   const sonnetPrice = limits.models.get("claude-sonnet-5-5") as Price;
   const base = { input_tokens: 100, output_tokens: 50 };
   for (const details of [{ thinking_tokens: 0 }, { thinking_tokens: 50 }, null]) {
-    assert.equal(unpricedField({ ...base, output_tokens_details: details }, limits), "", JSON.stringify(details));
+    assert.equal(unpricedField({ ...base, output_tokens_details: details }, limits), null, JSON.stringify(details));
   }
   for (const details of [{ thinking_tokens: 51 }, { thinking_tokens: -1 }, { thinking_tokens: 1.5 }, { thinking_tokens: "1" }, { thinking_tokens: 1, cached_tokens: 0 }, {}, [1], 5, "x"]) {
-    assert.equal(unpricedField({ ...base, output_tokens_details: details }, limits), "output_tokens_details", `priced output_tokens_details ${JSON.stringify(details)}`);
+    assert.deepEqual(unpricedField({ ...base, output_tokens_details: details }, limits), { field: "output_tokens_details" }, `priced output_tokens_details ${JSON.stringify(details)}`);
     assert.equal(usageCost({ ...base, output_tokens_details: details }, sonnetPrice, limits, 99), 99);
   }
-  assert.equal(unpricedField({ output_tokens_details: { thinking_tokens: 1 } }, limits), "output_tokens_details", "a share of output tokens the usage does not report");
-  // Any other field the broker does not know still counts at the worst, and is named.
-  assert.equal(unpricedField({ ...base, surcharge_tokens: 5 }, limits), "surcharge_tokens");
-  assert.equal(unpricedField("none", limits), "usage");
+  assert.deepEqual(unpricedField({ output_tokens_details: { thinking_tokens: 1 } }, limits), { field: "output_tokens_details" }, "a share of output tokens the usage does not report");
+  // Any other field the broker does not know still counts at the worst, and is named, whatever its
+  // name: the review of 0949a1e found an empty one priced, "" having meant everything priced, and
+  // one named usage logged as no usage at all.
+  assert.deepEqual(unpricedField({ ...base, surcharge_tokens: 5 }, limits), { field: "surcharge_tokens" });
+  assert.deepEqual(unpricedField({ ...base, "": 12345 }, limits), { field: "" });
+  assert.equal(usageCost({ ...base, "": 12345 }, sonnetPrice, limits, 99), 99);
+  assert.deepEqual(unpricedField({ ...base, usage: 5 }, limits), { field: "usage" });
+  assert.deepEqual(unpricedField("none", limits), { noUsage: true });
+  assert.deepEqual(unpricedField(undefined, limits), { noUsage: true });
 });
 
 test("the broker says, once a field, which usage field it counted at the worst", async () => {
@@ -1334,11 +1340,39 @@ test("the broker says, once a field, which usage field it counted at the worst",
   let k = 0;
   const { broker, notes } = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: JSON.stringify({ usage: answers.at(k++) }) }));
   for (const id of [1, 2, 3]) assert.equal(JSON.parse(await broker.handle(request(id, haiku()))).status, 200);
-  assert.deepEqual(notes, ["the broker counts a request at its worst: it cannot price the usage field surcharge_tokens"]);
+  assert.deepEqual(notes, ['the broker counts a request at its worst: it cannot price the usage field "surcharge_tokens"']);
   // An answer with no usage to read is said once too, and the key is never in a note.
   const bare = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: `no JSON ${KEY}` }));
   for (const id of [1, 2]) await bare.broker.handle(request(id, haiku()));
   assert.deepEqual(bare.notes, ["the broker counts a request at its worst: it cannot price an answer without a usage object"]);
+  // Fields named so as to pass for a sentinel or to write a line of the log's own, each said as the
+  // field it is, in one line (the review of 0949a1e): the empty name, a field named usage, a name
+  // that would start a workflow command on a line of its own, and a name past any length.
+  const odd = ["", "usage", "x\n::warning::injected", "y".repeat(1000)];
+  let j = 0;
+  const named = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1, [odd.at(j++) ?? "z"]: 1 } }) }));
+  for (const id of [1, 2, 3, 4]) await named.broker.handle(request(id, haiku()));
+  assert.equal(named.notes.length, 4, named.notes.join(" | "));
+  assert.equal(named.notes.at(0), 'the broker counts a request at its worst: it cannot price the usage field ""');
+  assert.equal(named.notes.at(1), 'the broker counts a request at its worst: it cannot price the usage field "usage"');
+  assert.equal(named.notes.at(2), 'the broker counts a request at its worst: it cannot price the usage field "x\\n::warning::injected"');
+  for (const n of named.notes) assert.ok(!n.includes("\n") && n.length <= LOG_LINE_MAX, `a note of ${n.length} characters, or with a line break: ${n.slice(0, 80)}`);
+});
+
+test("every line the broker writes to its log is its own words, with what it did not author as JSON, the key out, and a cap", () => {
+  const line = logLine(KEY);
+  assert.equal(line`plain words, ${3} requests`, "plain words, 3 requests");
+  assert.equal(line`at ${"/a b/socket"}`, 'at "/a b/socket"');
+  // A value that would end the line and start a workflow command stays on this line.
+  const injected = line`failed: ${"x\n::error::y\r"}`;
+  assert.equal(injected, 'failed: "x\\n::error::y\\r"');
+  assert.ok(!/[\r\n]/.test(injected));
+  // The key, wherever it is, is taken out.
+  assert.equal(line`${`the key ${KEY}`}`, '"the key [the API key]"');
+  // And no line passes LOG_LINE_MAX characters.
+  const long = line`${"z".repeat(5000)}`;
+  assert.equal(long.length, LOG_LINE_MAX);
+  assert.ok(long.endsWith("..."));
 });
 
 test("the broker prices what the usage reports, a long Haiku prompt at its higher prices, and the rest at the worst", () => {
