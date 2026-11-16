@@ -10,6 +10,10 @@
 //! [`DOCUMENTS`] every set of Markdown documents that are no records, each with why. Every Markdown
 //! file of the tree belongs to exactly one of them ([`undeclared`]), so that a new directory of
 //! records cannot stand undeclared, its names unread.
+//!
+//! `mn pressure` (`pressure.rs`) ranks the files by how many merged pull requests changed them
+//! and says what each is here. A file it ranks high that holds records and is in neither list is
+//! decided here: made a kind, or listed with the reason it stays one file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
