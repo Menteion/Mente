@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
-import { Broker, lineReader, readLimits, scrub, shape, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
+import { Broker, lineReader, readLimits, scrub, serve, shape, thinkingBlocks, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
 import { BrokerBroken, BrokerRefused, connectBroker } from "./brokered.ts";
 import {
   BASH,
@@ -812,7 +812,11 @@ test("models are priced, calls costed with their cache, and the budget stops bef
   const small = { x: "\u00e9" };
   assert.equal(JSON.stringify(small).length, 9);
   assert.ok(Math.abs(worstCost(small, sonnet) - (10 * 2 * 1.25 + MAX_TOKENS * 10) / 1e6) < 1e-12, String(worstCost(small, sonnet)));
-  assert.equal(worstCost(small, sonnet), brokerWorst(JSON.stringify(small), MAX_TOKENS, sonnet, 1.25));
+  assert.equal(worstCost(small, sonnet), brokerWorst(JSON.stringify(small), MAX_TOKENS, sonnet, readLimits(LIMITS_TEXT), 0));
+  // A thinking block of an earlier reply counts at maxTokens input tokens more, on both sides.
+  const replied = requestBody("claude-sonnet-5-5", "S", [{ role: "user", content: "x" }, { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s".repeat(200) }, { type: "text", text: "y" }] }, { role: "user", content: "z" }]);
+  assert.equal(worstCost(replied, sonnet), brokerWorst(JSON.stringify(replied), MAX_TOKENS, sonnet, readLimits(LIMITS_TEXT), 1));
+  assert.ok(worstCost(replied, sonnet) - brokerWorst(JSON.stringify(replied), MAX_TOKENS, sonnet, readLimits(LIMITS_TEXT), 0) > (MAX_TOKENS * 2 * 1.25) / 1e6 - 1e-12);
   const budget: Budget = { limit: 1, spent: 0, reserved: 0, stopped: false };
   assert.equal(reserve(budget, 0.6), true);
   assert.equal(reserve(budget, 0.6), false);
@@ -1043,6 +1047,7 @@ test("the broker reads its limits, and refuses limits that are not whole", () =>
     ["no standard usage", { standardUsage: {} }],
     ["a standard usage value that is no string", { standardUsage: { speed: 1 } }],
     ["no cap on requests in flight", { maxInFlight: 0 }],
+    ["no cap on connections", { maxConnections: 0 }],
     ["a cap on body bytes that is no whole number", { maxBodyBytes: 1.5 }],
     ["a cache write cheaper than an input token", { cacheWrite: 0.9 }],
     ["a cache read dearer than a cache write", { models: { "claude-haiku-5-5": { input: 1, output: 1, cacheRead: 2 } } }],
@@ -1154,7 +1159,7 @@ test("the harness stops at its budget before the broker refuses, and as at its b
   // billed at their most but for the cache write, one call fits and the second does not.
   const sonnet = own(KNOWN_MODELS, "claude-sonnet-5-5");
   const bodyOf = (k: number) => requestBody("claude-sonnet-5-5", "é".repeat(30000), [{ role: "user", content: `call ${k}` }]);
-  const limit = 1.6 * brokerWorst(JSON.stringify(bodyOf(0)), MAX_TOKENS, sonnet, readLimits(LIMITS_TEXT).cacheWrite);
+  const limit = 1.6 * brokerWorst(JSON.stringify(bodyOf(0)), MAX_TOKENS, sonnet, readLimits(LIMITS_TEXT), 0);
   const most = (body: string) => ({ status: 200, retryAfter: "", text: JSON.stringify({ content: [], usage: { input_tokens: new TextEncoder().encode(body).length, output_tokens: MAX_TOKENS } }) });
   const { broker } = fakeBroker(limit, most);
   const refusals: string[] = [];
@@ -1297,8 +1302,18 @@ test("the broker prices what the usage reports, a long Haiku prompt at its highe
   // And its worst case: a body of more than 100,000 bytes may hold that many tokens.
   const small = "x".repeat(100_000);
   const big = "x".repeat(100_001);
-  assert.ok(Math.abs(brokerWorst(small, 10, haikuPrice, 1.25) - (100_000 * 0.1 * 1.25 + 10 * 0.5) / 1e6) < 1e-12);
-  assert.ok(Math.abs(brokerWorst(big, 10, haikuPrice, 1.25) - (5 * (100_001 * 0.1 * 1.25 + 10 * 0.5)) / 1e6) < 1e-12);
+  const rules = { cacheWrite: 1.25, maxTokens: 16_000 };
+  assert.ok(Math.abs(brokerWorst(small, 10, haikuPrice, rules, 0) - (100_000 * 0.1 * 1.25 + 10 * 0.5) / 1e6) < 1e-12);
+  assert.ok(Math.abs(brokerWorst(big, 10, haikuPrice, rules, 0) - (5 * (100_001 * 0.1 * 1.25 + 10 * 0.5)) / 1e6) < 1e-12);
+  // A thinking block counts at maxTokens input tokens, whatever its signature's bytes: the re-check
+  // of 4ab15da had a 200-byte signature reserved as 200 tokens and billed at its whole reasoning.
+  assert.ok(Math.abs(brokerWorst("x", 10, sonnetPrice, rules, 1) - brokerWorst("x", 10, sonnetPrice, rules, 0) - (16_000 * 2 * 1.25) / 1e6) < 1e-12);
+  // And it can take a short Haiku prompt past the long-prompt threshold.
+  assert.ok(Math.abs(brokerWorst("x".repeat(90_000), 10, haikuPrice, rules, 1) - (5 * (106_000 * 0.1 * 1.25 + 10 * 0.5)) / 1e6) < 1e-12);
+  const blocks = { messages: [{ role: "user", content: [{ type: "text", text: "x" }] }, { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s" }, { type: "redacted_thinking", data: "d" }, { type: "text", text: "y" }] }, { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "t" }] }] };
+  assert.equal(thinkingBlocks(blocks), 3);
+  assert.equal(thinkingBlocks({ messages: [{ role: "user", content: [{ type: "thinking" }] }] }), 0);
+  assert.equal(thinkingBlocks("none"), 0);
   assert.equal(utf8Length("\u00e9"), 2);
 });
 
@@ -1324,6 +1339,12 @@ test("the broker refuses a body past its cap and a request past its cap in fligh
   assert.equal(broker.inFlight, 0);
   assert.equal(JSON.parse(await broker.handle(request(5, haiku()))).status, 200);
   assert.equal(posts.length, 3);
+  // A request whose earlier reply holds a thinking block reserves maxTokens input tokens for it: on
+  // Opus, $0.08 more, past a budget of $0.05 the same request without it fits within.
+  const opus = { model: "claude-opus-5-5", max_tokens: 100, messages: [{ role: "user", content: "x" }, { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s".repeat(200) }, { type: "text", text: "y" }] }, { role: "user", content: "z" }] };
+  const budgeted = fakeBroker(0.05, () => ({ status: 200, retryAfter: "", text: JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 } }) })).broker;
+  assert.equal(JSON.parse(await budgeted.handle(request(1, { ...opus, messages: [{ role: "user", content: "x" }] }))).status, 200);
+  assert.match(JSON.parse(await budgeted.handle(request(2, opus))).refused, /past its \$0\.05/);
   // The line reader: lines in order, blank ones skipped, and a line past its length stops it once.
   const lines: string[] = [];
   let stopped = 0;
@@ -1343,6 +1364,34 @@ test("the broker refuses a body past its cap and a request past its cap in fligh
 
 /** A socket address for a test: a named pipe on Windows, a path in a temporary directory elsewhere. */
 const socketPath = (dir: string, name: string) => (process.platform === "win32" ? `\\\\.\\pipe\\mente-${name}-${process.pid}-${Date.now()}` : join(dir, `${name}.sock`));
+
+test("the broker serves no more connections at once than broker-limits.json allows", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mente-conns-"));
+  const { broker } = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 } }) }), { ...readLimits(LIMITS_TEXT), maxConnections: 2 });
+  const at = socketPath(dir, "capped");
+  const server = await serve(broker, at, (e) => {
+    throw e;
+  });
+  const links: { close(): void }[] = [];
+  try {
+    const first = await connectBroker(at);
+    const second = await connectBroker(at);
+    links.push(first, second);
+    // The third is closed as it comes, so a request on it finds the broker gone.
+    const third = await connectBroker(at).catch((e: Error) => e);
+    if (!(third instanceof Error)) {
+      links.push(third);
+      await assert.rejects(third.post(haiku()), /gone|failed/, "the broker served a connection past its cap");
+    }
+    // The first two are served.
+    for (const link of [first, second]) assert.equal((await link.post(haiku())).status, 200);
+  } finally {
+    // Every link closed first, so that the server's close does not wait on one a failure left open.
+    for (const link of links) link.close();
+    await new Promise((done) => server.close(done));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("the harness fails clearly when the broker is not there, goes away, refuses or answers what it cannot read", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mente-broker-"));

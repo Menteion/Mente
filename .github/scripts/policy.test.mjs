@@ -1127,6 +1127,14 @@ const PINNED_FILES = new Map([
   [".github/scripts/lib/yaml.mjs", "ee62bc138d9f19d920de7c2224bdd22b09b821369f40bec8c528b5c54fca3dce"],
   [".github/scripts/lib/commits.mjs", "b431601e5565185ee6a48db2995962ea70736ecef2ab76ea458a05fd23fc6c3e"],
   [".github/scripts/commits.mjs", "967378f4f8253cbcc73b2539320c9bc99a1a79edc5277ad0c38903ddffcbd96f"],
+  // Every file on the API key's path and on the lock's, which run beside the key or as root: a line
+  // added anywhere in one, before the key's line or after it, is a change to a gate review sees
+  // (the re-check of 4ab15da: `set -x`, or the key written to a file, passed every rule of
+  // start-broker.sh's shape).
+  ["benchmark/harness/start-broker.sh", "9cea5b604d1eea6b5c060f3a8b4b95bd8bcfeaf62dee2a6bfe9fddfab7ef4f59"],
+  ["benchmark/harness/stop-broker.sh", "1f4ec139da512a920c4eeafad893e451c0629c93ea19bd740ba4b6fc5b092ffa"],
+  ["benchmark/harness/lock-sudo.sh", "7cd18d0f4c63e1c40482bfc53187c2e726a9c9575d957605d2699fc805c3f131"],
+  ["benchmark/harness/sandbox-root.sh", "e407ec6236117863fb72fdd2b709ec2a7bf6a08802095eae2d00f1047ad4ba3a"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
 /// jobs, and the jobs that run the release tests through cargo alone. A rule that read their
@@ -2833,6 +2841,11 @@ export function startBrokerProblems(text) {
   if (!BROKER_SETUP.every((line, k) => at(line) >= 0 && at(line) < at(BROKER_LINE) && (k === 0 || at(line) > at(BROKER_SETUP[k - 1])))) found.push("start-broker.sh does not set the core limit, the mask and the directory up, in that order, before it starts the broker");
   const nodes = lines.filter((l) => /(^|[\s;&|(])node(\s|$)/.test(l.replace(/#.*$/, "")));
   if (nodes.length !== 1) found.push(`start-broker.sh starts node ${nodes.length} times, not once`);
+  // The key is named twice, in the check that it is set and in the line that hands it to the
+  // broker, and the shell never traces what it runs.
+  const named = lines.filter((l) => l.includes("ANTHROPIC_API_KEY") && !l.trimStart().startsWith("#"));
+  if (named.length !== 2 || !named.includes(BROKER_LINE) || !named.some((l) => l.startsWith(': "${ANTHROPIC_API_KEY:?'))) found.push("start-broker.sh names the key beyond its check and the line that hands it to the broker");
+  if (lines.some((l) => /^\s*set\s+(-\w*x|-o\s+xtrace)|BASH_XTRACEFD|\bxtrace\b/.test(l.replace(/#.*$/, "")))) found.push("start-broker.sh traces what it runs, the key among it");
   return found;
 }
 
@@ -2913,9 +2926,16 @@ check("the broker, the one process that holds the key, starts under permission.j
     ["no mask", script.replace("umask 0177\n", "")],
     ["a mask after the broker starts", script.replace("umask 0177\n", "").replace(/(> "\$dir\/log" 2>&1 &\n)/, "$1umask 0177\n")],
     ["a second node", `${script}node -e 1\n`],
+    // The re-check of 4ab15da: lines added before the key's line, each a way to leak the key.
+    ["a trace", script.replace("ulimit -c 0\n", "set -x\nulimit -c 0\n")],
+    ["the key written to a file", script.replace("ulimit -c 0\n", 'printf %s "$ANTHROPIC_API_KEY" > "$RUNNER_TEMP/k"\nulimit -c 0\n')],
+    ["the key handed to another program", script.replace("ulimit -c 0\n", '/usr/bin/printf %s "$ANTHROPIC_API_KEY" | sha256sum\nulimit -c 0\n')],
   ]) {
     assert.ok(startBrokerProblems(text).length > 0, `a start-broker.sh with ${what} passes`);
+    // And the pin, which holds the file whole, fails on it whatever the rules above read.
+    assert.notEqual(digest(text), PINNED_FILES.get("benchmark/harness/start-broker.sh"), `a start-broker.sh with ${what} keeps its pin`);
   }
+  for (const file of ["start-broker.sh", "stop-broker.sh", "lock-sudo.sh", "sandbox-root.sh"]) assert.ok(PINNED_FILES.has(`benchmark/harness/${file}`), `${file}, on the key's path or the lock's, is not pinned whole`);
   // Every job sets up that Node: the secret jobs, the jobs that run the harness's tests and the
   // planted escapes among them, and the rest.
   assert.deepEqual(nodeProblems(allJobs()), []);

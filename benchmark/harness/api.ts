@@ -10,7 +10,7 @@
 // costs, never what the model is shown.
 
 import { readFileSync } from "node:fs";
-import { readLimits, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
+import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
 import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -25,8 +25,6 @@ export const API_VERSION: string = LIMITS.version;
 export const MAX_TOKENS: number = LIMITS.maxTokens;
 /** The most requests the broker sends at once: a run's concurrency may not pass it. */
 export const MAX_IN_FLIGHT: number = LIMITS.maxInFlight;
-/** A cache write's price, as a multiple of the input price, for 5-minute entries. */
-export const CACHE_WRITE: number = LIMITS.cacheWrite;
 
 /** A model and its prices, in US dollars per million tokens. */
 export interface Model {
@@ -80,10 +78,11 @@ export function inputTokens(usage: Usage): number {
 
 /**
  * The most a call can cost, as the broker reckons it from the body it is sent: every byte of the
- * body an input token written to the cache, and the most output.
+ * body an input token written to the cache, maxTokens more for each thinking block of its earlier
+ * replies, and the most output.
  */
 export function worstCost(body: object, model: Model): number {
-  return worstOfBody(JSON.stringify(body), MAX_TOKENS, model, CACHE_WRITE);
+  return worstOfBody(JSON.stringify(body), MAX_TOKENS, model, LIMITS, thinkingBlocks(body));
 }
 
 /** The budget of a run of the benchmark, in US dollars. */

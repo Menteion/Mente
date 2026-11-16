@@ -80,57 +80,87 @@ done
 hidden=("${outermost[@]:-}")
 
 # The working directory must not be a hidden path nor contain one, since it stays visible; when it
-# lies inside one, it is put back inside the tmpfs that covers it.
-inside=false
+# lies inside one, that hidden path is its parent here, and it is put back inside the tmpfs that
+# covers it.
+parent=""
 for h in "${hidden[@]:-}"; do
   [ -n "$h" ] || continue
   case "$h/" in "$workdir"/*) refuse "the working directory $workdir is, or contains, the hidden $h" ;; esac
-  case "$workdir/" in "$h"/*) inside=true ;; esac
+  case "$workdir/" in "$h"/*) parent="$h" ;; esac
 done
 
-# Scratch directories, root's own: an unreadable empty one, bound over each credential directory,
-# and, when the working directory is to be put back, one to hold it while its parent is covered.
+# Scratch directories, root's own, in /tmp, whose sticky bit lets no one else rename them: an
+# unreadable empty one, bound over each credential directory; and, when the working directory lies
+# inside a hidden path, one to hold it while that path is covered, and one where the tmpfs that
+# covers it is built before it is moved there whole.
 empty="$(mktemp -d)"
 chmod 000 "$empty"
 stash=""
-if $inside; then
+cover=""
+if [ -n "$parent" ]; then
   stash="$(mktemp -d)"
+  cover="$(mktemp -d)"
 fi
 
 # Enter fresh namespaces; arrange the mounts, still as root; then drop to the caller with no new
-# privileges and run the command.
+# privileges and run the command. Inside, each path the caller could rename is opened once, and
+# every mount on it goes through that descriptor (/proc/self/fd/N), never through its path again,
+# so that what was checked is what is mounted; a descriptor that no longer names the path it was
+# checked as is a path moved since, and is refused. Nothing is created on a path the caller owns:
+# the working directory is put back inside the cover, built at root's own scratch path. What still
+# goes by path is masking alone, in this namespace: the credential directories, and the last cd,
+# which, renamed under it, would only start the command, as the caller, somewhere else.
 exec unshare --net --pid --mount --uts --ipc --fork --mount-proc --kill-child -- \
   /usr/bin/env -i "PATH=$PATH" \
   "BENCH_HOME=$home" "BENCH_UID=$uid" "BENCH_GID=$gid" "BENCH_EMPTY=$empty" \
-  "BENCH_WORKDIR=$workdir" "BENCH_STASH=$stash" "BENCH_HIDDEN=$(printf '%s\n' "${hidden[@]:-}")" \
+  "BENCH_WORKDIR=$workdir" "BENCH_STASH=$stash" "BENCH_COVER=$cover" "BENCH_PARENT=$parent" \
+  "BENCH_REL=${workdir#"$parent"/}" "BENCH_HIDDEN=$(printf '%s\n' "${hidden[@]:-}")" \
   /bin/bash -c '
     set -euo pipefail
+    refuse() {
+      echo "mente-sandbox: $1" >&2
+      exit 2
+    }
+    opened() {
+      [ "$(readlink "/proc/self/fd/$1")" = "$2" ] || refuse "$2 moved while the sandbox was set up"
+    }
     mount --make-rprivate /
-    # The working directory as a mount of its own, so it stays writable under a read-only root:
-    # held aside while a hidden path above it is covered, or bound onto itself.
+    # The working directory, opened once and checked through its descriptor, then bound from it as
+    # a mount of its own, so it stays writable under a read-only root: held aside while the hidden
+    # path above it is covered, or bound onto itself.
+    exec {wd}<"$BENCH_WORKDIR"
+    opened "$wd" "$BENCH_WORKDIR"
+    if [ ! -d "/proc/self/fd/$wd" ] || [ "$(stat -L -c %u "/proc/self/fd/$wd")" != "$BENCH_UID" ]; then
+      refuse "the working directory $BENCH_WORKDIR is no longer a directory of the caller"
+    fi
     if [ -n "$BENCH_STASH" ]; then
-      mount --bind "$BENCH_WORKDIR" "$BENCH_STASH"
+      mount -c --bind "/proc/self/fd/$wd" "$BENCH_STASH"
     else
-      mount --bind "$BENCH_WORKDIR" "$BENCH_WORKDIR"
+      mount -c --bind "/proc/self/fd/$wd" "/proc/self/fd/$wd"
     fi
     for d in .ssh .config .aws .docker .gnupg .kube .npm; do
       if [ -d "$BENCH_HOME/$d" ]; then
-        mount --bind "$BENCH_EMPTY" "$BENCH_HOME/$d"
+        exec {c}<"$BENCH_HOME/$d"
+        mount -c --bind "$BENCH_EMPTY" "/proc/self/fd/$c"
       fi
     done
     while IFS= read -r p; do
       [ -n "$p" ] && [ -e "$p" ] || continue
-      if [ -d "$p" ]; then
-        mount -t tmpfs -o size=1m,mode=0755 tmpfs "$p"
+      exec {h}<"$p"
+      opened "$h" "$p"
+      if [ "$p" = "$BENCH_PARENT" ]; then
+        # The tmpfs that covers the hidden path the working directory lies in: built at root scratch,
+        # the working directory put back at its own place inside it, then moved over the path whole.
+        mount -t tmpfs -o size=1m,mode=0755 tmpfs "$BENCH_COVER"
+        mkdir -p "$BENCH_COVER/$BENCH_REL"
+        mount --move "$BENCH_STASH" "$BENCH_COVER/$BENCH_REL"
+        mount -c --move "$BENCH_COVER" "/proc/self/fd/$h"
+      elif [ -d "/proc/self/fd/$h" ]; then
+        mount -c -t tmpfs -o size=1m,mode=0755 tmpfs "/proc/self/fd/$h"
       else
-        mount --bind /dev/null "$p"
+        mount -c --bind /dev/null "/proc/self/fd/$h"
       fi
     done <<< "$BENCH_HIDDEN"
-    # The working directory, put back at its own path inside the tmpfs that covers its parent.
-    if [ -n "$BENCH_STASH" ]; then
-      mkdir -p "$BENCH_WORKDIR"
-      mount --move "$BENCH_STASH" "$BENCH_WORKDIR"
-    fi
     # A private /tmp, unless the working directory is in it.
     case "$BENCH_WORKDIR/" in
       /tmp/*) ;;

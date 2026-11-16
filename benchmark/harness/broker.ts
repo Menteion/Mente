@@ -17,8 +17,9 @@
 // earlier replies, the thinking blocks it wrote), and the 5-minute cache, which is all it can price.
 //
 // It spends within the run's limits, which it reads at its start from broker-limits.json beside
-// it: at most maxRequests requests, at most maxInFlight at once, no body past maxBodyBytes, and
-// nothing whose most cost could take the run past its budget or maxDollars, whichever is less. A
+// it: at most maxRequests requests, at most maxInFlight at once over at most maxConnections
+// connections, no body past maxBodyBytes, and nothing whose most cost could take the run past its
+// budget or maxDollars, whichever is less. A
 // process that reaches its socket can spend no more than that, and it never learns the key: the
 // broker takes the key out of every byte it writes. The harness reckons its own budget with the
 // same two functions, worstCost and usageCost, so that it stops at its budget before the broker
@@ -45,6 +46,7 @@ export interface Limits {
   maxTokens: number;
   maxRequests: number;
   maxInFlight: number;
+  maxConnections: number;
   maxBodyBytes: number;
   maxDollars: number;
   cacheWrite: number;
@@ -114,6 +116,7 @@ export function readLimits(text: string): Limits {
     maxTokens: whole(raw.maxTokens, "maxTokens"),
     maxRequests: whole(raw.maxRequests, "maxRequests"),
     maxInFlight: whole(raw.maxInFlight, "maxInFlight"),
+    maxConnections: whole(raw.maxConnections, "maxConnections"),
     maxBodyBytes: whole(raw.maxBodyBytes, "maxBodyBytes"),
     maxDollars: positive(raw.maxDollars, "maxDollars"),
     cacheWrite,
@@ -136,14 +139,35 @@ export function utf8Length(text: string): number {
 const factorFor = (tokens: number, price: Price): number => (price.longPrompt !== undefined && tokens > price.longPrompt.above ? price.longPrompt.factor : 1);
 
 /**
- * The most a request can cost: every byte of its body billed as an input token written to the
- * cache, since no token of text is shorter than a byte, at the prices of a prompt that long, and
- * its most output. A bound, not an estimate, so that what is reserved for the requests in flight
- * covers what they are billed.
+ * The thinking blocks of a request's earlier replies. With preserved thinking each is billed as
+ * input at the reasoning it stands for, which its signature's bytes do not bound; it came from one
+ * reply, so it stands for at most maxTokens tokens.
  */
-export function worstCost(bodyText: string, maxTokens: number, price: Price, cacheWrite: number): number {
-  const bytes = utf8Length(bodyText);
-  return (factorFor(bytes, price) * (bytes * price.input * cacheWrite + maxTokens * price.output)) / 1e6;
+export function thinkingBlocks(body: unknown): number {
+  if (!plain(body)) return 0;
+  const { messages } = body as { messages?: unknown };
+  if (!Array.isArray(messages)) return 0;
+  let n = 0;
+  for (const m of messages) {
+    const { role, content } = (plain(m) ? m : {}) as { role?: unknown; content?: unknown };
+    if (role !== "assistant" || !Array.isArray(content)) continue;
+    for (const b of content) {
+      const { type } = (plain(b) ? b : {}) as { type?: unknown };
+      if (type === "thinking" || type === "redacted_thinking") n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * The most a request can cost: every byte of its body billed as an input token written to the
+ * cache, since no token of text is shorter than a byte, and maxTokens more for each thinking block
+ * of its earlier replies, at the prices of a prompt that long, and its most output. A bound, not an
+ * estimate, so that what is reserved for the requests in flight covers what they are billed.
+ */
+export function worstCost(bodyText: string, maxTokens: number, price: Price, limits: Pick<Limits, "cacheWrite" | "maxTokens">, thinking: number): number {
+  const input = utf8Length(bodyText) + thinking * limits.maxTokens;
+  return (factorFor(input, price) * (input * price.input * limits.cacheWrite + maxTokens * price.output)) / 1e6;
 }
 
 /** The fields of a usage the broker prices. */
@@ -249,7 +273,7 @@ function shapeMessage(message: unknown): object | string {
 const REQUEST_KEYS = ["model", "max_tokens", "system", "cache_control", "messages"];
 
 /** A request cut to the shape the harness sends, and written anew; or why it is not that shape. */
-export type Shaped = { text: string; model: string; maxTokens: number } | { refused: string };
+export type Shaped = { text: string; model: string; maxTokens: number; thinking: number } | { refused: string };
 
 /**
  * The request the broker sends for a body it was given: the shape requestBody makes (api.ts),
@@ -281,7 +305,7 @@ export function shape(body: unknown, limits: Limits): Shaped {
     ...(cache_control === undefined ? {} : { cache_control: { type: "ephemeral" } }),
     messages: shapedMessages,
   };
-  return { text: JSON.stringify(request), model, maxTokens: max_tokens };
+  return { text: JSON.stringify(request), model, maxTokens: max_tokens, thinking: thinkingBlocks(request) };
 }
 
 /**
@@ -369,7 +393,7 @@ export class Broker {
     if (bytes > this.limits.maxBodyBytes) return answer({ refused: `a body of ${bytes} bytes, past the ${this.limits.maxBodyBytes} of broker-limits.json` });
     if (this.inFlight >= this.limits.maxInFlight) return answer({ refused: `a request past the ${this.limits.maxInFlight} the broker sends at once` });
     const price = this.limits.models.get(shaped.model) as Price;
-    const worst = worstCost(shaped.text, shaped.maxTokens, price, this.limits.cacheWrite);
+    const worst = worstCost(shaped.text, shaped.maxTokens, price, this.limits, shaped.thinking);
     // The run's limits reached: the answer says so, and the harness stops as at its budget.
     if (this.requests >= this.limits.maxRequests) return answer({ refused: `a request past the run's ${this.limits.maxRequests}`, exhausted: true });
     if (this.spent + this.reserved + worst > this.cap) return answer({ refused: `a request that could take the run past its $${this.cap}`, exhausted: true });
@@ -410,13 +434,13 @@ function option(name: string): string {
   return at > 0 ? (process.argv.at(at + 1) ?? "") : "";
 }
 
-/** Reads the key, then serves each connection to the socket, one request a line, until stopped. */
-async function main(): Promise<void> {
-  const socket = option("socket");
-  if (socket === "") throw new Error("no socket: pass --socket <path>");
-  held = readFileSync(0, "utf8").trim();
-  const limits = readLimits(readFileSync(new URL("./broker-limits.json", import.meta.url), "utf8"));
-  const broker = new Broker(held, limits, Number(option("budget")), httpPost);
+/**
+ * A server for the broker at `socket`: one request a line on each connection, a line past the most a
+ * request may hold refused and its connection closed, and no more than maxConnections connections
+ * at once, so that what the broker holds in memory has a bound.
+ */
+export function serve(broker: Broker, socket: string, onError: (e: Error) => void): Promise<net.Server> {
+  const limits = broker.limits;
   // A request line holds its body and an id: a little more than the most a body may hold.
   const maxLine = limits.maxBodyBytes + 1024;
   const server = net.createServer((conn) => {
@@ -427,7 +451,7 @@ async function main(): Promise<void> {
       (line) => {
         broker
           .handle(line)
-          .catch((e) => scrub(JSON.stringify({ id: null, refused: `the broker failed: ${String(e)}` }), held))
+          .catch((e) => scrub(JSON.stringify({ id: null, refused: `the broker failed: ${String(e)}` }), broker.key))
           .then((out) => conn.write(`${out}\n`));
       },
       () => {
@@ -437,11 +461,23 @@ async function main(): Promise<void> {
     );
     conn.on("data", (chunk: string) => feed(chunk));
   });
-  server.on("error", (e) => {
+  server.maxConnections = limits.maxConnections;
+  server.on("error", onError);
+  return new Promise((done) => server.listen(socket, () => done(server)));
+}
+
+/** Reads the key, then serves each connection to the socket, one request a line, until stopped. */
+async function main(): Promise<void> {
+  const socket = option("socket");
+  if (socket === "") throw new Error("no socket: pass --socket <path>");
+  held = readFileSync(0, "utf8").trim();
+  const limits = readLimits(readFileSync(new URL("./broker-limits.json", import.meta.url), "utf8"));
+  const broker = new Broker(held, limits, Number(option("budget")), httpPost);
+  await serve(broker, socket, (e) => {
     console.error(scrub(`the broker cannot listen at ${socket}: ${String(e)}`, held));
     process.exit(1);
   });
-  server.listen(socket, () => console.error(`the broker listens at ${socket}, within $${broker.cap}, ${limits.maxRequests} requests and ${limits.maxInFlight} at once`));
+  console.error(`the broker listens at ${socket}, within $${broker.cap}, ${limits.maxRequests} requests, ${limits.maxInFlight} at once and ${limits.maxConnections} connections`);
 }
 
 if (import.meta.main) {
