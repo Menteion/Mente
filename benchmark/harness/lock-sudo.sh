@@ -15,11 +15,11 @@
 #   - lets no unprivileged process watch another through perf (perf_event_paranoid at its highest);
 #   - leaves sudo one rule for the runner's user, the sandbox's root half by its SHA-256, so that
 #     sudo itself refuses a changed file, with its environment reset and its path fixed, and takes
-#     every other rule. The rule lets its caller keep descriptors open into the root half
-#     (closefrom_override, sudo -C), which the root half closes before the command starts: a
-#     caller's own descriptors give it nothing it lacks, and the harness's test passes some in to
-#     pin that the root half closes them, which sudo's own closing would otherwise do for it.
-# Then it checks that root is out of reach, as --check does again at the job's end.
+#     every other rule.
+# Before the rule stands, it calls the installed root half once as root holding descriptors 7, 8
+# and 9, which sudo's own closing would otherwise take away first, to see that the root half itself
+# starts its command with 0, 1 and 2 alone. Then it checks that root is out of reach, as --check
+# does again at the job's end.
 #
 #   bash benchmark/harness/lock-sudo.sh           after setup, before the sandbox and the key
 #   bash benchmark/harness/lock-sudo.sh --check   later: root is still out of the user's reach
@@ -54,8 +54,8 @@ problems() {
   if [ "$listed" != "(root) NOPASSWD: sha256:$digest $ENTRY" ]; then echo "sudo lists for $(id -un) something other than its one rule, the sandbox by its digest: ${listed:-nothing}"; fi
   defaults="$(awk '/^Matching Defaults entries/ { getline; sub(/^[ \t]+/, ""); print; exit }' <<< "$listing")"
   case "$defaults" in
-    *"env_reset, !env_keep, !setenv, closefrom_override, secure_path=${SECURE_PATH//:/\\:}") ;;
-    *) echo "sudo's defaults for $(id -un) do not end with env_reset, !env_keep, !setenv, closefrom_override and secure_path=$SECURE_PATH: ${defaults:-none}" ;;
+    *"env_reset, !env_keep, !setenv, secure_path=${SECURE_PATH//:/\\:}") ;;
+    *) echo "sudo's defaults for $(id -un) do not end with env_reset, !env_keep, !setenv and secure_path=$SECURE_PATH: ${defaults:-none}" ;;
   esac
   # Root's alone, every directory above the root half, its configuration and sudo's rules, the
   # directories of the path sudo runs commands from, and those files themselves. The rule's own
@@ -150,6 +150,16 @@ lock() {
   } | sudo -n tee "$CONF" > /dev/null
   sudo -n chown root:root "$CONF"
   sudo -n chmod 0644 "$CONF"
+  # The installed root half closes every descriptor it holds above 2 before its command starts:
+  # called once here, as root, holding descriptors 7, 8 and 9 on the workspace, the runs root and
+  # its configuration, the command must list 0, 1 and 2 alone. Through sudo, as the harness calls
+  # it, sudo closes them first, so only a call like this one shows the root half's own loop.
+  local probe fds
+  probe="$(mktemp -d "$RUNNER_TEMP/runs/lock-check.XXXXXX")"
+  fds="$(sudo -n /bin/bash -c 'exec 7< "$1" 8< "$2" 9< "$3" && exec "$4" "$5" /bin/sh -c "ls /proc/\$\$/fd"' check \
+    "$GITHUB_WORKSPACE" "$RUNNER_TEMP/runs" "$CONF" "$ENTRY" "$probe" | tr '\n' ' ')"
+  rmdir "$probe"
+  [ "$fds" = "0 1 2 " ] || fail "the root half started its command with descriptors it was handed: $fds"
   sudo -n sysctl -q -w "kernel.core_pattern=$CORE"
   sudo -n sysctl -q -w kernel.yama.ptrace_scope=2
   # The highest level the kernel takes: 4 where the distribution's kernel knows it, else 3.
@@ -166,7 +176,7 @@ lock() {
     set -euo pipefail
     user="$1"; entry="$2"; rule="$3"; digest="$4"; path="$5"
     {
-      printf "Defaults:%s env_reset, !env_keep, !setenv, closefrom_override, secure_path=\"%s\"\n" "$user" "$path"
+      printf "Defaults:%s env_reset, !env_keep, !setenv, secure_path=\"%s\"\n" "$user" "$path"
       printf "%s ALL=(root) NOPASSWD: sha256:%s %s\n" "$user" "$digest" "$entry"
     } > "$rule.new"
     chmod 0440 "$rule.new"

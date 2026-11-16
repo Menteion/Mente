@@ -7,7 +7,9 @@
 // a file planted under <out>/held-out/, standing in for a held-out run's record beside the canary's
 // own folder, as a public run's build sits beside the held-out runs' in a measured run; to connect
 // to a socket listening where the broker listens, $RUNNER_TEMP/broker/socket, whose requests the
-// broker sends on with the API key (benchmark/harness/broker.ts); to reach any of these through a
+// broker sends on with the API key (benchmark/harness/broker.ts); to connect to every other
+// pathname socket the kernel shows on the runner, its daemons sockets under /run among them; to
+// reach any of these through a
 // descriptor it did not open (both runs start from a shell that holds descriptors on the
 // workspace, the masked credential directory and the broker's directory, as the sandbox's root
 // half once leaked them: the final pass of 05fe2f6); to write into a directory outside its own; to
@@ -52,7 +54,7 @@ import { own } from "../own.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MARKER = "BENCH-DRIVER-MARKER-7f3a91c2";
-const ROUTES = ["env", "proc", "file", "net", "ws", "held", "run", "broker", "fd", "write", "work"] as const;
+const ROUTES = ["env", "proc", "file", "net", "ws", "held", "run", "broker", "sock", "fd", "write", "work"] as const;
 type Route = typeof ROUTES extends readonly (infer R)[] ? R : never;
 
 function option(name: string, fallback: string): string {
@@ -138,6 +140,16 @@ async function main(): Promise<void> {
     const buildEnv = childEnv(rustToolchain ? { RUSTUP_TOOLCHAIN: rustToolchain } : {});
     const built = await runProcess(rustc, [...RUST_FLAGS, "-o", exe, join(rustDir, "leak.rs")], { env: buildEnv, timeoutMs: BUILD_TIMEOUT_MS });
     if (built.status !== 0) throw new Error(`the canary did not build: ${built.stderr}`);
+    // Every pathname socket the kernel shows on the runner, the broker's stand-in among them, for the
+    // canary to try to reach: a read-only mount stops no connection, so the sandbox must keep each out
+    // of sight, the system bus and the journal under /run among them, whatever its path.
+    const sockets = readFileSync("/proc/net/unix", "utf8")
+      .split("\n")
+      .slice(1)
+      .map((line) => line.trim().split(/\s+/).slice(7).join(" "))
+      .filter((path) => path.startsWith("/"));
+    writeFileSync(join(rustDir, "canary-sockets.txt"), [...new Set([brokerSocket, ...sockets])].join("\n"));
+    console.log(`sockets the canary tries: ${new Set([brokerSocket, ...sockets]).size}`);
 
     const run = async (confined: boolean): Promise<Run> => {
       const tag = `${confined ? "confined" : "control"}-${Date.now()}`;
@@ -236,7 +248,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(
-    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set, another run's folder, the broker's socket, every descriptor it did not open, writes outside the working directory and a mark on any mount another run could see, and #load of each at build time; no process traces another",
+    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set, another run's folder, the broker's socket, every other socket on the runner, every descriptor it did not open, writes outside the working directory and a mark on any mount another run could see, and #load of each at build time; no process traces another",
   );
 }
 

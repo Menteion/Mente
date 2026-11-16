@@ -1527,22 +1527,19 @@ test("the sandbox's root half drops only to its caller, takes no path but a dire
       // the root half's own, each on a directory the sandbox covers.
       const fds = sudo([dir, "/bin/sh", "-c", "ls /proc/$$/fd"]);
       assert.deepEqual(fds.stdout.trim().split(/\s+/), ["0", "1", "2"], fds.stderr);
-      // And with descriptors 7, 8 and 9 held into the root half on the workspace, the runs root and
-      // its configuration, which sudo -C 10 lets through (closefrom_override): the root half itself
-      // closes them, so the command still holds 0, 1 and 2 alone. Without -C, sudo would close them
-      // first, and this would pin sudo, not the root half (the final pass of 7cf871c).
+      // sudo closes every descriptor above 2 itself, and lets no caller keep one open into the root
+      // half: the rule allows no -C. That the root half closes those it holds is shown where only
+      // a call as root can show it, by lock-sudo.sh, which calls the installed root half holding
+      // descriptors 7, 8 and 9 before the rule stands, and fails the lock if they reach the command.
       const held = [openSync(REPOSITORY, "r"), openSync(runs, "r"), openSync(SANDBOX_CONF, "r")];
       try {
-        const passed = spawnSync("sudo", ["-n", "-C", "10", installed, dir, "/bin/sh", "-c", "ls /proc/$$/fd"], {
+        const kept = spawnSync("sudo", ["-n", "-C", "10", installed, dir, "/bin/sh", "-c", "ls /proc/$$/fd"], {
           encoding: "utf8",
           timeout: 60_000,
           stdio: ["ignore", "pipe", "pipe", "ignore", "ignore", "ignore", "ignore", ...held],
         });
-        assert.deepEqual(passed.stdout.trim().split(/\s+/), ["0", "1", "2"], passed.stderr);
-        // sudo took -C 10 and started the root half with them: had it refused the option, it would
-        // never have started the root half, whose own refusal of /etc this shows.
-        const refused = spawnSync("sudo", ["-n", "-C", "10", installed, "/etc", "/bin/sh", "-c", "ls /proc/$$/fd"], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe", "ignore", "ignore", "ignore", "ignore", ...held] });
-        assert.match(refused.stderr, /does not lie under the runs root/, "sudo refused -C 10, so the root half was never handed descriptors 7, 8 and 9");
+        assert.notEqual(kept.status, 0, `sudo let its caller keep descriptors open into the root half: ${kept.stdout}`);
+        assert.match(kept.stderr, /-C|close/i, kept.stderr);
       } finally {
         for (const fd of held) closeSync(fd);
       }

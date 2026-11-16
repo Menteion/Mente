@@ -25,10 +25,11 @@
 # namespace with its own /proc, so no process outside, the driver and the broker among them, is in
 # its table; an IPC namespace; a mount namespace in which an empty tmpfs covers each hidden
 # directory and the runs root, an unreadable empty directory covers each credential directory under
-# the home, /tmp, /dev/shm, /dev/mqueue and the caller runtime directory under /run/user are its
-# own, and every other mount the table lists is read-only, so that no run leaves anything for
-# another to find and the toolchains cannot be changed; <workdir> alone stays visible and writable
-# outside those, put back at its own path inside the cover of the runs root.
+# the home, /tmp, /dev/shm, /dev/mqueue and /run are its own, the last with no socket of the
+# runner's daemons in it and an empty runtime directory for the caller, and every other mount the
+# table lists is read-only, which the root half checks before it runs the command, so that no run
+# leaves anything for another to find and the toolchains cannot be changed; <workdir> alone stays
+# visible and writable outside those, put back at its own path inside the cover of the runs root.
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/mente-sandbox.conf
@@ -66,9 +67,8 @@ while read -r kind path rest; do
   esac
 done < "$CONF"
 [ -n "$runs" ] && [ -d "$runs" ] && [ "$(realpath -e -- "$runs")" = "$runs" ] || refuse "$CONF names no runs root that is a real directory"
-# The sandbox has a /tmp of its own, which it mounts first: a runs root under the host one would be
-# gone by then.
-case "$runs/" in /tmp/*) refuse "$CONF names a runs root under /tmp, which the sandbox replaces with its own" ;; esac
+# The sandbox has a /tmp and a /run of its own: a runs root under the host ones would be gone.
+case "$runs/" in /tmp/* | /run/*) refuse "$CONF names a runs root under /tmp or /run, which the sandbox replaces with its own" ;; esac
 
 # The working directory: a directory of the caller's, strictly under the runs root.
 [ -d "$1" ] || refuse "the working directory $1 is no directory"
@@ -156,28 +156,71 @@ exec unshare --net --pid --mount --uts --ipc --fork --mount-proc --kill-child --
       fi
     done <<< "$BENCH_HIDDEN"
     rmdir "$scratch/stash" "$scratch/cover" "$scratch/empty" "$scratch"
-    # Shared memory, message queues and the caller own runtime directory, which programs of other
-    # runs and the runner could also write: private to this sandbox.
+    # Shared memory, message queues and /run, which the runner, its daemons and other runs also
+    # reach: private to this sandbox. A read-only mount stops no connection to a socket, and /run
+    # holds the daemons sockets, the system bus and the journal among them; the caller keeps only an
+    # empty runtime directory of its own, where the runner has one.
     mount -t tmpfs -o nosuid,nodev,mode=1777 tmpfs /dev/shm
     mount -t mqueue -o nosuid,nodev,noexec mqueue /dev/mqueue
-    private=("$BENCH_WORKDIR" /tmp /dev/shm /dev/mqueue)
-    if [ -d "/run/user/$BENCH_UID" ]; then
-      mount -t tmpfs -o nosuid,nodev,mode=0700,uid="$BENCH_UID",gid="$BENCH_GID" tmpfs "/run/user/$BENCH_UID"
-      private+=("/run/user/$BENCH_UID")
+    runtime=false
+    if [ -d "/run/user/$BENCH_UID" ]; then runtime=true; fi
+    mount -t tmpfs -o nosuid,nodev,mode=0755 tmpfs /run
+    if $runtime; then
+      mkdir -m 0755 /run/user
+      mkdir -m 0700 "/run/user/$BENCH_UID"
+      chown "$BENCH_UID:$BENCH_GID" "/run/user/$BENCH_UID"
     fi
-    # Every other mount read-only, each one the mount table lists, so that one this does not know
-    # of, a new shared mount among them, is read-only too; a remount that fails stops the sandbox.
-    keep=$(printf "%s\n" "${private[@]}")
-    while read -r target majmin; do
-      target="$(printf "%b" "$target")"
-      grep -qxF -- "$target" <<< "$keep" && continue
-      # A mount that another now lies over, a cover or the new /proc, is no longer reachable by its
-      # path, nor by the command: what its path reaches is the mount above, a filesystem of another
-      # device. The canary, which writes into every writable mount and is looked for from outside,
-      # finds any this would leave writable.
-      [ "$(stat -c "%Hd:%Ld" -- "$target" 2> /dev/null)" = "$majmin" ] || continue
-      mount -o remount,bind,ro -- "$target"
-    done < <(findmnt -rn -o TARGET,MAJ:MIN | sort -u)
+    keep="$(printf "%s\n" "$BENCH_WORKDIR" /tmp /dev/shm /dev/mqueue /run)"
+    # The mount table, read whole, so that a table it cannot read stops the sandbox, in the order
+    # the mounts were made: a mount is reachable by its path unless a later one lies on that path or
+    # on one above it, as a cover, the new /proc and the private /run do. A path the table escapes
+    # past these two forms is no path that exists, and its remount stops the sandbox.
+    table() {
+      targets=()
+      options=()
+      local text line t o
+      text="$(cat /proc/self/mountinfo)"
+      while IFS= read -r line; do
+        read -r _ _ _ _ t o _ <<< "$line"
+        t="${t//\\040/ }"
+        t="${t//\\134/\\}"
+        targets+=("$t")
+        options+=("$o")
+      done <<< "$text"
+      if [ "${#targets[@]}" -lt 2 ]; then
+        echo "mente-sandbox: the mount table holds too little to be read" >&2
+        exit 2
+      fi
+    }
+    reachable() {
+      local j u t="${targets[$1]}"
+      for ((j = $1 + 1; j < ${#targets[@]}; j++)); do
+        u="${targets[$j]}"
+        if [ "$u" = "$t" ] || [ "$u" = / ] || [[ "$t" == "$u"/* ]]; then return 1; fi
+      done
+      return 0
+    }
+    # Every other reachable mount read-only, each one the table lists, so that one this does not
+    # know of, a new shared mount among them, is read-only too; a remount that fails stops it.
+    table
+    for i in "${!targets[@]}"; do
+      t="${targets[$i]}"
+      if grep -qxF -- "$t" <<< "$keep" || ! reachable "$i"; then continue; fi
+      mount -o remount,bind,ro -- "$t"
+    done
+    # And then they are read-only, as the table reads afresh says, or the sandbox stops.
+    table
+    for i in "${!targets[@]}"; do
+      t="${targets[$i]}"
+      if grep -qxF -- "$t" <<< "$keep" || ! reachable "$i"; then continue; fi
+      case "${options[$i]}," in
+        ro,*) ;;
+        *)
+          echo "mente-sandbox: $t is still writable after the read-only pass" >&2
+          exit 2
+          ;;
+      esac
+    done
     cd "$BENCH_WORKDIR"
     # The command starts with descriptors 0, 1 and 2 alone: every other this shell holds, whatever
     # opened it, is closed here, last.

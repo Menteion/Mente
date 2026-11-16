@@ -10,9 +10,11 @@
 // never what it read; the check reads the flags. Under the sandbox every flag but `work` must be
 // false; without it, as a control, they are true, so a green result is not vacuous.
 //
-// It also writes a marker into every directory up to two levels below each mount it sees as
-// writable, but its own directory, and lists where it wrote in canary-wrote.txt there: the check
-// looks for each from outside, where any it finds is a channel from one run to another.
+// It connects to every socket in canary-sockets.txt in its own directory, which the check fills
+// with every pathname socket the kernel shows outside the sandbox, so that one it can reach fails
+// whatever its path. It also writes a marker into every directory up to two levels below each
+// mount it sees as writable, but its own directory, and lists where it wrote in canary-wrote.txt
+// there: the check looks for each from outside, where any it finds is a channel between runs.
 //
 //   leak <credential file> <workspace file> <held-out file> <directory to write into> <another run's file> <the broker's socket> <tag>
 use std::fs;
@@ -82,6 +84,10 @@ fn main() {
     // The broker's socket, which holds the key's spending: a path the sandbox covers.
     let broker_reached = !broker.is_empty() && reaches(&broker);
 
+    // Every socket the runner's daemons listen on, the system bus and the journal among them: a
+    // read-only mount stops no connection, so the sandbox must keep each out of sight.
+    let socket_reached = fs::read_to_string("canary-sockets.txt").map(|list| list.lines().filter(|l| !l.is_empty()).any(|p| reaches(p) || datagram_reaches(p))).unwrap_or(false);
+
     // A write outside the working directory, which a read-only root refuses, and one inside it.
     let probe = Path::new(&outside).join("canary-write");
     let wrote_outside = !outside.is_empty() && fs::write(&probe, b"x").is_ok();
@@ -96,7 +102,7 @@ fn main() {
     let _ = fs::remove_file("canary-work");
 
     println!(
-        "env={env_secret} proc={proc_secret} file={file_secret} net={has_network} ws={workspace_file} held={held_out_file} run={other_run_file} broker={broker_reached} fd={fd_reached} write={wrote_outside} work={wrote_inside}"
+        "env={env_secret} proc={proc_secret} file={file_secret} net={has_network} ws={workspace_file} held={held_out_file} run={other_run_file} broker={broker_reached} sock={socket_reached} fd={fd_reached} write={wrote_outside} work={wrote_inside}"
     );
 }
 
@@ -201,5 +207,16 @@ fn reaches(path: &str) -> bool {
 
 #[cfg(not(unix))]
 fn reaches(_path: &str) -> bool {
+    false
+}
+
+/// Whether a Unix datagram socket at `path` takes a connection, as the journal's does.
+#[cfg(unix)]
+fn datagram_reaches(path: &str) -> bool {
+    std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.connect(path)).is_ok()
+}
+
+#[cfg(not(unix))]
+fn datagram_reaches(_path: &str) -> bool {
     false
 }
