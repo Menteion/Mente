@@ -129,10 +129,10 @@ fn day(text: &str) -> Option<(i32, u32, u32)> {
     ))
 }
 
-/// The number of a pull request at its address.
+/// The number of a pull request at its address: a positive number, with no zero before it.
 fn pull_number(text: &str) -> Option<u32> {
     let n = text.strip_prefix(PULLS)?;
-    (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    (n.starts_with(|c: char| ('1'..='9').contains(&c)) && n.chars().all(|c| c.is_ascii_digit()))
         .then(|| n.parse().ok())
         .flatten()
 }
@@ -162,7 +162,10 @@ fn guard_of(text: &str) -> Option<Guard> {
 /// is removed, never reused. That the fix merged is a fact of the history, which the Commits check
 /// reads; this reads the tree.
 pub fn problems(root: &Path, rows: &[Escape]) -> Vec<String> {
-    let sources = Sources::read(root);
+    let sources = match Sources::read(root) {
+        Ok(sources) => sources,
+        Err(why) => return vec![format!("the guards cannot be read: {}", why)],
+    };
     let mut out = Vec::new();
     for r in rows {
         if !AREAS.contains(&r.area.as_str()) {
@@ -186,7 +189,10 @@ pub fn problems(root: &Path, rows: &[Escape]) -> Vec<String> {
     out
 }
 
-/// The files a guard may be declared in, read once.
+/// The code a guard may be declared in, read once from the files git tracks: the Rust sources of
+/// `compiler/` with their comments and literals taken out, the JavaScript and TypeScript of the
+/// workflow policy and of the Node tests with their comments taken out, and the quick checks' map.
+/// A name in a comment, in an untracked copy or in a spike declares no guard.
 struct Sources {
     rust: Vec<String>,
     policy: Vec<String>,
@@ -195,29 +201,38 @@ struct Sources {
 }
 
 impl Sources {
-    fn read(root: &Path) -> Sources {
-        let files = |dirs: &[&str], exts: &[&str]| {
-            let mut out = Vec::new();
-            for d in dirs {
-                collect(&root.join(d), exts, &mut out);
-            }
-            out
+    fn read(root: &Path) -> Result<Sources, String> {
+        let files = tracked(root)?;
+        let read = |dirs: &[&str], exts: &[&str], code: fn(&str) -> String| -> Vec<String> {
+            files
+                .iter()
+                .filter(|f| dirs.iter().any(|d| f.starts_with(&format!("{}/", d))))
+                .filter(|f| {
+                    Path::new(f)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| exts.contains(&e))
+                })
+                .filter_map(|f| fs::read_to_string(root.join(f)).ok())
+                .map(|text| code(&text))
+                .collect()
         };
-        Sources {
-            rust: files(&["compiler", "spikes"], &["rs"]),
-            policy: files(&[".github/scripts"], &["mjs"]),
-            node: files(
+        Ok(Sources {
+            rust: read(&["compiler"], &["rs"], rust_code),
+            policy: read(&[".github/scripts"], &["mjs"], js_code),
+            node: read(
                 &["benchmark", "tools", "site", ".github/scripts"],
                 &["mjs", "ts"],
+                js_code,
             ),
             quick: fs::read_to_string(root.join("tools/quick-checks.json")).unwrap_or_default(),
-        }
+        })
     }
 
     fn holds(&self, guard: &Guard) -> bool {
         let any = |texts: &[String], needle: &str| texts.iter().any(|t| t.contains(needle));
         match guard {
-            Guard::Test(name) => any(&self.rust, &format!("fn {}(", name)),
+            Guard::Test(name) => self.rust.iter().any(|code| runs_test(code, name)),
             Guard::Policy(name) => any(&self.policy, &format!("check(\"{}\"", name)),
             Guard::Node(name) => any(&self.node, &format!("test(\"{}\"", name)),
             Guard::Quick(name) => self.quick.contains(&format!("\"name\": \"{}\"", name)),
@@ -225,27 +240,273 @@ impl Sources {
     }
 }
 
-/// The text of each file under `dir` with one of `exts`, but none under `target` or
-/// `node_modules`.
-fn collect(dir: &Path, exts: &[&str], out: &mut Vec<String>) {
+/// The files git tracks in the repository at `root`, by their paths from it, `/` between names.
+/// In CI's test sandbox `.git` is an empty directory, so that a test cannot read the history; there
+/// the checkout is the tracked tree, and its files are read, but those a build or an install
+/// leaves under `target` and `node_modules`. That is sound because CI's checkout is fresh: nothing
+/// untracked stands in it but what its own steps build and install, under the two skipped. Anywhere else git is asked, with no program of the
+/// repository's configuration run, and a git that cannot answer fails the check.
+pub fn tracked(root: &Path) -> Result<Vec<String>, String> {
+    let git = root.join(".git");
+    if git.is_dir() && fs::read_dir(&git).is_ok_and(|mut d| d.next().is_none()) {
+        let mut out = Vec::new();
+        walk(root, "", &mut out);
+        return Ok(out);
+    }
+    let output = std::process::Command::new("git")
+        .args([
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "ls-files",
+            "-z",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git ls-files: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Each file under `dir`, by its path from the root after `prefix`, but none under `.git`, `target`
+/// or `node_modules`.
+fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        if path.is_dir() {
-            if name != "target" && name != "node_modules" {
-                collect(&path, exts, out);
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = format!("{}{}", prefix, name);
+        if entry.path().is_dir() {
+            if name != ".git" && name != "target" && name != "node_modules" {
+                walk(&entry.path(), &format!("{}/", path), out);
             }
-        } else if path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| exts.contains(&e))
-        {
-            out.extend(fs::read_to_string(&path).ok());
+        } else {
+            out.push(path);
         }
     }
+}
+
+/// Whether `code`, a Rust source as [`rust_code`] leaves it, declares a test `name` that runs: a
+/// function `fn name(` under `#[test]` and under no attribute that ignores it.
+fn runs_test(code: &str, name: &str) -> bool {
+    let needle = format!("fn {}(", name);
+    code.match_indices(&needle).any(|(at, _)| {
+        let before = &code[..at];
+        if before.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+        let attributes = attributes_before(before);
+        attributes.iter().any(|a| a == "test") && !attributes.iter().any(|a| a.contains("ignore"))
+    })
+}
+
+/// The attributes written just before the end of `code`, each without its `#[`, its `]` and its
+/// spaces, over the words `pub`, `async`, `unsafe` and `const` that may stand between them and
+/// the function.
+fn attributes_before(code: &str) -> Vec<String> {
+    let mut rest = code.trim_end();
+    let mut out = Vec::new();
+    loop {
+        if let Some(word) = ["pub", "async", "unsafe", "const"].into_iter().find(|w| {
+            rest.ends_with(w)
+                && !rest[..rest.len() - w.len()]
+                    .ends_with(|c: char| c.is_alphanumeric() || c == '_')
+        }) {
+            rest = rest[..rest.len() - word.len()].trim_end();
+            continue;
+        }
+        if !rest.ends_with(']') {
+            return out;
+        }
+        let mut depth = 0usize;
+        let mut open = None;
+        for (k, c) in rest.char_indices().rev() {
+            match c {
+                ']' => depth += 1,
+                '[' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(open) = open.filter(|&k| rest[..k].ends_with('#')) else {
+            return out;
+        };
+        out.push(
+            rest[open + 1..rest.len() - 1]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect(),
+        );
+        rest = rest[..open - 1].trim_end();
+    }
+}
+
+fn starts(c: &[char], k: usize, s: &str) -> bool {
+    s.chars().enumerate().all(|(j, x)| c.get(k + j) == Some(&x))
+}
+
+fn identifier(c: Option<&char>) -> bool {
+    c.is_some_and(|c| c.is_alphanumeric() || *c == '_')
+}
+
+/// A Rust source as its tokens read: each comment, block comments nested, made one space, and
+/// each string, raw string, byte string or character literal made `""`, so that a name written in
+/// one is no code. A lifetime stays as it is.
+pub fn rust_code(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut k = 0;
+    while k < c.len() {
+        if starts(&c, k, "//") {
+            while k < c.len() && c[k] != '\n' {
+                k += 1;
+            }
+            out.push(' ');
+            continue;
+        }
+        if starts(&c, k, "/*") {
+            let mut depth = 0usize;
+            while k < c.len() {
+                if starts(&c, k, "/*") {
+                    depth += 1;
+                    k += 2;
+                } else if starts(&c, k, "*/") {
+                    depth -= 1;
+                    k += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+            out.push(' ');
+            continue;
+        }
+        let token = k == 0 || !identifier(c.get(k - 1));
+        let prefix = usize::from(token && matches!(c[k], 'b' | 'c'));
+        if token && c.get(k + prefix) == Some(&'r') {
+            let hashes = c[k + prefix + 1..]
+                .iter()
+                .take_while(|&&h| h == '#')
+                .count();
+            if c.get(k + prefix + 1 + hashes) == Some(&'"') {
+                let close: String = std::iter::once('"')
+                    .chain(std::iter::repeat_n('#', hashes))
+                    .collect();
+                let mut j = k + prefix + 2 + hashes;
+                while j < c.len() && !starts(&c, j, &close) {
+                    j += 1;
+                }
+                k = (j + close.chars().count()).min(c.len());
+                out.push_str("\"\"");
+                continue;
+            }
+        }
+        if c.get(k + prefix) == Some(&'"') && (prefix == 0 || token) {
+            let mut j = k + prefix + 1;
+            while j < c.len() && c[j] != '"' {
+                j += if c[j] == '\\' { 2 } else { 1 };
+            }
+            k = (j + 1).min(c.len());
+            out.push_str("\"\"");
+            continue;
+        }
+        if c[k] == '\'' && (c.get(k + 1) == Some(&'\\') || c.get(k + 2) == Some(&'\'')) {
+            let mut j = k + 1;
+            while j < c.len() && c[j] != '\'' {
+                j += if c[j] == '\\' { 2 } else { 1 };
+            }
+            k = (j + 1).min(c.len());
+            out.push_str("\"\"");
+            continue;
+        }
+        out.push(c[k]);
+        k += 1;
+    }
+    out
+}
+
+/// A JavaScript or TypeScript source with each comment made one space. Its strings stay, since a
+/// test is named by one. A `/` that starts a regular expression, as the token before it says, is
+/// read as one, so that a `//` in it starts no comment.
+pub fn js_code(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut k = 0;
+    while k < c.len() {
+        if starts(&c, k, "//") {
+            while k < c.len() && c[k] != '\n' {
+                k += 1;
+            }
+            out.push(' ');
+            continue;
+        }
+        if starts(&c, k, "/*") {
+            k += 2;
+            while k < c.len() && !starts(&c, k, "*/") {
+                k += 1;
+            }
+            k = (k + 2).min(c.len());
+            out.push(' ');
+            continue;
+        }
+        let quote = matches!(c[k], '"' | '\'' | '`');
+        let regex = c[k] == '/' && {
+            let before = out.trim_end();
+            before.is_empty()
+                || before.ends_with(|p: char| "(,=:[!&|?{};+-*%<>~^".contains(p))
+                || [
+                    "return", "typeof", "case", "in", "of", "delete", "void", "throw", "new",
+                ]
+                .iter()
+                .any(|w| {
+                    before.ends_with(w)
+                        && !before[..before.len() - w.len()]
+                            .ends_with(|p: char| p.is_alphanumeric() || p == '_' || p == '$')
+                })
+        };
+        if quote || regex {
+            let end = c[k];
+            let mut j = k + 1;
+            let mut class = false;
+            while j < c.len() && (c[j] != end || class) {
+                if c[j] == '\\' {
+                    j += 1;
+                } else if regex && c[j] == '[' {
+                    class = true;
+                } else if regex && c[j] == ']' {
+                    class = false;
+                }
+                j += 1;
+            }
+            let j = (j + 1).min(c.len());
+            out.extend(&c[k..j]);
+            k = j;
+            continue;
+        }
+        out.push(c[k]);
+        k += 1;
+    }
+    out
 }
 
 /// The ISO week of a day, as `YYYY-Www`.

@@ -126,7 +126,7 @@ const BEFORE_THE_RULE: &[(&str, Option<&str>)] = &[
     ("dependency-approval", Some("2026-11-09")),
     ("example-bodies", Some("2026-11-09")),
     ("m2-design-closure", Some("2026-11-11")),
-    ("example-01-m2", Some("2026-11-11")),
+    ("example-binary-search-m2", Some("2026-11-11")),
     ("cranelift-simd-width", None),
     ("cranelift-float-select", None),
     ("cranelift-cf-abi", None),

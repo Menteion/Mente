@@ -3485,6 +3485,7 @@ const GATE_FILES = [
   "/compiler/mente-cli/tests/escapes.rs",
   "/compiler/mente-cli/src/records.rs",
   "/compiler/mente-cli/src/escapes.rs",
+  "/compiler/mente-cli/src/front-matter/",
   "/compiler/*/src/overflow_traps.rs",
   "/compiler/mente-threads/",
   "/compiler/*/Cargo.toml",

@@ -1,0 +1,8 @@
+fields day area note
+expect refused
+input
+---{CR}
+day: 2026-11-14{CR}
+area: checker{CR}
+note: No lint.{CR}
+---{CR}

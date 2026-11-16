@@ -1,0 +1,11 @@
+fields day area note
+expect accepted
+value day 2026-11-14
+value area checker
+value note No lint: a walker's `_` arm.
+input
+---
+day: 2026-11-14
+area: checker
+note: 'No lint: a walker''s `_` arm.'
+---
