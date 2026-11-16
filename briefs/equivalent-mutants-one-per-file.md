@@ -1,9 +1,9 @@
 ---
 id: equivalent-mutants-one-per-file
-status: draft
+status: active
 type: chore
 awaits: [docs/design-review.md#records-one-per-file]
-affectedFiles: [compiler/mente-cli/tests/mutants/**, compiler/mente-cli/src/mir_mutants.rs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, spec/mir-and-codegen.md, briefs/equivalent-mutants-one-per-file.md, briefs/archive/equivalent-mutants-one-per-file.md, briefs/reference-type-idiom.md]
+affectedFiles: [compiler/mente-cli/tests/mutants/**, compiler/mente-cli/src/mir_mutants.rs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, spec/mir-and-codegen.md, briefs/equivalent-mutants-one-per-file.md, briefs/archive/equivalent-mutants-one-per-file.md]
 protectedFiles: [.github/**, CLAUDE.md]
 ---
 
