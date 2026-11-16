@@ -1138,7 +1138,7 @@ const PINNED_FILES = new Map([
   ["benchmark/harness/sandbox-root.sh", "2298f2a5e113cd18c796a1359c54ffb0cd755b783ae0d056d662e06eaf24fbc6"],
   ["benchmark/harness/fetch-held-out.sh", "c16dff5677b17c9d6e9090cf35f93dc9f58782a182b2e417f1d23482fdce9792"],
   // The broker's own module, which start-broker.sh names through the workspace's path.
-  ["benchmark/harness/broker.ts", "156cbd599a100b3a483d5ea8f3d8695bcbe9763ffb3312eb76bd2edb7c4e5799"],
+  ["benchmark/harness/broker.ts", "20ad249db858d152ef201a89e96ba41035d619918764d2b8a6a8b2aa6db8df7e"],
   // Every file a secret job runs before its secret steps, with every module those import: none of
   // them can leave the secret steps an environment, a program first on PATH or a library to preload
   // without an edit review sees (secretPrefixFiles; the re-check of c55cf8f). And the pins of

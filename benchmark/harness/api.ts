@@ -174,6 +174,16 @@ export interface Reply {
   usage: Usage;
 }
 
+/**
+ * How many thinking blocks a request carried back, in the model's earlier replies among `messages`,
+ * and how many its answer held, which the next request carries back, each counted as the broker
+ * counts them (thinkingBlocks): so that a record shows whether a run sent the model's thinking back
+ * through the broker (the non-core preliminary run of 2026-11-16 could not tell from usage alone).
+ */
+export function thinkingCarried(messages: Message[], reply: Reply): { sent: number; received: number } {
+  return { sent: thinkingBlocks({ messages }), received: thinkingBlocks({ messages: [{ role: "assistant", content: reply.content }] }) };
+}
+
 /** The request body of one call. */
 export function requestBody(model: string, system: string, messages: Message[]): object {
   return {
