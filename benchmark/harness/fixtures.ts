@@ -22,13 +22,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  REPOSITORY,
   buildProgram,
-  checkOutside,
+  checkUnderRuns,
   childEnv,
   cleanOutput,
   dropExecutable,
-  hiddenPaths,
+  readSandboxRoots,
   runCases,
   runProcess,
   rustcInSysroot,
@@ -67,14 +66,14 @@ async function main(): Promise<void> {
     rustToolchain: option("rust-toolchain", pins.rust.toolchain),
     odin: option("odin", "odin"),
     sandbox: option("sandbox", ""),
-    hide: [REPOSITORY],
-    // The output directory, covered all but each fixture's own directory, as in the measured run.
-    cover: resolve(out),
+    // The output directory, under the sandbox's runs root, covered all but each fixture's own
+    // directory, as in the measured run.
+    out: resolve(out),
   };
   for (const lang of languages) {
     if (!(lang in EXTENSIONS)) throw new Error(`no fixtures for ${lang}`);
   }
-  checkOutside(out, tools);
+  if (tools.sandbox) checkUnderRuns(out, readSandboxRoots());
   if (fixtures && languages.includes("mente") && !tools.mn) throw new Error("the Mente fixtures need --mn");
   if (fixtures && languages.includes("rust")) {
     tools.rustc = await rustcInSysroot(tools.rustc, tools.rustToolchain);
@@ -140,7 +139,7 @@ async function main(): Promise<void> {
       rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "block.odin"), block);
-      const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["check", ".", "-no-entry-point"], hiddenPaths(tools));
+      const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["check", ".", "-no-entry-point"]);
       const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: 120_000 });
       // The block goes into the log beside the compiler's message, so that its author can fix it.
       if (p.status !== 0) failures.push(`odin document block ${i + 1}: odin check rejects it\n${block}\n${cleanOutput(p.stderr + p.stdout, dir).join("\n")}`);

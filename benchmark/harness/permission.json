@@ -1,0 +1,22 @@
+{
+  "about": "How the broker, the one process of a benchmark run that holds the API key, is started (benchmark/harness/broker.ts; docs/design-review.md, untrusted-test-isolation): under exactly this version of Node, whose permission model these flags rely on, with an environment cleared but for PATH (env -i, since NODE_OPTIONS could add --allow-child-process), and with exactly these flags, $GITHUB_WORKSPACE standing for the workspace. The workflow policy (.github/scripts/policy.test.mjs) requires each secret job's broker step to start it so, and every job that runs the harness's tests to run them on this version of Node; the harness's test runs planted escapes under these flags. None of refused may appear among them: each would let the process start another, run a worker, an addon or WASI, write a file, or open an inspector.",
+  "node": "24.22.1",
+  "broker": {
+    "script": "benchmark/harness/broker.ts",
+    "flags": [
+      "--disallow-code-generation-from-strings",
+      "--no-experimental-sqlite",
+      "--permission",
+      "--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker.ts",
+      "--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json"
+    ]
+  },
+  "refused": [
+    "--allow-child-process",
+    "--allow-worker",
+    "--allow-addons",
+    "--allow-wasi",
+    "--allow-fs-write",
+    "--allow-inspector"
+  ]
+}

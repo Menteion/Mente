@@ -40,19 +40,43 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
-      - name: The agents write the programs
+      - name: Take root from the runner's user, but for the sandbox
+        # From here to the job's end sudo runs nothing for the runner's user but the sandbox's
+        # root-owned half, no core dump is written, no process traces another, and no container
+        # daemon listens, so that no process of that user reads the key out of another's memory
+        # (benchmark/harness/lock-sudo.sh; docs/design-review.md, untrusted-test-isolation).
+        run: bash benchmark/harness/lock-sudo.sh
+      - name: The broker, the one process that holds the API key
+        # The key reaches the broker on its standard input and in no environment. Under Node's
+        # permission model and the flags of benchmark/harness/permission.json it can start no process,
+        # worker, addon or WASI, read only its own file and its limits, and write none; it sends on only
+        # the shape of request the harness makes, within the limits of broker-limits.json; and its
+        # socket is the runner's user's alone, out of the sandbox's reach. The step ends once it
+        # listens, and the shell that held the key with it (benchmark/harness/start-broker.sh;
+        # docs/design-review.md, untrusted-test-isolation).
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BUDGET: ${{ inputs.budget }}
+        run: bash benchmark/harness/start-broker.sh
+      - name: The agents write the programs
+        env:
           RUNS: ${{ inputs.runs }}
           BUDGET: ${{ inputs.budget }}
-        run: node --disallow-code-generation-from-strings benchmark/harness/probe.ts --runs "$RUNS" --budget "$BUDGET" --out probe-out
+        run: node --disallow-code-generation-from-strings benchmark/harness/probe.ts --runs "$RUNS" --budget "$BUDGET" --out probe-out --broker "$RUNNER_TEMP/broker/socket"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: syntax-probe-programs
           path: probe-out
+      - name: Stop the broker
+        # Whatever came before; its log holds no key, which the broker takes out of every byte it
+        # writes. Then root must still be out of the runner's user's reach, as the lock left it.
+        if: always()
+        run: |
+          bash benchmark/harness/stop-broker.sh
+          bash benchmark/harness/lock-sudo.sh --check
 
   check:
     name: Probe, mn checks
@@ -75,7 +99,7 @@ jobs:
         run: cargo build --locked --release --bin mn
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

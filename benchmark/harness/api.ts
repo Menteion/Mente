@@ -9,12 +9,22 @@
 // run of a language, so each later call reads it from the cache. Caching changes what a call
 // costs, never what the model is shown.
 
+import { readFileSync } from "node:fs";
+import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
+import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
-export const API_VERSION = "2026-10-21";
-export const MAX_TOKENS = 16000;
-/** A cache write's price, as a multiple of the input price, for 5-minute entries. */
-export const CACHE_WRITE = 1.25;
+/**
+ * The limits the broker, which holds the key, spends within (benchmark/harness/broker-limits.json):
+ * the harness reads its API version, its most output, its cache-write price and its models' prices
+ * from the same file, through the broker's own reader, so that the harness's budget and the
+ * broker's cannot drift apart.
+ */
+const LIMITS = readLimits(readFileSync(new URL("./broker-limits.json", import.meta.url), "utf8"));
+export const API_VERSION: string = LIMITS.version;
+export const MAX_TOKENS: number = LIMITS.maxTokens;
+/** The most requests the broker sends at once: a run's concurrency may not pass it. */
+export const MAX_IN_FLIGHT: number = LIMITS.maxInFlight;
 
 /** A model and its prices, in US dollars per million tokens. */
 export interface Model {
@@ -22,16 +32,13 @@ export interface Model {
   input: number;
   output: number;
   cacheRead: number;
+  /** For a model priced by its prompt's length, the factor every price takes above `above` tokens. */
+  longPrompt?: { above: number; factor: number };
 }
 
-// Prices as Anthropic lists them for its first-party API (the claude-api reference, cached
-// 2026-10-06): Haiku's are for prompts of 100K tokens or fewer, which every prompt here is.
-export const KNOWN_MODELS: Record<string, Model> = {
-  "claude-haiku-5-5": { id: "claude-haiku-5-5", input: 0.1, output: 0.5, cacheRead: 0.01 },
-  "claude-sonnet-5-5": { id: "claude-sonnet-5-5", input: 2, output: 10, cacheRead: 0.2 },
-  "claude-opus-5-5": { id: "claude-opus-5-5", input: 4, output: 20, cacheRead: 0.2 },
-  "claude-fable-5-1": { id: "claude-fable-5-1", input: 10, output: 50, cacheRead: 0.25 },
-};
+// The models a run may use, with their prices, from broker-limits.json, whose `about` says where
+// they come from. The broker refuses any other.
+export const KNOWN_MODELS: Record<string, Model> = Object.fromEntries([...LIMITS.models].map(([id, price]) => [id, { id, ...price }]));
 
 /**
  * Reads a comma-separated list of models: a known id, or `id@input/output/cache-read` with its
@@ -59,15 +66,9 @@ export interface Usage {
   cache_read_input_tokens?: number;
 }
 
-/** What a call cost, in US dollars. */
-export function callCost(usage: Usage, model: Model): number {
-  return (
-    (usage.input_tokens * model.input +
-      (usage.cache_creation_input_tokens ?? 0) * model.input * CACHE_WRITE +
-      (usage.cache_read_input_tokens ?? 0) * model.cacheRead +
-      usage.output_tokens * model.output) /
-    1e6
-  );
+/** What a call cost, in US dollars, as the broker counts it: at its worst when the usage is unreadable. */
+export function callCost(usage: Usage, model: Model, worst: number): number {
+  return usageCost(usage, model, LIMITS, worst);
 }
 
 /** All the input tokens a call was billed for, cached or not. */
@@ -76,11 +77,12 @@ export function inputTokens(usage: Usage): number {
 }
 
 /**
- * The most a call can cost: its prompt, estimated at one token per three characters and priced
- * as a cache write, and the most output it may produce.
+ * The most a call can cost, as the broker reckons it from the body it is sent: every byte of the
+ * body an input token written to the cache, maxTokens more for each thinking block of its earlier
+ * replies, and the most output.
  */
-export function worstCost(promptChars: number, model: Model): number {
-  return ((promptChars / 3) * model.input * CACHE_WRITE + MAX_TOKENS * model.output) / 1e6;
+export function worstCost(body: object, model: Model): number {
+  return worstOfBody(JSON.stringify(body), MAX_TOKENS, model, LIMITS, thinkingBlocks(body));
 }
 
 /** The budget of a run of the benchmark, in US dollars. */
@@ -108,6 +110,35 @@ export function settle(b: Budget, worst: number, cost: number): void {
   b.spent += cost;
 }
 
+/** A lost answer is sent again this many times; each try counts as spent at its most. */
+export const NETWORK_RETRIES = 3;
+
+/**
+ * One call within the budget, or null when the budget stops it: the harness's own, reckoned as the
+ * broker reckons it from the same body, or the broker's limits, which end the run as the budget
+ * does. The benchmark, the preliminary run and the syntax probe each make their calls so.
+ */
+export async function budgetedCall(post: Post, budget: Budget, body: object, model: Model): Promise<{ reply: Reply; cost: number } | null> {
+  const worst = worstCost(body, model);
+  for (let tries = 0; ; tries++) {
+    if (!reserve(budget, worst)) return null;
+    try {
+      const reply = await send(post, body);
+      const cost = callCost(reply.usage, model, worst);
+      settle(budget, worst, cost);
+      return { reply, cost };
+    } catch (e) {
+      // A lost answer may still have been billed, so it counts at its most.
+      settle(budget, worst, e instanceof NetworkError ? worst : 0);
+      if (e instanceof BrokerRefused && e.exhausted) {
+        budget.stopped = true;
+        return null;
+      }
+      if (!(e instanceof NetworkError) || tries >= NETWORK_RETRIES) throw e;
+    }
+  }
+}
+
 export type Message = { role: "user" | "assistant"; content: unknown };
 
 export interface Reply {
@@ -131,40 +162,32 @@ export function requestBody(model: string, system: string, messages: Message[]):
 /** A call whose answer was lost on the way, which may still have been billed. */
 export class NetworkError extends Error {}
 
+/** One request of the Messages API, sent through the broker (benchmark/harness/brokered.ts). */
+export type Post = (body: object) => Promise<Answer>;
+
 /**
- * One call, retried on a rate limit or a server error, which are not billed. A connection lost
- * during the call throws NetworkError, so that the caller can count the call as spent.
+ * One request, retried on a rate limit or a server error, which are not billed. A connection the
+ * broker lost during the call throws NetworkError, so that the caller can count the call as spent.
  */
-export async function ask(apiKey: string, model: string, system: string, messages: Message[]): Promise<Reply> {
+export async function send(post: Post, body: object): Promise<Reply> {
   for (let attempt = 0; ; attempt++) {
-    let response: Response;
-    try {
-      response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": API_VERSION,
-        },
-        body: JSON.stringify(requestBody(model, system, messages)),
-      });
-    } catch (e) {
-      throw new NetworkError(`the request failed: ${String(e)}`);
-    }
-    if (response.ok) {
-      const body = await response.json();
-      const content = body.content ?? [];
+    const answer = await post(body);
+    if (answer.status === -1) throw new NetworkError(answer.text);
+    if (answer.status >= 200 && answer.status < 300) {
+      const parsed = JSON.parse(answer.text);
+      const content = parsed.content ?? [];
       const text = content
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { text: string }) => b.text)
         .join("\n");
-      return { content, text, stop_reason: body.stop_reason, usage: body.usage };
+      return { content, text, stop_reason: parsed.stop_reason, usage: parsed.usage };
     }
-    const retryable = response.status === 429 || response.status >= 500;
+    const retryable = answer.status === 429 || answer.status >= 500;
     if (!retryable || attempt >= 5) {
-      throw new Error(`the API answered ${response.status}: ${await response.text()}`);
+      throw new Error(`the API answered ${answer.status}: ${answer.text}`);
     }
-    const after = Number(response.headers.get("retry-after") ?? "0");
+    const after = Number(answer.retryAfter || "0");
     await new Promise((done) => setTimeout(done, after > 0 ? after * 1000 : 2000 * 2 ** attempt));
   }
 }
+

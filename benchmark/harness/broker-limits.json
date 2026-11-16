@@ -1,0 +1,19 @@
+{
+  "about": "What the broker, the one process that holds the API key, lets a run spend (benchmark/harness/broker.ts; docs/design-review.md, untrusted-test-isolation). The broker reads this file at its start and refuses a request beyond it: a model not named here, more output tokens than maxTokens, a body past maxBodyBytes, a request past maxRequests or past maxInFlight at once, a connection past maxConnections, or one whose most cost could take the run past its budget or maxDollars, whichever is less. The harness reads its prices, the API version, maxTokens and maxInFlight from here too, so that the two cannot drift. Prices are US dollars per million tokens, as Anthropic's pricing page lists them for its first-party API on 2026-11-16, at standard speed and global inference; a cache write costs cacheWrite times the input price, for 5-minute entries, the one cache the broker lets a request ask for. A usage field the broker does not price costs nothing more at its value in standardUsage; at any other value, as for a field it does not know, the broker counts the request at its worst. Opus 5.5, Sonnet 5.5 and Fable 5.1 bill their whole context at these prices; Haiku 5.5 bills every price at longPrompt.factor times when a request's prompt, cached tokens included, holds more than longPrompt.above tokens.",
+  "url": "https://api.anthropic.com/v1/messages",
+  "version": "2026-10-21",
+  "maxTokens": 16000,
+  "maxRequests": 20000,
+  "maxInFlight": 16,
+  "maxConnections": 32,
+  "maxBodyBytes": 4194304,
+  "maxDollars": 500,
+  "cacheWrite": 1.25,
+  "standardUsage": { "service_tier": "standard", "speed": "standard", "inference_geo": "global" },
+  "models": {
+    "claude-haiku-5-5": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "longPrompt": { "above": 100000, "factor": 5 } },
+    "claude-sonnet-5-5": { "input": 2, "output": 10, "cacheRead": 0.1 },
+    "claude-opus-5-5": { "input": 4, "output": 20, "cacheRead": 0.2 },
+    "claude-fable-5-1": { "input": 10, "output": 50, "cacheRead": 0.25 }
+  }
+}

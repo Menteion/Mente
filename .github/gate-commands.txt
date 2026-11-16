@@ -103,7 +103,7 @@ perf.yml#kernels: node perf/run.mjs --mn "$RUNNER_TEMP/mn" --base-mn "$RUNNER_TE
 harness.yml#fixtures: node .github/scripts/build-time-code.mjs --before-toolchain
 harness.yml#fixtures: node .github/scripts/build-time-code.mjs
 harness.yml#fixtures: bash .github/scripts/overflow-proof.sh
-harness.yml#fixtures: node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
-harness.yml#fixtures: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/document-out"
-harness.yml#fixtures: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
+harness.yml#fixtures: node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/fixtures"
+harness.yml#fixtures: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/document"
+harness.yml#fixtures: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
 harness.yml#fixtures: npm run test:harness

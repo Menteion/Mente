@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.watch.outputs.run != 'false'
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
         if: steps.watch.outputs.run != 'false'

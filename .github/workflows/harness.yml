@@ -43,7 +43,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.watch.outputs.run != 'false'
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Put the pinned Rust outside the home
         if: steps.watch.outputs.run != 'false'
@@ -74,23 +74,34 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
+      - name: Take root from the runner's user, but for the sandbox
+        # From here to the job's end sudo runs nothing for the runner's user but the sandbox's
+        # root-owned half, no core dump is written, no process traces another, and no container
+        # daemon listens, so that no process of that user reads the key out of another's memory
+        # (benchmark/harness/lock-sudo.sh; docs/design-review.md, untrusted-test-isolation).
+        if: steps.watch.outputs.run != 'false'
+        run: bash benchmark/harness/lock-sudo.sh
       - name: Build and run the fixtures through the sandbox
         if: steps.watch.outputs.run != 'false'
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
         run: >-
           node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN"
-          --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
+          --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/fixtures"
       - name: Check the Odin document's code blocks
         if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/document-out"
+        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/document"
       - name: Prove the sandbox denies the key and the network
         if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
+        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
       - name: Test the harness
         if: steps.watch.outputs.run != 'false'
         run: npm run test:harness
+      - name: Root is still out of the runner's user's reach
+        # As benchmark/harness/lock-sudo.sh left it, whatever ran in between.
+        if: "!cancelled() && steps.watch.outputs.run != 'false'"
+        run: bash benchmark/harness/lock-sudo.sh --check

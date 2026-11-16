@@ -114,17 +114,23 @@ jobs:
         run: chmod +x "$RUNNER_TEMP/bin/mn"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Install the benchmark's Rust and Odin
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
+      - name: Take root from the runner's user, but for the sandbox
+        # From here to the job's end sudo runs nothing for the runner's user but the sandbox's
+        # root-owned half, no core dump is written, no process traces another, and no container
+        # daemon listens, so that no process of that user reads the key out of another's memory
+        # (benchmark/harness/lock-sudo.sh; docs/design-review.md, untrusted-test-isolation).
+        run: bash benchmark/harness/lock-sudo.sh
       - name: Prove the sandbox denies the key, the network and the held-out set, before measuring
         # On this runner, before the held-out set or the API key is anywhere near it: a failure
         # stops the run (benchmark/harness/sandbox-check.ts).
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node --disallow-code-generation-from-strings benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
+        run: node --disallow-code-generation-from-strings benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
       - name: Find the held-out commit corpus.lock names
         id: lock
         if: env.HAS_HELD_OUT == 'true'
@@ -142,10 +148,21 @@ jobs:
         if: env.HAS_HELD_OUT == 'true'
         # The checker's messages could name held-out tasks, so only its verdict reaches the log.
         run: node --disallow-code-generation-from-strings benchmark/check.mjs --held-out held-out-set > /dev/null 2>&1 || { echo "the held-out set does not match corpus.lock"; exit 1; }
+      - name: The broker, the one process that holds the API key
+        # The key reaches the broker on its standard input and in no environment. Under Node's
+        # permission model and the flags of benchmark/harness/permission.json it can start no process,
+        # worker, addon or WASI, read only its own file and its limits, and write none; it sends on only
+        # the shape of request the harness makes, within the limits of broker-limits.json; and its
+        # socket is the runner's user's alone, out of the sandbox's reach. The step ends once it
+        # listens, and the shell that held the key with it (benchmark/harness/start-broker.sh;
+        # docs/design-review.md, untrusted-test-isolation).
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BUDGET: ${{ inputs.budget }}
+        run: bash benchmark/harness/start-broker.sh
       - name: Run
         timeout-minutes: 340
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ODIN: ${{ steps.toolchains.outputs.odin }}
           BUDGET: ${{ inputs.budget }}
           MODELS: ${{ inputs.models }}
@@ -160,14 +177,21 @@ jobs:
           # working directory is inside it.
           node --disallow-code-generation-from-strings benchmark/harness/bench.ts --budget "$BUDGET" --models "$MODELS" --languages "$LANGUAGES" \
             --milestone "$MILESTONE" --runs "$RUNS" --tasks "$TASKS" --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" \
-            --sandbox "$SANDBOX" "${held_out[@]}" --out "$RUNNER_TEMP/bench-out"
+            --sandbox "$SANDBOX" "${held_out[@]}" --out "$RUNNER_TEMP/runs/bench" --broker "$RUNNER_TEMP/broker/socket"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: agent-benchmark-${{ inputs.milestone }}
           path: |
-            ${{ runner.temp }}/bench-out
-            !${{ runner.temp }}/bench-out/held-out
+            ${{ runner.temp }}/runs/bench
+            !${{ runner.temp }}/runs/bench/held-out
       - name: Remove the held-out set from the runner
         if: always()
-        run: rm -rf held-out-set "$RUNNER_TEMP/bench-out/held-out"
+        run: rm -rf held-out-set "$RUNNER_TEMP/runs/bench/held-out"
+      - name: Stop the broker
+        # Whatever came before; its log holds no key, which the broker takes out of every byte it
+        # writes. Then root must still be out of the runner's user's reach, as the lock left it.
+        if: always()
+        run: |
+          bash benchmark/harness/stop-broker.sh
+          bash benchmark/harness/lock-sudo.sh --check
