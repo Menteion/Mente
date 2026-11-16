@@ -139,15 +139,19 @@ jobs:
         # Quietly, at the commit corpus.lock names: nothing of the held-out repository, no subject,
         # file or name, reaches this public log, which actions/checkout's "HEAD is now at" line did.
         # The token reaches git masked, through git's config environment alone, never on a command
-        # line or in .git/config. The script runs under env -i, with a fresh HOME, so that nothing of
-        # the job's environment reaches it (benchmark/harness/fetch-held-out.sh).
+        # line or in .git/config. The step's shell drops what bash would read before its first line
+        # (BASH_ENV, ENV, SHELLOPTS, BASHOPTS); every command is named by its path; the token reaches
+        # the script on its standard input, never on a command line; and the script runs under env -i,
+        # with a fresh HOME, so that nothing of the job's environment reaches it
+        # (benchmark/harness/fetch-held-out.sh).
         if: env.HAS_HELD_OUT == 'true'
         env:
           HELD_OUT_TOKEN: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}
           HELD_OUT_COMMIT: ${{ steps.lock.outputs.commit }}
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS /usr/bin/bash --noprofile --norc -eo pipefail {0}
         run: |
-          home="$(mktemp -d)"
-          env -i PATH=/usr/bin:/bin HOME="$home" HELD_OUT_TOKEN="$HELD_OUT_TOKEN" HELD_OUT_COMMIT="$HELD_OUT_COMMIT" bash --noprofile --norc benchmark/harness/fetch-held-out.sh
+          home="$(/usr/bin/mktemp -d)"
+          printf '%s\n' "$HELD_OUT_TOKEN" | /usr/bin/env -i PATH=/usr/bin:/bin HOME="$home" HELD_OUT_COMMIT="$HELD_OUT_COMMIT" /usr/bin/bash --noprofile --norc benchmark/harness/fetch-held-out.sh
       - name: Check the held-out set against corpus.lock
         if: env.HAS_HELD_OUT == 'true'
         # The checker's messages could name held-out tasks, so only its verdict reaches the log.
@@ -158,12 +162,14 @@ jobs:
         # worker, addon or WASI, read only its own file and its limits, and write none; it sends on only
         # the shape of request the harness makes, within the limits of broker-limits.json; and its
         # socket is the runner's user's alone, out of the sandbox's reach. The step ends once it
-        # listens, and the shell that held the key with it (benchmark/harness/start-broker.sh;
+        # listens, and the shell that held the key with it, a shell that reads no BASH_ENV, ENV,
+        # SHELLOPTS or BASHOPTS and names every command by its path (benchmark/harness/start-broker.sh;
         # docs/design-review.md, untrusted-test-isolation).
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BUDGET: ${{ inputs.budget }}
-        run: bash benchmark/harness/start-broker.sh
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS /usr/bin/bash --noprofile --norc -eo pipefail {0}
+        run: /usr/bin/bash benchmark/harness/start-broker.sh
       - name: Run
         timeout-minutes: 340
         env:

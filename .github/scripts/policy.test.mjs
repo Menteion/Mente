@@ -74,7 +74,8 @@ const REPORT_FORMS = [`always() && ${WATCH}`, `failure() && ${WATCH}`];
 const REPORT_STEPS = new Set(["generated.yml#paths#Summary"]);
 const isReport = (file, id, s) => String(s.uses ?? "").startsWith("actions/upload-artifact@") || REPORT_STEPS.has(stepKey(file, id, s));
 /// The shells a step may run in, named bare: a shell given as a template (`true {0}`) could run
-/// nothing and pass.
+/// nothing and pass. The one template allowed, SECRET_SHELL, stands only on a step that is
+/// HELD_OUT_STEP or BROKER_STEP exactly, whose script the policy holds too.
 const SHELLS = new Set(["bash", "sh", "pwsh"]);
 /// The one job-level condition a required job may carry: it holds on both events a required check
 /// reports on, so the job is never skipped there.
@@ -1131,11 +1132,26 @@ const PINNED_FILES = new Map([
   // added anywhere in one, before the key's line or after it, is a change to a gate review sees
   // (the re-check of 4ab15da: `set -x`, or the key written to a file, passed every rule of
   // start-broker.sh's shape).
-  ["benchmark/harness/start-broker.sh", "9cea5b604d1eea6b5c060f3a8b4b95bd8bcfeaf62dee2a6bfe9fddfab7ef4f59"],
+  ["benchmark/harness/start-broker.sh", "a265fbf84c1ff02e56c5e2183267569f8740786dffcc7680d834b8fd7dd178af"],
   ["benchmark/harness/stop-broker.sh", "1f4ec139da512a920c4eeafad893e451c0629c93ea19bd740ba4b6fc5b092ffa"],
   ["benchmark/harness/lock-sudo.sh", "c6562d1115b5561722fc3657860b057cdbf75190c491b46e19b1cf4a6d132cdc"],
   ["benchmark/harness/sandbox-root.sh", "2298f2a5e113cd18c796a1359c54ffb0cd755b783ae0d056d662e06eaf24fbc6"],
-  ["benchmark/harness/fetch-held-out.sh", "45d25d82876561dd23474dccde1ff6e77ff4111728f8bfa95616fa220a7c72e6"],
+  ["benchmark/harness/fetch-held-out.sh", "13f3b60dfd00e0034c82ec8d8ff361a3d8b7d6bcb4779d54f9e75ae5c5843163"],
+  // The broker's own module, which start-broker.sh names through the workspace's path.
+  ["benchmark/harness/broker.ts", "156cbd599a100b3a483d5ea8f3d8695bcbe9763ffb3312eb76bd2edb7c4e5799"],
+  // Every file a secret job runs before its secret steps, with every module those import: none of
+  // them can leave the secret steps an environment, a program first on PATH or a library to preload
+  // without an edit review sees (secretPrefixFiles; the re-check of c55cf8f). And the pins of
+  // toolchains.json, which choose what install-toolchains.sh installs and runs outside the sandbox.
+  ["benchmark/harness/install-toolchains.sh", "db0719972981e0e212a3052c4439239852a75da432a9556f5c1200d4e57ac9f7"],
+  ["benchmark/harness/toolchains.json", "cd656ee22820f70bb218457f5941066bde4d3ae758355251830646bcaf4034e8"],
+  ["benchmark/harness/sandbox.sh", "e07589a6e45ed458002d77165e37866ac9987098ae705f5a9405ca672317c218"],
+  ["benchmark/harness/sandbox-check.ts", "982132df137c367d307fdc3a7d45761b45bd9a214860cf63262f5752d9114a54"],
+  ["benchmark/harness/build.ts", "b7cbef2b51fc6c7574dedc96435c2b26e74ced96c20ad0ed189ccb285ba5cf54"],
+  ["benchmark/harness/languages.ts", "c20a2cc3728849d6262d207194cc64a28efed6be7421a71da191602e8d668200"],
+  ["benchmark/harness/tasks.ts", "b9386ec2e03484721e3e05feb0b86c1ba35710c883f418473e188fe7045b2240"],
+  ["benchmark/own.mjs", "ec189cfb8e26ba2394424f1ed7922323786abde7c85c09b0f98eefca08f49330"],
+  ["benchmark/check.mjs", "36868660c86c3cea1d663ad9b64b374a5f29581279e21ca452f5e2d5e6f20303"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
 /// jobs, and the jobs that run the release tests through cargo alone. A rule that read their
@@ -1153,9 +1169,9 @@ const PINNED_JOBS = new Map([
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "4e6efc58580a30edeadd6ecf4464bd7ae2727083f3daa060f105aca1969ed0e8"],
   ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
-  ["benchmark.yml#bench", "4bc8f350ecb143b0f651e96eac38164d45e016c9b7ab1a508df702251d7de518"],
-  ["prelim.yml#prelim", "fa19a6bcc5b3a3d28cfd022b72cadd1ec362e81ad43cc12cf448af80d8c61f0f"],
-  ["probe.yml#write", "b01f5cf9b865647582ebe4ee11088545f3dc466d42ce89068ddd6acc4795a909"],
+  ["benchmark.yml#bench", "fd0a7134d75d81a5d806713686c09512c63f7bcecdc4728900ea0490bb763345"],
+  ["prelim.yml#prelim", "8cdbd87b6e25f49f467a4fd29be22c5623cfa4345d0232a1eb96f52e5b06ecb8"],
+  ["probe.yml#write", "b2101824c75847a1df40aec2ca58ba1fdbc9ab118d22f8e38e038f7bf61653ae"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1200,6 +1216,26 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
     for (const f of repoPaths(scriptTexts(w.doc, read))) if (/^\.github\/scripts\/[\w/-]+\.(sh|ps1|mjs)$/.test(f) && f !== POLICY) pending.push([key, f]);
   }
   for (const f of PINNED_FILES.keys()) pending.push(["PINNED_FILES", f]);
+  // In a secret job, every file its steps run up to the end of its secret steps, whatever its
+  // directory, and every module those import: no earlier step can change the environment the
+  // secret steps start in, through $GITHUB_ENV, $GITHUB_PATH or a program it leaves on the runner,
+  // without an edit to a pinned file (the re-check of c55cf8f: install-toolchains.sh and
+  // sandbox-check.ts, with its modules, were unpinned).
+  const unpinnedBeforeSecrets = (pinned) =>
+    [...SECRET_JOBS.keys()].flatMap((key) => {
+      const [file, id] = key.split("#");
+      const w = workflows().find((x) => x.file === file);
+      return secretPrefixFiles(w.doc, w.doc.jobs[id]).filter((f) => !pinned.has(f)).map((f) => `${key} runs ${f} up to its secret steps, which PINNED_FILES does not hold`);
+    });
+  assert.deepEqual(unpinnedBeforeSecrets(PINNED_FILES), [], "files a secret job runs before its secrets are in reach, unpinned");
+  for (const f of ["benchmark/harness/install-toolchains.sh", "benchmark/harness/sandbox-check.ts", "benchmark/harness/build.ts", "benchmark/check.mjs", "benchmark/harness/broker.ts"]) {
+    const fewer = new Map(PINNED_FILES);
+    fewer.delete(f);
+    assert.ok(unpinnedBeforeSecrets(fewer).some((p) => p.includes(` runs ${f} `)), `${f}, run before the secrets, left out of the pins passes`);
+  }
+  // And an edit to one, as the review planted it, changes the digest the pin holds.
+  const installer = "benchmark/harness/install-toolchains.sh";
+  assert.notEqual(digest(`${read(installer)}echo "BASH_ENV=$RUNNER_TEMP/x.sh" >> "$GITHUB_ENV"\n`), PINNED_FILES.get(installer), "an edit to install-toolchains.sh keeps its pin");
   const seen = new Set();
   while (pending.length > 0) {
     const [from, f] = pending.pop();
@@ -1208,7 +1244,7 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
     assert.ok(PINNED_FILES.has(f), `${from} runs ${f}, which PINNED_FILES does not hold`);
     for (const g of namedScripts(read(f))) pending.push([f, g]);
     // A pinned module's imports are pinned too.
-    if (f.endsWith(".mjs")) for (const g of repoPaths([`node ${f}`])) if (g !== f) pending.push([f, g]);
+    if (JS_MODULE.test(f)) for (const g of repoPaths([`node ${f}`])) if (g !== f) pending.push([f, g]);
   }
   // A script the policy cannot name, its path made of a variable, could be any script.
   const variablePath = /\.github\/scripts\/[^\s"'`]*\$/;
@@ -2793,6 +2829,12 @@ const SECRET_JOBS = new Map([
 const SECRET_ENVIRONMENT = "benchmark";
 /// A flag as start-broker.sh writes it: the value of a flag that names the workspace, quoted.
 const quoteFlag = (f) => (f.includes("=$") ? f.replace(/=(.*)$/, '="$1"') : f);
+/// The shell of every step that holds a secret: env drops what bash reads before the step's first
+/// line, BASH_ENV and ENV, which it runs, and SHELLOPTS and BASHOPTS, which can turn tracing on, from
+/// an environment any earlier step could have written through $GITHUB_ENV; then bash, by its path,
+/// reads no profile and stops at the first failure (the re-check of c55cf8f: the runner's own bash
+/// ran a BASH_ENV with the token present, and traced it).
+export const SECRET_SHELL = "/usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS /usr/bin/bash --noprofile --norc -eo pipefail {0}";
 /// The step that takes root from the runner's user for the rest of a job, but for the sandbox's
 /// root-owned half, before the sandbox runs anything and before the key is in reach: so that no
 /// process of that user, outside the sandbox, reads the key out of the broker's memory or the
@@ -2804,7 +2846,8 @@ export const LOCK_STEP = { name: "Take root from the runner's user, but for the 
 export const BROKER_STEP = {
   name: "The broker, the one process that holds the API key",
   env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}", BUDGET: "${{ inputs.budget }}" },
-  run: "bash benchmark/harness/start-broker.sh",
+  shell: SECRET_SHELL,
+  run: "/usr/bin/bash benchmark/harness/start-broker.sh",
 };
 /// The last step of a secret job: it stops the broker, whatever came before, and checks that root
 /// is still out of the runner's user's reach.
@@ -2813,12 +2856,13 @@ export const STOP_STEP = { name: "Stop the broker", if: "always()", run: "bash b
 export const LOCKED_STEP = { name: "Root is still out of the runner's user's reach", if: "!cancelled() && steps.watch.outputs.run != 'false'", run: "bash benchmark/harness/lock-sudo.sh --check" };
 /// The line of start-broker.sh that starts the broker: the key on its standard input and in no
 /// environment (`env -i`, which also drops NODE_OPTIONS, whose --allow-child-process would undo
-/// the permission model), under permission.json's flags.
-export const BROKER_LINE = `printf '%s\\n' "$ANTHROPIC_API_KEY" | env -i PATH="$PATH" node ${PERMISSION.broker.flags.map(quoteFlag).join(" ")} "$GITHUB_WORKSPACE/${PERMISSION.broker.script}" --socket "$dir/socket" --budget "$BUDGET" > "$dir/log" 2>&1 &`;
+/// the permission model), under permission.json's flags, each command by its path: env, and the
+/// Node of permission.json's version that setup-node put in the runner's tool cache.
+export const BROKER_LINE = `printf '%s\\n' "$ANTHROPIC_API_KEY" | /usr/bin/env -i PATH="$PATH" "$RUNNER_TOOL_CACHE/node/${PERMISSION.node}/x64/bin/node" ${PERMISSION.broker.flags.map(quoteFlag).join(" ")} "$GITHUB_WORKSPACE/${PERMISSION.broker.script}" --socket "$dir/socket" --budget "$BUDGET" > "$dir/log" 2>&1 &`;
 /// The lines start-broker.sh holds before BROKER_LINE: no core file at any size, a limit the
 /// runner's user cannot raise again, and a mask and a directory that keep the socket, the log and
 /// the pid file the runner's user's alone.
-const BROKER_SETUP = ['dir="$RUNNER_TEMP/broker"', "ulimit -c 0", "umask 0177", 'mkdir -m 0700 "$dir"'];
+const BROKER_SETUP = ['dir="$RUNNER_TEMP/broker"', "ulimit -c 0", "umask 0177", '/usr/bin/mkdir -m 0700 "$dir"'];
 /// The one place each secret may stand in a secret job, everything else refused: the key in the
 /// broker's step, the held-out set's token in the held-out step's.
 const HELD_OUT_TOKEN = "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}";
@@ -2830,10 +2874,13 @@ export const HELD_OUT_STEP = {
   name: "Check out the held-out set",
   if: "env.HAS_HELD_OUT == 'true'",
   env: { HELD_OUT_TOKEN, HELD_OUT_COMMIT: "${{ steps.lock.outputs.commit }}" },
-  // Under env -i, PATH, a fresh HOME, the token and the commit alone, as BROKER_LINE starts the
-  // broker: SHELLOPTS, BASH_ENV or git's settings in the job's environment reach none of it (the
-  // review of aafe59b: tracing printed the token before its mask).
-  run: "home=\"$(mktemp -d)\"\nenv -i PATH=/usr/bin:/bin HOME=\"$home\" HELD_OUT_TOKEN=\"$HELD_OUT_TOKEN\" HELD_OUT_COMMIT=\"$HELD_OUT_COMMIT\" bash --noprofile --norc benchmark/harness/fetch-held-out.sh\n",
+  shell: SECRET_SHELL,
+  // As BROKER_LINE starts the broker: the token on the script's standard input, never on env's
+  // command line, readable in /proc; every command by its path; and the script under env -i, with
+  // PATH, a fresh HOME and the commit alone, so that SHELLOPTS, BASH_ENV or git's settings in the
+  // job's environment reach none of it (the review of aafe59b: tracing printed the token before its
+  // mask; the re-check of c55cf8f: a shim first on PATH received it).
+  run: "home=\"$(/usr/bin/mktemp -d)\"\nprintf '%s\\n' \"$HELD_OUT_TOKEN\" | /usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$home\" HELD_OUT_COMMIT=\"$HELD_OUT_COMMIT\" /usr/bin/bash --noprofile --norc benchmark/harness/fetch-held-out.sh\n",
 };
 /// The one write to the environment of later steps a secret job may make before its held-out step
 /// and its broker's: a path of its own, which holds no secret and turns nothing on. Any other could
@@ -2855,6 +2902,18 @@ const isStep = (s, want) => {
   return JSON.stringify(rest) === JSON.stringify(wantRest) && (cond === wantCond || (wantCond === undefined && cond === "steps.watch.outputs.run != 'false'"));
 };
 
+/// Where a job's secret steps end: past its last step that is HELD_OUT_STEP or BROKER_STEP, or 0.
+const secretStepsEnd = (all) => all.reduce((end, s, i) => (isStep(s, HELD_OUT_STEP) || isStep(s, BROKER_STEP) ? i + 1 : end), 0);
+/// The files a secret job runs up to the end of its secret steps, the held-out step and the
+/// broker's, with every module those import: the scripts and modules, not the data they read.
+export function secretPrefixFiles(doc, job) {
+  const prefix = { ...job, steps: steps(job).slice(0, secretStepsEnd(steps(job))) };
+  const files = [...repoPaths(scriptTexts(doc, prefix))].filter((f) => (JS_MODULE.test(f) || /\.(sh|ps1)$/.test(f)) && f !== POLICY);
+  // The broker, whose path start-broker.sh builds from the workspace's, which no reading of a path
+  // follows.
+  return prefix.steps.some((s) => isStep(s, BROKER_STEP)) ? [...files, PERMISSION.broker.script] : files;
+}
+
 /// What is wrong with start-broker.sh: BROKER_SETUP, then BROKER_LINE, each once, and no other node.
 export function startBrokerProblems(text) {
   const found = [];
@@ -2864,7 +2923,7 @@ export function startBrokerProblems(text) {
     if (lines.filter((l) => l === line).length !== 1) found.push(`start-broker.sh does not hold, once: ${line}`);
   }
   if (!BROKER_SETUP.every((line, k) => at(line) >= 0 && at(line) < at(BROKER_LINE) && (k === 0 || at(line) > at(BROKER_SETUP[k - 1])))) found.push("start-broker.sh does not set the core limit, the mask and the directory up, in that order, before it starts the broker");
-  const nodes = lines.filter((l) => /(^|[\s;&|(])node(\s|$)/.test(l.replace(/#.*$/, "")));
+  const nodes = lines.filter((l) => /(^|[\s;&|(\/])node"?(\s|$)/.test(l.replace(/#.*$/, "")));
   if (nodes.length !== 1) found.push(`start-broker.sh starts node ${nodes.length} times, not once`);
   // The key is named twice, in the check that it is set and in the line that hands it to the
   // broker, and the shell never traces what it runs.
@@ -2892,10 +2951,11 @@ export function brokerProblems(key, job, doc = {}) {
     if (!heldOut.includes(s)) found.push(`${key}, step "${s.name ?? s.uses}": holds a secret where none belongs (the key belongs in BROKER_STEP alone, ${HELD_OUT_TOKEN} in HELD_OUT_STEP alone)`);
   }
   if (heldOut.length > 1) found.push(`${key} checks the held-out set out more than once`);
-  // Nothing before the held-out step and the broker's writes the environment of later steps but
-  // ENV_WRITES (the review of aafe59b: SHELLOPTS=xtrace through $GITHUB_ENV traced the token).
-  const firstHeld = all.findIndex((s) => isStep(s, HELD_OUT_STEP) || isStep(s, BROKER_STEP));
-  for (const s of all.slice(0, firstHeld < 0 ? all.length : firstHeld)) if (writesEnv(s)) found.push(`${key}, step "${s.name ?? s.uses}": writes the environment or the PATH of later steps before the secrets are in reach`);
+  // Nothing before the held-out step or the broker's writes the environment of later steps but
+  // ENV_WRITES (the review of aafe59b: SHELLOPTS=xtrace through $GITHUB_ENV traced the token); the
+  // scripts those steps run are pinned (secretPrefixFiles).
+  const lastHeld = secretStepsEnd(all);
+  for (const s of all.slice(0, lastHeld)) if (writesEnv(s)) found.push(`${key}, step "${s.name ?? s.uses}": writes the environment or the PATH of later steps before the secrets are in reach`);
   // No step checks the held-out repository out but HELD_OUT_STEP: actions/checkout prints the
   // commit's subject into the log, and a token as its input reaches .git/config unless told not to.
   for (const s of all) if (/^actions\/checkout@/.test(String(s.uses ?? "")) && String(s.with?.repository ?? "").toLowerCase() === HELD_OUT_REPOSITORY.toLowerCase()) found.push(`${key}, step "${s.name ?? s.uses}": checks the held-out repository out through actions/checkout, which prints its commit's subject into the log`);
@@ -2953,7 +3013,9 @@ check("the broker, the one process that holds the key, starts under permission.j
   assert.deepEqual(startBrokerProblems(script), []);
   for (const [what, text] of [
     ["--allow-child-process among the flags", script.replace("--permission", "--permission --allow-child-process")],
-    ["no env -i", script.replace('env -i PATH="$PATH" ', "")],
+    ["no env -i", script.replace('/usr/bin/env -i PATH="$PATH" ', "")],
+    ["Node found through PATH", script.replace('"$RUNNER_TOOL_CACHE/node/' + "24.22.1" + '/x64/bin/node"', "node")],
+    ["env found through PATH", script.replace('/usr/bin/env -i PATH="$PATH" ', 'env -i PATH="$PATH" ')],
     ["no core limit", script.replace("ulimit -c 0\n", "")],
     ["no mask", script.replace("umask 0177\n", "")],
     ["a mask after the broker starts", script.replace("umask 0177\n", "").replace(/(> "\$dir\/log" 2>&1 &\n)/, "$1umask 0177\n")],
@@ -3015,6 +3077,18 @@ check("the broker, the one process that holds the key, starts under permission.j
     ["the held-out step run in the job's environment", at(3, { ...HELD_OUT_STEP, run: "bash benchmark/harness/fetch-held-out.sh" })],
     ["a trace set for later steps before the secrets", { steps: [...job.steps.slice(0, 2), { run: 'echo "SHELLOPTS=xtrace" >> "$GITHUB_ENV"' }, ...job.steps.slice(2)] }],
     ["a program put first on PATH before the secrets", { steps: [...job.steps.slice(0, 2), { run: 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"' }, ...job.steps.slice(2)] }],
+    // The re-check of c55cf8f: the runner's bash read BASH_ENV and SHELLOPTS before the step's
+    // first line, the token already in its environment; env, mktemp and bash came from PATH; and
+    // the token stood on env's command line.
+    ["BASH_ENV set for later steps before the held-out step", { steps: [...job.steps.slice(0, 3), { run: 'echo "BASH_ENV=$RUNNER_TEMP/x.sh" >> "$GITHUB_ENV"' }, ...job.steps.slice(3)] }],
+    ["SHELLOPTS=xtrace set for later steps before the broker's step", { steps: [...job.steps.slice(0, 4), { run: 'echo "SHELLOPTS=xtrace" >> "$GITHUB_ENV"' }, ...job.steps.slice(4)] }],
+    ["the held-out step in the runner's shell", at(3, { name: HELD_OUT_STEP.name, if: HELD_OUT_STEP.if, env: HELD_OUT_STEP.env, run: HELD_OUT_STEP.run })],
+    ["the broker's step in the runner's shell", at(4, { name: BROKER_STEP.name, env: BROKER_STEP.env, run: BROKER_STEP.run })],
+    ["a shell that keeps BASH_ENV", at(3, { ...HELD_OUT_STEP, shell: SECRET_SHELL.replace("-u BASH_ENV ", "") })],
+    ["env found through PATH in the held-out step", at(3, { ...HELD_OUT_STEP, run: HELD_OUT_STEP.run.replace("/usr/bin/env ", "env ") })],
+    ["mktemp found through PATH", at(3, { ...HELD_OUT_STEP, run: HELD_OUT_STEP.run.replace("/usr/bin/mktemp", "mktemp") })],
+    ["the held-out token on env's command line", at(3, { ...HELD_OUT_STEP, run: 'home="$(/usr/bin/mktemp -d)"\n/usr/bin/env -i PATH=/usr/bin:/bin HOME="$home" HELD_OUT_TOKEN="$HELD_OUT_TOKEN" HELD_OUT_COMMIT="$HELD_OUT_COMMIT" /usr/bin/bash --noprofile --norc benchmark/harness/fetch-held-out.sh\n' })],
+    ["bash found through PATH in the broker's step", at(4, { ...BROKER_STEP, run: "bash benchmark/harness/start-broker.sh" })],
     ["the key as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.ANTHROPIC_API_KEY }}", "persist-credentials": false } })],
     ["another secret as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.OTHER }}", "persist-credentials": false } })],
     ["the held-out token in a step's env", at(5, { ...job.steps[5], env: { HELD_OUT: HELD_OUT_TOKEN } })],
@@ -3033,6 +3107,43 @@ check("the broker, the one process that holds the key, starts under permission.j
     assert.ok(brokerProblems("x.yml#y", planted).length > 0, `a secret job with ${what} passes`);
   }
   assert.ok(brokerProblems("x.yml#y", job, { env: { K: "${{ secrets.ANTHROPIC_API_KEY }}" } }).length > 0, "a secret job whose workflow's env holds the key passes");
+  // SECRET_SHELL, run for real, with what an earlier step could have left through $GITHUB_ENV: BASH_ENV and ENV naming a file that prints the token, SHELLOPTS
+  // set to trace, and env, mktemp and bash first on PATH as shims. The held-out step runs none of
+  // them, traces nothing and prints no token, and reaches its script, which refuses the commit
+  // before it fetches anything; the same step in the runner's own shell runs the file with the
+  // token (the re-check of c55cf8f). On Windows, env and bash are Git's, beside the git the policy
+  // runs, which read /usr/bin as Git's own: the shell's text runs unchanged.
+  {
+    const usrBin = (name) => (process.platform === "win32" ? path.resolve(git(["--exec-path"]).trim(), `../../../usr/bin/${name}.exe`) : `/usr/bin/${name}`);
+    const posix = (p) => p.replace(/\\/g, "/");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secret-shell-"));
+    try {
+      const token = "held-out-token-0123456789abcdef";
+      const shims = path.join(dir, "shims");
+      const log = path.join(dir, "shims.log");
+      fs.mkdirSync(shims);
+      for (const name of ["env", "mktemp", "bash"]) fs.writeFileSync(path.join(shims, name), `#!/bin/sh\necho "${name} from PATH" >> "${log}"\nexit 1\n`, { mode: 0o755 });
+      const startup = path.join(dir, "startup.sh");
+      fs.writeFileSync(startup, 'echo "a startup file ran with ${HELD_OUT_TOKEN:-no token}"\n');
+      fs.symlinkSync(path.join(ROOT, "benchmark"), path.join(dir, "benchmark"), "junction");
+      const step = path.join(dir, "step.sh");
+      fs.writeFileSync(step, HELD_OUT_STEP.run);
+      const env = { PATH: `${shims}${path.delimiter}${process.env.PATH ?? ""}`, HOME: posix(dir), BASH_ENV: posix(startup), ENV: posix(startup), SHELLOPTS: "xtrace", HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: "abc" };
+      const [command, ...args] = SECRET_SHELL.replace("{0}", posix(step)).split(" ");
+      assert.equal(command, "/usr/bin/env");
+      const r = spawnSync(usrBin("env"), args, { cwd: dir, env, encoding: "utf8", timeout: 30000 });
+      const printed = `${r.stdout}${r.stderr}`;
+      assert.ok(!fs.existsSync(log), `the held-out step ran a program of its PATH: ${fs.existsSync(log) ? fs.readFileSync(log, "utf8") : ""}`);
+      assert.ok(!printed.includes(token) && !printed.includes("a startup file ran") && !/^\+/m.test(printed), `the held-out step's shell ran a startup file, traced or printed the token: ${printed}`);
+      assert.equal(r.status, 1, printed);
+      assert.match(printed, /no full commit id/, `the held-out step did not reach its script: ${printed}`);
+      assert.ok(!fs.existsSync(path.join(dir, "held-out-set")), "the held-out step made held-out-set for a commit it refused");
+      const plain = spawnSync(usrBin("bash"), ["--noprofile", "--norc", "-eo", "pipefail", posix(step)], { cwd: dir, env, encoding: "utf8", timeout: 30000 });
+      assert.match(`${plain.stdout}${plain.stderr}`, new RegExp(`a startup file ran with ${token}`), "the simulation shows nothing: the runner's shell ran no startup file");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
   // Planted: a job that runs the sandbox and holds no secret.
   const watched = (s) => ({ ...s, if: "steps.watch.outputs.run != 'false'" });
   const fixtures = { steps: [watched(LOCK_STEP), watched({ name: "Prove", run: 'node benchmark/harness/sandbox-check.ts --sandbox "$SANDBOX"' }), LOCKED_STEP] };
@@ -4054,7 +4165,13 @@ check("no step of a required job can let it pass without checking", () => {
   }
 });
 
+/// Whether a step's shell is one SHELLS names, or SECRET_SHELL on a secret step exactly.
+const stepShellOk = (s) => SHELLS.has(s.shell) || (s.shell === SECRET_SHELL && (isStep(s, HELD_OUT_STEP) || isStep(s, BROKER_STEP)));
+
 check("every step runs in a shell named bare", () => {
+  // Planted: a template that could run nothing, and SECRET_SHELL on a step that is no secret step.
+  assert.ok(stepShellOk(HELD_OUT_STEP) && stepShellOk(BROKER_STEP) && stepShellOk({ run: "x", shell: "bash" }));
+  for (const s of [{ run: "x", shell: "true {0}" }, { run: "x", shell: SECRET_SHELL }, { ...BROKER_STEP, run: "true" }]) assert.ok(!stepShellOk(s), `a step with shell ${s.shell} and run ${s.run} passes`);
   for (const { file, doc } of workflows()) {
     const shell = doc.defaults?.run?.shell;
     if (shell !== undefined) assert.ok(SHELLS.has(shell), `${file}: defaults.run.shell: ${shell}`);
@@ -4062,7 +4179,7 @@ check("every step runs in a shell named bare", () => {
       const jobShell = job.defaults?.run?.shell;
       if (jobShell !== undefined) assert.ok(SHELLS.has(jobShell), `${file}, job ${id}: defaults.run.shell: ${jobShell}`);
       for (const s of steps(job)) {
-        if ("shell" in s) assert.ok(SHELLS.has(s.shell), `${stepKey(file, id, s)}: shell: ${s.shell}`);
+        if ("shell" in s) assert.ok(stepShellOk(s), `${stepKey(file, id, s)}: shell: ${s.shell}`);
       }
     }
   }

@@ -54,12 +54,14 @@ jobs:
         # worker, addon or WASI, read only its own file and its limits, and write none; it sends on only
         # the shape of request the harness makes, within the limits of broker-limits.json; and its
         # socket is the runner's user's alone, out of the sandbox's reach. The step ends once it
-        # listens, and the shell that held the key with it (benchmark/harness/start-broker.sh;
+        # listens, and the shell that held the key with it, a shell that reads no BASH_ENV, ENV,
+        # SHELLOPTS or BASHOPTS and names every command by its path (benchmark/harness/start-broker.sh;
         # docs/design-review.md, untrusted-test-isolation).
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BUDGET: ${{ inputs.budget }}
-        run: bash benchmark/harness/start-broker.sh
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS /usr/bin/bash --noprofile --norc -eo pipefail {0}
+        run: /usr/bin/bash benchmark/harness/start-broker.sh
       - name: The agents write the programs
         env:
           RUNS: ${{ inputs.runs }}

@@ -12,26 +12,28 @@
 # may write no core file at any size, a limit no process of the runner's user can raise again,
 # since `ulimit -c 0` sets the hard limit too; and its directory, its socket, its log and its pid
 # file are the runner's user's alone (mode 0700 and 0600). The sandbox covers the directory, so no
-# agent code reaches the socket.
+# agent code reaches the socket. Every command it runs while the key is in its environment is named
+# by its path, Node by the one setup-node put in the runner's tool cache at the version
+# permission.json names, so that no program first on PATH receives the key (the re-check of c55cf8f).
 set -euo pipefail
 : "${ANTHROPIC_API_KEY:?the key, from the env of the step}" "${BUDGET:?the budget of the run, in US dollars}"
-: "${RUNNER_TEMP:?the temporary directory of the runner}" "${GITHUB_WORKSPACE:?the workspace}"
+: "${RUNNER_TEMP:?the temporary directory of the runner}" "${GITHUB_WORKSPACE:?the workspace}" "${RUNNER_TOOL_CACHE:?the tool cache of the runner, where setup-node puts Node}"
 dir="$RUNNER_TEMP/broker"
 ulimit -c 0
 umask 0177
-mkdir -m 0700 "$dir"
-printf '%s\n' "$ANTHROPIC_API_KEY" | env -i PATH="$PATH" node --disallow-code-generation-from-strings --no-experimental-sqlite --permission --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker.ts" --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json" "$GITHUB_WORKSPACE/benchmark/harness/broker.ts" --socket "$dir/socket" --budget "$BUDGET" > "$dir/log" 2>&1 &
+/usr/bin/mkdir -m 0700 "$dir"
+printf '%s\n' "$ANTHROPIC_API_KEY" | /usr/bin/env -i PATH="$PATH" "$RUNNER_TOOL_CACHE/node/24.22.1/x64/bin/node" --disallow-code-generation-from-strings --no-experimental-sqlite --permission --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker.ts" --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json" "$GITHUB_WORKSPACE/benchmark/harness/broker.ts" --socket "$dir/socket" --budget "$BUDGET" > "$dir/log" 2>&1 &
 echo "$!" > "$dir/pid"
-for _ in $(seq 100); do
+for _ in $(/usr/bin/seq 100); do
   if [ -S "$dir/socket" ]; then break; fi
-  sleep 0.1
+  /usr/bin/sleep 0.1
 done
-cat "$dir/log"
+/usr/bin/cat "$dir/log"
 if [ ! -S "$dir/socket" ]; then
   echo "::error::the broker did not start"
   exit 1
 fi
-if [ "$(stat -c %a "$dir")" != 700 ] || [ "$(stat -c %a "$dir/socket")" != 600 ]; then
-  echo "::error::the broker's directory or socket is open to more than the runner's user: $(stat -c '%n %a' "$dir" "$dir/socket" | tr '\n' ' ')"
+if [ "$(/usr/bin/stat -c %a "$dir")" != 700 ] || [ "$(/usr/bin/stat -c %a "$dir/socket")" != 600 ]; then
+  echo "::error::the broker's directory or socket is open to more than the runner's user: $(/usr/bin/stat -c '%n %a' "$dir" "$dir/socket" | /usr/bin/tr '\n' ' ')"
   exit 1
 fi

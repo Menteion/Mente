@@ -1887,13 +1887,15 @@ test("fetch-held-out.sh checks the held-out set out at its commit, into a direct
     mkdirSync(shims);
     writeFileSync(join(shims, "git"), '#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do if [ "$a" = https://github.com/Menteion/mente-bench-heldout ]; then args+=("$ORIGIN_URL"); else args+=("$a"); fi; done\nexec "$REAL_GIT" "${args[@]}"\n', { mode: 0o755 });
     const realGit = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
-    const run = (work: string, env: Record<string, string>, before?: () => void) => {
+    const run = (work: string, env: Record<string, string>, before?: () => void, input = `${token}\n`) => {
       mkdirSync(work, { recursive: true });
       before?.();
-      // As the step starts it: a cleared environment but PATH, HOME, the token and the commit.
+      // As the step starts it: a cleared environment but PATH, HOME and the commit, the token on its
+      // standard input (the re-check of c55cf8f: on env's command line it was readable in /proc).
       const r = spawnSync("bash", ["--noprofile", "--norc", join(REPOSITORY, "benchmark", "harness", "fetch-held-out.sh")], {
         cwd: work,
         env: { PATH: `${shims}${delimiter}${process.env.PATH ?? ""}`, HOME: join(dir, "home"), REAL_GIT: realGit, ORIGIN_URL: pathToFileURL(origin).href, ...env },
+        input,
         encoding: "utf8",
         timeout: 60_000,
       });
@@ -1901,7 +1903,7 @@ test("fetch-held-out.sh checks the held-out set out at its commit, into a direct
       return { status: r.status, printed: `${r.stdout}${r.stderr}`.split("\n").filter((l) => !l.startsWith("::add-mask::")).join("\n") };
     };
     const leaks = (printed: string) => ["SECRETSUBJECT", "secret-task-name", "HEAD is now", token, commit.slice(0, 7)].filter((x) => printed.includes(x));
-    const fetched = run(join(dir, "a"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit });
+    const fetched = run(join(dir, "a"), { HELD_OUT_COMMIT: commit });
     assert.equal(fetched.status, 0, fetched.printed);
     assert.deepEqual(leaks(fetched.printed), [], fetched.printed);
     assert.equal(fetched.printed.trim(), "the held-out set is at the commit corpus.lock names");
@@ -1919,22 +1921,27 @@ test("fetch-held-out.sh checks the held-out set out at its commit, into a direct
       ["a link", (w: string) => symlinkSync(target, join(w, "held-out-set"), "junction")],
     ] as [string, (w: string) => void][]) {
       const work = join(dir, `there-${name.replace(/ /g, "-")}`);
-      const r = run(work, { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit }, () => make(work));
+      const r = run(work, { HELD_OUT_COMMIT: commit }, () => make(work));
       assert.notEqual(r.status, 0, `held-out-set there as ${name} passed`);
       assert.match(r.printed, /held-out-set is already there/, name);
     }
     assert.deepEqual(readdirSync(target), [], "the checkout went where the link pointed");
     // A commit corpus.lock does not name in full, one the repository does not hold, and no token
     // each fail saying only that.
-    const short = run(join(dir, "b"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit.slice(0, 12) });
+    const short = run(join(dir, "b"), { HELD_OUT_COMMIT: commit.slice(0, 12) });
     assert.notEqual(short.status, 0);
     assert.match(short.printed, /no full commit id/);
-    const missing = run(join(dir, "c"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: "f".repeat(40) });
+    const missing = run(join(dir, "c"), { HELD_OUT_COMMIT: "f".repeat(40) });
     assert.notEqual(missing.status, 0);
     assert.match(missing.printed, /could not be fetched/);
-    const none = run(join(dir, "d"), { HELD_OUT_COMMIT: commit });
+    const none = run(join(dir, "d"), { HELD_OUT_COMMIT: commit }, undefined, "");
     assert.notEqual(none.status, 0);
-    for (const r of [short, missing, none]) assert.deepEqual(leaks(r.printed), [], r.printed);
+    assert.match(none.printed, /the held-out token is not set/);
+    // A token in the environment alone is not read: the script takes it from its standard input.
+    const inEnv = run(join(dir, "e"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit }, undefined, "");
+    assert.notEqual(inEnv.status, 0);
+    assert.match(inEnv.printed, /the held-out token is not set/);
+    for (const r of [short, missing, none, inEnv]) assert.deepEqual(leaks(r.printed), [], r.printed);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1943,7 +1950,8 @@ test("fetch-held-out.sh checks the held-out set out at its commit, into a direct
 test("start-broker.sh starts the broker alone, its socket the runner's user's, its core limit 0, its environment PATH", { skip: LINUX_ONLY }, async () => {
   const temp = mkdtempSync(join(tmpdir(), "mente-start-"));
   const dir = join(temp, "broker");
-  const env = { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: KEY, BUDGET: "1", RUNNER_TEMP: temp, GITHUB_WORKSPACE: REPOSITORY };
+  // The runner's tool cache too, where setup-node put the Node start-broker.sh runs by its path.
+  const env = { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: KEY, BUDGET: "1", RUNNER_TEMP: temp, GITHUB_WORKSPACE: REPOSITORY, RUNNER_TOOL_CACHE: process.env.RUNNER_TOOL_CACHE ?? "" };
   try {
     const started = spawnSync("bash", [join(REPOSITORY, "benchmark", "harness", "start-broker.sh")], { env, encoding: "utf8", timeout: 60_000 });
     assert.equal(started.status, 0, started.stdout + started.stderr);
