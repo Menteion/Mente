@@ -946,3 +946,105 @@ fn test_the_reopen_rule_rejects_a_decision_without_its_condition() {
     };
     assert!(reads("", &stray)[0].contains("historic marker pinned"));
 }
+
+/// The text of each live brief under `root`, the files of `briefs/` but its archive, whose rounds
+/// are done.
+fn live_briefs(root: &Path) -> Vec<String> {
+    let dir = root.join(records::BRIEFS.dir);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x == records::BRIEFS.extension)
+        })
+        .filter_map(|e| fs::read_to_string(e.path()).ok())
+        .collect()
+}
+
+/// Each decided entry of `register` that nothing in the plan links, by its line and key: no list
+/// item of `roadmap`, no milestone's line `**Decided first:**` and no brief of `briefs` holds `design-review.md#<key>` with the key whole
+/// (Norman, 2026-11-17), so that no decision drops out of the plan. A brief's `awaits` counts.
+fn unplaced(register: &str, roadmap: &str, briefs: &[String]) -> Vec<String> {
+    let (read, _) = entries(register);
+    let items: Vec<&str> = roadmap
+        .lines()
+        .filter(|l| {
+            let item = l.trim_start();
+            item.starts_with("- ")
+                || item.starts_with("* ")
+                || item.starts_with("**Decided first:**")
+        })
+        .collect();
+    read.iter()
+        .filter(|e| status_word(&e.status) == "decided")
+        .filter(|e| {
+            let link = format!("design-review.md#{}", e.key);
+            let links = |text: &str| {
+                text.match_indices(&link).any(|(at, _)| {
+                    !text[at + link.len()..]
+                        .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-')
+                })
+            };
+            !items.iter().any(|l| links(l)) && !briefs.iter().any(|b| links(b))
+        })
+        .map(|e| format!("line {}: {}", e.line, e.key))
+        .collect()
+}
+
+/// Every decided entry has its place in the plan: an item of `ROADMAP.md` or a live brief links
+/// it, so that a decision is carried out where the plan does its work.
+#[test]
+fn test_every_decided_entry_has_its_place_in_the_plan() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let register = fs::read_to_string(root.join("docs/design-review.md")).unwrap();
+    let roadmap = fs::read_to_string(root.join("ROADMAP.md")).unwrap();
+    let found = unplaced(&register, &roadmap, &live_briefs(&root));
+    assert!(
+        found.is_empty(),
+        "decided entries no ROADMAP item and no live brief links (docs/design-review.md#records-one-per-file):\n{}",
+        found.join("\n")
+    );
+}
+
+/// The rule finds a decided entry that only prose, a longer key, an archived brief or a done
+/// entry's place would name, and accepts one that a list item or a live brief links.
+#[test]
+fn test_a_decided_entry_without_a_place_is_found() {
+    let register = "| Key | Problem | Proposed resolution | Status |\n\
+        | :--- | :--- | :--- | :--- |\n\
+        | `decided-first` | P. | **Decided (Norman, 2026-11-17).** R. **Reopen if:** X. | decided |\n\
+        | `in-roadmap` | P. | **Decided (Norman, 2026-11-17).** R. **Reopen if:** X. | decided |\n\
+        | `in-brief` | P. | **Decided (Norman, 2026-11-17).** R. **Reopen if:** X. | decided |\n\
+        | `in-prose` | P. | **Decided (Norman, 2026-11-17).** R. **Reopen if:** X. | decided |\n\
+        | `longer` | P. | **Decided (Norman, 2026-11-17).** R. **Reopen if:** X. | decided |\n\
+        | `archived` | P. | **Decided (Norman, 2026-11-17).** R. **Reopen if:** X. | decided |\n\
+        | `finished` | P. | Done. | done |\n";
+    let roadmap = "### M2\n\n\
+        **Decided first:** [`decided-first`](docs/design-review.md#decided-first).\n\n\
+        - [ ] The work ([`in-roadmap`](docs/design-review.md#in-roadmap)).\n\
+        - [x] Its sibling, after [`longer-key`](docs/design-review.md#longer-key).\n\n\
+        Prose that names [`in-prose`](docs/design-review.md#in-prose).\n";
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("register-plan");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("briefs/archive")).unwrap();
+    fs::write(
+        dir.join("briefs/a-task.md"),
+        "---\nid: a-task\nawaits: [docs/design-review.md#in-brief]\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("briefs/archive/done-task.md"),
+        "---\nid: done-task\nawaits: [docs/design-review.md#archived]\n---\n",
+    )
+    .unwrap();
+    let briefs = live_briefs(&dir);
+    assert_eq!(briefs.len(), 1);
+    assert_eq!(
+        unplaced(register, roadmap, &briefs),
+        ["line 6: in-prose", "line 7: longer", "line 8: archived"]
+    );
+}

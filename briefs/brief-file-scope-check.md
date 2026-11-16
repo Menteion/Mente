@@ -1,9 +1,9 @@
 ---
 id: brief-file-scope-check
-status: draft
+status: active
 type: feature
 awaits: [docs/design-review.md#brief-file-scope, docs/design-review.md#records-one-per-file]
-affectedFiles: [compiler/mente-cli/src/briefs.rs, compiler/mente-cli/src/lib.rs, compiler/mente-cli/src/main.rs, compiler/mente-cli/tests/briefs.rs, compiler/mente-cli/tests/register.rs, ROADMAP.md, docs/design-review.md, briefs/brief-file-scope-check.md, briefs/archive/brief-file-scope-check.md]
+affectedFiles: [compiler/mente-cli/tests/register.rs, ROADMAP.md, docs/design-review.md, briefs/brief-file-scope-check.md, briefs/archive/brief-file-scope-check.md]
 protectedFiles: [.github/**, CLAUDE.md, spec/**]
 ---
 
@@ -13,9 +13,9 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**]
 
 [`brief-file-scope`](../docs/design-review.md#brief-file-scope), decided on 2026-11-15, is held so far by memory alone. Two rules are added.
 
-The first fails a pull request that names no brief, or that changes a file outside its brief's `affectedFiles` or inside its `protectedFiles`. This round writes the side that reads the briefs and compares a list of changed files with them. The required check that runs it lives in `.github/`, which the test-isolation session owns and wires.
+The first fails a pull request that names no brief, or that changes a file outside its brief's `affectedFiles` or inside its `protectedFiles`. spec-brief already holds a round to its scope (`spec-brief archive <brief> --dry-run --strict --base <rev>`), with the scope's globs defined once, in the tool, so the check reuses it rather than copying its globs into Rust (the manager, 2026-11-17). The required check that runs it lives in `.github/`, which the test-isolation session owns and wires; this round writes down what it must wire.
 
-The second rule is in the register's test: every `decided` entry is linked from an item of `ROADMAP.md` or from a live brief, so that no decision drops out of the plan. On 2026-11-17, decided entries stood that appeared nowhere in `ROADMAP.md`.
+The second rule is in the register's test: every `decided` entry is linked from an item of `ROADMAP.md`, from a milestone's line of decisions taken first, or from a live brief, so that no decision drops out of the plan.
 
 ## Negative Scope
 
@@ -24,11 +24,16 @@ The second rule is in the register's test: every `decided` entry is linked from 
 
 ## Invariants
 
-- [ ] Each rule has a test seen to fail without it, with plants: no brief named, a file outside the scope, a file inside the protected files, a decided entry linked from nowhere.
-- [ ] `node tools/quick.mjs` passes before the push.
+- [x] The register's rule has tests seen to fail without it, with plants: a decided entry linked from nowhere, from prose only, from a longer key or from an archived brief, and a placement taken out of `ROADMAP.md`.
+- [ ] The scope check has tests seen to fail without it, with plants: no brief named, a file outside the scope, a file inside the protected files.
+
+  **Delegated** to test-isolation, which wires spec-brief's own scope check in `.github/` and plants its cases there.
+- [x] `node tools/quick.mjs` passes before the push.
 
 ## Acceptance Criteria
 
 - [ ] A function reads a pull request's brief and its changed files and returns each file out of scope, by the patterns spec-brief reads.
-- [ ] `tests/register.rs` refuses a decided entry that no ROADMAP item or live brief links.
-- [ ] The manager has the list of what test-isolation must wire.
+
+  **Rejected**: spec-brief's `archive --dry-run --strict --base <rev>` already returns each file out of scope and each protected file changed, by its own patterns; a Rust copy would define the scope's globs twice.
+- [x] `tests/register.rs` refuses a decided entry that no ROADMAP item or live brief links.
+- [x] The manager has the list of what test-isolation must wire.
