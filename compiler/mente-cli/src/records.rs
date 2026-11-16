@@ -65,8 +65,23 @@ pub const EQUIVALENT_MUTANTS: Kind = Kind {
     archive: None,
 };
 
+/// The groups of the equivalent mutants, `compiler/mente-cli/tests/mutants/equivalence-groups/<key>.md`,
+/// each stating once the reasoning its mutants share, which each mutant's record names.
+pub const EQUIVALENCE_GROUPS: Kind = Kind {
+    record: "a group of equivalent mutants",
+    dir: "compiler/mente-cli/tests/mutants/equivalence-groups",
+    extension: "md",
+    archive: None,
+};
+
 /// Every kind of record kept one file a record.
-pub const KINDS: &[Kind] = &[ESCAPES, BRIEFS, BENCHMARK_TASKS, EQUIVALENT_MUTANTS];
+pub const KINDS: &[Kind] = &[
+    ESCAPES,
+    BRIEFS,
+    BENCHMARK_TASKS,
+    EQUIVALENT_MUTANTS,
+    EQUIVALENCE_GROUPS,
+];
 
 /// A file that holds many records, and why it is not yet a kind of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

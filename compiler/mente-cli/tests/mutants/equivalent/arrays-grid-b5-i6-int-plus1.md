@@ -1,6 +1,0 @@
----
-mutant: compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i6/int+1
-reason: every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
----
-
-Narrowing an array literal into its declared type: each element is a constant that fits, 0 and 255 among them, so the check never fails. A literal without a 0 or a 255 would leave more of these; the corpus's literals hold both.
