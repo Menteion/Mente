@@ -39,6 +39,7 @@ import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, rea
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
+import { CHECKS as QUICK_CHECKS } from "../../tools/quick.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,7 +47,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 66;
+const FLOOR = 67;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -3534,6 +3535,18 @@ check("every job that confines agent code names the one sandbox", () => {
 });
 
 // ------------------------------------------------------------------------- the required checks
+
+check("tools/quick.mjs runs this policy before a push for a change to any file, since the policy reads files across the whole tree", () => {
+  // PR 161: a change to the benchmark's harness alone failed this policy in CI, where tools/quick.mjs
+  // had run it only for the gates' files. The policy reads far more than the gates: every module a
+  // job that holds a secret runs, the compiler's sources, the conformance programs, the corpus, the
+  // spec and the docs, read on 2026-11-16 as some 2,300 paths in every part of the tree. The one
+  // trigger that cannot fall behind what it reads is every path, tracked or new.
+  const policy = QUICK_CHECKS.filter((c) => c.run.join(" ") === "npm run test:ci");
+  assert.equal(policy.length, 1, "tools/quick.mjs runs the workflow policy in one check");
+  const missed = [...tracked(), "a-new-directory/a-new-file.txt", "a-new-file"].filter((f) => !policy[0].when.test(f));
+  assert.deepEqual(missed.slice(0, 20), [], `${missed.length} files whose change tools/quick.mjs would not check against this policy`);
+});
 
 check("the required checks are listed once each", () => {
   const names = requiredChecks();

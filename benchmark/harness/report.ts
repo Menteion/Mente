@@ -5,7 +5,7 @@
 // and the programs that led to a repair; core tasks apart from the others, and adversarial tasks
 // as caught at build, caught at run time or missed.
 
-import { ANOMALIES, anomalyOf } from "./broker.ts";
+import { anomalyOf, anomalyWords } from "./broker.ts";
 import type { Verdict } from "./build.ts";
 import type { Lang } from "./languages.ts";
 import { own, setOwn } from "../own.mjs";
@@ -19,7 +19,7 @@ export function failureOf(e: unknown, set: "public" | "held-out", name: string):
   const error = e instanceof Error ? e : new Error(String(e));
   if (set === "public") return `${name}: ${error.message}`;
   const anomaly = anomalyOf(e !== null && typeof e === "object" ? (e as { anomaly?: unknown }).anomaly : undefined);
-  if (anomaly !== null) return `a held-out run failed: ${ANOMALIES[anomaly]}`;
+  if (anomaly !== null) return `a held-out run failed: ${anomalyWords(anomaly)}`;
   return `a held-out run failed: ${own(/the API answered \d+/.exec(error.message), 0) ?? error.name}`;
 }
 

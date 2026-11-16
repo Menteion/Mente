@@ -33,11 +33,10 @@ function changedFiles() {
 const RUST_INPUTS = /\.rs$|(^|\/)Cargo\.(toml|lock)$|^clippy\.toml$|^rust-toolchain(\.toml)?$|^\.config\/|^\.cargo\//;
 const PROGRAMS = /^compiler\/|^conformance\/|^examples\/|^docs\/language-card\.md$|^docs\/platform-layer\.md$/;
 const DOCUMENTS = /\.md$|^spec\/|^docs\//;
-const GATES = /^\.github\/|^\.config\/|^\.cargo\/|(^|\/)Cargo\.(toml|lock)$|^clippy\.toml$|^package(-lock)?\.json$|^\.gitattributes$|^rust-toolchain(\.toml)?$/;
 const SITE = /^site\/|^README\.md$|^spec\/|^docs\//;
 
 /** Each check: the files that call for it, and the command. */
-const CHECKS = [
+export const CHECKS = [
   { name: "format", when: RUST_INPUTS, run: ["cargo", "fmt", "--all", "--check"] },
   { name: "lints", when: RUST_INPUTS, run: ["cargo", "clippy", "--all-targets", "--workspace", "--", "-D", "warnings"] },
   // The repository's gates: English text, the dependency policy, the lock's crates.
@@ -47,38 +46,46 @@ const CHECKS = [
   { name: "lint list, golden files and conformance", when: PROGRAMS, run: ["cargo", "test", "-p", "mente-cli", "--test", "lints", "--test", "reproducible", "--test", "conformance"] },
   { name: "spec directives", when: DOCUMENTS, run: ["cargo", "run", "--quiet", "--bin", "mn", "--", "spec"] },
   { name: "documentation tools", when: DOCUMENTS, run: ["npm", "run", "verify:docs"] },
-  { name: "workflow policy", when: GATES, run: ["npm", "run", "test:ci"] },
+  // The workflow policy reads files across the whole tree, not the gates alone: every module a job
+  // that holds a secret runs, the compiler's sources for its ignored tests, the corpus, the spec and
+  // the docs. So any change can fail it, and every change calls for it (PR 161: a change to the
+  // benchmark's harness alone failed it in CI, where this map had not run it). The policy's own test
+  // "quick.mjs runs the workflow policy ..." holds this.
+  { name: "workflow policy", when: /./, run: ["npm", "run", "test:ci"] },
   { name: "benchmark corpus", when: /^benchmark\//, run: ["npm", "run", "check:benchmark"] },
   { name: "benchmark checker", when: /^benchmark\//, run: ["npm", "run", "test:benchmark"] },
   { name: "benchmark harness", when: /^benchmark\/harness\//, run: ["npm", "run", "test:harness"] },
   { name: "site", when: SITE, run: ["npm", "run", "test:site"] },
 ];
 
-const dash = process.argv.indexOf("--");
-const ownTests = dash >= 0 ? process.argv.slice(dash + 1) : [];
-const changed = changedFiles();
-const due = CHECKS.filter((c) => [...changed].some((f) => c.when.test(f)));
-if (ownTests.length) due.push({ name: `the change's own tests (cargo test ${ownTests.join(" ")})`, run: ["cargo", "test", ...ownTests] });
-if (due.length === 0) {
-  console.log("quick: nothing changed against origin/main, so nothing to check");
-  process.exit(0);
-}
+// The checks run only when this file is the script, so that the policy's test can read CHECKS.
+if (import.meta.main) {
+  const dash = process.argv.indexOf("--");
+  const ownTests = dash >= 0 ? process.argv.slice(dash + 1) : [];
+  const changed = changedFiles();
+  const due = CHECKS.filter((c) => [...changed].some((f) => c.when.test(f)));
+  if (ownTests.length) due.push({ name: `the change's own tests (cargo test ${ownTests.join(" ")})`, run: ["cargo", "test", ...ownTests] });
+  if (due.length === 0) {
+    console.log("quick: nothing changed against origin/main, so nothing to check");
+    process.exit(0);
+  }
 
-console.log(`quick: ${changed.size} changed file(s); ${due.length} check(s)\n`);
-if (process.argv.includes("--list")) {
-  for (const check of due) console.log(`  ${check.name}: ${check.run.join(" ")}`);
-  process.exit(0);
+  console.log(`quick: ${changed.size} changed file(s); ${due.length} check(s)\n`);
+  if (process.argv.includes("--list")) {
+    for (const check of due) console.log(`  ${check.name}: ${check.run.join(" ")}`);
+    process.exit(0);
+  }
+  const results = [];
+  for (const check of due) {
+    console.log(`== ${check.name}: ${check.run.join(" ")}`);
+    const [cmd, ...args] = check.run;
+    // npm is a .cmd on Windows, which only a shell starts.
+    const r = spawnSync(cmd, args, { stdio: "inherit", env, shell: process.platform === "win32" && cmd === "npm" });
+    results.push([check.name, r.status === 0]);
+  }
+  console.log("\nquick:");
+  for (const [name, ok] of results) console.log(`  ${ok ? "pass" : "FAIL"}  ${name}`);
+  const failed = results.filter(([, ok]) => !ok).length;
+  if (!ownTests.length) console.log("\nAlso run the tests the change adds or changes: node tools/quick.mjs -- -p <crate> <filter>");
+  process.exit(failed ? 1 : 0);
 }
-const results = [];
-for (const check of due) {
-  console.log(`== ${check.name}: ${check.run.join(" ")}`);
-  const [cmd, ...args] = check.run;
-  // npm is a .cmd on Windows, which only a shell starts.
-  const r = spawnSync(cmd, args, { stdio: "inherit", env, shell: process.platform === "win32" && cmd === "npm" });
-  results.push([check.name, r.status === 0]);
-}
-console.log("\nquick:");
-for (const [name, ok] of results) console.log(`  ${ok ? "pass" : "FAIL"}  ${name}`);
-const failed = results.filter(([, ok]) => !ok).length;
-if (!ownTests.length) console.log("\nAlso run the tests the change adds or changes: node tools/quick.mjs -- -p <crate> <filter>");
-process.exit(failed ? 1 : 0);

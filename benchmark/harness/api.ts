@@ -12,7 +12,7 @@
 // costs, never what the model is shown.
 
 import { readFileSync } from "node:fs";
-import { ANOMALIES, readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Anomaly, type Answer } from "./broker.ts";
+import { anomalyWords, readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Anomaly, type Answer } from "./broker.ts";
 import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -157,7 +157,7 @@ export async function budgetedCall(post: Post, budget: Budget, body: object, mod
     // was spent, and the run fails on it, its answer unrecorded, as the broker, which closes, has it.
     if (cost > worst) {
       budget.stopped = true;
-      throw new RunAnomaly("past its worst", `${ANOMALIES["past its worst"]}: $${cost}, where the most was $${worst}`);
+      throw new RunAnomaly("past its worst", `${anomalyWords("past its worst")}: $${cost}, where the most was $${worst}`);
     }
     return { reply, cost };
   }

@@ -232,15 +232,18 @@ export function wrongModel(said: unknown, requested: string, limits: Pick<Limits
  */
 export type Anomaly = "another model" | "past its worst";
 
-/** Each anomaly as a run's record and the broker's refusals say it, naming no task. */
-export const ANOMALIES: Record<Anomaly, string> = {
-  "another model": "an answer came from another model than the one asked",
-  "past its worst": "an answer was billed past the most its request could cost",
-};
+/**
+ * Each anomaly as a run's record and the broker's refusals say it, naming no task. Read by
+ * comparison, never by a computed key, which the policy lets only benchmark/own.mjs read and the
+ * broker's permission flags leave it no import of.
+ */
+export function anomalyWords(anomaly: Anomaly): string {
+  return anomaly === "another model" ? "an answer came from another model than the one asked" : "an answer was billed past the most its request could cost";
+}
 
 /** An anomaly named by a value from elsewhere, a refusal line or an error, or null when it names none. */
 export function anomalyOf(value: unknown): Anomaly | null {
-  return typeof value === "string" && Object.hasOwn(ANOMALIES, value) ? (value as Anomaly) : null;
+  return value === "another model" || value === "past its worst" ? value : null;
 }
 
 /** The fields of a usage the broker prices. */
@@ -505,7 +508,7 @@ export class Broker {
     if (typeof request?.id === "number" || typeof request?.id === "string") id = request.id;
     // After the run's first anomaly nothing more is sent; the refusal names that anomaly, so that a
     // run whose requests race it fails for it, whichever answer the harness reads first.
-    if (this.closed !== null) return answer({ refused: `the broker admits nothing more this run: ${ANOMALIES[this.closed]}`, anomaly: this.closed });
+    if (this.closed !== null) return answer({ refused: `the broker admits nothing more this run: ${anomalyWords(this.closed)}`, anomaly: this.closed });
     const shaped = shape(request?.body, this.limits);
     if ("refused" in shaped) return answer({ refused: shaped.refused });
     const bytes = utf8Length(shaped.text);
