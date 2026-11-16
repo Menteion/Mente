@@ -1019,13 +1019,15 @@ pub fn verdict(runs: &[ProgramRun], eq: &Equivalences) -> Report {
                     None => report
                         .problems
                         .push(format!("{} gives no key, so no file can record it", o.id)),
-                    Some(key) => match keys.insert(key.clone(), o.id.clone()) {
-                        Some(other) if other != o.id => report.problems.push(format!(
-                            "{} and {} give one key, {}, so no file can record both",
-                            other, o.id, key
-                        )),
-                        _ => {}
-                    },
+                    // Each mutant's name is its own, so a key met before is another mutant's.
+                    Some(key) => {
+                        if let Some(other) = keys.insert(key.clone(), o.id.clone()) {
+                            report.problems.push(format!(
+                                "{} and {} give one key, {}, so no file can record both",
+                                other, o.id, key
+                            ));
+                        }
+                    }
                 }
             }
             let c = counts.entry(o.family).or_default();
