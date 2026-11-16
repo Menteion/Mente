@@ -69,6 +69,7 @@ const SUITES: &[Suite] = &[
             ("mir_run::tests::test_in_mir_run", false, true),
             ("mir_run::coverage::tests::test_in_coverage", false, true),
             ("catalogue::test_in_catalogue", false, true),
+            ("shared::test_in_shared_main", false, true),
         ],
     ),
     (
@@ -607,6 +608,20 @@ fn test_a_test_runs_from_exactly_its_target_file() {
         ),
         ("compiler/mente-cli/src/main.rs", "test_in_tool", false),
         ("compiler/mente-cli/src/main.rs", "test_in_shared", false),
+        // A test of another module of the same binary is not the target's, and a module of the
+        // package's binary is no module of a binary of src/bin (the survivors of Mutants on
+        // a136bf0).
+        ("compiler/mente-cli/src/records.rs", "test_in_lib", false),
+        (
+            "compiler/mente-cli/src/shared.rs",
+            "test_in_shared_main",
+            true,
+        ),
+        (
+            "compiler/mente-cli/src/bin/shared/mod.rs",
+            "test_in_shared_main",
+            false,
+        ),
         ("compiler/mente-cli/src/mir_run.rs", "test_in_mir_run", true),
         (
             "compiler/mente-cli/src/mir_run.rs",
