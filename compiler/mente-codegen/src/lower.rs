@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mente_mir::cfg::{
-    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Term, Ty,
+    self, ArithOp, BitOp, BlockId, Builder, CmpOp, Fact, FuncId, IntTy, Loc, Num, Op, Term, Ty,
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
@@ -831,6 +831,34 @@ impl<'a> Lower<'a> {
         self.inst(Op::Check { trap: site }, Ty::Unit, &args);
     }
 
+    /// The integer `guarded`, of type `t`, let through where `cond` holds, of which `fact` then
+    /// holds: elsewhere it traps at `span` with the pieces of `text` around `values`. A partial
+    /// operation takes what this yields (`cfg::Fact`).
+    fn guard(
+        &mut self,
+        cond: NodeId,
+        (kind, text): (&str, &[&str]),
+        values: &[NodeId],
+        (guarded, t): (NodeId, IntTy),
+        fact: Fact,
+        span: Span,
+    ) -> NodeId {
+        self.at(span);
+        let site = self.b.trap_site(kind, text);
+        let mut args = vec![cond];
+        args.extend_from_slice(values);
+        args.push(guarded);
+        let fact = self.b.fact_site(fact);
+        self.inst(Op::Guard { trap: site, fact }, Ty::Int(t), &args)
+    }
+
+    /// The integer `v`, of type `t`, of which `fact` holds where it stands: what Tier 1 proved,
+    /// or what a type gives, which costs nothing at run time.
+    fn assume(&mut self, v: NodeId, t: IntTy, fact: Fact) -> NodeId {
+        let fact = self.b.fact_site(fact);
+        self.inst(Op::Assume(fact), Ty::Int(t), &[v])
+    }
+
     fn finish(mut self) -> cfg::Function {
         let unreachable = self.b.trap_site(
             "unreachable",
@@ -1460,7 +1488,13 @@ impl<'a> Lower<'a> {
     ) -> Result<NodeId, String> {
         let (i, t) = i.int_node("an index")?.ok_or("an index of no value")?;
         self.at(span);
-        if !self.proven(ObligationKind::Index, Key::at(key, Tag::None)) {
+        // The element's address takes the index a guard lets through, or one Tier 1 proved lies
+        // inside: 0 to the last element, or to the type's largest value, if smaller.
+        let last = Num::new(len == 0, u128::from(len).abs_diff(1));
+        let inside = Fact::Within(Num::ZERO, last.min(t.max()));
+        let i = if self.proven(ObligationKind::Index, Key::at(key, Tag::None)) {
+            self.assume(i, t, inside)
+        } else {
             let zero = self.int(t, Num::ZERO);
             let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[i, zero]);
             let n = Num::new(false, u128::from(len));
@@ -1472,8 +1506,15 @@ impl<'a> Lower<'a> {
             };
             let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
             let after = format!(" is outside an array of length {}", len);
-            self.check(ok, "index-out-of-bounds", &["index ", &after], &[i], span);
-        }
+            self.guard(
+                ok,
+                ("index-out-of-bounds", &["index ", &after]),
+                &[i],
+                (i, t),
+                inside,
+                span,
+            )
+        };
         let index = self.cast(i, t, USIZE);
         Ok(self.inst(
             Op::Elem {
@@ -1543,7 +1584,10 @@ impl<'a> Lower<'a> {
             otherwise: (exit, vec![]),
         });
         self.switch(round);
-        each(self, i)?;
+        // The round runs where the index is below the length, the loop's condition.
+        let last = Num::new(len == 0, u128::from(len).abs_diff(1));
+        let inside = self.assume(i, USIZE, Fact::Within(Num::ZERO, last));
+        each(self, inside)?;
         let one = self.int(USIZE, Num::new(false, 1));
         let next = self.inst(
             Op::Arith {
@@ -1627,10 +1671,16 @@ impl<'a> Lower<'a> {
         let into = mir(to);
         let proven =
             key.is_some_and(|k| self.proven(ObligationKind::Range, Key::at(k, Tag::Into(to.name))));
-        if from == into || proven {
+        let (lo, hi) = (into.min(), into.max());
+        if from == into || (into.holds(from.min()) && into.holds(from.max())) {
             return self.cast(n, from, into);
         }
-        let (lo, hi) = (into.min(), into.max());
+        // Narrowing: the cast takes the value a guard lets through, or one Tier 1 proved fits,
+        // which a constant's own value may already say.
+        if proven {
+            let n = self.assume(n, from, Fact::Within(lo, hi));
+            return self.cast(n, from, into);
+        }
         let mut parts = Vec::new();
         // A bound needs a check where the source type reaches past it.
         if !into.holds(from.min()) {
@@ -1641,22 +1691,42 @@ impl<'a> Lower<'a> {
             let c = self.int(from, hi);
             parts.push(self.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[n, c]));
         }
-        if let Some(&first) = parts.first() {
-            let ok = parts[1..].iter().fold(first, |a, b| {
-                self.inst(Op::Bits(BitOp::And), Ty::Bool, &[a, *b])
-            });
-            let after = format!(" does not fit in `{}`", to.name);
-            self.check(ok, "narrowing", &["", &after], &[n], span);
-        }
+        let first = parts
+            .first()
+            .copied()
+            .ok_or("a narrowing with no bound to check");
+        let n = match first {
+            Ok(first) => {
+                let ok = parts[1..].iter().fold(first, |a, b| {
+                    self.inst(Op::Bits(BitOp::And), Ty::Bool, &[a, *b])
+                });
+                let after = format!(" does not fit in `{}`", to.name);
+                self.guard(
+                    ok,
+                    ("narrowing", &["", &after]),
+                    &[n],
+                    (n, from),
+                    Fact::Within(lo, hi),
+                    span,
+                )
+            }
+            Err(_) => n,
+        };
         self.cast(n, from, into)
     }
 
+    /// `n` of type `from` in type `to`. A cast that narrows takes a value of which a guard or
+    /// an assumption holds that it fits (`cfg::Fact`): where none does yet, the value's static
+    /// range, which the checker's types give, fits `to`, and this assumes it.
     fn cast(&mut self, n: NodeId, from: IntTy, to: IntTy) -> NodeId {
         if from == to {
-            n
-        } else {
-            self.inst(Op::Cast, Ty::Int(to), &[n])
+            return n;
         }
+        let fits = Fact::Within(to.min(), to.max());
+        let held = (to.holds(from.min()) && to.holds(from.max()))
+            || self.b.fact(n).is_some_and(|f| f.implies(fits));
+        let n = if held { n } else { self.assume(n, from, fits) };
+        self.inst(Op::Cast, Ty::Int(to), &[n])
     }
 
     /// Checks a value of `shape` against the refinements of the declared type `d`, elementwise
@@ -3026,11 +3096,16 @@ impl<'a> Lower<'a> {
             BinaryOp::Shl | BinaryOp::Shr => {
                 let t = self.worked_in(lt, le, "a shift")?;
                 let w = mir(t);
-                // The amount lies within the type's width, unless Tier 1 proves it does.
-                if !self.proven(
+                // The amount lies within the type's width: the shift takes the amount a guard
+                // lets through, or one Tier 1 proved does.
+                let last = Num::new(false, u128::from(t.bits) - 1);
+                let within = Fact::Within(Num::ZERO, last.min(tb.max()));
+                let b = if self.proven(
                     ObligationKind::Shift,
                     Key::at(tree.expr(re).span, Tag::None),
                 ) {
+                    self.assume(b, tb, within)
+                } else {
                     let zero = self.int(tb, Num::ZERO);
                     let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[b, zero]);
                     let width = Num::new(false, u128::from(t.bits));
@@ -3042,8 +3117,15 @@ impl<'a> Lower<'a> {
                     };
                     let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
                     let after = format!(" is outside 0 ..= {}", t.bits - 1);
-                    self.check(ok, "shift-amount", &["shift amount ", &after], &[b], span);
-                }
+                    self.guard(
+                        ok,
+                        ("shift-amount", &["shift amount ", &after]),
+                        &[b],
+                        (b, tb),
+                        within,
+                        span,
+                    )
+                };
                 let k = self.cast(b, tb, USIZE);
                 if op == BinaryOp::Shl {
                     let after = format!(" does not fit in `{}`", t.name);
@@ -3141,11 +3223,24 @@ impl<'a> Lower<'a> {
                 };
                 let divides = matches!(arith, ArithOp::Div | ArithOp::Rem);
                 let divisor = Key::at(tree.expr(re).span, Tag::None);
-                if divides && !self.proven(ObligationKind::Divisor, divisor) {
-                    let zero = self.int(ty, Num::ZERO);
-                    let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
-                    self.check(ok, "division-by-zero", &["division by zero"], &[], span);
-                }
+                // A division takes the divisor a guard lets through, or one Tier 1 proved is not
+                // zero.
+                let y = match (divides, self.proven(ObligationKind::Divisor, divisor)) {
+                    (false, _) => y,
+                    (true, true) => self.assume(y, ty, Fact::NonZero),
+                    (true, false) => {
+                        let zero = self.int(ty, Num::ZERO);
+                        let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
+                        self.guard(
+                            ok,
+                            ("division-by-zero", &["division by zero"]),
+                            &[],
+                            (y, ty),
+                            Fact::NonZero,
+                            span,
+                        )
+                    }
+                };
                 // An operation on a 128-bit operand is checked unless Tier 1 proves its result
                 // fits, and always when its operands have other types.
                 let trap = wide
@@ -3464,7 +3559,7 @@ pub fn hd(x: u32, d: u32) -> u32 = f(x) + x / d
         let call_f_hd = find(hd, false, f);
         let check_hd = m.functions[hd].blocks[call_f_hd.0].insts[call_f_hd.1 + 1..]
             .iter()
-            .position(|&v| matches!(m.functions[hd].op(v), Op::Check { .. }))
+            .position(|&v| matches!(m.functions[hd].op(v), Op::Check { .. } | Op::Guard { .. }))
             .map(|i| (call_f_hd.0, call_f_hd.1 + 1 + i))
             .unwrap();
         // The check hoisted above `f`'s count with the instructions that give its condition, each
@@ -3633,7 +3728,8 @@ pub fn j(c: bool, x: u32) -> u32 = if c { x / 2 } else { x }
         insts.insert(at_g, enter_f);
         let why = cfg::verify(&forked).unwrap_err();
         assert!(why.contains("where the latest effect is"), "{}", why);
-        // The exact division above the check of its divisor.
+        // The exact division above the guard of its divisor: moved alone, and moved with its
+        // divisor pointed at the one the guard takes, as a pass that hoists it would leave it.
         let d = index("d");
         let (bi, at_div) = find(d, &|op| {
             *op == Op::Arith {
@@ -3641,17 +3737,31 @@ pub fn j(c: bool, x: u32) -> u32 = if c { x / 2 } else { x }
                 trap: None,
             }
         });
-        let mut raised = m.clone();
-        let func = &mut raised.functions[d];
-        let div = func.blocks[bi].insts[at_div];
-        let check = func.effect(div).unwrap();
-        let insts = &mut func.blocks[bi].insts;
-        let at_check = insts.iter().position(|v| *v == check).unwrap();
-        insts.retain(|v| *v != div);
-        insts.insert(at_check, div);
-        let why = cfg::verify(&raised).unwrap_err();
+        let div = m.functions[d].blocks[bi].insts[at_div];
+        let guard = m.functions[d].own_args(div)[1];
+        let divisor = *m.functions[d].own_args(guard).last().unwrap();
+        let raise = |repoint: bool| {
+            let mut raised = m.clone();
+            let func = &mut raised.functions[d];
+            if repoint {
+                let (start, _) = func.operands[div.0 as usize];
+                func.pool[start as usize + 1] = divisor;
+            }
+            let insts = &mut func.blocks[bi].insts;
+            let at_guard = insts.iter().position(|v| *v == guard).unwrap();
+            insts.retain(|v| *v != div);
+            insts.insert(at_guard, div);
+            cfg::verify(&raised).unwrap_err()
+        };
+        let why = raise(false);
         assert!(
             why.contains("is not defined before it on every path"),
+            "{}",
+            why
+        );
+        let why = raise(true);
+        assert!(
+            why.contains("no guard or assumption holds nonzero"),
             "{}",
             why
         );
@@ -4440,7 +4550,9 @@ pub fn on_u128() -> u128 = -0_u128
             .ops
             .iter()
             .filter_map(|op| match op {
-                Op::Check { trap } => Some(f.traps[trap.0 as usize].kind.clone()),
+                Op::Check { trap } | Op::Guard { trap, .. } => {
+                    Some(f.traps[trap.0 as usize].kind.clone())
+                }
                 Op::Arith { trap: Some(_), .. } | Op::Neg { trap: Some(_) } | Op::Shl { .. } => {
                     Some("checked".to_string())
                 }
@@ -4454,6 +4566,7 @@ pub fn on_u128() -> u128 = -0_u128
                 | Op::Shr
                 | Op::Cmp(_)
                 | Op::Cast
+                | Op::Assume(_)
                 | Op::Slot { .. }
                 | Op::Elem { .. }
                 | Op::Load

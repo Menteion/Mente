@@ -126,6 +126,8 @@ fn kept_operands(m: &cfg::Module, f: &cfg::Function, v: NodeId) -> Vec<NodeId> {
         | Op::Cmp(_)
         | Op::Cast
         | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
         | Op::Slot { .. }
         | Op::Elem { .. }
         | Op::Load
@@ -1017,6 +1019,26 @@ impl Translate {
                 e.b.switch_to_block(ok);
                 return Ok(None);
             }
+            Op::Guard { trap: site, .. } => {
+                let ok = e.b.create_block();
+                let fail = e.b.create_block();
+                e.b.ins().brif(args[0], ok, &[], fail, &[]);
+                e.b.switch_to_block(fail);
+                let last = args.len().saturating_sub(1);
+                let shown: Vec<(Value, IntTy)> = args[1..last]
+                    .iter()
+                    .zip(&arg_tys[1..last])
+                    .filter_map(|(v, t)| match t {
+                        cfg::Ty::Int(i) => Some((*v, *i)),
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
+                    })
+                    .collect();
+                let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
+                trap_report(writer, rt, e, f, *site, &values, prefix)?;
+                e.b.switch_to_block(ok);
+                args[last]
+            }
+            Op::Assume(_) => args[0],
             Op::Slot { bytes } => {
                 let slot = e.b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -1186,6 +1208,7 @@ fn constant(f: &cfg::Function, v: NodeId) -> Option<Num> {
     match f.op(v) {
         Op::Int(bits) => Some(Num::from_bits(*bits, t)),
         Op::Cast => constant(f, *f.args(v).first()?).filter(|n| t.holds(*n)),
+        Op::Guard { .. } | Op::Assume(_) => constant(f, *f.own_args(v).last()?),
         Op::Param
         | Op::Bool(_)
         | Op::Arith { .. }

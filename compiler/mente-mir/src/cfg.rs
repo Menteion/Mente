@@ -33,6 +33,11 @@ pub struct FuncId(pub u32);
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TrapId(pub u32);
 
+/// A fact of a function's table, by index ([`Fact`]): kept apart, as a trap site is, so that an
+/// operation that states one stays as small as the others.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct FactId(pub u32);
+
 /// An integer type: its width in bits (8, 16, 32, 64 or 128) and whether it is signed.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct IntTy {
@@ -242,6 +247,81 @@ pub enum CmpOp {
     Ge,
 }
 
+/// The integer type `t` is, if it is one.
+fn int_ty(t: Ty) -> Option<IntTy> {
+    match t {
+        Ty::Int(i) => Some(i),
+        Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => None,
+    }
+}
+
+/// What a guard lets through, or an assumption states, of the value it yields ([`Op::Guard`],
+/// [`Op::Assume`]): a partial operation takes the operand it is partial in from one, so that it
+/// stands below what rules its bad values out by that operand alone, whatever the chain of
+/// effects is rewired to ([`verify_guards`]).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Fact {
+    /// The value is not zero: a divisor.
+    NonZero,
+    /// The value lies in `lo ..= hi`: an index, a shift amount, or a value narrowed into a type.
+    Within(Num, Num),
+}
+
+impl Fact {
+    /// Whether the fact holds of `n`.
+    pub fn holds(self, n: Num) -> bool {
+        match self {
+            Fact::NonZero => n != Num::ZERO,
+            Fact::Within(lo, hi) => lo <= n && n <= hi,
+        }
+    }
+
+    /// Whether every value the fact holds of, `need` holds of too.
+    pub fn implies(self, need: Fact) -> bool {
+        match (self, need) {
+            (Fact::NonZero, Fact::NonZero) => true,
+            (Fact::Within(lo, hi), Fact::NonZero) => hi < Num::ZERO || Num::ZERO < lo,
+            (Fact::Within(lo, hi), Fact::Within(a, b)) => a <= lo && hi <= b,
+            (Fact::NonZero, Fact::Within(..)) => false,
+        }
+    }
+}
+
+/// What a partial operation needs of the operand it is partial in ([`Function::partial_in`]).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Need {
+    /// A divisor: not zero.
+    NonZero,
+    /// A shift amount: within 0 to 127.
+    Amount,
+    /// An element's index: not negative, and within the addresses.
+    Index,
+    /// A value narrowed: within the type it narrows into.
+    Fits(IntTy),
+}
+
+impl Need {
+    /// The fact the operand must hold.
+    pub fn fact(self) -> Fact {
+        let top = |hi: u128| Fact::Within(Num::ZERO, Num::new(false, hi));
+        match self {
+            Need::NonZero => Fact::NonZero,
+            Need::Amount => top(127),
+            Need::Index => top(u128::from(u64::MAX)),
+            Need::Fits(t) => Fact::Within(t.min(), t.max()),
+        }
+    }
+}
+
+impl fmt::Display for Fact {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Fact::NonZero => write!(f, "nonzero"),
+            Fact::Within(lo, hi) => write!(f, "within {}..={}", lo, hi),
+        }
+    }
+}
+
 impl Op {
     /// How an instruction of this kind stands to the chain of effects ([`Chain`]). The builder
     /// threads what this names, and the verifier holds it, so that the two keep one list.
@@ -249,30 +329,68 @@ impl Op {
         match self {
             // May trap: a checked operation, a shift left, a check. Reads or writes memory: a
             // load, a store, a copy. Counts a call's frame, or makes a call.
+            // An assumption, which costs nothing at run time, stands where its fact holds.
             Op::Arith { trap: Some(_), .. }
             | Op::Neg { trap: Some(_) }
             | Op::Shl { .. }
             | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
             | Op::Load
             | Op::Store
             | Op::Copy { .. }
             | Op::Enter { .. }
             | Op::Call(_) => Chain::Follows,
-            // Partial: an exact operation leaves its type, a division divides by zero, a shift
-            // right shifts by more than its width, a cast leaves its type and an element's address
-            // leaves memory on some inputs, which the checks before it rule out.
-            Op::Arith { trap: None, .. }
-            | Op::Neg { trap: None }
+            // Exact arithmetic and negation: exact where the static ranges of their operands
+            // hold, which the verifier does not check ([`verify_guards`]).
+            Op::Arith {
+                op: ArithOp::Add | ArithOp::Sub | ArithOp::Mul,
+                trap: None,
+            }
+            | Op::Neg { trap: None } => Chain::Reads,
+            // A division, a shift right, a cast and an element's address are partial in one
+            // operand, which they take from a guard or an assumption ([`verify_guards`]).
+            Op::Arith {
+                op: ArithOp::Div | ArithOp::Rem,
+                trap: None,
+            }
             | Op::Shr
             | Op::Cast
-            | Op::Elem { .. } => Chain::Reads,
-            Op::Param
+            | Op::Elem { .. }
+            | Op::Param
             | Op::Int(_)
             | Op::Bool(_)
             | Op::Bits(_)
             | Op::Not
             | Op::Cmp(_)
             | Op::Slot { .. } => Chain::Free,
+        }
+    }
+
+    /// The fact this instruction states of the value it yields, where it is a guard or an
+    /// assumption, by its place in the function's table.
+    pub fn fact(&self) -> Option<FactId> {
+        match self {
+            Op::Guard { fact, .. } | Op::Assume(fact) => Some(*fact),
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Check { .. }
+            | Op::Slot { .. }
+            | Op::Elem { .. }
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. }
+            | Op::Enter { .. }
+            | Op::Call(_) => None,
         }
     }
 
@@ -292,6 +410,8 @@ impl Op {
             | Op::Cmp(_)
             | Op::Cast
             | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
             | Op::Slot { .. }
             | Op::Elem { .. }
             | Op::Load
@@ -363,6 +483,17 @@ pub enum Op {
     Check {
         trap: TrapId,
     },
+    /// A check that yields the value it guards, its last operand: traps at `trap` unless the
+    /// boolean operand holds, reporting the operands between, and yields the value, of which
+    /// `fact` then holds. A partial operation takes what it yields ([`Fact`]).
+    Guard {
+        trap: TrapId,
+        fact: FactId,
+    },
+    /// Yields its operand, of which `fact` holds where it stands: a guard Tier 1 proved, left out,
+    /// or a fact a type gives, which costs nothing at run time (the Ghost Contract `Assume` of
+    /// Engineering Guardrail #2). The MIR interpreter reports broken MIR where it does not hold.
+    Assume(FactId),
     /// A new stack slot of `bytes`, aligned to 16, its address the value.
     Slot {
         bytes: u32,
@@ -460,6 +591,8 @@ pub struct Function {
     pub pool: Vec<NodeId>,
     pub blocks: Vec<Block>,
     pub traps: Vec<TrapSite>,
+    /// The facts its guards and assumptions state.
+    pub facts: Vec<Fact>,
 }
 
 impl Function {
@@ -480,6 +613,86 @@ impl Function {
             Chain::Follows | Chain::Reads => self.args(v).last().copied(),
             Chain::Free => None,
         }
+    }
+
+    /// The fact that holds of value `v` wherever it is defined: a guard's or an assumption's, of
+    /// what it yields; a constant's, its own value; and a cast's, its operand's, whose value it
+    /// keeps where it verifies. None for any other value.
+    pub fn fact(&self, v: NodeId) -> Option<Fact> {
+        let op = self.ops.get(v.0 as usize)?;
+        match op {
+            Op::Int(bits) => int_ty(self.ty(v)).map(|t| {
+                let n = Num::from_bits(*bits, t);
+                Fact::Within(n, n)
+            }),
+            Op::Cast => self.own_args(v).first().and_then(|a| self.fact(*a)),
+            Op::Param
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
+            | Op::Slot { .. }
+            | Op::Elem { .. }
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. }
+            | Op::Enter { .. }
+            | Op::Call(_) => op
+                .fact()
+                .and_then(|id| self.facts.get(id.0 as usize).copied()),
+        }
+    }
+
+    /// The operand instruction `v` is partial in, by its place among its own operands, and what
+    /// it needs of it: a division's divisor, not zero; a shift's amount, within 0 to 127; an
+    /// element's index, not negative; and a narrowing cast's operand, within the type it
+    /// narrows into. None for an instruction defined on every operand.
+    pub fn partial_in(&self, v: NodeId) -> Option<(usize, Need)> {
+        match self.op(v) {
+            Op::Arith {
+                op: ArithOp::Div | ArithOp::Rem,
+                ..
+            } => Some((1, Need::NonZero)),
+            Op::Shl { .. } | Op::Shr => Some((1, Need::Amount)),
+            Op::Elem { .. } => Some((1, Need::Index)),
+            Op::Cast => {
+                let from = self.own_args(v).first().and_then(|a| int_ty(self.ty(*a)));
+                from.zip(int_ty(self.ty(v)))
+                    .filter(|(from, to)| !(to.holds(from.min()) && to.holds(from.max())))
+                    .map(|(_, to)| (0, Need::Fits(to)))
+            }
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Cmp(_)
+            | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
+            | Op::Slot { .. }
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. }
+            | Op::Enter { .. }
+            | Op::Call(_) => None,
+        }
+    }
+
+    /// A fact of the table as the printed form writes it.
+    fn fact_text(&self, id: FactId) -> String {
+        self.facts
+            .get(id.0 as usize)
+            .map_or(format!("f{}", id.0), |f| f.to_string())
     }
 
     /// The operands of `v` besides the effect it takes: of a call, the callee's arguments.
@@ -541,6 +754,8 @@ impl Function {
             .into(),
             Op::Cast => "cast".into(),
             Op::Check { trap } => format!("check t{}", trap.0),
+            Op::Guard { trap, fact } => format!("guard t{} {}", trap.0, self.fact_text(*fact)),
+            Op::Assume(fact) => format!("assume {}", self.fact_text(*fact)),
             Op::Slot { bytes } => format!("slot {}", bytes),
             Op::Elem { stride } => format!("elem {}", stride),
             Op::Load => "load".into(),
@@ -654,6 +869,11 @@ impl Builder {
         params[..params.len().saturating_sub(1)].to_vec()
     }
 
+    /// The fact that holds of value `v` wherever it is defined ([`Function::fact`]).
+    pub fn fact(&self, v: NodeId) -> Option<Fact> {
+        self.f.fact(v)
+    }
+
     /// The latest effect of the current block.
     pub fn latest(&self) -> NodeId {
         self.latest[self.current.0 as usize]
@@ -705,6 +925,34 @@ impl Builder {
 
     fn end(&mut self, term: Term) {
         self.f.blocks[self.current.0 as usize].term = term;
+    }
+
+    /// A fact of the function's table, for a guard or an assumption to state: one the table holds
+    /// already is given again.
+    pub fn fact_site(&mut self, fact: Fact) -> FactId {
+        match self.f.facts.iter().position(|f| *f == fact) {
+            Some(i) => FactId(i as u32),
+            None => {
+                self.f.facts.push(fact);
+                FactId(self.f.facts.len() as u32 - 1)
+            }
+        }
+    }
+
+    /// The value `v`, of which `fact` holds where it stands ([`Op::Assume`]).
+    pub fn assume(&mut self, v: NodeId, fact: Fact) -> NodeId {
+        let ty = self.f.ty(v);
+        let fact = self.fact_site(fact);
+        self.inst(Op::Assume(fact), ty, &[v])
+    }
+
+    /// The value last among `args` let through where the condition first among them holds, of
+    /// which `fact` then holds; elsewhere it traps at `trap`, reporting those between
+    /// ([`Op::Guard`]).
+    pub fn guard(&mut self, trap: TrapId, fact: Fact, args: &[NodeId]) -> NodeId {
+        let ty = args.last().map_or(Ty::Unit, |v| self.f.ty(*v));
+        let fact = self.fact_site(fact);
+        self.inst(Op::Guard { trap, fact }, ty, args)
     }
 
     /// Ends the current block in a jump to `to` with `args` and the latest effect.
@@ -831,7 +1079,41 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
     }
     verify_order(f)?;
     verify_chain(f)?;
+    verify_guards(f)?;
     verify_frames(f)
+}
+
+/// Every partial operation takes the operand it is partial in from a guard or an assumption whose
+/// fact rules its bad values out, or as a constant that is not one ([`Function::partial_in`],
+/// [`Function::fact`]): a division's divisor from one that holds it is not zero, a shift's amount
+/// from one that holds it within 0 to 127, an element's index from one that holds it is not
+/// negative, and a narrowing cast's operand from one that holds it within the type it narrows
+/// into. A partial operation then stands below its guard by that operand alone, which is not
+/// defined above the guard, whatever the chain of effects is rewired to. Exact arithmetic and
+/// negation are exact where the static ranges of their operands hold, which come from types and
+/// refinements this does not see; they read the latest effect instead ([`Chain::Reads`]).
+#[inline(never)]
+fn verify_guards(f: &Function) -> Result<(), String> {
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for &v in &b.insts {
+            let Some((k, need)) = f.partial_in(v) else {
+                continue;
+            };
+            let Some(&a) = f.own_args(v).get(k) else {
+                continue;
+            };
+            if !f.fact(a).is_some_and(|fact| fact.implies(need.fact())) {
+                return Err(format!(
+                    "v{} in block {}: it takes v{}, of which no guard or assumption holds {}",
+                    v.0,
+                    bi,
+                    a.0,
+                    need.fact()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The effects of `f` form one chain along every path ([`Chain`]): in each block, from its
@@ -1118,6 +1400,8 @@ fn verify_frames(f: &Function) -> Result<(), String> {
                 | Op::Cmp(_)
                 | Op::Cast
                 | Op::Check { .. }
+                | Op::Guard { .. }
+                | Op::Assume(_)
                 | Op::Slot { .. }
                 | Op::Elem { .. }
                 | Op::Load
@@ -1228,6 +1512,25 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             let mut wants = vec![Want::Is(Ty::Bool)];
             wants.extend(std::iter::repeat_n(Want::Int, values));
             (Want::Is(Ty::Unit), wants, Some((*trap, values)))
+        }
+        // The condition, the values the message reports, and the integer it guards, which it
+        // yields.
+        Op::Guard { trap, fact } => {
+            if f.facts.get(fact.0 as usize).is_none() {
+                return Err("a guard of a fact that does not exist".into());
+            }
+            let values = args.len().saturating_sub(2);
+            let mut wants = vec![Want::Is(Ty::Bool)];
+            wants.extend(std::iter::repeat_n(Want::Int, values));
+            wants.push(Want::Int);
+            let guarded = args.last().copied().unwrap_or(Ty::Unit);
+            (Want::Is(guarded), wants, Some((*trap, values)))
+        }
+        Op::Assume(fact) => {
+            if f.facts.get(fact.0 as usize).is_none() {
+                return Err("an assumption of a fact that does not exist".into());
+            }
+            (same, vec![Want::Int], None)
         }
         Op::Slot { .. } => (Want::Is(Ty::Addr), vec![], None),
         Op::Elem { .. } => (
@@ -1736,6 +2039,57 @@ impl<'m> Machine<'m> {
                 }
                 _ => return Err(broken("a check of a value that is not a bool")),
             },
+            // A guard traps as a check does, then yields the value it guards, of which its fact
+            // must hold: a guard whose condition lets through what its fact does not is broken.
+            Op::Guard { trap: at, fact } => {
+                let fact = f
+                    .facts
+                    .get(fact.0 as usize)
+                    .copied()
+                    .ok_or_else(|| broken("a guard of a fact that does not exist"))?;
+                let cond = match args.first() {
+                    Some(Val::Bool(c)) => Some(*c),
+                    Some(Val::Int(_) | Val::Addr(_) | Val::Unit) | None => None,
+                };
+                match cond {
+                    Some(true) => {}
+                    Some(false) => {
+                        let reported = &args[1..args.len().saturating_sub(1)];
+                        let shown: Vec<Option<Num>> = reported
+                            .iter()
+                            .map(|a| match a {
+                                Val::Int(n) => Some(*n),
+                                Val::Bool(_) | Val::Addr(_) | Val::Unit => None,
+                            })
+                            .collect();
+                        return Err(trap(f, *at, &shown));
+                    }
+                    None => return Err(broken("a guard of a value that is not a bool")),
+                }
+                let n = int(args.len().saturating_sub(1))?;
+                if !fact.holds(n) {
+                    return Err(broken(format!(
+                        "v{} lets through {}, of which {} does not hold",
+                        v.0, n, fact
+                    )));
+                }
+                Val::Int(n)
+            }
+            Op::Assume(fact) => match (
+                int(0)?,
+                f.facts
+                    .get(fact.0 as usize)
+                    .copied()
+                    .ok_or_else(|| broken("an assumption of a fact that does not exist"))?,
+            ) {
+                (n, fact) if fact.holds(n) => Val::Int(n),
+                (n, fact) => {
+                    return Err(broken(format!(
+                        "v{} assumes {} of {}, which it does not hold of",
+                        v.0, fact, n
+                    )))
+                }
+            },
             Op::Slot { bytes } => Val::Addr(self.memory.alloc(*bytes)),
             Op::Elem { stride } => {
                 let i = int(1)?;
@@ -2030,8 +2384,9 @@ mod tests {
         let le = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[x, hi]);
         let fits = b.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, le]);
         let t = b.trap_site("narrowing", &["", " does not fit in `u8`"]);
-        b.inst(Op::Check { trap: t }, Ty::Unit, &[fits, x]);
-        let y = b.inst(Op::Cast, Ty::Int(U8), &[x]);
+        let fact = Fact::Within(Num::ZERO, Num::from_i128(255));
+        let g = b.guard(t, fact, &[fits, x, x]);
+        let y = b.inst(Op::Cast, Ty::Int(U8), &[g]);
         b.ret(Some(y));
         let m = module(vec![b.finish()]);
         assert_eq!(run0(&m, 0, &[int(200)]), Ok(int(200)));
@@ -2039,6 +2394,20 @@ mod tests {
             run0(&m, 0, &[int(-1)]).unwrap_err().to_string(),
             "trap[narrowing] at 3:17: -1 does not fit in `u8`"
         );
+        // A guard whose condition lets through a value its fact does not hold of is broken MIR.
+        let mut b = Builder::new("loose", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = b.params(BlockId(0))[0];
+        let yes = b.inst(Op::Bool(true), Ty::Bool, &[]);
+        let t = b.trap_site("narrowing", &["", " does not fit in `u8`"]);
+        let fact = Fact::Within(Num::ZERO, Num::from_i128(255));
+        let g = b.guard(t, fact, &[yes, x, x]);
+        b.ret(Some(g));
+        let m = module(vec![b.finish()]);
+        assert_eq!(run0(&m, 0, &[int(255)]), Ok(int(255)));
+        assert!(matches!(
+            run0(&m, 0, &[int(256)]),
+            Err(Stop::Broken(why)) if why.contains("256, of which within 0..=255 does not hold")
+        ));
         // A refinement whose bound is a parameter reports the value and both bounds.
         let mut r = Builder::new("refined", &[Ty::Int(I64), Ty::Int(I64)], None);
         let [x, n] = r.params(BlockId(0))[..] else {
@@ -2179,6 +2548,23 @@ mod tests {
             let [x, y] = bl.params(BlockId(0))[..] else {
                 panic!("two parameters")
             };
+            let need = if matches!(
+                op,
+                Op::Arith {
+                    op: ArithOp::Div | ArithOp::Rem,
+                    ..
+                }
+            ) {
+                Some(Fact::NonZero)
+            } else if op == Op::Shr {
+                Some(Fact::Within(Num::ZERO, Num::new(false, 127)))
+            } else {
+                None
+            };
+            let y = match need {
+                Some(fact) => bl.assume(y, fact),
+                None => y,
+            };
             let r = bl.inst(op, Ty::Int(t), &[x, y]);
             bl.ret(Some(r));
             run0(&module(vec![bl.finish()]), 0, &[int(a), int(b)])
@@ -2209,6 +2595,7 @@ mod tests {
             panic!("two parameters")
         };
         let t = shl.trap_site("narrowing", &["", " does not fit in `i64`"]);
+        let k = shl.assume(k, Fact::Within(Num::ZERO, Num::new(false, 127)));
         let r = shl.inst(Op::Shl { trap: t }, Ty::Int(I64), &[x, k]);
         shl.ret(Some(r));
         let m = module(vec![shl.finish()]);
@@ -2230,6 +2617,7 @@ mod tests {
             panic!("two parameters")
         };
         let t = wide.trap_site("narrowing", &["", " does not fit in `i128`"]);
+        let k = wide.assume(k, Fact::Within(Num::ZERO, Num::new(false, 127)));
         let r = wide.inst(Op::Shl { trap: t }, Ty::Int(I128), &[x, k]);
         wide.ret(Some(r));
         let m = module(vec![wide.finish()]);
@@ -2456,8 +2844,8 @@ mod tests {
         );
     }
 
-    /// `fn f(x: i64, d: i64) -> i64`, whose effects form one chain: it checks `d != 0` and then
-    /// `x >= 0`, divides `x` by `d` exactly, reading the latest effect, adds 1 with a check, and
+    /// `fn f(x: i64, d: i64) -> i64`, whose effects form one chain: it guards `d != 0` and checks
+    /// `x >= 0`, divides `x` exactly by the divisor the guard yields, adds 1 with a check, and
     /// branches on the sum, returning it on one side and its checked square on the other. The
     /// instructions of block 0, by name: `zero`, `nz`, `check1`, `pos`, `check2`, `q`, `one`,
     /// `s`, `neg`.
@@ -2469,7 +2857,7 @@ mod tests {
         let zero = b.int(I64, Num::ZERO);
         let nz = b.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[d, zero]);
         let t0 = b.trap_site("division-by-zero", &["division by zero"]);
-        let check1 = b.inst(Op::Check { trap: t0 }, Ty::Unit, &[nz]);
+        let check1 = b.guard(t0, Fact::NonZero, &[nz, d]);
         let pos = b.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[x, zero]);
         let t1 = b.trap_site("contract", &["x is negative"]);
         let check2 = b.inst(Op::Check { trap: t1 }, Ty::Unit, &[pos]);
@@ -2479,7 +2867,7 @@ mod tests {
                 trap: None,
             },
             Ty::Int(I64),
-            &[x, d],
+            &[x, check1],
         );
         let one = b.int(I64, Num::from_i128(1));
         let t2 = b.trap_site("overflow", &["", " does not fit in `i64`"]);
@@ -2603,17 +2991,130 @@ mod tests {
             *effect = entry;
         }
         refused(early, latest, "a return before the last effect");
-        // The exact division raised above the check of its divisor, and reading the effect
-        // before that check where it stands.
+        // The exact division raised above the guard of its divisor; pointed at the divisor the
+        // guard takes and raised so, as a pass that hoists it would; and pointed at it in place.
+        let d = f.blocks[0].params[1];
+        let unguarded = "of which no guard or assumption holds nonzero";
         let mut raised = f.clone();
         moved(&mut raised, q, check1);
         refused(raised, "is not defined before it on every path", "raised");
-        let mut earlier = f.clone();
-        set_last(&mut earlier, q, check1);
-        refused(
-            earlier,
-            latest,
-            "a partial operation reading an earlier effect",
+        let mut repointed = f.clone();
+        set_last(&mut repointed, q, d);
+        moved(&mut repointed, q, check1);
+        refused(repointed, unguarded, "pointed at the divisor and raised");
+        let mut bare = f.clone();
+        set_last(&mut bare, q, d);
+        refused(bare, unguarded, "a divisor no guard holds");
+    }
+
+    /// Each partial operation takes the operand it is partial in from a guard or an assumption of
+    /// a fact that rules its bad values out, or as a constant that is no bad value, and the
+    /// verifier refuses it otherwise: a divisor that may be zero, a shift amount that may lie
+    /// outside 0 to 127, an index that may be negative or past every address, and a value
+    /// narrowed into a type it may not fit. A cast that widens is defined on every value, and a
+    /// cast keeps what is known of the value it takes.
+    #[test]
+    fn test_partial_operations_take_their_operand_from_what_rules_it_out() {
+        let (i, u) = (Ty::Int(I64), Ty::Int(U8));
+        // `op` of type `ty` on parameters of `params`, the `k`th first assumed `fact`.
+        let check = |op: Op, ty: Ty, params: &[Ty], k: usize, fact: Option<Fact>| {
+            let mut b = Builder::new("partial", params, None);
+            let mut ps = b.params(BlockId(0));
+            if let (Some(fact), Ty::Int(_)) = (fact, params[k]) {
+                ps[k] = b.assume(ps[k], fact);
+            }
+            b.inst(op, ty, &ps);
+            b.ret(None);
+            verify(&Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+            })
+        };
+        let within =
+            |lo: i128, hi: i128| Some(Fact::Within(Num::from_i128(lo), Num::from_i128(hi)));
+        let div = |op| Op::Arith { op, trap: None };
+        for op in [ArithOp::Div, ArithOp::Rem] {
+            assert!(check(div(op), i, &[i, i], 1, None).is_err());
+            assert!(check(div(op), i, &[i, i], 1, within(-1, 1)).is_err());
+            assert!(check(div(op), i, &[i, i], 1, within(0, 9)).is_err());
+            assert!(check(div(op), i, &[i, i], 1, within(-9, 0)).is_err());
+            assert_eq!(check(div(op), i, &[i, i], 1, within(1, 9)), Ok(()));
+            assert_eq!(check(div(op), i, &[i, i], 1, within(-9, -1)), Ok(()));
+            assert_eq!(check(div(op), i, &[i, i], 1, Some(Fact::NonZero)), Ok(()));
+        }
+        // A constant divisor: not zero, or zero.
+        for (n, ok) in [(3, true), (0, false)] {
+            let mut b = Builder::new("constant", &[i], None);
+            let x = b.params(BlockId(0))[0];
+            let k = b.int(I64, Num::from_i128(n));
+            b.inst(div(ArithOp::Div), i, &[x, k]);
+            b.ret(None);
+            let verified = verify(&Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+            });
+            assert_eq!(verified.is_ok(), ok, "{}", n);
+        }
+        let shl = Op::Shl { trap: TrapId(0) };
+        for op in [Op::Shr, shl] {
+            let checked = |fact| {
+                let mut b = Builder::new("shift", &[i, i], None);
+                b.trap_site("narrowing", &["", " does not fit"]);
+                let [x, k] = b.params(BlockId(0))[..] else {
+                    panic!("two parameters")
+                };
+                let k = match fact {
+                    Some(fact) => b.assume(k, fact),
+                    None => k,
+                };
+                b.inst(op.clone(), i, &[x, k]);
+                b.ret(None);
+                verify(&Module {
+                    functions: vec![b.finish()],
+                    budget: BUDGET,
+                })
+            };
+            assert!(checked(None).is_err());
+            assert!(checked(within(-1, 127)).is_err());
+            assert!(checked(within(0, 128)).is_err());
+            assert!(checked(Some(Fact::NonZero)).is_err());
+            assert_eq!(checked(within(0, 127)), Ok(()));
+        }
+        let elem = Op::Elem { stride: 1 };
+        let past = Some(Fact::Within(
+            Num::ZERO,
+            Num::new(false, u128::from(u64::MAX) + 1),
+        ));
+        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, None).is_err());
+        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, within(-1, 5)).is_err());
+        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, past).is_err());
+        assert_eq!(
+            check(elem, Ty::Addr, &[Ty::Addr, i], 1, within(0, 5)),
+            Ok(())
+        );
+        // An i64 into a u8, and a u8 into an i64.
+        assert!(check(Op::Cast, u, &[i], 0, None).is_err());
+        assert!(check(Op::Cast, u, &[i], 0, within(-1, 255)).is_err());
+        assert!(check(Op::Cast, u, &[i], 0, within(0, 256)).is_err());
+        assert_eq!(check(Op::Cast, u, &[i], 0, within(0, 255)), Ok(()));
+        assert_eq!(check(Op::Cast, i, &[u], 0, None), Ok(()));
+        // A divisor through a cast that keeps it: assumed not zero as a u8, divided as an i64.
+        let mut b = Builder::new("through", &[i, u], None);
+        let [x, d] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let d = b.assume(d, Fact::NonZero);
+        let d = b.inst(Op::Cast, i, &[d]);
+        b.inst(div(ArithOp::Div), i, &[x, d]);
+        b.ret(None);
+        let f = b.finish();
+        assert_eq!(f.fact(d), Some(Fact::NonZero));
+        assert_eq!(
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+            }),
+            Ok(())
         );
     }
 
@@ -2845,17 +3346,36 @@ mod tests {
     }
 
     /// A function of one block whose instruction is `op` of type `ty` on `args`, built from
-    /// parameters of `params`; `traps` are the sites' texts.
+    /// parameters of `params`; `traps` are the sites' texts. An integer operand the instruction
+    /// is partial in is first assumed to hold what it needs ([`Function::partial_in`]).
     fn one(op: Op, ty: Ty, params: &[Ty], args: &[usize], traps: &[&[&str]]) -> Function {
-        let mut b = Builder::new("one", params, None);
-        let ps = b.params(BlockId(0));
-        for t in traps {
-            b.trap_site("narrowing", t);
+        let build = |need: Option<(usize, Fact)>| {
+            let mut b = Builder::new("one", params, None);
+            let ps = b.params(BlockId(0));
+            for t in traps {
+                b.trap_site("narrowing", t);
+            }
+            let mut operands: Vec<NodeId> = args.iter().map(|i| ps[*i]).collect();
+            if let Some((k, fact)) = need {
+                if let (Some(o), Some(&Ty::Int(_))) =
+                    (operands.get(k).copied(), args.get(k).map(|i| &params[*i]))
+                {
+                    operands[k] = b.assume(o, fact);
+                }
+            }
+            b.inst(op.clone(), ty, &operands);
+            b.ret(None);
+            b.finish()
+        };
+        let plain = build(None);
+        let need = plain.blocks[0]
+            .insts
+            .last()
+            .and_then(|v| plain.partial_in(*v));
+        match need {
+            Some((k, need)) => build(Some((k, need.fact()))),
+            None => plain,
         }
-        let operands: Vec<NodeId> = args.iter().map(|i| ps[*i]).collect();
-        b.inst(op, ty, &operands);
-        b.ret(None);
-        b.finish()
     }
 
     #[test]
@@ -3036,6 +3556,8 @@ mod tests {
             let i = b.params(BlockId(0))[0];
             let s = b.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
             let _next = b.inst(Op::Slot { bytes: 4 }, Ty::Addr, &[]);
+            let inside = Fact::Within(Num::ZERO, Num::new(false, u128::from(u64::MAX)));
+            let i = b.assume(i, inside);
             let e = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[s, i]);
             let v = b.inst(Op::Load, Ty::Int(u16), &[e]);
             b.ret(Some(v));
@@ -3116,6 +3638,7 @@ mod tests {
             let [x, k] = b.params(BlockId(0))[..] else {
                 panic!("two parameters")
             };
+            let k = b.assume(k, Fact::Within(Num::ZERO, Num::new(false, 127)));
             let r = b.inst(Op::Shr, Ty::Int(I128), &[x, k]);
             b.ret(Some(r));
             run0(&module(vec![b.finish()]), 0, &[int(8), int(amount)])

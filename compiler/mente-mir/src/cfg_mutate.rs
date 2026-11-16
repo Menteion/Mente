@@ -176,9 +176,17 @@ impl Mutant {
                         // An effect made a partial operation, as a checked one made exact is,
                         // leaves the chain: what took it takes the effect it took.
                         match (was, op.chain()) {
-                            (Chain::Follows, Chain::Reads | Chain::Free) => {
+                            (Chain::Follows, Chain::Reads) => {
                                 if let Some(before) = f.args(v).last().copied() {
                                     replace_effect_uses(f, v, before);
+                                }
+                            }
+                            // One that takes no effect, as an exact division, lets go of it too.
+                            (Chain::Follows, Chain::Free) => {
+                                if let Some(before) = f.args(v).last().copied() {
+                                    replace_effect_uses(f, v, before);
+                                    let (start, len) = f.operands[v.0 as usize];
+                                    f.operands[v.0 as usize] = (start, len.saturating_sub(1));
                                 }
                             }
                             (Chain::Follows, Chain::Follows)
@@ -188,13 +196,25 @@ impl Mutant {
                             ) => {}
                         }
                     }
-                    Change::Remove => {
-                        block.insts.remove(i as usize);
-                        // What took the effect taken out takes the one it took.
-                        if let Some(before) = f.effect(v) {
-                            replace_effect_uses(f, v, before);
+                    Change::Remove => match f.op(v).fact() {
+                        // A guard that never fires: its value flows on, assumed.
+                        Some(fact) => {
+                            let args = f.args(v).to_vec();
+                            if let [.., guarded, effect] = args[..] {
+                                let start = f.pool.len() as u32;
+                                f.pool.extend([guarded, effect]);
+                                f.operands[v.0 as usize] = (start, 2);
+                                f.ops[v.0 as usize] = Op::Assume(fact);
+                            }
                         }
-                    }
+                        None => {
+                            f.blocks[self.block.0 as usize].insts.remove(i as usize);
+                            // What took the effect taken out takes the one it took.
+                            if let Some(before) = f.effect(v) {
+                                replace_effect_uses(f, v, before);
+                            }
+                        }
+                    },
                     Change::Bypass => {
                         let Some(&first) = f.args(v).first() else {
                             return out;
@@ -470,7 +490,9 @@ fn inst_changes(f: &cfg::Function, v: NodeId) -> Vec<Candidate> {
             .collect()
         }
         Op::Bool(b) => vec![(Family::Const, "flip", op(Op::Bool(!b)))],
-        Op::Check { .. } => vec![(Family::Trap, "check-removed", Change::Remove)],
+        Op::Check { .. } | Op::Guard { .. } => {
+            vec![(Family::Trap, "check-removed", Change::Remove)]
+        }
         Op::Store => vec![(Family::Memory, "store-removed", Change::Remove)],
         Op::Copy { .. } => vec![(Family::Memory, "copy-removed", Change::Remove)],
         // A count made exact never traps where the stack runs out. An entry, of a frame of 0,
@@ -488,6 +510,7 @@ fn inst_changes(f: &cfg::Function, v: NodeId) -> Vec<Candidate> {
         )],
         Op::Param
         | Op::Cast
+        | Op::Assume(_)
         | Op::Slot { .. }
         | Op::Elem { .. }
         | Op::Load
@@ -512,6 +535,8 @@ fn counted(f: &cfg::Function, v: NodeId) -> Option<FuncId> {
         | Op::Cmp(_)
         | Op::Cast
         | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
         | Op::Slot { .. }
         | Op::Elem { .. }
         | Op::Load
@@ -537,6 +562,8 @@ fn called(f: &cfg::Function, v: NodeId) -> Option<FuncId> {
         | Op::Cmp(_)
         | Op::Cast
         | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
         | Op::Slot { .. }
         | Op::Elem { .. }
         | Op::Load
@@ -651,7 +678,11 @@ pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
 /// - `effect-forked`: an effect taking the effect its own effect took, which two then take;
 /// - `effect-valued`: an effect or a partial operation taking a value that is no effect, its
 ///   first operand, in place of the effect;
-/// - `partial-raised`: a partial operation moved above the effect it reads, in its block;
+/// - `partial-raised`: an exact operation moved above the effect it reads, in its block;
+/// - `guard-unguarded`: a partial operation, or the cast between it and its guard, taking the
+///   value its guard takes in place of the one the guard yields;
+/// - `guard-raised`: that, and the partial operation moved above its guard, as a pass that hoists
+///   it past the guard would leave it;
 /// - `passed-valued`: a jump or a branch passing a value that is no effect, the branch's condition
 ///   or the jump's first argument, to its target's effect parameter;
 /// - `ended-early`: a return or a trap taking its block's effect parameter where an effect of the
@@ -706,6 +737,43 @@ pub fn unchained(m: &Module) -> Vec<(String, Module)> {
                         let insts = &mut g.blocks[bi].insts;
                         insts.retain(|u| *u != v);
                         insts.insert(at, v);
+                    }));
+                }
+            }
+            for (ii, &v) in b.insts.iter().enumerate() {
+                let name = |what: &str| format!("{}/b{}.i{}/{}", f.name, bi, ii, what);
+                let Some((k, need)) = f.partial_in(v) else {
+                    continue;
+                };
+                // The guard beneath the operand, through the casts that keep its value, and the
+                // instruction that takes it, with the place it takes it at.
+                let (mut taker, mut at) = (v, k);
+                let mut guard = f.own_args(v).get(k).copied();
+                while let Some(c) = guard.filter(|c| *f.op(*c) == Op::Cast) {
+                    (taker, at) = (c, 0);
+                    guard = f.own_args(c).first().copied();
+                }
+                // Where what the guard takes holds the need by itself, as a constant can, the
+                // guard rules nothing out, and nothing is planted.
+                let Some((guard, raw)) = guard
+                    .filter(|g| f.op(*g).fact().is_some())
+                    .and_then(|g| f.own_args(g).last().map(|raw| (g, *raw)))
+                    .filter(|(_, raw)| !f.fact(*raw).is_some_and(|fact| fact.implies(need.fact())))
+                else {
+                    continue;
+                };
+                let point = move |g: &mut cfg::Function| {
+                    let (start, _) = g.operands[taker.0 as usize];
+                    g.pool[start as usize + at] = raw;
+                };
+                out.push(changed(name("guard-unguarded"), &|g| point(g)));
+                let above = b.insts.iter().position(|u| *u == guard);
+                if let (true, Some(above)) = (taker == v, above) {
+                    out.push(changed(name("guard-raised"), &|g| {
+                        point(g);
+                        let insts = &mut g.blocks[bi].insts;
+                        insts.retain(|u| *u != v);
+                        insts.insert(above, v);
                     }));
                 }
             }
@@ -773,7 +841,7 @@ fn step(n: Num, up: bool) -> Option<Num> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfg::{Builder, IntTy, Limits, Memory, Stop, Val};
+    use crate::cfg::{Builder, Fact, IntTy, Limits, Memory, Stop, Val};
 
     const I64: IntTy = IntTy::new(64, true);
     const U8: IntTy = IntTy::new(8, false);
@@ -868,8 +936,9 @@ mod tests {
         let max = b.int(I64, Num::from_i128(255));
         let fits = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[y, max]);
         let narrowing = b.trap_site("narrowing", &["out of range"]);
-        b.inst(Op::Check { trap: narrowing }, Ty::Unit, &[fits]);
-        let small = b.inst(Op::Cast, Ty::Int(U8), &[y]);
+        let fits_u8 = Fact::Within(Num::ZERO, Num::from_i128(255));
+        let narrowed = b.guard(narrowing, fits_u8, &[fits, y]);
+        let small = b.inst(Op::Cast, Ty::Int(U8), &[narrowed]);
         let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[small]);
         b.ret(Some(r));
         let m = Module {
@@ -1051,7 +1120,15 @@ mod tests {
             Ty::Int(I64),
             &[x, one],
         );
-        b.jump(join, vec![up]);
+        let twice = b.inst(
+            Op::Arith {
+                op: ArithOp::Add,
+                trap: None,
+            },
+            Ty::Int(I64),
+            &[up, up],
+        );
+        b.jump(join, vec![twice]);
         b.switch(otherwise);
         b.jump(join, vec![x]);
         b.switch(join);
@@ -1074,6 +1151,8 @@ mod tests {
             "effect-forked",
             "effect-valued",
             "partial-raised",
+            "guard-unguarded",
+            "guard-raised",
             "passed-valued",
             "ended-early",
         ] {
@@ -1095,7 +1174,7 @@ mod tests {
                 Limits::default(),
             )
         };
-        assert_eq!(ran(&[Val::Bool(true), int(4)]), Ok(int(5)));
+        assert_eq!(ran(&[Val::Bool(true), int(4)]), Ok(int(10)));
         assert_eq!(ran(&[Val::Bool(false), int(4)]), Ok(int(4)));
     }
 
@@ -1169,6 +1248,7 @@ mod tests {
         let shl = b.inst(Op::Shl { trap: checked }, Ty::Int(I64), &[bits, k]);
         let shr = b.inst(Op::Shr, Ty::Int(I64), &[x, k]);
         let mut last = shr;
+        let y = b.assume(y, Fact::NonZero);
         for op in [
             ArithOp::Add,
             ArithOp::Sub,
@@ -1279,12 +1359,43 @@ mod tests {
         // Each checked operation also loses its trap; the check reports its line.
         let unchecked = kept.iter().filter(|x| x.operator == "unchecked").count();
         assert_eq!(unchecked, 5);
-        let removed = named(&m, &kept, "all/b0.i22/check-removed");
+        let removed = named(&m, &kept, "all/b0.i23/check-removed");
         assert_eq!(removed.loc(&m), cfg::Loc { line: 3, col: 7 });
         assert_eq!(
             removed.apply(&m).functions[0].blocks[0].insts.len(),
             m.functions[0].blocks[0].insts.len() - 1
         );
+    }
+
+    /// A guard taken out becomes an assumption of what it guarded, in its place: the value it
+    /// guarded still flows to the cast that takes it, and where the guard trapped, the run is now
+    /// broken MIR, as a check taken out leaves it.
+    #[test]
+    fn test_a_guard_taken_out_leaves_its_fact_assumed() {
+        let m = counted_call();
+        let all = mutants(&m);
+        let removed = named(&m, &all, "caller/b0.i5/check-removed").apply(&m);
+        assert_eq!(cfg::verify(&removed), Ok(()));
+        let (before, after) = (&m.functions[2], &removed.functions[2]);
+        assert_eq!(before.blocks[0].insts, after.blocks[0].insts);
+        let guard = after.blocks[0].insts[5];
+        assert!(matches!(after.op(guard), Op::Assume(_)));
+        assert_eq!(
+            after.fact(guard),
+            Some(Fact::Within(Num::ZERO, Num::from_i128(255)))
+        );
+        let ran = |m: &Module, n: i128| {
+            cfg::run(
+                m,
+                FuncId(2),
+                &[int(n)],
+                &mut Memory::default(),
+                Limits::default(),
+            )
+        };
+        assert_eq!(ran(&removed, 7), Ok(int(7)));
+        assert!(matches!(ran(&m, 300), Err(Stop::Trap(_))));
+        assert!(matches!(ran(&removed, 300), Err(Stop::Broken(_))));
     }
 
     /// A constant moves to `c + 1`, `c - 1` and `0` only where its type holds the new value,
