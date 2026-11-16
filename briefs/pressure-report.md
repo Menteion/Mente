@@ -21,10 +21,12 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**]
 
 ## Invariants
 
-- [ ] Each rule of the report and of the command has a test seen to fail without it.
-- [ ] `node tools/quick.mjs` passes before the push.
+- [x] Each rule of the report and of the command has a test seen to fail without it.
+- [x] `node tools/quick.mjs` passes before the push.
 
 ## Acceptance Criteria
 
-- [ ] `git log --first-parent --diff-merges=first-parent --name-only --format=%x00%cs%x09%s main | mn pressure` prints the ranking, with `--since` and `--top`.
+- [x] `git log --first-parent --diff-merges=first-parent --name-only --format=%x00%cs%x09%s main | mn pressure` prints the ranking, with `--since` and `--top`.
 - [ ] Each file the first run ranks high that holds records is a kind or is listed in `records::SHARED` with its reason.
+
+  **Delegated** to Norman: `docs/STATUS.md` and `ROADMAP.md` are listed in `SHARED`, since spec-graph reads each from one file; `compiler/mente-cli/src/catalogue.rs`, the error codes with their explanations, is proposed to him as one file a code, its key the code (`e0310`), and is not decided here.
