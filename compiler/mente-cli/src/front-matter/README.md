@@ -4,7 +4,7 @@ How a record's front matter is read, `front_matter` in `compiler/mente-cli/src/r
 
 Each case is a file `<key>.txt`, its name a key by the rule of `records.rs`, made of these lines in this order:
 
-1. `fields` and the names of the front matter's fields, in order, each after one space: `fields day area note`.
+1. `fields` and the names of the front matter's fields, in order, each after one space: `fields date area note`.
 2. `expect accepted` or `expect refused`.
 3. For an accepted case, one line `value <name> <text>` for each field, in order: the string the field is read as, written after one space to the end of the line. An empty string is the line `value <name>` alone.
 4. `input`.

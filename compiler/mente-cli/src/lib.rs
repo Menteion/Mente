@@ -2,4 +2,6 @@
 //! once: the forms the project's records are written in, and the record of escaped bugs.
 
 pub mod escapes;
+pub mod evidence;
+pub mod json;
 pub mod records;

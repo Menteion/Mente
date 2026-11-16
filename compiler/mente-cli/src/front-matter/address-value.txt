@@ -1,11 +1,11 @@
-fields day area note
+fields date area note
 expect accepted
-value day 2026-11-14
+value date 2026-11-14
 value area checker
 value note https://github.com/Menteion/Mente/pull/129
 input
 ---
-day: 2026-11-14
+date: 2026-11-14
 area: checker
 note: https://github.com/Menteion/Mente/pull/129
 ---

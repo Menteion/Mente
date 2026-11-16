@@ -8,6 +8,12 @@
 //! The rule here refuses a record's identifier by number, `ESC-001`. A spec's items cited by their
 //! place, "item 3 of core-calculus.md", are another kind of number: the stack-budget work moves
 //! those citations to the specs' keys, and their refusal comes with it.
+//!
+//! The check guards against a slip of the convention, not an adversary. It reads the text as a
+//! reader sees it, through markup, unseen characters and other hyphens, and inside compounds, but
+//! an identifier split across two lines on purpose, `ESC-` at a line's end and `001` on the next, is
+//! held by review only: joining words at a line's end would invent identifiers, `on-` then `2026`,
+//! where none was written.
 
 use mente_cli::records;
 
@@ -60,37 +66,44 @@ fn hyphen(c: char) -> bool {
     )
 }
 
+/// Whether `c` is written but not seen: a zero-width space, joiner or non-joiner, the word joiner,
+/// the byte-order mark, or the soft hyphen.
+fn unseen(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}'
+    )
+}
+
 /// The characters of `text` as a reader sees the words, each with its line: the markup of
-/// emphasis and code (`*`, `_`, `~`, a backtick) taken out, every hyphen made `-`, and a word
-/// broken after its hyphen at a line's end joined to the next line's.
+/// emphasis and code (`*`, `_`, `~`, a backtick) and the characters no one sees taken out, and
+/// every hyphen made `-`.
 fn normalised(text: &str) -> Vec<(char, usize)> {
     let mut out: Vec<(char, usize)> = Vec::new();
     let mut line = 1;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\n' {
-            line += 1;
-            let len = out.len();
-            let broken = len >= 2 && out[len - 1].0 == '-' && out[len - 2].0.is_alphabetic();
-            if broken {
-                while chars.peek().is_some_and(|c| *c == ' ' || *c == '\t') {
-                    chars.next();
-                }
-                continue;
-            }
-        }
-        if matches!(c, '*' | '_' | '~' | '`') {
+    for c in text.chars() {
+        if matches!(c, '*' | '_' | '~' | '`') || unseen(c) {
             continue;
         }
         out.push((if hyphen(c) { '-' } else { c }, line));
+        if c == '\n' {
+            line += 1;
+        }
     }
     out
 }
 
+/// Whether `c` ends a bare address in prose: a space, a character no address holds unescaped, or
+/// punctuation that closes a sentence or a clause around it.
+fn ends_address(c: char) -> bool {
+    c.is_whitespace() || "<>\"'[]{}|\\^,;".contains(c)
+}
+
 /// `text` as [`normalised`] with each link's target blanked: the address of a Markdown link,
 /// `[text](address)`, and of an autolink, `<https://...>`, where it closes before a space or the
-/// line's end; and a bare address, `https://...`, up to the next space. A link's text stays, and a
-/// link that never closes blanks nothing past its address.
+/// line's end; and a bare address, `https://...`, up to what ends it ([`ends_address`]), a `)` it
+/// does not open, or a full stop, colon, `!` or `?` that ends it. A link's text stays, a link that
+/// never closes blanks nothing past its address, and an identifier glued to an address is read.
 fn unlinked(text: &str) -> Vec<(char, usize)> {
     let mut c = normalised(text);
     let at = |c: &[(char, usize)], k: usize, s: &str| {
@@ -100,24 +113,44 @@ fn unlinked(text: &str) -> Vec<(char, usize)> {
     };
     let mut k = 0;
     while k < c.len() {
-        let (from, close) = if at(&c, k, "](") {
-            (k + 2, Some(')'))
-        } else if at(&c, k, "<http://") || at(&c, k, "<https://") {
-            (k + 1, Some('>'))
+        let (from, end) = if at(&c, k, "](") || at(&c, k, "<http://") || at(&c, k, "<https://") {
+            let (from, close) = if c[k].0 == ']' {
+                (k + 2, ')')
+            } else {
+                (k + 1, '>')
+            };
+            let end = (from..c.len())
+                .find(|&j| c[j].0.is_whitespace() || c[j].0 == close)
+                .unwrap_or(c.len());
+            if c.get(end).map(|p| p.0) != Some(close) {
+                k = end.max(k + 1);
+                continue;
+            }
+            (from, end)
         } else if at(&c, k, "http://") || at(&c, k, "https://") {
-            (k, None)
+            let mut open = 0usize;
+            let mut end = k;
+            while let Some(&(ch, _)) = c.get(end) {
+                if ends_address(ch) || (ch == ')' && open == 0) {
+                    break;
+                }
+                match ch {
+                    '(' => open += 1,
+                    ')' => open -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            while end > k && matches!(c[end - 1].0, '.' | ':' | '!' | '?') {
+                end -= 1;
+            }
+            (k, end)
         } else {
             k += 1;
             continue;
         };
-        let end = (from..c.len())
-            .find(|&j| c[j].0.is_whitespace() || Some(c[j].0) == close)
-            .unwrap_or(c.len());
-        let closed = close.is_none_or(|close| c.get(end).map(|p| p.0) == Some(close));
-        if closed {
-            for p in &mut c[from..end] {
-                p.0 = ' ';
-            }
+        for p in &mut c[from..end] {
+            p.0 = ' ';
         }
         k = end.max(k + 1);
     }
@@ -125,12 +158,14 @@ fn unlinked(text: &str) -> Vec<(char, usize)> {
 }
 
 /// Each identifier of a record by a number in `text`, with its line: two or more letters, in any
-/// case, a hyphen and digits, as a word of its own, `ESC-001`, `Dec-7` or `**ESC**-001`, in code or
-/// not, but a name of [`NAMES`], and none in a link's target, which names a page by its address. A
-/// diagnostic code, `E0310`, has no hyphen and is none.
+/// case, a hyphen and digits, with no letter or digit on either side, so also inside a compound,
+/// `pre-ESC-001` or `ESC-001-fix`, unless more digits follow after a hyphen, as in a date or a
+/// version (`menteion-paused-2026-11-15`, `claude-sonnet-5-5`), in code or not, `**ESC**-001`, but a name of [`NAMES`], and none
+/// in a link's target, which names a page by its address. A diagnostic code, `E0310`, has no hyphen
+/// and is none.
 fn numbered(text: &str) -> Vec<(usize, String)> {
     let chars = unlinked(text);
-    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let word = |c: char| c.is_alphanumeric();
     let mut found = Vec::new();
     let mut at = 0;
     while at < chars.len() {
@@ -148,7 +183,9 @@ fn numbered(text: &str) -> Vec<(usize, String)> {
             rest.iter().take_while(|p| p.0.is_ascii_digit()).count()
         });
         let end = hyphen + 1 + digits;
-        let ends = chars.get(end).is_none_or(|p| !word(p.0));
+        let ends = chars.get(end).is_none_or(|p| !word(p.0))
+            && !(chars.get(end).map(|p| p.0) == Some('-')
+                && chars.get(end + 1).is_some_and(|p| p.0.is_ascii_digit()));
         if letters >= 2 && chars.get(hyphen).map(|p| p.0) == Some('-') && digits > 0 && ends {
             let id: String = chars[at..end].iter().map(|p| p.0).collect();
             if !NAMES.iter().any(|n| n.eq_ignore_ascii_case(&id)) {
@@ -208,9 +245,10 @@ fn test_no_document_names_a_record_by_a_number() {
 }
 
 /// A record's number is refused wherever it stands and however it is written: in code, in
-/// emphasis, in a link's text, in any case, with any hyphen, and broken over two lines; and after a
-/// link that never closes. A diagnostic code, a name of [`NAMES`], a word with a hyphen before its
-/// digits, a word that runs on after them and a link's target are not.
+/// emphasis, in a link's text, in any case, with any hyphen or an unseen character in it, inside a
+/// compound, glued to an address, and after a link that never closes. A diagnostic code, a name of
+/// [`NAMES`], a word with a hyphen before its digits, a word that runs on after them, a link's
+/// target and words at the ends of two lines are not.
 #[test]
 fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
     for text in [
@@ -228,8 +266,12 @@ fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
         "ESC\u{2011}001",
         "ESC\u{2013}001",
         "ESC\u{2212}001",
-        "ESC-\n001",
-        "ESC-\n   001",
+        "ES\u{200B}C-001",
+        "ESC\u{00AD}-001",
+        "\u{FEFF}ESC-0\u{2060}01",
+        "pre-ESC-001",
+        "ESC-001-fix",
+        "my-ESC-001",
         "SHA-001",
         "Tier-3",
         "[ADR-0258](https://example.org/pause)",
@@ -238,6 +280,12 @@ fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
         "[unclosed](https://example.org ADR-0258",
         "[unclosed](ADR-0258",
         "<https://example.org ADR-0258",
+        "https://example.org)ADR-0258",
+        "https://example.org,ADR-0258",
+        "https://example.org;ADR-0258",
+        "https://example.org/\"ADR-0258",
+        "ADR-0258https://example.org",
+        "[a](https://example.org)ADR-0258",
         "---\nADR-0258",
     ] {
         assert_eq!(numbered(text).len(), 1, "{:?}: {:?}", text, numbered(text));
@@ -247,13 +295,17 @@ fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
         "Tier-1 and x86-64",
         "DEC-XXX numbers",
         "an N-1 split",
-        "ESC-001x and my-ESC-001",
+        "ESC-001x",
         "Apache-2.0 and ubuntu-24.04",
-        "stage-3 work",
+        "stage-3 work and a Tier-1-style proof",
         "a word broken at its hyphen-\nand then 2026",
+        "turned on-\n2026-11-17",
+        "the tag `menteion-paused-2026-11-15` and `claude-sonnet-5-5`",
         "[the record that pauses it](https://example.org/ADR-0258)",
         "<https://example.org/ADR-0258>",
         "see https://example.org/ADR-0258, then",
+        "see https://example.org/ADR-0258.",
+        "(https://example.org/wiki/A_(B)/ADR-0258)",
         "[a](https://example.org/ADR-1) and [b](http://example.org/DEC-2)",
     ] {
         assert_eq!(numbered(text), Vec::<(usize, String)>::new(), "{:?}", text);
@@ -262,9 +314,10 @@ fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
         numbered("one\nthen ESC-001 here"),
         vec![(2, "ESC-001".to_string())]
     );
+    // An identifier split across two lines on purpose is held by review only.
     assert_eq!(
         numbered("one\nESC-\n001 here"),
-        vec![(2, "ESC-001".to_string())]
+        Vec::<(usize, String)>::new()
     );
 }
 
@@ -322,7 +375,6 @@ fn test_a_key_is_lowercase_words_joined_by_hyphens() {
         "e0310-message",
         "m2",
         "m2-review",
-        "guard-2x",
         "console",
         "nul-check",
         "com10",
@@ -345,6 +397,9 @@ fn test_a_key_is_lowercase_words_joined_by_hyphens() {
         "adr-0258",
         "escape-1",
         "a-1-b",
+        "esc-001a",
+        "adr-0258x",
+        "guard-2x",
         "con",
         "prn",
         "aux",

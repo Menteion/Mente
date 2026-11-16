@@ -41,15 +41,15 @@ fn planted(name: &str, files: &[(&str, &str)]) -> io::Result<PathBuf> {
 }
 
 /// Every file of the record is named by a key, has the record's front matter, a day of the
-/// calendar, a pull request's address, one of the record's areas, what missed it, and a guard
-/// declared where its kind is: a Rust test, a check of the workflow policy, a Node test or a quick
-/// check. The directory holds nothing else. Deleting a guard fails this test.
+/// calendar, a pull request's address, one of the record's areas, what missed it, and a guard of
+/// one of the four forms. The directory holds nothing else. Whether each guard runs is what the
+/// runners' lists say, which `mn evidence` checks (`tests/evidence.rs`).
 #[test]
-fn test_every_escape_has_a_key_an_area_and_a_guard_that_stands() {
+fn test_every_escape_has_a_key_an_area_and_a_guard() {
     let rows =
         escapes::read(&root().join(escapes::RECORD)).unwrap_or_else(|p| panic!("{}", p.join("\n")));
     assert!(!rows.is_empty(), "{} holds no escape", escapes::RECORD);
-    let problems = escapes::problems(&root(), &rows);
+    let problems = escapes::problems(&rows);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
@@ -70,7 +70,7 @@ fn test_the_record_holds_only_files_named_by_a_key() {
     let rows = escapes::read(&dir).unwrap();
     let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
     assert_eq!(keys, ["generator-gap", "walker-hid-operands"]);
-    assert!(escapes::problems(&root(), &rows).is_empty());
+    assert!(escapes::problems(&rows).is_empty());
     for (name, path) in [
         ("numbered", "ESC-001.md"),
         ("uppercase", "Walker-hid.md"),
@@ -210,318 +210,30 @@ fn test_a_file_is_refused_for_each_rule_of_its_front_matter() {
 }
 
 /// An escape that reads is refused for each rule of the record it breaks: an area outside the
-/// list, nothing named as what missed it, and a guard of each kind that is declared nowhere; a
-/// guard of each kind that is declared is found.
+/// list, and nothing named as what missed it.
 #[test]
 fn test_an_escape_is_refused_for_each_rule_of_the_record() {
     for (text, problem) in [
         (
             file("2026-11-14", "parser", "No lint.", LINT),
-            "the area `parser` is none of",
+            "walker-hid: the area `parser` is none of",
         ),
         (
             file("2026-11-14", "checker", "''", LINT),
-            "it names no instrument that missed it",
-        ),
-        (
-            file(
-                "2026-11-14",
-                "checker",
-                "No lint.",
-                "fn test_no_such_test_is_declared_anywhere",
-            ),
-            "is declared nowhere",
-        ),
-        (
-            file(
-                "2026-11-14",
-                "policy",
-                "No check.",
-                "policy check \"no such check is declared anywhere\"",
-            ),
-            "is declared nowhere",
-        ),
-        (
-            file(
-                "2026-11-14",
-                "harness",
-                "No test.",
-                "node test \"no such test is declared anywhere\"",
-            ),
-            "is declared nowhere",
-        ),
-        (
-            file(
-                "2026-11-14",
-                "local checks",
-                "No check.",
-                "quick check \"no such check is declared anywhere\"",
-            ),
-            "is declared nowhere",
+            "walker-hid: it names no instrument that missed it",
         ),
     ] {
         let row = escapes::parse("walker-hid", &text).unwrap();
-        let found = escapes::problems(&root(), &[row]);
+        let found = escapes::problems(&[row]);
         assert_eq!(found.len(), 1, "{}: {:?}", text, found);
-        assert!(found[0].contains(problem), "{}: {:?}", text, found);
+        assert!(found[0].starts_with(problem), "{}: {:?}", text, found);
     }
-    for guard in [
-        LINT,
-        "policy check \"every file of .github/workflows is a workflow the policy reads\"",
-        "node test \"every script that calls the API plans its runs with no broker and no key, as far as its first call\"",
-        "quick check \"MIR mutation gate\"",
-    ] {
-        let row = escapes::parse(
-            "walker-hid",
-            &file("2026-11-14", "policy", "Something.", guard),
-        )
-        .unwrap();
-        assert!(escapes::problems(&root(), &[row]).is_empty(), "{}", guard);
-    }
-}
-
-/// A repository of this test binary's own, named `name`, holding `files`, of which git tracks
-/// those `tracked` names; with `tracked` `None`, a checkout whose `.git` is an empty directory, as
-/// in CI's test sandbox.
-fn repository(name: &str, files: &[(&str, &str)], tracked: Option<&[&str]>) -> io::Result<PathBuf> {
-    let dir = planted(name, files)?;
-    let Some(tracked) = tracked else {
-        fs::create_dir(dir.join(".git"))?;
-        return Ok(dir);
-    };
-    let git = |args: &[&str]| -> io::Result<()> {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .current_dir(&dir)
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("git {:?}: {}", args, status)))
-        }
-    };
-    git(&["init", "-q"])?;
-    if !tracked.is_empty() {
-        git(&[&["add", "--"][..], tracked].concat())?;
-    }
-    Ok(dir)
-}
-
-/// A guard is declared only in code that git tracks: a Rust test under `#[test]`, run and not
-/// ignored, in `compiler/`; a policy check or a Node test written in code. A name in a comment, in
-/// a string, in an untracked copy, in a spike, in a function that lost `#[test]` or in an ignored
-/// test declares none. In CI's sandbox, whose `.git` is empty, the checkout is read, but what a
-/// build or an install leaves under `target` and `node_modules`.
-#[test]
-fn test_a_guard_is_read_from_the_code_git_tracks() {
-    let test = escapes::parse(
+    let row = escapes::parse(
         "walker-hid",
-        &file("2026-11-14", "checker", "No lint.", "fn test_planted_guard"),
+        &file("2026-11-14", "checker", "No lint.", LINT),
     )
     .unwrap();
-    let check = escapes::parse(
-        "walker-hid",
-        &file(
-            "2026-11-14",
-            "policy",
-            "No check.",
-            "policy check \"a planted check\"",
-        ),
-    )
-    .unwrap();
-    let node = escapes::parse(
-        "walker-hid",
-        &file(
-            "2026-11-14",
-            "harness",
-            "No test.",
-            "node test \"a planted test\"",
-        ),
-    )
-    .unwrap();
-    let rust = "compiler/mente-x/src/lib.rs";
-    let policy = ".github/scripts/policy.test.mjs";
-    let harness = "benchmark/harness/harness.test.ts";
-    for (name, path, text, row, found) in [
-        (
-            "rust-test",
-            rust,
-            "#[test]\nfn test_planted_guard() {}\n",
-            &test,
-            true,
-        ),
-        (
-            "rust-attributes",
-            rust,
-            "#[test]\n#[cfg(unix)]\npub fn test_planted_guard() {\n}\n",
-            &test,
-            true,
-        ),
-        (
-            "rust-no-test",
-            rust,
-            "fn test_planted_guard() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-ignored",
-            rust,
-            "#[test]\n#[ignore = \"slow\"]\nfn test_planted_guard() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-ignored-first",
-            rust,
-            "#[ignore]\n#[test]\nfn test_planted_guard() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-line-comment",
-            rust,
-            "#[test]\n// fn test_planted_guard() {}\nfn other() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-block-comment",
-            rust,
-            "/* #[test]\nfn test_planted_guard() {} /* nested */ */\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-doc-comment",
-            rust,
-            "/// #[test]\n/// fn test_planted_guard() {}\nfn other() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-string",
-            rust,
-            "const S: &str = \"#[test]\\nfn test_planted_guard() {}\";\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-raw-string",
-            rust,
-            "const S: &str = r#\"#[test] fn test_planted_guard() {}\"#;\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-longer-name",
-            rust,
-            "#[test]\nfn xtest_planted_guard() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-spike",
-            "spikes/x/src/lib.rs",
-            "#[test]\nfn test_planted_guard() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "rust-extension",
-            "compiler/mente-x/src/lib.txt",
-            "#[test]\nfn test_planted_guard() {}\n",
-            &test,
-            false,
-        ),
-        (
-            "policy-check",
-            policy,
-            "check(\"a planted check\", () => {});\n",
-            &check,
-            true,
-        ),
-        (
-            "policy-line-comment",
-            policy,
-            "// check(\"a planted check\", () => {});\n",
-            &check,
-            false,
-        ),
-        (
-            "policy-block-comment",
-            policy,
-            "/*\ncheck(\"a planted check\", () => {});\n*/\n",
-            &check,
-            false,
-        ),
-        (
-            "policy-after-url",
-            policy,
-            "const u = \"https://x\"; check(\"a planted check\", () => {});\n",
-            &check,
-            true,
-        ),
-        (
-            "policy-after-regex",
-            policy,
-            "const r = /\\/\\//; check(\"a planted check\", () => {});\n",
-            &check,
-            true,
-        ),
-        (
-            "node-test",
-            harness,
-            "test(\"a planted test\", () => {});\n",
-            &node,
-            true,
-        ),
-        (
-            "node-commented",
-            harness,
-            "// test(\"a planted test\", () => {});\n",
-            &node,
-            false,
-        ),
-    ] {
-        let dir = repository(name, &[(path, text)], Some(&[path])).unwrap();
-        let problems = escapes::problems(&dir, std::slice::from_ref(row));
-        assert_eq!(problems.is_empty(), found, "{}: {:?}", name, problems);
-    }
-    // An untracked copy declares nothing; a tracked one does.
-    let declared = "#[test]\nfn test_planted_guard() {}\n";
-    let copy = "compiler/old/lib.rs";
-    let files = [(rust, "fn other() {}\n"), (copy, declared)];
-    let untracked = repository("untracked-copy", &files, Some(&[rust])).unwrap();
-    assert!(!escapes::problems(&untracked, std::slice::from_ref(&test)).is_empty());
-    let both = repository("tracked-copy", &files, Some(&[rust, copy])).unwrap();
-    assert!(escapes::problems(&both, std::slice::from_ref(&test)).is_empty());
-    // CI's sandbox: the checkout is read, but what a build or an install leaves.
-    for (name, path, found) in [
-        ("sandbox-source", rust, true),
-        ("sandbox-target", "compiler/target/debug/lib.rs", false),
-        ("sandbox-modules", "compiler/node_modules/x/lib.rs", false),
-    ] {
-        let dir = repository(name, &[(path, declared)], None).unwrap();
-        let problems = escapes::problems(&dir, std::slice::from_ref(&test));
-        assert_eq!(problems.is_empty(), found, "{}: {:?}", name, problems);
-    }
-    // A repository git cannot read fails the check, never passes it.
-    let broken = planted(
-        "broken-git",
-        &[(rust, declared), (".git", "gitdir: nowhere\n")],
-    )
-    .unwrap();
-    let problems = escapes::problems(&broken, std::slice::from_ref(&test));
-    assert_eq!(problems.len(), 1, "{:?}", problems);
-    assert!(
-        problems[0].starts_with("the guards cannot be read: git ls-files"),
-        "{:?}",
-        problems
-    );
+    assert_eq!(escapes::problems(&[row]), Vec::<String>::new());
 }
 
 /// `mn escapes` counts the escapes per ISO week, the Thursday's year deciding the week's, and per
@@ -579,7 +291,7 @@ fn mn(dir: &Path, args: &[&str]) -> (Option<i32>, String, String) {
 
 /// `mn escapes` prints the record's counts, `mn escapes --check` checks it as the test does, and
 /// each fails with what is wrong: an argument it does not take, a directory that is missing, an
-/// entry that is no escape, and, with `--check`, a guard declared nowhere.
+/// entry that is no escape, and, with `--check`, an area outside the record's list.
 #[test]
 fn test_mn_escapes_counts_and_checks_the_record() {
     let rows = escapes::read(&root().join(escapes::RECORD)).unwrap();
@@ -608,7 +320,7 @@ fn test_mn_escapes_counts_and_checks_the_record() {
     );
     let nowhere = file(
         "2026-11-14",
-        "checker",
+        "parser",
         "No lint.",
         "fn test_declared_nowhere",
     );
@@ -632,7 +344,7 @@ fn test_mn_escapes_counts_and_checks_the_record() {
     let (code, out, err) = mn(&dir, &["--check"]);
     assert_eq!((code, out.as_str()), (Some(1), ""));
     assert!(
-        err.starts_with("[FAIL] walker-hid: its guard") && err.contains("declared nowhere"),
+        err.starts_with("[FAIL] walker-hid: the area `parser` is none of"),
         "{}",
         err
     );

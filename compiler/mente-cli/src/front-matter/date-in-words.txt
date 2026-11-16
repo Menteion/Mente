@@ -1,0 +1,8 @@
+fields date area note
+expect refused
+input
+---
+date: soon
+area: checker
+note: No lint.
+---

@@ -31,17 +31,15 @@ pub fn is_day(day: &str) -> bool {
 
 /// Whether `key` is a record's key, as the register's entries are named: lowercase words of
 /// letters and digits joined by single hyphens, `guard-per-problem` or `bench-retired-misplaced-paren`.
-/// No word is digits alone, so that no key is a number in a key's dress, `esc-001` or `adr-0258`,
-/// and the first starts with a letter. Since a key names a file, it is no name Windows reserves.
+/// Every word starts with a letter, so that no key is a number in a key's dress: not `esc-001`,
+/// `adr-0258` or `esc-001a`. Since a key names a file, it is no name Windows reserves.
 pub fn is_key(key: &str) -> bool {
     !reserved(key)
-        && key.split('-').enumerate().all(|(k, word)| {
-            !word.is_empty()
+        && key.split('-').all(|word| {
+            word.starts_with(|c: char| c.is_ascii_lowercase())
                 && word
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-                && word.contains(|c: char| c.is_ascii_lowercase())
-                && (k > 0 || word.starts_with(|c: char| c.is_ascii_lowercase()))
         })
 }
 
@@ -60,7 +58,8 @@ fn reserved(name: &str) -> bool {
 /// `name: value` line each, between a first line `---` and the next. Each value is a string a YAML
 /// reader reads as this one does, so that the file renders where YAML is read: a plain value, which
 /// starts with no YAML indicator, holds no `: ` and no ` #`, and is none of YAML's other scalars,
-/// a null, a boolean or a number; or a value in single quotes, where `''` stands for one quote. No
+/// a null, a boolean, a number or a timestamp; or a value in single quotes, where `''` stands for
+/// one quote. A field named `date` holds a day, `YYYY-MM-DD`, plain, which YAML reads as a date. No
 /// tab and no carriage return stands anywhere in the file, since YAML reads either otherwise than
 /// as written. What follows the front matter is the record's prose, free.
 ///
@@ -96,12 +95,44 @@ pub fn front_matter(text: &str, fields: &[&str]) -> Result<Vec<String>, String> 
     lines
         .iter()
         .map(|(name, value)| {
+            let plain = !value.starts_with('\'');
+            if *name == "date" {
+                return (plain && is_day(value))
+                    .then(|| value.to_string())
+                    .ok_or("the value of `date` is no day `YYYY-MM-DD` written plain".to_string());
+            }
+            if plain && timestamp(value) {
+                return Err(format!(
+                    "the value of `{}` is a timestamp YAML reads as a date: quote it, `'...'`",
+                    name
+                ));
+            }
             scalar(value).ok_or(format!(
                 "the value of `{}` is no plain string and no value in single quotes: quote it, `'...'`, with `''` for a quote",
                 name
             ))
         })
         .collect()
+}
+
+/// Whether YAML reads the plain `value` as a timestamp: four digits, `-`, one or two, `-`, one or
+/// two, and then nothing, or a `T`, a `t` or a space before a digit.
+fn timestamp(value: &str) -> bool {
+    let mut parts = value.splitn(3, '-');
+    let (Some(year), Some(month), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let digits = |s: &str, lengths: &[usize]| {
+        lengths.contains(&s.len()) && s.chars().all(|c| c.is_ascii_digit())
+    };
+    let day: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let after = &rest[day.len()..];
+    digits(year, &[4])
+        && digits(month, &[1, 2])
+        && digits(&day, &[1, 2])
+        && (after.is_empty()
+            || (after.starts_with(['T', 't', ' '])
+                && after[1..].starts_with(|c: char| c.is_ascii_digit())))
 }
 
 /// The string a YAML reader reads in `value`, if it reads a string this reader agrees on.
