@@ -5,10 +5,18 @@
     "script": "benchmark/harness/broker.ts",
     "flags": [
       "--disallow-code-generation-from-strings",
+      "--no-experimental-sqlite",
       "--permission",
       "--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker.ts",
       "--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json"
     ]
   },
-  "refused": ["--allow-child-process", "--allow-worker", "--allow-addons", "--allow-wasi", "--allow-fs-write", "--allow-inspector"]
+  "refused": [
+    "--allow-child-process",
+    "--allow-worker",
+    "--allow-addons",
+    "--allow-wasi",
+    "--allow-fs-write",
+    "--allow-inspector"
+  ]
 }

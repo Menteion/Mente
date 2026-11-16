@@ -10,18 +10,21 @@
 // costs, never what the model is shown.
 
 import { readFileSync } from "node:fs";
-import { usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
+import { readLimits, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
 import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
 /**
  * The limits the broker, which holds the key, spends within (benchmark/harness/broker-limits.json):
  * the harness reads its API version, its most output, its cache-write price and its models' prices
- * from the same file, so that the harness's budget and the broker's cannot drift apart.
+ * from the same file, through the broker's own reader, so that the harness's budget and the
+ * broker's cannot drift apart.
  */
-const LIMITS = JSON.parse(readFileSync(new URL("./broker-limits.json", import.meta.url), "utf8"));
+const LIMITS = readLimits(readFileSync(new URL("./broker-limits.json", import.meta.url), "utf8"));
 export const API_VERSION: string = LIMITS.version;
 export const MAX_TOKENS: number = LIMITS.maxTokens;
+/** The most requests the broker sends at once: a run's concurrency may not pass it. */
+export const MAX_IN_FLIGHT: number = LIMITS.maxInFlight;
 /** A cache write's price, as a multiple of the input price, for 5-minute entries. */
 export const CACHE_WRITE: number = LIMITS.cacheWrite;
 
@@ -31,13 +34,13 @@ export interface Model {
   input: number;
   output: number;
   cacheRead: number;
+  /** For a model priced by its prompt's length, the factor every price takes above `above` tokens. */
+  longPrompt?: { above: number; factor: number };
 }
 
 // The models a run may use, with their prices, from broker-limits.json, whose `about` says where
 // they come from. The broker refuses any other.
-export const KNOWN_MODELS: Record<string, Model> = Object.fromEntries(
-  Object.entries(LIMITS.models as Record<string, Omit<Model, "id">>).map(([id, price]) => [id, { id, ...price }]),
-);
+export const KNOWN_MODELS: Record<string, Model> = Object.fromEntries([...LIMITS.models].map(([id, price]) => [id, { id, ...price }]));
 
 /**
  * Reads a comma-separated list of models: a known id, or `id@input/output/cache-read` with its
@@ -67,7 +70,7 @@ export interface Usage {
 
 /** What a call cost, in US dollars, as the broker counts it: at its worst when the usage is unreadable. */
 export function callCost(usage: Usage, model: Model, worst: number): number {
-  return usageCost(usage, model, CACHE_WRITE, worst);
+  return usageCost(usage, model, LIMITS, worst);
 }
 
 /** All the input tokens a call was billed for, cached or not. */

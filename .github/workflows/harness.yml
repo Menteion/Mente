@@ -74,6 +74,13 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
+      - name: Take root from the runner's user, but for the sandbox
+        # From here to the job's end sudo runs nothing for the runner's user but the sandbox's
+        # root-owned half, no core dump is written, no process traces another, and no container
+        # daemon listens, so that no process of that user reads the key out of another's memory
+        # (benchmark/harness/lock-sudo.sh; docs/design-review.md, untrusted-test-isolation).
+        if: steps.watch.outputs.run != 'false'
+        run: bash benchmark/harness/lock-sudo.sh
       - name: Build and run the fixtures through the sandbox
         if: steps.watch.outputs.run != 'false'
         env:
@@ -94,3 +101,7 @@ jobs:
       - name: Test the harness
         if: steps.watch.outputs.run != 'false'
         run: npm run test:harness
+      - name: Root is still out of the runner's user's reach
+        # As benchmark/harness/lock-sudo.sh left it, whatever ran in between.
+        if: "!cancelled() && steps.watch.outputs.run != 'false'"
+        run: bash benchmark/harness/lock-sudo.sh --check

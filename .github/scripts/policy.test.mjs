@@ -1144,9 +1144,9 @@ const PINNED_JOBS = new Map([
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "4e6efc58580a30edeadd6ecf4464bd7ae2727083f3daa060f105aca1969ed0e8"],
   ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
-  ["benchmark.yml#bench", "a4ba33dc5807bb9b4d795e35fdd5253871e879bf7123f8cae5a0495d96c8d258"],
-  ["prelim.yml#prelim", "ecd46f241e418c52cdcf0cad14f8570cde989c904f741ad1b8846a5a878070d6"],
-  ["probe.yml#write", "0152e169c66afb6044b882c4db3d02ec33827b233a554b56c678a9fe771f37ab"],
+  ["benchmark.yml#bench", "af5f61a2b22aba117e8f4aefca6cd49184d33bea00d02010b63669d3c2ec193a"],
+  ["prelim.yml#prelim", "cee1940893dfb55471a774452d9a0d4df45fda5d86b61b1600fe529eaf84b611"],
+  ["probe.yml#write", "b01f5cf9b865647582ebe4ee11088545f3dc466d42ce89068ddd6acc4795a909"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -2782,55 +2782,100 @@ const SECRET_JOBS = new Map([
 ]);
 /// The environment that holds the secrets.
 const SECRET_ENVIRONMENT = "benchmark";
-/// A flag as the step writes it: the value of a flag that names the workspace, quoted.
+/// A flag as start-broker.sh writes it: the value of a flag that names the workspace, quoted.
 const quoteFlag = (f) => (f.includes("=$") ? f.replace(/=(.*)$/, '="$1"') : f);
-/// The one step of a secret job that holds the API key: it starts the broker in the background,
-/// the key on its standard input and in no environment (`env -i`, which also drops NODE_OPTIONS,
-/// whose --allow-child-process would undo the permission model), under permission.json's flags,
-/// and ends once the broker listens (docs/design-review.md, untrusted-test-isolation).
+/// The step that takes root from the runner's user for the rest of a job, but for the sandbox's
+/// root-owned half, before the sandbox runs anything and before the key is in reach: so that no
+/// process of that user, outside the sandbox, reads the key out of the broker's memory or the
+/// runner's (benchmark/harness/lock-sudo.sh; docs/design-review.md, untrusted-test-isolation).
+export const LOCK_STEP = { name: "Take root from the runner's user, but for the sandbox", run: "bash benchmark/harness/lock-sudo.sh" };
+/// The one step of a secret job that holds the API key: it starts the broker in the background
+/// and ends once the broker listens (benchmark/harness/start-broker.sh, whose node line
+/// BROKER_LINE holds).
 export const BROKER_STEP = {
   name: "The broker, the one process that holds the API key",
   env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}", BUDGET: "${{ inputs.budget }}" },
-  run: [
-    'mkdir -m 700 "$RUNNER_TEMP/broker"',
-    `printf '%s\\n' "$ANTHROPIC_API_KEY" | env -i PATH="$PATH" node ${PERMISSION.broker.flags.map(quoteFlag).join(" ")} ${PERMISSION.broker.script} --socket "$RUNNER_TEMP/broker/socket" --budget "$BUDGET" > "$RUNNER_TEMP/broker/log" 2>&1 &`,
-    'echo "$!" > "$RUNNER_TEMP/broker/pid"',
-    'for _ in $(seq 100); do if [ -S "$RUNNER_TEMP/broker/socket" ]; then break; fi; sleep 0.1; done',
-    'cat "$RUNNER_TEMP/broker/log"',
-    'if [ ! -S "$RUNNER_TEMP/broker/socket" ]; then echo "::error::the broker did not start"; exit 1; fi',
-    "",
-  ].join("\n"),
+  run: "bash benchmark/harness/start-broker.sh",
 };
-/// The last step of a secret job: it stops the broker, whatever came before.
-export const STOP_STEP = {
-  name: "Stop the broker",
-  if: "always()",
-  run: ['if [ -f "$RUNNER_TEMP/broker/pid" ]; then kill "$(cat "$RUNNER_TEMP/broker/pid")" 2> /dev/null || true; fi', 'if [ -f "$RUNNER_TEMP/broker/log" ]; then cat "$RUNNER_TEMP/broker/log"; fi', ""].join("\n"),
+/// The last step of a secret job: it stops the broker, whatever came before, and checks that root
+/// is still out of the runner's user's reach.
+export const STOP_STEP = { name: "Stop the broker", if: "always()", run: "bash benchmark/harness/stop-broker.sh\nbash benchmark/harness/lock-sudo.sh --check\n" };
+/// The last step of a job that runs the sandbox and holds no secret: the same check.
+export const LOCKED_STEP = { name: "Root is still out of the runner's user's reach", if: "!cancelled() && steps.watch.outputs.run != 'false'", run: "bash benchmark/harness/lock-sudo.sh --check" };
+/// The line of start-broker.sh that starts the broker: the key on its standard input and in no
+/// environment (`env -i`, which also drops NODE_OPTIONS, whose --allow-child-process would undo
+/// the permission model), under permission.json's flags.
+export const BROKER_LINE = `printf '%s\\n' "$ANTHROPIC_API_KEY" | env -i PATH="$PATH" node ${PERMISSION.broker.flags.map(quoteFlag).join(" ")} "$GITHUB_WORKSPACE/${PERMISSION.broker.script}" --socket "$dir/socket" --budget "$BUDGET" > "$dir/log" 2>&1 &`;
+/// The lines start-broker.sh holds before BROKER_LINE: no core file at any size, a limit the
+/// runner's user cannot raise again, and a mask and a directory that keep the socket, the log and
+/// the pid file the runner's user's alone.
+const BROKER_SETUP = ['dir="$RUNNER_TEMP/broker"', "ulimit -c 0", "umask 0177", 'mkdir -m 0700 "$dir"'];
+/// The one place each secret may stand in a secret job, everything else refused: the key in the
+/// broker's step, the held-out set's token as the input of its checkout.
+const HELD_OUT_TOKEN = "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}";
+
+/// Whether a step is `want` exactly, but for the watch's condition, which a watched job's steps
+/// may carry.
+const isStep = (s, want) => {
+  const { if: cond, ...rest } = s;
+  const { if: wantCond, ...wantRest } = want;
+  return JSON.stringify(rest) === JSON.stringify(wantRest) && (cond === wantCond || (wantCond === undefined && cond === "steps.watch.outputs.run != 'false'"));
 };
 
-/// What is wrong with how a secret job holds its key: one step holds it, BROKER_STEP exactly; the
-/// one step beside it that may hold a secret is the held-out checkout, whose token it keeps out of
-/// .git/config; the step that runs the harness holds none and talks to the broker after it starts;
-/// STOP_STEP comes last; nothing wider than a step, the workflow's env or the job's, holds a secret;
-/// and Node is permission.json's version, whose permission model the flags rely on (nodeProblems).
+/// What is wrong with start-broker.sh: BROKER_SETUP, then BROKER_LINE, each once, and no other node.
+export function startBrokerProblems(text) {
+  const found = [];
+  const lines = text.split("\n");
+  const at = (line) => lines.indexOf(line);
+  for (const line of [...BROKER_SETUP, BROKER_LINE]) {
+    if (lines.filter((l) => l === line).length !== 1) found.push(`start-broker.sh does not hold, once: ${line}`);
+  }
+  if (!BROKER_SETUP.every((line, k) => at(line) >= 0 && at(line) < at(BROKER_LINE) && (k === 0 || at(line) > at(BROKER_SETUP[k - 1])))) found.push("start-broker.sh does not set the core limit, the mask and the directory up, in that order, before it starts the broker");
+  const nodes = lines.filter((l) => /(^|[\s;&|(])node(\s|$)/.test(l.replace(/#.*$/, "")));
+  if (nodes.length !== 1) found.push(`start-broker.sh starts node ${nodes.length} times, not once`);
+  return found;
+}
+
+/// What is wrong with how a secret job holds its key: root taken from the runner's user before the
+/// key is in reach (LOCK_STEP); one step holding the key, BROKER_STEP exactly; the one other step
+/// that may hold a secret, the held-out checkout, holding its token as its one input secret and
+/// keeping it out of .git/config; no secret wider than a step; the harness talking to the broker
+/// after it starts, holding none; STOP_STEP last; and permission.json's Node, set up once.
 export function brokerProblems(key, job, doc = {}) {
   const found = [];
   const all = steps(job);
-  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   if (holdsSecret(doc.env) || holdsSecret({ ...job, steps: null }) || "secrets" in job) found.push(`${key} holds a secret wider than a step, which would reach every step beside the broker`);
-  const brokers = all.filter((s) => same(s, BROKER_STEP));
+  const locks = all.filter((s) => isStep(s, LOCK_STEP) && s.if === undefined);
+  const brokers = all.filter((s) => isStep(s, BROKER_STEP) && s.if === undefined);
   if (brokers.length !== 1) found.push(`${key} does not start the broker once, as BROKER_STEP`);
-  for (const s of all.filter((x) => holdsSecret(x) && !same(x, BROKER_STEP))) {
-    // The checkout's token is its one secret: none in its env, in another input or in its condition.
-    const checkout = /^actions\/checkout@/.test(String(s.uses ?? "")) && isPlain(s.with) && "token" in s.with && !holdsSecret({ ...s, with: { ...s.with, token: null } });
-    if (!checkout) found.push(`${key}, step "${s.name ?? s.uses}": holds a secret beside the broker`);
+  if (locks.length !== 1 || all.indexOf(locks[0]) > all.findIndex((s) => holdsSecret(s))) found.push(`${key} does not take root from the runner's user once, as LOCK_STEP, before any secret is in reach`);
+  for (const s of all.filter((x) => holdsSecret(x) && !brokers.includes(x))) {
+    const checkout = /^actions\/checkout@/.test(String(s.uses ?? "")) && isPlain(s.with) && s.with.token === HELD_OUT_TOKEN && !holdsSecret({ ...s, with: { ...s.with, token: null } });
+    if (!checkout) found.push(`${key}, step "${s.name ?? s.uses}": holds a secret where none belongs (the key belongs in BROKER_STEP alone, ${HELD_OUT_TOKEN} in the held-out checkout's token alone)`);
     else if (s.with["persist-credentials"] !== false && s.with["persist-credentials"] !== "false") found.push(`${key}: the held-out checkout keeps its token in .git/config, persist-credentials not false`);
   }
-  const stops = all.filter((s) => same(s, STOP_STEP));
+  const stops = all.filter((s) => isStep(s, STOP_STEP) && s.if === "always()");
   if (stops.length !== 1 || all.at(-1) !== stops[0]) found.push(`${key} does not stop the broker in its last step, as STOP_STEP`);
   const harness = all.filter((s) => /benchmark\/harness\/(bench|prelim|probe)\.ts/.test(String(s.run ?? "")));
   const talks = harness.length === 1 && String(harness[0].run).includes('--broker "$RUNNER_TEMP/broker/socket"') && all.indexOf(harness[0]) > all.indexOf(brokers[0]);
   if (!talks) found.push(`${key} does not run the harness once, after the broker starts, talking to it`);
+  const node = all.filter((s) => /^actions\/setup-node@/.test(String(s.uses ?? "")));
+  if (node.length !== 1 || String(node[0].with?.["node-version"]) !== PERMISSION.node) found.push(`${key} does not set up Node ${PERMISSION.node} once, whose permission model the broker's flags rely on`);
+  return found;
+}
+
+/// What is wrong with a job that runs the benchmark's sandbox: root taken from the runner's user
+/// (LOCK_STEP) before the first step that runs it, and checked out of reach in the job's last step
+/// (STOP_STEP in a secret job, LOCKED_STEP in another).
+export function sudoLockProblems(key, job) {
+  const all = steps(job);
+  const first = all.findIndex((s) => /"\$SANDBOX"|benchmark\/harness\/sandbox(-check)?\.(sh|ts)/.test(String(s.run ?? "")));
+  if (first < 0) return [];
+  const found = [];
+  const locks = all.filter((s) => isStep(s, LOCK_STEP));
+  if (locks.length !== 1 || all.indexOf(locks[0]) > first) found.push(`${key} runs the sandbox, but does not take root from the runner's user once, as LOCK_STEP, before it`);
+  const last = all.at(-1);
+  if (!last || !(isStep(last, STOP_STEP) || isStep(last, LOCKED_STEP))) found.push(`${key} runs the sandbox, but does not check in its last step that root is still out of reach`);
   return found;
 }
 
@@ -2846,17 +2891,31 @@ export function nodeProblems(jobs) {
   return found;
 }
 
-check("the broker, the one process that holds the key, starts under permission.json's flags, and every job runs its Node", () => {
-  // The flags: Node's permission model and no code from strings, reads of the broker and its limits
-  // alone, and none of the flags that would let it start, load or write anything.
+check("the broker, the one process that holds the key, starts under permission.json's flags, root out of every reach, and every job runs its Node", () => {
+  // The flags: Node's permission model, no code from strings and no node:sqlite, reads of the
+  // broker and its limits alone, and none of the flags that would let it start, load or write
+  // anything. What the broker's own code imports or calls guarantees nothing, since
+  // process.getBuiltinModule reaches any built-in; the flags do, and the shape of what it sends.
   const flags = PERMISSION.broker.flags;
-  assert.ok(flags.includes("--permission") && flags.includes("--disallow-code-generation-from-strings"), "the broker's flags lose the permission model or the ban on code from strings");
+  for (const f of ["--permission", "--disallow-code-generation-from-strings", "--no-experimental-sqlite"]) assert.ok(flags.includes(f), `the broker's flags lose ${f}`);
   assert.deepEqual(flags.filter((f) => f.startsWith("--allow-")).sort(), ["--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json", "--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker.ts"]);
   for (const r of PERMISSION.refused) assert.ok(!flags.some((f) => f.startsWith(r)), `the broker's flags hold ${r}`);
   assert.match(PERMISSION.node, /^\d+\.\d+\.\d+$/);
-  // The broker imports nothing of the repository: its flags let it read no other file, so an
-  // import would fail as it ran, and this says so where review reads it.
+  // A relative import would fail as the broker ran, since its flags let it read no other file.
   assert.deepEqual(readSecretModule(PERMISSION.broker.script, read(PERMISSION.broker.script)).imports, [], "the broker imports a file, which its flags do not let it read");
+  // start-broker.sh starts it so, and nothing else.
+  const script = read("benchmark/harness/start-broker.sh");
+  assert.deepEqual(startBrokerProblems(script), []);
+  for (const [what, text] of [
+    ["--allow-child-process among the flags", script.replace("--permission", "--permission --allow-child-process")],
+    ["no env -i", script.replace('env -i PATH="$PATH" ', "")],
+    ["no core limit", script.replace("ulimit -c 0\n", "")],
+    ["no mask", script.replace("umask 0177\n", "")],
+    ["a mask after the broker starts", script.replace("umask 0177\n", "").replace(/(> "\$dir\/log" 2>&1 &\n)/, "$1umask 0177\n")],
+    ["a second node", `${script}node -e 1\n`],
+  ]) {
+    assert.ok(startBrokerProblems(text).length > 0, `a start-broker.sh with ${what} passes`);
+  }
   // Every job sets up that Node: the secret jobs, the jobs that run the harness's tests and the
   // planted escapes among them, and the rest.
   assert.deepEqual(nodeProblems(allJobs()), []);
@@ -2864,35 +2923,61 @@ check("the broker, the one process that holds the key, starts under permission.j
     const planted = [{ file: "x.yml", id: "y", job: { steps: [{ uses: "actions/setup-node@0", with: v === undefined ? {} : { "node-version": v } }] } }];
     assert.ok(nodeProblems(planted).length > 0, `a job that sets up Node ${v} passes`);
   }
+  // Every job that runs the sandbox takes root from the runner's user before it, and checks at its
+  // end that it is still out of reach.
+  for (const { file, id, job } of allJobs()) assert.deepEqual(sudoLockProblems(`${file}#${id}`, job), []);
+  assert.ok(allJobs().some(({ file, id, job }) => !SECRET_JOBS.has(`${file}#${id}`) && sudoLockProblems(`${file}#${id}`, { steps: steps(job).filter((s) => !isStep(s, LOCK_STEP)) }).length > 0), "no job that runs the sandbox outside the secret jobs proves the lock on every change");
   // Planted: each way a secret job's broker could go wrong.
   const job = {
     steps: [
       { uses: "actions/checkout@0", with: { "persist-credentials": false } },
       { uses: "actions/setup-node@0", with: { "node-version": PERMISSION.node, "package-manager-cache": false } },
-      { uses: "actions/checkout@0", with: { token: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}", "persist-credentials": false } },
+      LOCK_STEP,
+      { uses: "actions/checkout@0", with: { token: HELD_OUT_TOKEN, "persist-credentials": false } },
       BROKER_STEP,
       { name: "Run", run: 'node --disallow-code-generation-from-strings benchmark/harness/bench.ts --sandbox "$SANDBOX" --broker "$RUNNER_TEMP/broker/socket"' },
       STOP_STEP,
     ],
   };
   assert.deepEqual(brokerProblems("x.yml#y", job), []);
+  assert.deepEqual(sudoLockProblems("x.yml#y", job), []);
   const at = (k, step) => ({ steps: job.steps.map((s, i) => (i === k ? step : s)) });
+  const without = (k) => ({ steps: job.steps.filter((_, i) => i !== k) });
   for (const [what, planted] of [
-    ["--allow-child-process among the flags", at(3, { ...BROKER_STEP, run: BROKER_STEP.run.replace("--permission", "--permission --allow-child-process") })],
-    ["no env -i", at(3, { ...BROKER_STEP, run: BROKER_STEP.run.replace('env -i PATH="$PATH" ', "") })],
-    ["the key in the harness's step", at(4, { ...job.steps[4], env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" } })],
-    ["a harness that does not talk to the broker", at(4, { name: "Run", run: 'node benchmark/harness/bench.ts --sandbox "$SANDBOX"' })],
-    ["the held-out checkout keeping its token", at(2, { uses: "actions/checkout@0", with: { token: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}" } })],
-    ["the held-out token in a step's env", at(4, { ...job.steps[4], env: { HELD_OUT: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}" } })],
-    ["the held-out token in the checkout's env", at(2, { ...job.steps[2], env: { TOKEN: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}" } })],
+    ["the broker's step changed", at(4, { ...BROKER_STEP, run: "bash benchmark/harness/start-broker.sh --allow-child-process" })],
+    ["the key in the harness's step", at(5, { ...job.steps[5], env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" } })],
+    ["a harness that does not talk to the broker", at(5, { name: "Run", run: 'node benchmark/harness/bench.ts --sandbox "$SANDBOX"' })],
+    ["the held-out checkout keeping its token", at(3, { uses: "actions/checkout@0", with: { token: HELD_OUT_TOKEN } })],
+    ["the key as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.ANTHROPIC_API_KEY }}", "persist-credentials": false } })],
+    ["another secret as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.OTHER }}", "persist-credentials": false } })],
+    ["the held-out token in a step's env", at(5, { ...job.steps[5], env: { HELD_OUT: HELD_OUT_TOKEN } })],
+    ["the held-out token in the checkout's env", at(3, { ...job.steps[3], env: { TOKEN: HELD_OUT_TOKEN } })],
     ["the key in the job's env", { ...job, env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" } }],
-    ["no stop", { steps: job.steps.slice(0, 5) }],
-    ["a stop that is not last", { steps: [...job.steps.slice(0, 4), STOP_STEP, job.steps[4]] }],
-    ["the broker started twice", { steps: [...job.steps.slice(0, 4), BROKER_STEP, ...job.steps.slice(4)] }],
+    ["no stop", { steps: job.steps.slice(0, 6) }],
+    ["a stop that is not last", { steps: [...job.steps.slice(0, 5), STOP_STEP, job.steps[5]] }],
+    ["a stop without the lock's check", at(6, { ...STOP_STEP, run: "bash benchmark/harness/stop-broker.sh\n" })],
+    ["the broker started twice", { steps: [...job.steps.slice(0, 5), BROKER_STEP, ...job.steps.slice(5)] }],
+    ["no lock", without(2)],
+    ["the lock after the key is in reach", { steps: [job.steps[0], job.steps[1], job.steps[3], LOCK_STEP, ...job.steps.slice(4)] }],
+    ["the lock under a condition", at(2, { ...LOCK_STEP, if: "false" })],
+    ["no setup-node", without(1)],
+    ["another Node", at(1, { uses: "actions/setup-node@0", with: { "node-version": "24" } })],
   ]) {
     assert.ok(brokerProblems("x.yml#y", planted).length > 0, `a secret job with ${what} passes`);
   }
   assert.ok(brokerProblems("x.yml#y", job, { env: { K: "${{ secrets.ANTHROPIC_API_KEY }}" } }).length > 0, "a secret job whose workflow's env holds the key passes");
+  // Planted: a job that runs the sandbox and holds no secret.
+  const watched = (s) => ({ ...s, if: "steps.watch.outputs.run != 'false'" });
+  const fixtures = { steps: [watched(LOCK_STEP), watched({ name: "Prove", run: 'node benchmark/harness/sandbox-check.ts --sandbox "$SANDBOX"' }), LOCKED_STEP] };
+  assert.deepEqual(sudoLockProblems("x.yml#f", fixtures), []);
+  for (const [what, planted] of [
+    ["no lock", { steps: fixtures.steps.slice(1) }],
+    ["the lock after the sandbox", { steps: [fixtures.steps[1], fixtures.steps[0], fixtures.steps[2]] }],
+    ["no check at the end", { steps: fixtures.steps.slice(0, 2) }],
+    ["a check that is not last", { steps: [fixtures.steps[0], fixtures.steps[2], fixtures.steps[1]] }],
+  ]) {
+    assert.ok(sudoLockProblems("x.yml#f", planted).length > 0, `a job that runs the sandbox with ${what} passes`);
+  }
 });
 /// A node a job of SECRET_JOBS starts without disallowing code generation from strings.
 const NODE_WITHOUT_GUARD = /(^|[\s;&|(])node\s+(?!--disallow-code-generation-from-strings\s)/;

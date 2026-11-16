@@ -9,8 +9,8 @@
 // connect to a socket listening where the broker listens, $RUNNER_TEMP/broker/socket, whose
 // requests the broker sends on with the API key (benchmark/harness/broker.ts); to write into a
 // directory outside its own; and to write into its own. It also checks that the kernel lets no
-// process trace one it did not start (Yama's ptrace_scope at 1 or more), so that no process of the
-// runner's user reads the key out of the broker's memory. Four Odin canaries read the
+// process trace another (Yama's ptrace_scope at 2 or 3, which benchmark/harness/lock-sudo.sh sets
+// before this runs), so that no process of the runner's user reads the key out of the broker's memory. Four Odin canaries read the
 // credential file, the workspace file, the held-out stand-in and the held-out run's file at compile
 // time with `#load`.
 // With the sandbox each attempt must fail, except the write into the canary's own directory, which
@@ -189,7 +189,8 @@ async function main(): Promise<void> {
       if (odinControl.status !== 0) failures.push(`the Odin control did not read the ${what} with #load: ${odinControl.stderr.trim()}`);
       if (odinConfined.status === 0) failures.push(`the sandbox let Odin read the ${what} at compile time with #load`);
     }
-    // No process of the runner's user may trace one it did not start: Yama's scope 1 or more.
+    // No process of the runner's user may trace another, which only a process with CAP_SYS_PTRACE
+    // may once lock-sudo.sh has run: Yama's scope 2 or 3.
     let scope = "";
     try {
       scope = readFileSync("/proc/sys/kernel/yama/ptrace_scope", "utf8").trim();
@@ -197,7 +198,7 @@ async function main(): Promise<void> {
       scope = "absent";
     }
     console.log(`yama ptrace_scope: ${scope}`);
-    if (!/^[1-3]$/.test(scope)) failures.push(`Yama's ptrace_scope is ${scope}, so a process of the runner's user could read the broker's memory, and the key in it`);
+    if (!/^[23]$/.test(scope)) failures.push(`Yama's ptrace_scope is ${scope}, so a process of the runner's user could read another's memory, the broker's and the key in it among them: lock-sudo.sh sets 2`);
   } finally {
     await new Promise((done) => listener.close(() => done(undefined)));
     rmSync(brokerDir, { recursive: true, force: true });

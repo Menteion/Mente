@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import {
   API_VERSION,
   budgetedCall,
+  MAX_IN_FLIGHT,
   MAX_TOKENS,
   parseModels,
   requestBody,
@@ -246,6 +247,7 @@ async function main(): Promise<void> {
   const models = parseModels(option("models", "claude-sonnet-5-5,claude-haiku-5-5"));
   const runs = Number(option("runs", "5"));
   const concurrency = Number(option("concurrency", "8"));
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > MAX_IN_FLIGHT) throw new Error(`--concurrency ${concurrency}: from 1 to ${MAX_IN_FLIGHT}, the most requests the broker sends at once (broker-limits.json)`);
   const which = option("tasks", "all");
   const heldOutDir = option("held-out", "");
   const out = option("out", "bench-out");

@@ -119,6 +119,12 @@ jobs:
       - name: Install the benchmark's Rust and Odin
         id: toolchains
         run: bash benchmark/harness/install-toolchains.sh "$RUNNER_TEMP/odin"
+      - name: Take root from the runner's user, but for the sandbox
+        # From here to the job's end sudo runs nothing for the runner's user but the sandbox's
+        # root-owned half, no core dump is written, no process traces another, and no container
+        # daemon listens, so that no process of that user reads the key out of another's memory
+        # (benchmark/harness/lock-sudo.sh; docs/design-review.md, untrusted-test-isolation).
+        run: bash benchmark/harness/lock-sudo.sh
       - name: Prove the sandbox denies the key, the network and the held-out set, before measuring
         # On this runner, before the held-out set or the API key is anywhere near it: a failure
         # stops the run (benchmark/harness/sandbox-check.ts).
@@ -143,22 +149,17 @@ jobs:
         # The checker's messages could name held-out tasks, so only its verdict reaches the log.
         run: node --disallow-code-generation-from-strings benchmark/check.mjs --held-out held-out-set > /dev/null 2>&1 || { echo "the held-out set does not match corpus.lock"; exit 1; }
       - name: The broker, the one process that holds the API key
-        # The key reaches the broker on its standard input and in no environment, under Node's
-        # permission model: it can start no process, worker, addon or WASI, read only its own file and
-        # its limits, and write no file, and it spends within the run's budget and the limits of
-        # benchmark/harness/broker-limits.json. The step ends once the broker listens, and the shell
-        # that held the key with it (benchmark/harness/broker.ts, benchmark/harness/permission.json;
+        # The key reaches the broker on its standard input and in no environment. Under Node's
+        # permission model and the flags of benchmark/harness/permission.json it can start no process,
+        # worker, addon or WASI, read only its own file and its limits, and write none; it sends on only
+        # the shape of request the harness makes, within the limits of broker-limits.json; and its
+        # socket is the runner's user's alone, out of the sandbox's reach. The step ends once it
+        # listens, and the shell that held the key with it (benchmark/harness/start-broker.sh;
         # docs/design-review.md, untrusted-test-isolation).
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BUDGET: ${{ inputs.budget }}
-        run: |
-          mkdir -m 700 "$RUNNER_TEMP/broker"
-          printf '%s\n' "$ANTHROPIC_API_KEY" | env -i PATH="$PATH" node --disallow-code-generation-from-strings --permission --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker.ts" --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json" benchmark/harness/broker.ts --socket "$RUNNER_TEMP/broker/socket" --budget "$BUDGET" > "$RUNNER_TEMP/broker/log" 2>&1 &
-          echo "$!" > "$RUNNER_TEMP/broker/pid"
-          for _ in $(seq 100); do if [ -S "$RUNNER_TEMP/broker/socket" ]; then break; fi; sleep 0.1; done
-          cat "$RUNNER_TEMP/broker/log"
-          if [ ! -S "$RUNNER_TEMP/broker/socket" ]; then echo "::error::the broker did not start"; exit 1; fi
+        run: bash benchmark/harness/start-broker.sh
       - name: Run
         timeout-minutes: 340
         env:
@@ -188,8 +189,9 @@ jobs:
         if: always()
         run: rm -rf held-out-set "$RUNNER_TEMP/bench-out/held-out"
       - name: Stop the broker
-        # Whatever came before; its log holds no key, which the broker takes out of every byte it writes.
+        # Whatever came before; its log holds no key, which the broker takes out of every byte it
+        # writes. Then root must still be out of the runner's user's reach, as the lock left it.
         if: always()
         run: |
-          if [ -f "$RUNNER_TEMP/broker/pid" ]; then kill "$(cat "$RUNNER_TEMP/broker/pid")" 2> /dev/null || true; fi
-          if [ -f "$RUNNER_TEMP/broker/log" ]; then cat "$RUNNER_TEMP/broker/log"; fi
+          bash benchmark/harness/stop-broker.sh
+          bash benchmark/harness/lock-sudo.sh --check
