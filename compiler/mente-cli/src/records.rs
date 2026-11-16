@@ -2,6 +2,161 @@
 //! record (Norman, 2026-11-17): the design register's tests (`tests/register.rs`), the record of
 //! escaped bugs (`escapes.rs`, `tests/escapes.rs`, `mn escapes`), and the forms' own tests
 //! (`tests/records.rs`), which also hold that no document names a record by a number.
+//!
+//! A kind of record is kept one file a record, in a directory of its own, each file named by its
+//! record's key (Norman, 2026-11-17): two changes in flight that each add a record then never touch
+//! one file, and a record is found by its name. [`KINDS`] declares every kind kept so, and
+//! [`SHARED`] every file that still holds many records, each with why it is not yet a kind.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// A kind of record kept one file a record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kind {
+    /// What one record of the kind is, `an escaped bug`.
+    pub record: &'static str,
+    /// The kind's directory, from the repository's root.
+    pub dir: &'static str,
+    /// The extension of every record's file.
+    pub extension: &'static str,
+    /// The subdirectory, of the same form, that holds the kind's finished records, if it has one.
+    pub archive: Option<&'static str>,
+}
+
+/// The record of escaped bugs, `docs/escapes/<key>.md` (`escapes.rs`).
+pub const ESCAPES: Kind = Kind {
+    record: "an escaped bug",
+    dir: "docs/escapes",
+    extension: "md",
+    archive: None,
+};
+
+/// The task briefs, `briefs/<key>.md`, which spec-brief reads and archives to
+/// `briefs/archive/<key>.md`. `.spec-brief.json` takes each brief's id from its front matter, where
+/// it is the file's key.
+pub const BRIEFS: Kind = Kind {
+    record: "a task brief",
+    dir: "briefs",
+    extension: "md",
+    archive: Some("archive"),
+};
+
+/// Every kind of record kept one file a record.
+pub const KINDS: &[Kind] = &[ESCAPES, BRIEFS];
+
+/// A file that holds many records, and why it is not yet a kind of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shared {
+    /// The file, from the repository's root.
+    pub file: &'static str,
+    /// The records it holds.
+    pub records: &'static str,
+    /// Why it is still one file.
+    pub why: &'static str,
+}
+
+/// Every file that still holds many records. A file leaves this list in the change that makes its
+/// records a kind, since the test that reads the list requires each file to exist.
+pub const SHARED: &[Shared] = &[
+    Shared {
+        file: "docs/design-review.md",
+        records: "the design register's entries",
+        why: "spec-graph reads a register only as the table or the sections of one file, and checks its statuses, citations and keys there; the register becomes a kind when spec-graph reads a register kept one file an entry, a feature asked of the tools' owner",
+    },
+    Shared {
+        file: "compiler/mente-cli/tests/golden/mir.txt",
+        records: "the MIR of each program of the corpus",
+        why: "it becomes one file a program in a pull request of its own",
+    },
+    Shared {
+        file: "compiler/mente-cli/tests/golden/diagnostics.txt",
+        records: "the diagnostics of each program of the corpus",
+        why: "it becomes one file a program in a pull request of its own",
+    },
+    Shared {
+        file: "compiler/mente-cli/tests/golden/projections.txt",
+        records: "the projections of each program of the corpus",
+        why: "it becomes one file a program in a pull request of its own",
+    },
+    Shared {
+        file: "compiler/mente-cli/tests/mutants/equivalent.txt",
+        records: "the equivalent mutants of the MIR mutation gate, each with its reason",
+        why: "it becomes one file a mutant, its reason in the front matter, in a pull request of its own",
+    },
+];
+
+/// The file that keeps a directory in git while it holds no record.
+pub const KEEP: &str = ".gitkeep";
+
+/// Each record of `kind` in its directory `dir`, by key, with its file, in the order of their keys,
+/// the finished records of its archive among them; or each entry that is none: a file whose name is
+/// not `<key>.<extension>` by [`is_key`], a subdirectory but the archive, and a key both the
+/// directory and its archive hold. [`KEEP`] may stand in either.
+pub fn entries(kind: &Kind, dir: &Path) -> Result<Vec<(String, PathBuf)>, Vec<String>> {
+    let mut found = Vec::new();
+    let mut problems = Vec::new();
+    read_entries(kind, dir, "", kind.archive, &mut found, &mut problems);
+    found.sort();
+    for pair in found.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            problems.push(format!(
+                "{}: a key two files hold, {} and {}",
+                pair[0].0,
+                pair[0].1.display(),
+                pair[1].1.display()
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(found)
+    } else {
+        Err(problems)
+    }
+}
+
+/// The records of `kind` in `dir`, named in problems from `prefix`, with `archive` the one
+/// subdirectory read as more records.
+fn read_entries(
+    kind: &Kind,
+    dir: &Path,
+    prefix: &str,
+    archive: Option<&str>,
+    found: &mut Vec<(String, PathBuf)>,
+    problems: &mut Vec<String>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            problems.push(format!("{}: {}", dir.display(), e));
+            return;
+        }
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if path.is_dir() && archive == Some(name.as_str()) {
+            let inner = format!("{}{}/", prefix, name);
+            read_entries(kind, &path, &inner, None, found, problems);
+            continue;
+        }
+        if path.is_file() && name == KEEP {
+            continue;
+        }
+        let key = name
+            .strip_suffix(&format!(".{}", kind.extension))
+            .filter(|k| path.is_file() && is_key(k));
+        match key {
+            Some(key) => found.push((key.to_string(), path)),
+            None => problems.push(format!(
+                "{}{}: not {}, which is a file `<key>.{}` whose key is lowercase words of letters and digits joined by hyphens, and no name Windows reserves",
+                prefix, name, kind.record, kind.extension
+            )),
+        }
+    }
+}
 
 /// Whether `day` is a day of the calendar written `YYYY-MM-DD`.
 pub fn is_day(day: &str) -> bool {

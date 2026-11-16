@@ -73,6 +73,194 @@ fn test_a_key_is_lowercase_words_joined_by_hyphens() {
     assert!(records::is_key("readme-of-escapes"));
 }
 
+/// The id a brief's front matter gives it, which spec-brief reads (`.spec-brief.json`).
+fn brief_id(text: &str) -> Option<String> {
+    let text = text.replace("\r\n", "\n");
+    let front = text.strip_prefix("---\n")?.split_once("\n---")?.0;
+    front
+        .lines()
+        .find_map(|l| l.strip_prefix("id: "))
+        .map(|id| id.trim().to_string())
+}
+
+/// Every kind of record is a directory of files named by their keys, and nothing else; a brief's
+/// id, which spec-brief reads from its front matter, is its file's key; and spec-brief is
+/// configured to read the briefs so.
+#[test]
+fn test_every_kind_is_a_directory_of_files_named_by_a_key() {
+    for kind in records::KINDS {
+        let found = records::entries(kind, &root().join(kind.dir))
+            .unwrap_or_else(|p| panic!("{}:\n{}", kind.dir, p.join("\n")));
+        if *kind == records::BRIEFS {
+            for (key, path) in found {
+                let text = fs::read_to_string(&path).unwrap();
+                assert_eq!(
+                    brief_id(&text).as_deref(),
+                    Some(key.as_str()),
+                    "{}: a brief's id is its file's key",
+                    path.display()
+                );
+            }
+        }
+    }
+    let config = fs::read_to_string(root().join(".spec-brief.json")).unwrap();
+    for line in [
+        format!("\"briefs\": \"{}\",", records::BRIEFS.dir),
+        format!(
+            "\"archive\": \"{}/{}\",",
+            records::BRIEFS.dir,
+            records::BRIEFS.archive.unwrap()
+        ),
+        format!("\"files\": \"*.{}\",", records::BRIEFS.extension),
+        "\"source\": \"frontmatter\"".to_string(),
+    ] {
+        assert!(
+            config.contains(&line),
+            ".spec-brief.json does not say {}",
+            line
+        );
+    }
+}
+
+/// Every file that still holds many records exists and says why it is not yet a kind, and lies
+/// in no kind's directory; no two kinds share a directory.
+#[test]
+fn test_every_shared_record_file_exists_and_says_why() {
+    for shared in records::SHARED {
+        assert!(
+            root().join(shared.file).is_file(),
+            "{}: no file; a file that became a kind leaves records::SHARED",
+            shared.file
+        );
+        assert!(!shared.records.is_empty() && !shared.why.is_empty());
+        for kind in records::KINDS {
+            assert!(
+                !shared.file.starts_with(&format!("{}/", kind.dir)),
+                "{} lies in the directory of {}",
+                shared.file,
+                kind.record
+            );
+        }
+    }
+    let mut dirs: Vec<&str> = records::KINDS.iter().map(|k| k.dir).collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    assert_eq!(
+        dirs.len(),
+        records::KINDS.len(),
+        "two kinds share a directory"
+    );
+}
+
+/// A kind's directory is refused for each entry that is no record: a name that is no key, a
+/// number among them, a name Windows reserves, a file of another extension, a subdirectory but
+/// the archive, one inside the archive, and a key both the directory and its archive hold. A
+/// `.gitkeep` is no record and no problem, and the archive's records are the kind's.
+#[test]
+fn test_a_kind_refuses_each_entry_that_is_no_record() {
+    let briefs = records::BRIEFS;
+    let escapes = records::ESCAPES;
+    let planted = |name: &str, files: &[&str]| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("kinds")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for path in files {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "---\nid: x\n---\n").unwrap();
+        }
+        dir
+    };
+    let good = planted(
+        "good",
+        &[
+            ".gitkeep",
+            "rotate-tokens.md",
+            "archive/.gitkeep",
+            "split-the-judge.md",
+        ],
+    );
+    let keys: Vec<String> = records::entries(&briefs, &good)
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(keys, ["rotate-tokens", "split-the-judge"]);
+    let archived = planted(
+        "archived",
+        &["rotate-tokens.md", "archive/split-the-judge.md"],
+    );
+    assert_eq!(records::entries(&briefs, &archived).unwrap().len(), 2);
+    for (name, kind, path, problem) in [
+        (
+            "numbered",
+            briefs,
+            "001_rotate-tokens.md",
+            "001_rotate-tokens.md: not a task brief",
+        ),
+        (
+            "number",
+            escapes,
+            "ESC-001.md",
+            "ESC-001.md: not an escaped bug",
+        ),
+        ("reserved", escapes, "con.md", "con.md: not an escaped bug"),
+        (
+            "reserved-port",
+            briefs,
+            "archive/lpt1.md",
+            "archive/lpt1.md: not a task brief",
+        ),
+        (
+            "extension",
+            escapes,
+            "walker-hid.txt",
+            "walker-hid.txt: not an escaped bug",
+        ),
+        (
+            "subdirectory",
+            briefs,
+            "old/rotate.md",
+            "old: not a task brief",
+        ),
+        (
+            "no-archive",
+            escapes,
+            "archive/walker-hid.md",
+            "archive: not an escaped bug",
+        ),
+        (
+            "nested",
+            briefs,
+            "archive/archive/x.md",
+            "archive/archive: not a task brief",
+        ),
+        (
+            "twice",
+            briefs,
+            "archive/rotate-tokens.md",
+            "rotate-tokens: a key two files hold",
+        ),
+    ] {
+        let dir = planted(name, &["rotate-tokens.md", path]);
+        let found = records::entries(&kind, &dir).expect_err(name);
+        assert_eq!(found.len(), 1, "{}: {:?}", name, found);
+        assert!(found[0].starts_with(problem), "{}: {:?}", name, found);
+    }
+    assert_eq!(
+        brief_id("---\nstatus: draft\nid: rotate-tokens\n---\n# R\n").as_deref(),
+        Some("rotate-tokens")
+    );
+    assert_eq!(
+        brief_id("---\r\nid: rotate-tokens\r\n---\r\n").as_deref(),
+        Some("rotate-tokens")
+    );
+    assert_eq!(brief_id("# R\n\nid: rotate-tokens\n"), None);
+}
+
+/// A day is a day of the calendar written `YYYY-MM-DD`.
 /// A day is a day of the calendar written `YYYY-MM-DD`: each length of month, February of a leap
 /// year and of a common one, and no day 0 or month 0.
 #[test]

@@ -86,7 +86,7 @@ fn test_the_record_holds_only_files_named_by_a_key() {
         assert_eq!(problems.len(), 1, "{}: {:?}", path, problems);
         let entry = path.split('/').next().unwrap();
         assert!(
-            problems[0].starts_with(&format!("{}: no escape", entry)),
+            problems[0].starts_with(&format!("{}: not an escaped bug", entry)),
             "{}: {:?}",
             path,
             problems

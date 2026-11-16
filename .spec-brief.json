@@ -2,11 +2,9 @@
   "$schema": "./node_modules/@spec-family/spec-brief/schema.json",
   "briefs": "briefs",
   "archive": "briefs/archive",
-  "files": "[0-9]*.md",
+  "files": "*.md",
   "id": {
-    "source": "filename",
-    "separator": "_",
-    "digits": 3
+    "source": "frontmatter"
   },
   "status": {
     "field": "status",
