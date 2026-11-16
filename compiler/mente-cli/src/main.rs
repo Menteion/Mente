@@ -22,6 +22,7 @@
 //! - `mn evidence --spec-guard F --nextest F... [--node F]...`: Checks every guard of the escaped bugs
 //!   and every test an `@assert-count` names as evidence against what the runners run.
 //! - `mn pressure [--since D] [--top N]`: Reads `main`'s history from `git log` on its standard input and
+//!   ranks the files by how many merged pull requests changed them, each with what it is among the records.
 
 use std::env;
 use std::fs;
