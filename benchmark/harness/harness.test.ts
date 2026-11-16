@@ -4,10 +4,11 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, RunAnomaly, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
 import { Broker, httpPost, LOG_LINE_MAX, lineReader, logLine, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, wrongModel, type Answer, type Price } from "./broker.ts";
@@ -57,9 +58,11 @@ import { failureText, feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, wi
 import { failureOf, firstFailure, median, summarize, type RunRecord } from "./report.ts";
 import { own, setOwn } from "../own.mjs";
 import {
+  benchmarkTasks,
   extractProgram,
   feedbackPrompt,
   hasTodo,
+  heldOutTasks,
   outcome,
   parseCase,
   menteSignature,
@@ -195,6 +198,20 @@ test("a task's core mark and hidden tests are read", () => {
   assert.equal(task.core, false);
   assert.deepEqual(task.hidden, ["clamp(0, 0, 0) == 0"]);
   assert.equal(parseTask(TASK.replace("core: false", "core: true")).core, true);
+  // A retired task says so in its front matter, with or without a reason, and none other is.
+  assert.equal(task.retired, false);
+  assert.equal(parseTask(TASK.replace("core: false", "core: false\nretired: 2026-11-16 Changing the corpus")).retired, true);
+  assert.equal(parseTask(TASK.replace("core: false", "core: false\nretired:")).retired, true);
+  assert.equal(parseTask(TASK.replace("# Clamp to a range", "# Clamp to a range\n\nretired: in the body, not the front matter")).retired, false);
+  // And a measured run gives the agents no retired task, public or held out.
+  const of = (id: string, more = "") => parseTask(TASK.replace("id: clamp", `id: ${id}`).replace("core: false", `core: false${more}`));
+  const tasks = [of("kept"), of("gone", "\nretired: 2026-11-16 broken"), { ...of("later"), milestone: "M2" }];
+  assert.deepEqual(benchmarkTasks(tasks, "M1", "all").map((x) => x.id), ["kept"]);
+  assert.deepEqual(benchmarkTasks(tasks, "M1", "kept").map((x) => x.id), ["kept"]);
+  assert.throws(() => benchmarkTasks(tasks, "M1", "gone"), /no public M1 task gone/);
+  assert.throws(() => benchmarkTasks(tasks, "M1", "kept, nothing"), /no public M1 task nothing/);
+  const held = [{ ...of("h1"), set: "held-out", kind: "solve" }, { ...of("h2", "\nretired: 2026-11-16 broken"), set: "held-out", kind: "solve" }, { ...of("h3"), set: "held-out", kind: "adversarial" }];
+  assert.deepEqual(heldOutTasks(held, "M1").map((x) => x.id), ["h1"]);
 });
 
 test("cases are read as a returned value, what a mut argument is left holding, or both", () => {
@@ -1541,6 +1558,53 @@ test("an answer billed past the most its request could cost counts as billed, an
   assert.deepEqual([exact.broker.closed, exact.notes], [null, []]);
 });
 
+/**
+ * The scripts that call the API, each with the planning runs the test below makes of it: the
+ * benchmark for every milestone of the public tasks, the preliminary run for both of its sets, and
+ * the syntax probe.
+ */
+const PLANS: [string, string[][]][] = [
+  ["bench.ts", [...new Set(readdirSync(join(REPOSITORY, "benchmark", "tasks")).filter((f) => f.endsWith(".md")).map((f) => parseTask(readFileSync(join(REPOSITORY, "benchmark", "tasks", f), "utf8")).milestone))].sort().map((m) => ["--budget", "1", "--milestone", m, "--runs", "1"])],
+  ["prelim.ts", [["--tasks", "core", "--runs", "1"], ["--tasks", "non-core", "--runs", "1"]]],
+  ["probe.ts", [["--runs", "1"]]],
+];
+
+test("every script that calls the API plans its runs with no broker and no key, as far as its first call", () => {
+  // Run 3 of the plan (2026-11-16): bench.ts threw while choosing its tasks, before any call, with
+  // the key in reach, since no test had ever run its main. Each script's path up to its first call
+  // now runs here, on every change: its choice of tasks, its prompts, and its check that every task
+  // can be written in every language. A new script that calls the API joins PLANS, or this fails.
+  const harness = join(REPOSITORY, "benchmark", "harness");
+  const callers = readdirSync(harness).filter((f) => f.endsWith(".ts") && f !== "api.ts" && f !== "harness.test.ts" && readFileSync(join(harness, f), "utf8").includes("budgetedCall("));
+  assert.deepEqual(callers.sort(), PLANS.map(([f]) => f).sort(), "a script that calls the API is not planned here");
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "ANTHROPIC_API_KEY"));
+  const plan = (file: string, args: string[]) => spawnSync(process.execPath, ["--disallow-code-generation-from-strings", join(harness, file), "--plan", ...args], { cwd: REPOSITORY, env, encoding: "utf8", timeout: 120_000 });
+  const m1 = readdirSync(join(REPOSITORY, "benchmark", "tasks"))
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => parseTask(readFileSync(join(REPOSITORY, "benchmark", "tasks", f), "utf8")))
+    .filter((task) => task.milestone === "M1" && task.set === "public" && !task.retired);
+  for (const [file, runs] of PLANS) {
+    for (const args of runs) {
+      const r = plan(file, args);
+      const said = `${file} --plan ${args.join(" ")}: ${r.stderr.slice(-600)}`;
+      if (file === "bench.ts" && args.at(3) !== "M1") {
+        // A later milestone plans, or refuses as a run would: a task in a language the compiler or the
+        // harness cannot write yet. Never another error.
+        if (r.status !== 0) assert.match(r.stderr, /^Error: [\w-]+ in (mente|rust|odin): (`[^`]+` is not a type M\d has|the harness does not yet write .+)$/m, said);
+        continue;
+      }
+      assert.equal(r.status, 0, said);
+      const planned = JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "{}");
+      assert.ok(planned.planned_runs > 0, said);
+      if (file === "bench.ts") assert.equal(planned.planned_runs, m1.length * 2 * 3, `every public M1 task, in each model and language: ${said}`);
+    }
+  }
+  // A plan never opens the held-out set.
+  const held = plan("bench.ts", ["--budget", "1", "--held-out", "held-out-set"]);
+  assert.notEqual(held.status, 0);
+  assert.match(held.stderr, /--plan never opens the held-out set/);
+});
+
 test("every harness that calls the API records, in each attempt, the model that wrote the answer", () => {
   // So that every result says which model produced it (the second run with the real key recorded
   // only the model it asked).
@@ -1782,6 +1846,54 @@ test("every shell script of the harness parses", { skip: spawnSync("bash", ["-c"
   for (const f of scripts) {
     const r = spawnSync("bash", ["-n", join(dir, f)], { encoding: "utf8" });
     assert.equal(r.status, 0, `${f}: ${r.stderr}`);
+  }
+});
+
+test("fetch-held-out.sh checks the held-out set out at its commit and prints nothing of it", { skip: spawnSync("bash", ["-c", "true"]).status === 0 ? false : "no bash" }, () => {
+  // Run 3 of the plan (2026-11-16): actions/checkout printed the held-out commit's subject into this
+  // public repository's log. A repository standing in for the held-out one, reached through git's
+  // own insteadOf in a global configuration, so that the script runs as it is, its URL unchanged.
+  const dir = mkdtempSync(join(tmpdir(), "mente-held-out-"));
+  const token = "held-out-token-0123456789abcdef";
+  try {
+    const origin = join(dir, "origin");
+    mkdirSync(origin);
+    const git = (cwd: string, ...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });
+    git(origin, "init", "-q");
+    writeFileSync(join(origin, "secret-task-name.md"), "held out\n");
+    git(origin, "add", ".");
+    git(origin, "commit", "-q", "-m", "SECRETSUBJECT of a held-out task");
+    const commit = git(origin, "rev-parse", "HEAD").stdout.trim();
+    const global = join(dir, "gitconfig");
+    writeFileSync(global, `[url "${pathToFileURL(origin).href}"]\n\tinsteadOf = https://github.com/Menteion/mente-bench-heldout\n`);
+    const run = (work: string, env: Record<string, string>) => {
+      mkdirSync(work, { recursive: true });
+      const r = spawnSync("bash", [join(REPOSITORY, "benchmark", "harness", "fetch-held-out.sh")], { cwd: work, env: { PATH: process.env.PATH ?? "", HOME: dir, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1", ...env }, encoding: "utf8", timeout: 60_000 });
+      // The mask is the runner's to take; every other line is the log's.
+      return { status: r.status, printed: `${r.stdout}${r.stderr}`.split("\n").filter((l) => !l.startsWith("::add-mask::")).join("\n") };
+    };
+    const leaks = (printed: string) => ["SECRETSUBJECT", "secret-task-name", "HEAD is now", token, commit.slice(0, 7)].filter((s) => printed.includes(s));
+    const fetched = run(join(dir, "a"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit });
+    assert.equal(fetched.status, 0, fetched.printed);
+    assert.deepEqual(leaks(fetched.printed), [], fetched.printed);
+    assert.equal(fetched.printed.trim(), "the held-out set is at the commit corpus.lock names");
+    assert.equal(git(join(dir, "a", "held-out-set"), "rev-parse", "HEAD").stdout.trim(), commit);
+    assert.ok(existsSync(join(dir, "a", "held-out-set", "secret-task-name.md")));
+    // The token is in no file of the checkout.
+    assert.ok(!readFileSync(join(dir, "a", "held-out-set", ".git", "config"), "utf8").includes("extraheader"));
+    // A commit corpus.lock does not name in full, one the repository does not hold, and no token
+    // each fail saying only that.
+    const short = run(join(dir, "b"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit.slice(0, 12) });
+    assert.notEqual(short.status, 0);
+    assert.match(short.printed, /no full commit id/);
+    const missing = run(join(dir, "c"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: "f".repeat(40) });
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.printed, /could not be fetched/);
+    const none = run(join(dir, "d"), { HELD_OUT_COMMIT: commit });
+    assert.notEqual(none.status, 0);
+    for (const r of [short, missing, none]) assert.deepEqual(leaks(r.printed), [], r.printed);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
