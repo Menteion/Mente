@@ -74,7 +74,19 @@ const SUITES: &[Suite] = &[
     (
         "mente-cli::bin/extra",
         "mente-cli",
-        &[("test_in_extra", false, true)],
+        &[
+            ("test_in_extra", false, true),
+            ("shared::test_in_shared", false, true),
+        ],
+    ),
+    (
+        "mente-cli::bin/tool",
+        "mente-cli",
+        &[
+            ("test_in_tool", false, true),
+            ("parse::test_in_tool_parse", false, true),
+            ("inline::test_in_tool_inline", false, true),
+        ],
     ),
     (
         "mente-cli::escapes",
@@ -83,6 +95,8 @@ const SUITES: &[Suite] = &[
             ("test_in_escapes", false, true),
             ("test_ignored", true, true),
             ("test_filtered", false, false),
+            ("common::test_in_common", false, true),
+            ("inline::test_in_escapes_inline", false, true),
         ],
     ),
     (
@@ -106,7 +120,11 @@ const TREE: &[&str] = &[
     "compiler/mente-cli/src/mir_run/coverage.rs",
     "compiler/mente-cli/src/catalogue.rs",
     "compiler/mente-cli/src/bin/extra.rs",
+    "compiler/mente-cli/src/bin/shared/mod.rs",
+    "compiler/mente-cli/src/bin/tool/main.rs",
+    "compiler/mente-cli/src/bin/tool/parse.rs",
     "compiler/mente-cli/tests/escapes.rs",
+    "compiler/mente-cli/tests/common/mod.rs",
     "compiler/mente-interp/src/lib.rs",
     "compiler/mente-interp/src/tests.rs",
     "compiler/mente-mir/src/lib.rs",
@@ -153,7 +171,7 @@ fn runs() -> Result<Runs, String> {
 #[test]
 fn test_nextest_list_is_read_as_nextest_writes_it() {
     let tests = evidence::nextest(&list(SUITES)).unwrap();
-    assert_eq!(tests.len(), 12);
+    assert_eq!(tests.len(), SUITES.iter().map(|s| s.2.len()).sum::<usize>());
     assert!(tests.contains(&RustTest {
         binary: "mente-cli::escapes".to_string(),
         package: "mente-cli".to_string(),
@@ -198,7 +216,7 @@ fn test_nextest_list_is_read_as_nextest_writes_it() {
 #[test]
 fn test_a_node_report_is_read_as_our_reporter_writes_it() {
     let tests = evidence::node_report(&report().unwrap()).unwrap();
-    assert_eq!(tests.len(), 9);
+    assert_eq!(tests.len(), 13);
     assert_eq!(
         tests[1],
         NodeTest {
@@ -209,10 +227,23 @@ fn test_a_node_report_is_read_as_our_reporter_writes_it() {
             todo: false,
         }
     );
-    assert!(tests[2].skipped);
-    assert!(tests[3].todo);
-    assert_eq!(tests[4].suite, ["a policy suite"]);
-    assert_eq!(tests[6].suite, ["a suite", "an inner suite"]);
+    assert!(tests[2].skipped && tests[4].skipped);
+    assert!(tests[3].todo && tests[5].todo);
+    assert_eq!(
+        tests[6],
+        NodeTest {
+            file: "/w/.github/scripts/policy-helpers.mjs".to_string(),
+            suite: vec!["a policy suite".to_string()],
+            name: "a check from a helper".to_string(),
+            skipped: false,
+            todo: false,
+        }
+    );
+    assert_eq!(tests[7].suite, ["a policy suite"]);
+    assert_eq!(tests[9].suite, ["a suite", "an inner suite"]);
+    assert!(!tests
+        .iter()
+        .any(|t| t.name.contains("timed out") || t.name.contains("cancelled")));
     let line = "{\"name\": \"a\", \"suite\": [], \"file\": \"C:\\\\w\\\\a.mjs\", \"skipped\": false, \"todo\": false}";
     assert_eq!(evidence::node_report(line).unwrap()[0].file, "C:/w/a.mjs");
     for (text, why) in [
@@ -242,10 +273,24 @@ fn test_a_node_report_is_read_as_our_reporter_writes_it() {
     }
 }
 
-/// spec-guard's report of the directives it runs, `--json`, with `results`.
+/// The documents of the planted reports, as [`SCRIPT`] names them over [`DOCUMENT_FILES`].
+const DOCUMENTS: [&str; 2] = ["CLAUDE.md", "spec/a.md"];
+
+/// A `package.json` whose spec-guard script names [`DOCUMENTS`].
+const SCRIPT: &str = "{\"scripts\": {\"spec-guard\": \"spec-guard \\\"spec/*.md\\\" CLAUDE.md\"}}";
+
+/// The files of a tree [`SCRIPT`] expands to [`DOCUMENTS`].
+const DOCUMENT_FILES: [&str; 2] = ["CLAUDE.md", "spec/a.md"];
+
+fn documents() -> Vec<String> {
+    DOCUMENTS.iter().map(|d| d.to_string()).collect()
+}
+
+/// spec-guard's report of the directives it runs, `--json`, from its `check` of [`DOCUMENTS`],
+/// with `results`.
 fn spec_guard(results: &[&str]) -> String {
     format!(
-        "{{\"tool\": \"spec-guard\", \"toolVersion\": \"0.35.0\", \"formatVersion\": 1, \"ok\": true, \"errors\": [], \"results\": [{}]}}",
+        "{{\"tool\": \"spec-guard\", \"toolVersion\": \"0.35.0\", \"command\": \"check\", \"formatVersion\": 1, \"ok\": true, \"specFiles\": [\"CLAUDE.md\", \"spec/a.md\"], \"errors\": [], \"results\": [{}]}}",
         results.join(", ")
     )
 }
@@ -262,9 +307,9 @@ fn count(document: &str, line: usize, symbol: &str, targets: &[&str]) -> String 
 }
 
 /// The tests named as evidence are read from spec-guard's own report, each `@assert-count` whose
-/// symbol is `fn test_...`, with its document, line and target; a report of another tool or
-/// format, one with errors, one that names no test, and a directive over other than one file, are
-/// refused.
+/// symbol is `fn test_...`, with its document, line and target; a report of another tool, format
+/// or command, one over other documents than the script names, one with errors, one that names no
+/// test, and a directive over other than one file, are refused.
 #[test]
 fn test_the_evidence_is_read_from_spec_guards_report() {
     let present =
@@ -291,7 +336,7 @@ fn test_the_evidence_is_read_from_spec_guards_report() {
         ),
     ]);
     assert_eq!(
-        evidence::spec_guard(&text).unwrap(),
+        evidence::spec_guard(&text, &documents()).unwrap(),
         [
             Named {
                 document: "spec/a.md".to_string(),
@@ -323,6 +368,34 @@ fn test_the_evidence_is_read_from_spec_guards_report() {
             text.replace("\"formatVersion\": 1", "\"formatVersion\": 2"),
             "other than its version 1",
         ),
+        // The round-5 review's plant: a check of one document alone.
+        (
+            text.replace("\"command\": \"check\"", "\"command\": \"prove\""),
+            "a spec-guard command other than `check`",
+        ),
+        (
+            text.replace("\"command\": \"check\", ", ""),
+            "a spec-guard command other than `check`",
+        ),
+        (
+            text.replace("\"CLAUDE.md\", \"spec/a.md\"", "\"spec/a.md\""),
+            "covers other documents than its script names: missing [CLAUDE.md], beside them []",
+        ),
+        (
+            text.replace(
+                "\"CLAUDE.md\", \"spec/a.md\"",
+                "\"CLAUDE.md\", \"spec/a.md\", \"docs/x.md\"",
+            ),
+            "missing [], beside them [docs/x.md]",
+        ),
+        (
+            text.replace("\"specFiles\"", "\"files\""),
+            "names no `specFiles`",
+        ),
+        (
+            text.replace("\"CLAUDE.md\", \"spec/a.md\"", "\"CLAUDE.md\", 1"),
+            "a document of `specFiles` that is no string",
+        ),
         (
             text.replace("\"errors\": []", "\"errors\": [{}]"),
             "holds errors",
@@ -351,16 +424,96 @@ fn test_the_evidence_is_read_from_spec_guards_report() {
         ),
         (spec_guard(&["1"]), "a result that is no object"),
     ] {
-        let found = evidence::spec_guard(&text).expect_err(&text);
+        let found = evidence::spec_guard(&text, &documents()).expect_err(&text);
         assert!(found.contains(why), "{}: {}", text, found);
     }
 }
 
+/// The documents spec-guard's report must cover are read from the spec-guard script of
+/// `package.json` and expanded as spec-guard expands them, never copied; a script of another shape
+/// is refused. The repository's own script names the specs and the documents beside them.
+#[test]
+fn test_the_documents_are_read_from_the_spec_guard_script() {
+    let script = |s: &str| format!("{{\"scripts\": {{\"spec-guard\": \"{}\"}}}}", s);
+    let tree = [
+        "spec/a.md",
+        "spec/b.md",
+        "spec/.hidden.md",
+        "spec/c.txt",
+        "spec/sub/d.md",
+        "docs/x.md",
+        "README.md",
+    ];
+    let plant = |name: &str, package: &str| {
+        let mut files: Vec<(&str, &str)> = tree.iter().map(|f| (*f, "")).collect();
+        files.push(("package.json", package));
+        planted(name, &files).unwrap()
+    };
+    let dir = plant(
+        "script",
+        &script("spec-guard \\\"spec/*.md\\\" 'docs/*.md' README.md"),
+    );
+    assert_eq!(
+        evidence::spec_guard_files(&dir).unwrap(),
+        ["README.md", "docs/x.md", "spec/a.md", "spec/b.md"]
+    );
+    for (package, why) in [
+        (
+            script("npx spec-guard spec/a.md"),
+            "does not run spec-guard",
+        ),
+        (
+            script("spec-guard --json spec/a.md"),
+            "an option of the script",
+        ),
+        (
+            script("spec-guard spec/**/*.md"),
+            "a pattern mn evidence does not expand",
+        ),
+        (
+            script("spec-guard spec/a*.md"),
+            "a pattern mn evidence does not expand",
+        ),
+        (script("spec-guard $DOCS"), "more than plain words"),
+        (script("spec-guard a.md && rm b"), "more than plain words"),
+        (script("spec-guard \\\"a.md"), "more than plain words"),
+        (script(""), "is empty"),
+        ("{\"scripts\": {}}".to_string(), "no script `spec-guard`"),
+        ("{}".to_string(), "no `scripts`"),
+        ("[]".to_string(), "no JSON object"),
+    ] {
+        let dir = plant("script-refused", &package);
+        let found = evidence::spec_guard_files(&dir).expect_err(&package);
+        assert!(found.contains(why), "{}: {}", package, found);
+    }
+    let missing = planted("script-missing", &[]).unwrap();
+    assert!(evidence::spec_guard_files(&missing)
+        .expect_err("no package.json")
+        .contains("package.json"));
+    let own = evidence::spec_guard_files(&root()).unwrap();
+    for document in [
+        "CLAUDE.md",
+        "ROADMAP.md",
+        "README.md",
+        "spec/core-calculus.md",
+        "docs/STATUS.md",
+    ] {
+        assert!(own.iter().any(|d| d == document), "{}: {:?}", document, own);
+    }
+    let planted_documents = planted("documents", &DOCUMENT_FILES.map(|f| (f, ""))).unwrap();
+    fs::write(planted_documents.join("package.json"), SCRIPT).unwrap();
+    assert_eq!(
+        evidence::spec_guard_files(&planted_documents).unwrap(),
+        documents()
+    );
+}
+
 /// A test runs from a target file when nextest lists it, not ignored and taken by the profile, in
-/// the target's package and from exactly its module: `tests/x.rs` is the binary `x`, `src/lib.rs`
-/// the library's root, `src/main.rs` the root of the package's binary, `src/bin/x.rs` the binary
-/// `x`, and another file of `src/` its module and the modules it declares inline, never a
-/// submodule with a file of its own. A file nextest builds no test from is an error.
+/// the target's package and from exactly its module: `tests/x.rs` and `tests/x/main.rs` are the
+/// binary `x`, `src/lib.rs` the library's root, `src/main.rs` the root of the package's binary,
+/// `src/bin/x.rs` and `src/bin/x/main.rs` the binary `x`, and another file its module and the
+/// modules it declares inline, never a submodule with a file of its own. Each root keeps its
+/// submodules' files beside it. A file nextest builds no test from is an error.
 #[test]
 fn test_a_test_runs_from_exactly_its_target_file() {
     let runs = runs().unwrap();
@@ -387,6 +540,56 @@ fn test_a_test_runs_from_exactly_its_target_file() {
         ("compiler/mente-cli/src/main.rs", "test_in_extra", false),
         ("compiler/mente-cli/src/bin/extra.rs", "test_in_extra", true),
         ("compiler/mente-cli/src/bin/extra.rs", "test_in_main", false),
+        // A root keeps its submodules' files beside it: `mod shared;` in src/bin/extra.rs is
+        // src/bin/shared/mod.rs, and `mod common;` in tests/escapes.rs is tests/common/mod.rs.
+        (
+            "compiler/mente-cli/src/bin/extra.rs",
+            "test_in_shared",
+            false,
+        ),
+        (
+            "compiler/mente-cli/src/bin/shared/mod.rs",
+            "test_in_shared",
+            true,
+        ),
+        (
+            "compiler/mente-cli/tests/escapes.rs",
+            "test_in_common",
+            false,
+        ),
+        (
+            "compiler/mente-cli/tests/common/mod.rs",
+            "test_in_common",
+            true,
+        ),
+        (
+            "compiler/mente-cli/tests/escapes.rs",
+            "test_in_escapes_inline",
+            true,
+        ),
+        // src/bin/tool/main.rs is the root of the binary tool, and the files beside it its modules.
+        (
+            "compiler/mente-cli/src/bin/tool/main.rs",
+            "test_in_tool",
+            true,
+        ),
+        (
+            "compiler/mente-cli/src/bin/tool/main.rs",
+            "test_in_tool_inline",
+            true,
+        ),
+        (
+            "compiler/mente-cli/src/bin/tool/main.rs",
+            "test_in_tool_parse",
+            false,
+        ),
+        (
+            "compiler/mente-cli/src/bin/tool/parse.rs",
+            "test_in_tool_parse",
+            true,
+        ),
+        ("compiler/mente-cli/src/main.rs", "test_in_tool", false),
+        ("compiler/mente-cli/src/main.rs", "test_in_shared", false),
         ("compiler/mente-cli/src/mir_run.rs", "test_in_mir_run", true),
         (
             "compiler/mente-cli/src/mir_run.rs",
@@ -441,9 +644,8 @@ fn test_a_test_runs_from_exactly_its_target_file() {
     for target in [
         "spikes/x/src/lib.rs",
         "compiler/mente-cli/Cargo.toml",
-        "compiler/mente-cli/tests/stack/x.rs",
-        "compiler/mente-cli/src/bin/x/y.rs",
         "compiler/mente-cli/benches/x.rs",
+        "compiler/mente-cli/examples/x.rs",
         "compiler/mente-cli",
     ] {
         let found = runs
@@ -609,7 +811,9 @@ fn test_mn_evidence_checks_guards_and_evidence_against_the_lists() {
         ("nextest.json", list(SUITES)),
         ("node.jsonl", report().unwrap()),
         ("spec-guard.json", guard_report.clone()),
+        ("package.json", SCRIPT.to_string()),
     ]);
+    files.extend(DOCUMENT_FILES.map(|f| (f, String::new())));
     let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
     let dir = planted("cli", &refs).unwrap();
     let all = [
@@ -648,6 +852,31 @@ fn test_mn_evidence_checks_guards_and_evidence_against_the_lists() {
         err
     );
     fs::write(dir.join("spec-guard.json"), &guard_report).unwrap();
+    // A report of a check of one document alone, and no script to read the documents from.
+    fs::write(
+        dir.join("spec-guard.json"),
+        guard_report.replace("\"CLAUDE.md\", \"spec/a.md\"", "\"spec/a.md\""),
+    )
+    .unwrap();
+    let (code, _, err) = mn(&dir, &all);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.starts_with(
+            "[FAIL] spec-guard.json: spec-guard's report covers other documents than its script names"
+        ),
+        "{}",
+        err
+    );
+    fs::write(dir.join("spec-guard.json"), &guard_report).unwrap();
+    fs::rename(dir.join("package.json"), dir.join("package.off")).unwrap();
+    let (code, _, err) = mn(&dir, &all);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.starts_with("[FAIL] ") && err.contains("package.json"),
+        "{}",
+        err
+    );
+    fs::rename(dir.join("package.off"), dir.join("package.json")).unwrap();
     for (args, starts) in [
         (
             &["--spec-guard", "missing.json", "--nextest", "nextest.json"][..],

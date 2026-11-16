@@ -139,18 +139,16 @@ fn timestamp(value: &str) -> bool {
         lengths.contains(&s.len()) && s.chars().all(|c| c.is_ascii_digit())
     };
     let day: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    // What follows the day starts with no digit, so a time starts with one only after a `T`, a
+    // `t` or spaces.
     let after = &rest[day.len()..];
+    let time = after
+        .strip_prefix(['T', 't'])
+        .unwrap_or_else(|| after.trim_start_matches([' ', '\t']));
     digits(year, &[4])
         && digits(month, &[1, 2])
         && digits(&day, &[1, 2])
-        && (after.is_empty()
-            || after
-                .strip_prefix(['T', 't'])
-                .or_else(|| {
-                    let spaced = after.trim_start_matches([' ', '\t']);
-                    (spaced.len() < after.len()).then_some(spaced)
-                })
-                .is_some_and(|time| time.starts_with(|c: char| c.is_ascii_digit())))
+        && (after.is_empty() || time.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// The string a YAML reader reads in `value`, if it reads a string this reader agrees on.

@@ -25,7 +25,7 @@ A file starts with a front matter of five fields, each on one line `name: value`
 - Each escape says what missed it.
 - Each guard is of one of the four forms.
 
-Whether each guard runs is what the runners run, not what the sources spell. `mn evidence` reads the tools' own output, in JSON: nextest's list of the tests from each runner, as CI's profile takes them; our reporter's report of each Node run, `tools/evidence-reporter.mjs`; and spec-guard's report of the directives it runs. It fails a guard that no runner runs, an ignored, filtered, skipped or left-to-do test included, and every test an `@assert-count` names as evidence that nextest does not run from exactly its target file (`compiler/mente-cli/src/evidence.rs`).
+Whether each guard runs is what the runners run, not what the sources spell. `mn evidence` reads the tools' own output, in JSON: nextest's list of the tests from each runner, as CI's profile takes them; our reporter's report of each Node run, `tools/evidence-reporter.mjs`, which writes a test only when it passed or failed by its own body, never one that timed out or was cancelled; and spec-guard's report of its `check` over every document its npm script names, as `package.json` names them. It fails a guard that no runner runs, an ignored, filtered, skipped or left-to-do test included, and every test an `@assert-count` names as evidence that nextest does not run from exactly its target file (`compiler/mente-cli/src/evidence.rs`).
 
 That each fix merged is a fact of the history, which the Commits check reads: there each fixing commit is to carry its escape's key in a trailer, `Escaped: <key>`. That rule belongs to the Commits check's own pull request; the escapes recorded before it name their fix by its pull request alone.
 

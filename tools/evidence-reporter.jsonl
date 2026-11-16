@@ -2,8 +2,12 @@
 {"name":"a check with > < & \" ' and <!-- a comment -->","suite":[],"file":"/w/.github/scripts/policy.test.mjs","skipped":false,"todo":false}
 {"name":"a skipped check","suite":[],"file":"/w/.github/scripts/policy.test.mjs","skipped":true,"todo":false}
 {"name":"a check left to do","suite":[],"file":"/w/.github/scripts/policy.test.mjs","skipped":false,"todo":true}
+{"name":"a check skipped with no reason","suite":[],"file":"/w/.github/scripts/policy.test.mjs","skipped":true,"todo":false}
+{"name":"a check left to do with no reason","suite":[],"file":"/w/.github/scripts/policy.test.mjs","skipped":false,"todo":true}
+{"name":"a check from a helper","suite":["a policy suite"],"file":"/w/.github/scripts/policy-helpers.mjs","skipped":false,"todo":false}
 {"name":"a nested check","suite":["a policy suite"],"file":"/w/.github/scripts/policy.test.mjs","skipped":false,"todo":false}
 {"name":"a test inside","suite":["a suite"],"file":"/w/site/site.test.mjs","skipped":false,"todo":false}
 {"name":"a deeper test","suite":["a suite","an inner suite"],"file":"/w/site/site.test.mjs","skipped":false,"todo":false}
 {"name":"a subtest","suite":["a parent"],"file":"/w/site/site.test.mjs","skipped":false,"todo":false}
 {"name":"a parent","suite":[],"file":"/w/site/site.test.mjs","skipped":false,"todo":false}
+{"name":"a failing subtest","suite":["a parent whose subtest fails"],"file":"/w/site/site.test.mjs","skipped":false,"todo":false}

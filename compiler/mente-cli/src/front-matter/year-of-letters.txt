@@ -1,0 +1,11 @@
+fields date area note
+expect accepted
+value date 2026-11-14
+value area checker
+value note abcd-1-1
+input
+---
+date: 2026-11-14
+area: checker
+note: abcd-1-1
+---

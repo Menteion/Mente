@@ -1339,13 +1339,15 @@ fn cmd_evidence(args: &[String]) {
         }
         process::exit(1);
     };
-    fn load<T>(file: &str, parse: fn(&str) -> Result<T, String>) -> Result<T, Vec<String>> {
+    fn load<T>(file: &str, parse: impl Fn(&str) -> Result<T, String>) -> Result<T, Vec<String>> {
         fs::read_to_string(file)
             .map_err(|e| format!("{}: {}", file, e))
             .and_then(|t| parse(&t).map_err(|e| format!("{}: {}", file, e)))
             .map_err(|e| vec![e])
     }
-    let named = load(spec_guard, evidence::spec_guard).unwrap_or_else(|p| fail(p));
+    let documents = evidence::spec_guard_files(&root).unwrap_or_else(|e| fail(vec![e]));
+    let named =
+        load(spec_guard, |t| evidence::spec_guard(t, &documents)).unwrap_or_else(|p| fail(p));
     let mut runs = evidence::Runs::default();
     for file in nextest {
         runs.rust

@@ -429,6 +429,17 @@ fn test_the_guard_reads_json_as_npm_does() {
         parse_json("\"\\ud83e\\udd16\""),
         Ok(Json::Str("\u{1F916}".to_string()))
     );
+    // Only a high surrogate joins the escape after it, and only an escape `\u` of a low one: a
+    // character before a low surrogate, and a high surrogate before another escape or text, each
+    // stand alone (the survivors of Mutants on c56b5be).
+    for (text, read) in [
+        ("\"\\u0041\\udc00\"", "A\u{FFFD}"),
+        ("\"\\ud83d\\ndc00\"", "\u{FFFD}\ndc00"),
+        ("\"\\ud83dxudc00\"", "\u{FFFD}xudc00"),
+        ("\"\\ud83d\\u0041\"", "\u{FFFD}A"),
+    ] {
+        assert_eq!(parse_json(text), Ok(Json::Str(read.to_string())), "{text}");
+    }
     for bad in ["{", "{\"a\" 1}", "[1,]", "\"open", "{} x", "nope"] {
         assert!(parse_json(bad).is_err(), "{bad}");
     }
