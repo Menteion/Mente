@@ -73,6 +73,273 @@ fn test_a_key_is_lowercase_words_joined_by_hyphens() {
     assert!(records::is_key("readme-of-escapes"));
 }
 
+/// A name that is no key is told which part of the rule it breaks, in the words of the rule's one
+/// definition, and how to rename it where a key comes of it: a number up to twenty, or its
+/// ordinal, spelled in letters; a numbering, such as `esc-001`, never spelled, but the record named
+/// by what it records (the review of PR 175).
+#[test]
+fn test_a_refused_name_says_which_part_of_the_rule_it_breaks() {
+    let asks = |part: usize| format!("a key is {}", records::KEY_PARTS[part].asks);
+    for (name, parts) in [
+        ("fix-2nd-pass", vec![1]),
+        ("esc-001", vec![1]),
+        ("Guard_per", vec![0, 1]),
+        ("guard--per", vec![0, 1]),
+        ("con", vec![3]),
+        ("readme", vec![4]),
+    ] {
+        let expected: Vec<String> = parts.iter().map(|&p| asks(p)).collect();
+        assert_eq!(records::key_problems(name), expected, "{}", name);
+    }
+    let long = "a".repeat(records::KEY_LENGTH + 1);
+    assert_eq!(records::key_problems(&long), [asks(2)]);
+    assert!(records::KEY_PARTS[1]
+        .asks
+        .contains("starting with a letter"));
+    for (name, suggestion) in [
+        ("fix-2nd-pass", Some("fix-second-pass")),
+        ("Fix_2nd Pass", Some("fix-second-pass")),
+        ("pick-2", Some("pick-two")),
+        ("ring-20th", Some("ring-twentieth")),
+        ("esc-001", None),
+        ("pick-21", None),
+        ("pick-2x", None),
+        ("con", None),
+    ] {
+        assert_eq!(
+            records::suggest_key(name).as_deref(),
+            suggestion,
+            "{}",
+            name
+        );
+    }
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("kinds")
+        .join("messages");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["fix-2nd-pass.md", "esc-001.md", "walker-hid.txt"] {
+        fs::write(dir.join(name), "").unwrap();
+    }
+    let found = records::entries(&records::ESCAPES, &dir).expect_err("three refusals");
+    assert_eq!(
+        found,
+        [
+            format!(
+                "esc-001.md: not an escaped bug, since its name is no key: {}; name it by what it records, in lowercase words joined by hyphens",
+                asks(1)
+            ),
+            format!(
+                "fix-2nd-pass.md: not an escaped bug, since its name is no key: {}; rename it `fix-second-pass.md`",
+                asks(1)
+            ),
+            "walker-hid.txt: not an escaped bug, a file `<key>.md`; rename it `walker-hid.md`"
+                .to_string(),
+        ]
+    );
+    let missing = records::entries(&records::ESCAPES, &dir.join("gone")).expect_err("no directory");
+    assert!(
+        missing[0].contains("keeps its records in this directory, which is to exist"),
+        "{:?}",
+        missing
+    );
+}
+
+/// Every part gives a word of its own, and every word is a key's: checked over every part of up to
+/// three characters drawn from letters on either side of `z`, `z`, digits, a capital, `_` and a
+/// letter beyond ASCII, and on the spellings the doc gives.
+#[test]
+fn test_a_key_word_stands_for_one_part_alone() {
+    let alphabet = ['a', 'y', 'z', '0', '9', 'A', '_', 'é'];
+    let mut parts = vec![String::new()];
+    for length in 1..=3 {
+        let shorter: Vec<String> = parts
+            .iter()
+            .filter(|p| p.chars().count() == length - 1)
+            .cloned()
+            .collect();
+        for p in shorter {
+            for c in alphabet {
+                parts.push(format!("{}{}", p, c));
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeMap::new();
+    for part in &parts {
+        let word = records::key_word(part);
+        assert!(
+            (records::KEY_PARTS[0].holds)(&word) && (records::KEY_PARTS[1].holds)(&word),
+            "{:?} gives {:?}",
+            part,
+            word
+        );
+        if let Some(other) = seen.insert(word.clone(), part.clone()) {
+            panic!("{:?} and {:?} both give {:?}", other, part, word);
+        }
+    }
+    for (part, word) in [
+        ("pick", "pick"),
+        ("zero", "zzero"),
+        ("4", "z4"),
+        ("01", "z01"),
+        ("", "zh"),
+        ("Foo", "zh466f6f"),
+        ("a_b", "zh615f62"),
+    ] {
+        assert_eq!(records::key_word(part), word, "{:?}", part);
+    }
+    assert!(
+        seen.keys().all(|word| word != "z"),
+        "a part gives the word z"
+    );
+    assert_eq!(
+        records::key_of(&[&["array", "beyond", "4", "gib"]]).as_deref(),
+        Some("array-beyond-z4-gib")
+    );
+    let ab_c: &[&[&str]] = &[&["a", "b"], &["c"]];
+    let a_bc: &[&[&str]] = &[&["a"], &["b", "c"]];
+    assert_eq!(records::key_of(ab_c).as_deref(), Some("a-b-z-c"));
+    assert_eq!(records::key_of(a_bc).as_deref(), Some("a-z-b-c"));
+    assert_eq!(records::key_of(&[&["con"]]), None);
+    assert_eq!(records::key_of(&[&["a"; 51]]), None);
+}
+
+/// A kind holds its records' files themselves: a link in its directory is refused, never read as
+/// what it points to. Windows lets only an administrator make a link, so the Linux runners hold
+/// this case.
+#[cfg(unix)]
+#[test]
+fn test_a_link_in_a_kind_is_refused() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("kinds")
+        .join("link");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("elsewhere")).unwrap();
+    fs::write(dir.join("elsewhere/x.md"), "").unwrap();
+    let kind = dir.join("briefs");
+    fs::create_dir_all(&kind).unwrap();
+    std::os::unix::fs::symlink(dir.join("elsewhere/x.md"), kind.join("linked-brief.md")).unwrap();
+    std::os::unix::fs::symlink(dir.join("elsewhere"), kind.join("archive")).unwrap();
+    let found = records::entries(&records::BRIEFS, &kind).expect_err("two links");
+    assert_eq!(found.len(), 2, "{:?}", found);
+    assert!(
+        found.iter().all(|p| p.contains("but a link")),
+        "{:?}",
+        found
+    );
+}
+
+/// Every Markdown file of the tree belongs to exactly one declaration: a kind of record, a shared
+/// file or a set of documents, each with its reason; every exact pattern names a file that exists.
+#[test]
+fn test_every_markdown_file_is_declared_once() {
+    let problems =
+        records::undeclared(&root(), records::KINDS, records::SHARED, records::DOCUMENTS);
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    for set in records::DOCUMENTS {
+        assert!(!set.patterns.is_empty() && !set.what.is_empty() && !set.why.is_empty());
+        for pattern in set.patterns.iter().filter(|p| !p.contains('*')) {
+            assert!(
+                root().join(pattern).is_file(),
+                "{}: declared among {}, but no such file",
+                pattern,
+                set.what
+            );
+        }
+    }
+}
+
+/// A Markdown file nothing declares is refused with what to do, and so is one two declarations
+/// claim; a nested repository, `target` and `node_modules` are not read. A record of a new kind in
+/// a directory nothing declares, as the review of PR 175 planted, is refused by the real
+/// declarations.
+#[test]
+fn test_a_markdown_file_nothing_declares_is_refused() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("kinds")
+        .join("closed");
+    let _ = fs::remove_dir_all(&dir);
+    for file in [
+        "README.md",
+        "Upper.MD",
+        "docs/adr/0001-use-keys.md",
+        "docs/log.md",
+        "docs/page.md",
+        "notes/a-note.md",
+        "nested/.git/HEAD",
+        "nested/x.md",
+        "target/y.md",
+        "node_modules/z.md",
+        "notes.txt",
+    ] {
+        let path = dir.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "").unwrap();
+    }
+    let kinds = [records::Kind {
+        record: "a note",
+        dir: "notes",
+        extension: "md",
+        archive: None,
+    }];
+    let shared = [records::Shared {
+        file: "docs/log.md",
+        records: "the log",
+        why: "one file",
+    }];
+    let documents = [records::Documents {
+        patterns: &["README.md", "docs/*.md"],
+        what: "pages",
+        why: "pages",
+    }];
+    let found = records::undeclared(&dir, &kinds, &shared, &documents);
+    let nothing = "a Markdown file nothing declares: declare its directory in records.rs as a kind of record, whose files are then named by keys (`KINDS`), or as a set of documents with why they are none (`DOCUMENTS`)";
+    assert_eq!(
+        found,
+        [
+            format!("Upper.MD: {}", nothing),
+            format!("docs/adr/0001-use-keys.md: {}", nothing),
+            "docs/log.md: claimed by the shared file of the log and the documents of pages, where one declaration is to claim it".to_string(),
+        ]
+    );
+    let adr = dir.join("adr");
+    fs::create_dir_all(adr.join("docs/adr")).unwrap();
+    fs::write(adr.join("docs/adr/0001-use-keys.md"), "").unwrap();
+    let real = records::undeclared(&adr, records::KINDS, records::SHARED, records::DOCUMENTS);
+    assert_eq!(real, [format!("docs/adr/0001-use-keys.md: {}", nothing)]);
+}
+
+/// A pattern matches name by name: `*` within a name, `**` across any number of directories.
+#[test]
+fn test_a_pattern_matches_name_by_name() {
+    for (pattern, file, matches) in [
+        ("README.md", "README.md", true),
+        ("README.md", "docs/README.md", false),
+        ("spec/*.md", "spec/grammar.md", true),
+        ("spec/*.md", "spec/sub/grammar.md", false),
+        ("spikes/*/README.md", "spikes/tier1-latency/README.md", true),
+        ("spikes/*/README.md", "spikes/README.md", false),
+        (
+            "benchmark/prelim/**/*.md",
+            "benchmark/prelim/m1/a.reply.md",
+            true,
+        ),
+        ("benchmark/prelim/**/*.md", "benchmark/prelim/a.md", true),
+        ("benchmark/prelim/**/*.md", "benchmark/probe/a.md", false),
+        ("a*b*c.md", "axxbyyc.md", true),
+        ("a*b*c.md", "axxcyyb.md", false),
+        ("*.md", "x.txt", false),
+    ] {
+        assert_eq!(
+            records::matches_pattern(pattern, file),
+            matches,
+            "{} {}",
+            pattern,
+            file
+        );
+    }
+}
+
 /// The id a brief's front matter gives it, which spec-brief reads (`.spec-brief.json`).
 fn brief_id(text: &str) -> Option<String> {
     let text = text.replace("\r\n", "\n");
@@ -94,11 +361,14 @@ fn test_every_kind_is_a_directory_of_files_named_by_a_key() {
         if *kind == records::BRIEFS {
             for (key, path) in found {
                 let text = fs::read_to_string(&path).unwrap();
+                let id = brief_id(&text);
                 assert_eq!(
-                    brief_id(&text).as_deref(),
+                    id.as_deref(),
                     Some(key.as_str()),
-                    "{}: a brief's id is its file's key",
-                    path.display()
+                    "{}: a brief's id is its file's key: rename the file {}/{}.md, since spec-brief new names it after the title (records::BRIEFS)",
+                    path.display(),
+                    records::BRIEFS.dir,
+                    id.as_deref().unwrap_or("<its id>")
                 );
             }
         }
@@ -260,7 +530,6 @@ fn test_a_kind_refuses_each_entry_that_is_no_record() {
     assert_eq!(brief_id("# R\n\nid: rotate-tokens\n"), None);
 }
 
-/// A day is a day of the calendar written `YYYY-MM-DD`.
 /// A day is a day of the calendar written `YYYY-MM-DD`: each length of month, February of a leap
 /// year and of a common one, and no day 0 or month 0.
 #[test]

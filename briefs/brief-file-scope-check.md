@@ -3,7 +3,7 @@ id: brief-file-scope-check
 status: draft
 type: feature
 awaits: [docs/design-review.md#brief-file-scope, docs/design-review.md#records-one-per-file]
-affectedFiles: [compiler/mente-cli/src/briefs.rs, compiler/mente-cli/src/lib.rs, compiler/mente-cli/src/main.rs, compiler/mente-cli/tests/briefs.rs, compiler/mente-cli/tests/register.rs, ROADMAP.md, docs/design-review.md, briefs/**]
+affectedFiles: [compiler/mente-cli/src/briefs.rs, compiler/mente-cli/src/lib.rs, compiler/mente-cli/src/main.rs, compiler/mente-cli/tests/briefs.rs, compiler/mente-cli/tests/register.rs, ROADMAP.md, docs/design-review.md, briefs/brief-file-scope-check.md, briefs/archive/brief-file-scope-check.md]
 protectedFiles: [.github/**, CLAUDE.md, spec/**]
 ---
 
@@ -15,7 +15,7 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**]
 
 The first fails a pull request that names no brief, or that changes a file outside its brief's `affectedFiles` or inside its `protectedFiles`. This round writes the side that reads the briefs and compares a list of changed files with them. The required check that runs it lives in `.github/`, which the test-isolation session owns and wires.
 
-The second rule is in the register's test: every `decided` entry is linked from an item of `ROADMAP.md` or from a live brief, so that no decision drops out of the plan. On 2026-11-17, 8 of the 22 decided entries appeared nowhere in `ROADMAP.md`.
+The second rule is in the register's test: every `decided` entry is linked from an item of `ROADMAP.md` or from a live brief, so that no decision drops out of the plan. On 2026-11-17, decided entries stood that appeared nowhere in `ROADMAP.md`.
 
 ## Negative Scope
 

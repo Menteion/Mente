@@ -11,7 +11,7 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**]
 
 ## Intent
 
-The register's test exempts the entries decided before the reopen rule, the list `BEFORE_THE_RULE` in `tests/register.rs`, from naming what would reopen them, with no deadline. Norman set one on 2026-11-17: the list is empty by the M2 review. An item of the M2 review in `ROADMAP.md` says so. The conditions are drafted in batches of about twenty for Norman to sign, and each signed batch leaves the list in one change.
+The register's test exempts the entries decided before the reopen rule, the list `BEFORE_THE_RULE` in `tests/register.rs`, from naming what would reopen them, with no deadline. Norman set one on 2026-11-17: the list is empty by the M2 review. This round adds an item to the M2 review in `ROADMAP.md` that says so, with the first batch. The conditions are drafted in batches of about twenty for Norman to sign, and each signed batch leaves the list in one change.
 
 ## Negative Scope
 

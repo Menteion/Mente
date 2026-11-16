@@ -63,13 +63,14 @@ pub struct Escape {
     pub guard: Guard,
 }
 
-/// Every escape in the record's directory `dir`, in the order of their keys, or each problem in
-/// reading it: an entry that is no record of the kind, by [`records::entries`], and a file whose
-/// front matter is not the record's. Keys are unique since files' names are.
+/// Every escape in the record's directory `dir`, in the order of their keys, or every problem in
+/// reading it, all of them in one run: an entry that is no record of the kind, by
+/// [`records::scan`], and a file whose front matter is not the record's. Keys are unique since
+/// files' names are.
 pub fn read(dir: &Path) -> Result<Vec<Escape>, Vec<String>> {
     let mut rows = Vec::new();
-    let mut problems = Vec::new();
-    for (key, path) in records::entries(&records::ESCAPES, dir)? {
+    let (entries, mut problems) = records::scan(&records::ESCAPES, dir);
+    for (key, path) in entries {
         let name = format!("{}.md", key);
         match fs::read_to_string(&path) {
             Ok(text) => match parse(&key, &text) {

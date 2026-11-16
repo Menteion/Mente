@@ -11,7 +11,7 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**, compiler/mente-cli/tests/lints.
 
 ## Intent
 
-The golden outputs `tests/golden/mir.txt`, `tests/golden/diagnostics.txt` and `tests/golden/projections.txt` each hold every program of the corpus, so every change that adds a program or changes its lowering edits the same files. `mn pressure` ranked `diagnostics.txt` among the files the most merged pull requests change. Each becomes one file a program, under a directory per kind of output, named by the program's path. `records.rs` declares them as kinds and drops them from `SHARED`.
+The golden outputs `tests/golden/mir.txt`, `tests/golden/diagnostics.txt` and `tests/golden/projections.txt` each hold every program of the corpus, so every change that adds a program or changes its lowering edits the same files. `mn pressure` ranked `diagnostics.txt` among the files the most merged pull requests change. Each becomes one file a program, under a directory per kind of output, named by the key of the program's path: `records::key_of` of its names, without `.mn`, each split into words at `-` and `_`, so that `conformance/core-calculus/array_beyond_4_gib.mn` is `conformance-z-core-calculus-z-array-beyond-z4-gib`. Since a name's `-` and `_` give one separator, a test refuses two programs whose paths give one key, and says to rename one. `records.rs` declares them as kinds and drops them from `SHARED`.
 
 ## Negative Scope
 
