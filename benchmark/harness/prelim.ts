@@ -155,84 +155,96 @@ async function main(): Promise<void> {
     runs: [] as object[],
     spent: 0,
     stopped_early: false,
+    failure: "",
   };
   const spending: Budget = { limit: budget, spent: 0, reserved: 0, stopped: false };
-  outer: for (const model of MODELS) {
-    for (const task of tasks) {
-      const examples = task.examples.map(parseCase).filter((c): c is Case => c !== null);
-      const hidden = task.hidden.map(parseCase).filter((c): c is Case => c !== null);
-      for (let run = 1; run <= runs; run++) {
-        const messages: Message[] = [{ role: "user", content: userPrompt(task) }];
-        const attempts: object[] = [];
-        let spent = 0;
-        let program = "";
-        let file = "";
-        let finished = false;
-        for (let attempt = 0; attempt <= MAX_REPAIRS && !finished; attempt++) {
-          const answered = await budgetedCall(post, spending, { model: model.id, max_tokens: MAX_TOKENS, system, messages }, model);
-          if (!answered) {
-            record.stopped_early = true;
-            break outer;
-          }
-          const { reply, cost } = answered;
-          record.spent = spending.spent;
-          spent += cost;
-          // The reply goes back unchanged, so the transcript stays append-only.
-          messages.push({ role: "assistant", content: reply.content });
-          const name = `${model.id}-${task.id}-${run}-${attempt}`;
-          program = extractProgram(reply.text);
-          file = join(out, `${name}.mn`);
-          writeFileSync(file, `module prelim\n\n${program}`);
-          writeFileSync(join(out, `${name}.reply.md`), reply.text);
-          const refused = reply.stop_reason === "refusal";
-          const reported = refused ? [] : check(mn, file);
-          const results = refused || reported.length > 0 ? [] : runCases(mn, file, examples);
-          finished = refused || (reported.length === 0 && results.every((r) => r.pass));
-          attempts.push({
-            attempt,
-            stop_reason: reply.stop_reason,
-            usage: reply.usage,
-            cost,
-            file: `${name}.mn`,
-            diagnostics: reported.map((d) => d.line),
-            classes: reported.map((d) => failureClass(mn, d.code)),
-            examples: results,
-          });
-          if (!finished && attempt < MAX_REPAIRS) {
-            messages.push({
-              role: "user",
-              content: feedbackPrompt(
-                reported.map((d) => d.line),
-                results,
-              ),
+  let failure = "";
+  try {
+    outer: for (const model of MODELS) {
+      for (const task of tasks) {
+        const examples = task.examples.map(parseCase).filter((c): c is Case => c !== null);
+        const hidden = task.hidden.map(parseCase).filter((c): c is Case => c !== null);
+        for (let run = 1; run <= runs; run++) {
+          const messages: Message[] = [{ role: "user", content: userPrompt(task) }];
+          const attempts: object[] = [];
+          let spent = 0;
+          let program = "";
+          let file = "";
+          let finished = false;
+          for (let attempt = 0; attempt <= MAX_REPAIRS && !finished; attempt++) {
+            const answered = await budgetedCall(post, spending, { model: model.id, max_tokens: MAX_TOKENS, system, messages }, model);
+            if (!answered) {
+              record.stopped_early = true;
+              break outer;
+            }
+            const { reply, cost } = answered;
+            record.spent = spending.spent;
+            spent += cost;
+            // The reply goes back unchanged, so the transcript stays append-only.
+            messages.push({ role: "assistant", content: reply.content });
+            const name = `${model.id}-${task.id}-${run}-${attempt}`;
+            program = extractProgram(reply.text);
+            file = join(out, `${name}.mn`);
+            writeFileSync(file, `module prelim\n\n${program}`);
+            writeFileSync(join(out, `${name}.reply.md`), reply.text);
+            const refused = reply.stop_reason === "refusal";
+            const reported = refused ? [] : check(mn, file);
+            const results = refused || reported.length > 0 ? [] : runCases(mn, file, examples);
+            finished = refused || (reported.length === 0 && results.every((r) => r.pass));
+            attempts.push({
+              attempt,
+              answered_by: reply.model,
+              stop_reason: reply.stop_reason,
+              usage: reply.usage,
+              cost,
+              file: `${name}.mn`,
+              diagnostics: reported.map((d) => d.line),
+              classes: reported.map((d) => failureClass(mn, d.code)),
+              examples: results,
             });
+            if (!finished && attempt < MAX_REPAIRS) {
+              messages.push({
+                role: "user",
+                content: feedbackPrompt(
+                  reported.map((d) => d.line),
+                  results,
+                ),
+              });
+            }
           }
+          const builds = file !== "" && check(mn, file).length === 0;
+          const scored = builds ? runCases(mn, file, [...examples, ...hidden]) : [];
+          const solved = builds && !hasTodo(program) && scored.every((r) => r.pass);
+          record.runs.push({
+            model: model.id,
+            task: task.id,
+            run,
+            solved,
+            repairs: Math.max(attempts.length - 1, 0),
+            builds,
+            failed_cases: scored.filter((r) => !r.pass),
+            cost: spent,
+            attempts,
+          });
+          console.log(
+            `${model.id} ${task.id}-${run}: ${solved ? "solved" : "unsolved"} after ${Math.max(attempts.length - 1, 0)} repairs, $${spent.toFixed(4)}`,
+          );
         }
-        const builds = file !== "" && check(mn, file).length === 0;
-        const scored = builds ? runCases(mn, file, [...examples, ...hidden]) : [];
-        const solved = builds && !hasTodo(program) && scored.every((r) => r.pass);
-        record.runs.push({
-          model: model.id,
-          task: task.id,
-          run,
-          solved,
-          repairs: Math.max(attempts.length - 1, 0),
-          builds,
-          failed_cases: scored.filter((r) => !r.pass),
-          cost: spent,
-          attempts,
-        });
-        console.log(
-          `${model.id} ${task.id}-${run}: ${solved ? "solved" : "unsolved"} after ${Math.max(attempts.length - 1, 0)} repairs, $${spent.toFixed(4)}`,
-        );
       }
     }
+  } catch (e) {
+    // A failed call, an answer the broker refused as another model's among them, ends the run, and
+    // its record says so: no result stands for a model that did not write it.
+    failure = (e as Error).message;
   }
   broker.close();
+  record.spent = spending.spent;
+  record.failure = failure;
   writeFileSync(join(out, "results.json"), JSON.stringify(record, null, 2));
   console.log(
-    `${record.runs.length} runs, $${record.spent.toFixed(2)} of $${budget}${record.stopped_early ? ", stopped at the budget" : ""}`,
+    `${record.runs.length} runs, $${record.spent.toFixed(2)} of $${budget}${failure ? `; stopped by an error: ${failure}` : record.stopped_early ? ", stopped at the budget" : ""}`,
   );
+  if (failure) process.exit(1);
 }
 
 await main();

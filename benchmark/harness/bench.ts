@@ -65,7 +65,7 @@ import {
 } from "./build.ts";
 import { LANGUAGES, odinProgram, parseSignature, rustProgram, type Lang, type Signature } from "./languages.ts";
 import { feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
-import { summarize, type RunRecord } from "./report.ts";
+import { failureOf, summarize, type RunRecord } from "./report.ts";
 import { extractProgram, parseCase, parseTask, type Case, type CaseResult, type Task } from "./tasks.ts";
 import { own, setOwn } from "../own.mjs";
 
@@ -172,6 +172,7 @@ async function runOne(ctx: Context, spec: Spec): Promise<Detailed | null> {
     programs.push({ classes });
     attempts.push({
       attempt,
+      answered_by: reply.model,
       stop_reason: reply.stop_reason,
       usage: reply.usage,
       cost: answered.cost,
@@ -417,9 +418,9 @@ async function main(): Promise<void> {
           console.log(`[${done.length}/${specs.length}] ${spec.name}: ${outcome} after ${record.repairs} repairs, $${record.cost.toFixed(4)}`);
         } else console.log(`[${done.length}/${specs.length}] a held-out run finished`);
       } catch (e) {
-        const message = (e as Error).message;
-        // A held-out run's error names only the API status, never the task.
-        failure = spec.set === "public" ? `${spec.name}: ${message}` : `a held-out run failed: ${own(/the API answered \d+/.exec(message), 0) ?? (e as Error).name}`;
+        // A held-out run's error names only the API status, or that another model answered, never
+        // the task.
+        failure = failureOf(e, spec.set, spec.name);
         budget.stopped = true;
       }
     }

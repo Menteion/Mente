@@ -105,43 +105,54 @@ async function main(): Promise<void> {
     programs: [] as object[],
     spent: 0,
     stopped_early: false,
+    failure: "",
   };
   const spending: Budget = { limit: budget, spent: 0, reserved: 0, stopped: false };
 
-  for (const task of tasks) {
-    const user = userPrompt(task);
-    for (let run = 1; run <= runs; run++) {
-      const answered = await budgetedCall(post, spending, { model: MODEL, max_tokens: MAX_TOKENS, system, messages: [{ role: "user", content: user }] }, PRICES);
-      if (!answered) {
-        record.stopped_early = true;
-        break;
+  let failure = "";
+  try {
+    for (const task of tasks) {
+      const user = userPrompt(task);
+      for (let run = 1; run <= runs; run++) {
+        const answered = await budgetedCall(post, spending, { model: MODEL, max_tokens: MAX_TOKENS, system, messages: [{ role: "user", content: user }] }, PRICES);
+        if (!answered) {
+          record.stopped_early = true;
+          break;
+        }
+        const { reply, cost } = answered;
+        record.spent = spending.spent;
+        const name = `${task.id}-${run}`;
+        const source = `module probe\n\n${extractProgram(reply.text)}`;
+        writeFileSync(join(out, `${name}.mn`), source);
+        writeFileSync(join(out, `${name}.reply.md`), reply.text);
+        record.programs.push({
+          task: task.id,
+          run,
+          prompt: user,
+          answered_by: reply.model,
+          stop_reason: reply.stop_reason,
+          usage: reply.usage,
+          cost,
+          file: `${name}.mn`,
+          diagnostics: null,
+        });
+        console.log(`${name}: written, ${cost.toFixed(4)}`);
       }
-      const { reply, cost } = answered;
-      record.spent = spending.spent;
-      const name = `${task.id}-${run}`;
-      const source = `module probe\n\n${extractProgram(reply.text)}`;
-      writeFileSync(join(out, `${name}.mn`), source);
-      writeFileSync(join(out, `${name}.reply.md`), reply.text);
-      record.programs.push({
-        task: task.id,
-        run,
-        prompt: user,
-        stop_reason: reply.stop_reason,
-        usage: reply.usage,
-        cost,
-        file: `${name}.mn`,
-        diagnostics: null,
-      });
-      console.log(`${name}: written, ${cost.toFixed(4)}`);
+      if (record.stopped_early) break;
     }
-    if (record.stopped_early) break;
+  } catch (e) {
+    // A failed call, an answer the broker refused as another model's among them, ends the run, and
+    // its record says so: no result stands for a model that did not write it.
+    failure = (e as Error).message;
   }
-
   broker.close();
+  record.spent = spending.spent;
+  record.failure = failure;
   writeFileSync(join(out, "results.json"), JSON.stringify(record, null, 2));
   console.log(
-    `${record.programs.length} programs, $${record.spent.toFixed(2)} of $${budget}${record.stopped_early ? ", stopped at the budget" : ""}`,
+    `${record.programs.length} programs, $${record.spent.toFixed(2)} of $${budget}${failure ? `; stopped by an error: ${failure}` : record.stopped_early ? ", stopped at the budget" : ""}`,
   );
+  if (failure) process.exit(1);
 }
 
 await main();

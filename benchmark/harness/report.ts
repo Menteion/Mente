@@ -9,6 +9,19 @@ import type { Verdict } from "./build.ts";
 import type { Lang } from "./languages.ts";
 import { own, setOwn } from "../own.mjs";
 
+/**
+ * What a measured run's record and log say of the error that stopped it: for a public task, the
+ * run's name and the error; for a held-out task, only the API's status, or that another model than
+ * the one asked answered (a refusal of the broker's that says so), or the error's kind, never the
+ * task.
+ */
+export function failureOf(e: unknown, set: "public" | "held-out", name: string): string {
+  const error = e instanceof Error ? e : new Error(String(e));
+  if (set === "public") return `${name}: ${error.message}`;
+  if ((e as { wrongModel?: unknown }).wrongModel === true) return "a held-out run failed: an answer came from another model than the one asked";
+  return `a held-out run failed: ${own(/the API answered \d+/.exec(error.message), 0) ?? error.name}`;
+}
+
 export interface ProgramClasses {
   /** The failure classes of one program, distinct; empty when it passed what it was run on. */
   classes: string[];

@@ -2,15 +2,17 @@
 // benchmark run (benchmark/README.md, "The harness").
 //
 // The request names one model and no fallback, so every program comes from the model it names
-// and a refusal is recorded as one. Thinking is adaptive at each model's default effort, the API
-// version accepts no sampling parameters, and the conversation is sent as it was, the model's
+// and a refusal is recorded as one; the broker hands back only an answer that names, as its
+// writer, a model the requested one may come back as, and each attempt records that name.
+// Thinking is adaptive at each model's default effort, the API version accepts no sampling
+// parameters, and the conversation is sent as it was, the model's
 // earlier replies unchanged. The system prompt carries a cache breakpoint and the request asks for
 // automatic caching of the conversation, 5-minute entries both: the document is the same in every
 // run of a language, so each later call reads it from the cache. Caching changes what a call
 // costs, never what the model is shown.
 
 import { readFileSync } from "node:fs";
-import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
+import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, worstOfAnyModel as worstOfAnyBody, type Answer } from "./broker.ts";
 import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -85,6 +87,11 @@ export function worstCost(body: object, model: Model): number {
   return worstOfBody(JSON.stringify(body), MAX_TOKENS, model, LIMITS, thinkingBlocks(body));
 }
 
+/** The most a call could cost whichever model of broker-limits.json answered it, as the broker counts an answer from another model than the one asked. */
+export function worstOfAnyModel(body: object): number {
+  return worstOfAnyBody(JSON.stringify(body), MAX_TOKENS, LIMITS, thinkingBlocks(body));
+}
+
 /** The budget of a run of the benchmark, in US dollars. */
 export interface Budget {
   limit: number;
@@ -128,8 +135,9 @@ export async function budgetedCall(post: Post, budget: Budget, body: object, mod
       settle(budget, worst, cost);
       return { reply, cost };
     } catch (e) {
-      // A lost answer may still have been billed, so it counts at its most.
-      settle(budget, worst, e instanceof NetworkError ? worst : 0);
+      // A lost answer may still have been billed, so it counts at its most; an answer the broker
+      // refused as another model's was billed, and counts as the broker counts it.
+      settle(budget, worst, e instanceof NetworkError ? worst : e instanceof BrokerRefused && e.wrongModel ? worstOfAnyModel(body) : 0);
       if (e instanceof BrokerRefused && e.exhausted) {
         budget.stopped = true;
         return null;
@@ -142,6 +150,8 @@ export async function budgetedCall(post: Post, budget: Budget, body: object, mod
 export type Message = { role: "user" | "assistant"; content: unknown };
 
 export interface Reply {
+  /** The model that wrote the answer, as the answer names it: one the requested model may come back as, which the broker checks. */
+  model: string;
   content: unknown[];
   text: string;
   stop_reason: string;
@@ -175,12 +185,13 @@ export async function send(post: Post, body: object): Promise<Reply> {
     if (answer.status === -1) throw new NetworkError(answer.text);
     if (answer.status >= 200 && answer.status < 300) {
       const parsed = JSON.parse(answer.text);
+      if (typeof parsed?.model !== "string") throw new Error("the API answered without naming the model that wrote the answer");
       const content = parsed.content ?? [];
       const text = content
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { text: string }) => b.text)
         .join("\n");
-      return { content, text, stop_reason: parsed.stop_reason, usage: parsed.usage };
+      return { model: parsed.model, content, text, stop_reason: parsed.stop_reason, usage: parsed.usage };
     }
     const retryable = answer.status === 429 || answer.status >= 500;
     if (!retryable || attempt >= 5) {

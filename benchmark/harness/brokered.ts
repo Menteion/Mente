@@ -2,8 +2,8 @@
 // run and the syntax probe hold no API key, and send each request to the broker over its socket,
 // one JSON line each way. A broker that is not there, that goes away, or that answers what the
 // harness cannot read fails the run with a message saying so, and so does one that refuses a
-// request it does not send; one that refuses a request past the run's limits ends the run as its
-// budget would.
+// request it does not send or an answer from another model than the one asked; one that refuses a
+// request past the run's limits ends the run as its budget would.
 import net from "node:net";
 import type { Answer } from "./broker.ts";
 
@@ -14,15 +14,18 @@ export interface BrokerLink {
 }
 
 /**
- * A request the broker refused: one it does not send, or, when `exhausted`, one past the run's
- * limits, which ends the run as its budget would.
+ * A request the broker refused: one it does not send; or, when `exhausted`, one past the run's
+ * limits, which ends the run as its budget would; or, when `wrongModel`, one the API answered from
+ * a model other than the one asked, which was billed and fails the run.
  */
 export class BrokerRefused extends Error {
   exhausted: boolean;
+  wrongModel: boolean;
 
-  constructor(message: string, exhausted: boolean) {
+  constructor(message: string, exhausted: boolean, wrongModel = false) {
     super(message);
     this.exhausted = exhausted;
+    this.wrongModel = wrongModel;
   }
 }
 
@@ -63,7 +66,7 @@ export function connectBroker(path: string, timeoutMs = 20 * 60_000): Promise<Br
       }
       waiting.delete(r.id);
       clearTimeout(w.timer);
-      if (typeof r.refused === "string") w.fail(new BrokerRefused(`the broker refused the request: ${r.refused}`, r.exhausted === true));
+      if (typeof r.refused === "string") w.fail(new BrokerRefused(`the broker refused the request: ${r.refused}`, r.exhausted === true, r.wrongModel === true));
       else if (typeof r.status === "number" && typeof r.text === "string") w.done({ status: r.status, retryAfter: String(r.retryAfter ?? ""), text: r.text });
       else breakAll(new BrokerBroken(`the broker answered what the harness cannot read: ${line.slice(0, 200)}`));
     };
