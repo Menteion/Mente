@@ -23,12 +23,16 @@ const OWN_FAILURE = "testCodeFailure";
 /// The reporter: Node hands it the run's events, each file's in the order the tests are defined.
 export default async function* evidenceReporter(source) {
   // Each test and suite started, by its entry file and its id there: its name and its parent's id.
+  // Each file runs in a process of its own, where ids start again, and Node names its entry file;
+  // under --test-isolation=none every file runs in the one process, whose ids are unique, and
+  // Node names no entry file, so the key is then the id alone. The file that declares a test is
+  // never the key: a helper file declares tests inside another file's suites.
   const started = new Map();
   const ids = (data) => {
     if (!Number.isInteger(data.testId) || !Number.isInteger(data.parentId)) {
       throw new Error(`${data.file}: "${data.name}" has no testId or parentId, which this reporter reads its suites from (Node 24.22.1 gives both)`);
     }
-    return `${data.entryFile ?? data.file}\n`;
+    return `${data.entryFile ?? ""}\n`;
   };
   for await (const event of source) {
     const { type, data } = event;

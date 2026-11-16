@@ -225,8 +225,9 @@ pub fn quick_checks(text: &str) -> Result<Vec<String>, String> {
 pub const SPEC_GUARD_SCRIPT: &str = "spec-guard";
 
 /// The documents spec-guard checks, read from the `spec-guard` script of `package.json` under
-/// `root` and expanded as spec-guard expands them: each argument a file, or `dir/*.ext`, the files
-/// of `dir` with that extension, none whose name starts with a dot. A script that does not run
+/// `root` and expanded as spec-guard 0.35 expands them: each argument a file, or `dir/*.ext`, the
+/// files of `dir` whose names end in that extension, in that case, a name that starts with a dot
+/// among them, and no directory or file of a subdirectory. A script that does not run
 /// spec-guard, an option, a word a shell would read otherwise than as itself, or a pattern of
 /// another shape, is refused, so that the list is never guessed.
 pub fn spec_guard_files(root: &Path) -> Result<Vec<String>, String> {
@@ -270,7 +271,7 @@ pub fn spec_guard_files(root: &Path) -> Result<Vec<String>, String> {
                     .flatten()
                     .filter(|e| e.path().is_file())
                     .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .filter(|n| !n.starts_with('.') && n.ends_with(&format!(".{}", extension)))
+                    .filter(|n| n.ends_with(&format!(".{}", extension)))
                     .map(|n| format!("{}/{}", dir, n))
                     .collect();
                 names.sort();

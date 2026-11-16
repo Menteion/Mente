@@ -110,6 +110,26 @@ test("the evidence reporter writes nothing for a suite, a diagnostic, a test's o
   assert.equal(await written(EVENTS.filter((e) => !ran(e))), "");
 });
 
+test("without test isolation Node gives no entry file, and the reporter reads each test's suites by its id in the one process", async () => {
+  // `node --test --test-isolation=none`, as Node 24.22.1 runs it: every file in one process, ids
+  // unique across the run, and no `entryFile` on any event (the review of a136bf0).
+  const bare = (event) => {
+    delete event.data.entryFile;
+    return event;
+  };
+  const N = run(undefined);
+  const events = [
+    N.start(1, 0, 0, "a policy suite", POLICY),
+    N.start(2, 1, 1, "a check from a helper", HELPER),
+    N.end(2, 1, 1, "a check from a helper", "test", {}, HELPER),
+    N.end(1, 0, 0, "a policy suite", "suite", {}, POLICY),
+    N.start(3, 0, 0, "a site test", SITE),
+    N.end(3, 0, 0, "a site test", "test", {}, SITE),
+  ].map(bare);
+  const line = (name, suite, file) => `${JSON.stringify({ name, suite, file, skipped: false, todo: false })}\n`;
+  assert.equal(await written(events), line("a check from a helper", ["a policy suite"], HELPER) + line("a site test", [], SITE));
+});
+
 test("the evidence reporter refuses a test whose parent never started, parents that loop, and an event with no ids", async () => {
   for (const [events, why] of [
     [[P.start(2, 1, 1, "an orphan"), P.end(2, 1, 1, "an orphan", "test")], /the parent of "an orphan" was never started/],

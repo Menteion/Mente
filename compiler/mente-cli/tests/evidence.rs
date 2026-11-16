@@ -431,7 +431,10 @@ fn test_the_evidence_is_read_from_spec_guards_report() {
 
 /// The documents spec-guard's report must cover are read from the spec-guard script of
 /// `package.json` and expanded as spec-guard expands them, never copied; a script of another shape
-/// is refused. The repository's own script names the specs and the documents beside them.
+/// is refused. The repository's own script names the specs and the documents beside them. The
+/// planted tree holds the names spec-guard 0.35's own expansion was seen to take, a dotfile, a
+/// space, brackets and a leading hyphen, and to leave, a directory named `dir.md`, an extension in
+/// capitals and a file of a subdirectory (the review of a136bf0).
 #[test]
 fn test_the_documents_are_read_from_the_spec_guard_script() {
     let script = |s: &str| format!("{{\"scripts\": {{\"spec-guard\": \"{}\"}}}}", s);
@@ -439,6 +442,11 @@ fn test_the_documents_are_read_from_the_spec_guard_script() {
         "spec/a.md",
         "spec/b.md",
         "spec/.hidden.md",
+        "spec/with space.md",
+        "spec/[x].md",
+        "spec/-lead.md",
+        "spec/UPPER.MD",
+        "spec/dir.md/inside.md",
         "spec/c.txt",
         "spec/sub/d.md",
         "docs/x.md",
@@ -455,7 +463,16 @@ fn test_the_documents_are_read_from_the_spec_guard_script() {
     );
     assert_eq!(
         evidence::spec_guard_files(&dir).unwrap(),
-        ["README.md", "docs/x.md", "spec/a.md", "spec/b.md"]
+        [
+            "README.md",
+            "docs/x.md",
+            "spec/-lead.md",
+            "spec/.hidden.md",
+            "spec/[x].md",
+            "spec/a.md",
+            "spec/b.md",
+            "spec/with space.md"
+        ]
     );
     for (package, why) in [
         (
