@@ -250,7 +250,6 @@ async function main(): Promise<void> {
   const heldOutDir = option("held-out", "");
   const out = option("out", "bench-out");
   const plan = process.argv.includes("--plan");
-  if (plan && heldOutDir !== "") throw new Error("--plan never opens the held-out set: drop --held-out");
   const pins = JSON.parse(readFileSync(join(here, "toolchains.json"), "utf8"));
   const tools: Tools = {
     mn: option("mn", "target/release/mn"),
@@ -349,7 +348,8 @@ async function main(): Promise<void> {
   // 2026-11-16: the benchmark's choice of tasks threw before any call, with the key in reach, and no
   // test had ever run it).
   if (plan) {
-    console.log(JSON.stringify({ plan: "bench", milestone, models: models.map((m) => m.id), languages, runs, tasks: publicTasks.map((t) => t.id), planned_runs: specs.length }));
+    // The held-out set by its count alone, never a task's name.
+    console.log(JSON.stringify({ plan: "bench", milestone, models: models.map((m) => m.id), languages, runs, tasks: publicTasks.map((t) => t.id), held_out: heldTasks.length, planned_runs: specs.length }));
     return;
   }
 

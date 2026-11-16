@@ -1135,7 +1135,7 @@ const PINNED_FILES = new Map([
   ["benchmark/harness/stop-broker.sh", "1f4ec139da512a920c4eeafad893e451c0629c93ea19bd740ba4b6fc5b092ffa"],
   ["benchmark/harness/lock-sudo.sh", "c6562d1115b5561722fc3657860b057cdbf75190c491b46e19b1cf4a6d132cdc"],
   ["benchmark/harness/sandbox-root.sh", "2298f2a5e113cd18c796a1359c54ffb0cd755b783ae0d056d662e06eaf24fbc6"],
-  ["benchmark/harness/fetch-held-out.sh", "ae861c46e08389fdfaa6587bb7cab86b5d6694dfc63dc07bf15b854acc7f45b6"],
+  ["benchmark/harness/fetch-held-out.sh", "45d25d82876561dd23474dccde1ff6e77ff4111728f8bfa95616fa220a7c72e6"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
 /// jobs, and the jobs that run the release tests through cargo alone. A rule that read their
@@ -1153,7 +1153,7 @@ const PINNED_JOBS = new Map([
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "4e6efc58580a30edeadd6ecf4464bd7ae2727083f3daa060f105aca1969ed0e8"],
   ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
-  ["benchmark.yml#bench", "2b29bd7cbf9ace58ce82169c117b7d12ddfcdd8521cfb4dec39a5b94db512638"],
+  ["benchmark.yml#bench", "4bc8f350ecb143b0f651e96eac38164d45e016c9b7ab1a508df702251d7de518"],
   ["prelim.yml#prelim", "fa19a6bcc5b3a3d28cfd022b72cadd1ec362e81ad43cc12cf448af80d8c61f0f"],
   ["probe.yml#write", "b01f5cf9b865647582ebe4ee11088545f3dc466d42ce89068ddd6acc4795a909"],
 ]);
@@ -2830,34 +2830,22 @@ export const HELD_OUT_STEP = {
   name: "Check out the held-out set",
   if: "env.HAS_HELD_OUT == 'true'",
   env: { HELD_OUT_TOKEN, HELD_OUT_COMMIT: "${{ steps.lock.outputs.commit }}" },
-  run: "bash benchmark/harness/fetch-held-out.sh",
+  // Under env -i, PATH, a fresh HOME, the token and the commit alone, as BROKER_LINE starts the
+  // broker: SHELLOPTS, BASH_ENV or git's settings in the job's environment reach none of it (the
+  // review of aafe59b: tracing printed the token before its mask).
+  run: "home=\"$(mktemp -d)\"\nenv -i PATH=/usr/bin:/bin HOME=\"$home\" HELD_OUT_TOKEN=\"$HELD_OUT_TOKEN\" HELD_OUT_COMMIT=\"$HELD_OUT_COMMIT\" bash --noprofile --norc benchmark/harness/fetch-held-out.sh\n",
 };
+/// The one write to the environment of later steps a secret job may make before its held-out step
+/// and its broker's: a path of its own, which holds no secret and turns nothing on. Any other could
+/// set what the shells of those steps run with (SHELLOPTS, BASH_ENV) or put a program first on PATH.
+const ENV_WRITES = new Set(['echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"']);
+/// Whether a step writes the environment or the PATH of later steps other than by ENV_WRITES.
+const writesEnv = (s) => /GITHUB_ENV|GITHUB_PATH/.test(String(s.run ?? "")) && !ENV_WRITES.has(String(s.run ?? "").trim());
+/// What is wrong with the repository's paths for the held-out step: held-out-set, where it checks the
+/// set out, tracked as a file, a link or a directory.
+export const heldOutPathProblems = (paths) => [...paths].filter((f) => f === "held-out-set" || f.startsWith("held-out-set/")).map((f) => `${f}: a path of the repository where the held-out step checks the set out`);
 /// The held-out repository, which no step checks out but HELD_OUT_STEP.
 const HELD_OUT_REPOSITORY = "Menteion/mente-bench-heldout";
-
-/// What would let fetch-held-out.sh print something of the held-out repository into the log: a
-/// trace; a git command that is not quiet or whose output is not discarded, but for the commit id
-/// it reads into its own comparison; or an echo of anything but its own words and the mask.
-export function heldOutScriptProblems(text) {
-  const found = [];
-  const logical = text.replace(/\\\n\s*/g, " ").split("\n").map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
-  for (const line of logical) {
-    if (/\bset\s+-[a-z]*x|xtrace|BASH_XTRACEFD/.test(line)) found.push(`a trace: ${line}`);
-    const gits = [...line.matchAll(/(?:^|[;&|(]\s*|[A-Z_0-9]+="[^"]*"\s+)git\s/g)].length;
-    if (gits > 0) {
-      const captured = /^if \[ "\$\(git -C held-out-set rev-parse HEAD 2> \/dev\/null\)" != "\$HELD_OUT_COMMIT" \]; then$/.test(line);
-      if (!captured && !(/\s-q\s/.test(line) && /> \/dev\/null 2>&1 \|\| \{ echo "[^"$`]*"; exit 1; \}$/.test(line))) found.push(`a git command that is not quiet, its output kept: ${line}`);
-    }
-    for (const m of line.matchAll(/\b(echo|printf)\b\s*(.*)$/g)) {
-      const said = m[2];
-      if (m[1] === "printf" && /^'x-access-token:%s' "\$HELD_OUT_TOKEN" \| base64 -w0\)"$/.test(said)) continue;
-      if (m[1] === "echo" && (said === '"::add-mask::$auth"' || /^"[^"$`\\]*"/.test(said))) continue;
-      found.push(`a line that prints what it did not author: ${line}`);
-    }
-    if (/\b(cat|ls|find|tree|head|tail|less|more)\b/.test(line) || /\bgit\b[^;]*\b(log|show|status|ls-files|ls-tree|cat-file|diff)\b/.test(line)) found.push(`a command that prints the checkout: ${line}`);
-  }
-  return found;
-}
 
 /// Whether a step is `want` exactly, but for the watch's condition, which a watched job's steps
 /// may carry.
@@ -2904,6 +2892,10 @@ export function brokerProblems(key, job, doc = {}) {
     if (!heldOut.includes(s)) found.push(`${key}, step "${s.name ?? s.uses}": holds a secret where none belongs (the key belongs in BROKER_STEP alone, ${HELD_OUT_TOKEN} in HELD_OUT_STEP alone)`);
   }
   if (heldOut.length > 1) found.push(`${key} checks the held-out set out more than once`);
+  // Nothing before the held-out step and the broker's writes the environment of later steps but
+  // ENV_WRITES (the review of aafe59b: SHELLOPTS=xtrace through $GITHUB_ENV traced the token).
+  const firstHeld = all.findIndex((s) => isStep(s, HELD_OUT_STEP) || isStep(s, BROKER_STEP));
+  for (const s of all.slice(0, firstHeld < 0 ? all.length : firstHeld)) if (writesEnv(s)) found.push(`${key}, step "${s.name ?? s.uses}": writes the environment or the PATH of later steps before the secrets are in reach`);
   // No step checks the held-out repository out but HELD_OUT_STEP: actions/checkout prints the
   // commit's subject into the log, and a token as its input reaches .git/config unless told not to.
   for (const s of all) if (/^actions\/checkout@/.test(String(s.uses ?? "")) && String(s.with?.repository ?? "").toLowerCase() === HELD_OUT_REPOSITORY.toLowerCase()) found.push(`${key}, step "${s.name ?? s.uses}": checks the held-out repository out through actions/checkout, which prints its commit's subject into the log`);
@@ -2976,20 +2968,12 @@ check("the broker, the one process that holds the key, starts under permission.j
     assert.notEqual(digest(text), PINNED_FILES.get("benchmark/harness/start-broker.sh"), `a start-broker.sh with ${what} keeps its pin`);
   }
   for (const file of ["start-broker.sh", "stop-broker.sh", "lock-sudo.sh", "sandbox-root.sh", "fetch-held-out.sh"]) assert.ok(PINNED_FILES.has(`benchmark/harness/${file}`), `${file}, on the key's path, the held-out token's or the lock's, is not pinned whole`);
-  // The held-out step prints nothing of the held-out repository: no HEAD line, no subject, no file.
-  const fetchScript = read("benchmark/harness/fetch-held-out.sh");
-  assert.deepEqual(heldOutScriptProblems(fetchScript), []);
-  for (const [what, text] of [
-    ["a checkout that is not quiet", fetchScript.replace("checkout -q --detach FETCH_HEAD > /dev/null 2>&1", "checkout --detach FETCH_HEAD")],
-    ["a fetch whose output is kept", fetchScript.replace('"$HELD_OUT_COMMIT" > /dev/null 2>&1 || { echo "the held-out set could not be fetched"', '"$HELD_OUT_COMMIT" || { echo "the held-out set could not be fetched"')],
-    ["a trace", fetchScript.replace("set -euo pipefail", "set -euxo pipefail")],
-    ["the commit's subject printed", `${fetchScript}git -C held-out-set log -1 --format=%s\n`],
-    ["the checkout listed", `${fetchScript}ls held-out-set\n`],
-    ["the token printed", `${fetchScript}echo "$HELD_OUT_TOKEN"\n`],
-    ["the commit printed", fetchScript.replace('echo "the held-out set is at the commit corpus.lock names"', 'echo "the held-out set is at $HELD_OUT_COMMIT"')],
-  ]) {
-    assert.ok(heldOutScriptProblems(text).length > 0, `a fetch-held-out.sh with ${what} passes`);
-  }
+  // The held-out step's script is held by its pin, whose digest is its exact text: no rule over its
+  // lines stands for that (the review of aafe59b found a denylist of them easy to pass).
+  // held-out-set, where it checks the set out, is no path of the repository in any form: a link
+  // tracked there would take the checkout wherever it pointed (the review of aafe59b).
+  assert.deepEqual(heldOutPathProblems(tracked()), []);
+  assert.ok(heldOutPathProblems(new Set(["held-out-set"])).length > 0 && heldOutPathProblems(new Set(["held-out-set/x.md"])).length > 0, "a tracked held-out-set passed");
   // Every job sets up that Node: the secret jobs, the jobs that run the harness's tests and the
   // planted escapes among them, and the rest.
   assert.deepEqual(nodeProblems(allJobs()), []);
@@ -3028,6 +3012,9 @@ check("the broker, the one process that holds the key, starts under permission.j
     ["the held-out step changed", at(3, { ...HELD_OUT_STEP, run: "bash benchmark/harness/fetch-held-out.sh; git -C held-out-set log -1" })],
     ["the key in the held-out step", at(3, { ...HELD_OUT_STEP, env: { ...HELD_OUT_STEP.env, ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" } })],
     ["the held-out set checked out twice", { steps: [...job.steps.slice(0, 4), HELD_OUT_STEP, ...job.steps.slice(4)] }],
+    ["the held-out step run in the job's environment", at(3, { ...HELD_OUT_STEP, run: "bash benchmark/harness/fetch-held-out.sh" })],
+    ["a trace set for later steps before the secrets", { steps: [...job.steps.slice(0, 2), { run: 'echo "SHELLOPTS=xtrace" >> "$GITHUB_ENV"' }, ...job.steps.slice(2)] }],
+    ["a program put first on PATH before the secrets", { steps: [...job.steps.slice(0, 2), { run: 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"' }, ...job.steps.slice(2)] }],
     ["the key as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.ANTHROPIC_API_KEY }}", "persist-credentials": false } })],
     ["another secret as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.OTHER }}", "persist-credentials": false } })],
     ["the held-out token in a step's env", at(5, { ...job.steps[5], env: { HELD_OUT: HELD_OUT_TOKEN } })],

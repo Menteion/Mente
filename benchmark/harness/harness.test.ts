@@ -4,10 +4,10 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, RunAnomaly, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
@@ -631,6 +631,19 @@ test("an output directory outside the sandbox's runs root is refused, and the ro
   assert.equal(insideAny("/r/repo/bench-out", ["/r/repo"]), true);
   assert.equal(insideAny("/r/repository-out", ["/r/repo"]), false);
   assert.equal(insideAny("/t/bench-out", ["/r/repo", "/r/held"]), false);
+  // A link inside a root that points out of it lies outside: the paths are compared as the file
+  // system resolves them (the review of aafe59b: a held-out-set link to $RUNNER_TEMP passed for the
+  // hidden workspace).
+  const linked = mkdtempSync(join(tmpdir(), "mente-inside-"));
+  try {
+    mkdirSync(join(linked, "root"));
+    mkdirSync(join(linked, "elsewhere"));
+    symlinkSync(join(linked, "elsewhere"), join(linked, "root", "held-out-set"), "junction");
+    assert.equal(insideAny(join(linked, "root", "held-out-set"), [join(linked, "root")]), false, "a link out of the root passed for inside it");
+    assert.equal(insideAny(join(linked, "root"), [join(linked, "root")]), true);
+  } finally {
+    rmSync(linked, { recursive: true, force: true });
+  }
   const roots = sandboxRoots("hide /w/repo\nhide /t/broker\nruns /t/runs\n");
   assert.deepEqual(roots, { hide: ["/w/repo", "/t/broker"], runs: "/t/runs" });
   assert.throws(() => sandboxRoots("hide /w/repo\n"), /names no runs root/);
@@ -1599,10 +1612,15 @@ test("every script that calls the API plans its runs with no broker and no key, 
       if (file === "bench.ts") assert.equal(planned.planned_runs, m1.length * 2 * 3, `every public M1 task, in each model and language: ${said}`);
     }
   }
-  // A plan never opens the held-out set.
-  const held = plan("bench.ts", ["--budget", "1", "--held-out", "held-out-set"]);
-  assert.notEqual(held.status, 0);
-  assert.match(held.stderr, /--plan never opens the held-out set/);
+  // The held-out branch too, on stand-in tasks (benchmark/harness/fixtures/held-out): their reading,
+  // the filter that leaves the retired one out, and the check that each can be written, planned as
+  // counts alone, no held-out task named (the review of aafe59b: no plan had run that branch).
+  const held = plan("bench.ts", ["--budget", "1", "--milestone", "M1", "--runs", "1", "--held-out", join(harness, "fixtures", "held-out")]);
+  assert.equal(held.status, 0, held.stderr);
+  const heldPlan = JSON.parse(held.stdout.trim().split("\n").at(-1) ?? "{}");
+  assert.equal(heldPlan.held_out, 1, held.stdout);
+  assert.equal(heldPlan.planned_runs, (m1.length + 1) * 2 * 3, held.stdout);
+  assert.ok(!held.stdout.includes("stand-in"), "a plan named a held-out task");
 });
 
 test("every harness that calls the API records, in each attempt, the model that wrote the answer", () => {
@@ -1849,10 +1867,11 @@ test("every shell script of the harness parses", { skip: spawnSync("bash", ["-c"
   }
 });
 
-test("fetch-held-out.sh checks the held-out set out at its commit and prints nothing of it", { skip: spawnSync("bash", ["-c", "true"]).status === 0 ? false : "no bash" }, () => {
+test("fetch-held-out.sh checks the held-out set out at its commit, into a directory it makes, and prints nothing of it", { skip: spawnSync("bash", ["-c", "true"]).status === 0 ? false : "no bash" }, () => {
   // Run 3 of the plan (2026-11-16): actions/checkout printed the held-out commit's subject into this
-  // public repository's log. A repository standing in for the held-out one, reached through git's
-  // own insteadOf in a global configuration, so that the script runs as it is, its URL unchanged.
+  // public repository's log. A repository standing in for the held-out one, reached through a `git`
+  // first on PATH that hands the real one its URL instead of the held-out repository's, since the
+  // script reads no git configuration: the script runs as it is, its URL unchanged.
   const dir = mkdtempSync(join(tmpdir(), "mente-held-out-"));
   const token = "held-out-token-0123456789abcdef";
   try {
@@ -1864,15 +1883,24 @@ test("fetch-held-out.sh checks the held-out set out at its commit and prints not
     git(origin, "add", ".");
     git(origin, "commit", "-q", "-m", "SECRETSUBJECT of a held-out task");
     const commit = git(origin, "rev-parse", "HEAD").stdout.trim();
-    const global = join(dir, "gitconfig");
-    writeFileSync(global, `[url "${pathToFileURL(origin).href}"]\n\tinsteadOf = https://github.com/Menteion/mente-bench-heldout\n`);
-    const run = (work: string, env: Record<string, string>) => {
+    const shims = join(dir, "shims");
+    mkdirSync(shims);
+    writeFileSync(join(shims, "git"), '#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do if [ "$a" = https://github.com/Menteion/mente-bench-heldout ]; then args+=("$ORIGIN_URL"); else args+=("$a"); fi; done\nexec "$REAL_GIT" "${args[@]}"\n', { mode: 0o755 });
+    const realGit = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+    const run = (work: string, env: Record<string, string>, before?: () => void) => {
       mkdirSync(work, { recursive: true });
-      const r = spawnSync("bash", [join(REPOSITORY, "benchmark", "harness", "fetch-held-out.sh")], { cwd: work, env: { PATH: process.env.PATH ?? "", HOME: dir, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1", ...env }, encoding: "utf8", timeout: 60_000 });
+      before?.();
+      // As the step starts it: a cleared environment but PATH, HOME, the token and the commit.
+      const r = spawnSync("bash", ["--noprofile", "--norc", join(REPOSITORY, "benchmark", "harness", "fetch-held-out.sh")], {
+        cwd: work,
+        env: { PATH: `${shims}${delimiter}${process.env.PATH ?? ""}`, HOME: join(dir, "home"), REAL_GIT: realGit, ORIGIN_URL: pathToFileURL(origin).href, ...env },
+        encoding: "utf8",
+        timeout: 60_000,
+      });
       // The mask is the runner's to take; every other line is the log's.
       return { status: r.status, printed: `${r.stdout}${r.stderr}`.split("\n").filter((l) => !l.startsWith("::add-mask::")).join("\n") };
     };
-    const leaks = (printed: string) => ["SECRETSUBJECT", "secret-task-name", "HEAD is now", token, commit.slice(0, 7)].filter((s) => printed.includes(s));
+    const leaks = (printed: string) => ["SECRETSUBJECT", "secret-task-name", "HEAD is now", token, commit.slice(0, 7)].filter((x) => printed.includes(x));
     const fetched = run(join(dir, "a"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit });
     assert.equal(fetched.status, 0, fetched.printed);
     assert.deepEqual(leaks(fetched.printed), [], fetched.printed);
@@ -1881,6 +1909,21 @@ test("fetch-held-out.sh checks the held-out set out at its commit and prints not
     assert.ok(existsSync(join(dir, "a", "held-out-set", "secret-task-name.md")));
     // The token is in no file of the checkout.
     assert.ok(!readFileSync(join(dir, "a", "held-out-set", ".git", "config"), "utf8").includes("extraheader"));
+    // held-out-set there already, as a directory, a file or a link, is refused, and nothing goes
+    // where a link points (the review of aafe59b: the checkout landed in the link's target).
+    const target = join(dir, "target");
+    mkdirSync(target);
+    for (const [name, make] of [
+      ["a directory", (w: string) => mkdirSync(join(w, "held-out-set"))],
+      ["a file", (w: string) => writeFileSync(join(w, "held-out-set"), "x")],
+      ["a link", (w: string) => symlinkSync(target, join(w, "held-out-set"), "junction")],
+    ] as [string, (w: string) => void][]) {
+      const work = join(dir, `there-${name.replace(/ /g, "-")}`);
+      const r = run(work, { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit }, () => make(work));
+      assert.notEqual(r.status, 0, `held-out-set there as ${name} passed`);
+      assert.match(r.printed, /held-out-set is already there/, name);
+    }
+    assert.deepEqual(readdirSync(target), [], "the checkout went where the link pointed");
     // A commit corpus.lock does not name in full, one the repository does not hold, and no token
     // each fail saying only that.
     const short = run(join(dir, "b"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit.slice(0, 12) });
