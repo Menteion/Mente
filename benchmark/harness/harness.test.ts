@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { inspect } from "node:util";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, RunAnomaly, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
 import { Broker, httpPost, LOG_LINE_MAX, lineReader, logLine, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, wrongModel, type Answer, type Price } from "./broker.ts";
 import { BrokerBroken, BrokerRefused, connectBroker, refusalOf } from "./brokered.ts";
@@ -55,7 +56,7 @@ import {
   splitTop,
 } from "./languages.ts";
 import { failureText, feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
-import { failureOf, firstFailure, median, summarize, type RunRecord } from "./report.ts";
+import { failureOf, firstFailure, HeldOutError, heldOut, heldOutAsync, median, summarize, type RunRecord } from "./report.ts";
 import { own, setOwn } from "../own.mjs";
 import {
   benchmarkTasks,
@@ -1621,6 +1622,75 @@ test("every script that calls the API plans its runs with no broker and no key, 
   assert.equal(heldPlan.held_out, 1, held.stdout);
   assert.equal(heldPlan.planned_runs, (m1.length + 1) * 2 * 3, held.stdout);
   assert.ok(!held.stdout.includes("stand-in"), "a plan named a held-out task");
+  // A held-out task that cannot be written, by its signature, a type, or an example: each plan
+  // fails naming the task by its place alone, and no output of it holds anything of the task (the
+  // final pass on 89c7691: a mangled signature, parsed outside the try that hid such errors,
+  // printed itself). The stand-ins' every field holds "secret_heldout".
+  const bad = join(harness, "fixtures", "held-out-bad");
+  const cases = readdirSync(bad).sort();
+  assert.deepEqual(cases, ["example", "signature", "type"]);
+  const planned = cases.map((c) => [c, plan("bench.ts", ["--budget", "1", "--milestone", "M1", "--runs", "1", "--held-out", join(bad, c)])] as const);
+  for (const [c, r] of planned) assert.doesNotMatch(`${r.stdout}${r.stderr}`, /secret_heldout/i, `the plan of a held-out task with a bad ${c} printed the task`);
+  for (const [c, r] of planned) {
+    assert.notEqual(r.status, 0, `a held-out task with a bad ${c} planned`);
+    assert.match(r.stderr, /HeldOutError: held-out-1 cannot be written in (mente|rust|odin): Error$/m, `${c}: ${`${r.stdout}${r.stderr}`.slice(-600)}`);
+  }
+  for (const r of [held]) assert.doesNotMatch(`${r.stdout}${r.stderr}`, /stand-in|secret_heldout/i);
+});
+
+test("every step of a held-out task leaves through one boundary, which passes on nothing of the error it met", async () => {
+  // The final pass on 89c7691. An error carrying a held-out task's text in its message, its name
+  // and its cause leaves heldOut and heldOutAsync as a HeldOutError whose message, stack, cause and
+  // printed form, as node prints an uncaught error, hold none of it; and the measured run's record
+  // and log say only what the boundary made of it.
+  const secret = "SECRET_HELDOUT_TEXT";
+  const met = () => {
+    const e = new Error(`not a signature: ${secret} a b`, { cause: new Error(secret) });
+    e.name = `${secret}Error`;
+    return e;
+  };
+  const caught: unknown[] = [];
+  try {
+    heldOut("held-out-2 cannot be written in rust", () => {
+      throw met();
+    });
+  } catch (e) {
+    caught.push(e);
+  }
+  await heldOutAsync("a held-out run failed", async () => {
+    throw met();
+  }).catch((e: unknown) => caught.push(e));
+  assert.equal(caught.length, 2);
+  for (const e of caught) {
+    assert.ok(e instanceof HeldOutError);
+    assert.equal(e.cause, undefined);
+    for (const said of [e.message, String(e.stack), String(e), inspect(e)]) assert.ok(!said.includes(secret), `the boundary passed on the task's text: ${said}`);
+  }
+  assert.equal((caught[0] as Error).message, "held-out-2 cannot be written in rust: Error");
+  assert.equal(failureOf(caught[1], "held-out", "held-out-2-rust-claude-haiku-5-5-1"), "a held-out run failed: Error");
+  assert.equal(firstFailure("", caught[1], "held-out", "held-out-2-rust-claude-haiku-5-5-1"), "a held-out run failed: Error");
+  // What it keeps of a run's error: the anomaly and the API's status.
+  await heldOutAsync("a held-out run failed", async () => {
+    throw new RunAnomaly("another model", `an answer from ${secret}`);
+  }).catch((e: unknown) => {
+    assert.equal((e as Error).message, "a held-out run failed: an answer came from another model than the one asked");
+    // And the record and the log say what the boundary made of it.
+    assert.equal(failureOf(e, "held-out", "held-out-2-rust-claude-haiku-5-5-1"), "a held-out run failed: an answer came from another model than the one asked");
+  });
+  await heldOutAsync("a held-out run failed", async () => {
+    throw new Error(`the API answered 400: ${secret}`);
+  }).catch((e: unknown) => assert.equal((e as Error).message, "a held-out run failed: the API answered 400"));
+  // A value that returns passes unchanged.
+  assert.equal(heldOut("x", () => 7), 7);
+  // bench.ts sends every held-out step through it: the reading, each spec with its check, and each
+  // run; and reads the held-out set nowhere else.
+  const bench = readFileSync(join(REPOSITORY, "benchmark", "harness", "bench.ts"), "utf8");
+  assert.match(bench, /const heldTasks = heldOutDir \? readHeldOut\(join\(heldOutDir, "tasks"\), milestone\) : \[\];/);
+  assert.match(bench, /heldOut\(`held-out file \$\{k \+ 1\} could not be read`, \(\) => parseTask\(readFileSync\(join\(dir, f\), "utf8"\)\)\)/);
+  assert.match(bench, /return heldOut\("the held-out set could not be chosen from", \(\) => heldOutTasks\(tasks, milestone\)\);/);
+  assert.match(bench, /if \(set === "held-out"\) specs\.push\(heldOut\(`\$\{label\} cannot be written in \$\{lang\}`, specOf\)\);/);
+  assert.match(bench, /await heldOutAsync\("a held-out run failed", \(\) => runOne\(ctx, spec\)\)/);
+  assert.equal(bench.match(/\bheldOutDir\b/g)?.length, 6, "bench.ts reads the held-out set beyond its check and readHeldOut");
 });
 
 test("every harness that calls the API records, in each attempt, the model that wrote the answer", () => {
@@ -1950,10 +2020,15 @@ test("fetch-held-out.sh checks the held-out set out at its commit, into a direct
 test("start-broker.sh starts the broker alone, its socket the runner's user's, its core limit 0, its environment PATH", { skip: LINUX_ONLY }, async () => {
   const temp = mkdtempSync(join(tmpdir(), "mente-start-"));
   const dir = join(temp, "broker");
-  // The runner's tool cache too, where setup-node put the Node start-broker.sh runs by its path.
-  const env = { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: KEY, BUDGET: "1", RUNNER_TEMP: temp, GITHUB_WORKSPACE: REPOSITORY, RUNNER_TOOL_CACHE: process.env.RUNNER_TOOL_CACHE ?? "" };
+  // A tool cache of its own, laid out as setup-node lays out the runner's, with the Node that runs
+  // this test where start-broker.sh names Node by its path: no variable of the runner's needed.
+  const tools = join(temp, "tools");
+  mkdirSync(join(tools, "node", PERMISSION.node, "x64", "bin"), { recursive: true });
+  symlinkSync(process.execPath, join(tools, "node", PERMISSION.node, "x64", "bin", "node"));
+  const env = { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: KEY, BUDGET: "1", RUNNER_TEMP: temp, GITHUB_WORKSPACE: REPOSITORY, RUNNER_TOOL_CACHE: tools };
   try {
-    const started = spawnSync("bash", [join(REPOSITORY, "benchmark", "harness", "start-broker.sh")], { env, encoding: "utf8", timeout: 60_000 });
+    // In a privileged bash, as its step starts it.
+    const started = spawnSync("/usr/bin/bash", ["-p", join(REPOSITORY, "benchmark", "harness", "start-broker.sh")], { env, encoding: "utf8", timeout: 60_000 });
     assert.equal(started.status, 0, started.stdout + started.stderr);
     // Its directory, socket, log and pid file are the runner's user's alone.
     assert.equal(statSync(dir).mode & 0o777, 0o700, "the broker's directory");

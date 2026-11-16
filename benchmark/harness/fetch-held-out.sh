@@ -4,13 +4,14 @@
 # job's log is public on this public repository, and actions/checkout printed "HEAD is now at <commit>
 # <subject>" there (run 3 of the plan, 2026-11-16). Every line it prints is its own words.
 #
-# Its step starts it under `env -i`, with PATH, a fresh HOME and the commit alone, so that nothing
-# the job's environment holds (SHELLOPTS, BASH_ENV, git's own settings) reaches it; and git reads no
-# system or global configuration either. The token arrives on its standard input, never in an
-# environment or on a command line (the re-check of c55cf8f: env's arguments are readable in /proc),
-# and reaches git as an extra header through git's config environment, masked first; it is never in
-# held-out-set/.git/config, or in any line this script prints. held-out-set must not be there before it, in any form: a link
-# there would have taken the checkout wherever it pointed (the review of aafe59b).
+# Its step starts it under `env -i`, in a privileged bash, with PATH, a fresh HOME and the commit
+# alone, so that nothing the job's environment holds (SHELLOPTS, BASH_ENV, exported functions, git's
+# own settings) reaches it; and git reads no system or global configuration either. The token
+# arrives on its standard input, never in an environment or on a command line (the re-check of
+# c55cf8f: env's arguments are readable in /proc), and reaches git as an extra header through git's
+# config environment, masked first; it is never in held-out-set/.git/config, or in any line this
+# script prints. held-out-set must not be there before it, in any form: a link there would have
+# taken the checkout wherever it pointed (the review of aafe59b).
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 token=""

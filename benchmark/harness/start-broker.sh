@@ -3,7 +3,10 @@
 # (benchmark/harness/broker.ts; docs/design-review.md, untrusted-test-isolation), in the
 # background, and ends once it listens, so that the shell that held the key ends with this step.
 #
-#   ANTHROPIC_API_KEY=<key> BUDGET=<dollars> bash benchmark/harness/start-broker.sh
+#   ANTHROPIC_API_KEY=<key> BUDGET=<dollars> /usr/bin/bash -p benchmark/harness/start-broker.sh
+#
+# Its step runs it in a privileged bash, which imports no exported function: one named `printf`
+# would otherwise run in place of the builtin, with the key (the final pass on 89c7691).
 #
 # The key reaches the broker on its standard input and in no environment: the broker runs with an
 # environment cleared but for PATH (env -i, which also drops NODE_OPTIONS, whose

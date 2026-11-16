@@ -65,7 +65,7 @@ import {
 } from "./build.ts";
 import { LANGUAGES, odinProgram, parseSignature, rustProgram, type Lang, type Signature } from "./languages.ts";
 import { feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
-import { firstFailure, summarize, type RunRecord } from "./report.ts";
+import { firstFailure, heldOut, heldOutAsync, summarize, type RunRecord } from "./report.ts";
 import { benchmarkTasks, extractProgram, heldOutTasks, parseCase, parseTask, type Case, type CaseResult, type Task } from "./tasks.ts";
 import { own, setOwn } from "../own.mjs";
 
@@ -83,6 +83,13 @@ function readTasks(dir: string): Task[] {
     .filter((f) => f.endsWith(".md"))
     .sort()
     .map((f) => parseTask(readFileSync(join(dir, f), "utf8")));
+}
+
+/** The held-out set's tasks of a milestone, each file read through the boundary and named by its place. */
+function readHeldOut(dir: string, milestone: string): Task[] {
+  const files = heldOut("the held-out set could not be listed", () => readdirSync(dir).filter((f) => f.endsWith(".md")).sort());
+  const tasks = files.map((f, k) => heldOut(`held-out file ${k + 1} could not be read`, () => parseTask(readFileSync(join(dir, f), "utf8"))));
+  return heldOut("the held-out set could not be chosen from", () => heldOutTasks(tasks, milestone));
 }
 
 
@@ -306,7 +313,7 @@ async function main(): Promise<void> {
   // The tasks: the milestone's public solve and adversarial tasks, then its held-out solve tasks.
   const publicDir = join(here, "..", "tasks");
   const publicTasks = benchmarkTasks(readTasks(publicDir), milestone, which);
-  const heldTasks = heldOutDir ? heldOutTasks(readTasks(join(heldOutDir, "tasks")), milestone) : [];
+  const heldTasks = heldOutDir ? readHeldOut(join(heldOutDir, "tasks"), milestone) : [];
   const specs: Spec[] = [];
   for (let run = 1; run <= runs; run++) {
     const all: [Task, "public" | "held-out", string][] = [
@@ -317,26 +324,33 @@ async function main(): Promise<void> {
       for (const model of models) {
         for (const lang of languages) {
           const cases = (lines: string[]) => lines.map(parseCase).filter((c): c is Case => c !== null);
-          const spec: Spec = {
-            task,
-            label,
-            name: `${label}-${lang}-${model.id}-${run}`,
-            set,
-            lang,
-            model,
-            run,
-            sig: parseSignature(task.signature),
-            examples: cases(task.examples),
-            scored: cases([...task.examples, ...task.hidden]),
-            probe: task.probe.map((call) => ({ call, expected: "", value: true, leaves: false })),
-          };
-          try {
+          // The spec, from parsing the signature to the check that the task can be written: a
+          // held-out task's goes through the boundary whole, so that no error of it carries its text.
+          const specOf = (): Spec => {
+            const spec: Spec = {
+              task,
+              label,
+              name: `${label}-${lang}-${model.id}-${run}`,
+              set,
+              lang,
+              model,
+              run,
+              sig: parseSignature(task.signature),
+              examples: cases(task.examples),
+              scored: cases([...task.examples, ...task.hidden]),
+              probe: task.probe.map((call) => ({ call, expected: "", value: true, leaves: false })),
+            };
             checkWritable(spec);
-          } catch (e) {
-            // A held-out task's text never reaches the log.
-            throw new Error(set === "public" ? `${task.id} in ${lang}: ${(e as Error).message}` : `${label} cannot be written in ${lang}`);
+            return spec;
+          };
+          if (set === "held-out") specs.push(heldOut(`${label} cannot be written in ${lang}`, specOf));
+          else {
+            try {
+              specs.push(specOf());
+            } catch (e) {
+              throw new Error(`${task.id} in ${lang}: ${(e as Error).message}`);
+            }
           }
-          specs.push(spec);
         }
       }
     }
@@ -407,7 +421,9 @@ async function main(): Promise<void> {
     while (!budget.stopped && next < specs.length) {
       const spec = own(specs, next++);
       try {
-        const record = await runOne(ctx, spec);
+        // A held-out run goes through the boundary, so that its error names only its anomaly, the
+        // API's status or its kind.
+        const record = spec.set === "public" ? await runOne(ctx, spec) : await heldOutAsync("a held-out run failed", () => runOne(ctx, spec));
         if (!record) break;
         done.push(record);
         writeFileSync(join(out, spec.set === "public" ? "runs" : "held-out", spec.name, "record.json"), JSON.stringify(record, null, 2));

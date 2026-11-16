@@ -10,17 +10,66 @@ import type { Verdict } from "./build.ts";
 import type { Lang } from "./languages.ts";
 import { own, setOwn } from "../own.mjs";
 
+/** The kinds of error a held-out step may name: JavaScript's own, never a name a task's text set. */
+const ERROR_KINDS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError"]);
+
+/**
+ * Of an error a held-out step met, what may reach the log: the run's anomaly (Anomaly in
+ * broker.ts), the API's status, or the error's kind; never its message, its stack or its cause, any
+ * of which can carry a held-out task's text.
+ */
+function heldOutWhy(e: unknown): string {
+  const anomaly = anomalyOf(e !== null && typeof e === "object" ? (e as { anomaly?: unknown }).anomaly : undefined);
+  if (anomaly !== null) return anomalyWords(anomaly);
+  if (!(e instanceof Error)) return "Error";
+  return own(/the API answered \d+/.exec(e.message), 0) ?? (ERROR_KINDS.has(e.name) ? e.name : "Error");
+}
+
+/**
+ * The one error a step that reads or processes a held-out task leaves with: the step, which names
+ * the task by its place alone, and heldOutWhy of what it met. It is made here, so its stack holds
+ * none of the original's frames or text, and it has no cause.
+ */
+export class HeldOutError extends Error {
+  constructor(step: string, e: unknown) {
+    super(`${step}: ${heldOutWhy(e)}`);
+    this.name = "HeldOutError";
+  }
+}
+
+/**
+ * The boundary every step that reads or processes a held-out task goes through, its reading, its
+ * spec, the check that it can be written and its run: what the step returns passes, and any error
+ * leaves as a HeldOutError naming `step` alone (the final pass on 89c7691: a held-out task's
+ * mangled signature printed itself, from a parse outside the one try that hid such errors).
+ */
+export function heldOut<T>(step: string, run: () => T): T {
+  try {
+    return run();
+  } catch (e) {
+    throw new HeldOutError(step, e);
+  }
+}
+
+/** heldOut for a step that waits, a held-out task's run. */
+export async function heldOutAsync<T>(step: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (e) {
+    throw new HeldOutError(step, e);
+  }
+}
+
 /**
  * What a measured run's record and log say of the error that stopped it: for a public task, the
- * run's name and the error; for a held-out task, only the run's anomaly (Anomaly in broker.ts), the
- * API's status, or the error's kind, never the task.
+ * run's name and the error; for a held-out task, what its boundary made of it (HeldOutError), or,
+ * for an error that did not come through the boundary, heldOutWhy alone, never the task.
  */
 export function failureOf(e: unknown, set: "public" | "held-out", name: string): string {
   const error = e instanceof Error ? e : new Error(String(e));
   if (set === "public") return `${name}: ${error.message}`;
-  const anomaly = anomalyOf(e !== null && typeof e === "object" ? (e as { anomaly?: unknown }).anomaly : undefined);
-  if (anomaly !== null) return `a held-out run failed: ${anomalyWords(anomaly)}`;
-  return `a held-out run failed: ${own(/the API answered \d+/.exec(error.message), 0) ?? error.name}`;
+  if (e instanceof HeldOutError) return e.message;
+  return `a held-out run failed: ${heldOutWhy(e)}`;
 }
 
 /**

@@ -1132,11 +1132,11 @@ const PINNED_FILES = new Map([
   // added anywhere in one, before the key's line or after it, is a change to a gate review sees
   // (the re-check of 4ab15da: `set -x`, or the key written to a file, passed every rule of
   // start-broker.sh's shape).
-  ["benchmark/harness/start-broker.sh", "a265fbf84c1ff02e56c5e2183267569f8740786dffcc7680d834b8fd7dd178af"],
+  ["benchmark/harness/start-broker.sh", "9d3255c058d22c79fb2816413eb066d761ccd022a13eebe96c78f1946055853b"],
   ["benchmark/harness/stop-broker.sh", "1f4ec139da512a920c4eeafad893e451c0629c93ea19bd740ba4b6fc5b092ffa"],
   ["benchmark/harness/lock-sudo.sh", "c6562d1115b5561722fc3657860b057cdbf75190c491b46e19b1cf4a6d132cdc"],
   ["benchmark/harness/sandbox-root.sh", "2298f2a5e113cd18c796a1359c54ffb0cd755b783ae0d056d662e06eaf24fbc6"],
-  ["benchmark/harness/fetch-held-out.sh", "13f3b60dfd00e0034c82ec8d8ff361a3d8b7d6bcb4779d54f9e75ae5c5843163"],
+  ["benchmark/harness/fetch-held-out.sh", "c16dff5677b17c9d6e9090cf35f93dc9f58782a182b2e417f1d23482fdce9792"],
   // The broker's own module, which start-broker.sh names through the workspace's path.
   ["benchmark/harness/broker.ts", "156cbd599a100b3a483d5ea8f3d8695bcbe9763ffb3312eb76bd2edb7c4e5799"],
   // Every file a secret job runs before its secret steps, with every module those import: none of
@@ -1169,9 +1169,9 @@ const PINNED_JOBS = new Map([
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "4e6efc58580a30edeadd6ecf4464bd7ae2727083f3daa060f105aca1969ed0e8"],
   ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
-  ["benchmark.yml#bench", "fd0a7134d75d81a5d806713686c09512c63f7bcecdc4728900ea0490bb763345"],
-  ["prelim.yml#prelim", "8cdbd87b6e25f49f467a4fd29be22c5623cfa4345d0232a1eb96f52e5b06ecb8"],
-  ["probe.yml#write", "b2101824c75847a1df40aec2ca58ba1fdbc9ab118d22f8e38e038f7bf61653ae"],
+  ["benchmark.yml#bench", "5fe155416addc5eae5e51174842ae3bdf8e69ffdd1879ba691c482b60a03c971"],
+  ["prelim.yml#prelim", "ac6eadf49ad0da4d645891fc15d16450c3dbd0905926e5c9c92b548ed7557bc7"],
+  ["probe.yml#write", "0830c255940ceb132a7f00e0426efe6de5c4d1287edb351e8cffd93311c51b34"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -2832,9 +2832,16 @@ const quoteFlag = (f) => (f.includes("=$") ? f.replace(/=(.*)$/, '="$1"') : f);
 /// The shell of every step that holds a secret: env drops what bash reads before the step's first
 /// line, BASH_ENV and ENV, which it runs, and SHELLOPTS and BASHOPTS, which can turn tracing on, from
 /// an environment any earlier step could have written through $GITHUB_ENV; then bash, by its path,
-/// reads no profile and stops at the first failure (the re-check of c55cf8f: the runner's own bash
-/// ran a BASH_ENV with the token present, and traced it).
-export const SECRET_SHELL = "/usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS /usr/bin/bash --noprofile --norc -eo pipefail {0}";
+/// reads no profile, runs privileged, which imports no exported function and reads none of those
+/// variables either, and stops at the first failure (the re-check of c55cf8f: the runner's own bash
+/// ran a BASH_ENV with the token present, and traced it; the final pass on 89c7691: an exported
+/// `printf` printed the token, and the key). Every bash a secret step starts is privileged too.
+///
+/// What the shell cannot drop: LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT load into /usr/bin/env
+/// itself, before it runs. Those are held upstream, by what may write the environment of the secret
+/// steps at all: the job's digest, the one write ENV_WRITES allows, and the pins of every file an
+/// earlier step runs (secretPrefixFiles), which is why those pins matter.
+export const SECRET_SHELL = "/usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS /usr/bin/bash --noprofile --norc -p -eo pipefail {0}";
 /// The step that takes root from the runner's user for the rest of a job, but for the sandbox's
 /// root-owned half, before the sandbox runs anything and before the key is in reach: so that no
 /// process of that user, outside the sandbox, reads the key out of the broker's memory or the
@@ -2847,7 +2854,7 @@ export const BROKER_STEP = {
   name: "The broker, the one process that holds the API key",
   env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}", BUDGET: "${{ inputs.budget }}" },
   shell: SECRET_SHELL,
-  run: "/usr/bin/bash benchmark/harness/start-broker.sh",
+  run: "/usr/bin/bash -p benchmark/harness/start-broker.sh",
 };
 /// The last step of a secret job: it stops the broker, whatever came before, and checks that root
 /// is still out of the runner's user's reach.
@@ -2880,7 +2887,7 @@ export const HELD_OUT_STEP = {
   // PATH, a fresh HOME and the commit alone, so that SHELLOPTS, BASH_ENV or git's settings in the
   // job's environment reach none of it (the review of aafe59b: tracing printed the token before its
   // mask; the re-check of c55cf8f: a shim first on PATH received it).
-  run: "home=\"$(/usr/bin/mktemp -d)\"\nprintf '%s\\n' \"$HELD_OUT_TOKEN\" | /usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$home\" HELD_OUT_COMMIT=\"$HELD_OUT_COMMIT\" /usr/bin/bash --noprofile --norc benchmark/harness/fetch-held-out.sh\n",
+  run: "home=\"$(/usr/bin/mktemp -d)\"\nprintf '%s\\n' \"$HELD_OUT_TOKEN\" | /usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$home\" HELD_OUT_COMMIT=\"$HELD_OUT_COMMIT\" /usr/bin/bash --noprofile --norc -p benchmark/harness/fetch-held-out.sh\n",
 };
 /// The one write to the environment of later steps a secret job may make before its held-out step
 /// and its broker's: a path of its own, which holds no secret and turns nothing on. Any other could
@@ -3085,9 +3092,13 @@ check("the broker, the one process that holds the key, starts under permission.j
     ["the held-out step in the runner's shell", at(3, { name: HELD_OUT_STEP.name, if: HELD_OUT_STEP.if, env: HELD_OUT_STEP.env, run: HELD_OUT_STEP.run })],
     ["the broker's step in the runner's shell", at(4, { name: BROKER_STEP.name, env: BROKER_STEP.env, run: BROKER_STEP.run })],
     ["a shell that keeps BASH_ENV", at(3, { ...HELD_OUT_STEP, shell: SECRET_SHELL.replace("-u BASH_ENV ", "") })],
+    // The final pass on 89c7691: an exported function in place of printf printed the secret.
+    ["a shell whose bash is not privileged", at(3, { ...HELD_OUT_STEP, shell: SECRET_SHELL.replace(" -p ", " ") })],
+    ["fetch-held-out.sh in a bash that is not privileged", at(3, { ...HELD_OUT_STEP, run: HELD_OUT_STEP.run.replace(" -p ", " ") })],
+    ["start-broker.sh in a bash that is not privileged", at(4, { ...BROKER_STEP, run: BROKER_STEP.run.replace(" -p ", " ") })],
     ["env found through PATH in the held-out step", at(3, { ...HELD_OUT_STEP, run: HELD_OUT_STEP.run.replace("/usr/bin/env ", "env ") })],
     ["mktemp found through PATH", at(3, { ...HELD_OUT_STEP, run: HELD_OUT_STEP.run.replace("/usr/bin/mktemp", "mktemp") })],
-    ["the held-out token on env's command line", at(3, { ...HELD_OUT_STEP, run: 'home="$(/usr/bin/mktemp -d)"\n/usr/bin/env -i PATH=/usr/bin:/bin HOME="$home" HELD_OUT_TOKEN="$HELD_OUT_TOKEN" HELD_OUT_COMMIT="$HELD_OUT_COMMIT" /usr/bin/bash --noprofile --norc benchmark/harness/fetch-held-out.sh\n' })],
+    ["the held-out token on env's command line", at(3, { ...HELD_OUT_STEP, run: 'home="$(/usr/bin/mktemp -d)"\n/usr/bin/env -i PATH=/usr/bin:/bin HOME="$home" HELD_OUT_TOKEN="$HELD_OUT_TOKEN" HELD_OUT_COMMIT="$HELD_OUT_COMMIT" /usr/bin/bash --noprofile --norc -p benchmark/harness/fetch-held-out.sh\n' })],
     ["bash found through PATH in the broker's step", at(4, { ...BROKER_STEP, run: "bash benchmark/harness/start-broker.sh" })],
     ["the key as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.ANTHROPIC_API_KEY }}", "persist-credentials": false } })],
     ["another secret as the checkout's token", at(3, { uses: "actions/checkout@0", with: { token: "${{ secrets.OTHER }}", "persist-credentials": false } })],
@@ -3107,39 +3118,60 @@ check("the broker, the one process that holds the key, starts under permission.j
     assert.ok(brokerProblems("x.yml#y", planted).length > 0, `a secret job with ${what} passes`);
   }
   assert.ok(brokerProblems("x.yml#y", job, { env: { K: "${{ secrets.ANTHROPIC_API_KEY }}" } }).length > 0, "a secret job whose workflow's env holds the key passes");
-  // SECRET_SHELL, run for real, with what an earlier step could have left through $GITHUB_ENV: BASH_ENV and ENV naming a file that prints the token, SHELLOPTS
-  // set to trace, and env, mktemp and bash first on PATH as shims. The held-out step runs none of
-  // them, traces nothing and prints no token, and reaches its script, which refuses the commit
-  // before it fetches anything; the same step in the runner's own shell runs the file with the
-  // token (the re-check of c55cf8f). On Windows, env and bash are Git's, beside the git the policy
-  // runs, which read /usr/bin as Git's own: the shell's text runs unchanged.
+  // SECRET_SHELL, run for real on both secret steps, with what an earlier step could have left
+  // through $GITHUB_ENV: BASH_ENV and ENV naming a file that prints the secret, SHELLOPTS set to
+  // trace, exported functions in place of printf and ulimit that print it, and env, mktemp, mkdir
+  // and bash first on PATH as shims. Each step runs none of them, traces nothing and prints no
+  // secret, and reaches its script, which stops before it fetches or starts anything: the held-out
+  // step at the commit, the broker's at its directory, there already. The same step in the runner's
+  // own shell, no bash of it privileged, prints the secret, so that the run would see each attack
+  // (the re-check of c55cf8f; the final pass on 89c7691, whose exported printf printed the token and
+  // the key). On Windows, env and bash are Git's, beside the git the policy runs, which read /usr/bin
+  // as Git's own: the steps' text runs unchanged.
   {
     const usrBin = (name) => (process.platform === "win32" ? path.resolve(git(["--exec-path"]).trim(), `../../../usr/bin/${name}.exe`) : `/usr/bin/${name}`);
     const posix = (p) => p.replace(/\\/g, "/");
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secret-shell-"));
     try {
-      const token = "held-out-token-0123456789abcdef";
+      const secret = "secret-0123456789abcdef";
       const shims = path.join(dir, "shims");
       const log = path.join(dir, "shims.log");
       fs.mkdirSync(shims);
-      for (const name of ["env", "mktemp", "bash"]) fs.writeFileSync(path.join(shims, name), `#!/bin/sh\necho "${name} from PATH" >> "${log}"\nexit 1\n`, { mode: 0o755 });
+      for (const name of ["env", "mktemp", "mkdir", "bash"]) fs.writeFileSync(path.join(shims, name), `#!/bin/sh\necho "${name} from PATH" >> "${posix(log)}"\nexit 1\n`, { mode: 0o755 });
       const startup = path.join(dir, "startup.sh");
-      fs.writeFileSync(startup, 'echo "a startup file ran with ${HELD_OUT_TOKEN:-no token}"\n');
+      fs.writeFileSync(startup, 'echo "a startup file ran with ${HELD_OUT_TOKEN:-}${ANTHROPIC_API_KEY:-}"\n');
       fs.symlinkSync(path.join(ROOT, "benchmark"), path.join(dir, "benchmark"), "junction");
-      const step = path.join(dir, "step.sh");
-      fs.writeFileSync(step, HELD_OUT_STEP.run);
-      const env = { PATH: `${shims}${path.delimiter}${process.env.PATH ?? ""}`, HOME: posix(dir), BASH_ENV: posix(startup), ENV: posix(startup), SHELLOPTS: "xtrace", HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: "abc" };
-      const [command, ...args] = SECRET_SHELL.replace("{0}", posix(step)).split(" ");
-      assert.equal(command, "/usr/bin/env");
-      const r = spawnSync(usrBin("env"), args, { cwd: dir, env, encoding: "utf8", timeout: 30000 });
-      const printed = `${r.stdout}${r.stderr}`;
-      assert.ok(!fs.existsSync(log), `the held-out step ran a program of its PATH: ${fs.existsSync(log) ? fs.readFileSync(log, "utf8") : ""}`);
-      assert.ok(!printed.includes(token) && !printed.includes("a startup file ran") && !/^\+/m.test(printed), `the held-out step's shell ran a startup file, traced or printed the token: ${printed}`);
-      assert.equal(r.status, 1, printed);
-      assert.match(printed, /no full commit id/, `the held-out step did not reach its script: ${printed}`);
+      fs.mkdirSync(path.join(dir, "temp", "broker"), { recursive: true });
+      const attacks = [
+        ["a startup file", { BASH_ENV: posix(startup), ENV: posix(startup) }],
+        // Each writes to the log, past the pipe printf's output goes into.
+        ["exported functions", { "BASH_FUNC_printf%%": '() { echo "an exported function ran with $*" >&2; }', "BASH_FUNC_ulimit%%": '() { echo "an exported function ran with ${ANTHROPIC_API_KEY:-}" >&2; }' }],
+        ["a trace", { SHELLOPTS: "xtrace" }],
+      ];
+      for (const [what, s, secrets, reached] of [
+        ["the held-out step", HELD_OUT_STEP, { HELD_OUT_TOKEN: secret, HELD_OUT_COMMIT: "abc" }, /no full commit id/],
+        ["the broker's step", BROKER_STEP, { ANTHROPIC_API_KEY: secret, BUDGET: "1", RUNNER_TEMP: posix(path.join(dir, "temp")), GITHUB_WORKSPACE: posix(ROOT), RUNNER_TOOL_CACHE: posix(path.join(dir, "tools")) }, /File exists/],
+      ]) {
+        const step = path.join(dir, "step.sh");
+        for (const [attack, vars] of attacks) {
+          fs.writeFileSync(step, s.run);
+          fs.rmSync(log, { force: true });
+          const env = { PATH: `${shims}${path.delimiter}${process.env.PATH ?? ""}`, HOME: posix(dir), ...vars, ...secrets };
+          const [command, ...args] = s.shell.replace("{0}", posix(step)).split(" ");
+          assert.equal(command, "/usr/bin/env");
+          const r = spawnSync(usrBin("env"), args, { cwd: dir, env, encoding: "utf8", timeout: 30000 });
+          const printed = `${r.stdout}${r.stderr}`;
+          assert.ok(!fs.existsSync(log), `${what}, with ${attack}, ran a program of its PATH: ${fs.existsSync(log) ? fs.readFileSync(log, "utf8") : ""}`);
+          assert.ok(!printed.includes(secret) && !printed.includes("ran with") && !/^\+/m.test(printed), `${what}, with ${attack}, ran it, traced, or printed its secret: ${printed}`);
+          assert.equal(r.status, 1, printed);
+          assert.match(printed, reached, `${what}, with ${attack}, did not reach its script: ${printed}`);
+          // In the runner's own shell, no bash of it privileged, the same step prints the secret.
+          fs.writeFileSync(step, s.run.replaceAll(" -p ", " "));
+          const plain = spawnSync(usrBin("bash"), ["--noprofile", "--norc", "-eo", "pipefail", posix(step)], { cwd: dir, env, encoding: "utf8", timeout: 30000 });
+          assert.ok(`${plain.stdout}${plain.stderr}`.includes(secret), `the simulation shows nothing of ${what} with ${attack}: the runner's shell printed no secret: ${plain.stdout}${plain.stderr}`);
+        }
+      }
       assert.ok(!fs.existsSync(path.join(dir, "held-out-set")), "the held-out step made held-out-set for a commit it refused");
-      const plain = spawnSync(usrBin("bash"), ["--noprofile", "--norc", "-eo", "pipefail", posix(step)], { cwd: dir, env, encoding: "utf8", timeout: 30000 });
-      assert.match(`${plain.stdout}${plain.stderr}`, new RegExp(`a startup file ran with ${token}`), "the simulation shows nothing: the runner's shell ran no startup file");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
