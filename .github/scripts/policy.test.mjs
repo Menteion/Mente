@@ -3712,14 +3712,111 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
 /// The map of the quick checks before a push (tools/quick.mjs), which this policy reads as data.
 const QUICK_MAP = "tools/quick-checks.json";
 
-/// The files `npm run test:ci` runs, as package.json, a gate file, names them.
-const policyEntries = () => String(JSON.parse(read("package.json")).scripts?.["test:ci"] ?? "").match(/[^\s"']+\.mjs/g) ?? [];
+/// The step of the Documentation job that runs this policy, by its name, whose one command the gate
+/// test test_the_documentation_job_runs_the_workflow_policy and the job's pin hold.
+const POLICY_STEP = "The workflow policy, its required checks, path lists, pins and milestone tags";
+
+/// The files the workflow policy's step runs, read from that step, where CI runs them: `node --test`
+/// and its files alone, no other flag, and nothing named NODE_ in the env of the workflow, the job
+/// or the step, through which a preload would load code no file names (the check of 301509a: the
+/// files had been read from package.json's script, which CI does not run). Returns the files, and
+/// what is wrong with the step.
+export function policyStep(doc, job) {
+  const problems = [];
+  const step = steps(job).find((s) => s.name === POLICY_STEP);
+  const run = String(step?.run ?? "").trim();
+  const command = /^node --test((?: [\w./-]+\.mjs)+)$/.exec(run);
+  if (!command) problems.push(`the policy's step runs ${JSON.stringify(run)}, not node --test and its files alone`);
+  for (const [where, env] of [
+    ["the workflow", doc?.env],
+    ["the job", job?.env],
+    ["the step", step?.env],
+  ]) {
+    const named = env !== null && typeof env === "object" ? Object.keys(env).filter((k) => /^NODE_/i.test(k)) : [];
+    if (typeof env === "string" || named.length > 0) problems.push(`${where} sets ${typeof env === "string" ? "its whole env by an expression" : named.join(", ")}, which the policy's step must not see`);
+  }
+  return { entries: command ? command[1].trim().split(" ") : [], problems };
+}
+
+/// The files `git ls-files -s`'s output records as symbolic links (mode 120000): a link at a path
+/// CODEOWNERS holds is held by its own path, not by its target's (the check of 301509a).
+export const symlinksIn = (lsFiles) =>
+  lsFiles
+    .split("\n")
+    .filter((l) => /^120000 /.test(l))
+    .map((l) => l.split("\t").at(1) ?? "");
+
+/// Node's modules through which a module of the policy could load or run code that no import names:
+/// none of the policy's modules imports one.
+const POLICY_REFUSED_MODULES = new Set(["node:vm", "node:worker_threads", "node:module", "node:repl", "node:inspector", "node:wasi"]);
+/// The names, read as code and not in a string or a comment, through which a module loads or runs
+/// code its imports do not show: code from strings, CommonJS's loader, the built-in modules by name,
+/// a worker, and a loader hook (the check of 301509a).
+const POLICY_REFUSED_NAMES = new Set(["eval", "Function", "require", "createRequire", "getBuiltinModule", "Worker", "register"]);
+/// The calls of child_process, by the names the policy's modules import them under.
+const SPAWN_CALLS = new Set(["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]);
+/// The tokens of a piece of code as one text, a literal written as JSON: how a command is compared.
+const tokenText = (toks) => toks.map((x) => (x.t === "str" ? JSON.stringify(x.v) : x.v)).join(" ");
+/// The commands the policy's modules may start, as the first argument of a call of child_process
+/// reads: git, bash through bashPath(), node through process.execPath, and `cargo metadata`, which
+/// compiles nothing and runs no build script (build-time-code.mjs), with the first word of the
+/// arguments each must take, or null for any.
+const POLICY_SPAWN_COMMANDS = new Map(
+  [
+    ['"git"', null],
+    ['process.platform === "win32" ? "git" : "/usr/bin/git"', null],
+    ["bashPath()", null],
+    ["process.execPath", null],
+    ['"cargo"', "metadata"],
+  ].map(([c, first]) => [tokenText(jsTokens(c)), first]),
+);
+
+/// What a module of the policy runs that its imports do not show: a refused module or name, and
+/// each call of child_process that starts another command, or whose arguments name a file of the
+/// repository that no gate pattern holds (`isFile` says what the repository holds).
+export function policyLoads(file, text, isFile) {
+  const problems = [];
+  const toks = jsTokens(text);
+  for (const s of jsImports(toks).specifiers) if (POLICY_REFUSED_MODULES.has(s.v)) problems.push(`${file}:${s.line}: imports ${s.v}, a way to load or run code no import names`);
+  for (let i = 0; i < toks.length; i++) {
+    const tok = toks[i];
+    if (tok.t !== "id") continue;
+    // child_process imported as a namespace or a default, whose calls a reading of names would miss.
+    if (tok.v === "import" && toks[i - 1]?.v !== "." && (toks[i + 1]?.v === "*" || (toks[i + 1]?.t === "id" && toks[i + 1]?.v !== "type"))) {
+      const from = toks.slice(i + 1, i + 8).findIndex((x) => x.t === "id" && x.v === "from");
+      if (from >= 0 && toks[i + 2 + from]?.t === "str" && toks[i + 2 + from]?.v === "node:child_process") problems.push(`${file}:${tok.line}: imports child_process other than by its functions' names, so that a call of it could go unread`);
+    }
+    if (POLICY_REFUSED_NAMES.has(tok.v)) problems.push(`${file}:${tok.line}: ${tok.v}, a way to load or run code no import names`);
+    if (!SPAWN_CALLS.has(tok.v) || toks[i + 1]?.v !== "(" || toks[i - 1]?.v === "." || toks[i - 1]?.v === "function") continue;
+    // The call's arguments, to its closing parenthesis; the first, to its first comma.
+    let depth = 0;
+    let end = i + 1;
+    let firstEnd = -1;
+    for (; end < toks.length; end++) {
+      const v = toks[end].t === "punct" ? toks[end].v : "";
+      if (v === "(" || v === "[" || v === "{") depth++;
+      else if (v === ")" || v === "]" || v === "}") depth--;
+      if (depth === 1 && v === "," && firstEnd < 0) firstEnd = end;
+      if (depth === 0) break;
+    }
+    const command = tokenText(toks.slice(i + 2, firstEnd < 0 ? end : firstEnd));
+    const first = POLICY_SPAWN_COMMANDS.get(command);
+    if (first === undefined) problems.push(`${file}:${tok.line}: ${tok.v} starts ${command}, which is none of git, bash through bashPath(), node through process.execPath and cargo metadata`);
+    else if (first !== null && !(toks[firstEnd + 1]?.v === "[" && toks[firstEnd + 2]?.t === "str" && toks[firstEnd + 2]?.v === first)) problems.push(`${file}:${tok.line}: ${tok.v} starts ${command} other than as ${command} ${first}`);
+    for (const arg of toks.slice(i + 2, end)) {
+      const named = arg.t === "str" ? arg.v.replace(/^\.\//, "") : "";
+      if (named !== "" && isFile(named) && !GATE_FILES.some((p) => owns(p, named))) problems.push(`${file}:${tok.line}: ${tok.v} runs ${named}, which no gate pattern of .github/CODEOWNERS holds`);
+    }
+  }
+  return problems;
+}
 
 /// Every module the workflow policy's tests load, from `entries` through every relative import,
 /// static, `export ... from` or a literal `import("...")`, each text read by `readText`; and what
-/// the reading cannot follow: an import it cannot read, a computed `import(`, or a bare specifier
-/// other than a Node built-in, which would load code no path of the repository names.
-export function policyModules(entries, readText) {
+/// the reading cannot follow: an import it cannot read, a computed `import(`, a bare specifier other
+/// than a Node built-in, which would load code no path of the repository names, and what each
+/// module runs that its imports do not show (policyLoads).
+export function policyModules(entries, readText, isFile = (f) => tracked().has(f)) {
   const modules = [];
   const problems = [];
   const todo = [...entries];
@@ -3727,12 +3824,14 @@ export function policyModules(entries, readText) {
     const file = todo.shift();
     if (modules.includes(file)) continue;
     modules.push(file);
-    const found = jsImports(jsTokens(readText(file)));
+    const text = readText(file);
+    const found = jsImports(jsTokens(text));
     for (const line of found.unreadable) problems.push(`${file}:${line}: an import the policy cannot follow`);
     for (const s of found.specifiers) {
       if (/^\.{1,2}\//.test(s.v)) todo.push(path.posix.normalize(path.posix.join(path.posix.dirname(file), s.v)));
       else if (!s.v.startsWith("node:")) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a file of the repository nor a Node built-in`);
     }
+    problems.push(...policyLoads(file, text, isFile));
   }
   return { modules, problems };
 }
@@ -3742,13 +3841,20 @@ check("every module the workflow policy's tests load, directly or through anothe
   // .github/CODEOWNERS held, and one line there turned the strict assertions into no-ops: this
   // policy passed 70 of 70 with a computed key planted in the harness. No module it loads may be
   // one an edit without the owner's review can change.
-  const entries = policyEntries();
-  assert.ok(entries.includes(".github/scripts/policy.test.mjs") && entries.includes(".github/scripts/yaml.test.mjs"), `npm run test:ci runs ${entries.join(", ")}`);
+  // The files are read from the step CI runs, and package.json's script, which a session runs, is
+  // that step's command.
+  const docs = allJobs().find(({ file, id }) => file === "ci.yml" && id === "docs");
+  assert.ok(docs, "ci.yml has no Documentation job");
+  const { entries, problems: stepProblems } = policyStep(docs.doc, docs.job);
+  assert.deepEqual(stepProblems, [], "the step that runs this policy");
+  assert.ok(entries.includes(".github/scripts/policy.test.mjs") && entries.includes(".github/scripts/yaml.test.mjs"), `the policy's step runs ${entries.join(", ")}`);
+  assert.equal(JSON.parse(read("package.json")).scripts?.["test:ci"], `node --test ${entries.join(" ")}`, "package.json's test:ci is not the command the Documentation job runs");
   const unowned = (modules) => modules.filter((f) => !GATE_FILES.some((p) => owns(p, f)));
   const { modules, problems } = policyModules(entries, read);
-  assert.deepEqual(problems, [], "the workflow policy loads a module in a way it cannot follow");
+  assert.deepEqual(problems, [], "the workflow policy loads or runs code in a way it cannot follow");
   assert.ok(modules.includes(".github/scripts/lib/yaml.mjs") && modules.includes(".github/scripts/lib/build-time-code.mjs"), modules.join(", "));
   assert.deepEqual(unowned(modules), [], "modules the workflow policy loads that .github/CODEOWNERS does not give its owner");
+  assert.deepEqual(symlinksIn(git(["ls-files", "-s", "--", ...modules])), [], "modules of the workflow policy that are symbolic links");
   // The reviewer's case, planted: a module the policy loads that imports one no pattern holds,
   // through a held module, by a re-export, and by a literal dynamic import; and the loads it cannot
   // follow.
@@ -3761,6 +3867,64 @@ check("every module the workflow policy's tests load, directly or through anothe
   const plant = policyModules([".github/scripts/policy.test.mjs"], (f) => planted.get(f) ?? "");
   assert.deepEqual(unowned(plant.modules).sort(), ["site/markdown.mjs", "tools/y.mjs"], "an import of a module without an owner passed");
   assert.deepEqual(plant.problems.sort(), ["tools/y.mjs:1: imports some-package, which is neither a file of the repository nor a Node built-in", "tools/y.mjs:2: an import the policy cannot follow"]);
+  // The check of 301509a, planted: loads that no import shows, and commands no list holds.
+  const loads = [
+    ['import vm from "node:vm";', "imports node:vm"],
+    ['import { Worker } from "node:worker_threads";', "imports node:worker_threads"],
+    ['import { createRequire } from "node:module";', "imports node:module"],
+    ["const m = process.getBuiltinModule(name);", "getBuiltinModule, a way"],
+    ["const f = new Function(text);", "Function, a way"],
+    ["eval(text);", "eval, a way"],
+    ["const x = require(name);", "require, a way"],
+    ['module.register("./hooks.mjs");', "register, a way"],
+    ['import * as cp from "node:child_process";', "other than by its functions' names"],
+    ['import cp from "node:child_process";', "other than by its functions' names"],
+    ['execFileSync("cargo", ["build"]);', 'starts "cargo" other than as "cargo" metadata'],
+    ['spawnSync("sh", ["-c", "x"]);', 'spawnSync starts "sh", which is none of'],
+    ['execFileSync(cmd, []);', "execFileSync starts cmd, which is none of"],
+    ['spawnSync(process.execPath, ["site/check.mjs"]);', "spawnSync runs site/check.mjs"],
+    ['spawnSync(bashPath(), ["./site/x.sh"]);', "spawnSync runs site/x.sh"],
+    ['fork("site/check.mjs");', 'fork starts "site/check.mjs", which is none of'],
+    ['exec("node site/check.mjs");', 'exec starts "node site/check.mjs", which is none of'],
+    ['const vm = await import("node:vm");', "imports node:vm"],
+    ['import { runInNewContext } from "node:vm";', "imports node:vm"],
+  ];
+  const isFile = (f) => ["site/check.mjs", "site/x.sh", ".github/scripts/tools.sh"].includes(f);
+  for (const [code, said] of loads) {
+    const found = policyLoads("x.mjs", code, isFile);
+    assert.ok(found.some((p) => p.includes(said)), `${code} passed: ${found.join(" | ")}`);
+  }
+  // What the policy does run passes: git, bash on its own scripts, node on an owned file, and the
+  // names in strings and comments.
+  for (const code of [
+    'execFileSync("git", ["ls-files"]);',
+    'execFileSync("cargo", ["metadata", "--locked"]);',
+    'import { execFileSync, spawnSync } from "node:child_process";',
+    'spawnSync(bashPath(), [".github/scripts/tools.sh", mode]);',
+    "spawnSync(process.execPath, [script]);",
+    'const s = "eval(x); require(y)"; // new Function(z)',
+    "const r = /x/.exec(s);",
+  ]) {
+    assert.deepEqual(policyLoads("x.mjs", code, isFile), [], code);
+  }
+  // The step: the files it runs, and what would load code no file names.
+  const stepOf = (run, env = {}) => ({ steps: [{ name: POLICY_STEP, run, ...env }] });
+  assert.deepEqual(policyStep({}, stepOf("node --test a/x.test.mjs b/y.test.mjs")).entries, ["a/x.test.mjs", "b/y.test.mjs"]);
+  for (const [doc, job] of [
+    [{}, stepOf("node --import ./hook.mjs --test a/x.test.mjs")],
+    [{}, stepOf("node --require ./hook.cjs --test a/x.test.mjs")],
+    [{}, stepOf("node --test --experimental-loader ./hook.mjs a/x.test.mjs")],
+    [{}, stepOf("node --test a/x.test.mjs && node b.mjs")],
+    [{}, stepOf("node --test a/x.test.mjs", { env: { NODE_OPTIONS: "--import ./hook.mjs" } })],
+    [{}, { env: { NODE_OPTIONS: "--require ./hook.cjs" }, ...stepOf("node --test a/x.test.mjs") }],
+    [{ env: { NODE_PATH: "x" } }, stepOf("node --test a/x.test.mjs")],
+    [{}, { env: "${{ fromJSON(inputs.env) }}", ...stepOf("node --test a/x.test.mjs") }],
+    [{}, { steps: [] }],
+  ]) {
+    assert.ok(policyStep(doc, job).problems.length > 0, `a step that loads more passed: ${JSON.stringify({ doc, job })}`);
+  }
+  // A symbolic link among the modules.
+  assert.deepEqual(symlinksIn("100644 aaa 0\t.github/scripts/lib/yaml.mjs\n120000 bbb 0\t.github/scripts/lib/x.mjs\n"), [".github/scripts/lib/x.mjs"]);
 });
 
 /// The sandbox every job that confines agent code names, and nothing else may change.
