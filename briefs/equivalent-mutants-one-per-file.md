@@ -3,8 +3,8 @@ id: equivalent-mutants-one-per-file
 status: draft
 type: chore
 awaits: [docs/design-review.md#records-one-per-file]
-affectedFiles: [compiler/mente-cli/tests/mutants/**, compiler/mente-cli/src/mir_mutants.rs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, briefs/equivalent-mutants-one-per-file.md, briefs/archive/equivalent-mutants-one-per-file.md]
-protectedFiles: [.github/**, CLAUDE.md, spec/**]
+affectedFiles: [compiler/mente-cli/tests/mutants/**, compiler/mente-cli/src/mir_mutants.rs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, spec/mir-and-codegen.md, briefs/equivalent-mutants-one-per-file.md, briefs/archive/equivalent-mutants-one-per-file.md, briefs/reference-type-idiom.md]
+protectedFiles: [.github/**, CLAUDE.md]
 ---
 
 # Record each equivalent mutant of the MIR gate in a file of its own
@@ -20,6 +20,6 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**]
 
 ## Invariants
 
-- [ ] A survivor with no file fails the gate, and a file of a mutant some call kills fails it too, as now.
-- [ ] The key function is total over the gate's names and gives no two of them one key, by a test over every name the gate makes.
-- [ ] `node tools/quick.mjs` passes before the push.
+- [x] A survivor with no file fails the gate, and a file of a mutant some call kills fails it too, as now.
+- [x] The key function is total over the gate's names and gives no two of them one key, by a test over every name the gate makes. The gate itself checks it on every run, so a new name that gives no key, or one another name gives, fails the gate where it appears.
+- [x] `node tools/quick.mjs` passes before the push.

@@ -5,8 +5,8 @@
 //! the MIR interpreter. A mutant is killed when, for some call, what it prints, a value, what a
 //! `mut` argument is left holding, or a trap, differs from what the reference interpreter
 //! prints; it survives otherwise. The gate passes when every survivor of a gated program is
-//! recorded in `equivalent.txt`, one line per mutant, with the reason no input can tell it
-//! apart from the original.
+//! recorded in `tests/mutants/equivalent/`, one file per mutant, with the reason no input can tell
+//! it apart from the original ([`Equivalences`]).
 //!
 //! A run of the original that differs from the reference interpreter is a lowering bug, and
 //! fails the gate on its own. Every run fills new stack slots with [`POISON`] rather than
@@ -43,7 +43,8 @@ use mente_sema::CheckedModule;
 
 use crate::mir_run::{self, Printed};
 
-/// The gate's own files, from the repository's root: its programs and `equivalent.txt`.
+/// The gate's own files, from the repository's root: its programs, and the records of its
+/// equivalent mutants in `equivalent/`.
 pub const DIR: &str = "compiler/mente-cli/tests/mutants";
 
 /// A mutant may run this many times the original's instructions, plus [`STEP_ALLOWANCE`],
@@ -88,7 +89,7 @@ pub enum Kill {
 /// One mutant of one program, and what became of it.
 #[derive(Clone, Debug)]
 pub struct Outcome {
-    /// `program::function/block.site/operator`, the name `equivalent.txt` records.
+    /// `program::function/block.site/operator`, the name a record of an equivalent mutant gives.
     pub id: String,
     pub family: Family,
     /// The line and column in the program of what the mutant changes.
@@ -721,42 +722,102 @@ fn task_calls(task: &Path) -> Vec<String> {
 // Equivalences and the verdict
 // -------------------------------------------------------------------------------------------
 
-/// The survivors recorded as equivalent, each with its reason: `equivalent.txt`, one mutant a
-/// line, `program::mutant -- reason`, with `#` starting a comment line.
+/// The survivors recorded as equivalent, each with its reason, by its name,
+/// `program::function/block.site/operator`. Each is a file of its own in
+/// `tests/mutants/equivalent/` (`records::EQUIVALENT_MUTANTS`), named by [`mutant_key`] of the
+/// name its front matter gives, `mutant`, beside its `reason`; the prose after the front matter
+/// says what the mutants of its group share. A survivor without a record fails the gate; so does a
+/// record of a mutant some call kills, or of one the program no longer has. Before recording one,
+/// look for a call that kills it and add that call to the program instead; record only what has
+/// been reasoned through.
 #[derive(Clone, Debug, Default)]
 pub struct Equivalences {
     pub reasons: BTreeMap<String, String>,
 }
 
-impl Equivalences {
-    pub fn parse(text: &str) -> Result<Equivalences, String> {
-        let mut reasons = BTreeMap::new();
-        for (n, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((id, reason)) = line.split_once(" -- ") else {
-                return Err(format!("line {}: not `program::mutant -- reason`", n + 1));
-            };
-            let (id, reason) = (id.trim(), reason.trim());
-            if !id.contains("::") || reason.is_empty() {
-                return Err(format!(
-                    "line {}: a mutant and a written reason are both needed",
-                    n + 1
-                ));
-            }
-            if reasons.insert(id.to_string(), reason.to_string()).is_some() {
-                return Err(format!("line {}: `{}` is recorded twice", n + 1, id));
-            }
+/// The fields of a record of an equivalent mutant, in order.
+pub const RECORD_FIELDS: [&str; 2] = ["mutant", "reason"];
+
+/// The key of the record of the mutant `id`, its file's name: the program's stem and the rest of
+/// the name, each separator (`.`, `:`, `/`, `_`, a space) a hyphen, `>` written `-to-` (`-to`
+/// before a digit), `+` written `-plus` and `-` before a digit `-minus`, so that every word starts
+/// with a letter: `arith.mn::add/b0.i3/int-1` is `arith-add-b0-i3-int-minus1`, and
+/// `arith.mn::add/b0.i5/int>0` is `arith-add-b0-i5-int-to0`. `None` where the result is no key by
+/// `records::is_key`. One function derives every key, so that none is spelled by hand.
+pub fn mutant_key(id: &str) -> Option<String> {
+    let (program, mutant) = id.split_once("::")?;
+    let stem = Path::new(program).file_stem()?.to_str()?;
+    let spelled: Vec<char> = format!("{}-{}", stem, mutant).chars().collect();
+    let mut key = String::new();
+    for (k, &c) in spelled.iter().enumerate() {
+        let digit_next = spelled.get(k + 1).is_some_and(|d| d.is_ascii_digit());
+        match c {
+            '>' if digit_next => key.push_str("-to"),
+            '>' => key.push_str("-to-"),
+            '+' => key.push_str("-plus"),
+            '-' if digit_next => key.push_str("-minus"),
+            '.' | ':' | '/' | '_' | ' ' => key.push('-'),
+            _ => key.push(c),
         }
-        Ok(Equivalences { reasons })
+    }
+    let mut collapsed = String::new();
+    for c in key.chars() {
+        if !(c == '-' && collapsed.ends_with('-')) {
+            collapsed.push(c);
+        }
+    }
+    let key = collapsed.trim_matches('-').to_string();
+    mente_cli::records::is_key(&key).then_some(key)
+}
+
+impl Equivalences {
+    /// The equivalences of `records`, each a mutant's name and its reason.
+    #[cfg(test)]
+    pub fn of(records: &[(&str, &str)]) -> Equivalences {
+        Equivalences {
+            reasons: records
+                .iter()
+                .map(|(id, reason)| (id.to_string(), reason.to_string()))
+                .collect(),
+        }
     }
 
+    /// The mutant and the reason of the record whose file is named `key` and holds `text`: a front
+    /// matter of [`RECORD_FIELDS`], a name of a program's mutant whose [`mutant_key`] is `key`, and
+    /// a written reason.
+    pub fn record(key: &str, text: &str) -> Result<(String, String), String> {
+        let values = mente_cli::records::front_matter(text, &RECORD_FIELDS)?;
+        let (id, reason) = (values[0].clone(), values[1].clone());
+        if !id.contains("::") || reason.is_empty() {
+            return Err(
+                "a mutant of a program, `program::mutant`, and a written reason are both needed"
+                    .to_string(),
+            );
+        }
+        match mutant_key(&id) {
+            Some(k) if k == key => Ok((id, reason)),
+            Some(k) => Err(format!(
+                "the mutant `{}` is recorded in `{}.md`, its key",
+                id, k
+            )),
+            None => Err(format!("the mutant `{}` gives no key", id)),
+        }
+    }
+
+    /// The equivalences recorded under the repository's root `root`, every file of the kind.
     pub fn read(root: &Path) -> Result<Equivalences, String> {
-        let path = root.join(DIR).join("equivalent.txt");
-        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        Equivalences::parse(&text).map_err(|e| format!("{}: {}", path.display(), e))
+        let kind = mente_cli::records::EQUIVALENT_MUTANTS;
+        let dir = root.join(kind.dir);
+        let entries = mente_cli::records::entries(&kind, &dir).map_err(|p| p.join("\n"))?;
+        let mut reasons = BTreeMap::new();
+        for (key, path) in entries {
+            let text =
+                fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+            let (id, reason) = Equivalences::record(&key, &text)
+                .map_err(|e| format!("{}: {}", path.display(), e))?;
+            reasons.insert(id, reason);
+        }
+        Ok(Equivalences { reasons })
     }
 }
 
@@ -864,8 +925,11 @@ impl Report {
         }
         for (id, loc) in &self.unexplained {
             out.push_str(&format!(
-                "  survives with no written reason: {} at {}:{}\n",
-                id, loc.line, loc.col
+                "  survives with no written reason: {} at {}:{}, to record in equivalent/{}.md\n",
+                id,
+                loc.line,
+                loc.col,
+                mutant_key(id).unwrap_or_else(|| "<no key>".to_string())
             ));
         }
         for (id, call) in &self.refuted {
@@ -883,7 +947,7 @@ impl Report {
         out.push_str(if self.passes() {
             "[PASS] every mutant of the gated programs is killed or has a written reason\n"
         } else {
-            "[FAIL] add a call that kills each survivor, or record why none can in equivalent.txt\n"
+            "[FAIL] add a call that kills each survivor, or record why none can in its file of tests/mutants/equivalent/\n"
         });
         out
     }
@@ -924,10 +988,12 @@ pub fn command(root: &Path, reported: bool) -> bool {
 
 /// The verdict on runs already made: every survivor of a gated program must have a written
 /// reason, no recorded mutant may be killed, and no record of a program that ran may name a
-/// mutant it does not have.
+/// mutant it does not have. Every mutant of a gated program must give a key no other gives, so
+/// that a file of its own can record it.
 pub fn verdict(runs: &[ProgramRun], eq: &Equivalences) -> Report {
     let mut report = Report::default();
     let mut seen = std::collections::BTreeSet::new();
+    let mut keys: BTreeMap<String, String> = BTreeMap::new();
     for run in runs {
         let problems = run.problems.iter().map(|p| format!("{}: {}", run.name, p));
         if run.gated {
@@ -948,6 +1014,20 @@ pub fn verdict(runs: &[ProgramRun], eq: &Equivalences) -> Report {
         }
         for o in &run.outcomes {
             seen.insert(o.id.clone());
+            if run.gated {
+                match mutant_key(&o.id) {
+                    None => report
+                        .problems
+                        .push(format!("{} gives no key, so no file can record it", o.id)),
+                    Some(key) => match keys.insert(key.clone(), o.id.clone()) {
+                        Some(other) if other != o.id => report.problems.push(format!(
+                            "{} and {} give one key, {}, so no file can record both",
+                            other, o.id, key
+                        )),
+                        _ => {}
+                    },
+                }
+            }
             let c = counts.entry(o.family).or_default();
             c.mutants += 1;
             match (&o.killed, eq.reasons.contains_key(&o.id)) {
@@ -1031,7 +1111,7 @@ mod tests {
         assert!(run.outcomes.iter().all(|o| !o.id.contains("enter abs")));
     }
 
-    /// A survivor fails the gate until `equivalent.txt` records it with a reason; a record of a
+    /// A survivor fails the gate until a record of `equivalent/` gives it a reason; a record of a
     /// mutant some call kills, or of one the program no longer has, fails it too.
     #[test]
     fn test_a_survivor_without_a_written_reason_fails_the_gate() {
@@ -1045,27 +1125,27 @@ mod tests {
         let ids: Vec<&str> = none.unexplained.iter().map(|(id, _)| id.as_str()).collect();
         assert!(ids.contains(&"t.mn::abs/b0.i2/lt>le"), "{:?}", ids);
 
-        let mut text = String::from("# reasons\n");
-        for id in &ids {
-            text.push_str(&format!("{} -- reasoned in the test\n", id));
-        }
-        let recorded = Equivalences::parse(&text).unwrap();
+        let records: Vec<(&str, &str)> =
+            ids.iter().map(|id| (*id, "reasoned in the test")).collect();
+        let recorded = Equivalences::of(&records);
         let all = verdict(&runs, &recorded);
         assert!(all.passes(), "{:?}", all);
         let c = all.gated.get(&Family::Cmp).copied().unwrap_or_default();
         assert!(c.equivalent >= 1 && c.survived == 0, "{:?}", c);
 
-        let refuted = Equivalences::parse(&format!(
-            "{}t.mn::abs/b0.i2/lt>ge -- wrong: abs(5) tells it apart\n",
-            text
-        ))
-        .unwrap();
+        let refuted = Equivalences::of(
+            &[
+                records.clone(),
+                vec![("t.mn::abs/b0.i2/lt>ge", "wrong: abs(5) tells it apart")],
+            ]
+            .concat(),
+        );
         let wrong = verdict(&runs, &refuted);
         assert!(!wrong.passes());
         assert_eq!(wrong.refuted.len(), 1);
 
         let stale =
-            Equivalences::parse(&format!("{}t.mn::abs/b9.i9/lt>le -- gone\n", text)).unwrap();
+            Equivalences::of(&[records.clone(), vec![("t.mn::abs/b9.i9/lt>le", "gone")]].concat());
         assert_eq!(verdict(&runs, &stale).stale, ["t.mn::abs/b9.i9/lt>le"]);
 
         // A survivor of a program whose calls are fixed is reported, not failed on.
@@ -1074,13 +1154,35 @@ mod tests {
         assert!(report.passes(), "{:?}", report);
         assert!(!report.unexplained_reported.is_empty());
 
-        for bad in [
-            "t.mn::x",
-            "t.mn::x -- ",
-            "x -- why",
-            "t.mn::x -- a\nt.mn::x -- b",
+        // A record is a front matter of the mutant and its reason, in a file named by its key.
+        let record = |mutant: &str, reason: &str| {
+            format!("---\nmutant: {}\nreason: {}\n---\n", mutant, reason)
+        };
+        assert_eq!(
+            Equivalences::record(
+                "t-abs-b0-i2-lt-to-le",
+                &record("t.mn::abs/b0.i2/lt>le", "why")
+            ),
+            Ok(("t.mn::abs/b0.i2/lt>le".to_string(), "why".to_string()))
+        );
+        for (key, text, why) in [
+            (
+                "t-abs-b0-i2-lt-to-ge",
+                record("t.mn::abs/b0.i2/lt>le", "why"),
+                "is recorded in `t-abs-b0-i2-lt-to-le.md`",
+            ),
+            ("t-x", record("t.mn::X", "why"), "gives no key"),
+            ("x", record("x", "why"), "a mutant of a program"),
+            ("t-x", record("t.mn::x", "''"), "a written reason"),
+            (
+                "t-x",
+                "---\nmutant: t.mn::x\n---\n".to_string(),
+                "not the fields",
+            ),
+            ("t-x", "t.mn::x -- why\n".to_string(), "no front matter"),
         ] {
-            assert!(Equivalences::parse(bad).is_err(), "{}", bad);
+            let found = Equivalences::record(key, &text).expect_err(&text);
+            assert!(found.contains(why), "{}: {}", text, found);
         }
     }
 
@@ -1123,7 +1225,7 @@ mod tests {
             problems: Vec::new(),
             calls: 2,
         };
-        let eq = Equivalences::parse("g::f/b0.i3/int-1 -- reasoned\n").unwrap();
+        let eq = Equivalences::of(&[("g::f/b0.i3/int-1", "reasoned")]);
         let report = verdict(&[gated, reported("r"), reported("s")], &eq);
         assert_eq!((report.programs, report.calls), ((1, 2), 7));
         let get = |m: &BTreeMap<Family, Counts>, f| m.get(&f).copied().unwrap_or_default();
@@ -1155,6 +1257,86 @@ mod tests {
         );
         assert_eq!(report.unexplained.len(), 1);
         assert_eq!(report.unexplained_reported.len(), 2);
+    }
+
+    /// A mutant's key is its program's stem and the rest of its name, every word starting with a
+    /// letter; a name that cannot give such a key gives none.
+    #[test]
+    fn test_each_mutant_name_gives_its_key() {
+        for (id, key) in [
+            (
+                "compiler/mente-cli/tests/mutants/arith.mn::add/b0.i3/int-1",
+                Some("arith-add-b0-i3-int-minus1"),
+            ),
+            ("arith.mn::add/b0.i5/int>0", Some("arith-add-b0-i5-int-to0")),
+            ("t.mn::abs/b0.i2/lt>le", Some("t-abs-b0-i2-lt-to-le")),
+            ("t.mn::f/b0.i2/int+1", Some("t-f-b0-i2-int-plus1")),
+            (
+                "s.mn::enter checked/b0.i1/int>-1",
+                Some("s-enter-checked-b0-i1-int-to-minus1"),
+            ),
+            (
+                "c.mn::call/b0.i0/enter-exact",
+                Some("c-call-b0-i0-enter-exact"),
+            ),
+            ("t.mn::x_y", Some("t-x-y")),
+            ("t.mn::X", None),
+            ("t.mn::x/b0.i0/0", None),
+            ("t.mn", None),
+        ] {
+            assert_eq!(mutant_key(id).as_deref(), key, "{}", id);
+        }
+    }
+
+    /// Each mutant of a gated program gives a key of its own, or the gate fails: a file can record
+    /// only one mutant. Reported programs' mutants are never recorded, so they need none.
+    #[test]
+    fn test_each_gated_mutant_gives_a_key_of_its_own() {
+        let run = |name: &str, gated, ids: &[&str]| ProgramRun {
+            name: name.into(),
+            gated,
+            outcomes: ids
+                .iter()
+                .map(|id| Outcome {
+                    id: id.to_string(),
+                    family: Family::Cmp,
+                    loc: Loc::default(),
+                    killed: Some((Kill::Output, "f(1)".to_string())),
+                })
+                .collect(),
+            skipped: Vec::new(),
+            problems: Vec::new(),
+            calls: 1,
+        };
+        let apart = verdict(
+            &[run(
+                "t.mn",
+                true,
+                &["t.mn::x/b0.i0/lt>le", "t.mn::x/b0.i0/lt>ge"],
+            )],
+            &Equivalences::default(),
+        );
+        assert!(apart.passes(), "{:?}", apart.problems);
+        let report = verdict(
+            &[
+                run("t.mn", true, &["t.mn::x_y/b0.i0/lt>le"]),
+                run(
+                    "t_x.mn",
+                    true,
+                    &["t_x.mn::y/b0.i0/lt>le", "t_x.mn::Y/b0.i0/lt>le"],
+                ),
+                run("r.mn", false, &["r.mn::Y/b0.i0/lt>le"]),
+            ],
+            &Equivalences::default(),
+        );
+        assert_eq!(
+            report.problems,
+            [
+                "t.mn::x_y/b0.i0/lt>le and t_x.mn::y/b0.i0/lt>le give one key, t-x-y-b0-i0-lt-to-le, so no file can record both",
+                "t_x.mn::Y/b0.i0/lt>le gives no key, so no file can record it",
+            ]
+        );
+        assert!(report.problems_reported.is_empty() && !report.passes());
     }
 
     /// A call whose array argument has another length is refused alike by the reference
@@ -1520,10 +1702,10 @@ mod tests {
             "  reported problem: q: does not lower\n",
             "  survives: q::g/b1.term/swap at 3:4\n",
             "  problem: p: does not check\n",
-            "  survives with no written reason: p::f/b0.i1/lt>le at 3:4\n",
+            "  survives with no written reason: p::f/b0.i1/lt>le at 3:4, to record in equivalent/p-f-b0-i1-lt-to-le.md\n",
             "  recorded as equivalent, but `f(1)` kills it: p::f/b0.i2/flip\n",
             "  recorded, but the program has no such mutant: p::f/b9.i9/flip\n",
-            "[FAIL] add a call that kills each survivor, or record why none can in equivalent.txt\n",
+            "[FAIL] add a call that kills each survivor, or record why none can in its file of tests/mutants/equivalent/\n",
         ] {
             assert!(shown.contains(line), "no `{}` in:\n{}", line, shown);
         }
@@ -1599,7 +1781,7 @@ mod tests {
         let dir = scratch("command");
         assert!(!command(&dir, false));
         assert!(programs(&dir, true).is_err());
-        put(&dir.join(DIR).join("equivalent.txt"), "# none\n");
+        put(&dir.join(DIR).join("equivalent/.gitkeep"), "");
         put(
             &dir.join(DIR).join("id.mn"),
             "// call: id(true)\nmodule m\npub fn id(x: bool) -> bool = x\n",
@@ -1631,7 +1813,10 @@ mod tests {
             "// call: pick(true)\nmodule m\npub fn pick(c: bool) -> u8 = if c { 1 } else { 2 }\n",
         );
         assert!(!command(&dir, false));
-        put(&dir.join(DIR).join("equivalent.txt"), "not a record\n");
+        put(
+            &dir.join(DIR).join("equivalent/pick-pick.md"),
+            "not a record\n",
+        );
         assert!(!command(&dir, false));
         fs::remove_dir_all(&dir).ok();
     }
