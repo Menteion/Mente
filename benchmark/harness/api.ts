@@ -12,7 +12,7 @@
 // costs, never what the model is shown.
 
 import { readFileSync } from "node:fs";
-import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, worstOfAnyModel as worstOfAnyBody, type Answer } from "./broker.ts";
+import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
 import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -87,11 +87,6 @@ export function worstCost(body: object, model: Model): number {
   return worstOfBody(JSON.stringify(body), MAX_TOKENS, model, LIMITS, thinkingBlocks(body));
 }
 
-/** The most a call could cost whichever model of broker-limits.json answered it, as the broker counts an answer from another model than the one asked. */
-export function worstOfAnyModel(body: object): number {
-  return worstOfAnyBody(JSON.stringify(body), MAX_TOKENS, LIMITS, thinkingBlocks(body));
-}
-
 /** The budget of a run of the benchmark, in US dollars. */
 export interface Budget {
   limit: number;
@@ -135,9 +130,12 @@ export async function budgetedCall(post: Post, budget: Budget, body: object, mod
       settle(budget, worst, cost);
       return { reply, cost };
     } catch (e) {
-      // A lost answer may still have been billed, so it counts at its most; an answer the broker
-      // refused as another model's was billed, and counts as the broker counts it.
-      settle(budget, worst, e instanceof NetworkError ? worst : e instanceof BrokerRefused && e.wrongModel ? worstOfAnyModel(body) : 0);
+      // A lost answer may still have been billed, so it counts at its most. So does an answer the
+      // broker refused as another model's, as the broker counts it; after it the budget, like the
+      // broker, admits nothing more: the run fails on it.
+      const another = e instanceof BrokerRefused && e.wrongModel;
+      settle(budget, worst, e instanceof NetworkError || another ? worst : 0);
+      if (another) budget.stopped = true;
       if (e instanceof BrokerRefused && e.exhausted) {
         budget.stopped = true;
         return null;

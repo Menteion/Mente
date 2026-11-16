@@ -17,7 +17,7 @@
 // earlier replies, the thinking blocks it wrote), and the 5-minute cache, which is all it can price.
 // It hands back only an answer that names, as the model that wrote it, one the requested model may
 // come back as (answeredAs in broker-limits.json), and refuses any other, so that no result is
-// recorded for a model that did not write it.
+// recorded for a model that did not write it; after one, it admits nothing more.
 //
 // It spends within the run's limits, which it reads at its start from broker-limits.json beside
 // it: at most maxRequests requests, at most maxInFlight at once over at most maxConnections
@@ -206,14 +206,6 @@ export function thinkingBlocks(body: unknown): number {
 export function worstCost(bodyText: string, maxTokens: number, price: Price, limits: Pick<Limits, "cacheWrite" | "maxTokens">, thinking: number): number {
   const input = utf8Length(bodyText) + thinking * limits.maxTokens;
   return (factorFor(input, price) * (input * price.input * limits.cacheWrite + maxTokens * price.output)) / 1e6;
-}
-
-/**
- * The most a request could cost whichever model of broker-limits.json answered it: what the broker
- * counts for an answer from a model other than the one asked, whose prices it does not trust.
- */
-export function worstOfAnyModel(bodyText: string, maxTokens: number, limits: Pick<Limits, "cacheWrite" | "maxTokens" | "models">, thinking: number): number {
-  return Math.max(...[...limits.models.values()].map((price) => worstCost(bodyText, maxTokens, price, limits, thinking)));
 }
 
 /**
@@ -436,6 +428,8 @@ export class Broker {
   reserved = 0;
   requests = 0;
   inFlight = 0;
+  /** Whether an answer from another model than the one asked has come back: the broker then admits nothing more this run. */
+  closed = false;
 
   /**
    * Where the broker says, once a run each, what it could not price and which answers from another
@@ -489,6 +483,7 @@ export class Broker {
       return answer({ refused: "a request the broker cannot read" });
     }
     if (typeof request?.id === "number" || typeof request?.id === "string") id = request.id;
+    if (this.closed) return answer({ refused: "a request after an answer from another model than the one asked: the broker admits nothing more this run" });
     const shaped = shape(request?.body, this.limits);
     if ("refused" in shaped) return answer({ refused: shaped.refused });
     const bytes = utf8Length(shaped.text);
@@ -524,11 +519,16 @@ export class Broker {
     }
     const { model, usage } = (plain(parsed) ? parsed : {}) as { model?: unknown; usage?: unknown };
     // An answer from a model other than the one asked never reaches the harness: it would record
-    // that model's work as the other's. It was billed, at prices the broker does not trust, so it
-    // counts at the most any model it names could have cost, and the harness counts it alike.
+    // that model's work as the other's. It was billed, and counts at the requested model's worst,
+    // which admission reserved, so that the run's cap holds: a mismatch makes the answer unusable,
+    // and is no evidence that the API billed it otherwise (the review of b520209: counted at any
+    // model's most, a Haiku request answered as Sonnet took $1.05 of a $0.05 cap). The run fails on
+    // it, so the broker admits nothing more, and what such answers cost stops at what is in flight.
+    // The harness counts it alike, and stops alike.
     const wrong = wrongModel(model, shaped.model, this.limits);
     if (wrong !== null) {
-      this.spent += worstOfAnyModel(shaped.text, shaped.maxTokens, this.limits, shaped.thinking);
+      this.spent += worst;
+      this.closed = true;
       const line = logLine(this.key);
       const allowed = (this.limits.answeredAs.get(shaped.model) ?? []).join(", ");
       const why = "answered" in wrong ? line`the broker refuses an answer from the model ${wrong.answered} to a request for ${shaped.model}, which may come back only as ${allowed}` : line`the broker refuses an answer that names no model to a request for ${shaped.model}`;
