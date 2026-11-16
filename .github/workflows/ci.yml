@@ -359,11 +359,15 @@ jobs:
         with:
           node-version: 24.22.1
           package-manager-cache: false
-      # Exactly a name and a command, first, and through node itself: before npm ci, so that no
-      # install script or npm hook can change what it runs. The Rust jobs' test
+      # Exactly a name and two commands, first, and through node itself: before npm ci, so that no
+      # install script or npm hook can change what they run. The collector gives the policy git's
+      # facts, so that the policy starts no process; then the policy, the tests that run the tree's
+      # scripts, and the YAML reader's (policy-runtime-judge). The Rust jobs' test
       # test_the_documentation_job_runs_the_workflow_policy fails on any other key or order.
       - name: The workflow policy, its required checks, path lists, pins and milestone tags
-        run: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
+        run: |
+          node .github/scripts/policy-collect.mjs
+          node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs
       - name: Every pinned action is the commit its release's tag names
         # The policy checks a pin's form; this asks each action's repository for the commit its
         # tag names (.github/scripts/action-pins.mjs).

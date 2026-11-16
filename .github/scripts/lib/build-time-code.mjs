@@ -28,7 +28,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 export const CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index";
 
@@ -156,6 +155,8 @@ const TOOLCHAIN_LINES = [/^\[toolchain\]$/, /^channel = "\d+\.\d+\.\d+"$/, /^com
 /// those above, or a cargo configuration file anywhere in the tree, above it or in CARGO_HOME,
 /// which can name a wrapper around rustc that cargo would start. Read before rustup or cargo runs.
 /// `top` is the directory the walk up stops at, the filesystem's root unless a test names another.
+/// `tracked` is the files git tracks, which the caller reads: this module starts no process
+/// (policy-runtime-judge), so a caller that names none is refused rather than read for.
 export function toolchainProblems(root, { cargoHome = process.env.CARGO_HOME ?? path.join(process.env.HOME ?? process.env.USERPROFILE ?? "", ".cargo"), tracked, top } = {}) {
   const found = [];
   if (fs.existsSync(path.join(root, "rust-toolchain"))) found.push("a rust-toolchain file beside rust-toolchain.toml: rustup reads it instead");
@@ -176,21 +177,17 @@ export function toolchainProblems(root, { cargoHome = process.env.CARGO_HOME ?? 
   }
   for (const name of ["config", "config.toml"]) configs.add(path.resolve(cargoHome, name));
   for (const f of configs) if (fs.existsSync(f)) found.push(`${f}: a cargo configuration file could name a wrapper around rustc, which cargo would start`);
-  const files = tracked ?? execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\0").filter(Boolean);
-  for (const f of files) if (/(^|\/)\.cargo\/config(\.toml)?$/.test(f)) found.push(`${f}: a cargo configuration file in the tree`);
+  if (!Array.isArray(tracked)) throw new Error("the toolchain's check needs the files git tracks, which its caller reads");
+  for (const f of tracked) if (/(^|\/)\.cargo\/config(\.toml)?$/.test(f)) found.push(`${f}: a cargo configuration file in the tree`);
   return found;
 }
 
-/// What cargo reports of the workspace, with every feature on, so that no optional dependency is
-/// left out, and with the lock as it stands. cargo reads the manifests and fetches the crates the
-/// lock names; it compiles nothing and runs no build script.
-function cargoMetadata(root) {
-  return execFileSync("cargo", ["metadata", "--format-version", "1", "--locked", "--all-features"], { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] });
-}
-
-/// The CLI: the problems found, and what was read. `metadata` stands in for cargo in the policy's
-/// tests.
-export function main(root = process.cwd(), metadata = cargoMetadata, { beforeToolchain = false, toolchain = {} } = {}) {
+/// The CLI's logic: the problems found, and what was read. `metadata` gives cargo's report of the
+/// workspace, and `toolchain.tracked` the files git tracks: .github/scripts/build-time-code.mjs
+/// runs cargo and git for them, and the policy's tests hand in stand-ins. This module starts no
+/// process (policy-runtime-judge).
+export function main(root, metadata, { beforeToolchain = false, toolchain = {} } = {}) {
+  if (typeof metadata !== "function") throw new Error("the build-time check needs a reader of cargo's report, which its caller gives");
   const read = (f) => fs.readFileSync(path.join(root, f), "utf8");
   // The toolchain and cargo's configuration first: rustup installs what rust-toolchain.toml names,
   // and cargo starts what a configuration file names, before any manifest is read.

@@ -44,7 +44,8 @@ ci.yml#tier1-latency: node .github/scripts/build-time-code.mjs --before-toolchai
 ci.yml#tier1-latency: node .github/scripts/build-time-code.mjs
 ci.yml#tier1-latency: MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
 ci.yml#tier1-latency: bash .github/scripts/overflow-proof.sh
-ci.yml#docs: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs
+ci.yml#docs: node .github/scripts/policy-collect.mjs
+ci.yml#docs: node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs
 ci.yml#docs: node .github/scripts/action-pins.mjs
 ci.yml#docs: node .github/scripts/build-time-code.mjs --before-toolchain
 ci.yml#docs: node .github/scripts/build-time-code.mjs

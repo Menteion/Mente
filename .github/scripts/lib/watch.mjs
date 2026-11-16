@@ -21,7 +21,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 export const PATHS_FILE = ".github/instrument-paths.txt";
 /// The files whose change runs every instrument: the lists, the code that reads them, and what
@@ -127,19 +126,11 @@ export function decide(section, eventName, payload, changed) {
   return { run: false, reason: `none of the ${files.length} changed files is a path this instrument watches`, files };
 }
 
-/// The files changed between the merge base of `base` and `head`, and `head`, renames listed as
-/// a deletion and an addition so that a file moved out of a watched path still counts.
-export function gitChanged(base, head, cwd) {
-  const out = execFileSync("git", ["diff", "--name-only", "--no-renames", "-z", `${base}...${head}`], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  return out.split("\0").filter((f) => f !== "");
-}
-
-/// The CLI: decides for `args[0]`, a workflow file name, in the repository at `cwd`.
-export function main(args, env, cwd) {
+/// The CLI's logic: decides for `args[0]`, a workflow file name, in the repository at `cwd`, from
+/// `changed(base, head)`, the files changed between them, which .github/scripts/watch.mjs reads
+/// with git. This module starts no process (policy-runtime-judge).
+export function main(args, env, cwd, changed) {
+  if (typeof changed !== "function") throw new Error("the watch needs a reader of the changed files, which its caller gives");
   const workflow = args[0];
   if (!workflow || args.length !== 1) throw new Error("usage: node .github/scripts/watch.mjs <workflow file name>");
   if (!env.GITHUB_OUTPUT) throw new Error("GITHUB_OUTPUT is not set, so the decision would be lost");
@@ -148,7 +139,7 @@ export function main(args, env, cwd) {
   if (!section) throw new Error(`${PATHS_FILE} has no section [${workflow}]`);
   const eventName = env.GITHUB_EVENT_NAME ?? "";
   const payload = env.GITHUB_EVENT_PATH ? JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
-  const verdict = decide(section, eventName, payload, (b, h) => gitChanged(b, h, cwd));
+  const verdict = decide(section, eventName, payload, changed);
   const line = `${verdict.run ? "Runs" : "Nothing to check"}: ${verdict.reason}.`;
   console.log(line);
   fs.appendFileSync(env.GITHUB_OUTPUT, `run=${verdict.run}\n`);

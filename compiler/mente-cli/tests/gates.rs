@@ -627,9 +627,11 @@ fn package_scripts(text: &str) -> Result<Vec<(String, String)>, String> {
 
 /// The step of ci.yml's Documentation job that runs the workflow policy, exactly: a name and a
 /// command, with no shell, environment, directory or condition of its own, run through node itself.
-const POLICY_STEP: [&str; 2] = [
+const POLICY_STEP: [&str; 4] = [
     "      - name: The workflow policy, its required checks, path lists, pins and milestone tags",
-    "        run: node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs",
+    "        run: |",
+    "          node .github/scripts/policy-collect.mjs",
+    "          node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
 ];
 
 /// The steps before it, exactly: the checkout and node. Nothing has run when the policy does.
@@ -663,7 +665,7 @@ const SCRIPTS: [(&str, &str); 13] = [
     ("test:site", "node --test site/site.test.mjs"),
     (
         "test:ci",
-        "node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs",
+        "node .github/scripts/policy-collect.mjs && node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
     ),
     (
         "verify:docs",
@@ -737,11 +739,13 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         assert!(step.starts_with(start), "a step before the policy: {step}");
     }
     let line = job.iter().position(|l| *l == POLICY_STEP[0]).unwrap();
-    assert_eq!(job[line + 1], POLICY_STEP[1], "the policy step changed");
+    for (k, expected) in POLICY_STEP.iter().enumerate().skip(1) {
+        assert_eq!(job.get(line + k), Some(expected), "the policy step changed");
+    }
     assert!(
-        job.get(line + 2)
+        job.get(line + POLICY_STEP.len())
             .is_some_and(|l| l.starts_with("      - ") || l.trim().starts_with('#')),
-        "the policy step carries more than its name and command"
+        "the policy step carries more than its name and commands"
     );
     assert!(
         job[..line].iter().all(|l| !l.contains("run:")),
@@ -800,6 +804,7 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
     // No test of the policy's suites is skipped, left to do or singled out.
     for suite in [
         ".github/scripts/policy.test.mjs",
+        ".github/scripts/policy-run.test.mjs",
         ".github/scripts/yaml.test.mjs",
     ] {
         let text = fs::read_to_string(root.join(suite)).unwrap();
@@ -810,20 +815,28 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
             );
         }
     }
-    // The policy's floor of checks equals the checks it declares.
-    let policy = fs::read_to_string(root.join(".github/scripts/policy.test.mjs")).unwrap();
-    let checks = policy.lines().filter(|l| l.starts_with("check(\"")).count();
-    let floor: usize = policy
-        .lines()
-        .find_map(|l| l.strip_prefix("const FLOOR = "))
-        .and_then(|v| v.trim_end_matches(';').parse().ok())
-        .expect("the policy declares no FLOOR");
-    assert!(checks > 0);
-    assert_eq!(
-        floor, checks,
-        "the policy's FLOOR is not the number of its checks"
-    );
-    assert!(policy.contains("after(() => {\n  assert.ok(ran >= FLOOR"));
+    // The floor of checks of the policy and of its run tests equals the checks each declares.
+    for suite in [
+        ".github/scripts/policy.test.mjs",
+        ".github/scripts/policy-run.test.mjs",
+    ] {
+        let text = fs::read_to_string(root.join(suite)).unwrap();
+        let checks = text.lines().filter(|l| l.starts_with("check(\"")).count();
+        let floor: usize = text
+            .lines()
+            .find_map(|l| l.strip_prefix("const FLOOR = "))
+            .and_then(|v| v.trim_end_matches(';').parse().ok())
+            .unwrap_or_else(|| panic!("{suite} declares no FLOOR"));
+        assert!(checks > 0, "{suite} declares no check");
+        assert_eq!(
+            floor, checks,
+            "{suite}'s FLOOR is not the number of its checks"
+        );
+        assert!(
+            text.contains("after(() => {\n  assert.ok(ran >= FLOOR"),
+            "{suite} does not fail when fewer checks ran than its FLOOR"
+        );
+    }
 }
 
 /// Every text file in the repository is English: no CJK characters in code, comments, docs or
