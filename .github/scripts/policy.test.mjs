@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 68;
+const FLOOR = 69;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -213,6 +213,61 @@ check("every workflow sets its permissions at the top, read-only wherever a requ
     if ("permissions" in job) {
       assert.ok(readOnly(job.permissions), `${file}, job ${id}: a required job widens its permissions: ${JSON.stringify(job.permissions)}`);
     }
+  }
+});
+
+/**
+ * What lets a workflow's token post a check run or a commit status under any name: `write-all`, or
+ * `checks` or `statuses` write, at the workflow's top or in a job. GitHub matches a required check by
+ * its name and its source, and every required check of main comes from GitHub Actions, as such a
+ * post would. The probe of policy-runtime-judge (2026-11-16, judge-probe's pull request 3) saw a
+ * change's own workflow raise its token so and post a success status and a success check run under
+ * the judge's name. The judge posts through its own App, so no workflow needs either permission.
+ */
+export function verdictWriteProblems(file, doc) {
+  const posts = (p) => p === "write-all" || (isPlain(p) && (p.checks === "write" || p.statuses === "write"));
+  const found = [];
+  if (posts(doc.permissions)) found.push(`${file}: its token may post check runs or commit statuses: ${JSON.stringify(doc.permissions)}`);
+  for (const [id, job] of Object.entries(isPlain(doc.jobs) ? doc.jobs : {})) {
+    if (isPlain(job) && posts(job.permissions)) found.push(`${file}, job ${id}: its token may post check runs or commit statuses: ${JSON.stringify(job.permissions)}`);
+  }
+  return found;
+}
+
+check("no workflow's token can post a check run or a commit status, so none can stand in for a required check", () => {
+  for (const { file, doc } of workflows()) assert.deepEqual(verdictWriteProblems(file, doc), []);
+  // What the workflows hold passes: read alone, and the Pages job's pages and id-token write.
+  const base = { permissions: { contents: "read" }, jobs: { j: { "runs-on": "ubuntu-24.04" } } };
+  assert.deepEqual(verdictWriteProblems("x.yml", base), []);
+  assert.deepEqual(verdictWriteProblems("x.yml", { ...base, jobs: { j: { permissions: { pages: "write", "id-token": "write" } } } }), []);
+  assert.deepEqual(verdictWriteProblems("x.yml", { ...base, permissions: "read-all" }), []);
+  // Planted, at the top and in a job: each way to post one, and the probe's own forging job.
+  const forger = parseYaml(`name: Spoof
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  forger:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      statuses: write
+      checks: write
+    steps:
+      - run: gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="Workflow policy" -f head_sha="$SHA" -f status=completed -f conclusion=success
+`);
+  for (const [what, doc] of [
+    ["checks write at the top", { ...base, permissions: { contents: "read", checks: "write" } }],
+    ["statuses write at the top", { ...base, permissions: { contents: "read", statuses: "write" } }],
+    ["write-all at the top", { ...base, permissions: "write-all" }],
+    ["checks write in a job", { ...base, jobs: { j: { permissions: { checks: "write" } } } }],
+    ["statuses write in a job", { ...base, jobs: { j: { permissions: { statuses: "write" } } } }],
+    ["write-all in a job", { ...base, jobs: { j: { permissions: "write-all" } } }],
+    ["the probe's forging job", forger],
+  ]) {
+    assert.ok(verdictWriteProblems("x.yml", doc).length > 0, `a workflow with ${what} passes`);
   }
 });
 
