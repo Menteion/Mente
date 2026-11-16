@@ -34,22 +34,23 @@ pub const CI_HEADROOM: u128 = CI_PROCESS_BYTES / 4;
 /// The address space glibc keeps for malloc arenas in a process on CI: 64 MiB for each, and up to
 /// eight for each core, 2 GiB on four cores, which Linux's `ulimit -v` counts; the reference
 /// interpreter's segments, each a thread, make them all.
-pub const CI_ARENAS: u128 = 2 << 30;
+pub const CI_ARENAS: u128 = 2_147_483_648;
 
 /// What a test process reserves on CI besides its interpreters' stacks and its arenas: the test
-/// binary, its heap, and the stacks of the threads that run it.
-pub const CI_PROGRAM: u128 = 512 << 20;
-
-/// What fuzz's worker process reserves besides its one interpreter: the 256 MiB stacks `mn`
-/// runs its work on and its phase thread runs on (`fuzz.rs`). Each job is a worker process of
-/// its own, so these never share a process with the interpreters of another job.
-#[cfg(test)]
-pub const FUZZ_STACKS: u128 = 2 * (256 << 20);
+/// binary, its heap, and the stacks of the threads that run it: 512 MiB.
+pub const CI_PROGRAM: u128 = 536_870_912;
 
 /// What the stacks of each interpreter a harness runs may reserve: CI's process, less the
 /// headroom, the arenas and the program, shared by the interpreters CI runs at once in it.
 pub const HOST_ALLOWANCE: u128 =
     (CI_PROCESS_BYTES - CI_HEADROOM - CI_ARENAS - CI_PROGRAM) / CI_THREADS;
+
+/// Whether a program, or a function, whose bound on the reference interpreter's host memory is
+/// `bound` (`mente_interp::host_bound_of`) keeps within [`HOST_ALLOWANCE`]: the one place each
+/// harness asks it.
+pub const fn within_host_allowance(bound: u128) -> bool {
+    bound <= HOST_ALLOWANCE
+}
 
 /// The deepest a function whose frame is at least `frame` bytes may nest, for a run of its calls
 /// to fit [`HOST_ALLOWANCE`] (`mente_interp::host_bound_at`). A harness keeps each program it
@@ -59,7 +60,7 @@ pub const HOST_ALLOWANCE: u128 =
 pub const fn deepest_at(frame: u128) -> u32 {
     let mut depth = 0;
     while depth < mente_syntax::body::NESTING_LIMIT
-        && mente_interp::host_bound_at(frame, depth + 1) <= HOST_ALLOWANCE
+        && within_host_allowance(mente_interp::host_bound_at(frame, depth + 1))
     {
         depth += 1;
     }

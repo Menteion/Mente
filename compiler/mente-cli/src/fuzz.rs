@@ -1131,13 +1131,13 @@ impl Phases {
         // allowance does not run on it, since its run could take more than a test process may
         // (`mir_run::HOST_ALLOWANCE`): it is set aside, and counted as reaching the phase
         // `beyond-host-allowance`, which the run's summary reports with the others.
-        if mente_interp::host_bound_of(&module) > crate::mir_run::HOST_ALLOWANCE {
-            run.phase("beyond-host-allowance", || ());
-        } else {
+        if crate::mir_run::within_host_allowance(mente_interp::host_bound_of(&module)) {
             let panicked = run
                 .phase("interp", || interpret(&module, &functions))
                 .flatten();
             run.report("interp", Kind::Panic, panicked);
+        } else {
+            run.phase("beyond-host-allowance", || ());
         }
         if let Some(lowered) = &lowered {
             let broken = run.phase("mir", || run_mir(lowered, &functions)).flatten();
@@ -2914,7 +2914,7 @@ mod tests {
             mente_interp::host_bound_of(&mente_sema::check_program(&text(levels)).unwrap())
         };
         let over = (1..100)
-            .find(|&l| bound(l) > crate::mir_run::HOST_ALLOWANCE)
+            .find(|&l| !crate::mir_run::within_host_allowance(bound(l)))
             .unwrap();
         let case = |levels: usize| Case {
             text: text(levels),

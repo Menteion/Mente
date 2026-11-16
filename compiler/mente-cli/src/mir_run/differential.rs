@@ -717,7 +717,7 @@ mod tests {
             };
             // Every program keeps within the allowance of the interpreter's host memory.
             assert!(
-                mente_interp::host_bound_of(m) <= super::super::HOST_ALLOWANCE,
+                super::super::within_host_allowance(mente_interp::host_bound_of(m)),
                 "seed {} passes the host allowance: {} bytes",
                 seed,
                 mente_interp::host_bound_of(m)
@@ -752,13 +752,14 @@ mod tests {
     /// quarter of what a process may reserve kept as headroom, which is read where
     /// `.github/scripts/limits.sh` sets it for Linux and for Windows. Both processes that run
     /// generated or mutated programs fit: the comparison's, with an interpreter on each of CI's
-    /// cores, and fuzz's worker, with one interpreter beside its two large stacks. A function of
-    /// the narrowest frame nests less deep within it than one of a wide frame.
+    /// cores, and fuzz's worker, with one interpreter beside the two stacks of `mn`'s work and
+    /// its phase thread. A function of the narrowest frame nests 10 levels within it, one of a
+    /// wide frame 22; a bound of the allowance keeps within it, and a byte more does not.
     #[test]
     fn test_the_host_allowance_fits_ci_memory() {
         use super::super::{
-            deepest_at, CI_ARENAS, CI_HEADROOM, CI_PROCESS_BYTES, CI_PROGRAM, CI_THREADS,
-            FUZZ_STACKS, HOST_ALLOWANCE,
+            deepest_at, within_host_allowance, CI_ARENAS, CI_PROCESS_BYTES, CI_PROGRAM, CI_THREADS,
+            HOST_ALLOWANCE,
         };
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/limits.sh");
         let limits = fs::read_to_string(script).unwrap();
@@ -768,9 +769,11 @@ mod tests {
         ] {
             assert!(limits.contains(&set), "limits.sh no longer sets {:?}", set);
         }
-        let usable = CI_PROCESS_BYTES - CI_HEADROOM;
+        // A quarter of what a process may reserve is headroom, which no bound counts on.
+        let usable = CI_PROCESS_BYTES / 4 * 3;
+        let fuzz_stacks = 2 * crate::STACK as u128;
         let compared = CI_THREADS * HOST_ALLOWANCE + CI_ARENAS + CI_PROGRAM;
-        let fuzzed = HOST_ALLOWANCE + FUZZ_STACKS + CI_ARENAS + CI_PROGRAM;
+        let fuzzed = HOST_ALLOWANCE + fuzz_stacks + CI_ARENAS + CI_PROGRAM;
         let (narrow, wide) = (deepest_at(64 + 4), deepest_at(64 + 4 + 5 * 16));
         println!(
             "{} bytes an interpreter: {} for the comparison's process, {} for fuzz's worker, of {} \
@@ -779,12 +782,9 @@ mod tests {
         );
         assert!(compared <= usable && fuzzed <= usable);
         assert!(CI_THREADS * (HOST_ALLOWANCE + CI_THREADS) + CI_ARENAS + CI_PROGRAM > usable);
-        assert!(
-            narrow >= 6 && wide >= 21 && narrow < wide,
-            "{} {}",
-            narrow,
-            wide
-        );
+        assert_eq!((narrow, wide), (10, 22));
+        assert!(within_host_allowance(HOST_ALLOWANCE));
+        assert!(!within_host_allowance(HOST_ALLOWANCE + 1));
     }
 
     #[test]

@@ -2160,3 +2160,40 @@ fn element(v: &Value, i: Int, span: Span) -> Flow<&Value> {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recurses `levels` times, each frame holding a KiB, and probes at the bottom as a function
+    /// a step runs without checking again does.
+    #[inline(never)]
+    fn below(m: &mut Machine<'_>, levels: u32) {
+        let pad = [0u8; 1024];
+        std::hint::black_box(&pad);
+        if levels == 0 {
+            m.touch();
+        } else {
+            below(m, levels - 1);
+        }
+        std::hint::black_box(&pad);
+    }
+
+    /// A machine's probe records how far below its last check the host stack reaches where it
+    /// stands, and how far below its start the current call does, so that a step's measure takes
+    /// in what runs below the step's last check (`crate::host`): nine frames of a KiB each lie at
+    /// least 8 KiB below where the machine began.
+    #[test]
+    fn test_a_machines_probe_records_how_deep_a_step_reaches() {
+        let module =
+            match mente_sema::check_program_without_proofs("module m\npub fn f() -> u8 = 0\n") {
+                Ok(m) => m,
+                Err(d) => panic!("{:?}", d),
+            };
+        let mut m = Machine::new(&module, Limits::default(), None);
+        assert_eq!((m.deepest_step(), m.per_call()), (0, 0));
+        below(&mut m, 8);
+        assert!(m.deepest_step() >= 4096, "{}", m.deepest_step());
+        assert!(m.per_call() >= 4096, "{}", m.per_call());
+    }
+}

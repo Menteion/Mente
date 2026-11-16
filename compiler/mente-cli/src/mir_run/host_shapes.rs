@@ -61,13 +61,21 @@ struct Shape {
     args: Box<dyn Fn(usize) -> Vec<Value>>,
 }
 
+/// The first statement of every shape's body, which widens `q`'s frame: the array it discards is
+/// held to the end of the statement, 4 KiB as item 25 counts it, so that the budget holds about
+/// 250 calls of `q` and a run to its trap takes a moment. It costs a run next to nothing, since
+/// a repeat narrows its one element, and the host stack a call takes does not grow with it, since
+/// the interpreter keeps a value's elements off the host's stack. It nests no deeper than any
+/// shape's call at the first depth, so the module's nesting stays the shape's.
+const PAD: &str = "_ = [0_u128; 128]\n";
+
 /// The count `q` is first called on, which no budget reaches.
 fn count() -> Vec<Value> {
     vec![Value::Int(Int::from_u128(u128::from(u32::MAX)))]
 }
 
-/// `q(n: u32) -> u32 = <body>`, whose body is `open(i)` for each level `i` from the outside in,
-/// the call `q(n - 1)`, and `close(i)` from the inside out, after the declarations `before`.
+/// `q(n: u32) -> u32`, whose body is [`PAD`], then `open(i)` for each level `i` from the outside
+/// in, the call `q(n - 1)`, and `close(i)` from the inside out, after the declarations `before`.
 fn nested(
     name: &str,
     before: &'static str,
@@ -80,8 +88,8 @@ fn nested(
             let opened: String = (0..k).map(&open).collect();
             let closed: String = (0..k).rev().map(&close).collect();
             format!(
-                "module m\n{}pub fn q(n: u32) -> u32 = {}q(n - 1){}\n",
-                before, opened, closed
+                "module m\n{}pub fn q(n: u32) -> u32 {{\n{}{}q(n - 1){}\n}}\n",
+                before, PAD, opened, closed
             )
         }),
         args: Box::new(|_| count()),
@@ -121,8 +129,9 @@ fn shapes() -> Vec<Shape> {
                 let params: String = (1..k).map(|i| format!(", c{}: bool", i)).collect();
                 let args: String = (1..k).map(|i| format!(", c{}", i)).collect();
                 format!(
-                    "module m\npub fn q(n: u32{}) -> u32 = {}q(n{}){}\n",
+                    "module m\npub fn q(n: u32{}) -> u32 {{\n{}{}q(n{}){}\n}}\n",
                     params,
+                    PAD,
                     open,
                     args,
                     "\n} else {\n  0\n}".repeat(k - 1)
@@ -150,7 +159,8 @@ fn shapes() -> Vec<Shape> {
             name: "if without else".into(),
             text: Box::new(|k| {
                 format!(
-                    "module m\npub fn q(n: u32) -> u32 {{\n{}_ = q(n - 1){}\n0\n}}\n",
+                    "module m\npub fn q(n: u32) -> u32 {{\n{}{}_ = q(n - 1){}\n0\n}}\n",
+                    PAD,
                     "if n > 0 {\n".repeat(k),
                     "\n}".repeat(k)
                 )
@@ -276,7 +286,8 @@ fn shapes() -> Vec<Shape> {
             name: "-x".into(),
             text: Box::new(|k| {
                 format!(
-                    "module m\npub fn q(n: i64) -> i64 = {}q(n - 1){}\n",
+                    "module m\npub fn q(n: i64) -> i64 {{\n{}{}q(n - 1){}\n}}\n",
+                    PAD,
                     "-(".repeat(k),
                     ")".repeat(k)
                 )
@@ -288,8 +299,8 @@ fn shapes() -> Vec<Shape> {
             text: Box::new(|k| {
                 let ty = format!("{}u32", "[1]".repeat(k));
                 format!(
-                    "module m\npub fn q(n: u32, a: {}) -> u32 = q(n - 1, a)\n",
-                    ty
+                    "module m\npub fn q(n: u32, a: {}) -> u32 {{\n{}q(n - 1, a)\n}}\n",
+                    ty, PAD
                 )
             }),
             args: Box::new(|k| {
@@ -386,9 +397,22 @@ fn measure() -> Result<Vec<Measured>, String> {
                     shape.name, k, outcome
                 ));
             }
+            // The pad widens the frame alone: the module nests as deep without it.
+            let nesting = mente_interp::nesting(&m);
+            let unpadded = mente_sema::check_program_without_proofs(&text.replacen(PAD, "", 1))
+                .map(|m| mente_interp::nesting(&m));
+            if unpadded.as_ref().ok() != Some(&nesting) {
+                return Err(format!(
+                    "the shape `{}` at {} nests {} levels with its pad, and {:?} without",
+                    shape.name,
+                    k,
+                    nesting,
+                    unpadded.map_err(|d| d.len())
+                ));
+            }
             out.push(Measured {
                 shape: shape.name.clone(),
-                nesting: mente_interp::nesting(&m),
+                nesting,
                 per_call,
             });
         }
@@ -473,8 +497,9 @@ fn required() -> BTreeSet<String> {
     all
 }
 
-/// Whether every call of every shape keeps within this build's figures for its nesting: a report
-/// of each shape's figures, or one that names each shape that does not.
+/// Whether every call of every shape keeps within this build's figures for its nesting, and takes
+/// more host stack nested deeper: a report of each shape's figures, or one that names each shape
+/// that does not.
 pub(super) fn figures_hold() -> Result<String, String> {
     let (call, level) = mente_interp::host_figures();
     let measured = measure()?;
@@ -494,6 +519,14 @@ pub(super) fn figures_hold() -> Result<String, String> {
         if let [a, b] = pair {
             let levels = b.nesting.saturating_sub(a.nesting).max(1) as usize;
             let per_level = b.per_call.saturating_sub(a.per_call) / levels;
+            // Each level of nesting adds to the host stack a call takes, so a measure that does
+            // not grow with the nesting measures nothing.
+            if per_level == 0 {
+                over.push(format!(
+                    "`{}` takes {} bytes a call at nesting {} and {} at {}: the measure does not grow with the nesting",
+                    a.shape, a.per_call, a.nesting, b.per_call, b.nesting
+                ));
+            }
             if per_level > widest.0 {
                 widest = (per_level, a.shape.clone());
             }

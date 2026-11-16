@@ -17,6 +17,7 @@
 //! [`mir-control-flow`]: ../../docs/design-review.md#mir-control-flow
 
 use std::fmt;
+use std::ops::Range;
 
 use crate::NodeId;
 
@@ -779,36 +780,29 @@ fn successors(term: &Term) -> Vec<BlockId> {
 
 /// The dominator tree of a function's blocks reached from its entry: each block's immediate
 /// dominator, by the iterative algorithm of Cooper, Harvey and Kennedy over reverse postorder, and
-/// each block's place in a walk of the tree, so that whether one block dominates another is read
-/// in constant time.
+/// the blocks each block dominates as a range of a walk of the tree, so that whether one block
+/// dominates another is read in constant time.
 struct Dominators {
-    /// Each block's place on entry to it, and on leaving it, in a walk of the tree; none for a
-    /// block no path reaches.
-    span: Vec<Option<(usize, usize)>>,
+    /// The places, in the order a walk of the tree enters the blocks, of each block and of the
+    /// blocks it dominates; none for a block no path reaches.
+    span: Vec<Option<Range<usize>>>,
 }
 
 impl Dominators {
+    /// The dominators of `f`, which has an entry block and jumps only to its own blocks: the
+    /// verifier checks both before it reads the order of values (`verify_function`).
     fn of(f: &Function) -> Dominators {
         let n = f.blocks.len();
         let next: Vec<Vec<usize>> = f
             .blocks
             .iter()
-            .map(|b| {
-                successors(&b.term)
-                    .iter()
-                    .map(|t| t.0 as usize)
-                    .filter(|t| *t < n)
-                    .collect()
-            })
+            .map(|b| successors(&b.term).iter().map(|t| t.0 as usize).collect())
             .collect();
         // Reverse postorder of the blocks reached, by a walk that keeps its own stack.
         let mut order = Vec::new();
         let mut seen = vec![false; n];
-        let mut stack: Vec<(usize, usize)> = Vec::new();
-        if n > 0 {
-            seen[0] = true;
-            stack.push((0, 0));
-        }
+        seen[0] = true;
+        let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
         while let Some((b, k)) = stack.pop() {
             match next[b].get(k) {
                 Some(&t) => {
@@ -833,9 +827,7 @@ impl Dominators {
             }
         }
         let mut idom = vec![usize::MAX; n];
-        if n > 0 {
-            idom[0] = 0;
-        }
+        idom[0] = 0;
         let meet = |idom: &[usize], mut a: usize, mut b: usize| {
             while a != b {
                 while rank[a] > rank[b] {
@@ -872,24 +864,20 @@ impl Dominators {
         for &b in order.iter().skip(1) {
             children[idom[b]].push(b);
         }
+        // A block is entered before the blocks it dominates and left after them, so they are
+        // the blocks entered from its own entry until it is left.
         let mut span = vec![None; n];
-        let mut clock = 0;
-        let mut walk: Vec<(usize, bool)> = Vec::new();
-        if n > 0 {
-            walk.push((0, false));
-        }
-        while let Some((b, done)) = walk.pop() {
-            if done {
-                if let Some((start, _)) = span[b] {
-                    span[b] = Some((start, clock));
+        let mut entered = 0;
+        let mut walk: Vec<(usize, Option<usize>)> = vec![(0, None)];
+        while let Some((b, start)) = walk.pop() {
+            match start {
+                Some(start) => span[b] = Some(start..entered),
+                None => {
+                    walk.push((b, Some(entered)));
+                    entered += 1;
+                    walk.extend(children[b].iter().map(|c| (*c, None)));
                 }
-                clock += 1;
-                continue;
             }
-            span[b] = Some((clock, clock));
-            clock += 1;
-            walk.push((b, true));
-            walk.extend(children[b].iter().map(|c| (*c, false)));
         }
         Dominators { span }
     }
@@ -903,10 +891,10 @@ impl Dominators {
     /// passes through `a`.
     fn dominates(&self, a: usize, b: usize) -> bool {
         match (
-            self.span.get(a).copied().flatten(),
-            self.span.get(b).copied().flatten(),
+            self.span.get(a).cloned().flatten(),
+            self.span.get(b).cloned().flatten(),
         ) {
-            (Some((a0, a1)), Some((b0, b1))) => a0 <= b0 && b1 <= a1,
+            (Some(a), Some(b)) => a.contains(&b.start),
             (Some(_), None) | (None, Some(_)) | (None, None) => false,
         }
     }
@@ -932,7 +920,8 @@ fn verify_order(f: &Function) -> Result<(), String> {
     let dom = Dominators::of(f);
     let reached = |b: usize| dom.reached(b);
     let available = |a: NodeId, b: usize, place: usize| match defined.get(a.0 as usize) {
-        Some(Some((ab, ap))) => (*ab == b && *ap < place) || (*ab != b && dom.dominates(*ab, b)),
+        Some(Some((ab, ap))) if *ab == b => *ap < place,
+        Some(Some((ab, _))) => dom.dominates(*ab, b),
         _ => false,
     };
     for (b, block) in f.blocks.iter().enumerate() {
@@ -2307,6 +2296,18 @@ mod tests {
         let why = module(ordered(true)).unwrap_err();
         assert!(
             why.contains("is not defined before it on every path"),
+            "{}",
+            why
+        );
+        // `x + 1` taking itself in place of the constant: no instruction is defined before
+        // itself.
+        let mut itself = ordered(false);
+        let sum = itself.blocks[0].insts[1];
+        let (start, _) = itself.operands[sum.0 as usize];
+        itself.pool[start as usize + 1] = sum;
+        let why = module(itself).unwrap_err();
+        assert!(
+            why.contains(&format!("its operand v{} is not defined", sum.0)),
             "{}",
             why
         );

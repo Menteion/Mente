@@ -53,6 +53,7 @@ pub fn host_bound_of(m: &CheckedModule) -> u128 {
 fn types(m: &CheckedModule) -> u32 {
     let structs = m.structs.defs.iter().map(|s| height(s.tree()));
     let enums = m.structs.enums.iter().map(|e| height(e.tree()));
+    let levels = Levels::of_module(m);
     let fields = m
         .structs
         .defs
@@ -63,18 +64,15 @@ fn types(m: &CheckedModule) -> u32 {
                 .iter()
                 .flat_map(|v| v.fields.iter().map(|f| &f.ty))
         }))
-        .map(|t| depth(m, t, 0));
+        .map(|t| levels.of(m, t));
     structs.chain(enums).chain(fields).max().unwrap_or(0)
 }
 
 /// The height of `tree`: the levels of its deepest node, which the parser holds to
-/// `NESTING_LIMIT`.
+/// `NESTING_LIMIT`, so that the search for it starts there.
 fn height(tree: &Tree) -> u32 {
     let (mut low, mut high) = (0, NESTING_LIMIT);
     // `too_deep(limit)` is `None` exactly when no node is higher than `limit`.
-    if tree.too_deep(high).is_some() {
-        return NESTING_LIMIT + 1;
-    }
     while low < high {
         let mid = low + (high - low) / 2;
         if tree.too_deep(mid).is_some() {
@@ -86,32 +84,123 @@ fn height(tree: &Tree) -> u32 {
     low
 }
 
-/// The levels a value of type `t` nests through its elements and fields; `NESTING_LIMIT + 1`
-/// past the limit, where a declaration would name itself (`seen` declarations deep).
-fn depth(m: &CheckedModule, t: &Ty, seen: u32) -> u32 {
-    if seen > NESTING_LIMIT {
-        return NESTING_LIMIT + 1;
+/// The levels a value of each declared struct and enum nests through its fields: one for the
+/// value, and its deepest field's. They are worked out in rounds over the declarations, each from
+/// the last round's, until a round changes none: no declaration contains itself (`E0225`), so a
+/// round settles a declaration whose fields' declarations the round before settled, and the
+/// work grows with the declarations and the chain of them, never with the paths through them.
+struct Levels {
+    structs: Vec<u32>,
+    enums: Vec<u32>,
+}
+
+impl Levels {
+    fn of_module(m: &CheckedModule) -> Levels {
+        let mut levels = Levels {
+            structs: vec![0; m.structs.defs.len()],
+            enums: vec![0; m.structs.enums.len()],
+        };
+        loop {
+            let structs: Vec<u32> = m
+                .structs
+                .defs
+                .iter()
+                .map(|d| 1 + levels.deepest(m, d.fields.iter().map(|f| &f.ty)))
+                .collect();
+            let enums: Vec<u32> = m
+                .structs
+                .enums
+                .iter()
+                .map(|e| {
+                    1 + levels.deepest(
+                        m,
+                        e.variants
+                            .iter()
+                            .flat_map(|v| v.fields.iter().map(|f| &f.ty)),
+                    )
+                })
+                .collect();
+            if structs == levels.structs && enums == levels.enums {
+                return levels;
+            }
+            levels = Levels { structs, enums };
+        }
     }
-    let fields = |tys: Vec<&Ty>| tys.into_iter().map(|t| depth(m, t, seen + 1)).max();
-    1 + match t {
-        Ty::Array(_, elem) => depth(m, elem, seen),
-        Ty::Struct(s) => m
-            .structs
-            .get(s)
-            .and_then(|d| fields(d.fields.iter().map(|f| &f.ty).collect()))
-            .unwrap_or(0),
-        Ty::Enum(e) => m
-            .structs
-            .get_enum(e)
-            .and_then(|d| {
-                fields(
-                    d.variants
-                        .iter()
-                        .flat_map(|v| v.fields.iter().map(|f| &f.ty))
-                        .collect(),
-                )
-            })
-            .unwrap_or(0),
-        Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Any => 0,
+
+    /// The most levels a value of any of `tys` nests, none for none.
+    fn deepest<'t>(&self, m: &CheckedModule, tys: impl Iterator<Item = &'t Ty>) -> u32 {
+        tys.map(|t| self.of(m, t)).max().unwrap_or(0)
+    }
+
+    /// The levels a value of type `t` nests through its elements and fields: one for the value,
+    /// and its element's, or the levels of its declaration.
+    fn of(&self, m: &CheckedModule, t: &Ty) -> u32 {
+        match t {
+            Ty::Array(_, elem) => 1 + self.of(m, elem),
+            Ty::Struct(s) => m.structs.position(s).map_or(1, |i| self.structs[i]),
+            Ty::Enum(e) => m.structs.enum_position(e).map_or(1, |i| self.enums[i]),
+            Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Any => 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(text: &str) -> CheckedModule {
+        match mente_sema::check_program_without_proofs(text) {
+            Ok(m) => m,
+            Err(d) => panic!("{:?}\n{}", d, text),
+        }
+    }
+
+    /// `count` structs, each holding the next `fields` times, the last holding a `u8`, declared
+    /// the first first, so that each round of [`Levels`] settles one more of them; and a function
+    /// that nests next to nothing.
+    fn chain(count: usize, fields: usize) -> String {
+        let mut text = String::from("module m\npub fn f(x: u8) -> u8 = x\n");
+        for i in 0..count {
+            let ty = if i + 1 < count {
+                format!("S{}", i + 1)
+            } else {
+                "u8".to_string()
+            };
+            let held: Vec<String> = (0..fields).map(|k| format!("a{}: {}", k, ty)).collect();
+            text.push_str(&format!("struct S{} {{\n  {}\n}}\n", i, held.join("\n  ")));
+        }
+        text
+    }
+
+    /// A value nests a level for each array, struct and enum it passes through, and its
+    /// innermost value one more; a module nests as deep as its deepest value or tree, and so does
+    /// a call of each of its functions. A field of `S1` in a chain of 12 structs nests 12 levels;
+    /// an enum's variants' fields count as a struct's do.
+    #[test]
+    fn test_a_value_nests_a_level_for_each_type_it_passes_through() {
+        let m = module(&chain(12, 1));
+        assert_eq!(nesting(&m), 12);
+        assert_eq!(function_nesting(&m, 0), 12);
+        let arrays = module(
+            "module m\npub fn f(x: u8) -> u8 = x\nstruct A {\n  x: [2][3]u8\n}\n\
+             enum E {\n  V(a: A)\n  W\n}\nstruct B {\n  e: E\n  f: bool\n}\n",
+        );
+        // `[2][3]u8` nests 3 levels, `A` 4, `E` 5.
+        assert_eq!(Levels::of_module(&arrays).structs, [4, 6]);
+        assert_eq!(Levels::of_module(&arrays).enums, [5]);
+        assert_eq!(nesting(&arrays), 5);
+    }
+
+    /// Structs that each hold the next twice nest as deep as a chain of them, found in the time a
+    /// chain takes: the levels are worked out once a declaration, where following each field
+    /// would take 2^30 paths through 31 of them, the most a value of 4 GiB, kept in one piece, holds.
+    #[test]
+    fn test_types_held_twice_are_counted_once() {
+        let m = module(&chain(31, 2));
+        assert_eq!(nesting(&m), 31);
+        assert_eq!(
+            host_bound_of_function(&m, 0),
+            host_bound_at(m.frames[0].map_or(0, |f| f.bytes), 31)
+        );
     }
 }

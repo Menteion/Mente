@@ -691,11 +691,68 @@ mod tests {
         m
     }
 
+    /// The instructions of each block of function `fi` of `broken`, each by its place in the same
+    /// block of `original`, `i0`, `i1` and on, or `new` where it has none there.
+    fn order(original: &Module, broken: &Module, fi: usize) -> Vec<String> {
+        let before = &original.functions[fi].blocks;
+        broken.functions[fi]
+            .blocks
+            .iter()
+            .zip(before)
+            .map(|(b, o)| {
+                let place = |v: &NodeId| {
+                    o.insts
+                        .iter()
+                        .position(|u| u == v)
+                        .map_or("new".to_string(), |i| format!("i{}", i))
+                };
+                b.insts.iter().map(place).collect::<Vec<_>>().join(" ")
+            })
+            .collect()
+    }
+
+    /// `fn caller(x: i64) -> i64`, which counts and calls `id` on `x`, then counts `id` on what it
+    /// gave and calls it in the next block.
+    fn counted_across_blocks() -> Module {
+        let mut i = Builder::new("id", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = i.params(BlockId(0))[0];
+        i.end(Term::Return(Some(x)));
+        let mut id = i.finish();
+        id.frame = 72;
+        let mut b = Builder::new("caller", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = b.params(BlockId(0))[0];
+        let next = b.block(&[]);
+        let enter = |b: &mut Builder, arg: NodeId| {
+            let trap = Some(b.trap_site("stack-overflow", &["the call stack ran out"]));
+            b.inst(
+                Op::Enter {
+                    callee: FuncId(0),
+                    trap,
+                },
+                Ty::Unit,
+                &[arg],
+            )
+        };
+        enter(&mut b, x);
+        let y = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[x]);
+        enter(&mut b, y);
+        b.end(Term::Jump(next, vec![]));
+        b.switch(next);
+        let z = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[y]);
+        b.end(Term::Return(Some(z)));
+        let m = Module {
+            functions: vec![id, b.finish()],
+            budget: 1 << 20,
+        };
+        cfg::verify(&m).unwrap();
+        m
+    }
+
     /// An `Enter` dropped, doubled, moved past its call, moved past the narrowing check that takes
     /// it, or moved before the call that gives its argument breaks the count of a call's frame
     /// (`core-calculus.md`, item 25), and the verifier refuses each: a count taken where it is not
-    /// defined, or a call that does not close the latest count open. The original verifies and
-    /// runs.
+    /// defined, or a call that does not close the latest count open. Each change stands where its
+    /// name says, its call in the count's block or in a later one. The original verifies and runs.
     #[test]
     fn test_the_verifier_refuses_every_count_out_of_its_place() {
         let m = counted_call();
@@ -731,6 +788,24 @@ mod tests {
                 why
             );
         }
+        let orders: Vec<Vec<String>> = all.iter().map(|(_, broken)| order(&m, broken, 2)).collect();
+        assert_eq!(
+            orders,
+            [
+                ["i1 i2 i3 i4 i5 i6 i7"],
+                ["i0 new i1 i2 i3 i4 i5 i6 i7"],
+                // Past its call.
+                ["i1 i0 i2 i3 i4 i5 i6 i7"],
+                ["i0 i1 i3 i4 i5 i6 i7"],
+                ["i0 i1 i2 new i3 i4 i5 i6 i7"],
+                ["i0 i1 i3 i4 i5 i6 i7 i2"],
+                // Past the check that takes it, before the call that gives its argument.
+                ["i0 i1 i3 i4 i5 i2 i6 i7"],
+                ["i0 i2 i1 i3 i4 i5 i6 i7"],
+                // The call of `id` past the call of `callee`.
+                ["i0 i2 i3 i4 i5 i6 i7 i1"],
+            ]
+        );
         let ran = cfg::run(
             &m,
             FuncId(2),
@@ -739,6 +814,29 @@ mod tests {
             Limits::default(),
         );
         assert_eq!(ran, Ok(int(7)));
+        // A count whose call stands in the next block moves past it there.
+        let across = counted_across_blocks();
+        let all = unpaired(&across);
+        let named: Vec<(&str, Vec<String>)> = all
+            .iter()
+            .map(|(n, broken)| (n.as_str(), order(&across, broken, 1)))
+            .collect();
+        let both = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        assert_eq!(
+            named,
+            [
+                ("caller/b0.i0/enter-dropped", both("i1 i2", "i0")),
+                ("caller/b0.i0/enter-doubled", both("i0 new i1 i2", "i0")),
+                ("caller/b0.i0/enter-moved", both("i1 i0 i2", "i0")),
+                ("caller/b0.i2/enter-dropped", both("i0 i1", "i0")),
+                ("caller/b0.i2/enter-doubled", both("i0 i1 i2 new", "i0")),
+                ("caller/b0.i2/enter-moved", both("i0 i1", "i0 new")),
+                ("caller/b0.i2/enter-earlier", both("i0 i2 i1", "i0")),
+            ]
+        );
+        for (name, broken) in &all {
+            assert!(cfg::verify(broken).is_err(), "{}", name);
+        }
     }
 
     fn named<'a>(m: &Module, all: &'a [Mutant], name: &str) -> &'a Mutant {

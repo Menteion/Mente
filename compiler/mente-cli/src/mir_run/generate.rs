@@ -5715,7 +5715,7 @@ fn too_deep(program: &Program, module: &CheckedModule) -> Vec<usize> {
         .enumerate()
         .filter(|(_, (name, _))| {
             module.index(name).is_some_and(|i| {
-                mente_interp::host_bound_of_function(module, i) > super::HOST_ALLOWANCE
+                !super::within_host_allowance(mente_interp::host_bound_of_function(module, i))
             })
         })
         .map(|(k, _)| k)

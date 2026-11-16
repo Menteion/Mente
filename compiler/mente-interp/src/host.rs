@@ -54,9 +54,14 @@ const THREAD_START: usize = 64 << 10;
 /// where the check found the margin may take [`STEP`], and a step more is headroom; the segment
 /// the next step starts then takes [`THREAD_START`], above the platform's [`STACK_GUARANTEE`] and
 /// [`GUARD_PAGE`]. A thread's stack is address space the platform reserves and commits only as
-/// it is used, so a generous margin costs next to nothing.
-/// `test_a_segment_starts_from_the_least_a_switch_begins_with` holds it.
-pub(crate) const MARGIN: usize = 2 * STEP + THREAD_START + STACK_GUARANTEE + GUARD_PAGE;
+/// it is used, so a generous margin costs next to nothing: `2 * STEP + THREAD_START +
+/// STACK_GUARANTEE + GUARD_PAGE`, 244 KiB, which a build holds it to, and
+/// `test_a_segment_starts_from_the_least_a_switch_begins_with` holds enough.
+pub(crate) const MARGIN: usize = 249_856;
+
+// The margin is the step begun where the check found it, a step more, the start of the next
+// segment's thread, and what the platform keeps of that thread's stack: no build has another.
+const _: () = assert!(MARGIN == 2 * STEP + THREAD_START + STACK_GUARANTEE + GUARD_PAGE);
 
 /// The stack of each thread the interpreter runs on: room for many steps, so that a deep run
 /// starts few segments.
@@ -66,7 +71,7 @@ pub(crate) const SEGMENT: usize = 1024 * STEP;
 /// deepest point it reaches before a call it makes begins: in a build without optimisation, and
 /// in one with it. The shapes a call can stand in hold the build that runs them to its figure
 /// ([`host_figures`]).
-pub(crate) const CALLS: [usize; 2] = [4 << 10, 1 << 10];
+pub(crate) const CALLS: [usize; 2] = [4096, 1024];
 
 /// The most host stack one level of nesting adds to a call, as the parser counts levels
 /// (`NESTING_LIMIT`): in a build without optimisation, and in one with it, held as [`CALLS`] is.
@@ -79,19 +84,18 @@ pub const fn host_figures() -> (usize, usize) {
     (CALLS[build], LEVELS[build])
 }
 
-/// The larger of two figures.
-const fn larger(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
+/// The larger of two figures: their mean and half the distance between them. A comparison would
+/// make a case of a tie, which none of the figures meets, and which no test could tell from the
+/// other case.
+const fn larger(a: u128, b: u128) -> u128 {
+    (a + b + a.abs_diff(b)) / 2
 }
 
 /// The most host stack one open call of a function nesting `depth` levels takes, in any build: a
 /// call's figure and a level's for each level, of the larger build's.
 const fn call_cost(depth: u32) -> u128 {
-    larger(CALLS[0], CALLS[1]) as u128 + larger(LEVELS[0], LEVELS[1]) as u128 * depth as u128
+    let call = larger(CALLS[0] as u128, CALLS[1] as u128);
+    call + larger(LEVELS[0] as u128, LEVELS[1] as u128) * depth as u128
 }
 
 /// What the segments that hold `used` bytes of host stack reserve: each but the last is filled to
@@ -110,13 +114,16 @@ const fn reserved(used: u128) -> u128 {
 /// functions' (`crate::host_bound_of`), a function whose calls take more host stack for each
 /// byte of frame bounding more.
 pub const fn host_bound_at(frame: u128, depth: u32) -> u128 {
-    let frame = if frame < mente_sema::frames::CALL {
-        mente_sema::frames::CALL
-    } else {
-        frame
-    };
-    let calls = mente_sema::frames::BUDGET.div_ceil(frame);
-    reserved(calls * call_cost(depth) + call_cost(mente_syntax::body::NESTING_LIMIT))
+    reserved(host_used_at(frame, depth))
+}
+
+/// The most host stack a run holds at once, before its segments round it up
+/// ([`host_bound_at`]): the calls the budget holds of `frame`, a frame narrower than the call's 64
+/// bytes counting as the call's, each nesting `depth` levels, and one call nesting as deep as the
+/// parser allows.
+const fn host_used_at(frame: u128, depth: u32) -> u128 {
+    let calls = mente_sema::frames::BUDGET.div_ceil(larger(frame, mente_sema::frames::CALL));
+    calls * call_cost(depth) + call_cost(mente_syntax::body::NESTING_LIMIT)
 }
 
 /// The most host memory a run of any program reserves for its stacks, in any build, where nothing
@@ -148,11 +155,14 @@ pub(crate) fn here() -> usize {
 }
 
 /// Whether a call made from a frame whose local lies at `above` places its own locals lower: the
-/// stack grows down, as it does on x86-64 and AArch64, on Linux and on Windows alike.
+/// stack grows down, as it does on x86-64 and AArch64, on Linux and on Windows alike. Lower is
+/// where taking `above` away leaves less than nothing; no two frames share an address.
 #[inline(never)]
 fn deeper_is_lower(above: usize) -> bool {
     let mark = 0u8;
-    (black_box(&mark) as *const u8 as usize) < above
+    (black_box(&mark) as *const u8 as usize)
+        .checked_sub(above)
+        .is_none()
 }
 
 /// Why a segment cannot start: the host's stack grows up, which the segments' reading of what is
@@ -249,6 +259,97 @@ mod tests {
     fn test_the_host_stack_grows_down() {
         assert!(deeper_is_lower(here()));
         assert!(Host::start(0).is_ok());
+        // Every frame lies above the lowest address and below the highest.
+        assert!(!deeper_is_lower(0));
+        assert!(deeper_is_lower(usize::MAX));
+    }
+
+    /// The probe records the largest step from a check to the deepest point before the next, and
+    /// the most host stack a call takes from where it began to the deepest point before a call it
+    /// makes; a step and a call each restore their caller's mark when they end, and a segment's
+    /// records join its starter's.
+    #[test]
+    fn test_the_probe_records_the_deepest_step_and_call() {
+        let mut h = Host {
+            base: 1000,
+            last: 1000,
+            deepest: 0,
+            call: 1000,
+            per_call: 0,
+        };
+        // A check 100 bytes down: a step of 100, and the call has taken as much.
+        assert_eq!(h.enter(900), 1000);
+        assert_eq!((h.deepest(), h.per_call()), (100, 100));
+        // A probe 50 below that check: the step is still 100, the call 150.
+        h.touch(850);
+        assert_eq!((h.deepest(), h.per_call()), (100, 150));
+        // The step ends, and the next, from the outer check, reaches 200 down.
+        h.leave(1000);
+        h.touch(800);
+        assert_eq!((h.deepest(), h.per_call()), (200, 200));
+        // A call begins 300 down, and returns: the call measured from then on is its caller's.
+        assert_eq!(h.called(700), 1000);
+        h.touch(650);
+        assert_eq!((h.deepest(), h.per_call()), (350, 300));
+        h.returned(1000);
+        h.touch(600);
+        assert_eq!((h.deepest(), h.per_call()), (400, 400));
+        // What a segment started at 600 carries of the call, and what its records join.
+        assert_eq!(h.carried(600), 400);
+        let segment = Host {
+            base: 0,
+            last: 0,
+            deepest: 999,
+            call: 0,
+            per_call: 888,
+        };
+        h.absorb(&segment);
+        assert_eq!((h.deepest(), h.per_call()), (999, 888));
+        let quiet = Host {
+            deepest: 1,
+            per_call: 1,
+            ..segment
+        };
+        h.absorb(&quiet);
+        assert_eq!((h.deepest(), h.per_call()), (999, 888));
+    }
+
+    /// The host stack a run holds at once: the calls the budget holds of the frame, each at a
+    /// call's figure and a level's for each level of the build that takes more, and one call as
+    /// deep as the parser allows; a frame narrower than the call's 64 bytes counts as the call's.
+    #[test]
+    fn test_a_run_holds_the_calls_the_budget_holds_at_their_figures() {
+        let deepest = 4096 + 5376 * u128::from(mente_syntax::body::NESTING_LIMIT);
+        assert_eq!(host_used_at(64, 0), 16_384 * 4096 + deepest);
+        assert_eq!(host_used_at(64, 1), 16_384 * (4096 + 5376) + deepest);
+        assert_eq!(host_used_at(68, 10), 15_421 * (4096 + 53_760) + deepest);
+        assert_eq!(host_used_at(0, 3), host_used_at(64, 3));
+        assert_eq!(host_used_at(1, 3), host_used_at(64, 3));
+    }
+
+    /// The segments that hold a run's host stack: each holds what its margin leaves before the
+    /// next begins, and reserves its stack and the guard page below it.
+    #[test]
+    fn test_a_segment_holds_what_its_margin_leaves() {
+        let held = (SEGMENT - MARGIN) as u128;
+        let one = (SEGMENT + GUARD_PAGE) as u128;
+        assert_eq!(reserved(0), one);
+        assert_eq!(reserved(held - 1), one);
+        assert_eq!(reserved(held), 2 * one);
+        assert_eq!(reserved(3 * held), 4 * one);
+    }
+
+    /// The bound at the figures the register gives (`docs/design-review.md`,
+    /// `interpreter-host-memory`): any program nesting no deeper than 10 levels, or as deep as the
+    /// parser allows, and the narrow and the wide frame at the nesting each keeps within the
+    /// harnesses' allowance.
+    #[test]
+    fn test_the_host_bound_gives_the_registers_figures() {
+        assert_eq!(host_bound(0), 100_794_368);
+        assert_eq!(host_bound(10), 957_546_496);
+        assert_eq!(host_bound(256), 22_779_527_168);
+        assert_eq!(host_bound_at(68, 10), 907_149_312);
+        assert_eq!(host_bound_at(148, 22), 907_149_312);
     }
 
     /// Recurses, a frame of a few hundred bytes at a time, until no more than `left` is left of a
