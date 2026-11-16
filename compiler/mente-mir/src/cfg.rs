@@ -243,19 +243,15 @@ pub enum CmpOp {
 }
 
 impl Op {
-    /// Whether an instruction of this kind may be an effect: may trap, read or write memory, or
-    /// count or make a call.
-    fn may_be_effect(&self) -> bool {
+    /// Whether an instruction of this kind follows the latest effect, taking it as its last
+    /// operand, and is the latest after it: one that may trap, read or write memory
+    /// ([`Function::follows`]). A count and a call are effects too, which take the latest as their
+    /// last argument; an exact operation is none. The lowering threads what this names, and the
+    /// verifier reads what it names, so that the two keep one list.
+    pub fn follows_effect(&self) -> bool {
         match self {
-            Op::Arith { .. }
-            | Op::Neg { .. }
-            | Op::Shl { .. }
-            | Op::Check { .. }
-            | Op::Load
-            | Op::Store
-            | Op::Copy { .. }
-            | Op::Enter { .. }
-            | Op::Call(_) => true,
+            Op::Arith { trap, .. } | Op::Neg { trap } => trap.is_some(),
+            Op::Shl { .. } | Op::Check { .. } | Op::Load | Op::Store | Op::Copy { .. } => true,
             Op::Param
             | Op::Int(_)
             | Op::Bool(_)
@@ -265,7 +261,34 @@ impl Op {
             | Op::Cmp(_)
             | Op::Cast
             | Op::Slot { .. }
-            | Op::Elem { .. } => false,
+            | Op::Elem { .. }
+            | Op::Call(_)
+            | Op::Enter { .. } => false,
+        }
+    }
+
+    /// Whether an instruction of this kind is an effect: one that follows the latest effect
+    /// ([`Op::follows_effect`]), or a count or a call, which take it as their last argument.
+    fn is_effect(&self) -> bool {
+        match self {
+            Op::Enter { .. } | Op::Call(_) => true,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Check { .. }
+            | Op::Slot { .. }
+            | Op::Elem { .. }
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. } => self.follows_effect(),
         }
     }
 
@@ -444,11 +467,16 @@ impl Function {
         self.tys[v.0 as usize]
     }
 
-    /// The operands instruction `v` takes besides the effect it follows, where its operation may
-    /// follow one: a checked or exact arithmetic operation, a shift, a check, a load, a store and a
-    /// copy, a check's operands being its condition and the values its trap site reports.
+    /// The operands instruction `v` takes besides the effect it follows, where its operation
+    /// follows one ([`Op::follows_effect`]): a checked arithmetic operation, a shift, a check, a
+    /// load, a store and a copy, a check's operands being its condition and the values its trap
+    /// site reports.
     fn own_arity(&self, v: NodeId) -> Option<usize> {
-        match self.op(v) {
+        let op = self.op(v);
+        if !op.follows_effect() {
+            return None;
+        }
+        match op {
             Op::Arith { .. } | Op::Shl { .. } | Op::Store | Op::Copy { .. } => Some(2),
             Op::Neg { .. } | Op::Load => Some(1),
             Op::Check { trap } => self.traps.get(trap.0 as usize).map(|t| t.text.len()),
@@ -482,11 +510,11 @@ impl Function {
     }
 
     /// Whether `a` can stand for the state the effects before it left: a parameter of type
-    /// [`Ty::Effect`], or an instruction of a kind that may be an effect.
+    /// [`Ty::Effect`], or an instruction that is an effect ([`Op::is_effect`]).
     fn is_effect(&self, a: NodeId) -> bool {
         match self.ops.get(a.0 as usize) {
             Some(Op::Param) => self.tys.get(a.0 as usize) == Some(&Ty::Effect),
-            Some(op) => op.may_be_effect(),
+            Some(op) => op.is_effect(),
             None => false,
         }
     }
@@ -2342,6 +2370,43 @@ mod tests {
             "{}",
             why
         );
+    }
+
+    /// An operand past those an operation takes is the effect it follows, where it follows one, or
+    /// the instruction is refused: a checked addition that takes an integer, or a pure
+    /// instruction's result, past its two operands is refused, and one that takes the function's
+    /// effect there verifies; an exact addition follows no effect, so the same operand past its
+    /// two is refused.
+    #[test]
+    fn test_an_operand_past_an_operations_own_is_the_effect_it_follows() {
+        let addition = |checked: bool, last: usize| {
+            let mut b = Builder::new("f", &[Ty::Int(I64), Ty::Effect], Some(Ty::Int(I64)));
+            let [x, effect] = b.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let one = b.int(I64, Num::from_i128(1));
+            let less = b.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[x, one]);
+            let trap = checked.then(|| b.trap_site("overflow", &["", " does not fit in `i64`"]));
+            let past = [one, less, effect][last];
+            let sum = b.inst(add(trap), Ty::Int(I64), &[x, one, past]);
+            b.end(Term::Return(Some(sum)));
+            verify(&Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+            })
+        };
+        assert_eq!(addition(true, 2), Ok(()));
+        for (checked, last) in [(true, 0), (true, 1), (false, 2)] {
+            let why = addition(checked, last).unwrap_err();
+            // The type check reads three operands where the addition takes two.
+            assert!(
+                why.contains("of type i64 on ["),
+                "{} {}: {}",
+                checked,
+                last,
+                why
+            );
+        }
     }
 
     /// A block is entered with the same counts open on every path into it (`verify_frames`): a

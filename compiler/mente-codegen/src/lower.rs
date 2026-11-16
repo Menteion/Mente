@@ -39,28 +39,6 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
-/// Whether an instruction of `op` follows the latest effect and is the latest after it: one that
-/// may trap, read or write memory. A count and a call are effects too, which take the latest as
-/// their last argument (`Lower::call`); an exact operation is none.
-fn follows(op: &Op) -> bool {
-    match op {
-        Op::Arith { trap, .. } | Op::Neg { trap } => trap.is_some(),
-        Op::Shl { .. } | Op::Check { .. } | Op::Load | Op::Store | Op::Copy { .. } => true,
-        Op::Param
-        | Op::Int(_)
-        | Op::Bool(_)
-        | Op::Bits(_)
-        | Op::Not
-        | Op::Shr
-        | Op::Cmp(_)
-        | Op::Cast
-        | Op::Slot { .. }
-        | Op::Elem { .. }
-        | Op::Call(_)
-        | Op::Enter { .. } => false,
-    }
-}
-
 /// The kind and the text of the trap of a call that runs out of the stack budget
 /// (`core-calculus.md`, item 25).
 pub const RAN_OUT: [&str; 2] = ["stack-overflow", "the call stack ran out"];
@@ -849,7 +827,7 @@ impl<'a> Lower<'a> {
         // An instruction that may trap, read or write memory follows the latest effect, and is
         // the latest after it, so that no change can move one past another (`Function::follows`).
         // A count and a call take the latest effect as their last argument (`Lower::call`).
-        if follows(&op) {
+        if op.follows_effect() {
             let mut with = args.to_vec();
             with.push(self.chain);
             let v = self.b.inst(op, ty, &with);
