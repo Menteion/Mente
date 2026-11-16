@@ -259,25 +259,130 @@ fn test_front_matter_reads_every_case_of_its_fixtures() {
     }
 }
 
-/// Whether `c` is a pictograph: an emoji, a symbol of the emoji blocks, a dingbat, or the selector
-/// that asks for a character's emoji form.
+/// Unicode's property Extended_Pictographic, as ranges of code points, from `emoji-data.txt` of
+/// Unicode 16.0 (https://www.unicode.org/Public/16.0.0/ucd/emoji/emoji-data.txt), adjacent lines
+/// merged: every character Unicode deems pictographic, emoji and those that may become emoji, so
+/// that no hand-picked range lets one through.
+const EXTENDED_PICTOGRAPHIC: &[(u32, u32)] = &[
+    (0xA9, 0xA9),
+    (0xAE, 0xAE),
+    (0x203C, 0x203C),
+    (0x2049, 0x2049),
+    (0x2122, 0x2122),
+    (0x2139, 0x2139),
+    (0x2194, 0x2199),
+    (0x21A9, 0x21AA),
+    (0x231A, 0x231B),
+    (0x2328, 0x2328),
+    (0x2388, 0x2388),
+    (0x23CF, 0x23CF),
+    (0x23E9, 0x23F3),
+    (0x23F8, 0x23FA),
+    (0x24C2, 0x24C2),
+    (0x25AA, 0x25AB),
+    (0x25B6, 0x25B6),
+    (0x25C0, 0x25C0),
+    (0x25FB, 0x25FE),
+    (0x2600, 0x2605),
+    (0x2607, 0x2612),
+    (0x2614, 0x2685),
+    (0x2690, 0x2705),
+    (0x2708, 0x2712),
+    (0x2714, 0x2714),
+    (0x2716, 0x2716),
+    (0x271D, 0x271D),
+    (0x2721, 0x2721),
+    (0x2728, 0x2728),
+    (0x2733, 0x2734),
+    (0x2744, 0x2744),
+    (0x2747, 0x2747),
+    (0x274C, 0x274C),
+    (0x274E, 0x274E),
+    (0x2753, 0x2755),
+    (0x2757, 0x2757),
+    (0x2763, 0x2767),
+    (0x2795, 0x2797),
+    (0x27A1, 0x27A1),
+    (0x27B0, 0x27B0),
+    (0x27BF, 0x27BF),
+    (0x2934, 0x2935),
+    (0x2B05, 0x2B07),
+    (0x2B1B, 0x2B1C),
+    (0x2B50, 0x2B50),
+    (0x2B55, 0x2B55),
+    (0x3030, 0x3030),
+    (0x303D, 0x303D),
+    (0x3297, 0x3297),
+    (0x3299, 0x3299),
+    (0x1F000, 0x1F0FF),
+    (0x1F10D, 0x1F10F),
+    (0x1F12F, 0x1F12F),
+    (0x1F16C, 0x1F171),
+    (0x1F17E, 0x1F17F),
+    (0x1F18E, 0x1F18E),
+    (0x1F191, 0x1F19A),
+    (0x1F1AD, 0x1F1E5),
+    (0x1F201, 0x1F20F),
+    (0x1F21A, 0x1F21A),
+    (0x1F22F, 0x1F22F),
+    (0x1F232, 0x1F23A),
+    (0x1F23C, 0x1F23F),
+    (0x1F249, 0x1F3FA),
+    (0x1F400, 0x1F53D),
+    (0x1F546, 0x1F64F),
+    (0x1F680, 0x1F6FF),
+    (0x1F774, 0x1F77F),
+    (0x1F7D5, 0x1F7FF),
+    (0x1F80C, 0x1F80F),
+    (0x1F848, 0x1F84F),
+    (0x1F85A, 0x1F85F),
+    (0x1F888, 0x1F88F),
+    (0x1F8AE, 0x1F8FF),
+    (0x1F90C, 0x1F93A),
+    (0x1F93C, 0x1F945),
+    (0x1F947, 0x1FAFF),
+    (0x1FC00, 0x1FFFD),
+];
+
+/// Whether `c` has Unicode's property Extended_Pictographic.
 fn pictograph(c: char) -> bool {
-    matches!(
-        u32::from(c),
-        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0xFE0F
-    )
+    let c = u32::from(c);
+    EXTENDED_PICTOGRAPHIC
+        .binary_search_by(|&(lo, hi)| {
+            if hi < c {
+                std::cmp::Ordering::Less
+            } else if lo > c {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
 }
 
 /// Each way the specification's directory breaks its layout (CLAUDE.md, invariant 1): an entry
 /// that is no file, which a subdirectory is; a file that is not `README.md` and is no `<key>.md`,
-/// so no numeric prefix, `00_core.md`, and no other kind of file; and a line that holds a
-/// pictograph, which a decorative warning header is, by its file and line.
+/// so no numeric prefix, `00_core.md`, and no other kind of file; a line that holds a pictograph,
+/// which a decorative warning header is, by its file and line; and, so that nothing passes unread,
+/// an entry or a file that cannot be read and a spec that is not UTF-8 text.
 fn spec_layout(dir: &Path) -> Vec<String> {
     let mut problems = Vec::new();
-    let Ok(entries) = fs::read_dir(dir) else {
-        return vec![format!("{}: no directory", dir.display())];
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => return vec![format!("{}: {}", dir.display(), e)],
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                problems.push(format!(
+                    "{}: an entry that cannot be read: {}",
+                    dir.display(),
+                    e
+                ));
+                continue;
+            }
+        };
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if !path.is_file() {
@@ -295,7 +400,17 @@ fn spec_layout(dir: &Path) -> Vec<String> {
             ));
             continue;
         }
-        let text = fs::read_to_string(&path).unwrap_or_default();
+        let text = match fs::read(&path).map(String::from_utf8) {
+            Ok(Ok(text)) => text,
+            Ok(Err(_)) => {
+                problems.push(format!("{}: a spec that is not UTF-8 text", name));
+                continue;
+            }
+            Err(e) => {
+                problems.push(format!("{}: {}", name, e));
+                continue;
+            }
+        };
         for (n, line) in text.lines().enumerate() {
             if line.chars().any(pictograph) {
                 problems.push(format!(
@@ -373,6 +488,44 @@ fn test_the_spec_layout_refuses_each_way_a_spec_breaks_it() {
         assert_eq!(found.len(), 1, "{}: {:?}", name, found);
         assert!(found[0].starts_with(problem), "{}: {:?}", name, found);
     }
+    // The characters a hand-picked set let through, each pictographic by Unicode's property.
+    for c in ['⏳', '⌛', '⏰', '▶', 'ℹ', '↔', '©'] {
+        let dir = planted(
+            "property",
+            &[
+                ("README.md", good),
+                (
+                    "regions.md",
+                    &format!(
+                        "# A {} B
+",
+                        c
+                    ),
+                ),
+            ],
+        );
+        let found = spec_layout(&dir);
+        assert_eq!(found.len(), 1, "{:?}: {:?}", c, found);
+        assert!(
+            found[0].starts_with("regions.md:1: a pictograph"),
+            "{:?}: {:?}",
+            c,
+            found
+        );
+    }
+    // A spec that cannot be read as UTF-8, UTF-16 with a warning sign in it, is reported, never
+    // passed unread.
+    let dir = planted("utf16", &[("README.md", good)]);
+    let utf16: Vec<u8> = "# ⚠ Warning
+"
+    .encode_utf16()
+    .flat_map(u16::to_le_bytes)
+    .collect();
+    fs::write(dir.join("regions.md"), [&[0xFF, 0xFE][..], &utf16].concat()).unwrap();
+    assert_eq!(
+        spec_layout(&dir),
+        ["regions.md: a spec that is not UTF-8 text"]
+    );
     let arrows = planted("arrows", &[("README.md", "# A \u{2192} B, x \u{2264} y\n")]);
     assert_eq!(spec_layout(&arrows), Vec::<String>::new());
 }

@@ -3470,7 +3470,8 @@ check("the Documentation job lints every workflow with actionlint and shellcheck
 });
 
 /// The owner of the gate files, and the gate files, as the patterns of .github/CODEOWNERS: what
-/// decides whether a change may merge, which a pull request could otherwise weaken unseen.
+/// decides whether a change may merge, and the rules and philosophy it enforces, which a pull
+/// request could otherwise weaken unseen.
 const OWNER = "@Dancraft3746";
 const GATE_FILES = [
   "/.github/",
