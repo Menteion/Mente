@@ -1,17 +1,27 @@
 ---
 id: brief-file-scope-check
-status: active
+status: archived
 type: feature
 awaits: [docs/design-review.md#brief-file-scope, docs/design-review.md#records-one-per-file]
 affectedFiles: [compiler/mente-cli/tests/register.rs, ROADMAP.md, docs/design-review.md, briefs/brief-file-scope-check.md, briefs/archive/brief-file-scope-check.md]
 protectedFiles: [.github/**, CLAUDE.md, spec/**]
+integrity: sha256-51f7ecb296dbca7f699745f9ad3a29d72c5d252388d2508023d74cef0ef88de4
 ---
+
+<!-- spec-brief:banner -->
+> **Archived 2026-11-17.**
+> The register's test holds every decided entry to its place in the plan, a ROADMAP item or a live brief; the scope check reuses spec-brief's own, which test-isolation wires.
+> Merged in pull request [#177](https://github.com/Menteion/Mente/pull/177).
+> Recorded at commit `915f1b1`: 3 files changed, +124 −12.
+> Relative links were rewritten to resolve from `briefs/archive/` (1); no other word changed.
+> The body below describes the tree before execution and is not maintained.
+<!-- /spec-brief:banner -->
 
 # Hold each pull request to its brief's files, and each decided entry to its place in the plan
 
 ## Intent
 
-[`brief-file-scope`](../docs/design-review.md#brief-file-scope), decided on 2026-11-15, is held so far by memory alone. Two rules are added.
+[`brief-file-scope`](../../docs/design-review.md#brief-file-scope), decided on 2026-11-15, is held so far by memory alone. Two rules are added.
 
 The first fails a pull request that names no brief, or that changes a file outside its brief's `affectedFiles` or inside its `protectedFiles`. spec-brief already holds a round to its scope (`spec-brief archive <brief> --dry-run --strict --base <rev>`), with the scope's globs defined once, in the tool, so the check reuses it rather than copying its globs into Rust (the manager, 2026-11-17). The required check that runs it lives in `.github/`, which the test-isolation session owns and wires; this round writes down what it must wire.
 
