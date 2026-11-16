@@ -1,0 +1,35 @@
+{
+  "about": "The quick checks before a push (tools/quick.mjs; CLAUDE.md, \"Verification\"): each check's name, the pattern of the changed files that call for it, its command, and why. Data, not code: tools/quick.mjs reads it, and the workflow policy (.github/scripts/policy.test.mjs) reads it as data and never runs it, so that no edit to it changes what the policy does. Each pattern is a regular expression over a path relative to the repository's root, with forward slashes.",
+  "patterns": {
+    "every file": ".",
+    "rust inputs": "\\.rs$|(^|/)Cargo\\.(toml|lock)$|^clippy\\.toml$|^rust-toolchain(\\.toml)?$|^\\.config/|^\\.cargo/",
+    "programs": "^compiler/|^conformance/|^examples/|^docs/language-card\\.md$|^docs/platform-layer\\.md$",
+    "documents": "\\.md$|^spec/|^docs/",
+    "site": "^site/|^README\\.md$|^spec/|^docs/",
+    "benchmark": "^benchmark/",
+    "harness": "^benchmark/harness/"
+  },
+  "checks": [
+    { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
+    { "name": "lints", "when": "rust inputs", "run": ["cargo", "clippy", "--all-targets", "--workspace", "--", "-D", "warnings"] },
+    { "name": "gates", "when": "every file", "run": ["cargo", "test", "-p", "mente-cli", "--test", "gates"], "why": "The repository's gates: English text, the dependency policy, the lock's crates." },
+    {
+      "name": "lint list, golden files and conformance",
+      "when": "programs",
+      "run": ["cargo", "test", "-p", "mente-cli", "--test", "lints", "--test", "reproducible", "--test", "conformance"],
+      "why": "What a change to the compiler or to its programs must keep: the lint's list of what it does not see, the golden files every conformance program writes, and each program's expected report."
+    },
+    { "name": "spec directives", "when": "documents", "run": ["cargo", "run", "--quiet", "--bin", "mn", "--", "spec"] },
+    { "name": "documentation tools", "when": "documents", "run": ["npm", "run", "verify:docs"] },
+    {
+      "name": "workflow policy",
+      "when": "every file",
+      "run": ["npm", "run", "test:ci"],
+      "why": "The workflow policy reads files across the whole tree, not the gates alone: every module a job that holds a secret runs, the compiler's sources for its ignored tests, the corpus, the spec and the docs. So any change can fail it, and every change calls for it (PR 161: a change to the benchmark's harness alone failed it in CI, where this map had not run it). The policy's check \"tools/quick.mjs runs this policy before a push for a change to any file\" holds this."
+    },
+    { "name": "benchmark corpus", "when": "benchmark", "run": ["npm", "run", "check:benchmark"] },
+    { "name": "benchmark checker", "when": "benchmark", "run": ["npm", "run", "test:benchmark"] },
+    { "name": "benchmark harness", "when": "harness", "run": ["npm", "run", "test:harness"] },
+    { "name": "site", "when": "site", "run": ["npm", "run", "test:site"] }
+  ]
+}

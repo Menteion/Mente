@@ -39,7 +39,6 @@ import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, rea
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
-import { CHECKS as QUICK_CHECKS } from "../../tools/quick.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -47,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 67;
+const FLOOR = 68;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -3465,6 +3464,8 @@ const GATE_FILES = [
   "/compiler/*/Cargo.toml",
   "/spikes/*/Cargo.toml",
   "/.gitattributes",
+  "/tools/quick.mjs",
+  "/tools/quick-checks.json",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
@@ -3507,12 +3508,69 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
     ...[...tracked()].filter((f) => /^compiler\/[^/]+\/src\/overflow_traps\.rs$/.test(f)),
     // Every workspace member's manifest, wherever the member is.
     ...[...workspace().values()].map(({ dir }) => `${dir}/Cargo.toml`),
+    // The quick checks before a push, and their map, which this policy reads.
+    "tools/quick.mjs",
+    QUICK_MAP,
   ];
   for (const f of inputs) {
     assert.ok(tracked().has(f), `${f}, a gate input, is not in the repository`);
     assert.ok(GATE_FILES.some((p) => owns(p, f)), `${f} is a gate input without an owner in .github/CODEOWNERS`);
   }
   assert.ok(owns("/.github/", ".github/workflows/ci.yml") && !owns("/perf/run.mjs", "perf/run.test.mjs") && owns("/Cargo.toml", "Cargo.toml"));
+});
+
+/// The map of the quick checks before a push (tools/quick.mjs), which this policy reads as data.
+const QUICK_MAP = "tools/quick-checks.json";
+
+/// The files `npm run test:ci` runs, as package.json, a gate file, names them.
+const policyEntries = () => String(JSON.parse(read("package.json")).scripts?.["test:ci"] ?? "").match(/[^\s"']+\.mjs/g) ?? [];
+
+/// Every module the workflow policy's tests load, from `entries` through every relative import,
+/// static, `export ... from` or a literal `import("...")`, each text read by `readText`; and what
+/// the reading cannot follow: an import it cannot read, a computed `import(`, or a bare specifier
+/// other than a Node built-in, which would load code no path of the repository names.
+export function policyModules(entries, readText) {
+  const modules = [];
+  const problems = [];
+  const todo = [...entries];
+  while (todo.length > 0) {
+    const file = todo.shift();
+    if (modules.includes(file)) continue;
+    modules.push(file);
+    const found = jsImports(jsTokens(readText(file)));
+    for (const line of found.unreadable) problems.push(`${file}:${line}: an import the policy cannot follow`);
+    for (const s of found.specifiers) {
+      if (/^\.{1,2}\//.test(s.v)) todo.push(path.posix.normalize(path.posix.join(path.posix.dirname(file), s.v)));
+      else if (!s.v.startsWith("node:")) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a file of the repository nor a Node built-in`);
+    }
+  }
+  return { modules, problems };
+}
+
+check("every module the workflow policy's tests load, directly or through another, is a gate file its owner holds", () => {
+  // The quick check of d471f7e: policy.test.mjs imported tools/quick.mjs, which no pattern of
+  // .github/CODEOWNERS held, and one line there turned the strict assertions into no-ops: this
+  // policy passed 70 of 70 with a computed key planted in the harness. No module it loads may be
+  // one an edit without the owner's review can change.
+  const entries = policyEntries();
+  assert.ok(entries.includes(".github/scripts/policy.test.mjs") && entries.includes(".github/scripts/yaml.test.mjs"), `npm run test:ci runs ${entries.join(", ")}`);
+  const unowned = (modules) => modules.filter((f) => !GATE_FILES.some((p) => owns(p, f)));
+  const { modules, problems } = policyModules(entries, read);
+  assert.deepEqual(problems, [], "the workflow policy loads a module in a way it cannot follow");
+  assert.ok(modules.includes(".github/scripts/lib/yaml.mjs") && modules.includes(".github/scripts/lib/build-time-code.mjs"), modules.join(", "));
+  assert.deepEqual(unowned(modules), [], "modules the workflow policy loads that .github/CODEOWNERS does not give its owner");
+  // The reviewer's case, planted: a module the policy loads that imports one no pattern holds,
+  // through a held module, by a re-export, and by a literal dynamic import; and the loads it cannot
+  // follow.
+  const planted = new Map([
+    [".github/scripts/policy.test.mjs", 'import assert from "node:assert/strict";\nimport { x } from "./lib/x.mjs";\nconst y = await import("../../tools/y.mjs");\n'],
+    [".github/scripts/lib/x.mjs", 'export { x } from "../../../site/markdown.mjs";\n'],
+    ["site/markdown.mjs", "export const x = 1;\n"],
+    ["tools/y.mjs", 'import z from "some-package";\nconst w = await import(`./${"w"}.mjs`);\n'],
+  ]);
+  const plant = policyModules([".github/scripts/policy.test.mjs"], (f) => planted.get(f) ?? "");
+  assert.deepEqual(unowned(plant.modules).sort(), ["site/markdown.mjs", "tools/y.mjs"], "an import of a module without an owner passed");
+  assert.deepEqual(plant.problems.sort(), ["tools/y.mjs:1: imports some-package, which is neither a file of the repository nor a Node built-in", "tools/y.mjs:2: an import the policy cannot follow"]);
 });
 
 /// The sandbox every job that confines agent code names, and nothing else may change.
@@ -3542,9 +3600,15 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
   // job that holds a secret runs, the compiler's sources, the conformance programs, the corpus, the
   // spec and the docs, read on 2026-11-16 as some 2,300 paths in every part of the tree. The one
   // trigger that cannot fall behind what it reads is every path, tracked or new.
-  const policy = QUICK_CHECKS.filter((c) => c.run.join(" ") === "npm run test:ci");
-  assert.equal(policy.length, 1, "tools/quick.mjs runs the workflow policy in one check");
-  const missed = [...tracked(), "a-new-directory/a-new-file.txt", "a-new-file"].filter((f) => !policy[0].when.test(f));
+  // The map is data, read here and never run (the quick check of d471f7e: imported, it could have
+  // turned this policy's assertions off).
+  const map = JSON.parse(read(QUICK_MAP));
+  const policy = map.checks.filter((c) => Array.isArray(c.run) && c.run.join(" ") === "npm run test:ci");
+  assert.equal(policy.length, 1, `${QUICK_MAP} runs the workflow policy in one check`);
+  const source = Object.hasOwn(map.patterns, policy[0].when) ? map.patterns[policy[0].when] : null;
+  assert.equal(typeof source, "string", `${QUICK_MAP}: the workflow policy's check names no pattern the map defines`);
+  const when = new RegExp(source);
+  const missed = [...tracked(), "a-new-directory/a-new-file.txt", "a-new-file"].filter((f) => !when.test(f));
   assert.deepEqual(missed.slice(0, 20), [], `${missed.length} files whose change tools/quick.mjs would not check against this policy`);
 });
 
