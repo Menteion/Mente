@@ -17,6 +17,7 @@ This file is the switchboard, not the rulebook.
      <!-- @assert-count target="compiler/mente-cli/tests/escapes.rs" symbol="fn test_the_record_holds_only_files_named_by_a_key" min="1" reason="Every escaped bug's file is named by a key" -->
      <!-- @assert-count target="compiler/mente-cli/tests/register.rs" symbol="fn test_every_entry_is_named_by_a_key" min="1" reason="Every register entry, and so the anchor of every citation of one, is named by a key" -->
      <!-- @assert-count target="compiler/mente-cli/tests/records.rs" symbol="fn test_a_key_is_lowercase_words_joined_by_hyphens" min="1" reason="A record's key, and so a file's name, is never a number" -->
+     <!-- @assert-count target="compiler/mente-cli/tests/records.rs" symbol="fn test_every_kind_is_a_directory_of_files_named_by_a_key" min="1" reason="Every record, a task brief included, is a file named by its key" -->
    - A claim is a list item that starts with its one maturity label written as code: `Implemented`, `Specified`, `Target` or `Hypothesis`. A label inside a sentence or in parentheses is not a claim, and `spec-guard claims` does not read it; write it as a claim. One claim carries one label. A label in prose is reported as information, not refused: held by review only.
      <!-- @assert-count target="package.json" symbol="spec-guard claims" min="1" reason="spec-guard claims reads every claim's label" -->
      <!-- @assert-count target=".github/workflows/ci.yml" symbol="npm run verify:docs" min="1" reason="The Documentation job runs the claims check" -->
