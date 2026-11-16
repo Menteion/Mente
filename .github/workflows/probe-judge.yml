@@ -1,0 +1,23 @@
+# A throwaway probe for policy-runtime-judge (2026-11-16), removed once read. It runs from this
+# branch, the base, through pull_request_target, and fails on purpose. The probe reads where its
+# check lands, and whether a check of the same name from the change's own workflow can stand in
+# for it.
+name: Probe judge
+on:
+  pull_request_target:
+    branches: [probe-base]
+permissions:
+  contents: read
+jobs:
+  judge:
+    name: Workflow policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail on purpose, after a while
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "pull_request_target: GITHUB_SHA=$GITHUB_SHA, the PR's head $HEAD_SHA"
+          sleep 45
+          exit 1
