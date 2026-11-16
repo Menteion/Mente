@@ -17,6 +17,8 @@
 //! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate;
 //!   `@example` bodies are parsed as tokens but not executed.
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
+//! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes.md` per week and per area;
+//!   `--check` checks each row as its test does.
 
 use std::env;
 use std::fs;
@@ -31,6 +33,7 @@ use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, 
 use mente_syntax::parse_module;
 
 mod catalogue;
+mod escapes;
 mod fuzz;
 
 /// The language card of the language version this compiler implements, which ships with it
@@ -84,6 +87,7 @@ fn run() {
         "dump" => cmd_dump(&args[1..]),
         "smt" => cmd_smt(&args[1..]),
         "fuzz" => cmd_fuzz(&args[1..]),
+        "escapes" => cmd_escapes(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -115,6 +119,7 @@ fn print_help() {
     println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
+    println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes.md per week and per area; --check checks each row");
     println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
     println!("                               Fuzz every phase of the compiler, and minimize each crash found");
 }
@@ -1246,6 +1251,50 @@ fn strip_mn_comments(src: &str) -> String {
         }
     }
     out
+}
+
+/// `mn escapes [--check]`: the record of escaped bugs, `docs/escapes.md`, read from the current
+/// directory, counted per ISO week and per area; with `--check`, each row checked against the tree
+/// as `tests/escapes.rs` checks it. The counts are printed, never written into a document.
+fn cmd_escapes(args: &[String]) {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => {
+            eprintln!("Usage: mn escapes [--check]");
+            process::exit(1);
+        }
+    };
+    let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let text = match fs::read_to_string(root.join(escapes::RECORD)) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {}: {}", escapes::RECORD, e);
+            process::exit(1);
+        }
+    };
+    let rows = match escapes::parse(&text) {
+        Ok(rows) => rows,
+        Err(problems) => {
+            for p in problems {
+                eprintln!("[FAIL] {}", p);
+            }
+            process::exit(1);
+        }
+    };
+    if !check {
+        print!("{}", escapes::counts(&rows));
+        return;
+    }
+    let problems = escapes::problems(&root, &rows);
+    if problems.is_empty() {
+        println!("[PASS] mn escapes: every row of {} holds", escapes::RECORD);
+    } else {
+        for p in problems {
+            eprintln!("[FAIL] {}", p);
+        }
+        process::exit(1);
+    }
 }
 
 fn cmd_spec(_args: &[String]) {
