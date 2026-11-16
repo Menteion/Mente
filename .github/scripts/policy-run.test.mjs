@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 13;
+const FLOOR = 14;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -725,6 +725,53 @@ check("the collector reads the repository it is in, and runs no program git's co
     assert.ok(!fs.existsSync(marker), "the collector's git runs the fsmonitor of the repository's configuration");
     const facts = JSON.parse(fs.readFileSync(path.join(repo, "target", "policy-facts.json"), "utf8"));
     assert.deepEqual(facts, { head, tracked: [".github/scripts/policy-collect.mjs", "ROADMAP.md"], base: head, tags: ["m0a", "m0b"], baseRoadmap: "# Roadmap\n" });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("the Pages deployment publishes only a tag on a commit of main", () => {
+  // .github/scripts/commit-on-main.sh, which the deployment runs before it publishes (the review
+  // of 7ba7a5c): a milestone tag on a pull request's head, which main never took, is refused; a tag
+  // on main's head or on an older commit of main, lightweight or annotated, passes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-on-main-"));
+  try {
+    const sh = testGit(dir);
+    sh("init", "-q", "-b", "main");
+    const commit = (text) => {
+      fs.writeFileSync(path.join(dir, "a"), text);
+      sh("add", "-A");
+      sh("commit", "-q", "-m", text.trim());
+      return sh("rev-parse", "HEAD");
+    };
+    const older = commit("one\n");
+    const head = commit("two\n");
+    sh("checkout", "-q", "-b", "pull-request");
+    const unmerged = commit("three\n");
+    sh("checkout", "-q", "main");
+    sh("tag", "m1", head);
+    sh("tag", "-a", "-m", "m0", "m0", older);
+    sh("tag", "m9", unmerged);
+    const script = posixPath(path.join(HERE, "commit-on-main.sh"));
+    const run = (...args) => spawnSync(bashPath(), [script, ...args], { cwd: dir, encoding: "utf8", env: GIT_TEST_ENV, timeout: 30000 });
+    // Without origin/main there is nothing to check against: refused, never passed.
+    const none = run("m1");
+    assert.equal(none.status, 1, `${none.stdout}${none.stderr}`);
+    assert.match(none.stdout, /no origin\/main/);
+    sh("update-ref", "refs/remotes/origin/main", head);
+    for (const tag of ["m1", "m0", head, older]) {
+      const r = run(tag);
+      assert.equal(r.status, 0, `${tag}: ${r.stdout}${r.stderr}`);
+    }
+    for (const tag of ["m9", unmerged]) {
+      const r = run(tag);
+      assert.equal(r.status, 1, `${tag}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /^::error::.* is not in main's history/m, tag);
+    }
+    // A name of no commit, and no argument at all.
+    assert.equal(run("m404").status, 1);
+    assert.equal(run().status, 2);
+    assert.equal(run("").status, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -260,6 +260,10 @@ check("every workflow sets its permissions at the top, read-only wherever a requ
   }
 });
 
+/// The one job that publishes the site: the only one whose token may write Pages or an OIDC token,
+/// and whose environment is github-pages.
+const PAGES_DEPLOY_JOB = "pages-publish.yml#deploy";
+
 /// GitHub's permission scopes, each with the values it admits, from the workflow syntax's
 /// `permissions` (read on 2026-11-16): `id-token` and `copilot-requests` take write or none,
 /// `vulnerability-alerts` read or none, every other scope read, write or none.
@@ -294,11 +298,12 @@ const PERMISSION_SCOPES = new Map([
  * comes from GitHub Actions, as such a post would. The probe of policy-runtime-judge (2026-11-16,
  * judge-probe's pull request 3) saw a change's own workflow raise its token so and post a success
  * status and a success check run under the judge's name. The judge posts through its own App, so
- * no workflow needs either permission.
+ * no workflow needs either permission. And only PAGES_DEPLOY_JOB's token may write Pages or an
+ * OIDC token, which publish the site (the review of 7ba7a5c).
  */
 export function permissionProblems(file, doc) {
   const found = [];
-  const readPermissions = (where, p) => {
+  const readPermissions = (where, p, key = null) => {
     if (p === "read-all") return;
     if (p === "write-all") {
       found.push(`${where}: write-all, by which its token may post check runs or commit statuses`);
@@ -313,13 +318,14 @@ export function permissionProblems(file, doc) {
       if (admits === undefined) found.push(`${where}: ${JSON.stringify(scope)}, no permission scope of GitHub's`);
       else if (!admits.includes(value)) found.push(`${where}: ${scope}: ${JSON.stringify(value)}, none of ${admits.join(", ")}`);
       else if ((scope === "checks" || scope === "statuses") && value === "write") found.push(`${where}: ${scope}: write, by which its token may post check runs or commit statuses`);
+      else if ((scope === "pages" || scope === "id-token") && value === "write" && key !== PAGES_DEPLOY_JOB) found.push(`${where}: ${scope}: write, which only ${PAGES_DEPLOY_JOB} may hold, to publish the site`);
     }
   };
   // A workflow's own permissions are required by the check above; a job's may be left out, and
   // then are the workflow's.
   if (doc.permissions !== undefined) readPermissions(file, doc.permissions);
   for (const [id, job] of Object.entries(isPlain(doc.jobs) ? doc.jobs : {})) {
-    if (isPlain(job) && "permissions" in job) readPermissions(`${file}, job ${id}`, job.permissions);
+    if (isPlain(job) && "permissions" in job) readPermissions(`${file}, job ${id}`, job.permissions, `${file}#${id}`);
   }
   return found;
 }
@@ -333,11 +339,23 @@ check("every workflow's permissions are GitHub's scopes and values exactly, and 
     ["contents read", base],
     ["read-all", { ...base, permissions: "read-all" }],
     ["no permission at all", { ...base, permissions: {} }],
-    ["the Pages job's", job({ pages: "write", "id-token": "write" })],
     ["vulnerability-alerts read", job({ "vulnerability-alerts": "read" })],
     ["a job with none of its own", { ...base, jobs: { j: { "runs-on": "ubuntu-24.04" } } }],
   ]) {
     assert.deepEqual(permissionProblems("x.yml", doc), [], what);
+  }
+  const deploy = (permissions, id = "deploy", top = { contents: "read" }) => ({ permissions: top, jobs: { [id]: { "runs-on": "ubuntu-24.04", permissions } } });
+  assert.deepEqual(permissionProblems("pages-publish.yml", deploy({ contents: "read", pages: "write", "id-token": "write" })), [], "the Pages deployment's");
+  // Planted: Pages or an OIDC token written anywhere else: another job, another workflow, the
+  // publishing workflow's top, and its build job.
+  for (const [what, file, doc] of [
+    ["pages write in another job", "pages-publish.yml", deploy({ pages: "write" }, "build")],
+    ["id-token write in another job", "pages-publish.yml", deploy({ "id-token": "write" }, "build")],
+    ["pages write at the publishing workflow's top", "pages-publish.yml", deploy({ contents: "read" }, "deploy", { contents: "read", pages: "write" })],
+    ["pages write in another workflow's job of that name", "ci.yml", deploy({ pages: "write" })],
+    ["id-token write at another workflow's top", "x.yml", deploy({ contents: "read" }, "j", { "id-token": "write" })],
+  ]) {
+    assert.ok(permissionProblems(file, doc).some((p) => p.includes("which only pages-publish.yml#deploy may hold")), what);
   }
   // Planted, at the top and in a job: each way to post one, a key or a value GitHub does not name
   // as written, an expression, and the probe's own forging job.
@@ -1257,6 +1275,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
+  [".github/scripts/commit-on-main.sh", "3d07a1f8e70f54dc72e3b5adb67386ed08b194bdd3d856773c0a7605e01f025a"],
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
@@ -1267,7 +1286,7 @@ const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "be6b14c485b3c531af99e5be06448c455da9b7dcc902c70155ee3c39013a8867"],
+  [".github/scripts/policy-run.test.mjs", "16ebaf3b6414af2b1f0e08a002f90217a3a178015b78760b7a5e75a728b4f64f"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -1332,6 +1351,10 @@ const PINNED_JOBS = new Map([
   ["benchmark.yml#bench", "5fe155416addc5eae5e51174842ae3bdf8e69ffdd1879ba691c482b60a03c971"],
   ["prelim.yml#prelim", "ac6eadf49ad0da4d645891fc15d16450c3dbd0905926e5c9c92b548ed7557bc7"],
   ["probe.yml#write", "0830c255940ceb132a7f00e0426efe6de5c4d1287edb351e8cffd93311c51b34"],
+  // The site's publication: the build of a milestone tag, and its deployment, which proves the tag
+  // on main first (the review of 7ba7a5c).
+  ["pages-publish.yml#build", "2f9e4711fd8b17b1f3c0d0bad4c7ad13cd98511f8f0d84d390546823aaf2d981"],
+  ["pages-publish.yml#deploy", "977b6a501f7de3c08d912c3bbf9bf5ec2b6f1f11d42bb371147780de47ee640c"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1724,11 +1747,14 @@ const LEFT_OUTSIDE = new Map([
   ["harness.yml#fixtures", "its own sandbox confines agent code, not mn"],
   ["pages.yml#build", "it runs the change's site generator, its tests and `mn explain`, whose output is the site its link check reads"],
 ]);
-/// GATE_ONLY: the required jobs that run no code of the change but the gate's own scripts under
-/// .github/. Each is pinned whole, with every script it runs: an allowlist of exact steps, where a
+/// GATE_ONLY: the required or pinned jobs that run no code of the change but the gate's own scripts
+/// under .github/. Each is pinned whole, with every script it runs: an allowlist of exact steps, where a
 /// rule that read the steps for tools by their names let through every spelling it did not know
 /// (`sh -c`, a quoted name, a path to the tool, node's child_process; the third review of 980965e).
-const GATE_ONLY = new Map([["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"]]);
+const GATE_ONLY = new Map([
+  ["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"],
+  [PAGES_DEPLOY_JOB, "it runs .github/scripts/commit-on-main.sh alone, then deploys the site the build job made"],
+]);
 /// The labels a job may run on: each a literal, or a matrix value that is one.
 const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);
 /// The runners a job names: its literal label, or each value its matrix gives the key `runs-on`
@@ -1766,7 +1792,7 @@ check("every required job on Linux runs the change's code in the sandbox, or say
     if (GATE_ONLY.has(key)) assert.ok(PINNED_JOBS.has(key), `${key}, a job of GATE_ONLY, is not pinned whole: its exact steps are what it may run`);
   }
   for (const [name, set] of lists) {
-    for (const key of set) assert.ok(required.has(key) || (name === "SANDBOXED_JOBS" && key === "mutants-full.yml#full"), `${name} names ${key}, which is no required job`);
+    for (const key of set) assert.ok(required.has(key) || (name === "SANDBOXED_JOBS" && key === "mutants-full.yml#full") || (name === "GATE_ONLY" && PINNED_JOBS.has(key)), `${name} names ${key}, which is no required job${name === "GATE_ONLY" ? " and no pinned one" : ""}`);
   }
   // Nothing of the change lies under target/, where the tests are built: root mounts the tests'
   // own directory there, and refuses to through a link the change tracks (test-sandbox.sh); this
@@ -3038,7 +3064,7 @@ check("a node line without the flag that refuses code from strings is read as on
 
 /// The other jobs that name an environment, each with its name: the Pages deployment, whose
 /// environment holds no secret.
-const OTHER_ENVIRONMENTS = new Map([["pages-publish.yml#deploy", "github-pages"]]);
+const OTHER_ENVIRONMENTS = new Map([[PAGES_DEPLOY_JOB, "github-pages"]]);
 
 /// What is wrong with a job's environment: a job of SECRET_JOBS names SECRET_ENVIRONMENT, as a
 /// literal string, a job of OTHER_ENVIRONMENTS names its own, and no other job names any, so that
@@ -3790,52 +3816,81 @@ check("no two jobs of any workflow report a check of the same name", () => {
 /// on a pull request's head with the work it chose.
 const REQUIRED_EVENTS = new Set(["pull_request", "merge_group", "push"]);
 
-/// The workflows that run on pull requests and hold no required job, each with why it gates
-/// nothing. A check that runs on a pull request and is not required looks like a gate and is not
-/// one: "Build the site" ran on pull requests through a `paths:` filter for weeks, which kept it from
-/// being required, so a change that broke the site could merge.
-const ADVISORY_WORKFLOWS = new Map([
-  ["spike-cranelift.yml", "a spike in a workspace of its own (spikes/cranelift-debug-info), whose findings are data for the register; ci.yml's Debuggers checks are the gate"],
-  ["spike-error-return.yml", "a spike in a workspace of its own (spikes/error-return-registers), whose findings are data for the register"],
-  ["spike-tier1.yml", "the Tier-1 latency spike's measurement, data for the register; ci.yml's Tier-1 latency is the gate, and the Rust jobs run the spike's tests"],
+/// The jobs that run on pull requests, or on pushes to a branch other than main, and are no required
+/// check, each with why it gates nothing. A check that runs on a pull request or a branch and is not
+/// required looks like a gate and is not one: "Build the site" ran on pull requests through a
+/// `paths:` filter for weeks, which kept it from being required, so a change that broke the site
+/// could merge. Read job by job, so that a job beside a required one of its workflow is held too,
+/// and with a reason each (the review of 7ba7a5c).
+const ADVISORY_JOBS = new Map([
+  ["ci.yml#coverage", "a report of line coverage, in the run summary and as lcov, of the tests the required Rust jobs run as the gate"],
+  ["spike-cranelift.yml#check", "a spike in a workspace of its own (spikes/cranelift-debug-info), whose findings are data for the register; ci.yml's Debuggers checks are the gate"],
+  ["spike-error-return.yml#check", "a spike in a workspace of its own (spikes/error-return-registers), whose findings are data for the register"],
+  ["spike-tier1.yml#measure", "the Tier-1 latency spike's measurement, data for the register; ci.yml's Tier-1 latency is the gate, and the Rust jobs run the spike's tests"],
 ]);
 
-/// Why the workflows `docs` are not each a gate, a workflow `requiredFiles` holds, or one
-/// `advisory` names with its reason, when they run on pull requests; and why `advisory` names
-/// what it should not.
-export function advisoryProblems(docs, requiredFiles, advisory) {
+/// Whether triggers `on` run a workflow on a pull request, or on a push to a branch other than
+/// main: a push with no filter, with paths alone, or with branches other than main exactly. A push
+/// of tags alone runs on no branch.
+export function runsBeyondMain(on) {
+  if ("pull_request" in on || "pull_request_target" in on) return true;
+  if (!("push" in on)) return false;
+  const push = on.push;
+  if (!isPlain(push)) return true;
+  const branches = "branches" in push || "branches-ignore" in push;
+  if (!branches) return !("tags" in push || "tags-ignore" in push);
+  return !(Array.isArray(push.branches) && push.branches.length === 1 && push.branches[0] === "main" && !("branches-ignore" in push));
+}
+
+/// Why the jobs `jobs` ({ file, id, on }) are not each a required check, one of `required`
+/// ("file#id"), or one `advisory` names with a reason, when they run beyond main; and why
+/// `advisory` names what it should not.
+export function advisoryProblems(jobs, required, advisory) {
   const found = [];
-  for (const { file, doc } of docs) {
-    const on = triggers(doc);
-    const onPullRequests = "pull_request" in on || "pull_request_target" in on;
-    if (onPullRequests && !requiredFiles.has(file) && !advisory.has(file)) found.push(`${file} runs on pull requests and holds no required job: make its check required, or name it in ADVISORY_WORKFLOWS with why it gates nothing`);
-    if (advisory.has(file) && requiredFiles.has(file)) found.push(`${file} is in ADVISORY_WORKFLOWS, and holds a required job`);
-    if (advisory.has(file) && !onPullRequests) found.push(`${file} is in ADVISORY_WORKFLOWS, and runs on no pull request`);
+  const keys = new Set();
+  for (const { file, id, on } of jobs) {
+    const key = `${file}#${id}`;
+    keys.add(key);
+    const beyond = runsBeyondMain(on);
+    const listed = advisory.has(key);
+    const reason = advisory.get(key);
+    if (beyond && !required.has(key) && !listed) found.push(`${key} runs on pull requests or on a branch other than main, and is no required check: make it one, or name it in ADVISORY_JOBS with why it gates nothing`);
+    if (listed && (typeof reason !== "string" || reason.trim() === "")) found.push(`${key} is in ADVISORY_JOBS with no reason`);
+    if (listed && required.has(key)) found.push(`${key} is in ADVISORY_JOBS, and is a required check`);
+    if (listed && !beyond) found.push(`${key} is in ADVISORY_JOBS, and runs on no pull request and no branch other than main`);
   }
-  for (const file of advisory.keys()) if (!docs.some((d) => d.file === file)) found.push(`ADVISORY_WORKFLOWS names ${file}, which is no workflow`);
+  for (const key of advisory.keys()) if (!keys.has(key)) found.push(`ADVISORY_JOBS names ${key}, which is no job`);
   return found;
 }
 
-check("every workflow that runs on pull requests is a gate, or says why it gates nothing", () => {
-  const docs = workflows();
-  const requiredFiles = new Set(requiredJobs().map((j) => j.file));
-  assert.deepEqual(advisoryProblems(docs, requiredFiles, ADVISORY_WORKFLOWS), []);
-  assert.ok(requiredFiles.has("pages.yml"), "the site's build is no required check");
-  // Planted: the site's build as it was, run on pull requests and required by nothing; a listed
-  // workflow that became a gate; a listed one that no longer runs on pull requests; a workflow
-  // that runs on pull_request_target; and a name of no workflow.
-  const notRequired = new Set([...requiredFiles].filter((file) => file !== "pages.yml"));
-  assert.deepEqual(advisoryProblems(docs, notRequired, ADVISORY_WORKFLOWS).filter((p) => p.startsWith("pages.yml ")).length, 1, "the site's build, required by nothing, passes");
-  const spikes = docs.filter((d) => d.file.startsWith("spike-"));
-  assert.ok(spikes.length > 0, "no spike workflow to plant on");
-  const asGate = new Set([...requiredFiles, spikes[0].file]);
-  assert.ok(advisoryProblems(docs, asGate, ADVISORY_WORKFLOWS).some((p) => p === `${spikes[0].file} is in ADVISORY_WORKFLOWS, and holds a required job`), "a listed workflow that holds a required job passes");
-  const byHand = docs.map((d) => (d.file === spikes[0].file ? { file: d.file, doc: { ...d.doc, on: { workflow_dispatch: null } } } : d));
-  assert.ok(advisoryProblems(byHand, requiredFiles, ADVISORY_WORKFLOWS).some((p) => p === `${spikes[0].file} is in ADVISORY_WORKFLOWS, and runs on no pull request`), "a listed workflow that runs on no pull request passes");
-  const target = [...docs, { file: "x.yml", doc: { on: { pull_request_target: null } } }];
-  assert.ok(advisoryProblems(target, requiredFiles, ADVISORY_WORKFLOWS).some((p) => p.startsWith("x.yml runs on pull requests")), "a workflow on pull_request_target, required by nothing, passes");
-  const stale = new Map([...ADVISORY_WORKFLOWS, ["gone.yml", "x"]]);
-  assert.ok(advisoryProblems(docs, requiredFiles, stale).includes("ADVISORY_WORKFLOWS names gone.yml, which is no workflow"), "a listed name of no workflow passes");
+check("every job that runs on pull requests or on a branch other than main is a gate, or says why it gates nothing", () => {
+  const jobs = allJobs().map(({ file, doc, id }) => ({ file, id, on: triggers(doc) }));
+  const required = new Set(requiredJobs().map(({ file, id }) => `${file}#${id}`));
+  assert.deepEqual(advisoryProblems(jobs, required, ADVISORY_JOBS), []);
+  assert.ok(required.has("pages.yml#build"), "the site's build is no required check");
+  const refused = (list, req = required, advisory = ADVISORY_JOBS) => advisoryProblems(list, req, advisory);
+  const pages = jobs.find((j) => j.file === "pages.yml" && j.id === "build");
+  // Planted: the site's build as it was, required by nothing; a job beside it in its required
+  // workflow; a pull_request_target workflow; and each push that reaches a branch other than main.
+  assert.ok(refused(jobs, new Set([...required].filter((k) => k !== "pages.yml#build"))).some((p) => p.startsWith("pages.yml#build runs on")), "the site's build, required by nothing, passes");
+  assert.ok(refused([...jobs, { ...pages, id: "extra" }]).some((p) => p.startsWith("pages.yml#extra runs on")), "a job beside a required one passes");
+  assert.ok(refused([{ file: "x.yml", id: "j", on: { pull_request_target: null } }]).some((p) => p.startsWith("x.yml#j runs on")), "a job on pull_request_target passes");
+  for (const push of [null, { paths: ["src/**"] }, { branches: ["main", "dev"] }, { branches: ["*"] }, { "branches-ignore": ["main"] }, { branches: ["main"], "branches-ignore": ["x"] }, { tags: ["m*"], branches: ["dev"] }]) {
+    assert.ok(refused([{ file: "x.yml", id: "j", on: { push } }]).some((p) => p.startsWith("x.yml#j runs on")), `a job on push ${JSON.stringify(push)} passes`);
+  }
+  // What is no gate's business: main's pushes, tags alone, a schedule, a run by hand.
+  for (const on of [{ push: { branches: ["main"] } }, { push: { tags: ["m*"] } }, { schedule: [{ cron: "0 0 * * *" }] }, { workflow_dispatch: null }]) {
+    assert.deepEqual(refused([{ file: "x.yml", id: "j", on }], required, new Map()), [], JSON.stringify(on));
+  }
+  // A reason that is empty or blank; a listed job that is required, that runs on no pull request,
+  // or that is no job.
+  for (const reason of ["", "   ", undefined]) {
+    assert.ok(refused(jobs, required, new Map([...ADVISORY_JOBS, ["spike-tier1.yml#measure", reason]])).includes("spike-tier1.yml#measure is in ADVISORY_JOBS with no reason"), `the reason ${JSON.stringify(reason)} passes`);
+  }
+  assert.ok(refused(jobs, new Set([...required, "spike-tier1.yml#measure"])).includes("spike-tier1.yml#measure is in ADVISORY_JOBS, and is a required check"), "a listed required check passes");
+  const byHand = jobs.map((j) => (j.file === "spike-tier1.yml" ? { ...j, on: { workflow_dispatch: null } } : j));
+  assert.ok(refused(byHand).includes("spike-tier1.yml#measure is in ADVISORY_JOBS, and runs on no pull request and no branch other than main"), "a listed job that runs on no pull request passes");
+  assert.ok(refused(jobs, required, new Map([...ADVISORY_JOBS, ["gone.yml#j", "x"]])).includes("ADVISORY_JOBS names gone.yml#j, which is no job"), "a listed name of no job passes");
 });
 
 check("a workflow that holds a required job runs only on pull requests, the queue and main", () => {

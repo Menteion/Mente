@@ -58,14 +58,18 @@ jobs:
           path: target/site/book
 
   deploy:
-    # Only a milestone tag publishes. The github-pages environment must allow the tag (a
-    # deployment tag rule `m*`), since by default it admits only the default branch.
+    # Only a milestone tag publishes, and only one on a commit of main: anyone who can push could
+    # tag a pull request's head, which main never took (the review of 7ba7a5c). The github-pages
+    # environment must allow the tag (a deployment tag rule `m*`), since by default it admits only
+    # the default branch. The only job of any workflow whose token may write Pages or an OIDC token
+    # (.github/scripts/policy.test.mjs).
     name: Publish to GitHub Pages
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'm')
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      contents: read
       pages: write
       id-token: write
     concurrency:
@@ -75,5 +79,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tagged commit is in main's history
+        run: bash .github/scripts/commit-on-main.sh "$GITHUB_SHA"
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
