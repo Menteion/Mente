@@ -10,7 +10,7 @@
 // longer than the time limit.
 
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { odinProgram, parseSignature, rustProgram, type Lang, type Signature } from "./languages.ts";
@@ -99,11 +99,24 @@ export function sandboxed(sandbox: string, workdir: string, cmd: string, args: s
   return [BASH, [resolve(sandbox), resolve(workdir), command, ...args]];
 }
 
-/** Whether `path` is one of `roots` or lies inside one. */
+/** A path as the file system resolves it, links and all, or as written when it is not there yet. */
+function real(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * Whether `path` is one of `roots` or lies inside one, each as the file system resolves it: a link
+ * inside a root that points out of it lies outside (the review of aafe59b: a held-out-set link to
+ * $RUNNER_TEMP passed for the hidden workspace).
+ */
 export function insideAny(path: string, roots: string[]): boolean {
-  const p = resolve(path);
+  const p = real(path);
   return roots.some((r) => {
-    const root = resolve(r);
+    const root = real(r);
     return p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
   });
 }

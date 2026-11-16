@@ -79,16 +79,26 @@ async function main(): Promise<void> {
   const runs = Number(option("runs", "3"));
   const budget = Number(option("budget", "5"));
   const out = option("out", "probe-out");
+  const plan = process.argv.includes("--plan");
   // The broker holds the key; this process holds none.
   if (process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is set: the harness holds no key, the broker does (benchmark/harness/broker.ts)");
   const brokerAt = option("broker", "");
-  if (brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
-  const broker = await connectBroker(brokerAt);
-  const post: Post = (body) => broker.post(body);
+  if (!plan && brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
 
   const card = readFileSync("docs/language-card.md", "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");
   const system = systemPrompt(card);
   const tasks = m1Tasks("benchmark/tasks");
+  // A plan: the tasks and runs a run would make, chosen as a run chooses them, then printed, with no
+  // broker, no key and no agent code, before anything is written. A harness test makes it on every
+  // change, so that this script's path up to its first call runs in CI (run 3 of the plan, on
+  // 2026-11-16: the benchmark's choice of tasks threw before any call, with the key in reach, and no
+  // test had ever run it).
+  if (plan) {
+    console.log(JSON.stringify({ plan: "probe", model: MODEL, runs, tasks: tasks.map((t) => t.id), planned_runs: tasks.length * runs }));
+    return;
+  }
+  const broker = await connectBroker(brokerAt);
+  const post: Post = (body) => broker.post(body);
   mkdirSync(out, { recursive: true });
 
   const record = {

@@ -25,6 +25,8 @@ export interface Task {
   hidden: string[];
   /** An adversarial task's probe: the calls its `## Probe` names, written in backticks. */
   probe: string[];
+  /** Whether its front matter marks it retired, which keeps it out of every later score (benchmark/README.md). */
+  retired: boolean;
 }
 
 /**
@@ -41,6 +43,24 @@ export function preliminaryTasks(tasks: Task[], which: string): Task[] {
   const unknown = ids.filter((id) => !m1.some((t) => t.id === id));
   if (unknown.length > 0) throw new Error(`no public M1 solve task ${unknown.join(", ")}`);
   return m1.filter((t) => ids.includes(t.id));
+}
+
+/**
+ * The public tasks of a milestone a measured run gives the agents: none retired, and, unless
+ * `which` is `all`, those its comma-separated ids name; an id that names no such task is an error.
+ */
+export function benchmarkTasks(tasks: Task[], milestone: string, which: string): Task[] {
+  const kept = tasks.filter((t) => t.milestone === milestone && t.set === "public" && !t.retired);
+  if (which === "all") return kept;
+  const ids = which.split(",").map((id) => id.trim());
+  const unknown = ids.filter((id) => !kept.some((t) => t.id === id));
+  if (unknown.length > 0) throw new Error(`no public ${milestone} task ${unknown.join(", ")}`);
+  return kept.filter((t) => ids.includes(t.id));
+}
+
+/** The held-out solve tasks of a milestone a measured run gives the agents: none retired. */
+export function heldOutTasks(tasks: Task[], milestone: string): Task[] {
+  return tasks.filter((t) => t.milestone === milestone && t.kind === "solve" && !t.retired);
 }
 
 /** Reads one task file. */
@@ -67,6 +87,7 @@ export function parseTask(text: string): Task {
     examples: indented(section(body, "Examples")),
     hidden: indented(section(body, "Hidden tests")),
     probe: probeCalls(section(body, "Probe").join("\n"), own(indented(section(body, "Signature")), 0) ?? ""),
+    retired: Object.hasOwn(front, "retired"),
   };
 }
 

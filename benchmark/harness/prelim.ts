@@ -123,23 +123,35 @@ async function main(): Promise<void> {
   const budget = Number(option("budget", "5"));
   const out = resolve(option("out", "prelim-out"));
   const sandbox = option("sandbox", "");
+  const plan = process.argv.includes("--plan");
   // The broker holds the key; this process runs agent code through the sandbox, and holds none.
   if (process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is set: the harness holds no key, the broker does (benchmark/harness/broker.ts)");
   const brokerAt = option("broker", "");
-  if (brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
-  if (!sandbox) throw new Error("pass --sandbox: the agents' programs run on the machine whose broker holds the API key");
-  const broker = await connectBroker(brokerAt);
-  const post: Post = (body) => broker.post(body);
-  // --out under the sandbox's runs root, whose cover leaves it alone visible; --mn outside every
-  // directory the sandbox covers, or mn could not run there.
-  const roots = readSandboxRoots();
-  checkUnderRuns(out, roots);
-  if (insideAny(mn, [REPOSITORY, ...roots.hide, roots.runs])) throw new Error(`--mn must lie outside ${[...roots.hide, roots.runs].join(" and ")}, which the sandbox covers`);
-  confined.sandbox = sandbox;
-  confined.workdir = out;
+  if (!plan && brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
+  if (!plan && !sandbox) throw new Error("pass --sandbox: the agents' programs run on the machine whose broker holds the API key");
+  if (!plan) {
+    // --out under the sandbox's runs root, whose cover leaves it alone visible; --mn outside every
+    // directory the sandbox covers, or mn could not run there.
+    const roots = readSandboxRoots();
+    checkUnderRuns(out, roots);
+    if (insideAny(mn, [REPOSITORY, ...roots.hide, roots.runs])) throw new Error(`--mn must lie outside ${[...roots.hide, roots.runs].join(" and ")}, which the sandbox covers`);
+    confined.sandbox = sandbox;
+    confined.workdir = out;
+  }
   const card = readFileSync("docs/language-card.md", "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");
   const system = systemPrompt(card);
   const tasks = preliminaryTasks(readTasks("benchmark/tasks"), which);
+  // A plan: the tasks and runs a run would make, chosen as a run chooses them, then printed, with no
+  // broker, no key and no agent code, before anything is written. A harness test makes it on every
+  // change, so that this script's path up to its first call runs in CI (run 3 of the plan, on
+  // 2026-11-16: the benchmark's choice of tasks threw before any call, with the key in reach, and no
+  // test had ever run it).
+  if (plan) {
+    console.log(JSON.stringify({ plan: "prelim", models: MODELS.map((m) => m.id), runs, tasks: tasks.map((t) => t.id), planned_runs: MODELS.length * tasks.length * runs }));
+    return;
+  }
+  const broker = await connectBroker(brokerAt);
+  const post: Post = (body) => broker.post(body);
   mkdirSync(out, { recursive: true });
   const record = {
     models: MODELS,

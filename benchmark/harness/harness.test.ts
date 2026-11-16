@@ -4,11 +4,13 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { inspect } from "node:util";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, RunAnomaly, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
 import { Broker, httpPost, LOG_LINE_MAX, lineReader, logLine, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, wrongModel, type Answer, type Price } from "./broker.ts";
 import { BrokerBroken, BrokerRefused, connectBroker, refusalOf } from "./brokered.ts";
@@ -54,12 +56,14 @@ import {
   splitTop,
 } from "./languages.ts";
 import { failureText, feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
-import { failureOf, firstFailure, median, summarize, type RunRecord } from "./report.ts";
+import { failureOf, firstFailure, HeldOutError, heldOut, heldOutAsync, median, summarize, type RunRecord } from "./report.ts";
 import { own, setOwn } from "../own.mjs";
 import {
+  benchmarkTasks,
   extractProgram,
   feedbackPrompt,
   hasTodo,
+  heldOutTasks,
   outcome,
   parseCase,
   menteSignature,
@@ -195,6 +199,20 @@ test("a task's core mark and hidden tests are read", () => {
   assert.equal(task.core, false);
   assert.deepEqual(task.hidden, ["clamp(0, 0, 0) == 0"]);
   assert.equal(parseTask(TASK.replace("core: false", "core: true")).core, true);
+  // A retired task says so in its front matter, with or without a reason, and none other is.
+  assert.equal(task.retired, false);
+  assert.equal(parseTask(TASK.replace("core: false", "core: false\nretired: 2026-11-16 Changing the corpus")).retired, true);
+  assert.equal(parseTask(TASK.replace("core: false", "core: false\nretired:")).retired, true);
+  assert.equal(parseTask(TASK.replace("# Clamp to a range", "# Clamp to a range\n\nretired: in the body, not the front matter")).retired, false);
+  // And a measured run gives the agents no retired task, public or held out.
+  const of = (id: string, more = "") => parseTask(TASK.replace("id: clamp", `id: ${id}`).replace("core: false", `core: false${more}`));
+  const tasks = [of("kept"), of("gone", "\nretired: 2026-11-16 broken"), { ...of("later"), milestone: "M2" }];
+  assert.deepEqual(benchmarkTasks(tasks, "M1", "all").map((x) => x.id), ["kept"]);
+  assert.deepEqual(benchmarkTasks(tasks, "M1", "kept").map((x) => x.id), ["kept"]);
+  assert.throws(() => benchmarkTasks(tasks, "M1", "gone"), /no public M1 task gone/);
+  assert.throws(() => benchmarkTasks(tasks, "M1", "kept, nothing"), /no public M1 task nothing/);
+  const held = [{ ...of("h1"), set: "held-out", kind: "solve" }, { ...of("h2", "\nretired: 2026-11-16 broken"), set: "held-out", kind: "solve" }, { ...of("h3"), set: "held-out", kind: "adversarial" }];
+  assert.deepEqual(heldOutTasks(held, "M1").map((x) => x.id), ["h1"]);
 });
 
 test("cases are read as a returned value, what a mut argument is left holding, or both", () => {
@@ -614,6 +632,19 @@ test("an output directory outside the sandbox's runs root is refused, and the ro
   assert.equal(insideAny("/r/repo/bench-out", ["/r/repo"]), true);
   assert.equal(insideAny("/r/repository-out", ["/r/repo"]), false);
   assert.equal(insideAny("/t/bench-out", ["/r/repo", "/r/held"]), false);
+  // A link inside a root that points out of it lies outside: the paths are compared as the file
+  // system resolves them (the review of aafe59b: a held-out-set link to $RUNNER_TEMP passed for the
+  // hidden workspace).
+  const linked = mkdtempSync(join(tmpdir(), "mente-inside-"));
+  try {
+    mkdirSync(join(linked, "root"));
+    mkdirSync(join(linked, "elsewhere"));
+    symlinkSync(join(linked, "elsewhere"), join(linked, "root", "held-out-set"), "junction");
+    assert.equal(insideAny(join(linked, "root", "held-out-set"), [join(linked, "root")]), false, "a link out of the root passed for inside it");
+    assert.equal(insideAny(join(linked, "root"), [join(linked, "root")]), true);
+  } finally {
+    rmSync(linked, { recursive: true, force: true });
+  }
   const roots = sandboxRoots("hide /w/repo\nhide /t/broker\nruns /t/runs\n");
   assert.deepEqual(roots, { hide: ["/w/repo", "/t/broker"], runs: "/t/runs" });
   assert.throws(() => sandboxRoots("hide /w/repo\n"), /names no runs root/);
@@ -1541,6 +1572,127 @@ test("an answer billed past the most its request could cost counts as billed, an
   assert.deepEqual([exact.broker.closed, exact.notes], [null, []]);
 });
 
+/**
+ * The scripts that call the API, each with the planning runs the test below makes of it: the
+ * benchmark for every milestone of the public tasks, the preliminary run for both of its sets, and
+ * the syntax probe.
+ */
+const PLANS: [string, string[][]][] = [
+  ["bench.ts", [...new Set(readdirSync(join(REPOSITORY, "benchmark", "tasks")).filter((f) => f.endsWith(".md")).map((f) => parseTask(readFileSync(join(REPOSITORY, "benchmark", "tasks", f), "utf8")).milestone))].sort().map((m) => ["--budget", "1", "--milestone", m, "--runs", "1"])],
+  ["prelim.ts", [["--tasks", "core", "--runs", "1"], ["--tasks", "non-core", "--runs", "1"]]],
+  ["probe.ts", [["--runs", "1"]]],
+];
+
+test("every script that calls the API plans its runs with no broker and no key, as far as its first call", () => {
+  // Run 3 of the plan (2026-11-16): bench.ts threw while choosing its tasks, before any call, with
+  // the key in reach, since no test had ever run its main. Each script's path up to its first call
+  // now runs here, on every change: its choice of tasks, its prompts, and its check that every task
+  // can be written in every language. A new script that calls the API joins PLANS, or this fails.
+  const harness = join(REPOSITORY, "benchmark", "harness");
+  const callers = readdirSync(harness).filter((f) => f.endsWith(".ts") && f !== "api.ts" && f !== "harness.test.ts" && readFileSync(join(harness, f), "utf8").includes("budgetedCall("));
+  assert.deepEqual(callers.sort(), PLANS.map(([f]) => f).sort(), "a script that calls the API is not planned here");
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "ANTHROPIC_API_KEY"));
+  const plan = (file: string, args: string[]) => spawnSync(process.execPath, ["--disallow-code-generation-from-strings", join(harness, file), "--plan", ...args], { cwd: REPOSITORY, env, encoding: "utf8", timeout: 120_000 });
+  const m1 = readdirSync(join(REPOSITORY, "benchmark", "tasks"))
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => parseTask(readFileSync(join(REPOSITORY, "benchmark", "tasks", f), "utf8")))
+    .filter((task) => task.milestone === "M1" && task.set === "public" && !task.retired);
+  for (const [file, runs] of PLANS) {
+    for (const args of runs) {
+      const r = plan(file, args);
+      const said = `${file} --plan ${args.join(" ")}: ${r.stderr.slice(-600)}`;
+      if (file === "bench.ts" && args.at(3) !== "M1") {
+        // A later milestone plans, or refuses as a run would: a task in a language the compiler or the
+        // harness cannot write yet. Never another error.
+        if (r.status !== 0) assert.match(r.stderr, /^Error: [\w-]+ in (mente|rust|odin): (`[^`]+` is not a type M\d has|the harness does not yet write .+)$/m, said);
+        continue;
+      }
+      assert.equal(r.status, 0, said);
+      const planned = JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "{}");
+      assert.ok(planned.planned_runs > 0, said);
+      if (file === "bench.ts") assert.equal(planned.planned_runs, m1.length * 2 * 3, `every public M1 task, in each model and language: ${said}`);
+    }
+  }
+  // The held-out branch too, on stand-in tasks (benchmark/harness/fixtures/held-out): their reading,
+  // the filter that leaves the retired one out, and the check that each can be written, planned as
+  // counts alone, no held-out task named (the review of aafe59b: no plan had run that branch).
+  const held = plan("bench.ts", ["--budget", "1", "--milestone", "M1", "--runs", "1", "--held-out", join(harness, "fixtures", "held-out")]);
+  assert.equal(held.status, 0, held.stderr);
+  const heldPlan = JSON.parse(held.stdout.trim().split("\n").at(-1) ?? "{}");
+  assert.equal(heldPlan.held_out, 1, held.stdout);
+  assert.equal(heldPlan.planned_runs, (m1.length + 1) * 2 * 3, held.stdout);
+  assert.ok(!held.stdout.includes("stand-in"), "a plan named a held-out task");
+  // A held-out task that cannot be written, by its signature, a type, or an example: each plan
+  // fails naming the task by its place alone, and no output of it holds anything of the task (the
+  // final pass on 89c7691: a mangled signature, parsed outside the try that hid such errors,
+  // printed itself). The stand-ins' every field holds "secret_heldout".
+  const bad = join(harness, "fixtures", "held-out-bad");
+  const cases = readdirSync(bad).sort();
+  assert.deepEqual(cases, ["example", "signature", "type"]);
+  const planned = cases.map((c) => [c, plan("bench.ts", ["--budget", "1", "--milestone", "M1", "--runs", "1", "--held-out", join(bad, c)])] as const);
+  for (const [c, r] of planned) assert.doesNotMatch(`${r.stdout}${r.stderr}`, /secret_heldout/i, `the plan of a held-out task with a bad ${c} printed the task`);
+  for (const [c, r] of planned) {
+    assert.notEqual(r.status, 0, `a held-out task with a bad ${c} planned`);
+    assert.match(r.stderr, /HeldOutError: held-out-1 cannot be written in (mente|rust|odin): Error$/m, `${c}: ${`${r.stdout}${r.stderr}`.slice(-600)}`);
+  }
+  for (const r of [held]) assert.doesNotMatch(`${r.stdout}${r.stderr}`, /stand-in|secret_heldout/i);
+});
+
+test("every step of a held-out task leaves through one boundary, which passes on nothing of the error it met", async () => {
+  // The final pass on 89c7691. An error carrying a held-out task's text in its message, its name
+  // and its cause leaves heldOut and heldOutAsync as a HeldOutError whose message, stack, cause and
+  // printed form, as node prints an uncaught error, hold none of it; and the measured run's record
+  // and log say only what the boundary made of it.
+  const secret = "SECRET_HELDOUT_TEXT";
+  const met = () => {
+    const e = new Error(`not a signature: ${secret} a b`, { cause: new Error(secret) });
+    e.name = `${secret}Error`;
+    return e;
+  };
+  const caught: unknown[] = [];
+  try {
+    heldOut("held-out-2 cannot be written in rust", () => {
+      throw met();
+    });
+  } catch (e) {
+    caught.push(e);
+  }
+  await heldOutAsync("a held-out run failed", async () => {
+    throw met();
+  }).catch((e: unknown) => caught.push(e));
+  assert.equal(caught.length, 2);
+  for (const e of caught) {
+    assert.ok(e instanceof HeldOutError);
+    assert.equal(e.cause, undefined);
+    for (const said of [e.message, String(e.stack), String(e), inspect(e)]) assert.ok(!said.includes(secret), `the boundary passed on the task's text: ${said}`);
+  }
+  assert.equal((caught[0] as Error).message, "held-out-2 cannot be written in rust: Error");
+  assert.equal(failureOf(caught[1], "held-out", "held-out-2-rust-claude-haiku-5-5-1"), "a held-out run failed: Error");
+  assert.equal(firstFailure("", caught[1], "held-out", "held-out-2-rust-claude-haiku-5-5-1"), "a held-out run failed: Error");
+  // What it keeps of a run's error: the anomaly and the API's status.
+  await heldOutAsync("a held-out run failed", async () => {
+    throw new RunAnomaly("another model", `an answer from ${secret}`);
+  }).catch((e: unknown) => {
+    assert.equal((e as Error).message, "a held-out run failed: an answer came from another model than the one asked");
+    // And the record and the log say what the boundary made of it.
+    assert.equal(failureOf(e, "held-out", "held-out-2-rust-claude-haiku-5-5-1"), "a held-out run failed: an answer came from another model than the one asked");
+  });
+  await heldOutAsync("a held-out run failed", async () => {
+    throw new Error(`the API answered 400: ${secret}`);
+  }).catch((e: unknown) => assert.equal((e as Error).message, "a held-out run failed: the API answered 400"));
+  // A value that returns passes unchanged.
+  assert.equal(heldOut("x", () => 7), 7);
+  // bench.ts sends every held-out step through it: the reading, each spec with its check, and each
+  // run; and reads the held-out set nowhere else.
+  const bench = readFileSync(join(REPOSITORY, "benchmark", "harness", "bench.ts"), "utf8");
+  assert.match(bench, /const heldTasks = heldOutDir \? readHeldOut\(join\(heldOutDir, "tasks"\), milestone\) : \[\];/);
+  assert.match(bench, /heldOut\(`held-out file \$\{k \+ 1\} could not be read`, \(\) => parseTask\(readFileSync\(join\(dir, f\), "utf8"\)\)\)/);
+  assert.match(bench, /return heldOut\("the held-out set could not be chosen from", \(\) => heldOutTasks\(tasks, milestone\)\);/);
+  assert.match(bench, /if \(set === "held-out"\) specs\.push\(heldOut\(`\$\{label\} cannot be written in \$\{lang\}`, specOf\)\);/);
+  assert.match(bench, /await heldOutAsync\("a held-out run failed", \(\) => runOne\(ctx, spec\)\)/);
+  assert.equal(bench.match(/\bheldOutDir\b/g)?.length, 6, "bench.ts reads the held-out set beyond its check and readHeldOut");
+});
+
 test("every harness that calls the API records, in each attempt, the model that wrote the answer", () => {
   // So that every result says which model produced it (the second run with the real key recorded
   // only the model it asked).
@@ -1785,12 +1937,98 @@ test("every shell script of the harness parses", { skip: spawnSync("bash", ["-c"
   }
 });
 
+test("fetch-held-out.sh checks the held-out set out at its commit, into a directory it makes, and prints nothing of it", { skip: spawnSync("bash", ["-c", "true"]).status === 0 ? false : "no bash" }, () => {
+  // Run 3 of the plan (2026-11-16): actions/checkout printed the held-out commit's subject into this
+  // public repository's log. A repository standing in for the held-out one, reached through a `git`
+  // first on PATH that hands the real one its URL instead of the held-out repository's, since the
+  // script reads no git configuration: the script runs as it is, its URL unchanged.
+  const dir = mkdtempSync(join(tmpdir(), "mente-held-out-"));
+  const token = "held-out-token-0123456789abcdef";
+  try {
+    const origin = join(dir, "origin");
+    mkdirSync(origin);
+    const git = (cwd: string, ...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });
+    git(origin, "init", "-q");
+    writeFileSync(join(origin, "secret-task-name.md"), "held out\n");
+    git(origin, "add", ".");
+    git(origin, "commit", "-q", "-m", "SECRETSUBJECT of a held-out task");
+    const commit = git(origin, "rev-parse", "HEAD").stdout.trim();
+    const shims = join(dir, "shims");
+    mkdirSync(shims);
+    writeFileSync(join(shims, "git"), '#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do if [ "$a" = https://github.com/Menteion/mente-bench-heldout ]; then args+=("$ORIGIN_URL"); else args+=("$a"); fi; done\nexec "$REAL_GIT" "${args[@]}"\n', { mode: 0o755 });
+    const realGit = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+    const run = (work: string, env: Record<string, string>, before?: () => void, input = `${token}\n`) => {
+      mkdirSync(work, { recursive: true });
+      before?.();
+      // As the step starts it: a cleared environment but PATH, HOME and the commit, the token on its
+      // standard input (the re-check of c55cf8f: on env's command line it was readable in /proc).
+      const r = spawnSync("bash", ["--noprofile", "--norc", join(REPOSITORY, "benchmark", "harness", "fetch-held-out.sh")], {
+        cwd: work,
+        env: { PATH: `${shims}${delimiter}${process.env.PATH ?? ""}`, HOME: join(dir, "home"), REAL_GIT: realGit, ORIGIN_URL: pathToFileURL(origin).href, ...env },
+        input,
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+      // The mask is the runner's to take; every other line is the log's.
+      return { status: r.status, printed: `${r.stdout}${r.stderr}`.split("\n").filter((l) => !l.startsWith("::add-mask::")).join("\n") };
+    };
+    const leaks = (printed: string) => ["SECRETSUBJECT", "secret-task-name", "HEAD is now", token, commit.slice(0, 7)].filter((x) => printed.includes(x));
+    const fetched = run(join(dir, "a"), { HELD_OUT_COMMIT: commit });
+    assert.equal(fetched.status, 0, fetched.printed);
+    assert.deepEqual(leaks(fetched.printed), [], fetched.printed);
+    assert.equal(fetched.printed.trim(), "the held-out set is at the commit corpus.lock names");
+    assert.equal(git(join(dir, "a", "held-out-set"), "rev-parse", "HEAD").stdout.trim(), commit);
+    assert.ok(existsSync(join(dir, "a", "held-out-set", "secret-task-name.md")));
+    // The token is in no file of the checkout.
+    assert.ok(!readFileSync(join(dir, "a", "held-out-set", ".git", "config"), "utf8").includes("extraheader"));
+    // held-out-set there already, as a directory, a file or a link, is refused, and nothing goes
+    // where a link points (the review of aafe59b: the checkout landed in the link's target).
+    const target = join(dir, "target");
+    mkdirSync(target);
+    for (const [name, make] of [
+      ["a directory", (w: string) => mkdirSync(join(w, "held-out-set"))],
+      ["a file", (w: string) => writeFileSync(join(w, "held-out-set"), "x")],
+      ["a link", (w: string) => symlinkSync(target, join(w, "held-out-set"), "junction")],
+    ] as [string, (w: string) => void][]) {
+      const work = join(dir, `there-${name.replace(/ /g, "-")}`);
+      const r = run(work, { HELD_OUT_COMMIT: commit }, () => make(work));
+      assert.notEqual(r.status, 0, `held-out-set there as ${name} passed`);
+      assert.match(r.printed, /held-out-set is already there/, name);
+    }
+    assert.deepEqual(readdirSync(target), [], "the checkout went where the link pointed");
+    // A commit corpus.lock does not name in full, one the repository does not hold, and no token
+    // each fail saying only that.
+    const short = run(join(dir, "b"), { HELD_OUT_COMMIT: commit.slice(0, 12) });
+    assert.notEqual(short.status, 0);
+    assert.match(short.printed, /no full commit id/);
+    const missing = run(join(dir, "c"), { HELD_OUT_COMMIT: "f".repeat(40) });
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.printed, /could not be fetched/);
+    const none = run(join(dir, "d"), { HELD_OUT_COMMIT: commit }, undefined, "");
+    assert.notEqual(none.status, 0);
+    assert.match(none.printed, /the held-out token is not set/);
+    // A token in the environment alone is not read: the script takes it from its standard input.
+    const inEnv = run(join(dir, "e"), { HELD_OUT_TOKEN: token, HELD_OUT_COMMIT: commit }, undefined, "");
+    assert.notEqual(inEnv.status, 0);
+    assert.match(inEnv.printed, /the held-out token is not set/);
+    for (const r of [short, missing, none, inEnv]) assert.deepEqual(leaks(r.printed), [], r.printed);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("start-broker.sh starts the broker alone, its socket the runner's user's, its core limit 0, its environment PATH", { skip: LINUX_ONLY }, async () => {
   const temp = mkdtempSync(join(tmpdir(), "mente-start-"));
   const dir = join(temp, "broker");
-  const env = { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: KEY, BUDGET: "1", RUNNER_TEMP: temp, GITHUB_WORKSPACE: REPOSITORY };
+  // A tool cache of its own, laid out as setup-node lays out the runner's, with the Node that runs
+  // this test where start-broker.sh names Node by its path: no variable of the runner's needed.
+  const tools = join(temp, "tools");
+  mkdirSync(join(tools, "node", PERMISSION.node, "x64", "bin"), { recursive: true });
+  symlinkSync(process.execPath, join(tools, "node", PERMISSION.node, "x64", "bin", "node"));
+  const env = { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: KEY, BUDGET: "1", RUNNER_TEMP: temp, GITHUB_WORKSPACE: REPOSITORY, RUNNER_TOOL_CACHE: tools };
   try {
-    const started = spawnSync("bash", [join(REPOSITORY, "benchmark", "harness", "start-broker.sh")], { env, encoding: "utf8", timeout: 60_000 });
+    // In a privileged bash, as its step starts it.
+    const started = spawnSync("/usr/bin/bash", ["-p", join(REPOSITORY, "benchmark", "harness", "start-broker.sh")], { env, encoding: "utf8", timeout: 60_000 });
     assert.equal(started.status, 0, started.stdout + started.stderr);
     // Its directory, socket, log and pid file are the runner's user's alone.
     assert.equal(statSync(dir).mode & 0o777, 0o700, "the broker's directory");

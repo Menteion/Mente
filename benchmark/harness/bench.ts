@@ -65,8 +65,8 @@ import {
 } from "./build.ts";
 import { LANGUAGES, odinProgram, parseSignature, rustProgram, type Lang, type Signature } from "./languages.ts";
 import { feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
-import { firstFailure, summarize, type RunRecord } from "./report.ts";
-import { extractProgram, parseCase, parseTask, type Case, type CaseResult, type Task } from "./tasks.ts";
+import { firstFailure, heldOut, heldOutAsync, summarize, type RunRecord } from "./report.ts";
+import { benchmarkTasks, extractProgram, heldOutTasks, parseCase, parseTask, type Case, type CaseResult, type Task } from "./tasks.ts";
 import { own, setOwn } from "../own.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -85,10 +85,13 @@ function readTasks(dir: string): Task[] {
     .map((f) => parseTask(readFileSync(join(dir, f), "utf8")));
 }
 
-/** Whether a task's front matter marks it retired, which keeps it out of every later score. */
-function retired(dir: string, task: Task): boolean {
-  return /^retired:/m.test(readFileSync(own(join(dir, `${task.id}.md`), "utf8").split(/\n---\n/), 0));
+/** The held-out set's tasks of a milestone, each file read through the boundary and named by its place. */
+function readHeldOut(dir: string, milestone: string): Task[] {
+  const files = heldOut("the held-out set could not be listed", () => readdirSync(dir).filter((f) => f.endsWith(".md")).sort());
+  const tasks = files.map((f, k) => heldOut(`held-out file ${k + 1} could not be read`, () => parseTask(readFileSync(join(dir, f), "utf8"))));
+  return heldOut("the held-out set could not be chosen from", () => heldOutTasks(tasks, milestone));
 }
+
 
 interface Spec {
   task: Task;
@@ -253,6 +256,7 @@ async function main(): Promise<void> {
   const which = option("tasks", "all");
   const heldOutDir = option("held-out", "");
   const out = option("out", "bench-out");
+  const plan = process.argv.includes("--plan");
   const pins = JSON.parse(readFileSync(join(here, "toolchains.json"), "utf8"));
   const tools: Tools = {
     mn: option("mn", "target/release/mn"),
@@ -276,21 +280,21 @@ async function main(): Promise<void> {
   // The broker holds the key; this process starts agent code, and holds none.
   if (process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is set: the harness holds no key, the broker does (benchmark/harness/broker.ts)");
   const brokerAt = option("broker", "");
-  if (brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
+  if (!plan && brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
   // Agent programs run beside the broker, so never outside the sandbox: an empty --sandbox once meant
   // every build ran unconfined.
-  if (!tools.sandbox) throw new Error("pass --sandbox: the agents' programs run on the machine whose broker holds the API key");
+  if (!plan && !tools.sandbox) throw new Error("pass --sandbox: the agents' programs run on the machine whose broker holds the API key");
 
-  // The toolchains, checked against their pins and recorded.
+  // The toolchains, checked against their pins and recorded; a plan starts none.
   const versions: Partial<Record<Lang, string>> = {};
-  if (languages.includes("mente")) versions.mente = `mn at ${process.env.GITHUB_SHA ?? "a local build"}`;
-  if (languages.includes("rust")) {
+  if (!plan && languages.includes("mente")) versions.mente = `mn at ${process.env.GITHUB_SHA ?? "a local build"}`;
+  if (!plan && languages.includes("rust")) {
     tools.rustc = await rustcInSysroot(tools.rustc, tools.rustToolchain);
     const env = childEnv(tools.rustToolchain ? { RUSTUP_TOOLCHAIN: tools.rustToolchain } : {});
     versions.rust = (await runProcess(tools.rustc, ["--version"], { env, timeoutMs: 60_000 })).stdout.trim();
     if (!versions.rust.startsWith(`rustc ${pins.rust.toolchain} `)) throw new Error(`rustc is ${versions.rust}, not ${pins.rust.toolchain}`);
   }
-  if (languages.includes("odin")) {
+  if (!plan && languages.includes("odin")) {
     versions.odin = (await runProcess(tools.odin, ["version"], { timeoutMs: 60_000 })).stdout.trim();
     if (!versions.odin.includes(pins.odin.release)) throw new Error(`odin is ${versions.odin}, not ${pins.odin.release}`);
   }
@@ -308,17 +312,8 @@ async function main(): Promise<void> {
 
   // The tasks: the milestone's public solve and adversarial tasks, then its held-out solve tasks.
   const publicDir = join(here, "..", "tasks");
-  let publicTasks = readTasks(publicDir).filter((t) => t.milestone === milestone && t.set === "public" && !retired(publicDir, t));
-  if (which !== "all") {
-    const ids = which.split(",").map((id) => id.trim());
-    const unknown = ids.filter((id) => !publicTasks.some((t) => t.id === id));
-    if (unknown.length > 0) throw new Error(`no public ${milestone} task ${unknown.join(", ")}`);
-    publicTasks = publicTasks.filter((t) => ids.includes(t.id));
-  }
-  const heldDir = heldOutDir ? join(heldOutDir, "tasks") : "";
-  const heldTasks = heldOutDir
-    ? readTasks(heldDir).filter((t) => t.milestone === milestone && t.kind === "solve" && !retired(heldDir, t))
-    : [];
+  const publicTasks = benchmarkTasks(readTasks(publicDir), milestone, which);
+  const heldTasks = heldOutDir ? readHeldOut(join(heldOutDir, "tasks"), milestone) : [];
   const specs: Spec[] = [];
   for (let run = 1; run <= runs; run++) {
     const all: [Task, "public" | "held-out", string][] = [
@@ -329,29 +324,47 @@ async function main(): Promise<void> {
       for (const model of models) {
         for (const lang of languages) {
           const cases = (lines: string[]) => lines.map(parseCase).filter((c): c is Case => c !== null);
-          const spec: Spec = {
-            task,
-            label,
-            name: `${label}-${lang}-${model.id}-${run}`,
-            set,
-            lang,
-            model,
-            run,
-            sig: parseSignature(task.signature),
-            examples: cases(task.examples),
-            scored: cases([...task.examples, ...task.hidden]),
-            probe: task.probe.map((call) => ({ call, expected: "", value: true, leaves: false })),
-          };
-          try {
+          // The spec, from parsing the signature to the check that the task can be written: a
+          // held-out task's goes through the boundary whole, so that no error of it carries its text.
+          const specOf = (): Spec => {
+            const spec: Spec = {
+              task,
+              label,
+              name: `${label}-${lang}-${model.id}-${run}`,
+              set,
+              lang,
+              model,
+              run,
+              sig: parseSignature(task.signature),
+              examples: cases(task.examples),
+              scored: cases([...task.examples, ...task.hidden]),
+              probe: task.probe.map((call) => ({ call, expected: "", value: true, leaves: false })),
+            };
             checkWritable(spec);
-          } catch (e) {
-            // A held-out task's text never reaches the log.
-            throw new Error(set === "public" ? `${task.id} in ${lang}: ${(e as Error).message}` : `${label} cannot be written in ${lang}`);
+            return spec;
+          };
+          if (set === "held-out") specs.push(heldOut(`${label} cannot be written in ${lang}`, specOf));
+          else {
+            try {
+              specs.push(specOf());
+            } catch (e) {
+              throw new Error(`${task.id} in ${lang}: ${(e as Error).message}`);
+            }
           }
-          specs.push(spec);
         }
       }
     }
+  }
+
+  // A plan: the tasks and runs a run would make, chosen as a run chooses them, then printed, with no
+  // broker, no key and no agent code, before anything is written. A harness test makes it on every
+  // change, so that this script's path up to its first call runs in CI (run 3 of the plan, on
+  // 2026-11-16: the benchmark's choice of tasks threw before any call, with the key in reach, and no
+  // test had ever run it).
+  if (plan) {
+    // The held-out set by its count alone, never a task's name.
+    console.log(JSON.stringify({ plan: "bench", milestone, models: models.map((m) => m.id), languages, runs, tasks: publicTasks.map((t) => t.id), held_out: heldTasks.length, planned_runs: specs.length }));
+    return;
   }
 
   // The runs' folders exist before the first build, so that the sandbox has them to cover.
@@ -408,7 +421,9 @@ async function main(): Promise<void> {
     while (!budget.stopped && next < specs.length) {
       const spec = own(specs, next++);
       try {
-        const record = await runOne(ctx, spec);
+        // A held-out run goes through the boundary, so that its error names only its anomaly, the
+        // API's status or its kind.
+        const record = spec.set === "public" ? await runOne(ctx, spec) : await heldOutAsync("a held-out run failed", () => runOne(ctx, spec));
         if (!record) break;
         done.push(record);
         writeFileSync(join(out, spec.set === "public" ? "runs" : "held-out", spec.name, "record.json"), JSON.stringify(record, null, 2));
