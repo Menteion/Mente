@@ -39,6 +39,7 @@ import {
   MAX_TOKENS,
   parseModels,
   requestBody,
+  thinkingCarried,
   type Budget,
   type Message,
   type Model,
@@ -158,6 +159,9 @@ async function runOne(ctx: Context, spec: Spec): Promise<Detailed | null> {
     cost += answered.cost;
     tokens.input += reply.usage.input_tokens + (reply.usage.cache_creation_input_tokens ?? 0) + (reply.usage.cache_read_input_tokens ?? 0);
     tokens.output += reply.usage.output_tokens;
+    // The thinking blocks the request carried back and the reply holds, read before the reply joins
+    // the transcript.
+    const carried = thinkingCarried(messages, reply);
     // The reply goes back unchanged, so the transcript stays append-only.
     messages.push({ role: "assistant", content: reply.content });
     writeFileSync(join(dir, `${attempt}.reply.md`), reply.text);
@@ -178,6 +182,7 @@ async function runOne(ctx: Context, spec: Spec): Promise<Detailed | null> {
       answered_by: reply.model,
       stop_reason: reply.stop_reason,
       usage: reply.usage,
+      thinking_blocks: carried,
       cost: answered.cost,
       builds: build?.ok ?? false,
       diagnostics: build?.diagnostics ?? [],

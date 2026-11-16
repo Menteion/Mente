@@ -11,7 +11,7 @@ import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { inspect } from "node:util";
-import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, RunAnomaly, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
+import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, RunAnomaly, send, settle, thinkingCarried, worstCost, type Budget, type Usage } from "./api.ts";
 import { Broker, httpPost, LOG_LINE_MAX, lineReader, logLine, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, wrongModel, type Answer, type Price } from "./broker.ts";
 import { BrokerBroken, BrokerRefused, connectBroker, refusalOf } from "./brokered.ts";
 import {
@@ -1701,6 +1701,11 @@ test("every harness that calls the API records, in each attempt, the model that 
   for (const f of callers) {
     const text = readFileSync(join(REPOSITORY, "benchmark", "harness", f), "utf8");
     assert.equal(text.split("answered_by: reply.model,").length - 1, 1, `${f} records no answering model`);
+    // And how many thinking blocks the request carried back and the answer held, counted from the
+    // request's own messages, before the reply joins them (the non-core preliminary run of
+    // 2026-11-16 could not tell whether any went back).
+    assert.equal(text.split(/thinking_blocks: (carried|thinkingCarried\(messages, reply\)),/).length - 1, 2, `${f} records no thinking blocks in an attempt`);
+    if (text.includes("thinking_blocks: carried,")) assert.match(text, /const carried = thinkingCarried\(messages, reply\);\n(\s*\/\/.*\n)*\s*messages\.push\(\{ role: "assistant", content: reply\.content \}\);/, `${f} counts after the reply joined the messages`);
     // And a call that fails, an answer from another model among them, fails the job, its record
     // saying why.
     assert.equal(text.split("if (failure) process.exit(1);").length - 1, 1, `${f} does not fail the job on a failed call`);
@@ -1781,6 +1786,56 @@ test("the broker prices what the usage reports, a long Haiku prompt at its highe
   assert.equal(thinkingBlocks({ messages: [{ role: "user", content: [{ type: "thinking" }] }] }), 0);
   assert.equal(thinkingBlocks("none"), 0);
   assert.equal(utf8Length("\u00e9"), 2);
+  // A record's count of them: what the request carried back, and what its answer holds.
+  const reply = { model: "claude-haiku-5-5", content: [{ type: "thinking", thinking: "", signature: "u" }, { type: "text", text: "z" }], text: "z", stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+  assert.deepEqual(thinkingCarried(blocks.messages as never, reply), { sent: 3, received: 1 });
+  assert.deepEqual(thinkingCarried([{ role: "user", content: "hi" }], { ...reply, content: [{ type: "text", text: "z" }] }), { sent: 0, received: 0 });
+});
+
+test("the broker tallies the requests that carried thinking blocks back and what it reserved for them, and says so once the run's connection closes", async () => {
+  // So that a run shows the reservation path was taken: maxTokens input tokens for each block a
+  // request carries back (the non-core preliminary run of 2026-11-16 could not show it).
+  const { broker, notes } = fakeBroker(10, (body) => ({ status: 200, retryAfter: "", text: asAsked(body, { usage: { input_tokens: 1, output_tokens: 1 } }) }));
+  const back = { ...haiku(), messages: [{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s" }, { type: "redacted_thinking", data: "d" }, { type: "text", text: "y" }] }, { role: "user", content: "again" }] };
+  assert.equal(JSON.parse(await broker.handle(request(1, haiku()))).status, 200);
+  assert.deepEqual(broker.thinking, { requests: 0, blocks: 0, reserved: 0 }, "a request with no thinking blocks was tallied");
+  assert.equal(JSON.parse(await broker.handle(request(2, back))).status, 200);
+  assert.equal(JSON.parse(await broker.handle(request(3, back))).status, 200);
+  const limits = readLimits(LIMITS_TEXT);
+  const price = limits.models.get("claude-haiku-5-5") as Price;
+  const shaped = shape(back, limits) as { text: string; maxTokens: number };
+  const each = brokerWorst(shaped.text, shaped.maxTokens, price, limits, 2) - brokerWorst(shaped.text, shaped.maxTokens, price, limits, 0);
+  assert.deepEqual({ ...broker.thinking, reserved: 0 }, { requests: 2, blocks: 4, reserved: 0 });
+  assert.ok(Math.abs(broker.thinking.reserved - 2 * each) < 1e-12, String(broker.thinking.reserved));
+  assert.ok(Math.abs(each - (2 * 16_000 * 0.1 * 1.25) / 1e6) < 1e-12, String(each));
+  assert.match(broker.thinkingLine(), /^the broker admitted 2 requests that carried 4 thinking blocks back, and reserved \$[\d.e-]+ for those blocks, 16000 input tokens a block$/);
+  // A refused request reserves nothing, and is not tallied.
+  const refusing = fakeBroker(0.000001, () => ({ status: 200, retryAfter: "", text: "{}" }));
+  assert.ok(JSON.parse(await refusing.broker.handle(request(4, back))).refused);
+  assert.deepEqual(refusing.broker.thinking, { requests: 0, blocks: 0, reserved: 0 });
+  // Served: the line reaches the log once the last connection closes, and once for each tally.
+  const dir = mkdtempSync(join(tmpdir(), "mente-thinking-"));
+  const at = socketPath(dir, "thinking");
+  const server = await serve(broker, at, (e) => {
+    throw e;
+  });
+  try {
+    const before = notes.length;
+    const link = await connectBroker(at);
+    assert.equal((await link.post(back)).status, 200);
+    link.close();
+    for (let i = 0; i < 100 && notes.length === before; i++) await new Promise((done) => setTimeout(done, 10));
+    assert.deepEqual(notes.slice(before), [broker.thinkingLine()]);
+    assert.match(notes.at(-1) ?? "", /admitted 3 requests that carried 6 thinking blocks back/);
+    // A connection that sends nothing more leaves the tally as it was, said already.
+    const idle = await connectBroker(at);
+    idle.close();
+    await new Promise((done) => setTimeout(done, 100));
+    assert.equal(notes.length, before + 1, "the same tally was said twice");
+  } finally {
+    await new Promise((done) => server.close(done));
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the broker refuses a body past its cap and a request past its cap in flight, and a line past its length", async () => {

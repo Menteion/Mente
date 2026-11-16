@@ -461,6 +461,12 @@ export class Broker {
   note: (line: string) => void;
   /** What it has said, so that each is said once a run. */
   noted = new Set<string>();
+  /**
+   * The requests it admitted that carried thinking blocks back, the blocks, and what it reserved for
+   * them, maxTokens input tokens a block (worstCost): the run's log says them once the harness's
+   * connection closes (serve), so that a run shows the reservation path was taken.
+   */
+  thinking = { requests: 0, blocks: 0, reserved: 0 };
 
   constructor(key: string, limits: Limits, budget: number, post: Post, note: (line: string) => void = (line) => console.error(line)) {
     // A key of these characters alone is written in JSON as itself, so that taking it out of an
@@ -480,6 +486,11 @@ export class Broker {
     if (this.noted.has(said)) return;
     this.noted.add(said);
     this.note(line);
+  }
+
+  /** The line that says what the run's requests carried back of the model's thinking, and what it reserved for that. */
+  thinkingLine(): string {
+    return logLine(this.key)`the broker admitted ${this.thinking.requests} requests that carried ${this.thinking.blocks} thinking blocks back, and reserved $${this.thinking.reserved} for those blocks, ${this.limits.maxTokens} input tokens a block`;
   }
 
   /** What an answered request cost, by the usage the API reported; at its most when the broker cannot price it. */
@@ -521,6 +532,11 @@ export class Broker {
     if (this.spent + this.reserved + worst > this.cap) return answer({ refused: `a request that could take the run past its $${this.cap}`, exhausted: true });
     this.requests += 1;
     this.reserved += worst;
+    if (shaped.thinking > 0) {
+      this.thinking.requests += 1;
+      this.thinking.blocks += shaped.thinking;
+      this.thinking.reserved += worst - worstCost(shaped.text, shaped.maxTokens, price, this.limits, 0);
+    }
     this.inFlight += 1;
     let reply: Answer;
     try {
@@ -605,7 +621,15 @@ export function serve(broker: Broker, socket: string, onError: (e: Error) => voi
   const limits = broker.limits;
   // A request line holds its body and an id: a little more than the most a body may hold.
   const maxLine = limits.maxBodyBytes + 1024;
+  // Once the last connection closes, the harness's at the run's end, the log says what the run's
+  // requests carried back of the model's thinking and what was reserved for it, once for each tally.
+  let open = 0;
   const server = net.createServer((conn) => {
+    open += 1;
+    conn.on("close", () => {
+      open -= 1;
+      if (open === 0) broker.noteOnce({ thinking: { ...broker.thinking } }, broker.thinkingLine());
+    });
     conn.setEncoding("utf8");
     conn.on("error", () => conn.destroy());
     const feed = lineReader(

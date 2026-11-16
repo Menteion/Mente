@@ -27,7 +27,7 @@ import {
   userPrompt,
   type Task,
 } from "./tasks.ts";
-import { API_VERSION, budgetedCall, KNOWN_MODELS, MAX_TOKENS, type Budget, type Post } from "./api.ts";
+import { API_VERSION, budgetedCall, KNOWN_MODELS, MAX_TOKENS, thinkingCarried, type Budget, type Message, type Post } from "./api.ts";
 import { connectBroker } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -124,7 +124,9 @@ async function main(): Promise<void> {
     for (const task of tasks) {
       const user = userPrompt(task);
       for (let run = 1; run <= runs; run++) {
-        const answered = await budgetedCall(post, spending, { model: MODEL, max_tokens: MAX_TOKENS, system, messages: [{ role: "user", content: user }] }, PRICES);
+        // One turn: the request carries no reply back, and the record says so, as every harness's does.
+        const messages: Message[] = [{ role: "user", content: user }];
+        const answered = await budgetedCall(post, spending, { model: MODEL, max_tokens: MAX_TOKENS, system, messages }, PRICES);
         if (!answered) {
           record.stopped_early = true;
           break;
@@ -142,6 +144,7 @@ async function main(): Promise<void> {
           answered_by: reply.model,
           stop_reason: reply.stop_reason,
           usage: reply.usage,
+          thinking_blocks: thinkingCarried(messages, reply),
           cost,
           file: `${name}.mn`,
           diagnostics: null,

@@ -37,7 +37,7 @@ import {
   type CaseResult,
   type Task,
 } from "./tasks.ts";
-import { API_VERSION, budgetedCall, KNOWN_MODELS, MAX_TOKENS, type Budget, type Message, type Post } from "./api.ts";
+import { API_VERSION, budgetedCall, KNOWN_MODELS, MAX_TOKENS, thinkingCarried, type Budget, type Message, type Post } from "./api.ts";
 import { connectBroker } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -192,6 +192,9 @@ async function main(): Promise<void> {
             const { reply, cost } = answered;
             record.spent = spending.spent;
             spent += cost;
+            // The thinking blocks the request carried back and the reply holds, read before the reply
+            // joins the transcript.
+            const carried = thinkingCarried(messages, reply);
             // The reply goes back unchanged, so the transcript stays append-only.
             messages.push({ role: "assistant", content: reply.content });
             const name = `${model.id}-${task.id}-${run}-${attempt}`;
@@ -208,6 +211,7 @@ async function main(): Promise<void> {
               answered_by: reply.model,
               stop_reason: reply.stop_reason,
               usage: reply.usage,
+              thinking_blocks: carried,
               cost,
               file: `${name}.mn`,
               diagnostics: reported.map((d) => d.line),
