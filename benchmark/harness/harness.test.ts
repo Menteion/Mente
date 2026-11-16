@@ -4,24 +4,25 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chownSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
-import { Broker, lineReader, readLimits, scrub, serve, shape, thinkingBlocks, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
+import { Broker, httpPost, lineReader, readLimits, scrub, serve, shape, thinkingBlocks, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
 import { BrokerBroken, BrokerRefused, connectBroker } from "./brokered.ts";
 import {
   BASH,
   REPOSITORY,
   SANDBOX,
   caseResult,
-  checkOutside,
+  checkUnderRuns,
   childEnv,
   cleanOutput,
   failureClass,
-  hiddenPaths,
+  readSandboxRoots,
+  sandboxRoots,
   insideAny,
   menteCaseResult,
   namedCommand,
@@ -603,36 +604,28 @@ test("a command is wrapped in the sandbox when one is set, with every path made 
     BASH,
     [resolve("sb.sh"), resolve("out/w"), resolve("out/w/main"), "0"],
   ]);
-  // The paths to hide go first, each after --hide, made absolute.
-  assert.deepEqual(sandboxed("sb.sh", "/t/w", "odin", ["build", "."], ["repo", "held"]), [
-    BASH,
-    [resolve("sb.sh"), "--hide", resolve("repo"), "--hide", resolve("held"), resolve("/t/w"), "odin", "build", "."],
-  ]);
-  assert.deepEqual(sandboxed("", "/t/w", "odin", ["build"], ["repo"]), ["odin", ["build"]]);
+  // The sandbox takes no path to hide: what it covers comes from its root-owned configuration.
+  assert.equal(sandboxed("sb.sh", "/t/w", "odin", ["build", "."]).at(1)?.includes("--hide"), false);
 });
 
-test("an output directory inside a path the sandbox hides is refused", () => {
+test("an output directory outside the sandbox's runs root is refused, and the roots are read from its configuration", () => {
   assert.equal(insideAny("/r/repo", ["/r/repo"]), true);
   assert.equal(insideAny("/r/repo/bench-out", ["/r/repo"]), true);
   assert.equal(insideAny("/r/repository-out", ["/r/repo"]), false);
   assert.equal(insideAny("/t/bench-out", ["/r/repo", "/r/held"]), false);
-  const out = resolve(REPOSITORY, "..", "bench-out");
-  const tools = { mn: "", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "sb.sh", hide: [REPOSITORY], cover: out };
-  assert.throws(() => checkOutside(join(REPOSITORY, "bench-out"), tools), /must lie outside/);
-  // The output directory is covered itself, yet it is where the builds go, so it is not refused.
-  assert.doesNotThrow(() => checkOutside(out, tools));
-  // Each build is shown the hidden paths and the output directory, whose own folder stays visible.
-  assert.deepEqual(hiddenPaths(tools), [REPOSITORY, out]);
-  assert.deepEqual(hiddenPaths({ ...tools, cover: "" }), [REPOSITORY]);
-  // Without a sandbox nothing is hidden, so any output will do.
-  assert.doesNotThrow(() => checkOutside(join(REPOSITORY, "bench-out"), { ...tools, sandbox: "" }));
+  const roots = sandboxRoots("hide /w/repo\nhide /t/broker\nruns /t/runs\n");
+  assert.deepEqual(roots, { hide: ["/w/repo", "/t/broker"], runs: "/t/runs" });
+  assert.throws(() => sandboxRoots("hide /w/repo\n"), /names no runs root/);
+  // Strictly under the runs root, which the sandbox covers but for each build's own directory.
+  assert.doesNotThrow(() => checkUnderRuns(resolve("/t/runs/bench"), roots));
+  for (const out of ["/t/runs", "/t/other", "/t/runs-out", "/w/repo/bench-out"]) assert.throws(() => checkUnderRuns(resolve(out), roots), /must lie under the sandbox's runs root/, out);
   assert.ok(existsSync(join(REPOSITORY, "benchmark", "README.md")), "REPOSITORY is this repository's root");
 });
 
 test("no process that runs beside the key starts mn but through the sandbox", async () => {
   // The final review of PR 137: failureClass ran `mn explain` directly, as the runner's user,
   // beside the process that holds the key. mn is code of the branch; the sandbox is its only cage.
-  const tools = { mn: "mn", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "", hide: [], cover: "" };
+  const tools = { mn: "mn", native: false, rustc: "rustc", rustToolchain: "", odin: "odin", sandbox: "", out: "" };
   await assert.rejects(failureClass(tools, "E0001"), /outside the sandbox/);
   // Every module a job that holds the key runs starts mn only through `sandboxed(...)`: no spawn
   // takes mn as its command.
@@ -1141,6 +1134,22 @@ test("the broker takes the key out of every byte it writes", async () => {
   assert.ok(!(await echo.broker.handle(`{"id": "${KEY}"`)).includes(KEY), "the key in the answer to a line that is no JSON");
   assert.equal(scrub(`a ${KEY} b ${KEY}`, KEY), "a [the API key] b [the API key]");
   assert.throws(() => new Broker("", readLimits(LIMITS_TEXT), 1, async () => ({ status: 200, retryAfter: "", text: "" })), /no API key/);
+  // A redirect is never followed: the final pass of 05fe2f6 found fetch's default follows one, and
+  // a cross-origin redirect drops Authorization but sends x-api-key on. A fake transport that
+  // follows redirects unless told not to, as fetch does, shows the broker never lets it.
+  const seen: { url: string; key: string | null }[] = [];
+  const redirecting = (async (url: string | URL | Request, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    seen.push({ url: String(url), key: headers.get("x-api-key") });
+    if (init?.redirect === "error") throw new TypeError("fetch failed: a redirect");
+    seen.push({ url: "https://elsewhere.example/v1/messages", key: headers.get("x-api-key") });
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const redirected = new Broker(KEY, readLimits(LIMITS_TEXT), 1, httpPost(redirecting));
+  const lost = JSON.parse(await redirected.handle(request(1, haiku())));
+  assert.equal(lost.status, -1, "the broker followed a redirect");
+  assert.deepEqual(seen.map((s) => s.url), ["https://api.anthropic.com/v1/messages"], "the key went to another host");
+  await assert.rejects(httpPost(redirecting)("https://elsewhere.example/v1/messages", {}, "{}"), /no request goes to/);
   // A key JSON would write otherwise than as itself is refused, so that scrubbing an answer line,
   // which is JSON, finds every copy; the refusal does not print it.
   for (const odd of ['sk-ant-"quoted"-0123', "sk-ant-back\\slash-0123", "sk-ant-\u00e9-0123456"]) {
@@ -1500,34 +1509,47 @@ test("start-broker.sh starts the broker alone, its socket the runner's user's, i
   }
 });
 
-test("the sandbox's root half drops only to the user who called it, into a directory of that user's", { skip: LINUX_ONLY }, () => {
+test("the sandbox's root half drops only to its caller, takes no path but a directory under its runs root, and starts the command with descriptors 0, 1 and 2", { skip: LINUX_ONLY }, () => {
   const script = join(REPOSITORY, "benchmark", "harness", "sandbox-root.sh");
   const installed = "/usr/local/sbin/mente-sandbox";
-  const dir = mkdtempSync(join(tmpdir(), "mente-root-"));
   const uid = process.getuid?.() ?? -1;
-  try {
-    if (uid !== 0 && existsSync(installed)) {
-      // As the runner's user once lock-sudo.sh has installed it (the harness's fixtures job): sudo
-      // runs it, and it runs the command as this user, and nothing else runs.
+  if (uid !== 0 && existsSync(installed)) {
+    // As the runner's user once lock-sudo.sh has installed it (the harness's fixtures job): sudo
+    // runs it, and it runs the command as this user, and nothing else runs.
+    const { runs } = readSandboxRoots();
+    const dir = mkdtempSync(join(runs, "root-half-"));
+    try {
       const sudo = (args: string[]) => spawnSync("sudo", ["-n", installed, ...args], { encoding: "utf8", timeout: 60_000 });
       const ran = sudo([dir, "/usr/bin/id", "-u"]);
       assert.equal(ran.stdout.trim(), String(uid), ran.stderr);
-      assert.match(sudo(["/etc", "/usr/bin/id", "-u"]).stderr, /not the caller's/);
+      // The command holds descriptors 0, 1 and 2 alone: the final pass of 05fe2f6 found it holding
+      // the root half's own, each on a directory the sandbox covers.
+      const fds = sudo([dir, "/bin/sh", "-c", "ls /proc/$$/fd"]);
+      assert.deepEqual(fds.stdout.trim().split(/\s+/), ["0", "1", "2"], fds.stderr);
+      // No path but the working directory, and that one under the runs root and the caller's: the
+      // final pass of 05fe2f6 had --hide open /etc/shadow as root for the command to read.
+      assert.match(sudo(["--hide", "/etc/shadow", dir, "/bin/sh", "-c", "cat <&3"]).stderr, /takes no option/);
+      assert.match(sudo(["/etc", "/usr/bin/id", "-u"]).stderr, /does not lie under the runs root/);
+      assert.match(sudo([tmpdir(), "/usr/bin/id", "-u"]).stderr, /does not lie under the runs root/);
+      assert.match(sudo([runs, "/usr/bin/id", "-u"]).stderr, /does not lie under the runs root/);
       assert.match(sudo([join(dir, "missing"), "/usr/bin/id"]).stderr, /no directory/);
       assert.notEqual(spawnSync("sudo", ["-n", "true"]).status, 0, "sudo runs another command as root");
       assert.notEqual(spawnSync("sudo", ["-n", "cat", "/etc/shadow"]).status, 0, "sudo reads what only root reads");
-      return;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    // A developer's machine: nothing to call it as.
-    if (uid !== 0) return;
-    // As root, with sudo's variables set by hand (a container): each refusal, before any namespace.
+    return;
+  }
+  // A developer's machine: nothing to call it as.
+  if (uid !== 0) return;
+  // As root, with sudo's variables set by hand (a container): each refusal, before any namespace.
+  const dir = mkdtempSync(join(tmpdir(), "mente-root-"));
+  try {
     const run = (vars: Record<string, string>, args: string[]) => spawnSync("bash", [script, ...args], { env: { PATH: process.env.PATH ?? "", ...vars }, encoding: "utf8", timeout: 60_000 });
     assert.match(run({}, [dir, "id"]).stderr, /never runs a command as root/);
     assert.match(run({ SUDO_UID: "0", SUDO_GID: "0" }, [dir, "id"]).stderr, /never runs a command as root/);
     assert.match(run({ SUDO_UID: "x", SUDO_GID: "1" }, [dir, "id"]).stderr, /never runs a command as root/);
-    assert.match(run({ SUDO_UID: "1000", SUDO_GID: "1000" }, [join(dir, "missing"), "id"]).stderr, /no directory/);
-    assert.match(run({ SUDO_UID: "1000", SUDO_GID: "1000" }, [dir, "id"]).stderr, /not the caller's/);
-    chownSync(dir, 1000, 1000);
+    assert.match(run({ SUDO_UID: "1000", SUDO_GID: "1000" }, ["--hide", "/etc/shadow", dir, "id"]).stderr, /takes no option/);
     if (!existsSync("/etc/mente-sandbox.conf")) assert.match(run({ SUDO_UID: "1000", SUDO_GID: "1000" }, [dir, "id"]).stderr, /mente-sandbox\.conf is missing/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -87,17 +87,17 @@ jobs:
           ODIN: ${{ steps.toolchains.outputs.odin }}
         run: >-
           node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN"
-          --sandbox "$SANDBOX" --out "$RUNNER_TEMP/fixtures-out"
+          --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/fixtures"
       - name: Check the Odin document's code blocks
         if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/document-out"
+        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/document"
       - name: Prove the sandbox denies the key and the network
         if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
+        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
       - name: Test the harness
         if: steps.watch.outputs.run != 'false'
         run: npm run test:harness

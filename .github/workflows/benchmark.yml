@@ -130,7 +130,7 @@ jobs:
         # stops the run (benchmark/harness/sandbox-check.ts).
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node --disallow-code-generation-from-strings benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
+        run: node --disallow-code-generation-from-strings benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
       - name: Find the held-out commit corpus.lock names
         id: lock
         if: env.HAS_HELD_OUT == 'true'
@@ -177,17 +177,17 @@ jobs:
           # working directory is inside it.
           node --disallow-code-generation-from-strings benchmark/harness/bench.ts --budget "$BUDGET" --models "$MODELS" --languages "$LANGUAGES" \
             --milestone "$MILESTONE" --runs "$RUNS" --tasks "$TASKS" --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" \
-            --sandbox "$SANDBOX" "${held_out[@]}" --out "$RUNNER_TEMP/bench-out" --broker "$RUNNER_TEMP/broker/socket"
+            --sandbox "$SANDBOX" "${held_out[@]}" --out "$RUNNER_TEMP/runs/bench" --broker "$RUNNER_TEMP/broker/socket"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: agent-benchmark-${{ inputs.milestone }}
           path: |
-            ${{ runner.temp }}/bench-out
-            !${{ runner.temp }}/bench-out/held-out
+            ${{ runner.temp }}/runs/bench
+            !${{ runner.temp }}/runs/bench/held-out
       - name: Remove the held-out set from the runner
         if: always()
-        run: rm -rf held-out-set "$RUNNER_TEMP/bench-out/held-out"
+        run: rm -rf held-out-set "$RUNNER_TEMP/runs/bench/held-out"
       - name: Stop the broker
         # Whatever came before; its log holds no key, which the broker takes out of every byte it
         # writes. Then root must still be out of the runner's user's reach, as the lock left it.

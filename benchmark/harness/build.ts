@@ -10,7 +10,7 @@
 // longer than the time limit.
 
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { odinProgram, parseSignature, rustProgram, type Lang, type Signature } from "./languages.ts";
@@ -45,37 +45,58 @@ export interface Tools {
    */
   sandbox: string;
   /**
-   * What the sandbox covers with an empty tmpfs besides $GITHUB_WORKSPACE: this repository and the
-   * held-out checkout, wherever it is, so no agent code can read a task's files. The output
-   * directory must lie outside them.
+   * The output directory, in which every build's directory lies. With the sandbox it lies under the
+   * sandbox's runs root, which the sandbox covers all but the build's own directory, so no build
+   * can read another run's folder, a held-out run's prompts, programs and records among them.
    */
-  hide: string[];
-  /**
-   * The output directory, in which every build's directory lies: the sandbox covers it too, all
-   * but the build's own directory, so no build can read another run's folder, a held-out run's
-   * prompts, programs and records among them. Empty for none.
-   */
-  cover: string;
+  out: string;
 }
 
-/** Every path the sandbox hides from a build: the hidden ones and the output directory. */
-export function hiddenPaths(tools: Tools): string[] {
-  return [...tools.hide, ...(tools.cover ? [tools.cover] : [])];
+/** The sandbox's configuration, which benchmark/harness/lock-sudo.sh writes as root. */
+export const SANDBOX_CONF = "/etc/mente-sandbox.conf";
+
+/**
+ * What the sandbox covers, read from its configuration: the directories it hides (the workspace,
+ * where the held-out set is checked out, and the broker's directory) and the runs root, under which
+ * every working directory it takes must lie. The sandbox's root half takes no path but the working
+ * directory, so this is what the harness lays its output out by.
+ */
+export function sandboxRoots(text: string): { hide: string[]; runs: string } {
+  const hide: string[] = [];
+  let runs = "";
+  for (const line of text.split("\n")) {
+    const words = line.trim().split(/\s+/);
+    if (words.length === 2 && own(words, 0) === "hide") hide.push(own(words, 1));
+    else if (words.length === 2 && own(words, 0) === "runs") runs = own(words, 1);
+  }
+  if (runs === "") throw new Error(`${SANDBOX_CONF} names no runs root: benchmark/harness/lock-sudo.sh writes it`);
+  return { hide, runs };
+}
+
+/** The sandbox's roots on this runner, or an error saying the sandbox is not set up. */
+export function readSandboxRoots(): { hide: string[]; runs: string } {
+  let text = "";
+  try {
+    text = readFileSync(SANDBOX_CONF, "utf8");
+  } catch {
+    throw new Error(`no ${SANDBOX_CONF}: the sandbox is not set up; benchmark/harness/lock-sudo.sh sets it up`);
+  }
+  return sandboxRoots(text);
 }
 
 /** This repository's root, which the sandbox hides from agent code. */
 export const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
- * A command, wrapped so it runs through the sandbox when one is set: `sandbox.sh [--hide <path>]...
- * <workdir> <cmd> <args>`, run with bash. The process starts in its build directory, so the script,
+ * A command, wrapped so it runs through the sandbox when one is set: `sandbox.sh <workdir> <cmd>
+ * <args>`, run with bash. The process starts in its build directory, so the script,
  * the paths, and a command given as a path (such as `target/release/mn`) are made absolute against
  * the driver's own directory; a bare command name is left for PATH to find.
  */
-export function sandboxed(sandbox: string, workdir: string, cmd: string, args: string[], hide: string[] = []): [string, string[]] {
+export function sandboxed(sandbox: string, workdir: string, cmd: string, args: string[]): [string, string[]] {
   const command = /[\\/]/.test(cmd) ? resolve(cmd) : cmd;
   if (!sandbox) return [command, args];
-  return [BASH, [resolve(sandbox), ...hide.flatMap((h) => ["--hide", resolve(h)]), resolve(workdir), command, ...args]];
+  return [BASH, [resolve(sandbox), resolve(workdir), command, ...args]];
 }
 
 /** Whether `path` is one of `roots` or lies inside one. */
@@ -88,13 +109,12 @@ export function insideAny(path: string, roots: string[]): boolean {
 }
 
 /**
- * Refuses an output directory the sandbox would hide: every build's working directory lies in it,
- * and a working directory inside a hidden path would be covered with it.
+ * Refuses an output directory the sandbox would not take: every build's working directory lies in
+ * it, and the sandbox takes a working directory only strictly under its runs root.
  */
-export function checkOutside(out: string, tools: Tools): void {
-  if (tools.sandbox && insideAny(out, tools.hide)) {
-    throw new Error(`with --sandbox, --out must lie outside ${tools.hide.join(" and ")}, which the sandbox hides; ${resolve(out)} does not`);
-  }
+export function checkUnderRuns(out: string, roots: { runs: string }): void {
+  const p = resolve(out);
+  if (p === resolve(roots.runs) || !insideAny(p, [roots.runs])) throw new Error(`with --sandbox, --out must lie under the sandbox's runs root ${roots.runs}; ${p} does not`);
 }
 
 /**
@@ -313,7 +333,7 @@ export async function buildProgram(
   if (lang === "mente") {
     const file = join(dir, "solution.mn");
     writeFileSync(file, `module bench\n\n${program}`);
-    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["check", "--json", file], hiddenPaths(tools));
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["check", "--json", file]);
     const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: BUILD_TIMEOUT_MS });
     let diagnostics: MenteDiagnostic[];
     try {
@@ -338,7 +358,7 @@ export async function buildProgram(
     writeFileSync(file, program);
     writeFileSync(join(dir, "main.rs"), rustProgram(sig, cases));
     const env = childEnv(tools.rustToolchain ? { RUSTUP_TOOLCHAIN: tools.rustToolchain } : {});
-    const [c, a] = sandboxed(tools.sandbox, dir, tools.rustc, [...RUST_FLAGS, "-o", exe, "main.rs"], hiddenPaths(tools));
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.rustc, [...RUST_FLAGS, "-o", exe, "main.rs"]);
     const p = await runProcess(c, a, { cwd: dir, env, timeoutMs: BUILD_TIMEOUT_MS });
     const ok = p.status === 0 && !p.timedOut;
     return { lang, ok, diagnostics: ok ? [] : cleanOutput(p.stderr || p.stdout, dir), codes: [], file, dir, exe };
@@ -347,7 +367,7 @@ export async function buildProgram(
   writeFileSync(file, `package main\n\n${program}`);
   writeFileSync(join(dir, "harness.odin"), odinProgram(sig, cases));
   const exeName = process.platform === "win32" ? "main.exe" : "main";
-  const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["build", ".", `-out:${exeName}`], hiddenPaths(tools));
+  const [c, a] = sandboxed(tools.sandbox, dir, tools.odin, ["build", ".", `-out:${exeName}`]);
   const p = await runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: BUILD_TIMEOUT_MS });
   const ok = p.status === 0 && !p.timedOut;
   return { lang, ok, diagnostics: ok ? [] : cleanOutput(`${p.stderr}${p.stdout}`, dir), codes: [], file, dir, exe };
@@ -360,10 +380,10 @@ export async function runCases(build: Build, sig: Signature, cases: Case[], tool
   for (const [i, c] of cases.entries()) {
     if (build.lang === "mente") {
       const args = ["run", build.file, "--call", c.call, ...(tools.native ? ["--native"] : [])];
-      const [cmd, a] = sandboxed(tools.sandbox, build.dir, tools.mn, args, hiddenPaths(tools));
+      const [cmd, a] = sandboxed(tools.sandbox, build.dir, tools.mn, args);
       results.push(menteCaseResult(c, await runProcess(cmd, a, { cwd: build.dir, env: childEnv(), timeoutMs: RUN_TIMEOUT_MS * 6 })));
     } else {
-      const [cmd, a] = sandboxed(tools.sandbox, build.dir, build.exe, [String(i)], hiddenPaths(tools));
+      const [cmd, a] = sandboxed(tools.sandbox, build.dir, build.exe, [String(i)]);
       const p = await runProcess(cmd, a, { cwd: build.dir, env: childEnv(), timeoutMs: RUN_TIMEOUT_MS });
       results.push(caseResult(build.lang, c, p, mutCount, build.dir));
     }
@@ -401,9 +421,9 @@ const classes = new Map<string, Promise<string>>();
 export function failureClass(tools: Tools, code: string): Promise<string> {
   if (!tools.sandbox) return Promise.reject(new Error("mn explain would run outside the sandbox"));
   if (!classes.has(code)) {
-    const dir = resolve(tools.cover || ".", "explain");
+    const dir = resolve(tools.out || ".", "explain");
     mkdirSync(dir, { recursive: true });
-    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["explain", code], hiddenPaths(tools));
+    const [c, a] = sandboxed(tools.sandbox, dir, tools.mn, ["explain", code]);
     classes.set(
       code,
       runProcess(c, a, { cwd: dir, env: childEnv(), timeoutMs: 30_000 }).then((p) => own(/Failure class: ([^.]+)\./.exec(p.stdout), 1) ?? "unknown"),

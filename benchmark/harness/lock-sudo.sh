@@ -5,7 +5,9 @@
 # broker's, which holds the API key, or the runner's own, which holds the job's secrets. So, once
 # the job is set up and before the sandbox runs anything or the key is in reach, this:
 #   - installs a root-owned copy of benchmark/harness/sandbox-root.sh at /usr/local/sbin/
-#     mente-sandbox, and writes the paths it always covers to /etc/mente-sandbox.conf, root's alone;
+#     mente-sandbox, and writes what it covers to /etc/mente-sandbox.conf, root's alone: the
+#     workspace and the broker's directory, and the runs root, $RUNNER_TEMP/runs, under which every
+#     run's output directory lies and every working directory the sandbox takes;
 #   - sends every core dump nowhere, since a core of the broker or of the runner would hold a key;
 #   - lets no process trace another but one with CAP_SYS_PTRACE (Yama's ptrace_scope 2), which no
 #     process of the runner's user has once sudo is gone;
@@ -138,7 +140,11 @@ lock() {
   [ "$(id -u)" != 0 ] || fail "run it as the runner's user, whose sudo it takes"
   : "${GITHUB_WORKSPACE:?the workspace, which the sandbox covers}" "${RUNNER_TEMP:?the temporary directory of the runner, where the broker listens}"
   sudo -n install -o root -g root -m 0755 "$here/sandbox-root.sh" "$ENTRY"
-  printf '%s\n' "$GITHUB_WORKSPACE" "$RUNNER_TEMP/broker" | sudo -n tee "$CONF" > /dev/null
+  mkdir -p "$RUNNER_TEMP/runs"
+  {
+    printf 'hide %s\n' "$(realpath -e "$GITHUB_WORKSPACE")" "$(realpath -m "$RUNNER_TEMP/broker")"
+    printf 'runs %s\n' "$(realpath -e "$RUNNER_TEMP/runs")"
+  } | sudo -n tee "$CONF" > /dev/null
   sudo -n chown root:root "$CONF"
   sudo -n chmod 0644 "$CONF"
   sudo -n sysctl -q -w "kernel.core_pattern=$CORE"

@@ -22,7 +22,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { REPOSITORY, childEnv, insideAny, namedCommand, sandboxed } from "./build.ts";
+import { REPOSITORY, checkUnderRuns, childEnv, insideAny, namedCommand, readSandboxRoots, sandboxed } from "./build.ts";
 import {
   extractProgram,
   feedbackPrompt,
@@ -130,9 +130,11 @@ async function main(): Promise<void> {
   if (!sandbox) throw new Error("pass --sandbox: the agents' programs run on the machine whose broker holds the API key");
   const broker = await connectBroker(brokerAt);
   const post: Post = (body) => broker.post(body);
-  for (const [what, path] of [["--mn", mn], ["--out", out]]) {
-    if (insideAny(path, [REPOSITORY])) throw new Error(`${what} must lie outside ${REPOSITORY}, which the sandbox hides`);
-  }
+  // --out under the sandbox's runs root, whose cover leaves it alone visible; --mn outside every
+  // directory the sandbox covers, or mn could not run there.
+  const roots = readSandboxRoots();
+  checkUnderRuns(out, roots);
+  if (insideAny(mn, [REPOSITORY, ...roots.hide, roots.runs])) throw new Error(`--mn must lie outside ${[...roots.hide, roots.runs].join(" and ")}, which the sandbox covers`);
   confined.sandbox = sandbox;
   confined.workdir = out;
   const card = readFileSync("docs/language-card.md", "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");

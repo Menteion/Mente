@@ -418,11 +418,17 @@ export class Broker {
   }
 }
 
-/** The one POST the broker makes, to the API. */
-async function httpPost(url: string, headers: Record<string, string>, body: string): Promise<Answer> {
-  if (url !== API_URL) throw new Error(`no request goes to ${url}`);
-  const response = await fetch(url, { method: "POST", headers, body });
-  return { status: response.status, retryAfter: response.headers.get("retry-after") ?? "", text: await response.text() };
+/**
+ * The one POST the broker makes, to the API, through `fetchWith`. It follows no redirect: a fetch
+ * that follows one to another origin drops an Authorization header but sends x-api-key on, and with
+ * it the key. A redirect fails the request, which the broker answers as lost.
+ */
+export function httpPost(fetchWith: typeof fetch = fetch): Post {
+  return async (url, headers, body) => {
+    if (url !== API_URL) throw new Error(`no request goes to ${url}`);
+    const response = await fetchWith(url, { method: "POST", headers, body, redirect: "error" });
+    return { status: response.status, retryAfter: response.headers.get("retry-after") ?? "", text: await response.text() };
+  };
 }
 
 /** The key, once read, so that even an error on the way out never prints it. */
@@ -472,7 +478,7 @@ async function main(): Promise<void> {
   if (socket === "") throw new Error("no socket: pass --socket <path>");
   held = readFileSync(0, "utf8").trim();
   const limits = readLimits(readFileSync(new URL("./broker-limits.json", import.meta.url), "utf8"));
-  const broker = new Broker(held, limits, Number(option("budget")), httpPost);
+  const broker = new Broker(held, limits, Number(option("budget")), httpPost());
   await serve(broker, socket, (e) => {
     console.error(scrub(`the broker cannot listen at ${socket}: ${String(e)}`, held));
     process.exit(1);

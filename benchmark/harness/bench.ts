@@ -48,12 +48,13 @@ import {
 import { connectBroker } from "./brokered.ts";
 import {
   BUILD_MODES,
-  REPOSITORY,
   buildProgram,
-  checkOutside,
+  checkUnderRuns,
   childEnv,
   dropExecutable,
   failureClass,
+  insideAny,
+  readSandboxRoots,
   runCases,
   runProcess,
   rustcInSysroot,
@@ -259,14 +260,18 @@ async function main(): Promise<void> {
     rustToolchain: option("rust-toolchain", pins.rust.toolchain),
     odin: option("odin", "odin"),
     sandbox: option("sandbox", ""),
-    // The repository and the held-out checkout, which the sandbox hides from agent code, so that a
-    // program written for a public task cannot read a held-out task and print it.
-    hide: [REPOSITORY, ...(heldOutDir ? [heldOutDir] : [])],
-    // The output directory, covered all but each build's own directory, so no build reads another
-    // run's folder: a public program never sees a held-out run's prompts, programs or records.
-    cover: resolve(out),
+    // The output directory, under the sandbox's runs root, which it covers all but each build's own
+    // directory, so no build reads another run's folder: a public program never sees a held-out
+    // run's prompts, programs or records.
+    out: resolve(out),
   };
-  checkOutside(out, tools);
+  if (tools.sandbox) {
+    const roots = readSandboxRoots();
+    checkUnderRuns(out, roots);
+    // The held-out checkout lies in a directory the sandbox hides, the workspace, so that a program
+    // written for a public task cannot read a held-out task and print it.
+    if (heldOutDir && !insideAny(heldOutDir, roots.hide)) throw new Error(`--held-out must lie in a directory the sandbox hides, ${roots.hide.join(" or ")}; ${resolve(heldOutDir)} does not`);
+  }
   // The broker holds the key; this process starts agent code, and holds none.
   if (process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is set: the harness holds no key, the broker does (benchmark/harness/broker.ts)");
   const brokerAt = option("broker", "");

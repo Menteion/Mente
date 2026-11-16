@@ -1133,8 +1133,8 @@ const PINNED_FILES = new Map([
   // start-broker.sh's shape).
   ["benchmark/harness/start-broker.sh", "9cea5b604d1eea6b5c060f3a8b4b95bd8bcfeaf62dee2a6bfe9fddfab7ef4f59"],
   ["benchmark/harness/stop-broker.sh", "1f4ec139da512a920c4eeafad893e451c0629c93ea19bd740ba4b6fc5b092ffa"],
-  ["benchmark/harness/lock-sudo.sh", "99e2d4274549214e4e8668279e7737c26085b878944c39c460feeaf39c9d860d"],
-  ["benchmark/harness/sandbox-root.sh", "e407ec6236117863fb72fdd2b709ec2a7bf6a08802095eae2d00f1047ad4ba3a"],
+  ["benchmark/harness/lock-sudo.sh", "3a81db7e64273803ea5ae26c6790891365c44885cfa22e0f004a06433d553569"],
+  ["benchmark/harness/sandbox-root.sh", "51e5fc7180ee7c3b33c81bc0c73a796e6f17f5488f2298931687b5c8f48b864b"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
 /// jobs, and the jobs that run the release tests through cargo alone. A rule that read their
@@ -1152,8 +1152,8 @@ const PINNED_JOBS = new Map([
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "4e6efc58580a30edeadd6ecf4464bd7ae2727083f3daa060f105aca1969ed0e8"],
   ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
-  ["benchmark.yml#bench", "af5f61a2b22aba117e8f4aefca6cd49184d33bea00d02010b63669d3c2ec193a"],
-  ["prelim.yml#prelim", "cee1940893dfb55471a774452d9a0d4df45fda5d86b61b1600fe529eaf84b611"],
+  ["benchmark.yml#bench", "80e64b170d1ea2b8a44546715c64ccffa5fd117db36bc924736af621c84691da"],
+  ["prelim.yml#prelim", "fa19a6bcc5b3a3d28cfd022b72cadd1ec362e81ad43cc12cf448af80d8c61f0f"],
   ["probe.yml#write", "b01f5cf9b865647582ebe4ee11088545f3dc466d42ce89068ddd6acc4795a909"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every

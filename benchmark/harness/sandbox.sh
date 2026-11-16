@@ -7,7 +7,7 @@
 # workspace (where the held-out set is checked out), the broker's socket, every other run's folder,
 # and any write outside its own directory.
 #
-#   sandbox.sh [--hide <path>]... <workdir> <command> [args...]
+#   sandbox.sh <workdir> <command> [args...]
 #
 # This is the unprivileged half: it builds the only environment that crosses into the sandbox, a
 # cleared one rebuilt from a small allowlist, so that no secret is in the command's environment, and
@@ -15,26 +15,21 @@
 # runs from the root-owned copy benchmark/harness/lock-sudo.sh installs, the one command sudo still
 # runs for the runner's user once the job is set up, and decides as root what the command sees:
 # a network namespace with no route out, a PID namespace with its own /proc, an empty tmpfs over
-# the workspace, the broker's directory $RUNNER_TEMP/broker and every --hide path (the held-out
-# checkout, wherever it is, and the runs' output directory), an unreadable directory over each
-# credential directory, a private /tmp and a read-only root, with <workdir> alone writable, put
-# back at its own path inside the tmpfs when it lies inside a hidden path, and a drop to the
-# runner's own user with no new privileges, so the command is never root. It takes real root
-# through sudo rather than an unprivileged user namespace, which Ubuntu 24.04 restricts by default.
-# <workdir> must already exist and be the runner's user's; it must not be a hidden path nor contain
-# one, since showing it would show what is hidden. CI only: a developer's machine runs the harness
-# without it.
+# each directory /etc/mente-sandbox.conf names, the workspace (where the held-out set is checked
+# out) and the broker's directory $RUNNER_TEMP/broker, and over the runs root $RUNNER_TEMP/runs,
+# under which every run's output directory lies, an unreadable directory over each credential
+# directory, a private /tmp and a read-only root, with <workdir> alone writable, put back at its own
+# path inside the cover of the runs root, descriptors 0, 1 and 2 alone, and a drop to the runner's
+# own user with no new privileges, so the command is never root. It takes real root through sudo
+# rather than an unprivileged user namespace, which Ubuntu 24.04 restricts by default. <workdir>
+# must already exist, be the runner's user's and lie under the runs root. CI only: a developer's
+# machine runs the harness without it.
 set -euo pipefail
 
 ENTRY=/usr/local/sbin/mente-sandbox
 
-hide=()
-while [ "$#" -gt 0 ] && [ "$1" = "--hide" ]; do
-  hide+=(--hide "$2")
-  shift 2
-done
 if [ "$#" -lt 2 ]; then
-  echo "usage: sandbox.sh [--hide <path>]... <workdir> <command> [args...]" >&2
+  echo "usage: sandbox.sh <workdir> <command> [args...]" >&2
   exit 2
 fi
 workdir="$(realpath "$1")"
@@ -49,4 +44,4 @@ for name in RUSTUP_HOME CARGO_HOME RUSTUP_TOOLCHAIN; do
   fi
 done
 
-exec sudo -n "$ENTRY" "${hide[@]}" "$workdir" "${clean[@]}" "$@"
+exec sudo -n "$ENTRY" "$workdir" "${clean[@]}" "$@"
