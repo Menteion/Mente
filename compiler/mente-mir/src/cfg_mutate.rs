@@ -27,7 +27,8 @@
 //! the program computes; a call; a count moved, dropped or doubled, every one of which the
 //! verifier refuses, as [`unpaired`] shows; the count in an entry, of the run's first call, which
 //! never traps, since a call from outside whose frame is larger than the budget is refused before
-//! the entry runs; and the terminators `jump`, `return` and `trap`, whose targets
+//! the entry runs; the chain of effects broken, which the verifier refuses, as [`unchained`]
+//! shows; and the terminators `jump`, `return` and `trap`, whose targets
 //! and values the other families already reach through the instructions that compute them.
 //!
 //! A mutant is named by its function, its block, the instruction's index in that block or
@@ -35,7 +36,7 @@
 //! another function and to the instructions after it in its block, so a record that a mutant
 //! is equivalent survives unrelated edits as far as an index can.
 
-use crate::cfg::{self, ArithOp, BitOp, BlockId, CmpOp, FuncId, Module, Num, Op, Term, Ty};
+use crate::cfg::{self, ArithOp, BitOp, BlockId, Chain, CmpOp, FuncId, Module, Num, Op, Term, Ty};
 use crate::NodeId;
 
 /// A group of operators, by the kind of instruction or terminator they change.
@@ -169,19 +170,36 @@ impl Mutant {
                     return out;
                 };
                 match change {
-                    Change::Op(op) => f.ops[v.0 as usize] = op.clone(),
+                    Change::Op(op) => {
+                        let was = f.op(v).chain();
+                        f.ops[v.0 as usize] = op.clone();
+                        // An effect made a partial operation, as a checked one made exact is,
+                        // leaves the chain: what took it takes the effect it took.
+                        match (was, op.chain()) {
+                            (Chain::Follows, Chain::Reads | Chain::Free) => {
+                                if let Some(before) = f.args(v).last().copied() {
+                                    replace_effect_uses(f, v, before);
+                                }
+                            }
+                            (Chain::Follows, Chain::Follows)
+                            | (
+                                Chain::Reads | Chain::Free,
+                                Chain::Follows | Chain::Reads | Chain::Free,
+                            ) => {}
+                        }
+                    }
                     Change::Remove => {
                         block.insts.remove(i as usize);
-                        // What followed the effect taken out follows the one it followed.
-                        if let Some(before) = f.follows(v) {
-                            replace_uses(f, v, before);
+                        // What took the effect taken out takes the one it took.
+                        if let Some(before) = f.effect(v) {
+                            replace_effect_uses(f, v, before);
                         }
                     }
                     Change::Bypass => {
                         let Some(&first) = f.args(v).first() else {
                             return out;
                         };
-                        replace_uses(f, v, first);
+                        replace_value_uses(f, v, first);
                     }
                     Change::SwapTargets | Change::Always(_) => {}
                 }
@@ -211,32 +229,90 @@ impl Mutant {
     }
 }
 
-/// Every use of `old` in `f`, as an operand or in a terminator, reads `new` instead.
-fn replace_uses(f: &mut cfg::Function, old: NodeId, new: NodeId) {
-    for p in f.pool.iter_mut().filter(|p| **p == old) {
-        *p = new;
-    }
+/// Where each operand and terminator of `f` takes an effect, which the chain of effects holds
+/// ([`Chain`]), and where it takes a value.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Taken {
+    Effect,
+    Value,
+}
+
+/// Every use of `old` in `f` where it is taken as `taken` says, as an operand or in a
+/// terminator, reads `new` instead.
+fn replace(f: &mut cfg::Function, old: NodeId, new: NodeId, taken: Taken) {
     let swap = |v: &mut NodeId| {
         if *v == old {
             *v = new;
         }
     };
+    for i in 0..f.ops.len() {
+        let (start, len) = f.operands[i];
+        let (start, len) = (start as usize, len as usize);
+        let effect = match f.ops[i].chain() {
+            Chain::Follows | Chain::Reads => len.checked_sub(1),
+            Chain::Free => None,
+        };
+        for k in 0..len {
+            let here = if Some(k) == effect {
+                Taken::Effect
+            } else {
+                Taken::Value
+            };
+            if here == taken {
+                swap(&mut f.pool[start + k]);
+            }
+        }
+    }
+    // A terminator takes the latest effect last: a jump's and a branch's last arguments, a
+    // return's and a trap's effect.
+    let args = |args: &mut Vec<NodeId>| {
+        let last = args.len().saturating_sub(1);
+        for (k, a) in args.iter_mut().enumerate() {
+            let here = if k == last {
+                Taken::Effect
+            } else {
+                Taken::Value
+            };
+            if here == taken {
+                swap(a);
+            }
+        }
+    };
     for b in &mut f.blocks {
         match &mut b.term {
-            Term::Jump(_, args) => args.iter_mut().for_each(swap),
+            Term::Jump(_, a) => args(a),
             Term::Branch {
                 cond,
                 then,
                 otherwise,
             } => {
-                swap(cond);
-                then.1.iter_mut().for_each(swap);
-                otherwise.1.iter_mut().for_each(swap);
+                if taken == Taken::Value {
+                    swap(cond);
+                }
+                args(&mut then.1);
+                args(&mut otherwise.1);
             }
-            Term::Return(Some(v)) => swap(v),
-            Term::Return(None) | Term::Trap(_) => {}
+            Term::Return(v, effect) => match taken {
+                Taken::Value => v.iter_mut().for_each(swap),
+                Taken::Effect => swap(effect),
+            },
+            Term::Trap(_, effect) => {
+                if taken == Taken::Effect {
+                    swap(effect);
+                }
+            }
         }
     }
+}
+
+/// Every use of `old` as an effect reads `new` instead.
+fn replace_effect_uses(f: &mut cfg::Function, old: NodeId, new: NodeId) {
+    replace(f, old, new, Taken::Effect);
+}
+
+/// Every use of `old` as a value reads `new` instead; what takes it as an effect still does.
+fn replace_value_uses(f: &mut cfg::Function, old: NodeId, new: NodeId) {
+    replace(f, old, new, Taken::Value);
 }
 
 /// Every mutant the operators make of `m`, function by function, block by block, in order. Some
@@ -535,7 +611,7 @@ pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
                 // Past the first instruction after it, other than its call, that takes it.
                 let takes = b.insts[ii + 1..]
                     .iter()
-                    .position(|&u| f.follows(u) == Some(v));
+                    .position(|&u| f.effect(u) == Some(v) && called(f, u).is_none());
                 if let Some(k) = takes {
                     out.push((name("enter-later"), moved_to(ii + 1 + k)));
                 }
@@ -566,6 +642,123 @@ pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
         }
     }
     out
+}
+
+/// Each way a change could break the chain of effects ([`cfg::Chain`]), one module for each site
+/// and way, named as a mutant is:
+///
+/// - `effect-dropped`: an effect or a partial operation without the effect it takes;
+/// - `effect-forked`: an effect taking the effect its own effect took, which two then take;
+/// - `effect-valued`: an effect or a partial operation taking a value that is no effect, its
+///   first operand, in place of the effect;
+/// - `partial-raised`: a partial operation moved above the effect it reads, in its block;
+/// - `passed-valued`: a jump or a branch passing a value that is no effect, the branch's condition
+///   or the jump's first argument, to its target's effect parameter;
+/// - `ended-early`: a return or a trap taking its block's effect parameter where an effect of the
+///   block came since, which nothing would then take.
+///
+/// The verifier refuses every one ([`cfg::verify`]). They are not mutants of the gate: they show
+/// that the chain is held whole, by the verifier, whatever a change moves or rewrites.
+pub fn unchained(m: &Module) -> Vec<(String, Module)> {
+    let mut out = Vec::new();
+    for (fi, f) in m.functions.iter().enumerate() {
+        let changed = |name: String, change: &dyn Fn(&mut cfg::Function)| {
+            let mut copy = m.clone();
+            change(&mut copy.functions[fi]);
+            (name, copy)
+        };
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, &v) in b.insts.iter().enumerate() {
+                let name = |what: &str| format!("{}/b{}.i{}/{}", f.name, bi, ii, what);
+                let role = f.op(v).chain();
+                let Some(effect) = f.effect(v) else {
+                    continue;
+                };
+                out.push(changed(name("effect-dropped"), &|g| {
+                    let (start, len) = g.operands[v.0 as usize];
+                    g.operands[v.0 as usize] = (start, len.saturating_sub(1));
+                }));
+                let last = |g: &mut cfg::Function, to: NodeId| {
+                    let (start, len) = g.operands[v.0 as usize];
+                    if let Some(k) = (start + len).checked_sub(1) {
+                        g.pool[k as usize] = to;
+                    }
+                };
+                let forked = match role {
+                    Chain::Follows => f.effect(effect),
+                    Chain::Reads | Chain::Free => None,
+                };
+                if let Some(earlier) = forked {
+                    out.push(changed(name("effect-forked"), &|g| last(g, earlier)));
+                }
+                // Its first operand, where that is not also the effect, as a checked square's is.
+                if let Some(&value) = f.own_args(v).first().filter(|a| **a != effect) {
+                    out.push(changed(name("effect-valued"), &|g| last(g, value)));
+                }
+                // A partial operation above the effect it reads, where that effect is an
+                // instruction of its block.
+                let raised = match role {
+                    Chain::Reads => b.insts.iter().position(|u| *u == effect),
+                    Chain::Follows | Chain::Free => None,
+                };
+                if let Some(at) = raised {
+                    out.push(changed(name("partial-raised"), &|g| {
+                        let insts = &mut g.blocks[bi].insts;
+                        insts.retain(|u| *u != v);
+                        insts.insert(at, v);
+                    }));
+                }
+            }
+            let name = |what: &str| format!("{}/b{}.term/{}", f.name, bi, what);
+            // The latest effect where the block ends: its last effect, or its effect parameter.
+            let latest = b
+                .insts
+                .iter()
+                .rev()
+                .find(|u| f.op(**u).chain() == Chain::Follows)
+                .or(b.params.last())
+                .copied();
+            let passed = match &b.term {
+                Term::Jump(_, args) => args.first().copied(),
+                Term::Branch { cond, .. } => Some(*cond),
+                Term::Return(..) | Term::Trap(..) => None,
+            }
+            .filter(|value| Some(*value) != latest);
+            if let Some(value) = passed {
+                out.push(changed(name("passed-valued"), &|g| {
+                    set_effect(&mut g.blocks[bi].term, value)
+                }));
+            }
+            // A return or a trap after an effect of its block, taking the block's entry effect.
+            let since = b.insts.iter().any(|u| f.op(*u).chain() == Chain::Follows);
+            let ended = match &b.term {
+                Term::Return(..) | Term::Trap(..) => b.params.last().copied().filter(|_| since),
+                Term::Jump(..) | Term::Branch { .. } => None,
+            };
+            if let Some(entry) = ended {
+                out.push(changed(name("ended-early"), &|g| {
+                    set_effect(&mut g.blocks[bi].term, entry)
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// The effect a terminator takes made `to`: a jump's, a branch's first target's, a return's or a
+/// trap's.
+fn set_effect(term: &mut Term, to: NodeId) {
+    match term {
+        Term::Jump(_, args)
+        | Term::Branch {
+            then: (_, args), ..
+        } => {
+            if let Some(e) = args.last_mut() {
+                *e = to;
+            }
+        }
+        Term::Return(_, e) | Term::Trap(_, e) => *e = to,
+    }
 }
 
 /// `n + 1` when `up`, else `n - 1`, when its magnitude stays below 2^128.
@@ -607,17 +800,13 @@ mod tests {
         let head = b.block(&[Ty::Int(I64), Ty::Int(I64)]);
         let body = b.block(&[]);
         let exit = b.block(&[]);
-        b.end(Term::Jump(head, vec![zero, zero]));
+        b.jump(head, vec![zero, zero]);
         b.switch(head);
         let [i, s] = b.params(head)[..] else {
             panic!("two parameters")
         };
         let more = b.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, n]);
-        b.end(Term::Branch {
-            cond: more,
-            then: (body, vec![]),
-            otherwise: (exit, vec![]),
-        });
+        b.branch(more, (body, vec![]), (exit, vec![]));
         b.switch(body);
         let add = Op::Arith {
             op: ArithOp::Add,
@@ -626,9 +815,9 @@ mod tests {
         let s2 = b.inst(add.clone(), Ty::Int(I64), &[s, i]);
         let one = b.int(I64, Num::from_i128(1));
         let i2 = b.inst(add, Ty::Int(I64), &[i, one]);
-        b.end(Term::Jump(head, vec![i2, s2]));
+        b.jump(head, vec![i2, s2]);
         b.switch(exit);
-        b.end(Term::Return(Some(s)));
+        b.ret(Some(s));
         let m = Module {
             functions: vec![b.finish()],
             budget: 1 << 20,
@@ -644,12 +833,12 @@ mod tests {
     fn counted_call() -> Module {
         let mut c = Builder::new("callee", &[Ty::Int(U8)], Some(Ty::Int(U8)));
         let x = c.params(BlockId(0))[0];
-        c.end(Term::Return(Some(x)));
+        c.ret(Some(x));
         let mut callee = c.finish();
         callee.frame = 100;
         let mut i = Builder::new("id", &[Ty::Int(I64)], Some(Ty::Int(I64)));
         let x = i.params(BlockId(0))[0];
-        i.end(Term::Return(Some(x)));
+        i.ret(Some(x));
         let mut id = i.finish();
         id.frame = 72;
         let mut b = Builder::new("caller", &[Ty::Int(I64)], Some(Ty::Int(U8)));
@@ -668,7 +857,7 @@ mod tests {
         let _ = inner;
         let y = b.inst(Op::Call(FuncId(1)), Ty::Int(I64), &[x]);
         let trap = deep(&mut b);
-        let count = b.inst(
+        b.inst(
             Op::Enter {
                 callee: FuncId(0),
                 trap,
@@ -679,10 +868,10 @@ mod tests {
         let max = b.int(I64, Num::from_i128(255));
         let fits = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[y, max]);
         let narrowing = b.trap_site("narrowing", &["out of range"]);
-        b.inst(Op::Check { trap: narrowing }, Ty::Unit, &[fits, count]);
+        b.inst(Op::Check { trap: narrowing }, Ty::Unit, &[fits]);
         let small = b.inst(Op::Cast, Ty::Int(U8), &[y]);
         let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[small]);
-        b.end(Term::Return(Some(r)));
+        b.ret(Some(r));
         let m = Module {
             functions: vec![callee, id, b.finish()],
             budget: 1 << 20,
@@ -716,7 +905,7 @@ mod tests {
     fn counted_across_blocks() -> Module {
         let mut i = Builder::new("id", &[Ty::Int(I64)], Some(Ty::Int(I64)));
         let x = i.params(BlockId(0))[0];
-        i.end(Term::Return(Some(x)));
+        i.ret(Some(x));
         let mut id = i.finish();
         id.frame = 72;
         let mut b = Builder::new("caller", &[Ty::Int(I64)], Some(Ty::Int(I64)));
@@ -736,10 +925,10 @@ mod tests {
         enter(&mut b, x);
         let y = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[x]);
         enter(&mut b, y);
-        b.end(Term::Jump(next, vec![]));
+        b.jump(next, vec![]);
         b.switch(next);
         let z = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[y]);
-        b.end(Term::Return(Some(z)));
+        b.ret(Some(z));
         let m = Module {
             functions: vec![id, b.finish()],
             budget: 1 << 20,
@@ -774,12 +963,14 @@ mod tests {
         );
         for (name, broken) in &all {
             let why = cfg::verify(broken).unwrap_err();
-            // The order of values refuses a count or a call taken before it is given; the walk, a
-            // call that closes no count, or a count left open.
+            // The order of values refuses a count or a call taken before it is given; the chain,
+            // one that takes an effect not the latest; the walk, a call that closes no count, or a
+            // count left open.
             let structural = [
                 "is not defined before it on every path",
                 "does not close the latest count open",
                 "returns with the count",
+                "where the latest effect is",
             ];
             assert!(
                 structural.iter().any(|r| why.contains(r)),
@@ -837,6 +1028,75 @@ mod tests {
         for (name, broken) in &all {
             assert!(cfg::verify(broken).is_err(), "{}", name);
         }
+    }
+
+    /// `fn pick(c: bool, x: i64) -> i64`: `x + 1`, checked, where `c` holds, else `x`, joined.
+    fn pick() -> cfg::Function {
+        let mut b = Builder::new("pick", &[Ty::Bool, Ty::Int(I64)], Some(Ty::Int(I64)));
+        let [c, x] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let then = b.block(&[]);
+        let otherwise = b.block(&[]);
+        let join = b.block(&[Ty::Int(I64)]);
+        b.branch(c, (then, vec![]), (otherwise, vec![]));
+        b.switch(then);
+        let one = b.int(I64, Num::from_i128(1));
+        let t = b.trap_site("overflow", &["", " does not fit in `i64`"]);
+        let up = b.inst(
+            Op::Arith {
+                op: ArithOp::Add,
+                trap: Some(t),
+            },
+            Ty::Int(I64),
+            &[x, one],
+        );
+        b.jump(join, vec![up]);
+        b.switch(otherwise);
+        b.jump(join, vec![x]);
+        b.switch(join);
+        let r = b.params(join)[0];
+        b.ret(Some(r));
+        b.finish()
+    }
+
+    /// Every break of the chain of effects [`unchained`] plants is refused, each kind planted
+    /// at least once: in a caller that counts, narrows and calls, and in a function that
+    /// branches and joins with a value. The originals verify and run.
+    #[test]
+    fn test_the_verifier_refuses_every_break_of_the_chain() {
+        let mut m = counted_call();
+        m.functions.push(pick());
+        cfg::verify(&m).unwrap();
+        let all = unchained(&m);
+        for kind in [
+            "effect-dropped",
+            "effect-forked",
+            "effect-valued",
+            "partial-raised",
+            "passed-valued",
+            "ended-early",
+        ] {
+            assert!(
+                all.iter().any(|(n, _)| n.ends_with(kind)),
+                "no {} planted",
+                kind
+            );
+        }
+        for (name, broken) in &all {
+            assert!(cfg::verify(broken).is_err(), "{} verifies", name);
+        }
+        let ran = |args: &[Val]| {
+            cfg::run(
+                &m,
+                FuncId(3),
+                args,
+                &mut Memory::default(),
+                Limits::default(),
+            )
+        };
+        assert_eq!(ran(&[Val::Bool(true), int(4)]), Ok(int(5)));
+        assert_eq!(ran(&[Val::Bool(false), int(4)]), Ok(int(4)));
     }
 
     fn named<'a>(m: &Module, all: &'a [Mutant], name: &str) -> &'a Mutant {
@@ -949,15 +1209,11 @@ mod tests {
         b.inst(Op::Copy { bytes: 8 }, Ty::Unit, &[copy, out]);
         let then = b.block(&[Ty::Int(I64)]);
         let otherwise = b.block(&[Ty::Int(I64)]);
-        b.end(Term::Branch {
-            cond: conds[2],
-            then: (then, vec![flipped]),
-            otherwise: (otherwise, vec![x]),
-        });
+        b.branch(conds[2], (then, vec![flipped]), (otherwise, vec![x]));
         for t in [then, otherwise] {
             b.switch(t);
             let p = b.params(t)[0];
-            b.end(Term::Return(Some(p)));
+            b.ret(Some(p));
         }
         let m = Module {
             functions: vec![b.finish()],
@@ -1038,7 +1294,7 @@ mod tests {
         let consts = |t: IntTy, n: i128| {
             let mut b = Builder::new("k", &[], Some(Ty::Int(t)));
             let k = b.int(t, Num::from_i128(n));
-            b.end(Term::Return(Some(k)));
+            b.ret(Some(k));
             let m = Module {
                 functions: vec![b.finish()],
                 budget: 1 << 20,
@@ -1087,14 +1343,11 @@ mod tests {
             &[y, one],
         );
         let join = b.block(&[Ty::Int(I64)]);
-        b.end(Term::Branch {
-            cond: below,
-            then: (join, vec![y]),
-            otherwise: (join, vec![up]),
-        });
+        let latest = b.latest();
+        b.branch(below, (join, vec![y]), (join, vec![up]));
         b.switch(join);
         let r = b.params(join)[0];
-        b.end(Term::Return(Some(r)));
+        b.ret(Some(r));
         let m = Module {
             functions: vec![b.finish()],
             budget: 1 << 20,
@@ -1107,11 +1360,38 @@ mod tests {
         assert_eq!(run(&id, &[int(-5)]), Ok(int(-5)));
         assert_eq!(
             named(&m, &all, "n/b0.term/then").apply(&m).functions[0].blocks[0].term,
-            Term::Jump(join, vec![y])
+            Term::Jump(join, vec![y, latest])
         );
         assert_eq!(
             named(&m, &all, "n/b0.term/else").apply(&m).functions[0].blocks[0].term,
-            Term::Jump(join, vec![up])
+            Term::Jump(join, vec![up, latest])
+        );
+        // A `not` replaced by its operand: the branch it decides reads the operand, and the effect
+        // the branch passes on stays the latest.
+        let mut b = Builder::new("flip", &[Ty::Bool], Some(Ty::Int(I64)));
+        let c = b.params(BlockId(0))[0];
+        let not = b.inst(Op::Not, Ty::Bool, &[c]);
+        let (yes, no) = (b.block(&[]), b.block(&[]));
+        let entry = b.latest();
+        b.branch(not, (yes, vec![]), (no, vec![]));
+        for (block, n) in [(yes, 1), (no, 0)] {
+            b.switch(block);
+            let k = b.int(I64, Num::from_i128(n));
+            b.ret(Some(k));
+        }
+        let flip = Module {
+            functions: vec![b.finish()],
+            budget: 1 << 20,
+        };
+        let id = named(&flip, &mutants(&flip), "flip/b0.i0/not>id").apply(&flip);
+        assert_eq!(cfg::verify(&id), Ok(()));
+        assert_eq!(
+            id.functions[0].blocks[0].term,
+            Term::Branch {
+                cond: c,
+                then: (yes, vec![entry]),
+                otherwise: (no, vec![entry]),
+            }
         );
         // A branch's mutant is located at its condition, an instruction's at the instruction.
         let swap = named(&m, &all, "n/b0.term/swap");

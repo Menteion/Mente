@@ -366,8 +366,6 @@ fn prepare(
             }
         }
     }
-    // The effects before a run, its entry's last parameter: none.
-    values.push(Val::Unit);
     let mut c = Prepared {
         text: call.to_string(),
         func: entry.func,

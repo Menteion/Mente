@@ -91,8 +91,8 @@ pub enum Ty {
     Addr,
     /// What an instruction without a result has.
     Unit,
-    /// The state the effects before it left, a parameter of a block or a function that every
-    /// value is admitted to: the effect a jump or a call passes on (`Function::follows`). Native
+    /// The latest effect where a block begins: the type of its last parameter, and of no other,
+    /// which a jump or a call fills with the latest effect where it stands ([`Chain`]). Native
     /// code keeps no value for it.
     Effect,
 }
@@ -243,52 +243,36 @@ pub enum CmpOp {
 }
 
 impl Op {
-    /// Whether an instruction of this kind follows the latest effect, taking it as its last
-    /// operand, and is the latest after it: one that may trap, read or write memory
-    /// ([`Function::follows`]). A count and a call are effects too, which take the latest as their
-    /// last argument; an exact operation is none. The lowering threads what this names, and the
-    /// verifier reads what it names, so that the two keep one list.
-    pub fn follows_effect(&self) -> bool {
+    /// How an instruction of this kind stands to the chain of effects ([`Chain`]). The builder
+    /// threads what this names, and the verifier holds it, so that the two keep one list.
+    pub fn chain(&self) -> Chain {
         match self {
-            Op::Arith { trap, .. } | Op::Neg { trap } => trap.is_some(),
-            Op::Shl { .. } | Op::Check { .. } | Op::Load | Op::Store | Op::Copy { .. } => true,
-            Op::Param
-            | Op::Int(_)
-            | Op::Bool(_)
-            | Op::Bits(_)
-            | Op::Not
-            | Op::Shr
-            | Op::Cmp(_)
-            | Op::Cast
-            | Op::Slot { .. }
-            | Op::Elem { .. }
-            | Op::Call(_)
-            | Op::Enter { .. } => false,
-        }
-    }
-
-    /// Whether an instruction of this kind is an effect: one that follows the latest effect
-    /// ([`Op::follows_effect`]), or a count or a call, which take it as their last argument.
-    fn is_effect(&self) -> bool {
-        match self {
-            Op::Enter { .. } | Op::Call(_) => true,
-            Op::Param
-            | Op::Int(_)
-            | Op::Bool(_)
-            | Op::Arith { .. }
-            | Op::Neg { .. }
-            | Op::Bits(_)
-            | Op::Not
+            // May trap: a checked operation, a shift left, a check. Reads or writes memory: a
+            // load, a store, a copy. Counts a call's frame, or makes a call.
+            Op::Arith { trap: Some(_), .. }
+            | Op::Neg { trap: Some(_) }
             | Op::Shl { .. }
-            | Op::Shr
-            | Op::Cmp(_)
-            | Op::Cast
             | Op::Check { .. }
-            | Op::Slot { .. }
-            | Op::Elem { .. }
             | Op::Load
             | Op::Store
-            | Op::Copy { .. } => self.follows_effect(),
+            | Op::Copy { .. }
+            | Op::Enter { .. }
+            | Op::Call(_) => Chain::Follows,
+            // Partial: an exact operation leaves its type, a division divides by zero, a shift
+            // right shifts by more than its width, a cast leaves its type and an element's address
+            // leaves memory on some inputs, which the checks before it rule out.
+            Op::Arith { trap: None, .. }
+            | Op::Neg { trap: None }
+            | Op::Shr
+            | Op::Cast
+            | Op::Elem { .. } => Chain::Reads,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Cmp(_)
+            | Op::Slot { .. } => Chain::Free,
         }
     }
 
@@ -316,6 +300,25 @@ impl Op {
             | Op::Call(_) => None,
         }
     }
+}
+
+/// How an instruction stands to the chain of effects, which holds the order of every effect along
+/// every path: every block's last parameter, of type [`Ty::Effect`], is the latest effect where
+/// the block begins; an effect takes the latest as its last operand and is the latest after it;
+/// and every terminator takes the latest, a jump and a branch passing it to their targets' effect
+/// parameter, a return and a trap keeping it. So each effect is taken once along every path, by
+/// the next effect or by a terminator, and none is left that nothing takes.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Chain {
+    /// An effect: it may trap, read or write memory, or count or make a call.
+    Follows,
+    /// A partial operation, defined on only some inputs: it reads the latest effect as its last
+    /// operand, and does not become it, so that it stays below every check and branch that
+    /// guards it while it moves freely among pure operations.
+    Reads,
+    /// A total operation, which takes no effect: a constant, a comparison, a bit operation, or a
+    /// slot's address.
+    Free,
 }
 
 /// What a value is: its operation, with what is not a value; its operands are in the pool.
@@ -376,18 +379,18 @@ pub enum Op {
     Copy {
         bytes: u32,
     },
-    /// Calls a function of the module on its operands, the latest effect last where the callee
-    /// takes one (`Function::follows`); the value is its result, or unit, and the latest effect
-    /// after it. The [`Op::Enter`] before it counted the callee's frame, and the call gives those
+    /// Calls a function of the module on its operands, the latest effect last, which fills the
+    /// callee's effect parameter ([`Chain`]); the value is its result, or unit, and it is the
+    /// latest effect after it. The [`Op::Enter`] before it counted the callee's frame, and the call gives those
     /// bytes back when it returns.
     Call(FuncId),
     /// Counts the frame of `callee` against the run's stack budget, where the call is counted:
     /// its arguments evaluated, none narrowed yet, the callee's checks not begun
     /// (`core-calculus.md`, item 25). Its operands are those of its call, the arguments as
-    /// evaluated, before any is narrowed, and the latest effect last; its value is the latest
-    /// effect after it, which the callee's checks follow (`Function::follows`). So the order is
-    /// held by the values: the count stands after its arguments and the effects before it, and
-    /// before every narrowing, check and call that follows it. Traps at `trap` where the stack in use and
+    /// evaluated, before any is narrowed, and the latest effect last; it is the latest effect
+    /// after it, which the callee's checks take ([`Chain`]). So the chain holds its place: the
+    /// count stands after its arguments and the effects before it, and before every narrowing,
+    /// check and call after it. Traps at `trap` where the stack in use and
     /// that frame together exceed the budget; otherwise the bytes are in use until the call
     /// returns. Every path from an `Enter` reaches its call or a trap, and the calls that a
     /// callee's checks make between them are each counted and returned within. The lowering
@@ -409,8 +412,10 @@ pub enum Term {
         then: (BlockId, Vec<NodeId>),
         otherwise: (BlockId, Vec<NodeId>),
     },
-    Return(Option<NodeId>),
-    Trap(TrapId),
+    /// Returns the value, if any, after the latest effect, which it takes.
+    Return(Option<NodeId>, NodeId),
+    /// Traps at the site after the latest effect, which it takes.
+    Trap(TrapId, NodeId),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -467,64 +472,22 @@ impl Function {
         self.tys[v.0 as usize]
     }
 
-    /// The operands instruction `v` takes besides the effect it follows, where its operation
-    /// follows one ([`Op::follows_effect`]): a checked arithmetic operation, a shift, a check, a
-    /// load, a store and a copy, a check's operands being its condition and the values its trap
-    /// site reports.
-    fn own_arity(&self, v: NodeId) -> Option<usize> {
-        let op = self.op(v);
-        if !op.follows_effect() {
-            return None;
-        }
-        match op {
-            Op::Arith { .. } | Op::Shl { .. } | Op::Store | Op::Copy { .. } => Some(2),
-            Op::Neg { .. } | Op::Load => Some(1),
-            Op::Check { trap } => self.traps.get(trap.0 as usize).map(|t| t.text.len()),
-            Op::Param
-            | Op::Int(_)
-            | Op::Bool(_)
-            | Op::Bits(_)
-            | Op::Not
-            | Op::Shr
-            | Op::Cmp(_)
-            | Op::Cast
-            | Op::Slot { .. }
-            | Op::Elem { .. }
-            | Op::Call(_)
-            | Op::Enter { .. } => None,
+    /// The effect instruction `v` takes, as its last operand, where its operation follows or reads
+    /// the latest effect ([`Op::chain`]): the verifier holds it to the latest effect where `v`
+    /// stands ([`Chain`]).
+    pub fn effect(&self, v: NodeId) -> Option<NodeId> {
+        match self.op(v).chain() {
+            Chain::Follows | Chain::Reads => self.args(v).last().copied(),
+            Chain::Free => None,
         }
     }
 
-    /// The effect instruction `v` follows: its last operand, past those its operation takes. The
-    /// lowering threads every instruction that may trap, read or write memory, or count a call's
-    /// frame through the one before it, and a block or a function takes the latest as its last
-    /// parameter, of type [`Ty::Effect`]; a count and a call take it there as they take their
-    /// arguments. So their order is held by values, which the verifier checks are each defined
-    /// before their use on every path, and no change can move one past another.
-    pub fn follows(&self, v: NodeId) -> Option<NodeId> {
-        let args = self.args(v);
-        match self.own_arity(v) {
-            Some(n) if args.len() == n + 1 => args.last().copied().filter(|a| self.is_effect(*a)),
-            Some(_) | None => None,
-        }
-    }
-
-    /// Whether `a` can stand for the state the effects before it left: a parameter of type
-    /// [`Ty::Effect`], or an instruction that is an effect ([`Op::is_effect`]).
-    fn is_effect(&self, a: NodeId) -> bool {
-        match self.ops.get(a.0 as usize) {
-            Some(Op::Param) => self.tys.get(a.0 as usize) == Some(&Ty::Effect),
-            Some(op) => op.is_effect(),
-            None => false,
-        }
-    }
-
-    /// The operands of `v` besides the effect it follows.
+    /// The operands of `v` besides the effect it takes: of a call, the callee's arguments.
     pub fn own_args(&self, v: NodeId) -> &[NodeId] {
         let args = self.args(v);
-        match self.follows(v) {
-            Some(_) => &args[..args.len() - 1],
-            None => args,
+        match self.op(v).chain() {
+            Chain::Follows | Chain::Reads => &args[..args.len().saturating_sub(1)],
+            Chain::Free => args,
         }
     }
 
@@ -616,6 +579,8 @@ pub struct Builder {
     f: Function,
     current: BlockId,
     loc: Loc,
+    /// The latest effect of each block: its effect parameter, until an effect follows it.
+    latest: Vec<NodeId>,
 }
 
 impl Builder {
@@ -625,17 +590,21 @@ impl Builder {
     }
 
     /// A function whose entry block takes `params`, declared at `decl`: its parameters carry
-    /// that location, which a debugger names as the function's.
+    /// that location, which a debugger names as the function's. Its last parameter is the latest
+    /// effect before the call ([`Chain`]).
     pub fn declared_at(name: &str, params: &[Ty], result: Option<Ty>, decl: Loc) -> Builder {
+        let mut with = params.to_vec();
+        with.push(Ty::Effect);
         let mut b = Builder {
             f: Function {
                 name: name.to_string(),
-                params: params.to_vec(),
+                params: with,
                 result,
                 ..Function::default()
             },
             current: BlockId(0),
             loc: decl,
+            latest: Vec::new(),
         };
         let entry = b.block(params);
         b.switch(entry);
@@ -660,23 +629,34 @@ impl Builder {
         v
     }
 
-    /// A new block taking `params`, ended by a trap until it is given its terminator.
+    /// A new block taking `params` and, last, the latest effect where it begins; it returns
+    /// until it is given its terminator.
     pub fn block(&mut self, params: &[Ty]) -> BlockId {
         let id = BlockId(self.f.blocks.len() as u32);
-        let params = params
+        let mut taken: Vec<NodeId> = params
             .iter()
             .map(|t| self.value(Op::Param, *t, &[]))
             .collect();
+        let effect = self.value(Op::Param, Ty::Effect, &[]);
+        taken.push(effect);
         self.f.blocks.push(Block {
-            params,
+            params: taken,
             insts: Vec::new(),
-            term: Term::Return(None),
+            term: Term::Return(None, effect),
         });
+        self.latest.push(effect);
         id
     }
 
+    /// The parameters of block `b` besides its effect parameter.
     pub fn params(&self, b: BlockId) -> Vec<NodeId> {
-        self.f.block(b).params.clone()
+        let params = &self.f.block(b).params;
+        params[..params.len().saturating_sub(1)].to_vec()
+    }
+
+    /// The latest effect of the current block.
+    pub fn latest(&self) -> NodeId {
+        self.latest[self.current.0 as usize]
     }
 
     /// Builds into block `b` from now on.
@@ -688,10 +668,24 @@ impl Builder {
         self.current
     }
 
-    /// Appends an instruction to the current block.
+    /// Appends an instruction to the current block, taking `args` and, where its operation
+    /// follows or reads the latest effect, that effect last ([`Op::chain`]).
     pub fn inst(&mut self, op: Op, ty: Ty, args: &[NodeId]) -> NodeId {
-        let v = self.value(op, ty, args);
+        let role = op.chain();
+        let latest = self.latest();
+        let v = match role {
+            Chain::Follows | Chain::Reads => {
+                let mut with = args.to_vec();
+                with.push(latest);
+                self.value(op, ty, &with)
+            }
+            Chain::Free => self.value(op, ty, args),
+        };
         self.f.blocks[self.current.0 as usize].insts.push(v);
+        match role {
+            Chain::Follows => self.latest[self.current.0 as usize] = v,
+            Chain::Reads | Chain::Free => {}
+        }
         v
     }
 
@@ -709,9 +703,44 @@ impl Builder {
         id
     }
 
-    /// Ends the current block.
-    pub fn end(&mut self, term: Term) {
+    fn end(&mut self, term: Term) {
         self.f.blocks[self.current.0 as usize].term = term;
+    }
+
+    /// Ends the current block in a jump to `to` with `args` and the latest effect.
+    pub fn jump(&mut self, to: BlockId, mut args: Vec<NodeId>) {
+        args.push(self.latest());
+        self.end(Term::Jump(to, args));
+    }
+
+    /// Ends the current block in a branch on `cond`, each target given its arguments and the
+    /// latest effect.
+    pub fn branch(
+        &mut self,
+        cond: NodeId,
+        mut then: (BlockId, Vec<NodeId>),
+        mut otherwise: (BlockId, Vec<NodeId>),
+    ) {
+        let latest = self.latest();
+        then.1.push(latest);
+        otherwise.1.push(latest);
+        self.end(Term::Branch {
+            cond,
+            then,
+            otherwise,
+        });
+    }
+
+    /// Ends the current block in a return of `value`, if any, after the latest effect.
+    pub fn ret(&mut self, value: Option<NodeId>) {
+        let latest = self.latest();
+        self.end(Term::Return(value, latest));
+    }
+
+    /// Ends the current block in a trap at `site`, after the latest effect.
+    pub fn trap(&mut self, site: TrapId) {
+        let latest = self.latest();
+        self.end(Term::Trap(site, latest));
     }
 
     pub fn finish(self) -> Function {
@@ -755,6 +784,14 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
         Ok(())
     };
     for (bi, b) in f.blocks.iter().enumerate() {
+        // The block's last parameter, and only it, is the latest effect where it begins.
+        let effects: Vec<bool> = b.params.iter().map(|p| f.ty(*p) == Ty::Effect).collect();
+        if effects.last() != Some(&true) || effects.iter().filter(|e| **e).count() != 1 {
+            return Err(format!(
+                "block {} does not take the latest effect as its last parameter, and only there",
+                bi
+            ));
+        }
         for &v in &b.insts {
             let at = || format!("v{} in block {}", v.0, bi);
             if !defined(v) || f.args(v).iter().any(|a| !defined(*a)) {
@@ -778,21 +815,77 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
                 jump(then)?;
                 jump(otherwise)?;
             }
-            Term::Return(v) => {
+            Term::Return(v, effect) => {
                 let given = v.filter(|v| defined(*v)).map(|v| f.ty(v));
-                if given != f.result {
+                if given != f.result || !defined(*effect) {
                     return Err(format!("block {} returns the wrong type", bi));
                 }
             }
-            Term::Trap(t) => {
-                if f.traps.get(t.0 as usize).is_none_or(|s| s.text.len() != 1) {
+            Term::Trap(t, effect) => {
+                if f.traps.get(t.0 as usize).is_none_or(|s| s.text.len() != 1) || !defined(*effect)
+                {
                     return Err(format!("block {} traps at a site that does not exist", bi));
                 }
             }
         }
     }
     verify_order(f)?;
+    verify_chain(f)?;
     verify_frames(f)
+}
+
+/// The effects of `f` form one chain along every path ([`Chain`]): in each block, from its
+/// effect parameter, every effect takes the latest effect and is the latest after it, every
+/// partial operation reads the latest, and the terminator takes the latest, a jump or a branch
+/// passing it to its targets' effect parameter. So no effect is taken twice along a path, which
+/// would fork the chain, none is left that nothing takes, which a pass that keeps only what is
+/// used would delete, and no effect or partial operation moves past another effect while it
+/// takes the effect it took: an instruction moved keeps its operands, which are no longer the
+/// latest where it lands.
+fn verify_chain(f: &Function) -> Result<(), String> {
+    let name = |e: Option<NodeId>| e.map_or("no effect".to_string(), |e| format!("v{}", e.0));
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let Some(&first) = b.params.last() else {
+            return Err(format!("block {} takes no effect", bi));
+        };
+        let mut latest = first;
+        for &v in &b.insts {
+            let role = f.op(v).chain();
+            let taken = match role {
+                Chain::Follows | Chain::Reads => f.args(v).last().copied(),
+                Chain::Free => continue,
+            };
+            if taken != Some(latest) {
+                return Err(format!(
+                    "v{} in block {}: it takes {} where the latest effect is v{}",
+                    v.0,
+                    bi,
+                    name(taken),
+                    latest.0
+                ));
+            }
+            match role {
+                Chain::Follows => latest = v,
+                Chain::Reads | Chain::Free => {}
+            }
+        }
+        let taken: Vec<Option<NodeId>> = match &b.term {
+            Term::Jump(_, args) => vec![args.last().copied()],
+            Term::Branch {
+                then, otherwise, ..
+            } => vec![then.1.last().copied(), otherwise.1.last().copied()],
+            Term::Return(_, effect) | Term::Trap(_, effect) => vec![Some(*effect)],
+        };
+        if let Some(wrong) = taken.into_iter().find(|t| *t != Some(latest)) {
+            return Err(format!(
+                "block {}: its terminator takes {} where the latest effect is v{}",
+                bi,
+                name(wrong),
+                latest.0
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The blocks each block's terminator may go to.
@@ -802,7 +895,7 @@ fn successors(term: &Term) -> Vec<BlockId> {
         Term::Branch {
             then, otherwise, ..
         } => vec![then.0, otherwise.0],
-        Term::Return(_) | Term::Trap(_) => Vec::new(),
+        Term::Return(..) | Term::Trap(..) => Vec::new(),
     }
 }
 
@@ -975,8 +1068,8 @@ fn verify_order(f: &Function) -> Result<(), String> {
                 .chain(then.1.iter().copied())
                 .chain(otherwise.1.iter().copied())
                 .collect(),
-            Term::Return(v) => v.iter().copied().collect(),
-            Term::Trap(_) => Vec::new(),
+            Term::Return(v, effect) => v.iter().copied().chain([*effect]).collect(),
+            Term::Trap(_, effect) => vec![*effect],
         };
         if let Some(a) = used.iter().find(|a| !available(**a, b, end)) {
             return Err(format!(
@@ -1037,7 +1130,7 @@ fn verify_frames(f: &Function) -> Result<(), String> {
             Term::Branch {
                 then, otherwise, ..
             } => vec![then.0, otherwise.0],
-            Term::Return(_) => {
+            Term::Return(..) => {
                 if let Some(c) = open.last() {
                     return Err(format!(
                         "block {} returns with the count v{} open",
@@ -1046,7 +1139,7 @@ fn verify_frames(f: &Function) -> Result<(), String> {
                 }
                 Vec::new()
             }
-            Term::Trap(_) => Vec::new(),
+            Term::Trap(..) => Vec::new(),
         };
         for t in targets {
             match &open_at[t.0 as usize] {
@@ -1158,7 +1251,9 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
                 .functions
                 .get(c.0 as usize)
                 .ok_or("a call of a function that does not exist")?;
-            let params = callee.params.iter().map(|p| Want::param(*p)).collect();
+            // The callee's arguments; its last parameter, the effect, takes the latest effect.
+            let given = &callee.params[..callee.params.len().saturating_sub(1)];
+            let params = given.iter().map(|p| Want::param(*p)).collect();
             (Want::Is(callee.result.unwrap_or(Ty::Unit)), params, None)
         }
         Op::Enter { callee, trap } => {
@@ -1166,16 +1261,10 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
                 .functions
                 .get(callee.0 as usize)
                 .ok_or("a count of a function that does not exist")?;
-            // The arguments as evaluated, before any is narrowed, so of any type, and the effect
-            // it follows where the callee takes one: as many as the call passes.
-            let params = counted
-                .params
-                .iter()
-                .map(|p| match p {
-                    Ty::Effect => Want::Any,
-                    Ty::Int(_) | Ty::Bool | Ty::Addr | Ty::Unit => Want::Value,
-                })
-                .collect();
+            // The arguments as evaluated, before any is narrowed, so of any type: as many as the
+            // call passes besides the latest effect.
+            let given = &counted.params[..counted.params.len().saturating_sub(1)];
+            let params = given.iter().map(|_| Want::Value).collect();
             (Want::Is(Ty::Unit), params, trap.map(|t| (t, 0)))
         }
     };
@@ -1364,7 +1453,8 @@ impl Default for Limits {
 /// keep their frames on a stack of the interpreter's own, so a deep recursion never reaches the
 /// host's stack: its [`Op::Enter`]s trap against the module's budget first. `f` itself is the
 /// run's entry, which no frame of the program counts; every call of a function of the program,
-/// the run's first among them, is counted by its `Enter`.
+/// the run's first among them, is counted by its `Enter`. `args` are the entry's arguments; the
+/// run begins the chain of effects, its entry's effect parameter taking no value of its own.
 pub fn run(
     m: &Module,
     f: FuncId,
@@ -1453,6 +1543,9 @@ impl<'m> Machine<'m> {
             mark: self.memory.mark(),
             dest,
         };
+        // The latest effect before the call, which the interpreter keeps no value for.
+        let mut args = args;
+        args.push(Val::Unit);
         enter(&mut frame, BlockId(0), args)?;
         Ok(frame)
     }
@@ -1506,7 +1599,7 @@ impl<'m> Machine<'m> {
                     let args = args.iter().map(get).collect();
                     enter(top, *t, args)?;
                 }
-                Term::Return(v) => {
+                Term::Return(v, _) => {
                     let result = v.as_ref().map_or(Val::Unit, get);
                     let (mark, dest) = (top.mark, top.dest);
                     // A call gives back the bytes its `Enter` counted; the entry counted none.
@@ -1520,7 +1613,7 @@ impl<'m> Machine<'m> {
                         _ => return Ok(result),
                     }
                 }
-                Term::Trap(t) => return Err(trap(f, *t, &[])),
+                Term::Trap(t, _) => return Err(trap(f, *t, &[])),
             }
         }
     }
@@ -1767,9 +1860,9 @@ impl fmt::Display for Function {
                     jump(then),
                     jump(otherwise)
                 )?,
-                Term::Return(Some(v)) => writeln!(out, "  return v{}", v.0)?,
-                Term::Return(None) => writeln!(out, "  return")?,
-                Term::Trap(t) => writeln!(out, "  trap t{}", t.0)?,
+                Term::Return(Some(v), e) => writeln!(out, "  return v{} after v{}", v.0, e.0)?,
+                Term::Return(None, e) => writeln!(out, "  return after v{}", e.0)?,
+                Term::Trap(t, e) => writeln!(out, "  trap t{} after v{}", t.0, e.0)?,
             }
         }
         for (i, t) in self.traps.iter().enumerate() {
@@ -1864,24 +1957,20 @@ mod tests {
         let head = b.block(&[Ty::Int(I64), Ty::Int(I64)]);
         let body = b.block(&[]);
         let exit = b.block(&[]);
-        b.end(Term::Jump(head, vec![zero, zero]));
+        b.jump(head, vec![zero, zero]);
         b.switch(head);
         let [i, s] = b.params(head)[..] else {
             panic!("two parameters")
         };
         let more = b.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, n]);
-        b.end(Term::Branch {
-            cond: more,
-            then: (body, vec![]),
-            otherwise: (exit, vec![]),
-        });
+        b.branch(more, (body, vec![]), (exit, vec![]));
         b.switch(body);
         let s2 = b.inst(add(None), Ty::Int(I64), &[s, i]);
         let one = b.int(I64, Num::from_i128(1));
         let i2 = b.inst(add(None), Ty::Int(I64), &[i, one]);
-        b.end(Term::Jump(head, vec![i2, s2]));
+        b.jump(head, vec![i2, s2]);
         b.switch(exit);
-        b.end(Term::Return(Some(s)));
+        b.ret(Some(s));
         b.finish()
     }
 
@@ -1892,17 +1981,19 @@ mod tests {
         assert_eq!(run0(&m, 0, &[int(0)]), Ok(int(0)));
         let printed = m.functions[0].to_string();
         assert!(
-            printed.starts_with("fn sum(i64) -> i64 {\nblock0(v0: i64):\n  v1: i64 = int 0 @0:0\n"),
+            printed.starts_with(
+                "fn sum(i64, effect) -> i64 {\nblock0(v0: i64, v1: effect):\n  v2: i64 = int 0 @0:0\n"
+            ),
             "{}",
             printed
         );
         assert!(
-            printed.contains("  branch v4, block2(), block3()\n"),
+            printed.contains("  branch v8, block2(v5), block3(v5)\n"),
             "{}",
             printed
         );
         assert!(
-            printed.contains("  v5: i64 = add v3, v2 @0:0\n"),
+            printed.contains("  v9: i64 = add v4, v3, v6 @0:0\n"),
             "{}",
             printed
         );
@@ -1913,14 +2004,15 @@ mod tests {
         let mut b = Builder::new("twice", &[Ty::Int(I64)], Some(Ty::Int(I64)));
         let n = b.params(BlockId(0))[0];
         let s = call(&mut b, 0, Ty::Int(I64), &[n]);
-        b.end(Term::Return(Some(s)));
+        b.ret(Some(s));
         let m = module(vec![sum(), b.finish()]);
         let printed = m.to_string();
         let first = m.functions[0].to_string();
         let second = m.functions[1].to_string();
         assert_eq!(printed, format!("f0: {}\nf1: {}", first, second));
-        assert!(second.contains("= enter f0 t0 v0 @0:0\n"), "{}", second);
-        assert!(second.contains("= call f0 v0 @0:0\n"), "{}", second);
+        assert!(second.contains("= enter f0 t0 v0, v1 @0:0\n"), "{}", second);
+        assert!(second.contains("= call f0 v0, v2 @0:0\n"), "{}", second);
+        assert!(second.contains("  return v3 after v3\n"), "{}", second);
         // The same module prints the same text every time.
         assert_eq!(printed, m.to_string());
         assert_eq!(Module::default().to_string(), "");
@@ -1940,7 +2032,7 @@ mod tests {
         let t = b.trap_site("narrowing", &["", " does not fit in `u8`"]);
         b.inst(Op::Check { trap: t }, Ty::Unit, &[fits, x]);
         let y = b.inst(Op::Cast, Ty::Int(U8), &[x]);
-        b.end(Term::Return(Some(y)));
+        b.ret(Some(y));
         let m = module(vec![b.finish()]);
         assert_eq!(run0(&m, 0, &[int(200)]), Ok(int(200)));
         assert_eq!(
@@ -1960,7 +2052,7 @@ mod tests {
             &["", " lies outside the refinement `[", "..", "]`"],
         );
         r.inst(Op::Check { trap: site }, Ty::Unit, &[below, x, zero, n]);
-        r.end(Term::Return(None));
+        r.ret(None);
         let m = module(vec![r.finish()]);
         assert_eq!(run0(&m, 0, &[int(2), int(3)]), Ok(Val::Unit));
         assert_eq!(
@@ -1974,7 +2066,7 @@ mod tests {
         let zero = t.trap_site("division-by-zero", &["division by zero"]);
         t.inst(Op::Check { trap: zero }, Ty::Unit, &[c]);
         let site = t.trap_site("todo", &["todo reached: later"]);
-        t.end(Term::Trap(site));
+        t.trap(site);
         let m = module(vec![t.finish()]);
         assert_eq!(
             run0(&m, 0, &[Val::Bool(true)]),
@@ -2005,7 +2097,7 @@ mod tests {
                 Ty::Int(U128),
                 &[x, y],
             );
-            b.end(Term::Return(Some(p)));
+            b.ret(Some(p));
             Module {
                 functions: vec![b.finish()],
                 budget: BUDGET,
@@ -2033,7 +2125,7 @@ mod tests {
             b.at(2, 30);
             let trap = checked.then(|| b.trap_site("narrowing", &["", " does not fit in `u128`"]));
             let s = b.inst(add(trap), Ty::Int(t), &[x, y]);
-            b.end(Term::Return(Some(s)));
+            b.ret(Some(s));
             module(vec![b.finish()])
         };
         let top = Val::Int(U128.max());
@@ -2058,7 +2150,7 @@ mod tests {
             Ty::Int(U128),
             &[x, y],
         );
-        b.end(Term::Return(Some(d)));
+        b.ret(Some(d));
         let m = module(vec![b.finish()]);
         assert_eq!(
             run0(&m, 0, &[int(1), int(2)]).unwrap_err().to_string(),
@@ -2074,7 +2166,7 @@ mod tests {
         let x = b.params(BlockId(0))[0];
         let t = b.trap_site("narrowing", &["", " does not fit in `i128`"]);
         let r = b.inst(Op::Neg { trap: Some(t) }, Ty::Int(I128), &[x]);
-        b.end(Term::Return(Some(r)));
+        b.ret(Some(r));
         let m = module(vec![b.finish()]);
         assert_eq!(run0(&m, 0, &[int(5)]), Ok(int(-5)));
         assert!(matches!(run0(&m, 0, &[int(i128::MIN)]), Err(Stop::Trap(_))));
@@ -2088,7 +2180,7 @@ mod tests {
                 panic!("two parameters")
             };
             let r = bl.inst(op, Ty::Int(t), &[x, y]);
-            bl.end(Term::Return(Some(r)));
+            bl.ret(Some(r));
             run0(&module(vec![bl.finish()]), 0, &[int(a), int(b)])
         };
         let arith = |op| Op::Arith { op, trap: None };
@@ -2118,7 +2210,7 @@ mod tests {
         };
         let t = shl.trap_site("narrowing", &["", " does not fit in `i64`"]);
         let r = shl.inst(Op::Shl { trap: t }, Ty::Int(I64), &[x, k]);
-        shl.end(Term::Return(Some(r)));
+        shl.ret(Some(r));
         let m = module(vec![shl.finish()]);
         assert_eq!(run0(&m, 0, &[int(-3), int(2)]), Ok(int(-12)));
         // A wider operand whose shifted value fits the result type.
@@ -2139,7 +2231,7 @@ mod tests {
         };
         let t = wide.trap_site("narrowing", &["", " does not fit in `i128`"]);
         let r = wide.inst(Op::Shl { trap: t }, Ty::Int(I128), &[x, k]);
-        wide.end(Term::Return(Some(r)));
+        wide.ret(Some(r));
         let m = module(vec![wide.finish()]);
         assert_eq!(
             run0(&m, 0, &[int(1 << 126), int(1)]).unwrap_err().to_string(),
@@ -2154,7 +2246,7 @@ mod tests {
         let mut not = Builder::new("not", &[Ty::Int(U8)], Some(Ty::Int(U8)));
         let x = not.params(BlockId(0))[0];
         let r = not.inst(Op::Not, Ty::Int(U8), &[x]);
-        not.end(Term::Return(Some(r)));
+        not.ret(Some(r));
         assert_eq!(
             run0(&module(vec![not.finish()]), 0, &[int(5)]),
             Ok(int(250))
@@ -2165,7 +2257,7 @@ mod tests {
         };
         let x = cmp.inst(Op::Bits(BitOp::Xor), Ty::Bool, &[a, b]);
         let n = cmp.inst(Op::Not, Ty::Bool, &[x]);
-        cmp.end(Term::Return(Some(n)));
+        cmp.ret(Some(n));
         let m = module(vec![cmp.finish()]);
         assert_eq!(
             run0(&m, 0, &[Val::Bool(true), Val::Bool(false)]),
@@ -2213,7 +2305,7 @@ mod tests {
         let k = b.int(U8, Num::from_i128(1));
         let y = b.inst(add(None), Ty::Int(U8), &[x, k]);
         b.inst(Op::Store, Ty::Unit, &[at, y]);
-        b.end(Term::Return(None));
+        b.ret(None);
         // `fn main() -> u8`: a slot of u16s, filled, bumped, copied, read back.
         let mut m = Builder::new("main", &[], Some(Ty::Int(U8)));
         let slot = m.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
@@ -2233,7 +2325,7 @@ mod tests {
         let at = m.inst(Op::Elem { stride: 1 }, Ty::Addr, &[copy, one]);
         let r1 = m.inst(Op::Load, Ty::Int(U8), &[at]);
         let r = m.inst(add(None), Ty::Int(U8), &[r1, r2]);
-        m.end(Term::Return(Some(r)));
+        m.ret(Some(r));
         let module = module(vec![b.finish(), m.finish()]);
         assert_eq!(run0(&module, 1, &[]), Ok(int(33)));
         // A caller's memory, as `mn run --call` sets up a `mut` argument; wider elements.
@@ -2274,19 +2366,15 @@ mod tests {
             let left = b.block(&[]);
             let right = b.block(&[]);
             let join = b.block(&[Ty::Int(I64)]);
-            b.end(Term::Branch {
-                cond: c,
-                then: (left, vec![]),
-                otherwise: (right, vec![]),
-            });
+            b.branch(c, (left, vec![]), (right, vec![]));
             b.switch(left);
-            b.end(Term::Jump(join, vec![value]));
+            b.jump(join, vec![value]);
             b.switch(right);
-            b.end(Term::Jump(join, vec![value]));
+            b.jump(join, vec![value]);
             b.switch(join);
             value = b.params(join)[0];
         }
-        b.end(Term::Return(Some(value)));
+        b.ret(Some(value));
         let started = std::time::Instant::now();
         assert!(verify(&Module {
             functions: vec![b.finish()],
@@ -2313,7 +2401,7 @@ mod tests {
             let x = b.params(BlockId(0))[0];
             let one = b.int(I64, Num::from_i128(1));
             let sum = b.inst(add(None), Ty::Int(I64), &[x, one]);
-            b.end(Term::Return(Some(sum)));
+            b.ret(Some(sum));
             let mut f = b.finish();
             if late {
                 f.blocks[0].insts.swap(0, 1);
@@ -2346,21 +2434,17 @@ mod tests {
             let then = b.block(&[]);
             let otherwise = b.block(&[]);
             let join = b.block(&[Ty::Int(I64)]);
-            b.end(Term::Branch {
-                cond: c,
-                then: (then, vec![]),
-                otherwise: (otherwise, vec![]),
-            });
+            b.branch(c, (then, vec![]), (otherwise, vec![]));
             b.switch(then);
             let seven = b.int(I64, Num::from_i128(7));
-            b.end(Term::Jump(join, vec![seven]));
+            b.jump(join, vec![seven]);
             b.switch(otherwise);
             let eight = b.int(I64, Num::from_i128(8));
-            b.end(Term::Jump(join, vec![if pass { eight } else { seven }]));
+            b.jump(join, vec![if pass { eight } else { seven }]);
             b.switch(join);
             let v = b.params(join)[0];
             let r = if pass { v } else { seven };
-            b.end(Term::Return(Some(r)));
+            b.ret(Some(r));
             b.finish()
         };
         assert!(module(joined(true)).is_ok());
@@ -2372,41 +2456,165 @@ mod tests {
         );
     }
 
-    /// An operand past those an operation takes is the effect it follows, where it follows one, or
-    /// the instruction is refused: a checked addition that takes an integer, or a pure
-    /// instruction's result, past its two operands is refused, and one that takes the function's
-    /// effect there verifies; an exact addition follows no effect, so the same operand past its
-    /// two is refused.
+    /// `fn f(x: i64, d: i64) -> i64`, whose effects form one chain: it checks `d != 0` and then
+    /// `x >= 0`, divides `x` by `d` exactly, reading the latest effect, adds 1 with a check, and
+    /// branches on the sum, returning it on one side and its checked square on the other. The
+    /// instructions of block 0, by name: `zero`, `nz`, `check1`, `pos`, `check2`, `q`, `one`,
+    /// `s`, `neg`.
+    fn chained() -> (Function, [NodeId; 9]) {
+        let mut b = Builder::new("f", &[Ty::Int(I64), Ty::Int(I64)], Some(Ty::Int(I64)));
+        let [x, d] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let zero = b.int(I64, Num::ZERO);
+        let nz = b.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[d, zero]);
+        let t0 = b.trap_site("division-by-zero", &["division by zero"]);
+        let check1 = b.inst(Op::Check { trap: t0 }, Ty::Unit, &[nz]);
+        let pos = b.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[x, zero]);
+        let t1 = b.trap_site("contract", &["x is negative"]);
+        let check2 = b.inst(Op::Check { trap: t1 }, Ty::Unit, &[pos]);
+        let q = b.inst(
+            Op::Arith {
+                op: ArithOp::Div,
+                trap: None,
+            },
+            Ty::Int(I64),
+            &[x, d],
+        );
+        let one = b.int(I64, Num::from_i128(1));
+        let t2 = b.trap_site("overflow", &["", " does not fit in `i64`"]);
+        let s = b.inst(add(Some(t2)), Ty::Int(I64), &[q, one]);
+        let neg = b.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[s, zero]);
+        let left = b.block(&[]);
+        let right = b.block(&[]);
+        b.branch(neg, (left, vec![]), (right, vec![]));
+        b.switch(left);
+        b.ret(Some(s));
+        b.switch(right);
+        let t3 = b.trap_site("overflow", &["", " does not fit in `i64`"]);
+        let sq = b.inst(
+            Op::Arith {
+                op: ArithOp::Mul,
+                trap: Some(t3),
+            },
+            Ty::Int(I64),
+            &[s, s],
+        );
+        b.ret(Some(sq));
+        (b.finish(), [zero, nz, check1, pos, check2, q, one, s, neg])
+    }
+
+    /// The verifier holds the chain of effects whole ([`Chain`]), and refuses each way of breaking
+    /// it: an effect without the latest effect, one that takes an earlier effect, forking the
+    /// chain, alone or moved above the effect it skips; a value that is no effect where an effect
+    /// is taken, by an instruction or by a block's effect parameter; a return before the last
+    /// effect, which would leave that effect to nothing; and a partial operation, an exact
+    /// division, raised above the check that guards it, or reading an earlier effect in place.
     #[test]
-    fn test_an_operand_past_an_operations_own_is_the_effect_it_follows() {
-        let addition = |checked: bool, last: usize| {
-            let mut b = Builder::new("f", &[Ty::Int(I64), Ty::Effect], Some(Ty::Int(I64)));
-            let [x, effect] = b.params(BlockId(0))[..] else {
-                panic!("two parameters")
-            };
-            let one = b.int(I64, Num::from_i128(1));
-            let less = b.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[x, one]);
-            let trap = checked.then(|| b.trap_site("overflow", &["", " does not fit in `i64`"]));
-            let past = [one, less, effect][last];
-            let sum = b.inst(add(trap), Ty::Int(I64), &[x, one, past]);
-            b.end(Term::Return(Some(sum)));
+    fn test_the_verifier_holds_the_chain_of_effects() {
+        let check = |f: Function| {
             verify(&Module {
-                functions: vec![b.finish()],
+                functions: vec![f],
                 budget: BUDGET,
             })
         };
-        assert_eq!(addition(true, 2), Ok(()));
-        for (checked, last) in [(true, 0), (true, 1), (false, 2)] {
-            let why = addition(checked, last).unwrap_err();
-            // The type check reads three operands where the addition takes two.
-            assert!(
-                why.contains("of type i64 on ["),
-                "{} {}: {}",
-                checked,
-                last,
-                why
-            );
+        let (f, [_, _, check1, pos, check2, q, one, s, neg]) = chained();
+        let e0 = *f.blocks[0].params.last().unwrap_or(&s);
+        assert_eq!(check(f.clone()), Ok(()));
+        assert_eq!(
+            run0(
+                &Module {
+                    functions: vec![f.clone()],
+                    budget: BUDGET,
+                },
+                0,
+                &[int(7), int(2)]
+            ),
+            Ok(int(16))
+        );
+        // What each instruction takes last.
+        let set_last = |f: &mut Function, v: NodeId, to: NodeId| {
+            let (start, len) = f.operands[v.0 as usize];
+            f.pool[(start + len - 1) as usize] = to;
+        };
+        let moved = |f: &mut Function, v: NodeId, before: NodeId| {
+            let insts = &mut f.blocks[0].insts;
+            insts.retain(|u| *u != v);
+            let at = insts.iter().position(|u| *u == before).unwrap_or(0);
+            insts.insert(at, v);
+        };
+        let latest = "where the latest effect is";
+        let refused = |f: Function, why: &str, what: &str| {
+            let got = check(f).unwrap_err();
+            assert!(got.contains(why), "{}: {}", what, got);
+        };
+        // The checked addition without its effect: two operands where it takes one and the
+        // effect.
+        let mut dropped = f.clone();
+        let (start, len) = dropped.operands[s.0 as usize];
+        dropped.operands[s.0 as usize] = (start, len - 1);
+        refused(dropped, "of type i64 on [", "dropped");
+        // The second check taking the effect the first takes: a fork, alone and hoisted above it.
+        let mut forked = f.clone();
+        set_last(&mut forked, check2, e0);
+        refused(forked.clone(), latest, "forked");
+        moved(&mut forked, pos, check1);
+        moved(&mut forked, check2, check1);
+        refused(forked, latest, "forked and hoisted");
+        // A value that is no effect where an effect is taken: the constant 1 by the addition,
+        // and the sum's sign by the left block's effect parameter.
+        let mut valued = f.clone();
+        set_last(&mut valued, s, one);
+        refused(valued, latest, "a value in an effect slot");
+        let mut passed = f.clone();
+        if let Term::Branch { then, .. } = &mut passed.blocks[0].term {
+            if let Some(e) = then.1.last_mut() {
+                *e = neg;
+            }
         }
+        refused(passed, latest, "a value for an effect parameter");
+        // The right block returning its square after the effect before it, not after the
+        // square's own check.
+        // A block that takes two effect parameters, or whose last parameter is no effect.
+        let mut twice = f.clone();
+        let extra = twice.blocks[1].params[0];
+        twice.blocks[1].params.insert(0, extra);
+        if let Term::Branch { then, .. } = &mut twice.blocks[0].term {
+            then.1.insert(0, e0);
+        }
+        refused(
+            twice,
+            "as its last parameter, and only there",
+            "two effect parameters",
+        );
+        let mut swapped = f.clone();
+        swapped.params = vec![Ty::Int(I64), Ty::Effect, Ty::Int(I64)];
+        let d = swapped.blocks[0].params[1];
+        swapped.blocks[0].params.retain(|p| *p != d);
+        swapped.blocks[0].params.push(d);
+        refused(
+            swapped,
+            "as its last parameter, and only there",
+            "an effect parameter first",
+        );
+        let mut early = f.clone();
+        let entry = *early.blocks[2].params.last().unwrap_or(&s);
+        if let Term::Return(_, effect) = &mut early.blocks[2].term {
+            *effect = entry;
+        }
+        refused(early, latest, "a return before the last effect");
+        // The exact division raised above the check of its divisor, and reading the effect
+        // before that check where it stands.
+        let mut raised = f.clone();
+        moved(&mut raised, q, check1);
+        refused(raised, "is not defined before it on every path", "raised");
+        let mut earlier = f.clone();
+        set_last(&mut earlier, q, check1);
+        refused(
+            earlier,
+            latest,
+            "a partial operation reading an earlier effect",
+        );
     }
 
     /// A block is entered with the same counts open on every path into it (`verify_frames`): a
@@ -2417,7 +2625,7 @@ mod tests {
     fn test_counts_open_on_some_paths_into_a_block_are_refused() {
         // `fn leaf()`, which a caller counts and calls.
         let mut l = Builder::new("leaf", &[], None);
-        l.end(Term::Return(None));
+        l.ret(None);
         let mut leaf = l.finish();
         leaf.frame = 64;
         // A count on one path into the join, and its call after the join: the call takes a count
@@ -2434,29 +2642,25 @@ mod tests {
             let then = b.block(&[]);
             let otherwise = b.block(&[]);
             let join = b.block(&[]);
-            b.end(Term::Branch {
-                cond: c,
-                then: (then, vec![]),
-                otherwise: (otherwise, vec![]),
-            });
+            b.branch(c, (then, vec![]), (otherwise, vec![]));
             b.switch(then);
             if let (Some(_), true) = (early, call_in_then) {
                 b.inst(Op::Call(FuncId(0)), Ty::Unit, &[]);
             }
-            b.end(Term::Jump(join, vec![]));
+            b.jump(join, vec![]);
             b.switch(otherwise);
             let late = early.or_else(|| Some(b.inst(enter, Ty::Unit, &[])));
-            b.end(Term::Jump(join, vec![]));
+            b.jump(join, vec![]);
             b.switch(join);
             match (late, call_in_then) {
                 (Some(_), false) => {
                     b.inst(Op::Call(FuncId(0)), Ty::Unit, &[]);
-                    b.end(Term::Return(None));
+                    b.ret(None);
                 }
                 // A join that only traps returns nothing, so that the join itself is what fails.
                 (_, true) | (None, false) => {
                     let ends = b.trap_site("unreachable", &["no value"]);
-                    b.end(Term::Trap(ends));
+                    b.trap(ends);
                 }
             }
             Module {
@@ -2496,7 +2700,7 @@ mod tests {
         let n = b.params(BlockId(0))[0];
         b.at(3, 5);
         let r = call(&mut b, 0, Ty::Int(I64), &[n]);
-        b.end(Term::Return(Some(r)));
+        b.ret(Some(r));
         let mut down = b.finish();
         down.frame = 64;
         let m = module(vec![down]);
@@ -2515,13 +2719,9 @@ mod tests {
         let done = b.inst(Op::Cmp(CmpOp::Eq), Ty::Bool, &[n, zero]);
         let stop = b.block(&[]);
         let more = b.block(&[]);
-        b.end(Term::Branch {
-            cond: done,
-            then: (stop, vec![]),
-            otherwise: (more, vec![]),
-        });
+        b.branch(done, (stop, vec![]), (more, vec![]));
         b.switch(stop);
-        b.end(Term::Return(None));
+        b.ret(None);
         b.switch(more);
         let one = b.int(I64, Num::from_i128(1));
         let less = b.inst(
@@ -2533,7 +2733,7 @@ mod tests {
             &[n, one],
         );
         call(&mut b, 0, Ty::Unit, &[less]);
-        b.end(Term::Return(None));
+        b.ret(None);
         let mut count = b.finish();
         count.frame = 64;
         let m = module(vec![count.clone()]);
@@ -2544,14 +2744,14 @@ mod tests {
         );
         // Two calls of a frame of more than half the budget, one after the other.
         let mut big = Builder::new("big", &[], None);
-        big.end(Term::Return(None));
+        big.ret(None);
         let mut big = big.finish();
         big.frame = BUDGET / 2 + 1;
         let mut b = Builder::new("twice", &[], None);
         for _ in 0..2 {
             call(&mut b, 0, Ty::Unit, &[]);
         }
-        b.end(Term::Return(None));
+        b.ret(None);
         let m = module(vec![big.clone(), b.finish()]);
         assert_eq!(run0(&m, 1, &[]), Ok(Val::Unit));
         // A call that has returned gives its frame back, and no more: the entry calls `after(k)`,
@@ -2563,13 +2763,13 @@ mod tests {
         let k = a.params(BlockId(0))[0];
         call(&mut a, 1, Ty::Unit, &[]);
         call(&mut a, 0, Ty::Unit, &[k]);
-        a.end(Term::Return(None));
+        a.ret(None);
         let mut after = a.finish();
         after.frame = 1024;
         let mut e = Builder::new("entry", &[Ty::Int(I64)], None);
         let k = e.params(BlockId(0))[0];
         call(&mut e, 2, Ty::Unit, &[k]);
-        e.end(Term::Return(None));
+        e.ret(None);
         let m = module(vec![count, small, after, e.finish()]);
         assert_eq!(run0(&m, 3, &[int(16_367)]), Ok(Val::Unit));
         assert!(
@@ -2605,7 +2805,11 @@ mod tests {
         assert!(wrong(f).contains("does not exist"));
         // A return of the wrong type.
         let mut f = sum();
-        f.blocks[3].term = Term::Return(None);
+        let effect = f.blocks[3].term.clone();
+        let Term::Return(_, effect) = effect else {
+            panic!("sum's block 3 returns")
+        };
+        f.blocks[3].term = Term::Return(None, effect);
         assert!(wrong(f).contains("returns the wrong type"));
         // An addition of an i64 and a bool.
         let mut b = Builder::new("bad", &[Ty::Int(I64)], None);
@@ -2618,7 +2822,7 @@ mod tests {
         call(&mut b, 7, Ty::Unit, &[]);
         assert!(wrong(b.finish()).contains("does not exist"));
         let mut b = Builder::new("trap", &[], None);
-        b.end(Term::Trap(TrapId(0)));
+        b.trap(TrapId(0));
         assert!(wrong(b.finish()).contains("site that does not exist"));
         // A branch on an integer.
         let mut f = sum();
@@ -2650,6 +2854,7 @@ mod tests {
         }
         let operands: Vec<NodeId> = args.iter().map(|i| ps[*i]).collect();
         b.inst(op, ty, &operands);
+        b.ret(None);
         b.finish()
     }
 
@@ -2770,12 +2975,13 @@ mod tests {
         let mut callee = Builder::new("callee", &[u], Some(i));
         let p = callee.params(BlockId(0))[0];
         let w = callee.inst(Op::Cast, i, &[p]);
-        callee.end(Term::Return(Some(w)));
+        callee.ret(Some(w));
         let callee = callee.finish();
         let caller = |ty: Ty, param: Ty| {
             let mut b = Builder::new("caller", &[param], None);
             let p = b.params(BlockId(0))[0];
             call(&mut b, 0, ty, &[p]);
+            b.ret(None);
             Module {
                 functions: vec![callee.clone(), b.finish()],
                 budget: BUDGET,
@@ -2804,7 +3010,7 @@ mod tests {
         let mut b = Builder::new("peek", &[], Some(Ty::Int(IntTy::new(16, false))));
         let s = b.inst(Op::Slot { bytes: 2 }, Ty::Addr, &[]);
         let v = b.inst(Op::Load, Ty::Int(IntTy::new(16, false)), &[s]);
-        b.end(Term::Return(Some(v)));
+        b.ret(Some(v));
         let m = module(vec![b.finish()]);
         let peek =
             |memory: &mut Memory| run_counting(&m, FuncId(0), &[], memory, Limits::default());
@@ -2832,7 +3038,7 @@ mod tests {
             let _next = b.inst(Op::Slot { bytes: 4 }, Ty::Addr, &[]);
             let e = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[s, i]);
             let v = b.inst(Op::Load, Ty::Int(u16), &[e]);
-            b.end(Term::Return(Some(v)));
+            b.ret(Some(v));
             run(
                 &module(vec![b.finish()]),
                 FuncId(0),
@@ -2887,7 +3093,7 @@ mod tests {
         let s = b.inst(Op::Slot { bytes: 8 }, Ty::Addr, &[]);
         let k = b.int(I64, Num::from_i128(7));
         b.inst(Op::Store, Ty::Unit, &[s, k]);
-        b.end(Term::Return(None));
+        b.ret(None);
         let m = module(vec![b.finish()]);
         let limited = |steps| Limits { max_steps: steps };
         let mut memory = Memory::default();
@@ -2911,7 +3117,7 @@ mod tests {
                 panic!("two parameters")
             };
             let r = b.inst(Op::Shr, Ty::Int(I128), &[x, k]);
-            b.end(Term::Return(Some(r)));
+            b.ret(Some(r));
             run0(&module(vec![b.finish()]), 0, &[int(8), int(amount)])
         };
         assert_eq!(shr(127), Ok(int(0)));
@@ -2920,7 +3126,7 @@ mod tests {
         // A negative constant prints as its value.
         let mut b = Builder::new("k", &[], Some(Ty::Int(I64)));
         let k = b.int(I64, Num::from_i128(-5));
-        b.end(Term::Return(Some(k)));
+        b.ret(Some(k));
         assert!(b.finish().to_string().contains("= int -5 @"));
     }
 }

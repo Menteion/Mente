@@ -536,7 +536,8 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
 }
 
 /// The MIR parameters of a function of `sig`: the address of a result in memory first, then
-/// each parameter, a `mut` one or one in memory as an address; and its MIR result.
+/// each parameter, a `mut` one or one in memory as an address; and its MIR result. The builder
+/// adds the latest effect before the call last (`cfg::Chain`).
 fn mir_params(sig: &Sig) -> (Vec<Ty>, Option<Ty>) {
     let mut params = Vec::new();
     if sig.result.in_memory() {
@@ -545,8 +546,6 @@ fn mir_params(sig: &Sig) -> (Vec<Ty>, Option<Ty>) {
     for (is_mut, shape) in &sig.params {
         params.push(if *is_mut { Ty::Addr } else { shape.ty() });
     }
-    // The effects before the call, which the callee's own follow (`Function::follows`).
-    params.push(Ty::Effect);
     let result = match &sig.result {
         Shape::Int(_) | Shape::Bool => Some(sig.result.ty()),
         Shape::Array(..) | Shape::Struct(_) | Shape::Enum(_) | Shape::Unit => None,
@@ -675,9 +674,6 @@ struct Lower<'a> {
     /// Whether the lowering is making a call's checks in its callee's scope, whose checks are
     /// never left out.
     in_callee: bool,
-    /// The latest effect, which the next instruction that may trap, read or write memory, or count
-    /// or make a call follows, and which a jump passes on (`Function::follows`).
-    chain: NodeId,
 }
 
 impl<'a> Lower<'a> {
@@ -704,12 +700,6 @@ impl<'a> Lower<'a> {
                 col: decl.col,
             },
         );
-        // The effects before the call come in as the function's last parameter.
-        let chain = b
-            .params(BlockId(0))
-            .last()
-            .copied()
-            .ok_or("a function without the effects before it")?;
         Ok(Lower {
             m,
             sigs,
@@ -723,7 +713,6 @@ impl<'a> Lower<'a> {
             measure: None,
             obligations,
             in_callee: false,
-            chain,
         })
     }
 
@@ -756,48 +745,49 @@ impl<'a> Lower<'a> {
         self.b.at(span.line, span.col);
     }
 
-    /// A new block taking `params` and, last, the effects before it.
+    /// A new block taking `params`; the builder adds the latest effect where it begins.
     fn block(&mut self, params: &[Ty]) -> BlockId {
-        let mut with = params.to_vec();
-        with.push(Ty::Effect);
-        let id = self.b.block(&with);
+        let id = self.b.block(params);
         self.ended.push(false);
         id
     }
 
-    /// Ends the current block, each jump passing on the latest effect.
-    fn end(&mut self, term: Term) {
+    /// Marks the current block ended.
+    fn ended_here(&mut self) {
         self.ended[self.b.current().0 as usize] = true;
-        let chain = self.chain;
-        let term = match term {
-            Term::Jump(t, mut args) => {
-                args.push(chain);
-                Term::Jump(t, args)
-            }
-            Term::Branch {
-                cond,
-                mut then,
-                mut otherwise,
-            } => {
-                then.1.push(chain);
-                otherwise.1.push(chain);
-                Term::Branch {
-                    cond,
-                    then,
-                    otherwise,
-                }
-            }
-            t @ (Term::Return(_) | Term::Trap(_)) => t,
-        };
-        self.b.end(term);
     }
 
-    /// Continues in block `b`, whose last parameter is the latest effect there.
+    /// Ends the current block in a jump or a branch, which the builder has pass on the latest
+    /// effect; a return and a trap take it (`Lower::end_return`, `Lower::end_trap`).
+    fn end(&mut self, term: Term) {
+        self.ended_here();
+        match term {
+            Term::Jump(t, args) => self.b.jump(t, args),
+            Term::Branch {
+                cond,
+                then,
+                otherwise,
+            } => self.b.branch(cond, then, otherwise),
+            Term::Return(v, _) => self.b.ret(v),
+            Term::Trap(site, _) => self.b.trap(site),
+        }
+    }
+
+    /// Ends the current block in a return of `v`, if any, after the latest effect.
+    fn end_return(&mut self, v: Option<NodeId>) {
+        self.ended_here();
+        self.b.ret(v);
+    }
+
+    /// Ends the current block in a trap at `site`, after the latest effect.
+    fn end_trap(&mut self, site: cfg::TrapId) {
+        self.ended_here();
+        self.b.trap(site);
+    }
+
+    /// Continues in block `b`.
     fn switch(&mut self, b: BlockId) {
         self.b.switch(b);
-        if let Some(&chain) = self.b.params(b).last() {
-            self.chain = chain;
-        }
     }
 
     /// Continues in a new block nothing jumps to, after control has left.
@@ -811,7 +801,7 @@ impl<'a> Lower<'a> {
     fn trap(&mut self, kind: &str, text: &str, span: Span) -> V {
         self.at(span);
         let site = self.b.trap_site(kind, &[text]);
-        self.end(Term::Trap(site));
+        self.end_trap(site);
         self.dead()
     }
 
@@ -823,19 +813,9 @@ impl<'a> Lower<'a> {
         self.b.int(t, n)
     }
 
+    /// An instruction; the builder threads the chain of effects through it (`cfg::Chain`).
     fn inst(&mut self, op: Op, ty: Ty, args: &[NodeId]) -> NodeId {
-        // An instruction that may trap, read or write memory follows the latest effect, and is
-        // the latest after it, so that no change can move one past another (`Function::follows`).
-        // A count and a call take the latest effect as their last argument (`Lower::call`).
-        if op.follows_effect() {
-            let mut with = args.to_vec();
-            with.push(self.chain);
-            let v = self.b.inst(op, ty, &with);
-            self.chain = v;
-            v
-        } else {
-            self.b.inst(op, ty, args)
-        }
+        self.b.inst(op, ty, args)
     }
 
     fn bool(&mut self, b: bool) -> NodeId {
@@ -859,7 +839,7 @@ impl<'a> Lower<'a> {
         for i in 0..self.ended.len() {
             if !self.ended[i] {
                 self.b.switch(BlockId(i as u32));
-                self.b.end(Term::Trap(unreachable));
+                self.b.trap(unreachable);
             }
         }
         self.b.finish()
@@ -959,11 +939,11 @@ impl<'a> Lower<'a> {
             });
         }
         let v = self.call(self.s.index, args, span, sret, false)?;
-        let term = match v {
-            V::Int(n, _) | V::Bool(n) => Term::Return(Some(n)),
-            V::Mem(_) | V::Unit | V::Never => Term::Return(None),
+        let value = match v {
+            V::Int(n, _) | V::Bool(n) => Some(n),
+            V::Mem(_) | V::Unit | V::Never => None,
         };
-        self.end(term);
+        self.end_return(value);
         let mut f = self.finish();
         f.name = format!("enter {}", f.name);
         Ok(f)
@@ -1000,7 +980,7 @@ impl<'a> Lower<'a> {
             self.clause(c, ("ensures", ObligationKind::Ensures), &text, span, key)?;
         }
         match v {
-            V::Int(n, _) | V::Bool(n) => self.end(Term::Return(Some(n))),
+            V::Int(n, _) | V::Bool(n) => self.end_return(Some(n)),
             V::Mem(a) => {
                 let to = self.sret.ok_or("an array result with nowhere to go")?;
                 self.at(span);
@@ -1011,9 +991,9 @@ impl<'a> Lower<'a> {
                     Ty::Unit,
                     &[to, a],
                 );
-                self.end(Term::Return(None));
+                self.end_return(None);
             }
-            V::Unit | V::Never => self.end(Term::Return(None)),
+            V::Unit | V::Never => self.end_return(None),
         }
         self.dead();
         Ok(())
@@ -3217,11 +3197,10 @@ impl<'a> Lower<'a> {
         self.at(at);
         let deep = self.b.trap_site(RAN_OUT[0], &[RAN_OUT[1]]);
         // The count takes the call's arguments as the call does, the slot of a result kept in
-        // memory first and the latest effect last, and is then the latest effect itself.
+        // memory first, and the builder gives it the latest effect last (`cfg::Chain`).
         let mut counted: Vec<NodeId> = sret.into_iter().collect();
         counted.extend(&given);
-        counted.push(self.chain);
-        let count = self.b.inst(
+        self.b.inst(
             Op::Enter {
                 callee: sig.func,
                 trap: Some(deep),
@@ -3229,20 +3208,17 @@ impl<'a> Lower<'a> {
             Ty::Unit,
             &counted,
         );
-        self.chain = count;
         let values = match self.call_checks(index, &args, at, recursive)? {
             Some(values) => values,
             None => return Ok(V::Never),
         };
         let mut mir_args: Vec<NodeId> = sret.into_iter().collect();
         mir_args.extend(values);
-        mir_args.push(self.chain);
         let (_, result_ty) = mir_params(sig);
         self.at(at);
         let r = self
             .b
             .inst(Op::Call(sig.func), result_ty.unwrap_or(Ty::Unit), &mir_args);
-        self.chain = r;
         // A `mut` place takes back what the callee left, which enters its refinement. A struct's
         // fields hold theirs in any value the callee leaves, so they are not checked again.
         let entry = std::mem::replace(&mut self.entry, false);
@@ -3418,7 +3394,7 @@ mod tests {
     }
 
     /// The order of calls, of a call's count and of the stores that fill its arguments is held by
-    /// values (`Function::follows`): over frames of about 280 KB, two of which do not fit the
+    /// the chain of effects (`cfg::Chain`): over frames of about 280 KB, two of which do not fit the
     /// budget together, `g(x) + f(x)`, `f(x) + g(x)` and `k([g(x)])` run, and each reordering that
     /// would put two frames in use at once is refused: `f`'s count moved above `g`'s, `f`'s call
     /// moved below `g`'s, and `k`'s count moved right after the slot of its argument, above the
@@ -3564,11 +3540,10 @@ pub fn hd(x: u32, d: u32) -> u32 = f(x) + x / d
             ("m2", vec![3]),
             ("hd", vec![3, 3]),
         ] {
-            let mut values: Vec<cfg::Val> = args
+            let values: Vec<cfg::Val> = args
                 .into_iter()
                 .map(|n| cfg::Val::Int(Num::from_i128(n)))
                 .collect();
-            values.push(cfg::Val::Unit);
             let ran = cfg::run(
                 m,
                 entry(name),
@@ -3579,6 +3554,136 @@ pub fn hd(x: u32, d: u32) -> u32 = f(x) + x / d
             let expected = if name == "hd" { 1 } else { 0 };
             assert_eq!(ran, Ok(cfg::Val::Int(Num::from_i128(expected))), "{}", name);
         }
+    }
+
+    /// The chain of effects is held whole in lowered code (`cfg::Chain`). Every break
+    /// `cfg_mutate::unchained` plants, each kind at least once, is refused in programs that call,
+    /// store, divide and join; so are the two a review found verifying: `f`'s count in
+    /// `h = g(x) + f(x)` made to take the effect `g`'s count takes and hoisted above it, which ran
+    /// out of stack where `h` returns 0, and the exact division of `d(a, b) = a / b` raised above
+    /// the check of its divisor, which reported broken MIR where `d(1, 0)` traps.
+    #[test]
+    fn test_a_broken_chain_is_refused_in_lowered_code() {
+        let source = "module m
+fn f(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn g(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn k(xs: [1]u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[xs[0]]
+}
+pub fn h(x: u32) -> u32 = g(x) + f(x)
+pub fn m2(x: u32) -> u32 = k([g(x)])
+pub fn d(a: u32, b: u32) -> u32 = a / b
+pub fn j(c: bool, x: u32) -> u32 = if c { x / 2 } else { x }
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let m = &lowered.module;
+        let all = mente_mir::cfg_mutate::unchained(m);
+        for kind in [
+            "effect-dropped",
+            "effect-forked",
+            "effect-valued",
+            "partial-raised",
+            "passed-valued",
+            "ended-early",
+        ] {
+            assert!(
+                all.iter().any(|(n, _)| n.ends_with(kind)),
+                "no {} planted",
+                kind
+            );
+        }
+        for (name, changed) in &all {
+            assert!(cfg::verify(changed).is_err(), "{} verifies", name);
+        }
+        let index = |name: &str| m.functions.iter().position(|f| f.name == name).unwrap();
+        // Where in function `at` the first instruction `is` picks stands.
+        let find = |at: usize, is: &dyn Fn(&Op) -> bool| {
+            let func = &m.functions[at];
+            func.blocks
+                .iter()
+                .enumerate()
+                .find_map(|(bi, b)| {
+                    b.insts
+                        .iter()
+                        .position(|&v| is(func.op(v)))
+                        .map(|i| (bi, i))
+                })
+                .unwrap()
+        };
+        // `f`'s count takes the effect `g`'s count takes, and stands above it.
+        let (h, f, g) = (index("h"), index("f"), index("g"));
+        let (bi, at_g) = find(h, &|op| op.counted() == Some(FuncId(g as u32)));
+        let (_, at_f) = find(h, &|op| op.counted() == Some(FuncId(f as u32)));
+        let mut forked = m.clone();
+        let func = &mut forked.functions[h];
+        let (enter_g, enter_f) = (func.blocks[bi].insts[at_g], func.blocks[bi].insts[at_f]);
+        let before_g = func.effect(enter_g).unwrap();
+        let (start, len) = func.operands[enter_f.0 as usize];
+        func.pool[(start + len - 1) as usize] = before_g;
+        let insts = &mut func.blocks[bi].insts;
+        insts.retain(|v| *v != enter_f);
+        insts.insert(at_g, enter_f);
+        let why = cfg::verify(&forked).unwrap_err();
+        assert!(why.contains("where the latest effect is"), "{}", why);
+        // The exact division above the check of its divisor.
+        let d = index("d");
+        let (bi, at_div) = find(d, &|op| {
+            *op == Op::Arith {
+                op: cfg::ArithOp::Div,
+                trap: None,
+            }
+        });
+        let mut raised = m.clone();
+        let func = &mut raised.functions[d];
+        let div = func.blocks[bi].insts[at_div];
+        let check = func.effect(div).unwrap();
+        let insts = &mut func.blocks[bi].insts;
+        let at_check = insts.iter().position(|v| *v == check).unwrap();
+        insts.retain(|v| *v != div);
+        insts.insert(at_check, div);
+        let why = cfg::verify(&raised).unwrap_err();
+        assert!(
+            why.contains("is not defined before it on every path"),
+            "{}",
+            why
+        );
+        // The originals run.
+        let entry = |name: &str| {
+            lowered
+                .entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .func
+        };
+        let run = |name: &str, args: &[i128]| {
+            let values: Vec<cfg::Val> = args
+                .iter()
+                .map(|n| cfg::Val::Int(Num::from_i128(*n)))
+                .collect();
+            cfg::run(
+                m,
+                entry(name),
+                &values,
+                &mut cfg::Memory::default(),
+                cfg::Limits::default(),
+            )
+        };
+        assert_eq!(run("h", &[3]), Ok(cfg::Val::Int(Num::from_i128(0))));
+        assert_eq!(run("d", &[7, 2]), Ok(cfg::Val::Int(Num::from_i128(3))));
+        assert!(
+            matches!(run("d", &[1, 0]), Err(cfg::Stop::Trap(t)) if t.contains("division-by-zero")),
+            "{:?}",
+            run("d", &[1, 0])
+        );
     }
 
     #[test]
@@ -3705,7 +3810,7 @@ pub fn g(c: bool) -> i32 {
         let returns = g
             .blocks
             .iter()
-            .filter(|b| matches!(b.term, Term::Return(_)))
+            .filter(|b| matches!(b.term, Term::Return(..)))
             .count();
         assert_eq!(returns, 2, "{}", g);
     }
@@ -3774,7 +3879,7 @@ pub fn no_copies_read() -> usize = [[todo(\"a\")]; 0].len
                 .unwrap();
             func.blocks
                 .iter()
-                .filter(|b| matches!(b.term, Term::Return(_)))
+                .filter(|b| matches!(b.term, Term::Return(..)))
                 .count()
         };
         for f in [
@@ -3839,7 +3944,7 @@ pub fn returns(c: bool) -> u8 {
                 .unwrap();
             func.blocks
                 .iter()
-                .filter(|b| matches!(b.term, Term::Return(_)))
+                .filter(|b| matches!(b.term, Term::Return(..)))
                 .count()
         };
         for f in [
@@ -3896,7 +4001,7 @@ fn id(x: u8) -> u8 = x
                 !func
                     .blocks
                     .iter()
-                    .any(|b| matches!(b.term, Term::Return(_))),
+                    .any(|b| matches!(b.term, Term::Return(..))),
                 "{}",
                 func
             );

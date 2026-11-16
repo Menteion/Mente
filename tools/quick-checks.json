@@ -7,7 +7,8 @@
     "documents": "\\.md$|^spec/|^docs/",
     "site": "^site/|^README\\.md$|^spec/|^docs/",
     "benchmark": "^benchmark/",
-    "harness": "^benchmark/harness/"
+    "harness": "^benchmark/harness/",
+    "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/"
   },
   "checks": [
     { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
@@ -18,6 +19,18 @@
       "when": "programs",
       "run": ["cargo", "test", "-p", "mente-cli", "--test", "lints", "--test", "reproducible", "--test", "conformance"],
       "why": "What a change to the compiler or to its programs must keep: the lint's list of what it does not see, the golden files every conformance program writes, and each program's expected report."
+    },
+    {
+      "name": "MIR mutation gate",
+      "when": "mir",
+      "run": ["cargo", "test", "-p", "mente-cli", "--bin", "mn", "mir_mutants"],
+      "why": "The gate's records name each mutant by the MIR it changes, so a change to MIR, to the lowering or to the gate can add, drop or rename a mutant, which only the gate's own tests see (PR 158: an operation made exact stopped verifying, and the gate's records named a mutant that no longer existed, which CI found and these checks had not run)."
+    },
+    {
+      "name": "demo mutation gate",
+      "when": "mir",
+      "run": ["cargo", "test", "-p", "mente-cli", "--test", "cli", "test_mn_test_mutate_runs_the_demo_gate"],
+      "why": "`mn test --mutate` runs the same gate on the corpus, through the command."
     },
     { "name": "spec directives", "when": "documents", "run": ["cargo", "run", "--quiet", "--bin", "mn", "--", "spec"] },
     { "name": "documentation tools", "when": "documents", "run": ["npm", "run", "verify:docs"] },

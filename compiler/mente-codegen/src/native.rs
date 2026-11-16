@@ -801,7 +801,7 @@ impl Translate {
                         &no,
                     );
                 }
-                Term::Return(r) => {
+                Term::Return(r, _) => {
                     let mut out = Vec::new();
                     match (r, ret_ptr) {
                         (Some(r), Some(at)) => {
@@ -814,7 +814,7 @@ impl Translate {
                     }
                     b.ins().return_(&out);
                 }
-                Term::Trap(site) => {
+                Term::Trap(site, _) => {
                     let mut e = Emit { b: &mut b, ptr };
                     trap_report(writer, rt, &mut e, f, *site, &[], prefix)?;
                 }
