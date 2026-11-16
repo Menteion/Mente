@@ -21,6 +21,11 @@
 # The lints.
 /clippy.toml @Dancraft3746
 
+# The project's rulebook and its philosophy, which change only with Norman's review (Norman,
+# 2026-11-17).
+/CLAUDE.md @Dancraft3746
+/spec/philosophy.md @Dancraft3746
+
 # The pinned documentation tools and their configuration.
 /package.json @Dancraft3746
 /package-lock.json @Dancraft3746
