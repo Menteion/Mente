@@ -23,10 +23,12 @@
 #
 # Inside: a network namespace, so the command has only a down loopback and no route out; a PID
 # namespace with its own /proc, so no process outside, the driver and the broker among them, is in
-# its table; a mount namespace in which an empty tmpfs covers each hidden directory and the runs
-# root, an unreadable empty directory covers each credential directory under the home, /tmp is a
-# private tmpfs and the root is read-only, so the toolchains cannot be changed; <workdir> alone
-# stays visible and writable, put back at its own path inside the cover of the runs root.
+# its table; an IPC namespace; a mount namespace in which an empty tmpfs covers each hidden
+# directory and the runs root, an unreadable empty directory covers each credential directory under
+# the home, /tmp, /dev/shm, /dev/mqueue and the caller runtime directory under /run/user are its
+# own, and every other mount the table lists is read-only, so that no run leaves anything for
+# another to find and the toolchains cannot be changed; <workdir> alone stays visible and writable
+# outside those, put back at its own path inside the cover of the runs root.
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/mente-sandbox.conf
@@ -64,6 +66,9 @@ while read -r kind path rest; do
   esac
 done < "$CONF"
 [ -n "$runs" ] && [ -d "$runs" ] && [ "$(realpath -e -- "$runs")" = "$runs" ] || refuse "$CONF names no runs root that is a real directory"
+# The sandbox has a /tmp of its own, which it mounts first: a runs root under the host one would be
+# gone by then.
+case "$runs/" in /tmp/*) refuse "$CONF names a runs root under /tmp, which the sandbox replaces with its own" ;; esac
 
 # The working directory: a directory of the caller's, strictly under the runs root.
 [ -d "$1" ] || refuse "the working directory $1 is no directory"
@@ -107,55 +112,72 @@ for h in "${hidden[@]:-}"; do
 done
 [ -n "$parent" ] || refuse "the working directory $workdir lies in no covered directory"
 
-# Scratch directories, root's own, in /tmp, whose sticky bit lets no one else rename them: an
-# unreadable empty one, bound over each credential directory; one to hold the working directory
-# while its parent is covered; and one where the tmpfs that covers the parent is built before it is
-# moved there whole, so that nothing is ever made on a path the caller owns.
-empty="$(mktemp -d)"
-chmod 000 "$empty"
-stash="$(mktemp -d)"
-cover="$(mktemp -d)"
-
 # Enter fresh namespaces; arrange the mounts, still as root, by looking paths up and opening none;
 # close every descriptor above 2; then drop to the caller with no new privileges and run the
-# command. A path the caller renames while this runs moves a mount within this namespace alone,
-# which changes what the command, running as the caller, sees of the caller's own files, and
-# nothing on the host.
+# command. Everything the mounts need is made inside the namespace, on its private /tmp, so that
+# nothing is left on the host whatever happens to this call, a kill among it. A path the caller
+# renames while this runs moves a mount within this namespace alone, which changes what the
+# command, running as the caller, sees of the caller's own files, and nothing on the host.
 exec unshare --net --pid --mount --uts --ipc --fork --mount-proc --kill-child -- \
   /usr/bin/env -i "PATH=$PATH" \
-  "BENCH_HOME=$home" "BENCH_UID=$uid" "BENCH_GID=$gid" "BENCH_EMPTY=$empty" \
-  "BENCH_WORKDIR=$workdir" "BENCH_STASH=$stash" "BENCH_COVER=$cover" "BENCH_PARENT=$parent" \
+  "BENCH_HOME=$home" "BENCH_UID=$uid" "BENCH_GID=$gid" \
+  "BENCH_WORKDIR=$workdir" "BENCH_PARENT=$parent" \
   "BENCH_REL=${workdir#"$parent"/}" "BENCH_HIDDEN=$(printf '%s\n' "${hidden[@]:-}")" \
   /bin/bash -c '
     set -euo pipefail
     mount --make-rprivate /
+    # A private /tmp first, and on it the scratch: an unreadable empty directory, bound over each
+    # credential directory; one to hold the working directory while its parent is covered; and one
+    # where the tmpfs that covers the parent is built before it is moved there whole, so that
+    # nothing is ever made on a path the caller owns.
+    mount -t tmpfs -o mode=1777 tmpfs /tmp
+    scratch=/tmp/.mente-sandbox
+    mkdir -m 0700 "$scratch" "$scratch/stash" "$scratch/cover"
+    mkdir -m 0000 "$scratch/empty"
     # The working directory as a mount of its own, so it stays writable under a read-only root,
     # held aside while its parent is covered.
-    mount --bind "$BENCH_WORKDIR" "$BENCH_STASH"
+    mount --bind "$BENCH_WORKDIR" "$scratch/stash"
     for d in .ssh .config .aws .docker .gnupg .kube .npm; do
       if [ -d "$BENCH_HOME/$d" ]; then
-        mount --bind "$BENCH_EMPTY" "$BENCH_HOME/$d"
+        mount --bind "$scratch/empty" "$BENCH_HOME/$d"
       fi
     done
     while IFS= read -r p; do
       [ -n "$p" ] && [ -d "$p" ] || continue
       if [ "$p" = "$BENCH_PARENT" ]; then
-        # The tmpfs that covers the parent: built at root scratch, the working directory put back
-        # at its own place inside it, then moved over the parent whole.
-        mount -t tmpfs -o size=1m,mode=0755 tmpfs "$BENCH_COVER"
-        mkdir -p "$BENCH_COVER/$BENCH_REL"
-        mount --move "$BENCH_STASH" "$BENCH_COVER/$BENCH_REL"
-        mount --move "$BENCH_COVER" "$p"
+        # The tmpfs that covers the parent: built on the scratch, the working directory put back at
+        # its own place inside it, then moved over the parent whole.
+        mount -t tmpfs -o size=1m,mode=0755 tmpfs "$scratch/cover"
+        mkdir -p "$scratch/cover/$BENCH_REL"
+        mount --move "$scratch/stash" "$scratch/cover/$BENCH_REL"
+        mount --move "$scratch/cover" "$p"
       else
         mount -t tmpfs -o size=1m,mode=0755 tmpfs "$p"
       fi
     done <<< "$BENCH_HIDDEN"
-    # A private /tmp, unless the working directory is in it.
-    case "$BENCH_WORKDIR/" in
-      /tmp/*) ;;
-      *) mount -t tmpfs -o mode=1777 tmpfs /tmp ;;
-    esac
-    mount -o remount,bind,ro /
+    rmdir "$scratch/stash" "$scratch/cover" "$scratch/empty" "$scratch"
+    # Shared memory, message queues and the caller own runtime directory, which programs of other
+    # runs and the runner could also write: private to this sandbox.
+    mount -t tmpfs -o nosuid,nodev,mode=1777 tmpfs /dev/shm
+    mount -t mqueue -o nosuid,nodev,noexec mqueue /dev/mqueue
+    private=("$BENCH_WORKDIR" /tmp /dev/shm /dev/mqueue)
+    if [ -d "/run/user/$BENCH_UID" ]; then
+      mount -t tmpfs -o nosuid,nodev,mode=0700,uid="$BENCH_UID",gid="$BENCH_GID" tmpfs "/run/user/$BENCH_UID"
+      private+=("/run/user/$BENCH_UID")
+    fi
+    # Every other mount read-only, each one the mount table lists, so that one this does not know
+    # of, a new shared mount among them, is read-only too; a remount that fails stops the sandbox.
+    keep=$(printf "%s\n" "${private[@]}")
+    while read -r target majmin; do
+      target="$(printf "%b" "$target")"
+      grep -qxF -- "$target" <<< "$keep" && continue
+      # A mount that another now lies over, a cover or the new /proc, is no longer reachable by its
+      # path, nor by the command: what its path reaches is the mount above, a filesystem of another
+      # device. The canary, which writes into every writable mount and is looked for from outside,
+      # finds any this would leave writable.
+      [ "$(stat -c "%Hd:%Ld" -- "$target" 2> /dev/null)" = "$majmin" ] || continue
+      mount -o remount,bind,ro -- "$target"
+    done < <(findmnt -rn -o TARGET,MAJ:MIN | sort -u)
     cd "$BENCH_WORKDIR"
     # The command starts with descriptors 0, 1 and 2 alone: every other this shell holds, whatever
     # opened it, is closed here, last.

@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +16,7 @@ import {
   BASH,
   REPOSITORY,
   SANDBOX,
+  SANDBOX_CONF,
   caseResult,
   checkUnderRuns,
   childEnv,
@@ -1526,6 +1527,25 @@ test("the sandbox's root half drops only to its caller, takes no path but a dire
       // the root half's own, each on a directory the sandbox covers.
       const fds = sudo([dir, "/bin/sh", "-c", "ls /proc/$$/fd"]);
       assert.deepEqual(fds.stdout.trim().split(/\s+/), ["0", "1", "2"], fds.stderr);
+      // And with descriptors 7, 8 and 9 held into the root half on the workspace, the runs root and
+      // its configuration, which sudo -C 10 lets through (closefrom_override): the root half itself
+      // closes them, so the command still holds 0, 1 and 2 alone. Without -C, sudo would close them
+      // first, and this would pin sudo, not the root half (the final pass of 7cf871c).
+      const held = [openSync(REPOSITORY, "r"), openSync(runs, "r"), openSync(SANDBOX_CONF, "r")];
+      try {
+        const passed = spawnSync("sudo", ["-n", "-C", "10", installed, dir, "/bin/sh", "-c", "ls /proc/$$/fd"], {
+          encoding: "utf8",
+          timeout: 60_000,
+          stdio: ["ignore", "pipe", "pipe", "ignore", "ignore", "ignore", "ignore", ...held],
+        });
+        assert.deepEqual(passed.stdout.trim().split(/\s+/), ["0", "1", "2"], passed.stderr);
+        // sudo took -C 10 and started the root half with them: had it refused the option, it would
+        // never have started the root half, whose own refusal of /etc this shows.
+        const refused = spawnSync("sudo", ["-n", "-C", "10", installed, "/etc", "/bin/sh", "-c", "ls /proc/$$/fd"], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe", "ignore", "ignore", "ignore", "ignore", ...held] });
+        assert.match(refused.stderr, /does not lie under the runs root/, "sudo refused -C 10, so the root half was never handed descriptors 7, 8 and 9");
+      } finally {
+        for (const fd of held) closeSync(fd);
+      }
       // No path but the working directory, and that one under the runs root and the caller's: the
       // final pass of 05fe2f6 had --hide open /etc/shadow as root for the command to read.
       assert.match(sudo(["--hide", "/etc/shadow", dir, "/bin/sh", "-c", "cat <&3"]).stderr, /takes no option/);

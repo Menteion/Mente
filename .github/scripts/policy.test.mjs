@@ -1133,8 +1133,8 @@ const PINNED_FILES = new Map([
   // start-broker.sh's shape).
   ["benchmark/harness/start-broker.sh", "9cea5b604d1eea6b5c060f3a8b4b95bd8bcfeaf62dee2a6bfe9fddfab7ef4f59"],
   ["benchmark/harness/stop-broker.sh", "1f4ec139da512a920c4eeafad893e451c0629c93ea19bd740ba4b6fc5b092ffa"],
-  ["benchmark/harness/lock-sudo.sh", "3a81db7e64273803ea5ae26c6790891365c44885cfa22e0f004a06433d553569"],
-  ["benchmark/harness/sandbox-root.sh", "51e5fc7180ee7c3b33c81bc0c73a796e6f17f5488f2298931687b5c8f48b864b"],
+  ["benchmark/harness/lock-sudo.sh", "6e4f67b27c456cae8d42582b40ace1ae9fdba90506e324904b27f29ba654f69f"],
+  ["benchmark/harness/sandbox-root.sh", "3f181ef4112296ab2723f327716ed26a19c8ea2a9391ee3e4799aef40e7e7164"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
 /// jobs, and the jobs that run the release tests through cargo alone. A rule that read their

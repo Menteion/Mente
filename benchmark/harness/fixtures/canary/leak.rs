@@ -10,14 +10,18 @@
 // never what it read; the check reads the flags. Under the sandbox every flag but `work` must be
 // false; without it, as a control, they are true, so a green result is not vacuous.
 //
-//   leak <credential file> <workspace file> <held-out file> <directory to write into> <another run's file> <the broker's socket>
+// It also writes a marker into every directory up to two levels below each mount it sees as
+// writable, but its own directory, and lists where it wrote in canary-wrote.txt there: the check
+// looks for each from outside, where any it finds is a channel from one run to another.
+//
+//   leak <credential file> <workspace file> <held-out file> <directory to write into> <another run's file> <the broker's socket> <tag>
 use std::fs;
 use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
-    let (credential, workspace, held_out, outside, other_run, broker) = (arg(1), arg(2), arg(3), arg(4), arg(5), arg(6));
+    let (credential, workspace, held_out, outside, other_run, broker, tag) = (arg(1), arg(2), arg(3), arg(4), arg(5), arg(6), arg(7));
     let needle = std::env::var("BENCH_CANARY_NEEDLE").unwrap_or_default();
 
     // Descriptors it did not open, read first, before it opens anything: the sandbox starts it with
@@ -85,6 +89,10 @@ fn main() {
         let _ = fs::remove_file(&probe);
     }
     let wrote_inside = fs::write("canary-work", b"x").is_ok();
+
+    // A marker on every writable mount, for the check to look for from outside.
+    let shared = shared_writes(if tag.is_empty() { "untagged" } else { &tag });
+    let _ = fs::write("canary-wrote.txt", shared.join("\n"));
     let _ = fs::remove_file("canary-work");
 
     println!(
@@ -114,6 +122,60 @@ fn inherited_descriptors() -> Vec<String> {
         }
     }
     found
+}
+
+/// The mount points this process sees as writable, by /proc/self/mountinfo: each whose own options
+/// say rw, of a filesystem that holds files a program can make, so not proc, sysfs and their kind.
+fn writable_mounts() -> Vec<String> {
+    let kernel = ["proc", "sysfs", "cgroup", "cgroup2", "devpts", "securityfs", "debugfs", "tracefs", "bpf", "pstore", "configfs", "fusectl", "autofs", "binfmt_misc", "efivarfs", "selinuxfs", "nsfs", "rpc_pipefs"];
+    let Ok(info) = fs::read_to_string("/proc/self/mountinfo") else { return Vec::new() };
+    let mut found: Vec<String> = Vec::new();
+    for line in info.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(dash) = fields.iter().position(|f| *f == "-") else { continue };
+        let (Some(point), Some(options), Some(fstype)) = (fields.get(4), fields.get(5), fields.get(dash + 1)) else { continue };
+        if !options.split(',').any(|o| o == "rw") || kernel.contains(fstype) {
+            continue;
+        }
+        let point = point.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\");
+        if !found.contains(&point) {
+            found.push(point);
+        }
+    }
+    found
+}
+
+/// Makes a file named for `tag` in every directory up to two levels below each writable mount, but
+/// its own directory, and returns where it could: each is a place another run might also reach.
+fn shared_writes(tag: &str) -> Vec<String> {
+    let own_dir = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let name = format!("bench-canary-{tag}");
+    let mut wrote: Vec<String> = Vec::new();
+    for mount in writable_mounts() {
+        let mut dirs = vec![(Path::new(&mount).to_path_buf(), 0)];
+        while let Some((dir, depth)) = dirs.pop() {
+            let shown = dir.to_string_lossy().to_string();
+            if !own_dir.is_empty() && (shown == own_dir || shown.starts_with(&format!("{own_dir}/"))) {
+                continue;
+            }
+            let probe = dir.join(&name);
+            if fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok() {
+                let shown = probe.to_string_lossy().to_string();
+                if !wrote.contains(&shown) {
+                    wrote.push(shown);
+                }
+            }
+            if depth < 2 {
+                let Ok(entries) = fs::read_dir(&dir) else { continue };
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        dirs.push((entry.path(), depth + 1));
+                    }
+                }
+            }
+        }
+    }
+    wrote
 }
 
 /// Whether anything is reachable through descriptor `n`: a directory listed or a file read through

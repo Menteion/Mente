@@ -15,7 +15,10 @@
 #   - lets no unprivileged process watch another through perf (perf_event_paranoid at its highest);
 #   - leaves sudo one rule for the runner's user, the sandbox's root half by its SHA-256, so that
 #     sudo itself refuses a changed file, with its environment reset and its path fixed, and takes
-#     every other rule.
+#     every other rule. The rule lets its caller keep descriptors open into the root half
+#     (closefrom_override, sudo -C), which the root half closes before the command starts: a
+#     caller's own descriptors give it nothing it lacks, and the harness's test passes some in to
+#     pin that the root half closes them, which sudo's own closing would otherwise do for it.
 # Then it checks that root is out of reach, as --check does again at the job's end.
 #
 #   bash benchmark/harness/lock-sudo.sh           after setup, before the sandbox and the key
@@ -51,8 +54,8 @@ problems() {
   if [ "$listed" != "(root) NOPASSWD: sha256:$digest $ENTRY" ]; then echo "sudo lists for $(id -un) something other than its one rule, the sandbox by its digest: ${listed:-nothing}"; fi
   defaults="$(awk '/^Matching Defaults entries/ { getline; sub(/^[ \t]+/, ""); print; exit }' <<< "$listing")"
   case "$defaults" in
-    *"env_reset, !env_keep, !setenv, secure_path=${SECURE_PATH//:/\\:}") ;;
-    *) echo "sudo's defaults for $(id -un) do not end with env_reset, !env_keep, !setenv and secure_path=$SECURE_PATH: ${defaults:-none}" ;;
+    *"env_reset, !env_keep, !setenv, closefrom_override, secure_path=${SECURE_PATH//:/\\:}") ;;
+    *) echo "sudo's defaults for $(id -un) do not end with env_reset, !env_keep, !setenv, closefrom_override and secure_path=$SECURE_PATH: ${defaults:-none}" ;;
   esac
   # Root's alone, every directory above the root half, its configuration and sudo's rules, the
   # directories of the path sudo runs commands from, and those files themselves. The rule's own
@@ -163,7 +166,7 @@ lock() {
     set -euo pipefail
     user="$1"; entry="$2"; rule="$3"; digest="$4"; path="$5"
     {
-      printf "Defaults:%s env_reset, !env_keep, !setenv, secure_path=\"%s\"\n" "$user" "$path"
+      printf "Defaults:%s env_reset, !env_keep, !setenv, closefrom_override, secure_path=\"%s\"\n" "$user" "$path"
       printf "%s ALL=(root) NOPASSWD: sha256:%s %s\n" "$user" "$digest" "$entry"
     } > "$rule.new"
     chmod 0440 "$rule.new"

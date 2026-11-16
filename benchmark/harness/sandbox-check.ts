@@ -10,8 +10,9 @@
 // broker sends on with the API key (benchmark/harness/broker.ts); to reach any of these through a
 // descriptor it did not open (both runs start from a shell that holds descriptors on the
 // workspace, the masked credential directory and the broker's directory, as the sandbox's root
-// half once leaked them: the final pass of 05fe2f6); to write into a directory outside its own;
-// and to write into its own. It also checks that the kernel lets no
+// half once leaked them: the final pass of 05fe2f6); to write into a directory outside its own; to
+// leave a mark on every mount it sees as writable, which this looks for from outside, where one
+// found is a channel between runs (the final pass of 7cf871c: /dev/shm); and to write into its own. It also checks that the kernel lets no
 // process trace another (Yama's ptrace_scope at 2 or 3, which benchmark/harness/lock-sudo.sh sets
 // before this runs), so that no process of the runner's user reads the key out of the broker's memory. Four Odin canaries read the
 // credential file, the workspace file, the held-out stand-in and the held-out run's file at compile
@@ -40,6 +41,7 @@ import {
   RUN_TIMEOUT_MS,
   RUST_FLAGS,
   checkUnderRuns,
+  insideAny,
   childEnv,
   readSandboxRoots,
   runProcess,
@@ -63,6 +65,8 @@ interface Run {
   /** Whether the canary ran and printed every flag, so that a crash is not read as a block. */
   ran: boolean;
   status: number | null;
+  /** The markers it left on writable mounts that the runner, outside the sandbox, could see. */
+  seen: string[];
   raw: string;
   stderr: string;
 }
@@ -136,7 +140,8 @@ async function main(): Promise<void> {
     if (built.status !== 0) throw new Error(`the canary did not build: ${built.stderr}`);
 
     const run = async (confined: boolean): Promise<Run> => {
-      const [inner, innerArgs] = sandboxed(confined ? sandbox : "", rustDir, exe, [credential, workspaceFile, heldOutFile, outside, otherRun, brokerSocket]);
+      const tag = `${confined ? "confined" : "control"}-${Date.now()}`;
+      const [inner, innerArgs] = sandboxed(confined ? sandbox : "", rustDir, exe, [credential, workspaceFile, heldOutFile, outside, otherRun, brokerSocket, tag]);
       // Started from a shell that holds descriptors 3, 4 and 5 on the workspace, the credential's
       // masked directory and the broker's directory: the control reaches the planted files through
       // them, and the sandbox must start the canary with none of them, nor any other.
@@ -146,13 +151,26 @@ async function main(): Promise<void> {
       const p = await runProcess(cmd, args, { cwd: rustDir, env, timeoutMs: RUN_TIMEOUT_MS });
       const printed = Object.fromEntries(p.stdout.trim().split(/\s+/).map((kv) => kv.split("=")));
       const flags = Object.fromEntries(ROUTES.map((r) => [r, own(printed, r) === "true"])) as Record<Route, boolean>;
-      return { flags, ran: ROUTES.every((r) => r in printed), status: p.status, raw: p.stdout.trim(), stderr: p.stderr.trim() };
+      // Where the canary left a marker on a mount it saw as writable, looked for from outside the
+      // sandbox: one found here, outside its own directory, is a place another run could find it.
+      const list = join(rustDir, "canary-wrote.txt");
+      const wrote = existsSync(list) ? readFileSync(list, "utf8").split("\n").filter((l) => l !== "") : [];
+      rmSync(list, { force: true });
+      const seen = wrote.filter((w) => !insideAny(w, [rustDir]) && existsSync(w));
+      for (const w of seen) rmSync(w, { force: true });
+      return { flags, ran: ROUTES.every((r) => r in printed), status: p.status, raw: p.stdout.trim(), stderr: p.stderr.trim(), seen };
     };
 
     const control = await run(false);
     const confined = await run(true);
     console.log(`rust control  : ${control.raw}`);
     console.log(`rust sandboxed: ${confined.raw}`);
+    console.log(`writes seen outside: control ${control.seen.length} (${control.seen.join(" ")}), sandboxed ${confined.seen.length}`);
+    // A write the runner sees from a run's sandbox, outside its own directory, is a channel from
+    // that run to the next, a held-out run's to a public one's: the sandbox leaves none, and the
+    // control, writing as the runner does, finds one, or the probe proves nothing.
+    if (control.seen.length === 0) failures.push("the control canary left no marker the runner could see, so its sandboxed run proves nothing of shared mounts");
+    if (confined.seen.length > 0) failures.push(`the sandbox let the canary write where the runner, and so another run, sees it: ${confined.seen.join(", ")}`);
     // Each run must have produced its flags, so a canary the sandbox crashed is not read as blocked.
     if (!control.ran || control.status !== 0) failures.push(`the control canary did not run: status ${control.status}, ${control.raw} ${control.stderr}`);
     if (!confined.ran || confined.status !== 0) failures.push(`the sandboxed canary did not run: status ${confined.status}, ${confined.raw} ${confined.stderr}`);
@@ -218,7 +236,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(
-    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set, another run's folder, the broker's socket, every descriptor it did not open and writes outside the working directory, and #load of each at build time; no process traces another",
+    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set, another run's folder, the broker's socket, every descriptor it did not open, writes outside the working directory and a mark on any mount another run could see, and #load of each at build time; no process traces another",
   );
 }
 
