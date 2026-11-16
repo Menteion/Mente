@@ -246,6 +246,8 @@ case "${1:-}" in
     "$subcommand" "$@"
     exit
     ;;
+  # The measurement of the sandbox's cost by its parts (the canary): bash reading this file to here.
+  noop) exit 0 ;;
 esac
 
 # The AppArmor profiles of this runner that grant a user namespace, one name a line: each is a way
@@ -403,6 +405,29 @@ setup_as_root() {
   /usr/bin/install -d -m 0755 -o 0 -g 0 "$home" "$root"
   /usr/bin/install -m 0644 -o 0 -g 0 "$here/test-sandbox.sh" "$self"
   printf '%s\n' "$workspace" > "$home/workspace"
+  # MEASUREMENT ONLY (the sandbox-cost pull request's first round, removed before review): sudo's
+  # cost without its PAM session, its log and its account checks, each on a command of its own that
+  # nothing else runs through sudo, so that the canary can time sudo with each part off. Each line
+  # is checked by visudo alone first, and left out if this sudo does not know it.
+  local line file
+  for line in 'Defaults!/usr/bin/echo !pam_session' 'Defaults!/usr/bin/printf !pam_session, !syslog' 'Defaults!/usr/bin/sleep !pam_session, !pam_setcred, !pam_acct_mgmt, !syslog'; do
+    file=$(/usr/bin/mktemp)
+    printf '%s\n' "$line" > "$file"
+    if /usr/sbin/visudo -c -q -f "$file" > /dev/null 2>&1; then
+      printf '%s\n' "$line" >> /etc/sudoers.d/90-mente-measure
+      echo "measurement: sudoers takes $line"
+    else
+      echo "measurement: sudoers refuses $line"
+    fi
+    /usr/bin/rm -f "$file"
+  done
+  if [ -f /etc/sudoers.d/90-mente-measure ]; then
+    /usr/bin/chmod 0440 /etc/sudoers.d/90-mente-measure
+    if ! /usr/sbin/visudo -c -q > /dev/null 2>&1; then
+      /usr/bin/rm -f /etc/sudoers.d/90-mente-measure
+      echo "measurement: sudoers as a whole refused the lines, removed"
+    fi
+  fi
   # No crash starts a core handler: the runner's is a pipe to a program that runs as root outside
   # every namespace, on the core the crashed process shaped, and the kernel starts a piped handler
   # whatever core limit the process set itself, but for a limit of exactly one byte. A pattern
@@ -914,6 +939,74 @@ check() {
   {
     echo
     echo "A process started and ended in the sandbox costs $((serial / 1000)).$(printf '%03d' $((serial % 1000))) ms more than as the runner's user when it is started alone, the median of 20, and $((parallel / 1000)).$(printf '%03d' $((parallel % 1000))) ms when $cores are started at once, the median of seven rounds."
+  } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
+
+  # MEASUREMENT ONLY (the sandbox-cost pull request's first round, removed before review): what each
+  # part of that cost is, each part a command of its own, measured as the whole is, alone (the
+  # median of 20) and as many at once as the runner has cores (the median of seven rounds of 4 on
+  # every core), less a process run directly.
+  part_alone() {
+    local k begin direct inside costs=()
+    for k in $(/usr/bin/seq 20); do
+      begin=$(now)
+      /usr/bin/true
+      direct=$(($(now) - begin))
+      begin=$(now)
+      "$@" > /dev/null 2>&1 || return 1
+      inside=$(($(now) - begin))
+      costs+=("$((inside - direct))")
+    done
+    printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 10p
+  }
+  part_lanes() {
+    local core pids=() begin pid failed=0 which=$1
+    shift
+    begin=$(now)
+    for core in $(/usr/bin/seq "$cores"); do
+      if [ "$which" = part ]; then
+        (for k in 1 2 3 4; do "$@" > /dev/null 2>&1 || exit 1; done) &
+      else
+        (for k in 1 2 3 4; do /usr/bin/true || exit 1; done) &
+      fi
+      pids+=("$!")
+    done
+    for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+    if [ "$failed" != 0 ]; then return 1; fi
+    echo $(($(now) - begin))
+  }
+  part_at_once() {
+    local k inside direct costs=()
+    for k in 1 2 3 4 5 6 7; do
+      inside=$(part_lanes part "$@") || return 1
+      direct=$(part_lanes direct) || return 1
+      costs+=("$(((inside - direct) / (4 * cores)))")
+    done
+    printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 4p
+  }
+  ms() { if [ -z "$1" ]; then echo "failed"; else echo "$(($1 / 1000)).$(printf '%03d' $(($1 % 1000))) ms"; fi; }
+  part_line() {
+    local name=$1 alone at_once
+    shift
+    alone=$(part_alone "$@") || alone=''
+    at_once=$(part_at_once "$@") || at_once=''
+    echo "| $name | $(ms "$alone") | $(ms "$at_once") |"
+  }
+  {
+    echo
+    echo "What each part of a sandboxed process costs, less a process run directly (measurement):"
+    echo
+    echo "| part | alone, median of 20 | $cores at once, median of 7 |"
+    echo "|---|---|---|"
+    part_line "bash, started" /usr/bin/bash -c :
+    part_line "bash, reading test-sandbox.sh to its dispatch" /usr/bin/bash "$self" noop
+    part_line "sudo, as today" /usr/bin/sudo -n /usr/bin/true
+    part_line "sudo, without its PAM session" /usr/bin/sudo -n /usr/bin/echo -n
+    part_line "sudo, without its PAM session and syslog" /usr/bin/sudo -n /usr/bin/printf ''
+    part_line "sudo, without its PAM session, credentials, account check and syslog" /usr/bin/sudo -n /usr/bin/sleep 0
+    part_line "sudo and unshare's namespaces, as today" /usr/bin/sudo -n /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- /usr/bin/true
+    part_line "the whole wrapper, as today" /usr/bin/bash "$self" run /usr/bin/true
+    echo
+    echo "measurement: sudo's version: $(/usr/bin/sudo -V 2> /dev/null | /usr/bin/head -1); its defaults for this user: $(/usr/bin/sudo -n -l 2> /dev/null | /usr/bin/awk '/^Matching Defaults entries/ { getline; sub(/^[ \t]+/, ""); print; exit }')"
   } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
 
   # The probe crashed two processes in the sandbox, one at a core limit it had lowered to 0. The

@@ -1281,7 +1281,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "02a8f1312275c5146ddf7950f9d933dab304c5b4470de0ffef792240ffa522d1"],
+  [".github/scripts/test-sandbox.sh", "a3c8c81241e376c6e178123d669471380be4a274b4fcb885c7d1dac42b5e8dae"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
