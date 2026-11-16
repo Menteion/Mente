@@ -751,6 +751,141 @@ fn successors(term: &Term) -> Vec<BlockId> {
     }
 }
 
+/// The dominator tree of a function's blocks reached from its entry: each block's immediate
+/// dominator, by the iterative algorithm of Cooper, Harvey and Kennedy over reverse postorder, and
+/// each block's place in a walk of the tree, so that whether one block dominates another is read
+/// in constant time.
+struct Dominators {
+    /// Each block's place on entry to it, and on leaving it, in a walk of the tree; none for a
+    /// block no path reaches.
+    span: Vec<Option<(usize, usize)>>,
+}
+
+impl Dominators {
+    fn of(f: &Function) -> Dominators {
+        let n = f.blocks.len();
+        let next: Vec<Vec<usize>> = f
+            .blocks
+            .iter()
+            .map(|b| {
+                successors(&b.term)
+                    .iter()
+                    .map(|t| t.0 as usize)
+                    .filter(|t| *t < n)
+                    .collect()
+            })
+            .collect();
+        // Reverse postorder of the blocks reached, by a walk that keeps its own stack.
+        let mut order = Vec::new();
+        let mut seen = vec![false; n];
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        if n > 0 {
+            seen[0] = true;
+            stack.push((0, 0));
+        }
+        while let Some((b, k)) = stack.pop() {
+            match next[b].get(k) {
+                Some(&t) => {
+                    stack.push((b, k + 1));
+                    if !seen[t] {
+                        seen[t] = true;
+                        stack.push((t, 0));
+                    }
+                }
+                None => order.push(b),
+            }
+        }
+        order.reverse();
+        let mut rank = vec![usize::MAX; n];
+        for (i, &b) in order.iter().enumerate() {
+            rank[b] = i;
+        }
+        let mut before: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &b in &order {
+            for &t in &next[b] {
+                before[t].push(b);
+            }
+        }
+        let mut idom = vec![usize::MAX; n];
+        if n > 0 {
+            idom[0] = 0;
+        }
+        let meet = |idom: &[usize], mut a: usize, mut b: usize| {
+            while a != b {
+                while rank[a] > rank[b] {
+                    a = idom[a];
+                }
+                while rank[b] > rank[a] {
+                    b = idom[b];
+                }
+            }
+            a
+        };
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &b in order.iter().skip(1) {
+                let mut new = usize::MAX;
+                for &p in &before[b] {
+                    if idom[p] != usize::MAX {
+                        new = if new == usize::MAX {
+                            p
+                        } else {
+                            meet(&idom, p, new)
+                        };
+                    }
+                }
+                if new != idom[b] {
+                    idom[b] = new;
+                    changed = true;
+                }
+            }
+        }
+        // A walk of the tree, each block's children after it.
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &b in order.iter().skip(1) {
+            children[idom[b]].push(b);
+        }
+        let mut span = vec![None; n];
+        let mut clock = 0;
+        let mut walk: Vec<(usize, bool)> = Vec::new();
+        if n > 0 {
+            walk.push((0, false));
+        }
+        while let Some((b, done)) = walk.pop() {
+            if done {
+                if let Some((start, _)) = span[b] {
+                    span[b] = Some((start, clock));
+                }
+                clock += 1;
+                continue;
+            }
+            span[b] = Some((clock, clock));
+            clock += 1;
+            walk.push((b, true));
+            walk.extend(children[b].iter().map(|c| (*c, false)));
+        }
+        Dominators { span }
+    }
+
+    /// Whether a path from the entry reaches block `b`.
+    fn reached(&self, b: usize) -> bool {
+        self.span.get(b).is_some_and(|s| s.is_some())
+    }
+
+    /// Whether block `a` dominates block `b`, both reached: every path from the entry to `b`
+    /// passes through `a`.
+    fn dominates(&self, a: usize, b: usize) -> bool {
+        match (
+            self.span.get(a).copied().flatten(),
+            self.span.get(b).copied().flatten(),
+        ) {
+            (Some((a0, a1)), Some((b0, b1))) => a0 <= b0 && b1 <= a1,
+            (Some(_), None) | (None, Some(_)) | (None, None) => false,
+        }
+    }
+}
+
 /// Every value is defined before it is used, on every path: an operand of an instruction is a
 /// parameter of its block, an instruction before it in its block, or a value of a block that
 /// dominates its block, and an operand of a terminator likewise. So nothing reads a value before
@@ -758,7 +893,6 @@ fn successors(term: &Term) -> Vec<BlockId> {
 /// stands after the arguments it takes, and before the narrowings, checks and call that take it
 /// ([`Op::Enter`]). A block no path reaches is not checked.
 fn verify_order(f: &Function) -> Result<(), String> {
-    let n = f.blocks.len();
     // Where each value is defined: its block, and its place there, 0 for a parameter.
     let mut defined: Vec<Option<(usize, usize)>> = vec![None; f.ops.len()];
     for (bi, b) in f.blocks.iter().enumerate() {
@@ -769,54 +903,14 @@ fn verify_order(f: &Function) -> Result<(), String> {
             defined[v.0 as usize] = Some((bi, i + 1));
         }
     }
-    let next: Vec<Vec<BlockId>> = f.blocks.iter().map(|b| successors(&b.term)).collect();
-    let mut reached = vec![false; n];
-    let mut work = vec![0usize];
-    while let Some(b) = work.pop() {
-        if b < n && !reached[b] {
-            reached[b] = true;
-            work.extend(next[b].iter().map(|t| t.0 as usize));
-        }
-    }
-    let mut before: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (b, ts) in next.iter().enumerate() {
-        for t in ts {
-            if reached[b] && (t.0 as usize) < n {
-                before[t.0 as usize].push(b);
-            }
-        }
-    }
-    // The dominators of each block reached: itself, and those of every block before it.
-    let mut dom: Vec<Vec<bool>> = (0..n).map(|b| vec![b != 0 && reached[b]; n]).collect();
-    if n > 0 {
-        dom[0][0] = true;
-    }
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for b in 1..n {
-            if !reached[b] {
-                continue;
-            }
-            let mut d = vec![true; n];
-            for &p in &before[b] {
-                for (k, x) in d.iter_mut().enumerate() {
-                    *x = *x && dom[p][k];
-                }
-            }
-            d[b] = true;
-            if d != dom[b] {
-                dom[b] = d;
-                changed = true;
-            }
-        }
-    }
+    let dom = Dominators::of(f);
+    let reached = |b: usize| dom.reached(b);
     let available = |a: NodeId, b: usize, place: usize| match defined.get(a.0 as usize) {
-        Some(Some((ab, ap))) => (*ab == b && *ap < place) || (*ab != b && dom[b][*ab]),
+        Some(Some((ab, ap))) => (*ab == b && *ap < place) || (*ab != b && dom.dominates(*ab, b)),
         _ => false,
     };
     for (b, block) in f.blocks.iter().enumerate() {
-        if !reached[b] {
+        if !reached(b) {
             continue;
         }
         for (i, &v) in block.insts.iter().enumerate() {
@@ -2141,6 +2235,43 @@ mod tests {
         assert_eq!(memory.load(w, Ty::Bool), Ok(Val::Bool(true)));
         assert!(memory.load(w + 30, Ty::Int(U64)).is_err());
         assert_eq!(w % 16, 0);
+    }
+
+    /// The order of values is checked in time and memory that grow with the function, not with
+    /// its square: a chain of 20,000 diamonds, each branch reading a value of the block before
+    /// it, verifies at once, where a table of every block's dominators would hold 3.6 billion
+    /// entries. A verifier that grew so had the generated programs' coverage time out on CI.
+    #[test]
+    fn test_the_verifier_reads_a_long_function_in_linear_time() {
+        let mut b = Builder::new("long", &[Ty::Bool, Ty::Int(I64)], Some(Ty::Int(I64)));
+        let [c, x] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let mut value = x;
+        for _ in 0..20_000 {
+            let left = b.block(&[]);
+            let right = b.block(&[]);
+            let join = b.block(&[Ty::Int(I64)]);
+            b.end(Term::Branch {
+                cond: c,
+                then: (left, vec![]),
+                otherwise: (right, vec![]),
+            });
+            b.switch(left);
+            b.end(Term::Jump(join, vec![value]));
+            b.switch(right);
+            b.end(Term::Jump(join, vec![value]));
+            b.switch(join);
+            value = b.params(join)[0];
+        }
+        b.end(Term::Return(Some(value)));
+        let started = std::time::Instant::now();
+        assert!(verify(&Module {
+            functions: vec![b.finish()],
+            budget: BUDGET,
+        })
+        .is_ok());
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
     }
 
     /// Every value is defined before it is used on every path (`verify_order`): an operand defined

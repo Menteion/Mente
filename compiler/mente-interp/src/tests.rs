@@ -1989,16 +1989,3 @@ fn test_a_recursion_through_nested_ifs_runs_to_the_budget() {
         over
     );
 }
-
-/// Every call of every shape a call can stand in keeps within what this build's figures give it
-/// for its nesting (`crate::measure`), so that the bound on the interpreter's host memory, which
-/// the harnesses that run generated and mutated programs derive their nesting from
-/// (`crate::host_bound`), holds: a step that grows a frame past its figure fails here first. The
-/// generated programs' comparison holds a build with optimisation to its own figures the same way.
-#[test]
-fn test_every_call_keeps_within_the_host_figures() {
-    match crate::host_figures_hold() {
-        Ok(report) => println!("{}", report),
-        Err(over) => panic!("{}", over),
-    }
-}

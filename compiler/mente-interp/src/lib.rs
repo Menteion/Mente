@@ -22,16 +22,16 @@ mod eval;
 mod host;
 pub mod int;
 mod kinds;
-mod measure;
+mod nesting;
 
 use std::fmt;
 
 use mente_sema::CheckedModule;
 use mente_syntax::Span;
 
-pub use host::host_bound;
+pub use host::{host_bound, host_bound_at, host_figures};
 pub use int::Int;
-pub use measure::{host_figures_hold, nesting};
+pub use nesting::{function_nesting, host_bound_of, host_bound_of_function, nesting};
 
 /// A value of M2's slice: an integer, a `bool`, an array, a struct, a variant of an enum, or no
 /// value.
@@ -393,7 +393,7 @@ pub(crate) fn deepest_step(
 /// Runs `name` on `args` within `limits`, and gives beside its outcome the most host stack one
 /// of its calls took, from where it began to the deepest point it reached before a call it made
 /// began (`host`).
-pub(crate) fn host_per_call(
+pub fn host_per_call(
     module: &CheckedModule,
     name: &str,
     args: Vec<Value>,

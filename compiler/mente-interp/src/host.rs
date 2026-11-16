@@ -14,7 +14,7 @@
 //!
 //! What the segments take of the host's memory is bounded by how deep the program nests: each
 //! call open takes at most [`CALLS`]' figure and [`LEVELS`]' for each level of nesting, which
-//! `crate::measure` holds every shape to, and [`host_bound`] is what a run of a given nesting
+//! every shape a call can stand in is held to, and [`host_bound`] is what a run of a given nesting
 //! reserves at most, in any build. The harnesses that run generated and mutated programs derive
 //! the nesting they keep to from it.
 //!
@@ -64,16 +64,17 @@ pub(crate) const SEGMENT: usize = 1024 * STEP;
 
 /// The most host stack one call takes besides its levels of nesting, from where it begins to the
 /// deepest point it reaches before a call it makes begins: in a build without optimisation, and
-/// in one with it. `host_figures_hold` (`crate::measure`) holds the build that runs it to its
-/// figure, on every shape a call can stand in.
+/// in one with it. The shapes a call can stand in hold the build that runs them to its figure
+/// ([`host_figures`]).
 pub(crate) const CALLS: [usize; 2] = [4 << 10, 1 << 10];
 
 /// The most host stack one level of nesting adds to a call, as the parser counts levels
 /// (`NESTING_LIMIT`): in a build without optimisation, and in one with it, held as [`CALLS`] is.
-pub(crate) const LEVELS: [usize; 2] = [5376, 1792];
+pub(crate) const LEVELS: [usize; 2] = [5376, 2048];
 
-/// The figures of the build that runs: what a call takes, and what each level adds.
-pub(crate) const fn this_build() -> (usize, usize) {
+/// The figures of the build that runs: what a call takes, and what each level adds, which the
+/// shapes a call can stand in are held to (`mente-cli`'s `mir_run::host_shapes`).
+pub const fn host_figures() -> (usize, usize) {
     let build = if cfg!(debug_assertions) { 0 } else { 1 };
     (CALLS[build], LEVELS[build])
 }
@@ -87,19 +88,42 @@ const fn larger(a: usize, b: usize) -> usize {
     }
 }
 
+/// The most host stack one open call of a function nesting `depth` levels takes, in any build: a
+/// call's figure and a level's for each level, of the larger build's.
+const fn call_cost(depth: u32) -> u128 {
+    larger(CALLS[0], CALLS[1]) as u128 + larger(LEVELS[0], LEVELS[1]) as u128 * depth as u128
+}
+
+/// What the segments that hold `used` bytes of host stack reserve: each but the last is filled to
+/// within its margin before the next begins, and each reserves [`SEGMENT`] and the guard page the
+/// platform keeps below it.
+const fn reserved(used: u128) -> u128 {
+    (used / (SEGMENT - MARGIN) as u128 + 1) * (SEGMENT + GUARD_PAGE) as u128
+}
+
 /// The most host memory a run of the reference interpreter reserves for its stacks, in any build,
-/// where nothing the program declares nests deeper than `depth` levels (`crate::nesting`). A run
-/// has at most as many calls open at once as the budget holds frames of the call's 64 bytes, each
-/// taking at most a call's figure and a level's for each level it nests, of the larger build's;
-/// one call more covers what the run takes before its first call. Each segment but the last is
-/// filled to within its margin before the next begins, and each reserves [`SEGMENT`].
+/// where every function it can call has a frame of at least `frame` bytes and nests at most
+/// `depth` levels (`crate::nesting`). The frames of the calls open at once fill at most the
+/// budget, so there are at most as many as it holds of `frame`, each taking at most a call's
+/// figure and a level's for each level; one call nesting as deep as the parser allows more covers
+/// what the run takes before its first call. A program's own bound is the largest of its
+/// functions' (`crate::host_bound_of`), a function whose calls take more host stack for each
+/// byte of frame bounding more.
+pub const fn host_bound_at(frame: u128, depth: u32) -> u128 {
+    let frame = if frame < mente_sema::frames::CALL {
+        mente_sema::frames::CALL
+    } else {
+        frame
+    };
+    let calls = mente_sema::frames::BUDGET.div_ceil(frame);
+    reserved(calls * call_cost(depth) + call_cost(mente_syntax::body::NESTING_LIMIT))
+}
+
+/// The most host memory a run of any program reserves for its stacks, in any build, where nothing
+/// the program declares nests deeper than `depth` levels: every frame is at least the call's 64
+/// bytes.
 pub const fn host_bound(depth: u32) -> u128 {
-    let call = larger(CALLS[0], CALLS[1]) as u128;
-    let level = larger(LEVELS[0], LEVELS[1]) as u128;
-    let calls = mente_sema::frames::BUDGET / mente_sema::frames::CALL + 1;
-    let used = calls * (call + level * depth as u128);
-    let segments = used / (SEGMENT - MARGIN) as u128 + 1;
-    segments * SEGMENT as u128
+    host_bound_at(mente_sema::frames::CALL, depth)
 }
 
 /// Where the interpreter stands on the host's stack: the address its segment began at, the

@@ -5349,15 +5349,33 @@ const DEEP_CHANCE: u64 = 35;
 /// interpreter did on a thread sized per call, fails the comparison.
 fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
     let name = format!("f{}", k);
-    let mut e = format!("if n > 0 {{\n  {}(n - 1)\n}} else {{\n  0\n}}", name);
+    // Half the recursions keep the narrowest frame, `n` alone, and nest only as deep as the
+    // harnesses' allowance lets so narrow a frame (`super::deepest_at`); the others carry five
+    // `u128`s on, a frame wide enough for all eight wrappers. A frame is at least the call's 64
+    // bytes and its parameters'.
+    let wide = rng.chance(50);
+    let (params, passed, given, frame) = if wide {
+        (
+            ", a: u128, b: u128, c: u128, d: u128, e: u128",
+            ", a, b, c, d, e",
+            ", 1, 2, 3, 4, 5",
+            64 + 4 + 5 * 16,
+        )
+    } else {
+        ("", "", "", 64 + 4)
+    };
+    let mut e = format!(
+        "if n > 0 {{\n  {}(n - 1{})\n}} else {{\n  0\n}}",
+        name, passed
+    );
     // The levels the parser counts: the `if`, its block, the call, `n - 1` and `n`; each wrapper
-    // adds its own, and stops before the nesting passes the harnesses' bound
-    // (`super::MAX_NESTING`).
+    // adds its own, and stops before the nesting passes what the frame allows.
+    let deepest = super::deepest_at(frame);
     let mut levels = 5;
     for _ in 0..1 + rng.below(8) {
         let kind = rng.below(4);
         let adds = if kind == 0 { 2 } else { 1 };
-        if levels + adds > super::MAX_NESTING {
+        if levels + adds > deepest {
             break;
         }
         levels += adds;
@@ -5371,11 +5389,16 @@ fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
     vec![
         (
             name.clone(),
-            format!("fn {}(n: u32) -> u32 = {}\n", name, e),
+            format!("fn {}(n: u32{}) -> u32 = {}\n", name, params, e),
         ),
         (
             format!("f{}", k + 1),
-            format!("pub fn f{}() -> u32 = {}(4294967295)\n", k + 1, name),
+            format!(
+                "pub fn f{}() -> u32 = {}(4294967295{})\n",
+                k + 1,
+                name,
+                given
+            ),
         ),
     ]
 }
@@ -5682,31 +5705,30 @@ pub fn checked(seed: u64) -> Checked {
     unreachable!("the rounds end at MAX_ROUNDS")
 }
 
-/// The functions of `program` that nest deeper than the harnesses' bound (`super::MAX_NESTING`),
-/// by their index among its functions: each is generated again, so that no generated program
-/// nests deeper than the bound on the reference interpreter's host memory allows.
+/// The functions of `program` whose calls would take more host memory than the harnesses'
+/// allowance (`super::HOST_ALLOWANCE`; `mente_interp::host_bound_of_function`), by their index
+/// among its functions: each is generated again, so that every generated program keeps within it.
 fn too_deep(program: &Program, module: &CheckedModule) -> Vec<usize> {
     program
         .functions
         .iter()
         .enumerate()
         .filter(|(_, (name, _))| {
-            module
-                .index(name)
-                .and_then(|i| module.functions[i].as_ref())
-                .is_some_and(|f| f.syntax.tree.too_deep(super::MAX_NESTING).is_some())
+            module.index(name).is_some_and(|i| {
+                mente_interp::host_bound_of_function(module, i) > super::HOST_ALLOWANCE
+            })
         })
         .map(|(k, _)| k)
         .collect()
 }
 
-/// A program still deeper than the harnesses' bound after every round of generating its
-/// functions again: a bug of the generator.
+/// A program still beyond the harnesses' allowance after every round of generating its functions
+/// again: a bug of the generator.
 fn deeper(seed: u64) -> String {
     format!(
-        "seed {}: a function still nests deeper than {} levels after {} rounds of generating it again",
+        "seed {}: a function still passes the host allowance of {} bytes after {} rounds of generating it again",
         seed,
-        super::MAX_NESTING,
+        super::HOST_ALLOWANCE,
         MAX_ROUNDS
     )
 }

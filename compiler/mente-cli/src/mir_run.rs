@@ -16,6 +16,8 @@ mod coverage;
 mod differential;
 #[cfg(test)]
 mod generate;
+#[cfg(test)]
+mod host_shapes;
 
 /// What each test process may reserve on CI: `ulimit -v` on Linux, a job object on Windows
 /// (`.github/scripts/limits.sh`, which a test reads).
@@ -26,22 +28,38 @@ pub const CI_PROCESS_BYTES: u128 = 8 << 30;
 /// processes of single-threaded tests nextest runs beside each other hold together.
 pub const CI_THREADS: u128 = 4;
 
-/// What a test process reserves on CI besides the reference interpreter's stacks: glibc keeps 64
-/// MiB of address space for each malloc arena, and makes up to eight for each core, 2 GiB on CI's
-/// four, which Linux's `ulimit -v` counts.
-pub const CI_RESERVED: u128 = 2 << 30;
+/// What no bound counts on of what a test process may reserve on CI: a quarter of it.
+pub const CI_HEADROOM: u128 = CI_PROCESS_BYTES / 4;
 
-/// The deepest a program that a harness generates or mutates may nest, as the parser counts
-/// levels (`mente_interp::nesting`): the largest nesting whose bound on the reference
-/// interpreter's host memory (`mente_interp::host_bound`), for each interpreter CI runs at once in
-/// one process, fits what the process may reserve beside its other needs. A harness bounds the
-/// shape of what it runs, never the depth of a call.
-pub const MAX_NESTING: u32 = deepest_within((CI_PROCESS_BYTES - CI_RESERVED) / CI_THREADS);
+/// The address space glibc keeps for malloc arenas in a process on CI: 64 MiB for each, and up to
+/// eight for each core, 2 GiB on four cores, which Linux's `ulimit -v` counts; the reference
+/// interpreter's segments, each a thread, make them all.
+pub const CI_ARENAS: u128 = 2 << 30;
 
-/// The deepest nesting whose host bound is at most `bytes`.
-const fn deepest_within(bytes: u128) -> u32 {
+/// What a test process reserves on CI besides its interpreters' stacks and its arenas: the test
+/// binary, its heap, and the stacks of the threads that run it.
+pub const CI_PROGRAM: u128 = 512 << 20;
+
+/// What fuzz's worker process reserves besides its one interpreter: the 256 MiB stacks `mn`
+/// runs its work on and its phase thread runs on (`fuzz.rs`). Each job is a worker process of
+/// its own, so these never share a process with the interpreters of another job.
+#[cfg(test)]
+pub const FUZZ_STACKS: u128 = 2 * (256 << 20);
+
+/// What the stacks of each interpreter a harness runs may reserve: CI's process, less the
+/// headroom, the arenas and the program, shared by the interpreters CI runs at once in it.
+pub const HOST_ALLOWANCE: u128 =
+    (CI_PROCESS_BYTES - CI_HEADROOM - CI_ARENAS - CI_PROGRAM) / CI_THREADS;
+
+/// The deepest a function whose frame is at least `frame` bytes may nest, for a run of its calls
+/// to fit [`HOST_ALLOWANCE`] (`mente_interp::host_bound_at`). A harness keeps each program it
+/// generates or mutates within the allowance by the program's own bound
+/// (`mente_interp::host_bound_of`): it bounds the shape of what it runs, never the depth of a call.
+#[cfg(test)]
+pub const fn deepest_at(frame: u128) -> u32 {
     let mut depth = 0;
-    while depth < mente_syntax::body::NESTING_LIMIT && mente_interp::host_bound(depth + 1) <= bytes
+    while depth < mente_syntax::body::NESTING_LIMIT
+        && mente_interp::host_bound_at(frame, depth + 1) <= HOST_ALLOWANCE
     {
         depth += 1;
     }

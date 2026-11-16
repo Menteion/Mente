@@ -28,8 +28,8 @@ use super::generate;
 /// table.
 macro_rules! constructs {
     ($name:ident, $all:ident: $t:ty { $($p:pat => $n:literal,)+ }) => {
-        const $all: &[&str] = &[$($n),+];
-        fn $name(x: &$t) -> &'static str {
+        pub(super) const $all: &[&str] = &[$($n),+];
+        pub(super) fn $name(x: &$t) -> &'static str {
             match x {
                 $($p => $n,)+
             }
@@ -308,7 +308,7 @@ const COMPARISONS: &[&str] = &[
 const SHIFTS: &[&str] = &["right shift past the bits its value is kept in"];
 
 /// What generated programs never hold, each with its reason.
-const NOT_GENERATED: &[(&str, &str)] = &[
+pub(super) const NOT_GENERATED: &[(&str, &str)] = &[
     (
         "expression error",
         "only a diagnostic puts it in a tree, and a generated program parses",
@@ -1208,7 +1208,7 @@ fn structs(src: &str) -> Vec<StructSyntax> {
 
 /// The compound assignments the grammar has, as the parser reads them: each binary operator
 /// followed by `=`, where that parses as an assignment.
-fn compound_assignments() -> Vec<String> {
+pub(super) fn compound_assignments() -> Vec<String> {
     BINARIES
         .iter()
         .filter_map(|symbol| {
