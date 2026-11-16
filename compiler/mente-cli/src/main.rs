@@ -17,8 +17,8 @@
 //! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate;
 //!   `@example` bodies are parsed as tokens but not executed.
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
-//! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes.md` per week and per area;
-//!   `--check` checks each row as its test does.
+//! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes/` per week and per area;
+//!   `--check` checks each escape as its test does.
 
 use std::env;
 use std::fs;
@@ -119,7 +119,7 @@ fn print_help() {
     println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
-    println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes.md per week and per area; --check checks each row");
+    println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes/ per week and per area; --check checks each escape");
     println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
     println!("                               Fuzz every phase of the compiler, and minimize each crash found");
 }
@@ -1253,8 +1253,8 @@ fn strip_mn_comments(src: &str) -> String {
     out
 }
 
-/// `mn escapes [--check]`: the record of escaped bugs, `docs/escapes.md`, read from the current
-/// directory, counted per ISO week and per area; with `--check`, each row checked against the tree
+/// `mn escapes [--check]`: the record of escaped bugs, one file an escape in `docs/escapes/`, read
+/// from the current directory, counted per ISO week and per area; with `--check`, each escape checked against the tree
 /// as `tests/escapes.rs` checks it. The counts are printed, never written into a document.
 fn cmd_escapes(args: &[String]) {
     let check = match args {
@@ -1266,14 +1266,7 @@ fn cmd_escapes(args: &[String]) {
         }
     };
     let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let text = match fs::read_to_string(root.join(escapes::RECORD)) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {}: {}", escapes::RECORD, e);
-            process::exit(1);
-        }
-    };
-    let rows = match escapes::parse(&text) {
+    let rows = match escapes::read(&root.join(escapes::RECORD)) {
         Ok(rows) => rows,
         Err(problems) => {
             for p in problems {
@@ -1288,7 +1281,10 @@ fn cmd_escapes(args: &[String]) {
     }
     let problems = escapes::problems(&root, &rows);
     if problems.is_empty() {
-        println!("[PASS] mn escapes: every row of {} holds", escapes::RECORD);
+        println!(
+            "[PASS] mn escapes: every escape of {} holds",
+            escapes::RECORD
+        );
     } else {
         for p in problems {
             eprintln!("[FAIL] {}", p);

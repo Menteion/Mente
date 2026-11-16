@@ -41,3 +41,61 @@ pub fn is_key(key: &str) -> bool {
             && (k > 0 || word.starts_with(|c: char| c.is_ascii_lowercase()))
     })
 }
+
+/// The values of a record file's front matter, which names exactly `fields`, in that order, one
+/// `name: value` line each, between a first line `---` and the next. Each value is a string a YAML
+/// reader reads as this one does, so that the file renders where YAML is read: a plain value, which
+/// starts with no YAML indicator and holds no `: ` and no ` #`, or a value in single quotes, where
+/// `''` stands for one quote. Line ends may be CRLF. What follows the front matter is the record's
+/// prose, free.
+pub fn front_matter(text: &str, fields: &[&str]) -> Result<Vec<String>, String> {
+    let text = text.replace("\r\n", "\n");
+    let rest = text
+        .strip_prefix("---\n")
+        .ok_or("no front matter: the file does not start with a line `---`")?;
+    let front = match rest.split_once("\n---\n") {
+        Some((front, _)) => front,
+        None => rest
+            .strip_suffix("\n---")
+            .ok_or("its front matter does not close with a line `---`")?,
+    };
+    let lines: Vec<(&str, &str)> = front
+        .lines()
+        .map(|l| l.split_once(": ").unwrap_or((l, "")))
+        .collect();
+    let names: Vec<&str> = lines.iter().map(|(n, _)| *n).collect();
+    if names != fields {
+        return Err(format!(
+            "its front matter names {:?}, not the fields {:?} in that order",
+            names, fields
+        ));
+    }
+    lines
+        .iter()
+        .map(|(name, value)| {
+            scalar(value).ok_or(format!(
+                "the value of `{}` is no plain value and no value in single quotes: quote it, `'...'`, with `''` for a quote",
+                name
+            ))
+        })
+        .collect()
+}
+
+/// The string a YAML reader reads in `value`, if it reads one this reader agrees on.
+fn scalar(value: &str) -> Option<String> {
+    if let Some(inner) = value.strip_prefix('\'') {
+        let inner = inner.strip_suffix('\'')?;
+        // Every quote inside is one of a pair.
+        if inner.replace("''", "").contains('\'') {
+            return None;
+        }
+        return Some(inner.replace("''", "'"));
+    }
+    let plain = !value.is_empty()
+        && value.trim() == value
+        && !value.starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c))
+        && !value.contains(": ")
+        && !value.contains(" #")
+        && !value.ends_with(':');
+    plain.then(|| value.to_string())
+}

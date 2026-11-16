@@ -17,22 +17,19 @@ const NUMBERED: &str = "a record is named by a key, never by a number (CLAUDE.md
 /// (`SHA-256`), a vector extension (`AVX-512`) and a standard (`IEEE-754`).
 const STANDARD_NAMES: &[&str] = &["UTF", "SHA", "AVX", "IEEE"];
 
-/// Records of another repository, cited by the names they have there: Menteion's decision records
-/// that pause it (`docs/design-review.md`, `menteion-pause`).
-const CITED: &[&str] = &["ADR-0258", "ADR-0259"];
-
 /// The directories whose documents name records: the register and the other documents, the specs,
 /// and the task briefs.
 const DOCUMENTS: &[&str] = &["docs", "spec", "briefs"];
 
 /// Each identifier of a record by a number in `text`, with its line: two or more capital letters,
 /// a hyphen and digits, as a word of its own, `ESC-001` or `DEC-7`, in code or not, but a standard
-/// name or a cited record. A diagnostic code, `E0310`, has no hyphen and is none.
+/// name, and none in a link's target, which names a page by its address, not a record by its name.
+/// A diagnostic code, `E0310`, has no hyphen and is none.
 fn numbered(text: &str) -> Vec<(usize, String)> {
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     let mut found = Vec::new();
     for (n, line) in text.lines().enumerate() {
-        let chars: Vec<char> = line.chars().collect();
+        let chars = unlinked(line);
         let mut at = 0;
         while at < chars.len() {
             let starts = chars[at].is_ascii_uppercase() && (at == 0 || !word(chars[at - 1]));
@@ -53,7 +50,7 @@ fn numbered(text: &str) -> Vec<(usize, String)> {
             if caps >= 2 && chars.get(hyphen) == Some(&'-') && digits > 0 && ends {
                 let id: String = chars[at..end].iter().collect();
                 let prefix: String = chars[at..hyphen].iter().collect();
-                if !STANDARD_NAMES.contains(&prefix.as_str()) && !CITED.contains(&id.as_str()) {
+                if !STANDARD_NAMES.contains(&prefix.as_str()) {
                     found.push((n + 1, id));
                 }
             }
@@ -61,6 +58,38 @@ fn numbered(text: &str) -> Vec<(usize, String)> {
         }
     }
     found
+}
+
+/// The characters of `line` with each link's target blanked: the address of a Markdown link,
+/// `[text](address)`, of an autolink, `<https://...>`, and of a bare address, `https://...` up to
+/// the next space. A link's text stays.
+fn unlinked(line: &str) -> Vec<char> {
+    let mut chars: Vec<char> = line.chars().collect();
+    let at = |chars: &[char], k: usize, s: &str| {
+        s.chars()
+            .enumerate()
+            .all(|(j, c)| chars.get(k + j) == Some(&c))
+    };
+    let mut k = 0;
+    while k < chars.len() {
+        let (from, stop): (usize, fn(char) -> bool) = if at(&chars, k, "](") {
+            (k + 2, |c| c == ')')
+        } else if at(&chars, k, "<http://") || at(&chars, k, "<https://") {
+            (k + 1, |c| c == '>')
+        } else if at(&chars, k, "http://") || at(&chars, k, "https://") {
+            (k, char::is_whitespace)
+        } else {
+            k += 1;
+            continue;
+        };
+        let mut end = from;
+        while end < chars.len() && !stop(chars[end]) {
+            chars[end] = ' ';
+            end += 1;
+        }
+        k = end.max(k + 1);
+    }
+    chars
 }
 
 fn root() -> PathBuf {
@@ -103,8 +132,8 @@ fn test_no_document_names_a_record_by_a_number() {
     assert!(found.is_empty(), "{}:\n{}", NUMBERED, found.join("\n"));
 }
 
-/// A record's number is refused wherever it stands, in code or not; a diagnostic code, a standard
-/// name, a cited record of another repository and a word with a hyphen before its digits are not.
+/// A record's number is refused wherever it stands, in code, in a link's text or not; a diagnostic
+/// code, a standard name, a word with a hyphen before its digits and a link's target are not.
 #[test]
 fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
     for text in [
@@ -113,13 +142,19 @@ fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
         "`ADR-12`",
         "(RFC-9110)",
         "ESC-1000",
+        "Menteion's ADR-0258",
+        "[ADR-0258](https://example.org/pause)",
+        "https://example.org/a ADR-0258",
+        "<https://example.org/a> ADR-0258 (https://example.org/b)",
     ] {
         assert_eq!(numbered(text).len(), 1, "{}", text);
     }
     for text in [
         "`E0310` is a diagnostic code",
-        "UTF-8 and SHA-256, AVX-512, IEEE-754",
-        "Menteion's ADR-0258",
+        "[the record that pauses it](https://example.org/ADR-0258)",
+        "<https://example.org/ADR-0258>",
+        "see https://example.org/ADR-0258, then",
+        "[a](https://example.org/ADR-1) and [b](http://example.org/DEC-2)",
         "Tier-1 and x86-64",
         "DEC-XXX numbers",
         "an N-1 split",
@@ -131,6 +166,29 @@ fn test_a_record_number_is_refused_and_a_diagnostic_code_is_not() {
         numbered("one\nthen ESC-001 here"),
         vec![(2, "ESC-001".to_string())]
     );
+}
+
+/// Each standard name is the start of a standard's spelling that is no record's, and one letter
+/// away from it is a number again: the list holds these names and no other.
+#[test]
+fn test_each_standard_name_is_a_standard_and_nothing_else_is() {
+    let standards = [
+        ("UTF", "UTF-8", "UTG-8"),
+        ("SHA", "SHA-256", "SHB-256"),
+        ("AVX", "AVX-512", "AVY-512"),
+        ("IEEE", "IEEE-754", "IEEF-754"),
+    ];
+    let names: Vec<&str> = standards.iter().map(|(name, _, _)| *name).collect();
+    assert_eq!(names, STANDARD_NAMES);
+    for (_, standard, near) in standards {
+        assert_eq!(
+            numbered(standard),
+            Vec::<(usize, String)>::new(),
+            "{}",
+            standard
+        );
+        assert_eq!(numbered(near).len(), 1, "{}", near);
+    }
 }
 
 /// A key is lowercase words of letters and digits, the first a letter, joined by single hyphens.

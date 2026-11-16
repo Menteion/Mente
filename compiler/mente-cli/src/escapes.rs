@@ -1,9 +1,10 @@
-//! The record of escaped bugs, `docs/escapes.md` (Norman, 2026-11-16): each bug that escaped its
-//! author's own checks, the instrument that missed it and the guard its fix added
-//! (`docs/design-review.md`, `guard-per-problem`). The table is read here, once: by `mn escapes`,
-//! which counts the escapes per week and per area, and by the test that checks every row
-//! (`tests/escapes.rs`), which includes this file. No count is written into a document. A row is
-//! named by a key, as the register's entries are, by the one rule of [`crate::records`].
+//! The record of escaped bugs (Norman, 2026-11-16): each bug that escaped its author's own checks,
+//! the instrument that missed it and the guard its fix added (`docs/design-review.md`,
+//! `guard-per-problem`). One file an escape, `docs/escapes/<key>.md` (Norman, 2026-11-17), so that
+//! two fixes in flight never touch one file: the file's name is the escape's key, by the one rule
+//! of [`crate::records`], and its front matter holds the escape's fields. The directory is read
+//! here, once: by `mn escapes`, which counts the escapes per week and per area, and by the test
+//! that checks every file (`tests/escapes.rs`). No count is written into a document.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,11 +12,11 @@ use std::path::Path;
 
 use crate::records;
 
-/// The record, from the repository's root.
-pub const RECORD: &str = "docs/escapes.md";
+/// The record's directory, from the repository's root.
+pub const RECORD: &str = "docs/escapes";
 
-/// The table's header, exactly.
-pub const HEADER: &str = "| Key | Date | Fixed by | Area | Missed by | Guard |";
+/// The fields of an escape's front matter, each once, in this order.
+pub const FIELDS: [&str; 5] = ["date", "fixed-by", "area", "missed-by", "guard"];
 
 /// The areas an escape may be in, so that the counts per area are not split by a spelling.
 pub const AREAS: &[&str] = &[
@@ -30,8 +31,8 @@ pub const AREAS: &[&str] = &[
     "harness",
 ];
 
-/// The pull requests a row links to.
-const PULLS: &str = "https://github.com/Menteion/Mente/pull/";
+/// The address of the pull requests that fix an escape.
+pub const PULLS: &str = "https://github.com/Menteion/Mente/pull/";
 
 /// What now catches an escape's class, each found where it is declared.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,9 +47,10 @@ pub enum Guard {
     Quick(String),
 }
 
-/// One row of the record.
+/// One escape of the record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Escape {
+    /// The escape's key, its file's name.
     pub key: String,
     /// The day the escape was found.
     pub date: (i32, u32, u32),
@@ -59,18 +61,34 @@ pub struct Escape {
     pub guard: Guard,
 }
 
-/// The rows of the record's table, in order, or each line that cannot be read as one.
-pub fn parse(text: &str) -> Result<Vec<Escape>, Vec<String>> {
-    let mut lines = text.lines().skip_while(|l| l.trim() != HEADER);
-    if lines.next().is_none() {
-        return Err(vec![format!("{} has no table headed `{}`", RECORD, HEADER)]);
-    }
+/// Every escape in the record's directory `dir`, in the order of their keys, or each problem in
+/// reading it: an entry that is no file `<key>.md` whose key the key rule admits, and a file whose
+/// front matter is not the record's. Keys are unique since files' names are.
+pub fn read(dir: &Path) -> Result<Vec<Escape>, Vec<String>> {
+    let entries = fs::read_dir(dir).map_err(|e| vec![format!("{}: {}", dir.display(), e)])?;
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
     let mut rows = Vec::new();
     let mut problems = Vec::new();
-    for (k, line) in lines.skip(1).take_while(|l| l.starts_with('|')).enumerate() {
-        match row(line) {
-            Ok(r) => rows.push(r),
-            Err(why) => problems.push(format!("row {}: {}: {}", k + 1, why, line)),
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        let key = name
+            .strip_suffix(".md")
+            .filter(|k| path.is_file() && records::is_key(k));
+        let Some(key) = key else {
+            problems.push(format!(
+                "{}: no escape, which is a file `<key>.md` whose key is lowercase words of letters and digits joined by hyphens",
+                name
+            ));
+            continue;
+        };
+        match fs::read_to_string(&path) {
+            Ok(text) => match parse(key, &text) {
+                Ok(row) => rows.push(row),
+                Err(why) => problems.push(format!("{}: {}", name, why)),
+            },
+            Err(e) => problems.push(format!("{}: {}", name, e)),
         }
     }
     if problems.is_empty() {
@@ -80,24 +98,21 @@ pub fn parse(text: &str) -> Result<Vec<Escape>, Vec<String>> {
     }
 }
 
-fn row(line: &str) -> Result<Escape, String> {
-    let cells: Vec<&str> = line
-        .trim()
-        .trim_matches('|')
-        .split('|')
-        .map(str::trim)
-        .collect();
-    let [key, date, pull, area, missed, guard] = cells[..] else {
-        return Err(format!("{} cells, not 6", cells.len()));
-    };
+/// The escape of key `key` that a file's text records: a front matter of exactly [`FIELDS`], in
+/// the one form of [`records::front_matter`], and then any prose.
+pub fn parse(key: &str, text: &str) -> Result<Escape, String> {
+    let values = records::front_matter(text, &FIELDS)?;
+    let value = |k: usize| values[k].as_str();
     Ok(Escape {
-        key: key.trim_matches('`').to_string(),
-        date: day(date).ok_or("a date that is no day `YYYY-MM-DD`")?,
-        pull: pull_number(pull).ok_or("a fix that is no link `[#N](...pull/N)`")?,
-        area: area.to_string(),
-        missed: missed.to_string(),
-        guard: guard_of(guard).ok_or(
-            "a guard that is none of `fn test_...`, policy check \"...\", node test \"...\", quick check \"...\"",
+        key: key.to_string(),
+        date: day(value(0)).ok_or("a date that is no day `YYYY-MM-DD`")?,
+        pull: pull_number(value(1)).ok_or(
+            "a fix that is no pull request's address, `https://github.com/Menteion/Mente/pull/N`",
+        )?,
+        area: value(2).to_string(),
+        missed: value(3).to_string(),
+        guard: guard_of(value(4)).ok_or(
+            "a guard that is none of `fn test_...`, `policy check \"...\"`, `node test \"...\"`, `quick check \"...\"`",
         )?,
     })
 }
@@ -114,12 +129,12 @@ fn day(text: &str) -> Option<(i32, u32, u32)> {
     ))
 }
 
-/// `[#N](https://github.com/Menteion/Mente/pull/N)`, the same `N` twice.
+/// The number of a pull request at its address.
 fn pull_number(text: &str) -> Option<u32> {
-    let rest = text.strip_prefix("[#")?;
-    let (n, link) = rest.split_once("](")?;
-    let link = link.strip_suffix(')')?.strip_prefix(PULLS)?;
-    (n == link).then(|| n.parse().ok()).flatten()
+    let n = text.strip_prefix(PULLS)?;
+    (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .then(|| n.parse().ok())
+        .flatten()
 }
 
 fn guard_of(text: &str) -> Option<Guard> {
@@ -130,7 +145,7 @@ fn guard_of(text: &str) -> Option<Guard> {
             .strip_suffix('"')?;
         (!name.is_empty() && !name.contains('"')).then(|| name.to_string())
     };
-    if let Some(name) = text.strip_prefix("`fn ").and_then(|t| t.strip_suffix('`')) {
+    if let Some(name) = text.strip_prefix("fn ") {
         let ok = name.starts_with("test_")
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         return ok.then(|| Guard::Test(name.to_string()));
@@ -141,26 +156,15 @@ fn guard_of(text: &str) -> Option<Guard> {
         .or_else(|| quoted("quick check ").map(Guard::Quick))
 }
 
-/// Each way the rows break the record's rules, with the repository at `root`: each key is a key by
-/// [`records::is_key`] and no other row's, and since a row is never removed, no key is reused;
-/// each area is one of [`AREAS`]; each row says what missed it; and each guard stands where it is
-/// declared, so that deleting it fails the record. The order of the rows is free: the days order
-/// them, and two fixes in flight each add their own. That the fix merged is a fact of the history,
-/// which the Commits check reads (`Escaped: <key>`); this reads the tree.
+/// Each way the escapes break the record's rules, with the repository at `root`: each area is one
+/// of [`AREAS`]; each escape says what missed it; and each guard stands where it is declared, so
+/// that deleting it fails the record. A key is a file's name, so it is unique, and since no file
+/// is removed, never reused. That the fix merged is a fact of the history, which the Commits check
+/// reads; this reads the tree.
 pub fn problems(root: &Path, rows: &[Escape]) -> Vec<String> {
     let sources = Sources::read(root);
     let mut out = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
     for r in rows {
-        if !records::is_key(&r.key) {
-            out.push(format!(
-                "{}: no key, which is lowercase words of letters and digits joined by hyphens",
-                r.key
-            ));
-        }
-        if !seen.insert(r.key.as_str()) {
-            out.push(format!("{}: another row has this key", r.key));
-        }
         if !AREAS.contains(&r.area.as_str()) {
             out.push(format!(
                 "{}: the area `{}` is none of {}",
