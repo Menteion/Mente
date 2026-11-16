@@ -2,8 +2,7 @@
 //! tests: every row is checked against the tree, through the one reader of the table, which
 //! `mn escapes` uses too, so that a row and its guard cannot part unseen.
 
-#[path = "../src/escapes.rs"]
-mod escapes;
+use mente_cli::escapes;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,22 +20,21 @@ fn table(rows: &[&str]) -> String {
     )
 }
 
-/// A row that holds, with id `id`, day `day`, area `area`, what missed it `missed` and guard
-/// `guard`.
-fn row(id: &str, day: &str, area: &str, missed: &str, guard: &str) -> String {
+/// A row with key `key`, day `day`, area `area`, what missed it `missed` and guard `guard`.
+fn row(key: &str, day: &str, area: &str, missed: &str, guard: &str) -> String {
     format!(
         "| `{}` | {} | [#129](https://github.com/Menteion/Mente/pull/129) | {} | {} | {} |",
-        id, day, area, missed, guard
+        key, day, area, missed, guard
     )
 }
 
 const LINT: &str = "`fn test_exhaustive_crates_deny_wildcard_arms`";
 
-/// Every row of the record has the next id, a day no earlier than the row above's, one of the
-/// record's areas, what missed it, and a guard declared where its kind is: a Rust test, a check of
-/// the workflow policy, a Node test or a quick check. Deleting a guard fails this test.
+/// Every row of the record has a key no other row has, a day of the calendar, one of the record's
+/// areas, what missed it, and a guard declared where its kind is: a Rust test, a check of the
+/// workflow policy, a Node test or a quick check. Deleting a guard fails this test.
 #[test]
-fn test_every_escape_has_its_id_its_day_its_area_and_a_guard_that_stands() {
+fn test_every_escape_has_a_key_an_area_and_a_guard_that_stands() {
     let text = fs::read_to_string(root().join(escapes::RECORD)).unwrap();
     let rows = escapes::parse(&text).unwrap_or_else(|p| panic!("{}", p.join("\n")));
     assert!(!rows.is_empty(), "{} holds no row", escapes::RECORD);
@@ -44,29 +42,54 @@ fn test_every_escape_has_its_id_its_day_its_area_and_a_guard_that_stands() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// A row is refused for each rule it breaks: a line that does not read as a row, an id out of
-/// turn or repeated, a day before the row above's, an area outside the list, nothing named as
-/// what missed it, and a guard of each kind that is declared nowhere.
+/// A row is refused for each rule it breaks: a line that does not read as a row, a key that is
+/// none or another row's, an area outside the list, nothing named as what missed it, and a guard
+/// of each kind that is declared nowhere. The order of the rows is free.
 #[test]
 fn test_a_row_is_refused_for_each_rule_it_breaks() {
-    let good = row("ESC-001", "2026-11-14", "checker", "No lint.", LINT);
-    let rows = escapes::parse(&table(&[&good])).unwrap();
-    assert_eq!(rows.len(), 1);
+    let good = row(
+        "walker-hid-operands",
+        "2026-11-14",
+        "checker",
+        "No lint.",
+        LINT,
+    );
+    let later = row("generator-gap", "2026-11-13", "MIR", "The generator.", LINT);
+    let rows = escapes::parse(&table(&[&good, &later])).unwrap();
+    assert_eq!(rows.len(), 2);
     assert!(escapes::problems(&root(), &rows).is_empty());
     // Lines that do not read as a row.
     for bad in [
-        row("ESC-001", "2026-02-30", "checker", "No lint.", LINT),
-        row("ESC-001", "14-11-2026", "checker", "No lint.", LINT),
-        row("ESC-001", "2026-11-14", "checker", "No lint.", "test_x"),
         row(
-            "ESC-001",
+            "walker-hid-operands",
+            "2026-02-30",
+            "checker",
+            "No lint.",
+            LINT,
+        ),
+        row(
+            "walker-hid-operands",
+            "14-11-2026",
+            "checker",
+            "No lint.",
+            LINT,
+        ),
+        row(
+            "walker-hid-operands",
+            "2026-11-14",
+            "checker",
+            "No lint.",
+            "test_x",
+        ),
+        row(
+            "walker-hid-operands",
             "2026-11-14",
             "checker",
             "No lint.",
             "`fn helper`",
         ),
         row(
-            "ESC-001",
+            "walker-hid-operands",
             "2026-11-14",
             "checker",
             "No lint.",
@@ -78,28 +101,27 @@ fn test_a_row_is_refused_for_each_rule_it_breaks() {
         assert!(escapes::parse(&table(&[&bad])).is_err(), "{}", bad);
     }
     // Rows that read and break a rule.
-    let second = |day: &str| row("ESC-002", day, "MIR", "The generator.", LINT);
     for (rows, problem) in [
+        (vec![good.clone(), good.clone()], "another row has this key"),
         (
-            vec![good.clone(), good.clone()],
-            "the id of row 2 is ESC-002",
-        ),
-        (vec![second("2026-11-14")], "the id of row 1 is ESC-001"),
-        (
-            vec![good.clone(), second("2026-11-13")],
-            "its day comes before the row above's",
+            vec![row("ESC-001", "2026-11-14", "checker", "No lint.", LINT)],
+            "no key",
         ),
         (
-            vec![row("ESC-001", "2026-11-14", "parser", "No lint.", LINT)],
+            vec![row("Walker-hid", "2026-11-14", "checker", "No lint.", LINT)],
+            "no key",
+        ),
+        (
+            vec![row("walker-hid", "2026-11-14", "parser", "No lint.", LINT)],
             "the area `parser` is none of",
         ),
         (
-            vec![row("ESC-001", "2026-11-14", "checker", "", LINT)],
+            vec![row("walker-hid", "2026-11-14", "checker", "", LINT)],
             "it names no instrument that missed it",
         ),
         (
             vec![row(
-                "ESC-001",
+                "walker-hid",
                 "2026-11-14",
                 "checker",
                 "No lint.",
@@ -109,7 +131,7 @@ fn test_a_row_is_refused_for_each_rule_it_breaks() {
         ),
         (
             vec![row(
-                "ESC-001",
+                "walker-hid",
                 "2026-11-14",
                 "policy",
                 "No check.",
@@ -119,7 +141,7 @@ fn test_a_row_is_refused_for_each_rule_it_breaks() {
         ),
         (
             vec![row(
-                "ESC-001",
+                "walker-hid",
                 "2026-11-14",
                 "harness",
                 "No test.",
@@ -129,7 +151,7 @@ fn test_a_row_is_refused_for_each_rule_it_breaks() {
         ),
         (
             vec![row(
-                "ESC-001",
+                "walker-hid",
                 "2026-11-14",
                 "local checks",
                 "No check.",
@@ -155,7 +177,7 @@ fn test_a_row_is_refused_for_each_rule_it_breaks() {
         "quick check \"MIR mutation gate\"",
     ] {
         let parsed = escapes::parse(&table(&[&row(
-            "ESC-001",
+            "walker-hid",
             "2026-11-14",
             "policy",
             "Something.",
@@ -181,9 +203,9 @@ fn test_escapes_are_counted_per_iso_week_and_per_area() {
         assert_eq!(escapes::week(day), week, "{:?}", day);
     }
     let rows = escapes::parse(&table(&[
-        &row("ESC-001", "2026-11-14", "checker", "A.", LINT),
-        &row("ESC-002", "2026-11-15", "MIR", "B.", LINT),
-        &row("ESC-003", "2026-11-16", "MIR", "C.", LINT),
+        &row("first", "2026-11-14", "checker", "A.", LINT),
+        &row("second", "2026-11-16", "MIR", "C.", LINT),
+        &row("third", "2026-11-15", "MIR", "B.", LINT),
     ]))
     .unwrap();
     assert_eq!(

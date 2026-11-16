@@ -27,13 +27,13 @@ use std::process;
 use std::time::Instant;
 
 use mente_ast::project_spec_blueprint;
+use mente_cli::escapes;
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
 use mente_sema::check_module;
 use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
 
 mod catalogue;
-mod escapes;
 mod fuzz;
 
 /// The language card of the language version this compiler implements, which ships with it

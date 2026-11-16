@@ -5,6 +5,10 @@
 use std::fs;
 use std::path::Path;
 
+// The forms of a record, defined once: a day of the calendar, a key (Norman, 2026-11-17).
+use mente_cli::records;
+use mente_cli::records::is_day;
+
 /// The day from which a decision names the evidence that would reopen it (Norman, 2026-11-13).
 const REOPEN_RULE_FROM: &str = "2026-11-13";
 
@@ -350,32 +354,6 @@ fn entries(register: &str) -> (Vec<Entry>, Vec<String>) {
     (found, malformed)
 }
 
-/// Whether `day` is a day of the calendar written `YYYY-MM-DD`.
-fn is_day(day: &str) -> bool {
-    let shape = day.len() == 10
-        && day.char_indices().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        });
-    if !shape {
-        return false;
-    }
-    let number = |range: std::ops::Range<usize>| day[range].parse::<u32>().unwrap_or(0);
-    let (year, month, date) = (number(0..4), number(5..7), number(8..10));
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let length = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=length).contains(&date)
-}
-
 /// Every day written `YYYY-MM-DD` in a text, whatever precedes it.
 fn days_in(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
@@ -628,6 +606,29 @@ fn test_decided_entries_name_what_would_reopen_them() {
         found.is_empty(),
         "the register's rules for decisions (docs/design-review.md, its introduction):\n{}",
         found.join("\n")
+    );
+}
+
+/// Every entry is named by a key, by the one rule the record of escaped bugs reads too: lowercase
+/// words of letters and digits joined by hyphens, never a number (CLAUDE.md, invariant 1).
+#[test]
+fn test_every_entry_is_named_by_a_key() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let register = fs::read_to_string(root.join("docs/design-review.md")).unwrap();
+    let (read, _) = entries(&register);
+    let bad: Vec<String> = read
+        .iter()
+        .filter(|e| !records::is_key(&e.key))
+        .map(|e| format!("line {}: {}", e.line, e.key))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "entries not named by a key:
+{}",
+        bad.join(
+            "
+"
+        )
     );
 }
 

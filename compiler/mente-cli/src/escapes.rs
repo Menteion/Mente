@@ -2,17 +2,20 @@
 //! author's own checks, the instrument that missed it and the guard its fix added
 //! (`docs/design-review.md`, `guard-per-problem`). The table is read here, once: by `mn escapes`,
 //! which counts the escapes per week and per area, and by the test that checks every row
-//! (`tests/escapes.rs`), which includes this file. No count is written into a document.
+//! (`tests/escapes.rs`), which includes this file. No count is written into a document. A row is
+//! named by a key, as the register's entries are, by the one rule of [`crate::records`].
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use crate::records;
+
 /// The record, from the repository's root.
 pub const RECORD: &str = "docs/escapes.md";
 
 /// The table's header, exactly.
-pub const HEADER: &str = "| Id | Date | Fixed by | Area | Missed by | Guard |";
+pub const HEADER: &str = "| Key | Date | Fixed by | Area | Missed by | Guard |";
 
 /// The areas an escape may be in, so that the counts per area are not split by a spelling.
 pub const AREAS: &[&str] = &[
@@ -46,8 +49,8 @@ pub enum Guard {
 /// One row of the record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Escape {
-    pub id: String,
-    /// The day the fix merged.
+    pub key: String,
+    /// The day the escape was found.
     pub date: (i32, u32, u32),
     /// The pull request that merged the fix.
     pub pull: u32,
@@ -84,11 +87,11 @@ fn row(line: &str) -> Result<Escape, String> {
         .split('|')
         .map(str::trim)
         .collect();
-    let [id, date, pull, area, missed, guard] = cells[..] else {
+    let [key, date, pull, area, missed, guard] = cells[..] else {
         return Err(format!("{} cells, not 6", cells.len()));
     };
     Ok(Escape {
-        id: id.trim_matches('`').to_string(),
+        key: key.trim_matches('`').to_string(),
         date: day(date).ok_or("a date that is no day `YYYY-MM-DD`")?,
         pull: pull_number(pull).ok_or("a fix that is no link `[#N](...pull/N)`")?,
         area: area.to_string(),
@@ -99,33 +102,16 @@ fn row(line: &str) -> Result<Escape, String> {
     })
 }
 
+/// A day of the calendar, by the one rule of [`records::is_day`].
 fn day(text: &str) -> Option<(i32, u32, u32)> {
-    let mut parts = text.split('-');
-    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() || y.len() != 4 || m.len() != 2 || d.len() != 2 {
+    if !records::is_day(text) {
         return None;
     }
-    let (y, m, d) = (y.parse().ok()?, m.parse().ok()?, d.parse().ok()?);
-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    (1..=12)
-        .contains(&m)
-        .then_some(())
-        .filter(|()| (1..=days[(m - 1) as usize]).contains(&d))
-        .map(|()| (y, m, d))
+    Some((
+        text[0..4].parse().ok()?,
+        text[5..7].parse().ok()?,
+        text[8..10].parse().ok()?,
+    ))
 }
 
 /// `[#N](https://github.com/Menteion/Mente/pull/N)`, the same `N` twice.
@@ -155,39 +141,41 @@ fn guard_of(text: &str) -> Option<Guard> {
         .or_else(|| quoted("quick check ").map(Guard::Quick))
 }
 
-/// Each way the rows break the record's rules, with the repository at `root`: each id is the next
-/// of `ESC-001`, `ESC-002`, ..., so that ids are unique and none is reused; the days never go
-/// back; each area is one of [`AREAS`]; each row says what missed it; and each guard stands where
-/// it is declared, so that deleting it fails the record. That the fix merged is a fact of the
-/// history, which the Commits check reads (`Escaped: <id>`); this reads the tree.
+/// Each way the rows break the record's rules, with the repository at `root`: each key is a key by
+/// [`records::is_key`] and no other row's, and since a row is never removed, no key is reused;
+/// each area is one of [`AREAS`]; each row says what missed it; and each guard stands where it is
+/// declared, so that deleting it fails the record. The order of the rows is free: the days order
+/// them, and two fixes in flight each add their own. That the fix merged is a fact of the history,
+/// which the Commits check reads (`Escaped: <key>`); this reads the tree.
 pub fn problems(root: &Path, rows: &[Escape]) -> Vec<String> {
     let sources = Sources::read(root);
     let mut out = Vec::new();
-    let mut last = (0, 0, 0);
-    for (k, r) in rows.iter().enumerate() {
-        let expected = format!("ESC-{:03}", k + 1);
-        if r.id != expected {
-            out.push(format!("{}: the id of row {} is {}", r.id, k + 1, expected));
+    let mut seen = std::collections::BTreeSet::new();
+    for r in rows {
+        if !records::is_key(&r.key) {
+            out.push(format!(
+                "{}: no key, which is lowercase words of letters and digits joined by hyphens",
+                r.key
+            ));
         }
-        if r.date < last {
-            out.push(format!("{}: its day comes before the row above's", r.id));
+        if !seen.insert(r.key.as_str()) {
+            out.push(format!("{}: another row has this key", r.key));
         }
-        last = r.date;
         if !AREAS.contains(&r.area.as_str()) {
             out.push(format!(
                 "{}: the area `{}` is none of {}",
-                r.id,
+                r.key,
                 r.area,
                 AREAS.join(", ")
             ));
         }
         if r.missed.is_empty() {
-            out.push(format!("{}: it names no instrument that missed it", r.id));
+            out.push(format!("{}: it names no instrument that missed it", r.key));
         }
         if !sources.holds(&r.guard) {
             out.push(format!(
                 "{}: its guard {:?} is declared nowhere",
-                r.id, r.guard
+                r.key, r.guard
             ));
         }
     }
