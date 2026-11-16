@@ -2,10 +2,11 @@
 // run and the syntax probe hold no API key, and send each request to the broker over its socket,
 // one JSON line each way. A broker that is not there, that goes away, or that answers what the
 // harness cannot read fails the run with a message saying so, and so does one that refuses a
-// request it does not send or an answer from another model than the one asked; one that refuses a
-// request past the run's limits ends the run as its budget would.
+// request it does not send or for a run's anomaly (an answer from another model than the one
+// asked, and every request after an anomaly); one that refuses a request past the run's limits
+// ends the run as its budget would.
 import net from "node:net";
-import type { Answer } from "./broker.ts";
+import { anomalyOf, type Anomaly, type Answer } from "./broker.ts";
 
 /** A connection to the broker: one request out, its answer back. */
 export interface BrokerLink {
@@ -15,18 +16,26 @@ export interface BrokerLink {
 
 /**
  * A request the broker refused: one it does not send; or, when `exhausted`, one past the run's
- * limits, which ends the run as its budget would; or, when `wrongModel`, one the API answered from
- * a model other than the one asked, which was billed and fails the run.
+ * limits, which ends the run as its budget would; or, with an `anomaly`, one for the run's anomaly,
+ * which fails the run: an answer from another model, which was `billed`, or any request after the
+ * run's first anomaly, which was not sent.
  */
 export class BrokerRefused extends Error {
   exhausted: boolean;
-  wrongModel: boolean;
+  anomaly: Anomaly | null;
+  billed: boolean;
 
-  constructor(message: string, exhausted: boolean, wrongModel = false) {
+  constructor(message: string, exhausted: boolean, anomaly: Anomaly | null = null, billed = false) {
     super(message);
     this.exhausted = exhausted;
-    this.wrongModel = wrongModel;
+    this.anomaly = anomaly;
+    this.billed = billed;
   }
+}
+
+/** The refusal a broker's answer line holds, read the one way the harness reads it. */
+export function refusalOf(r: { refused: string; exhausted?: unknown; anomaly?: unknown; billed?: unknown }): BrokerRefused {
+  return new BrokerRefused(`the broker refused the request: ${r.refused}`, r.exhausted === true, anomalyOf(r.anomaly), r.billed === true);
 }
 
 /** The broker is not there, is gone, gave no answer in time, or answered what cannot be read. */
@@ -66,7 +75,7 @@ export function connectBroker(path: string, timeoutMs = 20 * 60_000): Promise<Br
       }
       waiting.delete(r.id);
       clearTimeout(w.timer);
-      if (typeof r.refused === "string") w.fail(new BrokerRefused(`the broker refused the request: ${r.refused}`, r.exhausted === true, r.wrongModel === true));
+      if (typeof r.refused === "string") w.fail(refusalOf(r));
       else if (typeof r.status === "number" && typeof r.text === "string") w.done({ status: r.status, retryAfter: String(r.retryAfter ?? ""), text: r.text });
       else breakAll(new BrokerBroken(`the broker answered what the harness cannot read: ${line.slice(0, 200)}`));
     };

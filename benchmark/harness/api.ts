@@ -12,7 +12,7 @@
 // costs, never what the model is shown.
 
 import { readFileSync } from "node:fs";
-import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
+import { ANOMALIES, readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Anomaly, type Answer } from "./broker.ts";
 import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -115,6 +115,16 @@ export function settle(b: Budget, worst: number, cost: number): void {
 /** A lost answer is sent again this many times; each try counts as spent at its most. */
 export const NETWORK_RETRIES = 3;
 
+/** A call whose answer the run cannot stand on (Anomaly in broker.ts), which fails the run. */
+export class RunAnomaly extends Error {
+  anomaly: Anomaly;
+
+  constructor(anomaly: Anomaly, message: string) {
+    super(message);
+    this.anomaly = anomaly;
+  }
+}
+
 /**
  * One call within the budget, or null when the budget stops it: the harness's own, reckoned as the
  * broker reckons it from the same body, or the broker's limits, which end the run as the budget
@@ -124,24 +134,32 @@ export async function budgetedCall(post: Post, budget: Budget, body: object, mod
   const worst = worstCost(body, model);
   for (let tries = 0; ; tries++) {
     if (!reserve(budget, worst)) return null;
+    let reply: Reply;
     try {
-      const reply = await send(post, body);
-      const cost = callCost(reply.usage, model, worst);
-      settle(budget, worst, cost);
-      return { reply, cost };
+      reply = await send(post, body);
     } catch (e) {
       // A lost answer may still have been billed, so it counts at its most. So does an answer the
-      // broker refused as another model's, as the broker counts it; after it the budget, like the
-      // broker, admits nothing more: the run fails on it.
-      const another = e instanceof BrokerRefused && e.wrongModel;
-      settle(budget, worst, e instanceof NetworkError || another ? worst : 0);
-      if (another) budget.stopped = true;
-      if (e instanceof BrokerRefused && e.exhausted) {
+      // broker refused as another model's, as the broker counts it. After a refusal for the run's
+      // anomaly the budget, like the broker, admits nothing more: the run fails on it.
+      const refused = e instanceof BrokerRefused ? e : null;
+      settle(budget, worst, e instanceof NetworkError || refused?.billed === true ? worst : 0);
+      if (refused?.anomaly) budget.stopped = true;
+      if (refused?.exhausted) {
         budget.stopped = true;
         return null;
       }
       if (!(e instanceof NetworkError) || tries >= NETWORK_RETRIES) throw e;
+      continue;
     }
+    const cost = callCost(reply.usage, model, worst);
+    settle(budget, worst, cost);
+    // A usage that costs more than the most its request could cannot be honest: it counts, since it
+    // was spent, and the run fails on it, its answer unrecorded, as the broker, which closes, has it.
+    if (cost > worst) {
+      budget.stopped = true;
+      throw new RunAnomaly("past its worst", `${ANOMALIES["past its worst"]}: $${cost}, where the most was $${worst}`);
+    }
+    return { reply, cost };
   }
 }
 

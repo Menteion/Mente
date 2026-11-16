@@ -65,7 +65,7 @@ import {
 } from "./build.ts";
 import { LANGUAGES, odinProgram, parseSignature, rustProgram, type Lang, type Signature } from "./languages.ts";
 import { feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
-import { failureOf, summarize, type RunRecord } from "./report.ts";
+import { firstFailure, summarize, type RunRecord } from "./report.ts";
 import { extractProgram, parseCase, parseTask, type Case, type CaseResult, type Task } from "./tasks.ts";
 import { own, setOwn } from "../own.mjs";
 
@@ -418,9 +418,9 @@ async function main(): Promise<void> {
           console.log(`[${done.length}/${specs.length}] ${spec.name}: ${outcome} after ${record.repairs} repairs, $${record.cost.toFixed(4)}`);
         } else console.log(`[${done.length}/${specs.length}] a held-out run finished`);
       } catch (e) {
-        // A held-out run's error names only the API status, or that another model answered, never
-        // the task.
-        failure = failureOf(e, spec.set, spec.name);
+        // The first failure stands; a held-out run's names only the run's anomaly, the API status or
+        // the error's kind, never the task.
+        failure = firstFailure(failure, e, spec.set, spec.name);
         budget.stopped = true;
       }
     }

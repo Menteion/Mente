@@ -17,7 +17,8 @@
 // earlier replies, the thinking blocks it wrote), and the 5-minute cache, which is all it can price.
 // It hands back only an answer that names, as the model that wrote it, one the requested model may
 // come back as (answeredAs in broker-limits.json), and refuses any other, so that no result is
-// recorded for a model that did not write it; after one, it admits nothing more.
+// recorded for a model that did not write it. After one, or after an answer billed past the most
+// its request could cost, it admits nothing more, and the run fails (Anomaly).
 //
 // It spends within the run's limits, which it reads at its start from broker-limits.json beside
 // it: at most maxRequests requests, at most maxInFlight at once over at most maxConnections
@@ -223,8 +224,27 @@ export function wrongModel(said: unknown, requested: string, limits: Pick<Limits
   return (limits.answeredAs.get(requested) ?? []).includes(said) ? null : { answered: said };
 }
 
+/**
+ * What makes a run fail and the broker admit nothing more for the rest of it: an answer from another
+ * model than the one asked (WrongModel), or an answer whose usage cost more than the most its request
+ * could, which no honest usage does (the re-check of 2ead2d4: 200,000 output tokens against a
+ * max_tokens of 16,000 spent $0.10 of a $0.05 cap).
+ */
+export type Anomaly = "another model" | "past its worst";
+
+/** Each anomaly as a run's record and the broker's refusals say it, naming no task. */
+export const ANOMALIES: Record<Anomaly, string> = {
+  "another model": "an answer came from another model than the one asked",
+  "past its worst": "an answer was billed past the most its request could cost",
+};
+
+/** An anomaly named by a value from elsewhere, a refusal line or an error, or null when it names none. */
+export function anomalyOf(value: unknown): Anomaly | null {
+  return typeof value === "string" && Object.hasOwn(ANOMALIES, value) ? (value as Anomaly) : null;
+}
+
 /** The fields of a usage the broker prices. */
-const PRICED = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+const PRICED =["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
 
 /**
  * Whether a field of a usage that the broker does not price costs nothing as the API reported it:
@@ -428,12 +448,12 @@ export class Broker {
   reserved = 0;
   requests = 0;
   inFlight = 0;
-  /** Whether an answer from another model than the one asked has come back: the broker then admits nothing more this run. */
-  closed = false;
+  /** The run's first anomaly, after which the broker admits nothing more, or null while there is none. */
+  closed: Anomaly | null = null;
 
   /**
-   * Where the broker says, once a run each, what it could not price and which answers from another
-   * model it refused: its log, by default, each line made by logLine.
+   * Where the broker says, once a run each, what it could not price and each anomaly it met: its
+   * log, by default, each line made by logLine.
    */
   note: (line: string) => void;
   /** What it has said, so that each is said once a run. */
@@ -483,7 +503,9 @@ export class Broker {
       return answer({ refused: "a request the broker cannot read" });
     }
     if (typeof request?.id === "number" || typeof request?.id === "string") id = request.id;
-    if (this.closed) return answer({ refused: "a request after an answer from another model than the one asked: the broker admits nothing more this run" });
+    // After the run's first anomaly nothing more is sent; the refusal names that anomaly, so that a
+    // run whose requests race it fails for it, whichever answer the harness reads first.
+    if (this.closed !== null) return answer({ refused: `the broker admits nothing more this run: ${ANOMALIES[this.closed]}`, anomaly: this.closed });
     const shaped = shape(request?.body, this.limits);
     if ("refused" in shaped) return answer({ refused: shaped.refused });
     const bytes = utf8Length(shaped.text);
@@ -525,17 +547,26 @@ export class Broker {
     // model's most, a Haiku request answered as Sonnet took $1.05 of a $0.05 cap). The run fails on
     // it, so the broker admits nothing more, and what such answers cost stops at what is in flight.
     // The harness counts it alike, and stops alike.
+    const say = logLine(this.key);
     const wrong = wrongModel(model, shaped.model, this.limits);
     if (wrong !== null) {
       this.spent += worst;
-      this.closed = true;
-      const line = logLine(this.key);
+      this.closed ??= "another model";
       const allowed = (this.limits.answeredAs.get(shaped.model) ?? []).join(", ");
-      const why = "answered" in wrong ? line`the broker refuses an answer from the model ${wrong.answered} to a request for ${shaped.model}, which may come back only as ${allowed}` : line`the broker refuses an answer that names no model to a request for ${shaped.model}`;
+      const why = "answered" in wrong ? say`the broker refuses an answer from the model ${wrong.answered} to a request for ${shaped.model}, which may come back only as ${allowed}` : say`the broker refuses an answer that names no model to a request for ${shaped.model}`;
       this.noteOnce({ requested: shaped.model, ...wrong }, why);
-      return answer({ refused: why, wrongModel: true });
+      return answer({ refused: why, anomaly: "another model", billed: true });
     }
-    this.spent += this.cost(usage, price, worst);
+    // A usage that costs more than the most its request could cannot be honest. The money is spent,
+    // so the ledger counts what the usage says, and the run's cap may be passed by it alone; the run
+    // fails on it, so the broker admits nothing more. The answer goes back, so that the harness
+    // reckons the same cost from the same usage, fails alike, and records nothing of it.
+    const cost = this.cost(usage, price, worst);
+    this.spent += cost;
+    if (cost > worst) {
+      this.closed ??= "past its worst";
+      this.noteOnce({ pastItsWorst: true }, say`the broker counted a request at $${cost}, past the $${worst} it reserved for it: no honest usage costs more, so it admits nothing more this run`);
+    }
     return answer({ status: reply.status, retryAfter: reply.retryAfter, text: reply.text });
   }
 }

@@ -9,9 +9,9 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
+import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, RunAnomaly, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
 import { Broker, httpPost, LOG_LINE_MAX, lineReader, logLine, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, wrongModel, type Answer, type Price } from "./broker.ts";
-import { BrokerBroken, BrokerRefused, connectBroker } from "./brokered.ts";
+import { BrokerBroken, BrokerRefused, connectBroker, refusalOf } from "./brokered.ts";
 import {
   BASH,
   REPOSITORY,
@@ -54,7 +54,7 @@ import {
   splitTop,
 } from "./languages.ts";
 import { failureText, feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, withoutFrontMatter } from "./prompts.ts";
-import { failureOf, median, summarize, type RunRecord } from "./report.ts";
+import { failureOf, firstFailure, median, summarize, type RunRecord } from "./report.ts";
 import { own, setOwn } from "../own.mjs";
 import {
   extractProgram,
@@ -1231,12 +1231,12 @@ test("the harness stops at its budget before the broker refuses, and as at its b
   const swapped = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: JSON.stringify({ model: "claude-haiku-5-5", content: [], usage: { input_tokens: 1, output_tokens: 1 } }) })).broker;
   const swappedPost = async (body: object) => {
     const answer = JSON.parse(await swapped.handle(request(1, body)));
-    if (typeof answer.refused === "string") throw new BrokerRefused(answer.refused, answer.exhausted === true, answer.wrongModel === true);
+    if (typeof answer.refused === "string") throw refusalOf(answer);
     return answer as Answer;
   };
   const ledger: Budget = { limit: 10, spent: 0, reserved: 0, stopped: false };
   const asked = requestBody("claude-sonnet-5-5", "S", [{ role: "user", content: "x" }]);
-  await assert.rejects(budgetedCall(swappedPost, ledger, asked, sonnet), (e: unknown) => e instanceof BrokerRefused && e.wrongModel);
+  await assert.rejects(budgetedCall(swappedPost, ledger, asked, sonnet), (e: unknown) => e instanceof BrokerRefused && e.anomaly === "another model" && e.billed);
   assert.ok(Math.abs(ledger.spent - worstCost(asked, sonnet)) < 1e-12, `the harness counted $${ledger.spent}, not Sonnet's most`);
   assert.ok(Math.abs(ledger.spent - swapped.spent) < 1e-12, `the harness counted $${ledger.spent}, the broker $${swapped.spent}`);
   assert.deepEqual([ledger.reserved, ledger.stopped], [0, true]);
@@ -1397,14 +1397,14 @@ test("the broker hands back no answer from another model than the one asked: it 
   const { broker, notes, posts } = answering("claude-sonnet-5-5");
   const first = JSON.parse(await broker.handle(request(1, haiku())));
   assert.equal(first.refused, 'the broker refuses an answer from the model "claude-sonnet-5-5" to a request for "claude-haiku-5-5", which may come back only as "claude-haiku-5-5"');
-  assert.deepEqual([first.wrongModel, first.exhausted, first.status, first.text], [true, undefined, undefined, undefined], "the broker handed back another model's answer");
+  assert.deepEqual([first.anomaly, first.billed, first.exhausted, first.status, first.text], ["another model", true, undefined, undefined, undefined], "the broker handed back another model's answer");
   // Billed, at the requested model's worst, which admission reserved, so that the run's cap holds.
   assert.ok(Math.abs(broker.spent - brokerWorst(JSON.stringify(haiku()), 100, limits.models.get("claude-haiku-5-5") as Price, limits, 0)) < 1e-12, `spent ${broker.spent}`);
   assert.equal(broker.reserved, 0);
   // The run fails on it, so the broker admits nothing more: the next request is refused, unsent.
   const after = JSON.parse(await broker.handle(request(2, haiku())));
-  assert.match(after.refused, /admits nothing more this run/);
-  assert.deepEqual([after.wrongModel, after.exhausted], [undefined, undefined]);
+  assert.equal(after.refused, "the broker admits nothing more this run: an answer came from another model than the one asked");
+  assert.deepEqual([after.anomaly, after.billed, after.exhausted], ["another model", undefined, undefined]);
   assert.equal(posts.length, 1);
   assert.deepEqual(notes, [first.refused]);
   // An answer that names no model, and one whose name would write a line of its own: each refused,
@@ -1418,7 +1418,7 @@ test("the broker hands back no answer from another model than the one asked: it 
   // An answer that is no JSON names no model either, and the key never reaches the refusal.
   const garbled = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: `no JSON ${KEY}` }));
   const line = await garbled.broker.handle(request(1, haiku()));
-  assert.equal(JSON.parse(line).wrongModel, true);
+  assert.equal(JSON.parse(line).anomaly, "another model");
   assert.ok(!line.includes(KEY));
   // An answer from the model asked is handed back, priced by its usage; an error status, which
   // names no model and is not billed, is handed back as it was.
@@ -1458,13 +1458,87 @@ test("answers from another model keep the run within its cap, whatever is in fli
   assert.match(JSON.parse(await broker.handle(request(5, big))).refused, /past its \$0\.05/);
   release();
   const answers = (await Promise.all(flying)).map((line) => JSON.parse(line));
-  assert.ok(answers.every((a) => a.wrongModel === true), JSON.stringify(answers));
+  assert.ok(answers.every((a) => a.anomaly === "another model" && a.billed === true), JSON.stringify(answers));
   assert.ok(broker.spent <= broker.cap, `spent $${broker.spent} of a $${broker.cap} cap`);
   assert.ok(Math.abs(broker.spent - 4 * brokerWorst(JSON.stringify(big), MAX_TOKENS, limits.models.get("claude-haiku-5-5") as Price, limits, 0)) < 1e-12, `spent $${broker.spent}`);
   assert.ok(Math.abs(broker.reserved) < 1e-12, `reserved $${broker.reserved}`);
   assert.equal(notes.length, 1, "four refusals of one mismatch were said more than once");
   assert.match(JSON.parse(await broker.handle(request(6, haiku()))).refused, /admits nothing more/);
   assert.equal(posts.length, 4);
+});
+
+test("a run whose requests race its anomaly fails for that anomaly, and its first failure stands", async () => {
+  // The re-check of 2ead2d4: each worker of the benchmark wrote its error over the last, so a racing
+  // worker's refusal after the broker closed could replace the wrong-model failure, and a held-out
+  // run then read "Error". Two workers' calls, each with its own budget, as if the harness's stop
+  // had not yet reached the second: one answered as Haiku to a request for Sonnet, which closes the
+  // broker, and one sent after it.
+  const sonnet = own(KNOWN_MODELS, "claude-sonnet-5-5");
+  const { broker, posts } = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: JSON.stringify({ model: "claude-haiku-5-5", content: [], usage: { input_tokens: 1, output_tokens: 1 } }) }));
+  const post = async (body: object) => {
+    const answer = JSON.parse(await broker.handle(request(1, body)));
+    if (typeof answer.refused === "string") throw refusalOf(answer);
+    return answer as Answer;
+  };
+  const asked = requestBody("claude-sonnet-5-5", "S", [{ role: "user", content: "x" }]);
+  const failed = () => budgetedCall(post, { limit: 10, spent: 0, reserved: 0, stopped: false }, asked, sonnet).then(() => null, (e: unknown) => e);
+  const wrong = await failed();
+  const after = await failed();
+  assert.ok(wrong instanceof BrokerRefused && wrong.billed && wrong.anomaly === "another model", String(wrong));
+  assert.ok(after instanceof BrokerRefused && !after.billed && after.anomaly === "another model", String(after));
+  assert.equal(posts.length, 1);
+  // Read in either order, a held-out run fails for the anomaly, and the first failure stands.
+  for (const order of [
+    [wrong, after],
+    [after, wrong],
+  ]) {
+    let held = "";
+    let open = "";
+    for (const e of order) {
+      held = firstFailure(held, e, "held-out", "held-out-3-mente");
+      open = firstFailure(open, e, "public", "gcd-mente-claude-sonnet-5-5-1");
+    }
+    assert.equal(held, "a held-out run failed: an answer came from another model than the one asked");
+    assert.equal(open, `gcd-mente-claude-sonnet-5-5-1: ${(order.at(0) as Error).message}`);
+  }
+  // The benchmark records its failures so.
+  assert.match(readFileSync(join(REPOSITORY, "benchmark", "harness", "bench.ts"), "utf8"), /\bfailure = firstFailure\(failure, e, spec\.set, spec\.name\);/);
+});
+
+test("an answer billed past the most its request could cost counts as billed, and fails the run as another model's does", async () => {
+  // The re-check of 2ead2d4: 200,000 output tokens against a max_tokens of 16,000, from the model
+  // asked, spent $0.10 of a $0.05 cap, and the run went on. No honest usage costs more than its
+  // request could: the money is spent, so both ledgers count what the usage says, and both then
+  // admit nothing more, the broker saying so once.
+  const limits = readLimits(LIMITS_TEXT);
+  const haikuModel = own(KNOWN_MODELS, "claude-haiku-5-5");
+  const usage = { input_tokens: 10, output_tokens: 200_000 };
+  const { broker, notes, posts } = fakeBroker(0.05, (body) => ({ status: 200, retryAfter: "", text: asAsked(body, { content: [{ type: "text", text: "a program" }], stop_reason: "end_turn", usage }) }));
+  const post = async (body: object) => {
+    const answer = JSON.parse(await broker.handle(request(1, body)));
+    if (typeof answer.refused === "string") throw refusalOf(answer);
+    return answer as Answer;
+  };
+  const body = requestBody("claude-haiku-5-5", "S", [{ role: "user", content: "x" }]);
+  const ledger: Budget = { limit: 0.05, spent: 0, reserved: 0, stopped: false };
+  await assert.rejects(budgetedCall(post, ledger, body, haikuModel), (e: unknown) => e instanceof RunAnomaly && e.anomaly === "past its worst");
+  const billed = usageCost(usage, limits.models.get("claude-haiku-5-5") as Price, limits, 0);
+  assert.ok(billed > worstCost(body, haikuModel) && billed > 0.05, String(billed));
+  assert.ok(Math.abs(broker.spent - billed) < 1e-12, `the broker counted $${broker.spent}, not the $${billed} billed`);
+  assert.ok(Math.abs(ledger.spent - broker.spent) < 1e-12, `the harness counted $${ledger.spent}, the broker $${broker.spent}`);
+  assert.deepEqual([broker.closed, ledger.stopped], ["past its worst", true]);
+  assert.equal(notes.length, 1);
+  assert.match(notes.at(0) ?? "", /past the \$[0-9.e-]+ it reserved for it/);
+  // Nothing more is sent, by the harness or by the broker.
+  assert.equal(await budgetedCall(post, ledger, body, haikuModel), null);
+  const after = JSON.parse(await broker.handle(request(2, haiku())));
+  assert.deepEqual([after.anomaly, after.billed], ["past its worst", undefined]);
+  assert.equal(posts.length, 1);
+  // A usage at the worst exactly is honest: every byte of the body written to the cache, and the
+  // most output.
+  const exact = fakeBroker(10, (sent) => ({ status: 200, retryAfter: "", text: asAsked(sent, { usage: { input_tokens: 0, cache_creation_input_tokens: utf8Length(sent), output_tokens: 100 } }) }));
+  assert.equal(JSON.parse(await exact.broker.handle(request(1, haiku()))).status, 200);
+  assert.deepEqual([exact.broker.closed, exact.notes], [null, []]);
 });
 
 test("every harness that calls the API records, in each attempt, the model that wrote the answer", () => {
@@ -1482,13 +1556,18 @@ test("every harness that calls the API records, in each attempt, the model that 
 });
 
 test("a measured run's failure names its run and error, and a held-out run's only the API's status or that another model answered", () => {
-  const wrong = new BrokerRefused('the broker refused the request: the broker refuses an answer from the model "claude-sonnet-5-5" to a request for "claude-haiku-5-5"', false, true);
+  const wrong = new BrokerRefused('the broker refused the request: the broker refuses an answer from the model "claude-sonnet-5-5" to a request for "claude-haiku-5-5"', false, "another model", true);
   assert.equal(failureOf(wrong, "public", "gcd-mente-claude-haiku-5-5-1"), `gcd-mente-claude-haiku-5-5-1: ${wrong.message}`);
   assert.equal(failureOf(wrong, "held-out", "held-out-3-mente"), "a held-out run failed: an answer came from another model than the one asked");
   assert.equal(failureOf(new Error("the API answered 400: a held-out task's text"), "held-out", "held-out-3-mente"), "a held-out run failed: the API answered 400");
   assert.equal(failureOf(new BrokerRefused("a model it does not name", false), "held-out", "held-out-3-mente"), "a held-out run failed: Error");
   assert.equal(failureOf("no error", "held-out", "held-out-3-mente"), "a held-out run failed: Error");
   assert.equal(failureOf("no error", "public", "gcd"), "gcd: no error");
+  // An answer billed past its worst, and a refusal after either anomaly, are named as their anomaly.
+  assert.equal(failureOf(new RunAnomaly("past its worst", "an answer was billed past the most its request could cost: $0.1, where the most was $0.008"), "held-out", "held-out-3-mente"), "a held-out run failed: an answer was billed past the most its request could cost");
+  assert.equal(failureOf(refusalOf({ refused: "the broker admits nothing more this run: x", anomaly: "past its worst" }), "held-out", "held-out-3-mente"), "a held-out run failed: an answer was billed past the most its request could cost");
+  assert.equal(failureOf(refusalOf({ refused: "x", anomaly: "toString" }), "held-out", "held-out-3-mente"), "a held-out run failed: Error", "a name no anomaly has was read as one");
+  assert.equal(failureOf(null, "held-out", "held-out-3-mente"), "a held-out run failed: Error");
 });
 
 test("every line the broker writes to its log is its own words, with what it did not author as JSON, the key out, and a cap", () => {
@@ -1648,7 +1727,7 @@ test("the harness fails clearly when the broker is not there, goes away, refuses
           if (id === 2) conn.write(`${JSON.stringify({ id, status: 200, retryAfter: "", text: "two" })}\n`);
           if (id === 3) conn.write(`${JSON.stringify({ id, refused: "a model it does not name" })}\n`);
           if (id === 4) conn.write(`${JSON.stringify({ id, refused: "a request past the run's 2", exhausted: true })}\n`);
-          if (id === 5) conn.write(`${JSON.stringify({ id, refused: "an answer from the model \"claude-sonnet-5-5\"", wrongModel: true })}\n`);
+          if (id === 5) conn.write(`${JSON.stringify({ id, refused: "an answer from the model \"claude-sonnet-5-5\"", anomaly: "another model", billed: true })}\n`);
           if (id === 6) conn.write("garbage\n");
         }
       });
@@ -1657,9 +1736,9 @@ test("the harness fails clearly when the broker is not there, goes away, refuses
     const link = await connectBroker(at);
     const [one, two] = await Promise.all([link.post({}), link.post({})]);
     assert.deepEqual([one.text, two.text], ["one", "two"]);
-    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && !e.exhausted && !e.wrongModel);
-    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && e.exhausted && !e.wrongModel);
-    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && e.wrongModel && !e.exhausted);
+    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && !e.exhausted && e.anomaly === null && !e.billed);
+    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && e.exhausted && e.anomaly === null);
+    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && e.anomaly === "another model" && e.billed && !e.exhausted);
     await assert.rejects(link.post({}), /cannot read: garbage/);
     await assert.rejects(link.post({}), BrokerBroken, "a broken link took another request");
     // A broker that goes away while a request waits, and one that never answers.
