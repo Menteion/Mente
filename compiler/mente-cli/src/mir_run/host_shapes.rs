@@ -5,12 +5,12 @@
 //! for its nesting.
 //!
 //! The constructs come from the tables of the generator's coverage (`coverage.rs`): every
-//! construct of an expression, an operator, an argument, a statement, an assignment and an arm,
-//! each compound assignment, and each place an assignment writes, must stand on the path from a
-//! shape's body to its recursive call, unless it holds no expression or no checked program has it
-//! ([`HOLDS_NO_CALL`], `coverage::NOT_GENERATED`). So a new construct is measured, or a test fails,
-//! without anyone remembering to add it, and each operator and compound assignment is a shape of
-//! its own, written from its table.
+//! construct of an expression, an operator, an argument, a statement, an assignment, an arm, a
+//! function's contract and a loop's clauses, each compound assignment, and each place an
+//! assignment writes, must stand on the path from a shape's body to its recursive call, unless it
+//! holds no expression or no checked program has it ([`HOLDS_NO_CALL`], `coverage::NOT_GENERATED`).
+//! So a new construct is measured, or a test fails, without anyone remembering to add it, and each
+//! operator and compound assignment is a shape of its own, written from its table.
 
 use std::collections::BTreeSet;
 
@@ -34,6 +34,14 @@ pub(super) const HOLDS_NO_CALL: &[(&str, &str)] = &[
     ("return", "a `return` without a value holds no expression"),
     ("break", "`break` holds no expression"),
     ("continue", "`continue` holds no expression"),
+    (
+        "loop without an invariant",
+        "a loop without an invariant holds no clause",
+    ),
+    (
+        "loop without decreases",
+        "a loop without decreases holds no clause",
+    ),
 ];
 
 /// The places an assignment writes, by the construct its place is.
@@ -110,6 +118,45 @@ fn in_blocks(
         move |i| format!("if n > 0 {{\n{}", head(i)),
         move |i| format!("{}\n}} else {{\n  0\n}}", tail(i)),
     )
+}
+
+/// The call `q(n - 1)` in `k` nested `if`s: a clause's measure.
+fn guarded(k: usize) -> String {
+    format!(
+        "({}q(n - 1){})",
+        "if n > 0 {\n".repeat(k),
+        "\n} else {\n  0\n}".repeat(k)
+    )
+}
+
+/// `q` whose call stands in a clause of its own, `clause(k)`; its body returns 0 after the pad.
+fn in_clause(name: &str, clause: fn(usize) -> String) -> Shape {
+    Shape {
+        name: name.to_string(),
+        text: Box::new(move |k| {
+            format!(
+                "module m\npub fn q(n: u32) -> u32\n  {}\n{{\n{}0\n}}\n",
+                clause(k),
+                PAD
+            )
+        }),
+        args: Box::new(|_| count()),
+    }
+}
+
+/// `q` whose call stands in a clause, `clause(k)`, of a loop of one round in its body.
+fn in_loop(name: &str, clause: fn(usize) -> String) -> Shape {
+    Shape {
+        name: name.to_string(),
+        text: Box::new(move |k| {
+            format!(
+                "module m\npub fn q(n: u32) -> u32 {{\n{}var i: u32 = 0\nwhile i < 1 {} {{\n  i += 1\n}}\n0\n}}\n",
+                PAD,
+                clause(k)
+            )
+        }),
+        args: Box::new(|_| count()),
+    }
 }
 
 const STRUCT: &str = "struct S {\n  x: u32\n}\n";
@@ -338,6 +385,16 @@ fn shapes() -> Vec<Shape> {
         };
         out.push(shape);
     }
+    // Each clause a call can stand in: a function's contract, and a loop's.
+    out.extend([
+        in_clause("requires", |k| format!("requires {} >= 0", guarded(k))),
+        in_clause("ensures", |k| format!("ensures {} >= 0", guarded(k))),
+        in_clause("decreases", |k| format!("decreases {}", guarded(k))),
+        in_loop("loop invariant", |k| {
+            format!("invariant {} >= 0", guarded(k))
+        }),
+        in_loop("loop decreases", |k| format!("decreases {}", guarded(k))),
+    ]);
     // Each compound assignment of the table, to an element, whose place is read and written.
     for op in coverage::compound_assignments() {
         let name = format!("compound assignment {}", op);
@@ -459,8 +516,26 @@ fn constructs(m: &CheckedModule) -> BTreeSet<String> {
                 _ => {}
             }
         }
+        for c in q.syntax.contracts.iter() {
+            if holds(tree.expr(c.expr).span, call) {
+                out.insert(coverage::contract_kind(c).to_string());
+            }
+        }
         for s in tree.stmts.iter().filter(|s| holds(s.span, call)) {
             out.insert(coverage::stmt_kind(&s.kind).to_string());
+            if let StmtKind::While {
+                invariants,
+                decreases,
+                ..
+            } = &s.kind
+            {
+                if invariants.iter().any(|e| holds(tree.expr(*e).span, call)) {
+                    out.insert(coverage::invariant_kind(&true).to_string());
+                }
+                if decreases.iter().any(|e| holds(tree.expr(*e).span, call)) {
+                    out.insert(coverage::loop_decreases_kind(&true).to_string());
+                }
+            }
             if let StmtKind::Assign { place: p, op, .. } = &s.kind {
                 out.insert(coverage::assign_kind(op).to_string());
                 if let AssignOp::Compound(b) = op {
@@ -485,6 +560,9 @@ fn required() -> BTreeSet<String> {
         coverage::STMTS,
         coverage::ASSIGNS,
         coverage::ARMS,
+        coverage::CONTRACTS,
+        coverage::INVARIANTS,
+        coverage::LOOP_DECREASES,
         &PLACES,
     ]
     .iter()
