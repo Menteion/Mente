@@ -732,8 +732,9 @@ check("the collector reads the repository it is in, and runs no program git's co
 
 check("the site is published only from a milestone tag on a commit of main", () => {
   // .github/scripts/commit-on-main.sh (the review of 7ba7a5c): a milestone tag on a pull request's
-  // head, which main never took, is refused; a tag on main's head or on an older commit of main,
-  // lightweight or annotated, passes. And .github/scripts/publish-tag.sh, which pages-publish.yml
+  // head, which main never took, is refused, and so is one on a commit inside a pull request main
+  // merged, which never stood as main itself (the re-review of 40bb29a); a tag on main's head, on an
+  // older commit of main or on the merge, lightweight or annotated, passes. And .github/scripts/publish-tag.sh, which pages-publish.yml
   // runs before anything of the tag (Norman, 2026-11-17): it checks out a tag on main, and refuses a
   // tag outside main, a name of another shape and none, leaving the checkout where it was.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-on-main-"));
@@ -751,6 +752,15 @@ check("the site is published only from a milestone tag on a commit of main", () 
     sh("checkout", "-q", "-b", "pull-request");
     const unmerged = commit("three\n");
     sh("checkout", "-q", "main");
+    // A pull request main merged, as the merge queue merges one: a merge commit whose first parent is
+    // main's head, and whose second is the pull request's own commit.
+    sh("checkout", "-q", "-b", "merged", head);
+    const inner = commit("inner\n");
+    sh("checkout", "-q", "main");
+    sh("merge", "-q", "--no-ff", "-m", "Merge pull request #1 from merged", "merged");
+    const merge = sh("rev-parse", "HEAD");
+    sh("tag", "m2", inner);
+    sh("tag", "m3", merge);
     sh("tag", "m1", head);
     sh("tag", "-a", "-m", "m0", "m0", older);
     sh("tag", "m9", unmerged);
@@ -760,15 +770,15 @@ check("the site is published only from a milestone tag on a commit of main", () 
     const none = run("m1");
     assert.equal(none.status, 1, `${none.stdout}${none.stderr}`);
     assert.match(none.stdout, /no origin\/main/);
-    sh("update-ref", "refs/remotes/origin/main", head);
-    for (const tag of ["m1", "m0", head, older]) {
+    sh("update-ref", "refs/remotes/origin/main", merge);
+    for (const tag of ["m1", "m0", "m3", head, older, merge]) {
       const r = run(tag);
       assert.equal(r.status, 0, `${tag}: ${r.stdout}${r.stderr}`);
     }
-    for (const tag of ["m9", unmerged]) {
+    for (const tag of ["m2", inner, "m9", unmerged]) {
       const r = run(tag);
       assert.equal(r.status, 1, `${tag}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stdout, /^::error::.* is not in main's history/m, tag);
+      assert.match(r.stdout, /^::error::.* is no commit of main's own history/m, tag);
     }
     // A name of no commit, and no argument at all.
     assert.equal(run("m404").status, 1);
@@ -793,7 +803,8 @@ check("the site is published only from a milestone tag on a commit of main", () 
     }
     const before = sh("rev-parse", "HEAD");
     for (const [tag, refusal] of [
-      ["m9", /is not in main's history/],
+      ["m9", /is no commit of main's own history/],
+      ["m2", /is no commit of main's own history/],
       ["m404", /names no commit/],
       ["m1; touch pwned", /no milestone's name/],
       ["$(touch pwned)", /no milestone's name/],
