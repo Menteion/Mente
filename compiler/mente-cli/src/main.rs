@@ -1381,7 +1381,8 @@ fn cmd_evidence(args: &[String]) {
 fn cmd_pressure(args: &[String]) {
     fn usage() -> ! {
         eprintln!(
-            "Usage: {} | mn pressure [--since YYYY-MM-DD] [--top N]",
+            "Usage: {} && {} | mn pressure [--since YYYY-MM-DD] [--top N]",
+            pressure::FETCH,
             pressure::LOG
         );
         process::exit(1);
