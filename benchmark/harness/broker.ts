@@ -130,6 +130,32 @@ export function scrub(text: string, key: string): string {
   return key === "" ? text : text.split(key).join("[the API key]");
 }
 
+/** The most a line of the broker's log may hold, in characters. */
+export const LOG_LINE_MAX = 400;
+
+/**
+ * The one way a line reaches the broker's log, which the job's last step prints into the Actions
+ * log: a template whose words are the broker's own, with every value it did not author written as
+ * JSON, a number aside, so that no newline, control character or workflow command a value holds
+ * starts a line of its own; with the key taken out; and with at most LOG_LINE_MAX characters.
+ *
+ *   logLine(key)`the broker cannot listen at ${socket}: ${error}`
+ */
+export function logLine(key: string): (words: TemplateStringsArray, ...values: unknown[]) => string {
+  return (words, ...values) => {
+    let text = "";
+    for (const [k, w] of words.entries()) {
+      text += w;
+      if (k < values.length) {
+        const value = values.at(k);
+        text += typeof value === "number" ? String(value) : JSON.stringify(String(value));
+      }
+    }
+    text = scrub(text, key);
+    return text.length > LOG_LINE_MAX ? `${text.slice(0, LOG_LINE_MAX - 3)}...` : text;
+  };
+}
+
 /** A text's length in UTF-8 bytes. */
 export function utf8Length(text: string): number {
   return new TextEncoder().encode(text).length;
@@ -175,13 +201,21 @@ const PRICED = ["input_tokens", "output_tokens", "cache_creation_input_tokens", 
 
 /**
  * Whether a field of a usage that the broker does not price costs nothing as the API reported it:
- * empty, the 5-minute cache's breakdown, server tools never used, and the one value of each field of
- * standardUsage in broker-limits.json (the standard tier, speed and place of inference). Anything
- * else, a 1-hour cache write, a web search, fast mode, inference held in one region, or a field the
- * broker does not know, makes it count the request at its worst.
+ * empty, the 5-minute cache's breakdown, the share of the output tokens that were thinking, which
+ * output_tokens already counts (exactly {thinking_tokens: N}, N a whole number no larger than
+ * output_tokens), server tools never used, and the one value of each field of standardUsage in
+ * broker-limits.json (the standard tier, speed and place of inference). Anything else, a 1-hour
+ * cache write, a web search, fast mode, inference held in one region, or a field the broker does not
+ * know, makes it count the request at its worst.
  */
-function costsNothing(key: string, value: unknown, standard: Map<string, string>): boolean {
+function costsNothing(key: string, value: unknown, standard: Map<string, string>, usage: object): boolean {
   if (value === null || value === 0) return true;
+  if (key === "output_tokens_details") {
+    if (!plain(value) || extraKeys(value, ["thinking_tokens"]).length > 0) return false;
+    const thinking = (value as { thinking_tokens?: unknown }).thinking_tokens;
+    const output = (usage as { output_tokens?: unknown }).output_tokens;
+    return typeof thinking === "number" && Number.isInteger(thinking) && thinking >= 0 && typeof output === "number" && thinking <= output;
+  }
   if (key === "cache_creation") {
     if (!plain(value) || extraKeys(value, ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"]).length > 0) return false;
     const hour = (value as { ephemeral_1h_input_tokens?: unknown }).ephemeral_1h_input_tokens;
@@ -191,10 +225,24 @@ function costsNothing(key: string, value: unknown, standard: Map<string, string>
   return standard.has(key) && standard.get(key) === value;
 }
 
+/**
+ * Why the broker cannot price a usage, which makes it count the request at its worst: the first
+ * field it does not know or that the API reported at a value that costs more, whatever its name,
+ * the empty one and one named usage among them; or no usage object to read. Null when it can price
+ * it all: no name a field can take means that.
+ */
+export type Unpriced = { field: string } | { noUsage: true } | null;
+
+/** Why the broker cannot price a usage, or null when it can price it all (Unpriced). */
+export function unpricedField(usage: unknown, limits: Pick<Limits, "standardUsage">): Unpriced {
+  if (!plain(usage)) return { noUsage: true };
+  for (const [key, value] of Object.entries(usage)) if (!PRICED.includes(key) && !costsNothing(key, value, limits.standardUsage, usage)) return { field: key };
+  return null;
+}
+
 /** What a request cost by the usage the API reported, or its worst case when the broker cannot price all of it. */
 export function usageCost(usage: unknown, price: Price, limits: Pick<Limits, "cacheWrite" | "standardUsage">, worst: number): number {
-  if (!plain(usage)) return worst;
-  for (const [key, value] of Object.entries(usage)) if (!PRICED.includes(key) && !costsNothing(key, value, limits.standardUsage)) return worst;
+  if (unpricedField(usage, limits) !== null) return worst;
   const cacheWrite = limits.cacheWrite;
   const u = usage as { input_tokens?: unknown; output_tokens?: unknown; cache_creation_input_tokens?: unknown; cache_read_input_tokens?: unknown };
   const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : Number.NaN);
@@ -354,7 +402,12 @@ export class Broker {
   requests = 0;
   inFlight = 0;
 
-  constructor(key: string, limits: Limits, budget: number, post: Post) {
+  /** Where the broker says what it could not price, once a field: its log, by default, each line made by logLine. */
+  note: (line: string) => void;
+  /** The usage fields it has said it could not price, so that each is said once a run. */
+  noted = new Set<string>();
+
+  constructor(key: string, limits: Limits, budget: number, post: Post, note: (line: string) => void = (line) => console.error(line)) {
     // A key of these characters alone is written in JSON as itself, so that taking it out of an
     // answer line, which is JSON, takes it out of every value in it.
     if (!/^[A-Za-z0-9_-]{8,}$/.test(key)) throw new Error("no API key on the broker's standard input: one line of letters, digits, '-' and '_'");
@@ -363,6 +416,7 @@ export class Broker {
     this.limits = limits;
     this.post = post;
     this.cap = Math.min(budget, limits.maxDollars);
+    this.note = note;
   }
 
   /** What an answered request cost, by the usage the API reported; at its most when the broker cannot price it. */
@@ -371,7 +425,17 @@ export class Broker {
     try {
       usage = JSON.parse(text)?.usage;
     } catch {
-      return worst;
+      usage = undefined;
+    }
+    // A field it cannot price makes it count the request at its worst, and its log says which, once
+    // a field, so that a run that stops early shows why (the first run with the real key, on
+    // 2026-11-16: output_tokens_details, which the broker did not then know).
+    const unpriced = unpricedField(usage, this.limits);
+    const said = JSON.stringify(unpriced);
+    if (unpriced !== null && !this.noted.has(said)) {
+      this.noted.add(said);
+      const line = logLine(this.key);
+      this.note("field" in unpriced ? line`the broker counts a request at its worst: it cannot price the usage field ${unpriced.field}` : line`the broker counts a request at its worst: it cannot price an answer without a usage object`);
     }
     return usageCost(usage, price, this.limits, worst);
   }
@@ -480,15 +544,15 @@ async function main(): Promise<void> {
   const limits = readLimits(readFileSync(new URL("./broker-limits.json", import.meta.url), "utf8"));
   const broker = new Broker(held, limits, Number(option("budget")), httpPost());
   await serve(broker, socket, (e) => {
-    console.error(scrub(`the broker cannot listen at ${socket}: ${String(e)}`, held));
+    console.error(logLine(held)`the broker cannot listen at ${socket}: ${String(e)}`);
     process.exit(1);
   });
-  console.error(`the broker listens at ${socket}, within $${broker.cap}, ${limits.maxRequests} requests, ${limits.maxInFlight} at once and ${limits.maxConnections} connections`);
+  console.error(logLine(held)`the broker listens at ${socket}, within $${broker.cap}, ${limits.maxRequests} requests, ${limits.maxInFlight} at once and ${limits.maxConnections} connections`);
 }
 
 if (import.meta.main) {
   main().catch((e) => {
-    console.error(scrub(`the broker stops: ${String(e)}`, held));
+    console.error(logLine(held)`the broker stops: ${String(e)}`);
     process.exit(1);
   });
 }
