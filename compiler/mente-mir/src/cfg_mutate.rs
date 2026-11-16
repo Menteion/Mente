@@ -1099,7 +1099,8 @@ mod tests {
         }
     }
 
-    /// `fn pick(c: bool, x: i64) -> i64`: `x + 1`, checked, where `c` holds, else `x`, joined.
+    /// `fn pick(c: bool, x: i64) -> i64`: `(x + 1) * 2`, the sum checked, where `c` holds, else
+    /// `x / x` by a divisor a guard holds is not zero, joined, where a comparison takes no effect.
     fn pick() -> cfg::Function {
         let mut b = Builder::new("pick", &[Ty::Bool, Ty::Int(I64)], Some(Ty::Int(I64)));
         let [c, x] = b.params(BlockId(0))[..] else {
@@ -1130,9 +1131,22 @@ mod tests {
         );
         b.jump(join, vec![twice]);
         b.switch(otherwise);
-        b.jump(join, vec![x]);
+        let zero = b.int(I64, Num::ZERO);
+        let nz = b.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[x, zero]);
+        let t = b.trap_site("division-by-zero", &["division by zero"]);
+        let divisor = b.guard(t, Fact::NonZero, &[nz, x]);
+        let q = b.inst(
+            Op::Arith {
+                op: ArithOp::Div,
+                trap: None,
+            },
+            Ty::Int(I64),
+            &[x, divisor],
+        );
+        b.jump(join, vec![q]);
         b.switch(join);
         let r = b.params(join)[0];
+        b.inst(Op::Cmp(CmpOp::Eq), Ty::Bool, &[r, r]);
         b.ret(Some(r));
         b.finish()
     }
@@ -1165,6 +1179,67 @@ mod tests {
         for (name, broken) in &all {
             assert!(cfg::verify(broken).is_err(), "{} verifies", name);
         }
+        // Each site and way, and what the moves and the re-pointing leave.
+        let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "caller/b0.i0/effect-dropped",
+                "caller/b0.i0/effect-valued",
+                "caller/b0.i1/effect-dropped",
+                "caller/b0.i1/effect-forked",
+                "caller/b0.i1/effect-valued",
+                "caller/b0.i2/effect-dropped",
+                "caller/b0.i2/effect-forked",
+                "caller/b0.i5/effect-dropped",
+                "caller/b0.i5/effect-forked",
+                "caller/b0.i5/effect-valued",
+                "caller/b0.i7/effect-dropped",
+                "caller/b0.i7/effect-forked",
+                "caller/b0.i7/effect-valued",
+                "caller/b0.i6/guard-unguarded",
+                "caller/b0.i6/guard-raised",
+                "caller/b0.term/ended-early",
+                "pick/b0.term/passed-valued",
+                "pick/b1.i1/effect-dropped",
+                "pick/b1.i1/effect-valued",
+                "pick/b1.i2/effect-dropped",
+                "pick/b1.i2/partial-raised",
+                "pick/b1.term/passed-valued",
+                "pick/b2.i2/effect-dropped",
+                "pick/b2.i2/effect-valued",
+                "pick/b2.i3/guard-unguarded",
+                "pick/b2.i3/guard-raised",
+                "pick/b2.term/passed-valued",
+            ]
+        );
+        let plant = |name: &str| {
+            &all.iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no plant {}", name))
+                .1
+        };
+        // The exact doubling above the checked sum it reads; the division above its guard.
+        assert_eq!(
+            order(&m, plant("pick/b1.i2/partial-raised"), 3)[1],
+            "i0 i2 i1"
+        );
+        assert_eq!(
+            order(&m, plant("pick/b2.i3/guard-raised"), 3)[2],
+            "i0 i1 i3 i2"
+        );
+        // The division and the cast taking what their guards take.
+        let pick = &m.functions[3];
+        let (q, x) = (pick.blocks[2].insts[3], pick.blocks[0].params[1]);
+        for name in ["pick/b2.i3/guard-unguarded", "pick/b2.i3/guard-raised"] {
+            assert_eq!(plant(name).functions[3].own_args(q)[1], x, "{}", name);
+        }
+        let caller = &m.functions[2];
+        let (cast, y) = (caller.blocks[0].insts[6], caller.blocks[0].insts[1]);
+        assert_eq!(
+            plant("caller/b0.i6/guard-unguarded").functions[2].own_args(cast)[0],
+            y
+        );
         let ran = |args: &[Val]| {
             cfg::run(
                 &m,
@@ -1175,7 +1250,7 @@ mod tests {
             )
         };
         assert_eq!(ran(&[Val::Bool(true), int(4)]), Ok(int(10)));
-        assert_eq!(ran(&[Val::Bool(false), int(4)]), Ok(int(4)));
+        assert_eq!(ran(&[Val::Bool(false), int(4)]), Ok(int(1)));
     }
 
     fn named<'a>(m: &Module, all: &'a [Mutant], name: &str) -> &'a Mutant {
@@ -1365,6 +1440,27 @@ mod tests {
             removed.apply(&m).functions[0].blocks[0].insts.len(),
             m.functions[0].blocks[0].insts.len() - 1
         );
+    }
+
+    /// A check taken out just before a trap hands the trap the effect the check took, so that the
+    /// mutant verifies and the trap is reached where the check would have trapped first.
+    #[test]
+    fn test_a_check_taken_out_hands_a_trap_the_effect_it_took() {
+        let mut b = Builder::new("halt", &[Ty::Bool], None);
+        let c = b.params(BlockId(0))[0];
+        let entry = b.latest();
+        let t = b.trap_site("check", &["c is false"]);
+        b.inst(Op::Check { trap: t }, Ty::Unit, &[c]);
+        let todo = b.trap_site("todo", &["todo reached"]);
+        b.trap(todo);
+        let m = Module {
+            functions: vec![b.finish()],
+            budget: 1 << 20,
+        };
+        cfg::verify(&m).unwrap();
+        let removed = named(&m, &mutants(&m), "halt/b0.i0/check-removed").apply(&m);
+        assert_eq!(cfg::verify(&removed), Ok(()));
+        assert_eq!(removed.functions[0].blocks[0].term, Term::Trap(todo, entry));
     }
 
     /// A guard taken out becomes an assumption of what it guarded, in its place: the value it

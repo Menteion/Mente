@@ -1924,13 +1924,17 @@ impl<'m> Machine<'m> {
     fn inst(&mut self, f: &Function, v: NodeId, vals: &[Val]) -> Result<Val, Stop> {
         let args: Vec<Val> = f.own_args(v).iter().map(|a| vals[a.0 as usize]).collect();
         let ty = f.ty(v);
-        let int = |i: usize| match args.get(i) {
-            Some(Val::Int(n)) => Ok(*n),
-            _ => Err(broken(format!("v{} wants an integer operand", v.0))),
+        let int = |i: usize| -> Result<Num, Stop> {
+            match args.get(i) {
+                Some(Val::Int(n)) => Ok(*n),
+                _ => Err(broken(format!("v{} wants an integer operand", v.0))),
+            }
         };
-        let addr = |i: usize| match args.get(i) {
-            Some(Val::Addr(a)) => Ok(*a),
-            _ => Err(broken(format!("v{} wants an address operand", v.0))),
+        let addr = |i: usize| -> Result<u64, Stop> {
+            match args.get(i) {
+                Some(Val::Addr(a)) => Ok(*a),
+                _ => Err(broken(format!("v{} wants an address operand", v.0))),
+            }
         };
         // An integer result of the value's type: an exact one must fit, a checked one traps.
         let fit = |n: Option<Num>, trap_at: Option<TrapId>| -> Result<Val, Stop> {
@@ -1985,7 +1989,7 @@ impl<'m> Machine<'m> {
                 _ => return Err(broken("bits on a value that is no integer or bool")),
             },
             Op::Not => match (args.first(), ty) {
-                (Some(Val::Bool(a)), _) => Val::Bool(!a),
+                (Some(Val::Bool(a)), _) => Val::Bool(!*a),
                 (_, Ty::Int(t)) => Val::Int(Num::from_bits(!int(0)?.to_bits(t), t)),
                 _ => return Err(broken("not on a value that is no integer or bool")),
             },
@@ -2407,6 +2411,42 @@ mod tests {
         assert!(matches!(
             run0(&m, 0, &[int(256)]),
             Err(Stop::Broken(why)) if why.contains("256, of which within 0..=255 does not hold")
+        ));
+        // An assumption that does not hold of what it takes is broken MIR, though nothing after it
+        // would be.
+        let mut b = Builder::new("assumed", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = b.params(BlockId(0))[0];
+        let a = b.assume(x, Fact::Within(Num::ZERO, Num::from_i128(255)));
+        b.ret(Some(a));
+        let m = module(vec![b.finish()]);
+        assert_eq!(run0(&m, 0, &[int(255)]), Ok(int(255)));
+        assert!(matches!(
+            run0(&m, 0, &[int(256)]),
+            Err(Stop::Broken(why)) if why.contains("assumes within 0..=255 of 256")
+        ));
+        // A division the verifier would refuse, run as it is: a zero divisor is broken MIR, and
+        // never a panic of the interpreter.
+        let mut b = Builder::new("bare", &[Ty::Int(I64), Ty::Int(I64)], Some(Ty::Int(I64)));
+        let [x, d] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let q = b.inst(
+            Op::Arith {
+                op: ArithOp::Div,
+                trap: None,
+            },
+            Ty::Int(I64),
+            &[x, d],
+        );
+        b.ret(Some(q));
+        let unverified = Module {
+            functions: vec![b.finish()],
+            budget: BUDGET,
+        };
+        assert!(verify(&unverified).is_err());
+        assert!(matches!(
+            run0(&unverified, 0, &[int(1), int(0)]),
+            Err(Stop::Broken(why)) if why.contains("divides by zero unchecked")
         ));
         // A refinement whose bound is a parameter reports the value and both bounds.
         let mut r = Builder::new("refined", &[Ty::Int(I64), Ty::Int(I64)], None);
@@ -3098,6 +3138,12 @@ mod tests {
         assert!(check(Op::Cast, u, &[i], 0, within(0, 256)).is_err());
         assert_eq!(check(Op::Cast, u, &[i], 0, within(0, 255)), Ok(()));
         assert_eq!(check(Op::Cast, i, &[u], 0, None), Ok(()));
+        // An i64 into a u64, which holds its largest value and not its smallest, and a u8 into
+        // an i8, which holds its smallest and not its largest.
+        let (u64t, i8t) = (Ty::Int(IntTy::new(64, false)), Ty::Int(IntTy::new(8, true)));
+        assert!(check(Op::Cast, u64t, &[i], 0, None).is_err());
+        assert!(check(Op::Cast, i8t, &[u], 0, None).is_err());
+        assert_eq!(check(Op::Cast, i8t, &[u], 0, within(0, 127)), Ok(()));
         // A divisor through a cast that keeps it: assumed not zero as a u8, divided as an i64.
         let mut b = Builder::new("through", &[i, u], None);
         let [x, d] = b.params(BlockId(0))[..] else {
