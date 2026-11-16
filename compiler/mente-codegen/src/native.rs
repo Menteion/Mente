@@ -65,7 +65,7 @@ fn cl_type(t: cfg::Ty, ptr: Type) -> Type {
         cfg::Ty::Int(i) => int_type(i),
         cfg::Ty::Bool => types::I8,
         cfg::Ty::Addr => ptr,
-        cfg::Ty::Unit => types::I8,
+        cfg::Ty::Unit | cfg::Ty::Effect => types::I8,
     }
 }
 
@@ -96,6 +96,42 @@ struct Runtime {
     print: ClFunc,
     udivmod: ClFunc,
     strings: HashMap<String, DataId>,
+}
+
+/// The operands of instruction `v` of `f` that native code keeps: of a call, its arguments but
+/// the effects passed to it, which the callee's signature leaves out; of a count, which native
+/// code does not run yet, none; of any other, those besides the effect it follows.
+fn kept_operands(m: &cfg::Module, f: &cfg::Function, v: NodeId) -> Vec<NodeId> {
+    match f.op(v) {
+        Op::Call(c) => match m.functions.get(c.0 as usize) {
+            Some(callee) => f
+                .own_args(v)
+                .iter()
+                .zip(&callee.params)
+                .filter(|(_, p)| **p != cfg::Ty::Effect)
+                .map(|(a, _)| *a)
+                .collect(),
+            None => f.own_args(v).to_vec(),
+        },
+        Op::Enter { .. } => Vec::new(),
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Store
+        | Op::Copy { .. } => f.own_args(v).to_vec(),
+    }
 }
 
 /// The trap a call of `entry` from outside the program raises on `args` before the entry runs,
@@ -233,7 +269,16 @@ pub fn program(
                 });
         let mut ctx = writer.module().make_context();
         ctx.func.signature = signature(f, conv, ptr);
-        Translate::function(writer, &mut rt, &ids, f, &mut ctx, &mut fctx, ptr, prefix)?;
+        Translate::function(
+            writer,
+            &mut rt,
+            (&ids, &lowered.module),
+            f,
+            &mut ctx,
+            &mut fctx,
+            ptr,
+            prefix,
+        )?;
         writer.define_function_as(ids[i], &mut ctx, decl, &f.name)?;
     }
     define_main(
@@ -264,7 +309,8 @@ fn signature(
     if wide {
         sig.params.push(AbiParam::new(ptr));
     }
-    for p in &f.params {
+    // Native code keeps no value for the effects before a call.
+    for p in f.params.iter().filter(|p| **p != cfg::Ty::Effect) {
         sig.params.extend(abi(cl_type(*p, ptr)));
     }
     if let Some(r) = f.result.filter(|_| !wide) {
@@ -654,7 +700,7 @@ impl Translate {
     fn function(
         writer: &mut ObjectWriter,
         rt: &mut Runtime,
-        ids: &[ClFunc],
+        (ids, m): (&[ClFunc], &cfg::Module),
         f: &cfg::Function,
         ctx: &mut Context,
         fctx: &mut FunctionBuilderContext,
@@ -671,15 +717,20 @@ impl Translate {
             if bi == 0 {
                 continue;
             }
-            for &p in &block.params {
+            for &p in block.params.iter().filter(|p| f.ty(**p) != cfg::Ty::Effect) {
                 vals[p.0 as usize] = Some(b.append_block_param(blocks[bi], ty(p)));
             }
         }
         b.switch_to_block(blocks[0]);
         let ret_ptr = returns_wide(f, ptr).then(|| b.append_block_param(blocks[0], ptr));
         // Every parameter first, then the halves of each 128-bit one joined.
-        let raw: Vec<Vec<Value>> = f.blocks[0]
+        let kept: Vec<NodeId> = f.blocks[0]
             .params
+            .iter()
+            .copied()
+            .filter(|p| f.ty(*p) != cfg::Ty::Effect)
+            .collect();
+        let raw: Vec<Vec<Value>> = kept
             .iter()
             .map(|&p| match ty(p) {
                 t if t == types::I128 => vec![
@@ -696,7 +747,7 @@ impl Translate {
                 _ => halves[0],
             })
             .collect();
-        for (p, v) in f.blocks[0].params.iter().zip(entry_params) {
+        for (p, v) in kept.iter().zip(entry_params) {
             vals[p.0 as usize] = Some(v);
         }
         for (bi, block) in f.blocks.iter().enumerate() {
@@ -713,25 +764,35 @@ impl Translate {
                     b.set_srcloc(sl);
                 }
                 let mut e = Emit { b: &mut b, ptr };
-                let value = Self::inst(writer, rt, ids, f, &mut e, &vals, v, prefix)?;
+                let value = Self::inst(writer, rt, (ids, m), f, &mut e, &vals, v, prefix)?;
                 vals[v.0 as usize] = value;
             }
             let get = |v: &NodeId| {
                 vals[v.0 as usize].ok_or_else(|| err("a value used before it is defined"))
             };
-            let args = |vs: &[NodeId]| -> Result<Vec<ir::BlockArg>, CodegenError> {
-                vs.iter().map(|v| get(v).map(Into::into)).collect()
-            };
+            // A jump passes no value for the effects before its target.
+            let args =
+                |t: cfg::BlockId, vs: &[NodeId]| -> Result<Vec<ir::BlockArg>, CodegenError> {
+                    vs.iter()
+                        .zip(&f.blocks[t.0 as usize].params)
+                        .filter(|(_, p)| f.ty(**p) != cfg::Ty::Effect)
+                        .map(|(v, _)| get(v).map(Into::into))
+                        .collect()
+                };
             match &block.term {
                 Term::Jump(t, a) => {
-                    b.ins().jump(blocks[t.0 as usize], &args(a)?);
+                    b.ins().jump(blocks[t.0 as usize], &args(*t, a)?);
                 }
                 Term::Branch {
                     cond,
                     then,
                     otherwise,
                 } => {
-                    let (c, yes, no) = (get(cond)?, args(&then.1)?, args(&otherwise.1)?);
+                    let (c, yes, no) = (
+                        get(cond)?,
+                        args(then.0, &then.1)?,
+                        args(otherwise.0, &otherwise.1)?,
+                    );
                     b.ins().brif(
                         c,
                         blocks[then.0 .0 as usize],
@@ -768,7 +829,7 @@ impl Translate {
     fn inst(
         writer: &mut ObjectWriter,
         rt: &mut Runtime,
-        ids: &[ClFunc],
+        (ids, m): (&[ClFunc], &cfg::Module),
         f: &cfg::Function,
         e: &mut Emit,
         vals: &[Option<Value>],
@@ -776,18 +837,19 @@ impl Translate {
         prefix: &str,
     ) -> Result<Option<Value>, CodegenError> {
         let ptr = e.ptr;
-        // The operands besides a call's count, which native code does not keep yet.
-        let args: Vec<Value> = f
-            .own_args(v)
+        // The operands native code keeps: none of the effect an instruction follows, of a count,
+        // which native code does not run yet, nor of the effects passed to a call.
+        let operands = kept_operands(m, f, v);
+        let args: Vec<Value> = operands
             .iter()
             .map(|a| vals[a.0 as usize].ok_or_else(|| err("a value used before it is defined")))
             .collect::<Result<_, _>>()?;
-        let arg_tys: Vec<cfg::Ty> = f.own_args(v).iter().map(|a| f.ty(*a)).collect();
+        let arg_tys: Vec<cfg::Ty> = operands.iter().map(|a| f.ty(*a)).collect();
         let rty = f.ty(v);
         let t = cl_type(rty, ptr);
         let int = |x: cfg::Ty| match x {
             cfg::Ty::Int(i) => Ok(i),
-            cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => {
+            cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
                 Err(err("an integer operation on a value that is not one"))
             }
         };
@@ -947,7 +1009,7 @@ impl Translate {
                     .zip(&arg_tys[1..])
                     .filter_map(|(v, t)| match t {
                         cfg::Ty::Int(i) => Some((*v, *i)),
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => None,
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
                     })
                     .collect();
                 let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
@@ -1394,7 +1456,7 @@ fn make_call(
                 (false, Shape::Int(_), Arg::Int(n)) => {
                     let i = match mty {
                         cfg::Ty::Int(i) => *i,
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => {
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
                             return Err(err("an integer argument of another type"))
                         }
                     };

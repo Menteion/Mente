@@ -748,7 +748,9 @@ fn test_mn_dump_prints_canonical_forms() {
     assert_eq!(mir.status.code(), Some(0));
     let mir_text = text(&mir.stdout);
     assert!(
-        mir_text.starts_with("mente-dump 3 mir\nf0: fn f(u8) -> u8 frame 66 {\nblock0(v0: u8):\n"),
+        mir_text.starts_with(
+            "mente-dump 3 mir\nf0: fn f(u8, effect) -> u8 frame 66 {\nblock0(v0: u8, v1: effect):\n"
+        ),
         "{}",
         mir_text
     );

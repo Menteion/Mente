@@ -1570,6 +1570,8 @@ fn run_mir(lowered: &Lowered, functions: &[Function]) -> Option<String> {
                     }
                 }
             }
+            // The effects before a run, its entry's last parameter: none.
+            values.push(Val::Unit);
             if let Err(cfg::Stop::Broken(why)) =
                 cfg::run(&lowered.module, entry.func, &values, &mut memory, limits)
             {

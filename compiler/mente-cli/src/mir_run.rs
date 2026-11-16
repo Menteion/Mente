@@ -121,6 +121,8 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
             }
         }
     }
+    // The effects before a run, its entry's last parameter: none, which unit stands for.
+    values.push(Val::Unit);
     let limits = cfg::Limits::default();
     let result = cfg::run(&lowered.module, entry.func, &values, &mut memory, limits)
         .map_err(|stop| stop.to_string())?;

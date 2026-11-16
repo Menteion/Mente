@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mente_mir::cfg::{
-    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Takes, Term, Ty,
+    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Term, Ty,
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
@@ -38,6 +38,28 @@ use mente_syntax::tree::{
     ExprKind, PatternKind, Payload, Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::Span;
+
+/// Whether an instruction of `op` follows the latest effect and is the latest after it: one that
+/// may trap, read or write memory. A count and a call are effects too, which take the latest as
+/// their last argument (`Lower::call`); an exact operation is none.
+fn follows(op: &Op) -> bool {
+    match op {
+        Op::Arith { trap, .. } | Op::Neg { trap } => trap.is_some(),
+        Op::Shl { .. } | Op::Check { .. } | Op::Load | Op::Store | Op::Copy { .. } => true,
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Call(_)
+        | Op::Enter { .. } => false,
+    }
+}
 
 /// The kind and the text of the trap of a call that runs out of the stack budget
 /// (`core-calculus.md`, item 25).
@@ -545,6 +567,8 @@ fn mir_params(sig: &Sig) -> (Vec<Ty>, Option<Ty>) {
     for (is_mut, shape) in &sig.params {
         params.push(if *is_mut { Ty::Addr } else { shape.ty() });
     }
+    // The effects before the call, which the callee's own follow (`Function::follows`).
+    params.push(Ty::Effect);
     let result = match &sig.result {
         Shape::Int(_) | Shape::Bool => Some(sig.result.ty()),
         Shape::Array(..) | Shape::Struct(_) | Shape::Enum(_) | Shape::Unit => None,
@@ -673,9 +697,9 @@ struct Lower<'a> {
     /// Whether the lowering is making a call's checks in its callee's scope, whose checks are
     /// never left out.
     in_callee: bool,
-    /// The count of the call whose checks the lowering is making, which every instruction it
-    /// makes there of a kind that may trap takes (`Op::Enter`).
-    count: Option<NodeId>,
+    /// The latest effect, which the next instruction that may trap, read or write memory, or count
+    /// or make a call follows, and which a jump passes on (`Function::follows`).
+    chain: NodeId,
 }
 
 impl<'a> Lower<'a> {
@@ -702,6 +726,12 @@ impl<'a> Lower<'a> {
                 col: decl.col,
             },
         );
+        // The effects before the call come in as the function's last parameter.
+        let chain = b
+            .params(BlockId(0))
+            .last()
+            .copied()
+            .ok_or("a function without the effects before it")?;
         Ok(Lower {
             m,
             sigs,
@@ -715,7 +745,7 @@ impl<'a> Lower<'a> {
             measure: None,
             obligations,
             in_callee: false,
-            count: None,
+            chain,
         })
     }
 
@@ -748,21 +778,54 @@ impl<'a> Lower<'a> {
         self.b.at(span.line, span.col);
     }
 
+    /// A new block taking `params` and, last, the effects before it.
     fn block(&mut self, params: &[Ty]) -> BlockId {
-        let id = self.b.block(params);
+        let mut with = params.to_vec();
+        with.push(Ty::Effect);
+        let id = self.b.block(&with);
         self.ended.push(false);
         id
     }
 
+    /// Ends the current block, each jump passing on the latest effect.
     fn end(&mut self, term: Term) {
         self.ended[self.b.current().0 as usize] = true;
+        let chain = self.chain;
+        let term = match term {
+            Term::Jump(t, mut args) => {
+                args.push(chain);
+                Term::Jump(t, args)
+            }
+            Term::Branch {
+                cond,
+                mut then,
+                mut otherwise,
+            } => {
+                then.1.push(chain);
+                otherwise.1.push(chain);
+                Term::Branch {
+                    cond,
+                    then,
+                    otherwise,
+                }
+            }
+            t @ (Term::Return(_) | Term::Trap(_)) => t,
+        };
         self.b.end(term);
+    }
+
+    /// Continues in block `b`, whose last parameter is the latest effect there.
+    fn switch(&mut self, b: BlockId) {
+        self.b.switch(b);
+        if let Some(&chain) = self.b.params(b).last() {
+            self.chain = chain;
+        }
     }
 
     /// Continues in a new block nothing jumps to, after control has left.
     fn dead(&mut self) -> V {
         let dead = self.block(&[]);
-        self.b.switch(dead);
+        self.switch(dead);
         V::Never
     }
 
@@ -783,17 +846,17 @@ impl<'a> Lower<'a> {
     }
 
     fn inst(&mut self, op: Op, ty: Ty, args: &[NodeId]) -> NodeId {
-        // Within a call's checks, an instruction of a kind that may trap takes the call's count
-        // last, so that it cannot stand before the count (`Op::Enter`).
-        match (op.takes(), self.count) {
-            (Takes::Last, Some(count)) => {
-                let mut with = args.to_vec();
-                with.push(count);
-                self.b.inst(op, ty, &with)
-            }
-            (Takes::Last, None) | (Takes::First | Takes::Nothing, Some(_) | None) => {
-                self.b.inst(op, ty, args)
-            }
+        // An instruction that may trap, read or write memory follows the latest effect, and is
+        // the latest after it, so that no change can move one past another (`Function::follows`).
+        // A count and a call take the latest effect as their last argument (`Lower::call`).
+        if follows(&op) {
+            let mut with = args.to_vec();
+            with.push(self.chain);
+            let v = self.b.inst(op, ty, &with);
+            self.chain = v;
+            v
+        } else {
+            self.b.inst(op, ty, args)
         }
     }
 
@@ -1081,10 +1144,10 @@ impl<'a> Lower<'a> {
                     then: (pass, vec![]),
                     otherwise: (fail, vec![]),
                 });
-                self.b.switch(fail);
+                self.switch(fail);
                 // The `else` leaves, so its end is never reached.
                 self.body(*otherwise)?;
-                self.b.switch(pass);
+                self.switch(pass);
             }
             StmtKind::Return(value) => {
                 match value {
@@ -1136,7 +1199,7 @@ impl<'a> Lower<'a> {
         let round = self.block(&[]);
         let exit = self.block(&[]);
         self.jump(head, vec![]);
-        self.b.switch(head);
+        self.switch(head);
         for &i in invariants {
             let text = format!(
                 "`invariant {}` is false at the loop head",
@@ -1153,7 +1216,7 @@ impl<'a> Lower<'a> {
             then: (round, vec![]),
             otherwise: (exit, vec![]),
         });
-        self.b.switch(round);
+        self.switch(round);
         if let (Some((seen, slots)), Some(&first)) = (before, decreases.first()) {
             let now = self.measure(decreases, None)?;
             // A measure of any integer type fits u128 once it is not negative.
@@ -1188,7 +1251,7 @@ impl<'a> Lower<'a> {
         if !v.never() {
             self.jump(head, vec![]);
         }
-        self.b.switch(exit);
+        self.switch(exit);
         Ok(V::Unit)
     }
 
@@ -1512,7 +1575,7 @@ impl<'a> Lower<'a> {
         let exit = self.block(&[]);
         let zero = self.int(USIZE, Num::ZERO);
         self.jump(head, vec![zero]);
-        self.b.switch(head);
+        self.switch(head);
         let i = self.b.params(head)[0];
         let n = self.int(USIZE, Num::new(false, u128::from(len)));
         let more = self.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, n]);
@@ -1521,7 +1584,7 @@ impl<'a> Lower<'a> {
             then: (round, vec![]),
             otherwise: (exit, vec![]),
         });
-        self.b.switch(round);
+        self.switch(round);
         each(self, i)?;
         let one = self.int(USIZE, Num::new(false, 1));
         let next = self.inst(
@@ -1533,7 +1596,7 @@ impl<'a> Lower<'a> {
             &[i, one],
         );
         self.jump(head, vec![next]);
-        self.b.switch(exit);
+        self.switch(exit);
         Ok(())
     }
 
@@ -1763,7 +1826,7 @@ impl<'a> Lower<'a> {
                 then: (check, vec![]),
                 otherwise: (after, vec![]),
             });
-            self.b.switch(check);
+            self.switch(check);
             for (fs, fd) in vs.fields.iter().zip(&vd.fields) {
                 if !self.refines(def.tree(), fd.decl) {
                     continue;
@@ -1773,7 +1836,7 @@ impl<'a> Lower<'a> {
                 self.refined(x, &fs.shape, (def.tree(), fd.decl), span, key)?;
             }
             self.jump(after, vec![]);
-            self.b.switch(after);
+            self.switch(after);
         }
         Ok(())
     }
@@ -1856,7 +1919,7 @@ impl<'a> Lower<'a> {
             then: (known, vec![]),
             otherwise: (cast, vec![]),
         });
-        self.b.switch(known);
+        self.switch(known);
         // With s < u: u > s, u >= s and u != s hold; with the operands swapped, s < u.
         let holds = match op {
             CmpOp::Ne => true,
@@ -1866,12 +1929,12 @@ impl<'a> Lower<'a> {
         };
         let r = self.bool(holds);
         self.jump(join, vec![r]);
-        self.b.switch(cast);
+        self.switch(cast);
         let s = self.cast(s, ss, su);
         let (x, y) = if swapped { (s, u) } else { (u, s) };
         let r = self.inst(Op::Cmp(op), Ty::Bool, &[x, y]);
         self.jump(join, vec![r]);
-        self.b.switch(join);
+        self.switch(join);
         Ok(self.b.params(join)[0])
     }
 
@@ -2667,11 +2730,11 @@ impl<'a> Lower<'a> {
             then,
             otherwise,
         });
-        self.b.switch(right);
+        self.switch(right);
         if let Some(r) = self.expr(rhs)?.bool_node("an operand of `and` or `or`")? {
             self.jump(join, vec![r]);
         }
-        self.b.switch(join);
+        self.switch(join);
         Ok(V::Bool(self.b.params(join)[0]))
     }
 
@@ -2706,17 +2769,17 @@ impl<'a> Lower<'a> {
             then: (yes, vec![]),
             otherwise: (no, vec![]),
         });
-        self.b.switch(yes);
+        self.switch(yes);
         let v = self.body(then)?;
         self.meet(v, join, join_ty);
-        self.b.switch(no);
+        self.switch(no);
         let v = match otherwise {
             Some(Else::Block(b)) => self.body(b)?,
             Some(Else::If(i)) => self.expr(i)?,
             None => V::Unit,
         };
         self.meet(v, join, join_ty);
-        self.b.switch(join);
+        self.switch(join);
         // An `if` of no type has branches that all leave, so nothing reaches its end.
         if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
             return Ok(V::Never);
@@ -2822,7 +2885,7 @@ impl<'a> Lower<'a> {
                         then: (run, vec![]),
                         otherwise: (next, vec![]),
                     });
-                    self.b.switch(run);
+                    self.switch(run);
                     Some(next)
                 }
                 None => None,
@@ -2851,11 +2914,11 @@ impl<'a> Lower<'a> {
             };
             self.meet(v, join, join_ty);
             match next {
-                Some(next) => self.b.switch(next),
+                Some(next) => self.switch(next),
                 None => break,
             }
         }
-        self.b.switch(join);
+        self.switch(join);
         // A `match` of no type has arms that all leave, so nothing reaches its end.
         if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
             return Ok(V::Never);
@@ -2902,7 +2965,7 @@ impl<'a> Lower<'a> {
             Ty::Int(t) => V::Int(p()?, t),
             Ty::Bool => V::Bool(p()?),
             Ty::Addr => V::Mem(p()?),
-            Ty::Unit => V::Unit,
+            Ty::Unit | Ty::Effect => V::Unit,
         })
     }
 
@@ -3175,27 +3238,33 @@ impl<'a> Lower<'a> {
         }
         self.at(at);
         let deep = self.b.trap_site(RAN_OUT[0], &[RAN_OUT[1]]);
-        let count = self.inst(
+        // The count takes the call's arguments as the call does, the slot of a result kept in
+        // memory first and the latest effect last, and is then the latest effect itself.
+        let mut counted: Vec<NodeId> = sret.into_iter().collect();
+        counted.extend(&given);
+        counted.push(self.chain);
+        let count = self.b.inst(
             Op::Enter {
                 callee: sig.func,
                 trap: Some(deep),
             },
             Ty::Unit,
-            &given,
+            &counted,
         );
-        let outer = self.count.replace(count);
-        let checked = self.call_checks(index, &args, at, recursive);
-        self.count = outer;
-        let values = match checked? {
+        self.chain = count;
+        let values = match self.call_checks(index, &args, at, recursive)? {
             Some(values) => values,
             None => return Ok(V::Never),
         };
-        let mut mir_args = vec![count];
-        mir_args.extend(sret);
+        let mut mir_args: Vec<NodeId> = sret.into_iter().collect();
         mir_args.extend(values);
+        mir_args.push(self.chain);
         let (_, result_ty) = mir_params(sig);
         self.at(at);
-        let r = self.inst(Op::Call(sig.func), result_ty.unwrap_or(Ty::Unit), &mir_args);
+        let r = self
+            .b
+            .inst(Op::Call(sig.func), result_ty.unwrap_or(Ty::Unit), &mir_args);
+        self.chain = r;
         // A `mut` place takes back what the callee left, which enters its refinement. A struct's
         // fields hold theirs in any value the callee leaves, so they are not checked again.
         let entry = std::mem::replace(&mut self.entry, false);
@@ -3342,6 +3411,197 @@ mod tests {
         signed: false,
         bits: 16,
     };
+
+    /// Lowering and verifying take time that grows with the function, not with its square: a body
+    /// of 3,000 `if`s, each a branch and a join and a call, threading its effects through every
+    /// block, lowers and verifies at once. The verifier once kept a table of every block's
+    /// dominators, and the generated programs' coverage timed out on CI.
+    #[test]
+    fn test_a_long_function_lowers_and_verifies_in_linear_time() {
+        let mut source = String::from(
+            "module m\nfn g(x: u32) -> u32 = x\npub fn f(x: u32) -> u32 {\n  var a: u32 = 0\n",
+        );
+        for k in 0..3000 {
+            source.push_str(&format!("  if x > {} {{\n    a = g(a)\n  }}\n", k));
+        }
+        source.push_str("  a\n}\n");
+        let module = mente_sema::check_program_without_proofs(&source).unwrap();
+        let started = std::time::Instant::now();
+        let lowered = lower(&module).unwrap();
+        cfg::verify(&lowered.module).unwrap();
+        let blocks: usize = lowered
+            .module
+            .functions
+            .iter()
+            .map(|f| f.blocks.len())
+            .sum();
+        assert!(blocks > 6000, "{} blocks", blocks);
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+    }
+
+    /// The order of calls, of a call's count and of the stores that fill its arguments is held by
+    /// values (`Function::follows`): over frames of about 280 KB, two of which do not fit the
+    /// budget together, `g(x) + f(x)`, `f(x) + g(x)` and `k([g(x)])` run, and each reordering that
+    /// would put two frames in use at once is refused: `f`'s count moved above `g`'s, `f`'s call
+    /// moved below `g`'s, and `k`'s count moved right after the slot of its argument, above the
+    /// call of `g` that fills it. So is a check moved above a call before it, which would report
+    /// its trap where the call runs out of stack: in `f(x) + x / d`, the division's check above
+    /// `f`'s count. So is every change `cfg_mutate::unpaired` makes.
+    #[test]
+    fn test_reordered_calls_counts_and_stores_are_refused() {
+        let source = "module m
+fn f(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn g(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn k(xs: [1]u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[xs[0]]
+}
+pub fn h(x: u32) -> u32 = g(x) + f(x)
+pub fn h2(x: u32) -> u32 = f(x) + g(x)
+pub fn m2(x: u32) -> u32 = k([g(x)])
+pub fn hd(x: u32, d: u32) -> u32 = f(x) + x / d
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let m = &lowered.module;
+        let index = |name: &str| m.functions.iter().position(|f| f.name == name).unwrap();
+        let (f, g, k) = (index("f"), index("g"), index("k"));
+        // Where in its one block function `at` makes the count, or the call, of function `of`.
+        let find = |at: usize, count: bool, of: usize| {
+            let func = &m.functions[at];
+            func.blocks
+                .iter()
+                .enumerate()
+                .find_map(|(bi, b)| {
+                    b.insts
+                        .iter()
+                        .position(|&v| {
+                            let callee = FuncId(of as u32);
+                            if count {
+                                func.op(v).counted() == Some(callee)
+                            } else {
+                                *func.op(v) == Op::Call(callee)
+                            }
+                        })
+                        .map(|i| (bi, i))
+                })
+                .unwrap()
+        };
+        let moved = |at: usize, (bi, from): (usize, usize), to: usize| {
+            let mut changed = m.clone();
+            let insts = &mut changed.functions[at].blocks[bi].insts;
+            let v = insts.remove(from);
+            insts.insert(to, v);
+            changed
+        };
+        let (h, h2, m2) = (index("h"), index("h2"), index("m2"));
+        let enter_f = find(h, true, f);
+        let (_, enter_g) = find(h, true, g);
+        let call_f = find(h2, false, f);
+        let (_, call_g) = find(h2, false, g);
+        let hd = index("hd");
+        let enter_f_hd = find(hd, true, f);
+        let call_f_hd = find(hd, false, f);
+        let check_hd = m.functions[hd].blocks[call_f_hd.0].insts[call_f_hd.1 + 1..]
+            .iter()
+            .position(|&v| matches!(m.functions[hd].op(v), Op::Check { .. }))
+            .map(|i| (call_f_hd.0, call_f_hd.1 + 1 + i))
+            .unwrap();
+        // The check hoisted above `f`'s count with the instructions that give its condition, each
+        // of the parameters and constants alone: only the effect it follows holds it in place.
+        let hoisted = {
+            let mut changed = m.clone();
+            let func = &mut changed.functions[hd];
+            let (bi, at) = check_hd;
+            let check = func.blocks[bi].insts[at];
+            let mut needed = vec![check];
+            let mut k = 0;
+            while k < needed.len() {
+                let v = needed[k];
+                for &a in func.own_args(v) {
+                    if func.blocks[bi].insts[enter_f_hd.1..at].contains(&a) && !needed.contains(&a)
+                    {
+                        needed.push(a);
+                    }
+                }
+                k += 1;
+            }
+            let insts = &mut func.blocks[bi].insts;
+            let kept: Vec<NodeId> = insts
+                .iter()
+                .copied()
+                .filter(|v| needed.contains(v))
+                .collect();
+            insts.retain(|v| !needed.contains(v));
+            for (i, v) in kept.into_iter().enumerate() {
+                insts.insert(enter_f_hd.1 + i, v);
+            }
+            changed
+        };
+        let enter_k = find(m2, true, k);
+        let slot = m.functions[m2].args(m.functions[m2].blocks[enter_k.0].insts[enter_k.1])[0];
+        let after_slot = m.functions[m2].blocks[enter_k.0]
+            .insts
+            .iter()
+            .position(|&v| v == slot)
+            .unwrap()
+            + 1;
+        for (what, changed) in [
+            ("f's count above g's", moved(h, enter_f, enter_g)),
+            ("f's call below g's", moved(h2, call_f, call_g)),
+            (
+                "k's count above the store of its argument",
+                moved(m2, enter_k, after_slot),
+            ),
+            ("the division's check above f's count", hoisted),
+        ] {
+            let why = cfg::verify(&changed).unwrap_err();
+            assert!(
+                why.contains("is not defined before it on every path"),
+                "{}: {}",
+                what,
+                why
+            );
+        }
+        for (name, changed) in mente_mir::cfg_mutate::unpaired(m) {
+            assert!(cfg::verify(&changed).is_err(), "{} verifies", name);
+        }
+        let entry = |name: &str| {
+            lowered
+                .entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .func
+        };
+        for (name, args) in [
+            ("h", vec![3]),
+            ("h2", vec![3]),
+            ("m2", vec![3]),
+            ("hd", vec![3, 3]),
+        ] {
+            let mut values: Vec<cfg::Val> = args
+                .into_iter()
+                .map(|n| cfg::Val::Int(Num::from_i128(n)))
+                .collect();
+            values.push(cfg::Val::Unit);
+            let ran = cfg::run(
+                m,
+                entry(name),
+                &values,
+                &mut cfg::Memory::default(),
+                cfg::Limits::default(),
+            );
+            let expected = if name == "hd" { 1 } else { 0 };
+            assert_eq!(ran, Ok(cfg::Val::Int(Num::from_i128(expected))), "{}", name);
+        }
+    }
 
     #[test]
     fn test_shapes_have_the_size_and_type_of_their_values() {
@@ -3710,7 +3970,7 @@ pub fn set(mut s: S) {
                 .to_string()
         };
         // `make` returns through the address its caller passes, and builds in a slot of 32.
-        assert!(f("make").contains("fn make(addr, u32)"), "{}", text);
+        assert!(f("make").contains("fn make(addr, u32, effect)"), "{}", text);
         assert!(f("make").contains("slot 32"), "{}", text);
         // A field away from the start is reached at its offset.
         assert!(f("get").contains("elem 1"), "{}", f("get"));
@@ -3758,7 +4018,7 @@ pub fn get(e: E) -> u64 = match e {
         // `get` loads the tag, compares it with 1, and reads `wide` at its offset.
         assert!(f("get").contains(": u8 = load v0"), "{}", f("get"));
         assert!(f("get").contains("= int 8"), "{}", f("get"));
-        assert!(f("get").contains("bool = eq v1"), "{}", f("get"));
+        assert!(f("get").contains("bool = eq v2"), "{}", f("get"));
     }
 
     /// An array or a struct read from a binding is passed by its address, and copied first only

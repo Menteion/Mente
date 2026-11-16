@@ -90,6 +90,10 @@ pub enum Ty {
     Addr,
     /// What an instruction without a result has.
     Unit,
+    /// The state the effects before it left, a parameter of a block or a function that every
+    /// value is admitted to: the effect a jump or a call passes on (`Function::follows`). Native
+    /// code keeps no value for it.
+    Effect,
 }
 
 impl fmt::Display for Ty {
@@ -99,6 +103,7 @@ impl fmt::Display for Ty {
             Ty::Bool => write!(f, "bool"),
             Ty::Addr => write!(f, "addr"),
             Ty::Unit => write!(f, "unit"),
+            Ty::Effect => write!(f, "effect"),
         }
     }
 }
@@ -236,18 +241,33 @@ pub enum CmpOp {
     Ge,
 }
 
-/// Where an instruction takes the count of a call, the value of an [`Op::Enter`]: a call takes
-/// its own count first, and an instruction of a callee's checks of a kind that may trap, an
-/// arithmetic operation whether checked or exact, a shift, a check or a count, takes the count of
-/// the call whose checks it belongs to last.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Takes {
-    First,
-    Last,
-    Nothing,
-}
-
 impl Op {
+    /// Whether an instruction of this kind may be an effect: may trap, read or write memory, or
+    /// count or make a call.
+    fn may_be_effect(&self) -> bool {
+        match self {
+            Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Shl { .. }
+            | Op::Check { .. }
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. }
+            | Op::Enter { .. }
+            | Op::Call(_) => true,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Slot { .. }
+            | Op::Elem { .. } => false,
+        }
+    }
+
     /// The function whose frame this instruction counts, where it is a count, an [`Op::Enter`].
     pub fn counted(&self) -> Option<FuncId> {
         match self {
@@ -270,31 +290,6 @@ impl Op {
             | Op::Store
             | Op::Copy { .. }
             | Op::Call(_) => None,
-        }
-    }
-
-    /// Where this instruction takes a count.
-    pub fn takes(&self) -> Takes {
-        match self {
-            Op::Call(_) => Takes::First,
-            Op::Arith { .. }
-            | Op::Neg { .. }
-            | Op::Shl { .. }
-            | Op::Check { .. }
-            | Op::Enter { .. } => Takes::Last,
-            Op::Param
-            | Op::Int(_)
-            | Op::Bool(_)
-            | Op::Bits(_)
-            | Op::Not
-            | Op::Shr
-            | Op::Cmp(_)
-            | Op::Cast
-            | Op::Slot { .. }
-            | Op::Elem { .. }
-            | Op::Load
-            | Op::Store
-            | Op::Copy { .. } => Takes::Nothing,
         }
     }
 }
@@ -357,17 +352,18 @@ pub enum Op {
     Copy {
         bytes: u32,
     },
-    /// Calls a function of the module; the value is its result, or unit. Its first operand is
-    /// the count of its callee, the [`Op::Enter`] that counted the callee's frame, and the call
-    /// gives those bytes back when it returns; the operands after it are the arguments.
+    /// Calls a function of the module on its operands, the latest effect last where the callee
+    /// takes one (`Function::follows`); the value is its result, or unit, and the latest effect
+    /// after it. The [`Op::Enter`] before it counted the callee's frame, and the call gives those
+    /// bytes back when it returns.
     Call(FuncId),
     /// Counts the frame of `callee` against the run's stack budget, where the call is counted:
     /// its arguments evaluated, none narrowed yet, the callee's checks not begun
-    /// (`core-calculus.md`, item 25). Its operands are the call's arguments as evaluated, before
-    /// any is narrowed, and its value, of type unit, is the count: the call takes it first, and
-    /// every instruction of the callee's checks that may trap takes it last ([`Takes`]). So the
-    /// order is held by the values: the count stands after the arguments it takes, and before
-    /// every narrowing, check and call that takes it. Traps at `trap` where the stack in use and
+    /// (`core-calculus.md`, item 25). Its operands are those of its call, the arguments as
+    /// evaluated, before any is narrowed, and the latest effect last; its value is the latest
+    /// effect after it, which the callee's checks follow (`Function::follows`). So the order is
+    /// held by the values: the count stands after its arguments and the effects before it, and
+    /// before every narrowing, check and call that follows it. Traps at `trap` where the stack in use and
     /// that frame together exceed the budget; otherwise the bytes are in use until the call
     /// returns. Every path from an `Enter` reaches its call or a trap, and the calls that a
     /// callee's checks make between them are each counted and returned within. The lowering
@@ -447,32 +443,59 @@ impl Function {
         self.tys[v.0 as usize]
     }
 
-    /// Whether `v` is a count, the value of an [`Op::Enter`].
-    pub fn is_count(&self, v: NodeId) -> bool {
-        self.ops
-            .get(v.0 as usize)
-            .is_some_and(|op| op.counted().is_some())
+    /// The operands instruction `v` takes besides the effect it follows, where its operation may
+    /// follow one: a checked or exact arithmetic operation, a shift, a check, a load, a store and a
+    /// copy, a check's operands being its condition and the values its trap site reports.
+    fn own_arity(&self, v: NodeId) -> Option<usize> {
+        match self.op(v) {
+            Op::Arith { .. } | Op::Shl { .. } | Op::Store | Op::Copy { .. } => Some(2),
+            Op::Neg { .. } | Op::Load => Some(1),
+            Op::Check { trap } => self.traps.get(trap.0 as usize).map(|t| t.text.len()),
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Slot { .. }
+            | Op::Elem { .. }
+            | Op::Call(_)
+            | Op::Enter { .. } => None,
+        }
     }
 
-    /// The count instruction `v` takes, where it takes one ([`Takes`]).
-    pub fn count_of(&self, v: NodeId) -> Option<NodeId> {
+    /// The effect instruction `v` follows: its last operand, past those its operation takes. The
+    /// lowering threads every instruction that may trap, read or write memory, or count a call's
+    /// frame through the one before it, and a block or a function takes the latest as its last
+    /// parameter, of type [`Ty::Effect`]; a count and a call take it there as they take their
+    /// arguments. So their order is held by values, which the verifier checks are each defined
+    /// before their use on every path, and no change can move one past another.
+    pub fn follows(&self, v: NodeId) -> Option<NodeId> {
         let args = self.args(v);
-        let at = match self.op(v).takes() {
-            Takes::First => args.first(),
-            Takes::Last => args.last(),
-            Takes::Nothing => None,
-        };
-        at.copied().filter(|a| self.is_count(*a))
+        match self.own_arity(v) {
+            Some(n) if args.len() == n + 1 => args.last().copied().filter(|a| self.is_effect(*a)),
+            Some(_) | None => None,
+        }
     }
 
-    /// The operands of `v` besides the count it takes: a call's arguments, a check's condition
-    /// and the values it reports, a count's arguments.
+    /// Whether `a` can stand for the state the effects before it left: a parameter of type
+    /// [`Ty::Effect`], or an instruction of a kind that may be an effect.
+    fn is_effect(&self, a: NodeId) -> bool {
+        match self.ops.get(a.0 as usize) {
+            Some(Op::Param) => self.tys.get(a.0 as usize) == Some(&Ty::Effect),
+            Some(op) => op.may_be_effect(),
+            None => false,
+        }
+    }
+
+    /// The operands of `v` besides the effect it follows.
     pub fn own_args(&self, v: NodeId) -> &[NodeId] {
         let args = self.args(v);
-        match (self.count_of(v), self.op(v).takes()) {
-            (Some(_), Takes::First) => &args[1..],
-            (Some(_), Takes::Last) => &args[..args.len() - 1],
-            (None, _) | (Some(_), Takes::Nothing) => args,
+        match self.follows(v) {
+            Some(_) => &args[..args.len() - 1],
+            None => args,
         }
     }
 
@@ -495,7 +518,7 @@ impl Function {
             Op::Param => "param".into(),
             Op::Int(bits) => match self.ty(v) {
                 Ty::Int(t) => format!("int {}", Num::from_bits(*bits, t)),
-                Ty::Bool | Ty::Addr | Ty::Unit => format!("int {}", bits),
+                Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => format!("int {}", bits),
             },
             Op::Bool(b) => format!("bool {}", b),
             Op::Arith { op, trap } => {
@@ -692,9 +715,12 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
             .blocks
             .get(b.0 as usize)
             .ok_or(format!("a jump to block {} that does not exist", b.0))?;
-        let given: Vec<Ty> = args.iter().map(|a| f.ty(*a)).collect();
-        let wanted: Vec<Ty> = target.params.iter().map(|p| f.ty(*p)).collect();
-        if args.iter().any(|a| !defined(*a)) || given != wanted {
+        let admitted = args.len() == target.params.len()
+            && args
+                .iter()
+                .zip(&target.params)
+                .all(|(a, p)| Want::param(f.ty(*p)).admits(f.ty(*a)));
+        if args.iter().any(|a| !defined(*a)) || !admitted {
             return Err(format!("a jump to block {} with the wrong arguments", b.0));
         }
         Ok(())
@@ -941,9 +967,6 @@ fn verify_order(f: &Function) -> Result<(), String> {
                 b, a.0
             ));
         }
-        if let Some(a) = used.iter().find(|a| f.is_count(**a)) {
-            return Err(format!("block {}: a count v{} used as a value", b, a.0));
-        }
     }
     Ok(())
 }
@@ -965,8 +988,8 @@ fn verify_frames(f: &Function) -> Result<(), String> {
             match f.op(v) {
                 Op::Enter { .. } => open.push(v),
                 Op::Call(c) => {
-                    let latest = open.pop();
-                    if latest.is_none() || latest != f.count_of(v) {
+                    let latest = open.pop().and_then(|count| f.op(count).counted());
+                    if latest != Some(*c) {
                         return Err(format!(
                             "v{} in block {}: a call of f{} that does not close the latest count open",
                             v.0, b.0, c.0
@@ -1035,6 +1058,8 @@ enum Want {
     IntOrBool,
     /// A value of any type but unit: an argument as evaluated.
     Value,
+    /// Any value: what a parameter of type [`Ty::Effect`] admits.
+    Any,
 }
 
 impl Want {
@@ -1044,6 +1069,15 @@ impl Want {
             Want::Int => matches!(t, Ty::Int(_)),
             Want::IntOrBool => matches!(t, Ty::Int(_) | Ty::Bool),
             Want::Value => t != Ty::Unit,
+            Want::Any => true,
+        }
+    }
+
+    /// What a parameter of type `t` admits: a value of its type, or any value for an effect.
+    fn param(t: Ty) -> Want {
+        match t {
+            Ty::Effect => Want::Any,
+            Ty::Int(_) | Ty::Bool | Ty::Addr | Ty::Unit => Want::Is(t),
         }
     }
 }
@@ -1052,7 +1086,6 @@ impl Want {
 /// operands' types, and the trap site it may raise, with room for the values it reports.
 fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
     let ty = f.ty(v);
-    check_count(f, v)?;
     let args: Vec<Ty> = f.own_args(v).iter().map(|a| f.ty(*a)).collect();
     let same = Want::Is(ty);
     let reported = |t: &Option<TrapId>| t.map(|t| (t, 1));
@@ -1104,20 +1137,11 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             None,
         ),
         Op::Call(c) => {
-            match f.count_of(v).and_then(|count| f.op(count).counted()) {
-                Some(counted) if counted != *c => {
-                    return Err(format!(
-                        "a call of f{} that takes the count of f{}",
-                        c.0, counted.0
-                    ))
-                }
-                Some(_) | None => {}
-            }
             let callee = m
                 .functions
                 .get(c.0 as usize)
                 .ok_or("a call of a function that does not exist")?;
-            let params = callee.params.iter().map(|p| Want::Is(*p)).collect();
+            let params = callee.params.iter().map(|p| Want::param(*p)).collect();
             (Want::Is(callee.result.unwrap_or(Ty::Unit)), params, None)
         }
         Op::Enter { callee, trap } => {
@@ -1125,21 +1149,17 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
                 .functions
                 .get(callee.0 as usize)
                 .ok_or("a count of a function that does not exist")?;
-            // The arguments as evaluated, of any type: one for each parameter, beside the slot of
-            // a result kept in memory, which is no argument.
-            let given = args.len();
-            let wanted = counted.params.len();
-            if given + 1 < wanted || given > wanted {
-                return Err(format!(
-                    "a count of f{} on {} arguments, for {} parameters",
-                    callee.0, given, wanted
-                ));
-            }
-            (
-                Want::Is(Ty::Unit),
-                vec![Want::Value; given],
-                trap.map(|t| (t, 0)),
-            )
+            // The arguments as evaluated, before any is narrowed, so of any type, and the effect
+            // it follows where the callee takes one: as many as the call passes.
+            let params = counted
+                .params
+                .iter()
+                .map(|p| match p {
+                    Ty::Effect => Want::Any,
+                    Ty::Int(_) | Ty::Bool | Ty::Addr | Ty::Unit => Want::Value,
+                })
+                .collect();
+            (Want::Is(Ty::Unit), params, trap.map(|t| (t, 0)))
         }
     };
     let site = trap.is_none_or(|(t, values)| {
@@ -1158,20 +1178,6 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             f.op(v)
         )),
     }
-}
-
-/// Where instruction `v` takes a count, and whether it must: a call takes the count of its callee
-/// first, always, and an instruction that may trap takes one last where it belongs to a callee's
-/// checks. A count is no other operand of any instruction or terminator.
-fn check_count(f: &Function, v: NodeId) -> Result<(), String> {
-    let count = f.count_of(v);
-    if f.op(v).takes() == Takes::First && count.is_none() {
-        return Err("a call whose first operand is not a count".into());
-    }
-    if f.own_args(v).iter().any(|a| f.is_count(*a)) {
-        return Err("a count used as a value".into());
-    }
-    Ok(())
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1282,7 +1288,7 @@ impl Memory {
                 Ok(Val::Int(Num::from_bits(u128::from_le_bytes(bits), t)))
             }
             Ty::Bool => Ok(Val::Bool(self.bytes[self.range(at, 1)?.start] != 0)),
-            Ty::Addr | Ty::Unit => Err(Stop::Broken(format!("a load of {}", ty))),
+            Ty::Addr | Ty::Unit | Ty::Effect => Err(Stop::Broken(format!("a load of {}", ty))),
         }
     }
 
@@ -1528,7 +1534,7 @@ impl<'m> Machine<'m> {
             Op::Param => return Err(broken("a parameter in a block's instructions")),
             Op::Int(bits) => match ty {
                 Ty::Int(t) => Val::Int(Num::from_bits(*bits, t)),
-                Ty::Bool | Ty::Addr | Ty::Unit => {
+                Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => {
                     return Err(broken("an integer of a type that is not one"))
                 }
             },
@@ -1812,9 +1818,8 @@ mod tests {
             Ty::Unit,
             args,
         );
-        let mut with = vec![count];
-        with.extend_from_slice(args);
-        b.inst(Op::Call(FuncId(callee)), ty, &with)
+        let _ = count;
+        b.inst(Op::Call(FuncId(callee)), ty, args)
     }
 
     fn run0(m: &Module, f: u32, args: &[Val]) -> Result<Val, Stop> {
@@ -1898,7 +1903,7 @@ mod tests {
         let second = m.functions[1].to_string();
         assert_eq!(printed, format!("f0: {}\nf1: {}", first, second));
         assert!(second.contains("= enter f0 t0 v0 @0:0\n"), "{}", second);
-        assert!(second.contains("= call f0 v1, v0 @0:0\n"), "{}", second);
+        assert!(second.contains("= call f0 v0 @0:0\n"), "{}", second);
         // The same module prints the same text every time.
         assert_eq!(printed, m.to_string());
         assert_eq!(Module::default().to_string(), "");
@@ -2339,9 +2344,9 @@ mod tests {
     }
 
     /// A block is entered with the same counts open on every path into it (`verify_frames`): a
-    /// count on one path and its call after the join is a count not defined on every path, and a
-    /// count before a branch with its call on one side only enters the join with it open on one
-    /// path and closed on the other. A count before the branch and its call after the join verify.
+    /// count on one path and its call after the join, and a count before a branch with its call on
+    /// one side only, each enter the join with the count open on one path and not on the other. A
+    /// count before the branch and its call after the join verify.
     #[test]
     fn test_counts_open_on_some_paths_into_a_block_are_refused() {
         // `fn leaf()`, which a caller counts and calls.
@@ -2369,8 +2374,8 @@ mod tests {
                 otherwise: (otherwise, vec![]),
             });
             b.switch(then);
-            if let (Some(count), true) = (early, call_in_then) {
-                b.inst(Op::Call(FuncId(0)), Ty::Unit, &[count]);
+            if let (Some(_), true) = (early, call_in_then) {
+                b.inst(Op::Call(FuncId(0)), Ty::Unit, &[]);
             }
             b.end(Term::Jump(join, vec![]));
             b.switch(otherwise);
@@ -2378,8 +2383,8 @@ mod tests {
             b.end(Term::Jump(join, vec![]));
             b.switch(join);
             match (late, call_in_then) {
-                (Some(count), false) => {
-                    b.inst(Op::Call(FuncId(0)), Ty::Unit, &[count]);
+                (Some(_), false) => {
+                    b.inst(Op::Call(FuncId(0)), Ty::Unit, &[]);
                     b.end(Term::Return(None));
                 }
                 // A join that only traps returns nothing, so that the join itself is what fails.
@@ -2393,10 +2398,11 @@ mod tests {
                 budget: BUDGET,
             }
         };
-        // The count only in `otherwise`, the call after the join.
+        // The count only in `otherwise`, the call after the join: the join is entered with the
+        // count open on one path and on the other none.
         let why = verify(&shaped(false, false)).unwrap_err();
         assert!(
-            why.contains("is not defined before it on every path"),
+            why.contains("is entered with different counts of calls open"),
             "{}",
             why
         );

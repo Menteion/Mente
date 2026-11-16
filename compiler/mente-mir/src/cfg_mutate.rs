@@ -172,6 +172,10 @@ impl Mutant {
                     Change::Op(op) => f.ops[v.0 as usize] = op.clone(),
                     Change::Remove => {
                         block.insts.remove(i as usize);
+                        // What followed the effect taken out follows the one it followed.
+                        if let Some(before) = f.follows(v) {
+                            replace_uses(f, v, before);
+                        }
                     }
                     Change::Bypass => {
                         let Some(&first) = f.args(v).first() else {
@@ -531,7 +535,7 @@ pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
                 // Past the first instruction after it, other than its call, that takes it.
                 let takes = b.insts[ii + 1..]
                     .iter()
-                    .position(|&u| f.count_of(u) == Some(v) && called(f, u).is_none());
+                    .position(|&u| f.follows(u) == Some(v));
                 if let Some(k) = takes {
                     out.push((name("enter-later"), moved_to(ii + 1 + k)));
                 }
@@ -541,6 +545,22 @@ pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
                     .rposition(|u| f.own_args(v).contains(u));
                 if let Some(k) = given {
                     out.push((name("enter-earlier"), moved_to(k)));
+                }
+            }
+            // Each call past the next call of its block.
+            for (ii, &v) in b.insts.iter().enumerate() {
+                if called(f, v).is_none() {
+                    continue;
+                }
+                let next = b.insts[ii + 1..]
+                    .iter()
+                    .position(|&u| called(f, u).is_some());
+                if let Some(k) = next {
+                    let mut moved = m.clone();
+                    let insts = &mut moved.functions[fi].blocks[bi].insts;
+                    insts.remove(ii);
+                    insts.insert(ii + 1 + k, v);
+                    out.push((format!("{}/b{}.i{}/call-later", f.name, bi, ii), moved));
                 }
             }
         }
@@ -645,7 +665,8 @@ mod tests {
             Ty::Unit,
             &[x],
         );
-        let y = b.inst(Op::Call(FuncId(1)), Ty::Int(I64), &[inner, x]);
+        let _ = inner;
+        let y = b.inst(Op::Call(FuncId(1)), Ty::Int(I64), &[x]);
         let trap = deep(&mut b);
         let count = b.inst(
             Op::Enter {
@@ -660,7 +681,7 @@ mod tests {
         let narrowing = b.trap_site("narrowing", &["out of range"]);
         b.inst(Op::Check { trap: narrowing }, Ty::Unit, &[fits, count]);
         let small = b.inst(Op::Cast, Ty::Int(U8), &[y]);
-        let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[count, small]);
+        let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[small]);
         b.end(Term::Return(Some(r)));
         let m = Module {
             functions: vec![callee, id, b.finish()],
@@ -691,15 +712,24 @@ mod tests {
                 "caller/b0.i2/enter-moved",
                 "caller/b0.i2/enter-later",
                 "caller/b0.i2/enter-earlier",
+                "caller/b0.i1/call-later",
             ]
         );
         for (name, broken) in &all {
             let why = cfg::verify(broken).unwrap_err();
-            let expected = match name.rsplit('/').next() {
-                Some("enter-doubled") => "does not close the latest count open",
-                _ => "is not defined before it on every path",
-            };
-            assert!(why.contains(expected), "{}: {}", name, why);
+            // The order of values refuses a count or a call taken before it is given; the walk, a
+            // call that closes no count, or a count left open.
+            let structural = [
+                "is not defined before it on every path",
+                "does not close the latest count open",
+                "returns with the count",
+            ];
+            assert!(
+                structural.iter().any(|r| why.contains(r)),
+                "{}: {}",
+                name,
+                why
+            );
         }
         let ran = cfg::run(
             &m,
