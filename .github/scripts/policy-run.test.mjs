@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 11;
+const FLOOR = 13;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -41,6 +41,38 @@ after(() => {
 
 /// git, in the repository.
 const git = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+/// A path as git's sh and git's configuration take it, with forward slashes on Windows too.
+const posixPath = (p) => p.replace(/\\/g, "/");
+/// `env` without a variable of git's own, any of which could name another repository (GIT_DIR),
+/// more configuration (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT) or another identity.
+const withoutGitVariables = (env) => Object.fromEntries(Object.entries(env).filter(([name]) => !name.toUpperCase().startsWith("GIT_")));
+/// The identity of every commit the run tests make in their own repositories, fixed here: never the
+/// identity of whoever runs them (the review of 100e1e5).
+const TEST_IDENTITY = { name: "t", email: "t@example.invalid" };
+/// git's environment in the run tests' repositories, and the CLIs' the tests run there, from
+/// `env`: no variable of git's own from it, no system or global configuration, and TEST_IDENTITY as
+/// author and committer, given as an environment rather than `git -c`. /dev/null names no
+/// configuration on Linux and to Git for Windows alike, which refuses node's os.devNull.
+const gitTestEnv = (env) => ({
+  ...withoutGitVariables(env),
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_AUTHOR_NAME: TEST_IDENTITY.name,
+  GIT_AUTHOR_EMAIL: TEST_IDENTITY.email,
+  GIT_COMMITTER_NAME: TEST_IDENTITY.name,
+  GIT_COMMITTER_EMAIL: TEST_IDENTITY.email,
+});
+const GIT_TEST_ENV = gitTestEnv(process.env);
+/// git in the run tests' repository at `dir`, its output trimmed.
+const testGit =
+  (dir, env = GIT_TEST_ENV) =>
+  (...args) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf8", env }).trim();
+/// That every commit of the repository `sh` runs git in is TEST_IDENTITY's, as author and committer.
+function assertTestIdentity(sh) {
+  const who = `${TEST_IDENTITY.name} <${TEST_IDENTITY.email}>`;
+  for (const line of sh("log", "--format=%an <%ae>|%cn <%ce>").split("\n")) assert.equal(line, `${who}|${who}`, "a commit of the run tests' repository is not the fixture's identity's");
+}
 
 /// The bash the run tests run scripts in, by its path: on Windows, Git's, beside the git on PATH,
 /// since a bare `bash` there may be WSL's; elsewhere /usr/bin/bash, since a bare name is looked up on
@@ -445,8 +477,7 @@ check("timeout, in bash, stops a command at its limit and passes one within it",
 check("the watch CLI decides on a real history, through any path, and fails rather than say nothing", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-watch-"));
   try {
-    const sh = (...args) =>
-      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
+    const sh = testGit(dir);
     const write = (file, text) => {
       fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
       fs.writeFileSync(path.join(dir, file), text);
@@ -457,9 +488,9 @@ check("the watch CLI decides on a real history, through any path, and fails rath
       sh("commit", "-q", "-m", "change");
       return sh("rev-parse", "HEAD");
     };
-    sh("init", "-q");
+    sh("init", "-q", "-b", "main");
     const base = commit({ [PATHS_FILE]: "[x.yml]\nsrc/**\n", "src/a.rs": "a\n", "docs/a.md": "a\n" });
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
+    const env = Object.fromEntries(Object.entries(GIT_TEST_ENV).filter(([k]) => !k.startsWith("GITHUB_")));
     const cli = (script, head, { output = true } = {}) => {
       const event = path.join(dir, "event.json");
       fs.writeFileSync(event, JSON.stringify({ pull_request: { base: { sha: base }, head: { sha: head } } }));
@@ -485,6 +516,7 @@ check("the watch CLI decides on a real history, through any path, and fails rath
     const link = path.join(dir, "linked");
     fs.symlinkSync(HERE, link, "junction");
     assert.equal(cli(path.join(link, "watch.mjs"), src).output, "run=true\n");
+    assertTestIdentity(sh);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -507,9 +539,8 @@ check("the Commits check fails on every event while a base change is newer than 
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   try {
-    const sh = (...args) =>
-      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
-    sh("init", "-q");
+    const sh = testGit(dir);
+    sh("init", "-q", "-b", "main");
     fs.writeFileSync(path.join(dir, "a"), "a\n");
     sh("add", "-A");
     sh("commit", "-q", "-m", "Base");
@@ -519,7 +550,7 @@ check("the Commits check fails on every event while a base change is newer than 
       sh("commit", "-q", "-am", "Change a");
       return sh("rev-parse", "HEAD");
     };
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
+    const env = Object.fromEntries(Object.entries(GIT_TEST_ENV).filter(([k]) => !k.startsWith("GITHUB_")));
     const spawnWith = (eventName, payload) =>
       new Promise((done) => {
         const event = path.join(dir, "event.json");
@@ -575,8 +606,126 @@ check("the Commits check fails on every event while a base change is newer than 
     // Without the head's runs it fails rather than pass unseen.
     api.runs.delete(second);
     assert.equal((await run(second, "synchronize")).status, 1);
+    assertTestIdentity(sh);
   } finally {
     server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("the run tests' repositories commit as the fixture's identity, under no configuration of the caller's", () => {
+  // A caller whose git names another identity and either runs a hook on every commit or points at
+  // another repository, through each place git reads it from: the global configuration, the home
+  // directory's .gitconfig, and the variables of git's own. Plain git takes each, as the controls
+  // show; the tests' git takes none (the review of 100e1e5).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-test-git-"));
+  try {
+    const marker = path.join(dir, "hook-ran");
+    const hooks = path.join(dir, "hooks");
+    fs.mkdirSync(hooks);
+    fs.writeFileSync(path.join(hooks, "pre-commit"), `#!/bin/sh\necho ran >> '${posixPath(marker)}'\n`, { mode: 0o755 });
+    const config = `[user]\n\tname = Someone\n\temail = someone@example.com\n[core]\n\thooksPath = ${posixPath(hooks)}\n`;
+    fs.writeFileSync(path.join(dir, "global.gitconfig"), config);
+    fs.mkdirSync(path.join(dir, "home"));
+    fs.writeFileSync(path.join(dir, "home", ".gitconfig"), config);
+    const other = path.join(dir, "other");
+    fs.mkdirSync(other);
+    testGit(other)("init", "-q", "-b", "main");
+    const plain = { ...withoutGitVariables(process.env), GIT_CONFIG_NOSYSTEM: "1" };
+    const someone = { GIT_AUTHOR_NAME: "Someone", GIT_AUTHOR_EMAIL: "someone@example.com", GIT_COMMITTER_NAME: "Someone", GIT_COMMITTER_EMAIL: "someone@example.com" };
+    const callers = {
+      "a global configuration": { ...plain, GIT_CONFIG_GLOBAL: posixPath(path.join(dir, "global.gitconfig")) },
+      "a home directory's .gitconfig": { ...plain, HOME: posixPath(path.join(dir, "home")) },
+      "git's variables": { ...plain, GIT_CONFIG_GLOBAL: "/dev/null", ...someone, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: posixPath(hooks) },
+      "a GIT_DIR of another repository": { ...plain, GIT_CONFIG_GLOBAL: "/dev/null", ...someone, GIT_DIR: path.join(other, ".git") },
+    };
+    const who = `${TEST_IDENTITY.name} <${TEST_IDENTITY.email}>`;
+    for (const [what, caller] of Object.entries(callers)) {
+      const repo = fs.mkdtempSync(path.join(dir, "repo-"));
+      const commit = (sh, text) => {
+        fs.writeFileSync(path.join(repo, "a"), text);
+        sh("add", "-A");
+        sh("commit", "-q", "-m", text.trim());
+      };
+      testGit(repo)("init", "-q", "-b", "main");
+      // The control: plain git, under the caller's environment, takes what it names.
+      fs.rmSync(marker, { force: true });
+      const plainGit = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8", env: caller }).trim();
+      commit(plainGit, "control\n");
+      assert.equal(plainGit("log", "-1", "--format=%an <%ae>|%s"), "Someone <someone@example.com>|control", `${what}: plain git does not take the caller's identity`);
+      if (caller.GIT_DIR) {
+        assert.equal(testGit(other)("log", "--format=%s"), "control", `${what}: plain git does not commit to the repository GIT_DIR names`);
+      } else {
+        assert.ok(fs.existsSync(marker), `${what}: plain git runs no hook the caller names`);
+      }
+      // The tests' git, from the same environment, takes none of it.
+      fs.rmSync(marker, { force: true });
+      const sh = testGit(repo, gitTestEnv(caller));
+      commit(sh, "tested\n");
+      assert.ok(!fs.existsSync(marker), `${what}: the tests' git runs a hook the caller names`);
+      assert.equal(sh("log", "-1", "--format=%an <%ae>|%cn <%ce>|%s"), `${who}|${who}|tested`, `${what}: the tests' git commits elsewhere, or as another identity`);
+      if (caller.GIT_DIR) assert.equal(testGit(other)("log", "--format=%s"), "control", `${what}: the tests' git commits to the repository GIT_DIR names`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("the collector reads the repository it is in, and runs no program git's configuration names", () => {
+  // The collector, copied into a repository of its own, under a caller whose git names an
+  // fsmonitor in the repository's configuration, sorts tags backwards from the home directory's
+  // .gitconfig and from git's variables, and points GIT_DIR at another repository. Plain git takes
+  // each, as the controls show; the collector's facts are the repository's own, and the fsmonitor
+  // never runs (the review of 100e1e5). The system configuration lies outside what a test may
+  // write, so its refusal is held by GIT_CONFIG_NOSYSTEM's reading alone.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-collect-"));
+  try {
+    const repo = path.join(dir, "repo");
+    fs.mkdirSync(path.join(repo, ".github", "scripts"), { recursive: true });
+    fs.copyFileSync(path.join(HERE, "policy-collect.mjs"), path.join(repo, ".github", "scripts", "policy-collect.mjs"));
+    fs.writeFileSync(path.join(repo, "ROADMAP.md"), "# Roadmap\n");
+    const sh = testGit(repo);
+    sh("init", "-q", "-b", "main");
+    sh("add", "-A");
+    sh("commit", "-q", "-m", "Base");
+    sh("tag", "m0a");
+    sh("tag", "m0b");
+    const head = sh("rev-parse", "HEAD");
+    const other = path.join(dir, "other");
+    fs.mkdirSync(other);
+    const osh = testGit(other);
+    osh("init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(other, "ROADMAP.md"), "# Another\n");
+    osh("add", "-A");
+    osh("commit", "-q", "-m", "Other");
+    const marker = path.join(dir, "fsmonitor-ran");
+    const fsmonitor = path.join(dir, "fsmonitor.sh");
+    fs.writeFileSync(fsmonitor, `#!/bin/sh\necho ran >> '${posixPath(marker)}'\n`, { mode: 0o755 });
+    sh("config", "core.fsmonitor", posixPath(fsmonitor));
+    fs.mkdirSync(path.join(dir, "home"));
+    fs.writeFileSync(path.join(dir, "home", ".gitconfig"), "[tag]\n\tsort = -refname\n");
+    const base = Object.fromEntries(Object.entries(GIT_TEST_ENV).filter(([k]) => !k.startsWith("GITHUB_")));
+    const { GIT_CONFIG_GLOBAL: _, ...noGlobal } = base;
+    const plain = (env, ...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8", env, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    // The controls: plain git takes each.
+    plain(base, "ls-files", "-z");
+    assert.ok(fs.existsSync(marker), "plain git ls-files runs no fsmonitor of the repository's configuration");
+    fs.rmSync(marker);
+    assert.equal(plain({ ...noGlobal, HOME: posixPath(path.join(dir, "home")) }, "-c", "core.fsmonitor=false", "tag", "-l"), "m0b\nm0a", "plain git does not read the home directory's .gitconfig");
+    const sorted = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "tag.sort", GIT_CONFIG_VALUE_0: "-refname" };
+    assert.equal(plain({ ...base, ...sorted }, "-c", "core.fsmonitor=false", "tag", "-l"), "m0b\nm0a", "plain git does not read git's variables");
+    assert.equal(plain({ ...base, GIT_DIR: path.join(other, ".git") }, "rev-parse", "HEAD"), osh("rev-parse", "HEAD"), "plain git does not read GIT_DIR's repository");
+    // The collector, under all of it.
+    const r = spawnSync(process.execPath, [path.join(repo, ".github", "scripts", "policy-collect.mjs")], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...noGlobal, HOME: posixPath(path.join(dir, "home")), ...sorted, GIT_DIR: path.join(other, ".git") },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(marker), "the collector's git runs the fsmonitor of the repository's configuration");
+    const facts = JSON.parse(fs.readFileSync(path.join(repo, "target", "policy-facts.json"), "utf8"));
+    assert.deepEqual(facts, { head, tracked: [".github/scripts/policy-collect.mjs", "ROADMAP.md"], base: head, tags: ["m0a", "m0b"], baseRoadmap: "# Roadmap\n" });
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

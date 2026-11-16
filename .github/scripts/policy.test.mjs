@@ -83,12 +83,23 @@ export function gitHead(root) {
 /// job's step, and npm run test:ci): the files git tracks and the milestones' facts. Refused when
 /// they are of another commit than the one checked out, so that no stale facts pass.
 const FACTS_FILE = path.join(ROOT, "target", "policy-facts.json");
-/// The collector's facts from their text, refused unless they are of `head` and whole.
+/// The collector's facts from their text, refused unless they are of `head` and whole: an object
+/// whose files and tags are names, each a string that is not empty, and whose base is a full commit
+/// id, so that nothing the policy reads from them is of another type than it expects (the review of
+/// 100e1e5).
 export function readFacts(text, head) {
   if (text === null) throw new Error("no facts from the collector: run node .github/scripts/policy-collect.mjs first, as npm run test:ci does");
   const facts = JSON.parse(text);
+  if (facts === null || typeof facts !== "object" || Array.isArray(facts)) throw new Error("the collector's facts are not an object: run node .github/scripts/policy-collect.mjs again");
   if (facts.head !== head) throw new Error(`the collector's facts are of ${facts.head}, not of ${head}, the commit checked out: run node .github/scripts/policy-collect.mjs again, as npm run test:ci does`);
-  const whole = Array.isArray(facts.tracked) && facts.tracked.length > 0 && typeof facts.base === "string" && Array.isArray(facts.tags) && typeof facts.baseRoadmap === "string";
+  const names = (list) => Array.isArray(list) && list.every((name) => typeof name === "string" && name !== "");
+  const whole =
+    names(facts.tracked) &&
+    facts.tracked.length > 0 &&
+    typeof facts.base === "string" &&
+    /^[0-9a-f]{40}$/.test(facts.base) &&
+    names(facts.tags) &&
+    typeof facts.baseRoadmap === "string";
   if (!whole) throw new Error("the collector's facts are not whole: run node .github/scripts/policy-collect.mjs again");
   return facts;
 }
@@ -1254,8 +1265,8 @@ const PINNED_FILES = new Map([
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
-  [".github/scripts/policy-collect.mjs", "02b715f49c93ad6e140ff22fa598bcb57831c09642afcbe754863107156018be"],
-  [".github/scripts/policy-run.test.mjs", "a4b193cf7b6e647246a9c52e59ae750c9a3363b0a1a99979ee33a7b197f84e0f"],
+  [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
+  [".github/scripts/policy-run.test.mjs", "be6b14c485b3c531af99e5be06448c455da9b7dcc902c70155ee3c39013a8867"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -1264,18 +1275,18 @@ const PINNED_FILES = new Map([
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
   // Mutants floor, the watch, the actions' pins and the YAML reader the policy reads every
   // workflow with.
-  [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
-  [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
+  [".github/scripts/build-time-code.mjs", "874280f8818d786a0c6f0bca3a60ced4ae397c0f13169a1244303d4a436487ec"],
+  [".github/scripts/lib/build-time-code.mjs", "99b866cb2014b1a97c770819e4707fa06ef203da6bb7e2efc7c6cc3b65517b6a"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
   [".github/scripts/lib/mutants-floor.mjs", "20e30ecfcbb91626c8f3ed22f6709d52afc7ca34cf7dd5c6433728a09108babb"],
-  [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
-  [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
+  [".github/scripts/watch.mjs", "55168acde1c9d16a823db62389483640e24e745dfd39ad6e984cf88c3200a7d3"],
+  [".github/scripts/lib/watch.mjs", "895bedf2e57eb8dd3fc327a33d34e2adedf2770df18de599fae304a6819fe502"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
   [".github/scripts/lib/action-pins.mjs", "f08a9cec14bea0adb5a077a2dc33a52b668868bcd6cc15de2691c57ad8e837dc"],
   [".github/scripts/yaml.test.mjs", "4dc4626a1c6ecb74f5c82f82d3994e6d477d30a7ac63b5e25b2b702665f9eab3"],
   [".github/scripts/lib/yaml.mjs", "ee62bc138d9f19d920de7c2224bdd22b09b821369f40bec8c528b5c54fca3dce"],
-  [".github/scripts/lib/commits.mjs", "b431601e5565185ee6a48db2995962ea70736ecef2ab76ea458a05fd23fc6c3e"],
-  [".github/scripts/commits.mjs", "967378f4f8253cbcc73b2539320c9bc99a1a79edc5277ad0c38903ddffcbd96f"],
+  [".github/scripts/lib/commits.mjs", "bd79c94ae1cc142d48e066b22ea559a2f6bbc20c5af877de56fc1b9d9d382a90"],
+  [".github/scripts/commits.mjs", "33c4156781145f9c0a0e127fb99c304a85e1ed508e1321c4e56a3992ce6d4322"],
   // Every file on the API key's path and on the lock's, which run beside the key or as root: a line
   // added anywhere in one, before the key's line or after it, is a change to a gate review sees
   // (the re-check of 4ab15da: `set -x`, or the key written to a file, passed every rule of
@@ -3571,11 +3582,22 @@ export function judgeSpawnProblems(text) {
 }
 
 check("every module the workflow policy's tests load, directly or through another, is a gate file its owner holds", () => {
-  // The policy itself starts no process.
-  assert.deepEqual(judgeSpawnProblems(read(POLICY)), [], "the policy starts processes of its own");
+  // The policy starts no process, nor does any module it loads: the libraries it shares with the
+  // scripts the jobs run take what git and cargo report from those scripts (the review of
+  // 100e1e5: three of them still imported child_process).
+  const judged = policyModules([POLICY], read).modules;
+  assert.ok(judged.includes(".github/scripts/lib/build-time-code.mjs") && judged.includes(".github/scripts/lib/watch.mjs") && judged.includes(".github/scripts/lib/commits.mjs"), judged.join(", "));
+  assert.deepEqual(judged.flatMap((f) => judgeSpawnProblems(read(f)).map((p) => `${f}: ${p}`)), [], "the policy, or a module it loads, may start a process");
   for (const plant of ['import { spawnSync } from "node:child_process";\n', 'const cp = await import("node:child_process");\n', 'import { Worker } from "node:worker_threads";\n', 'const c = process.getBuiltinModule("node:child_process");\n']) {
     assert.ok(judgeSpawnProblems(plant).length > 0, `the policy may start a process through ${plant.trim()}`);
   }
+  // Planted through a module it loads: a library that spawns, reached by an import of the policy's.
+  const spawning = new Map([
+    [POLICY, 'import { x } from "./lib/x.mjs";\n'],
+    [".github/scripts/lib/x.mjs", 'import { execFileSync } from "node:child_process";\nexport const x = () => execFileSync("git", ["ls-files"]);\n'],
+  ]);
+  const reached = policyModules([POLICY], (f) => spawning.get(f) ?? "").modules;
+  assert.ok(reached.flatMap((f) => judgeSpawnProblems(spawning.get(f) ?? "")).length > 0, "a library the policy loads may start a process");
   // The quick check of d471f7e: policy.test.mjs imported tools/quick.mjs, which no pattern of
   // .github/CODEOWNERS held, and one line there turned the strict assertions into no-ops: this
   // policy passed 70 of 70 with a computed key planted in the harness. No module it loads may be
@@ -4664,7 +4686,7 @@ check("the policy reads the commit checked out from .git, in each form git keeps
     fs.rmSync(dir, { recursive: true, force: true });
   }
   // And the policy reads its facts only at the commit checked out, and whole: facts of another
-  // commit, none at all, or with a part missing are refused.
+  // commit, none at all, with a part missing or of another type, are refused.
   assert.equal(FACTS.head, gitHead(ROOT));
   const whole = { head: "a".repeat(40), tracked: ["README.md"], base: "b".repeat(40), tags: ["m0a"], baseRoadmap: "# Roadmap\n" };
   assert.deepEqual(readFacts(JSON.stringify(whole), "a".repeat(40)), whole);
@@ -4675,6 +4697,24 @@ check("the policy reads the commit checked out from .git, in each form git keeps
     assert.throws(() => readFacts(JSON.stringify(rest), "a".repeat(40)), /not whole/, part);
   }
   assert.throws(() => readFacts(JSON.stringify({ ...whole, tracked: [] }), "a".repeat(40)), /not whole/, "no tracked file");
+  for (const text of ["null", "[]", '"facts"', "7"]) assert.throws(() => readFacts(text, "a".repeat(40)), /not an object/, text);
+  const misshapen = {
+    "a tracked file that is not a string": { tracked: ["README.md", 7] },
+    "a tracked file that is an object": { tracked: [{ toString: "README.md" }] },
+    "a tracked file with no name": { tracked: ["README.md", ""] },
+    "a tag that is not a string": { tags: ["m0a", null] },
+    "a tag with no name": { tags: [""] },
+    "a base that is a branch's name": { base: "main" },
+    "a base that is a short commit id": { base: "b".repeat(12) },
+    "a base in capitals": { base: "B".repeat(40) },
+    "a base with more after its id": { base: `${"b".repeat(40)}\n` },
+    "a base that is not a string": { base: 7 },
+    "a base that is a list holding an id": { base: ["b".repeat(40)] },
+    "a ROADMAP.md that is not a string": { baseRoadmap: ["# Roadmap\n"] },
+  };
+  for (const [what, part] of Object.entries(misshapen)) {
+    assert.throws(() => readFacts(JSON.stringify({ ...whole, ...part }), "a".repeat(40)), /not whole/, what);
+  }
 });
 
 check("every milestone done on the base has its tag", () => {

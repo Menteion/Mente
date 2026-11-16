@@ -11,7 +11,30 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const git = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+/// git with every key by which a command here could start a program set on its own command line,
+/// which wins over the repository's configuration: `git ls-files` runs core.fsmonitor from
+/// .git/config (the review of 100e1e5).
+const GIT_ISOLATION = [
+  "-c", "core.fsmonitor=false",
+  "-c", "core.hooksPath=/dev/null",
+  "-c", "core.pager=cat",
+  "-c", "core.sshCommand=",
+  "-c", "core.askPass=",
+  "-c", "credential.helper=",
+  "-c", "diff.external=",
+  "-c", "log.showSignature=false",
+  "-c", "gpg.program=",
+];
+/// git's environment: the runner's without a variable of git's own, any of which could name another
+/// repository (GIT_DIR) or more configuration (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT), and with no
+/// system or global configuration. /dev/null names no configuration on Linux and to Git for Windows
+/// alike, which refuses node's os.devNull.
+const GIT_ENV = {
+  ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.toUpperCase().startsWith("GIT_"))),
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+};
+const git = (args) => execFileSync("git", [...GIT_ISOLATION, ...args], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: GIT_ENV });
 
 /// The base the pull request or merge group is checked against: the event's, or the merge base
 /// with origin/main.
@@ -31,7 +54,8 @@ function policyBase() {
   }
 }
 
-const base = policyBase();
+// The base as a full commit id, whatever form named it.
+const base = git(["rev-parse", "--verify", `${policyBase()}^{commit}`]).trim();
 const facts = {
   // The commit the facts are of, which the policy compares with the one checked out.
   head: git(["rev-parse", "HEAD"]).trim(),
@@ -40,8 +64,9 @@ const facts = {
   // The milestones' tags, and ROADMAP.md as the base holds it.
   base,
   tags: git(["tag", "-l"]).split(/\r?\n/).filter(Boolean),
-  baseRoadmap: git(["show", `${base}:ROADMAP.md`]),
+  // The blob as stored: cat-file runs no textconv filter, which `git show` may.
+  baseRoadmap: git(["cat-file", "blob", `${base}:ROADMAP.md`]),
 };
 fs.mkdirSync(path.join(ROOT, "target"), { recursive: true });
 fs.writeFileSync(path.join(ROOT, "target", "policy-facts.json"), JSON.stringify(facts));
-console.log(`the workflow policy's facts: ${facts.tracked.length} tracked files at ${facts.head.slice(0, 12)}, base ${base === "HEAD" ? "HEAD" : base.slice(0, 12)}`);
+console.log(`the workflow policy's facts: ${facts.tracked.length} tracked files at ${facts.head.slice(0, 12)}, base ${base.slice(0, 12)}`);

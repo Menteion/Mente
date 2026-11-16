@@ -22,7 +22,6 @@
 // none can form a workflow command.
 
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
 
 /// The code points `is_cjk` rejects, as inclusive ranges: Hangul Jamo; the CJK radicals and
 /// Kangxi radicals; everything from the ideographic description characters through the unified
@@ -82,13 +81,9 @@ export function problems(commits, pullRequest, baseChanged = false) {
   return found;
 }
 
-/// The commits reachable from `head` and not from `base`, oldest first.
-export function commitsBetween(base, head, cwd) {
-  const out = execFileSync("git", ["log", "--reverse", "--format=%H%x1f%s%x1f%B%x1e", `${base}..${head}`], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+/// The commits of git's log in the form .github/scripts/commits.mjs asks for, oldest first: each
+/// record its id, its subject and its message, separated by \x1f and ended by \x1e.
+export function parseLog(out) {
   return out
     .split("\x1e")
     .map((record) => record.replace(/^\n/, ""))
@@ -149,8 +144,11 @@ async function apiGet(env, path) {
   return response.json();
 }
 
-/// The CLI: checks the event's commits in the repository at `cwd` and returns the exit code.
-export async function main(env, cwd) {
+/// The CLI's logic: checks the event's commits, `between(base, head)` oldest first, which
+/// .github/scripts/commits.mjs reads with git, and returns the exit code. This module starts no
+/// process (policy-runtime-judge).
+export async function main(env, between) {
+  if (typeof between !== "function") throw new Error("the Commits check needs a reader of the commits, which its caller gives");
   const eventName = env.GITHUB_EVENT_NAME ?? "";
   if (!env.GITHUB_EVENT_PATH) throw new Error("GITHUB_EVENT_PATH is not set");
   if (!env.GITHUB_REPOSITORY) throw new Error("GITHUB_REPOSITORY is not set");
@@ -180,7 +178,7 @@ export async function main(env, cwd) {
   const timeline = await apiList(env, `/repos/${repo}/issues/${pr.number}/timeline`);
   const headRuns = await apiList(env, `/repos/${repo}/actions/runs?event=pull_request&head_sha=${pr.head}`, "workflow_runs");
   const baseChanged = retargeted || baseChangedSincePush([...events, ...timeline], headRuns);
-  const commits = commitsBetween(base, head, cwd);
+  const commits = between(base, head);
   if (commits.length === 0) throw new Error(`no commits in ${base}..${head}`);
   const found = problems(commits, pullRequest, baseChanged);
   console.log(`${commits.length} commits in ${base.slice(0, 7)}..${head.slice(0, 7)}${pullRequest ? ", and the pull request's title and body" : ""}.`);
