@@ -1,0 +1,79 @@
+# The documentation site's publication (docs/design-review.md, `docs-site`): a milestone tag (`m*`)
+# builds the site as pages.yml does, as the edition the tag names, and publishes it to GitHub Pages,
+# marked pre-release and unstable. A run by hand builds the site of the branch it is started on and
+# publishes it only when started on a milestone tag. It holds no required job: pages.yml's "Build the
+# site" is the check of every pull request, and this workflow runs on events a required job may not.
+# Every action is pinned to a full commit SHA, as in ci.yml.
+name: Publish the site
+
+on:
+  push:
+    tags: ["m*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build the site to publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the tree can run where cargo builds
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
+      - name: Test the site generator and its link check
+        run: npm run test:site
+      - name: Install mdBook
+        run: bash .github/scripts/install-mdbook.sh
+      - name: Build mn, whose `mn explain` the error-code pages come from
+        run: cargo build --locked --bin mn
+      - name: Build the site and check every link
+        env:
+          # A milestone tag names the edition; anything else is an unreleased build of its commit.
+          SITE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          SITE_REF: ${{ github.sha }}
+        run: node site/build.mjs --mn target/debug/mn --mdbook "$HOME/.local/mdbook/mdbook"
+      - name: Upload the site for GitHub Pages
+        if: github.ref_type == 'tag'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: target/site/book
+
+  deploy:
+    # Only a milestone tag publishes. The github-pages environment must allow the tag (a
+    # deployment tag rule `m*`), since by default it admits only the default branch.
+    name: Publish to GitHub Pages
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'm')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

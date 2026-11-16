@@ -44,7 +44,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 66;
+const FLOOR = 67;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1257,6 +1257,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
+  [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
@@ -1721,6 +1722,7 @@ const LEFT_OUTSIDE = new Map([
   ["mir-mutants.yml#gate", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
   ["perf.yml#kernels", "it measures mn and its kernels through perf, with the base branch's compiler beside the change's"],
   ["harness.yml#fixtures", "its own sandbox confines agent code, not mn"],
+  ["pages.yml#build", "it runs the change's site generator, its tests and `mn explain`, whose output is the site its link check reads"],
 ]);
 /// GATE_ONLY: the required jobs that run no code of the change but the gate's own scripts under
 /// .github/. Each is pinned whole, with every script it runs: an allowlist of exact steps, where a
@@ -3036,7 +3038,7 @@ check("a node line without the flag that refuses code from strings is read as on
 
 /// The other jobs that name an environment, each with its name: the Pages deployment, whose
 /// environment holds no secret.
-const OTHER_ENVIRONMENTS = new Map([["pages.yml#deploy", "github-pages"]]);
+const OTHER_ENVIRONMENTS = new Map([["pages-publish.yml#deploy", "github-pages"]]);
 
 /// What is wrong with a job's environment: a job of SECRET_JOBS names SECRET_ENVIRONMENT, as a
 /// literal string, a job of OTHER_ENVIRONMENTS names its own, and no other job names any, so that
@@ -3123,7 +3125,7 @@ check("every job that holds a secret names the environment benchmark, for main a
     ["prelim.yml#prelim", { environment: "${{ inputs.environment }}" }],
     ["benchmark.yml#build", { environment: SECRET_ENVIRONMENT }],
     ["ci.yml#test", { environment: "staging" }],
-    ["pages.yml#deploy", { environment: { name: SECRET_ENVIRONMENT } }],
+    ["pages-publish.yml#deploy", { environment: { name: SECRET_ENVIRONMENT } }],
   ]) {
     assert.ok(environmentProblems(key, job).length > 0, `the environment rule lets through ${key}: ${JSON.stringify(job)}`);
   }
@@ -3788,6 +3790,54 @@ check("no two jobs of any workflow report a check of the same name", () => {
 /// on a pull request's head with the work it chose.
 const REQUIRED_EVENTS = new Set(["pull_request", "merge_group", "push"]);
 
+/// The workflows that run on pull requests and hold no required job, each with why it gates
+/// nothing. A check that runs on a pull request and is not required looks like a gate and is not
+/// one: "Build the site" ran on pull requests through a `paths:` filter for weeks, which kept it from
+/// being required, so a change that broke the site could merge.
+const ADVISORY_WORKFLOWS = new Map([
+  ["spike-cranelift.yml", "a spike in a workspace of its own (spikes/cranelift-debug-info), whose findings are data for the register; ci.yml's Debuggers checks are the gate"],
+  ["spike-error-return.yml", "a spike in a workspace of its own (spikes/error-return-registers), whose findings are data for the register"],
+  ["spike-tier1.yml", "the Tier-1 latency spike's measurement, data for the register; ci.yml's Tier-1 latency is the gate, and the Rust jobs run the spike's tests"],
+]);
+
+/// Why the workflows `docs` are not each a gate, a workflow `requiredFiles` holds, or one
+/// `advisory` names with its reason, when they run on pull requests; and why `advisory` names
+/// what it should not.
+export function advisoryProblems(docs, requiredFiles, advisory) {
+  const found = [];
+  for (const { file, doc } of docs) {
+    const on = triggers(doc);
+    const onPullRequests = "pull_request" in on || "pull_request_target" in on;
+    if (onPullRequests && !requiredFiles.has(file) && !advisory.has(file)) found.push(`${file} runs on pull requests and holds no required job: make its check required, or name it in ADVISORY_WORKFLOWS with why it gates nothing`);
+    if (advisory.has(file) && requiredFiles.has(file)) found.push(`${file} is in ADVISORY_WORKFLOWS, and holds a required job`);
+    if (advisory.has(file) && !onPullRequests) found.push(`${file} is in ADVISORY_WORKFLOWS, and runs on no pull request`);
+  }
+  for (const file of advisory.keys()) if (!docs.some((d) => d.file === file)) found.push(`ADVISORY_WORKFLOWS names ${file}, which is no workflow`);
+  return found;
+}
+
+check("every workflow that runs on pull requests is a gate, or says why it gates nothing", () => {
+  const docs = workflows();
+  const requiredFiles = new Set(requiredJobs().map((j) => j.file));
+  assert.deepEqual(advisoryProblems(docs, requiredFiles, ADVISORY_WORKFLOWS), []);
+  assert.ok(requiredFiles.has("pages.yml"), "the site's build is no required check");
+  // Planted: the site's build as it was, run on pull requests and required by nothing; a listed
+  // workflow that became a gate; a listed one that no longer runs on pull requests; a workflow
+  // that runs on pull_request_target; and a name of no workflow.
+  const notRequired = new Set([...requiredFiles].filter((file) => file !== "pages.yml"));
+  assert.deepEqual(advisoryProblems(docs, notRequired, ADVISORY_WORKFLOWS).filter((p) => p.startsWith("pages.yml ")).length, 1, "the site's build, required by nothing, passes");
+  const spikes = docs.filter((d) => d.file.startsWith("spike-"));
+  assert.ok(spikes.length > 0, "no spike workflow to plant on");
+  const asGate = new Set([...requiredFiles, spikes[0].file]);
+  assert.ok(advisoryProblems(docs, asGate, ADVISORY_WORKFLOWS).some((p) => p === `${spikes[0].file} is in ADVISORY_WORKFLOWS, and holds a required job`), "a listed workflow that holds a required job passes");
+  const byHand = docs.map((d) => (d.file === spikes[0].file ? { file: d.file, doc: { ...d.doc, on: { workflow_dispatch: null } } } : d));
+  assert.ok(advisoryProblems(byHand, requiredFiles, ADVISORY_WORKFLOWS).some((p) => p === `${spikes[0].file} is in ADVISORY_WORKFLOWS, and runs on no pull request`), "a listed workflow that runs on no pull request passes");
+  const target = [...docs, { file: "x.yml", doc: { on: { pull_request_target: null } } }];
+  assert.ok(advisoryProblems(target, requiredFiles, ADVISORY_WORKFLOWS).some((p) => p.startsWith("x.yml runs on pull requests")), "a workflow on pull_request_target, required by nothing, passes");
+  const stale = new Map([...ADVISORY_WORKFLOWS, ["gone.yml", "x"]]);
+  assert.ok(advisoryProblems(docs, requiredFiles, stale).includes("ADVISORY_WORKFLOWS names gone.yml, which is no workflow"), "a listed name of no workflow passes");
+});
+
 check("a workflow that holds a required job runs only on pull requests, the queue and main", () => {
   for (const file of new Set(requiredJobs().map((j) => j.file))) {
     const on = triggers(workflows().find((w) => w.file === file).doc);
@@ -3961,6 +4011,7 @@ const TIMEOUTS = new Map([
   ["mir-mutants.yml#gate", 30],
   ["perf.yml#kernels", 60],
   ["harness.yml#fixtures", 30],
+  ["pages.yml#build", 15],
 ]);
 
 /// The time an ignored test may take where a required job runs it by name, in release: those runs

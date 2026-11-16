@@ -42,4 +42,4 @@ The book is written to `target/site/book`; open `index.html` in it. `--no-mdbook
 
 ## Publishing
 
-[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) builds and checks the site on every pull request that touches its sources, and keeps the result as the workflow artifact `docs-site`. On a milestone tag (`m*`) it publishes the site to GitHub Pages, marked pre-release and unstable. The repository's `github-pages` environment must allow the tag: a deployment tag rule `m*` beside the default branch.
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) builds and checks the site on every pull request, in the merge queue and on `main`, as the required check "Build the site", and keeps the result as the workflow artifact `docs-site`. [`.github/workflows/pages-publish.yml`](../.github/workflows/pages-publish.yml) builds it again on a milestone tag (`m*`) and publishes it to GitHub Pages, marked pre-release and unstable. The repository's `github-pages` environment must allow the tag: a deployment tag rule `m*` beside the default branch.
