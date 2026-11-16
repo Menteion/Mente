@@ -1,11 +1,20 @@
 ---
 id: pressure-report
-status: active
+status: archived
 type: feature
 awaits: [docs/design-review.md#records-one-per-file]
 affectedFiles: [compiler/mente-cli/src/pressure.rs, compiler/mente-cli/tests/pressure.rs, compiler/mente-cli/src/lib.rs, compiler/mente-cli/src/main.rs, compiler/mente-cli/src/records.rs, briefs/pressure-report.md, briefs/archive/pressure-report.md]
 protectedFiles: [.github/**, CLAUDE.md, spec/**]
+integrity: sha256-562abcd8a249c3c27cb5dc7ed8f91f821a67c92ac4d5c636225beb9b6926d0a6
 ---
+
+<!-- spec-brief:banner -->
+> **Archived 2026-11-17.**
+> mn pressure ranks the files by how many merged pull requests changed them, each with its place among the records; STATUS.md and ROADMAP.md joined the shared record files.
+> Merged in pull request [#176](https://github.com/Menteion/Mente/pull/176).
+> Recorded at commit `91ddd44`: 6 files changed, +431 −5.
+> The body below describes the tree before execution and is not maintained.
+<!-- /spec-brief:banner -->
 
 # Report which files the most merged pull requests change
 
