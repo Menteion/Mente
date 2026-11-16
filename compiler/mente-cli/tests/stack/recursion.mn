@@ -1,0 +1,100 @@
+// Recursions against the stack budget of item 25 of `core-calculus.md`: frames that hold
+// nothing, frames that do not divide the budget, one that fills it exactly, and a mutual
+// recursion. Each figure is derived by hand from item 25's equations: `spin` has a frame of 64,
+// `down` 84, `fact` 120, `fill` 128 (the call's 64, a `u64` parameter, three `u64` bindings, and
+// the 32 its last statement holds), `a` 84 and `b` 88. A call `down(n)` makes n + 1 calls, so
+// the most that fit are budget / frame; `a(n)` makes n + 1 calls alternating `a` and `b`, of 172
+// bytes a pair, so 6,096 pairs fit and the 12,193rd call, of `a`, traps. `then_down`, of 88,
+// calls `down(1)`, whose two frames are given back when it returns, before `down(n)`: the
+// 1,048,488 bytes left hold exactly 12,482 frames of `down`. `deep` is the recursion of the
+// program generated from seed 0, whose shape ran the reference interpreter's host stack out in a
+// release build on Windows: it traps at the budget, at its call of itself.
+// call: spin() -> trap[stack-overflow] at 27:3: the call stack ran out
+// call: down(12482) -> 0
+// call: down(12483) -> trap[stack-overflow] at 34:3: the call stack ran out
+// call: fact(8737) -> trap[narrowing] at 41:3
+// call: fact(8738) -> trap[stack-overflow] at 41:7: the call stack ran out
+// call: fill(8191) -> 0
+// call: fill(8192) -> trap[stack-overflow] at 51:3: the call stack ran out
+// call: a(12191) -> 0
+// call: a(12192) -> trap[stack-overflow] at 66:3: the call stack ran out
+// call: then_down(12481) -> 0
+// call: then_down(12482) -> trap[stack-overflow] at 34:3: the call stack ran out
+// call: deep_run() -> trap[stack-overflow] at 85:15: the call stack ran out
+module stack
+
+pub fn spin() {
+  spin()
+}
+
+pub fn down(n: u32) -> u32 {
+  if n == 0 {
+    return 0
+  }
+  down(n - 1)
+}
+
+pub fn fact(n: u64) -> u64 {
+  if n == 0 {
+    return 1
+  }
+  n * fact(n - 1)
+}
+
+pub fn fill(n: u64) -> u64 {
+  val x = n
+  val y = x
+  val z = y
+  if z == 0 {
+    return 0
+  }
+  fill(z - 1)
+}
+
+pub fn a(n: u32) -> u32 {
+  if n == 0 {
+    return 0
+  }
+  b(n - 1)
+}
+
+fn b(n: u32) -> u32 {
+  val m: u32 = n
+  if m == 0 {
+    return 0
+  }
+  a(m - 1)
+}
+
+pub fn then_down(n: u32) -> u32 {
+  val first = down(1)
+  down(n) + first
+}
+
+fn deep(n: u32) -> u32 = match n {
+  0 => 2
+  _ => if n > 0 {
+    match n {
+      0 => 2
+      _ => 0 | (match n {
+        0 => 2
+        _ => if n > 0 {
+          match n {
+            0 => 2
+            _ => (if n > 0 {
+              deep(n - 1)
+            } else {
+              0
+            }) + 0
+          }
+        } else {
+          1
+        }
+      })
+    }
+  } else {
+    1
+  }
+}
+
+pub fn deep_run() -> u32 = deep(4294967295)

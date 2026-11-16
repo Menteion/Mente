@@ -1,0 +1,81 @@
+// Frames against the stack budget of item 25 of `core-calculus.md`, each derived by hand from
+// its equations, with arrays of `u32`, four bytes an element. `whole` and `whole_then` have
+// frames of exactly the budget, 1,048,576 bytes: the call's 64, the `u32` parameter, the array's
+// 524,252 bytes and the 524,256 its initializer holds, the repeated `0_u32` and the array; the
+// first call of either runs, and `whole_then` traps at the call it makes, of `zero`, of 65.
+// `inner` has a frame of 600,000, and so does `outer`: each fits as a run's first call, and
+// their two frames do not, so `outer` traps at its call of `inner`. A call inside an argument
+// has returned before the call it is an argument of is counted, and calls one after another do
+// not add up: `nested` and `twice` run. `take` has a frame of 1,048,509, which with `order`'s 73
+// is six bytes over the budget: the call traps as running out of stack, though its argument
+// would not fit `take`'s parameter either, since the call is counted before any argument is
+// narrowed. `guarded` and `ok` have frames of 600,072, and a call in `guarded`'s `requires` is
+// counted on top of `guarded`'s frame, so `wrapped` traps at the call of `ok`. `huge` holds an
+// array of 1,200,000 bytes, more than the budget: called from outside on an argument its `u8`
+// parameter cannot hold, the run's first call traps as running out of stack, at the function's
+// name, since it is counted against an empty stack before its argument is narrowed.
+// call: whole(3) -> 0
+// call: whole_then(3) -> trap[stack-overflow] at 37:7: the call stack ran out
+// call: inner(3) -> 0
+// call: outer(3) -> trap[stack-overflow] at 48:10: the call stack ran out
+// call: nested(3) -> 0
+// call: twice(3) -> 0
+// call: order(300) -> trap[stack-overflow] at 60:31: the call stack ran out
+// call: wrapped(3) -> trap[stack-overflow] at 69:12: the call stack ran out
+// call: huge(300) -> trap[stack-overflow] at 77:8: the call stack ran out
+module stack
+
+fn zero() -> u8 = 0_u8
+
+pub fn whole(k: u32) -> u32 {
+  val big: [131063]u32 = [0_u32; 131063]
+  big[k]
+}
+
+pub fn whole_then(k: u32) -> u32 {
+  val big: [131063]u32 = [0_u32; 131063]
+  _ = zero()
+  big[k]
+}
+
+pub fn inner(k: u32) -> u32 {
+  val a: [74991]u32 = [0_u32; 74991]
+  a[k]
+}
+
+pub fn outer(k: u32) -> u32 {
+  val b: [74991]u32 = [0_u32; 74991]
+  b[k] + inner(k)
+}
+
+pub fn nested(k: u32) -> u32 = inner(inner(k))
+
+pub fn twice(k: u32) -> u32 = inner(k) + inner(k)
+
+fn take(x: u8) -> u32 {
+  val a: [131055]u32 = [0_u32; 131055]
+  a[x]
+}
+
+pub fn order(y: u16) -> u32 = take(y)
+
+fn ok(x: u32) -> bool {
+  val c: [75000]u32 = [0_u32; 75000]
+  c[x] == 0
+}
+
+@checked
+pub fn guarded(x: u32) -> u32
+  requires ok(x)
+{
+  val d: [75000]u32 = [0_u32; 75000]
+  d[x]
+}
+
+pub fn wrapped(x: u32) -> u32 = guarded(x)
+
+pub fn huge(x: u8) -> u8 {
+  val a: [300000]u32 = [0_u32; 300000]
+  _ = a
+  x
+}

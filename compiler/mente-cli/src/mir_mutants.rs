@@ -334,7 +334,7 @@ fn prepare(
         .iter()
         .map(|(_, v)| native_arg(v))
         .collect::<Option<Vec<_>>>()
-        .is_none_or(|native_args| native::refusal(entry, &native_args).is_some());
+        .is_none_or(|native_args| native::refusal(lowered, entry, &native_args).is_some());
     if outside {
         return Ok(None);
     }
@@ -392,10 +392,7 @@ fn prepare(
 /// Runs a prepared call on `m` within `max_steps`, and prints as `mn run` does.
 fn execute(m: &cfg::Module, c: &Prepared, max_steps: u64) -> (Printed, u64) {
     let mut memory = c.memory.clone();
-    let limits = cfg::Limits {
-        max_steps,
-        ..cfg::Limits::default()
-    };
+    let limits = cfg::Limits { max_steps };
     let (result, steps) = cfg::run_counting(m, c.func, &c.values, &mut memory, limits);
     let printed = result.map_err(|s| s.to_string()).and_then(|v| {
         let mut out = vec![match &c.sret {

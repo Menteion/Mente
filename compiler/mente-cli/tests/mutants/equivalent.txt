@@ -16,22 +16,22 @@ compiler/mente-cli/tests/mutants/arith.mn::neg/b0.i3/ge>gt -- -a of an i8 lies i
 # Narrowing an array literal into its declared type: each element is a constant that fits, 0 and
 # 255 among them, so the check never fails. A literal without a 0 or a 255 would leave more of
 # these; the corpus's literals hold both.
-compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i3/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
-compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i5/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
-compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i7/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
-compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i8/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
-compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i3/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
-compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i5/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
-compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i7/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
-compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i8/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
-compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i3/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
-compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i5/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
-compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i7/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
-compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i8/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
-compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i3/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
-compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i5/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
-compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i7/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
-compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i8/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
+compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i4/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i6/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
+compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i8/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
+compiler/mente-cli/tests/mutants/arrays.mn::set/b2.i9/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
+compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i4/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i6/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
+compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i8/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
+compiler/mente-cli/tests/mutants/arrays.mn::grid/b5.i9/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
+compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i4/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i6/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
+compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i8/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
+compiler/mente-cli/tests/mutants/arrays.mn::bump/b2.i9/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
+compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i4/int-1 -- every element of the literal is a constant in 0..=255, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i6/int+1 -- every element of the literal is a constant in 0..=255, so `<= 256` holds wherever `<= 255` does
+compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i8/and>or -- every element of the literal is in 0..=255, where `>= 0 and <= 255` and `>= 0 or <= 255` are both true
+compiler/mente-cli/tests/mutants/arrays.mn::apart/b2.i9/check-removed -- every element of the literal is a constant in 0..=255, so this narrowing check never fails
 
 # A sum or product of unsigned values, narrowed back: never negative, and at least its constant
 # addend, so a lower bound moved below that changes nothing.
@@ -44,11 +44,11 @@ compiler/mente-cli/tests/mutants/mutargs.mn::bump/b0.i5/ge>gt -- x + 1 of a u8 i
 compiler/mente-cli/tests/mutants/traps.mn::noisy/b0.i3/int+1 -- x + 1 of a u8 is at least 1, so `>= 1` holds wherever `>= 0` does
 compiler/mente-cli/tests/mutants/traps.mn::noisy/b0.i3/int-1 -- x + 1 of a u8 is at least 1, so `>= -1` holds wherever `>= 0` does
 compiler/mente-cli/tests/mutants/traps.mn::noisy/b0.i4/ge>gt -- x + 1 of a u8 is at least 1, never 0, so `> 0` and `>= 0` agree
-compiler/mente-cli/tests/mutants/loops.mn::total/b2.i10/int-1 -- s + step of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/loops.mn::total/b2.i11/int-1 -- s + step of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
 compiler/mente-cli/tests/mutants/loops.mn::odd/b4.i4/int-1 -- s + w of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
 compiler/mente-cli/tests/mutants/contracts.mn::up/b1.i3/int-1 -- x + d of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
-compiler/mente-cli/tests/mutants/contracts.mn::walk/b9.i14/int-1 -- i + step of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
-compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i23/int-1 -- m + down(m, k) of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/contracts.mn::walk/b9.i15/int-1 -- i + step of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i24/int-1 -- m + down(m, k) of two u8 is never negative, so `>= -1` holds wherever `>= 0` does
 compiler/mente-cli/tests/mutants/contracts.mn::twice/b0.i4/int-1 -- x * 2 of a u8 is never negative, so `>= -1` holds wherever `>= 0` does
 compiler/mente-cli/tests/mutants/mutargs.mn::twice/b0.i4/int-1 -- x * 2 of a u8 is never negative, so `>= -1` holds wherever `>= 0` does
 
@@ -69,19 +69,19 @@ compiler/mente-cli/tests/mutants/arrays.mn::bump/b3.i25/check-removed -- the wri
 compiler/mente-cli/tests/mutants/divide.mn::div/b0.i6/int-1 -- a quotient of two i32 is at least -2147483648 (-2147483648 / 1), so `>= -2147483649` holds wherever `>= -2147483648` does
 compiler/mente-cli/tests/mutants/divide.mn::r/b0.i3/unchecked -- a % b has a magnitude below |b| and the sign of a, so it always fits in i128 and its overflow check never fires
 compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i5/int+1 -- n - k of two u8 is at most 255, so `<= 256` holds wherever `<= 255` does
-compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i25/int+1 -- each sum m + down(m, k) a run computes is k * t(t - 1) / 2 for some t, with k at most 255; no triangular number above 1 is a power of two, so it is never 256 and `<= 256` agrees with `<= 255`
+compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i26/int+1 -- each sum m + down(m, k) a run computes is k * t(t - 1) / 2 for some t, with k at most 255; no triangular number above 1 is a power of two, so it is never 256 and `<= 256` agrees with `<= 255`
 
 # An `if` whose arms agree where the comparison changes.
 compiler/mente-cli/tests/mutants/compare.mn::bigger/b0.i0/ge>gt -- `>=` and `>` differ only at a == b, where both arms give the same value
 
 # A `decreases` measure that is a u8 is never negative.
-compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i12/check-removed -- the measure m of the recursive call is a u8, never negative, so the check that it is not negative never fails
-compiler/mente-cli/tests/mutants/contracts.mn::enter down/b0.i2/check-removed -- the entry's measure n is a u8, never negative, so the check that it is not negative never fails
+compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i13/check-removed -- the measure m of the recursive call is a u8, never negative, so the check that it is not negative never fails
+compiler/mente-cli/tests/mutants/contracts.mn::enter down/b0.i3/check-removed -- the entry's measure n is a u8, never negative, so the check that it is not negative never fails
 
 # A measure of one clause compares lexicographically with nothing after it: `smaller or (equal
 # and false)`. The equality is and-ed with false, so nothing that computes it changes the result.
-compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i15/eq>ne -- the equality is and-ed with false, so the result is false whatever it is
-compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i17/or>xor -- the right side, `equal and false`, is always false, and `smaller xor false` is `smaller or false`
+compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i16/eq>ne -- the equality is and-ed with false, so the result is false whatever it is
+compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i18/or>xor -- the right side, `equal and false`, is always false, and `smaller xor false` is `smaller or false`
 compiler/mente-cli/tests/mutants/contracts.mn::walk/b6.i0/int+1 -- this computes whether the measure equals the last one, which is and-ed with false, so the result is false whatever it is
 compiler/mente-cli/tests/mutants/contracts.mn::walk/b6.i0/int-1 -- this computes whether the measure equals the last one, which is and-ed with false, so the result is false whatever it is
 compiler/mente-cli/tests/mutants/contracts.mn::walk/b6.i1/lt>ge -- this computes whether the measure equals the last one, which is and-ed with false, so the result is false whatever it is
@@ -90,7 +90,7 @@ compiler/mente-cli/tests/mutants/contracts.mn::walk/b6.term/swap -- this compute
 compiler/mente-cli/tests/mutants/contracts.mn::walk/b6.term/then -- this computes whether the measure equals the last one, which is and-ed with false, so the result is false whatever it is
 compiler/mente-cli/tests/mutants/contracts.mn::walk/b6.term/else -- this computes whether the measure equals the last one, which is and-ed with false; the measure already passed the check that it is not negative, so the cast this arm makes is exact too
 compiler/mente-cli/tests/mutants/contracts.mn::walk/b7.i0/flip -- this computes whether the measure equals the last one, which is and-ed with false, so the result is false whatever it is
-compiler/mente-cli/tests/mutants/contracts.mn::walk/b8.i1/eq>ne -- this computes whether the measure equals the last one, which is and-ed with false, so the result is false whatever it is
+compiler/mente-cli/tests/mutants/contracts.mn::walk/b8.i2/eq>ne -- this computes whether the measure equals the last one, which is and-ed with false, so the result is false whatever it is
 compiler/mente-cli/tests/mutants/contracts.mn::walk/b9.i1/or>xor -- the right side, `equal and false`, is always false, and `smaller xor false` is `smaller or false`
 
 # The loop measure's comparison runs after the check that the measure is not negative.
@@ -108,12 +108,29 @@ compiler/mente-cli/tests/mutants/contracts.mn::walk/b0.i4/store-removed -- the f
 # The entry checks the `mut` place's refinement again after the call returns. keep's own body
 # checks it after its one change, the call of twice, so the entry's check never fails, and k is
 # then 2 * k0 below 20, so at most 18.
-compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i11/int-1 -- keep's body already checked k against [0..20) after its only change, so `>= -1` holds wherever `>= 0` does
-compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i12/int+1 -- keep's body already checked k against [0..20) after its only change, so `< 21` holds wherever `< 20` does
-compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i12/int-1 -- k after keep returns is 2 * k0 below 20, so at most 18, and `< 19` holds wherever `< 20` does
-compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i16/lt>le -- keep's body already checked k against [0..20) after its only change, so k is never 20 and `<= 20` agrees with `< 20`
-compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i17/and>or -- keep's body already checked k against [0..20) after its only change, so both halves hold and `or` gives what `and` gives
-compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i18/check-removed -- keep's body already checked k against [0..20) after its only change, so this check never fails
+compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i12/int-1 -- keep's body already checked k against [0..20) after its only change, so `>= -1` holds wherever `>= 0` does
+compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i13/int+1 -- keep's body already checked k against [0..20) after its only change, so `< 21` holds wherever `< 20` does
+compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i13/int-1 -- k after keep returns is 2 * k0 below 20, so at most 18, and `< 19` holds wherever `< 20` does
+compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i17/lt>le -- keep's body already checked k against [0..20) after its only change, so k is never 20 and `<= 20` agrees with `< 20`
+compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i18/and>or -- keep's body already checked k against [0..20) after its only change, so both halves hold and `or` gives what `and` gives
+compiler/mente-cli/tests/mutants/contracts.mn::enter keep/b0.i19/check-removed -- keep's body already checked k against [0..20) after its only change, so this check never fails
 
 # A sum of two u8 fields or parameters, narrowed into u8: never negative, as arith.mn's add.
 compiler/mente-cli/tests/mutants/structs.mn::first/b0.i6/int-1 -- p.a + k of two u8 is never negative, so its narrowing's lower bound holds as `>= -1` wherever it holds as `>= 0`
+
+# A count made exact (`enter-exact`) differs from the original only where the stack runs out at
+# its call (`core-calculus.md`, item 25). None of these calls is reached through a recursion but
+# `down`'s, which `decreases n`, a u8, holds to 255 calls: whatever the input, the stack at each
+# holds a few frames of a few hundred bytes at most, far below the budget of 1,048,576 bytes.
+# stack.mn's recursion reaches the budget, and kills the operator there.
+compiler/mente-cli/tests/mutants/contracts.mn::call/b0.i0/enter-exact -- call is entered from outside alone, so its call of need stands on two frames of a few dozen bytes, far below the budget
+compiler/mente-cli/tests/mutants/contracts.mn::down/b1.i10/enter-exact -- down recurses at most 255 calls deep, since its measure n is a u8 that each call makes smaller, and 255 of its frames are far below the budget
+compiler/mente-cli/tests/mutants/contracts.mn::keep/b0.i0/enter-exact -- keep is entered from outside alone, so its call of twice stands on two frames of a few dozen bytes, far below the budget
+compiler/mente-cli/tests/mutants/mutargs.mn::one/b0.i0/enter-exact -- one is entered from outside alone, so its call of bump stands on two frames of a few dozen bytes, far below the budget
+compiler/mente-cli/tests/mutants/mutargs.mn::element/b0.i7/enter-exact -- element is entered from outside alone, so its call of bump stands on two frames of a few dozen bytes, far below the budget
+compiler/mente-cli/tests/mutants/mutargs.mn::pair/b0.i0/enter-exact -- pair is entered from outside alone, so its call of swap stands on two frames of a few dozen bytes, far below the budget
+compiler/mente-cli/tests/mutants/structs.mn::field/b0.i4/enter-exact -- field is entered from outside alone, so its call of bump stands on two frames of a few hundred bytes, far below the budget
+compiler/mente-cli/tests/mutants/structs.mn::kept/b0.i4/enter-exact -- kept is entered from outside alone, so its call of change stands on two frames of a few hundred bytes, far below the budget
+compiler/mente-cli/tests/mutants/structs.mn::kept/b0.i6/enter-exact -- kept is entered from outside alone, so its call of first stands on two frames of a few hundred bytes, far below the budget
+compiler/mente-cli/tests/mutants/traps.mn::drop/b0.i0/enter-exact -- drop is entered from outside alone, so its call of noisy stands on two frames of a few dozen bytes, far below the budget
+compiler/mente-cli/tests/mutants/traps.mn::use_mk/b0.i1/enter-exact -- use_mk is entered from outside alone, so its call of mk stands on two frames of a few dozen bytes, far below the budget

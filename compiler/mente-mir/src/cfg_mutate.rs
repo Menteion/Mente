@@ -17,13 +17,18 @@
 //!   a jump to either target, which also replaces an `if` value by either arm, since MIR has no
 //!   select and the lowering joins an `if` value in a block parameter;
 //! - [`Family::Trap`]: a run-time check taken out, so that its trap never fires, and a checked
-//!   operation made exact, so that where it would trap the MIR interpreter reports broken MIR;
+//!   operation made exact, so that where it would trap the MIR interpreter reports broken MIR: a
+//!   count of a call's frame, `enter`, included, which then never runs out of the budget;
 //! - [`Family::Identity`]: a negation, a `not` or a shift replaced by its first operand;
 //! - [`Family::Memory`]: a store or a copy taken out.
 //!
 //! Not mutated: a cast, which only moves a value between types that hold it; a slot, an element
 //! address or a load, whose change reads other bytes of the same frame rather than another value
-//! the program computes; a call; and the terminators `jump`, `return` and `trap`, whose targets
+//! the program computes; a call; a count moved, dropped or doubled, every one of which the
+//! verifier refuses, as [`unpaired`] shows; the count in an entry, of the run's first call, which
+//! never traps, since a call from outside whose frame is larger than the budget is refused before
+//! the entry runs; the chain of effects broken, which the verifier refuses, as [`unchained`]
+//! shows; and the terminators `jump`, `return` and `trap`, whose targets
 //! and values the other families already reach through the instructions that compute them.
 //!
 //! A mutant is named by its function, its block, the instruction's index in that block or
@@ -31,7 +36,7 @@
 //! another function and to the instructions after it in its block, so a record that a mutant
 //! is equivalent survives unrelated edits as far as an index can.
 
-use crate::cfg::{self, ArithOp, BitOp, BlockId, CmpOp, FuncId, Module, Num, Op, Term, Ty};
+use crate::cfg::{self, ArithOp, BitOp, BlockId, Chain, CmpOp, FuncId, Module, Num, Op, Term, Ty};
 use crate::NodeId;
 
 /// A group of operators, by the kind of instruction or terminator they change.
@@ -165,15 +170,56 @@ impl Mutant {
                     return out;
                 };
                 match change {
-                    Change::Op(op) => f.ops[v.0 as usize] = op.clone(),
-                    Change::Remove => {
-                        block.insts.remove(i as usize);
+                    Change::Op(op) => {
+                        let was = f.op(v).chain();
+                        f.ops[v.0 as usize] = op.clone();
+                        // An effect made a partial operation, as a checked one made exact is,
+                        // leaves the chain: what took it takes the effect it took.
+                        match (was, op.chain()) {
+                            (Chain::Follows, Chain::Reads) => {
+                                if let Some(before) = f.args(v).last().copied() {
+                                    replace_effect_uses(f, v, before);
+                                }
+                            }
+                            // One that takes no effect, as an exact division, lets go of it too.
+                            (Chain::Follows, Chain::Free) => {
+                                if let Some(before) = f.args(v).last().copied() {
+                                    replace_effect_uses(f, v, before);
+                                    let (start, len) = f.operands[v.0 as usize];
+                                    f.operands[v.0 as usize] = (start, len.saturating_sub(1));
+                                }
+                            }
+                            (Chain::Follows, Chain::Follows)
+                            | (
+                                Chain::Reads | Chain::Free,
+                                Chain::Follows | Chain::Reads | Chain::Free,
+                            ) => {}
+                        }
                     }
+                    Change::Remove => match f.op(v).fact() {
+                        // A guard that never fires: its value flows on, assumed.
+                        Some(fact) => {
+                            let args = f.args(v).to_vec();
+                            if let [.., guarded, effect] = args[..] {
+                                let start = f.pool.len() as u32;
+                                f.pool.extend([guarded, effect]);
+                                f.operands[v.0 as usize] = (start, 2);
+                                f.ops[v.0 as usize] = Op::Assume(fact);
+                            }
+                        }
+                        None => {
+                            f.blocks[self.block.0 as usize].insts.remove(i as usize);
+                            // What took the effect taken out takes the one it took.
+                            if let Some(before) = f.effect(v) {
+                                replace_effect_uses(f, v, before);
+                            }
+                        }
+                    },
                     Change::Bypass => {
                         let Some(&first) = f.args(v).first() else {
                             return out;
                         };
-                        replace_uses(f, v, first);
+                        replace_value_uses(f, v, first);
                     }
                     Change::SwapTargets | Change::Always(_) => {}
                 }
@@ -203,32 +249,90 @@ impl Mutant {
     }
 }
 
-/// Every use of `old` in `f`, as an operand or in a terminator, reads `new` instead.
-fn replace_uses(f: &mut cfg::Function, old: NodeId, new: NodeId) {
-    for p in f.pool.iter_mut().filter(|p| **p == old) {
-        *p = new;
-    }
+/// Where each operand and terminator of `f` takes an effect, which the chain of effects holds
+/// ([`Chain`]), and where it takes a value.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Taken {
+    Effect,
+    Value,
+}
+
+/// Every use of `old` in `f` where it is taken as `taken` says, as an operand or in a
+/// terminator, reads `new` instead.
+fn replace(f: &mut cfg::Function, old: NodeId, new: NodeId, taken: Taken) {
     let swap = |v: &mut NodeId| {
         if *v == old {
             *v = new;
         }
     };
+    for i in 0..f.ops.len() {
+        let (start, len) = f.operands[i];
+        let (start, len) = (start as usize, len as usize);
+        let effect = match f.ops[i].chain() {
+            Chain::Follows | Chain::Reads => len.checked_sub(1),
+            Chain::Free => None,
+        };
+        for k in 0..len {
+            let here = if Some(k) == effect {
+                Taken::Effect
+            } else {
+                Taken::Value
+            };
+            if here == taken {
+                swap(&mut f.pool[start + k]);
+            }
+        }
+    }
+    // A terminator takes the latest effect last: a jump's and a branch's last arguments, a
+    // return's and a trap's effect.
+    let args = |args: &mut Vec<NodeId>| {
+        let last = args.len().saturating_sub(1);
+        for (k, a) in args.iter_mut().enumerate() {
+            let here = if k == last {
+                Taken::Effect
+            } else {
+                Taken::Value
+            };
+            if here == taken {
+                swap(a);
+            }
+        }
+    };
     for b in &mut f.blocks {
         match &mut b.term {
-            Term::Jump(_, args) => args.iter_mut().for_each(swap),
+            Term::Jump(_, a) => args(a),
             Term::Branch {
                 cond,
                 then,
                 otherwise,
             } => {
-                swap(cond);
-                then.1.iter_mut().for_each(swap);
-                otherwise.1.iter_mut().for_each(swap);
+                if taken == Taken::Value {
+                    swap(cond);
+                }
+                args(&mut then.1);
+                args(&mut otherwise.1);
             }
-            Term::Return(Some(v)) => swap(v),
-            Term::Return(None) | Term::Trap(_) => {}
+            Term::Return(v, effect) => match taken {
+                Taken::Value => v.iter_mut().for_each(swap),
+                Taken::Effect => swap(effect),
+            },
+            Term::Trap(_, effect) => {
+                if taken == Taken::Effect {
+                    swap(effect);
+                }
+            }
         }
     }
+}
+
+/// Every use of `old` as an effect reads `new` instead.
+fn replace_effect_uses(f: &mut cfg::Function, old: NodeId, new: NodeId) {
+    replace(f, old, new, Taken::Effect);
+}
+
+/// Every use of `old` as a value reads `new` instead; what takes it as an effect still does.
+fn replace_value_uses(f: &mut cfg::Function, old: NodeId, new: NodeId) {
+    replace(f, old, new, Taken::Value);
 }
 
 /// Every mutant the operators make of `m`, function by function, block by block, in order. Some
@@ -386,12 +490,342 @@ fn inst_changes(f: &cfg::Function, v: NodeId) -> Vec<Candidate> {
             .collect()
         }
         Op::Bool(b) => vec![(Family::Const, "flip", op(Op::Bool(!b)))],
-        Op::Check { .. } => vec![(Family::Trap, "check-removed", Change::Remove)],
+        Op::Check { .. } | Op::Guard { .. } => {
+            vec![(Family::Trap, "check-removed", Change::Remove)]
+        }
         Op::Store => vec![(Family::Memory, "store-removed", Change::Remove)],
         Op::Copy { .. } => vec![(Family::Memory, "copy-removed", Change::Remove)],
-        Op::Param | Op::Cast | Op::Slot { .. } | Op::Elem { .. } | Op::Load | Op::Call(_) => {
-            Vec::new()
+        // A count made exact never traps where the stack runs out. An entry, of a frame of 0,
+        // counts the run's first call, which a frame larger than the budget never reaches.
+        Op::Enter {
+            callee,
+            trap: Some(_),
+        } if f.frame > 0 => vec![(
+            Family::Trap,
+            "enter-exact",
+            op(Op::Enter {
+                callee: *callee,
+                trap: None,
+            }),
+        )],
+        Op::Param
+        | Op::Cast
+        | Op::Assume(_)
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Call(_)
+        | Op::Enter { .. } => Vec::new(),
+    }
+}
+
+/// The callee whose frame the instruction `v` of `f` counts, where it is an [`Op::Enter`].
+fn counted(f: &cfg::Function, v: NodeId) -> Option<FuncId> {
+    match f.op(v) {
+        Op::Enter { callee, .. } => Some(*callee),
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Store
+        | Op::Copy { .. }
+        | Op::Call(_) => None,
+    }
+}
+
+/// The callee of the instruction `v` of `f`, where it is an [`Op::Call`].
+fn called(f: &cfg::Function, v: NodeId) -> Option<FuncId> {
+    match f.op(v) {
+        Op::Call(c) => Some(*c),
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Store
+        | Op::Copy { .. }
+        | Op::Enter { .. } => None,
+    }
+}
+
+/// Where the call of `callee` that an `Enter` at `block`, `at` opens stands: the first call of
+/// `callee` after it in its block, or else in a block after its own.
+fn its_call(f: &cfg::Function, block: usize, at: usize, callee: FuncId) -> Option<(usize, usize)> {
+    let is_call = |v: NodeId| called(f, v) == Some(callee);
+    let later = f.blocks[block].insts[at + 1..]
+        .iter()
+        .position(|&v| is_call(v))
+        .map(|i| (block, at + 1 + i));
+    later.or_else(|| {
+        f.blocks
+            .iter()
+            .enumerate()
+            .skip(block + 1)
+            .find_map(|(bi, b)| b.insts.iter().position(|&v| is_call(v)).map(|i| (bi, i)))
+    })
+}
+
+/// Each way a change could break the count of a call's frame (`core-calculus.md`, item 25): an
+/// [`Op::Enter`] of `m` dropped, doubled, moved past its call, moved past the first narrowing or
+/// check that takes it, or moved before an argument it takes, one module for each `Enter` and
+/// each way, named as a mutant is. The verifier refuses every one ([`cfg::verify`]): a count
+/// taken where it is not defined, or a call that does not close the latest count open. They are
+/// not mutants of the gate, whose mutants verify: they show that the count's place is held by
+/// MIR's values.
+pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
+    let mut out = Vec::new();
+    for (fi, f) in m.functions.iter().enumerate() {
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, &v) in b.insts.iter().enumerate() {
+                let Some(callee) = counted(f, v) else {
+                    continue;
+                };
+                let name = |what: &str| format!("{}/b{}.i{}/{}", f.name, bi, ii, what);
+                let mut dropped = m.clone();
+                dropped.functions[fi].blocks[bi].insts.remove(ii);
+                out.push((name("enter-dropped"), dropped));
+                let mut doubled = m.clone();
+                let g = &mut doubled.functions[fi];
+                let twin = NodeId(g.ops.len() as u32);
+                g.ops.push(g.ops[v.0 as usize].clone());
+                g.tys.push(g.tys[v.0 as usize]);
+                g.locs.push(g.locs[v.0 as usize]);
+                let start = g.pool.len() as u32;
+                let operands = f.args(v).to_vec();
+                g.pool.extend(&operands);
+                g.operands.push((start, operands.len() as u32));
+                g.blocks[bi].insts.insert(ii + 1, twin);
+                out.push((name("enter-doubled"), doubled));
+                let moved_to = |to: usize| {
+                    let mut moved = m.clone();
+                    let insts = &mut moved.functions[fi].blocks[bi].insts;
+                    insts.remove(ii);
+                    insts.insert(to, v);
+                    moved
+                };
+                if let Some((cb, ci)) = its_call(f, bi, ii, callee) {
+                    let mut moved = m.clone();
+                    let g = &mut moved.functions[fi];
+                    g.blocks[cb].insts.insert(ci + 1, v);
+                    g.blocks[bi].insts.remove(ii);
+                    out.push((name("enter-moved"), moved));
+                }
+                // Past the first instruction after it, other than its call, that takes it.
+                let takes = b.insts[ii + 1..]
+                    .iter()
+                    .position(|&u| f.effect(u) == Some(v) && called(f, u).is_none());
+                if let Some(k) = takes {
+                    out.push((name("enter-later"), moved_to(ii + 1 + k)));
+                }
+                // Before the last of its arguments that an instruction of its block gives.
+                let given = b.insts[..ii]
+                    .iter()
+                    .rposition(|u| f.own_args(v).contains(u));
+                if let Some(k) = given {
+                    out.push((name("enter-earlier"), moved_to(k)));
+                }
+            }
+            // Each call past the next call of its block.
+            for (ii, &v) in b.insts.iter().enumerate() {
+                if called(f, v).is_none() {
+                    continue;
+                }
+                let next = b.insts[ii + 1..]
+                    .iter()
+                    .position(|&u| called(f, u).is_some());
+                if let Some(k) = next {
+                    let mut moved = m.clone();
+                    let insts = &mut moved.functions[fi].blocks[bi].insts;
+                    insts.remove(ii);
+                    insts.insert(ii + 1 + k, v);
+                    out.push((format!("{}/b{}.i{}/call-later", f.name, bi, ii), moved));
+                }
+            }
         }
+    }
+    out
+}
+
+/// Each way a change could break the chain of effects ([`cfg::Chain`]), one module for each site
+/// and way, named as a mutant is:
+///
+/// - `effect-dropped`: an effect or a partial operation without the effect it takes;
+/// - `effect-forked`: an effect taking the effect its own effect took, which two then take;
+/// - `effect-valued`: an effect or a partial operation taking a value that is no effect, its
+///   first operand, in place of the effect;
+/// - `partial-raised`: an exact operation moved above the effect it reads, in its block;
+/// - `guard-unguarded`: a partial operation, or the cast between it and its guard, taking the
+///   value its guard takes in place of the one the guard yields;
+/// - `guard-raised`: that, and the partial operation moved above its guard, as a pass that hoists
+///   it past the guard would leave it;
+/// - `passed-valued`: a jump or a branch passing a value that is no effect, the branch's condition
+///   or the jump's first argument, to its target's effect parameter;
+/// - `ended-early`: a return or a trap taking its block's effect parameter where an effect of the
+///   block came since, which nothing would then take.
+///
+/// The verifier refuses every one ([`cfg::verify`]). They are not mutants of the gate: they show
+/// that the chain is held whole, by the verifier, whatever a change moves or rewrites.
+pub fn unchained(m: &Module) -> Vec<(String, Module)> {
+    let mut out = Vec::new();
+    for (fi, f) in m.functions.iter().enumerate() {
+        let changed = |name: String, change: &dyn Fn(&mut cfg::Function)| {
+            let mut copy = m.clone();
+            change(&mut copy.functions[fi]);
+            (name, copy)
+        };
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, &v) in b.insts.iter().enumerate() {
+                let name = |what: &str| format!("{}/b{}.i{}/{}", f.name, bi, ii, what);
+                let role = f.op(v).chain();
+                let Some(effect) = f.effect(v) else {
+                    continue;
+                };
+                out.push(changed(name("effect-dropped"), &|g| {
+                    let (start, len) = g.operands[v.0 as usize];
+                    g.operands[v.0 as usize] = (start, len.saturating_sub(1));
+                }));
+                let last = |g: &mut cfg::Function, to: NodeId| {
+                    let (start, len) = g.operands[v.0 as usize];
+                    if let Some(k) = (start + len).checked_sub(1) {
+                        g.pool[k as usize] = to;
+                    }
+                };
+                let forked = match role {
+                    Chain::Follows => f.effect(effect),
+                    Chain::Reads | Chain::Free => None,
+                };
+                if let Some(earlier) = forked {
+                    out.push(changed(name("effect-forked"), &|g| last(g, earlier)));
+                }
+                // Its first operand, where that is not also the effect, as a checked square's is.
+                if let Some(&value) = f.own_args(v).first().filter(|a| **a != effect) {
+                    out.push(changed(name("effect-valued"), &|g| last(g, value)));
+                }
+                // A partial operation above the effect it reads, where that effect is an
+                // instruction of its block.
+                let raised = match role {
+                    Chain::Reads => b.insts.iter().position(|u| *u == effect),
+                    Chain::Follows | Chain::Free => None,
+                };
+                if let Some(at) = raised {
+                    out.push(changed(name("partial-raised"), &|g| {
+                        let insts = &mut g.blocks[bi].insts;
+                        insts.retain(|u| *u != v);
+                        insts.insert(at, v);
+                    }));
+                }
+            }
+            for (ii, &v) in b.insts.iter().enumerate() {
+                let name = |what: &str| format!("{}/b{}.i{}/{}", f.name, bi, ii, what);
+                let Some((k, need)) = f.partial_in(v) else {
+                    continue;
+                };
+                // The guard beneath the operand, through the casts that keep its value, and the
+                // instruction that takes it, with the place it takes it at.
+                let (mut taker, mut at) = (v, k);
+                let mut guard = f.own_args(v).get(k).copied();
+                while let Some(c) = guard.filter(|c| *f.op(*c) == Op::Cast) {
+                    (taker, at) = (c, 0);
+                    guard = f.own_args(c).first().copied();
+                }
+                // Where what the guard takes holds the need by itself, as a constant can, the
+                // guard rules nothing out, and nothing is planted.
+                let Some((guard, raw)) = guard
+                    .filter(|g| f.op(*g).fact().is_some())
+                    .and_then(|g| f.own_args(g).last().map(|raw| (g, *raw)))
+                    .filter(|(_, raw)| !f.fact(*raw).is_some_and(|fact| fact.implies(need.fact())))
+                else {
+                    continue;
+                };
+                let point = move |g: &mut cfg::Function| {
+                    let (start, _) = g.operands[taker.0 as usize];
+                    g.pool[start as usize + at] = raw;
+                };
+                out.push(changed(name("guard-unguarded"), &|g| point(g)));
+                let above = b.insts.iter().position(|u| *u == guard);
+                if let (true, Some(above)) = (taker == v, above) {
+                    out.push(changed(name("guard-raised"), &|g| {
+                        point(g);
+                        let insts = &mut g.blocks[bi].insts;
+                        insts.retain(|u| *u != v);
+                        insts.insert(above, v);
+                    }));
+                }
+            }
+            let name = |what: &str| format!("{}/b{}.term/{}", f.name, bi, what);
+            // The latest effect where the block ends: its last effect, or its effect parameter.
+            let latest = b
+                .insts
+                .iter()
+                .rev()
+                .find(|u| f.op(**u).chain() == Chain::Follows)
+                .or(b.params.last())
+                .copied();
+            let passed = match &b.term {
+                Term::Jump(_, args) => args.first().copied(),
+                Term::Branch { cond, .. } => Some(*cond),
+                Term::Return(..) | Term::Trap(..) => None,
+            }
+            .filter(|value| Some(*value) != latest);
+            if let Some(value) = passed {
+                out.push(changed(name("passed-valued"), &|g| {
+                    set_effect(&mut g.blocks[bi].term, value)
+                }));
+            }
+            // A return or a trap after an effect of its block, taking the block's entry effect.
+            let since = b.insts.iter().any(|u| f.op(*u).chain() == Chain::Follows);
+            let ended = match &b.term {
+                Term::Return(..) | Term::Trap(..) => b.params.last().copied().filter(|_| since),
+                Term::Jump(..) | Term::Branch { .. } => None,
+            };
+            if let Some(entry) = ended {
+                out.push(changed(name("ended-early"), &|g| {
+                    set_effect(&mut g.blocks[bi].term, entry)
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// The effect a terminator takes made `to`: a jump's, a branch's first target's, a return's or a
+/// trap's.
+fn set_effect(term: &mut Term, to: NodeId) {
+    match term {
+        Term::Jump(_, args)
+        | Term::Branch {
+            then: (_, args), ..
+        } => {
+            if let Some(e) = args.last_mut() {
+                *e = to;
+            }
+        }
+        Term::Return(_, e) | Term::Trap(_, e) => *e = to,
     }
 }
 
@@ -407,7 +841,7 @@ fn step(n: Num, up: bool) -> Option<Num> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfg::{Builder, IntTy, Limits, Memory, Stop, Val};
+    use crate::cfg::{Builder, Fact, IntTy, Limits, Memory, Stop, Val};
 
     const I64: IntTy = IntTy::new(64, true);
     const U8: IntTy = IntTy::new(8, false);
@@ -418,10 +852,7 @@ mod tests {
             FuncId(0),
             args,
             &mut Memory::default(),
-            Limits {
-                max_depth: 100,
-                max_steps: 10_000,
-            },
+            Limits { max_steps: 10_000 },
         )
     }
 
@@ -437,17 +868,13 @@ mod tests {
         let head = b.block(&[Ty::Int(I64), Ty::Int(I64)]);
         let body = b.block(&[]);
         let exit = b.block(&[]);
-        b.end(Term::Jump(head, vec![zero, zero]));
+        b.jump(head, vec![zero, zero]);
         b.switch(head);
         let [i, s] = b.params(head)[..] else {
             panic!("two parameters")
         };
         let more = b.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, n]);
-        b.end(Term::Branch {
-            cond: more,
-            then: (body, vec![]),
-            otherwise: (exit, vec![]),
-        });
+        b.branch(more, (body, vec![]), (exit, vec![]));
         b.switch(body);
         let add = Op::Arith {
             op: ArithOp::Add,
@@ -456,14 +883,374 @@ mod tests {
         let s2 = b.inst(add.clone(), Ty::Int(I64), &[s, i]);
         let one = b.int(I64, Num::from_i128(1));
         let i2 = b.inst(add, Ty::Int(I64), &[i, one]);
-        b.end(Term::Jump(head, vec![i2, s2]));
+        b.jump(head, vec![i2, s2]);
         b.switch(exit);
-        b.end(Term::Return(Some(s)));
+        b.ret(Some(s));
         let m = Module {
             functions: vec![b.finish()],
+            budget: 1 << 20,
         };
         cfg::verify(&m).unwrap();
         m
+    }
+
+    /// `fn callee(x: u8) -> u8 = x`, of a frame of 100 bytes, `fn id(x: i64) -> i64 = x`, and
+    /// `fn caller(x: i64) -> u8 = callee(id(x))`, which counts and calls `id`, then counts
+    /// `callee` on what `id` gave, narrows that with a check, and calls `callee`, as the lowering
+    /// does.
+    fn counted_call() -> Module {
+        let mut c = Builder::new("callee", &[Ty::Int(U8)], Some(Ty::Int(U8)));
+        let x = c.params(BlockId(0))[0];
+        c.ret(Some(x));
+        let mut callee = c.finish();
+        callee.frame = 100;
+        let mut i = Builder::new("id", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = i.params(BlockId(0))[0];
+        i.ret(Some(x));
+        let mut id = i.finish();
+        id.frame = 72;
+        let mut b = Builder::new("caller", &[Ty::Int(I64)], Some(Ty::Int(U8)));
+        let x = b.params(BlockId(0))[0];
+        let deep =
+            |b: &mut Builder| Some(b.trap_site("stack-overflow", &["the call stack ran out"]));
+        let trap = deep(&mut b);
+        let inner = b.inst(
+            Op::Enter {
+                callee: FuncId(1),
+                trap,
+            },
+            Ty::Unit,
+            &[x],
+        );
+        let _ = inner;
+        let y = b.inst(Op::Call(FuncId(1)), Ty::Int(I64), &[x]);
+        let trap = deep(&mut b);
+        b.inst(
+            Op::Enter {
+                callee: FuncId(0),
+                trap,
+            },
+            Ty::Unit,
+            &[y],
+        );
+        let max = b.int(I64, Num::from_i128(255));
+        let fits = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[y, max]);
+        let narrowing = b.trap_site("narrowing", &["out of range"]);
+        let fits_u8 = Fact::Within(Num::ZERO, Num::from_i128(255));
+        let narrowed = b.guard(narrowing, fits_u8, &[fits, y]);
+        let small = b.inst(Op::Cast, Ty::Int(U8), &[narrowed]);
+        let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[small]);
+        b.ret(Some(r));
+        let m = Module {
+            functions: vec![callee, id, b.finish()],
+            budget: 1 << 20,
+        };
+        cfg::verify(&m).unwrap();
+        m
+    }
+
+    /// The instructions of each block of function `fi` of `broken`, each by its place in the same
+    /// block of `original`, `i0`, `i1` and on, or `new` where it has none there.
+    fn order(original: &Module, broken: &Module, fi: usize) -> Vec<String> {
+        let before = &original.functions[fi].blocks;
+        broken.functions[fi]
+            .blocks
+            .iter()
+            .zip(before)
+            .map(|(b, o)| {
+                let place = |v: &NodeId| {
+                    o.insts
+                        .iter()
+                        .position(|u| u == v)
+                        .map_or("new".to_string(), |i| format!("i{}", i))
+                };
+                b.insts.iter().map(place).collect::<Vec<_>>().join(" ")
+            })
+            .collect()
+    }
+
+    /// `fn caller(x: i64) -> i64`, which counts and calls `id` on `x`, then counts `id` on what it
+    /// gave and calls it in the next block.
+    fn counted_across_blocks() -> Module {
+        let mut i = Builder::new("id", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = i.params(BlockId(0))[0];
+        i.ret(Some(x));
+        let mut id = i.finish();
+        id.frame = 72;
+        let mut b = Builder::new("caller", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = b.params(BlockId(0))[0];
+        let next = b.block(&[]);
+        let enter = |b: &mut Builder, arg: NodeId| {
+            let trap = Some(b.trap_site("stack-overflow", &["the call stack ran out"]));
+            b.inst(
+                Op::Enter {
+                    callee: FuncId(0),
+                    trap,
+                },
+                Ty::Unit,
+                &[arg],
+            )
+        };
+        enter(&mut b, x);
+        let y = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[x]);
+        enter(&mut b, y);
+        b.jump(next, vec![]);
+        b.switch(next);
+        let z = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[y]);
+        b.ret(Some(z));
+        let m = Module {
+            functions: vec![id, b.finish()],
+            budget: 1 << 20,
+        };
+        cfg::verify(&m).unwrap();
+        m
+    }
+
+    /// An `Enter` dropped, doubled, moved past its call, moved past the narrowing check that takes
+    /// it, or moved before the call that gives its argument breaks the count of a call's frame
+    /// (`core-calculus.md`, item 25), and the verifier refuses each: a count taken where it is not
+    /// defined, or a call that does not close the latest count open. Each change stands where its
+    /// name says, its call in the count's block or in a later one. The original verifies and runs.
+    #[test]
+    fn test_the_verifier_refuses_every_count_out_of_its_place() {
+        let m = counted_call();
+        let all = unpaired(&m);
+        let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "caller/b0.i0/enter-dropped",
+                "caller/b0.i0/enter-doubled",
+                "caller/b0.i0/enter-moved",
+                "caller/b0.i2/enter-dropped",
+                "caller/b0.i2/enter-doubled",
+                "caller/b0.i2/enter-moved",
+                "caller/b0.i2/enter-later",
+                "caller/b0.i2/enter-earlier",
+                "caller/b0.i1/call-later",
+            ]
+        );
+        for (name, broken) in &all {
+            let why = cfg::verify(broken).unwrap_err();
+            // The order of values refuses a count or a call taken before it is given; the chain,
+            // one that takes an effect not the latest; the walk, a call that closes no count, or a
+            // count left open.
+            let structural = [
+                "is not defined before it on every path",
+                "does not close the latest count open",
+                "returns with the count",
+                "where the latest effect is",
+            ];
+            assert!(
+                structural.iter().any(|r| why.contains(r)),
+                "{}: {}",
+                name,
+                why
+            );
+        }
+        let orders: Vec<Vec<String>> = all.iter().map(|(_, broken)| order(&m, broken, 2)).collect();
+        assert_eq!(
+            orders,
+            [
+                ["i1 i2 i3 i4 i5 i6 i7"],
+                ["i0 new i1 i2 i3 i4 i5 i6 i7"],
+                // Past its call.
+                ["i1 i0 i2 i3 i4 i5 i6 i7"],
+                ["i0 i1 i3 i4 i5 i6 i7"],
+                ["i0 i1 i2 new i3 i4 i5 i6 i7"],
+                ["i0 i1 i3 i4 i5 i6 i7 i2"],
+                // Past the check that takes it, before the call that gives its argument.
+                ["i0 i1 i3 i4 i5 i2 i6 i7"],
+                ["i0 i2 i1 i3 i4 i5 i6 i7"],
+                // The call of `id` past the call of `callee`.
+                ["i0 i2 i3 i4 i5 i6 i7 i1"],
+            ]
+        );
+        let ran = cfg::run(
+            &m,
+            FuncId(2),
+            &[int(7)],
+            &mut Memory::default(),
+            Limits::default(),
+        );
+        assert_eq!(ran, Ok(int(7)));
+        // A count whose call stands in the next block moves past it there.
+        let across = counted_across_blocks();
+        let all = unpaired(&across);
+        let named: Vec<(&str, Vec<String>)> = all
+            .iter()
+            .map(|(n, broken)| (n.as_str(), order(&across, broken, 1)))
+            .collect();
+        let both = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        assert_eq!(
+            named,
+            [
+                ("caller/b0.i0/enter-dropped", both("i1 i2", "i0")),
+                ("caller/b0.i0/enter-doubled", both("i0 new i1 i2", "i0")),
+                ("caller/b0.i0/enter-moved", both("i1 i0 i2", "i0")),
+                ("caller/b0.i2/enter-dropped", both("i0 i1", "i0")),
+                ("caller/b0.i2/enter-doubled", both("i0 i1 i2 new", "i0")),
+                ("caller/b0.i2/enter-moved", both("i0 i1", "i0 new")),
+                ("caller/b0.i2/enter-earlier", both("i0 i2 i1", "i0")),
+            ]
+        );
+        for (name, broken) in &all {
+            assert!(cfg::verify(broken).is_err(), "{}", name);
+        }
+    }
+
+    /// `fn pick(c: bool, x: i64) -> i64`: `(x + 1) * 2`, the sum checked, where `c` holds, else
+    /// `x / x` by a divisor a guard holds is not zero, joined, where a comparison takes no effect.
+    fn pick() -> cfg::Function {
+        let mut b = Builder::new("pick", &[Ty::Bool, Ty::Int(I64)], Some(Ty::Int(I64)));
+        let [c, x] = b.params(BlockId(0))[..] else {
+            panic!("two parameters")
+        };
+        let then = b.block(&[]);
+        let otherwise = b.block(&[]);
+        let join = b.block(&[Ty::Int(I64)]);
+        b.branch(c, (then, vec![]), (otherwise, vec![]));
+        b.switch(then);
+        let one = b.int(I64, Num::from_i128(1));
+        let t = b.trap_site("overflow", &["", " does not fit in `i64`"]);
+        let up = b.inst(
+            Op::Arith {
+                op: ArithOp::Add,
+                trap: Some(t),
+            },
+            Ty::Int(I64),
+            &[x, one],
+        );
+        let twice = b.inst(
+            Op::Arith {
+                op: ArithOp::Add,
+                trap: None,
+            },
+            Ty::Int(I64),
+            &[up, up],
+        );
+        b.jump(join, vec![twice]);
+        b.switch(otherwise);
+        let zero = b.int(I64, Num::ZERO);
+        let nz = b.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[x, zero]);
+        let t = b.trap_site("division-by-zero", &["division by zero"]);
+        let divisor = b.guard(t, Fact::NonZero, &[nz, x]);
+        let q = b.inst(
+            Op::Arith {
+                op: ArithOp::Div,
+                trap: None,
+            },
+            Ty::Int(I64),
+            &[x, divisor],
+        );
+        b.jump(join, vec![q]);
+        b.switch(join);
+        let r = b.params(join)[0];
+        b.inst(Op::Cmp(CmpOp::Eq), Ty::Bool, &[r, r]);
+        b.ret(Some(r));
+        b.finish()
+    }
+
+    /// Every break of the chain of effects [`unchained`] plants is refused, each kind planted
+    /// at least once: in a caller that counts, narrows and calls, and in a function that
+    /// branches and joins with a value. The originals verify and run.
+    #[test]
+    fn test_the_verifier_refuses_every_break_of_the_chain() {
+        let mut m = counted_call();
+        m.functions.push(pick());
+        cfg::verify(&m).unwrap();
+        let all = unchained(&m);
+        for kind in [
+            "effect-dropped",
+            "effect-forked",
+            "effect-valued",
+            "partial-raised",
+            "guard-unguarded",
+            "guard-raised",
+            "passed-valued",
+            "ended-early",
+        ] {
+            assert!(
+                all.iter().any(|(n, _)| n.ends_with(kind)),
+                "no {} planted",
+                kind
+            );
+        }
+        for (name, broken) in &all {
+            assert!(cfg::verify(broken).is_err(), "{} verifies", name);
+        }
+        // Each site and way, and what the moves and the re-pointing leave.
+        let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "caller/b0.i0/effect-dropped",
+                "caller/b0.i0/effect-valued",
+                "caller/b0.i1/effect-dropped",
+                "caller/b0.i1/effect-forked",
+                "caller/b0.i1/effect-valued",
+                "caller/b0.i2/effect-dropped",
+                "caller/b0.i2/effect-forked",
+                "caller/b0.i5/effect-dropped",
+                "caller/b0.i5/effect-forked",
+                "caller/b0.i5/effect-valued",
+                "caller/b0.i7/effect-dropped",
+                "caller/b0.i7/effect-forked",
+                "caller/b0.i7/effect-valued",
+                "caller/b0.i6/guard-unguarded",
+                "caller/b0.i6/guard-raised",
+                "caller/b0.term/ended-early",
+                "pick/b0.term/passed-valued",
+                "pick/b1.i1/effect-dropped",
+                "pick/b1.i1/effect-valued",
+                "pick/b1.i2/effect-dropped",
+                "pick/b1.i2/partial-raised",
+                "pick/b1.term/passed-valued",
+                "pick/b2.i2/effect-dropped",
+                "pick/b2.i2/effect-valued",
+                "pick/b2.i3/guard-unguarded",
+                "pick/b2.i3/guard-raised",
+                "pick/b2.term/passed-valued",
+            ]
+        );
+        let plant = |name: &str| {
+            &all.iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no plant {}", name))
+                .1
+        };
+        // The exact doubling above the checked sum it reads; the division above its guard.
+        assert_eq!(
+            order(&m, plant("pick/b1.i2/partial-raised"), 3)[1],
+            "i0 i2 i1"
+        );
+        assert_eq!(
+            order(&m, plant("pick/b2.i3/guard-raised"), 3)[2],
+            "i0 i1 i3 i2"
+        );
+        // The division and the cast taking what their guards take.
+        let pick = &m.functions[3];
+        let (q, x) = (pick.blocks[2].insts[3], pick.blocks[0].params[1]);
+        for name in ["pick/b2.i3/guard-unguarded", "pick/b2.i3/guard-raised"] {
+            assert_eq!(plant(name).functions[3].own_args(q)[1], x, "{}", name);
+        }
+        let caller = &m.functions[2];
+        let (cast, y) = (caller.blocks[0].insts[6], caller.blocks[0].insts[1]);
+        assert_eq!(
+            plant("caller/b0.i6/guard-unguarded").functions[2].own_args(cast)[0],
+            y
+        );
+        let ran = |args: &[Val]| {
+            cfg::run(
+                &m,
+                FuncId(3),
+                args,
+                &mut Memory::default(),
+                Limits::default(),
+            )
+        };
+        assert_eq!(ran(&[Val::Bool(true), int(4)]), Ok(int(10)));
+        assert_eq!(ran(&[Val::Bool(false), int(4)]), Ok(int(1)));
     }
 
     fn named<'a>(m: &Module, all: &'a [Mutant], name: &str) -> &'a Mutant {
@@ -536,6 +1323,7 @@ mod tests {
         let shl = b.inst(Op::Shl { trap: checked }, Ty::Int(I64), &[bits, k]);
         let shr = b.inst(Op::Shr, Ty::Int(I64), &[x, k]);
         let mut last = shr;
+        let y = b.assume(y, Fact::NonZero);
         for op in [
             ArithOp::Add,
             ArithOp::Sub,
@@ -576,18 +1364,15 @@ mod tests {
         b.inst(Op::Copy { bytes: 8 }, Ty::Unit, &[copy, out]);
         let then = b.block(&[Ty::Int(I64)]);
         let otherwise = b.block(&[Ty::Int(I64)]);
-        b.end(Term::Branch {
-            cond: conds[2],
-            then: (then, vec![flipped]),
-            otherwise: (otherwise, vec![x]),
-        });
+        b.branch(conds[2], (then, vec![flipped]), (otherwise, vec![x]));
         for t in [then, otherwise] {
             b.switch(t);
             let p = b.params(t)[0];
-            b.end(Term::Return(Some(p)));
+            b.ret(Some(p));
         }
         let m = Module {
             functions: vec![b.finish()],
+            budget: 1 << 20,
         };
         cfg::verify(&m).unwrap();
 
@@ -649,12 +1434,64 @@ mod tests {
         // Each checked operation also loses its trap; the check reports its line.
         let unchecked = kept.iter().filter(|x| x.operator == "unchecked").count();
         assert_eq!(unchecked, 5);
-        let removed = named(&m, &kept, "all/b0.i22/check-removed");
+        let removed = named(&m, &kept, "all/b0.i23/check-removed");
         assert_eq!(removed.loc(&m), cfg::Loc { line: 3, col: 7 });
         assert_eq!(
             removed.apply(&m).functions[0].blocks[0].insts.len(),
             m.functions[0].blocks[0].insts.len() - 1
         );
+    }
+
+    /// A check taken out just before a trap hands the trap the effect the check took, so that the
+    /// mutant verifies and the trap is reached where the check would have trapped first.
+    #[test]
+    fn test_a_check_taken_out_hands_a_trap_the_effect_it_took() {
+        let mut b = Builder::new("halt", &[Ty::Bool], None);
+        let c = b.params(BlockId(0))[0];
+        let entry = b.latest();
+        let t = b.trap_site("check", &["c is false"]);
+        b.inst(Op::Check { trap: t }, Ty::Unit, &[c]);
+        let todo = b.trap_site("todo", &["todo reached"]);
+        b.trap(todo);
+        let m = Module {
+            functions: vec![b.finish()],
+            budget: 1 << 20,
+        };
+        cfg::verify(&m).unwrap();
+        let removed = named(&m, &mutants(&m), "halt/b0.i0/check-removed").apply(&m);
+        assert_eq!(cfg::verify(&removed), Ok(()));
+        assert_eq!(removed.functions[0].blocks[0].term, Term::Trap(todo, entry));
+    }
+
+    /// A guard taken out becomes an assumption of what it guarded, in its place: the value it
+    /// guarded still flows to the cast that takes it, and where the guard trapped, the run is now
+    /// broken MIR, as a check taken out leaves it.
+    #[test]
+    fn test_a_guard_taken_out_leaves_its_fact_assumed() {
+        let m = counted_call();
+        let all = mutants(&m);
+        let removed = named(&m, &all, "caller/b0.i5/check-removed").apply(&m);
+        assert_eq!(cfg::verify(&removed), Ok(()));
+        let (before, after) = (&m.functions[2], &removed.functions[2]);
+        assert_eq!(before.blocks[0].insts, after.blocks[0].insts);
+        let guard = after.blocks[0].insts[5];
+        assert!(matches!(after.op(guard), Op::Assume(_)));
+        assert_eq!(
+            after.fact(guard),
+            Some(Fact::Within(Num::ZERO, Num::from_i128(255)))
+        );
+        let ran = |m: &Module, n: i128| {
+            cfg::run(
+                m,
+                FuncId(2),
+                &[int(n)],
+                &mut Memory::default(),
+                Limits::default(),
+            )
+        };
+        assert_eq!(ran(&removed, 7), Ok(int(7)));
+        assert!(matches!(ran(&m, 300), Err(Stop::Trap(_))));
+        assert!(matches!(ran(&removed, 300), Err(Stop::Broken(_))));
     }
 
     /// A constant moves to `c + 1`, `c - 1` and `0` only where its type holds the new value,
@@ -664,9 +1501,10 @@ mod tests {
         let consts = |t: IntTy, n: i128| {
             let mut b = Builder::new("k", &[], Some(Ty::Int(t)));
             let k = b.int(t, Num::from_i128(n));
-            b.end(Term::Return(Some(k)));
+            b.ret(Some(k));
             let m = Module {
                 functions: vec![b.finish()],
+                budget: 1 << 20,
             };
             mutants(&m)
                 .iter()
@@ -712,16 +1550,14 @@ mod tests {
             &[y, one],
         );
         let join = b.block(&[Ty::Int(I64)]);
-        b.end(Term::Branch {
-            cond: below,
-            then: (join, vec![y]),
-            otherwise: (join, vec![up]),
-        });
+        let latest = b.latest();
+        b.branch(below, (join, vec![y]), (join, vec![up]));
         b.switch(join);
         let r = b.params(join)[0];
-        b.end(Term::Return(Some(r)));
+        b.ret(Some(r));
         let m = Module {
             functions: vec![b.finish()],
+            budget: 1 << 20,
         };
         let all = mutants(&m);
         let id = named(&m, &all, "n/b0.i0/neg>id").apply(&m);
@@ -731,11 +1567,38 @@ mod tests {
         assert_eq!(run(&id, &[int(-5)]), Ok(int(-5)));
         assert_eq!(
             named(&m, &all, "n/b0.term/then").apply(&m).functions[0].blocks[0].term,
-            Term::Jump(join, vec![y])
+            Term::Jump(join, vec![y, latest])
         );
         assert_eq!(
             named(&m, &all, "n/b0.term/else").apply(&m).functions[0].blocks[0].term,
-            Term::Jump(join, vec![up])
+            Term::Jump(join, vec![up, latest])
+        );
+        // A `not` replaced by its operand: the branch it decides reads the operand, and the effect
+        // the branch passes on stays the latest.
+        let mut b = Builder::new("flip", &[Ty::Bool], Some(Ty::Int(I64)));
+        let c = b.params(BlockId(0))[0];
+        let not = b.inst(Op::Not, Ty::Bool, &[c]);
+        let (yes, no) = (b.block(&[]), b.block(&[]));
+        let entry = b.latest();
+        b.branch(not, (yes, vec![]), (no, vec![]));
+        for (block, n) in [(yes, 1), (no, 0)] {
+            b.switch(block);
+            let k = b.int(I64, Num::from_i128(n));
+            b.ret(Some(k));
+        }
+        let flip = Module {
+            functions: vec![b.finish()],
+            budget: 1 << 20,
+        };
+        let id = named(&flip, &mutants(&flip), "flip/b0.i0/not>id").apply(&flip);
+        assert_eq!(cfg::verify(&id), Ok(()));
+        assert_eq!(
+            id.functions[0].blocks[0].term,
+            Term::Branch {
+                cond: c,
+                then: (yes, vec![entry]),
+                otherwise: (no, vec![entry]),
+            }
         );
         // A branch's mutant is located at its condition, an instruction's at the instruction.
         let swap = named(&m, &all, "n/b0.term/swap");

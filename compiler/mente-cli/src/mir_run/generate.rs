@@ -1261,6 +1261,17 @@ impl Gen {
             out.push_str(&text);
             functions.push((format!("f{}", k), start..out.len()));
         }
+        // Now and then a recursion the stack budget ends, from a random source of its own, so
+        // that the functions above stay as they are (`deep_recursion`).
+        let mut rng = stream(self.seed, count, 0);
+        if rng.chance(DEEP_CHANCE) {
+            for (name, text) in deep_recursion(&mut rng, count) {
+                out.push('\n');
+                let start = out.len();
+                out.push_str(&text);
+                functions.push((name, start..out.len()));
+            }
+        }
         (out, functions)
     }
 
@@ -5326,6 +5337,72 @@ impl Gen {
 }
 
 /// A field as its declaration writes it: `name: type`, with its refinement when it has one.
+/// How often, in percent, a program ends in a recursion the stack budget ends.
+const DEEP_CHANCE: u64 = 35;
+
+/// A recursion the stack budget ends, as functions `f{k}` and `f{k + 1}` with their texts: `f{k}`
+/// calls itself on `n - 1` inside one to eight wrappers, each an `if`, a `match` or an operator
+/// around what it wraps, and the public `f{k + 1}` calls it on a count no budget reaches. So a
+/// run of the program grows each path's host stack, through the shapes that take the most of it
+/// for the least frame, up to item 25's trap, which every path must raise at the same call
+/// (`core-calculus.md`, item 25): a path that ran out of host stack first, as the reference
+/// interpreter did on a thread sized per call, fails the comparison.
+fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
+    let name = format!("f{}", k);
+    // Half the recursions keep the narrowest frame, `n` alone, and nest only as deep as the
+    // harnesses' allowance lets so narrow a frame (`super::deepest_at`); the others carry five
+    // `u128`s on, a frame wide enough for all eight wrappers. A frame is at least the call's 64
+    // bytes and its parameters'.
+    let wide = rng.chance(50);
+    let (params, passed, given, frame) = if wide {
+        (
+            ", a: u128, b: u128, c: u128, d: u128, e: u128",
+            ", a, b, c, d, e",
+            ", 1, 2, 3, 4, 5",
+            64 + 4 + 5 * 16,
+        )
+    } else {
+        ("", "", "", 64 + 4)
+    };
+    let mut e = format!(
+        "if n > 0 {{\n  {}(n - 1{})\n}} else {{\n  0\n}}",
+        name, passed
+    );
+    // The levels the parser counts: the `if`, its block, the call, `n - 1` and `n`; each wrapper
+    // adds its own, and stops before the nesting passes what the frame allows.
+    let deepest = super::deepest_at(frame);
+    let mut levels = 5;
+    for _ in 0..1 + rng.below(8) {
+        let kind = rng.below(4);
+        let adds = if kind == 0 { 2 } else { 1 };
+        if levels + adds > deepest {
+            break;
+        }
+        levels += adds;
+        e = match kind {
+            0 => format!("if n > 0 {{\n{}\n}} else {{\n  1\n}}", e),
+            1 => format!("match n {{\n  0 => 2\n  _ => {}\n}}", e),
+            2 => format!("({}) + 0", e),
+            _ => format!("0 | ({})", e),
+        };
+    }
+    vec![
+        (
+            name.clone(),
+            format!("fn {}(n: u32{}) -> u32 = {}\n", name, params, e),
+        ),
+        (
+            format!("f{}", k + 1),
+            format!(
+                "pub fn f{}() -> u32 = {}(4294967295{})\n",
+                k + 1,
+                name,
+                given
+            ),
+        ),
+    ]
+}
+
 fn field_text(f: &GField) -> String {
     let range = |r: R| match (f.exclusive, r.hi.add(Num::small(1))) {
         (true, Some(end)) => format!("[{}..{}]", r.lo, end),
@@ -5534,14 +5611,27 @@ pub fn checked(seed: u64) -> Checked {
         };
         let diagnostics = match panic::catch_unwind(|| mente_sema::check_program(&program.text)) {
             Ok(Ok(module)) => {
-                return Checked {
-                    program,
-                    module: Some(module),
-                    claims,
-                    regenerated,
-                    problems,
-                    attempts,
+                let deep = too_deep(&program, &module);
+                if deep.is_empty() {
+                    return Checked {
+                        program,
+                        module: Some(module),
+                        claims,
+                        regenerated,
+                        problems,
+                        attempts,
+                    };
                 }
+                if round == MAX_ROUNDS {
+                    problems.push(deeper(seed));
+                    return refused(program, claims, problems);
+                }
+                attempts.resize(program.functions.len(), 0);
+                regenerated += deep.len();
+                for k in deep {
+                    attempts[k] += 1;
+                }
+                continue;
             }
             Ok(Err(diagnostics)) => diagnostics,
             Err(_) => {
@@ -5581,6 +5671,16 @@ pub fn checked(seed: u64) -> Checked {
             return refused(program, claims, problems);
         };
         attempts.resize(program.functions.len(), 0);
+        // A function deeper than the harnesses' bound is generated again before the reference
+        // interpreter runs anything of the program.
+        let deep = too_deep(&program, &kept);
+        if !deep.is_empty() {
+            regenerated += deep.len();
+            for k in deep {
+                attempts[k] += 1;
+            }
+            continue;
+        }
         let mut again = BTreeSet::new();
         for d in &diagnostics {
             let Some(k) = program
@@ -5603,6 +5703,34 @@ pub fn checked(seed: u64) -> Checked {
         }
     }
     unreachable!("the rounds end at MAX_ROUNDS")
+}
+
+/// The functions of `program` whose calls would take more host memory than the harnesses'
+/// allowance (`super::HOST_ALLOWANCE`; `mente_interp::host_bound_of_function`), by their index
+/// among its functions: each is generated again, so that every generated program keeps within it.
+fn too_deep(program: &Program, module: &CheckedModule) -> Vec<usize> {
+    program
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| {
+            module.index(name).is_some_and(|i| {
+                !super::within_host_allowance(mente_interp::host_bound_of_function(module, i))
+            })
+        })
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// A program still beyond the harnesses' allowance after every round of generating its functions
+/// again: a bug of the generator.
+fn deeper(seed: u64) -> String {
+    format!(
+        "seed {}: a function still passes the host allowance of {} bytes after {} rounds of generating it again",
+        seed,
+        super::HOST_ALLOWANCE,
+        MAX_ROUNDS
+    )
 }
 
 /// What an `E0508` claims of a value: that it is at most, or at least, `bound`, which lies
@@ -5842,7 +5970,6 @@ fn always_traps(
     };
     out.seen = true;
     let limits = mente_interp::Limits {
-        max_depth: 64,
         max_steps: 200_000,
         ..mente_interp::Limits::default()
     };

@@ -16,6 +16,57 @@ mod coverage;
 mod differential;
 #[cfg(test)]
 mod generate;
+#[cfg(test)]
+mod host_shapes;
+
+/// What each test process may reserve on CI: `ulimit -v` on Linux, a job object on Windows
+/// (`.github/scripts/limits.sh`, which a test reads): 8 GiB.
+pub const CI_PROCESS_BYTES: u128 = 8_589_934_592;
+
+/// The interpreters CI runs at once in one test process: one on each of a runner's four cores, as
+/// a test of the group `all-cores` does (`.config/nextest.toml`), and no more than the four
+/// processes of single-threaded tests nextest runs beside each other hold together.
+pub const CI_THREADS: u128 = 4;
+
+/// What no bound counts on of what a test process may reserve on CI: a quarter of it, 2 GiB,
+/// which a test holds it to.
+pub const CI_HEADROOM: u128 = 2_147_483_648;
+
+/// The address space glibc keeps for malloc arenas in a process on CI: 64 MiB for each, and up to
+/// eight for each core, 2 GiB on four cores, which Linux's `ulimit -v` counts; the reference
+/// interpreter's segments, each a thread, make them all.
+pub const CI_ARENAS: u128 = 2_147_483_648;
+
+/// What a test process reserves on CI besides its interpreters' stacks and its arenas: the test
+/// binary, its heap, and the stacks of the threads that run it: 512 MiB.
+pub const CI_PROGRAM: u128 = 536_870_912;
+
+/// What the stacks of each interpreter a harness runs may reserve: CI's process, less the
+/// headroom, the arenas and the program, shared by the interpreters CI runs at once in it.
+pub const HOST_ALLOWANCE: u128 =
+    (CI_PROCESS_BYTES - CI_HEADROOM - CI_ARENAS - CI_PROGRAM) / CI_THREADS;
+
+/// Whether a program, or a function, whose bound on the reference interpreter's host memory is
+/// `bound` (`mente_interp::host_bound_of`) keeps within [`HOST_ALLOWANCE`]: the one place each
+/// harness asks it.
+pub const fn within_host_allowance(bound: u128) -> bool {
+    bound <= HOST_ALLOWANCE
+}
+
+/// The deepest a function whose frame is at least `frame` bytes may nest, for a run of its calls
+/// to fit [`HOST_ALLOWANCE`] (`mente_interp::host_bound_at`). A harness keeps each program it
+/// generates or mutates within the allowance by the program's own bound
+/// (`mente_interp::host_bound_of`): it bounds the shape of what it runs, never the depth of a call.
+#[cfg(test)]
+pub const fn deepest_at(frame: u128) -> u32 {
+    let mut depth = 0;
+    while depth < mente_syntax::body::NESTING_LIMIT
+        && within_host_allowance(mente_interp::host_bound_at(frame, depth + 1))
+    {
+        depth += 1;
+    }
+    depth
+}
 
 /// What a run printed: its value and what each `mut` argument was left holding, or why it
 /// stopped.
@@ -40,12 +91,13 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
     if let Some(why) = misshapen(entry, &args) {
         return Err(why);
     }
-    // An argument that does not fit its parameter's type traps before the entry is called.
+    // The run's first call, counted against the budget, and an argument that does not fit its
+    // parameter's type trap before the entry is called.
     let native_args = args
         .iter()
         .map(|(_, v)| native_arg(v))
         .collect::<Result<Vec<_>, String>>()?;
-    if let Some(trap) = native::refusal(entry, &native_args) {
+    if let Some(trap) = native::refusal(lowered, entry, &native_args) {
         return Err(trap);
     }
     let mut memory = Memory::default();

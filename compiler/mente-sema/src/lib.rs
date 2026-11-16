@@ -1137,11 +1137,11 @@ mod tests {
     fn test_typed_functions_dump_with_their_diagnostics() {
         assert_eq!(
             dump_typed("module m\npub fn f(x: u8) -> u8 {\n  val y = x + 1\n  y\n}\npub fn g() -> u8 = zz\n"),
-            "mente-dump 2 typed\n(fn f ((x u8)) u8 () {(val y (+ x 1)); y})\n  (binding x u8)\n  (binding y u8)\n  (expr 0 3:11 1 u8)\n  (expr 1 3:15 1 integer)\n  (expr 2 3:11 5 u8)\n  (expr 3 4:3 1 u8)\n(fn g () u8 () (= zz))\n  (expr 0 6:20 2 _)\n6:20 E0201\n"
+            "mente-dump 3 typed\n(fn f ((x u8)) u8 () {(val y (+ x 1)); y})\n  (binding x u8)\n  (binding y u8)\n  (expr 0 3:11 1 u8)\n  (expr 1 3:15 1 integer)\n  (expr 2 3:11 5 u8)\n  (expr 3 4:3 1 u8)\n(fn g () u8 () (= zz))\n  (expr 0 6:20 2 _)\n6:20 E0201\n"
         );
         assert_eq!(
             dump_typed("module m\nlet x = 1\n"),
-            "mente-dump 2 typed\n2:1 E0111\n"
+            "mente-dump 3 typed\n2:1 E0111\n"
         );
     }
 

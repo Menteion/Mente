@@ -19,15 +19,19 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 mod eval;
+mod host;
 pub mod int;
 mod kinds;
+mod nesting;
 
 use std::fmt;
 
 use mente_sema::CheckedModule;
 use mente_syntax::Span;
 
+pub use host::{host_bound, host_bound_at, host_figures};
 pub use int::Int;
+pub use nesting::{function_nesting, host_bound_of, host_bound_of_function, nesting};
 
 /// A value of M2's slice: an integer, a `bool`, an array, a struct, a variant of an enum, or no
 /// value.
@@ -237,11 +241,10 @@ impl fmt::Display for Stop {
     }
 }
 
-/// The resources a run may use.
+/// The resources a run may use. Its stack is no limit of these: the budget of item 25 of
+/// `core-calculus.md` is one for every run (`mente_sema::frames::BUDGET`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// Nested calls before the stack runs out, which traps.
-    pub max_depth: usize,
     /// Statements and loop rounds before the run stops.
     pub max_steps: u64,
     /// Elements of one array literal `[v; n]`.
@@ -251,7 +254,6 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Limits {
         Limits {
-            max_depth: 10_000,
             max_steps: 100_000_000,
             max_array: 1 << 24,
         }
@@ -271,7 +273,7 @@ pub fn call(
 
 /// Calls the function `name` like [`call`], and returns its result with the final value of
 /// each parameter, which a `mut` parameter leaves in the place its caller passed. The run gets
-/// a thread of its own with a stack deep enough for `limits.max_depth` calls.
+/// a thread of its own, and more as it needs them (`host`).
 pub fn call_leaving(
     module: &CheckedModule,
     name: &str,
@@ -314,7 +316,7 @@ pub fn call_observed<'m>(
 }
 
 /// Calls of one module that share one thread: [`with_calls`] hands them to a closure that runs
-/// on a thread with a stack deep enough for `limits.max_depth` calls, and each call runs there,
+/// on a thread of the interpreter's, and each call runs there, with the segments it needs,
 /// without a thread of its own. A thread costs more than a short call, on Windows many times
 /// more, so a check that makes hundreds of calls of a function makes them here.
 pub struct Calls<'m> {
@@ -344,7 +346,7 @@ pub fn with_calls<'m, R: Send>(
     limits: Limits,
     f: impl FnOnce(&mut Calls<'m>) -> R + Send,
 ) -> Result<R, Stop> {
-    mente_threads::alone(None, Some(stack_bytes(limits.max_depth)), || {
+    mente_threads::alone(None, Some(host::SEGMENT), || {
         f(&mut Calls { module, limits })
     })
     .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
@@ -358,7 +360,7 @@ fn run<'m>(
     limits: Limits,
     seen: Option<Observer<'m>>,
 ) -> Result<(Value, Vec<Value>), Stop> {
-    mente_threads::alone(None, Some(stack_bytes(limits.max_depth)), || {
+    mente_threads::alone(None, Some(host::SEGMENT), || {
         eval::Machine::new(module, limits, seen).enter(name, args)
     })
     .map_err(|e| Stop::BadArguments(format!("the interpreter could not start: {}", e)))?
@@ -369,12 +371,48 @@ fn run<'m>(
     })
 }
 
-/// Stack bytes reserved for each nested call of the interpreted program.
-const STACK_PER_CALL: usize = 64 << 10;
+/// Runs `name` on `args` like [`call_leaving`], and gives beside its outcome the largest step of
+/// the host stack between two checks of the run (`host`), which a test holds to `host::STEP`.
+#[cfg(test)]
+pub(crate) fn deepest_step(
+    module: &CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+) -> (Result<(Value, Vec<Value>), Stop>, usize) {
+    let ran = mente_threads::alone(None, Some(host::SEGMENT), || {
+        let mut m = eval::Machine::new(module, Limits::default(), None);
+        let outcome = m.enter(name, args);
+        (outcome, m.deepest_step())
+    });
+    match ran {
+        Ok(Ok(r)) => r,
+        _ => panic!("the interpreter's thread did not run"),
+    }
+}
 
-/// The stack a run's thread gets: a base for the interpreter itself, and room for each call.
-fn stack_bytes(max_depth: usize) -> usize {
-    (1 << 20) + STACK_PER_CALL * max_depth
+/// Runs `name` on `args` within `limits`, and gives beside its outcome the most host stack one
+/// of its calls took, from where it began to the deepest point it reached before a call it made
+/// began (`host`).
+pub fn host_per_call(
+    module: &CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+    limits: Limits,
+) -> (Result<(Value, Vec<Value>), Stop>, usize) {
+    let ran = mente_threads::alone(None, Some(host::SEGMENT), || {
+        let mut m = eval::Machine::new(module, limits, None);
+        let outcome = m.enter(name, args);
+        (outcome, m.per_call())
+    });
+    match ran {
+        Ok(Ok(r)) => r,
+        _ => (
+            Err(Stop::BadArguments(
+                "the interpreter stopped unexpectedly".to_string(),
+            )),
+            0,
+        ),
+    }
 }
 
 /// Runs a program: its `main`, which takes no parameters (`core-calculus.md`, item 10).

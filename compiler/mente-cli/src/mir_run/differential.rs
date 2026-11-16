@@ -35,9 +35,9 @@ use super::generate::{self, CallPlan, Mode};
 use super::{native_within, reference_within, run_lowered, CallArgs, Printed};
 
 /// The reference interpreter's limits in a comparison: a generated call does a few thousand
-/// steps at most, far below MIR's own limit.
+/// steps at most, far below MIR's own limit. The stack is no limit of these: item 25's budget
+/// bounds every run alike.
 const STEPS: Limits = Limits {
-    max_depth: 10_000,
     max_steps: 1_000_000,
     max_array: 1 << 24,
 };
@@ -219,9 +219,15 @@ fn compare_module(
             finished.push((c, expected));
         }
     }
+    // A call the reference interpreter ends at the stack budget is compared on MIR, and not run
+    // natively: native code counts no frame yet, and its stack ends at the system's guard page
+    // (`core-calculus.md`, item 25, what the paths do not do yet).
+    let native: Vec<usize> = (0..finished.len())
+        .filter(|&k| trap_at(&finished[k].1).is_none_or(|(kind, _, _)| kind != "stack-overflow"))
+        .collect();
     let natively = match scratch {
-        Some(dir) if !finished.is_empty() => {
-            let list: Vec<CallArgs> = finished.iter().map(|(c, _)| (*c).clone()).collect();
+        Some(dir) if !native.is_empty() => {
+            let list: Vec<CallArgs> = native.iter().map(|&k| finished[k].0.clone()).collect();
             match native_within(&lowered, &list, dir, "program", Some(NATIVE_TIME)) {
                 Ok(all) => Some(all),
                 Err(e) => {
@@ -289,12 +295,16 @@ fn compare_module(
                 ),
             }
         }
-        if let Some(all) = &natively {
-            if all[k] != got {
+        let natively = natively
+            .as_ref()
+            .zip(native.iter().position(|&n| n == k))
+            .map(|(all, j)| &all[j]);
+        if let Some(printed) = natively {
+            if *printed != got {
                 finding(
                     Kind::Codegen,
                     &call,
-                    format!("MIR prints {}, native code {}", show(&got), show(&all[k])),
+                    format!("MIR prints {}, native code {}", show(&got), show(printed)),
                 );
             }
         }
@@ -705,6 +715,13 @@ mod tests {
             let Some(m) = &c.module else {
                 panic!("seed {} does not check", seed);
             };
+            // Every program keeps within the allowance of the interpreter's host memory.
+            assert!(
+                super::super::within_host_allowance(mente_interp::host_bound_of(m)),
+                "seed {} passes the host allowance: {} bytes",
+                seed,
+                mente_interp::host_bound_of(m)
+            );
             let proven = m
                 .functions
                 .iter()
@@ -728,6 +745,47 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(proven >= 100, "Tier 1 proves only {} obligations", proven);
+    }
+
+    /// The allowance every program a harness generates or mutates keeps its bound on the reference
+    /// interpreter's host memory within (`mente_interp::host_bound_of`) fits CI's limits, with a
+    /// quarter of what a process may reserve kept as headroom, which is read where
+    /// `.github/scripts/limits.sh` sets it for Linux and for Windows. Both processes that run
+    /// generated or mutated programs fit: the comparison's, with an interpreter on each of CI's
+    /// cores, and fuzz's worker, with one interpreter beside the two stacks of `mn`'s work and
+    /// its phase thread. A function of the narrowest frame nests 10 levels within it, one of a
+    /// wide frame 22; a bound of the allowance keeps within it, and a byte more does not.
+    #[test]
+    fn test_the_host_allowance_fits_ci_memory() {
+        use super::super::{
+            deepest_at, within_host_allowance, CI_ARENAS, CI_HEADROOM, CI_PROCESS_BYTES,
+            CI_PROGRAM, CI_THREADS, HOST_ALLOWANCE,
+        };
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/limits.sh");
+        let limits = fs::read_to_string(script).unwrap();
+        for set in [
+            format!("ulimit -v {} ", CI_PROCESS_BYTES >> 10),
+            format!("-ProcessBytes {} ", CI_PROCESS_BYTES),
+        ] {
+            assert!(limits.contains(&set), "limits.sh no longer sets {:?}", set);
+        }
+        // A quarter of what a process may reserve is headroom, which no bound counts on.
+        assert_eq!(CI_HEADROOM, CI_PROCESS_BYTES / 4);
+        let usable = CI_PROCESS_BYTES / 4 * 3;
+        let fuzz_stacks = 2 * crate::STACK as u128;
+        let compared = CI_THREADS * HOST_ALLOWANCE + CI_ARENAS + CI_PROGRAM;
+        let fuzzed = HOST_ALLOWANCE + fuzz_stacks + CI_ARENAS + CI_PROGRAM;
+        let (narrow, wide) = (deepest_at(64 + 4), deepest_at(64 + 4 + 5 * 16));
+        println!(
+            "{} bytes an interpreter: {} for the comparison's process, {} for fuzz's worker, of {} \
+             usable; at a frame of 68 bytes a function nests at most {} levels, at 148 {}",
+            HOST_ALLOWANCE, compared, fuzzed, usable, narrow, wide
+        );
+        assert!(compared <= usable && fuzzed <= usable);
+        assert!(CI_THREADS * (HOST_ALLOWANCE + CI_THREADS) + CI_ARENAS + CI_PROGRAM > usable);
+        assert_eq!((narrow, wide), (10, 22));
+        assert!(within_host_allowance(HOST_ALLOWANCE));
+        assert!(!within_host_allowance(HOST_ALLOWANCE + 1));
     }
 
     #[test]
@@ -872,6 +930,42 @@ mod tests {
         assert!(report.calls >= 60, "{}", report.summary());
     }
 
+    /// Among the seeds the comparison above runs, the generator ends some programs in a recursion
+    /// the stack budget ends, through nested `if`s, `match`es and operators
+    /// (`generate::deep_recursion`): on each, the reference interpreter and MIR grow their host
+    /// stacks through those shapes and trap at the same call, item 25's (`core-calculus.md`). A
+    /// thread sized per call ran out of host stack on such a recursion before the budget did.
+    #[test]
+    fn test_generated_recursions_run_to_the_budget_on_both_interpreters() {
+        let mut deep = 0;
+        for seed in 0..9 {
+            let c = generate::checked(seed);
+            let Some(m) = &c.module else {
+                continue;
+            };
+            let Some((name, at)) = c.program.functions.last() else {
+                continue;
+            };
+            if !c.program.text[at.clone()].contains("(4294967295)") {
+                continue;
+            }
+            let reference = reference_within(m, name, Vec::new(), STEPS);
+            let mir = match lower::lower(m) {
+                Ok(l) => run_lowered(&l, name, Vec::new()),
+                Err(e) => panic!("seed {}: not lowered: {}", seed, e),
+            };
+            assert!(
+                trap_at(&reference).is_some_and(|(kind, _, _)| kind == "stack-overflow"),
+                "seed {}: {:?}",
+                seed,
+                reference
+            );
+            assert_eq!(reference, mir, "seed {}", seed);
+            deep += 1;
+        }
+        assert!(deep > 0, "no program of seeds 0 to 8 ends in a recursion");
+    }
+
     /// Every conformance program that must pass, with generated arguments for its public
     /// functions, prints the same on the four paths.
     #[test]
@@ -1005,6 +1099,11 @@ mod tests {
     #[test]
     #[ignore = "generates and runs many programs; CI runs it in release (generated.yml)"]
     fn generated_programs_run_alike_on_the_three_paths() {
+        // The figures the nesting the generator keeps to rests on hold in this build too, as a
+        // test holds them in a build without optimisation (`mente_interp::host_bound`).
+        if let Err(over) = super::super::host_shapes::figures_hold() {
+            panic!("{}", over);
+        }
         let first = env_or("MENTE_GEN_FIRST_SEED", 0);
         let count = env_or("MENTE_GEN_PROGRAMS", 300);
         let plan = CallPlan {

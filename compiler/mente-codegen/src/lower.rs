@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mente_mir::cfg::{
-    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Term, Ty,
+    self, ArithOp, BitOp, BlockId, Builder, CmpOp, Fact, FuncId, IntTy, Loc, Num, Op, Term, Ty,
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
@@ -39,6 +39,10 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
+/// The kind and the text of the trap of a call that runs out of the stack budget
+/// (`core-calculus.md`, item 25).
+pub const RAN_OUT: [&str; 2] = ["stack-overflow", "the call stack ran out"];
+
 /// A lowered module: its MIR, and for each function with a body its entry.
 #[derive(Clone, Debug)]
 pub struct Lowered {
@@ -52,6 +56,8 @@ pub struct Lowered {
 pub struct Entry {
     pub name: String,
     pub func: FuncId,
+    /// The function the entry calls, whose call is the run's first.
+    pub callee: FuncId,
     pub params: Vec<(bool, Shape)>,
     pub result: Shape,
     /// The function's name in the source, where a call from outside the program reports an
@@ -489,12 +495,18 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
             None => None,
         });
     }
-    let mut module = cfg::Module::default();
+    // The budget and each function's frame are the checker's (`core-calculus.md`, item 25); an
+    // entry, which no program calls, counts none.
+    let mut module = cfg::Module {
+        functions: Vec::new(),
+        budget: mente_sema::frames::BUDGET,
+    };
     for (i, f) in m.functions.iter().enumerate() {
         if let Some(f) = f {
-            let lowered = Lower::new(m, &sigs, &shapes, i, false)?
+            let mut lowered = Lower::new(m, &sigs, &shapes, i, false)?
                 .function()
                 .map_err(|e| format!("fn {}: {}", f.syntax.name, e))?;
+            lowered.frame = m.frames.get(i).copied().flatten().map_or(0, |f| f.bytes);
             module.functions.push(lowered);
         }
     }
@@ -509,6 +521,7 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
             entries.push(Entry {
                 name: f.syntax.name.clone(),
                 func,
+                callee: sig.func,
                 params: sig.params.clone(),
                 result: sig.result.clone(),
                 at: Loc {
@@ -523,7 +536,8 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
 }
 
 /// The MIR parameters of a function of `sig`: the address of a result in memory first, then
-/// each parameter, a `mut` one or one in memory as an address; and its MIR result.
+/// each parameter, a `mut` one or one in memory as an address; and its MIR result. The builder
+/// adds the latest effect before the call last (`cfg::Chain`).
 fn mir_params(sig: &Sig) -> (Vec<Ty>, Option<Ty>) {
     let mut params = Vec::new();
     if sig.result.in_memory() {
@@ -731,21 +745,55 @@ impl<'a> Lower<'a> {
         self.b.at(span.line, span.col);
     }
 
+    /// A new block taking `params`; the builder adds the latest effect where it begins.
     fn block(&mut self, params: &[Ty]) -> BlockId {
         let id = self.b.block(params);
         self.ended.push(false);
         id
     }
 
-    fn end(&mut self, term: Term) {
+    /// Marks the current block ended.
+    fn ended_here(&mut self) {
         self.ended[self.b.current().0 as usize] = true;
-        self.b.end(term);
+    }
+
+    /// Ends the current block in a jump or a branch, which the builder has pass on the latest
+    /// effect; a return and a trap take it (`Lower::end_return`, `Lower::end_trap`).
+    fn end(&mut self, term: Term) {
+        self.ended_here();
+        match term {
+            Term::Jump(t, args) => self.b.jump(t, args),
+            Term::Branch {
+                cond,
+                then,
+                otherwise,
+            } => self.b.branch(cond, then, otherwise),
+            Term::Return(v, _) => self.b.ret(v),
+            Term::Trap(site, _) => self.b.trap(site),
+        }
+    }
+
+    /// Ends the current block in a return of `v`, if any, after the latest effect.
+    fn end_return(&mut self, v: Option<NodeId>) {
+        self.ended_here();
+        self.b.ret(v);
+    }
+
+    /// Ends the current block in a trap at `site`, after the latest effect.
+    fn end_trap(&mut self, site: cfg::TrapId) {
+        self.ended_here();
+        self.b.trap(site);
+    }
+
+    /// Continues in block `b`.
+    fn switch(&mut self, b: BlockId) {
+        self.b.switch(b);
     }
 
     /// Continues in a new block nothing jumps to, after control has left.
     fn dead(&mut self) -> V {
         let dead = self.block(&[]);
-        self.b.switch(dead);
+        self.switch(dead);
         V::Never
     }
 
@@ -753,7 +801,7 @@ impl<'a> Lower<'a> {
     fn trap(&mut self, kind: &str, text: &str, span: Span) -> V {
         self.at(span);
         let site = self.b.trap_site(kind, &[text]);
-        self.end(Term::Trap(site));
+        self.end_trap(site);
         self.dead()
     }
 
@@ -765,6 +813,7 @@ impl<'a> Lower<'a> {
         self.b.int(t, n)
     }
 
+    /// An instruction; the builder threads the chain of effects through it (`cfg::Chain`).
     fn inst(&mut self, op: Op, ty: Ty, args: &[NodeId]) -> NodeId {
         self.b.inst(op, ty, args)
     }
@@ -782,6 +831,34 @@ impl<'a> Lower<'a> {
         self.inst(Op::Check { trap: site }, Ty::Unit, &args);
     }
 
+    /// The integer `guarded`, of type `t`, let through where `cond` holds, of which `fact` then
+    /// holds: elsewhere it traps at `span` with the pieces of `text` around `values`. A partial
+    /// operation takes what this yields (`cfg::Fact`).
+    fn guard(
+        &mut self,
+        cond: NodeId,
+        (kind, text): (&str, &[&str]),
+        values: &[NodeId],
+        (guarded, t): (NodeId, IntTy),
+        fact: Fact,
+        span: Span,
+    ) -> NodeId {
+        self.at(span);
+        let site = self.b.trap_site(kind, text);
+        let mut args = vec![cond];
+        args.extend_from_slice(values);
+        args.push(guarded);
+        let fact = self.b.fact_site(fact);
+        self.inst(Op::Guard { trap: site, fact }, Ty::Int(t), &args)
+    }
+
+    /// The integer `v`, of type `t`, of which `fact` holds where it stands: what Tier 1 proved,
+    /// or what a type gives, which costs nothing at run time.
+    fn assume(&mut self, v: NodeId, t: IntTy, fact: Fact) -> NodeId {
+        let fact = self.b.fact_site(fact);
+        self.inst(Op::Assume(fact), Ty::Int(t), &[v])
+    }
+
     fn finish(mut self) -> cfg::Function {
         let unreachable = self.b.trap_site(
             "unreachable",
@@ -790,7 +867,7 @@ impl<'a> Lower<'a> {
         for i in 0..self.ended.len() {
             if !self.ended[i] {
                 self.b.switch(BlockId(i as u32));
-                self.b.end(Term::Trap(unreachable));
+                self.b.trap(unreachable);
             }
         }
         self.b.finish()
@@ -890,11 +967,11 @@ impl<'a> Lower<'a> {
             });
         }
         let v = self.call(self.s.index, args, span, sret, false)?;
-        let term = match v {
-            V::Int(n, _) | V::Bool(n) => Term::Return(Some(n)),
-            V::Mem(_) | V::Unit | V::Never => Term::Return(None),
+        let value = match v {
+            V::Int(n, _) | V::Bool(n) => Some(n),
+            V::Mem(_) | V::Unit | V::Never => None,
         };
-        self.end(term);
+        self.end_return(value);
         let mut f = self.finish();
         f.name = format!("enter {}", f.name);
         Ok(f)
@@ -931,7 +1008,7 @@ impl<'a> Lower<'a> {
             self.clause(c, ("ensures", ObligationKind::Ensures), &text, span, key)?;
         }
         match v {
-            V::Int(n, _) | V::Bool(n) => self.end(Term::Return(Some(n))),
+            V::Int(n, _) | V::Bool(n) => self.end_return(Some(n)),
             V::Mem(a) => {
                 let to = self.sret.ok_or("an array result with nowhere to go")?;
                 self.at(span);
@@ -942,9 +1019,9 @@ impl<'a> Lower<'a> {
                     Ty::Unit,
                     &[to, a],
                 );
-                self.end(Term::Return(None));
+                self.end_return(None);
             }
-            V::Unit | V::Never => self.end(Term::Return(None)),
+            V::Unit | V::Never => self.end_return(None),
         }
         self.dead();
         Ok(())
@@ -1053,10 +1130,10 @@ impl<'a> Lower<'a> {
                     then: (pass, vec![]),
                     otherwise: (fail, vec![]),
                 });
-                self.b.switch(fail);
+                self.switch(fail);
                 // The `else` leaves, so its end is never reached.
                 self.body(*otherwise)?;
-                self.b.switch(pass);
+                self.switch(pass);
             }
             StmtKind::Return(value) => {
                 match value {
@@ -1108,7 +1185,7 @@ impl<'a> Lower<'a> {
         let round = self.block(&[]);
         let exit = self.block(&[]);
         self.jump(head, vec![]);
-        self.b.switch(head);
+        self.switch(head);
         for &i in invariants {
             let text = format!(
                 "`invariant {}` is false at the loop head",
@@ -1125,7 +1202,7 @@ impl<'a> Lower<'a> {
             then: (round, vec![]),
             otherwise: (exit, vec![]),
         });
-        self.b.switch(round);
+        self.switch(round);
         if let (Some((seen, slots)), Some(&first)) = (before, decreases.first()) {
             let now = self.measure(decreases, None)?;
             // A measure of any integer type fits u128 once it is not negative.
@@ -1160,7 +1237,7 @@ impl<'a> Lower<'a> {
         if !v.never() {
             self.jump(head, vec![]);
         }
-        self.b.switch(exit);
+        self.switch(exit);
         Ok(V::Unit)
     }
 
@@ -1411,7 +1488,13 @@ impl<'a> Lower<'a> {
     ) -> Result<NodeId, String> {
         let (i, t) = i.int_node("an index")?.ok_or("an index of no value")?;
         self.at(span);
-        if !self.proven(ObligationKind::Index, Key::at(key, Tag::None)) {
+        // The element's address takes the index a guard lets through, or one Tier 1 proved lies
+        // inside: 0 to the last element, or to the type's largest value, if smaller.
+        let last = Num::new(len == 0, u128::from(len).abs_diff(1));
+        let inside = Fact::Within(Num::ZERO, last.min(t.max()));
+        let i = if self.proven(ObligationKind::Index, Key::at(key, Tag::None)) {
+            self.assume(i, t, inside)
+        } else {
             let zero = self.int(t, Num::ZERO);
             let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[i, zero]);
             let n = Num::new(false, u128::from(len));
@@ -1423,8 +1506,15 @@ impl<'a> Lower<'a> {
             };
             let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
             let after = format!(" is outside an array of length {}", len);
-            self.check(ok, "index-out-of-bounds", &["index ", &after], &[i], span);
-        }
+            self.guard(
+                ok,
+                ("index-out-of-bounds", &["index ", &after]),
+                &[i],
+                (i, t),
+                inside,
+                span,
+            )
+        };
         let index = self.cast(i, t, USIZE);
         Ok(self.inst(
             Op::Elem {
@@ -1484,7 +1574,7 @@ impl<'a> Lower<'a> {
         let exit = self.block(&[]);
         let zero = self.int(USIZE, Num::ZERO);
         self.jump(head, vec![zero]);
-        self.b.switch(head);
+        self.switch(head);
         let i = self.b.params(head)[0];
         let n = self.int(USIZE, Num::new(false, u128::from(len)));
         let more = self.inst(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, n]);
@@ -1493,8 +1583,11 @@ impl<'a> Lower<'a> {
             then: (round, vec![]),
             otherwise: (exit, vec![]),
         });
-        self.b.switch(round);
-        each(self, i)?;
+        self.switch(round);
+        // The round runs where the index is below the length, the loop's condition.
+        let last = Num::new(len == 0, u128::from(len).abs_diff(1));
+        let inside = self.assume(i, USIZE, Fact::Within(Num::ZERO, last));
+        each(self, inside)?;
         let one = self.int(USIZE, Num::new(false, 1));
         let next = self.inst(
             Op::Arith {
@@ -1505,7 +1598,7 @@ impl<'a> Lower<'a> {
             &[i, one],
         );
         self.jump(head, vec![next]);
-        self.b.switch(exit);
+        self.switch(exit);
         Ok(())
     }
 
@@ -1578,10 +1671,16 @@ impl<'a> Lower<'a> {
         let into = mir(to);
         let proven =
             key.is_some_and(|k| self.proven(ObligationKind::Range, Key::at(k, Tag::Into(to.name))));
-        if from == into || proven {
+        let (lo, hi) = (into.min(), into.max());
+        if from == into || (into.holds(from.min()) && into.holds(from.max())) {
             return self.cast(n, from, into);
         }
-        let (lo, hi) = (into.min(), into.max());
+        // Narrowing: the cast takes the value a guard lets through, or one Tier 1 proved fits,
+        // which a constant's own value may already say.
+        if proven {
+            let n = self.assume(n, from, Fact::Within(lo, hi));
+            return self.cast(n, from, into);
+        }
         let mut parts = Vec::new();
         // A bound needs a check where the source type reaches past it.
         if !into.holds(from.min()) {
@@ -1592,22 +1691,42 @@ impl<'a> Lower<'a> {
             let c = self.int(from, hi);
             parts.push(self.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[n, c]));
         }
-        if let Some(&first) = parts.first() {
-            let ok = parts[1..].iter().fold(first, |a, b| {
-                self.inst(Op::Bits(BitOp::And), Ty::Bool, &[a, *b])
-            });
-            let after = format!(" does not fit in `{}`", to.name);
-            self.check(ok, "narrowing", &["", &after], &[n], span);
-        }
+        let first = parts
+            .first()
+            .copied()
+            .ok_or("a narrowing with no bound to check");
+        let n = match first {
+            Ok(first) => {
+                let ok = parts[1..].iter().fold(first, |a, b| {
+                    self.inst(Op::Bits(BitOp::And), Ty::Bool, &[a, *b])
+                });
+                let after = format!(" does not fit in `{}`", to.name);
+                self.guard(
+                    ok,
+                    ("narrowing", &["", &after]),
+                    &[n],
+                    (n, from),
+                    Fact::Within(lo, hi),
+                    span,
+                )
+            }
+            Err(_) => n,
+        };
         self.cast(n, from, into)
     }
 
+    /// `n` of type `from` in type `to`. A cast that narrows takes a value of which a guard or
+    /// an assumption holds that it fits (`cfg::Fact`): where none does yet, the value's static
+    /// range, which the checker's types give, fits `to`, and this assumes it.
     fn cast(&mut self, n: NodeId, from: IntTy, to: IntTy) -> NodeId {
         if from == to {
-            n
-        } else {
-            self.inst(Op::Cast, Ty::Int(to), &[n])
+            return n;
         }
+        let fits = Fact::Within(to.min(), to.max());
+        let held = (to.holds(from.min()) && to.holds(from.max()))
+            || self.b.fact(n).is_some_and(|f| f.implies(fits));
+        let n = if held { n } else { self.assume(n, from, fits) };
+        self.inst(Op::Cast, Ty::Int(to), &[n])
     }
 
     /// Checks a value of `shape` against the refinements of the declared type `d`, elementwise
@@ -1735,7 +1854,7 @@ impl<'a> Lower<'a> {
                 then: (check, vec![]),
                 otherwise: (after, vec![]),
             });
-            self.b.switch(check);
+            self.switch(check);
             for (fs, fd) in vs.fields.iter().zip(&vd.fields) {
                 if !self.refines(def.tree(), fd.decl) {
                     continue;
@@ -1745,7 +1864,7 @@ impl<'a> Lower<'a> {
                 self.refined(x, &fs.shape, (def.tree(), fd.decl), span, key)?;
             }
             self.jump(after, vec![]);
-            self.b.switch(after);
+            self.switch(after);
         }
         Ok(())
     }
@@ -1828,7 +1947,7 @@ impl<'a> Lower<'a> {
             then: (known, vec![]),
             otherwise: (cast, vec![]),
         });
-        self.b.switch(known);
+        self.switch(known);
         // With s < u: u > s, u >= s and u != s hold; with the operands swapped, s < u.
         let holds = match op {
             CmpOp::Ne => true,
@@ -1838,12 +1957,12 @@ impl<'a> Lower<'a> {
         };
         let r = self.bool(holds);
         self.jump(join, vec![r]);
-        self.b.switch(cast);
+        self.switch(cast);
         let s = self.cast(s, ss, su);
         let (x, y) = if swapped { (s, u) } else { (u, s) };
         let r = self.inst(Op::Cmp(op), Ty::Bool, &[x, y]);
         self.jump(join, vec![r]);
-        self.b.switch(join);
+        self.switch(join);
         Ok(self.b.params(join)[0])
     }
 
@@ -2639,11 +2758,11 @@ impl<'a> Lower<'a> {
             then,
             otherwise,
         });
-        self.b.switch(right);
+        self.switch(right);
         if let Some(r) = self.expr(rhs)?.bool_node("an operand of `and` or `or`")? {
             self.jump(join, vec![r]);
         }
-        self.b.switch(join);
+        self.switch(join);
         Ok(V::Bool(self.b.params(join)[0]))
     }
 
@@ -2678,17 +2797,17 @@ impl<'a> Lower<'a> {
             then: (yes, vec![]),
             otherwise: (no, vec![]),
         });
-        self.b.switch(yes);
+        self.switch(yes);
         let v = self.body(then)?;
         self.meet(v, join, join_ty);
-        self.b.switch(no);
+        self.switch(no);
         let v = match otherwise {
             Some(Else::Block(b)) => self.body(b)?,
             Some(Else::If(i)) => self.expr(i)?,
             None => V::Unit,
         };
         self.meet(v, join, join_ty);
-        self.b.switch(join);
+        self.switch(join);
         // An `if` of no type has branches that all leave, so nothing reaches its end.
         if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
             return Ok(V::Never);
@@ -2794,7 +2913,7 @@ impl<'a> Lower<'a> {
                         then: (run, vec![]),
                         otherwise: (next, vec![]),
                     });
-                    self.b.switch(run);
+                    self.switch(run);
                     Some(next)
                 }
                 None => None,
@@ -2823,11 +2942,11 @@ impl<'a> Lower<'a> {
             };
             self.meet(v, join, join_ty);
             match next {
-                Some(next) => self.b.switch(next),
+                Some(next) => self.switch(next),
                 None => break,
             }
         }
-        self.b.switch(join);
+        self.switch(join);
         // A `match` of no type has arms that all leave, so nothing reaches its end.
         if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
             return Ok(V::Never);
@@ -2874,7 +2993,7 @@ impl<'a> Lower<'a> {
             Ty::Int(t) => V::Int(p()?, t),
             Ty::Bool => V::Bool(p()?),
             Ty::Addr => V::Mem(p()?),
-            Ty::Unit => V::Unit,
+            Ty::Unit | Ty::Effect => V::Unit,
         })
     }
 
@@ -2977,11 +3096,16 @@ impl<'a> Lower<'a> {
             BinaryOp::Shl | BinaryOp::Shr => {
                 let t = self.worked_in(lt, le, "a shift")?;
                 let w = mir(t);
-                // The amount lies within the type's width, unless Tier 1 proves it does.
-                if !self.proven(
+                // The amount lies within the type's width: the shift takes the amount a guard
+                // lets through, or one Tier 1 proved does.
+                let last = Num::new(false, u128::from(t.bits) - 1);
+                let within = Fact::Within(Num::ZERO, last.min(tb.max()));
+                let b = if self.proven(
                     ObligationKind::Shift,
                     Key::at(tree.expr(re).span, Tag::None),
                 ) {
+                    self.assume(b, tb, within)
+                } else {
                     let zero = self.int(tb, Num::ZERO);
                     let ge = self.inst(Op::Cmp(CmpOp::Ge), Ty::Bool, &[b, zero]);
                     let width = Num::new(false, u128::from(t.bits));
@@ -2993,8 +3117,15 @@ impl<'a> Lower<'a> {
                     };
                     let ok = self.inst(Op::Bits(BitOp::And), Ty::Bool, &[ge, below]);
                     let after = format!(" is outside 0 ..= {}", t.bits - 1);
-                    self.check(ok, "shift-amount", &["shift amount ", &after], &[b], span);
-                }
+                    self.guard(
+                        ok,
+                        ("shift-amount", &["shift amount ", &after]),
+                        &[b],
+                        (b, tb),
+                        within,
+                        span,
+                    )
+                };
                 let k = self.cast(b, tb, USIZE);
                 if op == BinaryOp::Shl {
                     let after = format!(" does not fit in `{}`", t.name);
@@ -3092,11 +3223,24 @@ impl<'a> Lower<'a> {
                 };
                 let divides = matches!(arith, ArithOp::Div | ArithOp::Rem);
                 let divisor = Key::at(tree.expr(re).span, Tag::None);
-                if divides && !self.proven(ObligationKind::Divisor, divisor) {
-                    let zero = self.int(ty, Num::ZERO);
-                    let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
-                    self.check(ok, "division-by-zero", &["division by zero"], &[], span);
-                }
+                // A division takes the divisor a guard lets through, or one Tier 1 proved is not
+                // zero.
+                let y = match (divides, self.proven(ObligationKind::Divisor, divisor)) {
+                    (false, _) => y,
+                    (true, true) => self.assume(y, ty, Fact::NonZero),
+                    (true, false) => {
+                        let zero = self.int(ty, Num::ZERO);
+                        let ok = self.inst(Op::Cmp(CmpOp::Ne), Ty::Bool, &[y, zero]);
+                        self.guard(
+                            ok,
+                            ("division-by-zero", &["division by zero"]),
+                            &[],
+                            (y, ty),
+                            Fact::NonZero,
+                            span,
+                        )
+                    }
+                };
                 // An operation on a 128-bit operand is checked unless Tier 1 proves its result
                 // fits, and always when its operands have other types.
                 let trap = wide
@@ -3118,11 +3262,12 @@ impl<'a> Lower<'a> {
 
     // -- calls -----------------------------------------------------------------------------
 
-    /// Calls function `index` with `args`, as the reference interpreter does: each argument
-    /// narrowed into its parameter's type at its own span, the parameters' refinements checked,
-    /// then the callee's `requires` and its `decreases` measure, at `at`; for a `recursive`
-    /// call, the measure must be smaller than this function's. After the call, a `mut` place
-    /// is checked against its declared refinement.
+    /// Calls function `index` with `args`, as the reference interpreter does: the call counted
+    /// against the stack budget first, where its arguments are evaluated and none is narrowed yet
+    /// (`core-calculus.md`, item 25); then each argument narrowed into its parameter's type at its
+    /// own span, the parameters' refinements checked, then the callee's `requires` and its
+    /// `decreases` measure, at `at`; for a `recursive` call, the measure must be smaller than
+    /// this function's. After the call, a `mut` place is checked against its declared refinement.
     fn call(
         &mut self,
         index: usize,
@@ -3132,47 +3277,43 @@ impl<'a> Lower<'a> {
         recursive: bool,
     ) -> Result<V, String> {
         let sig = self.sig_of(index)?;
-        let mut callee = Scope::new(self.m, index)?;
-        // Each argument narrowed into its parameter's type, at its own span.
-        let mut values = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            let shape = &sig.params[i].1;
-            values.push(match arg {
-                Arg::Value(v, span, from) => {
-                    let v = self.narrow(*v, from, shape, *span, Some(*span))?;
-                    if v.never() {
-                        return Ok(V::Never);
-                    }
-                    callee.locals[i] = Some(match v {
-                        V::Mem(a) => Local::Place(a, shape.clone()),
-                        v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => Local::Value(v),
-                    });
-                    match v {
-                        V::Int(n, _) | V::Bool(n) | V::Mem(n) => n,
-                        V::Unit | V::Never => return Err("an argument without a value".into()),
-                    }
-                }
-                Arg::Place(a, shape, _, _) => {
-                    callee.locals[i] = Some(Local::Place(*a, shape.clone()));
-                    *a
-                }
+        // The call is counted here, on its arguments as evaluated, and its frame is in use while
+        // its checks run and until it returns; a call those checks make is counted and returned
+        // within (`Op::Enter`). An argument that gives no value leaves before the call.
+        let mut given = Vec::new();
+        for arg in &args {
+            given.push(match arg {
+                Arg::Value(V::Int(n, _) | V::Bool(n) | V::Mem(n), _, _)
+                | Arg::Place(n, _, _, _) => *n,
+                Arg::Value(V::Never, _, _) => return Ok(V::Never),
+                Arg::Value(V::Unit, _, _) => return Err("an argument without a value".into()),
             });
         }
-        // Then each parameter's refinement, in the callee's scope, since a bound may name
-        // another parameter.
-        let caller = self.measure.clone();
-        let saved = std::mem::replace(&mut self.s, callee);
-        let was = std::mem::replace(&mut self.in_callee, true);
-        let outcome = self.callee_checks(&args, at, recursive, caller);
-        self.in_callee = was;
-        self.s = saved;
-        outcome?;
-        let mut mir_args = Vec::new();
-        mir_args.extend(sret);
+        self.at(at);
+        let deep = self.b.trap_site(RAN_OUT[0], &[RAN_OUT[1]]);
+        // The count takes the call's arguments as the call does, the slot of a result kept in
+        // memory first, and the builder gives it the latest effect last (`cfg::Chain`).
+        let mut counted: Vec<NodeId> = sret.into_iter().collect();
+        counted.extend(&given);
+        self.b.inst(
+            Op::Enter {
+                callee: sig.func,
+                trap: Some(deep),
+            },
+            Ty::Unit,
+            &counted,
+        );
+        let values = match self.call_checks(index, &args, at, recursive)? {
+            Some(values) => values,
+            None => return Ok(V::Never),
+        };
+        let mut mir_args: Vec<NodeId> = sret.into_iter().collect();
         mir_args.extend(values);
         let (_, result_ty) = mir_params(sig);
         self.at(at);
-        let r = self.inst(Op::Call(sig.func), result_ty.unwrap_or(Ty::Unit), &mir_args);
+        let r = self
+            .b
+            .inst(Op::Call(sig.func), result_ty.unwrap_or(Ty::Unit), &mir_args);
         // A `mut` place takes back what the callee left, which enters its refinement. A struct's
         // fields hold theirs in any value the callee leaves, so they are not checked again.
         let entry = std::mem::replace(&mut self.entry, false);
@@ -3197,6 +3338,55 @@ impl<'a> Lower<'a> {
                 return Err("a result in memory without its slot".into())
             }
         })
+    }
+
+    /// The checks of a call of function `index` at `at` that its count stands before: each
+    /// argument narrowed into its parameter's type, at its own span, then the callee's checks in
+    /// its scope; the arguments the call takes, or none where an argument gives no value.
+    fn call_checks(
+        &mut self,
+        index: usize,
+        args: &[Arg<'a>],
+        at: Span,
+        recursive: bool,
+    ) -> Result<Option<Vec<NodeId>>, String> {
+        let sig = self.sig_of(index)?;
+        let mut callee = Scope::new(self.m, index)?;
+        // Each argument narrowed into its parameter's type, at its own span.
+        let mut values = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let shape = &sig.params[i].1;
+            values.push(match arg {
+                Arg::Value(v, span, from) => {
+                    let v = self.narrow(*v, from, shape, *span, Some(*span))?;
+                    if v.never() {
+                        return Ok(None);
+                    }
+                    callee.locals[i] = Some(match v {
+                        V::Mem(a) => Local::Place(a, shape.clone()),
+                        v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => Local::Value(v),
+                    });
+                    match v {
+                        V::Int(n, _) | V::Bool(n) | V::Mem(n) => n,
+                        V::Unit | V::Never => return Err("an argument without a value".into()),
+                    }
+                }
+                Arg::Place(a, shape, _, _) => {
+                    callee.locals[i] = Some(Local::Place(*a, shape.clone()));
+                    *a
+                }
+            });
+        }
+        // Then each parameter's refinement, in the callee's scope, since a bound may name
+        // another parameter.
+        let caller = self.measure.clone();
+        let saved = std::mem::replace(&mut self.s, callee);
+        let was = std::mem::replace(&mut self.in_callee, true);
+        let outcome = self.callee_checks(args, at, recursive, caller);
+        self.in_callee = was;
+        self.s = saved;
+        outcome?;
+        Ok(Some(values))
     }
 
     /// The checks a call makes in the callee's scope: the parameters' refinements, `requires`
@@ -3270,6 +3460,341 @@ mod tests {
         signed: false,
         bits: 16,
     };
+
+    /// Lowering and verifying take time that grows with the function, not with its square: a body
+    /// of 3,000 `if`s, each a branch and a join and a call, threading its effects through every
+    /// block, lowers and verifies at once. The verifier once kept a table of every block's
+    /// dominators, and the generated programs' coverage timed out on CI.
+    #[test]
+    fn test_a_long_function_lowers_and_verifies_in_linear_time() {
+        let mut source = String::from(
+            "module m\nfn g(x: u32) -> u32 = x\npub fn f(x: u32) -> u32 {\n  var a: u32 = 0\n",
+        );
+        for k in 0..3000 {
+            source.push_str(&format!("  if x > {} {{\n    a = g(a)\n  }}\n", k));
+        }
+        source.push_str("  a\n}\n");
+        let module = mente_sema::check_program_without_proofs(&source).unwrap();
+        let started = std::time::Instant::now();
+        let lowered = lower(&module).unwrap();
+        cfg::verify(&lowered.module).unwrap();
+        let blocks: usize = lowered
+            .module
+            .functions
+            .iter()
+            .map(|f| f.blocks.len())
+            .sum();
+        assert!(blocks > 6000, "{} blocks", blocks);
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+    }
+
+    /// The order of calls, of a call's count and of the stores that fill its arguments is held by
+    /// the chain of effects (`cfg::Chain`): over frames of about 280 KB, two of which do not fit the
+    /// budget together, `g(x) + f(x)`, `f(x) + g(x)` and `k([g(x)])` run, and each reordering that
+    /// would put two frames in use at once is refused: `f`'s count moved above `g`'s, `f`'s call
+    /// moved below `g`'s, and `k`'s count moved right after the slot of its argument, above the
+    /// call of `g` that fills it. So is a check moved above a call before it, which would report
+    /// its trap where the call runs out of stack: in `f(x) + x / d`, the division's check above
+    /// `f`'s count. So is every change `cfg_mutate::unpaired` makes.
+    #[test]
+    fn test_reordered_calls_counts_and_stores_are_refused() {
+        let source = "module m
+fn f(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn g(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn k(xs: [1]u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[xs[0]]
+}
+pub fn h(x: u32) -> u32 = g(x) + f(x)
+pub fn h2(x: u32) -> u32 = f(x) + g(x)
+pub fn m2(x: u32) -> u32 = k([g(x)])
+pub fn hd(x: u32, d: u32) -> u32 = f(x) + x / d
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let m = &lowered.module;
+        let index = |name: &str| m.functions.iter().position(|f| f.name == name).unwrap();
+        let (f, g, k) = (index("f"), index("g"), index("k"));
+        // Where in its one block function `at` makes the count, or the call, of function `of`.
+        let find = |at: usize, count: bool, of: usize| {
+            let func = &m.functions[at];
+            func.blocks
+                .iter()
+                .enumerate()
+                .find_map(|(bi, b)| {
+                    b.insts
+                        .iter()
+                        .position(|&v| {
+                            let callee = FuncId(of as u32);
+                            if count {
+                                func.op(v).counted() == Some(callee)
+                            } else {
+                                *func.op(v) == Op::Call(callee)
+                            }
+                        })
+                        .map(|i| (bi, i))
+                })
+                .unwrap()
+        };
+        let moved = |at: usize, (bi, from): (usize, usize), to: usize| {
+            let mut changed = m.clone();
+            let insts = &mut changed.functions[at].blocks[bi].insts;
+            let v = insts.remove(from);
+            insts.insert(to, v);
+            changed
+        };
+        let (h, h2, m2) = (index("h"), index("h2"), index("m2"));
+        let enter_f = find(h, true, f);
+        let (_, enter_g) = find(h, true, g);
+        let call_f = find(h2, false, f);
+        let (_, call_g) = find(h2, false, g);
+        let hd = index("hd");
+        let enter_f_hd = find(hd, true, f);
+        let call_f_hd = find(hd, false, f);
+        let check_hd = m.functions[hd].blocks[call_f_hd.0].insts[call_f_hd.1 + 1..]
+            .iter()
+            .position(|&v| matches!(m.functions[hd].op(v), Op::Check { .. } | Op::Guard { .. }))
+            .map(|i| (call_f_hd.0, call_f_hd.1 + 1 + i))
+            .unwrap();
+        // The check hoisted above `f`'s count with the instructions that give its condition, each
+        // of the parameters and constants alone: only the effect it follows holds it in place.
+        let hoisted = {
+            let mut changed = m.clone();
+            let func = &mut changed.functions[hd];
+            let (bi, at) = check_hd;
+            let check = func.blocks[bi].insts[at];
+            let mut needed = vec![check];
+            let mut k = 0;
+            while k < needed.len() {
+                let v = needed[k];
+                for &a in func.own_args(v) {
+                    if func.blocks[bi].insts[enter_f_hd.1..at].contains(&a) && !needed.contains(&a)
+                    {
+                        needed.push(a);
+                    }
+                }
+                k += 1;
+            }
+            let insts = &mut func.blocks[bi].insts;
+            let kept: Vec<NodeId> = insts
+                .iter()
+                .copied()
+                .filter(|v| needed.contains(v))
+                .collect();
+            insts.retain(|v| !needed.contains(v));
+            for (i, v) in kept.into_iter().enumerate() {
+                insts.insert(enter_f_hd.1 + i, v);
+            }
+            changed
+        };
+        let enter_k = find(m2, true, k);
+        let slot = m.functions[m2].args(m.functions[m2].blocks[enter_k.0].insts[enter_k.1])[0];
+        let after_slot = m.functions[m2].blocks[enter_k.0]
+            .insts
+            .iter()
+            .position(|&v| v == slot)
+            .unwrap()
+            + 1;
+        for (what, changed) in [
+            ("f's count above g's", moved(h, enter_f, enter_g)),
+            ("f's call below g's", moved(h2, call_f, call_g)),
+            (
+                "k's count above the store of its argument",
+                moved(m2, enter_k, after_slot),
+            ),
+            ("the division's check above f's count", hoisted),
+        ] {
+            let why = cfg::verify(&changed).unwrap_err();
+            assert!(
+                why.contains("is not defined before it on every path"),
+                "{}: {}",
+                what,
+                why
+            );
+        }
+        for (name, changed) in mente_mir::cfg_mutate::unpaired(m) {
+            assert!(cfg::verify(&changed).is_err(), "{} verifies", name);
+        }
+        let entry = |name: &str| {
+            lowered
+                .entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .func
+        };
+        for (name, args) in [
+            ("h", vec![3]),
+            ("h2", vec![3]),
+            ("m2", vec![3]),
+            ("hd", vec![3, 3]),
+        ] {
+            let values: Vec<cfg::Val> = args
+                .into_iter()
+                .map(|n| cfg::Val::Int(Num::from_i128(n)))
+                .collect();
+            let ran = cfg::run(
+                m,
+                entry(name),
+                &values,
+                &mut cfg::Memory::default(),
+                cfg::Limits::default(),
+            );
+            let expected = if name == "hd" { 1 } else { 0 };
+            assert_eq!(ran, Ok(cfg::Val::Int(Num::from_i128(expected))), "{}", name);
+        }
+    }
+
+    /// The chain of effects is held whole in lowered code (`cfg::Chain`). Every break
+    /// `cfg_mutate::unchained` plants, each kind at least once, is refused in programs that call,
+    /// store, divide and join; so are the two a review found verifying: `f`'s count in
+    /// `h = g(x) + f(x)` made to take the effect `g`'s count takes and hoisted above it, which ran
+    /// out of stack where `h` returns 0, and the exact division of `d(a, b) = a / b` raised above
+    /// the check of its divisor, which reported broken MIR where `d(1, 0)` traps.
+    #[test]
+    fn test_a_broken_chain_is_refused_in_lowered_code() {
+        let source = "module m
+fn f(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn g(x: u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[x]
+}
+fn k(xs: [1]u32) -> u32 {
+  val a: [70000]u32 = [0_u32; 70000]
+  a[xs[0]]
+}
+pub fn h(x: u32) -> u32 = g(x) + f(x)
+pub fn m2(x: u32) -> u32 = k([g(x)])
+pub fn d(a: u32, b: u32) -> u32 = a / b
+pub fn j(c: bool, x: u32) -> u32 = if c { x / 2 } else { x }
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = lower(&module).unwrap();
+        let m = &lowered.module;
+        let all = mente_mir::cfg_mutate::unchained(m);
+        for kind in [
+            "effect-dropped",
+            "effect-forked",
+            "effect-valued",
+            "partial-raised",
+            "passed-valued",
+            "ended-early",
+        ] {
+            assert!(
+                all.iter().any(|(n, _)| n.ends_with(kind)),
+                "no {} planted",
+                kind
+            );
+        }
+        for (name, changed) in &all {
+            assert!(cfg::verify(changed).is_err(), "{} verifies", name);
+        }
+        let index = |name: &str| m.functions.iter().position(|f| f.name == name).unwrap();
+        // Where in function `at` the first instruction `is` picks stands.
+        let find = |at: usize, is: &dyn Fn(&Op) -> bool| {
+            let func = &m.functions[at];
+            func.blocks
+                .iter()
+                .enumerate()
+                .find_map(|(bi, b)| {
+                    b.insts
+                        .iter()
+                        .position(|&v| is(func.op(v)))
+                        .map(|i| (bi, i))
+                })
+                .unwrap()
+        };
+        // `f`'s count takes the effect `g`'s count takes, and stands above it.
+        let (h, f, g) = (index("h"), index("f"), index("g"));
+        let (bi, at_g) = find(h, &|op| op.counted() == Some(FuncId(g as u32)));
+        let (_, at_f) = find(h, &|op| op.counted() == Some(FuncId(f as u32)));
+        let mut forked = m.clone();
+        let func = &mut forked.functions[h];
+        let (enter_g, enter_f) = (func.blocks[bi].insts[at_g], func.blocks[bi].insts[at_f]);
+        let before_g = func.effect(enter_g).unwrap();
+        let (start, len) = func.operands[enter_f.0 as usize];
+        func.pool[(start + len - 1) as usize] = before_g;
+        let insts = &mut func.blocks[bi].insts;
+        insts.retain(|v| *v != enter_f);
+        insts.insert(at_g, enter_f);
+        let why = cfg::verify(&forked).unwrap_err();
+        assert!(why.contains("where the latest effect is"), "{}", why);
+        // The exact division above the guard of its divisor: moved alone, and moved with its
+        // divisor pointed at the one the guard takes, as a pass that hoists it would leave it.
+        let d = index("d");
+        let (bi, at_div) = find(d, &|op| {
+            *op == Op::Arith {
+                op: cfg::ArithOp::Div,
+                trap: None,
+            }
+        });
+        let div = m.functions[d].blocks[bi].insts[at_div];
+        let guard = m.functions[d].own_args(div)[1];
+        let divisor = *m.functions[d].own_args(guard).last().unwrap();
+        let raise = |repoint: bool| {
+            let mut raised = m.clone();
+            let func = &mut raised.functions[d];
+            if repoint {
+                let (start, _) = func.operands[div.0 as usize];
+                func.pool[start as usize + 1] = divisor;
+            }
+            let insts = &mut func.blocks[bi].insts;
+            let at_guard = insts.iter().position(|v| *v == guard).unwrap();
+            insts.retain(|v| *v != div);
+            insts.insert(at_guard, div);
+            cfg::verify(&raised).unwrap_err()
+        };
+        let why = raise(false);
+        assert!(
+            why.contains("is not defined before it on every path"),
+            "{}",
+            why
+        );
+        let why = raise(true);
+        assert!(
+            why.contains("no guard or assumption holds nonzero"),
+            "{}",
+            why
+        );
+        // The originals run.
+        let entry = |name: &str| {
+            lowered
+                .entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .func
+        };
+        let run = |name: &str, args: &[i128]| {
+            let values: Vec<cfg::Val> = args
+                .iter()
+                .map(|n| cfg::Val::Int(Num::from_i128(*n)))
+                .collect();
+            cfg::run(
+                m,
+                entry(name),
+                &values,
+                &mut cfg::Memory::default(),
+                cfg::Limits::default(),
+            )
+        };
+        assert_eq!(run("h", &[3]), Ok(cfg::Val::Int(Num::from_i128(0))));
+        assert_eq!(run("d", &[7, 2]), Ok(cfg::Val::Int(Num::from_i128(3))));
+        assert!(
+            matches!(run("d", &[1, 0]), Err(cfg::Stop::Trap(t)) if t.contains("division-by-zero")),
+            "{:?}",
+            run("d", &[1, 0])
+        );
+    }
 
     #[test]
     fn test_shapes_have_the_size_and_type_of_their_values() {
@@ -3395,7 +3920,7 @@ pub fn g(c: bool) -> i32 {
         let returns = g
             .blocks
             .iter()
-            .filter(|b| matches!(b.term, Term::Return(_)))
+            .filter(|b| matches!(b.term, Term::Return(..)))
             .count();
         assert_eq!(returns, 2, "{}", g);
     }
@@ -3464,7 +3989,7 @@ pub fn no_copies_read() -> usize = [[todo(\"a\")]; 0].len
                 .unwrap();
             func.blocks
                 .iter()
-                .filter(|b| matches!(b.term, Term::Return(_)))
+                .filter(|b| matches!(b.term, Term::Return(..)))
                 .count()
         };
         for f in [
@@ -3529,7 +4054,7 @@ pub fn returns(c: bool) -> u8 {
                 .unwrap();
             func.blocks
                 .iter()
-                .filter(|b| matches!(b.term, Term::Return(_)))
+                .filter(|b| matches!(b.term, Term::Return(..)))
                 .count()
         };
         for f in [
@@ -3586,7 +4111,7 @@ fn id(x: u8) -> u8 = x
                 !func
                     .blocks
                     .iter()
-                    .any(|b| matches!(b.term, Term::Return(_))),
+                    .any(|b| matches!(b.term, Term::Return(..))),
                 "{}",
                 func
             );
@@ -3638,7 +4163,7 @@ pub fn set(mut s: S) {
                 .to_string()
         };
         // `make` returns through the address its caller passes, and builds in a slot of 32.
-        assert!(f("make").contains("fn make(addr, u32)"), "{}", text);
+        assert!(f("make").contains("fn make(addr, u32, effect)"), "{}", text);
         assert!(f("make").contains("slot 32"), "{}", text);
         // A field away from the start is reached at its offset.
         assert!(f("get").contains("elem 1"), "{}", f("get"));
@@ -3686,7 +4211,7 @@ pub fn get(e: E) -> u64 = match e {
         // `get` loads the tag, compares it with 1, and reads `wide` at its offset.
         assert!(f("get").contains(": u8 = load v0"), "{}", f("get"));
         assert!(f("get").contains("= int 8"), "{}", f("get"));
-        assert!(f("get").contains("bool = eq v1"), "{}", f("get"));
+        assert!(f("get").contains("bool = eq v2"), "{}", f("get"));
     }
 
     /// An array or a struct read from a binding is passed by its address, and copied first only
@@ -4025,7 +4550,9 @@ pub fn on_u128() -> u128 = -0_u128
             .ops
             .iter()
             .filter_map(|op| match op {
-                Op::Check { trap } => Some(f.traps[trap.0 as usize].kind.clone()),
+                Op::Check { trap } | Op::Guard { trap, .. } => {
+                    Some(f.traps[trap.0 as usize].kind.clone())
+                }
                 Op::Arith { trap: Some(_), .. } | Op::Neg { trap: Some(_) } | Op::Shl { .. } => {
                     Some("checked".to_string())
                 }
@@ -4039,12 +4566,14 @@ pub fn on_u128() -> u128 = -0_u128
                 | Op::Shr
                 | Op::Cmp(_)
                 | Op::Cast
+                | Op::Assume(_)
                 | Op::Slot { .. }
                 | Op::Elem { .. }
                 | Op::Load
                 | Op::Store
                 | Op::Copy { .. }
-                | Op::Call(_) => None,
+                | Op::Call(_)
+                | Op::Enter { .. } => None,
             })
             .collect();
         kinds.sort();

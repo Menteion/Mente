@@ -83,9 +83,10 @@ const MAX_ARGUMENT_VALUES: usize = 256;
 
 /// The limits of every interpreted call: tight, since only a crash matters. The reference
 /// interpreter copies an array value at each assignment, so it gets fewer steps and smaller
-/// arrays.
+/// arrays. The stack is no limit of these: item 25's budget ends every run alike, and the
+/// programs fuzz runs on the reference interpreter keep within the allowance of its host memory
+/// (`mir_run::HOST_ALLOWANCE`).
 const MAX_STEPS: u64 = 100_000;
-const MAX_DEPTH: usize = 64;
 const REFERENCE_STEPS: u64 = 20_000;
 const REFERENCE_ARRAY: u128 = 256;
 
@@ -1126,10 +1127,18 @@ impl Phases {
                 self.objects(run, lowered, &functions);
             }
         }
-        let panicked = run
-            .phase("interp", || interpret(&module, &functions))
-            .flatten();
-        run.report("interp", Kind::Panic, panicked);
+        // A program whose bound on the reference interpreter's host memory passes the harnesses'
+        // allowance does not run on it, since its run could take more than a test process may
+        // (`mir_run::HOST_ALLOWANCE`): it is set aside, and counted as reaching the phase
+        // `beyond-host-allowance`, which the run's summary reports with the others.
+        if crate::mir_run::within_host_allowance(mente_interp::host_bound_of(&module)) {
+            let panicked = run
+                .phase("interp", || interpret(&module, &functions))
+                .flatten();
+            run.report("interp", Kind::Panic, panicked);
+        } else {
+            run.phase("beyond-host-allowance", || ());
+        }
         if let Some(lowered) = &lowered {
             let broken = run.phase("mir", || run_mir(lowered, &functions)).flatten();
             run.report("mir", Kind::BrokenMir, broken);
@@ -1494,7 +1503,6 @@ fn arg(s: &Scalar) -> native::Arg {
 /// did.
 fn interpret(module: &CheckedModule, functions: &[Function]) -> Option<String> {
     let limits = mente_interp::Limits {
-        max_depth: MAX_DEPTH,
         max_steps: REFERENCE_STEPS,
         max_array: REFERENCE_ARRAY,
     };
@@ -1531,7 +1539,6 @@ fn interpret(module: &CheckedModule, functions: &[Function]) -> Option<String> {
 /// Runs every edge call on MIR, and says how the MIR broke, if it did.
 fn run_mir(lowered: &Lowered, functions: &[Function]) -> Option<String> {
     let limits = cfg::Limits {
-        max_depth: MAX_DEPTH,
         max_steps: MAX_STEPS,
     };
     for f in functions {
@@ -1540,7 +1547,8 @@ fn run_mir(lowered: &Lowered, functions: &[Function]) -> Option<String> {
         };
         'calls: for call in edge_calls(&f.params) {
             let args: Vec<native::Arg> = call.iter().map(arg).collect();
-            if native::refusal(entry, &args).is_some() || call.len() != entry.params.len() {
+            if native::refusal(lowered, entry, &args).is_some() || call.len() != entry.params.len()
+            {
                 continue;
             }
             let mut memory = Memory::default();
@@ -2885,6 +2893,46 @@ mod tests {
         let outcome = InProcess(phases(None)).exec(&broken).unwrap();
         assert_eq!(outcome.failures, Vec::new());
         assert!(outcome.reached("check") && !outcome.reached("lower"));
+    }
+
+    /// A program whose bound on the reference interpreter's host memory passes the harnesses'
+    /// allowance (`mir_run::HOST_ALLOWANCE`) is set aside from the reference interpreter, and
+    /// counted as reaching `beyond-host-allowance`; one a level less deep, within it, runs on it.
+    #[test]
+    fn test_a_program_beyond_the_host_allowance_is_set_aside_and_counted() {
+        // `if`s on a `bool`, which hold next to nothing: a frame narrow for its nesting.
+        let text = |levels: usize| {
+            format!(
+                "module m\npub fn f(c: bool) -> u64 = {}7{}\n",
+                "if c {\n".repeat(levels),
+                "\n} else {\n  0\n}".repeat(levels)
+            )
+        };
+        let bound = |levels: usize| {
+            mente_interp::host_bound_of(&mente_sema::check_program(&text(levels)).unwrap())
+        };
+        let over = (1..100)
+            .find(|&l| !crate::mir_run::within_host_allowance(bound(l)))
+            .unwrap();
+        let case = |levels: usize| Case {
+            text: text(levels),
+            edit: 0,
+            thorough: false,
+        };
+        let beyond = InProcess(Phases::default()).exec(&case(over)).unwrap();
+        assert!(
+            beyond.reached("beyond-host-allowance")
+                && !beyond.reached("interp")
+                && beyond.reached("mir"),
+            "{:?}",
+            beyond.reached
+        );
+        let within = InProcess(Phases::default()).exec(&case(over - 1)).unwrap();
+        assert!(
+            within.reached("interp") && !within.reached("beyond-host-allowance"),
+            "{:?}",
+            within.reached
+        );
     }
 
     /// Failures that meet one bug share a key: a panic by its place, a hang by its phase, and

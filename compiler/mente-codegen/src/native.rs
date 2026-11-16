@@ -65,7 +65,7 @@ fn cl_type(t: cfg::Ty, ptr: Type) -> Type {
         cfg::Ty::Int(i) => int_type(i),
         cfg::Ty::Bool => types::I8,
         cfg::Ty::Addr => ptr,
-        cfg::Ty::Unit => types::I8,
+        cfg::Ty::Unit | cfg::Ty::Effect => types::I8,
     }
 }
 
@@ -98,14 +98,54 @@ struct Runtime {
     strings: HashMap<String, DataId>,
 }
 
-/// The trap a call of `entry` from outside the program raises on `args` before anything else,
-/// if an argument does not fit its parameter's type: the reference interpreter narrows every
-/// argument into its parameter's type first, in order and element by element, at the function's
-/// name, and reports the first value that does not fit. The entry takes each argument in its
-/// parameter's own type, which cannot hold such a value, so whoever calls the entry narrows
-/// every argument this way first; the entry then checks the refinements, as the interpreter
-/// does once every argument is narrowed.
-pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
+/// The operands of instruction `v` of `f` that native code keeps: of a call, its arguments but
+/// the effects passed to it, which the callee's signature leaves out; of a count, which native
+/// code does not run yet, none; of any other, those besides the effect it follows.
+fn kept_operands(m: &cfg::Module, f: &cfg::Function, v: NodeId) -> Vec<NodeId> {
+    match f.op(v) {
+        Op::Call(c) => match m.functions.get(c.0 as usize) {
+            Some(callee) => f
+                .own_args(v)
+                .iter()
+                .zip(&callee.params)
+                .filter(|(_, p)| **p != cfg::Ty::Effect)
+                .map(|(a, _)| *a)
+                .collect(),
+            None => f.own_args(v).to_vec(),
+        },
+        Op::Enter { .. } => Vec::new(),
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
+        | Op::Slot { .. }
+        | Op::Elem { .. }
+        | Op::Load
+        | Op::Store
+        | Op::Copy { .. } => f.own_args(v).to_vec(),
+    }
+}
+
+/// The trap a call of `entry` from outside the program raises on `args` before the entry runs,
+/// if any. The run's first call is counted first, against a stack with nothing in use, before any
+/// argument is narrowed: a function whose frame is larger than the budget traps as running out of
+/// stack, at its name (`core-calculus.md`, item 25). Then the reference interpreter narrows every
+/// argument into its parameter's type, in order and element by element, at the function's name,
+/// and reports the first value that does not fit. The entry takes each argument in its
+/// parameter's own type, which cannot hold such a value, so whoever calls the entry counts the
+/// call and narrows every argument this way first; the entry then checks the refinements, as the
+/// interpreter does once every argument is narrowed.
+pub fn refusal(lowered: &Lowered, entry: &Entry, args: &[Arg]) -> Option<String> {
     fn first(shape: &Shape, arg: &Arg) -> Option<(Num, &'static str)> {
         match (shape, arg) {
             (Shape::Int(t), Arg::Int(n)) => {
@@ -126,6 +166,15 @@ pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
                 .find_map(|(f, a)| first(&f.shape, a)),
             _ => None,
         }
+    }
+    if lowered.module.runs_out(0, entry.callee) {
+        return Some(format!(
+            "trap[{}] at {}:{}: {}",
+            crate::lower::RAN_OUT[0],
+            entry.at.line,
+            entry.at.col,
+            crate::lower::RAN_OUT[1]
+        ));
     }
     entry
         .params
@@ -222,7 +271,16 @@ pub fn program(
                 });
         let mut ctx = writer.module().make_context();
         ctx.func.signature = signature(f, conv, ptr);
-        Translate::function(writer, &mut rt, &ids, f, &mut ctx, &mut fctx, ptr, prefix)?;
+        Translate::function(
+            writer,
+            &mut rt,
+            (&ids, &lowered.module),
+            f,
+            &mut ctx,
+            &mut fctx,
+            ptr,
+            prefix,
+        )?;
         writer.define_function_as(ids[i], &mut ctx, decl, &f.name)?;
     }
     define_main(
@@ -253,7 +311,8 @@ fn signature(
     if wide {
         sig.params.push(AbiParam::new(ptr));
     }
-    for p in &f.params {
+    // Native code keeps no value for the effects before a call.
+    for p in f.params.iter().filter(|p| **p != cfg::Ty::Effect) {
         sig.params.extend(abi(cl_type(*p, ptr)));
     }
     if let Some(r) = f.result.filter(|_| !wide) {
@@ -643,7 +702,7 @@ impl Translate {
     fn function(
         writer: &mut ObjectWriter,
         rt: &mut Runtime,
-        ids: &[ClFunc],
+        (ids, m): (&[ClFunc], &cfg::Module),
         f: &cfg::Function,
         ctx: &mut Context,
         fctx: &mut FunctionBuilderContext,
@@ -660,15 +719,20 @@ impl Translate {
             if bi == 0 {
                 continue;
             }
-            for &p in &block.params {
+            for &p in block.params.iter().filter(|p| f.ty(**p) != cfg::Ty::Effect) {
                 vals[p.0 as usize] = Some(b.append_block_param(blocks[bi], ty(p)));
             }
         }
         b.switch_to_block(blocks[0]);
         let ret_ptr = returns_wide(f, ptr).then(|| b.append_block_param(blocks[0], ptr));
         // Every parameter first, then the halves of each 128-bit one joined.
-        let raw: Vec<Vec<Value>> = f.blocks[0]
+        let kept: Vec<NodeId> = f.blocks[0]
             .params
+            .iter()
+            .copied()
+            .filter(|p| f.ty(*p) != cfg::Ty::Effect)
+            .collect();
+        let raw: Vec<Vec<Value>> = kept
             .iter()
             .map(|&p| match ty(p) {
                 t if t == types::I128 => vec![
@@ -685,7 +749,7 @@ impl Translate {
                 _ => halves[0],
             })
             .collect();
-        for (p, v) in f.blocks[0].params.iter().zip(entry_params) {
+        for (p, v) in kept.iter().zip(entry_params) {
             vals[p.0 as usize] = Some(v);
         }
         for (bi, block) in f.blocks.iter().enumerate() {
@@ -702,25 +766,35 @@ impl Translate {
                     b.set_srcloc(sl);
                 }
                 let mut e = Emit { b: &mut b, ptr };
-                let value = Self::inst(writer, rt, ids, f, &mut e, &vals, v, prefix)?;
+                let value = Self::inst(writer, rt, (ids, m), f, &mut e, &vals, v, prefix)?;
                 vals[v.0 as usize] = value;
             }
             let get = |v: &NodeId| {
                 vals[v.0 as usize].ok_or_else(|| err("a value used before it is defined"))
             };
-            let args = |vs: &[NodeId]| -> Result<Vec<ir::BlockArg>, CodegenError> {
-                vs.iter().map(|v| get(v).map(Into::into)).collect()
-            };
+            // A jump passes no value for the effects before its target.
+            let args =
+                |t: cfg::BlockId, vs: &[NodeId]| -> Result<Vec<ir::BlockArg>, CodegenError> {
+                    vs.iter()
+                        .zip(&f.blocks[t.0 as usize].params)
+                        .filter(|(_, p)| f.ty(**p) != cfg::Ty::Effect)
+                        .map(|(v, _)| get(v).map(Into::into))
+                        .collect()
+                };
             match &block.term {
                 Term::Jump(t, a) => {
-                    b.ins().jump(blocks[t.0 as usize], &args(a)?);
+                    b.ins().jump(blocks[t.0 as usize], &args(*t, a)?);
                 }
                 Term::Branch {
                     cond,
                     then,
                     otherwise,
                 } => {
-                    let (c, yes, no) = (get(cond)?, args(&then.1)?, args(&otherwise.1)?);
+                    let (c, yes, no) = (
+                        get(cond)?,
+                        args(then.0, &then.1)?,
+                        args(otherwise.0, &otherwise.1)?,
+                    );
                     b.ins().brif(
                         c,
                         blocks[then.0 .0 as usize],
@@ -729,7 +803,7 @@ impl Translate {
                         &no,
                     );
                 }
-                Term::Return(r) => {
+                Term::Return(r, _) => {
                     let mut out = Vec::new();
                     match (r, ret_ptr) {
                         (Some(r), Some(at)) => {
@@ -742,7 +816,7 @@ impl Translate {
                     }
                     b.ins().return_(&out);
                 }
-                Term::Trap(site) => {
+                Term::Trap(site, _) => {
                     let mut e = Emit { b: &mut b, ptr };
                     trap_report(writer, rt, &mut e, f, *site, &[], prefix)?;
                 }
@@ -757,7 +831,7 @@ impl Translate {
     fn inst(
         writer: &mut ObjectWriter,
         rt: &mut Runtime,
-        ids: &[ClFunc],
+        (ids, m): (&[ClFunc], &cfg::Module),
         f: &cfg::Function,
         e: &mut Emit,
         vals: &[Option<Value>],
@@ -765,17 +839,19 @@ impl Translate {
         prefix: &str,
     ) -> Result<Option<Value>, CodegenError> {
         let ptr = e.ptr;
-        let args: Vec<Value> = f
-            .args(v)
+        // The operands native code keeps: none of the effect an instruction follows, of a count,
+        // which native code does not run yet, nor of the effects passed to a call.
+        let operands = kept_operands(m, f, v);
+        let args: Vec<Value> = operands
             .iter()
             .map(|a| vals[a.0 as usize].ok_or_else(|| err("a value used before it is defined")))
             .collect::<Result<_, _>>()?;
-        let arg_tys: Vec<cfg::Ty> = f.args(v).iter().map(|a| f.ty(*a)).collect();
+        let arg_tys: Vec<cfg::Ty> = operands.iter().map(|a| f.ty(*a)).collect();
         let rty = f.ty(v);
         let t = cl_type(rty, ptr);
         let int = |x: cfg::Ty| match x {
             cfg::Ty::Int(i) => Ok(i),
-            cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => {
+            cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
                 Err(err("an integer operation on a value that is not one"))
             }
         };
@@ -935,7 +1011,7 @@ impl Translate {
                     .zip(&arg_tys[1..])
                     .filter_map(|(v, t)| match t {
                         cfg::Ty::Int(i) => Some((*v, *i)),
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => None,
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
                     })
                     .collect();
                 let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
@@ -943,6 +1019,26 @@ impl Translate {
                 e.b.switch_to_block(ok);
                 return Ok(None);
             }
+            Op::Guard { trap: site, .. } => {
+                let ok = e.b.create_block();
+                let fail = e.b.create_block();
+                e.b.ins().brif(args[0], ok, &[], fail, &[]);
+                e.b.switch_to_block(fail);
+                let last = args.len().saturating_sub(1);
+                let shown: Vec<(Value, IntTy)> = args[1..last]
+                    .iter()
+                    .zip(&arg_tys[1..last])
+                    .filter_map(|(v, t)| match t {
+                        cfg::Ty::Int(i) => Some((*v, *i)),
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
+                    })
+                    .collect();
+                let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
+                trap_report(writer, rt, e, f, *site, &values, prefix)?;
+                e.b.switch_to_block(ok);
+                args[last]
+            }
+            Op::Assume(_) => args[0],
             Op::Slot { bytes } => {
                 let slot = e.b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -971,6 +1067,9 @@ impl Translate {
                 e.b.call_memcpy(config, args[0], args[1], n);
                 return Ok(None);
             }
+            // Native code counts no frame yet: its stack ends at the system's guard page
+            // (`core-calculus.md`, item 25, what the paths do not do yet).
+            Op::Enter { .. } => return Ok(None),
             Op::Call(c) => {
                 let callee = &ids[c.0 as usize];
                 let fref = writer.module_mut().declare_func_in_func(*callee, e.b.func);
@@ -1109,6 +1208,7 @@ fn constant(f: &cfg::Function, v: NodeId) -> Option<Num> {
     match f.op(v) {
         Op::Int(bits) => Some(Num::from_bits(*bits, t)),
         Op::Cast => constant(f, *f.args(v).first()?).filter(|n| t.holds(*n)),
+        Op::Guard { .. } | Op::Assume(_) => constant(f, *f.own_args(v).last()?),
         Op::Param
         | Op::Bool(_)
         | Op::Arith { .. }
@@ -1124,7 +1224,8 @@ fn constant(f: &cfg::Function, v: NodeId) -> Option<Num> {
         | Op::Load
         | Op::Store
         | Op::Copy { .. }
-        | Op::Call(_) => None,
+        | Op::Call(_)
+        | Op::Enter { .. } => None,
     }
 }
 
@@ -1351,7 +1452,7 @@ fn make_call(
     let mir = &lowered.module.functions[entry.func.0 as usize];
     {
         let mut e = Emit { b, ptr };
-        if let Some(trap) = refusal(entry, &call.args) {
+        if let Some(trap) = refusal(lowered, entry, &call.args) {
             emit_text(writer, rt, &mut e, 2, &format!("{}{}\n", prefix, trap))?;
             emit_exit(writer, rt, &mut e, 1);
             return Ok(());
@@ -1378,7 +1479,7 @@ fn make_call(
                 (false, Shape::Int(_), Arg::Int(n)) => {
                     let i = match mty {
                         cfg::Ty::Int(i) => *i,
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit => {
+                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
                             return Err(err("an integer argument of another type"))
                         }
                     };
@@ -1965,22 +2066,70 @@ pub fn f(a: i128, xs: [2]u8, mut b: u128) -> i128 {
         let int = |n: i128| Arg::Int(Num::from_i128(n));
         let args = |a: Arg, xs: [i128; 2], b: Arg| vec![a, Arg::Array(xs.map(int).to_vec()), b];
         let below_i128 = Arg::Int(Num::new(true, (1u128 << 127) + 1));
-        assert_eq!(refusal(entry, &args(int(1), [2, 3], int(4))), None);
         assert_eq!(
-            refusal(entry, &args(below_i128.clone(), [2, 3], int(4))).as_deref(),
+            refusal(&lowered, entry, &args(int(1), [2, 3], int(4))),
+            None
+        );
+        assert_eq!(
+            refusal(&lowered, entry, &args(below_i128.clone(), [2, 3], int(4))).as_deref(),
             Some("trap[narrowing] at 2:8: -170141183460469231731687303715884105729 does not fit in `i128`")
         );
         // The first value that does not fit, though a later one does not either.
         assert_eq!(
-            refusal(entry, &args(int(1), [300, -1], int(-1))).as_deref(),
+            refusal(&lowered, entry, &args(int(1), [300, -1], int(-1))).as_deref(),
             Some("trap[narrowing] at 2:8: 300 does not fit in `u8`")
         );
         assert_eq!(
-            refusal(entry, &args(int(1), [2, 3], int(-1))).as_deref(),
+            refusal(&lowered, entry, &args(int(1), [2, 3], int(-1))).as_deref(),
             Some("trap[narrowing] at 2:8: -1 does not fit in `u128`")
         );
         // An argument of another shape is not a narrowing; the caller refuses it otherwise.
-        assert_eq!(refusal(entry, &args(Arg::Bool(true), [2, 3], int(4))), None);
+        assert_eq!(
+            refusal(&lowered, entry, &args(Arg::Bool(true), [2, 3], int(4))),
+            None
+        );
+    }
+
+    /// A call from outside is the run's first call, counted against an empty stack before any
+    /// argument is narrowed (`core-calculus.md`, item 25): a frame of exactly the budget runs, one
+    /// larger traps as running out of stack at the function's name, and so it does on an argument
+    /// its parameter's type cannot hold.
+    #[test]
+    fn test_a_call_from_outside_is_counted_before_its_arguments_are_narrowed() {
+        // `whole`'s frame is the budget: the call's 64, `k`'s 4, the array's 524,252 bytes and the
+        // 524,256 its initializer holds; `over`'s is 8 bytes more, and `huge`'s far more.
+        let source = "module m
+pub fn whole(k: u32) -> u32 {
+  val big: [131063]u32 = [0_u32; 131063]
+  big[k]
+}
+pub fn over(k: u32) -> u32 {
+  val big: [131064]u32 = [0_u32; 131064]
+  big[k]
+}
+pub fn huge(x: u8) -> u8 {
+  val a: [300000]u32 = [0_u32; 300000]
+  _ = a
+  x
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let entry = |name: &str| lowered.entries.iter().find(|e| e.name == name).unwrap();
+        let int = |n: i128| vec![Arg::Int(Num::from_i128(n))];
+        assert_eq!(refusal(&lowered, entry("whole"), &int(3)), None);
+        assert_eq!(
+            refusal(&lowered, entry("over"), &int(3)).as_deref(),
+            Some("trap[stack-overflow] at 6:8: the call stack ran out")
+        );
+        for x in [3, 300] {
+            assert_eq!(
+                refusal(&lowered, entry("huge"), &int(x)).as_deref(),
+                Some("trap[stack-overflow] at 10:8: the call stack ran out"),
+                "huge({})",
+                x
+            );
+        }
     }
 
     /// The symbols of an object that are not the program's own functions: what it imports, and
