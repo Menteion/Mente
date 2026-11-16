@@ -53,9 +53,12 @@ problems() {
     *) echo "sudo's defaults for $(id -un) do not end with env_reset, !env_keep, !setenv and secure_path=$SECURE_PATH: ${defaults:-none}" ;;
   esac
   # Root's alone, every directory above the root half, its configuration and sudo's rules, the
-  # directories of the path sudo runs commands from, and those files themselves.
+  # directories of the path sudo runs commands from, and those files themselves. The rule's own
+  # file lies in a directory the runner's image lets no one else enter (0750 on GitHub's hosted
+  # runners), so it is read through sudo -l above; sudo itself refuses a rules file that is not
+  # root's alone.
   local p d
-  for p in "$ENTRY" "$CONF" /etc/sudoers "$RULE" ${SECURE_PATH//:/ }; do
+  for p in "$ENTRY" "$CONF" /etc/sudoers "$(dirname "$RULE")" ${SECURE_PATH//:/ }; do
     d="$p"
     while :; do
       local mode

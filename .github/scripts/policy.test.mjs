@@ -1133,7 +1133,7 @@ const PINNED_FILES = new Map([
   // start-broker.sh's shape).
   ["benchmark/harness/start-broker.sh", "9cea5b604d1eea6b5c060f3a8b4b95bd8bcfeaf62dee2a6bfe9fddfab7ef4f59"],
   ["benchmark/harness/stop-broker.sh", "1f4ec139da512a920c4eeafad893e451c0629c93ea19bd740ba4b6fc5b092ffa"],
-  ["benchmark/harness/lock-sudo.sh", "7cd18d0f4c63e1c40482bfc53187c2e726a9c9575d957605d2699fc805c3f131"],
+  ["benchmark/harness/lock-sudo.sh", "99e2d4274549214e4e8668279e7737c26085b878944c39c460feeaf39c9d860d"],
   ["benchmark/harness/sandbox-root.sh", "e407ec6236117863fb72fdd2b709ec2a7bf6a08802095eae2d00f1047ad4ba3a"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
