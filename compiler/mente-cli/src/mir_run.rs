@@ -20,16 +20,17 @@ mod generate;
 mod host_shapes;
 
 /// What each test process may reserve on CI: `ulimit -v` on Linux, a job object on Windows
-/// (`.github/scripts/limits.sh`, which a test reads).
-pub const CI_PROCESS_BYTES: u128 = 8 << 30;
+/// (`.github/scripts/limits.sh`, which a test reads): 8 GiB.
+pub const CI_PROCESS_BYTES: u128 = 8_589_934_592;
 
 /// The interpreters CI runs at once in one test process: one on each of a runner's four cores, as
 /// a test of the group `all-cores` does (`.config/nextest.toml`), and no more than the four
 /// processes of single-threaded tests nextest runs beside each other hold together.
 pub const CI_THREADS: u128 = 4;
 
-/// What no bound counts on of what a test process may reserve on CI: a quarter of it.
-pub const CI_HEADROOM: u128 = CI_PROCESS_BYTES / 4;
+/// What no bound counts on of what a test process may reserve on CI: a quarter of it, 2 GiB,
+/// which a test holds it to.
+pub const CI_HEADROOM: u128 = 2_147_483_648;
 
 /// The address space glibc keeps for malloc arenas in a process on CI: 64 MiB for each, and up to
 /// eight for each core, 2 GiB on four cores, which Linux's `ulimit -v` counts; the reference

@@ -758,8 +758,8 @@ mod tests {
     #[test]
     fn test_the_host_allowance_fits_ci_memory() {
         use super::super::{
-            deepest_at, within_host_allowance, CI_ARENAS, CI_PROCESS_BYTES, CI_PROGRAM, CI_THREADS,
-            HOST_ALLOWANCE,
+            deepest_at, within_host_allowance, CI_ARENAS, CI_HEADROOM, CI_PROCESS_BYTES,
+            CI_PROGRAM, CI_THREADS, HOST_ALLOWANCE,
         };
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/limits.sh");
         let limits = fs::read_to_string(script).unwrap();
@@ -770,6 +770,7 @@ mod tests {
             assert!(limits.contains(&set), "limits.sh no longer sets {:?}", set);
         }
         // A quarter of what a process may reserve is headroom, which no bound counts on.
+        assert_eq!(CI_HEADROOM, CI_PROCESS_BYTES / 4);
         let usable = CI_PROCESS_BYTES / 4 * 3;
         let fuzz_stacks = 2 * crate::STACK as u128;
         let compared = CI_THREADS * HOST_ALLOWANCE + CI_ARENAS + CI_PROGRAM;

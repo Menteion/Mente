@@ -31,24 +31,24 @@ use std::hint::black_box;
 /// the parser allows, rounded up. On 2026-11-16, on x86-64 Windows, that was 20,656 bytes in a
 /// build without optimisation, which keeps a slot for every local of a function, and 4,184 in one
 /// with it, both the step that enters a call. Every build uses the one figure, so that a step
-/// measured in one build holds in the other.
-pub(crate) const STEP: usize = 48 << 10;
+/// measured in one build holds in the other: 48 KiB.
+pub(crate) const STEP: usize = 49_152;
 
 /// The guard page the platform keeps below a thread's stack, which no frame may reach: at most
 /// 64 KiB, the largest page AArch64 Linux runs with. Kept on every platform, so that the margin is
-/// one figure everywhere.
-const GUARD_PAGE: usize = 64 << 10;
+/// one figure everywhere: 64 KiB.
+const GUARD_PAGE: usize = 65_536;
 
 /// What Windows keeps of every Rust thread's stack for its handler of an overflow: Rust's
 /// standard library asks for 20 KiB (`SetThreadStackGuarantee`), which no frame may reach. Kept
-/// on every platform, as the guard page is.
-const STACK_GUARANTEE: usize = 20 << 10;
+/// on every platform, as the guard page is: 20 KiB.
+const STACK_GUARANTEE: usize = 20_480;
 
 /// What starting a thread takes of the stack of the thread that starts it, beyond the guard page
 /// and the guarantee: the platform's own code. On 2026-11-16, on x86-64 Windows, a thread started
 /// with 28 to 32 KiB left in a build with optimisation, and with 36 to 40 KiB left in one without,
 /// the guarantee included; with headroom, 64 KiB.
-const THREAD_START: usize = 64 << 10;
+const THREAD_START: usize = 65_536;
 
 /// What a segment keeps free: where less is left, the next step starts a segment. The step begun
 /// where the check found the margin may take [`STEP`], and a step more is headroom; the segment
