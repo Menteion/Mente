@@ -1,11 +1,20 @@
 ---
 id: equivalent-mutants-one-per-file
-status: active
+status: archived
 type: chore
 awaits: [docs/design-review.md#records-one-per-file]
 affectedFiles: [compiler/mente-cli/tests/mutants/**, compiler/mente-cli/src/mir_mutants.rs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, spec/mir-and-codegen.md, briefs/equivalent-mutants-one-per-file.md, briefs/archive/equivalent-mutants-one-per-file.md]
 protectedFiles: [.github/**, CLAUDE.md]
+integrity: sha256-2ed033fe596ba869a6432e50a2e176f4822e085fa5fbc1351a908a11300d340a
 ---
+
+<!-- spec-brief:banner -->
+> **Archived 2026-11-16.**
+> Each equivalent mutant of the MIR gate is a file of its own, named by the key one function derives from its name; the gate refuses a mutant that gives no key of its own.
+> Merged in pull request [#178](https://github.com/Menteion/Mente/pull/178).
+> Recorded at commit `5b2c1a5`: 92 files changed, +772 −205.
+> The body below describes the tree before execution and is not maintained.
+<!-- /spec-brief:banner -->
 
 # Record each equivalent mutant of the MIR gate in a file of its own
 
