@@ -5,9 +5,32 @@
 // and the programs that led to a repair; core tasks apart from the others, and adversarial tasks
 // as caught at build, caught at run time or missed.
 
+import { anomalyOf, anomalyWords } from "./broker.ts";
 import type { Verdict } from "./build.ts";
 import type { Lang } from "./languages.ts";
 import { own, setOwn } from "../own.mjs";
+
+/**
+ * What a measured run's record and log say of the error that stopped it: for a public task, the
+ * run's name and the error; for a held-out task, only the run's anomaly (Anomaly in broker.ts), the
+ * API's status, or the error's kind, never the task.
+ */
+export function failureOf(e: unknown, set: "public" | "held-out", name: string): string {
+  const error = e instanceof Error ? e : new Error(String(e));
+  if (set === "public") return `${name}: ${error.message}`;
+  const anomaly = anomalyOf(e !== null && typeof e === "object" ? (e as { anomaly?: unknown }).anomaly : undefined);
+  if (anomaly !== null) return `a held-out run failed: ${anomalyWords(anomaly)}`;
+  return `a held-out run failed: ${own(/the API answered \d+/.exec(error.message), 0) ?? error.name}`;
+}
+
+/**
+ * The failure a measured run records once one of its concurrent runs fails: the first, which the
+ * errors of the runs that race it, such as the broker's refusals after the run's anomaly, never
+ * replace (the re-check of 2ead2d4: the last error won, and a held-out run read "Error").
+ */
+export function firstFailure(failure: string, e: unknown, set: "public" | "held-out", name: string): string {
+  return failure !== "" ? failure : failureOf(e, set, name);
+}
 
 export interface ProgramClasses {
   /** The failure classes of one program, distinct; empty when it passed what it was run on. */

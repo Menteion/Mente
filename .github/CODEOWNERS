@@ -61,3 +61,8 @@
 # How git reads the tree: a file it marks -diff or binary shows no line in a diff, and the
 # Mutants job would test none of its mutants.
 /.gitattributes @Dancraft3746
+
+# The quick checks before a push and their map, which the workflow policy reads: every session runs
+# them, and a module the policy loaded could turn its assertions off (the quick check of d471f7e).
+/tools/quick.mjs @Dancraft3746
+/tools/quick-checks.json @Dancraft3746

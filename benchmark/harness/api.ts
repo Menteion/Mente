@@ -2,15 +2,17 @@
 // benchmark run (benchmark/README.md, "The harness").
 //
 // The request names one model and no fallback, so every program comes from the model it names
-// and a refusal is recorded as one. Thinking is adaptive at each model's default effort, the API
-// version accepts no sampling parameters, and the conversation is sent as it was, the model's
+// and a refusal is recorded as one; the broker hands back only an answer that names, as its
+// writer, a model the requested one may come back as, and each attempt records that name.
+// Thinking is adaptive at each model's default effort, the API version accepts no sampling
+// parameters, and the conversation is sent as it was, the model's
 // earlier replies unchanged. The system prompt carries a cache breakpoint and the request asks for
 // automatic caching of the conversation, 5-minute entries both: the document is the same in every
 // run of a language, so each later call reads it from the cache. Caching changes what a call
 // costs, never what the model is shown.
 
 import { readFileSync } from "node:fs";
-import { readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Answer } from "./broker.ts";
+import { anomalyWords, readLimits, thinkingBlocks, usageCost, worstCost as worstOfBody, type Anomaly, type Answer } from "./broker.ts";
 import { BrokerRefused } from "./brokered.ts";
 import { own } from "../own.mjs";
 
@@ -113,6 +115,16 @@ export function settle(b: Budget, worst: number, cost: number): void {
 /** A lost answer is sent again this many times; each try counts as spent at its most. */
 export const NETWORK_RETRIES = 3;
 
+/** A call whose answer the run cannot stand on (Anomaly in broker.ts), which fails the run. */
+export class RunAnomaly extends Error {
+  anomaly: Anomaly;
+
+  constructor(anomaly: Anomaly, message: string) {
+    super(message);
+    this.anomaly = anomaly;
+  }
+}
+
 /**
  * One call within the budget, or null when the budget stops it: the harness's own, reckoned as the
  * broker reckons it from the same body, or the broker's limits, which end the run as the budget
@@ -122,26 +134,40 @@ export async function budgetedCall(post: Post, budget: Budget, body: object, mod
   const worst = worstCost(body, model);
   for (let tries = 0; ; tries++) {
     if (!reserve(budget, worst)) return null;
+    let reply: Reply;
     try {
-      const reply = await send(post, body);
-      const cost = callCost(reply.usage, model, worst);
-      settle(budget, worst, cost);
-      return { reply, cost };
+      reply = await send(post, body);
     } catch (e) {
-      // A lost answer may still have been billed, so it counts at its most.
-      settle(budget, worst, e instanceof NetworkError ? worst : 0);
-      if (e instanceof BrokerRefused && e.exhausted) {
+      // A lost answer may still have been billed, so it counts at its most. So does an answer the
+      // broker refused as another model's, as the broker counts it. After a refusal for the run's
+      // anomaly the budget, like the broker, admits nothing more: the run fails on it.
+      const refused = e instanceof BrokerRefused ? e : null;
+      settle(budget, worst, e instanceof NetworkError || refused?.billed === true ? worst : 0);
+      if (refused?.anomaly) budget.stopped = true;
+      if (refused?.exhausted) {
         budget.stopped = true;
         return null;
       }
       if (!(e instanceof NetworkError) || tries >= NETWORK_RETRIES) throw e;
+      continue;
     }
+    const cost = callCost(reply.usage, model, worst);
+    settle(budget, worst, cost);
+    // A usage that costs more than the most its request could cannot be honest: it counts, since it
+    // was spent, and the run fails on it, its answer unrecorded, as the broker, which closes, has it.
+    if (cost > worst) {
+      budget.stopped = true;
+      throw new RunAnomaly("past its worst", `${anomalyWords("past its worst")}: $${cost}, where the most was $${worst}`);
+    }
+    return { reply, cost };
   }
 }
 
 export type Message = { role: "user" | "assistant"; content: unknown };
 
 export interface Reply {
+  /** The model that wrote the answer, as the answer names it: one the requested model may come back as, which the broker checks. */
+  model: string;
   content: unknown[];
   text: string;
   stop_reason: string;
@@ -175,12 +201,13 @@ export async function send(post: Post, body: object): Promise<Reply> {
     if (answer.status === -1) throw new NetworkError(answer.text);
     if (answer.status >= 200 && answer.status < 300) {
       const parsed = JSON.parse(answer.text);
+      if (typeof parsed?.model !== "string") throw new Error("the API answered without naming the model that wrote the answer");
       const content = parsed.content ?? [];
       const text = content
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { text: string }) => b.text)
         .join("\n");
-      return { content, text, stop_reason: parsed.stop_reason, usage: parsed.usage };
+      return { model: parsed.model, content, text, stop_reason: parsed.stop_reason, usage: parsed.usage };
     }
     const retryable = answer.status === 429 || answer.status >= 500;
     if (!retryable || attempt >= 5) {

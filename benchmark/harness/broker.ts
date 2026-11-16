@@ -15,6 +15,10 @@
 // requestBody), cut to that shape and written anew, never the bytes it was given: a model it names,
 // max_tokens up to its cap, a system prompt and messages of text alone (and, in the model's own
 // earlier replies, the thinking blocks it wrote), and the 5-minute cache, which is all it can price.
+// It hands back only an answer that names, as the model that wrote it, one the requested model may
+// come back as (answeredAs in broker-limits.json), and refuses any other, so that no result is
+// recorded for a model that did not write it. After one, or after an answer billed past the most
+// its request could cost, it admits nothing more, and the run fails (Anomaly).
 //
 // It spends within the run's limits, which it reads at its start from broker-limits.json beside
 // it: at most maxRequests requests, at most maxInFlight at once over at most maxConnections
@@ -53,6 +57,8 @@ export interface Limits {
   /** Fields of a usage the broker does not price, each with the one value at which it costs nothing more. */
   standardUsage: Map<string, string>;
   models: Map<string, Price>;
+  /** For each model, the names an answer to a request for it may carry in its model field. */
+  answeredAs: Map<string, string[]>;
 }
 
 /** What the API answered: its status, its retry-after header, and its body as text. */
@@ -92,8 +98,14 @@ export function readLimits(text: string): Limits {
   const cacheWrite = positive(raw.cacheWrite, "cacheWrite");
   if (cacheWrite < 1) throw new Error("broker-limits.json: cacheWrite is below 1, so a cache write would cost less than an input token");
   const models = new Map<string, Price>();
+  const answeredAs = new Map<string, string[]>();
   for (const [id, price] of Object.entries(raw.models ?? {})) {
-    const p = price as Price;
+    const p = price as Price & { answeredAs?: unknown };
+    const names = p?.answeredAs;
+    if (!Array.isArray(names) || names.length === 0 || !names.every((n) => typeof n === "string" && n !== "") || new Set(names).size !== names.length) {
+      throw new Error(`broker-limits.json: ${id}'s answeredAs is no list of the distinct names an answer to it may carry`);
+    }
+    answeredAs.set(id, names as string[]);
     const read: Price = { input: positive(p?.input, `${id}'s input price`), output: positive(p?.output, `${id}'s output price`), cacheRead: positive(p?.cacheRead, `${id}'s cache-read price`) };
     if (read.cacheRead > read.input * cacheWrite) throw new Error(`broker-limits.json: ${id}'s cache read costs more than a cache write`);
     if (p.longPrompt !== undefined) {
@@ -122,6 +134,7 @@ export function readLimits(text: string): Limits {
     cacheWrite,
     standardUsage,
     models,
+    answeredAs,
   };
 }
 
@@ -196,8 +209,45 @@ export function worstCost(bodyText: string, maxTokens: number, price: Price, lim
   return (factorFor(input, price) * (input * price.input * limits.cacheWrite + maxTokens * price.output)) / 1e6;
 }
 
+/**
+ * Why the broker refuses an answer the API billed: the model it names is not one the requested
+ * model may come back as (answeredAs in broker-limits.json), or it names none. Null when it is one
+ * of them. A result is the work of the model it is recorded for, or no result at all: in the second
+ * run with the real key (2026-11-16), Haiku's one answer had Sonnet's text and usage to the token,
+ * and nothing read or recorded which model had written it.
+ */
+export type WrongModel = { answered: string } | { noModel: true } | null;
+
+/** Why the broker refuses an answer from `said`, the model the answer names, to a request for `requested`, or null (WrongModel). */
+export function wrongModel(said: unknown, requested: string, limits: Pick<Limits, "answeredAs">): WrongModel {
+  if (typeof said !== "string") return { noModel: true };
+  return (limits.answeredAs.get(requested) ?? []).includes(said) ? null : { answered: said };
+}
+
+/**
+ * What makes a run fail and the broker admit nothing more for the rest of it: an answer from another
+ * model than the one asked (WrongModel), or an answer whose usage cost more than the most its request
+ * could, which no honest usage does (the re-check of 2ead2d4: 200,000 output tokens against a
+ * max_tokens of 16,000 spent $0.10 of a $0.05 cap).
+ */
+export type Anomaly = "another model" | "past its worst";
+
+/**
+ * Each anomaly as a run's record and the broker's refusals say it, naming no task. Read by
+ * comparison, never by a computed key, which the policy lets only benchmark/own.mjs read and the
+ * broker's permission flags leave it no import of.
+ */
+export function anomalyWords(anomaly: Anomaly): string {
+  return anomaly === "another model" ? "an answer came from another model than the one asked" : "an answer was billed past the most its request could cost";
+}
+
+/** An anomaly named by a value from elsewhere, a refusal line or an error, or null when it names none. */
+export function anomalyOf(value: unknown): Anomaly | null {
+  return value === "another model" || value === "past its worst" ? value : null;
+}
+
 /** The fields of a usage the broker prices. */
-const PRICED = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+const PRICED =["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
 
 /**
  * Whether a field of a usage that the broker does not price costs nothing as the API reported it:
@@ -401,10 +451,15 @@ export class Broker {
   reserved = 0;
   requests = 0;
   inFlight = 0;
+  /** The run's first anomaly, after which the broker admits nothing more, or null while there is none. */
+  closed: Anomaly | null = null;
 
-  /** Where the broker says what it could not price, once a field: its log, by default, each line made by logLine. */
+  /**
+   * Where the broker says, once a run each, what it could not price and each anomaly it met: its
+   * log, by default, each line made by logLine.
+   */
   note: (line: string) => void;
-  /** The usage fields it has said it could not price, so that each is said once a run. */
+  /** What it has said, so that each is said once a run. */
   noted = new Set<string>();
 
   constructor(key: string, limits: Limits, budget: number, post: Post, note: (line: string) => void = (line) => console.error(line)) {
@@ -419,23 +474,23 @@ export class Broker {
     this.note = note;
   }
 
+  /** Says a line in the broker's log once a run: `what` names it among the things said. */
+  noteOnce(what: unknown, line: string): void {
+    const said = JSON.stringify(what);
+    if (this.noted.has(said)) return;
+    this.noted.add(said);
+    this.note(line);
+  }
+
   /** What an answered request cost, by the usage the API reported; at its most when the broker cannot price it. */
-  cost(text: string, price: Price, worst: number): number {
-    let usage;
-    try {
-      usage = JSON.parse(text)?.usage;
-    } catch {
-      usage = undefined;
-    }
+  cost(usage: unknown, price: Price, worst: number): number {
     // A field it cannot price makes it count the request at its worst, and its log says which, once
     // a field, so that a run that stops early shows why (the first run with the real key, on
     // 2026-11-16: output_tokens_details, which the broker did not then know).
     const unpriced = unpricedField(usage, this.limits);
-    const said = JSON.stringify(unpriced);
-    if (unpriced !== null && !this.noted.has(said)) {
-      this.noted.add(said);
+    if (unpriced !== null) {
       const line = logLine(this.key);
-      this.note("field" in unpriced ? line`the broker counts a request at its worst: it cannot price the usage field ${unpriced.field}` : line`the broker counts a request at its worst: it cannot price an answer without a usage object`);
+      this.noteOnce(unpriced, "field" in unpriced ? line`the broker counts a request at its worst: it cannot price the usage field ${unpriced.field}` : line`the broker counts a request at its worst: it cannot price an answer without a usage object`);
     }
     return usageCost(usage, price, this.limits, worst);
   }
@@ -451,6 +506,9 @@ export class Broker {
       return answer({ refused: "a request the broker cannot read" });
     }
     if (typeof request?.id === "number" || typeof request?.id === "string") id = request.id;
+    // After the run's first anomaly nothing more is sent; the refusal names that anomaly, so that a
+    // run whose requests race it fails for it, whichever answer the harness reads first.
+    if (this.closed !== null) return answer({ refused: `the broker admits nothing more this run: ${anomalyWords(this.closed)}`, anomaly: this.closed });
     const shaped = shape(request?.body, this.limits);
     if ("refused" in shaped) return answer({ refused: shaped.refused });
     const bytes = utf8Length(shaped.text);
@@ -477,7 +535,41 @@ export class Broker {
     }
     this.reserved -= worst;
     // The API bills no answer but a success.
-    if (reply.status >= 200 && reply.status < 300) this.spent += this.cost(reply.text, price, worst);
+    if (reply.status < 200 || reply.status >= 300) return answer({ status: reply.status, retryAfter: reply.retryAfter, text: reply.text });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(reply.text);
+    } catch {
+      parsed = undefined;
+    }
+    const { model, usage } = (plain(parsed) ? parsed : {}) as { model?: unknown; usage?: unknown };
+    // An answer from a model other than the one asked never reaches the harness: it would record
+    // that model's work as the other's. It was billed, and counts at the requested model's worst,
+    // which admission reserved, so that the run's cap holds: a mismatch makes the answer unusable,
+    // and is no evidence that the API billed it otherwise (the review of b520209: counted at any
+    // model's most, a Haiku request answered as Sonnet took $1.05 of a $0.05 cap). The run fails on
+    // it, so the broker admits nothing more, and what such answers cost stops at what is in flight.
+    // The harness counts it alike, and stops alike.
+    const say = logLine(this.key);
+    const wrong = wrongModel(model, shaped.model, this.limits);
+    if (wrong !== null) {
+      this.spent += worst;
+      this.closed ??= "another model";
+      const allowed = (this.limits.answeredAs.get(shaped.model) ?? []).join(", ");
+      const why = "answered" in wrong ? say`the broker refuses an answer from the model ${wrong.answered} to a request for ${shaped.model}, which may come back only as ${allowed}` : say`the broker refuses an answer that names no model to a request for ${shaped.model}`;
+      this.noteOnce({ requested: shaped.model, ...wrong }, why);
+      return answer({ refused: why, anomaly: "another model", billed: true });
+    }
+    // A usage that costs more than the most its request could cannot be honest. The money is spent,
+    // so the ledger counts what the usage says, and the run's cap may be passed by it alone; the run
+    // fails on it, so the broker admits nothing more. The answer goes back, so that the harness
+    // reckons the same cost from the same usage, fails alike, and records nothing of it.
+    const cost = this.cost(usage, price, worst);
+    this.spent += cost;
+    if (cost > worst) {
+      this.closed ??= "past its worst";
+      this.noteOnce({ pastItsWorst: true }, say`the broker counted a request at $${cost}, past the $${worst} it reserved for it: no honest usage costs more, so it admits nothing more this run`);
+    }
     return answer({ status: reply.status, retryAfter: reply.retryAfter, text: reply.text });
   }
 }
