@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 68;
+const FLOOR = 70;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -214,6 +214,146 @@ check("every workflow sets its permissions at the top, read-only wherever a requ
       assert.ok(readOnly(job.permissions), `${file}, job ${id}: a required job widens its permissions: ${JSON.stringify(job.permissions)}`);
     }
   }
+});
+
+/// GitHub's permission scopes, each with the values it admits, from the workflow syntax's
+/// `permissions` (read on 2026-11-16): `id-token` and `copilot-requests` take write or none,
+/// `vulnerability-alerts` read or none, every other scope read, write or none.
+const READ_WRITE_NONE = ["read", "write", "none"];
+const PERMISSION_SCOPES = new Map([
+  ["actions", READ_WRITE_NONE],
+  ["artifact-metadata", READ_WRITE_NONE],
+  ["attestations", READ_WRITE_NONE],
+  ["checks", READ_WRITE_NONE],
+  ["code-quality", READ_WRITE_NONE],
+  ["contents", READ_WRITE_NONE],
+  ["copilot-requests", ["write", "none"]],
+  ["deployments", READ_WRITE_NONE],
+  ["discussions", READ_WRITE_NONE],
+  ["id-token", ["write", "none"]],
+  ["issues", READ_WRITE_NONE],
+  ["packages", READ_WRITE_NONE],
+  ["pages", READ_WRITE_NONE],
+  ["pull-requests", READ_WRITE_NONE],
+  ["security-events", READ_WRITE_NONE],
+  ["statuses", READ_WRITE_NONE],
+  ["vulnerability-alerts", ["read", "none"]],
+]);
+
+/**
+ * What is wrong with a workflow's permissions, at its top and in each job. They are an allow-list,
+ * not a reading of what GitHub might accept: the shorthand `read-all`, or a map whose every key is a
+ * scope of PERMISSION_SCOPES and whose every value is one that scope admits, exactly as written.
+ * Anything else is refused, other cases and expressions (`${{ }}`) included. And no token may post
+ * a check run or a commit status: `write-all`, `checks: write` and `statuses: write` are refused.
+ * GitHub matches a required check by its name and its source, and every required check of main
+ * comes from GitHub Actions, as such a post would. The probe of policy-runtime-judge (2026-11-16,
+ * judge-probe's pull request 3) saw a change's own workflow raise its token so and post a success
+ * status and a success check run under the judge's name. The judge posts through its own App, so
+ * no workflow needs either permission.
+ */
+export function permissionProblems(file, doc) {
+  const found = [];
+  const readPermissions = (where, p) => {
+    if (p === "read-all") return;
+    if (p === "write-all") {
+      found.push(`${where}: write-all, by which its token may post check runs or commit statuses`);
+      return;
+    }
+    if (!isPlain(p)) {
+      found.push(`${where}: permissions that are neither read-all nor a map of GitHub's scopes: ${JSON.stringify(p)}`);
+      return;
+    }
+    for (const [scope, value] of Object.entries(p)) {
+      const admits = PERMISSION_SCOPES.get(scope);
+      if (admits === undefined) found.push(`${where}: ${JSON.stringify(scope)}, no permission scope of GitHub's`);
+      else if (!admits.includes(value)) found.push(`${where}: ${scope}: ${JSON.stringify(value)}, none of ${admits.join(", ")}`);
+      else if ((scope === "checks" || scope === "statuses") && value === "write") found.push(`${where}: ${scope}: write, by which its token may post check runs or commit statuses`);
+    }
+  };
+  // A workflow's own permissions are required by the check above; a job's may be left out, and
+  // then are the workflow's.
+  if (doc.permissions !== undefined) readPermissions(file, doc.permissions);
+  for (const [id, job] of Object.entries(isPlain(doc.jobs) ? doc.jobs : {})) {
+    if (isPlain(job) && "permissions" in job) readPermissions(`${file}, job ${id}`, job.permissions);
+  }
+  return found;
+}
+
+check("every workflow's permissions are GitHub's scopes and values exactly, and no token can post a check run or a commit status", () => {
+  for (const { file, doc } of workflows()) assert.deepEqual(permissionProblems(file, doc), []);
+  // What passes: read alone, read-all, none at all, and the Pages job's pages and id-token write.
+  const base = { permissions: { contents: "read" }, jobs: { j: { "runs-on": "ubuntu-24.04" } } };
+  const job = (permissions) => ({ ...base, jobs: { j: { "runs-on": "ubuntu-24.04", permissions } } });
+  for (const [what, doc] of [
+    ["contents read", base],
+    ["read-all", { ...base, permissions: "read-all" }],
+    ["no permission at all", { ...base, permissions: {} }],
+    ["the Pages job's", job({ pages: "write", "id-token": "write" })],
+    ["vulnerability-alerts read", job({ "vulnerability-alerts": "read" })],
+    ["a job with none of its own", { ...base, jobs: { j: { "runs-on": "ubuntu-24.04" } } }],
+  ]) {
+    assert.deepEqual(permissionProblems("x.yml", doc), [], what);
+  }
+  // Planted, at the top and in a job: each way to post one, a key or a value GitHub does not name
+  // as written, an expression, and the probe's own forging job.
+  const forger = parseYaml(`name: Spoof
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  forger:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      statuses: write
+      checks: write
+    steps:
+      - run: gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="Workflow policy" -f head_sha="$SHA" -f status=completed -f conclusion=success
+`);
+  for (const [what, doc] of [
+    ["checks write at the top", { ...base, permissions: { contents: "read", checks: "write" } }],
+    ["statuses write at the top", { ...base, permissions: { contents: "read", statuses: "write" } }],
+    ["write-all at the top", { ...base, permissions: "write-all" }],
+    ["checks write in a job", job({ checks: "write" })],
+    ["statuses write in a job", job({ statuses: "write" })],
+    ["write-all in a job", job("write-all")],
+    ["Checks: write", job({ Checks: "write" })],
+    ["checks: Write", job({ checks: "Write" })],
+    ["Write-All", job("Write-All")],
+    ["Read-All", { ...base, permissions: "Read-All" }],
+    ["an expression for the whole block", job("${{ inputs.permissions }}")],
+    ["an expression for a value", job({ contents: "${{ inputs.access }}" })],
+    ["a scope GitHub does not name", job({ models: "read" })],
+    ["id-token read, which it does not admit", job({ "id-token": "read" })],
+    ["vulnerability-alerts write, which it does not admit", job({ "vulnerability-alerts": "write" })],
+    ["a value that is no string", job({ contents: true })],
+    ["permissions with no value", job(null)],
+    ["a list", job(["contents"])],
+    ["the probe's forging job", forger],
+  ]) {
+    assert.ok(permissionProblems("x.yml", doc).length > 0, `a workflow with ${what} passes`);
+  }
+});
+
+/// What is wrong with the files of .github/workflows: anything but a workflow the policy reads,
+/// a file directly in it named .yml or .yaml, exactly so. A file GitHub might run that workflows()
+/// does not read (x.YML) would escape every rule.
+export const workflowFileProblems = (paths) =>
+  [...paths].filter((f) => f.startsWith(`${WORKFLOWS}/`) && !/^[^/]+\.(yml|yaml)$/.test(f.slice(WORKFLOWS.length + 1))).map((f) => `${f}: a file of ${WORKFLOWS} the policy does not read as a workflow`);
+
+check("every file of .github/workflows is a workflow the policy reads", () => {
+  assert.deepEqual(workflowFileProblems(tracked()), []);
+  assert.deepEqual(workflowFileProblems(new Set([`${WORKFLOWS}/ci.yml`, `${WORKFLOWS}/x.yaml`, "docs/x.YML"])), []);
+  for (const f of ["x.YML", "x.Yaml", "x.yml.bak", "x", "sub/x.yml", ".x.json"]) {
+    assert.ok(workflowFileProblems(new Set([`${WORKFLOWS}/${f}`])).length > 0, `${f} in ${WORKFLOWS} passes`);
+  }
+  // And workflows() reads exactly the files this admits.
+  const read = workflows().map(({ file }) => `${WORKFLOWS}/${file}`).sort();
+  const admitted = [...tracked()].filter((f) => f.startsWith(`${WORKFLOWS}/`)).sort();
+  assert.deepEqual(read, admitted);
 });
 
 check("every action is pinned to a full commit SHA", () => {
