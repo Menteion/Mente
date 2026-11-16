@@ -344,20 +344,27 @@ const EXTENDED_PICTOGRAPHIC: &[(u32, u32)] = &[
     (0x1FC00, 0x1FFFD),
 ];
 
-/// Whether `c` has Unicode's property Extended_Pictographic.
+/// The characters that make a pictograph of what Extended_Pictographic leaves out: the selector
+/// that asks for a character's emoji form, U+FE0F, the combining keycap that makes a keycap of a
+/// digit or a sign, U+20E3, and the regional indicators whose pairs are flags, U+1F1E6 to U+1F1FF.
+const EMOJI_MAKERS: &[(u32, u32)] = &[(0xFE0F, 0xFE0F), (0x20E3, 0x20E3), (0x1F1E6, 0x1F1FF)];
+
+/// Whether `c` is or makes a pictograph: Unicode's property Extended_Pictographic, or one of
+/// [`EMOJI_MAKERS`].
 fn pictograph(c: char) -> bool {
     let c = u32::from(c);
-    EXTENDED_PICTOGRAPHIC
-        .binary_search_by(|&(lo, hi)| {
-            if hi < c {
-                std::cmp::Ordering::Less
-            } else if lo > c {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
+    EMOJI_MAKERS.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
+        || EXTENDED_PICTOGRAPHIC
+            .binary_search_by(|&(lo, hi)| {
+                if hi < c {
+                    std::cmp::Ordering::Less
+                } else if lo > c {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
 }
 
 /// Each way the specification's directory breaks its layout (CLAUDE.md, invariant 1): an entry
@@ -488,39 +495,38 @@ fn test_the_spec_layout_refuses_each_way_a_spec_breaks_it() {
         assert_eq!(found.len(), 1, "{}: {:?}", name, found);
         assert!(found[0].starts_with(problem), "{}: {:?}", name, found);
     }
-    // The characters a hand-picked set let through, each pictographic by Unicode's property.
-    for c in ['⏳', '⌛', '⏰', '▶', 'ℹ', '↔', '©'] {
-        let dir = planted(
-            "property",
-            &[
-                ("README.md", good),
-                (
-                    "regions.md",
-                    &format!(
-                        "# A {} B
-",
-                        c
-                    ),
-                ),
-            ],
-        );
+    // The characters a hand-picked set let through, each pictographic by Unicode's property, and
+    // the keycaps and flags the property leaves out.
+    for heading in [
+        "# A \u{23F3} B\n",
+        "# A \u{231B} B\n",
+        "# A \u{23F0} B\n",
+        "# A \u{25B6} B\n",
+        "# A \u{2139} B\n",
+        "# A \u{2194} B\n",
+        "# A \u{A9} B\n",
+        "## 1\u{FE0F}\u{20E3} One\n",
+        "## #\u{FE0F}\u{20E3} Sign\n",
+        "## 1\u{20E3} Keycap\n",
+        "## \u{1F1FA}\u{1F1F8} Flag\n",
+    ] {
+        let dir = planted("property", &[("README.md", good), ("regions.md", heading)]);
         let found = spec_layout(&dir);
-        assert_eq!(found.len(), 1, "{:?}: {:?}", c, found);
+        assert_eq!(found.len(), 1, "{:?}: {:?}", heading, found);
         assert!(
             found[0].starts_with("regions.md:1: a pictograph"),
             "{:?}: {:?}",
-            c,
+            heading,
             found
         );
     }
     // A spec that cannot be read as UTF-8, UTF-16 with a warning sign in it, is reported, never
     // passed unread.
     let dir = planted("utf16", &[("README.md", good)]);
-    let utf16: Vec<u8> = "# ⚠ Warning
-"
-    .encode_utf16()
-    .flat_map(u16::to_le_bytes)
-    .collect();
+    let utf16: Vec<u8> = "# \u{26A0} Warning\n"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
     fs::write(dir.join("regions.md"), [&[0xFF, 0xFE][..], &utf16].concat()).unwrap();
     assert_eq!(
         spec_layout(&dir),
