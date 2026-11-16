@@ -3,10 +3,15 @@
 // toolchain: the workflow "Harness" builds and runs the fixtures through rustc and odin.
 
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { callCost, KNOWN_MODELS, parseModels, requestBody, reserve, settle, worstCost, type Budget } from "./api.ts";
+import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
+import { Broker, readLimits, scrub, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
+import { BrokerBroken, BrokerRefused, connectBroker } from "./brokered.ts";
 import {
   BASH,
   REPOSITORY,
@@ -50,7 +55,6 @@ import { failureText, feedbackFor, hasTodoIn, systemPromptFor, userPromptFor, wi
 import { median, summarize, type RunRecord } from "./report.ts";
 import { own, setOwn } from "../own.mjs";
 import {
-  costOf,
   extractProgram,
   feedbackPrompt,
   hasTodo,
@@ -173,11 +177,6 @@ test("the program is the reply's first fenced block, or the whole reply", () => 
   assert.equal(extractProgram("Here:\n```mente\npub fn f() = 1\n```\nDone."), "pub fn f() = 1\n");
   assert.equal(extractProgram("```\npub fn g() = 2\n```"), "pub fn g() = 2\n");
   assert.equal(extractProgram("pub fn h() = 3"), "pub fn h() = 3\n");
-});
-
-test("a call's cost follows its tokens and the prices per million", () => {
-  assert.equal(costOf({ input_tokens: 1_000_000, output_tokens: 0 }, 2, 10), 2);
-  assert.equal(costOf({ input_tokens: 500_000, output_tokens: 100_000 }, 2, 10), 2);
 });
 
 test("the prompts carry the card, the signature and the examples, and no hidden test", () => {
@@ -804,9 +803,16 @@ test("models are priced, calls costed with their cache, and the budget stops bef
   const sonnet = KNOWN_MODELS["claude-sonnet-5-5"];
   assert.deepEqual(parseModels("claude-sonnet-5-5, claude-opus-5-5@4/20/0.2"), [sonnet, { id: "claude-opus-5-5", input: 4, output: 20, cacheRead: 0.2 }]);
   assert.throws(() => parseModels("claude-unknown"), /no prices for claude-unknown/);
-  const cost = callCost({ input_tokens: 1e6, output_tokens: 1e6, cache_creation_input_tokens: 1e6, cache_read_input_tokens: 1e6 }, sonnet);
+  const cost = callCost({ input_tokens: 1e6, output_tokens: 1e6, cache_creation_input_tokens: 1e6, cache_read_input_tokens: 1e6 }, sonnet, 0);
   assert.ok(Math.abs(cost - 14.7) < 1e-9, String(cost));
-  assert.ok(Math.abs(worstCost(3e6, sonnet) - 2.66) < 1e-9);
+  // A usage the harness cannot read counts at the call's worst, as the broker counts it.
+  assert.equal(callCost({ input_tokens: 10 } as Usage, sonnet, 0.5), 0.5);
+  // The worst case: every byte of the body an input token written to the cache, a character
+  // beyond ASCII its bytes, and the most output; the broker's, from the same body.
+  const small = { x: "\u00e9" };
+  assert.equal(JSON.stringify(small).length, 9);
+  assert.ok(Math.abs(worstCost(small, sonnet) - (10 * 2 * 1.25 + MAX_TOKENS * 10) / 1e6) < 1e-12, String(worstCost(small, sonnet)));
+  assert.equal(worstCost(small, sonnet), brokerWorst(JSON.stringify(small), MAX_TOKENS, sonnet, 1.25));
   const budget: Budget = { limit: 1, spent: 0, reserved: 0, stopped: false };
   assert.equal(reserve(budget, 0.6), true);
   assert.equal(reserve(budget, 0.6), false);
@@ -874,4 +880,367 @@ test("the totals give pass rates, first-program success, medians, spread and fai
   assert.deepEqual([pub.solve.core.runs, pub.solve.core.solved, pub.solve.non_core.runs, pub.solve.non_core.solved], [2, 2, 1, 0]);
   assert.deepEqual(pub.adversarial, { runs: 1, caught_at_build: 0, caught_at_run_time: 0, missed: 1, refused: 0 });
   assert.deepEqual([median([3, 1, 2]), median([1, 2, 3, 4]), median([])], [2, 2.5, null]);
+});
+
+// ------------------------------------------------------------------ the broker, which holds the key
+
+/** permission.json: the Node version and the broker's flags, defined once. */
+const PERMISSION = JSON.parse(readFileSync(join(REPOSITORY, "benchmark", "harness", "permission.json"), "utf8"));
+/** The broker's flags, each --allow-fs-read given in turn the paths a test allows. */
+const brokerFlags = (reads: string[]): string[] => {
+  let k = 0;
+  return (PERMISSION.broker.flags as string[]).map((f) => (f.startsWith("--allow-fs-read=") ? `--allow-fs-read=${reads.at(k++) ?? reads.at(0)}` : f));
+};
+/** The environment `env -i PATH="$PATH"` leaves, with what Windows needs to start a process at all. */
+const cleared = (): NodeJS.ProcessEnv => ({ PATH: process.env.PATH, ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}) });
+
+test("the harness's tests run on the Node version the broker's permission model is pinned to", () => {
+  assert.match(PERMISSION.node, /^\d+\.\d+\.\d+$/);
+  // In CI the policy requires every job that runs these tests to set up exactly this version.
+  if (process.env.CI) assert.equal(process.version, `v${PERMISSION.node}`, "the permission tests ran on another Node than the broker's");
+});
+
+/**
+ * The routes out of the broker, each a planted script that tries one and prints whether it got
+ * through: a process in every form, a process put in this one's place, a worker, an addon, WASI,
+ * the inspector, the bindings, a file read or written beyond what is allowed, code from a string,
+ * and child_process through require in a module and in a CommonJS script.
+ */
+const ESCAPES: [string, string][] = [
+  ["spawnSync", `const r = (await import("node:child_process")).spawnSync(process.execPath, ["-e", "0"]); if (r.error) throw r.error;`],
+  ["execFileSync", `(await import("node:child_process")).execFileSync(process.execPath, ["-e", "0"]);`],
+  ["exec", `const cp = await import("node:child_process"); await new Promise((ok, no) => { cp.exec(JSON.stringify(process.execPath) + " -e 0", (e) => (e ? no(e) : ok())); });`],
+  ["execve", `process.execve(process.execPath, [process.execPath, "-e", "console.log(JSON.stringify({ outcome: 'allowed', code: '' }))"]);`],
+  ["worker", `const { Worker } = await import("node:worker_threads"); const w = new Worker("0", { eval: true }); await new Promise((ok, no) => { w.on("exit", ok); w.on("error", no); });`],
+  ["dlopen", `try { process.dlopen({ exports: {} }, "missing.node"); } catch (e) { if (e.code === "ERR_DLOPEN_DISABLED" || e.code === "ERR_ACCESS_DENIED") throw e; }`],
+  ["wasi", `const { WASI } = await import("node:wasi"); new WASI({ version: "preview1" });`],
+  ["inspector", `const i = await import("node:inspector"); i.open(0, "127.0.0.1"); i.close();`],
+  ["binding", `process.binding("fs");`],
+  ["getBuiltinModule", `const r = process.getBuiltinModule("node:child_process").spawnSync(process.execPath, ["-e", "0"]); if (r.error) throw r.error;`],
+  ["createRequire", `const { createRequire } = await import("node:module"); const r = createRequire(import.meta.url)("node:child_process").spawnSync(process.execPath, ["-e", "0"]); if (r.error) throw r.error;`],
+  ["read", `(await import("node:fs")).readFileSync(process.argv.at(2));`],
+  ["write", `(await import("node:fs")).writeFileSync(process.argv.at(3), "x");`],
+  ["codegen", `Function("return 1")();`],
+];
+/** A planted script: the route's code, and one line saying whether it got through. */
+const planted = (code: string) =>
+  `const report = (outcome, code = "") => console.log(JSON.stringify({ outcome, code }));\ntry {\n  ${code}\n  report("allowed");\n} catch (e) {\n  report("refused", String(e?.code ?? e?.message ?? e));\n}\n`;
+/** The same through require, in a CommonJS script. */
+const PLANTED_CJS = `const report = (outcome, code = "") => console.log(JSON.stringify({ outcome, code }));\ntry {\n  const r = require("child_process").spawnSync(process.execPath, ["-e", "0"]);\n  if (r.error) throw r.error;\n  report("allowed");\n} catch (e) {\n  report("refused", String(e && (e.code || e.message)));\n}\n`;
+
+test("the broker's flags refuse every route out of it, which each script takes without them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mente-escapes-"));
+  try {
+    const other = join(REPOSITORY, "package.json");
+    const written = join(dir, "written.txt");
+    const run = (file: string, flags: string[], env: NodeJS.ProcessEnv = cleared()) => {
+      const r = spawnSync(process.execPath, [...flags, file, other, written], { cwd: dir, env, encoding: "utf8", timeout: 60_000 });
+      const last = r.stdout.trim().split("\n").at(-1) ?? "";
+      try {
+        return JSON.parse(last) as { outcome: string; code: string };
+      } catch {
+        return { outcome: "no report", code: `status ${r.status}: ${r.stderr.trim().slice(-300)}` };
+      }
+    };
+    const cases: [string, string][] = [...ESCAPES.map(([route, code]): [string, string] => [`${route}.mjs`, planted(code)]), ["require.cjs", PLANTED_CJS]];
+    for (const [name, text] of cases) {
+      const file = join(dir, name);
+      writeFileSync(file, text);
+      // Under the broker's flags, as the broker runs: the planted script alone readable.
+      const confined = run(file, brokerFlags([file]));
+      assert.equal(confined.outcome, "refused", `${name} got through the broker's flags: ${JSON.stringify(confined)}`);
+      if (name === "codegen.mjs") assert.match(confined.code, /Code generation from strings disallowed/, name);
+      else if (name === "dlopen.mjs") assert.equal(confined.code, "ERR_DLOPEN_DISABLED", name);
+      else if (name === "execve.mjs" && process.platform === "win32") assert.match(confined.code, /ERR_ACCESS_DENIED|ERR_FEATURE_UNAVAILABLE_ON_PLATFORM/, name);
+      else assert.equal(confined.code, "ERR_ACCESS_DENIED", `${name} was refused, but not by the permission model: ${confined.code}`);
+      // Without them, as a control, the same script gets through, so that each refusal proves
+      // something; Windows cannot put a process in another's place.
+      if (name === "execve.mjs" && process.platform === "win32") continue;
+      const free = run(file, []);
+      assert.equal(free.outcome, "allowed", `${name} cannot take its route even without the broker's flags, so its refusal proves nothing: ${JSON.stringify(free)}`);
+    }
+    // NODE_OPTIONS can add --allow-child-process to the flags, which is why the broker starts with
+    // an environment cleared but for PATH (env -i, which the policy pins).
+    const spawnFile = join(dir, "spawnSync.mjs");
+    const widened = run(spawnFile, brokerFlags([spawnFile]), { ...cleared(), NODE_OPTIONS: "--allow-child-process" });
+    assert.equal(widened.outcome, "allowed", "NODE_OPTIONS no longer widens the permission model; env -i may be dropped from the pin");
+    // The flags themselves name none of the refused ones.
+    for (const f of PERMISSION.broker.flags as string[]) for (const r of PERMISSION.refused as string[]) assert.ok(!f.startsWith(r), `the broker's flags hold ${r}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The real limits, and a broker over a fake transport that records each POST. */
+const LIMITS_TEXT = readFileSync(join(REPOSITORY, "benchmark", "harness", "broker-limits.json"), "utf8");
+const KEY = "sk-ant-test-0123456789abcdef";
+const fakeBroker = (budget: number, answer: (body: string) => Promise<Answer> | Answer, limits = readLimits(LIMITS_TEXT)) => {
+  const posts: { url: string; headers: Record<string, string>; body: string }[] = [];
+  const broker = new Broker(KEY, limits, budget, async (url, headers, body) => {
+    posts.push({ url, headers, body });
+    return answer(body);
+  });
+  return { broker, posts };
+};
+const request = (id: number, body: object) => JSON.stringify({ id, body });
+const haiku = (max = 100) => ({ model: "claude-haiku-5-5", max_tokens: max, messages: [{ role: "user", content: "hi" }] });
+
+test("the broker reads its limits, and refuses limits that are not whole", () => {
+  const limits = readLimits(LIMITS_TEXT);
+  assert.equal(limits.url, "https://api.anthropic.com/v1/messages");
+  assert.ok(limits.models.has("claude-haiku-5-5"));
+  // The harness reads its prices and caps from the same file.
+  assert.equal(limits.maxTokens, MAX_TOKENS);
+  assert.equal(own(KNOWN_MODELS, "claude-sonnet-5-5").output, (limits.models.get("claude-sonnet-5-5") as Price).output);
+  const raw = JSON.parse(LIMITS_TEXT);
+  for (const [what, change] of [
+    ["another address", { url: "https://example.com/v1/messages" }],
+    ["no version", { version: "latest" }],
+    ["a price that is not positive", { models: { "claude-haiku-5-5": { input: 0, output: 1, cacheRead: 1 } } }],
+    ["no model", { models: {} }],
+    ["no request cap", { maxRequests: 0 }],
+    ["no dollar cap", { maxDollars: -1 }],
+  ] as [string, object][]) {
+    assert.throws(() => readLimits(JSON.stringify({ ...raw, ...change })), /broker-limits\.json/, `limits with ${what} are read`);
+  }
+});
+
+test("the broker sends a request within the limits with the key, and refuses one beyond them", async () => {
+  const ok = { status: 200, retryAfter: "", text: JSON.stringify({ content: [], usage: { input_tokens: 1000, output_tokens: 1000 } }) };
+  const { broker, posts } = fakeBroker(1, () => ok);
+  const sent = JSON.parse(await broker.handle(request(1, haiku())));
+  assert.deepEqual([sent.id, sent.status], [1, 200]);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0]?.url, "https://api.anthropic.com/v1/messages");
+  assert.equal(posts[0]?.headers["x-api-key"], KEY);
+  assert.equal(posts[0]?.headers["anthropic-version"], readLimits(LIMITS_TEXT).version);
+  // Charged by the usage the API reported: 1000 input and 1000 output tokens of Haiku.
+  assert.ok(Math.abs(broker.spent - (1000 * 0.1 + 1000 * 0.5) / 1e6) < 1e-12, `spent ${broker.spent}`);
+  for (const [what, line] of [
+    ["a model it does not name", request(2, { ...haiku(), model: "gpt-x" })],
+    ["no model", request(3, { max_tokens: 10, messages: [] })],
+    ["max_tokens past the cap", request(4, haiku(MAX_TOKENS + 1))],
+    ["max_tokens of 0", request(5, haiku(0))],
+    ["max_tokens that is no whole number", request(6, { ...haiku(), max_tokens: 1.5 })],
+    ["a streamed request", request(7, { ...haiku(), stream: true })],
+    ["no body", JSON.stringify({ id: 8 })],
+    ["a line that is no JSON", "not json"],
+  ] as [string, string][]) {
+    const answer = JSON.parse(await broker.handle(line));
+    assert.equal(typeof answer.refused, "string", `the broker sent ${what}`);
+    assert.equal(answer.exhausted, undefined, `the broker read ${what} as the run's limits reached`);
+  }
+  assert.equal(posts.length, 1, "a refused request reached the API");
+  // The run's dollar cap is its budget or maxDollars, whichever is less.
+  assert.equal(fakeBroker(1e9, () => ok).broker.cap, readLimits(LIMITS_TEXT).maxDollars);
+});
+
+test("the broker spends within the run's budget and requests, counting a lost answer at its most", async () => {
+  // A budget a Haiku request of 16000 output tokens could pass at most twice ($0.008 each).
+  let release = () => {};
+  const held = new Promise<void>((done) => {
+    release = done;
+  });
+  const slow = fakeBroker(0.017, async () => {
+    await held;
+    return { status: 200, retryAfter: "", text: JSON.stringify({ usage: { input_tokens: 10, output_tokens: 10 } }) };
+  });
+  // Two requests in flight reserve their most; a third would pass the budget while they are.
+  const first = slow.broker.handle(request(1, haiku(MAX_TOKENS)));
+  const second = slow.broker.handle(request(2, haiku(MAX_TOKENS)));
+  const third = JSON.parse(await slow.broker.handle(request(3, haiku(MAX_TOKENS))));
+  assert.match(third.refused, /past its \$0\.017/);
+  assert.equal(third.exhausted, true, "a refusal at the budget does not say the run's limits are reached");
+  release();
+  await Promise.all([first, second]);
+  // Settled at what they cost, the budget has room again.
+  assert.equal(JSON.parse(await slow.broker.handle(request(4, haiku(MAX_TOKENS)))).status, 200);
+  // A lost answer counts at its most; an error status costs nothing.
+  const lost = fakeBroker(1, () => {
+    throw new Error("connection reset");
+  });
+  const answer = JSON.parse(await lost.broker.handle(request(1, haiku(MAX_TOKENS))));
+  assert.equal(answer.status, -1);
+  assert.ok(lost.broker.spent > 0.0079, `a lost answer counted ${lost.broker.spent}`);
+  const failing = fakeBroker(1, () => ({ status: 529, retryAfter: "3", text: "{}" }));
+  assert.equal(JSON.parse(await failing.broker.handle(request(1, haiku()))).retryAfter, "3");
+  assert.equal(failing.broker.spent, 0);
+  // At most maxRequests requests.
+  const counted = fakeBroker(1, () => ({ status: 200, retryAfter: "", text: "{}" }), { ...readLimits(LIMITS_TEXT), maxRequests: 2 });
+  for (const id of [1, 2]) assert.equal(JSON.parse(await counted.broker.handle(request(id, haiku()))).status, 200);
+  const past = JSON.parse(await counted.broker.handle(request(3, haiku())));
+  assert.match(past.refused, /past the run's 2/);
+  assert.equal(past.exhausted, true, "a refusal at the request cap does not say the run's limits are reached");
+});
+
+test("the broker takes the key out of every byte it writes", async () => {
+  // A transport that echoes the key back, in the answer, its header and an error.
+  const echo = fakeBroker(1, (body) => ({ status: 400, retryAfter: KEY, text: `the key was ${KEY}, the body ${body}` }));
+  const line = await echo.broker.handle(request(1, { ...haiku(), metadata: { user_id: KEY } }));
+  assert.ok(!line.includes(KEY), `the key in the broker's answer: ${line}`);
+  assert.match(line, /\[the API key\]/);
+  const thrown = fakeBroker(1, () => {
+    throw new Error(`refused ${KEY}`);
+  });
+  assert.ok(!(await thrown.broker.handle(request(1, haiku()))).includes(KEY), "the key in an error the broker wrote");
+  assert.ok(!(await echo.broker.handle(`{"id": "${KEY}"`)).includes(KEY), "the key in the answer to a line that is no JSON");
+  assert.equal(scrub(`a ${KEY} b ${KEY}`, KEY), "a [the API key] b [the API key]");
+  assert.throws(() => new Broker("", readLimits(LIMITS_TEXT), 1, async () => ({ status: 200, retryAfter: "", text: "" })), /no API key/);
+  // A key JSON would write otherwise than as itself is refused, so that scrubbing an answer line,
+  // which is JSON, finds every copy; the refusal does not print it.
+  for (const odd of ['sk-ant-"quoted"-0123', "sk-ant-back\\slash-0123", "sk-ant-\u00e9-0123456"]) {
+    assert.throws(
+      () => new Broker(odd, readLimits(LIMITS_TEXT), 1, async () => ({ status: 200, retryAfter: "", text: "" })),
+      (e: Error) => /no API key/.test(e.message) && !e.message.includes(odd),
+      `the broker took the key ${odd}`,
+    );
+  }
+});
+
+test("the harness stops at its budget before the broker refuses, and as at its budget when the broker does", async () => {
+  // The harness and the broker reckon one body alike. Each call's body holds 30000 characters
+  // of two bytes each, so that a reckoning by characters would put a call within a budget that
+  // the broker's, by bytes, puts beyond it: with a budget of 1.6 calls at their most, and answers
+  // billed at their most but for the cache write, one call fits and the second does not.
+  const sonnet = own(KNOWN_MODELS, "claude-sonnet-5-5");
+  const bodyOf = (k: number) => requestBody("claude-sonnet-5-5", "é".repeat(30000), [{ role: "user", content: `call ${k}` }]);
+  const limit = 1.6 * brokerWorst(JSON.stringify(bodyOf(0)), MAX_TOKENS, sonnet, readLimits(LIMITS_TEXT).cacheWrite);
+  const most = (body: string) => ({ status: 200, retryAfter: "", text: JSON.stringify({ content: [], usage: { input_tokens: new TextEncoder().encode(body).length, output_tokens: MAX_TOKENS } }) });
+  const { broker } = fakeBroker(limit, most);
+  const refusals: string[] = [];
+  const post = async (body: object) => {
+    const answer = JSON.parse(await broker.handle(request(1, body)));
+    if (typeof answer.refused === "string") {
+      refusals.push(answer.refused);
+      throw new BrokerRefused(answer.refused, answer.exhausted === true);
+    }
+    return answer as Answer;
+  };
+  const budget: Budget = { limit, spent: 0, reserved: 0, stopped: false };
+  let calls = 0;
+  for (let k = 0; k < 10; k++) {
+    if (!(await budgetedCall(post, budget, bodyOf(k), sonnet))) break;
+    calls++;
+  }
+  assert.ok(calls === 1 && budget.stopped, `the harness made ${calls} calls`);
+  assert.deepEqual(refusals, [], "the broker refused before the harness stopped");
+  assert.ok(Math.abs(budget.spent - broker.spent) < 1e-12, `the harness counted $${budget.spent}, the broker $${broker.spent}`);
+  // The broker's own limits, reached first: the call returns as at the budget, the harness's
+  // budget stopped too.
+  const capped = fakeBroker(10, most, { ...readLimits(LIMITS_TEXT), maxRequests: 1 }).broker;
+  const cappedPost = async (body: object) => {
+    const answer = JSON.parse(await capped.handle(request(1, body)));
+    if (typeof answer.refused === "string") throw new BrokerRefused(answer.refused, answer.exhausted === true);
+    return answer as Answer;
+  };
+  const wide: Budget = { limit: 10, spent: 0, reserved: 0, stopped: false };
+  assert.ok(await budgetedCall(cappedPost, wide, requestBody("claude-sonnet-5-5", "S", []), sonnet));
+  assert.equal(await budgetedCall(cappedPost, wide, requestBody("claude-sonnet-5-5", "S", []), sonnet), null);
+  assert.deepEqual([wide.stopped, wide.reserved], [true, 0]);
+  // A request the broker does not send fails the run.
+  await assert.rejects(budgetedCall(async () => Promise.reject(new BrokerRefused("a model it does not name", false)), { limit: 10, spent: 0, reserved: 0, stopped: false }, {}, sonnet), /does not name/);
+  // A lost answer is sent again NETWORK_RETRIES times, each counted at its most, then fails.
+  const lost: Budget = { limit: 10, spent: 0, reserved: 0, stopped: false };
+  let tries = 0;
+  const losing = async () => {
+    tries++;
+    return { status: -1, retryAfter: "", text: "the request failed" };
+  };
+  await assert.rejects(budgetedCall(losing, lost, {}, sonnet), NetworkError);
+  assert.equal(tries, NETWORK_RETRIES + 1);
+  assert.ok(Math.abs(lost.spent - tries * worstCost({}, sonnet)) < 1e-12, String(lost.spent));
+});
+
+/** A socket address for a test: a named pipe on Windows, a path in a temporary directory elsewhere. */
+const socketPath = (dir: string, name: string) => (process.platform === "win32" ? `\\\\.\\pipe\\mente-${name}-${process.pid}-${Date.now()}` : join(dir, `${name}.sock`));
+
+test("the harness fails clearly when the broker is not there, goes away, refuses or answers what it cannot read", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mente-broker-"));
+  try {
+    await assert.rejects(connectBroker(socketPath(dir, "nobody")), /the broker is not there/);
+    // A broker that answers by id, out of order; refuses id 3, and id 4 past the run's limits;
+    // answers id 5 with no JSON.
+    const at = socketPath(dir, "fake");
+    const server = net.createServer((conn) => {
+      let pending = "";
+      conn.setEncoding("utf8");
+      conn.on("data", (chunk: string) => {
+        pending += chunk;
+        const lines = pending.split("\n");
+        pending = lines.pop() ?? "";
+        for (const l of lines) {
+          const { id } = JSON.parse(l);
+          if (id === 1) setTimeout(() => conn.write(`${JSON.stringify({ id, status: 200, retryAfter: "", text: "one" })}\n`), 50);
+          if (id === 2) conn.write(`${JSON.stringify({ id, status: 200, retryAfter: "", text: "two" })}\n`);
+          if (id === 3) conn.write(`${JSON.stringify({ id, refused: "a model it does not name" })}\n`);
+          if (id === 4) conn.write(`${JSON.stringify({ id, refused: "a request past the run's 2", exhausted: true })}\n`);
+          if (id === 5) conn.write("garbage\n");
+        }
+      });
+    });
+    await new Promise<void>((done) => server.listen(at, done));
+    const link = await connectBroker(at);
+    const [one, two] = await Promise.all([link.post({}), link.post({})]);
+    assert.deepEqual([one.text, two.text], ["one", "two"]);
+    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && !e.exhausted);
+    await assert.rejects(link.post({}), (e: unknown) => e instanceof BrokerRefused && e.exhausted);
+    await assert.rejects(link.post({}), /cannot read: garbage/);
+    await assert.rejects(link.post({}), BrokerBroken, "a broken link took another request");
+    // A broker that goes away while a request waits, and one that never answers.
+    const quiet = net.createServer((conn) => setTimeout(() => conn.destroy(), 50));
+    const quietAt = socketPath(dir, "quiet");
+    await new Promise<void>((done) => quiet.listen(quietAt, done));
+    await assert.rejects((await connectBroker(quietAt)).post({}), /the broker is gone/);
+    // It reads what it is sent, so that it sees the link close; one that never read would hold its
+    // end of the connection open, and the test's process with it.
+    const mute = net.createServer((conn) => conn.resume());
+    const muteAt = socketPath(dir, "mute");
+    await new Promise<void>((done) => mute.listen(muteAt, done));
+    const muted = await connectBroker(muteAt, 100);
+    await assert.rejects(muted.post({}), /gave no answer/);
+    // A closed link fails what still waits, and takes nothing more.
+    const waits = muted.post({});
+    muted.close();
+    await assert.rejects(waits, /closed its link/);
+    await assert.rejects(muted.post({}), /closed its link/);
+    await Promise.all([server, quiet, mute].map((s) => new Promise((done) => s.close(done))));
+    // A failed answer is a network error the caller counts as spent; an error status throws.
+    await assert.rejects(send(async () => ({ status: -1, retryAfter: "", text: "the request failed" }), {}), NetworkError);
+    await assert.rejects(send(async () => ({ status: 400, retryAfter: "", text: "bad" }), {}), /the API answered 400: bad/);
+    const reply = await send(async () => ({ status: 200, retryAfter: "", text: JSON.stringify({ content: [{ type: "text", text: "x" }], stop_reason: "end_turn", usage: {} }) }), {});
+    assert.deepEqual([reply.text, reply.stop_reason], ["x", "end_turn"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the broker starts under its pinned flags, reads its key and limits, and refuses beyond them without sending", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mente-broker-"));
+  const at = socketPath(dir, "broker");
+  const script = join(REPOSITORY, "benchmark", "harness", "broker.ts");
+  const child = spawn(process.execPath, [...brokerFlags([script, join(REPOSITORY, "benchmark", "harness", "broker-limits.json")]), script, "--socket", at, "--budget", "1"], {
+    cwd: REPOSITORY,
+    env: cleared(),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let log = "";
+  child.stderr.on("data", (d) => (log += d));
+  child.stdout.on("data", (d) => (log += d));
+  child.stdin.end(`${KEY}\n`);
+  try {
+    let link: Awaited<ReturnType<typeof connectBroker>> | undefined;
+    for (let k = 0; k < 100 && !link; k++) {
+      link = await connectBroker(at).catch(() => undefined);
+      if (!link) await new Promise((done) => setTimeout(done, 100));
+    }
+    assert.ok(link, `the broker did not listen: ${log}`);
+    await assert.rejects(link.post({ ...haiku(), model: "gpt-x" }), /does not name/);
+    await assert.rejects(link.post(haiku(MAX_TOKENS + 1)), /beyond 1 to/);
+    link.close();
+    assert.match(log, /the broker listens at/);
+    assert.ok(!log.includes(KEY), "the broker wrote its key");
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

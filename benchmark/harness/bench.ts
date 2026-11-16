@@ -14,15 +14,17 @@
 //   node benchmark/harness/bench.ts --budget <dollars> [--milestone M1] [--languages mente,rust,odin]
 //     [--models claude-sonnet-5-5,claude-haiku-5-5] [--runs 5] [--tasks all|<id>,<id>]
 //     [--held-out <dir>] [--concurrency 8] [--mn target/release/mn] [--native] [--rustc rustc]
-//     [--odin odin] [--sandbox benchmark/harness/sandbox.sh] [--out bench-out]
+//     [--odin odin] [--sandbox benchmark/harness/sandbox.sh] [--out bench-out] --broker <socket>
 //
 // Agent programs can read files and open sockets, so it runs only with --sandbox, which runs every
 // agent build and agent program with least privilege (benchmark/harness/sandbox.sh): no network,
 // and the API key out of reach. It refuses to run without it.
 //
-// It calls the Claude Messages API with the key in ANTHROPIC_API_KEY, and stops before any call
-// that could take its spending past the budget, in US dollars: each call reserves the most it can
-// cost before it is sent. It writes `results.json` after every run, with the public runs in full
+// It holds no API key, and refuses to start with one in its environment: it sends each call of the
+// Claude Messages API to the broker at --broker (benchmark/harness/broker.ts), the one process that
+// holds the key, which spends within the run's limits too. It stops before any call that could take
+// its spending past the budget, in US dollars: each call reserves the most it can cost before it is
+// sent. It writes `results.json` after every run, with the public runs in full
 // and the held-out set only in the totals. The held-out runs' prompts, programs and records go to
 // `held-out/` under the output directory, which the workflow never uploads, and the log names a
 // held-out task only by its place in the set, so that its results leave the runner only as totals.
@@ -32,19 +34,17 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   API_VERSION,
-  ask,
-  callCost,
+  budgetedCall,
   MAX_TOKENS,
-  NetworkError,
   parseModels,
-  reserve,
-  settle,
-  worstCost,
+  requestBody,
   type Budget,
   type Message,
   type Model,
+  type Post,
   type Reply,
 } from "./api.ts";
+import { connectBroker } from "./brokered.ts";
 import {
   BUILD_MODES,
   REPOSITORY,
@@ -69,8 +69,6 @@ import { own, setOwn } from "../own.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAX_REPAIRS = 10;
-/** A lost connection is retried this many times; each try counts as spent at its most. */
-const NETWORK_RETRIES = 3;
 const DOCUMENTS: Partial<Record<Lang, string>> = { mente: "docs/language-card.md", odin: "benchmark/control/odin.md" };
 
 function option(name: string, fallback: string): string {
@@ -106,29 +104,16 @@ interface Spec {
 }
 
 interface Context {
-  apiKey: string;
+  post: Post;
   budget: Budget;
   systems: Partial<Record<Lang, string>>;
   tools: Tools;
   out: string;
 }
 
-/** One call within the budget: null when the budget stops it. */
-async function call(ctx: Context, spec: Spec, system: string, messages: Message[]): Promise<{ reply: Reply; cost: number } | null> {
-  for (let tries = 0; ; tries++) {
-    const worst = worstCost(system.length + JSON.stringify(messages).length, spec.model);
-    if (!reserve(ctx.budget, worst)) return null;
-    try {
-      const reply = await ask(ctx.apiKey, spec.model.id, system, messages);
-      const cost = callCost(reply.usage, spec.model);
-      settle(ctx.budget, worst, cost);
-      return { reply, cost };
-    } catch (e) {
-      // A lost answer may still have been billed, so it counts at its most.
-      settle(ctx.budget, worst, e instanceof NetworkError ? worst : 0);
-      if (!(e instanceof NetworkError) || tries >= NETWORK_RETRIES) throw e;
-    }
-  }
+/** One call within the budget, with the measured run's cache breakpoints: null when the budget stops it. */
+function call(ctx: Context, spec: Spec, system: string, messages: Message[]): Promise<{ reply: Reply; cost: number } | null> {
+  return budgetedCall(ctx.post, ctx.budget, requestBody(spec.model.id, system, messages), spec.model);
 }
 
 /** The failure classes of one program: its codes' classes or a build failure, else its cases' faults. */
@@ -280,11 +265,13 @@ async function main(): Promise<void> {
     cover: resolve(out),
   };
   checkOutside(out, tools);
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
-  if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
-  // Agent programs run while this process holds the key, so never outside the sandbox: an empty
-  // --sandbox once meant every build ran unconfined.
-  if (!tools.sandbox) throw new Error("pass --sandbox: the agents' programs run while this process holds the API key");
+  // The broker holds the key; this process starts agent code, and holds none.
+  if (process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is set: the harness holds no key, the broker does (benchmark/harness/broker.ts)");
+  const brokerAt = option("broker", "");
+  if (brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
+  // Agent programs run beside the broker, so never outside the sandbox: an empty --sandbox once meant
+  // every build ran unconfined.
+  if (!tools.sandbox) throw new Error("pass --sandbox: the agents' programs run on the machine whose broker holds the API key");
 
   // The toolchains, checked against their pins and recorded.
   const versions: Partial<Record<Lang, string>> = {};
@@ -363,7 +350,8 @@ async function main(): Promise<void> {
   mkdirSync(join(out, "runs"), { recursive: true });
   mkdirSync(join(out, "held-out"), { recursive: true });
   const budget: Budget = { limit: Number(budgetText), spent: 0, reserved: 0, stopped: false };
-  const ctx: Context = { apiKey, budget, systems, tools, out };
+  const broker = await connectBroker(brokerAt);
+  const ctx: Context = { post: (body) => broker.post(body), budget, systems, tools, out };
   const done: Detailed[] = [];
   let failure = "";
   let written = 0;
@@ -430,6 +418,7 @@ async function main(): Promise<void> {
     }
   };
   await Promise.all(Array.from({ length: Math.max(concurrency, 1) }, worker));
+  broker.close();
   write(true);
   console.log(
     `${done.length} of ${specs.length} runs, $${budget.spent.toFixed(2)} of $${budget.limit}` +

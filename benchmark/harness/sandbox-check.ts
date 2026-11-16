@@ -6,7 +6,11 @@
 // file standing in for the held-out set, which lives outside the workspace and is hidden by name;
 // to read a file planted under <out>/held-out/, standing in for a held-out run's record beside the
 // canary's own folder, as a public run's build sits beside the held-out runs' in a measured run; to
-// write into a directory outside its own; and to write into its own. Four Odin canaries read the
+// connect to a socket listening where the broker listens, $RUNNER_TEMP/broker/socket, whose
+// requests the broker sends on with the API key (benchmark/harness/broker.ts); to write into a
+// directory outside its own; and to write into its own. It also checks that the kernel lets no
+// process trace one it did not start (Yama's ptrace_scope at 1 or more), so that no process of the
+// runner's user reads the key out of the broker's memory. Four Odin canaries read the
 // credential file, the workspace file, the held-out stand-in and the held-out run's file at compile
 // time with `#load`.
 // With the sandbox each attempt must fail, except the write into the canary's own directory, which
@@ -21,7 +25,8 @@
 // --out must lie outside the repository, which the sandbox hides; the
 // held-out stand-in and the write probe go beside it. It runs in the workflow "Harness". The
 // marker stands in for the API key; the canary never prints what it read, only whether it could.
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -39,7 +44,7 @@ import { own } from "../own.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MARKER = "BENCH-DRIVER-MARKER-7f3a91c2";
-const ROUTES = ["env", "proc", "file", "net", "ws", "held", "run", "write", "work"] as const;
+const ROUTES = ["env", "proc", "file", "net", "ws", "held", "run", "broker", "write", "work"] as const;
 type Route = typeof ROUTES extends readonly (infer R)[] ? R : never;
 
 function option(name: string, fallback: string): string {
@@ -104,6 +109,19 @@ async function main(): Promise<void> {
   const hidden = [...hide, out];
   // The driver carries the marker in its own environment, so /proc reaches it only unconfined.
   process.env.BENCH_CANARY_DRIVER = MARKER;
+  // A socket where the broker listens, which the sandbox covers by default: the check runs before
+  // the broker starts, and refuses to stand in for one that is there.
+  const runnerTemp = process.env.RUNNER_TEMP ?? "";
+  if (runnerTemp === "") throw new Error("RUNNER_TEMP is not set; the sandbox check needs it to plant the broker's socket");
+  const brokerDir = join(runnerTemp, "broker");
+  if (existsSync(brokerDir)) throw new Error(`${brokerDir} exists: the sandbox check runs before the broker starts`);
+  mkdirSync(brokerDir, { recursive: true });
+  const brokerSocket = join(brokerDir, "socket");
+  const listener = net.createServer((conn) => conn.end());
+  await new Promise<void>((done, failed) => {
+    listener.on("error", failed);
+    listener.listen(brokerSocket, () => done());
+  });
 
   const failures: string[] = [];
   try {
@@ -117,7 +135,7 @@ async function main(): Promise<void> {
     if (built.status !== 0) throw new Error(`the canary did not build: ${built.stderr}`);
 
     const run = async (confined: boolean): Promise<Run> => {
-      const [cmd, args] = sandboxed(confined ? sandbox : "", rustDir, exe, [credential, workspaceFile, heldOutFile, outside, otherRun], hidden);
+      const [cmd, args] = sandboxed(confined ? sandbox : "", rustDir, exe, [credential, workspaceFile, heldOutFile, outside, otherRun, brokerSocket], hidden);
       // The needle lets the canary find the marker in /proc; a non-secret name, so it is forwarded.
       const env = childEnv({ BENCH_CANARY_NEEDLE: MARKER, BENCH_CANARY_ENV: "set" });
       const p = await runProcess(cmd, args, { cwd: rustDir, env, timeoutMs: RUN_TIMEOUT_MS });
@@ -171,7 +189,18 @@ async function main(): Promise<void> {
       if (odinControl.status !== 0) failures.push(`the Odin control did not read the ${what} with #load: ${odinControl.stderr.trim()}`);
       if (odinConfined.status === 0) failures.push(`the sandbox let Odin read the ${what} at compile time with #load`);
     }
+    // No process of the runner's user may trace one it did not start: Yama's scope 1 or more.
+    let scope = "";
+    try {
+      scope = readFileSync("/proc/sys/kernel/yama/ptrace_scope", "utf8").trim();
+    } catch {
+      scope = "absent";
+    }
+    console.log(`yama ptrace_scope: ${scope}`);
+    if (!/^[1-3]$/.test(scope)) failures.push(`Yama's ptrace_scope is ${scope}, so a process of the runner's user could read the broker's memory, and the key in it`);
   } finally {
+    await new Promise((done) => listener.close(() => done(undefined)));
+    rmSync(brokerDir, { recursive: true, force: true });
     rmSync(credential, { force: true });
     rmSync(heldOutDir, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
@@ -183,7 +212,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(
-    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set, another run's folder and writes outside the working directory, and #load of each at build time",
+    "\nthe sandbox denies the driver's marker, a credential file, the environment, the network, the workspace, the held-out set, another run's folder, the broker's socket and writes outside the working directory, and #load of each at build time; no process traces one it did not start",
   );
 }
 

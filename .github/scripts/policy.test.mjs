@@ -46,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 65;
+const FLOOR = 66;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1142,11 +1142,11 @@ const PINNED_JOBS = new Map([
   ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
-  ["ci.yml#docs", "728d28193b3dc09676ca7a597df6d2316b575ac7cfeae6023d14d9985d3f75ea"],
+  ["ci.yml#docs", "4e6efc58580a30edeadd6ecf4464bd7ae2727083f3daa060f105aca1969ed0e8"],
   ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
-  ["benchmark.yml#bench", "a0c1f4a01a77bdca6c4244bdcb8a1d7823ecab6bbbf7af255e5558549748e387"],
-  ["prelim.yml#prelim", "62295b08cf45f0ec24d0ae0e64280033dd717043a3a91b426d44db1f04184da8"],
-  ["probe.yml#write", "47b3f2429c6583a911517db869de4cc614911d0bba55ee5bcd37802a986b4a4f"],
+  ["benchmark.yml#bench", "a4ba33dc5807bb9b4d795e35fdd5253871e879bf7123f8cae5a0495d96c8d258"],
+  ["prelim.yml#prelim", "ecd46f241e418c52cdcf0cad14f8570cde989c904f741ad1b8846a5a878070d6"],
+  ["probe.yml#write", "0152e169c66afb6044b882c4db3d02ec33827b233a554b56c678a9fe771f37ab"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -2023,7 +2023,11 @@ const TOOLCHAIN_STEP = "node .github/scripts/build-time-code.mjs --before-toolch
 /// a package manager; the watch; and, each in the one job named, the gate's own steps that read
 /// nothing of the change's but the scripts the policy pins.
 const CHECKOUT_INPUTS = [{ "persist-credentials": false }, { "fetch-depth": 0, "persist-credentials": false }];
-const NODE_INPUTS = { "node-version": 24, "package-manager-cache": false };
+/// How the broker, the one process that holds the API key, is started, and the one Node every job
+/// sets up, whose permission model the broker's flags rely on (benchmark/harness/permission.json):
+/// read here, and by the harness's test of the escapes.
+const PERMISSION = JSON.parse(read("benchmark/harness/permission.json"));
+const NODE_INPUTS = { "node-version": PERMISSION.node, "package-manager-cache": false };
 const BEFORE_TOOLCHAIN = new Map([
   ["node --test .github/scripts/policy.test.mjs .github/scripts/yaml.test.mjs", { job: "ci.yml#docs", why: "the policy, first in the Documentation job" }],
   ["node .github/scripts/action-pins.mjs", { job: "ci.yml#docs", why: "the check of the actions' pins against their releases" }],
@@ -2132,7 +2136,7 @@ check("every required or pinned job but those of GATE_ONLY and SECRET_JOBS check
       ["P1, working-directory on the toolchain step", (job) => (toolchain(job)["working-directory"] = "compiler")],
       ["P2, a variable on the toolchain step", (job) => (toolchain(job).env = { MENTE_X: "1" })],
       ["P2, a shell on the toolchain step", (job) => (toolchain(job).shell = "sh")],
-      ["P3, setup-node with an input more", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { "node-version": 24, cache: "npm" } })],
+      ["P3, setup-node with an input more", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { ...NODE_INPUTS, cache: "npm" } })],
       ["P3, the checkout with a path", (job) => (job.steps[0].with = { ...job.steps[0].with, path: "elsewhere" })],
       ["P3, the checkout of another repository", (job) => (job.steps[0].with = { ...job.steps[0].with, repository: "someone/else" })],
       ["P4, a job default of a working directory", (job) => (job.defaults = { run: { shell: "bash", "working-directory": "compiler" } })],
@@ -2142,7 +2146,7 @@ check("every required or pinned job but those of GATE_ONLY and SECRET_JOBS check
       ["P6, GIT_CONFIG_COUNT on the workflow", (job, doc) => (doc.env = { ...doc.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "./x" })],
       ["a step of the change's before the check", (job) => job.steps.splice(1, 0, { name: "x", run: "bash ./x.sh" })],
       ["a step allowed only in another job, before the check", (job) => job.steps.splice(1, 0, { name: "x", run: 'echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"' })],
-      ["setup-node with its own cache left on", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { "node-version": 24 } })],
+      ["setup-node with its own cache left on", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { "node-version": PERMISSION.node } })],
       ["npm ci before the check", (job) => job.steps.splice(1, 0, { name: "x", run: "npm ci --ignore-scripts" })],
       ["an action before the check", (job) => job.steps.splice(1, 0, { uses: `someone/action@${"0".repeat(40)}` })],
       ["a second checkout", (job) => job.steps.splice(1, 0, clone(job.steps[0]))],
@@ -2533,7 +2537,7 @@ const COMPUTED_LOADS = new Map([
 ]);
 /// The modules of node a module of a secret job may import, each by `node:`; child_process only in
 /// SPAWNERS. None of them loads or runs code: no module, vm, worker_threads or child_process here.
-const NODE_MODULES = new Set(["node:fs", "node:path", "node:url", "node:crypto"]);
+const NODE_MODULES = new Set(["node:fs", "node:path", "node:url", "node:crypto", "node:net"]);
 /// The modules of a secret job that may start a process: each by its exact import of
 /// child_process, and every use of what it imports a call on a line named or counted, so that what
 /// they start is read where they start it: the harness's runProcess and the preliminary run's
@@ -2778,6 +2782,118 @@ const SECRET_JOBS = new Map([
 ]);
 /// The environment that holds the secrets.
 const SECRET_ENVIRONMENT = "benchmark";
+/// A flag as the step writes it: the value of a flag that names the workspace, quoted.
+const quoteFlag = (f) => (f.includes("=$") ? f.replace(/=(.*)$/, '="$1"') : f);
+/// The one step of a secret job that holds the API key: it starts the broker in the background,
+/// the key on its standard input and in no environment (`env -i`, which also drops NODE_OPTIONS,
+/// whose --allow-child-process would undo the permission model), under permission.json's flags,
+/// and ends once the broker listens (docs/design-review.md, untrusted-test-isolation).
+export const BROKER_STEP = {
+  name: "The broker, the one process that holds the API key",
+  env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}", BUDGET: "${{ inputs.budget }}" },
+  run: [
+    'mkdir -m 700 "$RUNNER_TEMP/broker"',
+    `printf '%s\\n' "$ANTHROPIC_API_KEY" | env -i PATH="$PATH" node ${PERMISSION.broker.flags.map(quoteFlag).join(" ")} ${PERMISSION.broker.script} --socket "$RUNNER_TEMP/broker/socket" --budget "$BUDGET" > "$RUNNER_TEMP/broker/log" 2>&1 &`,
+    'echo "$!" > "$RUNNER_TEMP/broker/pid"',
+    'for _ in $(seq 100); do if [ -S "$RUNNER_TEMP/broker/socket" ]; then break; fi; sleep 0.1; done',
+    'cat "$RUNNER_TEMP/broker/log"',
+    'if [ ! -S "$RUNNER_TEMP/broker/socket" ]; then echo "::error::the broker did not start"; exit 1; fi',
+    "",
+  ].join("\n"),
+};
+/// The last step of a secret job: it stops the broker, whatever came before.
+export const STOP_STEP = {
+  name: "Stop the broker",
+  if: "always()",
+  run: ['if [ -f "$RUNNER_TEMP/broker/pid" ]; then kill "$(cat "$RUNNER_TEMP/broker/pid")" 2> /dev/null || true; fi', 'if [ -f "$RUNNER_TEMP/broker/log" ]; then cat "$RUNNER_TEMP/broker/log"; fi', ""].join("\n"),
+};
+
+/// What is wrong with how a secret job holds its key: one step holds it, BROKER_STEP exactly; the
+/// one step beside it that may hold a secret is the held-out checkout, whose token it keeps out of
+/// .git/config; the step that runs the harness holds none and talks to the broker after it starts;
+/// STOP_STEP comes last; nothing wider than a step, the workflow's env or the job's, holds a secret;
+/// and Node is permission.json's version, whose permission model the flags rely on (nodeProblems).
+export function brokerProblems(key, job, doc = {}) {
+  const found = [];
+  const all = steps(job);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  if (holdsSecret(doc.env) || holdsSecret({ ...job, steps: null }) || "secrets" in job) found.push(`${key} holds a secret wider than a step, which would reach every step beside the broker`);
+  const brokers = all.filter((s) => same(s, BROKER_STEP));
+  if (brokers.length !== 1) found.push(`${key} does not start the broker once, as BROKER_STEP`);
+  for (const s of all.filter((x) => holdsSecret(x) && !same(x, BROKER_STEP))) {
+    // The checkout's token is its one secret: none in its env, in another input or in its condition.
+    const checkout = /^actions\/checkout@/.test(String(s.uses ?? "")) && isPlain(s.with) && "token" in s.with && !holdsSecret({ ...s, with: { ...s.with, token: null } });
+    if (!checkout) found.push(`${key}, step "${s.name ?? s.uses}": holds a secret beside the broker`);
+    else if (s.with["persist-credentials"] !== false && s.with["persist-credentials"] !== "false") found.push(`${key}: the held-out checkout keeps its token in .git/config, persist-credentials not false`);
+  }
+  const stops = all.filter((s) => same(s, STOP_STEP));
+  if (stops.length !== 1 || all.at(-1) !== stops[0]) found.push(`${key} does not stop the broker in its last step, as STOP_STEP`);
+  const harness = all.filter((s) => /benchmark\/harness\/(bench|prelim|probe)\.ts/.test(String(s.run ?? "")));
+  const talks = harness.length === 1 && String(harness[0].run).includes('--broker "$RUNNER_TEMP/broker/socket"') && all.indexOf(harness[0]) > all.indexOf(brokers[0]);
+  if (!talks) found.push(`${key} does not run the harness once, after the broker starts, talking to it`);
+  return found;
+}
+
+/// What is wrong with the Node the jobs set up: each sets up permission.json's, one Node for the
+/// broker, for the tests of its permission model and for every other job, read in one place.
+export function nodeProblems(jobs) {
+  const found = [];
+  for (const { file, id, job } of jobs) {
+    for (const s of steps(job).filter((x) => /^actions\/setup-node@/.test(String(x.uses ?? "")))) {
+      if (String(s.with?.["node-version"]) !== PERMISSION.node) found.push(`${file}#${id} sets up Node ${s.with?.["node-version"]}, not ${PERMISSION.node}, whose permission model the broker's flags rely on`);
+    }
+  }
+  return found;
+}
+
+check("the broker, the one process that holds the key, starts under permission.json's flags, and every job runs its Node", () => {
+  // The flags: Node's permission model and no code from strings, reads of the broker and its limits
+  // alone, and none of the flags that would let it start, load or write anything.
+  const flags = PERMISSION.broker.flags;
+  assert.ok(flags.includes("--permission") && flags.includes("--disallow-code-generation-from-strings"), "the broker's flags lose the permission model or the ban on code from strings");
+  assert.deepEqual(flags.filter((f) => f.startsWith("--allow-")).sort(), ["--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json", "--allow-fs-read=$GITHUB_WORKSPACE/benchmark/harness/broker.ts"]);
+  for (const r of PERMISSION.refused) assert.ok(!flags.some((f) => f.startsWith(r)), `the broker's flags hold ${r}`);
+  assert.match(PERMISSION.node, /^\d+\.\d+\.\d+$/);
+  // The broker imports nothing of the repository: its flags let it read no other file, so an
+  // import would fail as it ran, and this says so where review reads it.
+  assert.deepEqual(readSecretModule(PERMISSION.broker.script, read(PERMISSION.broker.script)).imports, [], "the broker imports a file, which its flags do not let it read");
+  // Every job sets up that Node: the secret jobs, the jobs that run the harness's tests and the
+  // planted escapes among them, and the rest.
+  assert.deepEqual(nodeProblems(allJobs()), []);
+  for (const v of [24, "24", "24.x", "lts/*", undefined]) {
+    const planted = [{ file: "x.yml", id: "y", job: { steps: [{ uses: "actions/setup-node@0", with: v === undefined ? {} : { "node-version": v } }] } }];
+    assert.ok(nodeProblems(planted).length > 0, `a job that sets up Node ${v} passes`);
+  }
+  // Planted: each way a secret job's broker could go wrong.
+  const job = {
+    steps: [
+      { uses: "actions/checkout@0", with: { "persist-credentials": false } },
+      { uses: "actions/setup-node@0", with: { "node-version": PERMISSION.node, "package-manager-cache": false } },
+      { uses: "actions/checkout@0", with: { token: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}", "persist-credentials": false } },
+      BROKER_STEP,
+      { name: "Run", run: 'node --disallow-code-generation-from-strings benchmark/harness/bench.ts --sandbox "$SANDBOX" --broker "$RUNNER_TEMP/broker/socket"' },
+      STOP_STEP,
+    ],
+  };
+  assert.deepEqual(brokerProblems("x.yml#y", job), []);
+  const at = (k, step) => ({ steps: job.steps.map((s, i) => (i === k ? step : s)) });
+  for (const [what, planted] of [
+    ["--allow-child-process among the flags", at(3, { ...BROKER_STEP, run: BROKER_STEP.run.replace("--permission", "--permission --allow-child-process") })],
+    ["no env -i", at(3, { ...BROKER_STEP, run: BROKER_STEP.run.replace('env -i PATH="$PATH" ', "") })],
+    ["the key in the harness's step", at(4, { ...job.steps[4], env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" } })],
+    ["a harness that does not talk to the broker", at(4, { name: "Run", run: 'node benchmark/harness/bench.ts --sandbox "$SANDBOX"' })],
+    ["the held-out checkout keeping its token", at(2, { uses: "actions/checkout@0", with: { token: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}" } })],
+    ["the held-out token in a step's env", at(4, { ...job.steps[4], env: { HELD_OUT: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}" } })],
+    ["the held-out token in the checkout's env", at(2, { ...job.steps[2], env: { TOKEN: "${{ secrets.MENTE_BENCH_HELDOUT_TOKEN }}" } })],
+    ["the key in the job's env", { ...job, env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" } }],
+    ["no stop", { steps: job.steps.slice(0, 5) }],
+    ["a stop that is not last", { steps: [...job.steps.slice(0, 4), STOP_STEP, job.steps[4]] }],
+    ["the broker started twice", { steps: [...job.steps.slice(0, 4), BROKER_STEP, ...job.steps.slice(4)] }],
+  ]) {
+    assert.ok(brokerProblems("x.yml#y", planted).length > 0, `a secret job with ${what} passes`);
+  }
+  assert.ok(brokerProblems("x.yml#y", job, { env: { K: "${{ secrets.ANTHROPIC_API_KEY }}" } }).length > 0, "a secret job whose workflow's env holds the key passes");
+});
 /// A node a job of SECRET_JOBS starts without disallowing code generation from strings.
 const NODE_WITHOUT_GUARD = /(^|[\s;&|(])node\s+(?!--disallow-code-generation-from-strings\s)/;
 
@@ -3055,10 +3171,13 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
       const check = all.findIndex((s) => /benchmark\/harness\/sandbox-check\.ts/.test(String(s.run ?? "")));
       assert.ok(check >= 0 && check < secretAt, `${key}: runs agent code, but sandbox-check.ts does not run before the secret is in reach`);
       for (const k of ["if", "continue-on-error"]) assert.ok(!(k in all[check]), `${key}: the sandbox check carries ${k}:`);
-      for (const s of all.slice(secretAt).filter((x) => holds(x) && typeof x.run === "string")) {
-        assert.match(s.run, /--sandbox "\$SANDBOX"/, `${key}, step "${s.name}": holds a secret and runs nothing through the sandbox`);
-      }
+      // The step that runs agent code, which holds no secret and talks to the broker, runs it all
+      // through the sandbox.
+      const runs = all.filter((s) => /benchmark\/harness\/(bench|prelim)\.ts/.test(String(s.run ?? "")));
+      assert.equal(runs.length, 1, `${key} runs the harness in ${runs.length} steps, not one`);
+      assert.match(runs[0].run, /--sandbox "\$SANDBOX"/, `${key}, step "${runs[0].name}": runs agent code, but not through the sandbox`);
     }
+    assert.deepEqual(brokerProblems(key, job, doc), []);
   }
   assert.deepEqual([...SECRET_JOBS.keys()].filter((k) => !found.has(k)), [], "SECRET_JOBS names jobs that hold no secret");
   // The final review's plants, and the other spellings of a secret.

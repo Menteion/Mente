@@ -97,7 +97,7 @@ jobs:
         run: chmod +x "$RUNNER_TEMP/bin/mn"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           package-manager-cache: false
       - name: Install the benchmark's Rust and Odin
         id: toolchains
@@ -106,17 +106,39 @@ jobs:
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
         run: node --disallow-code-generation-from-strings benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/sandbox-out"
-      - name: Run
+      - name: The broker, the one process that holds the API key
+        # The key reaches the broker on its standard input and in no environment, under Node's
+        # permission model: it can start no process, worker, addon or WASI, read only its own file and
+        # its limits, and write no file, and it spends within the run's budget and the limits of
+        # benchmark/harness/broker-limits.json. The step ends once the broker listens, and the shell
+        # that held the key with it (benchmark/harness/broker.ts, benchmark/harness/permission.json;
+        # docs/design-review.md, untrusted-test-isolation).
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BUDGET: ${{ inputs.budget }}
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/broker"
+          printf '%s\n' "$ANTHROPIC_API_KEY" | env -i PATH="$PATH" node --disallow-code-generation-from-strings --permission --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker.ts" --allow-fs-read="$GITHUB_WORKSPACE/benchmark/harness/broker-limits.json" benchmark/harness/broker.ts --socket "$RUNNER_TEMP/broker/socket" --budget "$BUDGET" > "$RUNNER_TEMP/broker/log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/broker/pid"
+          for _ in $(seq 100); do if [ -S "$RUNNER_TEMP/broker/socket" ]; then break; fi; sleep 0.1; done
+          cat "$RUNNER_TEMP/broker/log"
+          if [ ! -S "$RUNNER_TEMP/broker/socket" ]; then echo "::error::the broker did not start"; exit 1; fi
+      - name: Run
+        env:
           TASKS: ${{ inputs.tasks }}
           RUNS: ${{ inputs.runs }}
           BUDGET: ${{ inputs.budget }}
         run: >-
           node --disallow-code-generation-from-strings benchmark/harness/prelim.ts --sandbox "$SANDBOX" --mn "$RUNNER_TEMP/bin/mn"
-          --tasks "$TASKS" --runs "$RUNS" --budget "$BUDGET" --out "$RUNNER_TEMP/prelim-out"
+          --tasks "$TASKS" --runs "$RUNS" --budget "$BUDGET" --out "$RUNNER_TEMP/prelim-out" --broker "$RUNNER_TEMP/broker/socket"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: preliminary-run-${{ inputs.tasks }}
           path: ${{ runner.temp }}/prelim-out
+      - name: Stop the broker
+        # Whatever came before; its log holds no key, which the broker takes out of every byte it writes.
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/broker/pid" ]; then kill "$(cat "$RUNNER_TEMP/broker/pid")" 2> /dev/null || true; fi
+          if [ -f "$RUNNER_TEMP/broker/log" ]; then cat "$RUNNER_TEMP/broker/log"; fi

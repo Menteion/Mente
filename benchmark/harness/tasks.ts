@@ -128,16 +128,6 @@ export function extractProgram(reply: string): string {
   return (fenced ? own(fenced, 1) : reply).trim() + "\n";
 }
 
-export interface Usage {
-  input_tokens: number;
-  output_tokens: number;
-}
-
-/** What a call cost, in US dollars, at the given prices per million tokens. */
-export function costOf(usage: Usage, inputPerMillion: number, outputPerMillion: number): number {
-  return (usage.input_tokens * inputPerMillion + usage.output_tokens * outputPerMillion) / 1e6;
-}
-
 /** The system prompt: the language card is all the agent knows of Mente. */
 export function systemPrompt(card: string): string {
   return [

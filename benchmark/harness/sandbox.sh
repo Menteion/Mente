@@ -16,10 +16,12 @@
 #     /proc/<pid>/environ, which holds the key, cannot be opened;
 #   - a cleared environment rebuilt from a small allowlist, so the key is not in the command's own
 #     environment either;
-#   - a mount namespace in which an empty tmpfs covers $GITHUB_WORKSPACE and every --hide path
-#     (the held-out checkout, wherever it is, and the runs' output directory), an unreadable empty
-#     directory covers each credential directory under the runner's home, /tmp is a private tmpfs,
-#     and the root filesystem is read-only, so the toolchains cannot be changed;
+#   - a mount namespace in which an empty tmpfs covers $GITHUB_WORKSPACE, the broker's directory
+#     $RUNNER_TEMP/broker, whose socket would let the command spend the key (benchmark/harness/
+#     broker.ts), and every --hide path (the held-out checkout, wherever it is, and the runs' output
+#     directory), an unreadable empty directory covers each credential directory under the
+#     runner's home, /tmp is a private tmpfs, and the root filesystem is read-only, so the
+#     toolchains cannot be changed;
 #   - <workdir> alone stays visible and writable: when it lies inside a hidden path, as each build's
 #     directory lies inside the output directory, it is put back at its own path inside the tmpfs,
 #     so the command sees its own directory and none of the other runs' folders beside it;
@@ -46,7 +48,7 @@ shift
 # without repeats, and of nested ones only the outermost, since an inner path is covered with its
 # outer one and is gone once that is covered.
 hidden=()
-for p in "${GITHUB_WORKSPACE:-}" "${hide[@]}"; do
+for p in "${GITHUB_WORKSPACE:-}" "${RUNNER_TEMP:+$RUNNER_TEMP/broker}" "${hide[@]}"; do
   [ -n "$p" ] && [ -e "$p" ] || continue
   real="$(realpath "$p")"
   case " ${hidden[*]:-} " in

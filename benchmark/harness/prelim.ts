@@ -9,22 +9,21 @@
 // preliminary run, not a benchmark result, and it never opens the held-out set.
 //
 //   node benchmark/harness/prelim.ts --sandbox benchmark/harness/sandbox.sh --mn <mn> --out <dir>
-//     [--tasks core|non-core|<id>,<id>] [--runs 5] [--budget 5]
+//     --broker <socket> [--tasks core|non-core|<id>,<id>] [--runs 5] [--budget 5]
 //
-// The repairs need the key and the agents' programs in one process, so every `mn` call runs through
-// the sandbox (benchmark/harness/sandbox.sh), with no secret in its environment: agent-written code
-// never runs where the key is. The job proves the sandbox with sandbox-check.ts first
+// It holds no API key, and refuses to start with one in its environment: the broker at --broker
+// (benchmark/harness/broker.ts), the one process that holds the key, sends each call. Every `mn`
+// call on an agent's program runs through the sandbox (benchmark/harness/sandbox.sh), with no secret
+// in its environment: agent-written code never runs where the key is. The job proves the sandbox with sandbox-check.ts first
 // (.github/workflows/prelim.yml). The sandbox hides the repository, so --mn and --out lie outside it.
 //
-// It calls the Claude Messages API over HTTP with the key in ANTHROPIC_API_KEY. Each turn sends
-// the conversation so far as it was, the model's earlier replies unchanged, and the run stops
+// Each turn sends the conversation so far as it was, the model's earlier replies unchanged, and the run stops
 // before a call that could take its spending past the budget, in US dollars.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { REPOSITORY, childEnv, insideAny, namedCommand, sandboxed } from "./build.ts";
 import {
-  costOf,
   extractProgram,
   feedbackPrompt,
   hasTodo,
@@ -38,18 +37,14 @@ import {
   type CaseResult,
   type Task,
 } from "./tasks.ts";
+import { API_VERSION, budgetedCall, KNOWN_MODELS, MAX_TOKENS, type Budget, type Message, type Post } from "./api.ts";
+import { connectBroker } from "./brokered.ts";
 import { own } from "../own.mjs";
 
-const API_VERSION = "2026-10-21";
-const MAX_TOKENS = 16000;
 const MAX_REPAIRS = 10;
 
-// The models, a mid tier and a weaker one, with their prices in US dollars per million tokens
-// as Anthropic lists them on 2026-11-09 (Haiku's for prompts of 100K tokens or fewer).
-const MODELS = [
-  { id: "claude-sonnet-5-5", input: 2, output: 10 },
-  { id: "claude-haiku-5-5", input: 0.1, output: 0.5 },
-];
+// The models, a mid tier and a weaker one, with their prices from broker-limits.json (api.ts).
+const MODELS = [own(KNOWN_MODELS, "claude-sonnet-5-5"), own(KNOWN_MODELS, "claude-haiku-5-5")];
 
 function option(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
@@ -62,44 +57,6 @@ function readTasks(dir: string): Task[] {
     .filter((f) => f.endsWith(".md"))
     .sort()
     .map((f) => parseTask(readFileSync(join(dir, f), "utf8")));
-}
-
-type Message = { role: "user" | "assistant"; content: unknown };
-
-interface Reply {
-  content: unknown[];
-  text: string;
-  stop_reason: string;
-  usage: { input_tokens: number; output_tokens: number };
-}
-
-async function ask(apiKey: string, model: string, system: string, messages: Message[]): Promise<Reply> {
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": API_VERSION,
-      },
-      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages }),
-    });
-    if (response.ok) {
-      const body = await response.json();
-      const content = body.content ?? [];
-      const text = content
-        .filter((b: { type: string }) => b.type === "text")
-        .map((b: { text: string }) => b.text)
-        .join("\n");
-      return { content, text, stop_reason: body.stop_reason, usage: body.usage };
-    }
-    const retryable = response.status === 429 || response.status >= 500;
-    if (!retryable || attempt >= 3) {
-      throw new Error(`the API answered ${response.status}: ${await response.text()}`);
-    }
-    const after = Number(response.headers.get("retry-after") ?? "0");
-    await new Promise((done) => setTimeout(done, after > 0 ? after * 1000 : 2000 * 2 ** attempt));
-  }
 }
 
 interface Reported {
@@ -166,9 +123,13 @@ async function main(): Promise<void> {
   const budget = Number(option("budget", "5"));
   const out = resolve(option("out", "prelim-out"));
   const sandbox = option("sandbox", "");
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
-  if (apiKey === "") throw new Error("set ANTHROPIC_API_KEY");
-  if (!sandbox) throw new Error("pass --sandbox: the agents' programs run while this process holds the API key");
+  // The broker holds the key; this process runs agent code through the sandbox, and holds none.
+  if (process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is set: the harness holds no key, the broker does (benchmark/harness/broker.ts)");
+  const brokerAt = option("broker", "");
+  if (brokerAt === "") throw new Error("pass --broker <socket>: the broker sends the calls, with the key");
+  if (!sandbox) throw new Error("pass --sandbox: the agents' programs run on the machine whose broker holds the API key");
+  const broker = await connectBroker(brokerAt);
+  const post: Post = (body) => broker.post(body);
   for (const [what, path] of [["--mn", mn], ["--out", out]]) {
     if (insideAny(path, [REPOSITORY])) throw new Error(`${what} must lie outside ${REPOSITORY}, which the sandbox hides`);
   }
@@ -193,6 +154,7 @@ async function main(): Promise<void> {
     spent: 0,
     stopped_early: false,
   };
+  const spending: Budget = { limit: budget, spent: 0, reserved: 0, stopped: false };
   outer: for (const model of MODELS) {
     for (const task of tasks) {
       const examples = task.examples.map(parseCase).filter((c): c is Case => c !== null);
@@ -205,15 +167,13 @@ async function main(): Promise<void> {
         let file = "";
         let finished = false;
         for (let attempt = 0; attempt <= MAX_REPAIRS && !finished; attempt++) {
-          const chars = system.length + JSON.stringify(messages).length;
-          const worst = ((chars / 3) * model.input + MAX_TOKENS * model.output) / 1e6;
-          if (record.spent + worst > budget) {
+          const answered = await budgetedCall(post, spending, { model: model.id, max_tokens: MAX_TOKENS, system, messages }, model);
+          if (!answered) {
             record.stopped_early = true;
             break outer;
           }
-          const reply = await ask(apiKey, model.id, system, messages);
-          const cost = costOf(reply.usage, model.input, model.output);
-          record.spent += cost;
+          const { reply, cost } = answered;
+          record.spent = spending.spent;
           spent += cost;
           // The reply goes back unchanged, so the transcript stays append-only.
           messages.push({ role: "assistant", content: reply.content });
@@ -266,6 +226,7 @@ async function main(): Promise<void> {
       }
     }
   }
+  broker.close();
   writeFileSync(join(out, "results.json"), JSON.stringify(record, null, 2));
   console.log(
     `${record.runs.length} runs, $${record.spent.toFixed(2)} of $${budget}${record.stopped_early ? ", stopped at the budget" : ""}`,
