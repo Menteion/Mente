@@ -9,6 +9,7 @@
 // arguments; a `mut` argument is changed in place.
 
 import { own, setOwn } from "./own.mjs";
+import { quotient } from "./quotient.mjs";
 
 const some = (v) => ({ $: "some", args: [v] });
 const none = { $: "none" };
@@ -78,7 +79,7 @@ export const tasks = {
   },
 
   mean8(_, a) {
-    return a.reduce((s, x) => s + x, 0n) / 8n; // BigInt division truncates toward zero
+    return quotient(a.reduce((s, x) => s + x, 0n), 8n); // BigInt division truncates toward zero
   },
 
   "index-of-max"(_, a) {
@@ -92,7 +93,7 @@ export const tasks = {
   },
 
   percent(_, part, whole) {
-    return (part * 100n) / whole;
+    return quotient(part * 100n, whole);
   },
 
   "lower-bound"(_, a, x) {
@@ -121,7 +122,7 @@ export const tasks = {
     const out = [];
     for (let k = 0; k < 12; k++) {
       out.push(p % 10n);
-      p /= 10n;
+      p = quotient(p, 10n);
     }
     return out;
   },
@@ -146,7 +147,7 @@ export const tasks = {
   bucket(_, x, lo, hi, n) {
     if (x < lo) return 0n;
     if (x > hi) return n - 1n;
-    return ((x - lo) * n) / (hi - lo + 1n);
+    return quotient((x - lo) * n, hi - lo + 1n);
   },
 
   "merge-unique"(_, a, b, out) {
@@ -189,7 +190,7 @@ export const tasks = {
       if (stack.length < 2) return err(tag("StackUnderflow"));
       const b = stack.pop(), a = stack.pop();
       if (t === "/" && b === 0n) return err(tag("DivisionByZero"));
-      const r = t === "+" ? a + b : t === "-" ? a - b : t === "*" ? a * b : a / b;
+      const r = t === "+" ? a + b : t === "-" ? a - b : t === "*" ? a * b : quotient(a, b);
       if (!inI64(r)) return err(tag("Overflow"));
       stack.push(r);
     }
@@ -307,14 +308,14 @@ export const tasks = {
 
   stats(_, xs) {
     if (xs.length === 0) return none;
-    const mean = xs.reduce((s, x) => s + x, 0) / xs.length;
-    const variance = xs.reduce((s, x) => s + (x - mean) ** 2, 0) / xs.length;
+    const mean = quotient(xs.reduce((s, x) => s + x, 0), xs.length);
+    const variance = quotient(xs.reduce((s, x) => s + (x - mean) ** 2, 0), xs.length);
     return some({ mean, stddev: Math.sqrt(variance) });
   },
 
   "q-mul"(_, a, b) {
     const p = a.$q * b.$q; // scale 2^32
-    let r = p / 65536n; // truncates toward zero
+    let r = quotient(p, 65536n); // truncates toward zero
     const rem = p % 65536n;
     if ((rem < 0n ? -rem : rem) * 2n >= 65536n) r += p < 0n ? -1n : 1n;
     const lo = -(2n ** 31n), hi = 2n ** 31n - 1n;
@@ -322,7 +323,7 @@ export const tasks = {
   },
 
   "fuel-needed"(_, distance, consumption) {
-    return (distance * consumption) / 100;
+    return quotient(distance * consumption, 100);
   },
 
   // ---------------------------------------------------------------- M6

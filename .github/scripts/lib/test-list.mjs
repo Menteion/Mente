@@ -7,11 +7,13 @@
 // file review sees.
 
 /// The tests of a nextest list, as `<package> <test path>` with whether each is ignored.
+import { own } from "../../../benchmark/own.mjs";
+
 export function listedTests(list) {
   const out = [];
-  for (const suite of Object.values(list["rust-suites"] ?? {})) {
+  for (const suite of Object.values(own(list, "rust-suites") ?? {})) {
     for (const [name, test] of Object.entries(suite.testcases ?? {})) {
-      out.push({ test: `${suite["package-name"]} ${name}`, ignored: test.ignored === true });
+      out.push({ test: `${own(suite, "package-name")} ${name}`, ignored: test.ignored === true });
     }
   }
   return out;

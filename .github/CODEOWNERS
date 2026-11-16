@@ -33,7 +33,7 @@
 /perf/lib.mjs @Dancraft3746
 
 # The benchmark corpus's lock, its checker, the reference solutions it loads beside the
-# held-out set, and the one helper through which those and the harness read a computed member;
+# held-out set, and the helpers through which those and the harness read a computed member or divide;
 # and the harness, whole: the sandbox agent-written code runs in and its proof, every script and
 # module the jobs that hold the API key or the held-out set run (the reviews of PR 137 found the
 # toolchains' installer, five modules and reference.mjs outside this list), and the toolchains
@@ -42,6 +42,7 @@
 /benchmark/corpus.lock @Dancraft3746
 /benchmark/reference.mjs @Dancraft3746
 /benchmark/own.mjs @Dancraft3746
+/benchmark/quotient.mjs @Dancraft3746
 /benchmark/harness/ @Dancraft3746
 
 # The gate tests of the compiler's own suite: the dependency policy, the lock's allowlist, English

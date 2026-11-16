@@ -7,17 +7,19 @@
 // read wrongly.
 
 /// Parses `text` and returns its value: objects, arrays, strings, numbers, booleans and null.
+import { own, setOwn } from "../../../benchmark/own.mjs";
+
 export function parseYaml(text) {
   // Only printable ASCII, tab and LF (a CR before an LF aside): GitHub's reader breaks lines at
   // characters this one does not (NEL, U+0085, and the line separators), so a comment here could
   // be a key there (the fourth review of PR 137).
-  const odd = [...text].findIndex((c, k) => c !== "\t" && c !== "\n" && !(c === "\r" && text[k + 1] === "\n") && (c < " " || c > "~"));
+  const odd = [...text].findIndex((c, k) => c !== "\t" && c !== "\n" && !(c === "\r" && own(text, k + 1) === "\n") && (c < " " || c > "~"));
   if (odd >= 0) throw new Error(`line ${text.slice(0, odd).split("\n").length}: a character outside printable ASCII, tab and LF: U+${text.codePointAt(odd).toString(16).toUpperCase().padStart(4, "0")}`);
   const lines = text.split(/\r?\n/);
   let i = 0;
 
   const fail = (message, at = i) => {
-    throw new Error(`line ${at + 1}: ${message}: ${JSON.stringify(lines[at] ?? "")}`);
+    throw new Error(`line ${at + 1}: ${message}: ${JSON.stringify(own(lines, at) ?? "")}`);
   };
   const indentOf = (line) => {
     const lead = /^[ \t]*/.exec(line)[0];
@@ -26,16 +28,16 @@ export function parseYaml(text) {
   };
   const isBlank = (line) => /^\s*(#.*)?$/.test(line);
   const skipBlank = () => {
-    while (i < lines.length && isBlank(lines[i])) i++;
+    while (i < lines.length && isBlank(own(lines, i))) i++;
   };
   const KEY = /^([A-Za-z0-9_][A-Za-z0-9_.\-/]*|"[^"]*"|'[^']*'):(?:[ ]+(.*))?$/;
 
   function node(indent) {
     skipBlank();
     if (i >= lines.length) return null;
-    const ind = indentOf(lines[i]);
+    const ind = indentOf(own(lines, i));
     if (ind < indent) return null;
-    const content = lines[i].slice(ind);
+    const content = own(lines, i).slice(ind);
     if (content === "---" || content === "...") fail("several documents");
     return content === "-" || content.startsWith("- ") ? sequence(ind) : mapping(ind);
   }
@@ -45,10 +47,10 @@ export function parseYaml(text) {
     for (;;) {
       skipBlank();
       if (i >= lines.length) break;
-      const ind = indentOf(lines[i]);
+      const ind = indentOf(own(lines, i));
       if (ind < indent) break;
       if (ind > indent) fail("unexpected indentation");
-      const content = lines[i].slice(ind);
+      const content = own(lines, i).slice(ind);
       if (content === "-" || content.startsWith("- ")) break;
       const m = KEY.exec(content);
       if (!m) fail("not a key and a value");
@@ -59,7 +61,7 @@ export function parseYaml(text) {
       if (Object.hasOwn(out, key)) fail(`the key ${key} twice`);
       const at = i;
       i++;
-      out[key] = value(m[2] ?? "", indent, at);
+      setOwn(out, key, value(m[2] ?? "", indent, at));
     }
     return out;
   }
@@ -69,8 +71,8 @@ export function parseYaml(text) {
     for (;;) {
       skipBlank();
       if (i >= lines.length) break;
-      const ind = indentOf(lines[i]);
-      const content = lines[i].slice(ind);
+      const ind = indentOf(own(lines, i));
+      const content = own(lines, i).slice(ind);
       if (ind !== indent || !(content === "-" || content.startsWith("- "))) {
         if (ind > indent) fail("unexpected indentation");
         break;
@@ -83,7 +85,7 @@ export function parseYaml(text) {
       } else if (/^[A-Za-z0-9_][A-Za-z0-9_.\-/]*:( |$)/.test(item) || /^("[^"]*"|'[^']*'):( |$)/.test(item)) {
         // A mapping whose first key shares the line with the dash: read it as if the dash were
         // a space.
-        lines[i] = " ".repeat(itemIndent) + item;
+        setOwn(lines, i, " ".repeat(itemIndent) + item);
         out.push(mapping(itemIndent));
       } else {
         const at = i;
@@ -99,8 +101,8 @@ export function parseYaml(text) {
     if (text === "" || text.startsWith("#")) {
       skipBlank();
       if (i >= lines.length) return null;
-      const ind = indentOf(lines[i]);
-      const content = lines[i].slice(ind);
+      const ind = indentOf(own(lines, i));
+      const content = own(lines, i).slice(ind);
       if (ind > keyIndent) return node(ind);
       // A sequence may sit at its key's own indentation.
       if (ind === keyIndent && (content === "-" || content.startsWith("- "))) return sequence(ind);
@@ -114,7 +116,7 @@ export function parseYaml(text) {
     const body = [];
     let blockIndent = -1;
     while (i < lines.length) {
-      const line = lines[i];
+      const line = own(lines, i);
       if (line.trim() === "") {
         body.push("");
         i++;
@@ -127,7 +129,7 @@ export function parseYaml(text) {
       body.push(line.slice(blockIndent));
       i++;
     }
-    while (body.length > 0 && body[body.length - 1] === "") body.pop();
+    while (body.length > 0 && own(body, body.length - 1) === "") body.pop();
     let text;
     if (style === "|") {
       text = body.join("\n");
@@ -148,11 +150,11 @@ export function parseYaml(text) {
     // A plain scalar continued on a more indented line is not part of the subset.
     const next = (() => {
       let j = i;
-      while (j < lines.length && isBlank(lines[j])) j++;
+      while (j < lines.length && isBlank(own(lines, j))) j++;
       return j;
     })();
-    if (next < lines.length && indentOf(lines[next]) > keyIndent) {
-      const nextContent = lines[next].trimStart();
+    if (next < lines.length && indentOf(own(lines, next)) > keyIndent) {
+      const nextContent = own(lines, next).trimStart();
       const nested = nextContent.startsWith("- ") || KEY.test(nextContent);
       if (!nested) fail("a scalar continued on the next line", next);
     }
@@ -167,7 +169,7 @@ export function parseYaml(text) {
       // The escapes the reader decodes; any other (`\x41`, `A`, `\e`) is refused, not kept as
       // written, which would let the policy read text GitHub reads otherwise.
       const escapes = { n: "\n", t: "\t", '"': '"', "\\": "\\", "/": "/" };
-      return m[1].replace(/\\(.)/g, (_, c) => (Object.hasOwn(escapes, c) ? escapes[c] : fail(`an escape the reader does not decode: \\${c}`, at)));
+      return m[1].replace(/\\(.)/g, (_, c) => (Object.hasOwn(escapes, c) ? own(escapes, c) : fail(`an escape the reader does not decode: \\${c}`, at)));
     }
     if (text.startsWith("'")) {
       const m = /^'((?:[^']|'')*)'\s*(#.*)?$/.exec(text);

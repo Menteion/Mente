@@ -29,6 +29,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { own, setOwn } from "../../../benchmark/own.mjs";
 
 export const CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index";
 
@@ -166,7 +167,7 @@ export function toolchainProblems(root, { cargoHome = process.env.CARGO_HOME ?? 
     if (line === "" || line.startsWith("#")) continue;
     const k = TOOLCHAIN_LINES.findIndex((re) => re.test(line));
     if (k < 0) found.push(`rust-toolchain.toml:${n + 1}: not a line a pinned release holds: ${raw}`);
-    else seen[k]++;
+    else setOwn(seen, k, own(seen, k) + 1);
   }
   if (seen.some((c) => c !== 1)) found.push("rust-toolchain.toml does not hold its table, its release, its two components and its profile once each");
   const configs = new Set();

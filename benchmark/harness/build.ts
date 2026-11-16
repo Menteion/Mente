@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { odinProgram, parseSignature, rustProgram, type Lang, type Signature } from "./languages.ts";
 import { outcome, type Case, type CaseResult, type Task } from "./tasks.ts";
 import { own, setOwn } from "../own.mjs";
+import { quotient } from "../quotient.mjs";
 
 /** The time one case may run, in milliseconds. */
 export const RUN_TIMEOUT_MS = 10_000;
@@ -291,7 +292,7 @@ export function trapText(lang: "rust" | "odin", p: Proc, dir = "."): string {
 
 /** A case's result from the process that ran it. */
 export function caseResult(lang: "rust" | "odin", c: Case, p: Proc, mutCount: number, dir = "."): CaseResult {
-  if (p.timedOut) return { ...c, got: `ran longer than ${RUN_TIMEOUT_MS / 1000} s`, pass: false, fault: "timeout" };
+  if (p.timedOut) return { ...c, got: `ran longer than ${quotient(RUN_TIMEOUT_MS, 1000)} s`, pass: false, fault: "timeout" };
   if (p.status !== 0) return { ...c, got: trapText(lang, p, dir), pass: false, fault: "trap" };
   const got = printedOutcome(c, p.stdout, mutCount);
   return got === c.expected ? { ...c, got, pass: true } : { ...c, got, pass: false, fault: "wrong result" };
@@ -299,7 +300,7 @@ export function caseResult(lang: "rust" | "odin", c: Case, p: Proc, mutCount: nu
 
 /** A Mente case's result from `mn run`. */
 export function menteCaseResult(c: Case, p: Proc): CaseResult {
-  if (p.timedOut) return { ...c, got: `ran longer than ${RUN_TIMEOUT_MS / 1000} s`, pass: false, fault: "timeout" };
+  if (p.timedOut) return { ...c, got: `ran longer than ${quotient(RUN_TIMEOUT_MS, 1000)} s`, pass: false, fault: "timeout" };
   const got = outcome(c, p.status, p.stdout, p.stderr);
   if (p.status !== 0) {
     return { ...c, got, pass: false, fault: /more steps than its limit/.test(got) ? "timeout" : "trap" };

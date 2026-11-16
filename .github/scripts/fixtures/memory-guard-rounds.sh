@@ -1,0 +1,13 @@
+# Sources memory-guard.sh in a subshell, as the guard ran when it lost itself, with `ps` naming a
+# process of the owner $1 that is gone, `sleep` counting the rounds instead of waiting, at most $3,
+# and `sudo` saying what it was asked, against the stand-in meminfo $2; then says how many rounds
+# the guard went on through. The workflow policy's test of the guard runs this script rather than
+# hand bash its text (the review of 56c29cf: no -c in a call of the policy's).
+owner="$1"
+meminfo="$2"
+most="$3"
+rounds=0
+sleep() { rounds=$((rounds + 1)); [ "$rounds" -le "$most" ]; }
+ps() { case "$*" in *uid=*) echo " ${owner}" ;; *) echo "999999 1" ;; esac; }
+sudo() { echo "sudo $*"; }
+(. .github/scripts/memory-guard.sh "$meminfo"; echo "the guard went on through $((rounds - 1)) rounds")

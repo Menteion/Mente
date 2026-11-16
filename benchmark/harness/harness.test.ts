@@ -1925,6 +1925,15 @@ test("the harness fails clearly when the broker is not there, goes away, refuses
 /** Linux alone has bash, env -i, Unix sockets and /proc as the runners do. */
 const LINUX_ONLY = process.platform === "linux" ? false : "the runners' shell, sockets and /proc are Linux's";
 
+test("node refuses to generate code from strings under the flag the secret jobs run it with", () => {
+  // Moved from the workflow policy, whose calls may not hand node code to run (the review of 56c29cf).
+  for (const code of ["Function('return 1')()", "(() => 0)['constr' + 'uctor']('return 1')()", "eval('1')", "(async () => {}).constructor('return 1')()"]) {
+    const r = spawnSync(process.execPath, ["--disallow-code-generation-from-strings", "-e", code], { encoding: "utf8" });
+    assert.notEqual(r.status, 0, `node ran ${code} under --disallow-code-generation-from-strings`);
+    assert.match(r.stderr, /Code generation from strings disallowed/, code);
+  }
+});
+
 test("every shell script of the harness parses", { skip: spawnSync("bash", ["-c", "true"]).status === 0 ? false : "no bash" }, () => {
   // A script the jobs run only on a runner, such as lock-sudo.sh, would otherwise first fail there:
   // an apostrophe in a ${name:?message} inside double quotes opens a quote bash never closes.

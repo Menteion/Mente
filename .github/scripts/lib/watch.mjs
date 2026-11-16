@@ -22,6 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { own } from "../../../benchmark/own.mjs";
 
 export const PATHS_FILE = ".github/instrument-paths.txt";
 /// The files whose change runs every instrument: the lists, the code that reads them, and what
@@ -78,8 +79,8 @@ export function parsePaths(text) {
 export function globToRegExp(glob) {
   let source = "";
   for (let k = 0; k < glob.length; k++) {
-    const c = glob[k];
-    if (c === "*" && glob[k + 1] === "*") {
+    const c = own(glob, k);
+    if (c === "*" && own(glob, k + 1) === "*") {
       source += ".*";
       k++;
     } else if (c === "*") source += "[^/]*";

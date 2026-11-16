@@ -23,6 +23,7 @@
 
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
+import { own } from "../../../benchmark/own.mjs";
 
 /// The code points `is_cjk` rejects, as inclusive ranges: Hangul Jamo; the CJK radicals and
 /// Kangxi radicals; everything from the ideographic description characters through the unified
@@ -120,7 +121,7 @@ async function apiList(env, path, key) {
     });
     if (!response.ok) throw new Error(`${path}: the API answered ${response.status}`);
     const body = await response.json();
-    const items = key ? body[key] : body;
+    const items = key ? own(body, key) : body;
     if (!Array.isArray(items)) throw new Error(`${path}: the API answered no list`);
     out.push(...items);
     if (items.length < 100) return out;

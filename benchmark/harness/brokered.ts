@@ -7,6 +7,7 @@
 // ends the run as its budget would.
 import net from "node:net";
 import { anomalyOf, type Anomaly, type Answer } from "./broker.ts";
+import { quotient } from "../quotient.mjs";
 
 /** A connection to the broker: one request out, its answer back. */
 export interface BrokerLink {
@@ -88,7 +89,7 @@ export function connectBroker(path: string, timeoutMs = 20 * 60_000): Promise<Br
         const id = next++;
         const timer = setTimeout(() => {
           waiting.delete(id);
-          fail(new BrokerBroken(`the broker gave no answer in ${timeoutMs / 1000} s`));
+          fail(new BrokerBroken(`the broker gave no answer in ${quotient(timeoutMs, 1000)} s`));
         }, timeoutMs);
         waiting.set(id, { done, fail, timer });
         conn.write(`${JSON.stringify({ id, body })}\n`);

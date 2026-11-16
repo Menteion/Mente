@@ -39,6 +39,7 @@
 // (.github/scripts/test-sandbox.sh; docs/design-review.md, untrusted-test-isolation).
 
 import fs from "node:fs";
+import { own } from "../../../benchmark/own.mjs";
 
 /// What a unified diff changes, by the new file's line numbers: the lines each file gains, and the
 /// lines next to each deleted line (`deletions`), where cargo-mutants' `affected_lines` marks the line
@@ -290,17 +291,17 @@ export function changedRegions(diff) {
   const flush = () => {
     if (added.length > 0) {
       const first = added[0];
-      const last = added[added.length - 1];
+      const last = own(added, added.length - 1);
       if (removed.length === 0) out.push({ from: { line: first.at, column: 1 }, to: { line: last.at, column: last.text.length + 1 } });
       else {
         const a = removed[0];
-        const z = removed[removed.length - 1];
+        const z = own(removed, removed.length - 1);
         let p = 0;
-        while (p < a.length && p < first.text.length && a[p] === first.text[p]) p++;
+        while (p < a.length && p < first.text.length && own(a, p) === own(first.text, p)) p++;
         // On a single changed line the suffix may not reach back into the prefix.
         const room = added.length === 1 && removed.length === 1 ? Math.min(a.length, last.text.length) - p : added.length === 1 ? last.text.length - p : last.text.length;
         let s = 0;
-        while (s < room && s < z.length && z[z.length - 1 - s] === last.text[last.text.length - 1 - s]) s++;
+        while (s < room && s < z.length && own(z, z.length - 1 - s) === own(last.text, last.text.length - 1 - s)) s++;
         const toColumn = Math.max(last.text.length - s, 1);
         out.push({ from: { line: first.at, column: p + 1 }, to: { line: last.at, column: added.length === 1 ? Math.max(toColumn, p + 1) : toColumn } });
       }

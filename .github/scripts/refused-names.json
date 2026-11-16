@@ -1,0 +1,33 @@
+{
+  "about": "The names a module the workflow policy reads as tokens may not use, as code or as a string, each a way to run or load code that a reading of its imports does not see, or a way to reach one: eval and Function, the loaders and their hooks, the native loaders, workers, WebAssembly, and the objects that reach any global by a computed name. Data, so that the policy's own modules, which the same rules read, hold none of these names as literals (.github/scripts/policy.test.mjs, REFUSED_NAMES). `constructor` is refused but for defining a class's.",
+  "names": [
+    "eval",
+    "Function",
+    "AsyncFunction",
+    "require",
+    "createRequire",
+    "register",
+    "_load",
+    "getBuiltinModule",
+    "binding",
+    "_linkedBinding",
+    "dlopen",
+    "execve",
+    "Worker",
+    "WebAssembly",
+    "globalThis",
+    "global",
+    "Reflect",
+    "Proxy",
+    "getPrototypeOf",
+    "setPrototypeOf",
+    "prototype",
+    "defineProperty",
+    "defineProperties",
+    "__proto__",
+    "arguments",
+    "module",
+    "exports"
+  ],
+  "classOnly": "constructor"
+}

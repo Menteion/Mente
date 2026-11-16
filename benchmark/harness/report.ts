@@ -9,6 +9,7 @@ import { anomalyOf, anomalyWords } from "./broker.ts";
 import type { Verdict } from "./build.ts";
 import type { Lang } from "./languages.ts";
 import { own, setOwn } from "../own.mjs";
+import { quotient } from "../quotient.mjs";
 
 /** The kinds of error a held-out step may name: JavaScript's own, never a name a task's text set. */
 const ERROR_KINDS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError"]);
@@ -135,8 +136,8 @@ export interface Group {
 export function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? own(sorted, mid) : (own(sorted, mid - 1) + own(sorted, mid)) / 2;
+  const mid = Math.floor(quotient(sorted.length, 2));
+  return sorted.length % 2 === 1 ? own(sorted, mid) : quotient(own(sorted, mid - 1) + own(sorted, mid), 2);
 }
 
 function count(into: Record<string, number>, classes: string[]): void {
@@ -144,7 +145,7 @@ function count(into: Record<string, number>, classes: string[]): void {
 }
 
 function rate(part: number, whole: number): number | null {
-  return whole === 0 ? null : part / whole;
+  return whole === 0 ? null : quotient(part, whole);
 }
 
 /** The statistics of a set of solve runs. */
@@ -155,7 +156,7 @@ export function stats(runs: RunRecord[], runsPerTask: number): Stats {
     return rate(these.filter((r) => r.solved).length, these.length);
   });
   const known = byRun.filter((v): v is number => v !== null);
-  const mean = known.length > 0 ? known.reduce((a, b) => a + b, 0) / known.length : null;
+  const mean = known.length > 0 ? quotient(known.reduce((a, b) => a + b, 0), known.length) : null;
   const s: Stats = {
     runs: runs.length,
     solved: solved.length,
@@ -164,7 +165,7 @@ export function stats(runs: RunRecord[], runsPerTask: number): Stats {
     median_repairs_solved: median(solved.map((r) => r.repairs)),
     median_tokens_solved: median(solved.map((r) => r.tokens.input + r.tokens.output)),
     pass_rate_by_run: byRun,
-    pass_rate_stddev: mean === null ? null : Math.sqrt(known.reduce((a, v) => a + (v - mean) ** 2, 0) / known.length),
+    pass_rate_stddev: mean === null ? null : Math.sqrt(quotient(known.reduce((a, v) => a + (v - mean) ** 2, 0), known.length)),
     first_program_failures: {},
     last_program_failures: {},
     every_program_failures: {},

@@ -32,6 +32,7 @@ import path from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
+import { own, setOwn } from "../../benchmark/own.mjs";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
@@ -58,6 +59,9 @@ after(() => {
   assert.ok(ran >= FLOOR, `${ran} of the policy's ${FLOOR} checks ran: a skip or a filter left the rest out`);
 });
 const ROOT = path.resolve(HERE, "../..");
+/// The node the policy starts its own scripts in, the one running it: the one line that reads
+/// process.execPath, held by its text, and called wherever the policy starts node (OWN_COMMANDS).
+const nodePath = () => process.execPath;
 const read = (file) => fs.readFileSync(path.join(ROOT, file), "utf8");
 const git = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 const WORKFLOWS = ".github/workflows";
@@ -120,7 +124,7 @@ function workflows() {
 /// The events a workflow runs on, as an object whatever form `on:` takes.
 function triggers(doc) {
   const on = doc.on;
-  if (typeof on === "string") return { [on]: null };
+  if (typeof on === "string") return Object.fromEntries([[on, null]]);
   if (Array.isArray(on)) return Object.fromEntries(on.map((e) => [e, null]));
   return on ?? {};
 }
@@ -133,10 +137,10 @@ export function checkNames(id, job) {
   const matrix = job.strategy?.matrix;
   if (!matrix || typeof matrix !== "object") return [template];
   const keys = Object.keys(matrix).filter((k) => k !== "include" && k !== "exclude");
-  if (keys.some((k) => !Array.isArray(matrix[k]))) return [template];
+  if (keys.some((k) => !Array.isArray(own(matrix, k)))) return [template];
   if (matrix.exclude) throw new Error(`${id}: a matrix with exclude is not read here`);
   let combos = [{}];
-  for (const k of keys) combos = combos.flatMap((c) => matrix[k].map((v) => ({ ...c, [k]: v })));
+  for (const k of keys) combos = combos.flatMap((c) => own(matrix, k).map((v) => ({ ...c, ...Object.fromEntries([[k, v]]) })));
   if (matrix.include) {
     if (keys.length > 0) throw new Error(`${id}: a matrix with both keys and include is not read here`);
     combos = matrix.include;
@@ -144,7 +148,7 @@ export function checkNames(id, job) {
   const expression = () => /\$\{\{\s*matrix\.([\w-]+)\s*\}\}/g;
   return combos.map((c) =>
     expression().test(template)
-      ? template.replace(expression(), (all, key) => (key in c ? String(c[key]) : all))
+      ? template.replace(expression(), (all, key) => (key in c ? String(own(c, key)) : all))
       : `${template} (${Object.values(c).map(String).join(", ")})`,
   );
 }
@@ -182,7 +186,7 @@ check("every file under .github/ holds only printable ASCII, tab and LF", () => 
   for (const f of [...tracked()].filter((x) => x.startsWith(".github/"))) {
     const bytes = fs.readFileSync(path.join(ROOT, f));
     const k = bytes.findIndex((b) => b !== 0x09 && b !== 0x0a && (b < 0x20 || b > 0x7e));
-    if (k >= 0) odd.push(`${f}: byte 0x${bytes[k].toString(16)} at offset ${k}`);
+    if (k >= 0) odd.push(`${f}: byte 0x${own(bytes, k).toString(16)} at offset ${k}`);
   }
   assert.deepEqual(odd, [], "files under .github/ hold bytes outside printable ASCII, tab and LF");
   // The readers refuse such a character too, so that no later reading can depend on this check.
@@ -257,7 +261,7 @@ check("every checkout drops its credentials", () => {
   for (const { file, id, job } of allJobs()) {
     for (const s of steps(job)) {
       if (String(s.uses ?? "").startsWith("actions/checkout@")) {
-        assert.equal(s.with?.["persist-credentials"], false, `${file}, job ${id}: a checkout without persist-credentials: false`);
+        assert.equal(own(s.with, "persist-credentials"), false, `${file}, job ${id}: a checkout without persist-credentials: false`);
       }
     }
   }
@@ -385,7 +389,7 @@ check("every compiler crate proves its overflow checks in a release build", () =
 function uncomment(line) {
   let quote = null;
   for (let k = 0; k < line.length; k++) {
-    const c = line[k];
+    const c = own(line, k);
     if (quote !== null) {
       if (c === "\\" && quote === '"') k++;
       else if (c === quote) quote = null;
@@ -406,10 +410,10 @@ export function tomlSubset(text, file) {
   const lines = text.split(/\r?\n/);
   let current = null;
   const fail = (k, why) => {
-    throw new Error(`${file}:${k + 1}: ${why}: ${lines[k]}`);
+    throw new Error(`${file}:${k + 1}: ${why}: ${own(lines, k)}`);
   };
   for (let k = 0; k < lines.length; k++) {
-    const line = uncomment(lines[k]);
+    const line = uncomment(own(lines, k));
     if (line === "") continue;
     const header = /^(\[\[?)([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*)(\]\]?)$/.exec(line);
     if (header) {
@@ -427,10 +431,10 @@ export function tomlSubset(text, file) {
     let value = entry[2];
     if (value.startsWith('"""')) {
       const start = k;
-      value = lines[k].slice(lines[k].indexOf('"""'));
+      value = own(lines, k).slice(own(lines, k).indexOf('"""'));
       while (value.indexOf('"""', 3) < 0) {
         if (++k >= lines.length) fail(start, "a string never closed");
-        value += `\n${lines[k]}`;
+        value += `\n${own(lines, k)}`;
       }
       const end = value.indexOf('"""', 3);
       if (uncomment(value.slice(end + 3)) !== "") fail(k, "more after the string's end");
@@ -562,16 +566,16 @@ export function testsAt(dir, testPath, files) {
     } else {
       modules = parts.filter((p, k, all) => !(k === all.length - 1 && p === "mod"));
     }
-    if (modules.length > segments.length || modules.some((s, k) => s !== segments[k])) continue;
+    if (modules.length > segments.length || modules.some((s, k) => s !== own(segments, k))) continue;
     const inline = segments.slice(modules.length);
     const lines = text.split(/\r?\n/);
     const declared = inline.every((mod, depth) => lines.some((l) => l === `${" ".repeat(4 * depth)}mod ${mod} {`));
     if (!declared) continue;
     const head = new RegExp(`^${" ".repeat(4 * inline.length)}(pub(\\([^)]*\\))? )?fn ${name}\\(\\)`);
     for (let k = 0; k < lines.length; k++) {
-      if (!head.test(lines[k])) continue;
+      if (!head.test(own(lines, k))) continue;
       const attributes = [];
-      for (let j = k - 1; j >= 0 && /^\s*(#\[|\/\/)/.test(lines[j]); j--) if (/^\s*#\[/.test(lines[j])) attributes.push(lines[j].trim());
+      for (let j = k - 1; j >= 0 && /^\s*(#\[|\/\/)/.test(own(lines, j)); j--) if (/^\s*#\[/.test(own(lines, j))) attributes.push(own(lines, j).trim());
       let ignored = "no";
       for (const a of attributes) {
         if (/^#\[ignore\b/.test(a)) ignored = "yes";
@@ -691,14 +695,14 @@ export function mutantsSettings(text, file = ".cargo/mutants.toml") {
   k = 0;
   const skip = (lines) => {
     for (;;) {
-      const c = text[k];
+      const c = own(text, k);
       if (c === " " || c === "\t" || c === "\r" || (lines && c === "\n")) k++;
-      else if (c === "#") while (k < text.length && text[k] !== "\n") k++;
+      else if (c === "#") while (k < text.length && own(text, k) !== "\n") k++;
       else return;
     }
   };
   const string = () => {
-    const quote = text[k];
+    const quote = own(text, k);
     const end = text.indexOf(quote, k + 1);
     const line = text.indexOf("\n", k + 1);
     if (end < 0 || (line >= 0 && line < end)) fail("a string that does not close on its line");
@@ -710,28 +714,28 @@ export function mutantsSettings(text, file = ".cargo/mutants.toml") {
   for (;;) {
     skip(true);
     if (k >= text.length) break;
-    if (k > 0 && text[k - 1] !== "\n") fail("a key that does not start its line");
+    if (k > 0 && own(text, k - 1) !== "\n") fail("a key that does not start its line");
     const key = /^[a-z][a-z0-9_]*(?= = )/.exec(text.slice(k, k + 100))?.[0];
     if (!key) fail("not a bare key and its value");
     if (settings.has(key)) fail(`${key} twice`);
     k += key.length + 3;
     let value;
-    if (text[k] === "[") {
+    if (own(text, k) === "[") {
       k++;
       value = [];
       for (;;) {
         skip(true);
-        if (text[k] === "]") {
+        if (own(text, k) === "]") {
           k++;
           break;
         }
-        if (text[k] !== "'" && text[k] !== '"') fail(`${key} holds something other than strings`);
+        if (own(text, k) !== "'" && own(text, k) !== '"') fail(`${key} holds something other than strings`);
         value.push(string());
         skip(true);
-        if (text[k] === ",") k++;
-        else if (text[k] !== "]") fail(`${key}: a list that does not go on with , or end with ]`);
+        if (own(text, k) === ",") k++;
+        else if (own(text, k) !== "]") fail(`${key}: a list that does not go on with , or end with ]`);
       }
-    } else if (text[k] === "'" || text[k] === '"') {
+    } else if (own(text, k) === "'" || own(text, k) === '"') {
       value = string();
     } else {
       const word = /^(true|false)(?![\w.-])/.exec(text.slice(k, k + 8))?.[1];
@@ -740,7 +744,7 @@ export function mutantsSettings(text, file = ".cargo/mutants.toml") {
       k += word.length;
     }
     skip(false);
-    if (k < text.length && text[k] !== "\n") fail(`more after the value of ${key}`);
+    if (k < text.length && own(text, k) !== "\n") fail(`more after the value of ${key}`);
     settings.set(key, value);
   }
   return settings;
@@ -865,20 +869,20 @@ export function rustTokensText(text) {
     from = to;
   };
   while (k < n) {
-    const c = text[k];
+    const c = own(text, k);
     raw.lastIndex = k;
-    const rawMatch = /[bcr]/.test(c) && !/\w/.test(text[k - 1] ?? "") ? raw.exec(text) : null;
-    if (c === "/" && text[k + 1] === "/") {
+    const rawMatch = /[bcr]/.test(c) && !/\w/.test(own(text, k - 1) ?? "") ? raw.exec(text) : null;
+    if (c === "/" && own(text, k + 1) === "/") {
       const end = text.indexOf("\n", k);
       cut(end < 0 ? n : end, " ");
-    } else if (c === "/" && text[k + 1] === "*") {
+    } else if (c === "/" && own(text, k + 1) === "*") {
       let depth = 0;
       let j = k;
       while (j < n) {
-        if (text[j] === "/" && text[j + 1] === "*") {
+        if (own(text, j) === "/" && own(text, j + 1) === "*") {
           depth++;
           j += 2;
-        } else if (text[j] === "*" && text[j + 1] === "/") {
+        } else if (own(text, j) === "*" && own(text, j + 1) === "/") {
           depth--;
           j += 2;
           if (depth === 0) break;
@@ -891,15 +895,15 @@ export function rustTokensText(text) {
       cut(end < 0 ? n : end + close.length, '""');
     } else if (c === '"') {
       let j = k + 1;
-      while (j < n && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      while (j < n && own(text, j) !== '"') j += own(text, j) === "\\" ? 2 : 1;
       cut(Math.min(j + 1, n), '""');
-    } else if (c === "'" && text[k + 1] === "\\") {
+    } else if (c === "'" && own(text, k + 1) === "\\") {
       let j = k + 3;
-      while (j < n && text[j] !== "'" && text[j] !== "\n") j++;
+      while (j < n && own(text, j) !== "'" && own(text, j) !== "\n") j++;
       cut(Math.min(j + 1, n), '""');
-    } else if (c === "'" && k + 1 < n && text[k + 1] !== "\n") {
+    } else if (c === "'" && k + 1 < n && own(text, k + 1) !== "\n") {
       const width = text.codePointAt(k + 1) > 0xffff ? 2 : 1;
-      if (text[k + 1 + width] === "'") cut(k + 2 + width, '""');
+      if (own(text, k + 1 + width) === "'") cut(k + 2 + width, '""');
       else k++;
     } else k++;
   }
@@ -928,8 +932,8 @@ export function rustAttributes(text) {
     let depth = 0;
     let k = m.index + m[0].length - 1;
     for (; k < code.length; k++) {
-      if (code[k] === "[") depth++;
-      else if (code[k] === "]" && --depth === 0) break;
+      if (own(code, k) === "[") depth++;
+      else if (own(code, k) === "]" && --depth === 0) break;
     }
     found.push(code.slice(m.index + m[0].length, k));
     open.lastIndex = Math.min(k + 1, code.length);
@@ -1004,7 +1008,7 @@ check("git reads every change as text, and no source names mutants::skip, an att
       const entry = /^([a-z][a-z0-9_-]*) = (.+)$/.exec(line);
       if (current) {
         assert.ok(entry, `a line of [${prefix}${current[0]}] the policy does not read: ${raw}`);
-        current[1][entry[1]] = entry[2];
+        setOwn(current[1], entry[1], entry[2]);
       }
     }
     return tables;
@@ -1090,7 +1094,7 @@ export function jobDigest(doc, job) {
     Array.isArray(v)
       ? v.map(canon)
       : v !== null && typeof v === "object"
-        ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, k === "uses" ? String(v[k]).replace(/@[0-9a-f]{40}$/, "@pinned") : canon(v[k])]))
+        ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, k === "uses" ? String(own(v, k)).replace(/@[0-9a-f]{40}$/, "@pinned") : canon(own(v, k))]))
         : v;
   // The workflow's triggers and its token's permissions too: what starts a pinned job, and with what
   // rights, is part of it (the review of 41a54b6: an `issue_comment:` trigger and `contents: write`
@@ -1102,31 +1106,49 @@ export function jobDigest(doc, job) {
 /// the testing jobs themselves, every step's name, action, inputs, environment and script. A
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
-const PINNED_FILES = new Map([
+/// A map of pins from a list that names each key once: a Map keeps the last of a key listed twice,
+/// which could hide a stale digest (the rebase of PR 162 onto 163 listed benchmark/own.mjs twice).
+function pins(entries) {
+  const keys = entries.map(([k]) => k);
+  assert.deepEqual(keys.filter((k, i) => keys.indexOf(k) !== i), [], "a pin listed twice");
+  return new Map(entries);
+}
+const PINNED_FILES = pins([
   [".github/scripts/limits.sh", "ff5fb294d3365b4c5240a4b9f86042d3c9d2767e0c6e5e1fa0adceea359fdee9"],
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
-  [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
+  [".github/scripts/lib/test-list.mjs", "0b314ad2f2b6611294bccaeca8fb9c374316687150dda3285c1e0a1d05c2098f"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
   [".github/scripts/test-sandbox.sh", "02a8f1312275c5146ddf7950f9d933dab304c5b4470de0ffef792240ffa522d1"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
+  // The scripts the policy's own tests run in bash rather than hand it a text (the review of
+  // 56c29cf), as every bash call of the policy's runs a pinned script.
+  [".github/scripts/fixtures/limits-flags.sh", "93aceecd61587375a27ffa9024d09c6fb4a4a886c9fd434b04d25265e918de04"],
+  [".github/scripts/fixtures/memory-guard-rounds.sh", "fb410c103e87cced831cb1aea9e42532b302444d619e1e3ce4ab728196df0690"],
+  [".github/scripts/fixtures/sandbox-env.sh", "d06b123f31f4e722fb3cf3700c269c74d4bfde738b65f58ab662772ee4601b5e"],
+  [".github/scripts/fixtures/source-limits.sh", "4436811a3eca7b3d9dd6eed1c57d99b42d2893d0d8fb1a5d17e4efc269fb76b8"],
+  [".github/scripts/fixtures/runner-shell.sh", "2b72368e060ac8a9ddc5d1c89269f03935d567525a9c97c90ac84a9e80a25c62"],
+  [".github/scripts/fixtures/timeout.sh", "29d4ef118a7cc9c199b6cd88c55e5d6da2975e490b308d96b78fe9fb6229ef5e"],
   // The node scripts the pinned jobs run, and the modules they import: the build-time check, the
   // Mutants floor, the watch, the actions' pins and the YAML reader the policy reads every
   // workflow with.
   [".github/scripts/build-time-code.mjs", "624e95efda89eeed14f11b1fb088cb5e3e83bcbb829b9a79ddf75de71e5d04de"],
-  [".github/scripts/lib/build-time-code.mjs", "801d749e6063d4262c94cf3d7b418f657e6377411b52d92a357f83b3e21b293d"],
+  [".github/scripts/lib/build-time-code.mjs", "a7997682ca5e05bd91ac082b4a969d915167fb60826c9653a6ec50faa09b7ea5"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "20e30ecfcbb91626c8f3ed22f6709d52afc7ca34cf7dd5c6433728a09108babb"],
+  [".github/scripts/lib/mutants-floor.mjs", "a3661d6c58f4df1212ab91eecb93e2a25a45426361496deebe9b48ad276ab51a"],
   [".github/scripts/watch.mjs", "36b58568101a430681974fbbaa715aeb06478d1ed3a5fb67022b2222919c12c0"],
-  [".github/scripts/lib/watch.mjs", "891cd5c6696cf79c70dc958087ef37a96513d701ac41d64a73b50b6db0a6c87b"],
+  [".github/scripts/lib/watch.mjs", "84965f092bb1fdbb28a356d90fb248ad03451b5e235ed6deb9ca03434cf9e7b1"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
   [".github/scripts/lib/action-pins.mjs", "f08a9cec14bea0adb5a077a2dc33a52b668868bcd6cc15de2691c57ad8e837dc"],
   [".github/scripts/yaml.test.mjs", "4dc4626a1c6ecb74f5c82f82d3994e6d477d30a7ac63b5e25b2b702665f9eab3"],
-  [".github/scripts/lib/yaml.mjs", "ee62bc138d9f19d920de7c2224bdd22b09b821369f40bec8c528b5c54fca3dce"],
-  [".github/scripts/lib/commits.mjs", "b431601e5565185ee6a48db2995962ea70736ecef2ab76ea458a05fd23fc6c3e"],
+  [".github/scripts/lib/yaml.mjs", "cf2ea48ed753bbd3bbd111828295b5e44e6fa868bcf969d386733b83234c3105"],
+  [".github/scripts/lib/commits.mjs", "d290a8e7a429a1658b39322557cd350fbe1dc7558d1566ebbefc8f3944b543a7"],
+  // The helper the policy's scripts read a member by a computed key through (the review of 56c29cf),
+  // which sandbox-check.ts imports too, before the secrets.
+  ["benchmark/own.mjs", "ec189cfb8e26ba2394424f1ed7922323786abde7c85c09b0f98eefca08f49330"],
   [".github/scripts/commits.mjs", "967378f4f8253cbcc73b2539320c9bc99a1a79edc5277ad0c38903ddffcbd96f"],
   // Every file on the API key's path and on the lock's, which run beside the key or as root: a line
   // added anywhere in one, before the key's line or after it, is a change to a gate review sees
@@ -1147,10 +1169,10 @@ const PINNED_FILES = new Map([
   ["benchmark/harness/toolchains.json", "cd656ee22820f70bb218457f5941066bde4d3ae758355251830646bcaf4034e8"],
   ["benchmark/harness/sandbox.sh", "e07589a6e45ed458002d77165e37866ac9987098ae705f5a9405ca672317c218"],
   ["benchmark/harness/sandbox-check.ts", "982132df137c367d307fdc3a7d45761b45bd9a214860cf63262f5752d9114a54"],
-  ["benchmark/harness/build.ts", "b7cbef2b51fc6c7574dedc96435c2b26e74ced96c20ad0ed189ccb285ba5cf54"],
+  ["benchmark/harness/build.ts", "f0d75c10f5d1f68c4e9e9337cede2d856de629cf90c241e25bc91757f15ea0b2"],
   ["benchmark/harness/languages.ts", "c20a2cc3728849d6262d207194cc64a28efed6be7421a71da191602e8d668200"],
   ["benchmark/harness/tasks.ts", "b9386ec2e03484721e3e05feb0b86c1ba35710c883f418473e188fe7045b2240"],
-  ["benchmark/own.mjs", "ec189cfb8e26ba2394424f1ed7922323786abde7c85c09b0f98eefca08f49330"],
+  ["benchmark/quotient.mjs", "05459060be61f8bdaaabf55d66141a719bbd572da18f737c4212726de2fc0496"],
   ["benchmark/check.mjs", "36868660c86c3cea1d663ad9b64b374a5f29581279e21ca452f5e2d5e6f20303"],
 ]);
 /// Every job whose code of the change runs in the sandbox on Linux is pinned whole: the testing
@@ -1161,7 +1183,7 @@ const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#
 /// The jobs pinned whole: the sandboxed ones, and the Documentation job, which runs the policy and
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
-const PINNED_JOBS = new Map([
+const PINNED_JOBS = pins([
   ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
   ["mutants.yml#in-diff", "6b54eaf7d853b04bf84a06306bee5d6d0195bf17477bd7e2c6be4ceeaf9526ad"],
   ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
@@ -1197,8 +1219,8 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
   for (const [key, held] of PINNED_JOBS) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    assert.ok(w?.doc.jobs?.[id], `${file} has no job ${id}`);
-    const now = jobDigest(w.doc, w.doc.jobs[id]);
+    assert.ok(own(w?.doc.jobs, id), `${file} has no job ${id}`);
+    const now = jobDigest(w.doc, own(w.doc.jobs, id));
     if (now !== held) changed.push(`${key}: ${now}`);
   }
   assert.deepEqual(changed, [], "gates the policy pins changed; their digests now are the ones listed, which PINNED_FILES and PINNED_JOBS in .github/scripts/policy.test.mjs take in the same pull request");
@@ -1210,7 +1232,7 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
   for (const key of PINNED_JOBS.keys()) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    const job = w.doc.jobs[id];
+    const job = own(w.doc.jobs, id);
     const read = LEFT_OUTSIDE.has(key) ? { ...job, steps: steps(job).slice(0, steps(job).findIndex((s) => s.run === TOOLCHAIN_STEP) + 1) } : job;
     assert.ok(steps(read).length > 0, `${key} is read nowhere`);
     for (const f of repoPaths(scriptTexts(w.doc, read))) if (/^\.github\/scripts\/[\w/-]+\.(sh|ps1|mjs)$/.test(f) && f !== POLICY) pending.push([key, f]);
@@ -1225,7 +1247,7 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
     [...SECRET_JOBS.keys()].flatMap((key) => {
       const [file, id] = key.split("#");
       const w = workflows().find((x) => x.file === file);
-      return secretPrefixFiles(w.doc, w.doc.jobs[id]).filter((f) => !pinned.has(f)).map((f) => `${key} runs ${f} up to its secret steps, which PINNED_FILES does not hold`);
+      return secretPrefixFiles(w.doc, own(w.doc.jobs, id)).filter((f) => !pinned.has(f)).map((f) => `${key} runs ${f} up to its secret steps, which PINNED_FILES does not hold`);
     });
   assert.deepEqual(unpinnedBeforeSecrets(PINNED_FILES), [], "files a secret job runs before its secrets are in reach, unpinned");
   for (const f of ["benchmark/harness/install-toolchains.sh", "benchmark/harness/sandbox-check.ts", "benchmark/harness/build.ts", "benchmark/check.mjs", "benchmark/harness/broker.ts"]) {
@@ -1252,7 +1274,7 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
   for (const key of PINNED_JOBS.keys()) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    for (const t of scriptTexts(w.doc, w.doc.jobs[id])) assert.doesNotMatch(t, variablePath, `${key} names a script under .github/scripts by a variable`);
+    for (const t of scriptTexts(w.doc, own(w.doc.jobs, id))) assert.doesNotMatch(t, variablePath, `${key} names a script under .github/scripts by a variable`);
   }
   assert.match('s=.github/scripts/$name.sh; bash "$s"', variablePath);
   // What the pin of a job reads and leaves out.
@@ -1269,7 +1291,7 @@ check("the tests run through the pinned nextest under the shared limits, which n
     assert.ok(PINNED_JOBS.has(key), `${key}, a testing job, is not pinned`);
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    const job = w.doc.jobs[id];
+    const job = own(w.doc.jobs, id);
     const all = steps(job);
     const installs = all.filter((s) => /nextest/.test(String(s.run ?? "")) && /install/.test(String(s.run ?? "")));
     assert.deepEqual(installs.map((s) => String(s.run).trim()), ["bash .github/scripts/install-nextest.sh"], `${key}: nextest is installed other than by install-nextest.sh`);
@@ -1297,7 +1319,7 @@ check("the tests run through the pinned nextest under the shared limits, which n
     // default on a Linux runner.
     for (const s of all.filter((x) => /^\. \.github\/scripts\/limits\.sh$/m.test(String(x.run ?? "")))) {
       const shell = s.shell ?? job.defaults?.run?.shell ?? w.doc.defaults?.run?.shell;
-      const linux = /^ubuntu-/.test(String(job["runs-on"]));
+      const linux = /^ubuntu-/.test(String(own(job, "runs-on")));
       assert.ok(shell === "bash" || (shell === undefined && linux), `${stepKey(file, id, s)} sources limits.sh in ${shell ?? "the runner's default shell"}, not bash`);
     }
   }
@@ -1313,7 +1335,7 @@ check("the tests run through the pinned nextest under the shared limits, which n
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
     assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
-    const mutate = steps(w.doc.jobs[id]).filter((s) => /^cargo mutants (?!.*--list)/m.test(String(s.run ?? "")));
+    const mutate = steps(own(w.doc.jobs, id)).filter((s) => /^cargo mutants (?!.*--list)/m.test(String(s.run ?? "")));
     assert.ok(mutate.length > 0, `${file}: no step runs cargo mutants`);
     for (const s of mutate) {
       const body = String(s.run).split("\n");
@@ -1336,7 +1358,7 @@ check("limits.sh refuses an alias, a runner or a compiler from outside the repos
     // case of the runner, after every refusal passed.
     const run = (vars, cargoHome = home) => {
       const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CARGO_|NEXTEST_|RUSTC|RUSTDOC)/i.test(k)));
-      const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", ". .github/scripts/limits.sh"], { cwd: ROOT, encoding: "utf8", env: { ...env, ...vars, CARGO_HOME: cargoHome.replace(/\\/g, "/"), RUNNER_OS: "Elsewhere" }, timeout: 30000 });
+      const r = spawnSync(bashPath(), ["-eo", "pipefail", ".github/scripts/fixtures/source-limits.sh"], { cwd: ROOT, encoding: "utf8", env: { ...env, ...vars, CARGO_HOME: cargoHome.replace(/\\/g, "/"), RUNNER_OS: "Elsewhere" }, timeout: 30000 });
       return `${r.stdout}${r.stderr}`;
     };
     assert.match(run({}), /defines no limits for Elsewhere/, "limits.sh refuses a clean environment");
@@ -1346,7 +1368,7 @@ check("limits.sh refuses an alias, a runner or a compiler from outside the repos
     // cap already in the environment is refused, which could undo the Rust jobs' `-D warnings`.
     const flags = (vars) => {
       const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CARGO_|NEXTEST_|RUSTC|RUSTDOC)/i.test(k)));
-      const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", 'trap \'echo "flags=[${CARGO_ENCODED_RUSTFLAGS-unset}]"\' EXIT; . .github/scripts/limits.sh'], { cwd: ROOT, encoding: "utf8", env: { ...env, ...vars, CARGO_HOME: home.replace(/\\/g, "/"), RUNNER_OS: "Elsewhere" }, timeout: 30000 });
+      const r = spawnSync(bashPath(), ["-eo", "pipefail", ".github/scripts/fixtures/limits-flags.sh"], { cwd: ROOT, encoding: "utf8", env: { ...env, ...vars, CARGO_HOME: home.replace(/\\/g, "/"), RUNNER_OS: "Elsewhere" }, timeout: 30000 });
       return /flags=\[([^\]]*)\]/.exec(r.stdout)?.[1];
     };
     assert.equal(flags({ NEXTEST_PROFILE: "mutants" }), "--cap-lints=warn", "limits.sh does not cap the lints of a mutation run");
@@ -1485,18 +1507,18 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
   for (const key of SANDBOXED_JOBS) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    assert.ok(w?.doc.jobs?.[id], `${file} has no job ${id}`);
-    const job = w.doc.jobs[id];
+    assert.ok(own(w?.doc.jobs, id), `${file} has no job ${id}`);
+    const job = own(w.doc.jobs, id);
     const all = steps(job);
     const bash = (s) => {
       const shell = s.shell ?? job.defaults?.run?.shell ?? w.doc.defaults?.run?.shell;
-      return shell === "bash" || (shell === undefined && /^ubuntu-/.test(String(job["runs-on"])));
+      return shell === "bash" || (shell === undefined && /^ubuntu-/.test(String(own(job, "runs-on"))));
     };
     // One step sets the sandbox up and proves it. In a testing job it is the step right after the
     // tools are recorded, before the tests are built, and so before any runs.
     const naming = all.flatMap((s, k) => (/test-sandbox\.sh (setup|check)\b/.test(String(s.run ?? "")) ? [k] : []));
     assert.equal(naming.length, 1, `${key}: ${naming.length} steps set up or prove the sandbox, not one`);
-    const sandbox = all[naming[0]];
+    const sandbox = own(all, naming[0]);
     const where = stepKey(file, id, sandbox);
     assert.equal(sandbox.run, TESTING_JOBS.includes(key) ? SANDBOX_SETUP + VERIFY_TOOLS : SANDBOX_SETUP, `${where} does not set up and prove the sandbox as SANDBOX_SETUP in .github/scripts/policy.test.mjs reads it`);
     assert.deepEqual(Object.keys(sandbox).filter((k) => k !== "if").sort(), ["name", "run"], `${where} carries more than its name, its script and the watch's condition`);
@@ -1516,7 +1538,7 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       const step = stepKey(file, id, s);
       assert.ok(k > naming[0], `${step} runs code of the change before the sandbox is set up and proven`);
       const source = lines.findIndex((l) => SANDBOX_SOURCES.includes(l));
-      assert.ok(source >= 0 && source < runs[0], `${step} runs code of the change before it sources the limits or test-sandbox-env.sh, and so outside the sandbox: ${lines[runs[0]]}`);
+      assert.ok(source >= 0 && source < runs[0], `${step} runs code of the change before it sources the limits or test-sandbox-env.sh, and so outside the sandbox: ${own(lines, runs[0])}`);
       assert.ok(bash(s), `${step} sources the sandbox's settings in a shell that is not bash`);
       const mutants = lines.some((l) => /^cargo mutants (?!.*--list)/.test(l));
       // Every run of mutants caps the lints at warnings, so that a lint the change denies cannot
@@ -1536,7 +1558,7 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       }
       const ran = lines.flatMap((l, at) => (l === RAN || l.startsWith(`${RAN} `) ? [at] : []));
       assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${step} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
-      assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
+      assert.equal(own(lines, ran[0]), mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
     }
     assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
     assert.deepEqual(boundPlacementProblems(key, all), []);
@@ -1621,7 +1643,7 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
   );
   const sourced = (os_) => {
     const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/_RUNNER$/i.test(k))), RUNNER_OS: os_ };
-    const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", '. .github/scripts/test-sandbox-env.sh; echo "the step went on, its runner ${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER:-none}"'], { cwd: ROOT, encoding: "utf8", env, timeout: 30000 });
+    const r = spawnSync(bashPath(), ["-eo", "pipefail", ".github/scripts/fixtures/sandbox-env.sh"], { cwd: ROOT, encoding: "utf8", env, timeout: 30000 });
     return { status: r.status, out: `${r.stdout}${r.stderr}` };
   };
   const stopped = sourced("Linux");
@@ -1750,13 +1772,13 @@ const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);
 /// The runners a job names: its literal label, or each value its matrix gives the key `runs-on`
 /// names; null when it names them otherwise (an expression, a list, a group).
 export function runnersOf(job) {
-  const on = job?.["runs-on"];
+  const on = own(job, "runs-on");
   if (typeof on !== "string") return null;
   const ref = /^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/.exec(on);
   if (!ref) return /\$\{\{/.test(on) ? null : [on];
   const matrix = job.strategy?.matrix;
   if (!isPlain(matrix)) return null;
-  const values = Array.isArray(matrix[ref[1]]) ? matrix[ref[1]] : Array.isArray(matrix.include) ? matrix.include.map((c) => c?.[ref[1]]) : [];
+  const values = Array.isArray(own(matrix, ref[1])) ? own(matrix, ref[1]) : Array.isArray(matrix.include) ? matrix.include.map((c) => own(c, ref[1])) : [];
   return values.length > 0 && values.every((v) => typeof v === "string") ? values : null;
 }
 
@@ -1771,7 +1793,7 @@ check("every required job on Linux runs the change's code in the sandbox, or say
     const key = `${file}#${id}`;
     required.add(key);
     const runners = runnersOf(job);
-    assert.ok(runners && runners.every((r) => RUNNERS.has(r)), `${key} runs on ${JSON.stringify(job["runs-on"])}, which is no literal of RUNNERS nor a matrix value that is one`);
+    assert.ok(runners && runners.every((r) => RUNNERS.has(r)), `${key} runs on ${JSON.stringify(own(job, "runs-on"))}, which is no literal of RUNNERS nor a matrix value that is one`);
     const linux = runners.some((r) => r.startsWith("ubuntu-"));
     const holding = lists.filter(([, set]) => set.has(key)).map(([name]) => name);
     if (!linux) {
@@ -1807,7 +1829,7 @@ check("no required job restores a cache, and no job caches nextest", () => {
   // not to (the third review of 980965e): every setup-node says no, and names no cache.
   for (const { file, id, job } of allJobs()) {
     for (const s of steps(job).filter((x) => /^actions\/setup-node@/.test(String(x.uses ?? "")))) {
-      assert.ok(isPlain(s.with) && s.with["package-manager-cache"] === false && !("cache" in s.with) && !("cache-dependency-path" in s.with), `${stepKey(file, id, s)}: setup-node may restore a cache another job could have written; give it package-manager-cache: false and no cache`);
+      assert.ok(isPlain(s.with) && own(s.with, "package-manager-cache") === false && !("cache" in s.with) && !("cache-dependency-path" in s.with), `${stepKey(file, id, s)}: setup-node may restore a cache another job could have written; give it package-manager-cache: false and no cache`);
     }
   }
   for (const { file, id, job } of allJobs()) {
@@ -2017,7 +2039,7 @@ check("as cargo reads the manifests and the lock, no package of the workspace ru
     const toolchainText = '[toolchain]\nchannel = "1.97.1"\ncomponents = ["clippy", "rustfmt"]\nprofile = "minimal"\n';
     const lockText = `# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = "leaf"\nversion = "2.0.0"\nsource = "git+https://example.invalid/leaf#abc"\n`;
     fs.writeFileSync(path.join(cli, "Cargo.lock"), lockText);
-    const run = (...args) => spawnSync(process.execPath, [path.join(ROOT, ".github/scripts/build-time-code.mjs"), ...args], { cwd: cli, encoding: "utf8", env: { ...process.env, CARGO_HOME: path.join(cli, "home") } });
+    const run = (...args) => spawnSync(nodePath(), [path.join(ROOT, ".github/scripts/build-time-code.mjs"), ...args], { cwd: cli, encoding: "utf8", env: { ...process.env, CARGO_HOME: path.join(cli, "home") } });
     // A checkout below a cargo configuration of the machine's, which cargo would read too, fails
     // the check by design; there the clean case shows that failure instead.
     const above = [];
@@ -2117,7 +2139,7 @@ export function beforeToolchainProblems(file, id, doc, job) {
     } else if (/^actions\/checkout@[0-9a-f]{40}$/.test(uses)) {
       checkouts++;
       if (k !== 0) found.push(`${where} checks out after another step`);
-      if (!stepKeysAre(s, ["uses", "with"]) || !CHECKOUT_INPUTS.some((w) => sameKeys(s.with, Object.keys(w)) && Object.keys(w).every((x) => s.with[x] === w[x]))) {
+      if (!stepKeysAre(s, ["uses", "with"]) || !CHECKOUT_INPUTS.some((w) => sameKeys(s.with, Object.keys(w)) && Object.keys(w).every((x) => own(s.with, x) === own(w, x)))) {
         found.push(`${where} checks out with ${JSON.stringify(s.with ?? null)} or more keys than its inputs (${keys.join(", ")}), not one of CHECKOUT_INPUTS`);
       }
     } else if (/^actions\/setup-node@[0-9a-f]{40}$/.test(uses)) {
@@ -2167,18 +2189,18 @@ check("every required or pinned job but those of GATE_ONLY and SECRET_JOBS check
   for (const id of ["docs", "rust"]) {
     const plant = (change) => {
       const doc = clone(ci);
-      const job = doc.jobs[id];
+      const job = own(doc.jobs, id);
       change(job, doc);
       return [...beforeToolchainProblems("ci.yml", id, doc, job), ...toolEnvProblems(`ci.yml#${id}`, doc, job), ...(jobDigest(doc, job) === PINNED_JOBS.get(`ci.yml#${id}`) ? [] : ["the pin"])];
     };
     const ruled = (change) => {
       const doc = clone(ci);
-      change(doc.jobs[id], doc);
-      return [...beforeToolchainProblems("ci.yml", id, doc, doc.jobs[id]), ...toolEnvProblems(`ci.yml#${id}`, doc, doc.jobs[id])];
+      change(own(doc.jobs, id), doc);
+      return [...beforeToolchainProblems("ci.yml", id, doc, own(doc.jobs, id)), ...toolEnvProblems(`ci.yml#${id}`, doc, own(doc.jobs, id))];
     };
-    const toolchain = (job) => job.steps[index(job, (s) => s.run === TOOLCHAIN_STEP)];
+    const toolchain = (job) => own(job.steps, index(job, (s) => s.run === TOOLCHAIN_STEP));
     for (const [name, change] of [
-      ["P1, working-directory on the toolchain step", (job) => (toolchain(job)["working-directory"] = "compiler")],
+      ["P1, working-directory on the toolchain step", (job) => (setOwn(toolchain(job), "working-directory", "compiler"))],
       ["P2, a variable on the toolchain step", (job) => (toolchain(job).env = { MENTE_X: "1" })],
       ["P2, a shell on the toolchain step", (job) => (toolchain(job).shell = "sh")],
       ["P3, setup-node with an input more", (job) => job.steps.splice(1, id === "docs" ? 1 : 0, { uses: `actions/setup-node@${"0".repeat(40)}`, with: { ...NODE_INPUTS, cache: "npm" } })],
@@ -2196,7 +2218,7 @@ check("every required or pinned job but those of GATE_ONLY and SECRET_JOBS check
       ["an action before the check", (job) => job.steps.splice(1, 0, { uses: `someone/action@${"0".repeat(40)}` })],
       ["a second checkout", (job) => job.steps.splice(1, 0, clone(job.steps[0]))],
       ["the toolchain step under if: false", (job) => (toolchain(job).if = "false")],
-      ["the toolchain step allowed to fail", (job) => (toolchain(job)["continue-on-error"] = true)],
+      ["the toolchain step allowed to fail", (job) => (setOwn(toolchain(job), "continue-on-error", true))],
       ["a container", (job) => (job.container = "someone/image")],
       ["the policy step with a variable", (job) => {
         const s = job.steps.find((x) => BEFORE_TOOLCHAIN.has(String(x.run ?? "").trim()));
@@ -2297,12 +2319,22 @@ check("the list of tests is read as nextest writes it", () => {
   assert.equal(doctestProblems("   Compiling mente-ast\n").length, 1, "no library at all");
 });
 
-/// The bash the policy runs scripts in: on Windows, Git's, beside the git the policy runs, since a
-/// bare `bash` there may be WSL's.
+/// The bash the policy runs scripts in, by its path: on Windows, Git's, beside the git the policy
+/// runs, since a bare `bash` there may be WSL's; elsewhere /usr/bin/bash, since a bare name is looked
+/// up on the PATH a test hands the child, where a shim may stand first.
 function bashPath() {
-  if (process.platform !== "win32") return "bash";
+  if (process.platform !== "win32") return "/usr/bin/bash";
   const found = path.resolve(git(["--exec-path"]).trim(), "../../../usr/bin/bash.exe");
   assert.ok(fs.existsSync(found), `no bash beside git at ${found}`);
+  return found;
+}
+
+/// The env SECRET_SHELL names, /usr/bin/env, which the policy runs the secret steps in: on Windows,
+/// Git's, beside the git the policy runs, which reads SECRET_SHELL's /usr/bin as Git's own.
+function envPath() {
+  if (process.platform !== "win32") return "/usr/bin/env";
+  const found = path.resolve(git(["--exec-path"]).trim(), "../../../usr/bin/env.exe");
+  assert.ok(fs.existsSync(found), `no env beside git at ${found}`);
   return found;
 }
 
@@ -2319,10 +2351,9 @@ check("the memory guard goes on when the process it would stop is already gone",
     const ROUNDS = 5;
     // `sudo` stands in too, and says what it was asked: the guard stops through it a process of
     // the sandbox's user, which the runner's user cannot stop, and no other.
-    const guard = (owner) =>
-      `rounds=0; sleep() { rounds=$((rounds + 1)); [ "$rounds" -le ${ROUNDS} ]; }; ps() { case "$*" in *uid=*) echo " ${owner}" ;; *) echo "999999 1" ;; esac; }; sudo() { echo "sudo $*"; }; (. .github/scripts/memory-guard.sh "$1"; echo "the guard went on through $((rounds - 1)) rounds")`;
-    const script = guard("1001");
-    const r = spawnSync(bashPath(), ["-eo", "pipefail", "-c", script, "guard", meminfo.replace(/\\/g, "/")], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
+    // The stand-ins are .github/scripts/fixtures/memory-guard-rounds.sh's, which takes the owner `ps`
+    // names, the meminfo and the rounds.
+    const r = spawnSync(bashPath(), ["-eo", "pipefail", ".github/scripts/fixtures/memory-guard-rounds.sh", "1001", meminfo.replace(/\\/g, "/"), String(ROUNDS)], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
     const rounds = (String(r.stdout).match(/^memory guard: 1 MB available, stopping /gm) ?? []).length;
     assert.equal(rounds, ROUNDS, `the guard stopped after ${rounds} of ${ROUNDS} rounds: ${r.error ?? ""}${r.stdout}${r.stderr}`);
     assert.match(String(r.stdout), new RegExp(`^the guard went on through ${ROUNDS} rounds$`, "m"), `the guard did not go on after its rounds: ${r.stdout}${r.stderr}`);
@@ -2330,7 +2361,7 @@ check("the memory guard goes on when the process it would stop is already gone",
     assert.doesNotMatch(String(r.stdout), /^sudo /m, "the guard stops through sudo a process that is not the sandbox's");
     const uid = spawnSync(bashPath(), [".github/scripts/test-sandbox.sh", "uid"], { cwd: ROOT, encoding: "utf8", timeout: 30000 }).stdout.trim();
     assert.match(uid, /^\d+$/, "test-sandbox.sh names no user for the tests");
-    const s = spawnSync(bashPath(), ["-eo", "pipefail", "-c", guard(uid), "guard", meminfo.replace(/\\/g, "/")], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
+    const s = spawnSync(bashPath(), ["-eo", "pipefail", ".github/scripts/fixtures/memory-guard-rounds.sh", uid, meminfo.replace(/\\/g, "/"), String(ROUNDS)], { cwd: ROOT, encoding: "utf8", timeout: 30000 });
     assert.equal((String(s.stdout).match(/^sudo -n kill -9 999999$/gm) ?? []).length, ROUNDS, `the guard does not stop a process of the sandbox's user through sudo: ${s.error ?? ""}${s.stdout}${s.stderr}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -2347,7 +2378,7 @@ check("every measured benchmark run proves its sandbox first", () => {
     const check = all.findIndex((s) => /benchmark\/harness\/sandbox-check\.ts/.test(String(s.run ?? "")));
     assert.ok(check >= 0 && check < run, `${file}, job ${id}: the benchmark runs agent code before sandbox-check.ts proves the sandbox`);
     for (const key of ["if", "continue-on-error"]) {
-      assert.ok(!(key in all[check]), `${file}, job ${id}: the sandbox check carries ${key}:, so a run could measure without it`);
+      assert.ok(!(key in own(all, check)), `${file}, job ${id}: the sandbox check carries ${key}:, so a run could measure without it`);
     }
   }
   assert.ok(measured > 0, "no workflow runs benchmark/harness/bench.ts");
@@ -2385,23 +2416,23 @@ export function jsTokens(text) {
   const out = [];
   const n = text.length;
   const starts = [0];
-  for (let i = 0; i < n; i++) if (text[i] === "\n") starts.push(i + 1);
+  for (let i = 0; i < n; i++) if (own(text, i) === "\n") starts.push(i + 1);
   const lineOf = (at) => {
     let lo = 0;
     let hi = starts.length - 1;
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1;
-      if (starts[mid] <= at) lo = mid;
+      if (own(starts, mid) <= at) lo = mid;
       else hi = mid - 1;
     }
     return lo + 1;
   };
-  const push = (t, v, at, extra = {}) => out.push({ t, v, line: lineOf(at), ...extra });
+  const push = (t, v, at, extra = {}) => out.push({ t, v, line: lineOf(at), at, ...extra });
   let k = text.startsWith("#!") ? Math.max(text.indexOf("\n"), 0) : 0;
   let depth = 0;
   const resume = [];
   const regexAllowed = () => {
-    const p = out[out.length - 1];
+    const p = own(out, out.length - 1);
     if (!p) return true;
     if (p.t === "punct") return !/^[)\]}]$/.test(p.v);
     if (p.t === "tpl") return Boolean(p.open);
@@ -2411,7 +2442,7 @@ export function jsTokens(text) {
   const template = (at) => {
     let v = "";
     while (k < n) {
-      const c = text[k];
+      const c = own(text, k);
       if (c === "\\") {
         v += text.slice(k, k + 2);
         k += 2;
@@ -2419,7 +2450,7 @@ export function jsTokens(text) {
         k++;
         push("tpl", v, at);
         return;
-      } else if (c === "$" && text[k + 1] === "{") {
+      } else if (c === "$" && own(text, k + 1) === "{") {
         k += 2;
         push("tpl", v, at, { open: true });
         resume.push(depth);
@@ -2433,27 +2464,27 @@ export function jsTokens(text) {
     push("tpl", v, at, { bad: true });
   };
   while (k < n) {
-    const c = text[k];
+    const c = own(text, k);
     const at = k;
     if (c === " " || c === "\t" || c === "\n" || c === "\r") {
       k++;
-    } else if (c === "/" && text[k + 1] === "/") {
+    } else if (c === "/" && own(text, k + 1) === "/") {
       const e = text.indexOf("\n", k);
       k = e < 0 ? n : e;
-    } else if (c === "/" && text[k + 1] === "*") {
+    } else if (c === "/" && own(text, k + 1) === "*") {
       const e = text.indexOf("*/", k + 2);
       if (e < 0) push("punct", "/*", at, { bad: true });
       k = e < 0 ? n : e + 2;
     } else if (c === '"' || c === "'") {
       let j = k + 1;
       let v = "";
-      while (j < n && text[j] !== c && text[j] !== "\n") {
-        if (text[j] === "\\") {
+      while (j < n && own(text, j) !== c && own(text, j) !== "\n") {
+        if (own(text, j) === "\\") {
           v += text.slice(j, j + 2);
           j += 2;
-        } else v += text[j++];
+        } else v += own(text, j++);
       }
-      push("str", unescapeJs(v), at, text[j] === c ? {} : { bad: true });
+      push("str", unescapeJs(v), at, own(text, j) === c ? {} : { bad: true });
       k = j + 1;
     } else if (c === "`") {
       k++;
@@ -2465,25 +2496,25 @@ export function jsTokens(text) {
     } else if (c === "/" && regexAllowed()) {
       let j = k + 1;
       let inClass = false;
-      while (j < n && text[j] !== "\n" && (text[j] !== "/" || inClass)) {
-        if (text[j] === "\\") j++;
-        else if (text[j] === "[") inClass = true;
-        else if (text[j] === "]") inClass = false;
+      while (j < n && own(text, j) !== "\n" && (own(text, j) !== "/" || inClass)) {
+        if (own(text, j) === "\\") j++;
+        else if (own(text, j) === "[") inClass = true;
+        else if (own(text, j) === "]") inClass = false;
         j++;
       }
-      const closed = text[j] === "/";
+      const closed = own(text, j) === "/";
       j++;
-      while (j < n && /[a-z]/i.test(text[j])) j++;
+      while (j < n && /[a-z]/i.test(own(text, j))) j++;
       push("re", text.slice(k, j), at, closed ? {} : { bad: true });
       k = j;
     } else if (/[A-Za-z_$]/.test(c)) {
       let j = k + 1;
-      while (j < n && /[\w$]/.test(text[j])) j++;
+      while (j < n && /[\w$]/.test(own(text, j))) j++;
       push("id", text.slice(k, j), at);
       k = j;
     } else if (/[0-9]/.test(c)) {
       let j = k + 1;
-      while (j < n && /[\w.]/.test(text[j])) j++;
+      while (j < n && /[\w.]/.test(own(text, j))) j++;
       push("num", text.slice(k, j), at);
       k = j;
     } else {
@@ -2504,7 +2535,7 @@ function unescapeJs(raw) {
     const hex = cp ?? u ?? x;
     if (hex !== undefined) return String.fromCodePoint(parseInt(hex, 16));
     if (e === "\n") return "";
-    return simple[e] ?? e;
+    return own(simple, e) ?? e;
   });
 }
 
@@ -2515,9 +2546,9 @@ function unescapeJs(raw) {
 export function jsImports(toks) {
   const specifiers = [];
   const unreadable = [];
-  const at = (j) => toks[j] ?? { t: "end", v: "" };
+  const at = (j) => own(toks, j) ?? { t: "end", v: "" };
   for (let i = 0; i < toks.length; i++) {
-    const t = toks[i];
+    const t = own(toks, i);
     if (t.t !== "id" || at(i - 1).v === ".") continue;
     if (t.v === "import") {
       if (at(i + 1).v === "." && at(i + 2).v === "meta") continue;
@@ -2603,38 +2634,13 @@ const SPAWNERS = new Map([
     },
   ],
 ]);
-/// The names a module of a secret job may not use, each a way to run or load code that a reading
-/// of its imports does not see, or a way to reach one: eval and Function, the loaders and their
-/// hooks, the native loaders, workers, WebAssembly, and the objects that reach any global by a
-/// computed name.
-const REFUSED_NAMES = new Set([
-  "eval",
-  "Function",
-  "AsyncFunction",
-  "require",
-  "createRequire",
-  "register",
-  "_load",
-  "getBuiltinModule",
-  "binding",
-  "_linkedBinding",
-  "dlopen",
-  "Worker",
-  "WebAssembly",
-  "globalThis",
-  "global",
-  "Reflect",
-  "Proxy",
-  "getPrototypeOf",
-  "setPrototypeOf",
-  "prototype",
-  "defineProperty",
-  "defineProperties",
-  "__proto__",
-  "arguments",
-  "module",
-  "exports",
-]);
+/// The names a module the policy reads as tokens may not use, as code or as a string, each a way to
+/// run or load code that a reading of its imports does not see, or a way to reach one; and the one
+/// name it may use only to define a class's constructor. Data (.github/scripts/refused-names.json),
+/// so that the policy's own modules, which the same rules read, hold none of them as a literal.
+const REFUSED = JSON.parse(read(".github/scripts/refused-names.json"));
+const REFUSED_NAMES = new Set(REFUSED.names);
+const CLASS_ONLY = String(REFUSED.classOnly);
 /// What node runs as a module, by a file's name: what the closure of a job reads for imports.
 const JS_MODULE = /\.(mjs|cjs|js|ts|mts|cts|jsx|tsx)$/;
 /// The modules a secret job may run or import: ES modules alone, which the root package.json's
@@ -2676,6 +2682,198 @@ const OWN_TEXT = [
   "}",
   "",
 ].join("\n");
+/// The one module through which the modules the policy reads as tokens divide, by its text: none of
+/// them holds a `/` operator, so that every `/` in them starts a regular expression.
+const QUOTIENT_FILE = "benchmark/quotient.mjs";
+const QUOTIENT_TEXT = [
+  "// The one division of the modules the workflow policy reads as tokens (docs/design-review.md,",
+  "// untrusted-test-isolation). Those modules hold no `/` operator, so that every `/` in them starts a",
+  "// regular expression and no reading of their tokens takes one for the other; they divide through",
+  "// this function. The workflow policy holds this file's text.",
+  "",
+  "/** The quotient of two numbers, as `/` gives it. */",
+  "export function quotient(dividend, divisor) {",
+  "  return dividend / divisor;",
+  "}",
+  "",
+].join("\n");
+/// What a module of a secret job may use (readModule).
+const SECRET_PROFILE = {
+  modules: SECRET_MODULE,
+  nodeModules: NODE_MODULES,
+  processMembers: PROCESS_MEMBERS,
+  processWrites: new Set(),
+  spawners: SPAWNERS,
+  wholeSpawners: new Map(),
+  computedLoads: COMPUTED_LOADS,
+  // The broker's two divisions, by their text: its permission flags let it read no file but its
+  // own and its limits, so it cannot import quotient().
+  heldLines: new Map([
+    [
+      "benchmark/harness/broker.ts",
+      [
+        "  return (factorFor(input, price) * (input * price.input * limits.cacheWrite + maxTokens * price.output)) / 1e6;",
+        "  const total = (factorFor(input + written + read, price) * (input * price.input + written * price.input * cacheWrite + read * price.cacheRead + output * price.output)) / 1e6;",
+      ],
+    ],
+  ]),
+  nodeNames: new Map(),
+  numericIndex: false,
+  fixed: new Map([
+    [OWN_FILE, OWN_TEXT],
+    [QUOTIENT_FILE, QUOTIENT_TEXT],
+  ]),
+};
+/// The modules of node the workflow policy's own modules may import: what a test needs, none of them
+/// a way to load or run code; child_process only through POLICY_SPAWNERS.
+const POLICY_NODE_MODULES = new Set(["node:fs", "node:path", "node:url", "node:crypto", "node:os", "node:http", "node:test", "node:assert/strict"]);
+/// The members of `process` the policy's own modules may read, and the one they may write, the code a
+/// script exits with. process.execPath, which starts node, is read by nodePath()'s line alone, which
+/// POLICY_PROFILE holds by its text (the review of 56c29cf: a module could have set it before a call
+/// read it).
+const POLICY_PROCESS_MEMBERS = new Set(["argv", "env", "exit", "exitCode", "platform", "cwd"]);
+/// The line that defines nodePath(), held by its text.
+const NODE_PATH_LINE = "const nodePath = () => process.execPath;";
+/// The modules of the policy that start processes, each by its one import of child_process, with
+/// every call of what it imports listed whole (callText): its command, its arguments and its
+/// environment as written. A call added or changed is a change to this list, which review sees.
+const POLICY_SPAWNERS = new Map([
+  [
+    ".github/scripts/policy.test.mjs",
+    {
+      line: 'import { execFileSync, spawn, spawnSync } from "node:child_process";',
+      calls: [
+        "execFileSync ( \"git\" , args , { cwd : ROOT , encoding : \"utf8\" , maxBuffer : 64 * 1024 * 1024 } )",
+        "spawnSync ( bashPath ( ) , [ path . join ( ROOT , \".github/scripts/overflow-proof.sh\" ) . replace ( /\\\\/g , \"/\" ) ] , { cwd : dir , encoding : \"utf8\" , env , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \"-eo\" , \"pipefail\" , \".github/scripts/fixtures/source-limits.sh\" ] , { cwd : ROOT , encoding : \"utf8\" , env : { . . . env , . . . vars , CARGO_HOME : cargoHome . replace ( /\\\\/g , \"/\" ) , RUNNER_OS : \"Elsewhere\" } , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \"-eo\" , \"pipefail\" , \".github/scripts/fixtures/limits-flags.sh\" ] , { cwd : ROOT , encoding : \"utf8\" , env : { . . . env , . . . vars , CARGO_HOME : home . replace ( /\\\\/g , \"/\" ) , RUNNER_OS : \"Elsewhere\" } , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \".github/scripts/tools.sh\" , mode ] , { cwd : ROOT , encoding : \"utf8\" , env , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \"-eo\" , \"pipefail\" , \".github/scripts/fixtures/sandbox-env.sh\" ] , { cwd : ROOT , encoding : \"utf8\" , env , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \".github/scripts/test-sandbox.sh\" , . . . args ] , { cwd : ROOT , encoding : \"utf8\" , env , timeout : 30000 } )",
+        "spawnSync ( nodePath ( ) , [ path . join ( ROOT , \".github/scripts/build-time-code.mjs\" ) , . . . args ] , { cwd : cli , encoding : \"utf8\" , env : { . . . process . env , CARGO_HOME : path . join ( cli , \"home\" ) } } )",
+        "spawnSync ( bashPath ( ) , [ \"-eo\" , \"pipefail\" , \".github/scripts/fixtures/memory-guard-rounds.sh\" , \"1001\" , meminfo . replace ( /\\\\/g , \"/\" ) , String ( ROUNDS ) ] , { cwd : ROOT , encoding : \"utf8\" , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \".github/scripts/test-sandbox.sh\" , \"uid\" ] , { cwd : ROOT , encoding : \"utf8\" , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \"-eo\" , \"pipefail\" , \".github/scripts/fixtures/memory-guard-rounds.sh\" , uid , meminfo . replace ( /\\\\/g , \"/\" ) , String ( ROUNDS ) ] , { cwd : ROOT , encoding : \"utf8\" , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ \".github/scripts/fixtures/timeout.sh\" , . . . args ] , { cwd : ROOT , encoding : \"utf8\" , timeout : 30000 } )",
+        "spawnSync ( envPath ( ) , SECRET_SHELL . replace ( \"{0}\" , posix ( step ) ) . split ( \" \" ) . slice ( 1 ) , { cwd : dir , env , encoding : \"utf8\" , timeout : 30000 } )",
+        "spawnSync ( bashPath ( ) , [ path . join ( ROOT , \".github/scripts/fixtures/runner-shell.sh\" ) . replace ( /\\\\/g , \"/\" ) , posix ( step ) ] , { cwd : dir , env , encoding : \"utf8\" , timeout : 30000 } )",
+        "execFileSync ( \"git\" , args , { cwd : dir , encoding : \"utf8\" , env : GIT_TEST_ENV } )",
+        "spawnSync ( nodePath ( ) , [ path . join ( root , \".github/scripts/watch.mjs\" ) , \"x.yml\" ] , { cwd : dir , encoding : \"utf8\" , env : { . . . env , GITHUB_EVENT_NAME : \"pull_request\" , GITHUB_EVENT_PATH : event , . . . ( output ? { GITHUB_OUTPUT : out } : { } ) } , } )",
+        "execFileSync ( \"git\" , args , { cwd : dir , encoding : \"utf8\" , env : GIT_TEST_ENV } )",
+        "spawn ( nodePath ( ) , [ path . join ( ROOT , \".github/scripts/commits.mjs\" ) ] , { cwd : dir , env : { . . . env , GITHUB_EVENT_NAME : eventName , GITHUB_EVENT_PATH : event , GITHUB_REPOSITORY : \"o/r\" , GITHUB_API_URL : `http://127.0.0.1:` server . address ( ) . port `` , GITHUB_TOKEN : \"t\" , PR_TITLE : \"Title\" , PR_BODY : \"Body\" , } , } )",
+      ],
+    },
+  ],
+  [
+    ".github/scripts/lib/build-time-code.mjs",
+    {
+      line: 'import { execFileSync } from "node:child_process";',
+      calls: [
+        "execFileSync ( \"git\" , [ \"ls-files\" , \"-z\" ] , { cwd : root , encoding : \"utf8\" , maxBuffer : 64 * 1024 * 1024 } )",
+        "execFileSync ( \"cargo\" , [ \"metadata\" , \"--format-version\" , \"1\" , \"--locked\" , \"--all-features\" ] , { cwd : root , encoding : \"utf8\" , maxBuffer : 256 * 1024 * 1024 , stdio : [ \"ignore\" , \"pipe\" , \"inherit\" ] } )",
+      ],
+    },
+  ],
+  [
+    ".github/scripts/lib/commits.mjs",
+    {
+      line: 'import { execFileSync } from "node:child_process";',
+      calls: [
+        "execFileSync ( \"git\" , [ \"log\" , \"--reverse\" , \"--format=%H%x1f%s%x1f%B%x1e\" , `` base `..` head `` ] , { cwd , encoding : \"utf8\" , maxBuffer : 64 * 1024 * 1024 , } )",
+      ],
+    },
+  ],
+  [
+    ".github/scripts/lib/watch.mjs",
+    {
+      line: 'import { execFileSync } from "node:child_process";',
+      calls: [
+        "execFileSync ( \"git\" , [ \"diff\" , \"--name-only\" , \"--no-renames\" , \"-z\" , `` base `...` head `` ] , { cwd , encoding : \"utf8\" , maxBuffer : 64 * 1024 * 1024 , } )",
+      ],
+    },
+  ],
+]);
+/// What the workflow policy's own modules may use: the secret modules' rules, read exactly, with the
+/// node modules and the members of process a test needs, an index by a numeric literal, and spawns
+/// listed whole (the review of 56c29cf).
+const POLICY_PROFILE = {
+  modules: /\.mjs$/,
+  nodeModules: POLICY_NODE_MODULES,
+  processMembers: POLICY_PROCESS_MEMBERS,
+  processWrites: new Set(["exitCode"]),
+  spawners: new Map(),
+  wholeSpawners: POLICY_SPAWNERS,
+  computedLoads: new Map(),
+  heldLines: new Map([[".github/scripts/policy.test.mjs", [NODE_PATH_LINE]]]),
+  // node:test's run() loads any test file, its mock.module() any module.
+  nodeNames: new Map([["node:test", new Set(["test", "after", "before", "describe", "it"])]]),
+  numericIndex: true,
+  fixed: new Map([
+    [OWN_FILE, OWN_TEXT],
+    [QUOTIENT_FILE, QUOTIENT_TEXT],
+  ]),
+};
+/// The commands a call POLICY_SPAWNERS lists may start anywhere, as its first argument reads.
+const POLICY_COMMANDS = new Set(['"git"', '"cargo"']);
+/// The commands policy.test.mjs alone starts, through its own definitions: bash through bashPath()
+/// and node through nodePath(), each defined there once, by the text given, and otherwise only
+/// called. A call of one names the script it runs, as a literal or a literal joined to a base,
+/// after bash's `-eo pipefail`: for node a script the policy walks (POLICY_SPAWNED), for bash one it
+/// pins (PINNED_FILES). The base, ROOT or a link to it a test makes, is held by the call's listing.
+/// And env through envPath(), whose call runs the secret steps' shell: it takes SECRET_SHELL's words
+/// after /usr/bin/env, and nothing else.
+const OWN_COMMANDS = new Map([
+  ["bashPath", { definition: "function bashPath() {", runs: "pins" }],
+  ["nodePath", { definition: NODE_PATH_LINE, runs: "walks" }],
+  ["envPath", { definition: "function envPath() {", runs: "the secret shell" }],
+]);
+/// How the one call of envPath() begins: SECRET_SHELL's words after its env, the step's script in
+/// place of {0}.
+const SECRET_SHELL_CALL = 'spawnSync ( envPath ( ) , SECRET_SHELL . replace ( "{0}" , posix ( step ) ) . split ( " " ) . slice ( 1 ) , ';
+/// What is wrong with the calls POLICY_SPAWNERS lists: a command not of POLICY_COMMANDS, or of
+/// OWN_COMMANDS outside policy.test.mjs; an argument that hands the command code or configuration
+/// (handedCode); a script run that the policy neither walks nor pins, or a script of `spawned` no
+/// call starts; and a command of OWN_COMMANDS defined other than once by its text in the policy's
+/// own text, or used other than called.
+export function spawnListProblems(spawners, policyText, spawned = POLICY_SPAWNED, pinned = PINNED_FILES) {
+  const found = [];
+  const started = new Set();
+  for (const [file, { calls }] of spawners) {
+    for (const call of calls) {
+      const command = /^\w+ \( (.*?) , /.exec(call)?.at(1) ?? "";
+      const name = /^(\w+) \( \)$/.exec(command)?.at(1) ?? "";
+      const ownCommand = file === ".github/scripts/policy.test.mjs" && OWN_COMMANDS.has(name);
+      if (!POLICY_COMMANDS.has(command) && !ownCommand) found.push(`${file}: a call that starts ${command}, none of ${[...POLICY_COMMANDS].join(", ")}, or of ${[...OWN_COMMANDS.keys()].join("(), ")}() in policy.test.mjs`);
+      for (const flag of handedCode(call)) found.push(`${file}: a call that hands its command ${flag}: ${call}`);
+      if (!ownCommand) continue;
+      if (OWN_COMMANDS.get(name)?.runs === "the secret shell") {
+        if (!call.startsWith(SECRET_SHELL_CALL)) found.push(`${file}: a call of ${name}() that runs other than SECRET_SHELL's words: ${call}`);
+        continue;
+      }
+      const named = /^\w+ \( \w+ \( \) , \[ (?:"-eo" , "pipefail" , )?(?:"([^"]*)"|path \. join \( \w+ , "([^"]*)" \))/.exec(call);
+      const script = named?.at(1) ?? named?.at(2);
+      const walks = OWN_COMMANDS.get(name)?.runs === "walks";
+      if (script === undefined) found.push(`${file}: a call of ${name}() that names no script it runs: ${call}`);
+      else if (walks ? !spawned.includes(script) : !pinned.has(script)) found.push(`${file}: a call of ${name}() that runs ${script}, which the policy ${walks ? "does not walk (POLICY_SPAWNED)" : "does not pin (PINNED_FILES)"}`);
+      else if (walks) started.add(script);
+    }
+  }
+  for (const script of spawned) if (!started.has(script)) found.push(`${script}: a script POLICY_SPAWNED names that no listed call starts`);
+  const toks = jsTokens(policyText);
+  for (const [name, { definition }] of OWN_COMMANDS) {
+    const text = jsTokens(definition).map((x) => x.v);
+    const at = (i) => toks.slice(i - 1, i - 1 + text.length).map((x) => x.v);
+    const uses = toks.map((x, i) => (x.t === "id" && x.v === name && toks.at(i - 1)?.v !== "." ? i : -1)).filter((i) => i >= 0);
+    const defined = uses.filter((i) => at(i).join(" ") === text.join(" ")).length;
+    const other = uses.filter((i) => at(i).join(" ") !== text.join(" ") && !(own(toks, i + 1)?.v === "(" && toks.at(i + 2)?.v === ")")).length;
+    if (defined !== 1 || other > 0) found.push(`${name} is defined ${defined} times by \`${definition}\` and used ${other} times other than called, where it is defined once and only called`);
+  }
+  return found;
+}
+
+/// The node scripts the policy starts, each an entry of its closure as the files its step runs are.
+const POLICY_SPAWNED = [".github/scripts/build-time-code.mjs", ".github/scripts/commits.mjs", ".github/scripts/watch.mjs"];
+
 /// The keywords after which `[` opens an array or a pattern, not a computed member.
 const KEYWORDS = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await|extends|const|let|var)$/;
 /// Whether the `[` at `i` reads a member by a computed key, or names one: after a name, a
@@ -2688,31 +2886,31 @@ const KEYWORDS = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do
 /// `with`, where it starts a statement. A reading of tokens, this narrows what can be spelled and
 /// stays a reading aid: no reading decides what arbitrary code does.
 export function computedAccessAt(toks, i) {
-  const t = toks[i];
-  if (!(t?.t === "punct" && t.v === "[") || toks[i + 1]?.v === "]") return false;
-  const p = toks[i - 1];
+  const t = own(toks, i);
+  if (!(t?.t === "punct" && t.v === "[") || own(toks, i + 1)?.v === "]") return false;
+  const p = own(toks, i - 1);
   if (!p) return false;
-  const afterDot = (j) => toks[j - 1]?.t === "punct" && toks[j - 1].v === ".";
+  const afterDot = (j) => own(toks, j - 1)?.t === "punct" && own(toks, j - 1).v === ".";
   const endsExpression = (x, j) => x && ((x.t === "id" && (!KEYWORDS.test(x.v) || afterDot(j))) || x.t === "str" || x.t === "num" || (x.t === "tpl" && !x.open) || (x.t === "punct" && /^[)\]]$/.test(x.v)));
   // A computed key: `[...]` followed by `:` (a property or a pattern's) or `(` (a method's).
   let close = i + 1;
   for (let depth = 0; close < toks.length; close++) {
-    if (toks[close].t === "punct" && /^[[({]$/.test(toks[close].v)) depth++;
-    if (toks[close].t === "punct" && /^[\])}]$/.test(toks[close].v) && depth-- === 0) break;
+    if (own(toks, close).t === "punct" && /^[[({]$/.test(own(toks, close).v)) depth++;
+    if (own(toks, close).t === "punct" && /^[\])}]$/.test(own(toks, close).v) && depth-- === 0) break;
   }
-  if (toks[close + 1]?.t === "punct" && /^[:(]$/.test(toks[close + 1].v) && p.t === "punct" && /^[{,;}]$/.test(p.v)) return true;
+  if (own(toks, close + 1)?.t === "punct" && /^[:(]$/.test(own(toks, close + 1).v) && p.t === "punct" && /^[{,;}]$/.test(p.v)) return true;
   if (p.t === "id") return !KEYWORDS.test(p.v) || afterDot(i - 1);
   if (p.t === "str" || p.t === "num" || p.t === "re" || (p.t === "tpl" && !p.open)) return true;
   if (p.t !== "punct") return false;
   if (p.v === "]" || p.v === "}") return true;
-  if (p.v === "." && toks[i - 2]?.v === "?") return true;
-  if (p.v === "!") return endsExpression(toks[i - 2], i - 2);
+  if (p.v === "." && own(toks, i - 2)?.v === "?") return true;
+  if (p.v === "!") return endsExpression(own(toks, i - 2), i - 2);
   if (p.v === ")") {
     let depth = 0;
     for (let j = i - 1; j >= 0; j--) {
-      if (toks[j].t === "punct" && toks[j].v === ")") depth++;
-      if (toks[j].t === "punct" && toks[j].v === "(" && --depth === 0) {
-        const q = toks[j - 1];
+      if (own(toks, j).t === "punct" && own(toks, j).v === ")") depth++;
+      if (own(toks, j).t === "punct" && own(toks, j).v === "(" && --depth === 0) {
+        const q = own(toks, j - 1);
         const control = q?.t === "id" && /^(if|while|for|switch|catch|with)$/.test(q.v) && !afterDot(j - 1);
         return !control;
       }
@@ -2732,36 +2930,50 @@ export function computedAccessAt(toks, i) {
 /// module can spell; they cannot decide what arbitrary code does, so the code owner's review holds
 /// what they do not list (docs/design-review.md, trust-from-structure), and each node of a secret
 /// job runs with code generation from strings disallowed, which no spelling gets past.
-export function readSecretModule(file, text) {
-  // OWN_FILE is held by its whole text, which no rule below need read.
-  if (file === OWN_FILE) return { problems: text === OWN_TEXT ? [] : [`${file}: its text is not the one the policy holds (OWN_TEXT)`], imports: [] };
+export function readModule(file, text, profile) {
+  // A file the profile holds by its whole text needs no rule below.
+  const fixed = profile.fixed.get(file);
+  if (fixed !== undefined) return { problems: text === fixed ? [] : [`${file}: its text is not the one the policy holds`], imports: [] };
   const problems = [];
   // An ES module alone: `.cjs` and `.cts` are CommonJS, whose `arguments`, `require` and
   // `module` load any module by a computed name (the re-check of da58409).
-  if (!SECRET_MODULE.test(file)) problems.push(`${file}: no .mjs, .js or .ts module, which the package's "type": "module" makes ES modules`);
+  if (!profile.modules.test(file)) problems.push(`${file}: no module of the kinds ${profile.modules} names, ES modules all`);
   const imports = [];
   const lines = text.split("\n");
-  const named = COMPUTED_LOADS.get(file);
+  const named = profile.computedLoads.get(file);
   if (named && lines.filter((l) => l === named.line).length !== 1) problems.push(`${file}: its named load is not the one line \`${named.line.trim()}\`, once`);
   if (/[^\t\n -~]/.test(text)) problems.push(`${file}: a character outside printable ASCII, tab and LF`);
-  // The named load's line is read as blank, keeping every other line's number.
-  const toks = jsTokens(named ? lines.map((l) => (l === named.line ? "" : l)).join("\n") : text);
+  // The lines the profile holds by their text, each there once.
+  const held = profile.heldLines.get(file) ?? [];
+  for (const line of held) if (lines.filter((l) => l === line).length !== 1) problems.push(`${file}: a line the policy holds by its text is not there once: ${line.trim()}`);
+  // The named load's line and the held lines are read as blank, keeping every other line's number.
+  const blank = new Set([...(named ? [named.line] : []), ...held]);
+  const toks = jsTokens(blank.size > 0 ? lines.map((l) => (blank.has(l) ? "" : l)).join("\n") : text);
   const where = (t) => `${file}:${t.line}`;
-  const prior = (i) => toks[i - 1] ?? { t: "start", v: "" };
+  const prior = (i) => own(toks, i - 1) ?? { t: "start", v: "" };
   for (let i = 0; i < toks.length; i++) {
-    const t = toks[i];
+    const t = own(toks, i);
     if (t.bad) problems.push(`${where(t)}: a literal or a comment that does not close`);
     if (t.t === "punct" && t.v === "\\") problems.push(`${where(t)}: a backslash outside a literal, as in an escaped name`);
     if ((t.t === "id" || t.t === "str" || t.t === "tpl") && REFUSED_NAMES.has(t.v)) problems.push(`${where(t)}: ${t.v}, a way to run or load code that a reading of its imports does not see`);
-    if ((t.t === "str" || t.t === "tpl") && t.v === "constructor") problems.push(`${where(t)}: "constructor", the way to Function`);
-    if (t.t === "id" && t.v === "constructor" && !(toks[i + 1]?.v === "(" && /^[{};]$/.test(prior(i).v) && prior(i).t === "punct")) problems.push(`${where(t)}: constructor, other than defining a class's, the way to Function`);
-    if (t.t === "id" && t.v === "process" && prior(i).v !== "." && !(toks[i + 1]?.v === "." && toks[i + 2]?.t === "id" && PROCESS_MEMBERS.has(toks[i + 2].v))) {
-      problems.push(`${where(t)}: process other than as process.${[...PROCESS_MEMBERS].join(", process.")}`);
+    if ((t.t === "str" || t.t === "tpl") && t.v === CLASS_ONLY) problems.push(`${where(t)}: "${CLASS_ONLY}", the way to Function`);
+    if (t.t === "id" && t.v === CLASS_ONLY && !(own(toks, i + 1)?.v === "(" && /^[{};]$/.test(prior(i).v) && prior(i).t === "punct")) problems.push(`${where(t)}: ${CLASS_ONLY}, other than defining a class's, the way to Function`);
+    if (t.t === "id" && t.v === "process" && prior(i).v !== "." && !(own(toks, i + 1)?.v === "." && toks.at(i + 2)?.t === "id" && profile.processMembers.has(toks.at(i + 2)?.v))) {
+      problems.push(`${where(t)}: process other than as process.${[...profile.processMembers].join(", process.")}`);
     }
+    // And never written: process.execPath, which starts node, would start anything (the review of
+    // 56c29cf).
+    if (t.t === "id" && t.v === "process" && prior(i).v !== "." && own(toks, i + 1)?.v === "." && writes(toks, i + 3) && !profile.processWrites.has(toks.at(i + 2)?.v)) problems.push(`${where(t)}: process.${toks.at(i + 2)?.v} written`);
+    // The reading is exact: no division, so that every `/` starts a regular expression; none where
+    // JavaScript could read a division instead (after `++`, `--`, a postfix `!`, or a keyword
+    // that is a property's name); no number misread, as in `1..constructor` (the review of 56c29cf).
+    if (t.t === "punct" && t.v === "/") problems.push(`${where(t)}: a division, which a module the policy reads may not hold, so that every \`/\` starts a regular expression (divide with ${QUOTIENT_FILE}'s quotient())`);
+    if (t.t === "re" && !regexPlaced(toks, i)) problems.push(`${where(t)}: a \`/\` the reading cannot place, where JavaScript could read a division`);
+    if (t.t === "num" && !NUMBER.test(t.v)) problems.push(`${where(t)}: ${t.v}, a number the reading does not take whole, as in 1..${CLASS_ONLY}`);
     // Every computed member access, whatever its key: OWN_FILE's `own` and `setOwn` read and
     // write only own properties (the review of 41a54b6: `(() => 0)["constr" + "uctor"]` and
     // `p["getBuilt" + "inModule"]` after `const p = process`).
-    if (computedAccessAt(toks, i)) problems.push(`${where(t)}: a member read by a computed key, which only ${OWN_FILE}'s own() and setOwn() do`);
+    if (computedAccessAt(toks, i) && !(profile.numericIndex && own(toks, i + 1)?.t === "num" && toks.at(i + 2)?.v === "]")) problems.push(`${where(t)}: a member read by a computed key, which only ${OWN_FILE}'s own() and setOwn() do`);
   }
   const read = jsImports(toks);
   for (const line of read.unreadable) problems.push(`${file}:${line}: an import the policy cannot read as a static import of a literal`);
@@ -2771,19 +2983,26 @@ export function readSecretModule(file, text) {
       const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), s.v));
       imports.push(target);
       if (!tracked().has(target)) problems.push(`${file}:${s.line}: imports ${s.v}, which is no file of the repository`);
-      if (!SECRET_MODULE.test(target)) problems.push(`${file}:${s.line}: imports ${s.v}, which is no .mjs, .js or .ts module`);
+      if (!profile.modules.test(target)) problems.push(`${file}:${s.line}: imports ${s.v}, which is no module of the kinds ${profile.modules} names`);
     } else if (s.v === "node:child_process") {
-      if (!SPAWNERS.has(file)) problems.push(`${file}:${s.line}: imports child_process, which only the modules of SPAWNERS may`);
-    } else if (!NODE_MODULES.has(s.v)) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a relative file nor one of NODE_MODULES`);
+      if (!profile.spawners.has(file) && !profile.wholeSpawners.has(file)) problems.push(`${file}:${s.line}: imports child_process, which only the modules of SPAWNERS may`);
+    } else if (!profile.nodeModules.has(s.v)) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a relative file nor one of the profile's node modules`);
+    else if (profile.nodeNames.has(s.v)) {
+      // Only by the names the profile lets it take, in the one form that names them all.
+      const allowed = profile.nodeNames.get(s.v);
+      const named = /^import \{ ([\w, ]+) \} from "([\w:/]+)";$/.exec(lines.at(s.line - 1) ?? "");
+      if (!named || named.at(2) !== s.v || !String(named.at(1)).split(", ").every((n) => allowed.has(n))) problems.push(`${file}:${s.line}: imports ${s.v} other than by the names ${[...allowed].join(", ")}, one line naming them`);
+    }
   }
-  const spawner = SPAWNERS.get(file);
+  const spawner = profile.spawners.get(file);
+  const whole = profile.wholeSpawners.get(file);
   // No module but SPAWNERS names child_process at all, in any form the reading does not take for
   // an import of it.
   // Read as the rest is read, decoded: the text, and every literal's value, an escape in it spelled
   // out (the review of 75e5eeb: a second import of `"node:child_process"` counted as none in
   // the text).
   const naming = toks.filter((x) => (x.t === "str" || x.t === "tpl") && x.v.includes("child_process"));
-  if (!spawner && (text.includes("child_process") || naming.length > 0)) problems.push(`${file}: names child_process, which only the modules of SPAWNERS may`);
+  if (!spawner && !whole && (text.includes("child_process") || naming.length > 0)) problems.push(`${file}: names child_process, which only the modules of SPAWNERS may`);
   if (spawner) {
     const lineNo = (line) => lines.flatMap((l, k) => (l === line ? [k + 1] : []));
     const importAt = lineNo(spawner.line);
@@ -2796,7 +3015,7 @@ export function readSecretModule(file, text) {
       const found = toks.filter((t) => t.t === "id" && t.v === word && prior(toks.indexOf(t)).v !== ".");
       const rest = found.filter((t) => !definedAt.includes(t.line));
       const callAt = typeof calls === "number" ? null : calls.map(lineNo);
-      const isCall = (t) => toks[toks.indexOf(t) + 1]?.v === "(";
+      const isCall = (t) => own(toks, toks.indexOf(t) + 1)?.v === "(";
       const ok =
         found.length - rest.length === definedAt.length &&
         rest.every(isCall) &&
@@ -2806,9 +3025,97 @@ export function readSecretModule(file, text) {
     uses(spawner.word, importAt, spawner.calls);
     if (spawner.through) uses(spawner.through.word, lineNo(spawner.calls[0]), spawner.through.calls);
   }
+  // A module of whole spawners: child_process by its one import line, and each call of what it
+  // imports listed whole, its command, its arguments and its environment as written, none handing
+  // its command code or configuration (the review of 56c29cf: `git -c alias.x=!sh`, `node -e`,
+  // `bash -c` and `cargo metadata --config` each ran anything through an allowed command).
+  if (whole) {
+    const importAt = lines.flatMap((l, k) => (l === whole.line ? [k + 1] : []));
+    const imported = read.specifiers.filter((s) => s.v === "node:child_process");
+    if (importAt.length !== 1 || imported.length !== 1 || imported.at(0)?.line !== importAt.at(0)) problems.push(`${file}: its import of child_process is not \`${whole.line}\` alone, once`);
+    const names = new Set(String(/^import \{ ([\w, ]+) \} from "node:child_process";$/.exec(whole.line)?.at(1) ?? "").split(", "));
+    const listed = [...whole.calls];
+    for (let i = 0; i < toks.length; i++) {
+      const c = toks.at(i);
+      if (c?.t !== "id" || !names.has(c.v) || c.line === importAt.at(0) || prior(i).v === ".") continue;
+      if (toks.at(i + 1)?.v !== "(") {
+        problems.push(`${where(c)}: ${c.v} other than called, so that what it starts could go unread`);
+        continue;
+      }
+      const call = callText(toks, i);
+      const at = listed.indexOf(call);
+      if (at < 0) problems.push(`${where(c)}: a call of child_process the profile does not list whole: ${call}`);
+      else listed.splice(at, 1);
+    }
+    for (const call of listed) problems.push(`${file}: a call the profile lists that the module does not make: ${call}`);
+    for (const call of whole.calls) for (const flag of handedCode(call)) problems.push(`${file}: a call that hands its command code or configuration, ${flag}: ${call}`);
+  }
   return { problems, imports };
 }
+export function readSecretModule(file, text) {
+  return readModule(file, text, SECRET_PROFILE);
+}
 export const secretModuleProblems = (file, text) => readSecretModule(file, text).problems;
+
+/// Whether the tokens at `at` write what precedes them: an assignment, compound or not, an increment
+/// or a decrement.
+function writes(toks, at) {
+  const a = toks.at(at);
+  const b = toks.at(at + 1);
+  if (a?.t !== "punct") return false;
+  if (a.v === "=") return b?.v !== "=" && b?.v !== ">";
+  if ((a.v === "+" || a.v === "-") && b?.v === a.v) return true;
+  if (a.v === "<" || a.v === ">") return b?.v === a.v && (toks.at(at + 2)?.v === "=" || (toks.at(at + 2)?.v === ">" && toks.at(at + 3)?.v === "="));
+  return /^[-+*%&|^?]$/.test(a.v) && (b?.v === "=" || (b?.v === a.v && toks.at(at + 2)?.v === "="));
+}
+
+/// The punctuators and keywords after which JavaScript reads a `/` as a regular expression, never a
+/// division.
+const REGEX_AFTER_PUNCT = new Set(["(", ",", "=", ":", "[", "!", "&", "|", "?", "{", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
+/// A number as JavaScript writes one, whole: anything else the tokenizer took for one hides a member.
+const NUMBER = /^(0[xX][0-9a-fA-F_]+n?|0[oO][0-7_]+n?|0[bB][01_]+n?|\d[\d_]*(\.[\d_]*)?([eE][+-]?\d+)?n?)$/;
+
+/// Whether the regular expression at `i` stands where JavaScript must read a `/` as one: after a
+/// punctuator of REGEX_AFTER_PUNCT that is not half of `++` or `--`, nor a postfix `!`; after a
+/// keyword of REGEX_AFTER_WORD that is not a property's name; in a template's interpolation; or first.
+export function regexPlaced(toks, i) {
+  const p = toks.at(i - 1);
+  const q = toks.at(i - 2);
+  if (p === undefined) return true;
+  if (p.t === "tpl") return Boolean(p.open);
+  if (p.t === "id") return REGEX_AFTER_WORD.has(p.v) && q?.v !== ".";
+  if (p.t !== "punct" || !REGEX_AFTER_PUNCT.has(p.v)) return false;
+  if ((p.v === "+" || p.v === "-") && q?.t === "punct" && q.v === p.v) return false;
+  if (p.v === "!" && q !== undefined && ((q.t === "id" && !REGEX_AFTER_WORD.has(q.v)) || q.t === "num" || q.t === "str" || (q.t === "punct" && (q.v === ")" || q.v === "]")))) return false;
+  return true;
+}
+
+/// A call's tokens as one text, from its callee to its closing parenthesis: a string literal as
+/// JSON, a template's parts between backquotes, everything else as written.
+export function callText(toks, i) {
+  let depth = 0;
+  let j = i + 1;
+  for (; j < toks.length; j++) {
+    const x = toks.at(j);
+    if (x?.t === "punct" && /^[([{]$/.test(x.v)) depth++;
+    if (x?.t === "punct" && /^[)\]}]$/.test(x.v) && --depth === 0) break;
+  }
+  return toks
+    .slice(i, j + 1)
+    .map((x) => (x.t === "str" ? JSON.stringify(x.v) : x.t === "tpl" ? `\`${x.v}\`` : x.v))
+    .join(" ");
+}
+
+/// The arguments of a listed call that hand its command code or configuration: `-c` and its kin to
+/// bash, git or node, `-e` and `--eval`, the loaders, `--config` to cargo or git, and git's
+/// configuration keys that run a program.
+const HANDED = new Set(["-c", "-e", "--eval", "-p", "--print", "-r", "--require", "--import", "--loader", "--experimental-loader", "--config", "--config-env", "--exec-path", "--upload-pack", "--receive-pack", "--paginate", "-P"]);
+export function handedCode(call) {
+  return [...call.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+    .map((m) => JSON.parse(`"${m.at(1)}"`))
+    .filter((v) => HANDED.has(v) || /^(--config|--exec-path|--eval|--import|--require|--loader)=/.test(v) || /^-c./.test(v) || /^(core|alias|credential|protocol|url|http)\./.test(v));
+}
 
 /// Every job that holds a secret, each with the job of its workflow that builds mn for it (or none)
 /// and whether it runs agent code. Each names the environment `benchmark`, the one place the
@@ -2929,7 +3236,7 @@ export function startBrokerProblems(text) {
   for (const line of [...BROKER_SETUP, BROKER_LINE]) {
     if (lines.filter((l) => l === line).length !== 1) found.push(`start-broker.sh does not hold, once: ${line}`);
   }
-  if (!BROKER_SETUP.every((line, k) => at(line) >= 0 && at(line) < at(BROKER_LINE) && (k === 0 || at(line) > at(BROKER_SETUP[k - 1])))) found.push("start-broker.sh does not set the core limit, the mask and the directory up, in that order, before it starts the broker");
+  if (!BROKER_SETUP.every((line, k) => at(line) >= 0 && at(line) < at(BROKER_LINE) && (k === 0 || at(line) > at(own(BROKER_SETUP, k - 1))))) found.push("start-broker.sh does not set the core limit, the mask and the directory up, in that order, before it starts the broker");
   const nodes = lines.filter((l) => /(^|[\s;&|(\/])node"?(\s|$)/.test(l.replace(/#.*$/, "")));
   if (nodes.length !== 1) found.push(`start-broker.sh starts node ${nodes.length} times, not once`);
   // The key is named twice, in the check that it is set and in the line that hands it to the
@@ -2972,7 +3279,7 @@ export function brokerProblems(key, job, doc = {}) {
   const talks = harness.length === 1 && String(harness[0].run).includes('--broker "$RUNNER_TEMP/broker/socket"') && all.indexOf(harness[0]) > all.indexOf(brokers[0]);
   if (!talks) found.push(`${key} does not run the harness once, after the broker starts, talking to it`);
   const node = all.filter((s) => /^actions\/setup-node@/.test(String(s.uses ?? "")));
-  if (node.length !== 1 || String(node[0].with?.["node-version"]) !== PERMISSION.node) found.push(`${key} does not set up Node ${PERMISSION.node} once, whose permission model the broker's flags rely on`);
+  if (node.length !== 1 || String(own(node[0]?.with, "node-version")) !== PERMISSION.node) found.push(`${key} does not set up Node ${PERMISSION.node} once, whose permission model the broker's flags rely on`);
   return found;
 }
 
@@ -2997,7 +3304,7 @@ export function nodeProblems(jobs) {
   const found = [];
   for (const { file, id, job } of jobs) {
     for (const s of steps(job).filter((x) => /^actions\/setup-node@/.test(String(x.uses ?? "")))) {
-      if (String(s.with?.["node-version"]) !== PERMISSION.node) found.push(`${file}#${id} sets up Node ${s.with?.["node-version"]}, not ${PERMISSION.node}, whose permission model the broker's flags rely on`);
+      if (String(own(s.with, "node-version")) !== PERMISSION.node) found.push(`${file}#${id} sets up Node ${own(s.with, "node-version")}, not ${PERMISSION.node}, whose permission model the broker's flags rely on`);
     }
   }
   return found;
@@ -3129,7 +3436,6 @@ check("the broker, the one process that holds the key, starts under permission.j
   // the key). On Windows, env and bash are Git's, beside the git the policy runs, which read /usr/bin
   // as Git's own: the steps' text runs unchanged.
   {
-    const usrBin = (name) => (process.platform === "win32" ? path.resolve(git(["--exec-path"]).trim(), `../../../usr/bin/${name}.exe`) : `/usr/bin/${name}`);
     const posix = (p) => p.replace(/\\/g, "/");
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "secret-shell-"));
     try {
@@ -3157,9 +3463,9 @@ check("the broker, the one process that holds the key, starts under permission.j
           fs.writeFileSync(step, s.run);
           fs.rmSync(log, { force: true });
           const env = { PATH: `${shims}${path.delimiter}${process.env.PATH ?? ""}`, HOME: posix(dir), ...vars, ...secrets };
-          const [command, ...args] = s.shell.replace("{0}", posix(step)).split(" ");
-          assert.equal(command, "/usr/bin/env");
-          const r = spawnSync(usrBin("env"), args, { cwd: dir, env, encoding: "utf8", timeout: 30000 });
+          assert.equal(s.shell, SECRET_SHELL);
+          assert.equal(SECRET_SHELL.split(" ").at(0), "/usr/bin/env");
+          const r = spawnSync(envPath(), SECRET_SHELL.replace("{0}", posix(step)).split(" ").slice(1), { cwd: dir, env, encoding: "utf8", timeout: 30000 });
           const printed = `${r.stdout}${r.stderr}`;
           assert.ok(!fs.existsSync(log), `${what}, with ${attack}, ran a program of its PATH: ${fs.existsSync(log) ? fs.readFileSync(log, "utf8") : ""}`);
           assert.ok(!printed.includes(secret) && !printed.includes("ran with") && !/^\+/m.test(printed), `${what}, with ${attack}, ran it, traced, or printed its secret: ${printed}`);
@@ -3167,7 +3473,7 @@ check("the broker, the one process that holds the key, starts under permission.j
           assert.match(printed, reached, `${what}, with ${attack}, did not reach its script: ${printed}`);
           // In the runner's own shell, no bash of it privileged, the same step prints the secret.
           fs.writeFileSync(step, s.run.replaceAll(" -p ", " "));
-          const plain = spawnSync(usrBin("bash"), ["--noprofile", "--norc", "-eo", "pipefail", posix(step)], { cwd: dir, env, encoding: "utf8", timeout: 30000 });
+          const plain = spawnSync(bashPath(), [path.join(ROOT, ".github/scripts/fixtures/runner-shell.sh").replace(/\\/g, "/"), posix(step)], { cwd: dir, env, encoding: "utf8", timeout: 30000 });
           assert.ok(`${plain.stdout}${plain.stderr}`.includes(secret), `the simulation shows nothing of ${what} with ${attack}: the runner's shell printed no secret: ${plain.stdout}${plain.stderr}`);
         }
       }
@@ -3189,18 +3495,30 @@ check("the broker, the one process that holds the key, starts under permission.j
     assert.ok(sudoLockProblems("x.yml#f", planted).length > 0, `a job that runs the sandbox with ${what} passes`);
   }
 });
+/// The environment of the policy's own commits in its tests' repositories: a fixed author and
+/// committer, and no signing, as an environment rather than `git -c`, which a call of the policy's
+/// may not hand git (the review of 56c29cf).
+const GIT_TEST_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@example.invalid",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@example.invalid",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "commit.gpgsign",
+  GIT_CONFIG_VALUE_0: "false",
+};
 /// A node a job of SECRET_JOBS starts without disallowing code generation from strings.
 const NODE_WITHOUT_GUARD = /(^|[\s;&|(])node\s+(?!--disallow-code-generation-from-strings\s)/;
 
-check("node refuses to generate code from strings under the flag the secret jobs run it with", () => {
-  for (const code of ["Function('return 1')()", "(() => 0)['constr' + 'uctor']('return 1')()", "eval('1')", "(async () => {}).constructor('return 1')()"]) {
-    const r = spawnSync(process.execPath, ["--disallow-code-generation-from-strings", "-e", code], { encoding: "utf8" });
-    assert.notEqual(r.status, 0, `node ran ${code} under --disallow-code-generation-from-strings`);
-    assert.match(r.stderr, /Code generation from strings disallowed/, code);
-  }
+check("a node a secret job starts without disallowing code generation from strings is read as one", () => {
+  // That node refuses code from strings under the flag is the harness's test (benchmark/harness/
+  // harness.test.ts), which may hand node code to run; the policy's calls may not (the review of
+  // 56c29cf).
   for (const line of ["node benchmark/harness/bench.ts", "x && node -e 1", "(node x.mjs)"]) assert.match(line, NODE_WITHOUT_GUARD, line);
   assert.doesNotMatch("node --disallow-code-generation-from-strings benchmark/harness/bench.ts --budget 1", NODE_WITHOUT_GUARD);
 });
+
 
 /// The other jobs that name an environment, each with its name: the Pages deployment, whose
 /// environment holds no secret.
@@ -3255,7 +3573,7 @@ check("every workflow that holds a secret job starts by a dispatch alone, with a
   const holding = new Set([...SECRET_JOBS.keys()].map((k) => k.split("#")[0]));
   for (const { file, doc } of workflows()) if (holding.has(file)) assert.deepEqual(secretWorkflowProblems(file, doc), []);
   const [leakFile, leakJob] = LEAK_CHECKED.split("#");
-  const checked = workflows().find((x) => x.file === leakFile)?.doc.jobs?.[leakJob];
+  const checked = own(workflows().find((x) => x.file === leakFile)?.doc.jobs, leakJob);
   assert.equal(steps(checked).filter((s) => JSON.stringify(s) === JSON.stringify(LEAK_STEP)).length, 1, `${LEAK_CHECKED} does not run LEAK_STEP once, on every pull request`);
   assert.ok(requiredJobs().some(({ file, id }) => `${file}#${id}` === LEAK_CHECKED), `${LEAK_CHECKED}, which checks on every pull request that no secret leaked, is no required job`);
   const base = { on: { workflow_dispatch: { inputs: { runs: { default: "1" } } } }, permissions: { contents: "read" }, jobs: { write: { "runs-on": "ubuntu-24.04" }, check: { steps: [{ uses: "actions/checkout@0" }, LEAK_STEP] } } };
@@ -3304,9 +3622,9 @@ check("every job that holds a secret names the environment benchmark, for main a
 export function secretNameOf(text) {
   const toks = jsTokens(text);
   const found = toks.flatMap((x, i) =>
-    x.t === "id" && x.v === "const" && toks[i + 1]?.v === "SECRET_NAME" && toks[i + 2]?.v === "=" && toks[i + 3]?.t === "re" && toks[i + 4]?.v === ";" ? [toks[i + 3].v] : [],
+    x.t === "id" && x.v === "const" && own(toks, i + 1)?.v === "SECRET_NAME" && own(toks, i + 2)?.v === "=" && own(toks, i + 3)?.t === "re" && own(toks, i + 4)?.v === ";" ? [own(toks, i + 3).v] : [],
   );
-  const defined = toks.filter((x, i) => x.t === "id" && x.v === "SECRET_NAME" && /^(const|let|var|function|class)$/.test(toks[i - 1]?.v ?? "")).length;
+  const defined = toks.filter((x, i) => x.t === "id" && x.v === "SECRET_NAME" && /^(const|let|var|function|class)$/.test(own(toks, i - 1)?.v ?? "")).length;
   if (found.length !== 1 || defined !== 1) return null;
   const m = /^\/(.+)\/i$/.exec(found[0]);
   return m ? new RegExp(m[1], "i") : null;
@@ -3344,7 +3662,7 @@ export function secretPlaceProblems(key, doc, job) {
   };
   walk(doc.env ?? {}, "workflow.env");
   walk(job, "job");
-  const value = (where) => where.replace(/^job/, "").split(/\.|\[(\d+)\]/).filter(Boolean).reduce((v, k) => v?.[k], job);
+  const value = (where) => where.replace(/^job/, "").split(/\.|\[(\d+)\]/).filter(Boolean).reduce((v, k) => own(v, k), job);
   // An expression that reads a secret-named variable back out of the environment, or the whole
   // environment, hands the secret on as `secrets.` would: in an action's input, an artifact's
   // name, a script's output (the final pass of ad38011: `${{ env.ANTHROPIC_API_KEY }}` in a
@@ -3376,7 +3694,7 @@ export function secretPlaceProblems(key, doc, job) {
       if (env) return !(SECRET_NAME.test(env[1]) && SECRET_VALUE.test(String(value(where))));
       const input = /^job\.steps\[(\d+)\]\.with\.([A-Za-z_][\w-]*)$/.exec(where);
       if (input) {
-        const action = String(steps(job)[Number(input[1])]?.uses ?? "").replace(/@.*$/, "");
+        const action = String(own(steps(job), Number(input[1]))?.uses ?? "").replace(/@.*$/, "");
         return !(SECRET_INPUTS.has(`${action}#${input[2]}`) && SECRET_VALUE.test(String(value(where))));
       }
       return true;
@@ -3456,7 +3774,7 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     }
     if (held.builtBy !== null) {
       assert.ok([job.needs].flat().includes(held.builtBy), `${key} does not need ${held.builtBy}, the job that builds mn for it`);
-      const builder = doc.jobs?.[held.builtBy];
+      const builder = own(doc.jobs, held.builtBy);
       assert.ok(builder, `${file} has no job ${held.builtBy}`);
       assert.deepEqual(beforeToolchainProblems(file, held.builtBy, doc, builder), [], `${file}#${held.builtBy} builds mn for a job that holds a secret without the build-time check first`);
       assert.ok(!holds(builder) && !("secrets" in builder), `${file}#${held.builtBy}, which builds mn, holds a secret`);
@@ -3465,7 +3783,7 @@ check("every job that holds a secret is pinned whole, takes mn from a job that c
     if (held.agents) {
       const check = all.findIndex((s) => /benchmark\/harness\/sandbox-check\.ts/.test(String(s.run ?? "")));
       assert.ok(check >= 0 && check < secretAt, `${key}: runs agent code, but sandbox-check.ts does not run before the secret is in reach`);
-      for (const k of ["if", "continue-on-error"]) assert.ok(!(k in all[check]), `${key}: the sandbox check carries ${k}:`);
+      for (const k of ["if", "continue-on-error"]) assert.ok(!(k in own(all, check)), `${key}: the sandbox check carries ${k}:`);
       // The step that runs agent code, which holds no secret and talks to the broker, runs it all
       // through the sandbox.
       const runs = all.filter((s) => /benchmark\/harness\/(bench|prelim)\.ts/.test(String(s.run ?? "")));
@@ -3614,8 +3932,8 @@ check("the Documentation job lints every workflow with actionlint and shellcheck
   const job = workflows().find((w) => w.file === "ci.yml").doc.jobs.docs;
   const env = Object.assign({}, ...steps(job).map((s) => s.env ?? {}));
   for (const tool of ["ACTIONLINT", "SHELLCHECK"]) {
-    assert.match(String(env[`${tool}_VERSION`] ?? ""), /^\d+\.\d+\.\d+$/, `${tool} is not pinned to a version`);
-    assert.match(String(env[`${tool}_SHA256`] ?? ""), /^[0-9a-f]{64}$/, `${tool}'s download has no checksum`);
+    assert.match(String(own(env, `${tool}_VERSION`) ?? ""), /^\d+\.\d+\.\d+$/, `${tool} is not pinned to a version`);
+    assert.match(String(own(env, `${tool}_SHA256`) ?? ""), /^[0-9a-f]{64}$/, `${tool}'s download has no checksum`);
   }
   const runs = steps(job).map((s) => String(s.run ?? "")).join("\n");
   assert.equal((runs.match(/sha256sum -c -/g) ?? []).length, 2, "both downloads are checked against their checksums");
@@ -3645,6 +3963,7 @@ const GATE_FILES = [
   "/benchmark/corpus.lock",
   "/benchmark/reference.mjs",
   "/benchmark/own.mjs",
+  "/benchmark/quotient.mjs",
   "/benchmark/harness/",
   "/compiler/mente-cli/tests/gates.rs",
   "/compiler/mente-cli/tests/lints.rs",
@@ -3746,92 +4065,22 @@ export const symlinksIn = (lsFiles) =>
     .filter((l) => /^120000 /.test(l))
     .map((l) => l.split("\t").at(1) ?? "");
 
-/// Node's modules through which a module of the policy could load or run code that no import names:
-/// none of the policy's modules imports one.
-const POLICY_REFUSED_MODULES = new Set(["node:vm", "node:worker_threads", "node:module", "node:repl", "node:inspector", "node:wasi"]);
-/// The names, read as code and not in a string or a comment, through which a module loads or runs
-/// code its imports do not show: code from strings, CommonJS's loader, the built-in modules by name,
-/// a worker, and a loader hook (the check of 301509a).
-const POLICY_REFUSED_NAMES = new Set(["eval", "Function", "require", "createRequire", "getBuiltinModule", "Worker", "register"]);
-/// The calls of child_process, by the names the policy's modules import them under.
-const SPAWN_CALLS = new Set(["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]);
-/// The tokens of a piece of code as one text, a literal written as JSON: how a command is compared.
-const tokenText = (toks) => toks.map((x) => (x.t === "str" ? JSON.stringify(x.v) : x.v)).join(" ");
-/// The commands the policy's modules may start, as the first argument of a call of child_process
-/// reads: git, bash through bashPath(), node through process.execPath, and `cargo metadata`, which
-/// compiles nothing and runs no build script (build-time-code.mjs), with the first word of the
-/// arguments each must take, or null for any.
-const POLICY_SPAWN_COMMANDS = new Map(
-  [
-    ['"git"', null],
-    ['process.platform === "win32" ? "git" : "/usr/bin/git"', null],
-    ["bashPath()", null],
-    ["process.execPath", null],
-    ['"cargo"', "metadata"],
-  ].map(([c, first]) => [tokenText(jsTokens(c)), first]),
-);
-
-/// What a module of the policy runs that its imports do not show: a refused module or name, and
-/// each call of child_process that starts another command, or whose arguments name a file of the
-/// repository that no gate pattern holds (`isFile` says what the repository holds).
-export function policyLoads(file, text, isFile) {
-  const problems = [];
-  const toks = jsTokens(text);
-  for (const s of jsImports(toks).specifiers) if (POLICY_REFUSED_MODULES.has(s.v)) problems.push(`${file}:${s.line}: imports ${s.v}, a way to load or run code no import names`);
-  for (let i = 0; i < toks.length; i++) {
-    const tok = toks[i];
-    if (tok.t !== "id") continue;
-    // child_process imported as a namespace or a default, whose calls a reading of names would miss.
-    if (tok.v === "import" && toks[i - 1]?.v !== "." && (toks[i + 1]?.v === "*" || (toks[i + 1]?.t === "id" && toks[i + 1]?.v !== "type"))) {
-      const from = toks.slice(i + 1, i + 8).findIndex((x) => x.t === "id" && x.v === "from");
-      if (from >= 0 && toks[i + 2 + from]?.t === "str" && toks[i + 2 + from]?.v === "node:child_process") problems.push(`${file}:${tok.line}: imports child_process other than by its functions' names, so that a call of it could go unread`);
-    }
-    if (POLICY_REFUSED_NAMES.has(tok.v)) problems.push(`${file}:${tok.line}: ${tok.v}, a way to load or run code no import names`);
-    if (!SPAWN_CALLS.has(tok.v) || toks[i + 1]?.v !== "(" || toks[i - 1]?.v === "." || toks[i - 1]?.v === "function") continue;
-    // The call's arguments, to its closing parenthesis; the first, to its first comma.
-    let depth = 0;
-    let end = i + 1;
-    let firstEnd = -1;
-    for (; end < toks.length; end++) {
-      const v = toks[end].t === "punct" ? toks[end].v : "";
-      if (v === "(" || v === "[" || v === "{") depth++;
-      else if (v === ")" || v === "]" || v === "}") depth--;
-      if (depth === 1 && v === "," && firstEnd < 0) firstEnd = end;
-      if (depth === 0) break;
-    }
-    const command = tokenText(toks.slice(i + 2, firstEnd < 0 ? end : firstEnd));
-    const first = POLICY_SPAWN_COMMANDS.get(command);
-    if (first === undefined) problems.push(`${file}:${tok.line}: ${tok.v} starts ${command}, which is none of git, bash through bashPath(), node through process.execPath and cargo metadata`);
-    else if (first !== null && !(toks[firstEnd + 1]?.v === "[" && toks[firstEnd + 2]?.t === "str" && toks[firstEnd + 2]?.v === first)) problems.push(`${file}:${tok.line}: ${tok.v} starts ${command} other than as ${command} ${first}`);
-    for (const arg of toks.slice(i + 2, end)) {
-      const named = arg.t === "str" ? arg.v.replace(/^\.\//, "") : "";
-      if (named !== "" && isFile(named) && !GATE_FILES.some((p) => owns(p, named))) problems.push(`${file}:${tok.line}: ${tok.v} runs ${named}, which no gate pattern of .github/CODEOWNERS holds`);
-    }
-  }
-  return problems;
-}
-
-/// Every module the workflow policy's tests load, from `entries` through every relative import,
-/// static, `export ... from` or a literal `import("...")`, each text read by `readText`; and what
-/// the reading cannot follow: an import it cannot read, a computed `import(`, a bare specifier other
-/// than a Node built-in, which would load code no path of the repository names, and what each
-/// module runs that its imports do not show (policyLoads).
-export function policyModules(entries, readText, isFile = (f) => tracked().has(f)) {
+/// Every module the workflow policy runs, from `entries` and the node scripts it starts
+/// (POLICY_SPAWNED) through every relative import, each text read by `readText`, with what the
+/// policy profile refuses in each (readModule): an import it cannot read or that is no owned `.mjs`
+/// file, a module of node outside its list, a computed member, a name or a `/` it cannot place, a
+/// call of child_process not listed whole.
+export function policyModules(entries, readText, spawned = POLICY_SPAWNED) {
   const modules = [];
   const problems = [];
-  const todo = [...entries];
+  const todo = [...entries, ...spawned];
   while (todo.length > 0) {
     const file = todo.shift();
-    if (modules.includes(file)) continue;
+    if (file === undefined || modules.includes(file)) continue;
     modules.push(file);
-    const text = readText(file);
-    const found = jsImports(jsTokens(text));
-    for (const line of found.unreadable) problems.push(`${file}:${line}: an import the policy cannot follow`);
-    for (const s of found.specifiers) {
-      if (/^\.{1,2}\//.test(s.v)) todo.push(path.posix.normalize(path.posix.join(path.posix.dirname(file), s.v)));
-      else if (!s.v.startsWith("node:")) problems.push(`${file}:${s.line}: imports ${s.v}, which is neither a file of the repository nor a Node built-in`);
-    }
-    problems.push(...policyLoads(file, text, isFile));
+    const read = readModule(file, readText(file), POLICY_PROFILE);
+    problems.push(...read.problems);
+    todo.push(...read.imports);
   }
   return { modules, problems };
 }
@@ -3848,65 +4097,120 @@ check("every module the workflow policy's tests load, directly or through anothe
   const { entries, problems: stepProblems } = policyStep(docs.doc, docs.job);
   assert.deepEqual(stepProblems, [], "the step that runs this policy");
   assert.ok(entries.includes(".github/scripts/policy.test.mjs") && entries.includes(".github/scripts/yaml.test.mjs"), `the policy's step runs ${entries.join(", ")}`);
-  assert.equal(JSON.parse(read("package.json")).scripts?.["test:ci"], `node --test ${entries.join(" ")}`, "package.json's test:ci is not the command the Documentation job runs");
+  assert.equal(own(JSON.parse(read("package.json")).scripts, "test:ci"), `node --test ${entries.join(" ")}`, "package.json's test:ci is not the command the Documentation job runs");
   const unowned = (modules) => modules.filter((f) => !GATE_FILES.some((p) => owns(p, f)));
   const { modules, problems } = policyModules(entries, read);
   assert.deepEqual(problems, [], "the workflow policy loads or runs code in a way it cannot follow");
   assert.ok(modules.includes(".github/scripts/lib/yaml.mjs") && modules.includes(".github/scripts/lib/build-time-code.mjs"), modules.join(", "));
   assert.deepEqual(unowned(modules), [], "modules the workflow policy loads that .github/CODEOWNERS does not give its owner");
   assert.deepEqual(symlinksIn(git(["ls-files", "-s", "--", ...modules])), [], "modules of the workflow policy that are symbolic links");
-  // The reviewer's case, planted: a module the policy loads that imports one no pattern holds,
-  // through a held module, by a re-export, and by a literal dynamic import; and the loads it cannot
-  // follow.
+  assert.deepEqual(spawnListProblems(POLICY_SPAWNERS, read(".github/scripts/policy.test.mjs")), [], "the calls POLICY_SPAWNERS lists");
+  for (const f of POLICY_SPAWNED) assert.ok(modules.includes(f), `${f}, a script the policy starts, is not walked`);
+  // The quick check of d471f7e, planted: a module the policy loads that imports one no pattern holds
+  // through a held module, by a re-export; a literal dynamic import, refused outright.
   const planted = new Map([
     [".github/scripts/policy.test.mjs", 'import assert from "node:assert/strict";\nimport { x } from "./lib/x.mjs";\nconst y = await import("../../tools/y.mjs");\n'],
     [".github/scripts/lib/x.mjs", 'export { x } from "../../../site/markdown.mjs";\n'],
     ["site/markdown.mjs", "export const x = 1;\n"],
-    ["tools/y.mjs", 'import z from "some-package";\nconst w = await import(`./${"w"}.mjs`);\n'],
   ]);
-  const plant = policyModules([".github/scripts/policy.test.mjs"], (f) => planted.get(f) ?? "");
-  assert.deepEqual(unowned(plant.modules).sort(), ["site/markdown.mjs", "tools/y.mjs"], "an import of a module without an owner passed");
-  assert.deepEqual(plant.problems.sort(), ["tools/y.mjs:1: imports some-package, which is neither a file of the repository nor a Node built-in", "tools/y.mjs:2: an import the policy cannot follow"]);
-  // The check of 301509a, planted: loads that no import shows, and commands no list holds.
-  const loads = [
-    ['import vm from "node:vm";', "imports node:vm"],
-    ['import { Worker } from "node:worker_threads";', "imports node:worker_threads"],
-    ['import { createRequire } from "node:module";', "imports node:module"],
-    ["const m = process.getBuiltinModule(name);", "getBuiltinModule, a way"],
-    ["const f = new Function(text);", "Function, a way"],
-    ["eval(text);", "eval, a way"],
-    ["const x = require(name);", "require, a way"],
-    ['module.register("./hooks.mjs");', "register, a way"],
-    ['import * as cp from "node:child_process";', "other than by its functions' names"],
-    ['import cp from "node:child_process";', "other than by its functions' names"],
-    ['execFileSync("cargo", ["build"]);', 'starts "cargo" other than as "cargo" metadata'],
-    ['spawnSync("sh", ["-c", "x"]);', 'spawnSync starts "sh", which is none of'],
-    ['execFileSync(cmd, []);', "execFileSync starts cmd, which is none of"],
-    ['spawnSync(process.execPath, ["site/check.mjs"]);', "spawnSync runs site/check.mjs"],
-    ['spawnSync(bashPath(), ["./site/x.sh"]);', "spawnSync runs site/x.sh"],
-    ['fork("site/check.mjs");', 'fork starts "site/check.mjs", which is none of'],
-    ['exec("node site/check.mjs");', 'exec starts "node site/check.mjs", which is none of'],
-    ['const vm = await import("node:vm");', "imports node:vm"],
-    ['import { runInNewContext } from "node:vm";', "imports node:vm"],
-  ];
-  const isFile = (f) => ["site/check.mjs", "site/x.sh", ".github/scripts/tools.sh"].includes(f);
-  for (const [code, said] of loads) {
-    const found = policyLoads("x.mjs", code, isFile);
-    assert.ok(found.some((p) => p.includes(said)), `${code} passed: ${found.join(" | ")}`);
-  }
-  // What the policy does run passes: git, bash on its own scripts, node on an owned file, and the
-  // names in strings and comments.
-  for (const code of [
-    'execFileSync("git", ["ls-files"]);',
-    'execFileSync("cargo", ["metadata", "--locked"]);',
-    'import { execFileSync, spawnSync } from "node:child_process";',
-    'spawnSync(bashPath(), [".github/scripts/tools.sh", mode]);',
-    "spawnSync(process.execPath, [script]);",
-    'const s = "eval(x); require(y)"; // new Function(z)',
-    "const r = /x/.exec(s);",
+  const plant = policyModules([".github/scripts/policy.test.mjs"], (f) => planted.get(f) ?? "", []);
+  assert.ok(unowned(plant.modules).includes("site/markdown.mjs"), "an import of a module without an owner passed");
+  assert.ok(plant.problems.some((p) => /a load at run time/.test(p)), plant.problems.join(" | "));
+  // The review of 56c29cf, planted: each bypass it ran, read as a module of the policy.
+  const refused = (code, said, file = ".github/scripts/lib/x.mjs") => {
+    const found = readModule(file, code, POLICY_PROFILE).problems;
+    assert.ok(found.some((p) => p.includes(said)), `${code} passed, or failed otherwise: ${found.join(" | ")}`);
+  };
+  // The tokenizer fooled: a division read as a regular expression that hides an import, and a
+  // regular expression read as a division that hides code.
+  refused('let planted = 0;\nplanted++ / 1; await import("../../site/evil.mjs"); planted = 2 / 1;\n', "cannot place");
+  refused("if (1) /'/; run(code) // '\n", "a division");
+  refused("const n = a.in / 2; x(); const m = 1 / 2;\n", "cannot place");
+  refused("const n = x! / 2; y(); const m = /2/;\n", "cannot place");
+  refused("const f = 1..toString;\n", "a number the reading does not take whole");
+  // The denylists: a computed member, the Function constructor, an escaped name, process's native
+  // members, child_process under another name or loaded some other way.
+  refused('const e = globalThis["ev" + "al"];\n', "computed key");
+  refused('const m = process["getBuiltin" + "Module"]("vm");\n', "computed key");
+  refused('const f = (() => {})["con" + "structor"]("return 1");\n', "computed key");
+  refused(`const f = (() => {}).${"con"}structor("return 1");\n`, "the way to Function");
+  refused(`const f = (async () => {}).${"con"}structor("return 1");\n`, "the way to Function");
+  refused("const v = \\u0065val(1);\n", "a backslash");
+  refused('const b = process.binding("fs");\n', "process other than");
+  refused("const d = process.dlopen(m, f);\n", "process other than");
+  refused('process.execve("/bin/sh", []);\n', "process other than");
+  refused('process.execPath = "/tmp/x";\n', "process.execPath written");
+  refused('import { spawnSync as run } from "node:child_process";\n', "imports child_process");
+  refused('import cp from "node:child_process";\n', "imports child_process");
+  refused('export { spawnSync } from "node:child_process";\n', "imports child_process");
+  refused('const cp = await import("node:child_process");\n', "a load at run time");
+  refused('import { run } from "node:test";\nrun({ files: ["site/evil.mjs"] });\n', "other than by the names");
+  refused('import * as t from "node:test";\n', "other than by the names");
+  refused('import { setupPrimary } from "node:cluster";\n', "neither a relative file nor one of");
+  refused('import { DatabaseSync } from "node:sqlite";\n', "neither a relative file nor one of");
+  refused('import inspector from "node:inspector/promises";\n', "neither a relative file nor one of");
+  refused('import vm from "node:vm";\n', "neither a relative file nor one of");
+  refused('import x from "./evil.wasm";\n', "no module of the kinds");
+  refused('import x from "./evil.cjs";\n', "no module of the kinds");
+  refused("const l = module.constructor._load;\n", "module, a way to run or load code", ".github/scripts/lib/x.cjs");
+  // child_process in a module that may start processes: only as listed, only called.
+  const watchLine = 'import { execFileSync } from "node:child_process";\n';
+  refused(`${watchLine}execFileSync.call(null, "sh", ["-c", "x"]);\n`, "other than called", ".github/scripts/lib/watch.mjs");
+  refused(`${watchLine}execFileSync?.("sh", ["-c", "x"]);\n`, "other than called", ".github/scripts/lib/watch.mjs");
+  refused(`${watchLine}execFileSync("git", ["-c", "core.pager=sh", "log"]);\n`, "does not list whole", ".github/scripts/lib/watch.mjs");
+  refused(`${watchLine}execFileSync(path.join("site", "evil.sh"));\n`, "does not list whole", ".github/scripts/lib/watch.mjs");
+  // Spawn arguments that hand an allowed command code or configuration, in a listed call.
+  const OWN_DEFINED = `function bashPath() {}\n${NODE_PATH_LINE}\nfunction envPath() {}\n`;
+  for (const [call, flag] of [
+    ['execFileSync ( "git" , [ "-c" , "alias.x=!sh" , "x" ] )', "-c"],
+    ['execFileSync ( "git" , [ "-ccore.pager=sh" , "log" ] )', "-ccore.pager=sh"],
+    ['spawnSync ( nodePath ( ) , [ "-e" , code ] )', "-e"],
+    ['spawnSync ( bashPath ( ) , [ "-c" , cmd ] )', "-c"],
+    ['execFileSync ( "cargo" , [ "metadata" , "--config" , "build.rustc-wrapper=/tmp/w" ] )', "--config"],
+    ['spawnSync ( nodePath ( ) , [ "--import=./hook.mjs" , x ] )', "--import=./hook.mjs"],
   ]) {
-    assert.deepEqual(policyLoads("x.mjs", code, isFile), [], code);
+    assert.ok(handedCode(call).includes(flag), `${call} hands nothing`);
+    assert.ok(spawnListProblems(new Map([[".github/scripts/policy.test.mjs", { calls: [call] }]]), OWN_DEFINED, []).some((p) => p.includes(flag)), call);
   }
+  assert.ok(spawnListProblems(new Map([["x.mjs", { calls: ['execFileSync ( "sh" , [ "x" ] )'] }]]), OWN_DEFINED, []).some((p) => p.includes("none of")));
+  // node and bash only through policy.test.mjs's own definitions, each defined once by its text
+  // and only called (the review of 56c29cf: process.execPath, which a module could set, read at
+  // each call).
+  const spawnsOf = (calls, text = OWN_DEFINED, spawned = []) => spawnListProblems(new Map([[".github/scripts/policy.test.mjs", { calls }]]), text, spawned);
+  assert.deepEqual(spawnsOf([]), []);
+  assert.ok(spawnListProblems(new Map([[".github/scripts/lib/watch.mjs", { calls: ['spawnSync ( nodePath ( ) , [ path . join ( ROOT , ".github/scripts/watch.mjs" ) ] )'] }]]), OWN_DEFINED, []).some((p) => p.includes("none of")), "nodePath() of another module's");
+  assert.ok(spawnsOf(['spawnSync ( process . execPath , [ path . join ( ROOT , ".github/scripts/watch.mjs" ) ] )']).some((p) => p.includes("none of")), "process.execPath at a call");
+  assert.ok(spawnsOf([], "function bashPath() {}\nbashPath = () => \"/tmp/x\";\nconst nodePath = () => process.execPath;\n").some((p) => p.includes("bashPath is defined 1 times") && p.includes("used 1 times other than called")), "bashPath written");
+  assert.ok(spawnsOf([], "function bashPath() {}\nfunction bashPath() {}\nconst nodePath = () => process.execPath;\n").some((p) => p.includes("bashPath is defined 2 times")), "bashPath defined twice");
+  assert.ok(spawnsOf([], "function bashPath() {}\nconst nodePath = () => \"/tmp/node\";\n").some((p) => p.includes("nodePath is defined 0 times")), "nodePath defined by another text");
+  assert.ok(spawnsOf([], `${OWN_DEFINED}const f = (nodePath) => nodePath;\n`).some((p) => p.includes("nodePath is defined 1 times") && p.includes("used 2 times other than called")), "nodePath shadowed");
+  refused("const n = process.execPath;\n", "process other than as");
+  // Each call of them names the script it runs: one the policy walks for node, one it pins for bash;
+  // and every script the policy walks as started is one a call starts (the mutant that emptied
+  // POLICY_SPAWNED passed).
+  const walked = ".github/scripts/watch.mjs";
+  assert.deepEqual(spawnsOf([`spawnSync ( nodePath ( ) , [ path . join ( ROOT , "${walked}" ) ] )`], OWN_DEFINED, [walked]), []);
+  assert.ok(spawnsOf([`spawnSync ( nodePath ( ) , [ path . join ( ROOT , "${walked}" ) ] )`]).some((p) => p.includes("does not walk")), "a node script the policy does not walk");
+  assert.ok(spawnsOf(['spawnSync ( nodePath ( ) , [ script , "x.yml" ] )'], OWN_DEFINED, [walked]).some((p) => p.includes("names no script")), "a node script by a name");
+  assert.ok(spawnsOf([], OWN_DEFINED, [walked]).some((p) => p.includes("no listed call starts")), "a walked script no call starts");
+  assert.deepEqual(spawnsOf(['spawnSync ( bashPath ( ) , [ "-eo" , "pipefail" , ".github/scripts/fixtures/timeout.sh" ] )']), []);
+  assert.ok(spawnsOf(['spawnSync ( bashPath ( ) , [ "tools/evil.sh" ] )']).some((p) => p.includes("does not pin")), "a bash script the policy does not pin");
+  assert.ok(spawnsOf(['spawnSync ( bashPath ( ) , [ "--rcfile" , "x" , ".github/scripts/tools.sh" ] )']).some((p) => p.includes("does not pin")), "bash handed a flag before its script");
+  // env only with SECRET_SHELL's words.
+  assert.deepEqual(spawnsOf([`${SECRET_SHELL_CALL}{ cwd : dir } )`]), []);
+  for (const call of ['spawnSync ( envPath ( ) , [ "sh" , "-c" , "x" ] )', 'spawnSync ( envPath ( ) , args , { cwd : dir } )', `${SECRET_SHELL_CALL.replace("SECRET_SHELL", "OTHER_SHELL")}{ } )`]) assert.ok(spawnsOf([call]).some((p) => p.includes("other than SECRET_SHELL's words")), `env run as ${call}`);
+  assert.ok(spawnsOf([], "function bashPath() {}\nconst nodePath = () => process.execPath;\n").some((p) => p.includes("envPath is defined 0 times")), "envPath defined by another text");
+  // What the policy runs passes: its own listed calls, read as it reads them.
+  assert.deepEqual(readModule(".github/scripts/lib/watch.mjs", read(".github/scripts/lib/watch.mjs"), POLICY_PROFILE).problems, []);
+  // And the secret jobs' modules are read as exactly: the same planted division hides nothing there.
+  assert.ok(readSecretModule("benchmark/harness/x.ts", 'let n = 0;\nn++ / 1; await import("./evil.ts"); n = 2 / 1;\n').problems.some((p) => p.includes("cannot place")));
+  assert.ok(readSecretModule("benchmark/harness/x.ts", "const half = n / 2;\n").problems.some((p) => p.includes("a division")));
+  assert.ok(readSecretModule(QUOTIENT_FILE, `${QUOTIENT_TEXT}// more\n`).problems.length > 0, "a quotient.mjs other than the one the policy holds passes");
+  // The broker's two divisions, held by their text: one changed is refused, and the code it hides with it.
+  const brokerText = read("benchmark/harness/broker.ts");
+  assert.deepEqual(readSecretModule("benchmark/harness/broker.ts", brokerText).problems, []);
+  assert.ok(readSecretModule("benchmark/harness/broker.ts", brokerText.replace(") / 1e6;", ") / 1e6; x();")).problems.some((p) => p.includes("not there once")));
+  refused("const e = Reflect.get(x, y);\n", "Reflect, a way");
   // The step: the files it runs, and what would load code no file names.
   const stepOf = (run, env = {}) => ({ steps: [{ name: POLICY_STEP, run, ...env }] });
   assert.deepEqual(policyStep({}, stepOf("node --test a/x.test.mjs b/y.test.mjs")).entries, ["a/x.test.mjs", "b/y.test.mjs"]);
@@ -3959,7 +4263,7 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
   const map = JSON.parse(read(QUICK_MAP));
   const policy = map.checks.filter((c) => Array.isArray(c.run) && c.run.join(" ") === "npm run test:ci");
   assert.equal(policy.length, 1, `${QUICK_MAP} runs the workflow policy in one check`);
-  const source = Object.hasOwn(map.patterns, policy[0].when) ? map.patterns[policy[0].when] : null;
+  const source = Object.hasOwn(map.patterns, policy[0].when) ? own(map.patterns, policy[0].when) : null;
   assert.equal(typeof source, "string", `${QUICK_MAP}: the workflow policy's check names no pattern the map defines`);
   const when = new RegExp(source);
   const missed = [...tracked(), "a-new-directory/a-new-file.txt", "a-new-file"].filter((f) => !when.test(f));
@@ -3990,11 +4294,11 @@ const MATRIX_FROM_INPUTS = new Map([["mutants-full.yml#full", "the shards to run
 /// otherwise than the policy read them).
 export function matrixValuesOf(matrix, key) {
   if (!isPlain(matrix)) return null;
-  if (Array.isArray(matrix[key])) return matrix[key];
+  if (Array.isArray(own(matrix, key))) return own(matrix, key);
   if (key in matrix && key !== "include" && key !== "exclude") return null;
   const include = matrix.include;
   if (!Array.isArray(include) || include.length === 0 || Object.keys(matrix).some((k) => k !== "include")) return null;
-  return include.every((c) => isPlain(c) && Object.hasOwn(c, key)) ? include.map((c) => c[key]) : null;
+  return include.every((c) => isPlain(c) && Object.hasOwn(c, key)) ? include.map((c) => own(c, key)) : null;
 }
 const YAML_WORDS = /^(null|true|false|yes|no|on|off|y|n)$/i;
 export const plainNameValue = (v) => (typeof v === "number" && Number.isInteger(v) && v >= 0) || (typeof v === "string" && /^[A-Za-z][A-Za-z0-9 _.,()+/-]*$/.test(v) && !YAML_WORDS.test(v));
@@ -4034,7 +4338,7 @@ export function expressionProblems(file, doc) {
       if (!allowed) found.push(`${key}: its strategy or matrix is or holds an expression, so the checks it reports and its runners cannot be read`);
     }
     const runners = runnersOf(job);
-    if (!MATRIX_FROM_INPUTS.has(key) && (!runners || !runners.every((r) => RUNNERS.has(r)))) found.push(`${key}: runs-on ${JSON.stringify(job?.["runs-on"])} is no literal of RUNNERS nor a matrix value that is one`);
+    if (!MATRIX_FROM_INPUTS.has(key) && (!runners || !runners.every((r) => RUNNERS.has(r)))) found.push(`${key}: runs-on ${JSON.stringify(own(job, "runs-on"))} is no literal of RUNNERS nor a matrix value that is one`);
     mapping(`${key}: env`, job?.env);
     if (job?.defaults !== undefined && (!isPlain(job.defaults) || expression(job.defaults))) found.push(`${key}: its defaults are or hold an expression`);
     for (const s of steps(job ?? {})) {
@@ -4280,7 +4584,7 @@ check("every ignored test a required job runs has a time limit of its own", () =
         // Every timeout runs in bash, GNU's: Windows' own shell finds timeout.exe, which only
         // waits. A job's default shell is bash only on a Linux runner named as such.
         const shell = s.shell ?? job.defaults?.run?.shell ?? doc.defaults?.run?.shell;
-        const linux = /^ubuntu-/.test(String(job["runs-on"]));
+        const linux = /^ubuntu-/.test(String(own(job, "runs-on")));
         if (/(^|[\s(&;|])timeout\s+\d/.test(line)) {
           assert.ok(shell === "bash" || (shell === undefined && linux), `${stepKey(file, id, s)} runs timeout in ${shell ?? "the runner's default shell"}, not bash`);
         }
@@ -4299,9 +4603,9 @@ check("every ignored test a required job runs has a time limit of its own", () =
   // The form the rule pins works where the steps run it, in bash: GNU timeout stops the command at
   // its limit (exit 124) and passes a command within it, where a timeout that only waits, as
   // Windows' own is, would do neither.
-  const timeout = (cmd) => spawnSync(bashPath(), ["-c", cmd], { cwd: ROOT, encoding: "utf8", timeout: 30000 }).status;
-  assert.equal(timeout(`timeout ${IGNORED_TEST_LIMIT} true`), 0, `timeout ${IGNORED_TEST_LIMIT} does not pass a command within its limit`);
-  assert.equal(timeout("timeout 1s sleep 10"), 124, "timeout does not stop a command at its limit");
+  const timeout = (...args) => spawnSync(bashPath(), [".github/scripts/fixtures/timeout.sh", ...args], { cwd: ROOT, encoding: "utf8", timeout: 30000 }).status;
+  assert.equal(timeout(IGNORED_TEST_LIMIT, "true"), 0, `timeout ${IGNORED_TEST_LIMIT} does not pass a command within its limit`);
+  assert.equal(timeout("1s", "sleep", "10"), 124, "timeout does not stop a command at its limit");
 });
 
 check("every required job takes at most the time the policy holds for it", () => {
@@ -4310,7 +4614,7 @@ check("every required job takes at most the time the policy holds for it", () =>
     const key = `${file}#${id}`;
     keys.add(key);
     assert.ok(TIMEOUTS.has(key), `${key} is a required job without a time in TIMEOUTS`);
-    assert.equal(job["timeout-minutes"], TIMEOUTS.get(key), `${key}: timeout-minutes is ${job["timeout-minutes"]}, where the policy holds ${TIMEOUTS.get(key)}`);
+    assert.equal(own(job, "timeout-minutes"), TIMEOUTS.get(key), `${key}: timeout-minutes is ${own(job, "timeout-minutes")}, where the policy holds ${TIMEOUTS.get(key)}`);
   }
   assert.deepEqual([...TIMEOUTS.keys()].filter((k) => !keys.has(k)), [], "TIMEOUTS holds a time for a job that is not required");
 });
@@ -4325,7 +4629,7 @@ check("every required check is one job that runs on every pull request and in th
     const on = triggers(doc);
     for (const event of ["pull_request", "merge_group"]) {
       assert.ok(event in on, `${where}: the workflow does not run on ${event}`);
-      const filter = on[event] ?? {};
+      const filter = own(on, event) ?? {};
       for (const key of ["paths", "paths-ignore", "branches", "branches-ignore"]) {
         assert.ok(!(key in filter), `${where}: its ${event} trigger has ${key}:, so a run it skips never reports`);
       }
@@ -4402,7 +4706,7 @@ check("every instrument workflow decides at its first step, and every later step
     const where = `${file}, job ${id}`;
     assert.ok(sections.has(file), `${where}: a watch step, but ${PATHS_FILE} has no [${file}]`);
     assert.match(String(all[0].uses ?? ""), /^actions\/checkout@/, `${where}: the first step is not the checkout`);
-    assert.equal(all[0].with?.["fetch-depth"], 0, `${where}: the checkout needs fetch-depth: 0 for the diff`);
+    assert.equal(own(all[0]?.with, "fetch-depth"), 0, `${where}: the checkout needs fetch-depth: 0 for the diff`);
     const watch = all[1];
     assert.equal(watch?.id, "watch", `${where}: the step after the checkout is not the watch`);
     assert.equal(String(watch.run).trim(), `node .github/scripts/watch.mjs ${file}`, `${where}: the watch step reads another list`);
@@ -4463,8 +4767,8 @@ function scriptTexts(doc, job) {
     for (const m of text.matchAll(/\bnpm run ([\w:-]+)/g)) {
       if (seen.has(m[1]) || !(m[1] in scripts)) continue;
       seen.add(m[1]);
-      texts.push(scripts[m[1]], "package.json");
-      addNpm(scripts[m[1]], seen);
+      texts.push(own(scripts, m[1]), "package.json");
+      addNpm(own(scripts, m[1]), seen);
     }
   };
   const envs = [doc.env, job.env, ...steps(job).map((s) => s.env)].filter(Boolean);
@@ -4570,7 +4874,7 @@ function rustItem(file, marker) {
   let depth = 0;
   let inString = false;
   for (let k = open; k < text.length; k++) {
-    const c = text[k];
+    const c = own(text, k);
     if (inString) {
       if (c === "\\") k++;
       else if (c === '"') inString = false;
@@ -4618,7 +4922,7 @@ check("every path list names everything its jobs build, run and read", () => {
       }
       repoPaths(texts).forEach((f) => needed.add(f));
     }
-    for (const [source, marker] of CODE_CORPORA[file] ?? []) {
+    for (const [source, marker] of own(CODE_CORPORA, file) ?? []) {
       const corpus = codeCorpus(source, marker);
       assert.ok(corpus.length > 0, `${source}: \`${marker}\` names no directory of the repository`);
       corpus.forEach((dir) => filesUnder(dir).forEach((f) => needed.add(f)));
@@ -4723,7 +5027,7 @@ check("the watch CLI decides on a real history, through any path, and fails rath
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-watch-"));
   try {
     const sh = (...args) =>
-      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
+      execFileSync("git", args, { cwd: dir, encoding: "utf8", env: GIT_TEST_ENV }).trim();
     const write = (file, text) => {
       fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
       fs.writeFileSync(path.join(dir, file), text);
@@ -4735,33 +5039,32 @@ check("the watch CLI decides on a real history, through any path, and fails rath
       return sh("rev-parse", "HEAD");
     };
     sh("init", "-q");
-    const base = commit({ [PATHS_FILE]: "[x.yml]\nsrc/**\n", "src/a.rs": "a\n", "docs/a.md": "a\n" });
+    const base = commit(Object.fromEntries([[PATHS_FILE, "[x.yml]\nsrc/**\n"], ["src/a.rs", "a\n"], ["docs/a.md", "a\n"]]));
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
-    const cli = (script, head, { output = true } = {}) => {
+    const cli = (root, head, { output = true } = {}) => {
       const event = path.join(dir, "event.json");
       fs.writeFileSync(event, JSON.stringify({ pull_request: { base: { sha: base }, head: { sha: head } } }));
       const out = path.join(dir, `out-${Math.random().toString(36).slice(2)}.txt`);
-      const r = spawnSync(process.execPath, [script, "x.yml"], {
+      const r = spawnSync(nodePath(), [path.join(root, ".github/scripts/watch.mjs"), "x.yml"], {
         cwd: dir,
         encoding: "utf8",
         env: { ...env, GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: event, ...(output ? { GITHUB_OUTPUT: out } : {}) },
       });
       return { status: r.status, output: fs.existsSync(out) ? fs.readFileSync(out, "utf8") : "", stderr: r.stderr };
     };
-    const script = path.join(HERE, "watch.mjs");
     const docs = commit({ "docs/a.md": "b\n" });
-    assert.deepEqual(cli(script, docs), { status: 0, output: "run=false\n", stderr: "" });
+    assert.deepEqual(cli(ROOT, docs), { status: 0, output: "run=false\n", stderr: "" });
     const src = commit({ "src/a.rs": "b\n" });
-    assert.equal(cli(script, src).output, "run=true\n");
+    assert.equal(cli(ROOT, src).output, "run=true\n");
     const cargo = commit({ ".cargo/config.toml": "[build]\n" });
-    assert.equal(cli(script, cargo).output, "run=true\n");
-    const silent = cli(script, docs, { output: false });
+    assert.equal(cli(ROOT, cargo).output, "run=true\n");
+    const silent = cli(ROOT, docs, { output: false });
     assert.equal(silent.status, 1);
     assert.match(silent.stderr, /GITHUB_OUTPUT/);
     // Started through a junction, as a checkout under another path would be: main still runs.
     const link = path.join(dir, "linked");
-    fs.symlinkSync(HERE, link, "junction");
-    assert.equal(cli(path.join(link, "watch.mjs"), src).output, "run=true\n");
+    fs.symlinkSync(ROOT, link, "junction");
+    assert.equal(cli(link, src).output, "run=true\n");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -4818,7 +5121,7 @@ check("the Commits check fails on every event while a base change is newer than 
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   try {
     const sh = (...args) =>
-      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
+      execFileSync("git", args, { cwd: dir, encoding: "utf8", env: GIT_TEST_ENV }).trim();
     sh("init", "-q");
     fs.writeFileSync(path.join(dir, "a"), "a\n");
     sh("add", "-A");
@@ -4834,7 +5137,7 @@ check("the Commits check fails on every event while a base change is newer than 
       new Promise((done) => {
         const event = path.join(dir, "event.json");
         fs.writeFileSync(event, JSON.stringify(payload));
-        const child = spawn(process.execPath, [path.join(HERE, "commits.mjs")], {
+        const child = spawn(nodePath(), [path.join(ROOT, ".github/scripts/commits.mjs")], {
           cwd: dir,
           env: {
             ...env,
@@ -4924,7 +5227,7 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   // the tab git ends it with.
   assert.throws(() => parseDiff('diff --git "a/compiler/a/src/\\303\\251.rs" "b/compiler/a/src/\\303\\251.rs"\n--- "a/compiler/a/src/\\303\\251.rs"\n+++ "b/compiler/a/src/\\303\\251.rs"\n@@ -1,1 +1,2 @@\n x\n+y\n'), /git quoted/);
   assert.deepEqual([...parseDiff("diff --git a/compiler/a/src/a b.rs b/compiler/a/src/a b.rs\n--- a/compiler/a/src/a b.rs\t\n+++ b/compiler/a/src/a b.rs\t\n@@ -1,1 +1,2 @@\n x\n+y\n").added.keys()], ["compiler/a/src/a b.rs"]);
-  const mutantsJob = steps(workflows().find((w) => w.file === "mutants.yml").doc.jobs["in-diff"]).map((s) => String(s.run ?? "")).join("\n");
+  const mutantsJob = steps(own(workflows().find((w) => w.file === "mutants.yml").doc.jobs, "in-diff")).map((s) => String(s.run ?? "")).join("\n");
   // With quotePath off, git quotes only a path holding a quote, a backslash or a control character,
   // which the floor refuses; a path in any other script stays as it is (the fourth review).
   assert.match(mutantsJob, /^\s*git -c core\.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > pr\.diff$/m, "the Mutants job reads the diff in a form .gitattributes or the path's characters can change");
@@ -5113,7 +5416,7 @@ function policyBase() {
   const name = process.env.GITHUB_EVENT_NAME;
   if (name && process.env.GITHUB_EVENT_PATH) {
     const payload = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-    const base = { pull_request: payload.pull_request?.base?.sha, merge_group: payload.merge_group?.base_sha, push: payload.before }[name];
+    const base = own({ pull_request: payload.pull_request?.base?.sha, merge_group: payload.merge_group?.base_sha, push: payload.before }, name);
     if (base && !/^0+$/.test(base)) return base;
   }
   try {
@@ -5168,7 +5471,7 @@ check("every instrument scheduled for a finished milestone is a required check",
   let due = 0;
   for (const row of rows) {
     const instrument = row[0];
-    const named = [...row[row.length - 1].matchAll(/\bM\d+[a-z]?\b/g)].map((m) => m[0]);
+    const named = [...own(row, row.length - 1).matchAll(/\bM\d+[a-z]?\b/g)].map((m) => m[0]);
     assert.ok(named.length > 0, `the row "${instrument.slice(0, 40)}" names no milestone`);
     if (!named.some(isDone)) continue;
     due++;

@@ -37,6 +37,8 @@ rust-toolchain.toml
 # The floor of work the job checks.
 .github/scripts/mutants-floor.mjs
 .github/scripts/lib/mutants-floor.mjs
+# The one helper through which the floor reads a member by a computed key.
+benchmark/own.mjs
 .github/workflows/mutants.yml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
@@ -58,6 +60,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The helper it reads a member by a computed key through.
+benchmark/own.mjs
 
 [fuzz.yml]
 merge_group: skip
@@ -78,6 +82,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The helper it reads a member by a computed key through.
+benchmark/own.mjs
 
 [smt.yml]
 compiler/**
@@ -97,6 +103,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The helper it reads a member by a computed key through.
+benchmark/own.mjs
 
 [mir-mutants.yml]
 compiler/**
@@ -115,6 +123,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The helper it reads a member by a computed key through.
+benchmark/own.mjs
 
 [perf.yml]
 compiler/**
@@ -129,6 +139,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The helper it reads a member by a computed key through.
+benchmark/own.mjs
 
 [harness.yml]
 benchmark/**
@@ -144,3 +156,5 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The helper it reads a member by a computed key through.
+benchmark/own.mjs
