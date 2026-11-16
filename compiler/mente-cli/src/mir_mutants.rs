@@ -334,7 +334,7 @@ fn prepare(
         .iter()
         .map(|(_, v)| native_arg(v))
         .collect::<Option<Vec<_>>>()
-        .is_none_or(|native_args| native::refusal(entry, &native_args).is_some());
+        .is_none_or(|native_args| native::refusal(lowered, entry, &native_args).is_some());
     if outside {
         return Ok(None);
     }

@@ -7,8 +7,16 @@
 //! nothing more. No figure per call bounds it, and none is assumed. So the interpreter runs in
 //! segments: at each step it reads how much of its segment's stack is left, and where less than
 //! [`MARGIN`] is, the step continues on a new segment, a thread started through
-//! `mente_threads::alone`, which the step waits for. A run is then bounded by the budget of item
-//! 25, whatever its shape, and the host's stack never ends a run.
+//! `mente_threads::alone`, which the step waits for. A run is then ended by the budget of item 25,
+//! whatever its shape, and the host's stack never ends a run. The margin is one figure for
+//! every build, made in one place of the largest step measured and of what the platform keeps of
+//! a thread's stack.
+//!
+//! What the segments take of the host's memory is bounded by how deep the program nests: each
+//! call open takes at most [`CALLS`]' figure and [`LEVELS`]' for each level of nesting, which
+//! `crate::measure` holds every shape to, and [`host_bound`] is what a run of a given nesting
+//! reserves at most, in any build. The harnesses that run generated and mutated programs derive
+//! the nesting they keep to from it.
 //!
 //! This module is the one sizing rule: every thread the interpreter runs on gets [`SEGMENT`], and
 //! no size is written where a thread starts.
@@ -17,32 +25,95 @@
 
 use std::hint::black_box;
 
-/// The most host stack one step of the interpreter uses between two checks, with headroom: twice
-/// the largest step the test `test_no_step_outgrows_the_host_step` measures, on each shape nested
-/// as deep as the parser allows, rounded up. On 2026-11-16, on x86-64 Windows, that was 19,008
-/// bytes without optimisation and 3,776 with it, both the step that enters a call; a build without
-/// optimisation keeps a slot for every local of a function, so its steps are several times larger.
-pub(crate) const STEP: usize = if cfg!(debug_assertions) {
-    40 << 10
-} else {
-    8 << 10
-};
+/// The most host stack one step of the interpreter takes, from a check to the deepest point of
+/// what runs before the next, in the build that takes the most, with headroom: twice the largest
+/// step the test `test_no_step_outgrows_the_host_step` measures, on each shape nested as deep as
+/// the parser allows, rounded up. On 2026-11-16, on x86-64 Windows, that was 20,656 bytes in a
+/// build without optimisation, which keeps a slot for every local of a function, and 4,184 in one
+/// with it, both the step that enters a call. Every build uses the one figure, so that a step
+/// measured in one build holds in the other.
+pub(crate) const STEP: usize = 48 << 10;
 
-/// What a segment keeps free: a step begun where the check found [`MARGIN`] left still fits, and so
-/// do the frames of the thread's own start above where the segment's interpreter began.
-pub(crate) const MARGIN: usize = 4 * STEP;
+/// The guard page the platform keeps below a thread's stack, which no frame may reach: at most
+/// 64 KiB, the largest page AArch64 Linux runs with. Kept on every platform, so that the margin is
+/// one figure everywhere.
+const GUARD_PAGE: usize = 64 << 10;
+
+/// What Windows keeps of every Rust thread's stack for its handler of an overflow: Rust's
+/// standard library asks for 20 KiB (`SetThreadStackGuarantee`), which no frame may reach. Kept
+/// on every platform, as the guard page is.
+const STACK_GUARANTEE: usize = 20 << 10;
+
+/// What starting a thread takes of the stack of the thread that starts it, beyond the guard page
+/// and the guarantee: the platform's own code. On 2026-11-16, on x86-64 Windows, a thread started
+/// with 28 to 32 KiB left in a build with optimisation, and with 36 to 40 KiB left in one without,
+/// the guarantee included; with headroom, 64 KiB.
+const THREAD_START: usize = 64 << 10;
+
+/// What a segment keeps free: where less is left, the next step starts a segment. The step begun
+/// where the check found the margin may take [`STEP`], and a step more is headroom; the segment
+/// the next step starts then takes [`THREAD_START`], above the platform's [`STACK_GUARANTEE`] and
+/// [`GUARD_PAGE`]. A thread's stack is address space the platform reserves and commits only as
+/// it is used, so a generous margin costs next to nothing.
+/// `test_a_segment_starts_from_the_least_a_switch_begins_with` holds it.
+pub(crate) const MARGIN: usize = 2 * STEP + THREAD_START + STACK_GUARANTEE + GUARD_PAGE;
 
 /// The stack of each thread the interpreter runs on: room for many steps, so that a deep run
 /// starts few segments.
 pub(crate) const SEGMENT: usize = 1024 * STEP;
 
+/// The most host stack one call takes besides its levels of nesting, from where it begins to the
+/// deepest point it reaches before a call it makes begins: in a build without optimisation, and
+/// in one with it. `host_figures_hold` (`crate::measure`) holds the build that runs it to its
+/// figure, on every shape a call can stand in.
+pub(crate) const CALLS: [usize; 2] = [4 << 10, 1 << 10];
+
+/// The most host stack one level of nesting adds to a call, as the parser counts levels
+/// (`NESTING_LIMIT`): in a build without optimisation, and in one with it, held as [`CALLS`] is.
+pub(crate) const LEVELS: [usize; 2] = [5376, 1792];
+
+/// The figures of the build that runs: what a call takes, and what each level adds.
+pub(crate) const fn this_build() -> (usize, usize) {
+    let build = if cfg!(debug_assertions) { 0 } else { 1 };
+    (CALLS[build], LEVELS[build])
+}
+
+/// The larger of two figures.
+const fn larger(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The most host memory a run of the reference interpreter reserves for its stacks, in any build,
+/// where nothing the program declares nests deeper than `depth` levels (`crate::nesting`). A run
+/// has at most as many calls open at once as the budget holds frames of the call's 64 bytes, each
+/// taking at most a call's figure and a level's for each level it nests, of the larger build's;
+/// one call more covers what the run takes before its first call. Each segment but the last is
+/// filled to within its margin before the next begins, and each reserves [`SEGMENT`].
+pub const fn host_bound(depth: u32) -> u128 {
+    let call = larger(CALLS[0], CALLS[1]) as u128;
+    let level = larger(LEVELS[0], LEVELS[1]) as u128;
+    let calls = mente_sema::frames::BUDGET / mente_sema::frames::CALL + 1;
+    let used = calls * (call + level * depth as u128);
+    let segments = used / (SEGMENT - MARGIN) as u128 + 1;
+    segments * SEGMENT as u128
+}
+
 /// Where the interpreter stands on the host's stack: the address its segment began at, the
-/// address of the last check, and the largest step between two checks so far.
-#[derive(Clone, Copy, Debug)]
+/// address of the last check, the largest step so far, from a check to the deepest point of what
+/// follows it before the next; and the address the current call began at, and the most host
+/// stack a call has taken so far, from where it began to the deepest point it reached before a
+/// call it makes began.
+#[derive(Clone, Debug)]
 pub(crate) struct Host {
     base: usize,
     last: usize,
     deepest: usize,
+    call: usize,
+    per_call: usize,
 }
 
 /// The address of a local of the caller's frame, as a number: the depth the stack has reached.
@@ -66,9 +137,10 @@ pub(crate) const GROWS_UP: &str =
     "the host's stack grows up, and the interpreter measures what is left of it as a stack that grows down";
 
 impl Host {
-    /// The host stack of a segment that begins here, on a thread of [`SEGMENT`] bytes; an error
-    /// where the stack does not grow down.
-    pub(crate) fn start() -> Result<Host, &'static str> {
+    /// The host stack of a segment that begins here, on a thread of [`SEGMENT`] bytes, inside a
+    /// call that has taken `carried` bytes of the segments before it; an error where the stack
+    /// does not grow down.
+    pub(crate) fn start(carried: usize) -> Result<Host, &'static str> {
         let base = here();
         if !deeper_is_lower(base) {
             return Err(GROWS_UP);
@@ -77,7 +149,15 @@ impl Host {
             base,
             last: base,
             deepest: 0,
+            call: base.saturating_add(carried),
+            per_call: 0,
         })
+    }
+
+    /// What the current call has taken of this segment and those before it, at `at`: the bytes a
+    /// segment started there carries.
+    pub(crate) fn carried(&self, at: usize) -> usize {
+        self.call.saturating_sub(at)
     }
 
     /// Whether less than [`MARGIN`] of the segment's stack is left at `at`.
@@ -88,7 +168,7 @@ impl Host {
     /// A check at `at`: records the step from the last check, and returns that check's address,
     /// for the step to restore when it ends.
     pub(crate) fn enter(&mut self, at: usize) -> usize {
-        self.deepest = self.deepest.max(self.last.saturating_sub(at));
+        self.touch(at);
         std::mem::replace(&mut self.last, at)
     }
 
@@ -97,15 +177,41 @@ impl Host {
         self.last = outer;
     }
 
+    /// A probe at `at`, in a function a step runs below its last check: records how far below that
+    /// check the step reached, and how far below its start the current call did.
+    pub(crate) fn touch(&mut self, at: usize) {
+        self.deepest = self.deepest.max(self.last.saturating_sub(at));
+        self.per_call = self.per_call.max(self.call.saturating_sub(at));
+    }
+
+    /// The start of a call at `at`, made by the current call, which has reached at least that far:
+    /// returns where the current call began, for [`Host::returned`] to restore.
+    pub(crate) fn called(&mut self, at: usize) -> usize {
+        self.touch(at);
+        std::mem::replace(&mut self.call, at)
+    }
+
+    /// The end of the call [`Host::called`] began, `outer` where its caller began.
+    pub(crate) fn returned(&mut self, outer: usize) {
+        self.call = outer;
+    }
+
     /// The largest step between two checks so far.
     #[cfg(test)]
     pub(crate) fn deepest(&self) -> usize {
         self.deepest
     }
 
-    /// This host's record of steps joined with a segment's.
+    /// The most host stack a call has taken so far, from where it began to the deepest point it
+    /// reached before a call it makes began.
+    pub(crate) fn per_call(&self) -> usize {
+        self.per_call
+    }
+
+    /// This host's records joined with a segment's.
     pub(crate) fn absorb(&mut self, segment: &Host) {
         self.deepest = self.deepest.max(segment.deepest);
+        self.per_call = self.per_call.max(segment.per_call);
     }
 }
 
@@ -118,7 +224,38 @@ mod tests {
     #[test]
     fn test_the_host_stack_grows_down() {
         assert!(deeper_is_lower(here()));
-        assert!(Host::start().is_ok());
+        assert!(Host::start(0).is_ok());
+    }
+
+    /// Recurses, a frame of a few hundred bytes at a time, until no more than `left` is left of a
+    /// segment of `size` begun at `base`, as `Host` measures it, and starts a segment there as
+    /// `Machine::segment` does, returning what the new segment returns.
+    #[inline(never)]
+    fn dive(base: usize, size: usize, left: usize) -> u32 {
+        let pad = [0u8; 256];
+        black_box(&pad);
+        if size - base.saturating_sub(here()) > left {
+            dive(base, size, left) + black_box(0)
+        } else {
+            match mente_threads::alone(None, Some(size), || 7u32) {
+                Ok(Ok(v)) => v,
+                _ => 0,
+            }
+        }
+    }
+
+    /// A switch begins with at least the margin less a step left: the check before found the
+    /// margin, and one step ran since. Starting a segment from there runs, so that reserves too
+    /// thin for the start of a thread fail here first: a release build's margin of 32 KiB once let
+    /// a recursion run its host stack out on Windows, where a thread's start needs about 30 KiB
+    /// left.
+    #[test]
+    fn test_a_segment_starts_from_the_least_a_switch_begins_with() {
+        let ran = mente_threads::alone(None, Some(SEGMENT), || {
+            let base = here();
+            dive(base, SEGMENT, MARGIN - STEP)
+        });
+        assert!(matches!(ran, Ok(Ok(7))));
     }
 
     /// A segment is low once less than the margin is left of it, and not before.
@@ -128,6 +265,8 @@ mod tests {
             base: SEGMENT + 1000,
             last: SEGMENT + 1000,
             deepest: 0,
+            call: SEGMENT + 1000,
+            per_call: 0,
         };
         assert!(!h.low(1000 + MARGIN));
         assert!(h.low(1000 + MARGIN - 1));

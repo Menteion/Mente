@@ -17,14 +17,17 @@
 //!   a jump to either target, which also replaces an `if` value by either arm, since MIR has no
 //!   select and the lowering joins an `if` value in a block parameter;
 //! - [`Family::Trap`]: a run-time check taken out, so that its trap never fires, and a checked
-//!   operation made exact, so that where it would trap the MIR interpreter reports broken MIR;
+//!   operation made exact, so that where it would trap the MIR interpreter reports broken MIR: a
+//!   count of a call's frame, `enter`, included, which then never runs out of the budget;
 //! - [`Family::Identity`]: a negation, a `not` or a shift replaced by its first operand;
 //! - [`Family::Memory`]: a store or a copy taken out.
 //!
 //! Not mutated: a cast, which only moves a value between types that hold it; a slot, an element
 //! address or a load, whose change reads other bytes of the same frame rather than another value
-//! the program computes; a call; the count of a call's frame, `enter`, whose every change the
-//! verifier refuses, as [`unpaired`] shows; and the terminators `jump`, `return` and `trap`, whose targets
+//! the program computes; a call; a count moved, dropped or doubled, every one of which the
+//! verifier refuses, as [`unpaired`] shows; the count in an entry, of the run's first call, which
+//! never traps, since a call from outside whose frame is larger than the budget is refused before
+//! the entry runs; and the terminators `jump`, `return` and `trap`, whose targets
 //! and values the other families already reach through the instructions that compute them.
 //!
 //! A mutant is named by its function, its block, the instruction's index in that block or
@@ -390,6 +393,19 @@ fn inst_changes(f: &cfg::Function, v: NodeId) -> Vec<Candidate> {
         Op::Check { .. } => vec![(Family::Trap, "check-removed", Change::Remove)],
         Op::Store => vec![(Family::Memory, "store-removed", Change::Remove)],
         Op::Copy { .. } => vec![(Family::Memory, "copy-removed", Change::Remove)],
+        // A count made exact never traps where the stack runs out. An entry, of a frame of 0,
+        // counts the run's first call, which a frame larger than the budget never reaches.
+        Op::Enter {
+            callee,
+            trap: Some(_),
+        } if f.frame > 0 => vec![(
+            Family::Trap,
+            "enter-exact",
+            op(Op::Enter {
+                callee: *callee,
+                trap: None,
+            }),
+        )],
         Op::Param
         | Op::Cast
         | Op::Slot { .. }
@@ -468,10 +484,12 @@ fn its_call(f: &cfg::Function, block: usize, at: usize, callee: FuncId) -> Optio
 }
 
 /// Each way a change could break the count of a call's frame (`core-calculus.md`, item 25): an
-/// [`Op::Enter`] of `m` dropped, doubled, or moved past its call, one module for each `Enter`
-/// and each way, named as a mutant is. The verifier refuses every one ([`cfg::verify`]): an
-/// uncounted call, a count left open at a return, a call before its count. They are not mutants
-/// of the gate, whose mutants verify: they show that the pairing is held by MIR's structure.
+/// [`Op::Enter`] of `m` dropped, doubled, moved past its call, moved past the first narrowing or
+/// check that takes it, or moved before an argument it takes, one module for each `Enter` and
+/// each way, named as a mutant is. The verifier refuses every one ([`cfg::verify`]): a count
+/// taken where it is not defined, or a call that does not close the latest count open. They are
+/// not mutants of the gate, whose mutants verify: they show that the count's place is held by
+/// MIR's values.
 pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
     let mut out = Vec::new();
     for (fi, f) in m.functions.iter().enumerate() {
@@ -490,15 +508,39 @@ pub fn unpaired(m: &Module) -> Vec<(String, Module)> {
                 g.ops.push(g.ops[v.0 as usize].clone());
                 g.tys.push(g.tys[v.0 as usize]);
                 g.locs.push(g.locs[v.0 as usize]);
-                g.operands.push((g.pool.len() as u32, 0));
+                let start = g.pool.len() as u32;
+                let operands = f.args(v).to_vec();
+                g.pool.extend(&operands);
+                g.operands.push((start, operands.len() as u32));
                 g.blocks[bi].insts.insert(ii + 1, twin);
                 out.push((name("enter-doubled"), doubled));
+                let moved_to = |to: usize| {
+                    let mut moved = m.clone();
+                    let insts = &mut moved.functions[fi].blocks[bi].insts;
+                    insts.remove(ii);
+                    insts.insert(to, v);
+                    moved
+                };
                 if let Some((cb, ci)) = its_call(f, bi, ii, callee) {
                     let mut moved = m.clone();
                     let g = &mut moved.functions[fi];
                     g.blocks[cb].insts.insert(ci + 1, v);
                     g.blocks[bi].insts.remove(ii);
                     out.push((name("enter-moved"), moved));
+                }
+                // Past the first instruction after it, other than its call, that takes it.
+                let takes = b.insts[ii + 1..]
+                    .iter()
+                    .position(|&u| f.count_of(u) == Some(v) && called(f, u).is_none());
+                if let Some(k) = takes {
+                    out.push((name("enter-later"), moved_to(ii + 1 + k)));
+                }
+                // Before the last of its arguments that an instruction of its block gives.
+                let given = b.insts[..ii]
+                    .iter()
+                    .rposition(|u| f.own_args(v).contains(u));
+                if let Some(k) = given {
+                    out.push((name("enter-earlier"), moved_to(k)));
                 }
             }
         }
@@ -575,45 +617,66 @@ mod tests {
         m
     }
 
-    /// `fn callee(x: u8) -> u8 = x`, of a frame of 100 bytes, and `fn caller(x: i64) -> u8`,
-    /// which counts it, narrows its argument with a check, and calls it, as the lowering does.
+    /// `fn callee(x: u8) -> u8 = x`, of a frame of 100 bytes, `fn id(x: i64) -> i64 = x`, and
+    /// `fn caller(x: i64) -> u8 = callee(id(x))`, which counts and calls `id`, then counts
+    /// `callee` on what `id` gave, narrows that with a check, and calls `callee`, as the lowering
+    /// does.
     fn counted_call() -> Module {
         let mut c = Builder::new("callee", &[Ty::Int(U8)], Some(Ty::Int(U8)));
         let x = c.params(BlockId(0))[0];
         c.end(Term::Return(Some(x)));
         let mut callee = c.finish();
         callee.frame = 100;
+        let mut i = Builder::new("id", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+        let x = i.params(BlockId(0))[0];
+        i.end(Term::Return(Some(x)));
+        let mut id = i.finish();
+        id.frame = 72;
         let mut b = Builder::new("caller", &[Ty::Int(I64)], Some(Ty::Int(U8)));
         let x = b.params(BlockId(0))[0];
-        let deep = b.trap_site("stack-overflow", &["the call stack ran out"]);
-        b.inst(
+        let deep =
+            |b: &mut Builder| Some(b.trap_site("stack-overflow", &["the call stack ran out"]));
+        let trap = deep(&mut b);
+        let inner = b.inst(
             Op::Enter {
-                callee: FuncId(0),
-                trap: deep,
+                callee: FuncId(1),
+                trap,
             },
             Ty::Unit,
-            &[],
+            &[x],
+        );
+        let y = b.inst(Op::Call(FuncId(1)), Ty::Int(I64), &[inner, x]);
+        let trap = deep(&mut b);
+        let count = b.inst(
+            Op::Enter {
+                callee: FuncId(0),
+                trap,
+            },
+            Ty::Unit,
+            &[y],
         );
         let max = b.int(I64, Num::from_i128(255));
-        let fits = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[x, max]);
+        let fits = b.inst(Op::Cmp(CmpOp::Le), Ty::Bool, &[y, max]);
         let narrowing = b.trap_site("narrowing", &["out of range"]);
-        b.inst(Op::Check { trap: narrowing }, Ty::Unit, &[fits]);
-        let small = b.inst(Op::Cast, Ty::Int(U8), &[x]);
-        let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[small]);
+        b.inst(Op::Check { trap: narrowing }, Ty::Unit, &[fits, count]);
+        let small = b.inst(Op::Cast, Ty::Int(U8), &[y]);
+        let r = b.inst(Op::Call(FuncId(0)), Ty::Int(U8), &[count, small]);
         b.end(Term::Return(Some(r)));
         let m = Module {
-            functions: vec![callee, b.finish()],
+            functions: vec![callee, id, b.finish()],
             budget: 1 << 20,
         };
         cfg::verify(&m).unwrap();
         m
     }
 
-    /// An `Enter` dropped, doubled, or moved past its call breaks the count of a call's frame,
-    /// and the verifier refuses each: a call no count opens, a count open at a return, a call
-    /// before its count. The original verifies and runs.
+    /// An `Enter` dropped, doubled, moved past its call, moved past the narrowing check that takes
+    /// it, or moved before the call that gives its argument breaks the count of a call's frame
+    /// (`core-calculus.md`, item 25), and the verifier refuses each: a count taken where it is not
+    /// defined, or a call that does not close the latest count open. The original verifies and
+    /// runs.
     #[test]
-    fn test_the_verifier_refuses_every_count_out_of_its_pairing() {
+    fn test_the_verifier_refuses_every_count_out_of_its_place() {
         let m = counted_call();
         let all = unpaired(&m);
         let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
@@ -622,20 +685,25 @@ mod tests {
             [
                 "caller/b0.i0/enter-dropped",
                 "caller/b0.i0/enter-doubled",
-                "caller/b0.i0/enter-moved"
+                "caller/b0.i0/enter-moved",
+                "caller/b0.i2/enter-dropped",
+                "caller/b0.i2/enter-doubled",
+                "caller/b0.i2/enter-moved",
+                "caller/b0.i2/enter-later",
+                "caller/b0.i2/enter-earlier",
             ]
         );
         for (name, broken) in &all {
             let why = cfg::verify(broken).unwrap_err();
             let expected = match name.rsplit('/').next() {
-                Some("enter-doubled") => "returns with the count of a call of f0 open",
-                _ => "a call of f0 that no count of it opens",
+                Some("enter-doubled") => "does not close the latest count open",
+                _ => "is not defined before it on every path",
             };
             assert!(why.contains(expected), "{}: {}", name, why);
         }
         let ran = cfg::run(
             &m,
-            FuncId(1),
+            FuncId(2),
             &[int(7)],
             &mut Memory::default(),
             Limits::default(),

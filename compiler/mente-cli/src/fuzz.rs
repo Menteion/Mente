@@ -83,7 +83,8 @@ const MAX_ARGUMENT_VALUES: usize = 256;
 
 /// The limits of every interpreted call: tight, since only a crash matters. The reference
 /// interpreter copies an array value at each assignment, so it gets fewer steps and smaller
-/// arrays. The stack is no limit of these: item 25's budget bounds every run alike.
+/// arrays. The stack is no limit of these: item 25's budget ends every run alike, and the
+/// nesting fuzz runs on the reference interpreter bounds its host memory (`mir_run::MAX_NESTING`).
 const MAX_STEPS: u64 = 100_000;
 const REFERENCE_STEPS: u64 = 20_000;
 const REFERENCE_ARRAY: u128 = 256;
@@ -1125,10 +1126,18 @@ impl Phases {
                 self.objects(run, lowered, &functions);
             }
         }
-        let panicked = run
-            .phase("interp", || interpret(&module, &functions))
-            .flatten();
-        run.report("interp", Kind::Panic, panicked);
+        // A program that nests deeper than the harnesses' bound does not run on the reference
+        // interpreter, whose run could take more host memory than a test process may
+        // (`mir_run::MAX_NESTING`): it is set aside, and counted as reaching the phase
+        // `nests-too-deep`, which the run's summary reports with the others.
+        if mente_interp::nesting(&module) > crate::mir_run::MAX_NESTING {
+            run.phase("nests-too-deep", || ());
+        } else {
+            let panicked = run
+                .phase("interp", || interpret(&module, &functions))
+                .flatten();
+            run.report("interp", Kind::Panic, panicked);
+        }
         if let Some(lowered) = &lowered {
             let broken = run.phase("mir", || run_mir(lowered, &functions)).flatten();
             run.report("mir", Kind::BrokenMir, broken);
@@ -1537,7 +1546,8 @@ fn run_mir(lowered: &Lowered, functions: &[Function]) -> Option<String> {
         };
         'calls: for call in edge_calls(&f.params) {
             let args: Vec<native::Arg> = call.iter().map(arg).collect();
-            if native::refusal(entry, &args).is_some() || call.len() != entry.params.len() {
+            if native::refusal(lowered, entry, &args).is_some() || call.len() != entry.params.len()
+            {
                 continue;
             }
             let mut memory = Memory::default();
@@ -2882,6 +2892,36 @@ mod tests {
         let outcome = InProcess(phases(None)).exec(&broken).unwrap();
         assert_eq!(outcome.failures, Vec::new());
         assert!(outcome.reached("check") && !outcome.reached("lower"));
+    }
+
+    /// A program that nests deeper than the harnesses' bound (`mir_run::MAX_NESTING`) is set aside
+    /// from the reference interpreter, and counted as reaching `nests-too-deep`; one level less
+    /// runs on it.
+    #[test]
+    fn test_a_program_deeper_than_the_harnesses_bound_is_set_aside_and_counted() {
+        // `1 * (` wraps `x` one level each, inside the body's own call of nothing else.
+        let nested = |levels: u32| Case {
+            text: format!(
+                "module m\npub fn f(x: u64) -> u64 = {}x{}\n",
+                "1 * (".repeat(levels as usize - 1),
+                ")".repeat(levels as usize - 1)
+            ),
+            edit: 0,
+            thorough: false,
+        };
+        let cap = crate::mir_run::MAX_NESTING;
+        let deep = InProcess(Phases::default()).exec(&nested(cap + 1)).unwrap();
+        assert!(
+            deep.reached("nests-too-deep") && !deep.reached("interp") && deep.reached("mir"),
+            "{:?}",
+            deep.reached
+        );
+        let within = InProcess(Phases::default()).exec(&nested(cap)).unwrap();
+        assert!(
+            within.reached("interp") && !within.reached("nests-too-deep"),
+            "{:?}",
+            within.reached
+        );
     }
 
     /// Failures that meet one bug share a key: a panic by its place, a hang by its phase, and

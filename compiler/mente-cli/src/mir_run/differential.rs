@@ -715,6 +715,13 @@ mod tests {
             let Some(m) = &c.module else {
                 panic!("seed {} does not check", seed);
             };
+            // No program nests deeper than the bound on the interpreter's host memory allows.
+            assert!(
+                mente_interp::nesting(m) <= super::super::MAX_NESTING,
+                "seed {} nests {} deep",
+                seed,
+                mente_interp::nesting(m)
+            );
             let proven = m
                 .functions
                 .iter()
@@ -738,6 +745,34 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(proven >= 100, "Tier 1 proves only {} obligations", proven);
+    }
+
+    /// The nesting every program a harness generates or mutates keeps to is the deepest whose bound
+    /// on the reference interpreter's host memory fits CI's limits (`mente_interp::host_bound`):
+    /// for each interpreter CI runs at once in one process, beside what the process reserves
+    /// otherwise, within what it may reserve, which is read where `.github/scripts/limits.sh` sets
+    /// it for Linux and for Windows. One level more would not fit.
+    #[test]
+    fn test_the_nesting_bound_fits_ci_memory() {
+        use super::super::{CI_PROCESS_BYTES, CI_RESERVED, CI_THREADS, MAX_NESTING};
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/limits.sh");
+        let limits = fs::read_to_string(script).unwrap();
+        for set in [
+            format!("ulimit -v {} ", CI_PROCESS_BYTES >> 10),
+            format!("-ProcessBytes {} ", CI_PROCESS_BYTES),
+        ] {
+            assert!(limits.contains(&set), "limits.sh no longer sets {:?}", set);
+        }
+        let at_once = |depth: u32| CI_THREADS * mente_interp::host_bound(depth) + CI_RESERVED;
+        println!(
+            "nesting at most {}: {} bytes of host stack an interpreter, {} with {} at once",
+            MAX_NESTING,
+            mente_interp::host_bound(MAX_NESTING),
+            at_once(MAX_NESTING),
+            CI_THREADS
+        );
+        assert!(at_once(MAX_NESTING) <= CI_PROCESS_BYTES);
+        assert!(at_once(MAX_NESTING + 1) > CI_PROCESS_BYTES);
     }
 
     #[test]
@@ -1051,6 +1086,11 @@ mod tests {
     #[test]
     #[ignore = "generates and runs many programs; CI runs it in release (generated.yml)"]
     fn generated_programs_run_alike_on_the_three_paths() {
+        // The figures the nesting the generator keeps to rests on hold in this build too, as a
+        // test holds them in a build without optimisation (`mente_interp::host_bound`).
+        if let Err(over) = mente_interp::host_figures_hold() {
+            panic!("{}", over);
+        }
         let first = env_or("MENTE_GEN_FIRST_SEED", 0);
         let count = env_or("MENTE_GEN_PROGRAMS", 300);
         let plan = CallPlan {

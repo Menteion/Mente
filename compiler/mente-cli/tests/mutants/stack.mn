@@ -1,0 +1,14 @@
+// The count of a call's frame against the stack budget (`core-calculus.md`, item 25): `down`, of a
+// frame of 84 bytes, has 12,483 calls open and traps at the 12,484th, as a run's first call. A
+// count made exact runs on past the budget, where the MIR interpreter reports broken MIR.
+// call: down(12482)
+// call: down(12483)
+// call: down(3)
+module stack
+
+pub fn down(n: u32) -> u32 {
+  if n == 0 {
+    return 0
+  }
+  down(n - 1)
+}

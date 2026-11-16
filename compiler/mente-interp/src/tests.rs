@@ -1158,6 +1158,22 @@ fn test_the_budget_counts_the_frames_of_nested_calls_only() {
         }))
     ));
     let many = "pub fn one() -> u32 {\n  val big: [400000]u8 = [0_u8; 400000]\n  _ = big\n  1\n}\npub fn many() -> u32 {\n  var total: u32 = 0\n  var i: u32 = 0\n  while i < 20 {\n    total += one()\n    i += 1\n  }\n  total\n}";
+    // A call that has returned gives its frame back, and no more: `then_down`, of 88 bytes, calls
+    // `down(1)` and then recurses through `down`, whose 12,482 frames fill the 1,048,488 bytes
+    // left exactly.
+    let then = "pub fn down(n: u32) -> u32 {\n  if n == 0 {\n    return 0\n  }\n  down(n - 1)\n}\npub fn then_down(n: u32) -> u32 {\n  val a = down(1)\n  down(n) + a\n}";
+    assert_eq!(module(then).frames[1].map(|f| f.bytes), Some(88));
+    assert_eq!(
+        run_with(then, "then_down(12481)", Limits::default()),
+        Ok(Value::Int(Int::ZERO))
+    );
+    assert!(matches!(
+        run_with(then, "then_down(12482)", Limits::default()),
+        Err(Stop::Trap(Trap {
+            kind: TrapKind::StackOverflow,
+            ..
+        }))
+    ));
     assert_eq!(module(many).frames[0].map(|f| f.bytes), Some(800_072));
     assert_eq!(
         run_with(many, "many()", Limits::default()),
@@ -1972,4 +1988,17 @@ fn test_a_recursion_through_nested_ifs_runs_to_the_budget() {
         "{:?}",
         over
     );
+}
+
+/// Every call of every shape a call can stand in keeps within what this build's figures give it
+/// for its nesting (`crate::measure`), so that the bound on the interpreter's host memory, which
+/// the harnesses that run generated and mutated programs derive their nesting from
+/// (`crate::host_bound`), holds: a step that grows a frame past its figure fails here first. The
+/// generated programs' comparison holds a build with optimisation to its own figures the same way.
+#[test]
+fn test_every_call_keeps_within_the_host_figures() {
+    match crate::host_figures_hold() {
+        Ok(report) => println!("{}", report),
+        Err(over) => panic!("{}", over),
+    }
 }

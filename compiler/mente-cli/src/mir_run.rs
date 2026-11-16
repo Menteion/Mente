@@ -17,6 +17,37 @@ mod differential;
 #[cfg(test)]
 mod generate;
 
+/// What each test process may reserve on CI: `ulimit -v` on Linux, a job object on Windows
+/// (`.github/scripts/limits.sh`, which a test reads).
+pub const CI_PROCESS_BYTES: u128 = 8 << 30;
+
+/// The interpreters CI runs at once in one test process: one on each of a runner's four cores, as
+/// a test of the group `all-cores` does (`.config/nextest.toml`), and no more than the four
+/// processes of single-threaded tests nextest runs beside each other hold together.
+pub const CI_THREADS: u128 = 4;
+
+/// What a test process reserves on CI besides the reference interpreter's stacks: glibc keeps 64
+/// MiB of address space for each malloc arena, and makes up to eight for each core, 2 GiB on CI's
+/// four, which Linux's `ulimit -v` counts.
+pub const CI_RESERVED: u128 = 2 << 30;
+
+/// The deepest a program that a harness generates or mutates may nest, as the parser counts
+/// levels (`mente_interp::nesting`): the largest nesting whose bound on the reference
+/// interpreter's host memory (`mente_interp::host_bound`), for each interpreter CI runs at once in
+/// one process, fits what the process may reserve beside its other needs. A harness bounds the
+/// shape of what it runs, never the depth of a call.
+pub const MAX_NESTING: u32 = deepest_within((CI_PROCESS_BYTES - CI_RESERVED) / CI_THREADS);
+
+/// The deepest nesting whose host bound is at most `bytes`.
+const fn deepest_within(bytes: u128) -> u32 {
+    let mut depth = 0;
+    while depth < mente_syntax::body::NESTING_LIMIT && mente_interp::host_bound(depth + 1) <= bytes
+    {
+        depth += 1;
+    }
+    depth
+}
+
 /// What a run printed: its value and what each `mut` argument was left holding, or why it
 /// stopped.
 pub type Printed = Result<Vec<String>, String>;
@@ -40,12 +71,13 @@ pub fn run_lowered(lowered: &Lowered, name: &str, args: Vec<(bool, Value)>) -> P
     if let Some(why) = misshapen(entry, &args) {
         return Err(why);
     }
-    // An argument that does not fit its parameter's type traps before the entry is called.
+    // The run's first call, counted against the budget, and an argument that does not fit its
+    // parameter's type trap before the entry is called.
     let native_args = args
         .iter()
         .map(|(_, v)| native_arg(v))
         .collect::<Result<Vec<_>, String>>()?;
-    if let Some(trap) = native::refusal(entry, &native_args) {
+    if let Some(trap) = native::refusal(lowered, entry, &native_args) {
         return Err(trap);
     }
     let mut memory = Memory::default();

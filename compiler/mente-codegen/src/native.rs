@@ -98,14 +98,16 @@ struct Runtime {
     strings: HashMap<String, DataId>,
 }
 
-/// The trap a call of `entry` from outside the program raises on `args` before anything else,
-/// if an argument does not fit its parameter's type: the reference interpreter narrows every
-/// argument into its parameter's type first, in order and element by element, at the function's
-/// name, and reports the first value that does not fit. The entry takes each argument in its
-/// parameter's own type, which cannot hold such a value, so whoever calls the entry narrows
-/// every argument this way first; the entry then checks the refinements, as the interpreter
-/// does once every argument is narrowed.
-pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
+/// The trap a call of `entry` from outside the program raises on `args` before the entry runs,
+/// if any. The run's first call is counted first, against a stack with nothing in use, before any
+/// argument is narrowed: a function whose frame is larger than the budget traps as running out of
+/// stack, at its name (`core-calculus.md`, item 25). Then the reference interpreter narrows every
+/// argument into its parameter's type, in order and element by element, at the function's name,
+/// and reports the first value that does not fit. The entry takes each argument in its
+/// parameter's own type, which cannot hold such a value, so whoever calls the entry counts the
+/// call and narrows every argument this way first; the entry then checks the refinements, as the
+/// interpreter does once every argument is narrowed.
+pub fn refusal(lowered: &Lowered, entry: &Entry, args: &[Arg]) -> Option<String> {
     fn first(shape: &Shape, arg: &Arg) -> Option<(Num, &'static str)> {
         match (shape, arg) {
             (Shape::Int(t), Arg::Int(n)) => {
@@ -126,6 +128,15 @@ pub fn refusal(entry: &Entry, args: &[Arg]) -> Option<String> {
                 .find_map(|(f, a)| first(&f.shape, a)),
             _ => None,
         }
+    }
+    if lowered.module.runs_out(0, entry.callee) {
+        return Some(format!(
+            "trap[{}] at {}:{}: {}",
+            crate::lower::RAN_OUT[0],
+            entry.at.line,
+            entry.at.col,
+            crate::lower::RAN_OUT[1]
+        ));
     }
     entry
         .params
@@ -765,12 +776,13 @@ impl Translate {
         prefix: &str,
     ) -> Result<Option<Value>, CodegenError> {
         let ptr = e.ptr;
+        // The operands besides a call's count, which native code does not keep yet.
         let args: Vec<Value> = f
-            .args(v)
+            .own_args(v)
             .iter()
             .map(|a| vals[a.0 as usize].ok_or_else(|| err("a value used before it is defined")))
             .collect::<Result<_, _>>()?;
-        let arg_tys: Vec<cfg::Ty> = f.args(v).iter().map(|a| f.ty(*a)).collect();
+        let arg_tys: Vec<cfg::Ty> = f.own_args(v).iter().map(|a| f.ty(*a)).collect();
         let rty = f.ty(v);
         let t = cl_type(rty, ptr);
         let int = |x: cfg::Ty| match x {
@@ -1355,7 +1367,7 @@ fn make_call(
     let mir = &lowered.module.functions[entry.func.0 as usize];
     {
         let mut e = Emit { b, ptr };
-        if let Some(trap) = refusal(entry, &call.args) {
+        if let Some(trap) = refusal(lowered, entry, &call.args) {
             emit_text(writer, rt, &mut e, 2, &format!("{}{}\n", prefix, trap))?;
             emit_exit(writer, rt, &mut e, 1);
             return Ok(());
@@ -1969,22 +1981,70 @@ pub fn f(a: i128, xs: [2]u8, mut b: u128) -> i128 {
         let int = |n: i128| Arg::Int(Num::from_i128(n));
         let args = |a: Arg, xs: [i128; 2], b: Arg| vec![a, Arg::Array(xs.map(int).to_vec()), b];
         let below_i128 = Arg::Int(Num::new(true, (1u128 << 127) + 1));
-        assert_eq!(refusal(entry, &args(int(1), [2, 3], int(4))), None);
         assert_eq!(
-            refusal(entry, &args(below_i128.clone(), [2, 3], int(4))).as_deref(),
+            refusal(&lowered, entry, &args(int(1), [2, 3], int(4))),
+            None
+        );
+        assert_eq!(
+            refusal(&lowered, entry, &args(below_i128.clone(), [2, 3], int(4))).as_deref(),
             Some("trap[narrowing] at 2:8: -170141183460469231731687303715884105729 does not fit in `i128`")
         );
         // The first value that does not fit, though a later one does not either.
         assert_eq!(
-            refusal(entry, &args(int(1), [300, -1], int(-1))).as_deref(),
+            refusal(&lowered, entry, &args(int(1), [300, -1], int(-1))).as_deref(),
             Some("trap[narrowing] at 2:8: 300 does not fit in `u8`")
         );
         assert_eq!(
-            refusal(entry, &args(int(1), [2, 3], int(-1))).as_deref(),
+            refusal(&lowered, entry, &args(int(1), [2, 3], int(-1))).as_deref(),
             Some("trap[narrowing] at 2:8: -1 does not fit in `u128`")
         );
         // An argument of another shape is not a narrowing; the caller refuses it otherwise.
-        assert_eq!(refusal(entry, &args(Arg::Bool(true), [2, 3], int(4))), None);
+        assert_eq!(
+            refusal(&lowered, entry, &args(Arg::Bool(true), [2, 3], int(4))),
+            None
+        );
+    }
+
+    /// A call from outside is the run's first call, counted against an empty stack before any
+    /// argument is narrowed (`core-calculus.md`, item 25): a frame of exactly the budget runs, one
+    /// larger traps as running out of stack at the function's name, and so it does on an argument
+    /// its parameter's type cannot hold.
+    #[test]
+    fn test_a_call_from_outside_is_counted_before_its_arguments_are_narrowed() {
+        // `whole`'s frame is the budget: the call's 64, `k`'s 4, the array's 524,252 bytes and the
+        // 524,256 its initializer holds; `over`'s is 8 bytes more, and `huge`'s far more.
+        let source = "module m
+pub fn whole(k: u32) -> u32 {
+  val big: [131063]u32 = [0_u32; 131063]
+  big[k]
+}
+pub fn over(k: u32) -> u32 {
+  val big: [131064]u32 = [0_u32; 131064]
+  big[k]
+}
+pub fn huge(x: u8) -> u8 {
+  val a: [300000]u32 = [0_u32; 300000]
+  _ = a
+  x
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let entry = |name: &str| lowered.entries.iter().find(|e| e.name == name).unwrap();
+        let int = |n: i128| vec![Arg::Int(Num::from_i128(n))];
+        assert_eq!(refusal(&lowered, entry("whole"), &int(3)), None);
+        assert_eq!(
+            refusal(&lowered, entry("over"), &int(3)).as_deref(),
+            Some("trap[stack-overflow] at 6:8: the call stack ran out")
+        );
+        for x in [3, 300] {
+            assert_eq!(
+                refusal(&lowered, entry("huge"), &int(x)).as_deref(),
+                Some("trap[stack-overflow] at 10:8: the call stack ran out"),
+                "huge({})",
+                x
+            );
+        }
     }
 
     /// The symbols of an object that are not the program's own functions: what it imports, and

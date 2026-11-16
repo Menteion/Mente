@@ -5350,8 +5350,18 @@ const DEEP_CHANCE: u64 = 35;
 fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
     let name = format!("f{}", k);
     let mut e = format!("if n > 0 {{\n  {}(n - 1)\n}} else {{\n  0\n}}", name);
+    // The levels the parser counts: the `if`, its block, the call, `n - 1` and `n`; each wrapper
+    // adds its own, and stops before the nesting passes the harnesses' bound
+    // (`super::MAX_NESTING`).
+    let mut levels = 5;
     for _ in 0..1 + rng.below(8) {
-        e = match rng.below(4) {
+        let kind = rng.below(4);
+        let adds = if kind == 0 { 2 } else { 1 };
+        if levels + adds > super::MAX_NESTING {
+            break;
+        }
+        levels += adds;
+        e = match kind {
             0 => format!("if n > 0 {{\n{}\n}} else {{\n  1\n}}", e),
             1 => format!("match n {{\n  0 => 2\n  _ => {}\n}}", e),
             2 => format!("({}) + 0", e),
@@ -5578,14 +5588,27 @@ pub fn checked(seed: u64) -> Checked {
         };
         let diagnostics = match panic::catch_unwind(|| mente_sema::check_program(&program.text)) {
             Ok(Ok(module)) => {
-                return Checked {
-                    program,
-                    module: Some(module),
-                    claims,
-                    regenerated,
-                    problems,
-                    attempts,
+                let deep = too_deep(&program, &module);
+                if deep.is_empty() {
+                    return Checked {
+                        program,
+                        module: Some(module),
+                        claims,
+                        regenerated,
+                        problems,
+                        attempts,
+                    };
                 }
+                if round == MAX_ROUNDS {
+                    problems.push(deeper(seed));
+                    return refused(program, claims, problems);
+                }
+                attempts.resize(program.functions.len(), 0);
+                regenerated += deep.len();
+                for k in deep {
+                    attempts[k] += 1;
+                }
+                continue;
             }
             Ok(Err(diagnostics)) => diagnostics,
             Err(_) => {
@@ -5625,6 +5648,16 @@ pub fn checked(seed: u64) -> Checked {
             return refused(program, claims, problems);
         };
         attempts.resize(program.functions.len(), 0);
+        // A function deeper than the harnesses' bound is generated again before the reference
+        // interpreter runs anything of the program.
+        let deep = too_deep(&program, &kept);
+        if !deep.is_empty() {
+            regenerated += deep.len();
+            for k in deep {
+                attempts[k] += 1;
+            }
+            continue;
+        }
         let mut again = BTreeSet::new();
         for d in &diagnostics {
             let Some(k) = program
@@ -5647,6 +5680,35 @@ pub fn checked(seed: u64) -> Checked {
         }
     }
     unreachable!("the rounds end at MAX_ROUNDS")
+}
+
+/// The functions of `program` that nest deeper than the harnesses' bound (`super::MAX_NESTING`),
+/// by their index among its functions: each is generated again, so that no generated program
+/// nests deeper than the bound on the reference interpreter's host memory allows.
+fn too_deep(program: &Program, module: &CheckedModule) -> Vec<usize> {
+    program
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| {
+            module
+                .index(name)
+                .and_then(|i| module.functions[i].as_ref())
+                .is_some_and(|f| f.syntax.tree.too_deep(super::MAX_NESTING).is_some())
+        })
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// A program still deeper than the harnesses' bound after every round of generating its
+/// functions again: a bug of the generator.
+fn deeper(seed: u64) -> String {
+    format!(
+        "seed {}: a function still nests deeper than {} levels after {} rounds of generating it again",
+        seed,
+        super::MAX_NESTING,
+        MAX_ROUNDS
+    )
 }
 
 /// What an `E0508` claims of a value: that it is at most, or at least, `bound`, which lies

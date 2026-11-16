@@ -22,13 +22,16 @@ mod eval;
 mod host;
 pub mod int;
 mod kinds;
+mod measure;
 
 use std::fmt;
 
 use mente_sema::CheckedModule;
 use mente_syntax::Span;
 
+pub use host::host_bound;
 pub use int::Int;
+pub use measure::{host_figures_hold, nesting};
 
 /// A value of M2's slice: an integer, a `bool`, an array, a struct, a variant of an enum, or no
 /// value.
@@ -384,6 +387,31 @@ pub(crate) fn deepest_step(
     match ran {
         Ok(Ok(r)) => r,
         _ => panic!("the interpreter's thread did not run"),
+    }
+}
+
+/// Runs `name` on `args` within `limits`, and gives beside its outcome the most host stack one
+/// of its calls took, from where it began to the deepest point it reached before a call it made
+/// began (`host`).
+pub(crate) fn host_per_call(
+    module: &CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+    limits: Limits,
+) -> (Result<(Value, Vec<Value>), Stop>, usize) {
+    let ran = mente_threads::alone(None, Some(host::SEGMENT), || {
+        let mut m = eval::Machine::new(module, limits, None);
+        let outcome = m.enter(name, args);
+        (outcome, m.per_call())
+    });
+    match ran {
+        Ok(Ok(r)) => r,
+        _ => (
+            Err(Stop::BadArguments(
+                "the interpreter stopped unexpectedly".to_string(),
+            )),
+            0,
+        ),
     }
 }
 

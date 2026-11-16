@@ -236,6 +236,69 @@ pub enum CmpOp {
     Ge,
 }
 
+/// Where an instruction takes the count of a call, the value of an [`Op::Enter`]: a call takes
+/// its own count first, and an instruction of a callee's checks of a kind that may trap, an
+/// arithmetic operation whether checked or exact, a shift, a check or a count, takes the count of
+/// the call whose checks it belongs to last.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Takes {
+    First,
+    Last,
+    Nothing,
+}
+
+impl Op {
+    /// The function whose frame this instruction counts, where it is a count, an [`Op::Enter`].
+    pub fn counted(&self) -> Option<FuncId> {
+        match self {
+            Op::Enter { callee, .. } => Some(*callee),
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Check { .. }
+            | Op::Slot { .. }
+            | Op::Elem { .. }
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. }
+            | Op::Call(_) => None,
+        }
+    }
+
+    /// Where this instruction takes a count.
+    pub fn takes(&self) -> Takes {
+        match self {
+            Op::Call(_) => Takes::First,
+            Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Shl { .. }
+            | Op::Check { .. }
+            | Op::Enter { .. } => Takes::Last,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Slot { .. }
+            | Op::Elem { .. }
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. } => Takes::Nothing,
+        }
+    }
+}
+
 /// What a value is: its operation, with what is not a value; its operands are in the pool.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Op {
@@ -294,18 +357,25 @@ pub enum Op {
     Copy {
         bytes: u32,
     },
-    /// Calls a function of the module; the value is its result, or unit. Its [`Op::Enter`] has
-    /// counted the callee's frame, and the call gives those bytes back when it returns.
+    /// Calls a function of the module; the value is its result, or unit. Its first operand is
+    /// the count of its callee, the [`Op::Enter`] that counted the callee's frame, and the call
+    /// gives those bytes back when it returns; the operands after it are the arguments.
     Call(FuncId),
     /// Counts the frame of `callee` against the run's stack budget, where the call is counted:
     /// its arguments evaluated, none narrowed yet, the callee's checks not begun
-    /// (`core-calculus.md`, item 25). Traps at `trap` where the stack in use and that frame
-    /// together exceed the budget; otherwise the bytes are in use until the [`Op::Call`] of
-    /// `callee` it opens returns. Every path from an `Enter` reaches its call or a trap, and the
-    /// calls that a callee's checks make between them are each counted and returned within.
+    /// (`core-calculus.md`, item 25). Its operands are the call's arguments as evaluated, before
+    /// any is narrowed, and its value, of type unit, is the count: the call takes it first, and
+    /// every instruction of the callee's checks that may trap takes it last ([`Takes`]). So the
+    /// order is held by the values: the count stands after the arguments it takes, and before
+    /// every narrowing, check and call that takes it. Traps at `trap` where the stack in use and
+    /// that frame together exceed the budget; otherwise the bytes are in use until the call
+    /// returns. Every path from an `Enter` reaches its call or a trap, and the calls that a
+    /// callee's checks make between them are each counted and returned within. The lowering
+    /// always gives it its trap; one without (`trap` none) is exact, which the mutation gate
+    /// makes, and the MIR interpreter reports broken MIR where it would run out.
     Enter {
         callee: FuncId,
-        trap: TrapId,
+        trap: Option<TrapId>,
     },
 }
 
@@ -377,6 +447,35 @@ impl Function {
         self.tys[v.0 as usize]
     }
 
+    /// Whether `v` is a count, the value of an [`Op::Enter`].
+    pub fn is_count(&self, v: NodeId) -> bool {
+        self.ops
+            .get(v.0 as usize)
+            .is_some_and(|op| op.counted().is_some())
+    }
+
+    /// The count instruction `v` takes, where it takes one ([`Takes`]).
+    pub fn count_of(&self, v: NodeId) -> Option<NodeId> {
+        let args = self.args(v);
+        let at = match self.op(v).takes() {
+            Takes::First => args.first(),
+            Takes::Last => args.last(),
+            Takes::Nothing => None,
+        };
+        at.copied().filter(|a| self.is_count(*a))
+    }
+
+    /// The operands of `v` besides the count it takes: a call's arguments, a check's condition
+    /// and the values it reports, a count's arguments.
+    pub fn own_args(&self, v: NodeId) -> &[NodeId] {
+        let args = self.args(v);
+        match (self.count_of(v), self.op(v).takes()) {
+            (Some(_), Takes::First) => &args[1..],
+            (Some(_), Takes::Last) => &args[..args.len() - 1],
+            (None, _) | (Some(_), Takes::Nothing) => args,
+        }
+    }
+
     pub fn op(&self, v: NodeId) -> &Op {
         &self.ops[v.0 as usize]
     }
@@ -433,7 +532,7 @@ impl Function {
             Op::Store => "store".into(),
             Op::Copy { bytes } => format!("copy {}", bytes),
             Op::Call(c) => format!("call f{}", c.0),
-            Op::Enter { callee, trap } => format!("enter f{} t{}", callee.0, trap.0),
+            Op::Enter { callee, trap } => trapped(&format!("enter f{}", callee.0), trap),
         }
     }
 }
@@ -444,6 +543,20 @@ pub struct Module {
     /// The run's stack budget in bytes, which the lowering takes from the one the checker
     /// defines (`core-calculus.md`, item 25): every [`Op::Enter`] counts against it.
     pub budget: u128,
+}
+
+impl Module {
+    /// The frame of `callee`: the bytes a call of it counts against the budget.
+    pub fn frame_of(&self, callee: FuncId) -> u128 {
+        self.functions.get(callee.0 as usize).map_or(0, |c| c.frame)
+    }
+
+    /// Whether a call of `callee`, made with `stack` bytes of frames in use, runs out of the
+    /// budget: the stack in use and the callee's frame together exceed it, and a call that fills
+    /// it exactly runs (`core-calculus.md`, item 25).
+    pub fn runs_out(&self, stack: u128, callee: FuncId) -> bool {
+        stack + self.frame_of(callee) > self.budget
+    }
 }
 
 /// Builds a function one block at a time.
@@ -623,17 +736,132 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
             }
         }
     }
+    verify_order(f)?;
     verify_frames(f)
 }
 
+/// The blocks each block's terminator may go to.
+fn successors(term: &Term) -> Vec<BlockId> {
+    match term {
+        Term::Jump(t, _) => vec![*t],
+        Term::Branch {
+            then, otherwise, ..
+        } => vec![then.0, otherwise.0],
+        Term::Return(_) | Term::Trap(_) => Vec::new(),
+    }
+}
+
+/// Every value is defined before it is used, on every path: an operand of an instruction is a
+/// parameter of its block, an instruction before it in its block, or a value of a block that
+/// dominates its block, and an operand of a terminator likewise. So nothing reads a value before
+/// an instruction gives it, and the order of a call's count is held by its values: a count
+/// stands after the arguments it takes, and before the narrowings, checks and call that take it
+/// ([`Op::Enter`]). A block no path reaches is not checked.
+fn verify_order(f: &Function) -> Result<(), String> {
+    let n = f.blocks.len();
+    // Where each value is defined: its block, and its place there, 0 for a parameter.
+    let mut defined: Vec<Option<(usize, usize)>> = vec![None; f.ops.len()];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for &p in &b.params {
+            defined[p.0 as usize] = Some((bi, 0));
+        }
+        for (i, &v) in b.insts.iter().enumerate() {
+            defined[v.0 as usize] = Some((bi, i + 1));
+        }
+    }
+    let next: Vec<Vec<BlockId>> = f.blocks.iter().map(|b| successors(&b.term)).collect();
+    let mut reached = vec![false; n];
+    let mut work = vec![0usize];
+    while let Some(b) = work.pop() {
+        if b < n && !reached[b] {
+            reached[b] = true;
+            work.extend(next[b].iter().map(|t| t.0 as usize));
+        }
+    }
+    let mut before: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (b, ts) in next.iter().enumerate() {
+        for t in ts {
+            if reached[b] && (t.0 as usize) < n {
+                before[t.0 as usize].push(b);
+            }
+        }
+    }
+    // The dominators of each block reached: itself, and those of every block before it.
+    let mut dom: Vec<Vec<bool>> = (0..n).map(|b| vec![b != 0 && reached[b]; n]).collect();
+    if n > 0 {
+        dom[0][0] = true;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 1..n {
+            if !reached[b] {
+                continue;
+            }
+            let mut d = vec![true; n];
+            for &p in &before[b] {
+                for (k, x) in d.iter_mut().enumerate() {
+                    *x = *x && dom[p][k];
+                }
+            }
+            d[b] = true;
+            if d != dom[b] {
+                dom[b] = d;
+                changed = true;
+            }
+        }
+    }
+    let available = |a: NodeId, b: usize, place: usize| match defined.get(a.0 as usize) {
+        Some(Some((ab, ap))) => (*ab == b && *ap < place) || (*ab != b && dom[b][*ab]),
+        _ => false,
+    };
+    for (b, block) in f.blocks.iter().enumerate() {
+        if !reached[b] {
+            continue;
+        }
+        for (i, &v) in block.insts.iter().enumerate() {
+            if let Some(a) = f.args(v).iter().find(|a| !available(**a, b, i + 1)) {
+                return Err(format!(
+                    "v{} in block {}: its operand v{} is not defined before it on every path",
+                    v.0, b, a.0
+                ));
+            }
+        }
+        let end = block.insts.len() + 1;
+        let used: Vec<NodeId> = match &block.term {
+            Term::Jump(_, args) => args.clone(),
+            Term::Branch {
+                cond,
+                then,
+                otherwise,
+            } => std::iter::once(*cond)
+                .chain(then.1.iter().copied())
+                .chain(otherwise.1.iter().copied())
+                .collect(),
+            Term::Return(v) => v.iter().copied().collect(),
+            Term::Trap(_) => Vec::new(),
+        };
+        if let Some(a) = used.iter().find(|a| !available(**a, b, end)) {
+            return Err(format!(
+                "block {}: its terminator's operand v{} is not defined before it on every path",
+                b, a.0
+            ));
+        }
+        if let Some(a) = used.iter().find(|a| f.is_count(**a)) {
+            return Err(format!("block {}: a count v{} used as a value", b, a.0));
+        }
+    }
+    Ok(())
+}
+
 /// Every call's frame is counted by an [`Op::Enter`] of its callee and given back by that call
-/// alone: along every path, a call closes the latest count not yet closed, of the same callee,
-/// so the counts of calls a callee's checks make nest within it; every path into a block
+/// alone: along every path, a call closes the latest count not yet closed, which is the count it
+/// takes, so the counts of calls a callee's checks make nest within it; every path into a block
 /// arrives with the same counts open; and a function returns with none open. So no call goes
 /// uncounted, and no count can fall through to a return, or around a loop, without its call,
 /// which would leave its bytes in use (`core-calculus.md`, item 25).
 fn verify_frames(f: &Function) -> Result<(), String> {
-    let mut open_at: Vec<Option<Vec<FuncId>>> = vec![None; f.blocks.len()];
+    let mut open_at: Vec<Option<Vec<NodeId>>> = vec![None; f.blocks.len()];
     open_at[0] = Some(Vec::new());
     let mut work = vec![BlockId(0)];
     while let Some(b) = work.pop() {
@@ -641,11 +869,12 @@ fn verify_frames(f: &Function) -> Result<(), String> {
         let mut open = open_at[b.0 as usize].clone().unwrap_or_default();
         for &v in &block.insts {
             match f.op(v) {
-                Op::Enter { callee, .. } => open.push(*callee),
+                Op::Enter { .. } => open.push(v),
                 Op::Call(c) => {
-                    if open.pop() != Some(*c) {
+                    let latest = open.pop();
+                    if latest.is_none() || latest != f.count_of(v) {
                         return Err(format!(
-                            "v{} in block {}: a call of f{} that no count of it opens",
+                            "v{} in block {}: a call of f{} that does not close the latest count open",
                             v.0, b.0, c.0
                         ));
                     }
@@ -677,7 +906,7 @@ fn verify_frames(f: &Function) -> Result<(), String> {
             Term::Return(_) => {
                 if let Some(c) = open.last() {
                     return Err(format!(
-                        "block {} returns with the count of a call of f{} open",
+                        "block {} returns with the count v{} open",
                         b.0, c.0
                     ));
                 }
@@ -710,6 +939,8 @@ enum Want {
     Is(Ty),
     Int,
     IntOrBool,
+    /// A value of any type but unit: an argument as evaluated.
+    Value,
 }
 
 impl Want {
@@ -718,6 +949,7 @@ impl Want {
             Want::Is(x) => x == t,
             Want::Int => matches!(t, Ty::Int(_)),
             Want::IntOrBool => matches!(t, Ty::Int(_) | Ty::Bool),
+            Want::Value => t != Ty::Unit,
         }
     }
 }
@@ -726,7 +958,8 @@ impl Want {
 /// operands' types, and the trap site it may raise, with room for the values it reports.
 fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
     let ty = f.ty(v);
-    let args: Vec<Ty> = f.args(v).iter().map(|a| f.ty(*a)).collect();
+    check_count(f, v)?;
+    let args: Vec<Ty> = f.own_args(v).iter().map(|a| f.ty(*a)).collect();
     let same = Want::Is(ty);
     let reported = |t: &Option<TrapId>| t.map(|t| (t, 1));
     let (result, operands, trap): (Want, Vec<Want>, Option<(TrapId, usize)>) = match f.op(v) {
@@ -777,6 +1010,15 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             None,
         ),
         Op::Call(c) => {
+            match f.count_of(v).and_then(|count| f.op(count).counted()) {
+                Some(counted) if counted != *c => {
+                    return Err(format!(
+                        "a call of f{} that takes the count of f{}",
+                        c.0, counted.0
+                    ))
+                }
+                Some(_) | None => {}
+            }
             let callee = m
                 .functions
                 .get(c.0 as usize)
@@ -785,10 +1027,25 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             (Want::Is(callee.result.unwrap_or(Ty::Unit)), params, None)
         }
         Op::Enter { callee, trap } => {
-            m.functions
+            let counted = m
+                .functions
                 .get(callee.0 as usize)
                 .ok_or("a count of a function that does not exist")?;
-            (Want::Is(Ty::Unit), vec![], Some((*trap, 0)))
+            // The arguments as evaluated, of any type: one for each parameter, beside the slot of
+            // a result kept in memory, which is no argument.
+            let given = args.len();
+            let wanted = counted.params.len();
+            if given + 1 < wanted || given > wanted {
+                return Err(format!(
+                    "a count of f{} on {} arguments, for {} parameters",
+                    callee.0, given, wanted
+                ));
+            }
+            (
+                Want::Is(Ty::Unit),
+                vec![Want::Value; given],
+                trap.map(|t| (t, 0)),
+            )
         }
     };
     let site = trap.is_none_or(|(t, values)| {
@@ -807,6 +1064,20 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             f.op(v)
         )),
     }
+}
+
+/// Where instruction `v` takes a count, and whether it must: a call takes the count of its callee
+/// first, always, and an instruction that may trap takes one last where it belongs to a callee's
+/// checks. A count is no other operand of any instruction or terminator.
+fn check_count(f: &Function, v: NodeId) -> Result<(), String> {
+    let count = f.count_of(v);
+    if f.op(v).takes() == Takes::First && count.is_none() {
+        return Err("a call whose first operand is not a count".into());
+    }
+    if f.own_args(v).iter().any(|a| f.is_count(*a)) {
+        return Err("a count used as a value".into());
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1084,7 +1355,11 @@ impl<'m> Machine<'m> {
                     return Err(Stop::OutOfSteps);
                 }
                 if let Op::Call(c) = f.op(v) {
-                    let args = f.args(v).iter().map(|a| top.vals[a.0 as usize]).collect();
+                    let args = f
+                        .own_args(v)
+                        .iter()
+                        .map(|a| top.vals[a.0 as usize])
+                        .collect();
                     let callee = self.frame(*c, args, Some(v))?;
                     stack.push(callee);
                     continue;
@@ -1134,7 +1409,7 @@ impl<'m> Machine<'m> {
     }
 
     fn inst(&mut self, f: &Function, v: NodeId, vals: &[Val]) -> Result<Val, Stop> {
-        let args: Vec<Val> = f.args(v).iter().map(|a| vals[a.0 as usize]).collect();
+        let args: Vec<Val> = f.own_args(v).iter().map(|a| vals[a.0 as usize]).collect();
         let ty = f.ty(v);
         let int = |i: usize| match args.get(i) {
             Some(Val::Int(n)) => Ok(*n),
@@ -1278,15 +1553,13 @@ impl<'m> Machine<'m> {
             }
             Op::Call(_) => return Err(broken("a call outside the frame loop")),
             Op::Enter { callee, trap: at } => {
-                let frame = self
-                    .m
-                    .functions
-                    .get(callee.0 as usize)
-                    .map_or(0, |c| c.frame);
-                if self.stack + frame > self.m.budget {
-                    return Err(trap(f, *at, &[]));
+                if self.m.runs_out(self.stack, *callee) {
+                    return Err(match at {
+                        Some(at) => trap(f, *at, &[]),
+                        None => broken("an exact count ran out of the budget"),
+                    });
                 }
-                self.stack += frame;
+                self.stack += self.m.frame_of(*callee);
                 Val::Unit
             }
         })
@@ -1433,17 +1706,21 @@ mod tests {
         m
     }
 
-    /// Counts the frame of function `callee` where `b` stands, as the lowering does before a call.
-    fn enter(b: &mut Builder, callee: u32) {
+    /// A call of function `callee` on `args` where `b` stands, counted first as the lowering counts
+    /// it: the count takes the arguments, and the call takes the count.
+    fn call(b: &mut Builder, callee: u32, ty: Ty, args: &[NodeId]) -> NodeId {
         let trap = b.trap_site("stack-overflow", &["the call stack ran out"]);
-        b.inst(
+        let count = b.inst(
             Op::Enter {
                 callee: FuncId(callee),
-                trap,
+                trap: Some(trap),
             },
             Ty::Unit,
-            &[],
+            args,
         );
+        let mut with = vec![count];
+        with.extend_from_slice(args);
+        b.inst(Op::Call(FuncId(callee)), ty, &with)
     }
 
     fn run0(m: &Module, f: u32, args: &[Val]) -> Result<Val, Stop> {
@@ -1519,15 +1796,15 @@ mod tests {
     fn test_a_module_prints_each_function_numbered_as_calls_name_it() {
         let mut b = Builder::new("twice", &[Ty::Int(I64)], Some(Ty::Int(I64)));
         let n = b.params(BlockId(0))[0];
-        enter(&mut b, 0);
-        let s = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[n]);
+        let s = call(&mut b, 0, Ty::Int(I64), &[n]);
         b.end(Term::Return(Some(s)));
         let m = module(vec![sum(), b.finish()]);
         let printed = m.to_string();
         let first = m.functions[0].to_string();
         let second = m.functions[1].to_string();
         assert_eq!(printed, format!("f0: {}\nf1: {}", first, second));
-        assert!(second.contains("= call f0 v0 @0:0\n"), "{}", second);
+        assert!(second.contains("= enter f0 t0 v0 @0:0\n"), "{}", second);
+        assert!(second.contains("= call f0 v1, v0 @0:0\n"), "{}", second);
         // The same module prints the same text every time.
         assert_eq!(printed, m.to_string());
         assert_eq!(Module::default().to_string(), "");
@@ -1830,8 +2107,7 @@ mod tests {
             let v = m.int(U8, Num::from_i128(10 * i + 1));
             m.inst(Op::Store, Ty::Unit, &[at, v]);
         }
-        enter(&mut m, 0);
-        m.inst(Op::Call(FuncId(0)), Ty::Unit, &[slot]);
+        call(&mut m, 0, Ty::Unit, &[slot]);
         let copy = m.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
         m.inst(Op::Copy { bytes: 3 }, Ty::Unit, &[copy, slot]);
         let two = m.int(U64, Num::from_i128(2));
@@ -1867,6 +2143,144 @@ mod tests {
         assert_eq!(w % 16, 0);
     }
 
+    /// Every value is defined before it is used on every path (`verify_order`): an operand defined
+    /// later in its block, or in a block that does not dominate its use, is refused, and so is a
+    /// jump that passes one; the same values in order verify.
+    #[test]
+    fn test_the_verifier_refuses_a_value_used_before_it_is_defined() {
+        let module = |f: Function| {
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+            })
+        };
+        // `x + 1`, the constant after the addition that takes it.
+        let ordered = |late: bool| {
+            let mut b = Builder::new("late", &[Ty::Int(I64)], Some(Ty::Int(I64)));
+            let x = b.params(BlockId(0))[0];
+            let one = b.int(I64, Num::from_i128(1));
+            let sum = b.inst(add(None), Ty::Int(I64), &[x, one]);
+            b.end(Term::Return(Some(sum)));
+            let mut f = b.finish();
+            if late {
+                f.blocks[0].insts.swap(0, 1);
+            }
+            f
+        };
+        assert!(module(ordered(false)).is_ok());
+        let why = module(ordered(true)).unwrap_err();
+        assert!(
+            why.contains("is not defined before it on every path"),
+            "{}",
+            why
+        );
+        // A value of one branch, used after the join that the other branch reaches too.
+        let joined = |pass: bool| {
+            let mut b = Builder::new("branch", &[Ty::Bool], Some(Ty::Int(I64)));
+            let c = b.params(BlockId(0))[0];
+            let then = b.block(&[]);
+            let otherwise = b.block(&[]);
+            let join = b.block(&[Ty::Int(I64)]);
+            b.end(Term::Branch {
+                cond: c,
+                then: (then, vec![]),
+                otherwise: (otherwise, vec![]),
+            });
+            b.switch(then);
+            let seven = b.int(I64, Num::from_i128(7));
+            b.end(Term::Jump(join, vec![seven]));
+            b.switch(otherwise);
+            let eight = b.int(I64, Num::from_i128(8));
+            b.end(Term::Jump(join, vec![if pass { eight } else { seven }]));
+            b.switch(join);
+            let v = b.params(join)[0];
+            let r = if pass { v } else { seven };
+            b.end(Term::Return(Some(r)));
+            b.finish()
+        };
+        assert!(module(joined(true)).is_ok());
+        let why = module(joined(false)).unwrap_err();
+        assert!(
+            why.contains("is not defined before it on every path"),
+            "{}",
+            why
+        );
+    }
+
+    /// A block is entered with the same counts open on every path into it (`verify_frames`): a
+    /// count on one path and its call after the join is a count not defined on every path, and a
+    /// count before a branch with its call on one side only enters the join with it open on one
+    /// path and closed on the other. A count before the branch and its call after the join verify.
+    #[test]
+    fn test_counts_open_on_some_paths_into_a_block_are_refused() {
+        // `fn leaf()`, which a caller counts and calls.
+        let mut l = Builder::new("leaf", &[], None);
+        l.end(Term::Return(None));
+        let mut leaf = l.finish();
+        leaf.frame = 64;
+        // A count on one path into the join, and its call after the join: the call takes a count
+        // the other path never defined.
+        let shaped = |count_first: bool, call_in_then: bool| {
+            let mut b = Builder::new("joined", &[Ty::Bool], None);
+            let c = b.params(BlockId(0))[0];
+            let trap = Some(b.trap_site("stack-overflow", &["the call stack ran out"]));
+            let enter = Op::Enter {
+                callee: FuncId(0),
+                trap,
+            };
+            let early = count_first.then(|| b.inst(enter.clone(), Ty::Unit, &[]));
+            let then = b.block(&[]);
+            let otherwise = b.block(&[]);
+            let join = b.block(&[]);
+            b.end(Term::Branch {
+                cond: c,
+                then: (then, vec![]),
+                otherwise: (otherwise, vec![]),
+            });
+            b.switch(then);
+            if let (Some(count), true) = (early, call_in_then) {
+                b.inst(Op::Call(FuncId(0)), Ty::Unit, &[count]);
+            }
+            b.end(Term::Jump(join, vec![]));
+            b.switch(otherwise);
+            let late = early.or_else(|| Some(b.inst(enter, Ty::Unit, &[])));
+            b.end(Term::Jump(join, vec![]));
+            b.switch(join);
+            match (late, call_in_then) {
+                (Some(count), false) => {
+                    b.inst(Op::Call(FuncId(0)), Ty::Unit, &[count]);
+                    b.end(Term::Return(None));
+                }
+                // A join that only traps returns nothing, so that the join itself is what fails.
+                (_, true) | (None, false) => {
+                    let ends = b.trap_site("unreachable", &["no value"]);
+                    b.end(Term::Trap(ends));
+                }
+            }
+            Module {
+                functions: vec![leaf.clone(), b.finish()],
+                budget: BUDGET,
+            }
+        };
+        // The count only in `otherwise`, the call after the join.
+        let why = verify(&shaped(false, false)).unwrap_err();
+        assert!(
+            why.contains("is not defined before it on every path"),
+            "{}",
+            why
+        );
+        // The count before the branch, the call only in `then`: the join, which traps, is entered
+        // with the count open on one path and closed on the other.
+        let why = verify(&shaped(true, true)).unwrap_err();
+        assert!(
+            why.contains("is entered with different counts of calls open"),
+            "{}",
+            why
+        );
+        // The count before the branch and the call after the join verify.
+        verify(&shaped(true, false)).unwrap();
+    }
+
     /// A recursion without end stops where its counts reach the budget, at the `Enter` whose frame
     /// would pass it, as a trap at that call: frames of 64 bytes fill a budget of 2^20 with 16,384
     /// calls, and the 16,385th traps. Calls one after another give their bytes back: a function
@@ -1878,8 +2292,7 @@ mod tests {
         let mut b = Builder::new("down", &[Ty::Int(I64)], Some(Ty::Int(I64)));
         let n = b.params(BlockId(0))[0];
         b.at(3, 5);
-        enter(&mut b, 0);
-        let r = b.inst(Op::Call(FuncId(0)), Ty::Int(I64), &[n]);
+        let r = call(&mut b, 0, Ty::Int(I64), &[n]);
         b.end(Term::Return(Some(r)));
         let mut down = b.finish();
         down.frame = 64;
@@ -1916,12 +2329,11 @@ mod tests {
             Ty::Int(I64),
             &[n, one],
         );
-        enter(&mut b, 0);
-        b.inst(Op::Call(FuncId(0)), Ty::Unit, &[less]);
+        call(&mut b, 0, Ty::Unit, &[less]);
         b.end(Term::Return(None));
         let mut count = b.finish();
         count.frame = 64;
-        let m = module(vec![count]);
+        let m = module(vec![count.clone()]);
         let fits = (BUDGET / 64) as i128;
         assert_eq!(run0(&m, 0, &[int(fits)]), Ok(Val::Unit));
         assert!(
@@ -1934,12 +2346,32 @@ mod tests {
         big.frame = BUDGET / 2 + 1;
         let mut b = Builder::new("twice", &[], None);
         for _ in 0..2 {
-            enter(&mut b, 0);
-            b.inst(Op::Call(FuncId(0)), Ty::Unit, &[]);
+            call(&mut b, 0, Ty::Unit, &[]);
         }
         b.end(Term::Return(None));
-        let m = module(vec![big, b.finish()]);
+        let m = module(vec![big.clone(), b.finish()]);
         assert_eq!(run0(&m, 1, &[]), Ok(Val::Unit));
+        // A call that has returned gives its frame back, and no more: the entry calls `after(k)`,
+        // of 1,024 bytes, which calls a function of 100,000 that returns, then `count(k)`, whose
+        // k + 1 frames of 64 fit the 1,047,552 bytes left up to k = 16,367.
+        let mut small = big;
+        small.frame = 100_000;
+        let mut a = Builder::new("after", &[Ty::Int(I64)], None);
+        let k = a.params(BlockId(0))[0];
+        call(&mut a, 1, Ty::Unit, &[]);
+        call(&mut a, 0, Ty::Unit, &[k]);
+        a.end(Term::Return(None));
+        let mut after = a.finish();
+        after.frame = 1024;
+        let mut e = Builder::new("entry", &[Ty::Int(I64)], None);
+        let k = e.params(BlockId(0))[0];
+        call(&mut e, 2, Ty::Unit, &[k]);
+        e.end(Term::Return(None));
+        let m = module(vec![count, small, after, e.finish()]);
+        assert_eq!(run0(&m, 3, &[int(16_367)]), Ok(Val::Unit));
+        assert!(
+            matches!(run0(&m, 3, &[int(16_368)]), Err(Stop::Trap(t)) if t.starts_with("trap[stack-overflow]"))
+        );
         let m = module(vec![sum()]);
         let limits = Limits { max_steps: 100 };
         assert_eq!(
@@ -1980,7 +2412,7 @@ mod tests {
         assert!(wrong(b.finish()).contains("Arith"));
         // A call of a function that does not exist, and a trap site that does not.
         let mut b = Builder::new("call", &[], None);
-        b.inst(Op::Call(FuncId(7)), Ty::Unit, &[]);
+        call(&mut b, 7, Ty::Unit, &[]);
         assert!(wrong(b.finish()).contains("does not exist"));
         let mut b = Builder::new("trap", &[], None);
         b.end(Term::Trap(TrapId(0)));
@@ -2140,8 +2572,7 @@ mod tests {
         let caller = |ty: Ty, param: Ty| {
             let mut b = Builder::new("caller", &[param], None);
             let p = b.params(BlockId(0))[0];
-            enter(&mut b, 0);
-            b.inst(Op::Call(FuncId(0)), ty, &[p]);
+            call(&mut b, 0, ty, &[p]);
             Module {
                 functions: vec![callee.clone(), b.finish()],
                 budget: BUDGET,

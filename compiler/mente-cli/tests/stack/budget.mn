@@ -10,15 +10,19 @@
 // is six bytes over the budget: the call traps as running out of stack, though its argument
 // would not fit `take`'s parameter either, since the call is counted before any argument is
 // narrowed. `guarded` and `ok` have frames of 600,072, and a call in `guarded`'s `requires` is
-// counted on top of `guarded`'s frame, so `wrapped` traps at the call of `ok`.
+// counted on top of `guarded`'s frame, so `wrapped` traps at the call of `ok`. `huge` holds an
+// array of 1,200,000 bytes, more than the budget: called from outside on an argument its `u8`
+// parameter cannot hold, the run's first call traps as running out of stack, at the function's
+// name, since it is counted against an empty stack before its argument is narrowed.
 // call: whole(3) -> 0
-// call: whole_then(3) -> trap[stack-overflow] at 33:7: the call stack ran out
+// call: whole_then(3) -> trap[stack-overflow] at 37:7: the call stack ran out
 // call: inner(3) -> 0
-// call: outer(3) -> trap[stack-overflow] at 44:10: the call stack ran out
+// call: outer(3) -> trap[stack-overflow] at 48:10: the call stack ran out
 // call: nested(3) -> 0
 // call: twice(3) -> 0
-// call: order(300) -> trap[stack-overflow] at 56:31: the call stack ran out
-// call: wrapped(3) -> trap[stack-overflow] at 65:12: the call stack ran out
+// call: order(300) -> trap[stack-overflow] at 60:31: the call stack ran out
+// call: wrapped(3) -> trap[stack-overflow] at 69:12: the call stack ran out
+// call: huge(300) -> trap[stack-overflow] at 77:8: the call stack ran out
 module stack
 
 fn zero() -> u8 = 0_u8
@@ -69,3 +73,9 @@ pub fn guarded(x: u32) -> u32
 }
 
 pub fn wrapped(x: u32) -> u32 = guarded(x)
+
+pub fn huge(x: u8) -> u8 {
+  val a: [300000]u32 = [0_u32; 300000]
+  _ = a
+  x
+}

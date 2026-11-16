@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mente_mir::cfg::{
-    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Term, Ty,
+    self, ArithOp, BitOp, BlockId, Builder, CmpOp, FuncId, IntTy, Loc, Num, Op, Takes, Term, Ty,
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
@@ -39,6 +39,10 @@ use mente_syntax::tree::{
 };
 use mente_syntax::Span;
 
+/// The kind and the text of the trap of a call that runs out of the stack budget
+/// (`core-calculus.md`, item 25).
+pub const RAN_OUT: [&str; 2] = ["stack-overflow", "the call stack ran out"];
+
 /// A lowered module: its MIR, and for each function with a body its entry.
 #[derive(Clone, Debug)]
 pub struct Lowered {
@@ -52,6 +56,8 @@ pub struct Lowered {
 pub struct Entry {
     pub name: String,
     pub func: FuncId,
+    /// The function the entry calls, whose call is the run's first.
+    pub callee: FuncId,
     pub params: Vec<(bool, Shape)>,
     pub result: Shape,
     /// The function's name in the source, where a call from outside the program reports an
@@ -515,6 +521,7 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
             entries.push(Entry {
                 name: f.syntax.name.clone(),
                 func,
+                callee: sig.func,
                 params: sig.params.clone(),
                 result: sig.result.clone(),
                 at: Loc {
@@ -666,6 +673,9 @@ struct Lower<'a> {
     /// Whether the lowering is making a call's checks in its callee's scope, whose checks are
     /// never left out.
     in_callee: bool,
+    /// The count of the call whose checks the lowering is making, which every instruction it
+    /// makes there of a kind that may trap takes (`Op::Enter`).
+    count: Option<NodeId>,
 }
 
 impl<'a> Lower<'a> {
@@ -705,6 +715,7 @@ impl<'a> Lower<'a> {
             measure: None,
             obligations,
             in_callee: false,
+            count: None,
         })
     }
 
@@ -772,7 +783,18 @@ impl<'a> Lower<'a> {
     }
 
     fn inst(&mut self, op: Op, ty: Ty, args: &[NodeId]) -> NodeId {
-        self.b.inst(op, ty, args)
+        // Within a call's checks, an instruction of a kind that may trap takes the call's count
+        // last, so that it cannot stand before the count (`Op::Enter`).
+        match (op.takes(), self.count) {
+            (Takes::Last, Some(count)) => {
+                let mut with = args.to_vec();
+                with.push(count);
+                self.b.inst(op, ty, &with)
+            }
+            (Takes::Last, None) | (Takes::First | Takes::Nothing, Some(_) | None) => {
+                self.b.inst(op, ty, args)
+            }
+        }
     }
 
     fn bool(&mut self, b: bool) -> NodeId {
@@ -3139,56 +3161,36 @@ impl<'a> Lower<'a> {
         recursive: bool,
     ) -> Result<V, String> {
         let sig = self.sig_of(index)?;
-        // The call is counted here, and its frame is in use while its checks run and until it
-        // returns; a call those checks make is counted and returned within (`Op::Enter`).
-        self.at(at);
-        let deep = self
-            .b
-            .trap_site("stack-overflow", &["the call stack ran out"]);
-        self.inst(
-            Op::Enter {
-                callee: sig.func,
-                trap: deep,
-            },
-            Ty::Unit,
-            &[],
-        );
-        let mut callee = Scope::new(self.m, index)?;
-        // Each argument narrowed into its parameter's type, at its own span.
-        let mut values = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            let shape = &sig.params[i].1;
-            values.push(match arg {
-                Arg::Value(v, span, from) => {
-                    let v = self.narrow(*v, from, shape, *span, Some(*span))?;
-                    if v.never() {
-                        return Ok(V::Never);
-                    }
-                    callee.locals[i] = Some(match v {
-                        V::Mem(a) => Local::Place(a, shape.clone()),
-                        v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => Local::Value(v),
-                    });
-                    match v {
-                        V::Int(n, _) | V::Bool(n) | V::Mem(n) => n,
-                        V::Unit | V::Never => return Err("an argument without a value".into()),
-                    }
-                }
-                Arg::Place(a, shape, _, _) => {
-                    callee.locals[i] = Some(Local::Place(*a, shape.clone()));
-                    *a
-                }
+        // The call is counted here, on its arguments as evaluated, and its frame is in use while
+        // its checks run and until it returns; a call those checks make is counted and returned
+        // within (`Op::Enter`). An argument that gives no value leaves before the call.
+        let mut given = Vec::new();
+        for arg in &args {
+            given.push(match arg {
+                Arg::Value(V::Int(n, _) | V::Bool(n) | V::Mem(n), _, _)
+                | Arg::Place(n, _, _, _) => *n,
+                Arg::Value(V::Never, _, _) => return Ok(V::Never),
+                Arg::Value(V::Unit, _, _) => return Err("an argument without a value".into()),
             });
         }
-        // Then each parameter's refinement, in the callee's scope, since a bound may name
-        // another parameter.
-        let caller = self.measure.clone();
-        let saved = std::mem::replace(&mut self.s, callee);
-        let was = std::mem::replace(&mut self.in_callee, true);
-        let outcome = self.callee_checks(&args, at, recursive, caller);
-        self.in_callee = was;
-        self.s = saved;
-        outcome?;
-        let mut mir_args = Vec::new();
+        self.at(at);
+        let deep = self.b.trap_site(RAN_OUT[0], &[RAN_OUT[1]]);
+        let count = self.inst(
+            Op::Enter {
+                callee: sig.func,
+                trap: Some(deep),
+            },
+            Ty::Unit,
+            &given,
+        );
+        let outer = self.count.replace(count);
+        let checked = self.call_checks(index, &args, at, recursive);
+        self.count = outer;
+        let values = match checked? {
+            Some(values) => values,
+            None => return Ok(V::Never),
+        };
+        let mut mir_args = vec![count];
         mir_args.extend(sret);
         mir_args.extend(values);
         let (_, result_ty) = mir_params(sig);
@@ -3218,6 +3220,55 @@ impl<'a> Lower<'a> {
                 return Err("a result in memory without its slot".into())
             }
         })
+    }
+
+    /// The checks of a call of function `index` at `at` that its count stands before: each
+    /// argument narrowed into its parameter's type, at its own span, then the callee's checks in
+    /// its scope; the arguments the call takes, or none where an argument gives no value.
+    fn call_checks(
+        &mut self,
+        index: usize,
+        args: &[Arg<'a>],
+        at: Span,
+        recursive: bool,
+    ) -> Result<Option<Vec<NodeId>>, String> {
+        let sig = self.sig_of(index)?;
+        let mut callee = Scope::new(self.m, index)?;
+        // Each argument narrowed into its parameter's type, at its own span.
+        let mut values = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let shape = &sig.params[i].1;
+            values.push(match arg {
+                Arg::Value(v, span, from) => {
+                    let v = self.narrow(*v, from, shape, *span, Some(*span))?;
+                    if v.never() {
+                        return Ok(None);
+                    }
+                    callee.locals[i] = Some(match v {
+                        V::Mem(a) => Local::Place(a, shape.clone()),
+                        v @ (V::Int(..) | V::Bool(_) | V::Unit | V::Never) => Local::Value(v),
+                    });
+                    match v {
+                        V::Int(n, _) | V::Bool(n) | V::Mem(n) => n,
+                        V::Unit | V::Never => return Err("an argument without a value".into()),
+                    }
+                }
+                Arg::Place(a, shape, _, _) => {
+                    callee.locals[i] = Some(Local::Place(*a, shape.clone()));
+                    *a
+                }
+            });
+        }
+        // Then each parameter's refinement, in the callee's scope, since a bound may name
+        // another parameter.
+        let caller = self.measure.clone();
+        let saved = std::mem::replace(&mut self.s, callee);
+        let was = std::mem::replace(&mut self.in_callee, true);
+        let outcome = self.callee_checks(args, at, recursive, caller);
+        self.in_callee = was;
+        self.s = saved;
+        outcome?;
+        Ok(Some(values))
     }
 
     /// The checks a call makes in the callee's scope: the parameters' refinements, `requires`
