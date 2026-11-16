@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { budgetedCall, callCost, KNOWN_MODELS, MAX_TOKENS, NETWORK_RETRIES, NetworkError, parseModels, requestBody, reserve, send, settle, worstCost, type Budget, type Usage } from "./api.ts";
-import { Broker, httpPost, lineReader, readLimits, scrub, serve, shape, thinkingBlocks, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
+import { Broker, httpPost, lineReader, readLimits, scrub, serve, shape, thinkingBlocks, unpricedField, usageCost, utf8Length, worstCost as brokerWorst, type Answer, type Price } from "./broker.ts";
 import { BrokerBroken, BrokerRefused, connectBroker } from "./brokered.ts";
 import {
   BASH,
@@ -1014,12 +1014,25 @@ const LIMITS_TEXT = readFileSync(join(REPOSITORY, "benchmark", "harness", "broke
 const KEY = "sk-ant-test-0123456789abcdef";
 const fakeBroker = (budget: number, answer: (body: string) => Promise<Answer> | Answer, limits = readLimits(LIMITS_TEXT)) => {
   const posts: { url: string; headers: Record<string, string>; body: string }[] = [];
-  const broker = new Broker(KEY, limits, budget, async (url, headers, body) => {
-    posts.push({ url, headers, body });
-    return answer(body);
-  });
-  return { broker, posts };
+  const notes: string[] = [];
+  const broker = new Broker(
+    KEY,
+    limits,
+    budget,
+    async (url, headers, body) => {
+      posts.push({ url, headers, body });
+      return answer(body);
+    },
+    (line) => notes.push(line),
+  );
+  return { broker, posts, notes };
 };
+
+/**
+ * Every usage the API has answered with that the broker has met, from runs with the real key
+ * (benchmark/harness/fixtures/usage.json), one to a line: the next real answer is one line more.
+ */
+const REAL_USAGE = JSON.parse(readFileSync(join(REPOSITORY, "benchmark", "harness", "fixtures", "usage.json"), "utf8")) as { from: string; model: string; usage: Record<string, unknown> }[];
 const request = (id: number, body: object) => JSON.stringify({ id, body });
 const haiku = (max = 100) => ({ model: "claude-haiku-5-5", max_tokens: max, messages: [{ role: "user", content: "hi" }] });
 
@@ -1280,6 +1293,52 @@ test("the broker sends only the shape the harness makes, written anew, and refus
   ] as [string, unknown][]) {
     assert.notEqual(refused(body), "", `the broker sends ${what}`);
   }
+});
+
+test("the broker prices every usage the API has answered it with, at what its tokens cost", () => {
+  // The first run with the real key, the syntax probe of 2026-11-16, found every call counted at
+  // its worst, since each usage held output_tokens_details, a field the broker did not know and the
+  // tests, whose usage objects were written by hand, had never shown it. Each real usage priced
+  // here is one the broker met; a new field, or a value that costs more, fails here, not in a run.
+  const limits = readLimits(LIMITS_TEXT);
+  assert.ok(REAL_USAGE.length >= 5, "no real usage to price");
+  for (const { from, model, usage } of REAL_USAGE) {
+    const price = limits.models.get(model) as Price;
+    assert.ok(price, `${from}: no price for ${model}`);
+    assert.equal(unpricedField(usage, limits), "", `${from}: the broker cannot price it`);
+    const n = (k: string) => Number(usage[k] ?? 0);
+    const prompt = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+    const factor = price.longPrompt !== undefined && prompt > price.longPrompt.above ? price.longPrompt.factor : 1;
+    const expected = (factor * (n("input_tokens") * price.input + n("cache_creation_input_tokens") * price.input * limits.cacheWrite + n("cache_read_input_tokens") * price.cacheRead + n("output_tokens") * price.output)) / 1e6;
+    assert.ok(Math.abs(usageCost(usage, price, limits, 99) - expected) < 1e-12, `${from}: priced at ${usageCost(usage, price, limits, 99)}, not ${expected}`);
+  }
+  // output_tokens_details costs nothing more in exactly one shape, {thinking_tokens: N}, N a whole
+  // number no larger than output_tokens, which it is a share of; in any other, the worst.
+  const sonnetPrice = limits.models.get("claude-sonnet-5-5") as Price;
+  const base = { input_tokens: 100, output_tokens: 50 };
+  for (const details of [{ thinking_tokens: 0 }, { thinking_tokens: 50 }, null]) {
+    assert.equal(unpricedField({ ...base, output_tokens_details: details }, limits), "", JSON.stringify(details));
+  }
+  for (const details of [{ thinking_tokens: 51 }, { thinking_tokens: -1 }, { thinking_tokens: 1.5 }, { thinking_tokens: "1" }, { thinking_tokens: 1, cached_tokens: 0 }, {}, [1], 5, "x"]) {
+    assert.equal(unpricedField({ ...base, output_tokens_details: details }, limits), "output_tokens_details", `priced output_tokens_details ${JSON.stringify(details)}`);
+    assert.equal(usageCost({ ...base, output_tokens_details: details }, sonnetPrice, limits, 99), 99);
+  }
+  assert.equal(unpricedField({ output_tokens_details: { thinking_tokens: 1 } }, limits), "output_tokens_details", "a share of output tokens the usage does not report");
+  // Any other field the broker does not know still counts at the worst, and is named.
+  assert.equal(unpricedField({ ...base, surcharge_tokens: 5 }, limits), "surcharge_tokens");
+  assert.equal(unpricedField("none", limits), "usage");
+});
+
+test("the broker says, once a field, which usage field it counted at the worst", async () => {
+  const answers = [{ input_tokens: 1, output_tokens: 1, surcharge_tokens: 5 }, { input_tokens: 1, output_tokens: 1, surcharge_tokens: 7 }, { input_tokens: 1, output_tokens: 1 }];
+  let k = 0;
+  const { broker, notes } = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: JSON.stringify({ usage: answers.at(k++) }) }));
+  for (const id of [1, 2, 3]) assert.equal(JSON.parse(await broker.handle(request(id, haiku()))).status, 200);
+  assert.deepEqual(notes, ["the broker counts a request at its worst: it cannot price the usage field surcharge_tokens"]);
+  // An answer with no usage to read is said once too, and the key is never in a note.
+  const bare = fakeBroker(10, () => ({ status: 200, retryAfter: "", text: `no JSON ${KEY}` }));
+  for (const id of [1, 2]) await bare.broker.handle(request(id, haiku()));
+  assert.deepEqual(bare.notes, ["the broker counts a request at its worst: it cannot price an answer without a usage object"]);
 });
 
 test("the broker prices what the usage reports, a long Haiku prompt at its higher prices, and the rest at the worst", () => {

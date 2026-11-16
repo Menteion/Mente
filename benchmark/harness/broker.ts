@@ -175,13 +175,21 @@ const PRICED = ["input_tokens", "output_tokens", "cache_creation_input_tokens", 
 
 /**
  * Whether a field of a usage that the broker does not price costs nothing as the API reported it:
- * empty, the 5-minute cache's breakdown, server tools never used, and the one value of each field of
- * standardUsage in broker-limits.json (the standard tier, speed and place of inference). Anything
- * else, a 1-hour cache write, a web search, fast mode, inference held in one region, or a field the
- * broker does not know, makes it count the request at its worst.
+ * empty, the 5-minute cache's breakdown, the share of the output tokens that were thinking, which
+ * output_tokens already counts (exactly {thinking_tokens: N}, N a whole number no larger than
+ * output_tokens), server tools never used, and the one value of each field of standardUsage in
+ * broker-limits.json (the standard tier, speed and place of inference). Anything else, a 1-hour
+ * cache write, a web search, fast mode, inference held in one region, or a field the broker does not
+ * know, makes it count the request at its worst.
  */
-function costsNothing(key: string, value: unknown, standard: Map<string, string>): boolean {
+function costsNothing(key: string, value: unknown, standard: Map<string, string>, usage: object): boolean {
   if (value === null || value === 0) return true;
+  if (key === "output_tokens_details") {
+    if (!plain(value) || extraKeys(value, ["thinking_tokens"]).length > 0) return false;
+    const thinking = (value as { thinking_tokens?: unknown }).thinking_tokens;
+    const output = (usage as { output_tokens?: unknown }).output_tokens;
+    return typeof thinking === "number" && Number.isInteger(thinking) && thinking >= 0 && typeof output === "number" && thinking <= output;
+  }
   if (key === "cache_creation") {
     if (!plain(value) || extraKeys(value, ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"]).length > 0) return false;
     const hour = (value as { ephemeral_1h_input_tokens?: unknown }).ephemeral_1h_input_tokens;
@@ -191,10 +199,20 @@ function costsNothing(key: string, value: unknown, standard: Map<string, string>
   return standard.has(key) && standard.get(key) === value;
 }
 
+/**
+ * The first field of a usage that the broker cannot price as the API reported it, which makes it
+ * count the request at its worst: a field it does not know, or one at a value that costs more;
+ * "usage" when there is no usage object to read; or "" when it can price them all.
+ */
+export function unpricedField(usage: unknown, limits: Pick<Limits, "standardUsage">): string {
+  if (!plain(usage)) return "usage";
+  for (const [key, value] of Object.entries(usage)) if (!PRICED.includes(key) && !costsNothing(key, value, limits.standardUsage, usage)) return key;
+  return "";
+}
+
 /** What a request cost by the usage the API reported, or its worst case when the broker cannot price all of it. */
 export function usageCost(usage: unknown, price: Price, limits: Pick<Limits, "cacheWrite" | "standardUsage">, worst: number): number {
-  if (!plain(usage)) return worst;
-  for (const [key, value] of Object.entries(usage)) if (!PRICED.includes(key) && !costsNothing(key, value, limits.standardUsage)) return worst;
+  if (unpricedField(usage, limits) !== "") return worst;
   const cacheWrite = limits.cacheWrite;
   const u = usage as { input_tokens?: unknown; output_tokens?: unknown; cache_creation_input_tokens?: unknown; cache_read_input_tokens?: unknown };
   const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : Number.NaN);
@@ -354,7 +372,12 @@ export class Broker {
   requests = 0;
   inFlight = 0;
 
-  constructor(key: string, limits: Limits, budget: number, post: Post) {
+  /** Where the broker says what it could not price, once a field: its log, by default. */
+  note: (line: string) => void;
+  /** The usage fields it has said it could not price, so that each is said once a run. */
+  noted = new Set<string>();
+
+  constructor(key: string, limits: Limits, budget: number, post: Post, note: (line: string) => void = (line) => console.error(line)) {
     // A key of these characters alone is written in JSON as itself, so that taking it out of an
     // answer line, which is JSON, takes it out of every value in it.
     if (!/^[A-Za-z0-9_-]{8,}$/.test(key)) throw new Error("no API key on the broker's standard input: one line of letters, digits, '-' and '_'");
@@ -363,6 +386,7 @@ export class Broker {
     this.limits = limits;
     this.post = post;
     this.cap = Math.min(budget, limits.maxDollars);
+    this.note = note;
   }
 
   /** What an answered request cost, by the usage the API reported; at its most when the broker cannot price it. */
@@ -371,7 +395,16 @@ export class Broker {
     try {
       usage = JSON.parse(text)?.usage;
     } catch {
-      return worst;
+      usage = undefined;
+    }
+    // A field it cannot price makes it count the request at its worst, and its log says which, once
+    // a field, so that a run that stops early shows why (the first run with the real key, on
+    // 2026-11-16: output_tokens_details, which the broker did not then know).
+    const field = unpricedField(usage, this.limits);
+    if (field !== "" && !this.noted.has(field)) {
+      this.noted.add(field);
+      const what = field === "usage" ? "an answer without a usage object" : `the usage field ${field}`;
+      this.note(scrub(`the broker counts a request at its worst: it cannot price ${what}`, this.key));
     }
     return usageCost(usage, price, this.limits, worst);
   }
