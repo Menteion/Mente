@@ -872,13 +872,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-codegen/src/lower.rs",
-        "literal_element",
-        "wildcard arm",
-        "match (exact, v) { (_, v) }",
-        "every element but an exact integer or a nested literal kept exact is narrowed into the element's shape, which `narrow` does for each kind",
-    ),
-    (
-        "mente-codegen/src/lower.rs",
         "match_expr",
         "if let",
         "if let (PatternKind::Variant { name, bindings, .. }, V::Mem(a), Shape::Enum(es)) = (&arm.pattern.kind, s, &read)",
