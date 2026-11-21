@@ -304,6 +304,8 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             unencoded: Vec::new(),
             admitted: fals,
             cut: tru,
+            cut_past_bound: false,
+            cut_at_lacked: true,
             returns: fals,
             result: None,
             finals: Vec::new(),
@@ -368,6 +370,8 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             unencoded: x.unencoded,
             admitted: fals,
             cut: tru,
+            cut_past_bound: false,
+            cut_at_lacked: true,
             returns: fals,
             result: None,
             finals: Vec::new(),
@@ -382,6 +386,8 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
     let mut cuts = x.cut.clone();
     cuts.extend(x.lacked.iter().copied());
     let cut = x.t.or(&cuts);
+    let live = |cuts: &[T]| cuts.iter().any(|&c| x.t.as_bool(c) != Some(false));
+    let (cut_past_bound, cut_at_lacked) = (live(&x.cut), live(&x.lacked));
     // What the run returns: its value and each parameter's final value, joined over the ways
     // out of the call, and whether one of them holds.
     let ways: Vec<(T, (V, Vars))> = x
@@ -413,6 +419,8 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
         unencoded: x.unencoded,
         admitted,
         cut,
+        cut_past_bound,
+        cut_at_lacked,
         returns,
         result,
         finals,
