@@ -27811,6 +27811,7 @@ block0(v0: u8, v1: effect):
 t0: stack-overflow @13:8 ["the call stack ran out"]
 t1: unreachable @13:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/ghost-contracts-and-totality/condition_forgets_an_or_an_assignment_changes.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/decreases_negative_at_a_call.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/decreases_not_smaller.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/decreases_proven.mn ==

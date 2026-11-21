@@ -7606,6 +7606,10 @@ mod tests {
         // Inside an `or` and a `not` alike.
         let negated = kept.replace("c < 1 and x + 124 > 0", "not (c >= 1 or x + 124 <= 0)");
         assert_eq!(codes(&negated), NONE);
+        // A comparison inside an `or` that reads what the right operand changes is forgotten
+        // too: `bump` makes `x` 9 after `x == 0 or x == 1` held (the review of pull request 193).
+        let either = "fn bump(mut x: u8) -> u8 {\n  x = 9\n  0\n}\npub fn f(x0: u8) -> u8[0..=1] {\n  var x: u8 = x0\n  if (x == 0 or x == 1) and bump(mut x) == 0 {\n    return x\n  }\n  0\n}";
+        assert_eq!(codes(either), ["E0502"]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // expect: pass
 module conformance
 // A conjunct of a loop's condition that assigns makes Tier 1 forget, of the conjuncts left of it,
-// only those that read what it assigns (spec item 2): `c < 1` still bounds the round, so the
+// only those that read what it assigns (core-calculus.md, item 10): `c < 1` still bounds the round, so the
 // measure `1 - c` is never negative there. Tier 1 once forgot the whole left side, and reported
 // the measure as one that could be negative (E0507).
 pub fn f(p: i64, q: u8) -> u8 {

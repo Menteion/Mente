@@ -1,0 +1,17 @@
+// expect: E0502
+module conformance
+// A conjunct that passes `x` as `mut` changes it, so of the conjuncts left of it every
+// comparison that reads `x` is forgotten, inside an `or` as well (core-calculus.md, item 10):
+// `bump` makes `x` 9, which `u8[0..=1]` does not hold, though `x == 0 or x == 1` held before.
+fn bump(mut x: u8) -> u8 {
+  x = 9
+  0
+}
+
+pub fn f(x0: u8) -> u8[0..=1] {
+  var x: u8 = x0
+  if (x == 0 or x == 1) and bump(mut x) == 0 {
+    return x
+  }
+  0
+}
