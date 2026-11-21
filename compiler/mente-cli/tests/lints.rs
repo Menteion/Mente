@@ -830,13 +830,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-codegen/src/lower.rs",
-        "if_expr",
-        "wildcard arm",
-        "match (&shape, self.interval(e)) { _ }",
-        "an `if` of `()` or of no type has no value to meet in its join",
-    ),
-    (
-        "mente-codegen/src/lower.rs",
         "in_memory",
         "matches!",
         "matches!(self, Shape::Array(..) | Shape::Struct(_) | Shape::Enum(_))",
@@ -890,13 +883,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "wildcard arm",
         "match (&arm.pattern.kind, tested) { _ }",
         "a pattern of another kind than its scrutinee is reported as an error",
-    ),
-    (
-        "mente-codegen/src/lower.rs",
-        "match_expr",
-        "wildcard arm",
-        "match (&shape, self.interval(e)) { _ }",
-        "a `match` of `()` or of no type has no value to join",
     ),
     (
         "mente-codegen/src/lower.rs",

@@ -1298,6 +1298,17 @@ impl Gen {
             out.push_str(&text);
             functions.push((format!("f{}", k), start..out.len()));
         }
+        // Now and then arrays that meet in one shape, from a random source of its own too, before
+        // the recursion, which ends a program, and named past its two functions
+        // (`meeting_arrays`).
+        let mut rng = stream(self.seed, count, 1);
+        if rng.chance(MEETING_CHANCE) {
+            let (name, text) = meeting_arrays(&mut rng, count + 2);
+            out.push('\n');
+            let start = out.len();
+            out.push_str(&text);
+            functions.push((name, start..out.len()));
+        }
         // Now and then a recursion the stack budget ends, from a random source of its own, so
         // that the functions above stay as they are (`deep_recursion`).
         let mut rng = stream(self.seed, count, 0);
@@ -5677,6 +5688,112 @@ fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
             ),
         ),
     ]
+}
+
+/// How often, in a hundred, a program also holds a function of arrays that meet in one shape
+/// ([`meeting_arrays`]).
+const MEETING_CHANCE: u64 = 20;
+
+/// A public function `f{k}` whose arrays meet in one machine shape where two become one value,
+/// from a random source of its own, so that the functions before it stay as they are: branches or
+/// arms that give arrays of different element types, an `if` the checker types narrower than the
+/// literal it holds, a row read from a literal of integers of no one type, and an element of one
+/// inside another (`core-calculus.md`, item 4). MIR once built such an array in one shape and read
+/// it in another (the nightly triage's root causes 2 and 11, and the review of PR 189); the MIR
+/// verifier now refuses any access of another shape (`cfg::check_memory`).
+fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
+    let name = format!("f{}", k);
+    let small = ["u8", "i8", "u16", "i16", "u32", "i32"];
+    let signed = ["i8", "i16", "i32", "i64"];
+    // A literal every type above holds, negative only for a signed one.
+    let literal = |t: &str, rng: &mut Rng| -> String {
+        let n = rng.below(101);
+        if t.starts_with('i') && rng.chance(40) {
+            format!("-{}", n.max(1))
+        } else {
+            n.to_string()
+        }
+    };
+    let roll = rng.below(4);
+    let text = if roll == 0 {
+        // Branches, or arms, of arrays of two element types, landing in a wider one.
+        let a = *rng.pick(&small);
+        let mut b = *rng.pick(&small);
+        if b == a {
+            b = "i64";
+        }
+        let (la, lb) = (literal(a, rng), literal(b, rng));
+        if rng.chance(50) {
+            format!(
+                "pub fn {}(c: bool, x: {}, y: {}) -> [2]i64 = if c {{ [x, {}_{}] }} else {{ [y, {}_{}] }}\n",
+                name, a, b, la, a, lb, b
+            )
+        } else {
+            let rest = rng.below(1001);
+            format!(
+                "pub fn {}(k: u8, x: {}, y: {}) -> [2]i64 = match k {{\n  0 => [x, {}_{}]\n  1 => [y, {}_{}]\n  _ => [{}; 2]\n}}\n",
+                name, a, b, la, a, lb, b, rest
+            )
+        }
+    } else if roll == 1 {
+        // An `if` of a `[n]u8` to the checker whose literal holds more, until it lands.
+        let n = 1 + rng.below(4);
+        let wide = *rng.pick(&["u16", "u32", "i32", "i64"]);
+        let held = 256 + rng.below(745);
+        format!(
+            "pub fn {}(c: bool, x: u8) -> {} {{\n  val a: [{}]{} = if c {{ [x; {}] }} else {{ [{}; {}] }}\n  a[{}]\n}}\n",
+            name,
+            wide,
+            n,
+            wide,
+            n,
+            held,
+            n,
+            n - 1
+        )
+    } else {
+        // A literal of a signed type beside a `u128` keeps its integers exact: a row of it read
+        // by index, or an element of it inside another literal.
+        let s = *rng.pick(&signed);
+        let negative = rng.chance(50);
+        let (first, result) = if negative {
+            (format!("-{}", 1 + rng.below(100)), "i128")
+        } else {
+            (rng.below(101).to_string(), "u128")
+        };
+        // Values a `u128` holds, and an `i128` too beside a negative one.
+        let big = |rng: &mut Rng| -> u128 {
+            if negative {
+                rng.u128() >> 28
+            } else {
+                rng.u128()
+            }
+        };
+        let (wide, wider) = (big(rng), big(rng));
+        if roll == 2 {
+            format!(
+                "pub fn {}(k: bool) -> [2]{} = [[{}_{}, {}], [{}_u128, {}]][if k {{ 1 }} else {{ 0 }}]\n",
+                name,
+                result,
+                first,
+                s,
+                rng.below(101),
+                wide,
+                wider
+            )
+        } else {
+            format!(
+                "pub fn {}(k: bool) -> [2]{} = [[{}_{}, {}_u128][if k {{ 1 }} else {{ 0 }}], {}_i8]\n",
+                name,
+                result,
+                first,
+                s,
+                wide,
+                rng.below(101)
+            )
+        }
+    };
+    (name, text)
 }
 
 fn field_text(f: &GField) -> String {
