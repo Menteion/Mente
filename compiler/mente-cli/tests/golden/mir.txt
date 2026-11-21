@@ -28499,6 +28499,128 @@ t1: unreachable @14:8 ["unreachable reached: control left the code the checker a
 == conformance/ghost-contracts-and-totality/invariant_not_preserved.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_changes_a_binding_inside_a_struct_literal.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_condition_changes_a_binding.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_condition_forgets_what_an_assignment_changes.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_condition_keeps_what_an_assignment_leaves.mn ==
+mente-dump 3 mir
+f0: fn f(i64, u8, effect) -> u8 frame 121 {
+block0(v0: i64, v1: u8, v2: effect):
+  v3: i64 = int 0 @8:15
+  v4: i64 = assume within 0..=255 v3, v2 @8:15
+  v5: u8 = cast v4 @8:15
+  v6: addr = slot 1 @8:15
+  v7: unit = store v6, v5, v4 @8:15
+  v8: i64 = int 0 @9:16
+  v9: i64 = assume within 0..=4294967295 v8, v7 @9:16
+  v10: u32 = cast v9 @9:16
+  v11: addr = slot 4 @9:16
+  v12: unit = store v11, v10, v9 @9:16
+  v13: addr = slot 1 @10:3
+  v14: bool = bool false @10:3
+  v15: unit = store v13, v14, v12 @10:3
+  v16: addr = slot 16 @10:3
+  jump block1(v15)
+block1(v17: effect):
+  v20: u32 = load v11, v17 @10:9
+  v21: i64 = int 1 @10:13
+  v22: i64 = cast v20 @10:13
+  v23: bool = lt v22, v21 @10:13
+  branch v23, block4(v20), block5(v23, v20)
+block2(v18: effect):
+  v50: i64 = int 1 @15:21
+  v51: u32 = load v11, v18 @15:25
+  v52: i64 = cast v51 @15:21
+  v53: i64 = sub v50, v52, v51 @15:21
+  v54: u128 = load v16, v51 @15:21
+  v55: bool = bool false @15:21
+  v56: i64 = int 0 @15:21
+  v57: bool = lt v53, v56 @15:21
+  branch v57, block11(v54), block12(v54)
+block3(v19: effect):
+  v94: u8 = load v6, v19 @19:3
+  return v94 after v94
+block4(v24: effect):
+  v27: u8 = load v6, v24 @10:19
+  v28: i64 = int 124 @10:23
+  v29: i64 = cast v27 @10:19
+  v30: i64 = add v29, v28, v27 @10:19
+  v31: i64 = int 0 @10:29
+  v32: bool = gt v30, v31 @10:29
+  jump block5(v32, v27)
+block5(v25: bool, v26: effect):
+  branch v25, block6(v26), block7(v25, v26)
+block6(v33: effect):
+  v36: i64 = int 8 @10:43
+  v37: bool = gt v0, v36 @10:43
+  branch v37, block8(v33), block9(v33)
+block7(v34: bool, v35: effect):
+  branch v34, block2(v35), block3(v35)
+block8(v38: effect):
+  v42: i64 = int 0 @11:9
+  v43: i64 = assume within 0..=255 v42, v38 @11:9
+  v44: u8 = cast v43 @11:9
+  v45: unit = store v6, v44, v43 @11:9
+  v46: i64 = int 0 @12:5
+  jump block10(v46, v45)
+block9(v39: effect):
+  v47: i64 = int 0 @14:5
+  jump block10(v47, v39)
+block10(v40: i64, v41: effect):
+  v48: i64 = int 0 @15:9
+  v49: bool = eq v40, v48 @15:9
+  jump block7(v49, v41)
+block11(v58: effect):
+  v62: bool = bool true @15:21
+  jump block13(v62, v58)
+block12(v59: effect):
+  v63: i64 = assume within 0..=340282366920938463463374607431768211455 v53, v59 @15:21
+  v64: u128 = cast v63 @15:21
+  v65: bool = lt v64, v54 @15:21
+  jump block13(v65, v63)
+block13(v60: bool, v61: effect):
+  v66: i64 = int 0 @15:21
+  v67: bool = lt v53, v66 @15:21
+  branch v67, block14(v61), block15(v61)
+block14(v68: effect):
+  v72: bool = bool false @15:21
+  jump block16(v72, v68)
+block15(v69: effect):
+  v73: i64 = assume within 0..=340282366920938463463374607431768211455 v53, v69 @15:21
+  v74: u128 = cast v73 @15:21
+  v75: bool = eq v74, v54 @15:21
+  jump block16(v75, v73)
+block16(v70: bool, v71: effect):
+  v76: bool = and v70, v55 @15:21
+  v77: bool = or v60, v76 @15:21
+  v78: bool = load v13, v71 @15:21
+  v79: bool = not v78 @15:21
+  v80: bool = or v79, v77 @15:21
+  v81: bool = bool true @15:21
+  v82: unit = store v13, v81, v78 @15:21
+  v83: i64 = assume within 0..=340282366920938463463374607431768211455 v53, v82 @15:21
+  v84: u128 = cast v83 @15:21
+  v85: unit = store v16, v84, v83 @15:21
+  v86: u32 = load v11, v85 @16:5
+  v87: i64 = int 1 @16:10
+  v88: i64 = cast v86 @16:10
+  v89: i64 = add v88, v87, v86 @16:10
+  v90: i64 = assume within 0..=4294967295 v89, v86 @16:10
+  v91: u32 = cast v90 @16:10
+  v92: unit = store v11, v91, v90 @16:10
+  v93: unit = store v6, v1, v92 @17:9
+  jump block1(v93)
+block17(v95: effect):
+  trap t0 after v95
+t0: unreachable @19:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter f(i64, u8, effect) -> u8 {
+block0(v0: i64, v1: u8, v2: effect):
+  v3: unit = enter f0 t0 v0, v1, v2 @7:8
+  v4: u8 = call f0 v0, v1, v3 @7:8
+  return v4 after v4
+t0: stack-overflow @7:8 ["the call stack ran out"]
+t1: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
 mente-dump 3 mir
 f0: fn count(u8, effect) -> u8 frame 75 {

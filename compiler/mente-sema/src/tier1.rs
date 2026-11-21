@@ -1180,6 +1180,26 @@ fn cond_mentions(c: &Cond, var: usize) -> bool {
     }
 }
 
+/// `c` with each comparison in it that mentions one of `vars` made unknown, and the rest kept:
+/// once those variables change, what the others say still holds, and assuming `Unknown` adds
+/// nothing in either polarity, inside a `not` or an `or` as well.
+fn forget_mentioning(c: Cond, vars: &[usize]) -> Cond {
+    let sub = |c: Box<Cond>| Box::new(forget_mentioning(*c, vars));
+    match c {
+        Cond::And(a, b) => Cond::And(sub(a), sub(b)),
+        Cond::Or(a, b) => Cond::Or(sub(a), sub(b)),
+        Cond::Not(a) => Cond::Not(sub(a)),
+        c @ (Cond::Cmp(..) | Cond::Far(..)) => {
+            if vars.iter().any(|&v| cond_mentions(&c, v)) {
+                Cond::Unknown
+            } else {
+                c
+            }
+        }
+        c @ (Cond::Const(_) | Cond::Unknown) => c,
+    }
+}
+
 /// After `var = terms + c`: the bounds beyond the octagon's reach that a single term carries,
 /// shifted by `c` and negated with the term. A sum of more terms carries none, which is sound.
 fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
@@ -5050,14 +5070,13 @@ impl<'a> Fx<'a> {
                 if !changed.is_empty() {
                     // A right operand that changes bindings where it runs leaves them changed:
                     // the state is then where the left operand decided, or where the right one
-                    // ended, and a left operand that reads what it changes is not known in it.
+                    // ended, and each comparison of the left operand that reads what it changes
+                    // is not known in it. The others still hold, a loop's counter among them.
                     self.assume(st, &l, !and);
                     *st = st.join(&s2);
                     let touched: Vec<usize> =
                         changed.iter().flat_map(|&b| self.vars_of(b)).collect();
-                    if touched.iter().any(|&x| cond_mentions(&l, x)) {
-                        l = Cond::Unknown;
-                    }
+                    l = forget_mentioning(l, &touched);
                 }
                 if and {
                     Cond::And(Box::new(l), Box::new(r))
@@ -7570,6 +7589,23 @@ mod tests {
             );
             assert_eq!(codes(&src), ["E0502"], "{}", changes);
         }
+    }
+
+    /// A conjunct that assigns makes Tier 1 forget, of the conjuncts left of it, only the
+    /// comparisons that read what it assigns. A loop's counter compared before it still bounds
+    /// the round, where Tier 1 once forgot the whole left side, and with it `c < 1`, so that the
+    /// measure `1 - c` looked negative at the head of a round (a false `E0507`, which a generated
+    /// program of pull request 182 met). A comparison of the assigned binding is still
+    /// forgotten, and proves nothing in the round.
+    #[test]
+    fn test_a_conjunct_that_assigns_forgets_only_what_reads_it() {
+        let kept = "pub fn f(p: i64, q: u8) -> u8 {\n  var x: u8 = 0\n  var c: u32 = 0\n  while c < 1 and x + 124 > 0 and (if p > 8 {\n    x = 0\n    0\n  } else {\n    0\n  }) == 0 decreases 1 - c {\n    c += 1\n    x = q\n  }\n  x\n}";
+        assert_eq!(codes(kept), NONE);
+        let forgotten = "pub fn f(p: i64) -> u8 {\n  var x: u8 = 0\n  var c: u8 = 0\n  while c < 3 and x < 5 and (if p > 8 {\n    x = 200\n    0\n  } else {\n    0\n  }) == 0 {\n    val y: u8[0..5] = x\n    c += 1\n    x = y\n  }\n  x\n}";
+        assert_eq!(codes(forgotten), ["E0502"]);
+        // Inside an `or` and a `not` alike.
+        let negated = kept.replace("c < 1 and x + 124 > 0", "not (c >= 1 or x + 124 <= 0)");
+        assert_eq!(codes(&negated), NONE);
     }
 
     #[test]

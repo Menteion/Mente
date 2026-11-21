@@ -1,0 +1,20 @@
+// expect: pass
+module conformance
+// A conjunct of a loop's condition that assigns makes Tier 1 forget, of the conjuncts left of it,
+// only those that read what it assigns (spec item 2): `c < 1` still bounds the round, so the
+// measure `1 - c` is never negative there. Tier 1 once forgot the whole left side, and reported
+// the measure as one that could be negative (E0507).
+pub fn f(p: i64, q: u8) -> u8 {
+  var x: u8 = 0
+  var c: u32 = 0
+  while c < 1 and x + 124 > 0 and (if p > 8 {
+    x = 0
+    0
+  } else {
+    0
+  }) == 0 decreases 1 - c {
+    c += 1
+    x = q
+  }
+  x
+}

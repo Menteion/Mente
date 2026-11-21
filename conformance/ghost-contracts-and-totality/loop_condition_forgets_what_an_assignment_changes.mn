@@ -1,0 +1,20 @@
+// expect: E0502
+module conformance
+// A conjunct of a loop's condition that reads a binding a later conjunct assigns is forgotten
+// in the round (spec item 2): `x < 5` held before `x = 200` ran, so `x` may be 200 in the body,
+// which `u8[0..5]` does not hold.
+pub fn f(p: i64) -> u8 {
+  var x: u8 = 0
+  var c: u8 = 0
+  while c < 3 and x < 5 and (if p > 8 {
+    x = 200
+    0
+  } else {
+    0
+  }) == 0 {
+    val y: u8[0..5] = x
+    c += 1
+    x = y
+  }
+  x
+}
