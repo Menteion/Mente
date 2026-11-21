@@ -7693,7 +7693,8 @@ mod tests {
             "{:#?}",
             &texts[..PINNED.len()]
         );
-        // In a program, before the recursion, named past it.
+        // In a program, before the recursion, named past it, and followed only by the recursion and
+        // the functions the loops' conjuncts call, which end a program.
         let mut seen = 0;
         for seed in 0..300 {
             let p = program(seed);
@@ -7712,9 +7713,10 @@ mod tests {
                 assert!(
                     p.functions[k + 1..]
                         .iter()
-                        .all(|(_, at)| p.text[at.clone()].contains("4294967295")
+                        .all(|(name, at)| name.starts_with("pin")
+                            || p.text[at.clone()].contains("4294967295")
                             || p.text[at.clone()].contains("(n: u32")),
-                    "seed {}: only the recursion follows",
+                    "seed {}: only the recursion and the loops' functions follow",
                     seed
                 );
             }
