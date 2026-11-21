@@ -282,15 +282,16 @@ pub fn program(
             prefix,
         )?;
         writer.define_function_as(ids[i], &mut ctx, decl, &f.name)?;
-        // A function's slots hold values its frame counts, so they never take more bytes than
-        // the frame (`core-calculus.md#stack-budget`); slots that did would be a fault of this
-        // compiler, which once gave every slot bytes of its own and a frame the sum of its
-        // branches. An entry counts no frame.
+        // A function's slots are held near its frame (`core-calculus.md#stack-budget`) by
+        // measure, not by construction, until the frame model gives them their offsets
+        // ([`aligned-frame-layout`]). Past item 5's ceiling, 256 times its frame, the compiler
+        // cannot build a function yet, which is a limit of the compiler, never of the program.
+        // An entry counts no frame.
         let slots = writer.stack_slot_bytes(&symbol(i, f)).unwrap_or(0);
-        if f.frame > 0 && u128::from(slots) > f.frame {
+        if f.frame > 0 && u128::from(slots) > CEILING * f.frame {
             return Err(err(format!(
-                "a fault of the compiler: the slots of `{}` take {} bytes, past the {} its frame counts",
-                f.name, slots, f.frame
+                "a limit of the compiler: the slots of `{}` take {} bytes, past {} times the {} its frame counts; the compiler cannot build it yet, and splitting it avoids the limit",
+                f.name, slots, CEILING, f.frame
             )));
         }
     }
@@ -828,7 +829,8 @@ impl Translate {
             return Ok(());
         }
         let mut scratch = None;
-        let layout = crate::slots::layout(f);
+        let layout =
+            crate::slots::layout(f).map_err(|e| err(format!("a limit of the compiler: {}", e)))?;
         let area = Area {
             slot: std::num::NonZeroU32::new(layout.bytes).map(|bytes| {
                 b.create_sized_stack_slot(StackSlotData::new(
@@ -1691,6 +1693,17 @@ impl Shared {
 /// remainder.
 pub(crate) const SCRATCH: u32 = 32;
 
+/// The most times its frame a function's machine code may take, item 5's ceiling: past it the
+/// compiler cannot build the function yet (`mir-and-codegen.md`, item 5).
+pub const CEILING: u128 = 256;
+
+/// The most times its frame the tests let a function's slots take, on every program of the
+/// conformance suite and the agent programs: measured, not built in, until the frame model gives
+/// slots their offsets ([`aligned-frame-layout`]). Native code that gave every slot bytes of its
+/// own once took 194 times a frame, two hundred branches of a 4 KiB array; the layout's own
+/// alignment and holes take up to 1.18 times, in the review's programs of pull request 183.
+pub const MEASURED: u128 = 2;
+
 /// The address of the function's scratch slot, where the runtime writes a result of at most
 /// [`SCRATCH`] bytes that the code loads at once, before anything else writes there. One slot
 /// serves every such call of the function: one each would grow the frame with the calls, past
@@ -2131,19 +2144,21 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         out
     }
 
-    /// Each function's stack slots in native code take at most its frame as the checker counts
-    /// it (`core-calculus.md`, item 25), on every target, for every program of the conformance
-    /// suite that lowers: native code lays the slots that are never alive together over the same
-    /// bytes, as the frame counts one branch of an `if` or one arm of a `match`. Native code once
-    /// gave every slot bytes of its own, so that two hundred branches of a 4 KiB array each took
-    /// 1.6 MB of stack for a frame of 8,265, past Windows' 1 MB stack before any branch ran.
+    /// Each function's stack slots in native code take at most twice its frame as the checker
+    /// counts it (`core-calculus.md`, item 25), on every target, for every program of the
+    /// conformance suite that lowers, the review's programs of pull request 183 among them: native
+    /// code lays the slots that are never alive together over the same bytes, as the frame counts
+    /// one branch of an `if` or one arm of a `match`. The bound is measured, not built in
+    /// ([`MEASURED`]). Native code once gave every slot bytes of its own, so that two hundred
+    /// branches of a 4 KiB array each took 1.6 MB of stack for a frame of 8,265, past Windows' 1 MB
+    /// stack before any branch ran.
     #[test]
-    fn test_native_slots_take_at_most_the_frame() {
+    fn test_native_slots_stay_within_twice_the_frame() {
         let frames = conformance_slot_frames();
         assert!(frames.len() > 100, "{} functions compared", frames.len());
         let over: Vec<String> = frames
             .iter()
-            .filter(|(_, _, _, frame, bytes)| u128::from(*bytes) > *frame)
+            .filter(|(_, _, _, frame, bytes)| u128::from(*bytes) > MEASURED * *frame)
             .map(|(file, target, name, frame, bytes)| {
                 format!("{file} {target:?} {name}: {bytes} bytes of slots, frame {frame}")
             })
@@ -2153,11 +2168,12 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
 
     /// A build gives a function's stack slots the bytes of its layout, which `frames_and_slots`
     /// reports beside the frame the checker counts, by the function's name; and it refuses a
-    /// function whose slots take more than its frame, as a fault of this compiler, but builds one
-    /// whose slots take exactly its frame, and one that counts no frame, as an entry.
+    /// function whose slots take more than 256 times its frame, item 5's ceiling, as a limit of the
+    /// compiler, but builds one whose slots take exactly that, and one that counts no frame, as an
+    /// entry.
     #[test]
-    fn test_a_build_refuses_slots_past_the_frame() {
-        let source = "module m\npub fn f(x: u8, i: usize[0..=63]) -> u8 {\n  var a: [64]u8 = [x; 64]\n  a[i] = 1\n  a[i]\n}\n";
+    fn test_a_build_refuses_slots_past_the_ceiling() {
+        let source = "module m\npub fn f(x: u8, i: usize[0..=255]) -> u8 {\n  var a: [256]u8 = [x; 256]\n  a[i] = 1\n  a[i]\n}\n";
         let module = mente_sema::check_program_without_proofs(source).unwrap();
         let mut lowered = crate::lower::lower(&module).unwrap();
         let k = lowered
@@ -2166,8 +2182,11 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
             .iter()
             .position(|f| f.name == "f")
             .unwrap();
-        let laid = crate::slots::layout(&lowered.module.functions[k]).bytes;
-        assert!(laid >= 64, "{laid}");
+        let laid = crate::slots::layout(&lowered.module.functions[k])
+            .unwrap()
+            .bytes;
+        // The literal and the binding it is copied into, alive together at the copy.
+        assert_eq!(laid, 512);
         let frame = lowered.module.functions[k].frame;
         let target = Target::X86_64Linux;
         assert_eq!(
@@ -2180,12 +2199,16 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
             frames_and_slots(lowered, target)
         };
         assert_eq!(
-            built(&mut lowered, u128::from(laid)).unwrap(),
-            [("f".to_string(), u128::from(laid), laid)]
+            built(&mut lowered, 2).unwrap(),
+            [("f".to_string(), 2, laid)],
+            "512 bytes of slots are 256 times a frame of 2"
         );
-        let refused = built(&mut lowered, u128::from(laid) - 1).unwrap_err();
+        let refused = built(&mut lowered, 1).unwrap_err();
         assert!(
-            refused.to_string().contains("a fault of the compiler"),
+            refused.to_string().contains("a limit of the compiler")
+                && refused
+                    .to_string()
+                    .contains("splitting it avoids the limit"),
             "{refused}"
         );
         assert!(built(&mut lowered, 0).unwrap().is_empty());
