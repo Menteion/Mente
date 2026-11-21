@@ -27,12 +27,16 @@ leak-timeout = { period = "100ms", result = "fail" }
 # each call run in a process of its own. On the Rust jobs' runners they took 16 to 111 s, the
 # conformance suite on AArch64 the longest. The native constructs take 4 to 6 s on Linux and
 # 22 s on Windows, where linking and starting processes cost most, and passed the default stop
-# of 40 s on one Windows runner whose conformance suite also went from 68 to 98 s. Each test is
+# of 40 s on one Windows runner whose conformance suite also went from 68 to 98 s. And types
+# nested as a DAG forty deep and as a chain of sixty thousand, each through every phase, which runs
+# on x86-64 Linux alone (MENTE_NESTED_TYPES): 27.8 s on its first run, past two thirds of the
+# default stop (pull request 198). Each test is
 # named by its package and its whole path, so that the override holds for that test alone, not
 # for every test whose name contains it or a test of the same path in another crate.
 [[profile.default.overrides]]
 filter = """
 (package(mente-sema) & test(=incremental::tests::test_a_session_reports_what_the_whole_module_check_does))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_types_nested_as_a_dag_or_a_long_chain_pass_every_phase))
 | (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite))
 | (package(mente-cli) & test(=mir_run::tests::test_mir_runs_every_agent_program_as_the_reference_interpreter_does))
 | (package(mente-cli) & test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar))

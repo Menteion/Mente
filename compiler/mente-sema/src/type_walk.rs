@@ -35,9 +35,6 @@ pub struct TypeWalk<'s> {
     structs: &'s Structs,
     /// Every declaration, by its slot: the structs first, then the enums.
     decls: Vec<Decl>,
-    /// The declarations each one holds, by slot, each with where it holds it, in the order of
-    /// its fields and variants.
-    held: Vec<Vec<(Via, usize)>>,
     /// The slots in dependency order: each after the declarations it holds, but for one that a
     /// cycle leads back to.
     order: Vec<usize>,
@@ -142,7 +139,6 @@ impl<'s> TypeWalk<'s> {
         TypeWalk {
             structs,
             decls,
-            held,
             order,
             cycles,
             budget,
@@ -173,24 +169,23 @@ impl<'s> TypeWalk<'s> {
         self.budget
     }
 
-    fn slot(&self, d: Decl) -> usize {
-        match d {
-            Decl::Struct(i) => i,
-            Decl::Enum(i) => self.structs.defs.len() + i,
-        }
-    }
-
     /// A fact of every declaration, worked out once, in dependency order, from the facts of its
     /// fields' types, as `fold` defines them. Each declaration and each node of each field's type
     /// is a step charged to the budget; the facts the budget leaves no steps for, which a fold
     /// over the module never meets, are none.
     pub fn fold<F: Fold>(&self, fold: &mut F) -> Facts<F::Fact> {
+        self.fold_within(fold, self.budget)
+    }
+
+    /// [`Self::fold`], within `budget` steps: the declaration whose step the budget does not
+    /// hold, and every one after it, has no fact.
+    fn fold_within<F: Fold>(&self, fold: &mut F, budget: usize) -> Facts<F::Fact> {
         let mut facts = Facts {
             facts: vec![None; self.decls.len()],
             structs: self.structs.defs.len(),
             steps: 0,
         };
-        let mut left = self.budget;
+        let mut spent = 0;
         for &k in &self.order {
             let d = self.decls[k];
             let tree = match d {
@@ -201,18 +196,18 @@ impl<'s> TypeWalk<'s> {
             for (_, fields) in fields_by_variant(self.structs, d) {
                 let mut taken = Vec::with_capacity(fields.len());
                 for def in fields {
-                    let fact = self.charged(&facts, fold, &def.ty, &mut left);
+                    let fact = self.charged(&facts, fold, &def.ty, budget, &mut spent);
                     taken.push(Field { def, tree, fact });
                 }
                 variants.push(taken);
             }
-            if left == 0 {
+            if spent >= budget {
                 break;
             }
-            left -= 1;
+            spent += 1;
             facts.facts[k] = fold.decl(d, &variants);
         }
-        facts.steps = self.budget - left;
+        facts.steps = spent;
         facts
     }
 
@@ -224,23 +219,27 @@ impl<'s> TypeWalk<'s> {
         fold: &mut F,
         t: &Ty,
     ) -> Option<F::Fact> {
-        let mut left = usize::MAX;
-        self.charged(facts, fold, t, &mut left)
+        self.charged(facts, fold, t, usize::MAX, &mut 0)
     }
 
-    /// [`Self::fact_of`], charging each node of `t` to `left`; none once it is spent.
+    /// [`Self::fact_of`], adding each node of `t` to `spent`; none once `spent` reaches
+    /// `budget`.
     fn charged<F: Fold>(
         &self,
         facts: &Facts<F::Fact>,
         fold: &mut F,
         t: &Ty,
-        left: &mut usize,
+        budget: usize,
+        spent: &mut usize,
     ) -> Option<F::Fact> {
         // The lengths of the arrays around the innermost type, outermost first.
         let mut lengths = Vec::new();
         let mut at = t;
         loop {
-            *left = left.checked_sub(1)?;
+            if *spent >= budget {
+                return None;
+            }
+            *spent += 1;
             match at {
                 Ty::Array(n, elem) => {
                     lengths.push(*n);
@@ -272,13 +271,6 @@ impl<'s> TypeWalk<'s> {
     /// What a value of type `t` holds, from `measures`, the measures of the declarations.
     pub fn measure_of(&self, measures: &Facts<Measure>, t: &Ty) -> Option<Measure> {
         self.fact_of(measures, &mut Measuring, t)
-    }
-
-    /// The declarations `d` holds, each with where it holds it.
-    pub fn held(&self, d: Decl) -> impl Iterator<Item = (Via, Decl)> + '_ {
-        self.held[self.slot(d)]
-            .iter()
-            .map(|&(via, j)| (via, self.decls[j]))
     }
 }
 
@@ -461,8 +453,12 @@ mod tests {
         let measures = walk.measures();
         assert_eq!(measures.steps, walk.budget());
         assert!(walk.cycles().is_empty());
+        // A step short, the last declaration has no fact, and the one before it has its own.
+        let short = walk.fold_within(&mut Measuring, walk.budget() - 1);
+        assert_eq!(short.steps, walk.budget() - 1);
+        assert_eq!(short.of(order[8]), None);
+        assert_eq!(short.of(order[7]), measures.of(order[7]));
         let e = Decl::Enum(0);
-        assert_eq!(walk.held(e).collect::<Vec<_>>().len(), 1);
         // `S0` holds 2 values, each level one and twice the one below; `E` its variant `V`'s
         // tag and `[2]S7`.
         let s7 = 3 * (1u128 << 7) - 1;
@@ -550,8 +546,9 @@ mod tests {
     /// variant with the most values, its tag counted, and the nodes of every variant's fields.
     #[test]
     fn test_a_types_measure_counts_arrays_and_enums() {
-        let s =
-            declared("module m\nstruct A {\n  xs: [3]u8\n}\nenum E {\n  V(a: A, b: u8)\n  W\n}\n");
+        let s = declared(
+            "module m\nstruct A {\n  xs: [3]u8\n}\nenum E {\n  V(a: A, b: u8)\n  W\n}\nenum F {\n  P(x: u8, y: u8)\n  Q(z: [3]u8)\n}\n",
+        );
         let walk = TypeWalk::new(&s);
         let measures = walk.measures();
         let a = measures.of(Decl::Struct(0)).copied().unwrap();
@@ -570,6 +567,17 @@ mod tests {
                 values: 7,
                 nodes: 5,
                 levels: 4
+            }
+        );
+        // The variant with the most values, `Q`'s four and its tag, beside `P`'s two and its
+        // tag; every variant's nodes.
+        let f = measures.of(Decl::Enum(1)).copied().unwrap();
+        assert_eq!(
+            f,
+            Measure {
+                values: 5,
+                nodes: 5,
+                levels: 3
             }
         );
         let of = |t: Ty| walk.measure_of(&measures, &t).unwrap();

@@ -1550,14 +1550,19 @@ fn path_counts(structs: &crate::structs::Structs) -> Facts<usize> {
     TypeWalk::new(structs).fold(&mut PathCount)
 }
 
-/// The fold of [`path_counts`], each field by the shape its declaration gives it.
+/// The fold of [`path_counts`]: an integer is one path, an array none, since a path goes
+/// through no element, and a struct the sum of its fields'; an enum is none, since a path goes
+/// through no variant.
 struct PathCount;
 
 impl Fold for PathCount {
     type Fact = usize;
 
-    fn leaf(&mut self, _: &Ty) -> Option<usize> {
-        Some(0)
+    fn leaf(&mut self, t: &Ty) -> Option<usize> {
+        Some(match t {
+            Ty::Int(_) => 1,
+            Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => 0,
+        })
     }
 
     fn array(&mut self, _: u128, _: usize) -> Option<usize> {
@@ -1566,18 +1571,12 @@ impl Fold for PathCount {
 
     fn decl(&mut self, d: Decl, variants: &[Vec<Field<'_, usize>>]) -> Option<usize> {
         match d {
-            // An enum field is no path Tier 1 follows.
-            Decl::Enum(_) => return Some(0),
-            Decl::Struct(_) => {}
+            Decl::Enum(_) => Some(0),
+            Decl::Struct(_) => variants
+                .iter()
+                .flatten()
+                .try_fold(0usize, |n, f| f.fact.map(|k| n.saturating_add(k))),
         }
-        variants.iter().flatten().try_fold(0usize, |n, f| {
-            let paths = match Fx::declared_shape(f.tree, f.def.decl) {
-                Shape::Int { .. } => Some(1),
-                Shape::Struct(_) => f.fact,
-                Shape::Array(..) | Shape::Other => Some(0),
-            };
-            paths.map(|k| n.saturating_add(k))
-        })
     }
 }
 

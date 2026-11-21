@@ -229,13 +229,13 @@ impl Fold for Refining {
     }
 
     fn decl(&mut self, _: Decl, variants: &[Vec<Field<'_, u128>>]) -> Option<u128> {
-        Some(variants.iter().flatten().fold(0, |n, f| {
+        variants.iter().flatten().try_fold(0u128, |n, f| {
             let checks = match refined_at_the_bottom(f.tree, f.def.decl) {
                 true => 1,
-                false => f.fact.unwrap_or(0),
+                false => f.fact?,
             };
-            n.saturating_add(checks)
-        }))
+            Some(n.saturating_add(checks))
+        })
     }
 }
 
@@ -255,9 +255,15 @@ fn refined_at_the_bottom(tree: &Tree, t: TypeId) -> bool {
 }
 
 impl Refined {
-    /// How many refinement checks a value of declaration `d` takes.
+    /// How many refinement checks a value of declaration `d` takes. One the walk gave no count,
+    /// a declaration a cycle leads back through, which the checker refuses, or one past the
+    /// walk's budget, counts past every limit: what is not counted is not unrolled.
     fn of(&self, d: Decl) -> u128 {
-        self.0.as_ref().and_then(|f| f.of(d)).copied().unwrap_or(0)
+        self.0
+            .as_ref()
+            .and_then(|f| f.of(d))
+            .copied()
+            .unwrap_or(u128::MAX)
     }
 
     /// How many refinement checks a value of the type `t` of `tree` takes: one for a refined
@@ -3629,7 +3635,8 @@ mod tests {
     fn test_refined_fields_are_found_in_a_step_for_each_field() {
         let mut src = String::from(
             "module m\nstruct S0 {\n  a: u8[1..=3]\n}\nstruct Plain {\n  b: [2]u8\n}\n\
-             enum Held {\n  V(s: S0)\n  W\n}\nenum Bare {\n  V(p: Plain)\n}\n",
+             enum Held {\n  V(s: S0)\n  W\n}\nenum Bare {\n  V(p: Plain)\n}\n\
+             struct Many {\n  xs: [3]S0\n}\n",
         );
         for k in 1..8 {
             src.push_str(&format!(
@@ -3642,9 +3649,9 @@ mod tests {
         let structs = &module.structs;
         let walk = TypeWalk::new(structs);
         let facts = walk.fold(&mut Refining);
-        // Eleven declarations; `S0`'s one field, `Plain`'s array and its element, the enums'
-        // payload fields, and two fields on each of seven levels.
-        assert_eq!(facts.steps, 11 + 1 + 2 + 2 + 2 * 7);
+        // Twelve declarations; `S0`'s one field, `Plain`'s array and its element, the enums'
+        // payload fields, `Many`'s array and its element, and two fields on each of seven levels.
+        assert_eq!(facts.steps, 12 + 1 + 2 + 2 + 2 + 2 * 7);
         let refined = Refined(Some(facts));
         for k in 0..8 {
             assert_eq!(
@@ -3665,6 +3672,13 @@ mod tests {
             refined.of(Decl::Enum(structs.enum_position("Bare").unwrap())),
             0
         );
+        // An array of refined structs is checked in a loop: its element's checks, once.
+        assert_eq!(
+            refined.of(Decl::Struct(structs.position("Many").unwrap())),
+            1
+        );
+        // A declaration the walk gave no count counts past every limit.
+        assert_eq!(Refined(None).of(Decl::Struct(0)), u128::MAX);
     }
 
     /// The refinement checks of a value that enters from outside are unrolled field by field, so
@@ -3697,9 +3711,11 @@ mod tests {
         );
     }
 
-    /// The shape of a struct twenty thousand deep, each level a struct or an enum holding the one
-    /// below it through an array, is let go of on the test's thread, whose 2 MiB a drop that took
-    /// a level of the host's stack for each struct overflowed at eight thousand (2026-11-22).
+    /// The shape of a struct two hundred thousand deep, each level a struct or an enum holding
+    /// the one below it through an array, is let go of on the test's thread: a drop that took a
+    /// level of the host's stack for each struct overflowed a thread's 2 MiB at eight thousand
+    /// (2026-11-22), and at twenty thousand still fit the 8 MiB a Linux main thread has, so that
+    /// the mutation run on CI saw no difference without `take_apart`.
     /// A level another shape still holds is left whole.
     #[test]
     fn test_a_deep_shape_is_let_go_of_one_level_at_a_time() {
@@ -3710,7 +3726,7 @@ mod tests {
         };
         let mut shape = Shape::Int(U16);
         let mut kept = None;
-        for k in 0..20_000 {
+        for k in 0..200_000 {
             let held = Shape::Array(1, Box::new(shape));
             shape = if k % 2 == 0 {
                 Shape::Struct(Arc::new(StructShape {

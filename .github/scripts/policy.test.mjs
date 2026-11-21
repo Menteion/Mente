@@ -657,6 +657,9 @@ const SLOW_TESTS = [
   ["mente-cli", "mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar"],
   ["mente-interp", "tests::test_a_program_tier1_proves_never_trips_its_checks"],
   ["mente-cli", "mir_run::tests::test_native_code_runs_each_construct_as_the_reference_interpreter_does"],
+  // Types nested as a DAG and as a long chain through every phase, on x86-64 Linux alone: 27.8 s
+  // on its first run (pull request 198).
+  ["mente-cli", "mir_run::differential::tests::test_types_nested_as_a_dag_or_a_long_chain_pass_every_phase"],
 ];
 /// The tests that run work on more than one thread at once (compiler/mente-threads),
 /// which the override of the group `all-cores` runs alone, each taking every test thread, so that

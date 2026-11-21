@@ -2850,7 +2850,8 @@ mod tests {
 
     /// A function whose arguments hold more values than the fuzzer builds is not run, by the
     /// measures of its parameters' types: of a DAG of structs, each holding two of the one before
-    /// it, `S6` holds 191 values and `S7` 383, past the 256 the fuzzer builds, as two `S6` are.
+    /// it, `S6` holds 191 values and `S7` 383, past the 256 the fuzzer builds, as two `S6` are;
+    /// an array of 255 holds exactly 256, and one of 256 one past.
     #[test]
     fn test_functions_past_the_arguments_values_are_not_run() {
         let mut text = String::from("module m\nstruct S0 {\n  a: u8\n}\n");
@@ -2861,14 +2862,16 @@ mod tests {
             ));
         }
         text.push_str(
-            "pub fn big(s: S7) -> u8 = 0\npub fn small(s: S6) -> u8 = 0\npub fn pair(a: S6, b: S6) -> u8 = 0\n",
+            "pub fn big(s: S7) -> u8 = 0\npub fn small(s: S6) -> u8 = 0\npub fn pair(a: S6, b: S6) -> u8 = 0\n\
+             pub fn edge(xs: [255]u8) -> u8 = 0\npub fn past(xs: [256]u8) -> u8 = 0\n",
         );
         let module = mente_sema::check_program(&text).unwrap();
         let run: Vec<String> = scalar_functions(&module)
             .into_iter()
             .map(|f| f.name)
             .collect();
-        assert_eq!(run, ["small"]);
+        // `[255]u8` holds 256 values, exactly the cap, and `[256]u8` one more.
+        assert_eq!(run, ["small", "edge"]);
     }
 
     /// A module that checks reaches every phase, the objects and both interpreters included,
