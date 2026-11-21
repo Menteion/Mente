@@ -170,8 +170,8 @@ jobs:
         # never from Tier 1's facts, unrolling each loop and each recursion up to 3 times
         # (docs/design-review.md, smt-independent-encoding). The known soundness bugs of
         # compiler/mente-cli/tests/smt-known are exported with the rest, and must be confirmed.
-        # The export fails on an obligation of Tier 1 with no site, on fewer queries than the
-        # baseline's floor, and on more checks cut off by the bound than its ceiling.
+        # The export fails on an obligation of Tier 1 with no site, and on a count of queries or of
+        # checks cut off by the bound that differs from the baseline's, in either direction.
         run: |
           set -euo pipefail
           mapfile -t pass < <(for f in conformance/*/*.mn; do
@@ -192,7 +192,7 @@ jobs:
         # are integer arithmetic, linear and nonlinear (a product of two variables, a division or a
         # remainder by one), over arrays, with conversions to bit-vectors for the bit operations; no
         # logic is set, and Z3 chooses. A timeout or `unknown`, which the nonlinear and bit-vector
-        # queries can give, decides nothing: more than the baseline allows fails the job, and so do
+        # queries can give, decides nothing: a count past the baseline's margin fails the job, and so do
         # a solver's error and a query with no answer. The answers are counted by fragment.
         run: |
           set -euo pipefail

@@ -321,11 +321,12 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
     Ok(w)
 }
 
-/// The counts of the CI job, recorded in [`BASELINE`], which each run is held to: the queries it
-/// writes may fall below the record by at most a hundredth, the checks cut off by the bound may
-/// rise above it by at most a hundredth, and the undecided answers may pass it by at most
-/// [`UNDECIDED_SLACK`], since a timeout depends on the runner. A change that moves a count past
-/// its margin records the new count, with why.
+/// The counts of the CI job, recorded in [`BASELINE`], which each run is held to exactly: the
+/// queries it writes and the checks cut off by the bound, which depend on the corpus and the
+/// encoding alone, must equal the record in either direction, so that a rise is recorded and a fall
+/// cannot hide inside an old margin; the undecided answers, which depend on the runner's speed, may
+/// differ from it by at most [`UNDECIDED_SLACK`] either way. A change that moves a count records the
+/// new count in the same pull request, and says why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Baseline {
     pub queries: usize,
@@ -336,7 +337,7 @@ pub struct Baseline {
 /// Where the baseline is kept, from the repository's root.
 pub const BASELINE: &str = "compiler/mente-cli/tests/smt-baseline.txt";
 
-/// How many undecided answers past the record a run may give.
+/// How many undecided answers more or fewer than the record a run may give.
 pub const UNDECIDED_SLACK: usize = 5;
 
 impl Baseline {
@@ -378,33 +379,38 @@ impl Baseline {
         })
     }
 
-    /// Why an export falls outside the baseline, if it does.
+    /// Why an export differs from the baseline, if it does: its queries or its checks cut off by
+    /// the bound, in either direction.
     pub fn export_problems(&self, w: &Written) -> Vec<String> {
         let mut out = Vec::new();
-        let floor = self.queries - self.queries / 100;
-        if w.queries < floor {
-            out.push(format!(
-                "{} queries were written, below the floor of {}, a hundredth under the {} recorded in {}: the encoding lost checks, or the corpus lost programs",
-                w.queries, floor, self.queries, BASELINE
-            ));
-        }
-        let ceiling = self.beyond_bound + self.beyond_bound / 100;
-        if w.beyond_bound > ceiling {
-            out.push(format!(
-                "{} checks Tier 1 erased are cut off by the bound, above the ceiling of {}, a hundredth over the {} recorded in {}: the encoding cuts off more paths than it did",
-                w.beyond_bound, ceiling, self.beyond_bound, BASELINE
-            ));
+        for (what, now, recorded, field) in [
+            ("queries were written", w.queries, self.queries, "queries"),
+            (
+                "checks Tier 1 erased are cut off by the bound",
+                w.beyond_bound,
+                self.beyond_bound,
+                "beyond-bound",
+            ),
+        ] {
+            if now != recorded {
+                out.push(format!(
+                    "{} {} where {} records {}: if the change means this, record `{}: {}` there in this pull request and say why; otherwise the encoding or the corpus lost or gained what it should not",
+                    now, what, BASELINE, recorded, field, now
+                ));
+            }
         }
         out
     }
 
-    /// Why a count of undecided answers falls outside the baseline, if it does.
+    /// Why a count of undecided answers differs from the baseline by more than
+    /// [`UNDECIDED_SLACK`], if it does.
     pub fn undecided_problem(&self, undecided: usize) -> Option<String> {
-        let cap = self.undecided + UNDECIDED_SLACK;
-        (undecided > cap).then(|| {
+        let low = self.undecided.saturating_sub(UNDECIDED_SLACK);
+        let high = self.undecided + UNDECIDED_SLACK;
+        (undecided < low || undecided > high).then(|| {
             format!(
-                "{} answers are undecided, above the cap of {}, the {} recorded in {} and {} more",
-                undecided, cap, self.undecided, BASELINE, UNDECIDED_SLACK
+                "{} answers are undecided, outside {} to {}, the {} {} records and {} either way: if the change means this, record `undecided: {}` there in this pull request and say why",
+                undecided, low, high, self.undecided, BASELINE, UNDECIDED_SLACK, undecided
             )
         })
     }
@@ -508,10 +514,17 @@ pub fn confirm_one(path: &Path, model: &str) -> Result<Verdict, String> {
         )));
     }
     let outcome = mente_interp::call(&checked, &header.function, args, Limits::default());
+    let clause = header
+        .obligation
+        .rsplit_once(" of the clause at ")
+        .and_then(|(_, at)| at.split_once(':'))
+        .and_then(|(l, c)| Some((l.parse().ok()?, c.parse().ok()?)))
+        .and_then(|(l, c)| clause_at(&checked, l, c));
     let trapped_here = matches!(&outcome, Err(Stop::Trap(t))
         if t.kind.name() == header.trap_kind
             && t.span.line == header.trap_line
-            && t.span.col == header.trap_col);
+            && t.span.col == header.trap_col
+            && tag_agrees(&header.obligation, &t.kind, clause.as_deref()));
     let ran = match &outcome {
         Ok(v) => format!("returns {}", v),
         Err(stop) => format!("stops: {}", stop),
@@ -536,6 +549,63 @@ pub fn confirm_one(path: &Path, model: &str) -> Result<Verdict, String> {
         call,
         ran
     )))
+}
+
+/// The clause of `checked` whose expression starts at `line:col`, a contract's, a loop's
+/// invariant or a loop's measure, written as the interpreter writes it in a trap.
+fn clause_at(checked: &CheckedModule, line: u32, col: u32) -> Option<String> {
+    for f in checked.functions.iter().flatten() {
+        let tree = &f.syntax.tree;
+        let mut clauses: Vec<mente_syntax::tree::ExprId> =
+            f.syntax.contracts.iter().map(|c| c.expr).collect();
+        for s in &tree.stmts {
+            if let mente_syntax::tree::StmtKind::While {
+                invariants,
+                decreases,
+                ..
+            } = &s.kind
+            {
+                clauses.extend(invariants.iter().chain(decreases));
+            }
+        }
+        for e in clauses {
+            let at = tree.expr(e).span;
+            if (at.line, at.col) == (line, col) {
+                return Some(tree.render_expr(e));
+            }
+        }
+    }
+    None
+}
+
+/// Whether a trap tells the obligation it is, beside its kind and its place, where it carries
+/// enough to: a narrowing names the type it narrows into, which an obligation's tag ``into `T``
+/// names; a clause's trap writes the clause, which the tag `of the clause at L:C` places and
+/// `clause` is. Any other trap, an index's, a divisor's, a shift amount's or a refinement's, carries
+/// its kind and its place alone, which two obligations can share: such a trap agrees with any.
+pub fn tag_agrees(obligation: &str, trap: &mente_interp::TrapKind, clause: Option<&str>) -> bool {
+    use mente_interp::TrapKind as K;
+    if let Some((_, ty)) = obligation.split_once(" into `") {
+        let ty = ty.trim_end_matches('`');
+        return matches!(trap, K::Narrowing { into, .. } if *into == ty);
+    }
+    if obligation.contains(" of the clause at ") {
+        return match trap {
+            K::Requires(text) | K::Ensures(text) | K::Invariant(text) | K::Decreases(text) => {
+                clause == Some(text.as_str())
+            }
+            K::Narrowing { .. }
+            | K::Refinement { .. }
+            | K::DivisionByZero
+            | K::IndexOutOfBounds { .. }
+            | K::ShiftAmount { .. }
+            | K::Todo(_)
+            | K::Unreachable(_)
+            | K::StackOverflow
+            | K::IntermediateOverflow => false,
+        };
+    }
+    true
 }
 
 /// The lines of a file of `tests/smt-known` that begin with `prefix`, each a function and an
@@ -1569,9 +1639,76 @@ mod tests {
         let _ = fs::remove_dir_all(&out);
     }
 
-    /// The CI job holds its counts to the baseline it records: the queries it writes to a floor a
-    /// hundredth under the record, the checks cut off by the bound to a ceiling a hundredth over
-    /// it, and the undecided answers to the record and a few; and the baseline is read strictly.
+    /// A trap tells its obligation by its tag where it carries enough to: a narrowing by the type it
+    /// narrows into, a clause's trap by the clause. A model whose run traps at the kind and place
+    /// its query names, but into another type than its obligation's, confirms nothing. Any other
+    /// trap agrees with every obligation of its kind and place, which is the known limit.
+    #[test]
+    fn test_a_trap_tells_its_obligation_where_it_carries_enough() {
+        use mente_interp::TrapKind as K;
+        let into = |t: &'static str| K::Narrowing {
+            value: None,
+            into: t,
+        };
+        assert!(tag_agrees("range at 4:19 into `i32`", &into("i32"), None));
+        assert!(!tag_agrees("range at 4:19 into `i32`", &into("i8"), None));
+        assert!(!tag_agrees(
+            "range at 4:19 into `i32`",
+            &K::DivisionByZero,
+            None
+        ));
+        let clause = "requires at 2:3 of the clause at 1:9";
+        let requires = K::Requires("(> x 0)".into());
+        assert!(tag_agrees(clause, &requires, Some("(> x 0)")));
+        assert!(!tag_agrees(clause, &requires, Some("(> y 0)")));
+        assert!(!tag_agrees(clause, &requires, None));
+        let index = K::IndexOutOfBounds {
+            index: Int::ZERO,
+            len: 1,
+        };
+        assert!(!tag_agrees(clause, &index, Some("(> x 0)")));
+        assert!(tag_agrees("divisor at 3:9", &K::DivisionByZero, None));
+        // A clause by its place, written as the interpreter writes it in a trap.
+        let src = "module m\npub fn f(x: u8) -> u8\n  requires x > 0\n{\n  var i: u8 = 0\n  while i < x invariant i <= x {\n    i += 1\n  }\n  i\n}\n";
+        let checked = mente_sema::check_program_without_proofs(src).unwrap();
+        assert_eq!(clause_at(&checked, 3, 12).as_deref(), Some("(> x 0)"));
+        assert_eq!(clause_at(&checked, 6, 25).as_deref(), Some("(<= i x)"));
+        assert_eq!(clause_at(&checked, 6, 9), None);
+        // Two obligations share one trap at the literal: its own narrowing of `x` into `i16`,
+        // which never fails, and the binding's narrowing of it into `u8`. A run of x = 300 traps
+        // into `u8`, which confirms the second and not the first, whatever its query holds.
+        let dir = scratch("tag");
+        let file = dir.join("t.mn");
+        fs::write(
+            &file,
+            "module m\npub fn f(x: i16) -> u8 {\n  val a: [2]u8 = [x, 1]\n  a[0]\n}\n",
+        )
+        .unwrap();
+        let query = |obligation: &str| {
+            format!(
+                "; source: {}:3:19\n; function: f\n; obligation: {}\n; trap: narrowing at 3:18\n(declare-const p.x Int)\n(assert (= p.x 300))\n(check-sat)\n(get-value (p.x))\n",
+                file.display(),
+                obligation
+            )
+        };
+        let path = dir.join("q.smt2");
+        fs::write(&path, query("range at 3:19 into `u8`")).unwrap();
+        let found = confirm_one(&path, "((p.x 300))");
+        assert!(
+            matches!(found, Ok(Verdict::Confirmed { .. })),
+            "{:?}",
+            found
+        );
+        fs::write(&path, query("range at 3:19 into `i16`")).unwrap();
+        let found = confirm_one(&path, "((p.x 300))");
+        assert!(matches!(found, Ok(Verdict::Unconfirmed(_))), "{:?}", found);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The CI job holds its counts to the baseline it records: the queries it writes and the
+    /// checks cut off by the bound exactly, in either direction, each difference asking for the
+    /// record to be updated in the same pull request; the undecided answers within a few either
+    /// way; and the baseline is read strictly.
     #[test]
     fn test_the_job_holds_its_counts_to_the_recorded_baseline() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1590,21 +1727,33 @@ mod tests {
             beyond_bound,
             ..Written::default()
         };
-        let floor = b.queries - b.queries / 100;
-        let ceiling = b.beyond_bound + b.beyond_bound / 100;
-        assert!(b.export_problems(&at(floor, ceiling)).is_empty());
-        let low = b.export_problems(&at(floor - 1, ceiling));
-        assert!(
-            low.len() == 1 && low[0].contains("below the floor"),
-            "{:?}",
-            low
-        );
-        let high = b.export_problems(&at(floor, ceiling + 1));
-        assert!(
-            high.len() == 1 && high[0].contains("cut off by the bound"),
-            "{:?}",
-            high
-        );
+        // The counts that depend on the corpus and the encoding alone are held exactly, either
+        // way; the undecided answers within the slack either way.
+        assert!(b.export_problems(&at(b.queries, b.beyond_bound)).is_empty());
+        for (w, says) in [
+            (at(b.queries + 1, b.beyond_bound), "queries were written"),
+            (at(b.queries - 1, b.beyond_bound), "queries were written"),
+            (at(b.queries, b.beyond_bound + 1), "cut off by the bound"),
+            (at(b.queries, b.beyond_bound - 1), "cut off by the bound"),
+        ] {
+            let found = b.export_problems(&w);
+            assert!(
+                found.len() == 1
+                    && found[0].contains(says)
+                    && found[0].contains("in this pull request and say why"),
+                "{:?}",
+                found
+            );
+        }
+        let ten = Baseline { undecided: 10, ..b };
+        for (undecided, holds) in [(4, false), (5, true), (10, true), (15, true), (16, false)] {
+            assert_eq!(
+                ten.undecided_problem(undecided).is_none(),
+                holds,
+                "{}",
+                undecided
+            );
+        }
         assert_eq!(b.undecided_problem(b.undecided + UNDECIDED_SLACK), None);
         assert!(b
             .undecided_problem(b.undecided + UNDECIDED_SLACK + 1)
