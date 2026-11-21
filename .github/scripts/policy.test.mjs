@@ -38,6 +38,7 @@ import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, rea
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
+import { CARGO_BUILDS, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../tools/raw-build.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,7 +46,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 72;
+const FLOOR = 73;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -3543,6 +3544,8 @@ const GATE_FILES = [
   "/tools/capped.ps1",
   "/tools/cargo.mjs",
   "/tools/mn.mjs",
+  "/tools/raw-build.mjs",
+  "/tools/raw-build-guard.mjs",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
@@ -3859,6 +3862,45 @@ check("the quick checks run every command in one of the machine's build slots, u
   }
   const noProofs = { ...texts.map, checks: texts.map.checks.filter((c) => c.run.join(" ") !== "node --test tools/local-limits.test.mjs") };
   assert.ok(localLimitsProblems({ ...texts, map: noProofs }).length > 0, "a map that runs no proof of the local limits passed");
+});
+
+check("the raw-build guard refuses a build outside the local limits and names the capped command to run instead", () => {
+  // The hook a session runs before each shell command (tools/raw-build-guard.mjs, which
+  // tools/raw-build.mjs decides for): a raw `cargo test`, or a binary run from target/, would run
+  // past the job object and the slots, as the test binary of 2026-11-22 did. The refusal names the
+  // command to run instead, as a diagnostic names its fix. Each case: the command, and what the
+  // guard must name instead, or null to let it through.
+  const cases = [
+    ["cargo test", "node tools/cargo.mjs test"],
+    ["cargo test -p mente-cli", "node tools/cargo.mjs test -p mente-cli"],
+    ["cd compiler && cargo build --release", "node tools/cargo.mjs build --release"],
+    ["CARGO_BUILD_JOBS=4 cargo t", "node tools/cargo.mjs t"],
+    ["cargo +nightly run --bin mn -- spec", "node tools/cargo.mjs +nightly run --bin mn -- spec"],
+    ["& cargo clippy --all-targets", "node tools/cargo.mjs clippy --all-targets"],
+    ['cargo test -p x -- "a b" && echo done', 'node tools/cargo.mjs test -p x -- "a b"'],
+    ["if true; then cargo test; fi", "node tools/cargo.mjs test"],
+    ["C:/Users/Dancr/.cargo/bin/cargo.exe check", "node tools/cargo.mjs check"],
+    ["target/debug/mn.exe check x.mn", "node tools/mn.mjs check x.mn"],
+    ["C:\\Repos\\Mente\\target\\release\\mn.exe run a.mn", "node tools/mn.mjs run a.mn"],
+    ["./target/debug/deps/mn-0e02cc27629dbce7.exe --list", "node tools/cargo.mjs test -- --list"],
+    ["node tools/cargo.mjs test -p mente-cli", null],
+    ["node tools/mn.mjs check examples/a.mn", null],
+    ["node tools/quick.mjs -- -p mente-cli x", null],
+    ["cargo fmt --all --check", null],
+    ["cargo metadata --format-version 1", null],
+    ['git commit -m "run cargo test before"', null],
+    ['git commit -m "fix the floor; cargo test passes"', null],
+    ["ls target/debug/", null],
+    ["grep -r cargo test.txt", null],
+    ["echo cargo test", null],
+    ["cargo testing-tool", null],
+  ];
+  const wrong = cases.filter(([command, instead]) => (rawBuildRefusal(command)?.instead ?? null) !== instead).map(([command, instead]) => `${command}: ${rawBuildRefusal(command)?.instead ?? null}, not ${instead}`);
+  assert.deepEqual(wrong, []);
+  // The words a session reads name the command found and the one to run.
+  const planted = rawBuildRefusal("cargo test");
+  assert.match(rawBuildMessage(planted), /^"cargo test" would run outside the local limits\. Run this instead: node tools\/cargo\.mjs test\n/);
+  for (const name of ["build", "test", "run", "clippy", "nextest", "check"]) assert.ok(CARGO_BUILDS.includes(name), `the guard lets cargo ${name} through`);
 });
 
 check("the required checks are listed once each", () => {
