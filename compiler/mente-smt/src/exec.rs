@@ -386,8 +386,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
     let mut cuts = x.cut.clone();
     cuts.extend(x.lacked.iter().copied());
     let cut = x.t.or(&cuts);
-    let live = |cuts: &[T]| cuts.iter().any(|&c| x.t.as_bool(c) != Some(false));
-    let (cut_past_bound, cut_at_lacked) = (live(&x.cut), live(&x.lacked));
+    let (cut_past_bound, cut_at_lacked) = (live(&x.t, &x.cut), live(&x.t, &x.lacked));
     // What the run returns: its value and each parameter's final value, joined over the ways
     // out of the call, and whether one of them holds.
     let ways: Vec<(T, (V, Vars))> = x
@@ -546,9 +545,8 @@ impl<'m> Exec<'m> {
         if self.recording && at.owner == self.entry {
             let fails = self.t.not(ok);
             let fails = self.t.and2(self.active, fails);
-            let t = &self.t;
-            let live = |cuts: &[T]| cuts.iter().any(|&c| t.as_bool(c) != Some(false));
-            let (beyond_bound, beyond_lacked) = (live(&self.cut), live(&self.lacked));
+            let (beyond_bound, beyond_lacked) =
+                (live(&self.t, &self.cut), live(&self.t, &self.lacked));
             self.sites.push(Site {
                 kind,
                 span: at.key,
@@ -672,10 +670,9 @@ impl<'m> Exec<'m> {
                 let at = At { owner, key, trap };
                 self.check(ok, Kind::Range, Tag::Into(t.name), at, "narrowing");
             }
+            // An array's elements are narrowed one by one; an element that narrows nothing, a
+            // `bool` or a struct, checks nothing, as a scalar of its shape does.
             (Shape::Array(len, elem), V::Arr(a, s)) => {
-                if !narrows(elem) {
-                    return;
-                }
                 let held = match s {
                     Shape::Array(_, e) => (**e).clone(),
                     Shape::Int(_) | Shape::Untyped | Shape::Bool | Shape::Other => (**elem).clone(),
@@ -1549,12 +1546,18 @@ impl<'m> Exec<'m> {
                     }
                 }
             }
-            ExprKind::Field { base, name } => match self.shape(*base) {
-                Shape::Array(len, _) if name == "len" => {
+            // An array's one field is its length, which the checker allows alone; read by its
+            // name with the shape, so that another field an array may gain later is a construct
+            // the encoding lacks, not a length.
+            ExprKind::Field { base, name } => match (self.shape(*base), name.as_str()) {
+                (Shape::Array(len, _), "len") => {
                     self.eval(*base);
                     V::Int(self.t.num(Big::from_u128(len)))
                 }
-                Shape::Array(..) | Shape::Int(_) | Shape::Untyped | Shape::Bool | Shape::Other => {
+                (
+                    Shape::Array(..) | Shape::Int(_) | Shape::Untyped | Shape::Bool | Shape::Other,
+                    _,
+                ) => {
                     self.lacks(span, "a field of a struct");
                     self.default(&shape)
                 }
@@ -2025,13 +2028,10 @@ impl<'m> Exec<'m> {
     }
 }
 
-/// Whether narrowing into a shape checks anything: an integer type within it.
-fn narrows(s: &Shape) -> bool {
-    match s {
-        Shape::Int(_) => true,
-        Shape::Array(_, e) => narrows(e),
-        Shape::Untyped | Shape::Bool | Shape::Other => false,
-    }
+/// Whether some path was cut off: one of `cuts`, each the condition of a path where it was cut,
+/// that is not false whatever the inputs. A path cut where no input reaches it cuts nothing.
+pub(crate) fn live(t: &Terms, cuts: &[T]) -> bool {
+    cuts.iter().any(|&c| t.as_bool(c) != Some(false))
 }
 
 /// The term of a value, where it has one.
@@ -2053,5 +2053,23 @@ fn empty_frame<'m>(f: &'m Function<'m>) -> Frame<'m> {
         measure: None,
         returns: Vec::new(),
         loops: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cut cuts a path where an input may reach it: a cut of a constant false path cuts none,
+    /// and one cut that may hold among such makes some path cut off.
+    #[test]
+    fn test_a_cut_is_live_where_an_input_may_reach_it() {
+        let mut t = Terms::default();
+        let (no, yes) = (t.bool(false), t.bool(true));
+        let c = t.input("p.c".to_string(), Sort::Bool);
+        assert!(!live(&t, &[]));
+        assert!(!live(&t, &[no, no]));
+        assert!(live(&t, &[no, c]));
+        assert!(live(&t, &[yes]));
     }
 }

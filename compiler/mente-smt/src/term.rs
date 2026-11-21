@@ -456,7 +456,9 @@ mod tests {
     #[test]
     fn test_terms_are_made_once_and_folded_on_constants() {
         let mut t = Terms::default();
+        assert!(t.is_empty());
         let x = t.input("p.x".into(), Sort::Int);
+        assert!(!t.is_empty() && t.len() == 1);
         let one = t.int(1);
         let a = t.add(x, one);
         assert_eq!(t.add(x, one), a);
@@ -484,6 +486,9 @@ mod tests {
         assert_eq!(t.eq(x, x), tru);
         assert_eq!(t.eq(one, two), fals);
         assert_eq!(t.eq(tru, tru), tru);
+        // Two boolean constants that differ fold to false, as two numbers do.
+        assert_eq!(t.eq(tru, fals), fals);
+        assert_eq!(t.eq(fals, tru), fals);
         let c = t.lt(x, two);
         assert_eq!(t.and(&[tru, c, c]), c);
         assert_eq!(t.and(&[c, fals]), fals);

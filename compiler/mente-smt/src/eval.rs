@@ -291,7 +291,7 @@ pub fn eval(s: &Sexp, env: &HashMap<String, Value>) -> Result<Value, String> {
         return bv2nat(args.first().ok_or("bv2nat of nothing")?, env);
     }
     let vals: Vec<Value> = match op.as_str() {
-        // These read their operands as they decide.
+        // `ite` reads the branch it takes alone; `and` and `or` read every operand, below.
         "ite" | "and" | "or" => Vec::new(),
         _ => args
             .iter()
@@ -496,5 +496,70 @@ mod tests {
         assert_eq!(m.get("p.b"), Some(&Value::Bool(true)));
         assert!(model("((p.x))").is_err());
         assert!(model("(5)").is_err());
+    }
+
+    /// A query defines constants alone, a function with parameters refused; and an indexed
+    /// operator is read as `int2bv` only as `(_ int2bv N)`.
+    #[test]
+    fn test_a_query_defines_constants_alone_and_reads_int2bv_by_its_index() {
+        let none = HashMap::new();
+        assert_eq!(
+            holds("(define-fun f () Int 3)\n(assert (= f 3))\n", &none),
+            Ok(true)
+        );
+        assert_eq!(
+            holds("(define-fun f ((x Int)) Int x)\n(assert true)\n", &none),
+            Err("`f` takes parameters".to_string())
+        );
+        let width = |text: &str| int2bv_width(&parse(text).unwrap()[0]);
+        assert_eq!(width("(_ int2bv 8)"), Some(8));
+        for other in ["(_ zero_extend 8)", "(x int2bv 8)", "(_ int2bv)", "int2bv"] {
+            assert_eq!(width(other), None, "{}", other);
+        }
+    }
+
+    /// A numeral is never negative, as SMT-LIB writes it: `-5` is a name, and minus five is
+    /// `(- 5)`; only `(as const ...)` makes a constant array; and `ite` reads the branch it takes
+    /// alone, while `and` and `or` read every operand.
+    #[test]
+    fn test_numerals_constant_arrays_and_lazy_operators_read_as_smt_lib_writes_them() {
+        let none = HashMap::new();
+        assert_eq!(
+            holds("(assert (= -5 -5))\n", &none),
+            Err("an unknown name `-5`".to_string())
+        );
+        assert_eq!(holds("(assert (= (- 5) (- 5)))\n", &none), Ok(true));
+        for head in ["(as nothing (Array Int Int))", "(_ const (Array Int Int))"] {
+            let q = format!(
+                "(define-fun a () (Array Int Int) ({} 0))\n(assert true)\n",
+                head
+            );
+            let found = holds(&q, &none);
+            assert!(
+                found
+                    .as_ref()
+                    .is_err_and(|e| e.starts_with("an unknown indexed operator")),
+                "{}: {:?}",
+                head,
+                found
+            );
+        }
+        for q in [
+            "(assert (= (ite true 1 nothing) 1))\n",
+            "(assert (= (ite false nothing 2) 2))\n",
+        ] {
+            assert_eq!(holds(q, &none), Ok(true), "{}", q);
+        }
+        for q in [
+            "(assert (not (and false nothing)))\n",
+            "(assert (or true nothing))\n",
+        ] {
+            assert_eq!(
+                holds(q, &none),
+                Err("an unknown name `nothing`".to_string()),
+                "{}",
+                q
+            );
+        }
     }
 }

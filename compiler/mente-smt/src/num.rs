@@ -36,9 +36,12 @@ impl Big {
         Big::new(false, mag)
     }
 
+    /// The value of `v`: its magnitude, negated where `v` is negative. Zero has no sign
+    /// ([`Big::new`]), so the sign is read with `is_negative`, not a comparison whose `<=`
+    /// would give zero the same value.
     pub fn from_i128(v: i128) -> Big {
         let m = Big::from_u128(v.unsigned_abs());
-        if v < 0 {
+        if v.is_negative() {
             m.neg()
         } else {
             m
@@ -83,7 +86,8 @@ impl Big {
         }
     }
 
-    /// The magnitude as a `u128`, when it fits.
+    /// The magnitude as a `u128`, when it fits: the limbs, each at its own 32 bits, summed,
+    /// which no two of them overlap to make other than their union.
     pub fn magnitude_u128(&self) -> Option<u128> {
         if self.mag.len() > 4 {
             return None;
@@ -92,7 +96,7 @@ impl Big {
             self.mag
                 .iter()
                 .enumerate()
-                .fold(0u128, |acc, (k, &l)| acc | (u128::from(l) << (32 * k))),
+                .fold(0u128, |acc, (k, &l)| acc + (u128::from(l) << (32 * k))),
         )
     }
 
@@ -129,13 +133,9 @@ impl Big {
                 out[i + j] = t as u32;
                 carry = t >> 32;
             }
-            let mut k = i + other.mag.len();
-            while carry > 0 {
-                let t = u64::from(out[k]) + carry;
-                out[k] = t as u32;
-                carry = t >> 32;
-                k += 1;
-            }
+            // The row's carry, below 2^32 since each product and sum stays below 2^64, lands in
+            // a limb no earlier row reached: row `i` writes up to `i + other.mag.len()` alone.
+            out[i + other.mag.len()] = carry as u32;
         }
         Big::new(self.neg != other.neg, out)
     }
@@ -234,7 +234,8 @@ impl fmt::Display for Big {
         while !rest.is_empty() {
             let mut rem = 0u64;
             for limb in rest.iter_mut().rev() {
-                let cur = (rem << 32) | u64::from(*limb);
+                // The remainder, below 10^9, above the limb's 32 bits: their sum is their union.
+                let cur = (rem << 32) + u64::from(*limb);
                 *limb = (cur / 1_000_000_000) as u32;
                 rem = cur % 1_000_000_000;
             }
@@ -282,12 +283,9 @@ fn sub_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
     let mut out = Vec::with_capacity(a.len());
     let mut borrow = 0i64;
     for (k, &x) in a.iter().enumerate() {
-        let mut t = i64::from(x) - i64::from(b.get(k).copied().unwrap_or(0)) - borrow;
-        borrow = 0;
-        if t < 0 {
-            t += 1 << 32;
-            borrow = 1;
-        }
+        let t = i64::from(x) - i64::from(b.get(k).copied().unwrap_or(0)) - borrow;
+        borrow = i64::from(t < 0);
+        // A difference of `-2^32` to `-1` borrows, and its low 32 bits are `t + 2^32`.
         out.push(t as u32);
     }
     out
@@ -302,7 +300,8 @@ fn div_mag(a: &[u32], b: &[u32]) -> (Vec<u32>, Vec<u32>) {
         let mut carry = (a[k / 32] >> (k % 32)) & 1;
         for limb in r.iter_mut() {
             let top = *limb >> 31;
-            *limb = (*limb << 1) | carry;
+            // The shifted limb's lowest bit is clear, so the carry's sum with it is their union.
+            *limb = (*limb << 1) + carry;
             carry = top;
         }
         if carry > 0 {
@@ -391,5 +390,22 @@ mod tests {
         assert_eq!(b(-1).mod_pow2(128), Big::from_u128(u128::MAX));
         assert_eq!(b(-1).mod_pow2(64), Big::from_u128(u128::from(u64::MAX)));
         assert_eq!(Big::pow2(130).add(&b(3)).mod_pow2(128), b(3));
+    }
+
+    /// A value reads back as a `u128` where it is one, its magnitude where that fits, and its
+    /// sign as it is: zero has none.
+    #[test]
+    fn test_a_value_reads_back_its_magnitude_and_its_sign() {
+        assert!(b(-1).is_negative() && b(i128::MIN).is_negative());
+        assert!(!b(0).is_negative() && !b(1).is_negative() && !b(0).neg().is_negative());
+        let two_limbs = (1u128 << 64) + 1;
+        for v in [0, 1, u128::from(u32::MAX), two_limbs, u128::MAX] {
+            assert_eq!(Big::from_u128(v).to_u128(), Some(v), "{}", v);
+            assert_eq!(Big::from_u128(v).magnitude_u128(), Some(v), "{}", v);
+        }
+        assert_eq!(b(-1).to_u128(), None);
+        assert_eq!(b(i128::MIN).magnitude_u128(), Some(1u128 << 127));
+        assert_eq!(Big::pow2(128).magnitude_u128(), None);
+        assert_eq!(Big::pow2(128).to_u128(), None);
     }
 }

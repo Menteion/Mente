@@ -603,6 +603,26 @@ fn test_mn_smt_compare_holds_a_run_to_its_base() {
         "{}",
         stdout
     );
+    // A program of the base this tree no longer holds is deleted, not lost.
+    let gone = dir.join("gone.mn");
+    fs::write(
+        &base_keys,
+        format!(
+            "{}file\t{}\t0123456789abcdef\tchecked\n",
+            base_text,
+            gone.display()
+        ),
+    )
+    .unwrap();
+    let run = compare();
+    let stdout = text(&run.stdout);
+    assert!(run.status.success(), "{}", stdout);
+    assert!(
+        stdout.contains(&format!("program: deleted: {}: 0 checks", gone.display()))
+            && !stdout.contains("lost: "),
+        "{}",
+        stdout
+    );
     // With no export of the base, every program is new while the base's workspace lacks the
     // encoding; once it holds it, wherever it lies, a program both trees hold unchanged that the
     // base's export did not read fails the run.
@@ -646,6 +666,28 @@ fn test_mn_smt_compare_holds_a_run_to_its_base() {
     assert_eq!(encodes(), Some(2));
     assert_eq!(compare().status.code(), Some(2));
     workspace(&["compiler/mente-syntax"]);
+    // Each flag misspelled alone, the command is a usage error.
+    for k in 0..4 {
+        let mut flags = ["--base-tree", "--base", "--head", "--waivers"];
+        let wrong = format!("{}s", flags[k]);
+        flags[k] = &wrong;
+        let run = mn(&[
+            "smt",
+            "--compare",
+            flags[0],
+            tree.to_str().unwrap(),
+            flags[1],
+            base_keys.to_str().unwrap(),
+            base_answers.to_str().unwrap(),
+            flags[2],
+            head_keys.to_str().unwrap(),
+            head_answers.to_str().unwrap(),
+            flags[3],
+            waivers.to_str().unwrap(),
+        ]);
+        assert_eq!(run.status.code(), Some(2), "{}", wrong);
+        assert!(text(&run.stderr).starts_with("Usage: mn smt --compare"));
+    }
     fs::write(&head_keys, "check\tm.mn\n").unwrap();
     for usage in [
         compare(),

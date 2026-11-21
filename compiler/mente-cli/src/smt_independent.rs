@@ -633,6 +633,9 @@ pub struct Waiver {
 impl Waiver {
     /// Reads a trailer's value, `<file> <function> <obligation>: <reason>`: the file and the
     /// function are words, the obligation runs to the first `: `, and the reason is not empty.
+    /// The value is trimmed first, so its file is never empty, and neither is a reason after
+    /// the first `: `, which a trimmed value cannot end with; a doubled space can still leave
+    /// the function empty, and a `: ` right after it the obligation.
     fn read(value: &str) -> Result<Waiver, String> {
         let bad = || {
             format!(
@@ -646,11 +649,7 @@ impl Waiver {
             return Err(bad());
         };
         let (obligation, reason) = rest.split_once(": ").ok_or_else(bad)?;
-        if file.is_empty()
-            || function.is_empty()
-            || obligation.is_empty()
-            || reason.trim().is_empty()
-        {
+        if function.is_empty() || obligation.is_empty() {
             return Err(bad());
         }
         Ok(Waiver {
@@ -1391,10 +1390,16 @@ pub fn confirm(answers: &str, gate: &Gate) -> Confirmed {
     c
 }
 
+/// What `mn smt --independent` exits with once it wrote everything: 1 when an obligation of Tier
+/// 1 has no site where it should, a defect of the encoding, and 0 otherwise.
+fn independent_status(w: &Written) -> i32 {
+    i32::from(w.unmatched > 0)
+}
+
 /// `mn smt --independent <file.mn | dir>... --out <dir> [--keys <file>]`: writes the independent
 /// queries and prints a summary, and with `--keys` what it made of each check Tier 1 erased, for
-/// the comparison with the base ([`Export`]); exits 1 when an obligation of Tier 1 has no site,
-/// and 2 when a file cannot be read or written.
+/// the comparison with the base ([`Export`]); exits as [`independent_status`] says, and 2 when a
+/// file cannot be read or written.
 pub fn cmd_independent(args: &[String]) {
     let mut out = None;
     let mut keys = None;
@@ -1439,8 +1444,9 @@ pub fn cmd_independent(args: &[String]) {
                     std::process::exit(2);
                 }
             }
-            if w.unmatched > 0 {
-                std::process::exit(1);
+            let status = independent_status(&w);
+            if status != 0 {
+                std::process::exit(status);
             }
         }
         Err(e) => {
@@ -2492,10 +2498,10 @@ mod tests {
     #[test]
     fn test_a_run_is_held_to_its_base_on_the_programs_both_hold_unchanged() {
         let (base, run) = base_and_run();
-        let base_answers = answers(&[("unsat", "base/f-3.smt2"), ("unsat", "base/k-8.smt2")]);
+        let base_answers = answers(&[("timeout", "base/f-3.smt2"), ("unsat", "base/k-8.smt2")]);
         let run_answers = answers(&[
             ("timeout", "head/f-3.smt2"),
-            ("unsat", "head/f-4.smt2"),
+            ("unknown", "head/f-4.smt2"),
             ("unsat", "head/k-8.smt2"),
             ("unknown", "head/e.smt2"),
         ]);
@@ -2520,9 +2526,10 @@ mod tests {
             ["u.mn: the base's checker accepts its module and this run's does not"]
         );
         assert!(!c.passes());
-        // Only the query both runs ask counts toward the base's undecided answers; every query
-        // of the run counts toward its share.
-        assert_eq!((c.undecided, c.total), ((0, 1), (2, 6)));
+        // Only a check both runs query counts toward the undecided answers over both, each side's
+        // own: not `f`'s range, which the base cut off and this run queries undecided. Every
+        // query of the run counts toward its share.
+        assert_eq!((c.undecided, c.total), ((1, 1), (3, 6)));
         let moved = c.moved.join("\n");
         for part in [
             "a.mn: `f`'s obligation `range at 4:1 into `u8`` is cut off by the bound on the base and a query here",
@@ -2810,9 +2817,13 @@ mod tests {
                 reason: "why not".to_string(),
             })
         );
-        let (none, bad) = waivers_of("a.mn f\na.mn f divisor at 3:9\na.mn f divisor at 3:9:  \n");
+        // Each part missing alone: the function, after a doubled space; the obligation, a `: `
+        // right after the function; the `: ` and the reason.
+        let (none, bad) = waivers_of(
+            "a.mn f\na.mn  divisor at 3:9: why\na.mn f : why\na.mn f divisor at 3:9\na.mn f divisor at 3:9:  \n",
+        );
         assert!(none.is_empty(), "{:?}", none);
-        assert_eq!(bad.len(), 3, "{:?}", bad);
+        assert_eq!(bad.len(), 5, "{:?}", bad);
         assert!(bad[0]
             .contains("is no waiver: write `Smt-Drop: <file> <function> <obligation>: <reason>`"));
         // The job reads the trailers of the commits since the base by this key.
@@ -3091,6 +3102,322 @@ pub fn outer(x: u8) -> u8 = inner(x)
                 seen.contains(listed),
                 "`{}` is listed but no program reaches it",
                 listed
+            );
+        }
+    }
+
+    /// A key is erased only where every record of it is proven; the keys keep the order of
+    /// their first records.
+    #[test]
+    fn test_a_key_is_erased_only_where_every_record_of_it_is_proven() {
+        let at = |line: u32, col: u32| Span {
+            start: (line * 100 + col) as usize,
+            end: (line * 100 + col + 1) as usize,
+            line,
+            col,
+        };
+        let o = |span: Span, proven: bool| Obligation {
+            kind: ObligationKind::Divisor,
+            span,
+            must: true,
+            proven,
+            detail: String::new(),
+            tag: Tier1Tag::None,
+        };
+        let (a, b, c) = (at(3, 9), at(4, 9), at(5, 9));
+        let records = [o(a, true), o(b, true), o(a, false), o(c, false), o(b, true)];
+        assert_eq!(erased(&records), [(Kind::Divisor, b, Tag::None)]);
+        assert_eq!(
+            erased(&[o(c, true), o(a, true)]),
+            [(Kind::Divisor, c, Tag::None), (Kind::Divisor, a, Tag::None)]
+        );
+    }
+
+    /// The sites of one obligation and one trap are one group, in the order they first appear;
+    /// another trap of the same obligation, or another obligation at the same trap, is a group
+    /// of its own. A function with no site and no construct that leaves it whole unencoded has
+    /// each of its obligations unmatched.
+    #[test]
+    fn test_sites_are_grouped_by_obligation_and_trap() {
+        let src = "module m\npub fn safe(d: u8[1..=9]) -> u8 = 7 % d\n";
+        let checked = mente_sema::check_program(src).unwrap();
+        let module = module_of(&checked);
+        let mut enc = mente_smt::encode(&module, 0);
+        let first = enc.sites[0].clone();
+        let n = enc.sites.len();
+        let mut other_trap = first.clone();
+        other_trap.trap.span.col += 1;
+        let mut other_key = first.clone();
+        other_key.span.col += 1;
+        enc.sites.extend([first.clone(), other_trap, other_key]);
+        let found = groups(&enc, |_| true);
+        let of = |k: usize| found.iter().position(|g| g.contains(&k)).unwrap();
+        assert_eq!(found[of(0)], [0, n]);
+        assert_eq!(found[of(n + 1)], [n + 1]);
+        assert_eq!(found[of(n + 2)], [n + 2]);
+        assert_eq!(found.iter().map(Vec::len).sum::<usize>(), enc.sites.len());
+        assert!(groups(&enc, |_| false).is_empty());
+        let cf = checked.functions[0].as_ref().unwrap();
+        assert!(unmatched(&cf.obligations, &enc).is_empty());
+        enc.sites.clear();
+        assert!(enc.unencoded.is_empty());
+        assert_eq!(unmatched(&cf.obligations, &enc).len(), cf.obligations.len());
+    }
+
+    /// The export counts each check by what the encoding made of it, each count the number of
+    /// its class in the keys, over programs that give every class: a loop past the bound, a
+    /// construct the encoding lacks before a check and around one, a module that does not check,
+    /// and a function whose sites an encoder lost, whose obligations are then unmatched and make
+    /// the export fail.
+    #[test]
+    fn test_the_export_counts_each_check_by_what_the_encoding_made_of_it() {
+        let dir = scratch("counts");
+        let lacked = dir.join("lacked.mn");
+        fs::write(
+            &lacked,
+            "module m\npub struct P {\n  pub a: u8\n}\npub fn g(d: u8[1..=9]) -> u8 {\n  val p: P = P(a: 7 % d)\n  p.a % d\n}\n",
+        )
+        .unwrap();
+        let unchecked = dir.join("unchecked.mn");
+        fs::write(&unchecked, "module m\npub fn f() -> u8 = true\n").unwrap();
+        let lost = dir.join("lost.mn");
+        fs::write(&lost, "module m\npub fn lost(d: u8[1..=9]) -> u8 = 7 % d\n").unwrap();
+        let bound =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/smt-known/loop-past-the-bound.mn");
+        let safe = dir.join("safe.mn");
+        fs::write(&safe, "module m\npub fn safe(d: u8[1..=9]) -> u8 = 7 % d\n").unwrap();
+        let files = [
+            bound.clone(),
+            lacked.clone(),
+            unchecked,
+            lost.clone(),
+            safe.clone(),
+        ];
+        let lose = |m: &Module, i: usize| {
+            let mut enc = mente_smt::encode(m, i);
+            if m.functions[i]
+                .as_ref()
+                .is_some_and(|f| f.syntax.name == "lost")
+            {
+                enc.sites.clear();
+            }
+            enc
+        };
+        let w = independent_with(&files, &dir.join("out"), &lose).unwrap();
+        let n = |c: &dyn Fn(&Class) -> bool| {
+            w.export
+                .checks
+                .iter()
+                .flat_map(|e| &e.classes)
+                .filter(|k| c(k))
+                .count()
+        };
+        let classes = (
+            n(&|c| matches!(c, Class::Query(_))),
+            n(&|c| *c == Class::Unreachable),
+            n(&|c| *c == Class::BeyondBound),
+            n(&|c| *c == Class::BeyondLacked),
+            n(&|c| *c == Class::NoSite),
+        );
+        assert_eq!(
+            classes,
+            (
+                w.queries,
+                w.unreachable,
+                w.beyond_bound,
+                w.beyond_lacked,
+                w.no_site
+            )
+        );
+        assert!(
+            w.queries > 0 && w.beyond_bound > 0 && w.beyond_lacked > 0 && w.no_site > 0,
+            "{:#?}",
+            w
+        );
+        assert_eq!((w.files, w.unchecked), (5, 1));
+        // Each place of a construct the encoding lacks is counted, and each obligation of the
+        // function whose sites were lost.
+        let mut unencoded = 0;
+        let mut obligations = 0;
+        for file in [&bound, &lacked, &lost, &safe] {
+            let checked = mente_sema::check_program(&fs::read_to_string(file).unwrap()).unwrap();
+            let module = module_of(&checked);
+            for (i, cf) in checked.functions.iter().enumerate() {
+                let Some(cf) = cf else {
+                    continue;
+                };
+                let enc = lose(&module, i);
+                unencoded += enc.unencoded.len();
+                obligations += unmatched(&cf.obligations, &enc).len();
+            }
+        }
+        assert!(unencoded > 0 && obligations > 0);
+        assert_eq!((w.unencoded, w.unmatched), (unencoded, obligations));
+        assert_eq!(independent_status(&w), 1);
+        assert_eq!(
+            independent_status(&Written {
+                unmatched: 0,
+                ..w.clone()
+            }),
+            0
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Each class reads back from its text, and the hash of a text is 64-bit FNV-1a, as its
+    /// published values give it.
+    #[test]
+    fn test_the_keys_read_each_class_back_and_hash_each_text_as_fnv_1a() {
+        for class in [
+            Class::Query("a/f-3-divisor.smt2".to_string()),
+            Class::Unreachable,
+            Class::BeyondBound,
+            Class::BeyondLacked,
+            Class::NoSite,
+        ] {
+            assert_eq!(Class::read(&class.text()), Some(class.clone()));
+        }
+        assert_eq!(Class::read("query"), None);
+        assert_eq!(text_hash(""), "cbf29ce484222325");
+        assert_eq!(text_hash("a"), "af63dc4c8601ec8c");
+        assert_eq!(text_hash("foobar"), "85944171f73967e8");
+    }
+
+    /// A model gives a boolean input its value: a run of `true` takes the branch that traps,
+    /// which a run of `false` would not.
+    #[test]
+    fn test_a_model_gives_a_boolean_input_its_value() {
+        let dir = scratch("boolean");
+        let file = dir.join("b.mn");
+        fs::write(
+            &file,
+            "module m\npub fn f(c: bool, d: u8) -> u8 {\n  if c {\n    7 % d\n  } else {\n    0\n  }\n}\n",
+        )
+        .unwrap();
+        let path = dir.join("q.smt2");
+        fs::write(
+            &path,
+            format!(
+                "; source: {}:4:9\n; function: f\n; obligation: divisor at 4:9\n; trap: division-by-zero at 4:5\n(declare-const p.c Bool)\n(declare-const p.d Int)\n(assert (and p.c (= p.d 0)))\n(check-sat)\n(get-value (p.c p.d))\n",
+                file.display()
+            ),
+        )
+        .unwrap();
+        let found = confirm_one(&path, "((p.c true) (p.d 0))");
+        assert!(
+            matches!(found, Ok(Verdict::Confirmed { .. })),
+            "{:?}",
+            found
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The encoding of function `function` of `src`, and the obligations Tier 1 records in it.
+    fn encoded(src: &str, function: &str) -> (Encoding, Vec<Obligation>) {
+        let checked = mente_sema::check_program(src).unwrap();
+        let module = module_of(&checked);
+        let index = checked.index(function).unwrap();
+        let cf = checked.functions[index].as_ref().unwrap();
+        (mente_smt::encode(&module, index), cf.obligations.clone())
+    }
+
+    /// The narrowing of a block's result is keyed at the block's last expression, where Tier 1
+    /// records it, an array literal there element by element; and a call's checks are the
+    /// callee's, never sites of the caller.
+    #[test]
+    fn test_a_result_is_keyed_at_its_expression_and_a_callee_keeps_its_checks() {
+        let src = "module m\npub fn f(a: u8) -> u8 {\n  val b: u8 = a\n  b + 1\n}\n";
+        let (enc, obligations) = encoded(src, "f");
+        assert!(unmatched(&obligations, &enc).is_empty(), "{:?}", enc.sites);
+        assert!(enc
+            .sites
+            .iter()
+            .any(|s| s.kind == Kind::Range && (s.span.line, s.span.col) == (4, 3)));
+        let src = "module m\npub fn pair(x: i16) -> [2]u8 {\n  val y: i16 = x\n  [y, 1]\n}\n";
+        let (enc, obligations) = encoded(src, "pair");
+        assert!(
+            obligations
+                .iter()
+                .any(|o| (o.span.line, o.span.col) == (4, 4)),
+            "{:?}",
+            obligations
+                .iter()
+                .map(|o| (o.span.line, o.span.col, o.kind.name(), o.tag))
+                .collect::<Vec<_>>()
+        );
+        assert!(unmatched(&obligations, &enc).is_empty(), "{:?}", enc.sites);
+        let src = "module m\npub fn half(x: u8, d: u8[1..=9]) -> u8 = x / d\npub fn g(x: u8) -> u8 = half(x, 3)\n";
+        let (enc, _) = encoded(src, "g");
+        assert!(!enc.sites.is_empty());
+        assert!(
+            enc.sites.iter().all(|s| s.span.line == 3),
+            "{:?}",
+            enc.sites
+        );
+    }
+
+    /// A check whose path was cut off at a construct the encoding lacks before it is cut off
+    /// there, though the function is also cut past the bound, after it.
+    #[test]
+    fn test_a_cut_before_a_check_names_it_over_a_cut_after() {
+        let src = "module m\npub struct P {\n  pub a: u8\n}\npub fn g(c: bool, n: u8) -> u8 {\n  var i: u8 = 0\n  if c {\n    val p: P = P(a: 1)\n    i = p.a\n  }\n  val q: u8 = 9 % 3\n  while i < n {\n    i += 1\n  }\n  q\n}\n";
+        let (mut enc, _) = encoded(src, "g");
+        assert!(enc.cut_past_bound && enc.cut_at_lacked);
+        let divisor = enc
+            .sites
+            .iter()
+            .position(|s| s.kind == Kind::Divisor)
+            .unwrap();
+        assert!(enc.sites[divisor].beyond_lacked && !enc.sites[divisor].beyond_bound);
+        assert_eq!(enc.query(&[divisor]), None);
+        assert_eq!(unqueried(&enc, &[divisor]), Unqueried::BeyondLacked);
+    }
+
+    /// A value of an array of more elements than an encoding holds is narrowed into its own type
+    /// without a cut: its elements already lie in it; and a type with no refinement checks none.
+    #[test]
+    fn test_a_large_array_of_its_own_type_is_narrowed_without_a_cut() {
+        let src = "module m\npub fn big(x: u8) -> u8 {\n  var a: [300]u8 = [0; 300]\n  a[1] = x\n  val b: [300]u8 = a\n  b[1]\n}\n";
+        let (enc, _) = encoded(src, "big");
+        assert!(enc.unencoded.is_empty(), "{:?}", enc.unencoded);
+        assert!(!enc.cut_past_bound && !enc.cut_at_lacked);
+    }
+
+    /// An expression begins within the budget while the terms already made do not pass it: a
+    /// function whose body is a literal begins it with the two constants every encoding starts
+    /// with, so a budget of two holds it, and one does not.
+    #[test]
+    fn test_the_budget_counts_the_terms_made_before_an_expression_begins() {
+        let checked =
+            mente_sema::check_program_without_proofs("module m\npub fn one() -> u8 = 1\n").unwrap();
+        let module = module_of(&checked);
+        let exhausted = |terms: usize| {
+            mente_smt::encode_within(&module, 0, terms)
+                .unencoded
+                .iter()
+                .any(|(_, what)| *what == "a function too large to encode")
+        };
+        assert!(!exhausted(2));
+        assert!(exhausted(1));
+    }
+
+    /// The length of an array is its type's, read without a cut; and a negation is checked at
+    /// the operator on a 128-bit operand alone, where no narrowing point follows it.
+    #[test]
+    fn test_a_length_is_read_and_a_negation_checked_on_128_bits_alone() {
+        for src in [
+            "module m\npub fn n(xs: [4]u8) -> usize = xs.len\n",
+            "module m\npub fn neg(x: i128) -> i128 = (-x) / 2\n",
+            "module m\npub fn neg8(x: i8) -> i8 = (-x) / 2\n",
+        ] {
+            let runs = agreement(src, &[]);
+            assert!(
+                runs.wrong.is_empty() && runs.compared > 0 && runs.cut == 0,
+                "{}: {} compared, {} cut: {:?}",
+                src,
+                runs.compared,
+                runs.cut,
+                runs.wrong
             );
         }
     }
