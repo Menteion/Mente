@@ -15,7 +15,7 @@ mod coverage;
 #[cfg(test)]
 mod differential;
 #[cfg(test)]
-mod generate;
+pub(crate) mod generate;
 #[cfg(test)]
 mod host_shapes;
 

@@ -55,8 +55,33 @@ pub const BENCHMARK_TASKS: Kind = Kind {
     archive: None,
 };
 
+/// The equivalent mutants of the MIR mutation gate,
+/// `compiler/mente-cli/tests/mutants/equivalent/<key>.md`, each named by the key
+/// `mir_mutants::mutant_key` derives from the mutant's name.
+pub const EQUIVALENT_MUTANTS: Kind = Kind {
+    record: "an equivalent mutant",
+    dir: "compiler/mente-cli/tests/mutants/equivalent",
+    extension: "md",
+    archive: None,
+};
+
+/// The groups of the equivalent mutants, `compiler/mente-cli/tests/mutants/equivalence-groups/<key>.md`,
+/// each stating once the reasoning its mutants share, which each mutant's record names.
+pub const EQUIVALENCE_GROUPS: Kind = Kind {
+    record: "a group of equivalent mutants",
+    dir: "compiler/mente-cli/tests/mutants/equivalence-groups",
+    extension: "md",
+    archive: None,
+};
+
 /// Every kind of record kept one file a record.
-pub const KINDS: &[Kind] = &[ESCAPES, BRIEFS, BENCHMARK_TASKS];
+pub const KINDS: &[Kind] = &[
+    ESCAPES,
+    BRIEFS,
+    BENCHMARK_TASKS,
+    EQUIVALENT_MUTANTS,
+    EQUIVALENCE_GROUPS,
+];
 
 /// A file that holds many records, and why it is not yet a kind of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,11 +131,6 @@ pub const SHARED: &[Shared] = &[
         file: "compiler/mente-cli/tests/golden/projections.txt",
         records: "the projections of each program of the corpus",
         why: "it becomes one file a program in a pull request of its own",
-    },
-    Shared {
-        file: "compiler/mente-cli/tests/mutants/equivalent.txt",
-        records: "the equivalent mutants of the MIR mutation gate, each with its reason",
-        why: "it becomes one file a mutant, its reason in the front matter, in a pull request of its own",
     },
 ];
 

@@ -1,0 +1,1 @@
+Narrowing an array literal into its declared type: each element is a constant that fits, 0 and 255 among them, so the check never fails. A literal without a 0 or a 255 would leave more mutants of this group; the corpus's literals hold both.
