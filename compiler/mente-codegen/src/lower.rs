@@ -2171,9 +2171,12 @@ impl<'a> Lower<'a> {
     }
 
     /// An element of an array literal, in the literal's element shape `elem`. Where the
-    /// literal keeps its integers exact, an integer is cast into `elem`, which holds it, and an
-    /// array literal nested in it is built in `elem` itself, so that its integers are never
-    /// narrowed on the way; any other element is narrowed into `elem`.
+    /// literal keeps its integers exact, an integer is kept in `elem`, which holds it; an array
+    /// literal nested in it that keeps its own exact is built in `elem` itself, so that its
+    /// integers are never narrowed on the way, and one whose elements have one integer type
+    /// narrows them into that type first, as every array literal does by itself
+    /// (`core-calculus.md`, item 4, Norman's decision of 2026-11-21), and is then kept in `elem`.
+    /// Any other element is narrowed into `elem`.
     fn literal_element(
         &mut self,
         item: ExprId,
@@ -2182,7 +2185,8 @@ impl<'a> Lower<'a> {
         span: Span,
     ) -> Result<V, String> {
         let tree = self.tree();
-        if exact && matches!(elem, Shape::Array(..)) {
+        let nested = tree.expr(item).kind.is_array_literal();
+        if exact && nested && self.exact(item) && matches!(elem, Shape::Array(..)) {
             if let ExprKind::Array(items) = &tree.expr(item).kind {
                 return self.array_literal(items, elem, true, span);
             }
@@ -2193,12 +2197,40 @@ impl<'a> Lower<'a> {
         let v = self.expr(item)?;
         let from = self.shape(item)?;
         let key = Some(tree.expr(item).span);
-        Ok(match (exact, v, elem) {
-            (true, V::Int(n, t), Shape::Int(to)) => {
-                let into = mir(*to);
+        Ok(match (exact, v) {
+            (true, v @ V::Int(..)) => self.kept_exact(v, &from, elem)?,
+            (true, v) if nested => self.kept_exact(v, &from, elem)?,
+            (_, v) => self.narrow(v, &from, elem, span, key)?,
+        })
+    }
+
+    /// A value of shape `from` kept in `to`, the machine type of an array literal that keeps
+    /// its integers exact, elementwise for an array: cast with no check, since `to` holds the
+    /// static range of every integer of the literal ([`Lower::leaf_hull`]), and every value that
+    /// reaches here lies within its own, a nested literal's after its own narrowing too.
+    fn kept_exact(&mut self, v: V, from: &Shape, to: &Shape) -> Result<V, String> {
+        Ok(match (v, from, to) {
+            (V::Int(n, t), _, Shape::Int(into)) => {
+                let into = mir(*into);
                 V::Int(self.cast(n, t, into), into)
             }
-            (_, v, _) => self.narrow(v, &from, elem, span, key)?,
+            (V::Mem(a), Shape::Array(_, fe), Shape::Array(len, te)) => {
+                if fe == te {
+                    return Ok(V::Mem(a));
+                }
+                let slot = self.inst(Op::Slot { bytes: to.size() }, Ty::Addr, &[]);
+                let (fe, te, len) = ((**fe).clone(), (**te).clone(), *len);
+                self.each(len, &mut |l, i| {
+                    let src = l.inst(Op::Elem { stride: fe.size() }, Ty::Addr, &[a, i]);
+                    let dst = l.inst(Op::Elem { stride: te.size() }, Ty::Addr, &[slot, i]);
+                    let x = l.load(src, &fe);
+                    let x = l.kept_exact(x, &fe, &te)?;
+                    l.store_shaped(dst, x, &te);
+                    Ok(())
+                })?;
+                V::Mem(slot)
+            }
+            (v, _, _) => v,
         })
     }
 
@@ -3890,6 +3922,36 @@ pub fn lands(p: [1]i8, b: u128[35..=45]) -> [2][1]u8 = [[b], p]
         }
         let text = lowered.module.to_string();
         assert!(text.contains("slot 16"), "{}", text);
+    }
+
+    /// Each array literal narrows its integers by itself (`core-calculus.md`, item 4, Norman's
+    /// decision of 2026-11-21): a row whose elements have one integer type narrows them into it,
+    /// whatever the rows beside it hold, and is then kept in the machine type of the literal
+    /// around it. The nightly runs found MIR building such a row in that machine type at once,
+    /// where the reference interpreter trapped (seeds 124647482 and 124661469).
+    #[test]
+    fn test_a_nested_literal_of_one_type_narrows_into_it_first() {
+        let src = "module m
+pub fn f() -> [2][2]u128 = [[1_i64, 18446744073709551615], [0, 1_u128]]
+pub fn g(p0: i32[10..=15]) -> usize {
+  val v2: [2][2]usize = [[p0, 2147483647 * p0], [16_u128 & 1_u128, p0]]
+  v2[0][1]
+}
+pub fn rows() -> [2][2]i64 = [[-1_i8, 5], [70000_u32, 1]]
+pub fn exact() -> [2][1]u64 = [[1], [12960978670946228878]]
+";
+        let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
+        // The row of `i64`s narrows its literal into `i64`, which traps.
+        assert_eq!(checks(&lowered, "f"), ["narrowing"]);
+        // The row of `i32`s narrows `2147483647 * p0` into `i32`, beside the narrowing of the
+        // whole into `usize`, where it lands.
+        assert_eq!(checks(&lowered, "g"), ["narrowing", "narrowing"]);
+        // Rows of one type each narrow each element into it, `i8` and `u32`, as the reference
+        // interpreter does: Tier 1 records no obligation for a nested row's narrowing yet, so
+        // each is a check, and none is left where the literal lands, in `i64`, which holds them.
+        assert_eq!(checks(&lowered, "rows"), ["narrowing"; 4]);
+        // A row of literals alone keeps its integers exact, as before.
+        assert_eq!(checks(&lowered, "exact"), Vec::<String>::new());
     }
 
     /// An expression of no type gives no value: a `todo` body, and an `if` whose branches all

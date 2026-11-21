@@ -844,6 +844,13 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-codegen/src/lower.rs",
+        "kept_exact",
+        "wildcard arm",
+        "match (v, from, to) { (v, _, _) }",
+        "keeping changes integers only, at every depth of arrays; a `bool`, a struct, an enum, `()` and no value are kept as they are",
+    ),
+    (
+        "mente-codegen/src/lower.rs",
         "literal_element",
         "if let",
         "if let ExprKind::Array(items) = &tree.expr(item).kind",
@@ -867,8 +874,8 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "mente-codegen/src/lower.rs",
         "literal_element",
         "wildcard arm",
-        "match (exact, v, elem) { (_, v, _) }",
-        "every element but an exact integer is narrowed into the element's shape, which `narrow` does for each kind",
+        "match (exact, v) { (_, v) }",
+        "every element but an exact integer or a nested literal kept exact is narrowed into the element's shape, which `narrow` does for each kind",
     ),
     (
         "mente-codegen/src/lower.rs",
