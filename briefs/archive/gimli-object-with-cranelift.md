@@ -1,11 +1,20 @@
 ---
 id: gimli-object-with-cranelift
-status: active
+status: archived
 type: chore
 awaits: [docs/design-review.md#dependency-approval]
 affectedFiles: [compiler/mente-codegen/Cargo.toml, compiler/mente-codegen/src/**, Cargo.lock, .config/approved-crates.txt, compiler/mente-cli/tests/gates.rs, .github/dependabot.yml, briefs/gimli-object-with-cranelift.md, briefs/archive/gimli-object-with-cranelift.md]
 protectedFiles: [CLAUDE.md, spec/**]
+integrity: sha256-660602cae09ec04a48a164d8abd0bf3f1902c4e8348db97b706a7ae1a5c6343a
 ---
+
+<!-- spec-brief:banner -->
+> **Archived 2026-11-21.**
+> gimli and object come only through cranelift, with no direct dependency on either; a test refuses a lock that holds either in a version not cranelift's, and the dependency policy reads the lock.
+> Merged in pull request [#180](https://github.com/Menteion/Mente/pull/180).
+> Recorded at commit `9c0b0fe`: 10 files changed, +352 −104.
+> The body below describes the tree before execution and is not maintained.
+<!-- /spec-brief:banner -->
 
 # Move gimli and object only with cranelift
 
