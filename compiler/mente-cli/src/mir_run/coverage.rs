@@ -1139,7 +1139,7 @@ fn reached_rows(f: &CheckedFn, seen: &mut BTreeSet<String>) {
         };
         let outer = ty(ExprId(k as u32));
         let mixed = matches!(outer, Ty::Array(_, inner) if matches!(**inner, Ty::Array(..)))
-            && matches!(leaf(outer), Some(Int::Mixed(_)));
+            && matches!(leaf(outer), Some(Int::Mixed(None)));
         let one = items.iter().any(|&i| {
             tree.expr(i).kind.is_array_literal() && matches!(leaf(ty(i)), Some(Int::One(_)))
         });

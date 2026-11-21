@@ -64,7 +64,7 @@ fn cl_type(t: cfg::Ty, ptr: Type) -> Type {
     match t {
         cfg::Ty::Int(i) => int_type(i),
         cfg::Ty::Bool => types::I8,
-        cfg::Ty::Addr => ptr,
+        cfg::Ty::Addr(_) => ptr,
         cfg::Ty::Unit | cfg::Ty::Effect => types::I8,
     }
 }
@@ -851,7 +851,7 @@ impl Translate {
         let t = cl_type(rty, ptr);
         let int = |x: cfg::Ty| match x {
             cfg::Ty::Int(i) => Ok(i),
-            cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
+            cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => {
                 Err(err("an integer operation on a value that is not one"))
             }
         };
@@ -1011,7 +1011,7 @@ impl Translate {
                     .zip(&arg_tys[1..])
                     .filter_map(|(v, t)| match t {
                         cfg::Ty::Int(i) => Some((*v, *i)),
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
+                        cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => None,
                     })
                     .collect();
                 let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
@@ -1030,7 +1030,7 @@ impl Translate {
                     .zip(&arg_tys[1..last])
                     .filter_map(|(v, t)| match t {
                         cfg::Ty::Int(i) => Some((*v, *i)),
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
+                        cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => None,
                     })
                     .collect();
                 let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
@@ -1479,7 +1479,7 @@ fn make_call(
                 (false, Shape::Int(_), Arg::Int(n)) => {
                     let i = match mty {
                         cfg::Ty::Int(i) => *i,
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
+                        cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => {
                             return Err(err("an integer argument of another type"))
                         }
                     };
