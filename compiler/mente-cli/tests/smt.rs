@@ -252,6 +252,141 @@ fn test_mn_smt_writes_a_query_for_each_discharged_obligation() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `mn smt --independent` writes a query for each check Tier 1 erases, headed by its source, its
+/// function, its obligation and the trap a model must raise; `mn smt --confirm` reads a solver's
+/// answers: `unsat` passes, a timeout decides nothing, and a model that does not satisfy its
+/// query, or a known bug no model confirms, fails the job. Each wants its arguments.
+#[test]
+fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
+    let dir = scratch("independent");
+    let file = dir.join("m.mn");
+    fs::write(
+        &file,
+        "module m\npub fn safe(d: u8[1..=9]) -> u8 = 7 % d\npub fn kept(d: u8) -> u8 = 7 % d\n",
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let run = mn(&[
+        "smt",
+        "--independent",
+        file.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    let stdout = text(&run.stdout);
+    assert!(run.status.success(), "{}{}", stdout, text(&run.stderr));
+    // `safe`'s divisor Tier 1 proves, and so erases; `kept`'s it does not, and has no query.
+    // Both results, `7 % d`, lie in `u8`, so their narrowings are erased too.
+    assert!(
+        stdout.contains("Wrote 3 independent queries for 2 functions of 1 files to `"),
+        "{}",
+        stdout
+    );
+    assert!(
+        stdout.ends_with("0 files do not check, 0 obligations have no site.\n"),
+        "{}",
+        stdout
+    );
+    let mut queries = Vec::new();
+    let mut stack = vec![out.clone()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                queries.push(p);
+            }
+        }
+    }
+    queries.sort();
+    let names: Vec<String> = queries
+        .iter()
+        .map(|q| q.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "kept-3-range.smt2",
+            "safe-2-divisor.smt2",
+            "safe-2-range.smt2"
+        ],
+        "{:?}",
+        queries
+    );
+    let query = &queries[1];
+    let body = fs::read_to_string(query).unwrap();
+    assert!(
+        body.starts_with(&format!(
+            "; source: {}:2:39\n; function: safe\n; obligation: divisor at 2:39\n; trap: division-by-zero at 2:35\n(declare-const p.d Int)\n",
+            file.display()
+        )),
+        "{}",
+        body
+    );
+    assert!(
+        body.ends_with("(check-sat)\n(get-value (p.d))\n"),
+        "{}",
+        body
+    );
+    let answers = dir.join("answers.txt");
+    let q = query.display();
+    let confirm = |lines: String, expect: Option<&Path>| {
+        fs::write(&answers, lines).unwrap();
+        let mut args = vec!["smt", "--confirm", answers.to_str().unwrap()];
+        if let Some(e) = expect {
+            args.extend(["--expect", e.to_str().unwrap()]);
+        }
+        mn(&args)
+    };
+    let run = confirm(
+        format!("unsat (error \"no model\")\t{}\ntimeout\t{}\n", q, q),
+        None,
+    );
+    let stdout = text(&run.stdout);
+    assert!(run.status.success(), "{}{}", stdout, text(&run.stderr));
+    assert!(
+        stdout.contains(&format!("undecided: {}: timeout", q)),
+        "{}",
+        stdout
+    );
+    assert!(
+        stdout.ends_with("1 unsat, 1 undecided, 0 confirmed soundness bugs of Tier 1, 0 known, 0 not confirmed, 0 known bugs missing.\n"),
+        "{}",
+        stdout
+    );
+    // d = 0 lies outside `safe`'s refinement: no input of the query, so the answer is wrong.
+    let run = confirm(format!("sat ((p.d 0))\t{}\n", q), None);
+    let stdout = text(&run.stdout);
+    assert_eq!(run.status.code(), Some(1), "{}", stdout);
+    assert!(
+        stdout.contains("unconfirmed: ")
+            && stdout.contains("the model safe(0) does not satisfy its query"),
+        "{}",
+        stdout
+    );
+    // A known bug that no answer confirms.
+    let expect = dir.join("known.mn");
+    fs::write(&expect, "// smt: kept division-by-zero at 3:30\n").unwrap();
+    let run = confirm(format!("unsat\t{}\n", q), Some(&expect));
+    let stdout = text(&run.stdout);
+    assert_eq!(run.status.code(), Some(1), "{}", stdout);
+    assert!(
+        stdout.contains("missing: ")
+            && stdout.contains("no query of `kept` was confirmed at its division-by-zero at 3:30"),
+        "{}",
+        stdout
+    );
+    for usage in [
+        mn(&["smt", "--independent", file.to_str().unwrap()]),
+        mn(&["smt", "--confirm"]),
+        mn(&["smt", "--confirm", answers.to_str().unwrap(), "--expect"]),
+    ] {
+        assert_eq!(usage.status.code(), Some(2), "{}", text(&usage.stderr));
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// Writes the construct programs into the directory `MENTE_SMT_CONSTRUCTS` names, for the CI job
 /// to give `mn smt`:
 /// `MENTE_SMT_CONSTRUCTS=<dir> cargo test -p mente-cli --test smt -- --ignored write_construct_programs`.

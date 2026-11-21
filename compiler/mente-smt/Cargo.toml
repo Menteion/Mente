@@ -1,0 +1,14 @@
+[package]
+name = "mente-smt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mente's independent SMT encoding of the checks Tier 1 proves, from the syntax tree alone"
+
+# The syntax tree alone: the encoding shares no code with Tier 1, whose proofs it checks
+# (test_crates_depend_only_on_allowed_crates).
+[dependencies]
+mente-syntax = { path = "../mente-syntax" }
+
+[lints]
+workspace = true
