@@ -151,27 +151,34 @@ pub fn tokenize(src: &str) -> Vec<Token> {
     lex(src).0
 }
 
-/// The value of `text` when it is one integer literal and nothing else, as the lexer reads
-/// literals: in decimal, `0x` hexadecimal or `0b` binary, with digits grouped by `_` and an
-/// optional suffix (`morphic-layouts.md`, item 2). `None` for anything else, a literal past
-/// `u128` included. The numbers of `@layout`, `@bytes` and `@bits` and the length of an
-/// array in a field's type are read with it, so they are read as every literal is, on every
-/// host alike.
-pub fn int_literal_value(text: &str) -> Option<u128> {
+/// The value and the suffix of `text` when it is one integer literal and nothing else, as the
+/// lexer reads literals: in decimal, `0x` hexadecimal or `0b` binary, with digits grouped by `_`,
+/// and the suffix as written after a `_`, `u8` for `300_u8` and `banana` for `8_banana`. `None`
+/// for anything else, a literal past `u128` included.
+pub fn int_literal(text: &str) -> Option<(u128, Option<String>)> {
     let (tokens, errors) = lex(text);
     match (tokens.as_slice(), errors.is_empty()) {
         (
             [Token {
-                kind: TokenKind::IntLit(value, _),
+                kind: TokenKind::IntLit(value, raw),
                 ..
             }, Token {
                 kind: TokenKind::Eof,
                 ..
             }],
             true,
-        ) => Some(*value),
+        ) => Some((*value, body::int_suffix(raw))),
         _ => None,
     }
+}
+
+/// The value of `text` when it is one integer literal with no suffix and nothing else
+/// ([`int_literal`]; `morphic-layouts.md`, item 2): a layout number counts bytes, bits or
+/// elements, which have no type, so it takes no suffix. The numbers of `@layout`, `@bytes` and
+/// `@bits` and the length of an array in a field's type are read with it, so they are read as
+/// every literal is, on every host alike.
+pub fn int_literal_value(text: &str) -> Option<u128> {
+    int_literal(text).and_then(|(value, suffix)| suffix.is_none().then_some(value))
 }
 
 /// Lexes `src` into tokens, and reports every lexical error on the way (`spec/grammar.md`,
@@ -911,7 +918,8 @@ pub struct ParamDecl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructFieldDecl {
     pub attrs: Vec<Attr>,
-    /// The numbers of its `@bytes(start..end)`, none when it has none or they are no literals.
+    /// The numbers of its first `@bytes(start..end)`, none when it has none or they are no
+    /// literals without a suffix.
     pub byte_range: Option<(u128, u128)>,
     pub is_pub: bool,
     pub name: String,
@@ -940,7 +948,10 @@ pub struct StructDecl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BitFieldDecl {
-    /// The numbers of its `@bits(start..end)`, none when it has none or they are no literals.
+    /// Its attributes as written, a second `@bits` among them where there is one.
+    pub attrs: Vec<Attr>,
+    /// The numbers of its first `@bits(start..end)`, none when it has none or they are no
+    /// literals without a suffix.
     pub bit_range: Option<(u128, u128)>,
     pub is_pub: bool,
     pub name: String,
@@ -948,7 +959,7 @@ pub struct BitFieldDecl {
     pub span: Span,
     pub name_span: Span,
     pub ty_span: Span,
-    /// The `@bits(...)` attribute, when there is one.
+    /// Its first `@bits(...)` attribute, when there is one.
     pub bits_span: Option<Span>,
 }
 
@@ -1696,12 +1707,12 @@ impl<'a> Parser<'a> {
 
             let f_start = self.span();
             let f_attrs = self.parse_attrs()?;
-            let mut byte_range = None;
-            for a in &f_attrs {
-                if a.name == "bytes" {
-                    byte_range = parse_range_arg(&a.args);
-                }
-            }
+            // The first `@bytes`, which the layout check reads too; a second is its own error
+            // there (`E0427`).
+            let byte_range = f_attrs
+                .iter()
+                .find(|a| a.name == "bytes")
+                .and_then(|a| parse_range_arg(&a.args));
             let f_pub = if *self.peek() == TokenKind::Pub {
                 self.next();
                 true
@@ -1806,14 +1817,11 @@ impl<'a> Parser<'a> {
         while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
             let f_start = self.span();
             let f_attrs = self.parse_attrs()?;
-            let mut bit_range = None;
-            let mut bits_span = None;
-            for a in &f_attrs {
-                if a.name == "bits" {
-                    bits_span = Some(a.span);
-                    bit_range = parse_range_arg(&a.args);
-                }
-            }
+            // The first `@bits`, which the layout check reads too; a second is its own error
+            // there (`E0427`).
+            let bits = f_attrs.iter().find(|a| a.name == "bits");
+            let bits_span = bits.map(|a| a.span);
+            let bit_range = bits.and_then(|a| parse_range_arg(&a.args));
             let f_pub = if *self.peek() == TokenKind::Pub {
                 self.next();
                 true
@@ -1826,6 +1834,7 @@ impl<'a> Parser<'a> {
             }
             let (ty, _, ty_span) = self.consume_field_type_and_default();
             fields.push(BitFieldDecl {
+                attrs: f_attrs,
                 bit_range,
                 is_pub: f_pub,
                 name: f_name,

@@ -1176,6 +1176,18 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub v: u64\n}\n",
     ),
     emitted(
+        "E0427",
+        FailureClass::HardwareContract,
+        "spec/morphic-layouts.md",
+        "A layout attribute written twice",
+        "A layout states each of its numbers once: a struct has one `@layout`, and a field one \
+         `@bytes` or one `@bits`. Every reader takes the first, so a second would be numbers no \
+         check reads; it is an error that names it. Keep the one that states the layout you \
+         mean.",
+        "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) @bytes(0..eight) pub v: u64\n}\n",
+        "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub v: u64\n}\n",
+    ),
+    emitted(
         "E0501",
         FailureClass::Proof,
         "spec/ghost-contracts-and-totality.md",

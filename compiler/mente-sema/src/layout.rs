@@ -12,11 +12,11 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fmt;
 
 use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
 use mente_syntax::{
-    int_literal_value, Attr, BitStructDecl, ItemDecl, ModuleFile, Span, StructDecl, StructFieldDecl,
+    int_literal, int_literal_value, Attr, BitStructDecl, ItemDecl, ModuleFile, Span, StructDecl,
+    StructFieldDecl,
 };
 
 use crate::structs::{Structs, ARRAY_ELEMENTS, VALUE_BYTES};
@@ -25,83 +25,95 @@ use crate::{BitStructProof, LayoutProof};
 /// The widest backing a bitstruct may have, `u128`, in bits: the most a bit number may be.
 const BACKING_BITS: u32 = 128;
 
-/// A number of `@layout`, `@bytes` or `@bits`, an array's length in a field's type, or a size,
-/// an offset or an alignment computed from them: at most [`VALUE_BYTES`], held the same on every
-/// host. It has no arithmetic operators and gives no raw value: each sum, difference, product and
-/// power is a checked method, whose `None` is a result past [`VALUE_BYTES`], so that no number
-/// a programmer writes wraps, on any host, and a new operation can only be one more checked
-/// method here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LayoutNum(u128);
+/// [`LayoutNum`] alone, in a module of its own: its field and its constructor are private to it,
+/// so no code of this file outside it reads a raw value or builds an unchecked one, and a new
+/// operation is one more checked method here. The compiler's privacy holds that; the workspace
+/// runs no doctests (the required check "No doctests"), so no compile-fail test states it.
+mod num {
+    use std::fmt;
 
-impl LayoutNum {
-    pub(crate) const ZERO: LayoutNum = LayoutNum(0);
+    use crate::structs::VALUE_BYTES;
 
-    /// A number no larger than `u32` holds, which every layout number may be.
-    pub(crate) const fn small(n: u32) -> LayoutNum {
-        LayoutNum(n as u128)
+    /// A number of `@layout`, `@bytes` or `@bits`, an array's length in a field's type, or a size,
+    /// an offset or an alignment computed from them: at most [`VALUE_BYTES`], held the same on every
+    /// host. It has no arithmetic operators and gives no raw value: each sum, difference, product and
+    /// power is a checked method, whose `None` is a result past [`VALUE_BYTES`], so that no number
+    /// a programmer writes wraps, on any host, and a new operation can only be one more checked
+    /// method here.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct LayoutNum(u128);
+
+    impl LayoutNum {
+        pub(crate) const ZERO: LayoutNum = LayoutNum(0);
+
+        /// A number no larger than `u32` holds, which every layout number may be.
+        pub(crate) const fn small(n: u32) -> LayoutNum {
+            LayoutNum(n as u128)
+        }
+
+        /// `n`, where it is no more than [`VALUE_BYTES`].
+        pub(crate) fn within(n: u128) -> Option<LayoutNum> {
+            (n <= VALUE_BYTES).then_some(LayoutNum(n))
+        }
+
+        pub(crate) fn checked_add(self, o: LayoutNum) -> Option<LayoutNum> {
+            LayoutNum::within(self.0.checked_add(o.0)?)
+        }
+
+        pub(crate) fn checked_sub(self, o: LayoutNum) -> Option<LayoutNum> {
+            self.0.checked_sub(o.0).map(LayoutNum)
+        }
+
+        pub(crate) fn checked_mul(self, o: LayoutNum) -> Option<LayoutNum> {
+            LayoutNum::within(self.0.checked_mul(o.0)?)
+        }
+
+        pub(crate) fn is_power_of_two(self) -> bool {
+            self.0.is_power_of_two()
+        }
+
+        /// The least power of two at least this, and at least 1.
+        pub(crate) fn next_power_of_two(self) -> Option<LayoutNum> {
+            LayoutNum::within(self.0.max(1).checked_next_power_of_two()?)
+        }
+
+        /// Whether this is a multiple of `o`, which 0 is of every number and only 0 of 0.
+        pub(crate) fn is_multiple_of(self, o: LayoutNum) -> bool {
+            self.0.is_multiple_of(o.0)
+        }
+
+        /// The least multiple of `o` at least this, for an `o` above 0.
+        pub(crate) fn round_up_to(self, o: LayoutNum) -> Option<LayoutNum> {
+            LayoutNum(self.0.checked_div(o.0)?)
+                .checked_add(LayoutNum::small(u32::from(!self.is_multiple_of(o))))?
+                .checked_mul(o)
+        }
+
+        /// The largest power of two that divides this, at most 16; 16 for 0, which every power
+        /// divides.
+        pub(crate) fn natural_alignment(self) -> LayoutNum {
+            let most = LayoutNum::small(16);
+            1u128
+                .checked_shl(self.0.trailing_zeros())
+                .map_or(most, |a| LayoutNum(a).min(most))
+        }
+
+        /// The bytes of a whole-byte width in bits, `None` for any other.
+        pub(super) fn bytes_of_bits(self) -> Option<LayoutNum> {
+            self.0
+                .is_multiple_of(8)
+                .then(|| LayoutNum(self.0.checked_div(8).unwrap_or(0)))
+        }
     }
 
-    /// `n`, where it is no more than [`VALUE_BYTES`].
-    pub(crate) fn within(n: u128) -> Option<LayoutNum> {
-        (n <= VALUE_BYTES).then_some(LayoutNum(n))
-    }
-
-    pub(crate) fn checked_add(self, o: LayoutNum) -> Option<LayoutNum> {
-        LayoutNum::within(self.0.checked_add(o.0)?)
-    }
-
-    pub(crate) fn checked_sub(self, o: LayoutNum) -> Option<LayoutNum> {
-        self.0.checked_sub(o.0).map(LayoutNum)
-    }
-
-    pub(crate) fn checked_mul(self, o: LayoutNum) -> Option<LayoutNum> {
-        LayoutNum::within(self.0.checked_mul(o.0)?)
-    }
-
-    pub(crate) fn is_power_of_two(self) -> bool {
-        self.0.is_power_of_two()
-    }
-
-    /// The least power of two at least this, and at least 1.
-    pub(crate) fn next_power_of_two(self) -> Option<LayoutNum> {
-        LayoutNum::within(self.0.max(1).checked_next_power_of_two()?)
-    }
-
-    /// Whether this is a multiple of `o`, which 0 is of every number and only 0 of 0.
-    pub(crate) fn is_multiple_of(self, o: LayoutNum) -> bool {
-        self.0.is_multiple_of(o.0)
-    }
-
-    /// The least multiple of `o` at least this, for an `o` above 0.
-    pub(crate) fn round_up_to(self, o: LayoutNum) -> Option<LayoutNum> {
-        LayoutNum(self.0.checked_div(o.0)?)
-            .checked_add(LayoutNum::small(u32::from(!self.is_multiple_of(o))))?
-            .checked_mul(o)
-    }
-
-    /// The largest power of two that divides this, at most 16; 16 for 0, which every power
-    /// divides.
-    pub(crate) fn natural_alignment(self) -> LayoutNum {
-        let most = LayoutNum::small(16);
-        1u128
-            .checked_shl(self.0.trailing_zeros())
-            .map_or(most, |a| LayoutNum(a).min(most))
-    }
-
-    /// The bytes of a whole-byte width in bits, `None` for any other.
-    fn bytes_of_bits(self) -> Option<LayoutNum> {
-        self.0
-            .is_multiple_of(8)
-            .then(|| LayoutNum(self.0.checked_div(8).unwrap_or(0)))
+    impl fmt::Display for LayoutNum {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
     }
 }
 
-impl fmt::Display for LayoutNum {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use num::LayoutNum;
 
 /// `E0223` for a layout number past [`VALUE_BYTES`], which `what` names with where it stands.
 fn past_value_bytes(span: Span, what: String) -> Diagnostic {
@@ -113,6 +125,36 @@ fn past_value_bytes(span: Span, what: String) -> Diagnostic {
             what, VALUE_BYTES
         ),
     )
+}
+
+/// `E0427` where `attrs` hold a second attribute named `name`: a layout states each of its
+/// numbers once, and every reader takes the first, so a second is an error that names it rather
+/// than numbers no check reads (`morphic-layouts.md`, item 2). `whose` names what holds it.
+fn written_twice(attrs: &[Attr], name: &str, whose: &str) -> Option<Diagnostic> {
+    let second = attrs.iter().filter(|a| a.name == name).nth(1)?;
+    Some(Diagnostic::error(
+        "E0427",
+        second.span,
+        format!(
+            "{} has a second `@{}`, `{}`; a layout states each of its numbers once, so keep one",
+            whose, name, second
+        ),
+    ))
+}
+
+/// Why the first of `texts` that is an integer literal with a suffix is no layout number: a
+/// layout number counts bytes, bits or elements, which have no type, so it takes no suffix
+/// ([`int_literal_value`]). `None` where none has one.
+fn suffixed<'t>(texts: impl IntoIterator<Item = &'t str>) -> Option<String> {
+    texts.into_iter().map(str::trim).find_map(|t| {
+        let (n, suffix) = int_literal(t)?;
+        suffix.map(|s| {
+            format!(
+                "`{}` has the suffix `{}`, and a layout number counts bytes, bits or elements, which have no type: write `{}`",
+                t, s, n
+            )
+        })
+    })
 }
 
 /// The byte sizes and alignments of a module's own fixed-size types, so that a `@layout` field
@@ -169,12 +211,16 @@ pub(crate) fn tables(module: &ModuleFile, structs: &Structs) -> Tables {
 }
 
 /// What a struct's first `@layout` says: nothing without one; its size, its alignment and its
-/// span; or the error of one whose `size` or `align` is missing or no integer literal (`E0426`),
-/// or past the bytes a value may hold (`E0223`).
+/// span; or the error of a second `@layout` (`E0427`), of one whose `size` or `align` is
+/// missing or no integer literal without a suffix (`E0426`), or past the bytes a value may hold
+/// (`E0223`).
 pub(crate) fn layout_attr(
     s: &StructDecl,
 ) -> Option<Result<(LayoutNum, LayoutNum, Span), Diagnostic>> {
     let a = s.attrs.iter().find(|a| a.name == "layout")?;
+    if let Some(d) = written_twice(&s.attrs, "layout", &format!("struct `{}`", s.name)) {
+        return Some(Err(d));
+    }
     let malformed = |what: String| {
         Diagnostic::error(
             "E0426",
@@ -201,10 +247,10 @@ pub(crate) fn layout_attr(
     let read = |name: &str, v: Option<&str>| -> Result<LayoutNum, Diagnostic> {
         let v = v.ok_or_else(|| malformed(format!("gives no `{}`", name)))?;
         let n = int_literal_value(v).ok_or_else(|| {
-            malformed(format!(
-                "gives `{}: {}`, which is no integer literal",
-                name, v
-            ))
+            malformed(match suffixed([v]) {
+                Some(why) => format!("gives `{}: {}`, but {}", name, v, why),
+                None => format!("gives `{}: {}`, which is no integer literal", name, v),
+            })
         })?;
         LayoutNum::within(n).ok_or_else(|| {
             past_value_bytes(
@@ -284,6 +330,10 @@ pub fn verify_explicit_struct_layout(
         String::from("| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n");
 
     for f in &s.fields {
+        let whose = format!("field `{}.{}`", s.name, f.name);
+        if let Some(d) = written_twice(&f.attrs, "bytes", &whose) {
+            return Err(d);
+        }
         let size = type_byte_size(&f.ty, named_sizes);
         let known = size.ok();
         let written = field_attr(f, "bytes");
@@ -292,10 +342,16 @@ pub fn verify_explicit_struct_layout(
                 "E0412",
                 f.name_span,
                 match written {
-                    Some(a) => format!(
-                        "field `{}.{}` has `{}`, which is no range `start..end` of integer literals; every field of a `@layout` struct needs one",
-                        s.name, f.name, a
-                    ),
+                    Some(a) => match suffixed(a.args.split("..")) {
+                        Some(why) => format!(
+                            "{} has `{}`, but {}; every field of a `@layout` struct needs a range `start..end` of integer literals",
+                            whose, a, why
+                        ),
+                        None => format!(
+                            "{} has `{}`, which is no range `start..end` of integer literals; every field of a `@layout` struct needs one",
+                            whose, a
+                        ),
+                    },
                     None => format!(
                         "field `{}.{}` has no `@bytes(start..end)`; every field of a `@layout` struct needs one",
                         s.name, f.name
@@ -384,13 +440,21 @@ pub fn verify_explicit_struct_layout(
         let expected_field_bytes = match size {
             Ok(n) => n,
             Err(NoSize::Unknown) => {
+                // An array's length is a layout number too, and takes no suffix.
+                let lengths = f.ty.split('[').skip(1).filter_map(|p| p.split(']').next());
                 return Err(Diagnostic::error(
                     "E0417",
                     f.ty_span,
-                    format!(
-                        "field `{}.{}` has type `{}`, whose byte size is not known, so `@bytes({}..{})` cannot be checked",
-                        s.name, f.name, f.ty, start, end
-                    ),
+                    match suffixed(lengths) {
+                        Some(why) => format!(
+                            "{} has type `{}`, whose byte size is not known: {}",
+                            whose, f.ty, why
+                        ),
+                        None => format!(
+                            "{} has type `{}`, whose byte size is not known, so `@bytes({}..{})` cannot be checked",
+                            whose, f.ty, start, end
+                        ),
+                    },
                 ))
             }
             Err(NoSize::PastLimit) => {
@@ -652,17 +716,26 @@ pub fn verify_bitstruct_layout(
     let widest = LayoutNum::small(BACKING_BITS);
     let mut cursor = LayoutNum::ZERO;
     for f in &bs.fields {
+        if let Some(d) = written_twice(&f.attrs, "bits", &format!("field `{}.{}`", bs.name, f.name))
+        {
+            return Err(d);
+        }
         let bits = f.bits_span.unwrap_or(f.name_span);
+        let first = f.attrs.iter().find(|a| a.name == "bits");
         let Some((start, end)) = f.bit_range else {
             return Err(Diagnostic::error(
                 "E0426",
                 bits,
-                match f.bits_span {
-                    Some(_) => format!(
+                match (first, first.and_then(|a| suffixed(a.args.split("..")))) {
+                    (Some(_), Some(why)) => format!(
+                        "field `{}.{}` has a `@bits` that is no range `start..end` of integer literals: {}",
+                        bs.name, f.name, why
+                    ),
+                    (Some(_), None) => format!(
                         "field `{}.{}` has a `@bits` that is no range `start..end` of integer literals",
                         bs.name, f.name
                     ),
-                    None => format!(
+                    (None, _) => format!(
                         "field `{}.{}` has no `@bits(start..end)`; every field of a bitstruct needs one",
                         bs.name, f.name
                     ),
@@ -801,7 +874,7 @@ pub fn verify_bitstruct_layout(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{type_byte_size, NoSize};
+    use super::{type_byte_size, LayoutNum, NoSize};
     use crate::structs::ARRAY_ELEMENTS;
 
     /// An array of the most elements an array may hold has a size, its elements' size times
@@ -814,8 +887,8 @@ mod tests {
         let none = HashMap::new();
         let most = format!("[{}]u8", ARRAY_ELEMENTS);
         assert_eq!(
-            type_byte_size(&most, &none).ok().map(|n| n.0),
-            Some(ARRAY_ELEMENTS)
+            type_byte_size(&most, &none).ok(),
+            LayoutNum::within(ARRAY_ELEMENTS)
         );
         let more = format!("[{}]u8", ARRAY_ELEMENTS + 1);
         assert_eq!(type_byte_size(&more, &none).err(), Some(NoSize::PastLimit));

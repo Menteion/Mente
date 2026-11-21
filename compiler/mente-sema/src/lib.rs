@@ -1592,6 +1592,124 @@ pub struct Rec {
         let fixed = mente_syntax::diagnostics::apply_fix(&src, &d.fixes[0]).unwrap();
         assert!(check_source(&fixed).is_ok(), "{}", fixed);
     }
+
+    /// A layout states each of its numbers once: a second `@layout`, `@bytes` or `@bits` is
+    /// `E0427`, at the second. The review of pull request 187 found `@bytes(0..8) @bytes(0..eight)`
+    /// drawing E0412 at the valid first, whose fix rewrote it with its own text: the parser read
+    /// the last `@bytes` and the layout check the first. Both read the first now.
+    #[test]
+    fn test_a_layout_attribute_written_twice_is_e0427() {
+        for (src, second) in [
+            (
+                layout(
+                    "@layout(size: 8, align: 8)\n@layout(size: 16, align: 8)",
+                    "  @bytes(0..8) pub a: u64\n",
+                ),
+                "@layout(size: 16, align: 8)",
+            ),
+            (
+                layout(
+                    "@layout(size: 8, align: 8)",
+                    "  @bytes(0..8) @bytes(0..eight) pub a: u64\n",
+                ),
+                "@bytes(0..eight)",
+            ),
+            (
+                String::from("module t\npub bitstruct B : u8 {\n  @bits(0..4) @bits(0..8) pub a: u4\n  @bits(4..8) pub b: u4\n}\n"),
+                "@bits(0..8)",
+            ),
+        ] {
+            let (d, text) = diagnosed(&src);
+            assert_eq!((d.code, text.as_str()), ("E0427", second), "{}", d);
+            assert!(
+                d.message.ends_with(&format!(
+                    "`{}`; a layout states each of its numbers once, so keep one",
+                    second
+                )),
+                "{}",
+                d.message
+            );
+        }
+        // The first is the one read: a valid first and an unreadable second is still E0427, not
+        // the E0412 of a range the check could not read.
+        let src = layout(
+            "@layout(size: 8, align: 8)",
+            "  @bytes(0..8) @bytes(0..eight) pub a: u64\n",
+        );
+        assert_eq!(check_source(&src).unwrap_err().len(), 1);
+    }
+
+    /// A layout number counts bytes, bits or elements, which have no type, so it takes no suffix:
+    /// the review of pull request 187 found `size: 8_banana` and `@bytes(0..300_u8)` read as 8 and
+    /// 300. Each place a layout number stands says so, and names the number to write; one with no
+    /// suffix, in hexadecimal or with `_` between its digits, stays a number.
+    #[test]
+    fn test_a_layout_number_takes_no_suffix() {
+        let why = |literal: &str, suffix: &str, n: u32| {
+            format!(
+                "`{}` has the suffix `{}`, and a layout number counts bytes, bits or elements, which have no type: write `{}`",
+                literal, suffix, n
+            )
+        };
+        for (src, code, literal, suffix, n) in [
+            (
+                layout(
+                    "@layout(size: 8_banana, align: 8)",
+                    "  @bytes(0..8) pub a: u64\n",
+                ),
+                "E0426",
+                "8_banana",
+                "banana",
+                8,
+            ),
+            (
+                layout(
+                    "@layout(size: 8, align: 8)",
+                    "  @bytes(0..8_u8) pub a: u64\n",
+                ),
+                "E0412",
+                "8_u8",
+                "u8",
+                8,
+            ),
+            (
+                String::from("module t\npub bitstruct B : u8 {\n  @bits(0..8_u8) pub a: u8\n}\n"),
+                "E0426",
+                "8_u8",
+                "u8",
+                8,
+            ),
+            (
+                layout(
+                    "@layout(size: 4, align: 1)",
+                    "  @bytes(0..4) pub a: [4_u8]u8\n",
+                ),
+                "E0417",
+                "4_u8",
+                "u8",
+                4,
+            ),
+        ] {
+            let (d, _) = diagnosed(&src);
+            assert_eq!(d.code, code, "{}", d);
+            assert!(
+                d.message.contains(&why(literal, suffix, n)),
+                "{}",
+                d.message
+            );
+        }
+        assert_eq!(
+            mente_syntax::int_literal("300_u8"),
+            Some((300, Some("u8".into())))
+        );
+        assert_eq!(
+            mente_syntax::int_literal("0xFF_u8"),
+            Some((255, Some("u8".into())))
+        );
+        assert_eq!(mente_syntax::int_literal_value("300_u8"), None);
+        assert_eq!(mente_syntax::int_literal_value("0x10"), Some(16));
+        assert_eq!(mente_syntax::int_literal_value("4_0"), Some(40));
+    }
 }
 
 #[cfg(test)]

@@ -29793,9 +29793,11 @@ mente-dump 3 mir
 == conformance/morphic-layouts/gap_between_bit_fields.mn == (exit 2)
 == conformance/morphic-layouts/gap_between_fields.mn == (exit 2)
 == conformance/morphic-layouts/layout_attribute_without_a_number.mn == (exit 2)
+== conformance/morphic-layouts/layout_attribute_written_twice.mn == (exit 2)
 == conformance/morphic-layouts/layout_numbers_past_their_limits.mn == (exit 2)
 == conformance/morphic-layouts/layout_numbers_read_as_literals.mn ==
 mente-dump 3 mir
+== conformance/morphic-layouts/layout_numbers_with_a_suffix.mn == (exit 2)
 == conformance/morphic-layouts/layout_sized_by_a_bitstruct.mn ==
 mente-dump 3 mir
 == conformance/morphic-layouts/misaligned_field.mn == (exit 2)
