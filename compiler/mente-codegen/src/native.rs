@@ -1664,7 +1664,7 @@ impl Shared {
 
 /// The most the runtime writes through a pointer at once: a 128-bit division's quotient and
 /// remainder.
-const SCRATCH: u32 = 32;
+pub(crate) const SCRATCH: u32 = 32;
 
 /// The address of the function's scratch slot, where the runtime writes a result of at most
 /// [`SCRATCH`] bytes that the code loads at once, before anything else writes there. One slot

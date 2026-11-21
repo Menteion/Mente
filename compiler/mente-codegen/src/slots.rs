@@ -21,6 +21,10 @@ use mente_mir::NodeId;
 /// The alignment of every slot, which `Op::Slot` promises.
 const ALIGN: u32 = 16;
 
+/// The bytes of a frame left beside a function's slots for the one slot native code adds, its
+/// scratch (`native::SCRATCH`).
+const RESERVED: u32 = crate::native::SCRATCH;
+
 /// The bytes of one function's slots: the offset of each `slot` instruction, by value, within
 /// one area of `bytes`.
 pub(crate) struct Layout {
@@ -180,37 +184,76 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
             }
         }
     }
-    // The slots alive together at each point: those of the addresses alive there, of the
-    // instruction's operands, and of the value it defines, which takes its slot's bytes where it
-    // is made even if nothing reads it.
-    let mut together: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); sizes.len()];
-    let mut meet = |slots: &BTreeSet<usize>| {
-        for &a in slots {
-            together[a].extend(slots.iter().copied().filter(|b| *b != a));
+    // Each address's base: the slot or the block parameter it was computed from, element by
+    // element. Every address of one base points into one slot, whichever it is in a run, so the
+    // slots a base may point into need no bytes apart for its sake: a parameter that may take any
+    // of a thousand slots, one on each path, holds one of them.
+    let mut base: Vec<NodeId> = (0..values).map(|v| NodeId(v as u32)).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &f.blocks {
+            for &v in &block.insts {
+                if !address(v) || slot_of[v.0 as usize].is_some() {
+                    continue;
+                }
+                let mut from = f
+                    .args(v)
+                    .iter()
+                    .filter(|a| address(**a))
+                    .map(|a| base[a.0 as usize]);
+                if let (Some(only), None) = (from.next(), from.next()) {
+                    if base[v.0 as usize] != only {
+                        base[v.0 as usize] = only;
+                        changed = true;
+                    }
+                }
+            }
         }
-    };
-    let slots_of = |vs: &mut dyn Iterator<Item = NodeId>| -> BTreeSet<usize> {
-        vs.flat_map(|v| roots[v.0 as usize].iter().copied())
-            .collect()
+    }
+    // The slots alive together at each point: two slots that two different bases alive there may
+    // point into, a base being alive where an address of it is, an operand of the instruction or
+    // the value it defines, which takes its slot's bytes where it is made even if nothing reads
+    // it. A point whose bases are those of the point before adds nothing.
+    let mut together: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); sizes.len()];
+    let mut last: Option<BTreeSet<NodeId>> = None;
+    let mut meet = |vs: &mut dyn Iterator<Item = NodeId>| {
+        let bases: BTreeSet<NodeId> = vs
+            .filter(|v| rooted(v))
+            .map(|v| base[v.0 as usize])
+            .collect();
+        if last.as_ref() == Some(&bases) {
+            return;
+        }
+        for &a in &bases {
+            for &b in bases.range(NodeId(a.0 + 1)..) {
+                for &x in &roots[a.0 as usize] {
+                    for &y in &roots[b.0 as usize] {
+                        if x != y {
+                            together[x].insert(y);
+                            together[y].insert(x);
+                        }
+                    }
+                }
+            }
+        }
+        last = Some(bases);
     };
     for block in &f.blocks {
         let mut live = live_after(block, &live_in);
-        meet(&slots_of(&mut live.iter().copied()));
+        meet(&mut live.iter().copied());
         for &v in block.insts.iter().rev() {
-            let at = slots_of(
+            meet(
                 &mut live
                     .iter()
                     .copied()
                     .chain([v])
                     .chain(f.args(v).iter().copied()),
             );
-            meet(&at);
             live.remove(&v);
             live.extend(f.args(v).iter().copied().filter(|a| rooted(a)));
         }
-        meet(&slots_of(
-            &mut live.iter().copied().chain(block.params.iter().copied()),
-        ));
+        meet(&mut live.iter().copied().chain(block.params.iter().copied()));
     }
     // Two slots of which no run makes both, as those of the two branches of an `if`, never hold
     // bytes at once, though an address that may point into either is alive where the branches
@@ -246,31 +289,59 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
         });
         blocks[to.0]
     };
-    // Each slot at the lowest offset clear of every slot placed before it that is alive with it
-    // in one run.
-    let mut placed: Vec<Option<u32>> = vec![None; sizes.len()];
-    let mut bytes = 0;
+    // Which pairs of slots one run may both make: two that are alive together in one run lie
+    // apart, and two of which no run makes both may share every byte.
+    let mut related: Vec<Vec<usize>> = vec![Vec::new(); sizes.len()];
     for k in 0..sizes.len() {
-        let mut taken: Vec<(u32, u32)> = Vec::new();
-        for &o in &together[k] {
-            let Some(at) = placed[o] else {
-                continue;
-            };
+        for o in 0..k {
             if reaches(where_made[o], where_made[k]) || reaches(where_made[k], where_made[o]) {
-                taken.push((at, at + sizes[o]));
+                related[k].push(o);
             }
         }
-        taken.sort_unstable();
-        let mut at = 0;
-        for (start, end) in taken {
-            if at + sizes[k] <= start {
-                break;
-            }
-            at = at.max(end);
+    }
+    // Two slots one run makes in turn, at one offset, would have one address, which Cranelift
+    // computes once and keeps alive from the first slot's use to the last's, so that its register
+    // allocation, and the instructions it executes, change with what shares bytes. So a slot
+    // starts where no slot of its run started, sharing their bytes from 16 on, while that keeps
+    // the slots within the frame they hold values of; past that, at the lowest clear offset.
+    let budget = u32::try_from(f.frame.saturating_sub(u128::from(RESERVED))).unwrap_or(u32::MAX);
+    let place = |apart: bool| -> (Vec<u32>, u32) {
+        let mut placed: Vec<u32> = Vec::with_capacity(sizes.len());
+        let mut bytes = 0;
+        for k in 0..sizes.len() {
+            let taken: Vec<(u32, u32)> = together[k]
+                .iter()
+                .filter(|o| **o < k && related[k].binary_search(o).is_ok())
+                .map(|&o| (placed[o], placed[o] + sizes[o]))
+                .collect();
+            let starts: BTreeSet<u32> = if apart {
+                related[k].iter().map(|&o| placed[o]).collect()
+            } else {
+                BTreeSet::new()
+            };
+            let clear = |at: u32| taken.iter().all(|&(s, e)| at + sizes[k] <= s || e <= at);
+            // Where a slot may begin: the start, the end of every slot it lies apart from, and
+            // one alignment past each start it does not take.
+            let candidates: BTreeSet<u32> = std::iter::once(0)
+                .chain(taken.iter().map(|&(_, e)| e))
+                .chain(starts.iter().map(|s| s + ALIGN))
+                .collect();
+            // The last candidate lies past every slot apart and past every start, so one is found.
+            let at = candidates
+                .into_iter()
+                .find(|&at| clear(at) && !starts.contains(&at))
+                .unwrap_or(0);
+            placed.push(at);
+            bytes = bytes.max(at + sizes[k]);
         }
-        placed[k] = Some(at);
+        (placed, bytes)
+    };
+    let (placed, bytes) = match place(true) {
+        (placed, bytes) if bytes <= budget => (placed, bytes),
+        _ => place(false),
+    };
+    for (k, at) in placed.into_iter().enumerate() {
         offsets[makers[k].0 as usize] = Some(at);
-        bytes = bytes.max(at + sizes[k]);
     }
     Layout { offsets, bytes }
 }
@@ -301,6 +372,33 @@ mod tests {
             })
             .collect();
         (layout, slots)
+    }
+
+    /// Two slots one run may both make share bytes when one block parameter may take either and
+    /// nothing else holds the first once the second is made: a parameter holds one slot at a
+    /// time. Counting every slot a parameter may take as alive at once gave a generated program's
+    /// parameter, joined from three hundred paths, a thousand slots apart, 16,208 bytes for a
+    /// frame of 363, which CI's build of it refused (seed 93 of the generator, 2026-11-21).
+    #[test]
+    fn test_the_slots_one_parameter_may_take_share_bytes() {
+        use mente_mir::cfg::{BlockId, Builder, IntTy, Ty};
+        let u8t = Ty::Int(IntTy::new(8, false));
+        let mut b = Builder::new("f", &[Ty::Bool], Some(u8t));
+        let c = b.params(BlockId(0))[0];
+        let first = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let later = b.block(&[]);
+        let join = b.block(&[Ty::Addr]);
+        b.branch(c, (later, vec![]), (join, vec![first]));
+        b.switch(later);
+        let second = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        b.jump(join, vec![second]);
+        b.switch(join);
+        let p = b.params(join)[0];
+        let v = b.inst(Op::Load, u8t, &[p]);
+        b.ret(Some(v));
+        let l = layout(&b.finish());
+        assert_eq!(l.offsets[first.0 as usize], l.offsets[second.0 as usize]);
+        assert_eq!(l.bytes, 16);
     }
 
     /// Whether two slots, each an offset and its bytes, hold no byte in common.
