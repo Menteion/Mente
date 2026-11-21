@@ -5961,21 +5961,29 @@ impl<'a> Fx<'a> {
     /// divisor was not 0 or that a narrowed value fit, are added. Otherwise those facts would
     /// prove the candidate's own checks once it is assumed at the head. `st` itself is the
     /// state in which it fails then. An evaluation that may trap is the only one that can end
-    /// with no state of one that had some, so no head is left empty by a candidate.
-    fn refute_cand(&mut self, st: &Octagon, c: Cand) -> Option<Octagon> {
-        let mut s = st.clone();
+    /// with no state of one that had some, so no head is left empty by a candidate: were one
+    /// to, every check of the loop `s` would count as proven, so the check stops the compile
+    /// there, in every build, with an internal error that names the loop and the candidate.
+    fn refute_cand(&mut self, st: &Octagon, c: Cand, s: StmtId) -> Option<Octagon> {
+        let mut after = st.clone();
         let outer = std::mem::replace(&mut self.unproven, 0);
-        let k = self.cand(&mut s, c);
+        let k = self.cand(&mut after, c);
         let may_trap = self.unproven > 0;
         self.unproven = outer;
         if may_trap {
             return Some(st.clone());
         }
-        debug_assert!(
-            !s.is_empty() || st.is_empty(),
-            "a candidate that cannot trap left no state of one that had some"
-        );
-        self.refute(&s, &k)
+        if after.is_empty() && !st.is_empty() {
+            let at = self.tree.stmt(s).span;
+            panic!(
+                "internal error: in `{}`, the loop at {}:{} has the candidate `{}`, which cannot trap, and its evaluation left no state of one that had some (ghost-contracts-and-totality.md, item 2, loop-candidates-by-syntax)",
+                self.syntax.name,
+                at.line,
+                at.col,
+                self.cand_text(c)
+            );
+        }
+        self.refute(&after, &k)
     }
 
     /// The state at a loop head: the entry state with every binding the loop changes
@@ -6583,11 +6591,24 @@ impl<'a> Fx<'a> {
             }
         }
         let written = cands.len();
-        // A written invariant lies in the Tier-1 fragment, which holds no call, `if` or
-        // `match`, so each of its conjuncts is a candidate by its syntax.
-        debug_assert!(cands.iter().all(|c| match c {
-            Cand::Expr(e) | Cand::Weak(e) => self.not_a_candidate(*e).is_none(),
-        }));
+        // A written invariant in the Tier-1 fragment, which holds no call, `if` or `match`, is a
+        // candidate by its syntax, conjunct by conjunct; one outside it is an axiom above, which
+        // `@checked` checks at run time and `@prove` trusts until `mn prove` runs (`route`). The
+        // check holds in every build, as the one of `refute_cand` does.
+        for c in &cands {
+            let (Cand::Expr(e) | Cand::Weak(e)) = *c;
+            if let Some(why) = self.not_a_candidate(e) {
+                let at = self.tree.stmt(s).span;
+                panic!(
+                    "internal error: in `{}`, the loop at {}:{} has the written invariant `{}` in the Tier-1 fragment, which is no candidate, since {} (ghost-contracts-and-totality.md, item 2, loop-candidates-by-syntax)",
+                    self.syntax.name,
+                    at.line,
+                    at.col,
+                    self.cand_text(*c),
+                    why
+                );
+            }
+        }
         let mut from_cond = Vec::new();
         self.conjuncts(cond, &mut from_cond);
         let mut from_guards = Vec::new();
@@ -6647,7 +6668,7 @@ impl<'a> Fx<'a> {
         self.recording = false;
         let entry_ok: Vec<bool> = cands
             .iter()
-            .map(|c| self.refute_cand(st, *c).is_none())
+            .map(|c| self.refute_cand(st, *c, s).is_none())
             .collect();
         let mut alive = entry_ok.clone();
         let mut back;
@@ -6656,7 +6677,7 @@ impl<'a> Fx<'a> {
             back = self.pass(&head, (s, cond, body), st).0;
             let mut dropped = false;
             for (k, c) in cands.iter().enumerate() {
-                if alive[k] && self.refute_cand(&back, *c).is_some() {
+                if alive[k] && self.refute_cand(&back, *c, s).is_some() {
                     alive[k] = false;
                     dropped = true;
                 }
@@ -6669,9 +6690,9 @@ impl<'a> Fx<'a> {
         let mut failures = Vec::new();
         for k in 0..written {
             let failing = if !entry_ok[k] {
-                self.refute_cand(st, cands[k]).map(|f| (f, true))
+                self.refute_cand(st, cands[k], s).map(|f| (f, true))
             } else if !alive[k] {
-                self.refute_cand(&back, cands[k]).map(|f| (f, false))
+                self.refute_cand(&back, cands[k], s).map(|f| (f, false))
             } else {
                 None
             };
