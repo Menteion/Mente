@@ -17,15 +17,14 @@ cranelift-frontend = "=0.137.1"
 cranelift-module = "=0.137.1"
 cranelift-object = "=0.137.1"
 cranelift-native = "=0.137.1"
-# gimli and object come only through cranelift's re-exports, `cranelift_codegen::gimli` and
-# `cranelift_object::object`, since cranelift-codegen and cranelift-object use them in their own
-# signatures: a version of either apart from cranelift's is a second crate, and a type of one is no
-# type of the other (E0308; Dependabot's pull request 164 moved them alone and broke every Rust
-# job). cranelift turns on gimli's `read`, `write` and `std` and object's `read_core`, `elf`,
-# `write` and `std`; object's `coff`, for Windows, is turned on here, under a name no code can
-# import, at exactly the version cranelift-object takes. test_gimli_and_object_are_cranelifts in
-# compiler/mente-cli holds them to one version each, cranelift's.
-object-features = { package = "object", version = "=0.40.0", default-features = false, features = ["coff"] }
+# gimli and object come only through cranelift, by its re-exports `cranelift_codegen::gimli` and
+# `cranelift_object::object`, and are no dependency of this crate: cranelift-codegen and
+# cranelift-object use them in their own signatures, so a version of either apart from cranelift's
+# is a second crate, and a type of one is no type of the other (E0308; Dependabot's pull request
+# 164 moved them alone and broke every Rust job). cranelift turns on every feature the writers use:
+# gimli's `read`, `write` and `std`, and object's `read_core`, `elf`, `write` and `std`, where
+# `write` brings `coff` and `pe` for Windows. test_gimli_and_object_are_cranelifts in
+# compiler/mente-cli holds the lock to one version of each, cranelift's.
 
 [lints]
 workspace = true

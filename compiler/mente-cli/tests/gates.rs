@@ -8,124 +8,183 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-/// The dependency policy of CLAUDE.md, applied to one manifest: a compiler crate depends
-/// only on the workspace's own crates, by path; `mente-mir` depends on nothing; only
-/// `mente-codegen` may add Cranelift, and `gimli` and `object` for its object files and
-/// debug information (Norman, 2026-11-10). A renamed dependency, `x = { package = "y", .. }`, is
-/// the crate `y`, whatever its key. Returns each dependency line outside the policy.
-fn dependency_policy_violations(krate: &str, manifest: &str) -> Vec<String> {
-    let mut section = String::new();
-    let mut found = Vec::new();
-    for line in manifest.lines().map(str::trim) {
-        if line.starts_with('[') {
-            section = line.trim_matches(|c| c == '[' || c == ']').to_string();
-            continue;
-        }
-        if !section.ends_with("dependencies") || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let key = line.split(['=', '.']).next().unwrap_or("").trim();
-        let name = line
-            .split_once("package = \"")
-            .and_then(|(_, rest)| rest.split('"').next())
-            .unwrap_or(key);
-        let allowed = if name.starts_with("mente-") {
-            krate != "mente-mir"
-                && !(krate == "mente-interp" && matches!(name, "mente-mir" | "mente-codegen"))
-                && line.contains("path =")
-        } else {
-            (name.starts_with("cranelift") || matches!(name, "gimli" | "object"))
-                && krate == "mente-codegen"
-        };
-        if !allowed {
-            found.push(format!("{}: [{}] {}", krate, section, line));
-        }
-    }
-    found
+/// The dependency policy of CLAUDE.md, applied to one crate of the workspace and its dependencies,
+/// each with whether it is a crate of the workspace: a compiler crate depends only on the
+/// workspace's own crates; `mente-mir` depends on nothing; the reference interpreter never on
+/// `mente-mir` or `mente-codegen`; and only `mente-codegen` may add Cranelift, and `gimli` and
+/// `object` for its object files and debug information (Norman, 2026-11-10). Returns each
+/// dependency outside the policy.
+fn dependency_policy_violations(krate: &str, deps: &[(String, bool)]) -> Vec<String> {
+    deps.iter()
+        .filter(|(name, local)| {
+            let allowed = if name.starts_with("mente-") {
+                *local
+                    && krate != "mente-mir"
+                    && !(krate == "mente-interp"
+                        && matches!(name.as_str(), "mente-mir" | "mente-codegen"))
+            } else {
+                (name.starts_with("cranelift") || matches!(name.as_str(), "gimli" | "object"))
+                    && krate == "mente-codegen"
+            };
+            !allowed
+        })
+        .map(|(name, local)| {
+            let from = if *local {
+                "the workspace"
+            } else {
+                "outside the workspace"
+            };
+            format!("{krate}: {name}, from {from}")
+        })
+        .collect()
+}
+
+/// Each crate of the workspace `lock` holds, with its dependencies, each with whether it is a
+/// crate of the workspace. A lock is cargo's own reading of every manifest, and CI builds with
+/// `--locked`, which refuses a lock that does not match them: a dependency stands in it under the
+/// crate's own name, however its manifest spells it, renamed with `package` in either quote, in
+/// a `[dependencies.<name>]` table, under a target or as a dev-dependency. The tests cannot run
+/// `cargo metadata` itself, since their sandbox holds no toolchain (.github/scripts/test-sandbox.sh).
+fn workspace_dependencies(lock: &str) -> BTreeMap<String, Vec<(String, bool)>> {
+    let entries = lock_entries(lock);
+    // A dependency as the lock writes it, `name`, or `name version` beside a second version.
+    let local = |dep: &str| {
+        let mut words = dep.split(' ');
+        let name = words.next().unwrap_or("");
+        let version = words.next();
+        let same: Vec<&LockEntry> = entries
+            .iter()
+            .filter(|e| e.name == name && version.is_none_or(|v| e.version == v))
+            .collect();
+        !same.is_empty() && same.iter().all(|e| e.source.is_none())
+    };
+    entries
+        .iter()
+        .filter(|e| e.source.is_none())
+        .map(|e| {
+            let deps = e
+                .dependencies
+                .iter()
+                .map(|d| (d.split(' ').next().unwrap_or(d).to_string(), local(d)))
+                .collect();
+            (e.name.clone(), deps)
+        })
+        .collect()
 }
 
 /// A new external dependency needs Norman's approval and a change to this policy.
 #[test]
 fn test_crates_depend_only_on_allowed_crates() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut found = dependency_policy_violations(
-        "workspace",
-        &fs::read_to_string(root.join("Cargo.toml")).unwrap(),
-    );
-    let mut crates = 0;
+    let crates = workspace_dependencies(&fs::read_to_string(root.join("Cargo.lock")).unwrap());
+    // Every crate of compiler/ is in the lock, read by its name.
+    let mut compiler = 0;
     for entry in fs::read_dir(root.join("compiler")).unwrap().flatten() {
-        if let Ok(manifest) = fs::read_to_string(entry.path().join("Cargo.toml")) {
-            crates += 1;
-            found.extend(dependency_policy_violations(
-                &entry.file_name().to_string_lossy(),
-                &manifest,
-            ));
+        if entry.path().join("Cargo.toml").exists() {
+            compiler += 1;
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                crates.contains_key(&name),
+                "Cargo.lock holds no crate {name}"
+            );
         }
     }
     assert!(
-        crates >= 7,
-        "expected the seven compiler crates, read {}",
-        crates
+        compiler >= 8,
+        "expected the compiler's crates, read {compiler}"
     );
+    let found: Vec<String> = crates
+        .iter()
+        .filter(|(name, _)| name.starts_with("mente-"))
+        .flat_map(|(name, deps)| dependency_policy_violations(name, deps))
+        .collect();
     assert!(
         found.is_empty(),
         "dependencies outside the policy:\n{}",
         found.join("\n")
     );
 
-    // The policy itself: what it lets through and what it stops.
-    let manifest = "[package]\nname = \"x\"\n\n[dependencies]\nmente-ast = { path = \"../mente-ast\" }\ncranelift-codegen = \"0.135\"\n\n[dev-dependencies]\nproptest = \"1\"\n";
+    // The policy on a lock, which writes a dependency's version where it holds two of the crate.
+    // Whatever form a manifest gives a dependency, the lock names the crate
+    // itself: `evil` here stands for `x = { package = "evil" }`, `x = { package = 'evil' }`,
+    // `[dependencies.evil]`, `[target.'cfg(windows)'.dependencies] evil = "1"` and
+    // `[dev-dependencies] evil = "1"` alike, so that no spelling reaches the policy.
+    let package = |name: &str, version: &str, source: bool, deps: &[&str]| {
+        let source = if source {
+            format!("source = \"{CRATES_IO}\"\n")
+        } else {
+            String::new()
+        };
+        let deps = if deps.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = deps.iter().map(|d| format!(" \"{d}\",\n")).collect();
+            format!("dependencies = [\n{}]\n", list.concat())
+        };
+        format!("[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n{source}{deps}\n")
+    };
+    let lock = [
+        "version = 4\n\n".to_string(),
+        package(
+            "mente-sema",
+            "0.1.0",
+            false,
+            &["mente-ast 0.1.0", "cranelift-codegen 0.137.1", "evil"],
+        ),
+        package("mente-ast", "0.1.0", false, &[]),
+        package(
+            "mente-codegen",
+            "0.1.0",
+            false,
+            &["cranelift-codegen 0.137.1", "evil", "gimli", "object"],
+        ),
+        package(
+            "mente-interp",
+            "0.1.0",
+            false,
+            &["mente-sema", "mente-mir", "mente-codegen"],
+        ),
+        package("mente-mir", "0.1.0", false, &["mente-ast 0.1.0"]),
+        package("mente-cli", "0.1.0", false, &["mente-ast 0.1.1"]),
+        package("mente-ast", "0.1.1", true, &[]),
+        package("cranelift-codegen", "0.137.1", true, &[]),
+        package("cranelift-codegen", "0.136.0", true, &[]),
+        package("evil", "1.0.0", true, &[]),
+        package("gimli", "0.33.0", true, &[]),
+        package("object", "0.40.0", true, &[]),
+    ]
+    .concat();
+    let crates = workspace_dependencies(&lock);
+    let refused = |name: &str| dependency_policy_violations(name, &crates[name]);
     assert_eq!(
-        dependency_policy_violations("mente-sema", manifest),
-        vec![
-            "mente-sema: [dependencies] cranelift-codegen = \"0.135\"".to_string(),
-            "mente-sema: [dev-dependencies] proptest = \"1\"".to_string(),
+        refused("mente-sema"),
+        [
+            "mente-sema: cranelift-codegen, from outside the workspace",
+            "mente-sema: evil, from outside the workspace"
+        ]
+    );
+    // Cranelift, gimli and object are mente-codegen's alone, and a second version of a crate is
+    // read by the one the dependency names.
+    assert_eq!(
+        refused("mente-codegen"),
+        ["mente-codegen: evil, from outside the workspace"]
+    );
+    // The reference interpreter shares no code with the paths it checks, and MIR takes nothing.
+    assert_eq!(
+        refused("mente-interp"),
+        [
+            "mente-interp: mente-mir, from the workspace",
+            "mente-interp: mente-codegen, from the workspace"
         ]
     );
     assert_eq!(
-        dependency_policy_violations("mente-codegen", manifest).len(),
-        1
+        refused("mente-mir"),
+        ["mente-mir: mente-ast, from the workspace"]
     );
-    assert_eq!(dependency_policy_violations("mente-mir", manifest).len(), 3);
-    // The reference interpreter shares no code with the paths it checks.
-    let interp = "[dependencies]\nmente-sema = { path = \"../mente-sema\" }\nmente-mir = { path = \"../mente-mir\" }\nmente-codegen = { path = \"../mente-codegen\" }\n";
+    // A crate named as one of the workspace's but taken from outside it is refused.
     assert_eq!(
-        dependency_policy_violations("mente-interp", interp),
-        vec![
-            "mente-interp: [dependencies] mente-mir = { path = \"../mente-mir\" }".to_string(),
-            "mente-interp: [dependencies] mente-codegen = { path = \"../mente-codegen\" }"
-                .to_string(),
-        ]
-    );
-    assert!(dependency_policy_violations("mente-cli", interp).is_empty());
-    assert_eq!(
-        dependency_policy_violations("mente-cli", "[dependencies]\nmente-ast = \"0.1\"\n").len(),
-        1
-    );
-    // The object and DWARF writers are mente-codegen's alone, and only those two.
-    let objects =
-        "[dependencies]\ngimli = { version = \"0.33\" }\nobject = \"0.40\"\nobject-pool = \"1\"\n";
-    assert_eq!(
-        dependency_policy_violations("mente-codegen", objects),
-        vec!["mente-codegen: [dependencies] object-pool = \"1\"".to_string()]
-    );
-    assert_eq!(
-        dependency_policy_violations("mente-sema", objects),
-        vec![
-            "mente-sema: [dependencies] gimli = { version = \"0.33\" }".to_string(),
-            "mente-sema: [dependencies] object = \"0.40\"".to_string(),
-            "mente-sema: [dependencies] object-pool = \"1\"".to_string(),
-        ]
-    );
-    // A renamed dependency is the crate it names: object under another key passes, and a crate
-    // outside the policy under an allowed key does not.
-    let renamed = "[dependencies]\nobject-features = { package = \"object\", version = \"=0.40.0\" }\ncranelift-extra = { package = \"evil\", version = \"1\" }\n";
-    assert_eq!(
-        dependency_policy_violations("mente-codegen", renamed),
-        vec![
-            "mente-codegen: [dependencies] cranelift-extra = { package = \"evil\", version = \"1\" }"
-                .to_string()
-        ]
+        refused("mente-cli"),
+        ["mente-cli: mente-ast, from outside the workspace"]
     );
 }
 

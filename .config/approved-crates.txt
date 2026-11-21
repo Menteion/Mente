@@ -10,7 +10,7 @@ allocator-api2: cranelift-codegen
 anyhow: cranelift-module
 arbitrary: cranelift-codegen
 bumpalo: cranelift-codegen
-cfg-if: object
+cfg-if: cranelift-object
 cranelift-assembler-x64: cranelift-codegen
 cranelift-assembler-x64-meta: cranelift-codegen
 cranelift-bforest: cranelift-codegen
@@ -26,7 +26,7 @@ cranelift-module: cranelift-module
 cranelift-native: cranelift-native
 cranelift-object: cranelift-object
 cranelift-srcgen: cranelift-codegen
-crc32fast: object
+crc32fast: cranelift-object
 equivalent: cranelift-codegen
 fnv: cranelift-codegen
 foldhash: cranelift-codegen
@@ -38,8 +38,8 @@ libc: cranelift-native
 libm: cranelift-codegen
 log: cranelift-codegen
 mach2: cranelift-native
-memchr: object
-object: object
+memchr: cranelift-object
+object: cranelift-object
 proc-macro2: cranelift-codegen
 quote: cranelift-codegen
 regalloc2: cranelift-codegen
