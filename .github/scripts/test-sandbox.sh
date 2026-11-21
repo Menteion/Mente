@@ -90,8 +90,11 @@ fail() {
 }
 
 # The processes alive in this namespace beside its first and the watcher, in `left`. A process
-# has ended when the kernel says so (State: Z) and no other thread of it runs: its name, which it
-# chooses, is never read, and one whose first thread alone has ended still counts.
+# has ended when the kernel says so (State: Z) and no other thread of it runs (Threads: 0 or 1):
+# its name, which it chooses, is never read, and one whose first thread alone has ended still
+# counts. A status that cannot be read, or holds no state or thread count, is a process alive, as
+# is a /proc with no process to list: the guard fails closed, as the program's does (the review of
+# 34250a3).
 remaining() {
   local dir pid key value rest state threads
   left=
@@ -106,9 +109,10 @@ remaining() {
           Threads:) threads=$value ;;
         esac
       done < "$dir/status"
-    } 2> /dev/null || continue
-    if [ -z "$state" ]; then continue; fi
-    if [ "$state" = Z ] && [ "${threads:-1}" -le 1 ]; then continue; fi
+    } 2> /dev/null || true
+    case "$state:$threads" in
+      Z:0 | Z:1) continue ;;
+    esac
     left="$left $pid"
   done
 }
@@ -557,7 +561,10 @@ setup() {
   # The wrapper and the namespace's first process, one program where a shell ran both and started
   # seven programs for each command (.github/scripts/test-sandbox.rs): built here, before any code of
   # the change runs, by the toolchain rust-toolchain.toml pins, with rustc alone, from that one file
-  # and no crate, outside the workspace's build; root installs it.
+  # and no crate, outside the workspace's build; root installs it. No digest of the program is
+  # checked: the source is pinned by the policy, the toolchain by rust-toolchain.toml, which may
+  # name no path, and nothing runs between the build and root's install; a digest would only repeat
+  # what this step just built, and would change with every toolchain.
   /usr/bin/mkdir -p "$RUNNER_TEMP/test-sandbox-build"
   rustc --edition 2021 -C opt-level=2 -C panic=abort -o "$RUNNER_TEMP/test-sandbox-build/test-sandbox" "$here/test-sandbox.rs"
   /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace" "$RUNNER_TEMP/test-sandbox-build/test-sandbox"
@@ -740,9 +747,14 @@ probe() {
 }
 
 # A process that outlives the command that started it, in a session of its own, holding none of
-# its output: `name` is how the canary finds it.
+# its output: `name`, its command line, is how the canary finds it. Its program is a copy of sleep
+# in TMPDIR whose file name, which the kernel gives the process as its own, begins with a byte that
+# is no UTF-8 (the review of 34250a3: a process so named hid from the program's leak guard, which
+# read its status as text).
 probe_outlive() {
-  /usr/bin/setsid /usr/bin/bash -c 'exec -a "$0" /usr/bin/sleep 600' "$1" < /dev/null > /dev/null 2>&1 &
+  local copy=${TMPDIR:-/tmp}/$'\xff'-$1
+  /usr/bin/cp /usr/bin/sleep "$copy"
+  /usr/bin/setsid /usr/bin/bash -c 'exec -a "$0" "$1" 600' "$1" "$copy" < /dev/null > /dev/null 2>&1 &
   /usr/bin/sleep 0.2
 }
 
@@ -752,7 +764,7 @@ probe_outlive() {
 # end, by SIGTERM as nextest stops a test and by SIGKILL, before the command has started or after,
 # ends the namespace. No crash in it starts the runner's core handler.
 check() {
-  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay cores costs serial parallel began refused
+  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay cores costs serial parallel began refused outlives
   declare -A outside in_sandbox
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
@@ -852,8 +864,11 @@ check() {
   if [ "${in_sandbox[core-limit]:-}" != 1/1 ]; then problem "a crash in the sandbox could write a core file: its core limit is ${in_sandbox[core-limit]:-not reported}, not one byte"; fi
 
   # A process left behind: the runner's user keeps it; the sandbox ends it and fails the command.
-  /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives"
+  # Its name, as the kernel shows it, begins with a byte that is no UTF-8.
+  TMPDIR=$work /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives"
   if ! within alive "$marker-outlives"; then problem "the canary's process did not outlive its command as the runner's user, so its run in the sandbox proves nothing"; fi
+  outlives=$(/usr/bin/pgrep -f "^$marker-outlives" | /usr/bin/head -n 1) || true
+  if [ "$(/usr/bin/head -c 1 "/proc/$outlives/comm" 2> /dev/null | /usr/bin/od -A n -t x1 | /usr/bin/tr -d ' ')" != ff ]; then problem "the canary's process is not named with a byte that is no UTF-8, so its run in the sandbox proves nothing"; fi
   /usr/bin/pkill -f "^$marker-outlives" || true
   status=0
   "$program" run /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives" 2> "$work/outlive.txt" || status=$?
@@ -949,11 +964,15 @@ check() {
   # The wrapper and the namespace's first process are one program (.github/scripts/test-sandbox.rs),
   # where the shell ran both (`reference`): for the same command, what it sees through each route is
   # the same, its mounts (less the numbers each mount is given anew), its user, groups and
-  # capabilities, no_new_privs, the signals it starts with blocked or ignored, its limits, its umask
-  # and its environment. And both refuse a command they could not hand over whole, before they record
-  # it.
+  # capabilities, no_new_privs, the signals it starts with blocked or ignored, the descriptors it
+  # holds, its limits, its umask and its environment; and the descriptors are its standard input,
+  # output and error alone, which a child of the command lists while the command holds no other (the
+  # review of 34250a3: a command that held the lifeline's end saw the same view). And both refuse a
+  # command they could not hand over whole, before they record it.
   view='/usr/bin/cut -d " " -f 4- /proc/self/mountinfo
 /usr/bin/grep -E "^(Uid|Gid|Groups|NoNewPrivs|Seccomp|CapInh|CapPrm|CapEff|CapBnd|CapAmb|SigBlk|SigIgn):" /proc/self/status
+echo -n "descriptors: "
+/usr/bin/ls -m /proc/$$/fd
 /usr/bin/cat /proc/self/limits
 umask
 /usr/bin/env | /usr/bin/sort'
@@ -963,8 +982,10 @@ umask
     problem "the shell's route could not run the view of the sandbox: $through_shell"
   elif [ "$through_one" != "$through_shell" ]; then
     problem "a command sees another sandbox through the one program than through the shell's route: $(/usr/bin/diff <(printf '%s\n' "$through_shell") <(printf '%s\n' "$through_one") | /usr/bin/head -n 20 | /usr/bin/tr '\n' ' ')"
+  elif ! /usr/bin/grep -q -x "descriptors: 0, 1, 2" <<< "$through_one"; then
+    problem "a command in the sandbox holds a descriptor beyond its standard input, output and error, through both routes: $(/usr/bin/grep "^descriptors:" <<< "$through_one")"
   else
-    echo "Through the one program and through the shell, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, signals, limits and environment."
+    echo "Through the one program and through the shell, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, signals, descriptors, limits and environment."
   fi
   for route in "$program run" "/usr/bin/bash $self reference"; do
     k=$(/usr/bin/wc -l < "$log")

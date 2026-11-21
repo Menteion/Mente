@@ -16,8 +16,8 @@
 //       enters the command's directory, sets the limits of the shell that started the wrapper and a
 //       core limit of one byte, starts the watcher that ends every process here when the wrapper
 //       ends, then runs the command as the sandbox's user, with no group, no capability, no way to
-//       gain one and only the environment named, waits for it, and fails it if it left a process
-//       behind.
+//       gain one, no descriptor but its standard input, output and error, and only the environment
+//       named, waits for it, and fails it if it left a process behind, or if it cannot tell.
 //
 // Its every effect on the command is the one test-sandbox.sh's shell route has (`reference`, its
 // `wrap` and `inner`): the canary runs both and compares what each command sees.
@@ -39,7 +39,7 @@
 
 use std::ffi::{CString, OsString};
 use std::io::Write;
-use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -52,7 +52,8 @@ const PROGRAM: &str = "/opt/mente-test-sandbox/test-sandbox";
 const UID: u32 = 4242424;
 const GID: u32 = 4242424;
 
-// Linux's numbers, the same on x86-64 and AArch64 but for the two system calls glibc wraps not.
+// Linux's numbers, the same on x86-64 and AArch64 but for two of the three system calls this
+// program makes through syscall(2): close_range, newer, has one number on every architecture.
 const MS_NOSUID: c_ulong = 2;
 const MS_NODEV: c_ulong = 4;
 const MS_NOEXEC: c_ulong = 8;
@@ -84,6 +85,7 @@ const SYS_CAPSET: c_long = 126;
 const SYS_PIVOT_ROOT: c_long = 41;
 #[cfg(target_arch = "aarch64")]
 const SYS_CAPSET: c_long = 91;
+const SYS_CLOSE_RANGE: c_long = 436;
 
 #[repr(C)]
 struct Rlimit {
@@ -127,7 +129,9 @@ extern "C" {
     fn setgroups(size: usize, list: *const u32) -> c_int;
     fn setresgid(real: u32, effective: u32, saved: u32) -> c_int;
     fn setresuid(real: u32, effective: u32, saved: u32) -> c_int;
-    fn prctl(option: c_int, arg2: c_ulong, arg3: c_ulong, arg4: c_ulong, arg5: c_ulong) -> c_int;
+    // Variadic, as glibc declares it; `control` below passes it four unsigned longs, as glibc reads
+    // them.
+    fn prctl(option: c_int, ...) -> c_int;
     fn signal(signal: c_int, handler: usize) -> usize;
     fn _exit(status: c_int) -> !;
 }
@@ -158,6 +162,13 @@ fn checked(result: c_int, what: &str) {
     if result == -1 {
         fail(1, &format!("{what}: {}", errno()));
     }
+}
+
+/// prctl(2) with its four arguments, each an unsigned long whatever its value, checked: a literal
+/// handed to a variadic function bare would be an int.
+fn control(option: c_int, arg2: c_ulong, arg3: c_ulong, arg4: c_ulong, arg5: c_ulong, what: &str) {
+    // SAFETY: prctl takes numbers alone for every option this program uses.
+    checked(unsafe { prctl(option, arg2, arg3, arg4, arg5) }, what);
 }
 
 /// A status as the shell gives it from waitpid's: the exit code, or 128 and the signal that ended
@@ -289,11 +300,12 @@ fn wrapper(args: &[OsString]) -> ! {
         // never returns.
         unsafe {
             // The lifeline's end the namespace reads, on standard input, open across the exec (dup2
-            // onto itself would leave it closing there).
-            if fds[0] == 0 {
-                fcntl(0, F_SETFD, 0);
-            } else {
-                dup2(fds[0], 0);
+            // onto itself would leave it closing there). A call that fails ends the child before
+            // sudo runs, as every call before an exec here does.
+            let (moved, what) = if fds[0] == 0 { (fcntl(0, F_SETFD, 0 as c_int), "fcntl the lifeline") } else { (dup2(fds[0], 0), "dup2 the lifeline") };
+            if moved == -1 {
+                say(&format!("test-sandbox: {what}: {}", errno()));
+                _exit(1)
             }
             execve(sudo.as_ptr(), argp.as_ptr(), environ);
             let e = errno();
@@ -359,34 +371,43 @@ fn limit(resource: c_int, value: &str, unit: u64, what: &str) {
     checked(unsafe { setrlimit(resource, &rlimit) }, what);
 }
 
-/// The processes alive in this namespace beside its first and the watcher. A process has ended
-/// when the kernel says so (State: Z) and no other thread of it runs: its name, which it chooses,
-/// is never read, and one whose first thread alone has ended still counts.
+/// Whether a process has ended, from its status file as read: the kernel says so (State: Z) and no
+/// other thread of it runs (Threads: 0 or 1). Its name, which it chooses and which may be any bytes,
+/// is never read, and one whose first thread alone has ended still counts. A status that could not
+/// be read, or holds no state or thread count, is a process alive: the guard fails closed (the review
+/// of 34250a3: a name that was no UTF-8 made the status unreadable as text, and the process it
+/// named went uncounted).
+fn ended(status: std::io::Result<Vec<u8>>) -> bool {
+    let Ok(status) = status else { return false };
+    let field = |name: &[u8]| -> Option<Vec<u8>> {
+        let line = status.split(|&b| b == b'\n').find(|line| line.starts_with(name))?;
+        line[name.len()..].split(|b| b.is_ascii_whitespace()).find(|word| !word.is_empty()).map(<[u8]>::to_vec)
+    };
+    let (state, threads) = (field(b"State:"), field(b"Threads:"));
+    state.as_deref() == Some(b"Z") && matches!(threads.as_deref(), Some(b"0" | b"1"))
+}
+
+/// The processes alive in this namespace beside its first and the watcher (`ended`). A /proc that
+/// cannot be listed counts as a process left: nothing here is taken as gone that was not seen to
+/// end.
 fn remaining(watcher: c_int) -> Vec<String> {
-    let mut left = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else { return left };
-    let mut pids: Vec<u64> = entries.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect();
-    pids.sort_unstable();
-    for pid in pids {
-        if pid == 1 || pid == watcher as u64 {
-            continue;
+    let unlisted = |e: std::io::Error| vec![format!("(the processes of /proc, which could not be listed: {e})")];
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(e) => return unlisted(e),
+    };
+    let mut pids: Vec<u64> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => pids.extend(entry.file_name().to_str().and_then(|name| name.parse::<u64>().ok())),
+            Err(e) => return unlisted(e),
         }
-        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else { continue };
-        let mut state = "";
-        let mut threads = 1;
-        for line in status.lines() {
-            if let Some(v) = line.strip_prefix("State:") {
-                state = v.split_whitespace().next().unwrap_or("");
-            } else if let Some(v) = line.strip_prefix("Threads:") {
-                threads = v.trim().parse().unwrap_or(1);
-            }
-        }
-        if state.is_empty() || (state == "Z" && threads <= 1) {
-            continue;
-        }
-        left.push(pid.to_string());
     }
-    left
+    pids.sort_unstable();
+    pids.into_iter()
+        .filter(|&pid| pid != 1 && pid != watcher as u64 && !ended(std::fs::read(format!("/proc/{pid}/status"))))
+        .map(|pid| pid.to_string())
+        .collect()
 }
 
 /// The command's program: its path, or, for a bare name, the first of PATH=/usr/bin:/bin that is a
@@ -407,23 +428,18 @@ fn program(name: &[u8]) -> Vec<u8> {
 /// The command's own process, never returning: the privileges dropped, as setpriv dropped them, and
 /// the command run with only the environment named, as `env -i` ran it.
 fn command(envs: &[Vec<u8>], argv: &[Vec<u8>]) -> ! {
-    // The lifeline is the wrapper's and the watcher's alone. The signals stay as the caller left
-    // them, as through the shell route.
-    // SAFETY: a plain system call on a number.
-    unsafe {
-        close(8);
-    }
+    // The signals stay as the caller left them, as through the shell route.
     let last_cap: c_ulong = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or_else(|| fail(1, "cap_last_cap: unreadable"));
+    // No capability any process here may hold again: the bounding set, emptied while root may.
+    for cap in 0..=last_cap {
+        control(PR_CAPBSET_DROP, cap, 0, 0, 0, "drop a capability of the bounding set");
+    }
+    control(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0, "no_new_privs");
     // SAFETY: every call takes numbers or pointers to values that outlive it.
     unsafe {
-        // No capability any process here may hold again: the bounding set, emptied while root may.
-        for cap in 0..=last_cap {
-            checked(prctl(PR_CAPBSET_DROP, cap, 0, 0, 0), "drop a capability of the bounding set");
-        }
-        checked(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), "no_new_privs");
         checked(setgroups(0, std::ptr::null()), "setgroups");
         checked(setresgid(GID, GID, GID), "setresgid");
         checked(setresuid(UID, UID, UID), "setresuid");
@@ -434,8 +450,8 @@ fn command(envs: &[Vec<u8>], argv: &[Vec<u8>]) -> ! {
         if syscall(SYS_CAPSET, &header as *const CapHeader, data.as_ptr()) != 0 {
             fail(1, &format!("capset: {}", errno()));
         }
-        checked(prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0), "clear the ambient capabilities");
     }
+    control(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0, "clear the ambient capabilities");
     // The environment `env -i <envs> PATH=/usr/bin:/bin HOME=/tmp TMPDIR=/tmp` gives: each in turn,
     // a later value of a name in the earlier one's place, as putenv(3) sets it.
     let mut env: Vec<Vec<u8>> = Vec::new();
@@ -453,6 +469,14 @@ fn command(envs: &[Vec<u8>], argv: &[Vec<u8>]) -> ! {
     argp.push(std::ptr::null());
     let mut envp: Vec<*const c_char> = envc.iter().map(|e| e.as_ptr()).collect();
     envp.push(std::ptr::null());
+    // No descriptor but standard input, output and error reaches the command, the last thing before
+    // its exec: not the lifeline's end on 8, the wrapper's and the watcher's alone, nor any other
+    // this process was left, whatever sudo closed (the review of 34250a3: the canary's view listed
+    // no descriptor, and a command that held the lifeline saw the same sandbox).
+    // SAFETY: a system call on numbers, each passed as the unsigned long the kernel reads.
+    if unsafe { syscall(SYS_CLOSE_RANGE, 3 as c_ulong, c_uint::MAX as c_ulong, 0 as c_ulong) } != 0 {
+        fail(1, &format!("close_range: {}", errno()));
+    }
     // SAFETY: NUL-terminated strings in NULL-terminated arrays, all alive at the call.
     unsafe { execve(path.as_ptr(), argp.as_ptr(), envp.as_ptr()) };
     let e = errno();
