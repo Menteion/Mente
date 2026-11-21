@@ -3578,6 +3578,7 @@ const GATE_FILES = [
   "/tools/local-limits.mjs",
   "/tools/local-limits.test.mjs",
   "/tools/capped.ps1",
+  "/tools/capped.mjs",
   "/tools/cargo.mjs",
   "/tools/mn.mjs",
   "/tools/raw-build.mjs",
@@ -3888,6 +3889,9 @@ check("the quick checks run every command in one of the machine's build slots, u
   // of two build slots for the machine (tools/local-limits.mjs). Read as text, never run.
   const texts = { quick: read("tools/quick.mjs"), limits: read("tools/local-limits.mjs"), capped: read("tools/capped.ps1"), mn: read("tools/mn.mjs"), cargo: read("tools/cargo.mjs"), map: JSON.parse(read(QUICK_MAP)) };
   for (const f of LOCAL_LIMITS) assert.ok(tracked().has(f), `${f} is not in the repository`);
+  // Each is a gate file, so that no edit lifts a limit without its owner's review (the review of
+  // 8f03074's round: cargo's runner, tools/capped.mjs, came in without an owner).
+  for (const f of LOCAL_LIMITS) assert.ok(GATE_FILES.some((p) => owns(p, f)), `${f}, one of the local limits, has no owner in .github/CODEOWNERS`);
   assert.deepEqual(localLimitsProblems(texts), []);
   // Planted, one at a time: each must be refused.
   const plants = [
