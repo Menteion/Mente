@@ -518,6 +518,8 @@ struct Scratch {
             ("  Left\n  Right\n}", "  Left\n  Right\n  Up\n}"),
             ("  fn hit(self) -> bool", "  fn hit(self) -> u8"),
         ] {
+            // An edit of text the module does not hold would change nothing, and prove nothing.
+            assert!(base.contains(from), "the module holds no `{}`", from);
             assert_ne!(
                 h,
                 spec(&base.replace(from, to)),
@@ -531,10 +533,11 @@ struct Scratch {
                 "bitstruct Hidden : u8 {\n  @bits(0..8) pub raw: u8",
                 "bitstruct Hidden : u8 {\n  @bits(0..8) pub bits: u8",
             ),
-            ("enum Inner { A, B }", "enum Inner { A, B, C }"),
+            ("enum Inner {\n  A\n  B\n}", "enum Inner {\n  A\n  B\n  C\n}"),
             ("  fn peek(self) -> bool", "  fn peek(self) -> u8"),
             ("struct Scratch {\n  n: u32", "struct Scratch {\n  n: u64"),
         ] {
+            assert!(base.contains(from), "the module holds no `{}`", from);
             assert_eq!(
                 h,
                 spec(&base.replace(from, to)),
