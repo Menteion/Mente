@@ -210,14 +210,6 @@ reference() {
   wrap "$@"
 }
 
-# MEASUREMENT ONLY (the sandbox-cost pull request's measuring rounds, removed before review): the
-# shell's wrapper with the program's `inner`, the route of the second round, so that the canary can
-# time what moving the wrapper into the program saved on the same runner.
-halfway() {
-  local first=("$program" inner)
-  wrap "$@"
-}
-
 # The shell route's wrapper, as the runner's user, as the program's `run` is: it records the command,
 # starts the namespace through sudo with the caller's `first` as its first process, and waits; its
 # end ends the namespace.
@@ -262,7 +254,7 @@ wrap() {
 
 # The shell route's subcommands end here: bash reads no further.
 case "${1:-}" in
-  inner | reference | halfway)
+  inner | reference)
     subcommand=$1
     shift
     "$subcommand" "$@"
@@ -954,71 +946,6 @@ check() {
     echo "A process started and ended in the sandbox costs $((serial / 1000)).$(printf '%03d' $((serial % 1000))) ms more than as the runner's user when it is started alone, the median of 20, and $((parallel / 1000)).$(printf '%03d' $((parallel % 1000))) ms when $cores are started at once, the median of seven rounds."
   } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
 
-  # MEASUREMENT ONLY (the sandbox-cost pull request's measuring rounds, removed before review): what each
-  # part of that cost is, each part a command of its own, measured as the whole is, alone (the
-  # median of 20) and as many at once as the runner has cores (the median of seven rounds of 4 on
-  # every core), less a process run directly.
-  part_alone() {
-    local k begin direct inside costs=()
-    for k in $(/usr/bin/seq 20); do
-      begin=$(now)
-      /usr/bin/true
-      direct=$(($(now) - begin))
-      begin=$(now)
-      "$@" > /dev/null 2>&1 || return 1
-      inside=$(($(now) - begin))
-      costs+=("$((inside - direct))")
-    done
-    printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 10p
-  }
-  part_lanes() {
-    local core pids=() begin pid failed=0 which=$1
-    shift
-    begin=$(now)
-    for core in $(/usr/bin/seq "$cores"); do
-      if [ "$which" = part ]; then
-        (for k in 1 2 3 4; do "$@" > /dev/null 2>&1 || exit 1; done) &
-      else
-        (for k in 1 2 3 4; do /usr/bin/true || exit 1; done) &
-      fi
-      pids+=("$!")
-    done
-    for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
-    if [ "$failed" != 0 ]; then return 1; fi
-    echo $(($(now) - begin))
-  }
-  part_at_once() {
-    local k inside direct costs=()
-    for k in 1 2 3 4 5 6 7; do
-      inside=$(part_lanes part "$@") || return 1
-      direct=$(part_lanes direct) || return 1
-      costs+=("$(((inside - direct) / (4 * cores)))")
-    done
-    printf '%s\n' "${costs[@]}" | /usr/bin/sort -n | /usr/bin/sed -n 4p
-  }
-  ms() { if [ -z "$1" ]; then echo "failed"; else echo "$(($1 / 1000)).$(printf '%03d' $(($1 % 1000))) ms"; fi; }
-  part_line() {
-    local name=$1 alone at_once
-    shift
-    alone=$(part_alone "$@") || alone=''
-    at_once=$(part_at_once "$@") || at_once=''
-    echo "| $name | $(ms "$alone") | $(ms "$at_once") |"
-  }
-  {
-    echo
-    echo "What each part of a sandboxed process costs, less a process run directly (measurement):"
-    echo
-    echo "| part | alone, median of 20 | $cores at once, median of 7 |"
-    echo "|---|---|---|"
-    part_line "sudo" /usr/bin/sudo -n /usr/bin/true
-    part_line "sudo and unshare's namespaces" /usr/bin/sudo -n /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- /usr/bin/true
-    part_line "the whole route through the one program, wrapper and inner" "$program" run /usr/bin/true
-    part_line "the shell's wrapper and the program's inner, as in round 2" /usr/bin/bash "$self" halfway /usr/bin/true
-    part_line "the whole route through the shell, as before" /usr/bin/bash "$self" reference /usr/bin/true
-    echo
-    : "measurement: sudo's version: $(/usr/bin/sudo -V 2> /dev/null | /usr/bin/head -1); its defaults for this user: $(/usr/bin/sudo -n -l 2> /dev/null | /usr/bin/awk '/^Matching Defaults entries/ { getline; sub(/^[ \t]+/, ""); print; exit }')"
-  } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
-
   # The wrapper and the namespace's first process are one program (.github/scripts/test-sandbox.rs),
   # where the shell ran both (`reference`): for the same command, what it sees through each route is
   # the same, its mounts (less the numbers each mount is given anew), its user, groups and
@@ -1033,9 +960,9 @@ umask
   if ! through_one=$("$program" run /usr/bin/bash -c "$view" 2>&1); then
     problem "the one program could not run the view of the sandbox: $through_one"
   elif ! through_shell=$(/usr/bin/bash "$self" reference /usr/bin/bash -c "$view" 2>&1); then
-    problem "the shell's inner could not run the view of the sandbox: $through_shell"
+    problem "the shell's route could not run the view of the sandbox: $through_shell"
   elif [ "$through_one" != "$through_shell" ]; then
-    problem "a command sees another sandbox through the one program than through the shell's inner: $(/usr/bin/diff <(printf '%s\n' "$through_shell") <(printf '%s\n' "$through_one") | /usr/bin/head -n 20 | /usr/bin/tr '\n' ' ')"
+    problem "a command sees another sandbox through the one program than through the shell's route: $(/usr/bin/diff <(printf '%s\n' "$through_shell") <(printf '%s\n' "$through_one") | /usr/bin/head -n 20 | /usr/bin/tr '\n' ' ')"
   else
     echo "Through the one program and through the shell, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, signals, limits and environment."
   fi

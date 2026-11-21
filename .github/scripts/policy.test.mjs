@@ -1281,7 +1281,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "b1ad92f9b398c20d707024cc43c6342c8152cc5caeb9353fb621411d0f789767"],
+  [".github/scripts/test-sandbox.sh", "6cd3aed6965da03fd52ef560c970a34eb88890b5834dea6d41069307881f140d"],
   // The sandbox's one program, cargo's runner and the namespace's first process, which
   // test-sandbox.sh builds at setup and every command runs through.
   [".github/scripts/test-sandbox.rs", "70c6da240e653cd85abab486a4eb69c5056206fdf91b81374d4ee7e86c72950c"],
