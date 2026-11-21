@@ -32783,6 +32783,522 @@ block0(v0: u8, v1: effect):
 t0: stack-overflow @11:8 ["the call stack ran out"]
 t1: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/ghost-contracts-and-totality/stale_fact_in_a_guard.mn ==
+mente-dump 3 mir
+f0: fn remainder(u8, u8, u8, effect) -> u8 frame 87 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: i64 = int 0 @9:15
+  v5: i64 = assume within 0..=255 v4, v3 @9:15
+  v6: u8 = cast v5 @9:15
+  v7: addr = slot 1 @9:15
+  v8: unit = store v7, v6, v5 @9:15
+  v9: i64 = int 0 @10:15
+  v10: i64 = assume within 0..=255 v9, v8 @10:15
+  v11: u8 = cast v10 @10:15
+  v12: addr = slot 1 @10:15
+  v13: unit = store v12, v11, v10 @10:15
+  v14: addr = slot 8 @11:18
+  v15: i64 = int 5 @11:19
+  v16: u64 = int 0 @11:19
+  v17: addr = elem 8 v14, v16 @11:19
+  v18: unit = store v17, v15, v13 @11:19
+  v19: addr = slot 1 @11:19
+  v24: u64 = int 0 @11:19
+  jump block1(v24, v18)
+block1(v20: u64, v21: effect):
+  v25: u64 = int 1 @11:19
+  v26: bool = lt v20, v25 @11:19
+  branch v26, block2(v21), block3(v21)
+block2(v22: effect):
+  v27: u64 = assume within 0..=0 v20, v22 @11:19
+  v28: addr = elem 8 v14, v27 @11:19
+  v29: addr = elem 1 v19, v27 @11:19
+  v30: i64 = load v28, v27 @11:19
+  v31: i64 = int 0 @11:19
+  v32: bool = ge v30, v31 @11:19
+  v33: i64 = int 255 @11:19
+  v34: bool = le v30, v33 @11:19
+  v35: bool = and v32, v34 @11:19
+  v36: i64 = guard t0 within 0..=255 v35, v30, v30, v30 @11:18
+  v37: u8 = cast v36 @11:18
+  v38: unit = store v29, v37, v36 @11:18
+  v39: u64 = int 1 @11:18
+  v40: u64 = add v20, v39, v38 @11:18
+  jump block1(v40, v38)
+block3(v23: effect):
+  v41: addr = slot 1 @11:18
+  v42: unit = copy 1 v41, v19, v23 @11:18
+  v43: i64 = int 0 @12:15
+  v44: i64 = assume within 0..=255 v43, v42 @12:15
+  v45: u8 = cast v44 @12:15
+  v46: addr = slot 1 @12:15
+  v47: unit = store v46, v45, v44 @12:15
+  jump block4(v47)
+block4(v48: effect):
+  v51: u8 = load v12, v48 @13:9
+  v52: bool = lt v51, v2 @13:13
+  branch v52, block5(v51), block6(v51)
+block5(v49: effect):
+  v53: unit = store v7, v0, v49 @14:9
+  v54: i64 = int 0 @15:15
+  v55: i64 = cast v1 @15:15
+  v56: bool = gt v55, v54 @15:15
+  branch v56, block7(v53), block8(v56, v53)
+block6(v50: effect):
+  v91: u8 = load v46, v50 @22:3
+  return v91 after v91
+block7(v57: effect):
+  v60: u8 = load v7, v57 @15:21
+  v61: i64 = int 4 @15:25
+  v62: i64 = cast v60 @15:21
+  v63: i64 = assume nonzero v61, v60 @15:21
+  v64: i64 = rem v62, v63 @15:21
+  v65: i64 = int 1 @15:30
+  v66: bool = le v64, v65 @15:30
+  jump block8(v66, v63)
+block8(v58: bool, v59: effect):
+  branch v58, block9(v59), block10(v59)
+block9(v67: effect):
+  v80: i64 = int 0 @19:9
+  v81: i64 = assume within 0..=255 v80, v67 @19:9
+  v82: u8 = cast v81 @19:9
+  v83: unit = store v7, v82, v81 @19:9
+  v84: u8 = load v12, v83 @20:5
+  v85: i64 = int 1 @20:10
+  v86: i64 = cast v84 @20:10
+  v87: i64 = add v86, v85, v84 @20:10
+  v88: i64 = assume within 0..=255 v87, v84 @20:10
+  v89: u8 = cast v88 @20:10
+  v90: unit = store v12, v89, v88 @20:10
+  jump block4(v90)
+block10(v68: effect):
+  v69: u8 = int 0 @16:11
+  v70: bool = ge v1, v69 @16:11
+  v71: u8 = int 1 @16:11
+  v72: bool = lt v1, v71 @16:11
+  v73: bool = and v70, v72 @16:11
+  v74: u8 = guard t1 within 0..=0 v73, v1, v1, v68 @16:11
+  v75: u64 = cast v74 @16:11
+  v76: addr = elem 1 v41, v75 @16:11
+  v77: u8 = load v76, v74 @16:11
+  v78: unit = store v46, v77, v77 @16:11
+  jump block6(v78)
+block11(v79: effect):
+  trap t2 after v79
+block12(v92: effect):
+  trap t2 after v92
+t0: narrowing @11:18 ["", " does not fit in `u8`"]
+t1: index-out-of-bounds @16:11 ["index ", " is outside an array of length 1"]
+t2: unreachable @22:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn branch(u8, u8, u8, effect) -> u8 frame 97 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: i64 = int 0 @26:15
+  v5: i64 = assume within 0..=255 v4, v3 @26:15
+  v6: u8 = cast v5 @26:15
+  v7: addr = slot 1 @26:15
+  v8: unit = store v7, v6, v5 @26:15
+  v9: i64 = int 0 @27:15
+  v10: i64 = assume within 0..=255 v9, v8 @27:15
+  v11: u8 = cast v10 @27:15
+  v12: addr = slot 1 @27:15
+  v13: unit = store v12, v11, v10 @27:15
+  v14: addr = slot 8 @28:18
+  v15: i64 = int 5 @28:19
+  v16: u64 = int 0 @28:19
+  v17: addr = elem 8 v14, v16 @28:19
+  v18: unit = store v17, v15, v13 @28:19
+  v19: addr = slot 1 @28:19
+  v24: u64 = int 0 @28:19
+  jump block1(v24, v18)
+block1(v20: u64, v21: effect):
+  v25: u64 = int 1 @28:19
+  v26: bool = lt v20, v25 @28:19
+  branch v26, block2(v21), block3(v21)
+block2(v22: effect):
+  v27: u64 = assume within 0..=0 v20, v22 @28:19
+  v28: addr = elem 8 v14, v27 @28:19
+  v29: addr = elem 1 v19, v27 @28:19
+  v30: i64 = load v28, v27 @28:19
+  v31: i64 = int 0 @28:19
+  v32: bool = ge v30, v31 @28:19
+  v33: i64 = int 255 @28:19
+  v34: bool = le v30, v33 @28:19
+  v35: bool = and v32, v34 @28:19
+  v36: i64 = guard t0 within 0..=255 v35, v30, v30, v30 @28:18
+  v37: u8 = cast v36 @28:18
+  v38: unit = store v29, v37, v36 @28:18
+  v39: u64 = int 1 @28:18
+  v40: u64 = add v20, v39, v38 @28:18
+  jump block1(v40, v38)
+block3(v23: effect):
+  v41: addr = slot 1 @28:18
+  v42: unit = copy 1 v41, v19, v23 @28:18
+  v43: i64 = int 0 @29:15
+  v44: i64 = assume within 0..=255 v43, v42 @29:15
+  v45: u8 = cast v44 @29:15
+  v46: addr = slot 1 @29:15
+  v47: unit = store v46, v45, v44 @29:15
+  jump block4(v47)
+block4(v48: effect):
+  v51: u8 = load v12, v48 @30:9
+  v52: bool = lt v51, v2 @30:13
+  branch v52, block5(v51), block6(v51)
+block5(v49: effect):
+  v53: unit = store v7, v0, v49 @31:9
+  v54: i64 = int 0 @32:15
+  v55: i64 = cast v1 @32:15
+  v56: bool = gt v55, v54 @32:15
+  branch v56, block7(v53), block8(v56, v53)
+block6(v50: effect):
+  v96: u8 = load v46, v50 @39:3
+  return v96 after v96
+block7(v57: effect):
+  v60: u8 = load v7, v57 @32:25
+  v61: i64 = int 1 @32:29
+  v62: i64 = cast v60 @32:29
+  v63: bool = gt v62, v61 @32:29
+  branch v63, block9(v60), block10(v60)
+block8(v58: bool, v59: effect):
+  branch v58, block12(v59), block13(v59)
+block9(v64: effect):
+  v68: i64 = int 1 @32:33
+  jump block11(v68, v64)
+block10(v65: effect):
+  v69: i64 = int 0 @32:44
+  jump block11(v69, v65)
+block11(v66: i64, v67: effect):
+  v70: i64 = int 0 @32:52
+  v71: bool = eq v66, v70 @32:52
+  jump block8(v71, v67)
+block12(v72: effect):
+  v85: i64 = int 0 @36:9
+  v86: i64 = assume within 0..=255 v85, v72 @36:9
+  v87: u8 = cast v86 @36:9
+  v88: unit = store v7, v87, v86 @36:9
+  v89: u8 = load v12, v88 @37:5
+  v90: i64 = int 1 @37:10
+  v91: i64 = cast v89 @37:10
+  v92: i64 = add v91, v90, v89 @37:10
+  v93: i64 = assume within 0..=255 v92, v89 @37:10
+  v94: u8 = cast v93 @37:10
+  v95: unit = store v12, v94, v93 @37:10
+  jump block4(v95)
+block13(v73: effect):
+  v74: u8 = int 0 @33:11
+  v75: bool = ge v1, v74 @33:11
+  v76: u8 = int 1 @33:11
+  v77: bool = lt v1, v76 @33:11
+  v78: bool = and v75, v77 @33:11
+  v79: u8 = guard t1 within 0..=0 v78, v1, v1, v73 @33:11
+  v80: u64 = cast v79 @33:11
+  v81: addr = elem 1 v41, v80 @33:11
+  v82: u8 = load v81, v79 @33:11
+  v83: unit = store v46, v82, v82 @33:11
+  jump block6(v83)
+block14(v84: effect):
+  trap t2 after v84
+block15(v97: effect):
+  trap t2 after v97
+t0: narrowing @28:18 ["", " does not fit in `u8`"]
+t1: index-out-of-bounds @33:11 ["index ", " is outside an array of length 1"]
+t2: unreachable @39:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn either(u8, u8, u8, effect) -> u8 frame 87 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: i64 = int 0 @43:15
+  v5: i64 = assume within 0..=255 v4, v3 @43:15
+  v6: u8 = cast v5 @43:15
+  v7: addr = slot 1 @43:15
+  v8: unit = store v7, v6, v5 @43:15
+  v9: i64 = int 0 @44:15
+  v10: i64 = assume within 0..=255 v9, v8 @44:15
+  v11: u8 = cast v10 @44:15
+  v12: addr = slot 1 @44:15
+  v13: unit = store v12, v11, v10 @44:15
+  v14: addr = slot 8 @45:18
+  v15: i64 = int 5 @45:19
+  v16: u64 = int 0 @45:19
+  v17: addr = elem 8 v14, v16 @45:19
+  v18: unit = store v17, v15, v13 @45:19
+  v19: addr = slot 1 @45:19
+  v24: u64 = int 0 @45:19
+  jump block1(v24, v18)
+block1(v20: u64, v21: effect):
+  v25: u64 = int 1 @45:19
+  v26: bool = lt v20, v25 @45:19
+  branch v26, block2(v21), block3(v21)
+block2(v22: effect):
+  v27: u64 = assume within 0..=0 v20, v22 @45:19
+  v28: addr = elem 8 v14, v27 @45:19
+  v29: addr = elem 1 v19, v27 @45:19
+  v30: i64 = load v28, v27 @45:19
+  v31: i64 = int 0 @45:19
+  v32: bool = ge v30, v31 @45:19
+  v33: i64 = int 255 @45:19
+  v34: bool = le v30, v33 @45:19
+  v35: bool = and v32, v34 @45:19
+  v36: i64 = guard t0 within 0..=255 v35, v30, v30, v30 @45:18
+  v37: u8 = cast v36 @45:18
+  v38: unit = store v29, v37, v36 @45:18
+  v39: u64 = int 1 @45:18
+  v40: u64 = add v20, v39, v38 @45:18
+  jump block1(v40, v38)
+block3(v23: effect):
+  v41: addr = slot 1 @45:18
+  v42: unit = copy 1 v41, v19, v23 @45:18
+  v43: i64 = int 0 @46:15
+  v44: i64 = assume within 0..=255 v43, v42 @46:15
+  v45: u8 = cast v44 @46:15
+  v46: addr = slot 1 @46:15
+  v47: unit = store v46, v45, v44 @46:15
+  jump block4(v47)
+block4(v48: effect):
+  v51: u8 = load v12, v48 @47:9
+  v52: bool = lt v51, v2 @47:13
+  branch v52, block5(v51), block6(v51)
+block5(v49: effect):
+  v53: unit = store v7, v0, v49 @48:9
+  v54: i64 = int 0 @49:15
+  v55: i64 = cast v1 @49:15
+  v56: bool = gt v55, v54 @49:15
+  branch v56, block7(v53), block8(v56, v53)
+block6(v50: effect):
+  v97: u8 = load v46, v50 @56:3
+  return v97 after v97
+block7(v57: effect):
+  v60: u8 = load v7, v57 @49:22
+  v61: i64 = int 4 @49:26
+  v62: i64 = cast v60 @49:22
+  v63: i64 = assume nonzero v61, v60 @49:22
+  v64: i64 = rem v62, v63 @49:22
+  v65: i64 = int 1 @49:31
+  v66: bool = le v64, v65 @49:31
+  branch v66, block10(v66, v63), block9(v63)
+block8(v58: bool, v59: effect):
+  branch v58, block11(v59), block12(v59)
+block9(v67: effect):
+  v70: i64 = int 5 @49:40
+  v71: i64 = cast v1 @49:40
+  v72: bool = gt v71, v70 @49:40
+  jump block10(v72, v67)
+block10(v68: bool, v69: effect):
+  jump block8(v68, v69)
+block11(v73: effect):
+  v86: i64 = int 0 @53:9
+  v87: i64 = assume within 0..=255 v86, v73 @53:9
+  v88: u8 = cast v87 @53:9
+  v89: unit = store v7, v88, v87 @53:9
+  v90: u8 = load v12, v89 @54:5
+  v91: i64 = int 1 @54:10
+  v92: i64 = cast v90 @54:10
+  v93: i64 = add v92, v91, v90 @54:10
+  v94: i64 = assume within 0..=255 v93, v90 @54:10
+  v95: u8 = cast v94 @54:10
+  v96: unit = store v12, v95, v94 @54:10
+  jump block4(v96)
+block12(v74: effect):
+  v75: u8 = int 0 @50:11
+  v76: bool = ge v1, v75 @50:11
+  v77: u8 = int 1 @50:11
+  v78: bool = lt v1, v77 @50:11
+  v79: bool = and v76, v78 @50:11
+  v80: u8 = guard t1 within 0..=0 v79, v1, v1, v74 @50:11
+  v81: u64 = cast v80 @50:11
+  v82: addr = elem 1 v41, v81 @50:11
+  v83: u8 = load v82, v80 @50:11
+  v84: unit = store v46, v83, v83 @50:11
+  jump block6(v84)
+block13(v85: effect):
+  trap t2 after v85
+block14(v98: effect):
+  trap t2 after v98
+t0: narrowing @45:18 ["", " does not fit in `u8`"]
+t1: index-out-of-bounds @50:11 ["index ", " is outside an array of length 1"]
+t2: unreachable @56:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn negated(u8, u8, u8, effect) -> u8 frame 87 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: i64 = int 0 @60:15
+  v5: i64 = assume within 0..=255 v4, v3 @60:15
+  v6: u8 = cast v5 @60:15
+  v7: addr = slot 1 @60:15
+  v8: unit = store v7, v6, v5 @60:15
+  v9: i64 = int 0 @61:15
+  v10: i64 = assume within 0..=255 v9, v8 @61:15
+  v11: u8 = cast v10 @61:15
+  v12: addr = slot 1 @61:15
+  v13: unit = store v12, v11, v10 @61:15
+  v14: addr = slot 8 @62:18
+  v15: i64 = int 5 @62:19
+  v16: u64 = int 0 @62:19
+  v17: addr = elem 8 v14, v16 @62:19
+  v18: unit = store v17, v15, v13 @62:19
+  v19: addr = slot 1 @62:19
+  v24: u64 = int 0 @62:19
+  jump block1(v24, v18)
+block1(v20: u64, v21: effect):
+  v25: u64 = int 1 @62:19
+  v26: bool = lt v20, v25 @62:19
+  branch v26, block2(v21), block3(v21)
+block2(v22: effect):
+  v27: u64 = assume within 0..=0 v20, v22 @62:19
+  v28: addr = elem 8 v14, v27 @62:19
+  v29: addr = elem 1 v19, v27 @62:19
+  v30: i64 = load v28, v27 @62:19
+  v31: i64 = int 0 @62:19
+  v32: bool = ge v30, v31 @62:19
+  v33: i64 = int 255 @62:19
+  v34: bool = le v30, v33 @62:19
+  v35: bool = and v32, v34 @62:19
+  v36: i64 = guard t0 within 0..=255 v35, v30, v30, v30 @62:18
+  v37: u8 = cast v36 @62:18
+  v38: unit = store v29, v37, v36 @62:18
+  v39: u64 = int 1 @62:18
+  v40: u64 = add v20, v39, v38 @62:18
+  jump block1(v40, v38)
+block3(v23: effect):
+  v41: addr = slot 1 @62:18
+  v42: unit = copy 1 v41, v19, v23 @62:18
+  v43: i64 = int 0 @63:15
+  v44: i64 = assume within 0..=255 v43, v42 @63:15
+  v45: u8 = cast v44 @63:15
+  v46: addr = slot 1 @63:15
+  v47: unit = store v46, v45, v44 @63:15
+  jump block4(v47)
+block4(v48: effect):
+  v51: u8 = load v12, v48 @64:9
+  v52: bool = lt v51, v2 @64:13
+  branch v52, block5(v51), block6(v51)
+block5(v49: effect):
+  v53: unit = store v7, v0, v49 @65:9
+  v54: i64 = int 0 @66:21
+  v55: i64 = cast v1 @66:21
+  v56: bool = eq v55, v54 @66:21
+  v57: bool = not v56 @66:21
+  branch v57, block7(v53), block8(v57, v53)
+block6(v50: effect):
+  v92: u8 = load v46, v50 @73:3
+  return v92 after v92
+block7(v58: effect):
+  v61: u8 = load v7, v58 @66:28
+  v62: i64 = int 4 @66:32
+  v63: i64 = cast v61 @66:28
+  v64: i64 = assume nonzero v62, v61 @66:28
+  v65: i64 = rem v63, v64 @66:28
+  v66: i64 = int 1 @66:37
+  v67: bool = le v65, v66 @66:37
+  jump block8(v67, v64)
+block8(v59: bool, v60: effect):
+  branch v59, block9(v60), block10(v60)
+block9(v68: effect):
+  v81: i64 = int 0 @70:9
+  v82: i64 = assume within 0..=255 v81, v68 @70:9
+  v83: u8 = cast v82 @70:9
+  v84: unit = store v7, v83, v82 @70:9
+  v85: u8 = load v12, v84 @71:5
+  v86: i64 = int 1 @71:10
+  v87: i64 = cast v85 @71:10
+  v88: i64 = add v87, v86, v85 @71:10
+  v89: i64 = assume within 0..=255 v88, v85 @71:10
+  v90: u8 = cast v89 @71:10
+  v91: unit = store v12, v90, v89 @71:10
+  jump block4(v91)
+block10(v69: effect):
+  v70: u8 = int 0 @67:11
+  v71: bool = ge v1, v70 @67:11
+  v72: u8 = int 1 @67:11
+  v73: bool = lt v1, v72 @67:11
+  v74: bool = and v71, v73 @67:11
+  v75: u8 = guard t1 within 0..=0 v74, v1, v1, v69 @67:11
+  v76: u64 = cast v75 @67:11
+  v77: addr = elem 1 v41, v76 @67:11
+  v78: u8 = load v77, v75 @67:11
+  v79: unit = store v46, v78, v78 @67:11
+  jump block6(v79)
+block11(v80: effect):
+  trap t2 after v80
+block12(v93: effect):
+  trap t2 after v93
+t0: narrowing @62:18 ["", " does not fit in `u8`"]
+t1: index-out-of-bounds @67:11 ["index ", " is outside an array of length 1"]
+t2: unreachable @73:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn enter remainder(u8, u8, u8, effect) -> u8 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: unit = enter f0 t0 v0, v1, v2, v3 @8:8
+  v5: i64 = int 0 @8:8
+  v6: i64 = int 1 @8:8
+  v7: i64 = cast v1 @8:8
+  v8: bool = ge v7, v5 @8:8
+  v9: i64 = cast v1 @8:8
+  v10: bool = le v9, v6 @8:8
+  v11: bool = and v8, v10 @8:8
+  v12: unit = check t1 v11, v1, v5, v6, v4 @8:8
+  v13: u8 = call f0 v0, v1, v2, v12 @8:8
+  return v13 after v13
+t0: stack-overflow @8:8 ["the call stack ran out"]
+t1: refinement @8:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter branch(u8, u8, u8, effect) -> u8 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: unit = enter f1 t0 v0, v1, v2, v3 @25:8
+  v5: i64 = int 0 @25:8
+  v6: i64 = int 1 @25:8
+  v7: i64 = cast v1 @25:8
+  v8: bool = ge v7, v5 @25:8
+  v9: i64 = cast v1 @25:8
+  v10: bool = le v9, v6 @25:8
+  v11: bool = and v8, v10 @25:8
+  v12: unit = check t1 v11, v1, v5, v6, v4 @25:8
+  v13: u8 = call f1 v0, v1, v2, v12 @25:8
+  return v13 after v13
+t0: stack-overflow @25:8 ["the call stack ran out"]
+t1: refinement @25:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @25:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter either(u8, u8, u8, effect) -> u8 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: unit = enter f2 t0 v0, v1, v2, v3 @42:8
+  v5: i64 = int 0 @42:8
+  v6: i64 = int 1 @42:8
+  v7: i64 = cast v1 @42:8
+  v8: bool = ge v7, v5 @42:8
+  v9: i64 = cast v1 @42:8
+  v10: bool = le v9, v6 @42:8
+  v11: bool = and v8, v10 @42:8
+  v12: unit = check t1 v11, v1, v5, v6, v4 @42:8
+  v13: u8 = call f2 v0, v1, v2, v12 @42:8
+  return v13 after v13
+t0: stack-overflow @42:8 ["the call stack ran out"]
+t1: refinement @42:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter negated(u8, u8, u8, effect) -> u8 {
+block0(v0: u8, v1: u8, v2: u8, v3: effect):
+  v4: unit = enter f3 t0 v0, v1, v2, v3 @59:8
+  v5: i64 = int 0 @59:8
+  v6: i64 = int 1 @59:8
+  v7: i64 = cast v1 @59:8
+  v8: bool = ge v7, v5 @59:8
+  v9: i64 = cast v1 @59:8
+  v10: bool = le v9, v6 @59:8
+  v11: bool = and v8, v10 @59:8
+  v12: unit = check t1 v11, v1, v5, v6, v4 @59:8
+  v13: u8 = call f3 v0, v1, v2, v12 @59:8
+  return v13 after v13
+t0: stack-overflow @59:8 ["the call stack ran out"]
+t1: refinement @59:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @59:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/ghost-contracts-and-totality/total_while_without_decreases.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/total_with_decreases_in_the_signature.mn ==
 mente-dump 3 mir

@@ -1205,6 +1205,201 @@ fn mentions(v: &Val, var: usize) -> bool {
     }
 }
 
+/// The variables value `v` reads.
+fn val_vars(v: &Val, out: &mut Vec<usize>) {
+    match v {
+        Val::Lin(t, _) => out.extend(t.iter().map(|t| t.var)),
+        Val::Quot { base, num, .. } => {
+            out.extend(base.0.iter().chain(&num.0).map(|t| t.var));
+        }
+        Val::Itv(..) | Val::Arr(_) | Val::Other => {}
+    }
+}
+
+/// The variables condition `c` reads.
+fn cond_vars(c: &Cond, out: &mut Vec<usize>) {
+    match c {
+        Cond::Cmp(_, l, r) => {
+            val_vars(l, out);
+            val_vars(r, out);
+        }
+        Cond::Far(_, far) => val_vars(&far.0, out),
+        Cond::Not(a) => cond_vars(a, out),
+        Cond::And(a, b) | Cond::Or(a, b) => {
+            cond_vars(a, out);
+            cond_vars(b, out);
+        }
+        Cond::Const(_) | Cond::Unknown => {}
+    }
+}
+
+/// What evaluates an expression, and so owns the conditions decided on the site variables it
+/// writes: the statement it stands in, nested statements aside, the function's clauses, or its
+/// expression body. A block's last statement that gives the block's value, of an `if` or a
+/// `match` or of the function's body, belongs to what the block stands in, since its value flows
+/// there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Owner {
+    Stmt(StmtId),
+    Clauses,
+    Body,
+}
+
+/// Who owns each site variable and each expression (`Owner`), read once from the tree: no
+/// condition outlives its owner ([`Fx::check_named`]; `ghost-contracts-and-totality.md`, item 2,
+/// `no-condition-outlives-its-owner`).
+struct Owners {
+    /// The owner, and the expression, of each site variable.
+    of_var: Vec<Option<(Owner, ExprId)>>,
+    /// The owner of each expression.
+    of_expr: Vec<Option<Owner>>,
+}
+
+impl Owners {
+    fn of(syntax: &FnSyntax, sites: &[Site], count: usize) -> Owners {
+        let tree = &syntax.tree;
+        let mut o = Owners {
+            of_var: vec![None; count],
+            of_expr: vec![None; tree.exprs.len()],
+        };
+        for c in &syntax.contracts {
+            o.expr(tree, sites, c.expr, Owner::Clauses);
+        }
+        match syntax.body {
+            Some(Body::Expr(e)) => o.expr(tree, sites, e, Owner::Body),
+            Some(Body::Block(b)) => o.block(tree, sites, b, Some(Owner::Body)),
+            None => {}
+        }
+        o
+    }
+
+    /// A block's statements, each its own owner but its last, when `value` names who the
+    /// block's value flows to and that statement gives it.
+    fn block(&mut self, tree: &Tree, sites: &[Site], b: BlockId, value: Option<Owner>) {
+        let stmts = &tree.block(b).stmts;
+        for (i, &s) in stmts.iter().enumerate() {
+            let gives_value = i + 1 == stmts.len()
+                && match tree.stmt(s).kind {
+                    StmtKind::Expr(_) => true,
+                    StmtKind::Binding { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::While { .. }
+                    | StmtKind::Guard { .. }
+                    | StmtKind::Return(_)
+                    | StmtKind::Break
+                    | StmtKind::Continue
+                    | StmtKind::Discard(_) => false,
+                };
+            let owner = match (gives_value, value) {
+                (true, Some(owner)) => owner,
+                (true, None) | (false, _) => Owner::Stmt(s),
+            };
+            self.stmt(tree, sites, s, owner);
+        }
+    }
+
+    fn stmt(&mut self, tree: &Tree, sites: &[Site], s: StmtId, owner: Owner) {
+        match &tree.stmt(s).kind {
+            StmtKind::Binding { init, .. } => self.expr(tree, sites, *init, owner),
+            StmtKind::Assign { place, value, .. } => {
+                self.expr(tree, sites, *place, owner);
+                self.expr(tree, sites, *value, owner);
+            }
+            StmtKind::While {
+                cond,
+                invariants,
+                decreases,
+                body,
+            } => {
+                for &e in std::iter::once(cond).chain(invariants).chain(decreases) {
+                    self.expr(tree, sites, e, owner);
+                }
+                self.block(tree, sites, *body, None);
+            }
+            StmtKind::Guard { cond, otherwise } => {
+                self.expr(tree, sites, *cond, owner);
+                self.block(tree, sites, *otherwise, None);
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
+                self.expr(tree, sites, *e, owner)
+            }
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+        }
+    }
+
+    fn expr(&mut self, tree: &Tree, sites: &[Site], e: ExprId, owner: Owner) {
+        self.of_expr[e.0 as usize] = Some(owner);
+        let mut vars = Vec::new();
+        match &sites[e.0 as usize] {
+            Site::Value(v) => vars.push(*v),
+            Site::Call(cs) => {
+                vars.extend(cs.ins.iter().chain(&cs.outs).flatten());
+                vars.extend(cs.result);
+                vars.extend(cs.paths.iter().flatten().map(|p| p.var));
+            }
+            Site::None => {}
+        }
+        for v in vars {
+            if let Some(slot) = self.of_var.get_mut(v) {
+                *slot = Some((owner, e));
+            }
+        }
+        let mut sub = |x: ExprId| self.expr(tree, sites, x, owner);
+        match &tree.expr(e).kind {
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                sub(*cond);
+                self.block(tree, sites, *then, Some(owner));
+                match otherwise {
+                    Some(Else::Block(b)) => self.block(tree, sites, *b, Some(owner)),
+                    Some(Else::If(i)) => self.expr(tree, sites, *i, owner),
+                    None => {}
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                sub(*scrutinee);
+                for arm in arms {
+                    match arm.body {
+                        ArmBody::Expr(x) => self.expr(tree, sites, x, owner),
+                        ArmBody::Block(b) => self.block(tree, sites, b, Some(owner)),
+                    }
+                }
+            }
+            ExprKind::Call { args, .. } => {
+                for a in args {
+                    sub(a.value);
+                }
+            }
+            ExprKind::Unary { operand, .. } => sub(*operand),
+            ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::Index {
+                base: lhs,
+                index: rhs,
+            } => {
+                sub(*lhs);
+                sub(*rhs);
+            }
+            ExprKind::Field { base, .. } | ExprKind::Repeat { value: base, .. } => sub(*base),
+            ExprKind::Array(items) => items.iter().for_each(|&i| sub(i)),
+            ExprKind::Construct { fields, .. } => fields.iter().for_each(|f| sub(f.value)),
+            ExprKind::Variant { payload, .. } => match payload {
+                Payload::None => {}
+                Payload::Named(fields) => fields.iter().for_each(|f| sub(f.value)),
+                Payload::Positional(args) => args.iter().for_each(|a| sub(a.value)),
+            },
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Error => {}
+        }
+    }
+}
+
 /// After `var = terms + c`: the bounds beyond the octagon's reach that a single term carries,
 /// shifted by `c` and negated with the term. A sum of more terms carries none, which is sound.
 fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
@@ -2006,12 +2201,13 @@ struct Frame {
 /// The rest of `Fx`, field by field, is none of it:
 /// - fixed for the whole function, read only: `syntax`, `tree`, `resolution`, `typing`,
 ///   `routing`, `structs`, `callees`, `src`, `vars`, `paths`, `sites`, `result`, `result_shape`,
-///   `temps`, `scratch`, `probe`, `count`, `measures`, `entry_measures`, `pattern_shapes`;
+///   `temps`, `scratch`, `probe`, `count`, `measures`, `entry_measures`, `pattern_shapes`,
+///   `owners`;
 /// - written only while recording, which never replays from the memo: `report`, `retries`,
 ///   `queries`;
 /// - restored by the statement or expression that changes it before it ends: `recording`,
-///   `scope`, `stmt`, `heads`, `head_of`, `arm`, `unfollowed`, and `tracks`, which a loop's pass
-///   pushes and truncates;
+///   `scope`, `stmt`, `heads`, `head_of`, `arm`, `unfollowed`, `open`, and `tracks`, which a
+///   loop's pass pushes and truncates;
 /// - scratch, written and read in the evaluation of one struct literal: `built`;
 /// - read by the analysis and the same at every meeting of a loop: `tracks`, the measures of
 ///   the loops around it, which an assignment in it moves. Each loop around pushes its own at
@@ -2079,6 +2275,13 @@ enum Cand {
     Weak(ExprId),
 }
 
+/// The expression of the loop's text a candidate is.
+fn cand_expr(c: Cand) -> ExprId {
+    match c {
+        Cand::Expr(e) | Cand::Weak(e) => e,
+    }
+}
+
 struct Fx<'a> {
     syntax: &'a FnSyntax,
     tree: &'a Tree,
@@ -2131,6 +2334,11 @@ struct Fx<'a> {
     /// The loop whose header, its condition and measures at the head of a round, is being
     /// read.
     head_of: Option<StmtId>,
+    /// Who owns each site variable, read once from the tree ([`Owners`]).
+    owners: Owners,
+    /// The owners being checked, innermost last: a condition that names a value whose owner is
+    /// not among them stops the compile ([`Fx::check_named`]).
+    open: Vec<Owner>,
     /// Each loop analysed outside the recording pass, with what its outcome depends on and the
     /// outcome ([`LoopOutcome`]): without it a loop would be analysed again for every round of
     /// every loop around it, in time exponential in their nesting.
@@ -2475,6 +2683,7 @@ impl<'a> Fx<'a> {
                     .collect()
             })
             .collect();
+        let owners = Owners::of(f.syntax, &sites, n.0);
         let mut fx = Fx {
             syntax: f.syntax,
             tree,
@@ -2507,6 +2716,8 @@ impl<'a> Fx<'a> {
             retries: Vec::new(),
             queries: None,
             head_of: None,
+            owners,
+            open: Vec::new(),
             loop_memo: Vec::new(),
             replays: None,
             passes: 0,
@@ -3653,6 +3864,35 @@ impl<'a> Fx<'a> {
 
     /// Narrows `st` to the points where `c` has the value `polarity`.
     fn assume(&self, st: &mut Octagon, c: &Cond, polarity: bool) {
+        self.check_named(c);
+        self.assume_in(st, c, polarity);
+    }
+
+    /// Stops the compile, in every build, where a condition names the value of an expression
+    /// whose owner is no longer being checked (`no-condition-outlives-its-owner`): the state
+    /// it is applied to holds an earlier evaluation of that value, or none, and never the one the
+    /// condition was decided on.
+    fn check_named(&self, c: &Cond) {
+        let mut vars = Vec::new();
+        cond_vars(c, &mut vars);
+        for v in vars {
+            if let Some(Some((owner, e))) = self.owners.of_var.get(v) {
+                if !self.open.contains(owner) {
+                    let at = self.span(*e);
+                    panic!(
+                        "internal error: in `{}`, a condition names the value of `{}` at {}:{}, whose owner is no longer being checked (ghost-contracts-and-totality.md, item 2, no-condition-outlives-its-owner)",
+                        self.syntax.name,
+                        self.own_text(*e).0,
+                        at.line,
+                        at.col
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`Fx::assume`] once its condition is checked.
+    fn assume_in(&self, st: &mut Octagon, c: &Cond, polarity: bool) {
         if st.is_empty() {
             return;
         }
@@ -3662,15 +3902,15 @@ impl<'a> Fx<'a> {
                     st.set_empty();
                 }
             }
-            Cond::Not(a) => self.assume(st, a, !polarity),
+            Cond::Not(a) => self.assume_in(st, a, !polarity),
             Cond::And(a, b) | Cond::Or(a, b) => {
                 if matches!(c, Cond::And(..)) == polarity {
-                    self.assume(st, a, polarity);
-                    self.assume(st, b, polarity);
+                    self.assume_in(st, a, polarity);
+                    self.assume_in(st, b, polarity);
                 } else {
                     let mut x = st.clone();
-                    self.assume(&mut x, a, polarity);
-                    self.assume(st, b, polarity);
+                    self.assume_in(&mut x, a, polarity);
+                    self.assume_in(st, b, polarity);
                     *st = x.join(st);
                 }
             }
@@ -4161,8 +4401,23 @@ impl<'a> Fx<'a> {
         self.record_check(o, |_| vec![(st.clone(), Goal::Index(i.clone(), len))]);
     }
 
-    /// The function's `ensures`, at a return of `v` or at the end of its body.
+    /// The function's `ensures`, at a return of `v` or at the end of its body, with its clauses
+    /// open.
     fn ensures(
+        &mut self,
+        st: &Octagon,
+        v: &Val,
+        span: Span,
+        value: Option<ExprId>,
+        anchor: Anchor,
+        at: &str,
+    ) {
+        self.opened(Owner::Clauses, |fx| {
+            fx.ensures_open(st, v, span, value, anchor, at)
+        });
+    }
+
+    fn ensures_open(
         &mut self,
         st: &Octagon,
         v: &Val,
@@ -4279,8 +4534,10 @@ impl<'a> Fx<'a> {
             self.scope.push(i);
         }
         // The function's clauses change nothing (`Fx::changes_nothing`), whether they are
-        // checked at run time or erased.
+        // checked at run time or erased, and run with their owner open, so that a condition of
+        // theirs is applied only while they are checked (`Fx::check_named`).
         let syntax = self.syntax;
+        self.open.push(Owner::Clauses);
         for c in &syntax.contracts {
             self.changes_nothing(c.expr, "clause");
         }
@@ -4298,9 +4555,17 @@ impl<'a> Fx<'a> {
             let v = self.eval(st, c.expr);
             self.assign(st, m, &v);
         }
+        self.open.pop();
     }
 
+    /// The function's body, its expression body or its block's value open as its owner.
     fn body(&mut self, st: &mut Octagon) {
+        self.open.push(Owner::Body);
+        self.body_open(st);
+        self.open.pop();
+    }
+
+    fn body_open(&mut self, st: &mut Octagon) {
         let shape = self.result_shape.clone();
         let place = format!("the result of `{}`", self.syntax.name);
         match self.syntax.body {
@@ -4356,11 +4621,25 @@ impl<'a> Fx<'a> {
                 break;
             }
             self.stmt = Some(s);
-            last = self.stmt_eval(st, s, tail.filter(|_| i + 1 == stmts.len()));
+            last = self.stmt_owned(st, s, tail.filter(|_| i + 1 == stmts.len()));
         }
         self.stmt = saved;
         self.scope.truncate(mark);
         last
+    }
+
+    /// A statement, with its owner open ([`Fx::check_named`]). A statement that gives its
+    /// block's value owns none of its values: they are its block's owner's, open around it.
+    fn stmt_owned(&mut self, st: &mut Octagon, s: StmtId, tail: Option<&Shape>) -> Val {
+        self.opened(Owner::Stmt(s), |fx| fx.stmt_eval(st, s, tail))
+    }
+
+    /// Runs `f` with `owner` open.
+    fn opened<T>(&mut self, owner: Owner, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.open.push(owner);
+        let out = f(self);
+        self.open.pop();
+        out
     }
 
     fn stmt_eval(&mut self, st: &mut Octagon, s: StmtId, tail: Option<&Shape>) -> Val {
@@ -5278,10 +5557,10 @@ impl<'a> Fx<'a> {
     }
 
     /// A condition, its operands evaluated once; the right operand of `and` and `or` is
-    /// evaluated where the left one has decided that it runs, and changes nothing there
-    /// ([`Fx::changes_nothing`]), so that the state after the operator is where the left one
-    /// decided it. A right operand that changed state left that state to say which operands had
-    /// run, which Tier 1 once answered by merging the two and forgetting what the left one read.
+    /// evaluated where the left one has decided that it runs, and changes no binding there
+    /// ([`Fx::changes_nothing`]). A right operand that changed state left the state after the
+    /// operator to say which operands had run, which Tier 1 once answered by forgetting what the
+    /// left one read.
     fn cond(&mut self, st: &mut Octagon, e: ExprId) -> Cond {
         let tree = self.tree;
         match &tree.expr(e).kind {
@@ -5301,6 +5580,12 @@ impl<'a> Fx<'a> {
                 let mut s2 = st.clone();
                 self.assume(&mut s2, &l, and);
                 let r = self.cond(&mut s2, *rhs);
+                // The state after the operator is where the left operand decided that the right
+                // one does not run, joined with where it ran, so that it keeps the condition's
+                // values as they are where the right operand ran (`no-condition-outlives-its-
+                // owner`); the right operand changes no binding.
+                self.assume(st, &l, !and);
+                *st = st.join(&s2);
                 if and {
                     Cond::And(Box::new(l), Box::new(r))
                 } else {
@@ -6195,6 +6480,12 @@ impl<'a> Fx<'a> {
     /// to, every check of the loop `s` would count as proven, so the check stops the compile
     /// there, in every build, with an internal error that names the loop and the candidate.
     fn refute_cand(&mut self, st: &Octagon, c: Cand, s: StmtId) -> Option<Octagon> {
+        let owner = self.owner_of(cand_expr(c));
+        self.opened(owner, |fx| fx.refute_cand_open(st, c, s))
+    }
+
+    /// [`Fx::refute_cand`] with the candidate's owner open.
+    fn refute_cand_open(&mut self, st: &Octagon, c: Cand, s: StmtId) -> Option<Octagon> {
         let mut after = st.clone();
         let outer = std::mem::replace(&mut self.unproven, 0);
         let k = self.cand(&mut after, c);
@@ -6238,12 +6529,17 @@ impl<'a> Fx<'a> {
         }
         // A candidate is the loop's own text, which reports what it must where it runs, in the
         // round: here it only narrows the head.
+        // Each is evaluated with its owner open, a guard of the body among them
+        // ([`Fx::check_named`]).
         let was = self.recording;
         self.recording = false;
         for (c, ok) in cands.iter().zip(alive) {
             if *ok {
-                let k = self.cand(&mut h, *c);
-                self.assume(&mut h, &k, true);
+                let owner = self.owner_of(cand_expr(*c));
+                self.opened(owner, |fx| {
+                    let k = fx.cand(&mut h, *c);
+                    fx.assume(&mut h, &k, true);
+                });
             }
         }
         self.recording = was;
@@ -6252,6 +6548,11 @@ impl<'a> Fx<'a> {
             self.assume(&mut h, &k, true);
         }
         h
+    }
+
+    /// Who owns expression `e`, the function's body for one no statement or clause holds.
+    fn owner_of(&self, e: ExprId) -> Owner {
+        self.owners.of_expr[e.0 as usize].unwrap_or(Owner::Body)
     }
 
     /// Runs the body once from the head: the state at the back edge and at the exit, where a
@@ -6410,7 +6711,8 @@ impl<'a> Fx<'a> {
             self.stmt = Some(s);
             match &tree.stmt(s).kind {
                 StmtKind::Expr(e) if i + 1 == stmts.len() => {
-                    ends = self.if_ends(std::mem::replace(&mut st, Octagon::new(0)), *e);
+                    let rest = std::mem::replace(&mut st, Octagon::new(0));
+                    ends = self.opened(Owner::Stmt(s), |fx| fx.if_ends(rest, *e));
                 }
                 StmtKind::Binding { .. }
                 | StmtKind::Assign { .. }
@@ -6421,7 +6723,7 @@ impl<'a> Fx<'a> {
                 | StmtKind::Continue
                 | StmtKind::Discard(_)
                 | StmtKind::Expr(_) => {
-                    self.stmt_eval(&mut st, s, None);
+                    self.stmt_owned(&mut st, s, None);
                 }
             }
         }
@@ -8080,6 +8382,113 @@ mod tests {
             );
             assert_eq!(codes(&src), ["E0236"], "{}", changes);
         }
+    }
+
+    /// A condition names only evaluations its state ran (`ghost-contracts-and-totality.md`, item
+    /// 2, `no-condition-outlives-its-owner`). Fable's final review of pull request 182 found
+    /// the remainder `x % 4` of a loop's candidate evaluated at the head, its fact `<= 1` left in
+    /// the state, and the round, after `x = v`, deciding the guard on it: the right operand of
+    /// `and` ran in a copy of the state, and its condition was applied to the state itself, which
+    /// held the head's evaluation. The `else` then knew `w` was 0, and `a[w]` lost its check;
+    /// `f(3, 1, 1)` read past the array natively. Each form below kept the stale fact so: an
+    /// `if`-valued conjunct, an `or` under the `and`, and a `not`. A loop's exit after a conjunct
+    /// that assigns did too, which no condition holds now (`core-calculus.md`, item 10).
+    #[test]
+    fn test_a_condition_names_only_evaluations_its_state_ran() {
+        let head = "pub fn f(v: u8, w: u8[0..=1], n: u8) -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  val a: [1]u8 = [5]\n  var r: u8 = 0\n";
+        let guarded = |cond: &str| {
+            format!(
+                "{}  while i < n {{\n    x = v\n    guard {} else {{\n      r = a[w]\n      break\n    }}\n    x = 0\n    i += 1\n  }}\n  r\n}}",
+                head, cond
+            )
+        };
+        let programs: Vec<String> = [
+            "w > 0 and x % 4 <= 1",
+            "w > 0 and (if x > 1 { 1 } else { 0 }) == 0",
+            "w > 0 and (x % 4 <= 1 or w > 5)",
+            "not (w == 0) and x % 4 <= 1",
+        ]
+        .iter()
+        .map(|c| guarded(c))
+        .collect();
+        for src in &programs {
+            let found: Vec<(ObligationKind, bool)> = obligations(src)
+                .into_iter()
+                .map(|(k, _, proven)| (k, proven))
+                .collect();
+            assert!(
+                found.contains(&(ObligationKind::Index, false)),
+                "{}\n{:?}",
+                src,
+                found
+            );
+            assert_eq!(codes(src), NONE, "{}", src);
+        }
+    }
+
+    /// A condition applied once the statement that decided it has ended stops the compile, in
+    /// every build, with an internal error that names the function and the expression whose
+    /// value it reads (`no-condition-outlives-its-owner`): planted here, as a future change
+    /// might carry one.
+    #[test]
+    #[should_panic(expected = "internal error: in `f`, a condition names the value of `x % 4`")]
+    fn test_a_condition_carried_past_its_statement_stops_the_compile() {
+        let src = "pub fn f(x: u8) -> u8 {\n  guard x % 4 <= 1 else {\n    return 0\n  }\n  x\n}";
+        with_fx(src, |fx, st| {
+            let tree = fx.tree;
+            let (s, cond) = tree
+                .stmts
+                .iter()
+                .enumerate()
+                .find_map(|(i, s)| match s.kind {
+                    StmtKind::Guard { cond, .. } => Some((StmtId(i as u32), cond)),
+                    StmtKind::Binding { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::While { .. }
+                    | StmtKind::Return(_)
+                    | StmtKind::Break
+                    | StmtKind::Continue
+                    | StmtKind::Discard(_)
+                    | StmtKind::Expr(_) => None,
+                })
+                .unwrap_or((StmtId(0), ExprId(0)));
+            let mut at = st.clone();
+            fx.open.push(Owner::Stmt(s));
+            let c = fx.cond(&mut at, cond);
+            fx.open.pop();
+            fx.assume(&mut at, &c, true);
+        });
+    }
+
+    /// A block's last statement that gives the block's value belongs to what the block stands
+    /// in, since its value flows there (`Owners::block`): an arm of the `if` a binding holds is
+    /// the binding's, and the function body's value is the body's. A statement before a block's
+    /// last is its own owner, and so is the last of a loop's body, whose value nothing takes.
+    #[test]
+    fn test_a_block_value_belongs_to_what_the_block_stands_in() {
+        let src = "pub fn f(x: u8) -> u8 {\n  val y: u8 = if x > 1 {\n    val z: u8 = x % 3\n    z % 2\n  } else {\n    0\n  }\n  var i: u8 = 0\n  while i < 3 {\n    i += 1\n    if x % 5 == 0 {\n      i += 1\n    }\n  }\n  y + x % 7\n}";
+        with_fx(src, |fx, _| {
+            let owner = |text: &str| {
+                (0..fx.tree.exprs.len())
+                    .map(|i| ExprId(i as u32))
+                    .find(|&e| fx.own_text(e).0 == text)
+                    .map(|e| fx.owner_of(e))
+            };
+            let binding_y = owner("x > 1");
+            assert!(matches!(binding_y, Some(Owner::Stmt(_))), "{:?}", binding_y);
+            assert_eq!(owner("z % 2"), binding_y);
+            let binding_z = owner("x % 3");
+            assert!(matches!(binding_z, Some(Owner::Stmt(_))), "{:?}", binding_z);
+            assert_ne!(binding_z, binding_y);
+            assert_eq!(owner("y + x % 7"), Some(Owner::Body));
+            let last_of_loop = owner("x % 5 == 0");
+            assert!(
+                matches!(last_of_loop, Some(Owner::Stmt(_))),
+                "{:?}",
+                last_of_loop
+            );
+            assert_ne!(last_of_loop, owner("i < 3"));
+        });
     }
 
     /// A loop's candidate holds only where evaluating it cannot trap (`ghost-contracts-and-

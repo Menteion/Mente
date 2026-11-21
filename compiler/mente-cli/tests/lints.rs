@@ -1379,7 +1379,7 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-sema/src/tier1.rs",
-        "assume",
+        "assume_in",
         "matches!",
         "matches!(c, Cond::And(..))",
         "`and` and `or` are the two conditions this arm takes; the test tells them apart",
