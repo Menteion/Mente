@@ -796,3 +796,28 @@ pub fn verify_bitstruct_layout(
         total_bits,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{type_byte_size, NoSize};
+    use crate::structs::ARRAY_ELEMENTS;
+
+    /// An array of the most elements an array may hold has a size, its elements' size times
+    /// their count, where that stays within the bytes a value may hold; one element more is past
+    /// the limit, whatever its elements. The two limits are equal, so only an array at the limit
+    /// tells the check of the elements from the check of the bytes after it (the mutants of pull
+    /// request 187 that turned `>` into `>=` and `==` there survived every test).
+    #[test]
+    fn test_an_array_of_the_most_elements_has_a_size() {
+        let none = HashMap::new();
+        let most = format!("[{}]u8", ARRAY_ELEMENTS);
+        assert_eq!(
+            type_byte_size(&most, &none).ok().map(|n| n.0),
+            Some(ARRAY_ELEMENTS)
+        );
+        let more = format!("[{}]u8", ARRAY_ELEMENTS + 1);
+        assert_eq!(type_byte_size(&more, &none).err(), Some(NoSize::PastLimit));
+    }
+}
