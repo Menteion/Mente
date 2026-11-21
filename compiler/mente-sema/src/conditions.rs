@@ -102,16 +102,6 @@ impl Place {
         }
     }
 
-    /// Whether a call the condition evaluates first may move to the line before its statement
-    /// and keep when it runs: not a loop's condition, which runs every round, nor an `else if`'s,
-    /// which runs only where the conditions before it fail, nor a clause, which a proof erases.
-    fn movable(self) -> bool {
-        match self {
-            Place::Guard | Place::If | Place::Scrutinee | Place::Operand(_) => true,
-            Place::While | Place::ElseIf | Place::Clause(_) => false,
-        }
-    }
-
     /// Why the place may change nothing.
     fn reason(self) -> &'static str {
         match self {
@@ -530,15 +520,14 @@ fn report(
     )
     .with_related(root, "the condition".to_string());
     // The fix moves the call to the line before its statement, where it runs as it did: first,
-    // every time the statement runs.
-    let fix = open
-        .first
-        .zip(leading)
-        .filter(|_| open.place.movable())
-        .and_then(|(stmt, c)| {
-            let line = format!("val {} = {}", name, text(tree.expr(c).span));
-            line_before(src, stmt.start, &line).map(|insert| (insert, c))
-        });
+    // every time the statement runs. Only a condition its statement evaluates first has
+    // `first`, which a loop's condition, an `else if`'s and a clause never have: the first runs
+    // every round, the second only where the conditions before it fail, the third where a
+    // proof erases it or not.
+    let fix = open.first.zip(leading).and_then(|(stmt, c)| {
+        let line = format!("val {} = {}", name, text(tree.expr(c).span));
+        line_before(src, stmt.start, &line).map(|insert| (insert, c))
+    });
     if let Some((insert, c)) = fix {
         d.fixes.push(Fix {
             message: format!(
@@ -642,6 +631,15 @@ mod tests {
             "the condition of this `if` passes `i` as `mut`, and a condition only decides: compute `next(mut i)` into a `val` in a statement of its own where it runs, `val v = next(mut i)`, and test `v > 3`"
         );
         assert_eq!(d.fixes.len(), 1);
+        // Effects in two calls: no one call holds them, so none is named and no fix moves one.
+        let (d, _) = refused(
+            "pub fn f(n: u8) -> u8 {\n  var i = n\n  var j = n\n  if next(mut i) > next(mut j) {\n    return 1\n  }\n  i + j\n}",
+        );
+        assert_eq!(
+            d.message,
+            "the condition of this `if` passes `i` as `mut`, and a condition only decides: move it out of the condition into a statement of its own where it runs, and test what it leaves"
+        );
+        assert!(d.fixes.is_empty());
         // An `else if` runs only where the conditions before it fail, and an `if` inside an
         // expression after what it follows: neither is offered a fix.
         let (d, _) = refused(

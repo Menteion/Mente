@@ -68,14 +68,9 @@ pub struct Resolution {
 
 impl Resolution {
     /// `base`, or `base` with the first number from 2 after it, that no binding of the function
-    /// has and no function or type of the module has (`E0220`): the name of a binding a fix
-    /// declares.
-    pub fn unused_name(&self, base: &str) -> String {
-        self.unused_name_besides(base, &[])
-    }
-
-    /// [`Resolution::unused_name`], and none of `besides`: the names earlier fixes of the
-    /// function declare, so that applying them all declares no name twice (`E0202`).
+    /// has, no function or type of the module has (`E0220`), and none of `besides`, the names
+    /// earlier fixes of the function declare, so that applying them all declares no name twice
+    /// (`E0202`): the name of a binding a fix declares.
     pub fn unused_name_besides(&self, base: &str, besides: &[String]) -> String {
         let taken = |n: &str| {
             self.bindings.iter().any(|b| b.name == n)

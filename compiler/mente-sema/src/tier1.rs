@@ -4268,12 +4268,6 @@ impl<'a> Fx<'a> {
     // -- the walk ------------------------------------------------------------------------------
 
     fn entry(&mut self, st: &mut Octagon) {
-        // The function's clauses change nothing (`Fx::changes_nothing`), whether they are
-        // checked at run time or erased.
-        let syntax = self.syntax;
-        for c in &syntax.contracts {
-            self.changes_nothing(c.expr, "clause");
-        }
         for i in 0..self.syntax.params.len() {
             if let Some(v) = self.vars[i] {
                 let shape = self.binding_shape(i);
@@ -4284,7 +4278,12 @@ impl<'a> Fx<'a> {
             }
             self.scope.push(i);
         }
+        // The function's clauses change nothing (`Fx::changes_nothing`), whether they are
+        // checked at run time or erased.
         let syntax = self.syntax;
+        for c in &syntax.contracts {
+            self.changes_nothing(c.expr, "clause");
+        }
         for c in &syntax.contracts {
             if c.kind == ContractKind::Requires {
                 let k = self.cond(st, c.expr);
@@ -5254,17 +5253,15 @@ impl<'a> Fx<'a> {
     /// check holds that in every build where Tier 1 relies on it: the condition `e`, a `noun`,
     /// reaching Tier 1 with an effect stops the compile with an internal error, which names the
     /// function, the condition and the binding it changes. A binding the condition declares
-    /// itself, in a block or a pattern inside it, is its own.
+    /// itself, in a block or a pattern inside it, is not yet in scope where the condition is
+    /// checked, and is its own.
     ///
     /// [`pure-conditions`]: ../../docs/design-review.md#pure-conditions
     fn changes_nothing(&self, e: ExprId, noun: &str) {
         let at = self.span(e);
         let mut changed = Vec::new();
         self.changed_expr(e, &mut changed);
-        let outside = changed.into_iter().find(|&b| {
-            let d = self.resolution.bindings[b].span;
-            d.start < at.start || at.end < d.end
-        });
+        let outside = changed.into_iter().find(|b| self.scope.contains(b));
         if let Some(b) = outside {
             panic!(
                 "internal error: in `{}`, the {} at {}:{} changes `{}`, and a condition changes nothing (core-calculus.md, item 10, pure-conditions); the checker refuses it (E0236)",
