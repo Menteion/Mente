@@ -170,6 +170,8 @@ jobs:
         # never from Tier 1's facts, unrolling each loop and each recursion up to 3 times
         # (docs/design-review.md, smt-independent-encoding). The known soundness bugs of
         # compiler/mente-cli/tests/smt-known are exported with the rest, and must be confirmed.
+        # The export fails on an obligation of Tier 1 with no site, on fewer queries than the
+        # baseline's floor, and on more checks cut off by the bound than its ceiling.
         run: |
           set -euo pipefail
           mapfile -t pass < <(for f in conformance/*/*.mn; do
@@ -178,7 +180,7 @@ jobs:
           mapfile -t agents < <(find benchmark/probe benchmark/prelim -name '*.mn' | sort)
           start=$(date +%s%N)
           ./target/release/mn smt --independent examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels \
-            compiler/mente-cli/tests/smt-known --out "$RUNNER_TEMP/independent" | tee "$RUNNER_TEMP/independent-export.txt"
+            compiler/mente-cli/tests/smt-known --out "$RUNNER_TEMP/independent" --baseline compiler/mente-cli/tests/smt-baseline.txt | tee "$RUNNER_TEMP/independent-export.txt"
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           printf 'INDEPENDENT_EXPORT_SECONDS=%d.%03d\n' $((ms / 1000)) $((ms % 1000)) >> "$GITHUB_ENV"
       - name: Ask Z3 for each independent query, and run each model on the reference interpreter
@@ -186,17 +188,18 @@ jobs:
         # `unsat`: no input fails the check within the bounds. `sat`: Z3's model is the inputs of a
         # run that fails a check Tier 1 proved; `mn smt --confirm` runs it on the reference
         # interpreter, and a trap there confirms a soundness bug of Tier 1, while any other outcome
-        # is a defect of the encoding. Both fail the job, unless the bug is a known one. A timeout
-        # or `unknown`, which nonlinear arithmetic can give, decides nothing and is counted.
+        # is a defect of the encoding. Both fail the job, unless the bug is a known one. The queries
+        # are integer arithmetic, linear and nonlinear (a product of two variables, a division or a
+        # remainder by one), over arrays, with conversions to bit-vectors for the bit operations; no
+        # logic is set, and Z3 chooses. A timeout or `unknown`, which the nonlinear and bit-vector
+        # queries can give, decides nothing: more than the baseline allows fails the job, and so do
+        # a solver's error and a query with no answer. The answers are counted by fragment.
         run: |
           set -euo pipefail
           find "$RUNNER_TEMP/independent" -name '*.smt2' | sort > "$RUNNER_TEMP/independent-queries.txt"
           total=$(wc -l < "$RUNNER_TEMP/independent-queries.txt")
-          # A floor, so that an export that silently lost its programs fails.
-          if [ "$total" -lt 2000 ]; then
-            echo "::error::only $total independent queries were written; the export lost programs"
-            exit 1
-          fi
+          # The function is called by name through xargs and bash -c, which shellcheck does not see.
+          # shellcheck disable=SC2329
           check() {
             answer=$(z3 -T:10 "$1" 2>&1 | tr '\n' ' ' | sed 's/ *$//')
             printf '%s\t%s\n' "$answer" "$1"
@@ -209,8 +212,8 @@ jobs:
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           seconds=$(printf '%d.%03d' $((ms / 1000)) $((ms % 1000)))
           status=0
-          ./target/release/mn smt --confirm "$RUNNER_TEMP/independent-answers.txt" \
-            --expect compiler/mente-cli/tests/smt-known/loop-candidate-facts.mn \
+          ./target/release/mn smt --confirm "$RUNNER_TEMP/independent-answers.txt" --queries "$RUNNER_TEMP/independent-queries.txt" \
+            --baseline compiler/mente-cli/tests/smt-baseline.txt --expect compiler/mente-cli/tests/smt-known/loop-candidate-facts.mn \
             > "$RUNNER_TEMP/confirm.txt" || status=$?
           cat "$RUNNER_TEMP/confirm.txt"
           count() { grep -c "^$1: " "$RUNNER_TEMP/confirm.txt" || true; }
@@ -222,6 +225,7 @@ jobs:
             echo "| Queries written | $total |"
             echo "| Answered \`unsat\` | $(cut -f1 "$RUNNER_TEMP/independent-answers.txt" | grep -c '^unsat' || true) |"
             echo "| Undecided: a timeout or \`unknown\` | $(count undecided) |"
+            echo "| Errors: a solver's error, or a query answered not once | $(count error) |"
             echo "| Soundness bugs of Tier 1, confirmed on the interpreter | $(count confirmed) |"
             echo "| Known soundness bugs, confirmed | $(count known) |"
             echo "| Models the interpreter does not confirm: defects of the encoding | $(count unconfirmed) |"
@@ -229,9 +233,12 @@ jobs:
             echo "| Places of a construct the encoding lacks | $(grep -c '^unencoded: ' "$RUNNER_TEMP/independent-export.txt" || true) |"
             echo "| Export, seconds | $INDEPENDENT_EXPORT_SECONDS |"
             echo "| Z3 ${Z3_VERSION} on every query, seconds, $(nproc) at once | $seconds |"
+            echo
+            grep -E '^(Wrote |fragment: |baseline: )' "$RUNNER_TEMP/independent-export.txt" "$RUNNER_TEMP/confirm.txt" \
+              | sed -E 's/^[^:]*:/- /' || true
           } | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$status" -ne 0 ]; then
-            echo "::error::the independent cross-check found a soundness bug of Tier 1, a defect of the encoding, or a known bug no longer confirmed; the lines above name each"
+            echo "::error::the independent cross-check found a soundness bug of Tier 1, a defect of the encoding, a known bug no longer confirmed, a solver's error or a count past its baseline; the lines above name each"
           fi
           exit "$status"
       - name: Keep the queries of a failed run

@@ -283,7 +283,8 @@ fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
         stdout
     );
     assert!(
-        stdout.ends_with("0 files do not check, 0 obligations have no site.\n"),
+        stdout.contains("Of the checks Tier 1 erased that no input reaches, 0 are unreachable, 0 lie past the bounds and 0 past a construct the encoding lacks.")
+            && stdout.ends_with("0 files do not check, 0 obligations have no site.\n"),
         "{}",
         stdout
     );
@@ -331,32 +332,53 @@ fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
     );
     let answers = dir.join("answers.txt");
     let q = query.display();
+    let other = queries[2].display();
+    // The queries asked, each of which must have one answer.
+    let asked = dir.join("asked.txt");
+    fs::write(&asked, format!("{}\n{}\n", q, other)).unwrap();
     let confirm = |lines: String, expect: Option<&Path>| {
         fs::write(&answers, lines).unwrap();
-        let mut args = vec!["smt", "--confirm", answers.to_str().unwrap()];
+        let mut args = vec![
+            "smt",
+            "--confirm",
+            answers.to_str().unwrap(),
+            "--queries",
+            asked.to_str().unwrap(),
+        ];
         if let Some(e) = expect {
             args.extend(["--expect", e.to_str().unwrap()]);
         }
         mn(&args)
     };
     let run = confirm(
-        format!("unsat (error \"no model\")\t{}\ntimeout\t{}\n", q, q),
+        format!("unsat (error \"no model\")\t{}\ntimeout\t{}\n", q, other),
         None,
     );
     let stdout = text(&run.stdout);
     assert!(run.status.success(), "{}{}", stdout, text(&run.stderr));
     assert!(
-        stdout.contains(&format!("undecided: {}: timeout", q)),
+        stdout.contains(&format!("undecided: {}: timeout", other))
+            && stdout.contains("fragment: 1 queries linear, 0 of them undecided")
+            && stdout.contains("fragment: 1 queries nonlinear, 1 of them undecided"),
         "{}",
         stdout
     );
     assert!(
-        stdout.ends_with("1 unsat, 1 undecided, 0 confirmed soundness bugs of Tier 1, 0 known, 0 not confirmed, 0 known bugs missing.\n"),
+        stdout.ends_with("1 unsat, 1 undecided, 0 confirmed soundness bugs of Tier 1, 0 known, 0 not confirmed, 0 known bugs missing, 0 errors.\n"),
+        "{}",
+        stdout
+    );
+    // A query of the list with no answer fails the job.
+    let run = confirm(format!("unsat\t{}\n", q), None);
+    let stdout = text(&run.stdout);
+    assert_eq!(run.status.code(), Some(1), "{}", stdout);
+    assert!(
+        stdout.contains(&format!("error: {}: asked and not answered", other)),
         "{}",
         stdout
     );
     // d = 0 lies outside `safe`'s refinement: no input of the query, so the answer is wrong.
-    let run = confirm(format!("sat ((p.d 0))\t{}\n", q), None);
+    let run = confirm(format!("sat ((p.d 0))\t{}\nunsat\t{}\n", q, other), None);
     let stdout = text(&run.stdout);
     assert_eq!(run.status.code(), Some(1), "{}", stdout);
     assert!(
@@ -367,13 +389,14 @@ fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
     );
     // A known bug that no answer confirms.
     let expect = dir.join("known.mn");
-    fs::write(&expect, "// smt: kept division-by-zero at 3:30\n").unwrap();
-    let run = confirm(format!("unsat\t{}\n", q), Some(&expect));
+    fs::write(&expect, "// smt: kept divisor at 3:32\n").unwrap();
+    let run = confirm(format!("unsat\t{}\nunsat\t{}\n", q, other), Some(&expect));
     let stdout = text(&run.stdout);
     assert_eq!(run.status.code(), Some(1), "{}", stdout);
     assert!(
         stdout.contains("missing: ")
-            && stdout.contains("no query of `kept` was confirmed at its division-by-zero at 3:30"),
+            && stdout
+                .contains("no query of `kept` was confirmed at its obligation `divisor at 3:32`"),
         "{}",
         stdout
     );

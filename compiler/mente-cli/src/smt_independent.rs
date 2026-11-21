@@ -14,7 +14,7 @@
 //! a defect of the encoding. Either fails the job, unless a file given with `--expect` names
 //! the confirmed bug as known (a line `// smt: <function> <trap> at <line>:<col>`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -130,17 +130,36 @@ pub fn erased(obligations: &[Obligation]) -> Vec<Key> {
     keys.into_iter().filter(|e| e.1).map(|e| e.0).collect()
 }
 
-/// The obligations Tier 1 records in a function that its encoding has no site for, where the
-/// encoding holds the function whole; none where a construct it lacks cuts a path off. Each is a
-/// defect of the encoding: a check Tier 1 may erase would have no query.
+/// The constructs whose absence leaves a function with no site at all: a parameter the encoding
+/// lacks, before which nothing is encoded, and a function cut off as too large.
+const WHOLE: [&str; 3] = [
+    "a parameter of a struct or an enum",
+    "an array of more elements than an encoding holds",
+    "a function too large to encode",
+];
+
+/// The obligations Tier 1 records in a function that its encoding has no site for, each a defect
+/// of the encoding: a check Tier 1 may erase would have no query. Matched in every function; the
+/// obligations within a construct the encoding lacks are left out, which have no site by design,
+/// and so is every obligation of a function a parameter it lacks, or its size, leaves unencoded.
 pub fn unmatched<'o>(obligations: &'o [Obligation], enc: &Encoding) -> Vec<&'o Obligation> {
-    if !enc.unencoded.is_empty() {
+    let whole = enc.sites.is_empty() && enc.unencoded.iter().any(|(_, what)| WHOLE.contains(what));
+    let exhausted = enc
+        .unencoded
+        .iter()
+        .any(|(_, what)| *what == "a function too large to encode");
+    if whole || exhausted {
         return Vec::new();
     }
+    let within = |o: &Obligation| {
+        enc.unencoded
+            .iter()
+            .any(|(at, _)| at.start <= o.span.start && o.span.end <= at.end)
+    };
     let keys: Vec<Key> = enc.sites.iter().map(|s| s.key()).collect();
     obligations
         .iter()
-        .filter(|o| !keys.contains(&key_of(o)))
+        .filter(|o| !within(o) && !keys.contains(&key_of(o)))
         .collect()
 }
 
@@ -161,19 +180,48 @@ pub fn groups(enc: &Encoding, keep: impl Fn(&Key) -> bool) -> Vec<Vec<usize>> {
     out.into_iter().map(|g| g.2).collect()
 }
 
+/// Why a check Tier 1 erased has no query: no input reaches it on any path the encoding follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unqueried {
+    /// No path was cut off before it: no input reaches it at all.
+    Unreachable,
+    /// A path was cut off past the bounds before it, which may reach it.
+    BeyondBound,
+    /// A path was cut off at a construct the encoding lacks before it, which may reach it.
+    BeyondLacked,
+}
+
+/// Why the sites `g` of one obligation have no query, where none does.
+pub fn unqueried(enc: &Encoding, g: &[usize]) -> Unqueried {
+    let sites = || g.iter().map(|&k| &enc.sites[k]);
+    if sites().any(|s| s.beyond_bound) {
+        Unqueried::BeyondBound
+    } else if sites().any(|s| s.beyond_lacked) {
+        Unqueried::BeyondLacked
+    } else {
+        Unqueried::Unreachable
+    }
+}
+
 /// What `mn smt --independent` did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Written {
     pub queries: usize,
     pub functions: usize,
     pub files: usize,
-    /// Checks Tier 1 erased that no input reaches within the bounds.
-    pub unreached: usize,
+    /// Checks Tier 1 erased that no input reaches, no path being cut off before them.
+    pub unreachable: usize,
+    /// Checks Tier 1 erased that no input reaches within the bounds, a path being cut off past
+    /// them before the check.
+    pub beyond_bound: usize,
+    /// Checks Tier 1 erased that no input reaches, a path being cut off at a construct the
+    /// encoding lacks before the check.
+    pub beyond_lacked: usize,
     /// Places of constructs the encoding lacks.
     pub unencoded: usize,
     /// Files whose module does not check.
     pub unchecked: usize,
-    /// Obligations of Tier 1 with no site in a function the encoding holds whole.
+    /// Obligations of Tier 1 with no site.
     pub unmatched: usize,
 }
 
@@ -196,8 +244,8 @@ fn below(out: &Path, file: &Path) -> PathBuf {
 
 /// Writes the independent queries of `files` below `out`, each in a file of its own,
 /// `<function>-<line>-<kind>[-n].smt2`, whose first line is `; source: <file>:<line>:<col>`,
-/// the obligation's place; prints each construct the encoding lacks and each file that does not
-/// check.
+/// the obligation's place; prints each construct the encoding lacks, each obligation with no
+/// site and each file that does not check, and counts each check with no query by why.
 pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
     let mut w = Written {
         files: files.len(),
@@ -247,7 +295,11 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
                 let site = &enc.sites[g[0]];
                 let (kind, span) = (site.kind, site.span);
                 let Some(text) = enc.query(&g) else {
-                    w.unreached += 1;
+                    match unqueried(&enc, &g) {
+                        Unqueried::Unreachable => w.unreachable += 1,
+                        Unqueried::BeyondBound => w.beyond_bound += 1,
+                        Unqueried::BeyondLacked => w.beyond_lacked += 1,
+                    }
                     continue;
                 };
                 let base = format!("{}-{}-{}", cf.syntax.name, span.line, kind.name());
@@ -269,20 +321,109 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
     Ok(w)
 }
 
+/// The counts of the CI job, recorded in [`BASELINE`], which each run is held to: the queries it
+/// writes may fall below the record by at most a hundredth, the checks cut off by the bound may
+/// rise above it by at most a hundredth, and the undecided answers may pass it by at most
+/// [`UNDECIDED_SLACK`], since a timeout depends on the runner. A change that moves a count past
+/// its margin records the new count, with why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Baseline {
+    pub queries: usize,
+    pub beyond_bound: usize,
+    pub undecided: usize,
+}
+
+/// Where the baseline is kept, from the repository's root.
+pub const BASELINE: &str = "compiler/mente-cli/tests/smt-baseline.txt";
+
+/// How many undecided answers past the record a run may give.
+pub const UNDECIDED_SLACK: usize = 5;
+
+impl Baseline {
+    /// The baseline a file records: its fields `queries`, `beyond-bound` and `undecided`, each
+    /// once, as decimal numbers; `#` lines are comments.
+    pub fn parse(text: &str) -> Result<Baseline, String> {
+        let mut fields: HashMap<&str, usize> = HashMap::new();
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (name, value) = line
+                .split_once(':')
+                .ok_or_else(|| format!("`{}` is no `name: count` line", line))?;
+            let name = name.trim();
+            if !["queries", "beyond-bound", "undecided"].contains(&name) {
+                return Err(format!("`{}` is no field of the baseline", name));
+            }
+            let value = value.trim();
+            let n = value
+                .parse()
+                .ok()
+                .filter(|_| value.bytes().all(|b| b.is_ascii_digit()))
+                .ok_or_else(|| format!("`{}: {}` is no decimal count", name, value))?;
+            if fields.insert(name, n).is_some() {
+                return Err(format!("`{}` is given twice", name));
+            }
+        }
+        let field = |name: &str| {
+            fields
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("the baseline has no `{}`", name))
+        };
+        Ok(Baseline {
+            queries: field("queries")?,
+            beyond_bound: field("beyond-bound")?,
+            undecided: field("undecided")?,
+        })
+    }
+
+    /// Why an export falls outside the baseline, if it does.
+    pub fn export_problems(&self, w: &Written) -> Vec<String> {
+        let mut out = Vec::new();
+        let floor = self.queries - self.queries / 100;
+        if w.queries < floor {
+            out.push(format!(
+                "{} queries were written, below the floor of {}, a hundredth under the {} recorded in {}: the encoding lost checks, or the corpus lost programs",
+                w.queries, floor, self.queries, BASELINE
+            ));
+        }
+        let ceiling = self.beyond_bound + self.beyond_bound / 100;
+        if w.beyond_bound > ceiling {
+            out.push(format!(
+                "{} checks Tier 1 erased are cut off by the bound, above the ceiling of {}, a hundredth over the {} recorded in {}: the encoding cuts off more paths than it did",
+                w.beyond_bound, ceiling, self.beyond_bound, BASELINE
+            ));
+        }
+        out
+    }
+
+    /// Why a count of undecided answers falls outside the baseline, if it does.
+    pub fn undecided_problem(&self, undecided: usize) -> Option<String> {
+        let cap = self.undecided + UNDECIDED_SLACK;
+        (undecided > cap).then(|| {
+            format!(
+                "{} answers are undecided, above the cap of {}, the {} recorded in {} and {} more",
+                undecided, cap, self.undecided, BASELINE, UNDECIDED_SLACK
+            )
+        })
+    }
+}
+
 /// What the run of a model shows of the query it satisfies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// The run traps where the query says: a check Tier 1 proved fails. The fields are the
-    /// source file, the function, the trap's kind, line and column, and the report.
-    Confirmed {
-        file: String,
-        function: String,
-        trap: (String, u32, u32),
-        report: String,
-    },
+    /// The run traps where the query says: a check Tier 1 proved fails. The fields are the bug
+    /// it confirms, its source file, its function and its obligation, and the report.
+    Confirmed { bug: Bug, report: String },
     /// The run does not trap where the query says: a defect of the encoding.
     Unconfirmed(String),
 }
+
+/// A soundness bug of Tier 1: the source file, the function, and the obligation as a query
+/// names it, its kind, its place and its tag, such as `range at 43:24 into `u8``, so that bugs
+/// that share one trap are told apart.
+pub type Bug = (String, String, String);
 
 /// The file, line and column of a query's first line, `; source: <file>:<line>:<col>`.
 fn source_of(query: &str) -> Option<(String, u32, u32)> {
@@ -377,17 +518,15 @@ pub fn confirm_one(path: &Path, model: &str) -> Result<Verdict, String> {
     };
     if trapped_here {
         return Ok(Verdict::Confirmed {
-            file,
-            function: header.function.clone(),
-            trap: (header.trap_kind, header.trap_line, header.trap_col),
             report: format!(
-                "{}: Tier 1 proved the {} obligation of `{}`, and {} {}",
+                "{}: Tier 1 proved the obligation `{}` of `{}`, and {} {}",
                 place, header.obligation, header.function, call, ran
             ),
+            bug: (file, header.function, header.obligation),
         });
     }
     Ok(Verdict::Unconfirmed(format!(
-        "{}: the query of the {} obligation of `{}` names the trap {} at {}:{}, but {} {}: a defect of the encoding",
+        "{}: the query of the obligation `{}` of `{}` names the trap {} at {}:{}, but {} {}: a defect of the encoding",
         place,
         header.obligation,
         header.function,
@@ -399,21 +538,32 @@ pub fn confirm_one(path: &Path, model: &str) -> Result<Verdict, String> {
     )))
 }
 
-/// The known bugs a file names: each line `// smt: <function> <trap> at <line>:<col>`.
-pub fn expected(file: &str, src: &str) -> Vec<(String, String, (String, u32, u32))> {
+/// The lines of a file of `tests/smt-known` that begin with `prefix`, each a function and an
+/// obligation as a query names it: `<prefix><function> <obligation>`.
+fn named(file: &str, src: &str, prefix: &str) -> Vec<Bug> {
     src.lines()
         .filter_map(|l| {
-            let rest = l.trim().strip_prefix("// smt: ")?;
-            let (function, rest) = rest.split_once(' ')?;
-            let (trap, place) = rest.split_once(" at ")?;
-            let (line, col) = place.trim().split_once(':')?;
+            let rest = l.trim().strip_prefix(prefix)?;
+            let (function, obligation) = rest.split_once(' ')?;
             Some((
                 file.to_string(),
                 function.to_string(),
-                (trap.to_string(), line.parse().ok()?, col.parse().ok()?),
+                obligation.trim().to_string(),
             ))
         })
         .collect()
+}
+
+/// The known soundness bugs a file names: each line `// smt: <function> <obligation>`.
+pub fn expected(file: &str, src: &str) -> Vec<Bug> {
+    named(file, src, "// smt: ")
+}
+
+/// The checks a file names as known to lie past the bounds: each line
+/// `// smt beyond the bound: <function> <obligation>`, which a test holds.
+#[cfg(test)]
+pub fn beyond(file: &str, src: &str) -> Vec<Bug> {
+    named(file, src, "// smt beyond the bound: ")
 }
 
 /// What `mn smt --confirm` found.
@@ -426,85 +576,145 @@ pub struct Confirmed {
     pub unconfirmed: Vec<String>,
     /// Known bugs no `sat` answer confirmed.
     pub missing: Vec<String>,
+    /// Answers that are none: a solver's error, an empty answer, an answer to no query or a
+    /// second answer to one, and a query with no answer.
+    pub errors: Vec<String>,
+    /// The undecided answers past the baseline's cap.
+    pub over: Option<String>,
+    /// How many queries of each fragment were answered, and how many of them undecided.
+    pub fragments: BTreeMap<&'static str, (usize, usize)>,
 }
 
 impl Confirmed {
-    /// Whether the job passes: no bug it did not expect, no defect of the encoding, and every
-    /// bug it expects confirmed.
+    /// Whether the job passes: no bug it did not expect, no defect of the encoding, every bug it
+    /// expects confirmed, every query answered once by the solver without an error, and no more
+    /// undecided answers than the baseline allows.
     pub fn passes(&self) -> bool {
-        self.confirmed.is_empty() && self.unconfirmed.is_empty() && self.missing.is_empty()
+        self.confirmed.is_empty()
+            && self.unconfirmed.is_empty()
+            && self.missing.is_empty()
+            && self.errors.is_empty()
+            && self.over.is_none()
     }
 }
 
-/// Whether a confirmed bug is the known bug `e`: one file, as paths, one function and one trap.
-fn is(
-    e: &(String, String, (String, u32, u32)),
-    found: &(String, String, (String, u32, u32)),
-) -> bool {
+/// Whether a confirmed bug is the known bug `e`: one file, as paths, one function and one
+/// obligation.
+fn is(e: &Bug, found: &Bug) -> bool {
     Path::new(&e.0) == Path::new(&found.0) && e.1 == found.1 && e.2 == found.2
 }
 
+/// What `confirm` holds the answers to: the known bugs, the queries that were asked, which each
+/// must have one answer, and the baseline of undecided answers.
+#[derive(Clone, Debug, Default)]
+pub struct Gate {
+    pub expect: Vec<Bug>,
+    pub queries: Option<Vec<String>>,
+    pub baseline: Option<Baseline>,
+}
+
 /// Reads the answers, one a line, a solver's whole answer on one line, a tab, then the query's
-/// path; and confirms each `sat`, the known bugs being those `expect` names.
-pub fn confirm(answers: &str, expect: &[(String, String, (String, u32, u32))]) -> Confirmed {
+/// path; and confirms each `sat`. An answer is `unsat`, `sat` with its model, or undecided,
+/// `unknown` or `timeout`; anything else, a solver's `(error ...)` or nothing, is an error.
+pub fn confirm(answers: &str, gate: &Gate) -> Confirmed {
     let mut c = Confirmed::default();
     let mut found = Vec::new();
+    let mut answered: Vec<&str> = Vec::new();
     for line in answers.lines().filter(|l| !l.trim().is_empty()) {
         let (answer, path) = line.split_once('\t').unwrap_or((line, ""));
+        if answered.contains(&path) {
+            c.errors.push(format!("{}: answered twice", path));
+            continue;
+        }
+        answered.push(path);
+        let fragment = fs::read_to_string(path)
+            .map(|q| mente_smt::fragment(&q))
+            .unwrap_or("unread");
+        let tally = c.fragments.entry(fragment).or_insert((0, 0));
+        tally.0 += 1;
         let mut words = answer.splitn(2, char::is_whitespace);
         match words.next() {
             Some("unsat") => c.unsat += 1,
             Some("sat") => {
                 let model = words.next().unwrap_or("");
                 match confirm_one(Path::new(path), model) {
-                    Ok(Verdict::Confirmed {
-                        file,
-                        function,
-                        trap,
-                        report,
-                    }) => {
-                        let key = (file, function, trap);
-                        if expect.iter().any(|e| is(e, &key)) {
+                    Ok(Verdict::Confirmed { bug, report }) => {
+                        if gate.expect.iter().any(|e| is(e, &bug)) {
                             c.known.push(report);
                         } else {
                             c.confirmed.push(report);
                         }
-                        found.push(key);
+                        found.push(bug);
                     }
                     Ok(Verdict::Unconfirmed(why)) => c.unconfirmed.push(why),
                     Err(why) => c.unconfirmed.push(format!("{}: {}", path, why)),
                 }
             }
-            _ => c.undecided.push(format!("{}: {}", path, answer)),
+            Some("unknown" | "timeout") => {
+                tally.1 += 1;
+                c.undecided.push(format!("{}: {}", path, answer));
+            }
+            _ => c.errors.push(format!(
+                "{}: the solver answered `{}`, which is neither `sat`, `unsat`, `unknown` nor `timeout`",
+                path, answer
+            )),
         }
     }
-    for e in expect {
+    if let Some(queries) = &gate.queries {
+        for q in queries.iter().filter(|q| !answered.contains(&q.as_str())) {
+            c.errors.push(format!("{}: asked and not answered", q));
+        }
+        for a in answered.iter().filter(|a| !queries.iter().any(|q| q == *a)) {
+            c.errors.push(format!("{}: answered and not asked", a));
+        }
+    }
+    for e in &gate.expect {
         if !found.iter().any(|f| is(e, f)) {
             c.missing.push(format!(
-                "{}: no query of `{}` was confirmed at its {} at {}:{}",
-                e.0, e.1, e.2 .0, e.2 .1, e.2 .2
+                "{}: no query of `{}` was confirmed at its obligation `{}`",
+                e.0, e.1, e.2
             ));
         }
     }
+    c.over = gate
+        .baseline
+        .and_then(|b| b.undecided_problem(c.undecided.len()));
     c
 }
 
-/// `mn smt --independent <file.mn | dir>... --out <dir>`: writes the independent queries and
-/// prints a summary; exits 1 when an obligation of Tier 1 has no site in a function the encoding
-/// holds whole, and 2 when a file cannot be read or written.
+/// The baseline at `path`, or an exit with why it cannot be read.
+fn baseline_at(path: &str) -> Baseline {
+    match fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(|t| Baseline::parse(&t))
+    {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: the baseline `{}`: {}", path, e);
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `mn smt --independent <file.mn | dir>... --out <dir> [--baseline <file>]`: writes the
+/// independent queries and prints a summary; exits 1 when an obligation of Tier 1 has no site,
+/// or when the counts fall outside the baseline, and 2 when a file cannot be read or written.
 pub fn cmd_independent(args: &[String]) {
     let mut out = None;
+    let mut baseline = None;
     let mut inputs = Vec::new();
     let mut words = args.iter();
     while let Some(word) = words.next() {
         if word == "--out" {
             out = words.next().map(PathBuf::from);
+        } else if word == "--baseline" {
+            baseline = Some(baseline_at(words.next().map_or("", String::as_str)));
         } else {
             inputs.push(PathBuf::from(word));
         }
     }
     let (Some(out), false) = (out, inputs.is_empty()) else {
-        eprintln!("Usage: mn smt --independent <file.mn | dir>... --out <dir>");
+        eprintln!("Usage: mn smt --independent <file.mn | dir>... --out <dir> [--baseline <file>]");
         std::process::exit(2);
     };
     let files: Vec<PathBuf> = inputs
@@ -514,17 +724,23 @@ pub fn cmd_independent(args: &[String]) {
     match independent(&files, &out) {
         Ok(w) => {
             println!(
-                "Wrote {} independent queries for {} functions of {} files to `{}`; {} checks Tier 1 erased are reached by no input within the bounds, {} places hold a construct the encoding lacks, {} files do not check, {} obligations have no site.",
+                "Wrote {} independent queries for {} functions of {} files to `{}`. Of the checks Tier 1 erased that no input reaches, {} are unreachable, {} lie past the bounds and {} past a construct the encoding lacks. {} places hold a construct the encoding lacks, {} files do not check, {} obligations have no site.",
                 w.queries,
                 w.functions,
                 w.files,
                 out.display(),
-                w.unreached,
+                w.unreachable,
+                w.beyond_bound,
+                w.beyond_lacked,
                 w.unencoded,
                 w.unchecked,
                 w.unmatched
             );
-            if w.unmatched > 0 {
+            let problems = baseline.map_or_else(Vec::new, |b| b.export_problems(&w));
+            for p in &problems {
+                println!("baseline: {}", p);
+            }
+            if w.unmatched > 0 || !problems.is_empty() {
                 std::process::exit(1);
             }
         }
@@ -535,66 +751,77 @@ pub fn cmd_independent(args: &[String]) {
     }
 }
 
-/// `mn smt --confirm <answers> [--expect <file.mn>]...`: confirms each `sat` answer on the
-/// reference interpreter and prints what it finds; exits 1 when a bug no `--expect` file names
-/// is confirmed, when a model is not confirmed, or when an expected bug is not, and 2 when a file
-/// cannot be read.
+/// `mn smt --confirm <answers> [--queries <list>] [--baseline <file>] [--expect <file.mn>]...`:
+/// confirms each `sat` answer on the reference interpreter and prints what it finds, and how many
+/// queries of each fragment were answered and undecided; exits 1 when a bug no `--expect` file
+/// names is confirmed, when a model is not confirmed, when an expected bug is not, when an
+/// answer is an error or a query of the list has none, or when the undecided answers pass the
+/// baseline, and 2 when a file cannot be read.
 pub fn cmd_confirm(args: &[String]) {
     let mut answers = None;
-    let mut expect = Vec::new();
+    let mut gate = Gate::default();
     let mut words = args.iter();
-    while let Some(word) = words.next() {
-        if word == "--expect" {
-            let Some(file) = words.next() else {
-                answers = None;
-                break;
-            };
-            match fs::read_to_string(file) {
-                Ok(src) => expect.extend(expected(file, &src)),
-                Err(e) => {
-                    eprintln!("error: cannot read `{}`: {}", file, e);
-                    std::process::exit(2);
-                }
-            }
-        } else {
-            answers = Some(word.clone());
-        }
-    }
-    let Some(answers) = answers else {
-        eprintln!("Usage: mn smt --confirm <answers> [--expect <file.mn>]...");
-        std::process::exit(2);
-    };
-    let text = match fs::read_to_string(&answers) {
-        Ok(t) => t,
+    let read = |file: &str| match fs::read_to_string(file) {
+        Ok(src) => src,
         Err(e) => {
-            eprintln!("error: cannot read `{}`: {}", answers, e);
+            eprintln!("error: cannot read `{}`: {}", file, e);
             std::process::exit(2);
         }
     };
-    let c = confirm(&text, &expect);
-    for l in &c.confirmed {
-        println!("confirmed: {}", l);
+    let mut usage = false;
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--expect" | "--queries" | "--baseline" => {
+                let Some(file) = words.next() else {
+                    usage = true;
+                    break;
+                };
+                match word.as_str() {
+                    "--expect" => gate.expect.extend(expected(file, &read(file))),
+                    "--queries" => {
+                        gate.queries = Some(read(file).lines().map(str::to_string).collect())
+                    }
+                    _ => gate.baseline = Some(baseline_at(file)),
+                }
+            }
+            _ => answers = Some(word.clone()),
+        }
     }
-    for l in &c.known {
-        println!("known: {}", l);
+    let (Some(answers), false) = (answers, usage) else {
+        eprintln!("Usage: mn smt --confirm <answers> [--queries <list>] [--baseline <file>] [--expect <file.mn>]...");
+        std::process::exit(2);
+    };
+    let c = confirm(&read(&answers), &gate);
+    for (prefix, lines) in [
+        ("confirmed", &c.confirmed),
+        ("known", &c.known),
+        ("unconfirmed", &c.unconfirmed),
+        ("missing", &c.missing),
+        ("error", &c.errors),
+        ("undecided", &c.undecided),
+    ] {
+        for l in lines {
+            println!("{}: {}", prefix, l);
+        }
     }
-    for l in &c.unconfirmed {
-        println!("unconfirmed: {}", l);
+    for (fragment, (n, undecided)) in &c.fragments {
+        println!(
+            "fragment: {} queries {}, {} of them undecided",
+            n, fragment, undecided
+        );
     }
-    for l in &c.missing {
-        println!("missing: {}", l);
-    }
-    for l in &c.undecided {
-        println!("undecided: {}", l);
+    if let Some(over) = &c.over {
+        println!("baseline: {}", over);
     }
     println!(
-        "{} unsat, {} undecided, {} confirmed soundness bugs of Tier 1, {} known, {} not confirmed, {} known bugs missing.",
+        "{} unsat, {} undecided, {} confirmed soundness bugs of Tier 1, {} known, {} not confirmed, {} known bugs missing, {} errors.",
         c.unsat,
         c.undecided.len(),
         c.confirmed.len(),
         c.known.len(),
         c.unconfirmed.len(),
-        c.missing.len()
+        c.missing.len(),
+        c.errors.len()
     );
     if !c.passes() {
         std::process::exit(1);
@@ -720,12 +947,13 @@ mod tests {
         out
     }
 
-    /// Runs `name` on each of `inputs` on one thread of the interpreter's.
+    /// Runs `name` on each of `inputs` on one thread of the interpreter's: the value each run
+    /// returns and its parameters' final values, or why it stops.
     fn run_all(
         module: &CheckedModule,
         name: &str,
         inputs: &[Vec<Value>],
-    ) -> Vec<Result<Value, Stop>> {
+    ) -> Vec<Result<(Value, Vec<Value>), Stop>> {
         let limits = Limits {
             max_steps: 50_000,
             ..Limits::default()
@@ -735,9 +963,7 @@ mod tests {
                 .iter()
                 .map(|args| {
                     let mut seen = |_: Span, _: Int, _: mente_interp::Shown| {};
-                    calls
-                        .observed(name, args.clone(), &mut seen)
-                        .map(|(v, _)| v)
+                    calls.observed(name, args.clone(), &mut seen)
                 })
                 .collect()
         })
@@ -760,17 +986,61 @@ mod tests {
     /// The most inputs of one function compared with the interpreter.
     const LIMIT: usize = 120;
 
-    /// Holds the encoding of every function of `src` against the interpreter, input by input:
-    /// where the inputs are admitted and no path of theirs is cut off, the sites whose condition
-    /// holds are exactly the trap the run raises, if a check raises it. Returns the runs
-    /// compared and each disagreement.
-    fn agreement(src: &str, extra: &[(String, Vec<Value>)]) -> (usize, Vec<String>) {
+    /// Whether the value of a term, `term`, is the value `v` the interpreter gives: an integer,
+    /// a boolean, an array element by element; no term for no value.
+    fn same(term: Option<&eval::Value>, v: &Value) -> bool {
+        match (term, v) {
+            (None, Value::Unit) => true,
+            (Some(eval::Value::Int(b)), Value::Int(i)) => {
+                let m = Big::from_u128(i.magnitude());
+                *b == if i.is_negative() { m.neg() } else { m }
+            }
+            (Some(eval::Value::Bool(b)), Value::Bool(c)) => b == c,
+            (Some(eval::Value::Array(default, set)), Value::Array(items)) => {
+                items.iter().enumerate().all(|(k, item)| {
+                    let at = set.get(&Big::from_u128(k as u128)).unwrap_or(default);
+                    same(Some(at), item)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// What holding an encoding against the interpreter found: the runs compared, the inputs
+    /// left out because a path of theirs is cut off past the bounds, and each disagreement.
+    #[derive(Debug, Default)]
+    struct Runs {
+        compared: usize,
+        cut: usize,
+        wrong: Vec<String>,
+    }
+
+    impl Runs {
+        fn add(&mut self, other: Runs) {
+            self.compared += other.compared;
+            self.cut += other.cut;
+            self.wrong.extend(other.wrong);
+        }
+
+        /// Whether the share of inputs cut off is at most the recorded one, `cut` of `total`,
+        /// and half a hundredth: more cut off means the encoding follows fewer paths.
+        fn cut_within(&self, (cut, total): (usize, usize)) -> bool {
+            let mine = self.compared + self.cut;
+            self.cut * total * 200 <= (cut * 200 + total) * mine
+        }
+    }
+
+    /// Holds the encoding of every function of `src` against the interpreter, input by input,
+    /// where the inputs are admitted and no path of theirs is cut off: the sites whose condition
+    /// holds are exactly the trap the run raises, if a check raises it; and where the run
+    /// returns, the encoding says it returns, the value it returns and the final value of each
+    /// parameter, a `mut` one's copy back. An input cut off is counted.
+    fn agreement(src: &str, extra: &[(String, Vec<Value>)]) -> Runs {
+        let mut runs = Runs::default();
         let Ok(checked) = mente_sema::check_program_without_proofs(src) else {
-            return (0, Vec::new());
+            return runs;
         };
         let module = module_of(&checked);
-        let mut compared = 0;
-        let mut wrong = Vec::new();
         for (i, f) in checked.functions.iter().enumerate() {
             let Some(cf) = f else {
                 continue;
@@ -791,7 +1061,9 @@ mod tests {
                 continue;
             }
             let mut roots: Vec<mente_smt::term::T> = enc.sites.iter().map(|s| s.fails).collect();
-            roots.extend([enc.admitted, enc.cut]);
+            roots.extend([enc.admitted, enc.cut, enc.returns]);
+            roots.extend(enc.result);
+            roots.extend(enc.finals.iter().flatten());
             let mut text = String::new();
             enc.terms.write(&roots, &mut text);
             let parsed = eval::parse(&text).unwrap();
@@ -807,30 +1079,39 @@ mod tests {
             let start = cf.syntax.name_span.start;
             let within = |s: Span| s.start >= start && s.end <= end;
             // The inputs the encoding admits and follows whole, each with the sites that hold of
-            // it; only those are run.
+            // it and the outcome it gives; only those are run.
             let mut kept = Vec::new();
             for args in &inputs {
                 let Some(values) = inputs_of(&enc, args) else {
                     continue;
                 };
                 let (env, _) = eval::run(&parsed, &values).unwrap();
-                let truth = |t: mente_smt::term::T| {
-                    eval::eval(&eval::Sexp::Atom(enc.terms.atom(t)), &env).unwrap()
-                        == eval::Value::Bool(true)
+                let value = |t: mente_smt::term::T| {
+                    eval::eval(&eval::parse(&enc.terms.atom(t)).unwrap()[0], &env).unwrap()
                 };
-                if !truth(enc.admitted) || truth(enc.cut) {
+                let truth = |t: mente_smt::term::T| value(t) == eval::Value::Bool(true);
+                if !truth(enc.admitted) {
+                    continue;
+                }
+                if truth(enc.cut) {
+                    runs.cut += 1;
                     continue;
                 }
                 let holding: Vec<&mente_smt::Site> =
                     enc.sites.iter().filter(|s| truth(s.fails)).collect();
-                kept.push((args.clone(), holding));
+                let result = enc.result.map(value);
+                let finals: Vec<Option<eval::Value>> =
+                    enc.finals.iter().map(|t| t.map(value)).collect();
+                kept.push((args.clone(), holding, truth(enc.returns), result, finals));
                 if kept.len() == LIMIT {
                     break;
                 }
             }
-            let runs: Vec<Vec<Value>> = kept.iter().map(|k| k.0.clone()).collect();
-            let outcomes = run_all(&checked, name, &runs);
-            for ((args, holding), outcome) in kept.into_iter().zip(outcomes) {
+            let calls: Vec<Vec<Value>> = kept.iter().map(|k| k.0.clone()).collect();
+            let outcomes = run_all(&checked, name, &calls);
+            for ((args, holding, returns, result, finals), outcome) in
+                kept.into_iter().zip(outcomes)
+            {
                 let call = format!(
                     "{}({})",
                     name,
@@ -854,70 +1135,104 @@ mod tests {
                     Ok(_) | Err(Stop::Trap(_)) => None,
                     Err(_) => continue,
                 };
-                compared += 1;
+                runs.compared += 1;
                 let traps: Vec<(&str, Span)> =
                     holding.iter().map(|s| (s.trap.kind, s.trap.span)).collect();
-                let agrees = match expected {
+                let mut agrees = match expected {
                     Some(t) => traps.len() == 1 && traps[0] == t,
                     None => traps.is_empty(),
                 };
+                // What a run that returns gives back, and that one that traps returns nothing.
+                let mut gives = String::new();
+                match &outcome {
+                    Ok((v, back)) => {
+                        let back_agrees = back.len() == finals.len()
+                            && back.iter().zip(&finals).all(|(b, f)| same(f.as_ref(), b));
+                        if !returns || !same(result.as_ref(), v) || !back_agrees {
+                            agrees = false;
+                            gives = format!(
+                                "; the encoding returns: {}, the value {:?} and the parameters {:?}",
+                                returns, result, finals
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        if returns {
+                            agrees = false;
+                            gives = "; the encoding returns".to_string();
+                        }
+                    }
+                }
                 if !agrees {
-                    wrong.push(format!(
-                        "{}: the run gives {:?}, the encoding's sites hold for {:?}",
+                    runs.wrong.push(format!(
+                        "{}: the run gives {:?}, the encoding's sites hold for {:?}{}",
                         call,
                         outcome.as_ref().map_err(|e| e.to_string()),
                         holding
                             .iter()
                             .map(|s| format!(
-                                "{} at {}:{} (trap {} at {}:{})",
-                                s.kind.name(),
-                                s.span.line,
-                                s.span.col,
+                                "{} (trap {} at {}:{})",
+                                s.obligation(),
                                 s.trap.kind,
                                 s.trap.span.line,
                                 s.trap.span.col
                             ))
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>(),
+                        gives
                     ));
                 }
             }
         }
-        (compared, wrong)
+        runs
     }
+
+    /// The share of the construct programs' inputs cut off past the bounds when it was recorded:
+    /// inputs cut off, of the inputs admitted.
+    const CONSTRUCTS_CUT: (usize, usize) = (113, 5749);
 
     /// The encoding of every construct program agrees with the reference interpreter on every
     /// input it admits and does not cut off: a query holds of an input exactly where the run of
-    /// that input traps at the query's check.
+    /// that input traps at the query's check, and a run that returns gives what the encoding
+    /// says. No larger a share of the inputs is cut off than was recorded.
     #[test]
     fn test_each_query_holds_exactly_of_the_inputs_whose_run_traps_there() {
-        let mut compared = 0;
-        let mut wrong = Vec::new();
+        let mut runs = Runs::default();
         for (program, calls) in crate::mir_run::CONSTRUCTS {
             let src = format!("module m\n{}\n", program);
             let extra: Vec<(String, Vec<Value>)> = calls
                 .iter()
                 .filter_map(|c| mente_interp::parse_call(c))
                 .collect();
-            let (n, w) = agreement(&src, &extra);
-            compared += n;
-            wrong.extend(
-                w.into_iter()
-                    .map(|w| format!("{}\n  {}", program.lines().next().unwrap_or(""), w)),
-            );
+            let mut found = agreement(&src, &extra);
+            let first = program.lines().next().unwrap_or("").to_string();
+            found.wrong = found
+                .wrong
+                .into_iter()
+                .map(|w| format!("{}\n  {}", first, w))
+                .collect();
+            runs.add(found);
         }
         assert!(
-            wrong.is_empty(),
+            runs.wrong.is_empty(),
             "{} disagreements of {} runs:\n{}",
-            wrong.len(),
-            compared,
-            wrong
+            runs.wrong.len(),
+            runs.compared,
+            runs.wrong
                 .iter()
                 .take(40)
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        assert!(compared > 2000, "only {} runs compared", compared);
+        assert!(runs.compared > 2000, "only {} runs compared", runs.compared);
+        assert!(
+            runs.cut_within(CONSTRUCTS_CUT),
+            "{} of {} inputs are cut off past the bounds, more than the {} of {} recorded",
+            runs.cut,
+            runs.cut + runs.compared,
+            CONSTRUCTS_CUT.0,
+            CONSTRUCTS_CUT.1
+        );
     }
 
     /// The modules of the corpus the CI job runs on, as files, its agent programs aside: the
@@ -962,13 +1277,13 @@ mod tests {
         out
     }
 
-    /// Every obligation Tier 1 records in a function the encoding holds whole has a site of the
-    /// same kind, place and tag: so each check Tier 1 erases has its query, and a site's key
-    /// says truly whether Tier 1 proved it.
+    /// Every obligation Tier 1 records has a site of the same kind, place and tag, in every
+    /// function, those within a construct the encoding lacks aside: so each check Tier 1 erases
+    /// has its query, and a site's key says truly whether Tier 1 proved it.
     #[test]
     fn test_every_obligation_tier1_records_is_a_site_of_the_encoding() {
         let mut missing = Vec::new();
-        let (mut whole, mut lacking, mut obligations) = (0, 0, 0);
+        let (mut functions, mut lacking, mut obligations) = (0, 0, 0);
         for (file, src) in corpus() {
             let Ok(checked) = mente_sema::check_program(&src) else {
                 continue;
@@ -979,95 +1294,115 @@ mod tests {
                     continue;
                 };
                 let enc = mente_smt::encode(&module, i);
-                if !enc.unencoded.is_empty() {
-                    lacking += 1;
-                    continue;
-                }
-                whole += 1;
+                functions += 1;
+                lacking += usize::from(!enc.unencoded.is_empty());
                 obligations += cf.obligations.len();
                 for o in unmatched(&cf.obligations, &enc) {
-                    {
-                        missing.push(format!(
-                            "{}: {} of `{}` at {}:{} {:?} ({})",
-                            file,
-                            o.kind.name(),
-                            cf.syntax.name,
-                            o.span.line,
-                            o.span.col,
-                            o.tag,
-                            o.detail
-                        ));
-                    }
+                    missing.push(format!(
+                        "{}: {} of `{}` at {}:{} {:?} ({})",
+                        file,
+                        o.kind.name(),
+                        cf.syntax.name,
+                        o.span.line,
+                        o.span.col,
+                        o.tag,
+                        o.detail
+                    ));
                 }
             }
         }
         assert!(
             missing.is_empty(),
-            "{} of {} obligations in {} functions have no site ({} functions not held whole):
-{}",
+            "{} of {} obligations in {} functions have no site ({} functions hold a construct the encoding lacks):\n{}",
             missing.len(),
             obligations,
-            whole,
+            functions,
             lacking,
-            missing.iter().take(60).cloned().collect::<Vec<_>>().join(
-                "
-"
-            )
+            missing.iter().take(60).cloned().collect::<Vec<_>>().join("\n")
         );
         assert!(
-            whole > 400 && obligations > 1500,
-            "only {} functions, {} obligations",
-            whole,
+            functions > 500 && lacking > 50 && obligations > 2500,
+            "only {} functions, {} with a construct the encoding lacks, {} obligations",
+            functions,
+            lacking,
             obligations
         );
-        // A site taken away is reported; a function the encoding does not hold whole is not.
-        let src = "module m
-pub fn f(x: u8, d: u8[1..=9]) -> u8 = x / d
-";
+        // A site taken away is reported, in a function the encoding holds whole and in one that
+        // holds a construct it lacks; an obligation within that construct is not.
+        let src = "module m\npub struct P {\n  pub a: u8\n}\npub fn f(x: u8, d: u8[1..=9]) -> u16 {\n  val p = P(a: x / d)\n  p.a + x / d\n}\n";
         let checked = mente_sema::check_program(src).unwrap();
         let module = module_of(&checked);
-        let cf = checked.functions[0].as_ref().unwrap();
-        let mut enc = mente_smt::encode(&module, 0);
+        let index = checked.index("f").unwrap();
+        let cf = checked.functions[index].as_ref().unwrap();
+        let mut enc = mente_smt::encode(&module, index);
+        assert!(!enc.unencoded.is_empty());
         assert!(unmatched(&cf.obligations, &enc).is_empty());
         let divisor = enc
             .sites
             .iter()
             .position(|s| s.kind == Kind::Divisor)
             .unwrap();
-        enc.sites.remove(divisor);
+        let taken = enc.sites.remove(divisor);
         let left = unmatched(&cf.obligations, &enc);
         assert_eq!(left.len(), 1);
-        assert_eq!(left[0].kind, ObligationKind::Divisor);
-        enc.unencoded.push((cf.syntax.name_span, "a struct"));
+        assert_eq!(
+            (left[0].kind, left[0].span),
+            (ObligationKind::Divisor, taken.span)
+        );
+        let construct = enc.unencoded[0].0;
+        assert!(cf
+            .obligations
+            .iter()
+            .any(|o| construct.start <= o.span.start && o.span.end <= construct.end));
+        let whole = vec![(cf.syntax.name_span, "a parameter of a struct or an enum")];
+        enc.sites.clear();
+        enc.unencoded = whole;
         assert!(unmatched(&cf.obligations, &enc).is_empty());
     }
 
+    /// The share of the corpus's inputs cut off past the bounds when it was recorded: inputs cut
+    /// off, of the inputs admitted.
+    const CORPUS_CUT: (usize, usize) = (611, 13220);
+
     /// The encoding of every function of the conformance programs, the examples and the kernels
-    /// agrees with the reference interpreter on every input it admits and does not cut off.
+    /// agrees with the reference interpreter on every input it admits and does not cut off, its
+    /// values included; no larger a share of the inputs is cut off than was recorded.
     #[test]
     fn test_each_query_of_the_corpus_holds_exactly_of_the_inputs_whose_run_traps_there() {
-        let mut compared = 0;
-        let mut wrong = Vec::new();
+        let mut runs = Runs::default();
         for (file, src) in corpus() {
             if file.starts_with("construct ") {
                 continue;
             }
-            let (n, w) = agreement(&src, &[]);
-            compared += n;
-            wrong.extend(w.into_iter().map(|w| format!("{}: {}", file, w)));
+            let mut found = agreement(&src, &[]);
+            found.wrong = found
+                .wrong
+                .into_iter()
+                .map(|w| format!("{}: {}", file, w))
+                .collect();
+            runs.add(found);
         }
         assert!(
-            wrong.is_empty(),
-            "{} disagreements of {} runs:
-{}",
-            wrong.len(),
-            compared,
-            wrong.iter().take(40).cloned().collect::<Vec<_>>().join(
-                "
-"
-            )
+            runs.wrong.is_empty(),
+            "{} disagreements of {} runs:\n{}",
+            runs.wrong.len(),
+            runs.compared,
+            runs.wrong
+                .iter()
+                .take(40)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
-        assert!(compared > 5000, "only {} runs compared", compared);
+        assert!(runs.compared > 5000, "only {} runs compared", runs.compared);
+        assert!(
+            runs.cut_within(CORPUS_CUT),
+            "{} of {} inputs are cut off past the bounds, more than the {} of {} recorded",
+            runs.cut,
+            runs.cut + runs.compared,
+            CORPUS_CUT.0,
+            CORPUS_CUT.1
+        );
     }
 
     /// A fresh scratch directory for one test.
@@ -1080,7 +1415,9 @@ pub fn f(x: u8, d: u8[1..=9]) -> u8 = x / d
 
     /// The known soundness bugs of `tests/smt-known` are written as queries, the model of each,
     /// a failing input, satisfies its query and traps on the interpreter where the query says,
-    /// and `confirm` reports each as known; without the file's `smt:` lines each fails the job.
+    /// and `confirm` reports each as known, by its obligation; without the file's `smt:` lines
+    /// each fails the job, and so does a bug known by another obligation, a solver's error, an
+    /// answer missing or given twice, and undecided answers past the baseline.
     #[test]
     fn test_the_known_soundness_bugs_are_confirmed_on_the_interpreter() {
         let file =
@@ -1102,71 +1439,64 @@ pub fn f(x: u8, d: u8[1..=9]) -> u8 = x / d
             .map(|e| e.path())
             .collect();
         queries.sort();
+        let listed: Vec<String> = queries.iter().map(|q| q.display().to_string()).collect();
+        let line = |answer: &str, q: &str| format!("{}\t{}\n", answer, q);
         let mut answers = String::new();
         let mut wrong = String::new();
-        for q in &queries {
-            let text = fs::read_to_string(q).unwrap();
-            let h = mente_smt::header(&text).unwrap();
-            let known = expect.iter().any(|(_, f, t)| {
-                *f == h.function && *t == (h.trap_kind.clone(), h.trap_line, h.trap_col)
-            });
-            let line = |answer: String| {
-                format!(
-                    "{}	{}
-",
-                    answer,
-                    q.display()
-                )
-            };
-            if known {
-                answers.push_str(&line(format!("sat {}", model(&h.function))));
+        for (q, path) in queries.iter().zip(&listed) {
+            let h = mente_smt::header(&fs::read_to_string(q).unwrap()).unwrap();
+            if expect
+                .iter()
+                .any(|(_, f, o)| *f == h.function && *o == h.obligation)
+            {
+                answers.push_str(&line(&format!("sat {}", model(&h.function)), path));
                 if h.function == "rem" {
-                    wrong.push_str(&line("sat ((p.d 1))".to_string()));
+                    wrong.push_str(&line("sat ((p.d 1))", path));
                 }
             } else {
-                answers.push_str(&line(
-                    "unsat (error \"model is not available\")".to_string(),
-                ));
+                answers.push_str(&line("unsat (error \"model is not available\")", path));
             }
         }
-        let c = confirm(&answers, &expect);
+        let gate = Gate {
+            expect: expect.clone(),
+            queries: Some(listed.clone()),
+            baseline: None,
+        };
+        let c = confirm(&answers, &gate);
         assert!(c.passes() && c.known.len() == 4, "{:#?}", c);
         assert!(
             c.unsat + 4 == queries.len() && c.undecided.is_empty(),
             "{:#?}",
             c
         );
-        let reported = c.known.join(
-            "
-",
-        );
+        let reported = c.known.join("\n");
         for part in [
-            "rem(0) stops: trap[division-by-zero] at 24:19",
-            "always() stops: trap[narrowing] at 51:14",
-            "narrow(6) stops: trap[narrowing] at 43:24",
-            "guarded(0)",
+            "the obligation `divisor at 24:23` of `rem`, and rem(0) stops: trap[division-by-zero] at 24:19",
+            "the obligation `range at 51:14 into `u8`` of `always`, and always() stops: trap[narrowing] at 51:14",
+            "the obligation `range at 43:24 into `u8`` of `narrow`, and narrow(6) stops: trap[narrowing] at 43:24",
+            "the obligation `divisor at 33:15` of `guarded`, and guarded(0)",
         ] {
-            assert!(
-                reported.contains(part),
-                "{} not in:
-{}",
-                part,
-                reported
-            );
+            assert!(reported.contains(part), "{} not in:\n{}", part, reported);
         }
-        // Not known, each is a soundness bug that fails the job; so is one known at another
-        // place, or in another file, which is then missing too.
-        let c = confirm(&answers, &[]);
+        // Not known, each is a soundness bug that fails the job; so is one known by another
+        // obligation, or in another file, which is then missing too.
+        let c = confirm(&answers, &Gate::default());
         assert_eq!((c.confirmed.len(), c.passes()), (4, false), "{:#?}", c);
-        let elsewhere: Vec<_> = expect
+        let elsewhere: Vec<Bug> = expect
             .iter()
             .enumerate()
-            .map(|(k, (f, n, (t, l, col)))| match k % 2 {
-                0 => (f.clone(), n.clone(), (t.clone(), *l, col + 1)),
-                _ => ("elsewhere.mn".to_string(), n.clone(), (t.clone(), *l, *col)),
+            .map(|(k, (f, n, o))| match k % 2 {
+                0 => (f.clone(), n.clone(), o.replace(" at ", " at 1")),
+                _ => ("elsewhere.mn".to_string(), n.clone(), o.clone()),
             })
             .collect();
-        let c = confirm(&answers, &elsewhere);
+        let c = confirm(
+            &answers,
+            &Gate {
+                expect: elsewhere,
+                ..Gate::default()
+            },
+        );
         assert_eq!(
             (c.known.len(), c.confirmed.len(), c.missing.len()),
             (0, 4, 4),
@@ -1174,15 +1504,8 @@ pub fn f(x: u8, d: u8[1..=9]) -> u8 = x / d
             c
         );
         // A model that does not satisfy its query is a defect, and a known bug not confirmed
-        // fails too; a timeout decides nothing.
-        let c = confirm(
-            &format!(
-                "{}timeout	somewhere.smt2
-",
-                wrong
-            ),
-            &expect,
-        );
+        // fails too; a timeout decides nothing, but past the baseline it fails.
+        let c = confirm(&format!("{}timeout\tsomewhere.smt2\n", wrong), &gate);
         assert_eq!(
             (c.unconfirmed.len(), c.missing.len(), c.undecided.len()),
             (1, 4, 1),
@@ -1195,7 +1518,174 @@ pub fn f(x: u8, d: u8[1..=9]) -> u8 = x / d
             c
         );
         assert!(!c.passes());
+        let tight = Gate {
+            baseline: Some(Baseline {
+                queries: 1,
+                beyond_bound: 0,
+                undecided: 0,
+            }),
+            ..Gate::default()
+        };
+        let many: String = (0..=UNDECIDED_SLACK)
+            .map(|k| line("unknown", &format!("q{}.smt2", k)))
+            .collect();
+        let c = confirm(&many, &tight);
+        assert!(c.over.is_some() && !c.passes(), "{:#?}", c);
+        let fewer: String = (0..UNDECIDED_SLACK)
+            .map(|k| line("timeout", &format!("q{}.smt2", k)))
+            .collect();
+        assert!(confirm(&fewer, &tight).passes());
+        // A solver's error, an empty answer, an answer twice, and a query of the list with no
+        // answer or an answer to none, each fails the job.
+        let first = &listed[0];
+        for (answers, says) in [
+            (
+                line("(error \"line 3: unknown constant\")", first),
+                "the solver answered `(error",
+            ),
+            (line("", first), "the solver answered ``"),
+            (
+                format!("{}{}", line("unsat", first), line("unsat", first)),
+                "answered twice",
+            ),
+            (line("unsat", "other.smt2"), "answered and not asked"),
+        ] {
+            let c = confirm(&answers, &gate);
+            assert!(
+                !c.passes() && c.errors.iter().any(|e| e.contains(says)),
+                "{}: {:#?}",
+                says,
+                c
+            );
+        }
+        let c = confirm(&line("unsat", first), &gate);
+        assert!(
+            c.errors
+                .iter()
+                .any(|e| e.ends_with(": asked and not answered")),
+            "{:#?}",
+            c
+        );
         let _ = fs::remove_dir_all(&out);
+    }
+
+    /// The CI job holds its counts to the baseline it records: the queries it writes to a floor a
+    /// hundredth under the record, the checks cut off by the bound to a ceiling a hundredth over
+    /// it, and the undecided answers to the record and a few; and the baseline is read strictly.
+    #[test]
+    fn test_the_job_holds_its_counts_to_the_recorded_baseline() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let b = Baseline::parse(&fs::read_to_string(root.join(BASELINE)).unwrap()).unwrap();
+        assert!(b.queries >= 1000, "{:?}", b);
+        let workflow = fs::read_to_string(root.join(".github/workflows/smt.yml")).unwrap();
+        assert_eq!(
+            workflow
+                .matches(&format!("--baseline {}", BASELINE))
+                .count(),
+            2,
+            "smt.yml gives the baseline to the export and to the confirmation"
+        );
+        let at = |queries: usize, beyond_bound: usize| Written {
+            queries,
+            beyond_bound,
+            ..Written::default()
+        };
+        let floor = b.queries - b.queries / 100;
+        let ceiling = b.beyond_bound + b.beyond_bound / 100;
+        assert!(b.export_problems(&at(floor, ceiling)).is_empty());
+        let low = b.export_problems(&at(floor - 1, ceiling));
+        assert!(
+            low.len() == 1 && low[0].contains("below the floor"),
+            "{:?}",
+            low
+        );
+        let high = b.export_problems(&at(floor, ceiling + 1));
+        assert!(
+            high.len() == 1 && high[0].contains("cut off by the bound"),
+            "{:?}",
+            high
+        );
+        assert_eq!(b.undecided_problem(b.undecided + UNDECIDED_SLACK), None);
+        assert!(b
+            .undecided_problem(b.undecided + UNDECIDED_SLACK + 1)
+            .is_some());
+        let ok = "# a comment\nqueries: 10\nbeyond-bound: 2\nundecided: 0\n";
+        assert_eq!(
+            Baseline::parse(ok),
+            Ok(Baseline {
+                queries: 10,
+                beyond_bound: 2,
+                undecided: 0
+            })
+        );
+        for (text, says) in [
+            (
+                "queries: 10\nbeyond-bound: 2\n",
+                "the baseline has no `undecided`",
+            ),
+            (
+                "queries: 10\nqueries: 11\nbeyond-bound: 2\nundecided: 0\n",
+                "`queries` is given twice",
+            ),
+            (
+                "queries: -1\nbeyond-bound: 2\nundecided: 0\n",
+                "`queries: -1` is no decimal count",
+            ),
+            (
+                "queries: 10\nbeyond-bound: 2\nundecided: 0\nunreached: 3\n",
+                "`unreached` is no field of the baseline",
+            ),
+            ("queries 10\n", "`queries 10` is no `name: count` line"),
+        ] {
+            assert_eq!(Baseline::parse(text), Err(says.to_string()), "{}", text);
+        }
+    }
+
+    /// The checks `tests/smt-known` names as lying past the bounds are erased by Tier 1, fail on
+    /// some input, and have no query, the encoding naming them cut off by the bound: the known
+    /// limit of K, which the job counts against its baseline.
+    #[test]
+    fn test_a_check_past_the_bound_is_named_cut_off_not_unreachable() {
+        let file =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/smt-known/loop-past-the-bound.mn");
+        let src = fs::read_to_string(&file).unwrap();
+        let limits = beyond(&file.display().to_string(), &src);
+        assert!(!limits.is_empty());
+        let checked = mente_sema::check_program(&src).unwrap();
+        let module = module_of(&checked);
+        for (_, function, obligation) in &limits {
+            let index = checked.index(function).unwrap();
+            let cf = checked.functions[index].as_ref().unwrap();
+            let mut enc = mente_smt::encode(&module, index);
+            let keys = erased(&cf.obligations);
+            let group = groups(&enc, |k| keys.contains(k))
+                .into_iter()
+                .find(|g| enc.sites[g[0]].obligation() == *obligation)
+                .unwrap_or_else(|| panic!("{} erases no `{}`", function, obligation));
+            let trap = enc.sites[group[0]].trap;
+            assert_eq!(unqueried(&enc, &group), Unqueried::BeyondBound);
+            assert_eq!(enc.query(&group), None);
+            // An input past the bound fails the check.
+            let fails = generated(&enc).into_iter().any(|args| {
+                matches!(
+                    mente_interp::call(&checked, function, args, Limits::default()),
+                    Err(Stop::Trap(t)) if t.kind.name() == trap.kind && t.span == trap.span
+                )
+            });
+            assert!(fails, "no input of `{}` fails `{}`", function, obligation);
+        }
+        // A check no path reaches, with none cut off, is unreachable.
+        let src =
+            "module m\npub fn f(x: u8, d: u8[1..=9]) -> u8 {\n  if 1 > 2 {\n    return x / d\n  }\n  x\n}\n";
+        let checked = mente_sema::check_program_without_proofs(src).unwrap();
+        let module = module_of(&checked);
+        let enc = mente_smt::encode(&module, 0);
+        let divisor = enc
+            .sites
+            .iter()
+            .position(|s| s.kind == Kind::Divisor)
+            .unwrap();
+        assert_eq!(unqueried(&enc, &[divisor]), Unqueried::Unreachable);
     }
 
     /// Each construct the encoding lacks where a path reaches it is one of `UNENCODED`, and

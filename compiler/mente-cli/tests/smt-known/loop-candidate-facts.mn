@@ -5,15 +5,15 @@
 // does not trap is then "proven" from that very fact, and left out of MIR and native code
 // (the nightly triage of 2026-11-21, root cause 1).
 //
-// Each `smt:` line names a function and the trap a run of its confirmed model raises, which
-// `mn smt --confirm --expect` holds as known. Once Tier 1 no longer proves one of these checks,
-// its query is no longer written and the job fails on that line: delete the line, and this file
-// once none is left.
+// Each `smt:` line names a function and an obligation, its kind, place and tag as a query names
+// it, which `mn smt --confirm --expect` holds as known once its model traps where its query says.
+// Once Tier 1 no longer proves the check, its query is no longer written and the job fails on
+// that line: delete the line, and this file once none is left.
 //
-// smt: rem division-by-zero at 24:19
-// smt: guarded division-by-zero at 33:11
-// smt: narrow narrowing at 43:24
-// smt: always narrowing at 51:14
+// smt: rem divisor at 24:23
+// smt: guarded divisor at 33:15
+// smt: narrow range at 43:24 into `u8`
+// smt: always range at 51:14 into `u8`
 module known
 
 fn take(x: u8) -> u8 = x

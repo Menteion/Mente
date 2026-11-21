@@ -104,8 +104,10 @@ struct Exec<'m> {
     unencoded: Vec<(Span, &'static str)>,
     /// Whether checks are sites: not on the entry, whose checks the inputs are taken to pass.
     recording: bool,
-    /// The paths cut off.
+    /// The paths cut off past the bounds.
     cut: Vec<T>,
+    /// The paths cut off at a construct the encoding lacks.
+    lacked: Vec<T>,
     exhausted: bool,
     /// The most terms the encoding makes.
     terms: usize,
@@ -302,6 +304,9 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             unencoded: Vec::new(),
             admitted: fals,
             cut: tru,
+            returns: fals,
+            result: None,
+            finals: Vec::new(),
         };
     };
     let mut x = Exec {
@@ -323,6 +328,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
         unencoded: Vec::new(),
         recording: false,
         cut: Vec::new(),
+        lacked: Vec::new(),
         exhausted: false,
         terms,
     };
@@ -362,6 +368,9 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             unencoded: x.unencoded,
             admitted: fals,
             cut: tru,
+            returns: fals,
+            result: None,
+            finals: Vec::new(),
         };
     }
     // The entry: the inputs lie in their types and refinements, and the `requires` and the
@@ -370,7 +379,32 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
     x.enter(values, None, entry);
     let admitted = x.active;
     x.run_body();
-    let cut = x.t.or(&x.cut.clone());
+    let mut cuts = x.cut.clone();
+    cuts.extend(x.lacked.iter().copied());
+    let cut = x.t.or(&cuts);
+    // What the run returns: its value and each parameter's final value, joined over the ways
+    // out of the call, and whether one of them holds.
+    let ways: Vec<(T, (V, Vars))> = x
+        .frame
+        .returns
+        .iter()
+        .map(|(g, v, vars)| (*g, (v.clone(), vars.clone())))
+        .collect();
+    let guards: Vec<T> = ways.iter().map(|w| w.0).collect();
+    let returns = x.t.or(&guards);
+    let result = term(&x.select(&ways, |(v, _)| v.clone()));
+    let finals = f
+        .syntax
+        .params
+        .iter()
+        .map(|p| {
+            let name = p.name.clone();
+            let back = x.select(&ways, |(_, vars)| {
+                vars.get(&name).cloned().unwrap_or(V::Unit)
+            });
+            term(&back)
+        })
+        .collect();
     Encoding {
         function: f.syntax.name.clone(),
         terms: x.t,
@@ -379,6 +413,9 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
         unencoded: x.unencoded,
         admitted,
         cut,
+        returns,
+        result,
+        finals,
     }
 }
 
@@ -501,6 +538,9 @@ impl<'m> Exec<'m> {
         if self.recording && at.owner == self.entry {
             let fails = self.t.not(ok);
             let fails = self.t.and2(self.active, fails);
+            let t = &self.t;
+            let live = |cuts: &[T]| cuts.iter().any(|&c| t.as_bool(c) != Some(false));
+            let (beyond_bound, beyond_lacked) = (live(&self.cut), live(&self.lacked));
             self.sites.push(Site {
                 kind,
                 span: at.key,
@@ -510,6 +550,8 @@ impl<'m> Exec<'m> {
                     span: at.trap,
                 },
                 fails,
+                beyond_bound,
+                beyond_lacked,
             });
         }
         self.active = self.t.and2(self.active, ok);
@@ -520,7 +562,8 @@ impl<'m> Exec<'m> {
         if !self.unencoded.contains(&(span, what)) {
             self.unencoded.push((span, what));
         }
-        self.bound();
+        self.lacked.push(self.active);
+        self.active = self.t.bool(false);
     }
 
     /// Cuts the path off past the bounds.
@@ -1488,7 +1531,14 @@ impl<'m> Exec<'m> {
                         let x = self.t.select(a, i);
                         self.wrap(x, &elem)
                     }
-                    V::Arr(..) | V::Int(_) | V::Bool(_) | V::Unit => self.default(&shape),
+                    // No array comes, as from a construct the encoding lacks: no path reaches
+                    // the index, whose check holds and stands as the site of Tier 1's obligation.
+                    V::Arr(..) | V::Int(_) | V::Bool(_) | V::Unit => {
+                        let ok = self.t.bool(true);
+                        let at = self.here(tree.expr(*index).span, span);
+                        self.check(ok, Kind::Index, Tag::None, at, "index-out-of-bounds");
+                        self.default(&shape)
+                    }
                 }
             }
             ExprKind::Field { base, name } => match self.shape(*base) {
