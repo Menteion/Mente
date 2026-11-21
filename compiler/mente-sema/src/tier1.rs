@@ -8463,10 +8463,11 @@ mod tests {
     /// A block's last statement that gives the block's value belongs to what the block stands
     /// in, since its value flows there (`Owners::block`): an arm of the `if` a binding holds is
     /// the binding's, and the function body's value is the body's. A statement before a block's
-    /// last is its own owner, and so is the last of a loop's body, whose value nothing takes.
+    /// last is its own owner, an expression statement such as an `if` too, and so is the last of
+    /// a loop's body, whose value nothing takes.
     #[test]
     fn test_a_block_value_belongs_to_what_the_block_stands_in() {
-        let src = "pub fn f(x: u8) -> u8 {\n  val y: u8 = if x > 1 {\n    val z: u8 = x % 3\n    z % 2\n  } else {\n    0\n  }\n  var i: u8 = 0\n  while i < 3 {\n    i += 1\n    if x % 5 == 0 {\n      i += 1\n    }\n  }\n  y + x % 7\n}";
+        let src = "pub fn f(x: u8) -> u8 {\n  val y: u8 = if x > 1 {\n    val z: u8 = x % 3\n    z % 2\n  } else {\n    0\n  }\n  var i: u8 = 0\n  while i < 3 {\n    i += 1\n    if x % 5 == 0 {\n      i += 1\n    }\n  }\n  if x % 6 == 0 {\n    i += 1\n  }\n  y + x % 7 + i\n}";
         with_fx(src, |fx, _| {
             let owner = |text: &str| {
                 (0..fx.tree.exprs.len())
@@ -8480,7 +8481,13 @@ mod tests {
             let binding_z = owner("x % 3");
             assert!(matches!(binding_z, Some(Owner::Stmt(_))), "{:?}", binding_z);
             assert_ne!(binding_z, binding_y);
-            assert_eq!(owner("y + x % 7"), Some(Owner::Body));
+            assert_eq!(owner("y + x % 7 + i"), Some(Owner::Body));
+            let before_last = owner("x % 6 == 0");
+            assert!(
+                matches!(before_last, Some(Owner::Stmt(_))),
+                "{:?}",
+                before_last
+            );
             let last_of_loop = owner("x % 5 == 0");
             assert!(
                 matches!(last_of_loop, Some(Owner::Stmt(_))),
