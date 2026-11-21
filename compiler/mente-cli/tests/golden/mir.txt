@@ -256,6 +256,7 @@ block0(v0: bool, v1: effect):
 t0: stack-overflow @45:8 ["the call stack ran out"]
 t1: unreachable @45:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/and_operand_that_passes_mut.mn == (exit 2)
 == conformance/core-calculus/arguments_keep_their_values.mn ==
 mente-dump 3 mir
 f0: fn first(addr, u8, effect) -> u8 frame 84 {
@@ -4433,6 +4434,7 @@ block0(v0: effect):
 t0: stack-overflow @154:8 ["the call stack ran out"]
 t1: unreachable @154:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/bool_scrutinee_that_passes_mut.mn == (exit 2)
 == conformance/core-calculus/bound_past_the_domain_may_fit.mn ==
 mente-dump 3 mir
 f0: fn narrowed(u128, u128, u128, effect) -> u8 frame 193 {
@@ -4929,6 +4931,7 @@ t1: unreachable @19:8 ["unreachable reached: control left the code the checker a
 == conformance/core-calculus/branches_of_two_aggregates_that_leave.mn == (exit 2)
 == conformance/core-calculus/break_outside_a_loop.mn == (exit 2)
 == conformance/core-calculus/call_without_body.mn == (exit 2)
+== conformance/core-calculus/clauses_that_change_state.mn == (exit 2)
 == conformance/core-calculus/comparison_literal_outside_the_type_it_takes.mn == (exit 2)
 == conformance/core-calculus/comparison_literal_takes_the_other_operands_type.mn ==
 mente-dump 3 mir
@@ -6167,7 +6170,6 @@ block0(v0: effect):
 t0: stack-overflow @116:8 ["the call stack ran out"]
 t1: unreachable @116:8 ["unreachable reached: control left the code the checker allows"]
 }
-== conformance/core-calculus/comparison_read_before_a_later_operand_changes_it.mn == (exit 2)
 == conformance/core-calculus/complement_lies_within_its_operands_type.mn ==
 mente-dump 3 mir
 f0: fn of_difference(u16, u16, effect) -> u16 frame 76 {
@@ -9438,8 +9440,211 @@ t0: stack-overflow @91:8 ["the call stack ran out"]
 t1: unreachable @91:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/compound_assignment_reads_its_place_first.mn == (exit 2)
-== conformance/core-calculus/condition_left_operand_read_before_the_right_one_changes_it.mn == (exit 2)
-== conformance/core-calculus/condition_right_operand_changes_a_binding.mn == (exit 2)
+== conformance/core-calculus/condition_computed_before_its_statement.mn ==
+mente-dump 3 mir
+f0: fn next(addr, effect) -> u8 frame 75 {
+block0(v0: addr, v1: effect):
+  v2: u8 = load v0, v1 @8:7
+  v3: i64 = int 2 @8:11
+  v4: i64 = cast v2 @8:7
+  v5: i64 = assume nonzero v3, v2 @8:7
+  v6: i64 = div v4, v5 @8:7
+  v7: i64 = assume within 0..=255 v6, v5 @8:7
+  v8: u8 = cast v7 @8:7
+  v9: unit = store v0, v8, v7 @8:7
+  v10: u8 = load v0, v9 @9:3
+  return v10 after v10
+block1(v11: effect):
+  trap t0 after v11
+t0: unreachable @9:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn before_an_if(u8, effect) -> u8 frame 76 {
+block0(v0: u8, v1: effect):
+  v2: addr = slot 1 @13:11
+  v3: unit = store v2, v0, v1 @13:11
+  v4: unit = enter f0 t0 v2, v3 @14:11
+  v5: u8 = load v2, v4 @14:11
+  v6: u8 = call f0 v2, v5 @14:11
+  v7: i64 = int 4 @15:10
+  v8: i64 = cast v6 @15:10
+  v9: bool = lt v8, v7 @15:10
+  branch v9, block1(v6), block2(v6)
+block1(v10: effect):
+  return v6 after v10
+block2(v11: effect):
+  jump block3(v11)
+block3(v12: effect):
+  v14: i64 = int 0 @18:3
+  v15: i64 = assume within 0..=255 v14, v12 @18:3
+  v16: u8 = cast v15 @18:3
+  return v16 after v15
+block4(v13: effect):
+  trap t1 after v13
+block5(v17: effect):
+  trap t1 after v17
+t0: stack-overflow @14:11 ["the call stack ran out"]
+t1: unreachable @18:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn before_a_guard(u8, effect) -> u8 frame 76 {
+block0(v0: u8, v1: effect):
+  v2: addr = slot 1 @22:11
+  v3: unit = store v2, v0, v1 @22:11
+  v4: unit = enter f0 t0 v2, v3 @23:11
+  v5: u8 = load v2, v4 @23:11
+  v6: u8 = call f0 v2, v5 @23:11
+  v7: i64 = int 3 @24:13
+  v8: i64 = cast v6 @24:13
+  v9: bool = gt v8, v7 @24:13
+  branch v9, block1(v6), block2(v6)
+block1(v10: effect):
+  v16: u8 = load v2, v10 @27:3
+  return v16 after v16
+block2(v11: effect):
+  v12: i64 = int 0 @25:12
+  v13: i64 = assume within 0..=255 v12, v11 @25:12
+  v14: u8 = cast v13 @25:12
+  return v14 after v13
+block3(v15: effect):
+  trap t1 after v15
+block4(v17: effect):
+  trap t1 after v17
+t0: stack-overflow @23:11 ["the call stack ran out"]
+t1: unreachable @27:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn every_round(u8, effect) -> u8 frame 77 {
+block0(v0: u8, v1: effect):
+  v2: addr = slot 1 @31:11
+  v3: unit = store v2, v0, v1 @31:11
+  v4: i64 = int 0 @32:20
+  v5: i64 = assume within 0..=255 v4, v3 @32:20
+  v6: u8 = cast v5 @32:20
+  v7: addr = slot 1 @32:20
+  v8: unit = store v7, v6, v5 @32:20
+  jump block1(v8)
+block1(v9: effect):
+  v12: u8 = load v7, v9 @33:9
+  v13: i64 = int 10 @33:18
+  v14: i64 = cast v12 @33:18
+  v15: bool = lt v14, v13 @33:18
+  branch v15, block2(v12), block3(v12)
+block2(v10: effect):
+  v16: unit = enter f0 t0 v2, v10 @34:13
+  v17: u8 = load v2, v16 @34:13
+  v18: u8 = call f0 v2, v17 @34:13
+  v19: i64 = int 0 @35:15
+  v20: i64 = cast v18 @35:15
+  v21: bool = gt v20, v19 @35:15
+  branch v21, block4(v18), block5(v18)
+block3(v11: effect):
+  v32: u8 = load v7, v11 @40:3
+  return v32 after v32
+block4(v22: effect):
+  v25: u8 = load v7, v22 @38:5
+  v26: i64 = int 1 @38:15
+  v27: i64 = cast v25 @38:15
+  v28: i64 = add v27, v26, v25 @38:15
+  v29: i64 = assume within 0..=255 v28, v25 @38:15
+  v30: u8 = cast v29 @38:15
+  v31: unit = store v7, v30, v29 @38:15
+  jump block1(v31)
+block5(v23: effect):
+  jump block3(v23)
+block6(v24: effect):
+  trap t1 after v24
+block7(v33: effect):
+  trap t1 after v33
+t0: stack-overflow @34:13 ["the call stack ran out"]
+t1: unreachable @40:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn main(effect) -> u8 frame 96 {
+block0(v0: effect):
+  v1: i64 = int 200 @43:36
+  v2: unit = enter f1 t0 v1, v0 @43:23
+  v3: i64 = assume within 0..=255 v1, v2 @43:23
+  v4: u8 = cast v3 @43:23
+  v5: u8 = call f1 v4, v3 @43:23
+  v6: i64 = int 9 @43:58
+  v7: unit = enter f2 t1 v6, v5 @43:43
+  v8: i64 = assume within 0..=255 v6, v7 @43:43
+  v9: u8 = cast v8 @43:43
+  v10: u8 = call f2 v9, v8 @43:43
+  v11: i64 = cast v5 @43:23
+  v12: i64 = cast v10 @43:23
+  v13: i64 = add v11, v12, v10 @43:23
+  v14: i64 = int 200 @43:75
+  v15: unit = enter f3 t2 v14, v10 @43:63
+  v16: i64 = assume within 0..=255 v14, v15 @43:63
+  v17: u8 = cast v16 @43:63
+  v18: u8 = call f3 v17, v16 @43:63
+  v19: i64 = cast v18 @43:23
+  v20: i64 = add v13, v19, v18 @43:23
+  v21: i64 = int 0 @43:23
+  v22: bool = ge v20, v21 @43:23
+  v23: i64 = int 255 @43:23
+  v24: bool = le v20, v23 @43:23
+  v25: bool = and v22, v24 @43:23
+  v26: i64 = guard t3 within 0..=255 v25, v20, v20, v18 @43:23
+  v27: u8 = cast v26 @43:23
+  return v27 after v26
+block1(v28: effect):
+  trap t4 after v28
+t0: stack-overflow @43:23 ["the call stack ran out"]
+t1: stack-overflow @43:43 ["the call stack ran out"]
+t2: stack-overflow @43:63 ["the call stack ran out"]
+t3: narrowing @43:23 ["", " does not fit in `u8`"]
+t4: unreachable @43:23 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter next(addr, effect) -> u8 {
+block0(v0: addr, v1: effect):
+  v2: unit = enter f0 t0 v0, v1 @7:4
+  v3: u8 = load v0, v2 @7:4
+  v4: u8 = call f0 v0, v3 @7:4
+  v5: u8 = load v0, v4 @7:4
+  return v4 after v5
+t0: stack-overflow @7:4 ["the call stack ran out"]
+t1: unreachable @7:4 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter before_an_if(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f1 t0 v0, v1 @12:8
+  v3: u8 = call f1 v0, v2 @12:8
+  return v3 after v3
+t0: stack-overflow @12:8 ["the call stack ran out"]
+t1: unreachable @12:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter before_a_guard(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f2 t0 v0, v1 @21:8
+  v3: u8 = call f2 v0, v2 @21:8
+  return v3 after v3
+t0: stack-overflow @21:8 ["the call stack ran out"]
+t1: unreachable @21:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter every_round(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f3 t0 v0, v1 @30:8
+  v3: u8 = call f3 v0, v2 @30:8
+  return v3 after v3
+t0: stack-overflow @30:8 ["the call stack ran out"]
+t1: unreachable @30:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter main(effect) -> u8 {
+block0(v0: effect):
+  v1: unit = enter f4 t0 v0 @43:8
+  v2: u8 = call f4 v1 @43:8
+  return v2 after v2
+t0: stack-overflow @43:8 ["the call stack ran out"]
+t1: unreachable @43:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/condition_that_leaves_by_break.mn ==
 mente-dump 3 mir
 f0: fn inner_loop(u8, effect) -> u8 frame 75 {
@@ -9546,6 +9751,9 @@ block0(v0: u8, v1: effect):
 t0: stack-overflow @16:8 ["the call stack ran out"]
 t1: unreachable @16:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/condition_that_passes_mut_after_an_or.mn == (exit 2)
+== conformance/core-calculus/condition_that_passes_mut_after_and.mn == (exit 2)
+== conformance/core-calculus/condition_that_passes_mut_in_a_comparison.mn == (exit 2)
 == conformance/core-calculus/contracts_used_modularly.mn ==
 mente-dump 3 mir
 f0: fn midpoint(u64, u64, effect) -> u64 frame 154 {
@@ -9763,6 +9971,7 @@ t1: refinement @9:8 ["", " lies outside the refinement `[", "..=", "]`"]
 t2: refinement @9:8 ["", " lies outside the refinement `[", "..=", "]`"]
 t3: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/else_if_condition_that_passes_mut.mn == (exit 2)
 == conformance/core-calculus/ensures_not_proven_at_a_return.mn == (exit 2)
 == conformance/core-calculus/enum_and_struct_of_one_name.mn == (exit 2)
 == conformance/core-calculus/enum_beyond_4_gib.mn == (exit 2)
@@ -17440,8 +17649,10 @@ t0: stack-overflow @69:8 ["the call stack ran out"]
 t1: unreachable @69:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/function_as_value.mn == (exit 2)
+== conformance/core-calculus/guard_condition_that_passes_mut_in_a_scrutinee.mn == (exit 2)
 == conformance/core-calculus/guard_that_falls_through.mn == (exit 2)
 == conformance/core-calculus/if_beyond_128_bits.mn == (exit 2)
+== conformance/core-calculus/if_expression_condition_that_assigns.mn == (exit 2)
 == conformance/core-calculus/if_values_kept_beside_mut_arguments.mn ==
 mente-dump 3 mir
 f0: fn first(addr, effect) -> u64 frame 89 {
@@ -21262,6 +21473,7 @@ t1: unreachable @15:8 ["unreachable reached: control left the code the checker a
 }
 == conformance/core-calculus/match_wildcard_on_a_bool.mn == (exit 2)
 == conformance/core-calculus/match_wildcard_on_an_enum.mn == (exit 2)
+== conformance/core-calculus/match_with_a_mut_call_in_a_loop_condition.mn == (exit 2)
 == conformance/core-calculus/match_with_mut_calls.mn ==
 mente-dump 3 mir
 f0: fn next(addr, effect) -> u8 frame 77 {
@@ -21345,7 +21557,7 @@ t0: stack-overflow @22:10 ["the call stack ran out"]
 t1: unreachable @25:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f3: fn in_a_loop_condition(u8, effect) -> u8 frame 80 {
+f3: fn in_a_loop(u8, effect) -> u8 frame 81 {
 block0(v0: u8, v1: effect):
   v2: addr = slot 1 @29:15
   v3: unit = store v2, v0, v1 @29:15
@@ -21356,86 +21568,93 @@ block0(v0: u8, v1: effect):
   v8: unit = store v7, v6, v5 @30:20
   jump block1(v8)
 block1(v9: effect):
-  v12: unit = enter f0 t0 v2, v9 @31:16
-  v13: u8 = load v2, v12 @31:16
-  v14: u8 = call f0 v2, v13 @31:16
-  v15: u8 = load v2, v14 @31:16
-  v18: i64 = int 1 @31:16
-  v19: i64 = cast v14 @31:16
-  v20: bool = eq v19, v18 @31:16
-  branch v20, block5(v15), block6(v15)
+  v12: bool = bool true @31:9
+  branch v12, block2(v9), block3(v9)
 block2(v10: effect):
-  v28: u8 = load v7, v10 @35:5
-  v29: i64 = int 1 @35:15
-  v30: i64 = cast v28 @35:15
-  v31: i64 = add v30, v29, v28 @35:15
-  v32: i64 = int 0 @35:15
-  v33: bool = ge v31, v32 @35:15
-  v34: i64 = int 255 @35:15
-  v35: bool = le v31, v34 @35:15
-  v36: bool = and v33, v35 @35:15
-  v37: i64 = guard t1 within 0..=255 v36, v31, v31, v28 @35:15
-  v38: u8 = cast v37 @35:15
-  v39: unit = store v7, v38, v37 @35:15
-  jump block1(v39)
+  v13: unit = enter f0 t0 v2, v10 @32:20
+  v14: u8 = load v2, v13 @32:20
+  v15: u8 = call f0 v2, v14 @32:20
+  v16: u8 = load v2, v15 @32:20
+  v19: i64 = int 1 @32:20
+  v20: i64 = cast v15 @32:20
+  v21: bool = eq v20, v19 @32:20
+  branch v21, block5(v16), block6(v16)
 block3(v11: effect):
-  v40: u8 = load v7, v11 @37:3
-  return v40 after v40
-block4(v16: bool, v17: effect):
-  branch v16, block2(v17), block3(v17)
-block5(v21: effect):
-  v23: bool = bool false @32:10
-  jump block4(v23, v21)
-block6(v22: effect):
-  v24: u8 = load v7, v22 @33:10
-  v25: i64 = int 10 @33:19
-  v26: i64 = cast v24 @33:19
-  v27: bool = lt v26, v25 @33:19
-  jump block4(v27, v24)
-block7(v41: effect):
-  trap t2 after v41
-t0: stack-overflow @31:16 ["the call stack ran out"]
-t1: narrowing @35:15 ["", " does not fit in `u8`"]
-t2: unreachable @37:3 ["unreachable reached: control left the code the checker allows"]
+  v44: u8 = load v7, v11 @41:3
+  return v44 after v44
+block4(v17: bool, v18: effect):
+  branch v17, block7(v18), block8(v18)
+block5(v22: effect):
+  v24: bool = bool false @33:12
+  jump block4(v24, v22)
+block6(v23: effect):
+  v25: u8 = load v7, v23 @34:12
+  v26: i64 = int 10 @34:21
+  v27: i64 = cast v25 @34:21
+  v28: bool = lt v27, v26 @34:21
+  jump block4(v28, v25)
+block7(v29: effect):
+  v32: u8 = load v7, v29 @39:5
+  v33: i64 = int 1 @39:15
+  v34: i64 = cast v32 @39:15
+  v35: i64 = add v34, v33, v32 @39:15
+  v36: i64 = int 0 @39:15
+  v37: bool = ge v35, v36 @39:15
+  v38: i64 = int 255 @39:15
+  v39: bool = le v35, v38 @39:15
+  v40: bool = and v37, v39 @39:15
+  v41: i64 = guard t1 within 0..=255 v40, v35, v35, v32 @39:15
+  v42: u8 = cast v41 @39:15
+  v43: unit = store v7, v42, v41 @39:15
+  jump block1(v43)
+block8(v30: effect):
+  jump block3(v30)
+block9(v31: effect):
+  trap t2 after v31
+block10(v45: effect):
+  trap t2 after v45
+t0: stack-overflow @32:20 ["the call stack ran out"]
+t1: narrowing @39:15 ["", " does not fit in `u8`"]
+t2: unreachable @41:3 ["unreachable reached: control left the code the checker allows"]
 }
 
 f4: fn main(effect) -> u8 frame 96 {
 block0(v0: effect):
-  v1: i64 = int 9 @40:40
-  v2: unit = enter f1 t0 v1, v0 @40:23
-  v3: i64 = assume within 0..=255 v1, v2 @40:23
-  v4: u8 = cast v3 @40:23
-  v5: u8 = call f1 v4, v3 @40:23
-  v6: i64 = int 0 @40:55
-  v7: unit = enter f2 t1 v6, v5 @40:45
-  v8: i64 = assume within 0..=255 v6, v7 @40:45
-  v9: u8 = cast v8 @40:45
-  v10: u8 = call f2 v9, v8 @40:45
-  v11: i64 = cast v5 @40:23
-  v12: i64 = cast v10 @40:23
-  v13: i64 = add v11, v12, v10 @40:23
-  v14: i64 = int 200 @40:80
-  v15: unit = enter f3 t2 v14, v10 @40:60
-  v16: i64 = assume within 0..=255 v14, v15 @40:60
-  v17: u8 = cast v16 @40:60
-  v18: u8 = call f3 v17, v16 @40:60
-  v19: i64 = cast v18 @40:23
-  v20: i64 = add v13, v19, v18 @40:23
-  v21: i64 = int 0 @40:23
-  v22: bool = ge v20, v21 @40:23
-  v23: i64 = int 255 @40:23
-  v24: bool = le v20, v23 @40:23
-  v25: bool = and v22, v24 @40:23
-  v26: i64 = guard t3 within 0..=255 v25, v20, v20, v18 @40:23
-  v27: u8 = cast v26 @40:23
+  v1: i64 = int 9 @44:40
+  v2: unit = enter f1 t0 v1, v0 @44:23
+  v3: i64 = assume within 0..=255 v1, v2 @44:23
+  v4: u8 = cast v3 @44:23
+  v5: u8 = call f1 v4, v3 @44:23
+  v6: i64 = int 0 @44:55
+  v7: unit = enter f2 t1 v6, v5 @44:45
+  v8: i64 = assume within 0..=255 v6, v7 @44:45
+  v9: u8 = cast v8 @44:45
+  v10: u8 = call f2 v9, v8 @44:45
+  v11: i64 = cast v5 @44:23
+  v12: i64 = cast v10 @44:23
+  v13: i64 = add v11, v12, v10 @44:23
+  v14: i64 = int 200 @44:70
+  v15: unit = enter f3 t2 v14, v10 @44:60
+  v16: i64 = assume within 0..=255 v14, v15 @44:60
+  v17: u8 = cast v16 @44:60
+  v18: u8 = call f3 v17, v16 @44:60
+  v19: i64 = cast v18 @44:23
+  v20: i64 = add v13, v19, v18 @44:23
+  v21: i64 = int 0 @44:23
+  v22: bool = ge v20, v21 @44:23
+  v23: i64 = int 255 @44:23
+  v24: bool = le v20, v23 @44:23
+  v25: bool = and v22, v24 @44:23
+  v26: i64 = guard t3 within 0..=255 v25, v20, v20, v18 @44:23
+  v27: u8 = cast v26 @44:23
   return v27 after v26
 block1(v28: effect):
   trap t4 after v28
-t0: stack-overflow @40:23 ["the call stack ran out"]
-t1: stack-overflow @40:45 ["the call stack ran out"]
-t2: stack-overflow @40:60 ["the call stack ran out"]
-t3: narrowing @40:23 ["", " does not fit in `u8`"]
-t4: unreachable @40:23 ["unreachable reached: control left the code the checker allows"]
+t0: stack-overflow @44:23 ["the call stack ran out"]
+t1: stack-overflow @44:45 ["the call stack ran out"]
+t2: stack-overflow @44:60 ["the call stack ran out"]
+t3: narrowing @44:23 ["", " does not fit in `u8`"]
+t4: unreachable @44:23 ["unreachable reached: control left the code the checker allows"]
 }
 
 f5: fn enter next(addr, effect) -> u8 {
@@ -21467,7 +21686,7 @@ t0: stack-overflow @19:8 ["the call stack ran out"]
 t1: unreachable @19:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f8: fn enter in_a_loop_condition(u8, effect) -> u8 {
+f8: fn enter in_a_loop(u8, effect) -> u8 {
 block0(v0: u8, v1: effect):
   v2: unit = enter f3 t0 v0, v1 @28:8
   v3: u8 = call f3 v0, v2 @28:8
@@ -21478,11 +21697,11 @@ t1: unreachable @28:8 ["unreachable reached: control left the code the checker a
 
 f9: fn enter main(effect) -> u8 {
 block0(v0: effect):
-  v1: unit = enter f4 t0 v0 @40:8
-  v2: u8 = call f4 v1 @40:8
+  v1: unit = enter f4 t0 v0 @44:8
+  v2: u8 = call f4 v1 @44:8
   return v2 after v2
-t0: stack-overflow @40:8 ["the call stack ran out"]
-t1: unreachable @40:8 ["unreachable reached: control left the code the checker allows"]
+t0: stack-overflow @44:8 ["the call stack ran out"]
+t1: unreachable @44:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/missing_mut_mark.mn == (exit 2)
 == conformance/core-calculus/missing_result.mn == (exit 2)
@@ -21772,6 +21991,7 @@ t0: stack-overflow @32:4 ["the call stack ran out"]
 t1: unreachable @32:4 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/operands_beyond_128_bits.mn == (exit 2)
+== conformance/core-calculus/or_operand_that_passes_mut_inside_an_and.mn == (exit 2)
 == conformance/core-calculus/pattern_binding_assigned.mn == (exit 2)
 == conformance/core-calculus/pattern_binding_named_like_an_enum.mn == (exit 2)
 == conformance/core-calculus/pattern_binding_named_twice.mn == (exit 2)
@@ -28488,120 +28708,7 @@ t1: unreachable @14:8 ["unreachable reached: control left the code the checker a
 == conformance/ghost-contracts-and-totality/invariant_not_preserved.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_candidate_that_always_leaves.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_candidate_that_always_traps.mn == (exit 2)
-== conformance/ghost-contracts-and-totality/loop_candidate_that_assigns.mn ==
-mente-dump 3 mir
-f0: fn take(u8, effect) -> u8 frame 66 {
-block0(v0: u8, v1: effect):
-  return v0 after v1
-block1(v2: effect):
-  trap t0 after v2
-t0: unreachable @7:24 ["unreachable reached: control left the code the checker allows"]
-}
-
-f1: fn f(u8, effect) -> u8 frame 93 {
-block0(v0: u8, v1: effect):
-  v2: i64 = int 0 @10:15
-  v3: i64 = assume within 0..=255 v2, v1 @10:15
-  v4: u8 = cast v3 @10:15
-  v5: addr = slot 1 @10:15
-  v6: unit = store v5, v4, v3 @10:15
-  v7: i64 = int 0 @11:15
-  v8: i64 = assume within 0..=255 v7, v6 @11:15
-  v9: u8 = cast v8 @11:15
-  v10: addr = slot 1 @11:15
-  v11: unit = store v10, v9, v8 @11:15
-  jump block1(v11)
-block1(v12: effect):
-  v15: u8 = load v10, v12 @12:14
-  v16: i64 = int 250 @12:18
-  v17: i64 = cast v15 @12:14
-  v18: i64 = add v17, v16, v15 @12:14
-  v19: unit = enter f0 t0 v18, v15 @12:9
-  v20: i64 = int 0 @12:9
-  v21: bool = ge v18, v20 @12:9
-  v22: i64 = int 255 @12:9
-  v23: bool = le v18, v22 @12:9
-  v24: bool = and v21, v23 @12:9
-  v25: i64 = guard t1 within 0..=255 v24, v18, v18, v19 @12:14
-  v26: u8 = cast v25 @12:14
-  v27: u8 = call f0 v26, v25 @12:9
-  v28: i64 = int 0 @12:25
-  v29: i64 = cast v27 @12:25
-  v30: bool = gt v29, v28 @12:25
-  branch v30, block4(v27), block5(v30, v27)
-block2(v13: effect):
-  v60: i64 = int 9 @19:9
-  v61: i64 = assume within 0..=255 v60, v13 @19:9
-  v62: u8 = cast v61 @19:9
-  v63: unit = store v10, v62, v61 @19:9
-  v64: u8 = load v5, v63 @20:5
-  v65: i64 = int 1 @20:10
-  v66: i64 = cast v64 @20:10
-  v67: i64 = add v66, v65, v64 @20:10
-  v68: i64 = assume within 0..=255 v67, v64 @20:10
-  v69: u8 = cast v68 @20:10
-  v70: unit = store v5, v69, v68 @20:10
-  jump block1(v70)
-block3(v14: effect):
-  v71: u8 = load v5, v14 @22:3
-  return v71 after v71
-block4(v31: effect):
-  v34: i64 = int 255 @12:39
-  v35: i64 = cast v0 @12:39
-  v36: bool = lt v35, v34 @12:39
-  branch v36, block6(v31), block7(v31)
-block5(v32: bool, v33: effect):
-  branch v32, block9(v33), block10(v32, v33)
-block6(v37: effect):
-  v41: i64 = int 0 @13:9
-  v42: i64 = assume within 0..=255 v41, v37 @13:9
-  v43: u8 = cast v42 @13:9
-  v44: unit = store v10, v43, v42 @13:9
-  v45: i64 = int 0 @14:5
-  jump block8(v45, v44)
-block7(v38: effect):
-  v46: i64 = int 0 @16:9
-  v47: i64 = assume within 0..=255 v46, v38 @16:9
-  v48: u8 = cast v47 @16:9
-  v49: unit = store v10, v48, v47 @16:9
-  v50: i64 = int 0 @17:5
-  jump block8(v50, v49)
-block8(v39: i64, v40: effect):
-  v51: i64 = int 0 @18:9
-  v52: bool = eq v39, v51 @18:9
-  jump block5(v52, v40)
-block9(v53: effect):
-  v56: u8 = load v5, v53 @18:15
-  v57: i64 = int 3 @18:19
-  v58: i64 = cast v56 @18:19
-  v59: bool = lt v58, v57 @18:19
-  jump block10(v59, v56)
-block10(v54: bool, v55: effect):
-  branch v54, block2(v55), block3(v55)
-block11(v72: effect):
-  trap t2 after v72
-t0: stack-overflow @12:9 ["the call stack ran out"]
-t1: narrowing @12:14 ["", " does not fit in `u8`"]
-t2: unreachable @22:3 ["unreachable reached: control left the code the checker allows"]
-}
-
-f2: fn enter take(u8, effect) -> u8 {
-block0(v0: u8, v1: effect):
-  v2: unit = enter f0 t0 v0, v1 @7:4
-  v3: u8 = call f0 v0, v2 @7:4
-  return v3 after v3
-t0: stack-overflow @7:4 ["the call stack ran out"]
-t1: unreachable @7:4 ["unreachable reached: control left the code the checker allows"]
-}
-
-f3: fn enter f(u8, effect) -> u8 {
-block0(v0: u8, v1: effect):
-  v2: unit = enter f1 t0 v0, v1 @9:8
-  v3: u8 = call f1 v0, v2 @9:8
-  return v3 after v3
-t0: stack-overflow @9:8 ["the call stack ran out"]
-t1: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
-}
+== conformance/ghost-contracts-and-totality/loop_candidate_that_assigns.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_candidate_that_calls.mn ==
 mente-dump 3 mir
 f0: fn take(u8, effect) -> u8 frame 66 {
@@ -28963,6 +29070,9 @@ t1: unreachable @37:8 ["unreachable reached: control left the code the checker a
 == conformance/ghost-contracts-and-totality/loop_candidate_that_may_stop.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_changes_a_binding_inside_a_struct_literal.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_condition_changes_a_binding.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_condition_that_assigns_beside_its_measure.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_condition_that_assigns_what_a_conjunct_read.mn == (exit 2)
+== conformance/ghost-contracts-and-totality/loop_condition_that_resets_its_measure.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
 mente-dump 3 mir
 f0: fn count(u8, effect) -> u8 frame 75 {

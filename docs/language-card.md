@@ -127,6 +127,7 @@ pub fn sign(x: i32) -> i32 = if x < 0 { -1 } else if x > 0 { 1 } else { 0 }
 - `if c { ... } else { ... }` is an expression when it has `else`. An `if` inside an operator's operand needs parentheses: `1 + (if c { 2 } else { 3 })`.
 - `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A loop that needs a fact the compiler cannot infer states it after the condition: `while i < n invariant k <= i {`.
 - `guard c else { ... }` continues when `c` holds. Its block must leave: `return`, `break`, `continue`, `todo` or `unreachable`.
+- Conditions, `requires`, `ensures`, `invariant`, `decreases` and the operands of `and` and `or` change nothing: no assignment, no `mut` argument. Call first into a `val`, `val v = next(mut i)`, then test `v > 0`. A loop that calls every round does so at the top of its body: `while r < 8 {`, then `val v = next(mut i)` and `guard v > 0 else { break }`.
 - There is no `for`, `match`, ternary `? :`, `loop` or `do`.
 
 ## Functions and `mut`
@@ -193,4 +194,6 @@ a && b, a || b, !a       // a and b, a or b, not a
 c ? a : b                // if c { a } else { b }
 x as u8                  // val y: u8 = x (checked where it lands)
 for i in 0..n { }        // a while loop with a counter
+while (n = f()) > 0 { }  // while true, then val n = f() and guard n > 0 else { break }
+ok && step(&mut s)       // val stepped = step(mut s), then ok and stepped
 ```

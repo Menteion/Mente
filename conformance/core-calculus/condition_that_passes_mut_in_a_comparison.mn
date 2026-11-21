@@ -1,0 +1,20 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (item 10): this `if` passes `x` as `mut` in the right
+// operand of its comparison, so the comparison's left operand would read `x` before the call
+// changes it, and its branch would see what the call left.
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+pub fn f() -> u8[0..=0] {
+  var x: u8 = 0
+  if x == bump(mut x) {
+    return 1
+  }
+  0
+}

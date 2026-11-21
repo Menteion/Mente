@@ -1140,6 +1140,13 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     // mente-sema
     (
+        "mente-sema/src/conditions.rs",
+        "decides",
+        "matches!",
+        "matches!(typing.exprs.get(scrutinee.0 as usize), Some(Ty::Bool))",
+        "a `match` on a `bool` decides as an `if` does, and its scrutinee is a condition; one on any other type is read as a value",
+    ),
+    (
         "mente-sema/src/check.rs",
         "arrays_in_one_piece",
         "if let",
@@ -1551,13 +1558,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "matches!",
         "matches!(b, Bound::Int { .. })",
         "only a literal bound is a literal",
-    ),
-    (
-        "mente-sema/src/tier1.rs",
-        "match_arms",
-        "matches!",
-        "matches!(self.typing.exprs[scrutinee.0 as usize], Ty::Bool)",
-        "a `bool` scrutinee is read as a condition; every other is read as a value",
     ),
     (
         "mente-sema/src/tier1.rs",

@@ -927,6 +927,25 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f(y: u8[-170141183460469231731687303715884105729..=3]) -> u8 = y\n",
         "module m\npub fn f(y: u8[0..=3]) -> u8 = y\n",
     ),
+    emitted(
+        "E0236",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A condition that changes state",
+        "A condition decides or states, and changes nothing: the condition of a `while`, a \
+         `guard` or an `if`, the scrutinee of a `match` on a `bool`, a contract clause and \
+         each operand of `and` and `or` hold no assignment and pass nothing `mut`, anywhere \
+         inside them. Where one changed state, every reader of the program had to tell which \
+         of its evaluations had run: whether the right operand of `and` ran, which branch was \
+         taken, whether a round ended early, whether a clause was checked or erased. Compute \
+         the call into a `val` on a line of its own and compare the `val` in the condition, \
+         which the fix does for a call its statement evaluates first. A loop calls every \
+         round at the top of its body instead, its condition keeping what comes before the \
+         call and a `guard ... else { break }` testing the rest. A clause states what holds \
+         over the values as they are.",
+        "module m\nfn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while next(mut i) > 0 and r < 8 {\n    r += 1\n  }\n  r\n}\n",
+        "module m\nfn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while true {\n    val v = next(mut i)\n    guard v > 0 and r < 8 else {\n      break\n    }\n    r += 1\n  }\n  r\n}\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

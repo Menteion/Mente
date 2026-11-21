@@ -14,6 +14,7 @@
 
 pub mod bounds;
 pub mod check;
+mod conditions;
 pub mod frames;
 pub mod incremental;
 pub mod literals;

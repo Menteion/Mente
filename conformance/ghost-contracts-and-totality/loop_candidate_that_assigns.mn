@@ -1,9 +1,9 @@
-// expect: pass
+// expect: E0236
 module conformance
-// A conjunct of a loop's condition that assigns, in a branch of an `if`, is no candidate (spec
-// item 2, "Facts at a loop head"): assumed at the head, its evaluation once set `j` to 0 there,
-// which proved `j + 250` fits in `u8` in the round, where the body has set `j` to 9. It is a
-// run-time check, which traps in the second round.
+// A condition decides and changes nothing (core-calculus.md, item 10): a conjunct of this loop's
+// condition assigns in a branch of an `if`. Before the rule it was a candidate fact Tier 1 kept
+// at the head (PR 182's review, b2): its evaluation set `j` to 0 there, which proved `j + 250`
+// fits in `u8` in the round, where the body has set `j` to 9.
 fn take(x: u8) -> u8 = x
 
 pub fn f(n: u8) -> u8 {

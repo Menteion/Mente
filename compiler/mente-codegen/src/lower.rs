@@ -4255,7 +4255,8 @@ pub fn kept() -> u8 {
 
     /// An argument read from a binding is copied exactly where a later operand may change that
     /// binding, by a `mut` argument or an assignment, wherever the operand holds it: in an
-    /// operator, an index, an `if`'s blocks, a loop's condition or body, a guard's condition.
+    /// operator, an index, an `if`'s blocks, a loop's body, a binding before a guard. A condition
+    /// changes nothing (`core-calculus.md`, item 10), so none of them is one.
     /// An element or a field of the binding counts as the binding. Nothing else copies it.
     #[test]
     fn test_an_argument_is_copied_only_where_a_later_operand_may_change_its_binding() {
@@ -4328,10 +4329,14 @@ pub fn assigned_place(c: bool) -> u8 {
     0
   })
 }
-pub fn loop_condition(c: bool) -> u8 {
+pub fn loop_top(c: bool) -> u8 {
   var xs: [2]u8 = [1, 2]
   first(xs, if c {
-    while bump(mut xs) > 5 {
+    while true {
+      val ok = bump(mut xs) > 5
+      guard ok else {
+        break
+      }
     }
     0
   } else {
@@ -4351,10 +4356,11 @@ pub fn loop_body(c: bool) -> u8 {
     0
   })
 }
-pub fn guard_condition(c: bool) -> u8 {
+pub fn before_a_guard(c: bool) -> u8 {
   var xs: [2]u8 = [1, 2]
   first(xs, if c {
-    guard bump(mut xs) == 0 else {
+    val ok = bump(mut xs) == 0
+    guard ok else {
       return 1
     }
     0
@@ -4417,9 +4423,9 @@ pub fn indexed_kept(c: bool) -> u8 {
             ("if_assigns", 1, true),
             ("assigned_value", 2, true),
             ("assigned_place", 2, true),
-            ("loop_condition", 1, true),
+            ("loop_top", 1, true),
             ("loop_body", 1, true),
-            ("guard_condition", 1, true),
+            ("before_a_guard", 1, true),
         ] {
             assert_eq!(count(name, true), bindings + usize::from(kept), "{}", name);
         }
