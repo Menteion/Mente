@@ -1,34 +1,46 @@
-// The tests' sandbox's first process (.github/scripts/test-sandbox.sh; docs/design-review.md,
-// untrusted-test-isolation): one program that does what the shell's `inner` did with seven, so that
-// the sandbox costs a process less (the measurement of 2026-11-17: two thirds of a process's cost
-// was those seven programs). It runs as root, as the first process of the namespaces `unshare`
-// made, with the wrapper's lifeline on its standard input:
+// The tests' sandbox's one program (.github/scripts/test-sandbox.sh; docs/design-review.md,
+// untrusted-test-isolation): the wrapper cargo hands each test executable to, and the namespace's
+// first process, where a shell ran both and started seven programs for each command (the
+// measurements of 2026-11-17 and 2026-11-21: those starts, then bash and its script, were most of a
+// process's cost). Two modes:
 //
-//   inner <cwd> <ulimit -v> <ulimit -f> [NAME=VALUE...] -- <command> [argument...]
+//   test-sandbox run <command> [argument...]
+//       The wrapper, as the runner's user: cargo's runner. It records the command, starts the
+//       namespace through `sudo -n unshare`, with this program's `inner` as its first process and a
+//       lifeline on that process's standard input, and waits; its end, by any signal, ends the
+//       namespace, and SIGTERM, SIGINT and SIGHUP ask the namespace to end before it does.
 //
-// It mounts an empty /tmp and target/tmp of the namespace's own and its own /proc, makes the
-// sandbox's root the root and drops the old one, enters the command's directory, sets the limits
-// of the shell that started the wrapper and a core limit of one byte, starts the watcher that ends
-// every process here when the wrapper ends, then runs the command as the sandbox's user, with no
-// group, no capability, no way to gain one and only the environment named, waits for it, and fails
-// it if it left a process behind. Its every effect on the command is the one the shell's `inner`
-// had: the canary runs both and compares what each command sees.
+//   test-sandbox inner <cwd> <ulimit -v> <ulimit -f> [NAME=VALUE...] -- <command> [argument...]
+//       The namespace's first process, as root: it mounts an empty /tmp and target/tmp of the
+//       namespace's own and its own /proc, makes the sandbox's root the root and drops the old one,
+//       enters the command's directory, sets the limits of the shell that started the wrapper and a
+//       core limit of one byte, starts the watcher that ends every process here when the wrapper
+//       ends, then runs the command as the sandbox's user, with no group, no capability, no way to
+//       gain one and only the environment named, waits for it, and fails it if it left a process
+//       behind.
+//
+// Its every effect on the command is the one test-sandbox.sh's shell route has (`reference`, its
+// `wrap` and `inner`): the canary runs both and compares what each command sees.
 //
 // Built at setup by the toolchain rust-toolchain.toml pins, with rustc alone and no crate:
 //
-//   rustc --edition 2021 -C opt-level=2 -C panic=abort -o inner .github/scripts/test-sandbox-inner.rs
+//   rustc --edition 2021 -C opt-level=2 -C panic=abort -o test-sandbox .github/scripts/test-sandbox.rs
 //
 // Every system call that fails ends it with a message and status 1, before the command runs: the
 // sandbox fails closed.
 
 use std::ffi::{CString, OsString};
+use std::io::Write;
 use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 
-// The sandbox's home, its root, and the user and group the command runs as (test-sandbox.sh).
+// The sandbox's home, its root, this program as setup installed it, and the user and group the
+// command runs as (test-sandbox.sh).
 const HOME: &str = "/opt/mente-test-sandbox";
 const ROOT: &str = "/opt/mente-test-sandbox/root";
+const PROGRAM: &str = "/opt/mente-test-sandbox/test-sandbox";
 const UID: u32 = 4242424;
 const GID: u32 = 4242424;
 
@@ -46,10 +58,14 @@ const PR_SET_NO_NEW_PRIVS: c_int = 38;
 const PR_CAP_AMBIENT: c_int = 47;
 const PR_CAP_AMBIENT_CLEAR_ALL: c_ulong = 4;
 const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+const SIGHUP: c_int = 1;
+const SIGINT: c_int = 2;
 const SIGKILL: c_int = 9;
 const SIGPIPE: c_int = 13;
+const SIGTERM: c_int = 15;
 const SIG_DFL: usize = 0;
 const O_RDWR: c_int = 2;
+const O_CLOEXEC: c_int = 0o2000000;
 const WNOHANG: c_int = 1;
 #[cfg(target_arch = "x86_64")]
 const SYS_PIVOT_ROOT: c_long = 155;
@@ -80,6 +96,7 @@ struct CapData {
 }
 
 extern "C" {
+    static environ: *const *const c_char;
     fn mount(source: *const c_char, target: *const c_char, fstype: *const c_char, flags: c_ulong, data: *const c_void) -> c_int;
     fn umount2(target: *const c_char, flags: c_int) -> c_int;
     fn syscall(number: c_long, ...) -> c_long;
@@ -90,9 +107,12 @@ extern "C" {
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+    fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
     fn dup2(old: c_int, new: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+    fn getrlimit(resource: c_int, limit: *mut Rlimit) -> c_int;
     fn setrlimit(resource: c_int, limit: *const Rlimit) -> c_int;
     fn setgroups(size: usize, list: *const u32) -> c_int;
     fn setresgid(real: u32, effective: u32, saved: u32) -> c_int;
@@ -124,6 +144,158 @@ fn checked(result: c_int, what: &str) {
         fail(1, &format!("{what}: {}", errno()));
     }
 }
+
+/// A status as the shell gives it from waitpid's: the exit code, or 128 and the signal that ended
+/// the process.
+fn status_of(raw: c_int) -> c_int {
+    let signal_number = raw & 0x7f;
+    if signal_number == 0 {
+        (raw >> 8) & 0xff
+    } else {
+        128 + signal_number
+    }
+}
+
+/// Waits for `child`, through every interruption, and returns its raw status.
+fn wait_for(child: c_int) -> c_int {
+    let mut raw = 0;
+    loop {
+        // SAFETY: a pointer to a status that outlives the call.
+        let r = unsafe { waitpid(child, &mut raw, 0) };
+        if r == child {
+            return raw;
+        }
+        if r == -1 && errno().kind() != std::io::ErrorKind::Interrupted {
+            fail(1, &format!("waitpid: {}", errno()));
+        }
+    }
+}
+
+// --- The wrapper ----------------------------------------------------------------------------------
+
+/// The lifeline's end the wrapper writes, and the last signal that asked it to stop, for the
+/// handler, which may only make system calls and store a number.
+static LIFELINE: AtomicI32 = AtomicI32::new(-1);
+static STOPPED_BY: AtomicI32 = AtomicI32::new(0);
+
+/// SIGTERM, SIGINT or SIGHUP: a line on the lifeline asks the namespace to end every process in it,
+/// and the wrapper ends with 128 and the signal once it has.
+extern "C" fn stop(signal_number: c_int) {
+    STOPPED_BY.store(signal_number, Ordering::SeqCst);
+    let newline = b"\n";
+    // SAFETY: write(2) is async-signal-safe; a closed or broken lifeline only fails the write.
+    unsafe { write(LIFELINE.load(Ordering::SeqCst), newline.as_ptr() as *const c_void, 1) };
+}
+
+/// Whether a variable of this name crosses into the sandbox: the names cargo, nextest and the tests
+/// set, and the terminal's and the locale's, as the shell route's `wrap` lists them. A name the
+/// shell would not take for a variable, which `compgen -e` never names, does not.
+fn crosses(name: &[u8]) -> bool {
+    let identifier = matches!(name.first(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_')) && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    if !identifier {
+        return false;
+    }
+    let exact: [&[u8]; 10] = [b"CARGO", b"NEXTEST", b"TERM", b"LANG", b"TZ", b"CI", b"NO_COLOR", b"CLICOLOR", b"CLICOLOR_FORCE", b"FORCE_COLOR"];
+    let prefix: [&[u8]; 5] = [b"CARGO_", b"NEXTEST_", b"MENTE_", b"RUST_", b"LC_"];
+    exact.contains(&name) || prefix.iter().any(|p| name.starts_with(p))
+}
+
+/// A limit of this process as `ulimit` prints it: `unlimited`, or its soft value in KiB.
+fn ulimit(resource: c_int, what: &str) -> String {
+    let mut rlimit = Rlimit { cur: 0, max: 0 };
+    // SAFETY: a pointer to a limit that outlives the call.
+    checked(unsafe { getrlimit(resource, &mut rlimit) }, what);
+    if rlimit.cur == RLIM_INFINITY {
+        "unlimited".to_string()
+    } else {
+        (rlimit.cur / 1024).to_string()
+    }
+}
+
+fn wrapper(args: &[OsString]) -> ! {
+    if args.is_empty() {
+        fail(2, "no command");
+    }
+    if args[0].as_bytes().contains(&b'=') {
+        fail(2, &format!("a command with = in its path would be read as a variable: {}", args[0].to_string_lossy()));
+    }
+    // Each command that ran inside, one a line, where no command inside can reach it.
+    let temp = std::env::var_os("RUNNER_TEMP").filter(|t| !t.is_empty()).unwrap_or_else(|| OsString::from("/nonexistent"));
+    let log = Path::new(&temp).join("test-sandbox-runs.log");
+    let line = [args[0].as_bytes(), b"\n"].concat();
+    if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(&log).and_then(|mut f| f.write_all(&line)) {
+        fail(1, &format!("{}: {e}", log.display()));
+    }
+    // The variables that cross, each NAME=VALUE, by name in the shell's order, the last of a name
+    // the shell would keep.
+    let mut named: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (name, value) in std::env::vars_os() {
+        let name = name.into_vec();
+        if !crosses(&name) {
+            continue;
+        }
+        let entry = [name.as_slice(), b"=", value.as_bytes()].concat();
+        match named.iter().position(|(n, _)| *n == name) {
+            Some(k) => named[k].1 = entry,
+            None => named.push((name, entry)),
+        }
+    }
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    // Where the command starts, every link resolved, and the limits of the process that started this
+    // one, which the namespace's first process sets for the command.
+    let cwd = std::env::current_dir().unwrap_or_else(|e| fail(1, &format!("getcwd: {e}"))).into_os_string().into_vec();
+    let mut argv: Vec<Vec<u8>> = [
+        "/usr/bin/sudo", "-n", "--", "/usr/bin/unshare", "--mount", "--pid", "--net", "--ipc", "--uts", "--fork", "--kill-child=SIGKILL", "--", PROGRAM, "inner",
+    ]
+    .iter()
+    .map(|a| a.as_bytes().to_vec())
+    .collect();
+    argv.push(cwd);
+    argv.push(ulimit(RLIMIT_AS, "ulimit -v").into_bytes());
+    argv.push(ulimit(RLIMIT_FSIZE, "ulimit -f").into_bytes());
+    argv.extend(named.into_iter().map(|(_, entry)| entry));
+    argv.push(b"--".to_vec());
+    argv.extend(args.iter().map(|a| a.as_bytes().to_vec()));
+    let argc: Vec<CString> = argv.into_iter().map(c).collect();
+    let mut argp: Vec<*const c_char> = argc.iter().map(|a| a.as_ptr()).collect();
+    argp.push(std::ptr::null());
+    let sudo = c("/usr/bin/sudo");
+    // The lifeline: a pipe this process alone writes, which the namespace reads as its standard
+    // input. It ends when this process does, by any signal, SIGKILL too: both ends close on exec, so
+    // no other process holds the end this one writes.
+    let mut fds = [0 as c_int; 2];
+    // SAFETY: a pointer to two descriptors that outlive the call.
+    checked(unsafe { pipe2(fds.as_mut_ptr(), O_CLOEXEC) }, "pipe");
+    // SAFETY: fork in a process of one thread; the child calls only system calls and execs.
+    let child = unsafe { fork() };
+    checked(child, "fork");
+    if child == 0 {
+        // SAFETY: plain system calls, and pointers to strings and arrays alive at the call; the child
+        // never returns.
+        unsafe {
+            dup2(fds[0], 0);
+            // The signals as the shell's process substitution left them: Rust's start ignores SIGPIPE.
+            signal(SIGPIPE, SIG_DFL);
+            execve(sudo.as_ptr(), argp.as_ptr(), environ);
+            let e = errno();
+            eprintln!("test-sandbox: /usr/bin/sudo: {e}");
+            _exit(if e.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 })
+        }
+    }
+    // SAFETY: plain system calls on numbers and a handler of the right type.
+    unsafe {
+        close(fds[0]);
+        LIFELINE.store(fds[1], Ordering::SeqCst);
+        for signal_number in [SIGTERM, SIGINT, SIGHUP] {
+            signal(signal_number, stop as extern "C" fn(c_int) as usize);
+        }
+    }
+    let status = status_of(wait_for(child));
+    let stopped = STOPPED_BY.load(Ordering::SeqCst);
+    std::process::exit(if stopped != 0 { 128 + stopped } else { status })
+}
+
+// --- The namespace's first process ----------------------------------------------------------------
 
 fn mount_fs(source: &str, target: &[u8], fstype: &str, flags: c_ulong, data: Option<&str>) {
     let source = c(source);
@@ -266,8 +438,7 @@ fn command(envs: &[Vec<u8>], argv: &[Vec<u8>]) -> ! {
     unsafe { _exit(if e.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 }) }
 }
 
-fn main() {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+fn inner(args: &[OsString]) -> ! {
     if args.len() < 3 {
         fail(2, "no command");
     }
@@ -362,21 +533,10 @@ fn main() {
     if child == 0 {
         command(&envs, &argv);
     }
-    let mut raw = 0;
-    loop {
-        // SAFETY: a pointer to a status that outlives the call.
-        let r = unsafe { waitpid(child, &mut raw, 0) };
-        if r == child {
-            break;
-        }
-        if r == -1 && errno().kind() != std::io::ErrorKind::Interrupted {
-            fail(1, &format!("waitpid: {}", errno()));
-        }
-    }
-    let signal_number = raw & 0x7f;
-    let mut status = if signal_number == 0 { (raw >> 8) & 0xff } else { 128 + signal_number };
+    let mut status = status_of(wait_for(child));
     // A process the command left behind ends with the namespace. As under nextest's leak-timeout,
     // 100 ms after the command, that fails it.
+    let mut raw = 0;
     let mut left = remaining(watcher);
     for _ in 0..10 {
         if left.is_empty() {
@@ -395,4 +555,13 @@ fn main() {
         }
     }
     std::process::exit(status)
+}
+
+fn main() {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    match args.first().map(|a| a.as_bytes()) {
+        Some(b"run") => wrapper(&args[1..]),
+        Some(b"inner") => inner(&args[1..]),
+        _ => fail(2, "usage: test-sandbox run <command> [argument...] | inner <cwd> <ulimit -v> <ulimit -f> [NAME=VALUE...] -- <command> [argument...]"),
+    }
 }

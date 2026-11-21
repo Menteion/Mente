@@ -10,13 +10,18 @@
 #   /usr/bin/bash .github/scripts/test-sandbox.sh env      what test-sandbox-env.sh evaluates: cargo's runner
 #   /usr/bin/bash .github/scripts/test-sandbox.sh ran [n]  at a step's end: n commands ran inside, 1 if not given,
 #                                                          and what the sandbox has cost the job so far
-#   /usr/bin/bash .github/scripts/test-sandbox.sh bound    after the job's last `ran`: the sandbox added under a
-#                                                          tenth to the job
+#   /usr/bin/bash .github/scripts/test-sandbox.sh bound    after the job's last `ran`: the sandbox added no more
+#                                                          than a tenth or no more than two minutes to the job
 #   /usr/bin/bash .github/scripts/test-sandbox.sh uid      the user the commands run as, for the memory guard
 #
-# How a command gets inside: `env` names this script as cargo's runner for the host's target
+# How a command gets inside: `env` names the sandbox's one program, which setup builds from
+# .github/scripts/test-sandbox.rs, as cargo's runner for the host's target
 # (CARGO_TARGET_<TRIPLE>_RUNNER), which `cargo test`, `cargo run`, nextest and, through nextest,
-# cargo-mutants all hand each executable to, as `run <executable> <arguments>`. Building stays
+# cargo-mutants all hand each executable to, as `test-sandbox run <executable> <arguments>`. It is the
+# wrapper and, through sudo and unshare, the namespace's first process: no shell runs for a
+# command. This script sets the sandbox up, proves it (the canary) and counts its cost; its own
+# `reference`, `wrap` and `inner` are the same route in the shell, which the canary runs beside the
+# program to show that a command sees the same through both. Building stays
 # outside: no package of the workspace may run code at build time, as cargo itself reads the
 # manifests (.github/scripts/build-time-code.mjs), and .cargo/mutants.toml may name no command.
 #
@@ -64,9 +69,10 @@
 # The workflow policy (.github/scripts/policy.test.mjs) pins this script and the steps that run it.
 set -euo pipefail
 
-# Root's own: this script's copy, which the wrapper and the namespace run, and the root.
+# Root's own: this script's copy, which the shell route runs, the one program, and the root.
 home=/opt/mente-test-sandbox
 self=$home/test-sandbox.sh
+program=$home/test-sandbox
 root=$home/root
 # The user and group the commands run as.
 uid=4242424
@@ -107,8 +113,9 @@ remaining() {
   done
 }
 
-# The first process of the namespace, as root: the mounts, the root, then the command as the
-# sandbox's user. Its standard input is the wrapper's lifeline.
+# The first process of the namespace in the shell route, as root: the mounts, the root, then the
+# command as the sandbox's user. Its standard input is the wrapper's lifeline. The one program's
+# `inner` does the same in one process (.github/scripts/test-sandbox.rs).
 inner() {
   local cwd=$1 vlimit=$2 flimit=$3 envs=() workspace status=0 watcher left k dir
   shift 3
@@ -195,23 +202,25 @@ inner() {
   exit "$status"
 }
 
-# The wrapper, as the runner's user: cargo's runner. It records the command, starts the namespace
-# through sudo, and waits; its end ends the namespace. The namespace's first process is the one
-# program setup built (.github/scripts/test-sandbox-inner.rs).
-run() {
-  local first=("$home/inner")
-  wrap "$@"
-}
-
-# The same wrapper with the shell's `inner` above as the namespace's first process: the route the
-# one program replaced, which the canary runs beside it to show that a command sees the same through
-# both.
+# The shell route whole: `wrap` below as the wrapper and the shell's `inner` above as the
+# namespace's first process, the route the one program replaced, which the canary runs beside the
+# program (`test-sandbox run`) to show that a command sees the same through both.
 reference() {
   local first=(/usr/bin/bash "$self" inner)
   wrap "$@"
 }
 
-# The wrapper's body, its namespace's first process the caller's `first`.
+# MEASUREMENT ONLY (the sandbox-cost pull request's measuring rounds, removed before review): the
+# shell's wrapper with the program's `inner`, the route of the second round, so that the canary can
+# time what moving the wrapper into the program saved on the same runner.
+halfway() {
+  local first=("$program" inner)
+  wrap "$@"
+}
+
+# The shell route's wrapper, as the runner's user, as the program's `run` is: it records the command,
+# starts the namespace through sudo with the caller's `first` as its first process, and waits; its
+# end ends the namespace.
 wrap() {
   local name envs=() child status=0 signal=
   if [ "$#" -lt 1 ]; then
@@ -251,18 +260,14 @@ wrap() {
   exit "$status"
 }
 
-# The two subcommands every sandboxed command starts, the wrapper and the namespace's first
-# process, end here: bash reads no further, so the length of the rest of this file, setup and the
-# canary, adds nothing to the cost of a test.
+# The shell route's subcommands end here: bash reads no further.
 case "${1:-}" in
-  run | inner | reference)
+  inner | reference | halfway)
     subcommand=$1
     shift
     "$subcommand" "$@"
     exit
     ;;
-  # The measurement of the sandbox's cost by its parts (the canary): bash reading this file to here.
-  noop) exit 0 ;;
 esac
 
 # The AppArmor profiles of this runner that grant a user namespace, one name a line: each is a way
@@ -358,20 +363,26 @@ read_cost() {
 }
 
 # The job's time since setup, in `total`, and the time the sandbox has added to it, in `share`, per
-# mille of the time without it, and one line, in `said`, that says so. The job's time is counted
-# from setup, which leaves out what ran before it, so the share is if anything too high.
+# mille of the time without it, and one line, in `said`, that says so, with both figures of the
+# bound: the share and the minutes. The job's time is counted from setup, which leaves out what ran
+# before it, so the share is if anything too high.
 share_of_job() {
+  local tenths
   total=$(($(now) - start))
   if [ "$total" -le "$added" ]; then fail "the sandbox's estimated cost, $(seconds "$added") s, is no less than the job's time since setup, $(seconds "$total") s"; fi
   share=$((1000 * added / (total - added)))
-  said="The sandbox has added an estimated $(seconds "$added") s to the $(seconds "$total") s since setup: $((share / 10)).$((share % 10))% of the time without it, against a bound of 10% for the whole job."
+  tenths=$((added / 6000000))
+  said="The sandbox has added an estimated $(seconds "$added") s to the $(seconds "$total") s since setup: $((share / 10)).$((share % 10))% of the time without it, and $((tenths / 10)).$((tenths % 10)) minutes, against a bound for the whole job of more than 10% and more than 2 minutes together."
 }
 
 # At the end of the job's last step that runs code of the change, after its `ran`: what the sandbox
-# added to the whole job, against a tenth of the job's time without it, the bound the decision on
-# the sandbox signed (docs/design-review.md, untrusted-test-isolation). Past it the step fails, so
-# that more tests, or a dearer sandbox, cannot cross the bound unseen. It is held once, for the
-# whole job: early in a job the canary's fixed cost outweighs the time so far.
+# added to the whole job, against the bound the decision on the sandbox holds
+# (docs/design-review.md, untrusted-test-isolation; Norman, 2026-11-21): more than a tenth of the
+# job's time without it and more than two minutes, both. Past it the step fails, so that more
+# tests, or a dearer sandbox, cannot cross the bound unseen. A long job is held to the tenth; a
+# short one, whose share the runner's speed moves by points, fails only once the sandbox has cost
+# it minutes. It is held once, for the whole job: early in a job the canary's fixed cost outweighs
+# the time so far.
 bound() {
   local start serial parallel added share said total
   if [ "${RUNNER_OS:-}" != Linux ]; then
@@ -381,10 +392,10 @@ bound() {
   read_cost
   share_of_job
   echo "$said" | /usr/bin/tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-  # More than a tenth of the time without the sandbox: added / (total - added) > 1/10, in whole
-  # microseconds, so that no rounding of the share lets 10.09% through.
-  if [ $((11 * added)) -gt "$total" ]; then
-    fail "the sandbox has added more than a tenth to this job's time, the bound its decision signed (docs/design-review.md, untrusted-test-isolation): make it cheaper, or reopen the decision"
+  # More than a tenth of the time without the sandbox, added / (total - added) > 1/10, in whole
+  # microseconds, so that no rounding of the share lets 10.09% through; and more than two minutes.
+  if [ $((11 * added)) -gt "$total" ] && [ "$added" -gt 120000000 ]; then
+    fail "the sandbox has added more than a tenth and more than two minutes to this job's time, the bound its decision holds (docs/design-review.md, untrusted-test-isolation): make it cheaper, or reopen the decision"
   fi
 }
 
@@ -419,10 +430,10 @@ setup_as_root() {
   fi
   /usr/bin/install -d -m 0755 -o 0 -g 0 "$home" "$root"
   /usr/bin/install -m 0644 -o 0 -g 0 "$here/test-sandbox.sh" "$self"
-  # The one program the wrapper starts as the namespace's first process, built by setup from the
-  # workspace's own .github/scripts/test-sandbox-inner.rs before any code of the change ran.
-  if [ -z "$built" ] || [ ! -f "$built" ] || [ -L "$built" ]; then fail "no built program of .github/scripts/test-sandbox-inner.rs at $built"; fi
-  /usr/bin/install -m 0755 -o 0 -g 0 "$built" "$home/inner"
+  # The one program, cargo's runner and the namespace's first process, built by setup from the
+  # workspace's own .github/scripts/test-sandbox.rs before any code of the change ran.
+  if [ -z "$built" ] || [ ! -f "$built" ] || [ -L "$built" ]; then fail "no built program of .github/scripts/test-sandbox.rs at $built"; fi
+  /usr/bin/install -m 0755 -o 0 -g 0 "$built" "$program"
   printf '%s\n' "$workspace" > "$home/workspace"
   # No crash starts a core handler: the runner's is a pipe to a program that runs as root outside
   # every namespace, on the core the crashed process shaped, and the kernel starts a piped handler
@@ -551,13 +562,13 @@ setup() {
       echo "module-autoload $state-not-unloaded ${entry%%:*}" >> "$controls"
     fi
   fi
-  # The namespace's first process, one program where a shell started seven for each command
-  # (.github/scripts/test-sandbox-inner.rs): built here, before any code of the change runs, by the
-  # toolchain rust-toolchain.toml pins, with rustc alone, from that one file and no crate, outside
-  # the workspace's build; root installs it.
+  # The wrapper and the namespace's first process, one program where a shell ran both and started
+  # seven programs for each command (.github/scripts/test-sandbox.rs): built here, before any code of
+  # the change runs, by the toolchain rust-toolchain.toml pins, with rustc alone, from that one file
+  # and no crate, outside the workspace's build; root installs it.
   /usr/bin/mkdir -p "$RUNNER_TEMP/test-sandbox-build"
-  rustc --edition 2021 -C opt-level=2 -C panic=abort -o "$RUNNER_TEMP/test-sandbox-build/inner" "$here/test-sandbox-inner.rs"
-  /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace" "$RUNNER_TEMP/test-sandbox-build/inner"
+  rustc --edition 2021 -C opt-level=2 -C panic=abort -o "$RUNNER_TEMP/test-sandbox-build/test-sandbox" "$here/test-sandbox.rs"
+  /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace" "$RUNNER_TEMP/test-sandbox-build/test-sandbox"
   : > "$log"
   echo "The sandbox of $workspace is at $root, for the user $uid."
 }
@@ -579,8 +590,8 @@ env_lines() {
     fail "the workspace's .git is not the one setup covered in the sandbox: it was made again after setup, or removed"
   fi
   : > "$log"
-  printf "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
-  printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/bash %s run'\n" "$self"
+  printf "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='%s run'\n" "$program"
+  printf "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='%s run'\n" "$program"
 }
 
 # Whether the step's tools handed commands to the sandbox at all: it fails a step in which cargo
@@ -590,7 +601,7 @@ env_lines() {
 # commands cost: each at the cost the canary measured for processes started as many at once as the
 # runner has cores, as nextest runs the tests, and one more at the cost of a process started alone,
 # for a step whose one command ran by itself; added to the job's, and reported. `bound` holds the
-# whole job's to a tenth, at its end.
+# whole job's to its bound, at its end.
 ran() {
   local need=${1:-1} count start serial parallel added share said total
   if [ "${RUNNER_OS:-}" != Linux ]; then
@@ -749,7 +760,7 @@ probe_outlive() {
 # end, by SIGTERM as nextest stops a test and by SIGKILL, before the command has started or after,
 # ends the namespace. No crash in it starts the runner's core handler.
 check() {
-  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay cores costs serial parallel began
+  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay cores costs serial parallel began refused
   declare -A outside in_sandbox
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
@@ -802,7 +813,7 @@ check() {
   # A variable the tests read crosses into the sandbox; one of the job does not.
   export MENTE_TEST_SANDBOX_PROBE=$marker TEST_SANDBOX_JOB=$marker
   control=$(ulimit -v 6291456 -f 1048576 && /usr/bin/bash .github/scripts/test-sandbox.sh probe "${args[@]}")
-  confined=$(ulimit -v 6291456 -f 1048576 && /usr/bin/bash "$self" run /usr/bin/bash .github/scripts/test-sandbox.sh probe "${args[@]}") \
+  confined=$(ulimit -v 6291456 -f 1048576 && "$program" run /usr/bin/bash .github/scripts/test-sandbox.sh probe "${args[@]}") \
     || problem "the probe did not run in the sandbox"
   while read -r route state; do outside[$route]=$state; done <<< "$control"
   while read -r route state; do in_sandbox[$route]=$state; done <<< "$confined"
@@ -853,14 +864,14 @@ check() {
   if ! within alive "$marker-outlives"; then problem "the canary's process did not outlive its command as the runner's user, so its run in the sandbox proves nothing"; fi
   /usr/bin/pkill -f "^$marker-outlives" || true
   status=0
-  /usr/bin/bash "$self" run /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives" 2> "$work/outlive.txt" || status=$?
+  "$program" run /usr/bin/bash .github/scripts/test-sandbox.sh probe-outlive "$marker-outlives" 2> "$work/outlive.txt" || status=$?
   /usr/bin/cat "$work/outlive.txt"
   if alive "$marker-outlives"; then problem "a process outlived its command in the sandbox"; fi
   if [ "$status" = 0 ] || ! /usr/bin/grep -q "left processes behind" "$work/outlive.txt"; then problem "a command that left a process behind passed in the sandbox (status $status)"; fi
 
   # The wrapper stopped, as nextest stops a test past its time, and killed.
   for signal in TERM KILL; do
-    /usr/bin/bash "$self" run /usr/bin/bash -c 'exec -a "$0" /usr/bin/sleep 600' "$marker-$signal" &
+    "$program" run /usr/bin/bash -c 'exec -a "$0" /usr/bin/sleep 600' "$marker-$signal" &
     wrapper=$!
     if ! within alive "$marker-$signal"; then problem "the canary's command did not start in the sandbox"; fi
     kill "-$signal" "$wrapper"
@@ -874,7 +885,7 @@ check() {
   done
   # The wrapper stopped before its command has started: the command must not run on without it.
   for delay in 0.005 0.015 0.03; do
-    /usr/bin/bash "$self" run /usr/bin/bash -c 'exec -a "$0" /usr/bin/sleep 600' "$marker-early" &
+    "$program" run /usr/bin/bash -c 'exec -a "$0" /usr/bin/sleep 600' "$marker-early" &
     wrapper=$!
     /usr/bin/sleep "$delay"
     kill -TERM "$wrapper" 2> /dev/null || true
@@ -901,7 +912,7 @@ check() {
     /usr/bin/true
     direct=$(($(now) - start))
     start=$(now)
-    /usr/bin/bash "$self" run /usr/bin/true
+    "$program" run /usr/bin/true
     inside=$(($(now) - start))
     costs+=("$((inside - direct))")
   done
@@ -914,7 +925,7 @@ check() {
     begin=$(now)
     for core in $(/usr/bin/seq "$cores"); do
       if [ "$1" = inside ]; then
-        (for k in 1 2 3 4; do /usr/bin/bash "$self" run /usr/bin/true || exit 1; done) &
+        (for k in 1 2 3 4; do "$program" run /usr/bin/true || exit 1; done) &
       else
         (for k in 1 2 3 4; do /usr/bin/true || exit 1; done) &
       fi
@@ -999,34 +1010,45 @@ check() {
     echo
     echo "| part | alone, median of 20 | $cores at once, median of 7 |"
     echo "|---|---|---|"
-    part_line "bash, started" /usr/bin/bash -c :
-    part_line "bash, reading test-sandbox.sh to its dispatch" /usr/bin/bash "$self" noop
     part_line "sudo" /usr/bin/sudo -n /usr/bin/true
     part_line "sudo and unshare's namespaces" /usr/bin/sudo -n /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- /usr/bin/true
-    part_line "the whole wrapper, through the one program" /usr/bin/bash "$self" run /usr/bin/true
-    part_line "the whole wrapper, through the shell's inner, as before" /usr/bin/bash "$self" reference /usr/bin/true
+    part_line "the whole route through the one program, wrapper and inner" "$program" run /usr/bin/true
+    part_line "the shell's wrapper and the program's inner, as in round 2" /usr/bin/bash "$self" halfway /usr/bin/true
+    part_line "the whole route through the shell, as before" /usr/bin/bash "$self" reference /usr/bin/true
     echo
     : "measurement: sudo's version: $(/usr/bin/sudo -V 2> /dev/null | /usr/bin/head -1); its defaults for this user: $(/usr/bin/sudo -n -l 2> /dev/null | /usr/bin/awk '/^Matching Defaults entries/ { getline; sub(/^[ \t]+/, ""); print; exit }')"
   } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
 
-  # The namespace's first process is one program (.github/scripts/test-sandbox-inner.rs), where the
-  # shell's `inner` started seven: for the same command, what it sees through each route is the same,
-  # its mounts (less the numbers each mount is given anew), its user, groups and capabilities,
-  # no_new_privs, its limits, its umask and its environment.
+  # The wrapper and the namespace's first process are one program (.github/scripts/test-sandbox.rs),
+  # where the shell ran both (`reference`): for the same command, what it sees through each route is
+  # the same, its mounts (less the numbers each mount is given anew), its user, groups and
+  # capabilities, no_new_privs, the signals it starts with blocked or ignored, its limits, its umask
+  # and its environment. And both refuse a command they could not hand over whole, before they record
+  # it.
   view='/usr/bin/cut -d " " -f 4- /proc/self/mountinfo
-/usr/bin/grep -E "^(Uid|Gid|Groups|NoNewPrivs|Seccomp|CapInh|CapPrm|CapEff|CapBnd|CapAmb):" /proc/self/status
+/usr/bin/grep -E "^(Uid|Gid|Groups|NoNewPrivs|Seccomp|CapInh|CapPrm|CapEff|CapBnd|CapAmb|SigBlk|SigIgn):" /proc/self/status
 /usr/bin/cat /proc/self/limits
 umask
 /usr/bin/env | /usr/bin/sort'
-  if ! through_one=$(/usr/bin/bash "$self" run /usr/bin/bash -c "$view" 2>&1); then
+  if ! through_one=$("$program" run /usr/bin/bash -c "$view" 2>&1); then
     problem "the one program could not run the view of the sandbox: $through_one"
   elif ! through_shell=$(/usr/bin/bash "$self" reference /usr/bin/bash -c "$view" 2>&1); then
     problem "the shell's inner could not run the view of the sandbox: $through_shell"
   elif [ "$through_one" != "$through_shell" ]; then
     problem "a command sees another sandbox through the one program than through the shell's inner: $(/usr/bin/diff <(printf '%s\n' "$through_shell") <(printf '%s\n' "$through_one") | /usr/bin/head -n 20 | /usr/bin/tr '\n' ' ')"
   else
-    echo "Through the one program and through the shell's inner, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, limits and environment."
+    echo "Through the one program and through the shell, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, signals, limits and environment."
   fi
+  for route in "$program run" "/usr/bin/bash $self reference"; do
+    k=$(/usr/bin/wc -l < "$log")
+    for refused in A=b ''; do
+      status=0
+      # shellcheck disable=SC2086
+      $route $refused > /dev/null 2>&1 || status=$?
+      if [ "$status" != 2 ]; then problem "${route% *} handed over a command it should refuse, '$refused': status $status"; fi
+    done
+    if [ "$(/usr/bin/wc -l < "$log")" != "$k" ]; then problem "${route% *} recorded a command it refused"; fi
+  done
 
   # The probe crashed two processes in the sandbox, one at a core limit it had lowered to 0. The
   # pattern is a file name, so the kernel started no handler, and the runner's journal holds none.
