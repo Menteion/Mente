@@ -2135,6 +2135,7 @@ pub fn huge(x: u8) -> u8 {
     /// The symbols of an object that are not the program's own functions: what it imports, and
     /// each function it defines whose name does not start with `mente_f`.
     fn platform_symbols(bytes: &[u8]) -> BTreeSet<String> {
+        use cranelift_object::object;
         use object::{Object as _, ObjectSymbol as _, SymbolKind};
         let file = object::File::parse(bytes).unwrap();
         file.symbols()
