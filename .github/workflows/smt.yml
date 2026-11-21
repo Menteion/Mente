@@ -169,9 +169,9 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         # compiler/mente-smt encodes each check from the syntax tree and the checker's types alone,
         # never from Tier 1's facts, unrolling each loop and each recursion up to 3 times
-        # (docs/design-review.md, smt-independent-encoding). The known soundness bugs of
-        # compiler/mente-cli/tests/smt-known are exported with the rest, and must be confirmed.
-        # The export fails on an obligation of Tier 1 with no site, and writes what it made of each
+        # (docs/design-review.md, smt-independent-encoding). The files of
+        # compiler/mente-cli/tests/smt-known are exported with the rest: a known limit, and any
+        # known soundness bug, a `// smt:` line there, which must be confirmed. The export fails on an obligation of Tier 1 with no site, and writes what it made of each
         # check Tier 1 erased, for the comparison with the base.
         run: |
           set -euo pipefail
@@ -214,7 +214,7 @@ jobs:
           seconds=$(printf '%d.%03d' $((ms / 1000)) $((ms % 1000)))
           status=0
           ./target/release/mn smt --confirm "$RUNNER_TEMP/independent-answers.txt" --queries "$RUNNER_TEMP/independent-queries.txt" \
-            --expect compiler/mente-cli/tests/smt-known/loop-candidate-facts.mn > "$RUNNER_TEMP/confirm.txt" || status=$?
+            --expect compiler/mente-cli/tests/smt-known > "$RUNNER_TEMP/confirm.txt" || status=$?
           cat "$RUNNER_TEMP/confirm.txt"
           count() { grep -c "^$1: " "$RUNNER_TEMP/confirm.txt" || true; }
           {

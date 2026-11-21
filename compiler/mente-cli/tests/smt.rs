@@ -400,10 +400,29 @@ fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
         "{}",
         stdout
     );
+    // A directory names the known bugs of each of its files; a path that is none cannot be read.
+    let known = dir.join("known");
+    fs::create_dir_all(&known).unwrap();
+    fs::write(known.join("a.mn"), "// smt: kept divisor at 3:32\n").unwrap();
+    fs::write(known.join("b.mn"), "// smt: safe divisor at 2:39\n").unwrap();
+    let run = confirm(format!("unsat\t{}\nunsat\t{}\n", q, other), Some(&known));
+    let stdout = text(&run.stdout);
+    assert_eq!(run.status.code(), Some(1), "{}", stdout);
+    assert!(
+        stdout.contains("no query of `kept` was confirmed at its obligation `divisor at 3:32`")
+            && stdout
+                .contains("no query of `safe` was confirmed at its obligation `divisor at 2:39`"),
+        "{}",
+        stdout
+    );
     for usage in [
         mn(&["smt", "--independent", file.to_str().unwrap()]),
         mn(&["smt", "--confirm"]),
         mn(&["smt", "--confirm", answers.to_str().unwrap(), "--expect"]),
+        confirm(
+            format!("unsat\t{}\nunsat\t{}\n", q, other),
+            Some(&dir.join("no-such-file.mn")),
+        ),
     ] {
         assert_eq!(usage.status.code(), Some(2), "{}", text(&usage.stderr));
     }

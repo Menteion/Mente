@@ -1456,10 +1456,10 @@ pub fn cmd_independent(args: &[String]) {
     }
 }
 
-/// `mn smt --confirm <answers> [--queries <list>] [--expect <file.mn>]...`:
+/// `mn smt --confirm <answers> [--queries <list>] [--expect <file.mn | dir>]...`:
 /// confirms each `sat` answer on the reference interpreter and prints what it finds, and how many
-/// queries of each fragment were answered and undecided; exits 1 when a bug no `--expect` file
-/// names is confirmed, when a model is not confirmed, when an expected bug is not, when an
+/// queries of each fragment were answered and undecided; exits 1 when a bug no `--expect` file,
+/// or file of an `--expect` directory, names is confirmed, when a model is not confirmed, when an expected bug is not, when an
 /// answer is an error or a query of the list has none, and 2 when a file cannot be read.
 pub fn cmd_confirm(args: &[String]) {
     let mut answers = None;
@@ -1481,7 +1481,15 @@ pub fn cmd_confirm(args: &[String]) {
                     break;
                 };
                 match word.as_str() {
-                    "--expect" => gate.expect.extend(expected(file, &read(file))),
+                    "--expect" => {
+                        if !Path::new(file).is_dir() {
+                            read(file);
+                        }
+                        for each in crate::collect_mn_files(Path::new(file)) {
+                            let shown = each.display().to_string();
+                            gate.expect.extend(expected(&shown, &read(&shown)));
+                        }
+                    }
                     _ => gate.queries = Some(read(file).lines().map(str::to_string).collect()),
                 }
             }
@@ -1489,7 +1497,9 @@ pub fn cmd_confirm(args: &[String]) {
         }
     }
     let (Some(answers), false) = (answers, usage) else {
-        eprintln!("Usage: mn smt --confirm <answers> [--queries <list>] [--expect <file.mn>]...");
+        eprintln!(
+            "Usage: mn smt --confirm <answers> [--queries <list>] [--expect <file.mn | dir>]..."
+        );
         std::process::exit(2);
     };
     let c = confirm(&read(&answers), &gate);
@@ -2101,140 +2111,118 @@ mod tests {
         dir
     }
 
-    /// The known soundness bugs of `tests/smt-known` are written as queries, the model of each,
-    /// a failing input, satisfies its query and traps on the interpreter where the query says,
-    /// and `confirm` reports each as known, by its obligation; without the file's `smt:` lines
-    /// each fails the job, and so does a bug known by another obligation, a solver's error, and an
-    /// answer missing or given twice. The export names each check Tier 1 erased once, with what
-    /// the encoding made of it.
+    /// A bug a file names as known (`// smt:` lines, read by `expected`) is confirmed on the
+    /// interpreter and reported as known, by its file, its function and its obligation; not
+    /// known, each is a soundness bug that fails the job, and so is one known by another
+    /// obligation or in another file, which is then missing too. A model that does not satisfy
+    /// its query is a defect, and so is a solver's error, an answer missing or given twice. Tier
+    /// 1 has no known soundness bug since pull request 182 fixed root cause 1, so the bugs here
+    /// are queries written by hand for checks it keeps, beside the export's own.
     #[test]
-    fn test_the_known_soundness_bugs_are_confirmed_on_the_interpreter() {
-        let file =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/smt-known/loop-candidate-facts.mn");
-        let out = scratch("known");
-        let w = independent(std::slice::from_ref(&file), &out).unwrap();
-        assert_eq!((w.files, w.unchecked, w.unencoded), (1, 0, 0));
+    fn test_a_bug_named_as_known_is_confirmed_and_reported_by_its_obligation() {
+        let dir = scratch("known");
+        let file = dir.join("bugs.mn");
+        fs::write(
+            &file,
+            "module m\n// smt: rem divisor at 4:31\n// smt: narrow range at 5:30 into `u8`\npub fn rem(d: u8) -> u8 = 7 % d\npub fn narrow(d: u8) -> u8 = d + 250\npub fn safe(d: u8[1..=9]) -> u8 = 7 % d\n",
+        )
+        .unwrap();
         let shown = file.display().to_string();
-        let source = fs::read_to_string(&file).unwrap();
+        let out = dir.join("out");
+        let w = independent(std::slice::from_ref(&file), &out).unwrap();
+        assert!(w.queries > 0, "{:#?}", w);
+        let expect = expected(&shown, &fs::read_to_string(&file).unwrap());
         assert_eq!(
-            w.export.files.get(&shown),
-            Some(&Program {
-                hash: text_hash(&source),
-                checks: true
-            }),
-            "{:?}",
-            w.export.files
+            expect,
+            [
+                (
+                    shown.clone(),
+                    "rem".to_string(),
+                    "divisor at 4:31".to_string()
+                ),
+                (
+                    shown.clone(),
+                    "narrow".to_string(),
+                    "range at 5:30 into `u8`".to_string()
+                ),
+            ]
         );
-        // Every check Tier 1 erased is exported once, with a class for each of its traps.
-        let checked = mente_sema::check_program(&source).unwrap();
-        let erased_keys: Vec<(String, String)> = checked
-            .functions
-            .iter()
-            .flatten()
-            .flat_map(|cf| {
-                erased(&cf.obligations)
-                    .into_iter()
-                    .map(|k| (cf.syntax.name.clone(), mente_smt::obligation_text(k)))
-            })
-            .collect();
-        let exported: Vec<(String, String)> = w
-            .export
-            .checks
-            .iter()
-            .map(|e| (e.function.clone(), e.obligation.clone()))
-            .collect();
-        assert_eq!(exported, erased_keys);
-        let n = |c: &dyn Fn(&Class) -> bool| {
-            w.export
-                .checks
-                .iter()
-                .flat_map(|e| &e.classes)
-                .filter(|k| c(k))
-                .count()
-        };
-        assert_eq!(
-            (
-                n(&|c| matches!(c, Class::Query(_))),
-                n(&|c| *c == Class::Unreachable),
-                n(&|c| *c == Class::BeyondBound),
-                n(&|c| *c == Class::BeyondLacked),
-                n(&|c| *c == Class::NoSite),
-            ),
-            (
-                w.queries,
-                w.unreachable,
-                w.beyond_bound,
-                w.beyond_lacked,
-                w.no_site
+        // The checks Tier 1 keeps, each asked as if it had erased it: its query holds of the
+        // input that traps.
+        let bug = |name: &str, place: &str, obligation: &str, trap: &str, d: u32| {
+            let path = out.join(format!("{}.smt2", name));
+            fs::write(
+                &path,
+                format!(
+                    "; source: {}:{}\n; function: {}\n; obligation: {}\n; trap: {}\n(declare-const p.d Int)\n(assert (= p.d {}))\n(check-sat)\n(get-value (p.d))\n",
+                    shown, place, name, obligation, trap, d
+                ),
             )
+            .unwrap();
+            path
+        };
+        let rem = bug(
+            "rem",
+            "4:31",
+            "divisor at 4:31",
+            "division-by-zero at 4:27",
+            0,
         );
-        for e in &w.export.checks {
-            assert_eq!(
-                (e.file.as_str(), &e.hash),
-                (shown.as_str(), &text_hash(&source))
-            );
-            assert!(!e.classes.is_empty());
-            for path in e.queries() {
-                let h = mente_smt::header(&fs::read_to_string(path).unwrap()).unwrap();
-                assert_eq!((&h.function, &h.obligation), (&e.function, &e.obligation));
+        let narrow = bug(
+            "narrow",
+            "5:30",
+            "range at 5:30 into `u8`",
+            "narrowing at 5:30",
+            6,
+        );
+        let mut queries: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![out.clone()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    queries.push(p);
+                }
             }
         }
-        assert_eq!(Export::read(&w.export.text()), Ok(w.export.clone()));
-        let expect = expected(&shown, &fs::read_to_string(&file).unwrap());
-        assert_eq!(expect.len(), 4, "{:?}", expect);
-        let model = |function: &str| match function {
-            "narrow" => "((p.d 6))",
-            "always" => "",
-            _ => "((p.d 0))",
-        };
-        let mut queries: Vec<PathBuf> = fs::read_dir(out.join(below(Path::new(""), &file)))
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .collect();
         queries.sort();
         let listed: Vec<String> = queries.iter().map(|q| q.display().to_string()).collect();
         let line = |answer: &str, q: &str| format!("{}\t{}\n", answer, q);
         let mut answers = String::new();
-        let mut wrong = String::new();
         for (q, path) in queries.iter().zip(&listed) {
-            let h = mente_smt::header(&fs::read_to_string(q).unwrap()).unwrap();
-            if expect
-                .iter()
-                .any(|(_, f, o)| *f == h.function && *o == h.obligation)
-            {
-                answers.push_str(&line(&format!("sat {}", model(&h.function)), path));
-                if h.function == "rem" {
-                    wrong.push_str(&line("sat ((p.d 1))", path));
-                }
+            if *q == rem {
+                answers.push_str(&line("sat ((p.d 0))", path));
+            } else if *q == narrow {
+                answers.push_str(&line("sat ((p.d 6))", path));
             } else {
                 answers.push_str(&line("unsat (error \"model is not available\")", path));
             }
         }
+        let wrong = line("sat ((p.d 1))", &rem.display().to_string());
         let gate = Gate {
             expect: expect.clone(),
             queries: Some(listed.clone()),
         };
         let c = confirm(&answers, &gate);
-        assert!(c.passes() && c.known.len() == 4, "{:#?}", c);
+        assert!(c.passes() && c.known.len() == 2, "{:#?}", c);
         assert!(
-            c.unsat + 4 == queries.len() && c.undecided.is_empty(),
+            c.unsat + 2 == queries.len() && c.undecided.is_empty(),
             "{:#?}",
             c
         );
         let reported = c.known.join("\n");
         for part in [
-            "the obligation `divisor at 24:23` of `rem`, and rem(0) stops: trap[division-by-zero] at 24:19",
-            "the obligation `range at 51:14 into `u8`` of `always`, and always() stops: trap[narrowing] at 51:14",
-            "the obligation `range at 43:24 into `u8`` of `narrow`, and narrow(6) stops: trap[narrowing] at 43:24",
-            "the obligation `divisor at 33:15` of `guarded`, and guarded(0)",
+            "the obligation `divisor at 4:31` of `rem`, and rem(0) stops: trap[division-by-zero] at 4:27",
+            "the obligation `range at 5:30 into `u8`` of `narrow`, and narrow(6) stops: trap[narrowing] at 5:30",
         ] {
             assert!(reported.contains(part), "{} not in:\n{}", part, reported);
         }
         // Not known, each is a soundness bug that fails the job; so is one known by another
         // obligation, or in another file, which is then missing too.
         let c = confirm(&answers, &Gate::default());
-        assert_eq!((c.confirmed.len(), c.passes()), (4, false), "{:#?}", c);
+        assert_eq!((c.confirmed.len(), c.passes()), (2, false), "{:#?}", c);
         let elsewhere: Vec<Bug> = expect
             .iter()
             .enumerate()
@@ -2252,7 +2240,7 @@ mod tests {
         );
         assert_eq!(
             (c.known.len(), c.confirmed.len(), c.missing.len()),
-            (0, 4, 4),
+            (0, 2, 2),
             "{:#?}",
             c
         );
@@ -2261,7 +2249,7 @@ mod tests {
         let c = confirm(&format!("{}timeout\tsomewhere.smt2\n", wrong), &gate);
         assert_eq!(
             (c.unconfirmed.len(), c.missing.len(), c.undecided.len()),
-            (1, 4, 1),
+            (1, 2, 1),
             "{:#?}",
             c
         );
@@ -2302,7 +2290,7 @@ mod tests {
             "{:#?}",
             c
         );
-        let _ = fs::remove_dir_all(&out);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A trap tells its obligation by its tag where it carries enough to: a narrowing by the type it
@@ -2940,9 +2928,10 @@ mod tests {
         assert!(encodes(&dir).unwrap_err().starts_with("cannot read `"));
     }
 
-    /// The checks `tests/smt-known` names as lying past the bounds are erased by Tier 1, fail on
-    /// some input, and have no query, the encoding naming them cut off by the bound: the known
-    /// limit of K, which the comparison with the base holds to the base's.
+    /// The checks `tests/smt-known` names as lying past the bounds are erased by Tier 1 and have
+    /// no query, the encoding naming them cut off by the bound, never unreachable: the known limit
+    /// of K, which the comparison with the base holds to the base's. No input fails such a check
+    /// where Tier 1 is sound, and none of the paths the encoding follows reaches it.
     #[test]
     fn test_a_check_past_the_bound_is_named_cut_off_not_unreachable() {
         let file =
@@ -2961,17 +2950,9 @@ mod tests {
                 .into_iter()
                 .find(|g| enc.sites[g[0]].obligation() == *obligation)
                 .unwrap_or_else(|| panic!("{} erases no `{}`", function, obligation));
-            let trap = enc.sites[group[0]].trap;
+            assert!(group.iter().all(|&k| enc.sites[k].beyond_bound));
             assert_eq!(unqueried(&enc, &group), Unqueried::BeyondBound);
             assert_eq!(enc.query(&group), None);
-            // An input past the bound fails the check.
-            let fails = generated(&enc).into_iter().any(|args| {
-                matches!(
-                    mente_interp::call(&checked, function, args, Limits::default()),
-                    Err(Stop::Trap(t)) if t.kind.name() == trap.kind && t.span == trap.span
-                )
-            });
-            assert!(fails, "no input of `{}` fails `{}`", function, obligation);
         }
         // A check no path reaches, with none cut off, is unreachable.
         let src =
@@ -3235,6 +3216,52 @@ pub fn outer(x: u8) -> u8 = inner(x)
             w
         );
         assert_eq!((w.files, w.unchecked), (5, 1));
+        // Every check Tier 1 erases in a file that checks is exported once, in Tier 1's order,
+        // with a class for each of its traps, each query naming its check; and a file that does
+        // not check is exported as one.
+        for file in [&bound, &lacked, &lost, &safe] {
+            let shown = file.display().to_string();
+            let source = fs::read_to_string(file).unwrap();
+            assert_eq!(
+                w.export.files.get(&shown),
+                Some(&Program {
+                    hash: text_hash(&source),
+                    checks: true
+                })
+            );
+            let checked = mente_sema::check_program(&source).unwrap();
+            let erased_keys: Vec<(String, String)> = checked
+                .functions
+                .iter()
+                .flatten()
+                .flat_map(|cf| {
+                    erased(&cf.obligations)
+                        .into_iter()
+                        .map(|k| (cf.syntax.name.clone(), mente_smt::obligation_text(k)))
+                })
+                .collect();
+            let exported: Vec<(String, String)> = w
+                .export
+                .of(&shown)
+                .iter()
+                .map(|e| (e.function.clone(), e.obligation.clone()))
+                .collect();
+            assert_eq!(exported, erased_keys, "{}", shown);
+        }
+        let unchecked = dir.join("unchecked.mn").display().to_string();
+        assert_eq!(
+            w.export.files.get(&unchecked).map(|p| p.checks),
+            Some(false)
+        );
+        for e in &w.export.checks {
+            assert!(!e.classes.is_empty());
+            assert_eq!(e.hash, w.export.files[&e.file].hash);
+            for path in e.queries() {
+                let h = mente_smt::header(&fs::read_to_string(path).unwrap()).unwrap();
+                assert_eq!((&h.function, &h.obligation), (&e.function, &e.obligation));
+            }
+        }
+        assert_eq!(Export::read(&w.export.text()), Ok(w.export.clone()));
         // Each place of a construct the encoding lacks is counted, and each obligation of the
         // function whose sites were lost.
         let mut unencoded = 0;
