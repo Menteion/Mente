@@ -5,14 +5,14 @@ type: chore
 awaits: [docs/design-review.md#records-one-per-file]
 affectedFiles: [compiler/mente-cli/tests/mutants/**, compiler/mente-cli/src/mir_mutants.rs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, spec/mir-and-codegen.md, briefs/equivalent-mutants-one-per-file.md, briefs/archive/equivalent-mutants-one-per-file.md]
 protectedFiles: [.github/**, CLAUDE.md]
-integrity: sha256-2d3f47a7fd726b5cda6c9ba897581842035a39b987e3e07e84fff63cb976b62e
+integrity: sha256-cc3bb8f8abe4d4945510e43456828d2fe9d0bd4d4564604b8bbb1816f3301cf0
 ---
 
 <!-- spec-brief:banner -->
 > **Archived 2026-11-21.**
 > Each equivalent mutant of the MIR gate is a file of its own, keyed by one function that every valid name passes and no two names share, beside the reasoning of its group, stated once; the gate refuses a record of a program it does not run.
 > Merged in pull request [#178](https://github.com/Menteion/Mente/pull/178).
-> Recorded at commit `4a7ed00`.
+> Recorded at commit `8b729ec`.
 > The body below describes the tree before execution and is not maintained.
 <!-- /spec-brief:banner -->
 
