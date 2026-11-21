@@ -1298,6 +1298,17 @@ impl Gen {
             out.push_str(&text);
             functions.push((format!("f{}", k), start..out.len()));
         }
+        // Now and then arrays that meet in one shape, from a random source of its own too, before
+        // the recursion, which ends a program, and named past its two functions
+        // (`meeting_arrays`).
+        let mut rng = stream(self.seed, count, 1);
+        if rng.chance(MEETING_CHANCE) {
+            let (name, text) = meeting_arrays(&mut rng, count + 2);
+            out.push('\n');
+            let start = out.len();
+            out.push_str(&text);
+            functions.push((name, start..out.len()));
+        }
         // Now and then a recursion the stack budget ends, from a random source of its own, so
         // that the functions above stay as they are (`deep_recursion`).
         let mut rng = stream(self.seed, count, 0);
@@ -5679,6 +5690,118 @@ fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
     ]
 }
 
+/// How often, in a hundred, a program also holds a function of arrays that meet in one shape
+/// ([`meeting_arrays`]).
+const MEETING_CHANCE: u64 = 20;
+
+/// A public function `f{k}` whose arrays meet in one machine shape where two become one value,
+/// from a random source of its own, so that the functions before it stay as they are: branches or
+/// arms that give arrays of different element types, an `if` the checker types narrower than the
+/// literal it holds, a row read from a literal of integers of no one type, and an element of one
+/// inside another (`core-calculus.md`, item 4). MIR once built such an array in one shape and read
+/// it in another (the nightly triage's root causes 2 and 11, and the review of PR 189); the MIR
+/// verifier now refuses any access of another shape (`cfg::check_memory`).
+fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
+    let name = format!("f{}", k);
+    let small = ["u8", "i8", "u16", "i16", "u32", "i32"];
+    let signed = ["i8", "i16", "i32", "i64"];
+    // A literal every type above holds, negative only for a signed one.
+    let literal = |t: &str, rng: &mut Rng| -> String {
+        let n = rng.below(101);
+        if t.starts_with('i') && rng.chance(40) {
+            format!("-{}", n.max(1))
+        } else {
+            n.to_string()
+        }
+    };
+    let roll = rng.below(4);
+    let text = if roll == 0 {
+        // Branches, or arms, of arrays of two element types, landing in a wider one.
+        let a = *rng.pick(&small);
+        let mut b = *rng.pick(&small);
+        if b == a {
+            b = "i64";
+        }
+        let (la, lb) = (literal(a, rng), literal(b, rng));
+        if rng.chance(50) {
+            format!(
+                "pub fn {}(c: bool, x: {}, y: {}) -> [2]i64 = if c {{ [x, {}_{}] }} else {{ [y, {}_{}] }}\n",
+                name, a, b, la, a, lb, b
+            )
+        } else {
+            let rest = rng.below(1001);
+            format!(
+                "pub fn {}(k: u8, x: {}, y: {}) -> [2]i64 = match k {{\n  0 => [x, {}_{}]\n  1 => [y, {}_{}]\n  _ => [{}; 2]\n}}\n",
+                name, a, b, la, a, lb, b, rest
+            )
+        }
+    } else if roll == 1 {
+        // An `if` of a `[n]u8` to the checker whose literal holds more, until it lands; its
+        // `[x; n]` half the time a binding its block gives by name (the review of PR 183).
+        let n = 1 + rng.below(4);
+        let wide = *rng.pick(&["u16", "u32", "i32", "i64"]);
+        let held = 256 + rng.below(745);
+        let bytes = if rng.chance(50) {
+            format!("{{\n    val t: [{}]u8 = [x; {}]\n    t\n  }}", n, n)
+        } else {
+            format!("{{ [x; {}] }}", n)
+        };
+        format!(
+            "pub fn {}(c: bool, x: u8) -> {} {{\n  val a: [{}]{} = if c {} else {{ [{}; {}] }}\n  a[{}]\n}}\n",
+            name,
+            wide,
+            n,
+            wide,
+            bytes,
+            held,
+            n,
+            n - 1
+        )
+    } else {
+        // A literal of a signed type beside a `u128` keeps its integers exact: a row of it read
+        // by index, or an element of it inside another literal.
+        let s = *rng.pick(&signed);
+        let negative = rng.chance(50);
+        let (first, result) = if negative {
+            (format!("-{}", 1 + rng.below(100)), "i128")
+        } else {
+            (rng.below(101).to_string(), "u128")
+        };
+        // Values a `u128` holds, and an `i128` too beside a negative one.
+        let big = |rng: &mut Rng| -> u128 {
+            if negative {
+                rng.u128() >> 28
+            } else {
+                rng.u128()
+            }
+        };
+        let (wide, wider) = (big(rng), big(rng));
+        if roll == 2 {
+            format!(
+                "pub fn {}(k: bool) -> [2]{} = [[{}_{}, {}], [{}_u128, {}]][if k {{ 1 }} else {{ 0 }}]\n",
+                name,
+                result,
+                first,
+                s,
+                rng.below(101),
+                wide,
+                wider
+            )
+        } else {
+            format!(
+                "pub fn {}(k: bool) -> [2]{} = [[{}_{}, {}_u128][if k {{ 1 }} else {{ 0 }}], {}_i8]\n",
+                name,
+                result,
+                first,
+                s,
+                wide,
+                rng.below(101)
+            )
+        }
+    };
+    (name, text)
+}
+
 fn field_text(f: &GField) -> String {
     let range = |r: R| match (f.exclusive, r.hi.add(Num::small(1))) {
         (true, Some(end)) => format!("[{}..{}]", r.lo, end),
@@ -7521,6 +7644,97 @@ mod tests {
             problems[0]
         );
     }
+
+    /// `meeting_arrays` writes each of its forms, every one of which checks: branches of arrays of
+    /// two element types, as an `if` and as a `match`, an `if` of a `[n]u8` holding a literal past
+    /// `u8`, a row of an exact literal read by index, and an element of one inside another. The
+    /// first functions are pinned, so that a change to a choice shows. In a program the function
+    /// lies before the recursion, which ends a program, named past the recursion's two.
+    #[test]
+    fn test_arrays_that_meet_in_one_shape_are_generated() {
+        let texts: Vec<String> = (0..200)
+            .map(|s| {
+                let (name, text) = meeting_arrays(&mut Rng::new(s), 3);
+                assert_eq!(name, "f3");
+                text
+            })
+            .collect();
+        for (s, text) in texts.iter().enumerate() {
+            assert!(text.starts_with("pub fn f3("), "{}: {}", s, text);
+            let source = format!("module m\n{}", text);
+            assert!(
+                mente_sema::check_program(&source).is_ok(),
+                "{}: {}",
+                s,
+                text
+            );
+            // Branches of two element types.
+            if let Some(rest) = text.split_once(", x: ").map(|(_, r)| r) {
+                let (a, rest) = rest.split_once(", y: ").unwrap_or((rest, ""));
+                let b = rest.split(')').next().unwrap_or("");
+                if !b.is_empty() {
+                    assert_ne!(a, b, "{}: {}", s, text);
+                }
+            }
+        }
+        for form in [
+            " = if c { [x, ",
+            " = match k {",
+            "{ [x; ",
+            "    t\n  } else { [",
+            "]][if k { 1 } else { 0 }]",
+            "_u128][if k { 1 } else { 0 }], ",
+        ] {
+            assert!(texts.iter().any(|t| t.contains(form)), "no `{}`", form);
+        }
+        assert_eq!(
+            texts[..PINNED.len()],
+            PINNED,
+            "{:#?}",
+            &texts[..PINNED.len()]
+        );
+        // In a program, before the recursion, named past it, and followed only by the recursion and
+        // the functions the loops' conjuncts call, which end a program.
+        let mut seen = 0;
+        for seed in 0..300 {
+            let p = program(seed);
+            for (k, (name, at)) in p.functions.iter().enumerate() {
+                let text = &p.text[at.clone()];
+                let meeting = text.contains("]][if k { 1 } else { 0 }]")
+                    || text.contains("_u128][if k { 1 } else { 0 }], ")
+                    || (text.contains("(c: bool, x: ") && text.contains(", y: "))
+                    || text.contains("(k: u8, x: ")
+                    || text.contains("(c: bool, x: u8) -> ");
+                if !meeting {
+                    continue;
+                }
+                seen += 1;
+                assert_eq!(*name, format!("f{}", k + 2), "seed {}", seed);
+                assert!(
+                    p.functions[k + 1..]
+                        .iter()
+                        .all(|(name, at)| name.starts_with("pin")
+                            || p.text[at.clone()].contains("4294967295")
+                            || p.text[at.clone()].contains("(n: u32")),
+                    "seed {}: only the recursion and the loops' functions follow",
+                    seed
+                );
+            }
+        }
+        assert!(seen >= 30, "{} programs hold arrays that meet", seen);
+    }
+
+    /// The first functions of `meeting_arrays`, from random sources 0 and on.
+    const PINNED: [&str; 8] = [
+        "pub fn f3(c: bool, x: i8, y: u32) -> [2]i64 = if c { [x, 14_i8] } else { [y, 73_u32] }\n",
+        "pub fn f3(k: bool) -> [2]i128 = [[-62_i32, 967083533817693959653399905997_u128][if k { 1 } else { 0 }], 16_i8]\n",
+        "pub fn f3(k: bool) -> [2]i128 = [[-50_i64, 33], [439395929139861948437874669498_u128, 936904490330284766988950014917]][if k { 1 } else { 0 }]\n",
+        "pub fn f3(c: bool, x: u8) -> i64 {\n  val a: [2]i64 = if c {\n    val t: [2]u8 = [x; 2]\n    t\n  } else { [562; 2] }\n  a[1]\n}\n",
+        "pub fn f3(k: u8, x: i16, y: u8) -> [2]i64 = match k {\n  0 => [x, 3_i16]\n  1 => [y, 47_u8]\n  _ => [98; 2]\n}\n",
+        "pub fn f3(k: u8, x: i32, y: i64) -> [2]i64 = match k {\n  0 => [x, -15_i32]\n  1 => [y, -36_i64]\n  _ => [615; 2]\n}\n",
+        "pub fn f3(c: bool, x: u8) -> u16 {\n  val a: [3]u16 = if c { [x; 3] } else { [353; 3] }\n  a[2]\n}\n",
+        "pub fn f3(k: u8, x: u8, y: i16) -> [2]i64 = match k {\n  0 => [x, 25_u8]\n  1 => [y, 64_i16]\n  _ => [475; 2]\n}\n",
+    ];
 
     /// Beside integers no standard type holds, a literal compared is a plain value, compared
     /// exactly, never literals under a bit operation, which take no type there (`E0212`);
