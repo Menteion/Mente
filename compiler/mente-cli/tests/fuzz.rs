@@ -354,7 +354,7 @@ fn test_fuzz_replay_goes_on_past_a_bad_record() {
         (run.status.code(), text(&run.stdout))
     };
     let (code, printed) = replay("mn fuzz found\nedit seed: -1\n");
-    assert_eq!(code, Some(3), "{}", printed);
+    assert_eq!(code, Some(5), "{}", printed);
     assert!(
         printed.contains("a.mn: panic in planted: a planted panic on edit seed 4242424242"),
         "{}",
@@ -374,7 +374,7 @@ fn test_fuzz_replay_goes_on_past_a_bad_record() {
     // A bad record alone, and a failure alone.
     fs::remove_file(seeds.join("a.found")).unwrap();
     let (code, printed) = replay("mn fuzz found\nphase: planted\n");
-    assert_eq!(code, Some(2), "{}", printed);
+    assert_eq!(code, Some(4), "{}", printed);
     assert!(
         printed.contains("b.found: no `edit seed:` field"),
         "{}",
@@ -492,38 +492,16 @@ fn replay(files: &[PathBuf]) {
     );
 }
 
-/// Every minimized crash in `tests/fuzz` whose fix has landed replays without a failure. A
-/// regression of the incremental phase, whose failure depends on the edit it was found with,
-/// carries its record, `<name>.found`, which names that edit seed, or `unknown` where it was
-/// lost; any other file there is a regression or a record of one.
+/// Every minimized crash in `tests/fuzz` whose fix has landed replays without a failure, each
+/// on the edits its record gives. Which regressions need a record, and which file is a
+/// regression's record, the replay's own functions decide, in the unit test
+/// `test_every_regression_of_a_phase_that_edits_carries_its_record` of `src/fuzz.rs`.
 #[test]
 fn test_fuzz_regressions_replay_without_a_failure() {
     let mut files = Vec::new();
     for entry in fs::read_dir(regressions()).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(stem) = name.strip_suffix(".found") {
-            assert!(
-                regressions().join(format!("{}.mn", stem)).is_file(),
-                "{} is the record of no regression: remove it, or add the regression it records",
-                name
-            );
-            continue;
-        }
-        assert!(
-            name.ends_with(".mn"),
-            "{} is neither a regression, a .mn file, nor the record of one, a .found file",
-            name
-        );
-        if name.starts_with("incremental-") {
-            let record = format!("{}.found", name.trim_end_matches(".mn"));
-            assert!(
-                regressions().join(&record).is_file(),
-                "{} has no record: write {} as mn fuzz wrote it, with the edit seed the failure was found with, or `edit seed: unknown` where it is lost",
-                name,
-                record
-            );
-        }
-        if !PENDING.contains(&name.as_str()) {
+        if name.ends_with(".mn") && !PENDING.contains(&name.as_str()) {
             files.push(entry.path());
         }
     }

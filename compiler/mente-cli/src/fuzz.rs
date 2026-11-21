@@ -1105,9 +1105,9 @@ impl Phases {
         if let Some(diagnostics) = &diagnostics {
             run.phase("render", || render(src, diagnostics));
             let disagreement = run
-                .phase("incremental", || incremental(src, edit, diagnostics))
+                .phase(EDITED_PHASE, || incremental(src, edit, diagnostics))
                 .flatten();
-            run.report("incremental", Kind::Disagrees, disagreement);
+            run.report(EDITED_PHASE, Kind::Disagrees, disagreement);
         }
         if run.thorough {
             run.stable("dump-typed", || mente_sema::dump_typed(src));
@@ -2351,17 +2351,40 @@ fn slug(failure: &Failure) -> String {
     for b in failure.key().bytes() {
         hash = (hash ^ u32::from(b)).wrapping_mul(0x0100_0193);
     }
-    let phase: String = failure
-        .phase
+    format!(
+        "{}-{}-{:08x}",
+        slug_phase(&failure.phase),
+        failure.kind.name(),
+        hash
+    )
+}
+
+/// A phase as a failure's name begins with it ([`slug`]): each character that is not a letter or
+/// a digit written as `-`.
+fn slug_phase(phase: &str) -> String {
+    phase
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    format!("{}-{}-{:08x}", phase, failure.kind.name(), hash)
+        .collect()
+}
+
+/// The phase whose failures depend on the edit seed: it edits its input by that seed, so a
+/// failure of it replays only on the seed its record names.
+const EDITED_PHASE: &str = "incremental";
+
+/// Whether a failure of `phase` needs its record to replay: one of a phase that edits its input
+/// by the edit seed.
+fn needs_record(phase: &str) -> bool {
+    phase == EDITED_PHASE
 }
 
 /// The extension of a failure's record, `<name>.found` beside `<name>.mn` and
 /// `<name>.orig.mn`: a name no other file of a corpus or a campaign's output takes.
 const RECORD: &str = "found";
+
+/// The field of a record that names its failure's phase. Records began with it when mn fuzz
+/// wrote them as `<name>.txt`, before they were named `<name>.found`.
+const PHASE_FIELD: &str = "phase:";
 
 /// A record's first line, which tells it from any other text.
 const RECORD_HEAD: &str = "mn fuzz found";
@@ -2386,30 +2409,44 @@ fn is_commit(text: &str) -> bool {
     text.len() == 40 && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The commit the compiler was built from, as far as this process can tell ([`commit_of`]):
-/// the runner's `GITHUB_SHA`, or the commit git names in the directory of the running `mn`.
-fn compiler_commit() -> String {
+/// The checkout that holds the running `mn`, as git names it at run time: its HEAD
+/// ([`head_of`]) and whether its tracked files differ from it ([`dirty_of`]). This is not
+/// necessarily the commit `mn` was built from, which a build without a build script cannot
+/// record, and a record says so in its field's name.
+fn checkout() -> (String, &'static str) {
     let dir = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf));
-    let git = dir.and_then(|d| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(d)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .map(|o| (o.status.success(), o.stdout))
-    });
-    commit_of(std::env::var("GITHUB_SHA").ok(), git)
+    let git = |args: &[&str]| {
+        dir.as_ref().and_then(|d| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(args)
+                .output()
+                .ok()
+                .map(|o| (o.status.success(), o.stdout))
+        })
+    };
+    (
+        head_of(git(&["rev-parse", "HEAD"])),
+        dirty_of(git(&["status", "--porcelain", "--untracked-files=no"])),
+    )
 }
 
-/// The first of `github_sha` and git's output, when git succeeded, that names a commit
-/// ([`is_commit`]); [`UNKNOWN`] when neither does.
-fn commit_of(github_sha: Option<String>, git: Option<(bool, Vec<u8>)>) -> String {
-    if let Some(sha) = github_sha.filter(|s| is_commit(s)) {
-        return sha;
+/// Whether git's `status --porcelain`, when it succeeded, names a tracked file that differs from
+/// HEAD: `yes` or `no`; [`UNKNOWN`] when git could not tell.
+fn dirty_of(status: Option<(bool, Vec<u8>)>) -> &'static str {
+    match status {
+        Some((true, out)) if out.iter().all(u8::is_ascii_whitespace) => "no",
+        Some((true, _)) => "yes",
+        _ => UNKNOWN,
     }
+}
+
+/// The commit git's `rev-parse HEAD` printed, when it succeeded and printed one
+/// ([`is_commit`]); [`UNKNOWN`] otherwise.
+fn head_of(git: Option<(bool, Vec<u8>)>) -> String {
     match git {
         Some((true, out)) => {
             let sha = String::from_utf8_lossy(&out).trim().to_string();
@@ -2423,13 +2460,29 @@ fn commit_of(github_sha: Option<String>, git: Option<(bool, Vec<u8>)>) -> String
     }
 }
 
+/// The flags a replay of a failure needs beside its file: `--phase-seconds` and `--stack-kib`
+/// where the campaign that found it set them otherwise than by default.
+fn replay_flags(phases: &Phases) -> String {
+    let mut flags = String::new();
+    if phases.budget != Duration::from_secs(PHASE_SECONDS) {
+        flags.push_str(&format!(" --phase-seconds {}", phases.budget.as_secs()));
+    }
+    if phases.stack != STACK_BYTES {
+        flags.push_str(&format!(" --stack-kib {}", phases.stack >> 10));
+    }
+    flags
+}
+
 /// A failure's record, as [`write_found`] writes it: its fixed fields one a line, the key and
-/// the message escaped onto one line each and last, so that no message can add a field.
-fn record(opts: &Options, found: &Found, name: &str, commit: &str) -> String {
+/// the message escaped onto one line each and last, so that no message can add a field. The
+/// checkout is the one holding `mn` when it ran ([`checkout`]): its HEAD, and whether it was
+/// dirty.
+fn record(opts: &Options, found: &Found, name: &str, checkout: &(String, &str)) -> String {
     let f = &found.failure;
     format!(
-        "{}\nphase: {}\nkind: {}\n{} {}\nfound by: mn fuzz --seed {} --jobs {} --phase-seconds {} --stack-kib {}, job {}, run {}\ncompiler: {}\ninput: {} bytes, minimized to {} bytes\nreplay: mn fuzz --replay {}.mn\nkey: {}\nmessage: {}\n",
+        "{}\n{} {}\nkind: {}\n{} {}\nfound by: mn fuzz --seed {} --jobs {} --phase-seconds {} --stack-kib {}, job {}, run {}\ncheckout HEAD at run time: {}\ncheckout dirty at run time: {}\ninput: {} bytes, minimized to {} bytes\nreplay: mn fuzz --replay {}.mn{}\nkey: {}\nmessage: {}\n",
         RECORD_HEAD,
+        PHASE_FIELD,
         f.phase,
         f.kind.name(),
         EDIT_SEED,
@@ -2440,10 +2493,12 @@ fn record(opts: &Options, found: &Found, name: &str, commit: &str) -> String {
         opts.phases.stack >> 10,
         found.job,
         found.run,
-        commit,
+        checkout.0,
+        checkout.1,
         found.original.len(),
         found.minimized.len(),
         name,
+        replay_flags(&opts.phases),
         escaped(&f.key()),
         escaped(&f.message)
     )
@@ -2453,7 +2508,7 @@ fn record(opts: &Options, found: &Found, name: &str, commit: &str) -> String {
 fn write_found(out: &Path, opts: &Options, found: &Found) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {}", out.display(), e))?;
     let name = slug(&found.failure);
-    let about = record(opts, found, &name, &compiler_commit());
+    let about = record(opts, found, &name, &checkout());
     let write = |file: String, text: &str| {
         let path = out.join(file);
         std::fs::write(&path, text).map_err(|e| format!("{}: {}", path.display(), e))
@@ -2559,7 +2614,10 @@ pub fn parse_args(args: &[String]) -> Result<Request, String> {
     Ok(request)
 }
 
-/// `mn fuzz`: returns the exit status, 1 when a failure was found, 2 on a usage error.
+/// `mn fuzz`: returns the exit status. A campaign exits 0 when it found no failure and 1 when it
+/// found one. `--replay` exits 0 when every file replays clean, 1 when one fails, 4 when a
+/// record is bad and 5 when both ([`replay_status`]). Either exits 2 on a usage error, with no
+/// seed or file, or when the `mn` executable or a worker cannot run.
 pub fn main(args: &[String]) -> i32 {
     let request = match parse_args(args) {
         Ok(r) => r,
@@ -2683,17 +2741,47 @@ enum Recorded {
     Unknown,
 }
 
-/// The record of the input at `path`, `<name>.found` beside `<name>.mn` or `<name>.orig.mn`.
-fn record_of(path: &Path) -> PathBuf {
+/// The name of the failure whose input lies at `path`: `<name>` of `<name>.mn` or
+/// `<name>.orig.mn`.
+fn failure_name(path: &Path) -> String {
     let file = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let name = file
-        .strip_suffix(".orig.mn")
+    file.strip_suffix(".orig.mn")
         .or_else(|| file.strip_suffix(".mn"))
-        .unwrap_or(&file);
-    path.with_file_name(format!("{}.{}", name, RECORD))
+        .unwrap_or(&file)
+        .to_string()
+}
+
+/// The record of the input at `path`, `<name>.found` beside `<name>.mn` or `<name>.orig.mn`:
+/// the one place a record is found, for the replay and for the regressions' test alike.
+fn record_of(path: &Path) -> PathBuf {
+    path.with_file_name(format!("{}.{}", failure_name(path), RECORD))
+}
+
+/// A record beside the input at `path` from before records were named `.found`: `<name>.txt`
+/// whose first line is its phase, as those records began ([`PHASE_FIELD`]).
+fn legacy_record_of(path: &Path) -> Option<PathBuf> {
+    let old = path.with_file_name(format!("{}.txt", failure_name(path)));
+    let text = std::fs::read_to_string(&old).ok()?;
+    text.starts_with(PHASE_FIELD).then_some(old)
+}
+
+/// The phase a failure's input names: its record's `phase:` where it has a record, which mn
+/// fuzz writes with every failure; or, for an input with none, the phase its name begins with as
+/// [`slug`] writes it, where that is [`EDITED_PHASE`]. A record decides over a name.
+fn phase_of(path: &Path) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(record_of(path)) {
+        return text
+            .lines()
+            .find_map(|l| l.strip_prefix(PHASE_FIELD))
+            .map(|p| p.trim().to_string());
+    }
+    let edited = format!("{}-", slug_phase(EDITED_PHASE));
+    failure_name(path)
+        .starts_with(&edited)
+        .then(|| EDITED_PHASE.to_string())
 }
 
 /// What the record `text` of the file `shown` says of its edits, read strictly: its first line
@@ -2755,7 +2843,9 @@ fn replay_edits(path: &Path) -> Result<Option<Recorded>, String> {
 }
 
 /// The edits a file replays on: its record's seed alone, or the edits 0 to 3; and the line that
-/// says why, where its record decides.
+/// says why, where its record decides; or a warning, where a record from before records were
+/// named `.found` lies beside it unread ([`legacy_record_of`]), or where its phase edits its
+/// input by the seed and it has no record ([`phase_of`], [`needs_record`]).
 fn edits_of(path: &Path) -> Result<(Vec<u64>, Option<String>), String> {
     Ok(match replay_edits(path)? {
         Some(Recorded::Seed(edit)) => (
@@ -2773,15 +2863,49 @@ fn edits_of(path: &Path) -> Result<(Vec<u64>, Option<String>), String> {
                 path.display()
             )),
         ),
-        None => ((0..4).collect(), None),
+        None => (
+            (0..4).collect(),
+            legacy_record_of(path)
+                .map(|old| {
+                    format!(
+                        "warning: {}: {} beside it is a record from before records were named `.{}`, and is not read; rename it to {} to replay on its edit seed, not on the edits 0 to 3",
+                        path.display(),
+                        old.display(),
+                        RECORD,
+                        record_of(path).display()
+                    )
+                })
+                .or_else(|| {
+                    phase_of(path).filter(|p| needs_record(p)).map(|p| {
+                        format!(
+                            "warning: {}: a failure of the {} phase, which edits its input by the seed, with no record: it is replayed on the edits 0 to 3, and its own seed may be another; keep {} as mn fuzz wrote it",
+                            path.display(),
+                            p,
+                            record_of(path).display()
+                        )
+                    })
+                }),
+        ),
     })
+}
+
+/// What `mn fuzz --replay` exits with: 0 when every file replays clean, 1 when one fails, 4 when
+/// a record is bad, and 5 when both; 2, a usage error or a worker that could not run, is
+/// returned before.
+fn replay_status(failed: bool, bad: bool) -> i32 {
+    match (failed, bad) {
+        (false, false) => 0,
+        (true, false) => 1,
+        (false, true) => 4,
+        (true, true) => 5,
+    }
 }
 
 /// Runs each file under `paths` through every phase and prints each failure: a found failure on
 /// the edit seed its record gives ([`edits_of`]), any other file with the edits 0 to 3. A file
 /// that hangs is not run again with the next edit, which would only hang too. A bad record is
-/// reported and its file left out, and the rest replay. Exits 1 when a file fails, 2 when a
-/// record is bad, and 3 when both.
+/// reported and its file left out, and the rest replay. Exits as [`replay_status`] says, and 2
+/// with no file or a worker that cannot run.
 fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
     let files = seed_corpus(paths);
     if files.is_empty() {
@@ -2845,12 +2969,7 @@ fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
         failed,
         bad
     );
-    match (failed > 0, bad > 0) {
-        (false, false) => 0,
-        (true, false) => 1,
-        (false, true) => 2,
-        (true, true) => 3,
-    }
+    replay_status(failed > 0, bad > 0)
 }
 
 #[cfg(test)]
@@ -3782,14 +3901,36 @@ mod tests {
             "{}",
             text
         );
-        assert!(lines[5].starts_with("compiler: "), "{}", text);
+        assert!(
+            lines[5].starts_with("checkout HEAD at run time: "),
+            "{}",
+            text
+        );
+        assert!(
+            ["yes", "no", UNKNOWN]
+                .iter()
+                .any(|d| lines[6] == format!("checkout dirty at run time: {}", d)),
+            "{}",
+            text
+        );
+        // The replay names the campaign's limits where they are not the defaults.
+        assert_eq!(
+            lines[8],
+            format!(
+                "replay: mn fuzz --replay {}.mn --phase-seconds 7 --stack-kib 512",
+                name
+            ),
+            "{}",
+            text
+        );
+        assert_eq!(replay_flags(&phases(None)), "");
         assert_eq!(
             *lines.last().unwrap(),
             r"message: a panic\nedit seed: 7\\n",
             "{}",
             text
         );
-        assert_eq!(lines.len(), 10, "{}", text);
+        assert_eq!(lines.len(), 11, "{}", text);
         assert!(!out.join(format!("{}.txt", name)).exists());
         for file in [format!("{}.mn", name), format!("{}.orig.mn", name)] {
             let (edits, why) = edits_of(&out.join(&file)).unwrap();
@@ -3798,7 +3939,28 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!(": replayed on its recorded edit seed {}", edit)));
         }
-        // A seed of a corpus has no record; a `.txt` beside a file is none.
+        // A record from before records were named `.found`, beside its input, is not read, and
+        // the replay warns, naming it and its new name.
+        std::fs::write(out.join("old.mn"), "module m\n").unwrap();
+        std::fs::write(
+            out.join("old.txt"),
+            "phase: incremental\nkind: panic\nedit seed: 9\n",
+        )
+        .unwrap();
+        let (edits, why) = edits_of(&out.join("old.mn")).unwrap();
+        assert_eq!(edits, vec![0, 1, 2, 3]);
+        let why = why.unwrap();
+        assert!(
+            why.starts_with("warning: ")
+                && why.contains(
+                    "old.txt beside it is a record from before records were named `.found`"
+                )
+                && why.contains("rename it to ")
+                && why.contains("old.found"),
+            "{}",
+            why
+        );
+        // A seed of a corpus has no record; a `.txt` beside a file that is no old record is none.
         std::fs::write(out.join("seed.mn"), "module m\n").unwrap();
         std::fs::write(out.join("seed.txt"), "mn fuzz found\nedit seed: 9\n").unwrap();
         assert_eq!(edits_of(&out.join("seed.mn")), Ok(((0..4).collect(), None)));
@@ -3861,47 +4023,141 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    /// A record names the commit the compiler was built from: the runner's `GITHUB_SHA` when it
-    /// is one, else what git printed when it succeeded and printed one, else `unknown`; and the
-    /// process names one or says it cannot.
+    /// A record names the checkout holding `mn` at run time, which is what this process can
+    /// tell: its HEAD, what git printed when it succeeded and printed a commit, else `unknown`;
+    /// and whether its tracked files differ, `yes` or `no` from git's porcelain status, else
+    /// `unknown`. The process names both or says it cannot.
     #[test]
-    fn test_a_record_names_the_compiler_commit_or_says_it_is_unknown() {
-        let a = "0123456789abcdef0123456789ABCDEF01234567".to_string();
-        let b = "fedcba9876543210fedcba9876543210fedcba98".to_string();
+    fn test_a_record_names_the_checkout_at_run_time_and_whether_it_is_dirty() {
+        let b = "fedcba9876543210fedcba9876543210FEDCBA98".to_string();
         let git = |ok: bool, out: &str| Some((ok, out.as_bytes().to_vec()));
-        assert_eq!(commit_of(Some(a.clone()), git(true, &b)), a);
-        for runner in [
-            None,
-            Some(a[..39].to_string()),
-            Some(format!("{}0", a)),
-            Some("z".repeat(40)),
-            Some(String::new()),
+        assert_eq!(head_of(git(true, &format!("{}\n", b))), b);
+        assert_eq!(head_of(git(false, &b)), UNKNOWN);
+        assert_eq!(head_of(None), UNKNOWN);
+        let a = "0123456789abcdef0123456789abcdef01234567";
+        for out in [
+            "fatal: not a git repository",
+            "",
+            &b[..39],
+            &format!("{}0", a),
+            &"g".repeat(40),
         ] {
-            assert_eq!(
-                commit_of(runner.clone(), git(true, &format!("{}\n", b))),
-                b,
-                "{:?}",
-                runner
+            assert_eq!(head_of(git(true, out)), UNKNOWN, "{}", out);
+        }
+        assert_eq!(dirty_of(git(true, "")), "no");
+        assert_eq!(dirty_of(git(true, "\n")), "no");
+        assert_eq!(
+            dirty_of(git(true, " M compiler/mente-cli/src/fuzz.rs\n")),
+            "yes"
+        );
+        assert_eq!(dirty_of(git(false, "")), UNKNOWN);
+        assert_eq!(dirty_of(None), UNKNOWN);
+        let (head, dirty) = checkout();
+        assert!(is_commit(&head) || head == UNKNOWN, "{}", head);
+        assert!(["yes", "no", UNKNOWN].contains(&dirty), "{}", dirty);
+        assert_eq!(head == UNKNOWN, dirty == UNKNOWN, "{} {}", head, dirty);
+    }
+
+    /// The replay exits 0, 1 for a failure, 4 for a bad record and 5 for both: a bad record's
+    /// code is its own, apart from a usage error's 2.
+    #[test]
+    fn test_the_replay_gives_a_bad_record_an_exit_code_of_its_own() {
+        assert_eq!(
+            [
+                replay_status(false, false),
+                replay_status(true, false),
+                replay_status(false, true),
+                replay_status(true, true)
+            ],
+            [0, 1, 4, 5]
+        );
+    }
+
+    /// Every regression whose phase edits its input by the seed carries its record, found where
+    /// the replay finds it ([`record_of`]); every record belongs to a regression; and a record's
+    /// phase decides over its file's name. The phase is a record's own `phase:`, or, for a file
+    /// with no record, the one its name begins with as mn fuzz names a failure.
+    #[test]
+    fn test_every_regression_of_a_phase_that_edits_carries_its_record() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fuzz");
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let inputs: Vec<PathBuf> = names
+            .iter()
+            .filter(|n| n.ends_with(".mn"))
+            .map(|n| dir.join(n))
+            .collect();
+        for name in &names {
+            assert!(
+                name.ends_with(".mn") || name.ends_with(&format!(".{}", RECORD)),
+                "{} is neither a regression, a .mn file, nor the record of one, a .{} file",
+                name,
+                RECORD
             );
-            assert_eq!(
-                commit_of(runner.clone(), git(false, &b)),
-                UNKNOWN,
-                "{:?}",
-                runner
-            );
-            assert_eq!(commit_of(runner.clone(), None), UNKNOWN, "{:?}", runner);
-            for out in ["fatal: not a git repository", "", &b[..39], &"g".repeat(40)] {
-                assert_eq!(
-                    commit_of(runner.clone(), git(true, out)),
-                    UNKNOWN,
-                    "{:?} {}",
-                    runner,
-                    out
+            if name.ends_with(&format!(".{}", RECORD)) {
+                assert!(
+                    inputs.iter().any(|i| record_of(i) == dir.join(name)),
+                    "{} is the record of no regression: remove it, or add the regression it records",
+                    name
                 );
             }
         }
-        let here = compiler_commit();
-        assert!(is_commit(&here) || here == UNKNOWN, "{}", here);
+        let mut edited = 0;
+        for input in &inputs {
+            if phase_of(input).is_some_and(|p| needs_record(&p)) {
+                edited += 1;
+                assert!(
+                    record_of(input).is_file(),
+                    "{} fails in a phase that edits its input by the seed, and has no record: write {} as mn fuzz wrote it, with the edit seed it was found with, or `edit seed: unknown` where it is lost",
+                    input.display(),
+                    record_of(input).display()
+                );
+            }
+        }
+        assert!(edited > 0);
+        // The rule reads the phase, not the name: a record decides, and a file with no record is
+        // placed by the phase its name begins with.
+        let scratch = std::env::temp_dir().join(format!("mente-fuzz-phase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let file = |name: &str, record: Option<&str>| {
+            let path = scratch.join(format!("{}.mn", name));
+            std::fs::write(&path, "module m\n").unwrap();
+            if let Some(text) = record {
+                std::fs::write(record_of(&path), text).unwrap();
+            }
+            path
+        };
+        let renamed = file(
+            "renamed-by-hand",
+            Some("mn fuzz found\nphase: incremental\nedit seed: 7\n"),
+        );
+        assert_eq!(phase_of(&renamed).as_deref(), Some(EDITED_PHASE));
+        let parsed = file(
+            "incremental-but-parsed",
+            Some("mn fuzz found\nphase: parse\nedit seed: 7\n"),
+        );
+        assert_eq!(phase_of(&parsed).as_deref(), Some("parse"));
+        let unrecorded = file("incremental-panic-0badf00d", None);
+        assert_eq!(phase_of(&unrecorded).as_deref(), Some(EDITED_PHASE));
+        // The replay warns of such a file, which it can replay on the edits 0 to 3 alone.
+        let (edits, why) = edits_of(&unrecorded).unwrap();
+        assert_eq!(edits, vec![0, 1, 2, 3]);
+        assert!(
+            why.as_deref().is_some_and(|w| w.starts_with("warning: ")
+                && w.contains(": a failure of the incremental phase, which edits its input by the seed, with no record")),
+            "{:?}",
+            why
+        );
+        assert_eq!(phase_of(&file("tier1-nested-loops", None)), None);
+        let orig = scratch.join("incremental-panic-0badf00d.orig.mn");
+        assert_eq!(record_of(&orig), record_of(&unrecorded));
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// A campaign without a number of runs goes on until its deadline, and no further.
