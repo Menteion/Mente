@@ -275,7 +275,7 @@ pub fn program(
             writer,
             &mut rt,
             (&ids, &lowered.module),
-            f,
+            (cfg::FuncId(i as u32), f),
             &mut ctx,
             &mut fctx,
             ptr,
@@ -703,7 +703,7 @@ impl Translate {
         writer: &mut ObjectWriter,
         rt: &mut Runtime,
         (ids, m): (&[ClFunc], &cfg::Module),
-        f: &cfg::Function,
+        (own, f): (cfg::FuncId, &cfg::Function),
         ctx: &mut Context,
         fctx: &mut FunctionBuilderContext,
         ptr: Type,
@@ -756,7 +756,7 @@ impl Translate {
         // first and traps, however little of the stack is in use (`core-calculus.md`, item 25),
         // as below. So its body is never built, and its slots, which may pass what a machine
         // frame can hold, are never made.
-        if f.frame > m.budget {
+        if m.runs_out(0, own) {
             b.ins().trap(TrapCode::STACK_OVERFLOW);
             b.seal_all_blocks();
             b.finalize(frontend);
@@ -2157,18 +2157,30 @@ pub fn huge(x: u8) -> u8 {
         }
     }
 
-    /// A function whose frame passes the budget is built on every target, though its slots pass
-    /// what a machine frame can hold: nothing reaches its body, since every call of it traps at
-    /// its count, as on MIR, one from outside at the function's name. A frame of the budget
-    /// itself is built whole. The fuzzer found Cranelift refusing a 4 GiB slot (2026-11-22).
+    /// A function whose frame passes the budget is built on every target with no body, since
+    /// every call of it traps at its count, as on MIR: one inside the program at the call, whose
+    /// trap native code now reports, and one from outside at the function's name. A frame of the
+    /// budget itself is built whole and is not refused. The fuzzer found Cranelift refusing the
+    /// 4 GiB slot of such a body (2026-11-22); here a 2 MB array passes the budget, and the
+    /// conformance program holds the 4 GiB one, on CI.
     #[test]
     fn test_a_function_past_the_budget_is_built_and_traps_at_its_call() {
-        let source =
-            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                "../../conformance/core-calculus/a_frame_past_the_budget_traps_at_its_call.mn",
-            ))
-            .unwrap();
-        let module = mente_sema::check_program_without_proofs(&source).unwrap();
+        let source = "module m
+fn huge(k: u8) -> u8 {
+  _ = [[0_u8; 1]; 2000000]
+  k
+}
+pub fn call(c: bool, k: u8) -> u8 = if c { huge(k) } else { k }
+pub fn past(k: u8) -> u8 {
+  _ = [[0_u8; 1]; 2000000]
+  k
+}
+pub fn exact(k: u32) -> u32 {
+  val big: [131063]u32 = [0_u32; 131063]
+  big[k]
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
         let lowered = crate::lower::lower(&module).unwrap();
         for target in [
             Target::X86_64Linux,
@@ -2177,13 +2189,21 @@ pub fn huge(x: u8) -> u8 {
         ] {
             let mut w = writer(target);
             program(&lowered, &[], "", &mut w).unwrap_or_else(|e| panic!("{:?}: {}", target, e));
+            // The count of `huge` in `call` traps natively, so its message is in the object.
+            let bytes = w.finish().unwrap();
+            assert!(
+                bytes
+                    .windows(b"the call stack ran out".len())
+                    .any(|w| w == b"the call stack ran out"),
+                "{target:?}"
+            );
         }
         let entry = |name: &str| lowered.entries.iter().find(|e| e.name == name).unwrap();
         let int = |n: i128| vec![Arg::Int(Num::from_i128(n))];
         assert_eq!(refusal(&lowered, entry("exact"), &int(3)), None);
         assert_eq!(
             refusal(&lowered, entry("past"), &int(3)).as_deref(),
-            Some("trap[stack-overflow] at 17:8: the call stack ran out")
+            Some("trap[stack-overflow] at 7:8: the call stack ran out")
         );
     }
 
