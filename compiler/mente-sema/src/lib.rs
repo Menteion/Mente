@@ -285,6 +285,12 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
     let (structs, declared) = structs::declare(module, &parsed_structs, &parsed_enums);
     errors.extend(declared);
     errors.sort_by_key(|d| d.primary.start);
+    // Tier 1 reads the types the declarations give, so it proves no function of a module with a
+    // struct or an enum whose declaration `declare` refused, such as one that contains itself
+    // (`E0225`), whose field paths go on without end; each body is checked all the same. An
+    // error of no type, two functions of one name, leaves Tier 1 to run, as `mn check --watch`
+    // runs it on a module of functions alone (`incremental.rs`).
+    let types_hold = structs.defs.iter().all(|d| d.ok) && structs.enums.iter().all(|e| e.ok);
     let parsed = parse_qualified(src, module);
     let mut todos: Vec<(Span, String)> = parsed
         .iter()
@@ -329,9 +335,13 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .iter()
         .map(|p| p.syntax.as_ref().map(check::Signature::of))
         .collect();
-    let callees: Vec<Option<tier1::Callee>> = parsed
+    let headers: Vec<Option<tier1::Header>> = parsed
         .iter()
-        .map(|p| p.syntax.as_ref().map(tier1::Callee::of))
+        .map(|p| p.syntax.as_ref().map(tier1::Header::of))
+        .collect();
+    let callees: Vec<Option<tier1::Callee>> = headers
+        .iter()
+        .map(|h| h.as_ref().map(tier1::Callee::of))
         .collect();
     let mut checked = Vec::new();
     let mut reports = Vec::new();
@@ -346,7 +356,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
                 let mut variables = 0;
-                if prove && found.is_empty() {
+                if prove && types_hold && found.is_empty() && tier1::proves(&names, &p.name) {
                     let f = tier1::Function {
                         syntax,
                         resolution: &resolution,
@@ -1361,6 +1371,49 @@ pub fn pick(x: i32) -> i32 ! RangeError {
         // The same body is accepted without the contract: raise is ordinary control flow.
         let plain = code.replace("@branchless\n", "");
         assert!(verify_module(&parse_module(&plain).unwrap()).is_ok());
+    }
+
+    /// Tier 1 proves no function of a module with a struct or an enum whose declaration fails:
+    /// a struct that contains itself, used as a parameter, once sent Tier 1 down its field paths
+    /// without end (the nightly fuzzer, 2026-11-14 to 11-20), and a function beside it whose
+    /// refinement Tier 1 cannot prove reports nothing of it until the types check. Its body is
+    /// still checked. An error of no type, two functions of one name, leaves Tier 1 to run, as
+    /// `mn check --watch` runs it on a module of functions alone: the fuzzer found the two
+    /// disagreeing when every declaration's error stopped Tier 1.
+    #[test]
+    fn test_tier1_proves_no_function_of_a_module_whose_types_fail() {
+        let codes = |src: &str| -> Vec<&'static str> {
+            check_source(src)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        let cycle = "module m\nstruct P {\n  a: P\n}\nfn e(p: P) -> u8 = 0\n";
+        assert_eq!(codes(cycle), ["E0225"]);
+        let beside = "module m\nstruct P {\n  a: P\n}\npub fn f(x: u8) -> u8[0..10] = x\n";
+        assert_eq!(codes(beside), ["E0225"]);
+        let held = beside.replace("  a: P\n", "  a: u8\n");
+        assert_eq!(codes(&held), ["E0502"]);
+        // A body's own error is reported beside the declarations'.
+        let body = beside.replace("= x\n", "= y\n");
+        assert_eq!(codes(&body), ["E0225", "E0201"]);
+        let enums = "module m\nenum E {\n  V(e: E)\n}\npub fn f(x: u8) -> u8[0..10] = x\n";
+        assert_eq!(codes(enums), ["E0225"]);
+        // Two functions of one name: neither is proven (`tier1::proves`), in a session as in a
+        // whole check, so the narrowing Tier 1 would prove always traps draws no `E0508`.
+        for twice in [
+            "module m\nfn f()\nfn f() -> u8 = 0xFFF\n",
+            "module m\npub fn f() -> u8 = 2\npub fn f() -> u8 = -0xFFFFFFFFFFFFFFFF_u128\n",
+        ] {
+            assert_eq!(codes(twice), ["E0228"], "{}", twice);
+            let session = incremental::Session::new(twice);
+            assert_eq!(
+                session.diagnostics(),
+                check_source(twice).err().unwrap_or_default().as_slice()
+            );
+        }
     }
 
     #[test]

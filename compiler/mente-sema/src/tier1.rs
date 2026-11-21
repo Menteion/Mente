@@ -54,58 +54,92 @@ impl Routing {
     }
 }
 
-pub use callee::Callee;
+pub use callee::{Callee, Header};
+
+/// Whether Tier 1 proves a function named `name` of a module whose functions are named
+/// `names`: not when another function shares the name (`E0228`), since a call by it could
+/// mean either, and comparing one's measure or clauses with the other's says nothing true. A
+/// session and a whole check read the same names, so they prove the same functions.
+pub fn proves(names: &[String], name: &str) -> bool {
+    names.iter().filter(|n| *n == name).count() <= 1
+}
 
 /// What Tier 1 reads of a function it calls, in a module of its own, so that its syntax stays
 /// private and its accessors are the only reads, even from the rest of this file.
 mod callee {
     use mente_syntax::tree::{Contract, FnSyntax, Param, Tree, TypeId};
 
-    /// What Tier 1 reads of a function it calls: its header, never its body. It keeps one
-    /// reference, as small as the syntax it reads, since each call of a nested expression holds
-    /// one on the stack. [`Callee::of`] names each part of the syntax, so that a part added to it
-    /// gets an accessor here or is left out on purpose, and a read of the body does not compile.
+    /// What a caller reads of a function: its header, never its body. It holds the header's own
+    /// nodes alone, the first ones of the function's tree, which the parser builds before the
+    /// body's ([`FnSyntax::header`]), so that no read of the body is possible through it, not
+    /// even of how many nodes the body takes.
+    #[derive(Clone, Debug)]
+    pub struct Header {
+        name: String,
+        params: Vec<Param>,
+        result: Option<TypeId>,
+        contracts: Vec<Contract>,
+        tree: Tree,
+    }
+
+    impl Header {
+        /// The header of `f`: everything but where its name is written and its body. Each part
+        /// of the syntax is named, so that a part added to it is placed here or left out on
+        /// purpose.
+        pub fn of(f: &FnSyntax) -> Header {
+            let FnSyntax {
+                name,
+                name_span: _,
+                params,
+                result,
+                contracts,
+                body: _,
+                tree,
+                header,
+            } = f;
+            Header {
+                name: name.clone(),
+                params: params.clone(),
+                result: *result,
+                contracts: contracts.clone(),
+                tree: tree.prefix(*header),
+            }
+        }
+    }
+
+    /// What Tier 1 reads of a function it calls, a [`Header`]: one reference, as small as the
+    /// syntax it reads, since each call of a nested expression holds one on the stack. Its
+    /// accessors are the only reads, even from the rest of this file.
     #[derive(Clone, Copy, Debug)]
     pub struct Callee<'a> {
-        syntax: &'a FnSyntax,
+        header: &'a Header,
     }
 
     impl<'a> Callee<'a> {
-        /// The header of `f`: everything but where its name is written and its body, which no
-        /// caller reads.
-        pub fn of(f: &'a FnSyntax) -> Callee<'a> {
-            let FnSyntax {
-                name: _,
-                name_span: _,
-                params: _,
-                result: _,
-                contracts: _,
-                body: _,
-                tree: _,
-            } = f;
-            Callee { syntax: f }
+        pub fn of(header: &'a Header) -> Callee<'a> {
+            Callee { header }
         }
 
         /// Its name, which a call resolves to it by, and which a session's context holds.
         pub fn name(&self) -> &'a str {
-            &self.syntax.name
+            &self.header.name
         }
 
         pub fn params(&self) -> &'a [Param] {
-            &self.syntax.params
+            &self.header.params
         }
 
         pub fn result(&self) -> Option<TypeId> {
-            self.syntax.result
+            self.header.result
         }
 
         pub fn contracts(&self) -> &'a [Contract] {
-            &self.syntax.contracts
+            &self.header.contracts
         }
 
-        /// The tree its types and clauses are written in.
+        /// The header's nodes, its types and clauses: none of the body's.
         pub fn tree(&self) -> &'a Tree {
-            &self.syntax.tree
+            &self.header.tree
         }
     }
 }
@@ -211,7 +245,8 @@ pub struct Report {
 /// proves it, assumes it or counts it as a measure. A session checks a caller again when it
 /// changes. It is rendered from the [`Callee`] Tier 1 reads, each part of which is named.
 pub fn header(f: &FnSyntax) -> String {
-    let c = Callee::of(f);
+    let h = Header::of(f);
+    let c = Callee::of(&h);
     let (params, result, contracts, t) = (c.params(), c.result(), c.contracts(), c.tree());
     let params: Vec<String> = params
         .iter()
@@ -1490,32 +1525,115 @@ type PathVal = (Vec<String>, Val);
 
 /// The scalar field paths of a value of struct `name`, not through an array, each with its
 /// declared shape: an integer field, and each scalar path of a struct field, in the order of
-/// the declaration. `None` when there are more than `room`, which each one listed takes one of:
-/// structs nested level by level can have a number of them that doubles with each level, and
-/// none is listed past the room.
+/// the declaration. Each takes one of `room`, which they are taken from only when they all fit.
+/// `None` when there are more than `room`, and for a struct that contains itself, which no value
+/// has (`E0225`).
 fn scalar_paths(
     structs: &crate::structs::Structs,
     name: &str,
     room: &mut usize,
 ) -> Option<Vec<(Vec<String>, Shape)>> {
-    let def = structs.get(name)?;
+    scalar_paths_counted(structs, name, room, &mut 0)
+}
+
+/// How far [`path_count`] has counted a struct's scalar paths.
+#[derive(Clone, Copy, Debug)]
+enum Count {
+    Unseen,
+    /// Being counted: a struct met again here contains itself.
+    Open,
+    /// Counted, saturating; `None` for a struct that contains itself or reaches one that does.
+    Done(Option<usize>),
+}
+
+/// [`scalar_paths`], adding to `visits` each struct it enters. Each struct's paths are counted
+/// once, by its index, so counting takes a step per struct and per field whatever the number
+/// of paths, which structs nested level by level double at each level, with fields of integers
+/// or of none. The walk that lists the paths enters only a struct that has some, so it takes at
+/// most a step per level of nesting for each path it lists, and lists none past the room.
+fn scalar_paths_counted(
+    structs: &crate::structs::Structs,
+    name: &str,
+    room: &mut usize,
+    visits: &mut usize,
+) -> Option<Vec<(Vec<String>, Shape)>> {
+    let at = structs.position(name)?;
+    let mut counts = vec![Count::Unseen; structs.defs.len()];
+    let n = path_count(structs, at, &mut counts, visits)?;
+    let left = room.checked_sub(n)?;
     let mut out = Vec::new();
+    list_paths(structs, at, &counts, &mut Vec::new(), &mut out, visits);
+    *room = left;
+    Some(out)
+}
+
+/// The number of scalar paths of the struct at `at` in `structs.defs`, saturating, each struct
+/// counted once in `counts`; `None` when it contains itself or reaches one that does, or names
+/// a struct the module does not declare.
+fn path_count(
+    structs: &crate::structs::Structs,
+    at: usize,
+    counts: &mut [Count],
+    visits: &mut usize,
+) -> Option<usize> {
+    match counts[at] {
+        Count::Done(n) => return n,
+        Count::Open => return None,
+        Count::Unseen => {}
+    }
+    *visits = visits.saturating_add(1);
+    counts[at] = Count::Open;
+    let def = &structs.defs[at];
+    let mut n = Some(0usize);
+    for f in &def.fields {
+        let k = match Fx::declared_shape(def.tree(), f.decl) {
+            Shape::Int { .. } => Some(1),
+            Shape::Struct(inner) => structs
+                .position(&inner)
+                .and_then(|i| path_count(structs, i, counts, visits)),
+            Shape::Array(..) | Shape::Other => Some(0),
+        };
+        n = n.zip(k).map(|(a, b)| a.saturating_add(b));
+    }
+    counts[at] = Count::Done(n);
+    n
+}
+
+/// Pushes to `out` the scalar paths of the struct at `at`, under the field names `prefix`,
+/// entering only the struct fields that have some, as `counts` holds them.
+fn list_paths(
+    structs: &crate::structs::Structs,
+    at: usize,
+    counts: &[Count],
+    prefix: &mut Vec<String>,
+    out: &mut Vec<(Vec<String>, Shape)>,
+    visits: &mut usize,
+) {
+    *visits = visits.saturating_add(1);
+    let def = &structs.defs[at];
     for f in &def.fields {
         match Fx::declared_shape(def.tree(), f.decl) {
             shape @ Shape::Int { .. } => {
-                *room = room.checked_sub(1)?;
-                out.push((vec![f.name.clone()], shape));
+                let mut names = prefix.clone();
+                names.push(f.name.clone());
+                out.push((names, shape));
             }
             Shape::Struct(inner) => {
-                for (mut names, shape) in scalar_paths(structs, &inner, room)? {
-                    names.insert(0, f.name.clone());
-                    out.push((names, shape));
+                let Some(i) = structs.position(&inner) else {
+                    continue;
+                };
+                match counts[i] {
+                    Count::Done(Some(0)) | Count::Done(None) | Count::Open | Count::Unseen => {}
+                    Count::Done(Some(_)) => {
+                        prefix.push(f.name.clone());
+                        list_paths(structs, i, counts, prefix, out, visits);
+                        prefix.pop();
+                    }
                 }
             }
             Shape::Array(..) | Shape::Other => {}
         }
     }
-    Some(out)
 }
 
 /// The declared shape of scalar field path `names` of a value of struct `name`.
@@ -6575,10 +6693,12 @@ mod tests {
             .iter()
             .map(|p| p.syntax.as_ref().map(Signature::of))
             .collect();
-        let callees: Vec<Option<Callee>> = parsed
+        let headers: Vec<Option<Header>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(Callee::of))
+            .map(|p| p.syntax.as_ref().map(Header::of))
             .collect();
+        let callees: Vec<Option<Callee>> =
+            headers.iter().map(|h| h.as_ref().map(Callee::of)).collect();
         let mut out = Vec::new();
         for (p, routing) in parsed.iter().zip(&routings) {
             let Some(syntax) = &p.syntax else {
@@ -6612,10 +6732,12 @@ mod tests {
             .iter()
             .map(|p| p.syntax.as_ref().map(Signature::of))
             .collect();
-        let callees: Vec<Option<Callee>> = parsed
+        let headers: Vec<Option<Header>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(Callee::of))
+            .map(|p| p.syntax.as_ref().map(Header::of))
             .collect();
+        let callees: Vec<Option<Callee>> =
+            headers.iter().map(|h| h.as_ref().map(Callee::of)).collect();
         let syntax = parsed.last().and_then(|p| p.syntax.as_ref()).unwrap();
         let structs = crate::structs::Structs::default();
         let (resolution, _) = crate::names::resolve(syntax, &names, &structs);
@@ -9558,6 +9680,44 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         assert_eq!(Routing::of(&[]), Routing::default());
     }
 
+    /// What Tier 1 reads of a callee holds its header's nodes alone, the first ones the parser
+    /// builds, and none of its body's: the review of pull request 190 found its tree the whole
+    /// function's, so that a read of the body compiled. The header renders from them as from
+    /// the whole tree, refinements and clauses included.
+    #[test]
+    fn test_a_callee_holds_its_headers_nodes_alone() {
+        let text = module("pub fn f(x: u8[0..10], ys: [2]u8) -> u8[0..=9]\n  requires x < 9\n  ensures result <= x\n{\n  var s: u8 = x\n  while s < 9 {\n    s += ys[0] % 2 + 1\n  }\n  s % 10\n}");
+        let m = mente_syntax::parse_module(&text).unwrap();
+        let f = mente_syntax::parse_bodies(&text, &m)
+            .remove(0)
+            .syntax
+            .unwrap();
+        let h = Header::of(&f);
+        let c = Callee::of(&h);
+        let t = c.tree();
+        assert_eq!(t.counts(), f.header);
+        assert!(t.stmts.is_empty() && t.blocks.is_empty(), "{:?}", t);
+        assert!(t.exprs.len() < f.tree.exprs.len() && t.types.len() < f.tree.types.len());
+        let rendered = |tree: &Tree| {
+            let mut parts: Vec<String> =
+                c.params().iter().map(|p| tree.render_type(p.ty)).collect();
+            parts.extend(c.result().map(|r| tree.render_type(r)));
+            parts.extend(c.contracts().iter().map(|k| tree.render_expr(k.expr)));
+            parts
+        };
+        assert_eq!(rendered(t), rendered(&f.tree));
+        assert_eq!(
+            rendered(t),
+            [
+                "u8[0..10]",
+                "[2]u8",
+                "u8[0..=9]",
+                "(< x 9)",
+                "(<= result x)"
+            ]
+        );
+    }
+
     /// The messages of the fixes of the only diagnostic of `src`, which must be an `E0502`.
     fn fix_messages(src: &str) -> Vec<String> {
         let d = diagnostics(src);
@@ -9797,9 +9957,56 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         assert_eq!(codes(&format!("{}{}", wide(119), two)), ["E0502"]);
     }
 
+    /// A struct that contains itself, which no value has (`E0225`), has no paths to follow,
+    /// directly or through another struct, and Tier 1 ends on a binding of it.
+    #[test]
+    fn test_a_struct_that_contains_itself_has_no_paths_to_follow() {
+        // A cycle with no integer field on it, directly or through another struct: its paths
+        // would go on without end, using none of the room.
+        for (decls, name) in [
+            ("struct P {\n  a: P\n}\n", "P"),
+            (
+                "struct A {\n  b: B\n}\nstruct B {\n  a: A\n  n: u8\n}\n",
+                "A",
+            ),
+            (
+                "struct Q {\n  n: u8\n  p: P\n}\nstruct P {\n  a: P\n}\n",
+                "Q",
+            ),
+        ] {
+            let src = module(decls);
+            let m = mente_syntax::parse_module(&src).unwrap();
+            let parsed = mente_syntax::parse_structs(&src, &m);
+            let (structs, declared) = crate::structs::declare(&m, &parsed, &[]);
+            assert!(declared.iter().any(|d| d.code == "E0225"), "{}", decls);
+            let mut room = RELATIONAL_LIMIT;
+            assert!(
+                scalar_paths(&structs, name, &mut room).is_none(),
+                "{}",
+                decls
+            );
+            // A binding of it is not followed, and Tier 1 ends.
+            let r = report(&format!("{}pub fn e(p: {}) -> u8 = 0", decls, name));
+            assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        }
+        // Two fields of one struct that is no cycle are each followed.
+        let src = module("struct L {\n  n: u8\n}\nstruct T {\n  a: L\n  b: L\n}\n");
+        let m = mente_syntax::parse_module(&src).unwrap();
+        let parsed = mente_syntax::parse_structs(&src, &m);
+        let (structs, _) = crate::structs::declare(&m, &parsed, &[]);
+        let mut room = RELATIONAL_LIMIT;
+        let paths = scalar_paths(&structs, "T", &mut room).unwrap();
+        assert_eq!(
+            paths.iter().map(|p| p.0.join(".")).collect::<Vec<_>>(),
+            ["a.n", "b.n"]
+        );
+    }
+
     /// The field paths of a struct are listed no further than the room they may take: structs
-    /// nested level by level, whose paths double with each level, are given up on once the room
-    /// is used, so a struct of 2^41 paths costs as much as one of 128.
+    /// nested level by level, whose paths double with each level, are given up on when their
+    /// count, which takes a step per struct and per field, passes the room, and the walk that
+    /// lists them takes a step per level of nesting for each path it lists
+    /// ([`test_counting_a_structs_paths_takes_a_step_per_struct`]).
     #[test]
     fn test_field_paths_are_listed_no_further_than_the_cap() {
         let mut src = String::from("module t\npub struct S0 {\n  a: u8\n  b: u8\n}\n");
@@ -9818,9 +10025,10 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         let paths = scalar_paths(&structs, "S5", &mut room).unwrap();
         assert_eq!((paths.len(), room), (64, RELATIONAL_LIMIT - 64));
         assert_eq!(paths[1].0, ["l", "l", "l", "l", "l", "b"]);
+        // Paths past the room take none of it.
         let mut room = RELATIONAL_LIMIT;
         assert!(scalar_paths(&structs, "S40", &mut room).is_none());
-        assert_eq!(room, 0);
+        assert_eq!(room, RELATIONAL_LIMIT);
         // A function of such bindings, of 2^21 paths each within the size a value may have,
         // follows none of them, and checks.
         let upto = src.find("pub struct S21").unwrap();
@@ -9837,6 +10045,84 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
                 path
             )]
         );
+    }
+
+    /// Counting a struct's scalar paths takes a step per struct, however many paths its nesting
+    /// doubles to, and listing them a step per level for each path listed: the review of pull
+    /// request 184 found structs nested forty levels deep whose leaves are no integers, an empty
+    /// array or a `bool`, which the walk that charged the room for integers alone visited
+    /// 2^41 times and never ended on. Steps are counted, not timed.
+    #[test]
+    fn test_counting_a_structs_paths_takes_a_step_per_struct() {
+        let nested = |leaf: &str, levels: usize| {
+            let mut src = format!(
+                "module t
+pub struct S0 {{
+  a: {}
+}}
+",
+                leaf
+            );
+            for k in 1..=levels {
+                src.push_str(&format!(
+                    "pub struct S{} {{
+  l: S{}
+  r: S{}
+}}
+",
+                    k,
+                    k - 1,
+                    k - 1
+                ));
+            }
+            src
+        };
+        let count = |src: &str, name: &str| {
+            let m = mente_syntax::parse_module(src).unwrap();
+            let parsed = mente_syntax::parse_structs(src, &m);
+            let (structs, declared) = crate::structs::declare(&m, &parsed, &[]);
+            assert!(declared.is_empty(), "{:?}", declared);
+            let (mut room, mut visits) = (RELATIONAL_LIMIT, 0);
+            let paths = scalar_paths_counted(&structs, name, &mut room, &mut visits);
+            (paths.map(|p| p.len()), visits)
+        };
+        // Leaves of no integer: no path, a step per struct to count, and one into the outermost
+        // to list none. Thirty levels of `bool` keep within the size a value may have (`E0223`).
+        let empty = [("[0]u8", 40), ("bool", 30)];
+        for (leaf, levels) in empty {
+            let outermost = format!("S{}", levels);
+            assert_eq!(
+                count(&nested(leaf, levels), &outermost),
+                (Some(0), levels + 2),
+                "{}",
+                leaf
+            );
+        }
+        // Integer leaves past the room: given up on after the count, which listed nothing.
+        assert_eq!(count(&nested("u8", 30), "S30"), (None, 31));
+        // Within the room: the 64 paths of six levels, each listed in a step per level.
+        let (paths, visits) = count(&nested("u8", 6), "S6");
+        assert_eq!(paths, Some(64));
+        assert!(visits <= 7 + 64 * 7, "{}", visits);
+        // A function of such a binding checks, of either leaf.
+        for (leaf, levels) in empty {
+            let src = format!(
+                "{}pub fn f(s: S{}) -> u8 = 0
+",
+                nested(leaf, levels),
+                levels
+            );
+            assert_eq!(
+                codes(
+                    &src["module t
+"
+                    .len()..]
+                ),
+                NONE,
+                "{}",
+                leaf
+            );
+        }
     }
 
     /// A measure over a field path proves where it gets smaller: a loop's `decreases k.n` with
@@ -10153,10 +10439,12 @@ mod timing {
             .iter()
             .map(|p| p.syntax.as_ref().map(Signature::of))
             .collect();
-        let callees: Vec<Option<Callee>> = parsed
+        let headers: Vec<Option<Header>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(Callee::of))
+            .map(|p| p.syntax.as_ref().map(Header::of))
             .collect();
+        let callees: Vec<Option<Callee>> =
+            headers.iter().map(|h| h.as_ref().map(Callee::of)).collect();
         let syntax = parsed[1].syntax.as_ref().unwrap();
         let structs = crate::structs::Structs::default();
         let (resolution, _) = crate::names::resolve(syntax, &names, &structs);

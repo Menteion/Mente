@@ -436,6 +436,7 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
         contracts,
         body,
         tree,
+        header: _,
     } = f;
     let Tree {
         exprs,
