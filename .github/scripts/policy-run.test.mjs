@@ -263,25 +263,36 @@ check("test-sandbox-env.sh stops a step with no sandbox, and test-sandbox.sh nam
     assert.equal(run(["ran", "3"], "Linux").status, 1, "fewer commands in the sandbox than mutants caught passes");
     costs(3_000_000);
     assert.equal(run(["ran", "many"], "Linux").status, 1, "a count that is no number passes");
-    // `ran` reports the share so far, whatever it is; `bound`, at the job's end, fails past a tenth
-    // of the job's time without the sandbox, and on a record that is missing or not whole.
+    // `ran` reports the share so far, whatever it is, and its minutes; `bound`, at the job's end,
+    // fails only past both a tenth of the job's time without the sandbox and two minutes (Norman,
+    // 2026-11-21: a short job whose share the runner's speed moves by points fails only once the
+    // sandbox has cost it minutes), and on a record that is missing or not whole.
     costs(9_500_000);
     const so = run(["ran"], "Linux");
     assert.equal(so.status, 0, `ran holds the job's share before its end: ${so.out}`);
-    assert.match(so.out, /The sandbox has added an estimated 9\.5 s to the 10\d\.\d s since setup: 10\.\d% /);
-    const over = run(["bound"], "Linux");
-    assert.equal(over.status, 1, `a sandbox that added more than a tenth to the job passes: ${over.out}`);
-    assert.match(over.out, /::error::the sandbox has added more than a tenth to this job's time/);
-    costs(8_000_000);
-    assert.equal(run(["bound"], "Linux").status, 0, "a sandbox that added under a tenth to the job fails");
-    // Close to the bound, over a job of 1000 s, where the milliseconds the script takes to start
-    // move the share by a few thousandths of a point: 10.05% fails, which a share rounded down to
-    // per mille would let through (the review of 41a54b6), and 9.95% passes.
-    const thousand = (Date.now() - 1_000_000) * 1000;
-    costs(91_320_000, thousand);
-    assert.equal(run(["bound"], "Linux").status, 1, "a sandbox that added 10.05% to the job passes");
-    costs(90_500_000, thousand);
-    assert.equal(run(["bound"], "Linux").status, 0, "a sandbox that added 9.95% to the job fails");
+    assert.match(so.out, /The sandbox has added an estimated 9\.5 s to the 10\d\.\d s since setup: 10\.\d% of the time without it, and 0\.1 minutes, against a bound for the whole job of more than 10% and more than 2 minutes together\./);
+    // A job whose sandbox added `share` of its time without it, and `seconds`: the time since setup
+    // is set so (added / (since - added)); the script's own start, a few milliseconds, lowers the
+    // share by thousandths of a point.
+    const job = (share, seconds) => {
+      const added = Math.round(seconds * 1_000_000);
+      costs(added, Date.now() * 1000 - Math.round(added + added / share));
+      return run(["bound"], "Linux");
+    };
+    const short = job(0.11, 60);
+    assert.equal(short.status, 0, `a sandbox that added 11% and 1 minute to the job fails: ${short.out}`);
+    assert.match(short.out, /: 1[01]\.\d% of the time without it, and 1\.0 minutes, /, "the bound's line does not state the share and the minutes");
+    const over = job(0.11, 180);
+    assert.equal(over.status, 1, `a sandbox that added 11% and 3 minutes to the job passes: ${over.out}`);
+    assert.match(over.out, /::error::the sandbox has added more than a tenth and more than two minutes to this job's time/);
+    assert.equal(job(0.09, 300).status, 0, "a sandbox that added 9% and 5 minutes to the job fails");
+    // Two minutes is no more than two minutes; a tenth of a second more is.
+    assert.equal(job(0.11, 120).status, 0, "a sandbox that added 11% and exactly 2 minutes to the job fails");
+    assert.equal(job(0.11, 120.1).status, 1, "a sandbox that added 11% and 2 minutes 0.1 s to the job passes");
+    // Close to the tenth, past two minutes: 10.05% fails, which a share rounded down to per mille
+    // would let through (the review of 41a54b6), and 9.95% passes.
+    assert.equal(job(0.1005, 180).status, 1, "a sandbox that added 10.05% and 3 minutes to the job passes");
+    assert.equal(job(0.0995, 180).status, 0, "a sandbox that added 9.95% and 3 minutes to the job fails");
     // An estimate no less than the whole time since setup is no estimate.
     costs(20_000_000, (Date.now() - 10_000) * 1000);
     assert.match(run(["bound"], "Linux").out, /::error::the sandbox's estimated cost, 20\.0 s, is no less than the job's time since setup/);
@@ -293,8 +304,11 @@ check("test-sandbox-env.sh stops a step with no sandbox, and test-sandbox.sh nam
       assert.match(run([sub], "Linux").out, /::error::no record of what the sandbox costs this job/, sub);
     }
     assert.equal(run(["ran"], "Windows", path.join(dir, "none")).status, 0, "Windows, which has no sandbox, fails the check that a command ran in it");
-    assert.equal(run(["run", "A=b"], "Linux").status, 2, "a command that env would read as a variable is handed over");
-    assert.equal(run(["run"], "Linux").status, 2);
+    // The shell route's wrapper refuses what it could not hand over whole, as the program's does
+    // (the canary runs both on a runner).
+    assert.equal(run(["reference", "A=b"], "Linux").status, 2, "a command that env would read as a variable is handed over");
+    assert.equal(run(["reference"], "Linux").status, 2);
+    assert.equal(run(["run"], "Linux").status, 2, "the script still takes a command to run, which the program now does");
     assert.equal(run(["nothing"], "Linux").status, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
