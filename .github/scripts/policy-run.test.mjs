@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 13;
+const FLOOR = 14;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -725,6 +725,101 @@ check("the collector reads the repository it is in, and runs no program git's co
     assert.ok(!fs.existsSync(marker), "the collector's git runs the fsmonitor of the repository's configuration");
     const facts = JSON.parse(fs.readFileSync(path.join(repo, "target", "policy-facts.json"), "utf8"));
     assert.deepEqual(facts, { head, tracked: [".github/scripts/policy-collect.mjs", "ROADMAP.md"], base: head, tags: ["m0a", "m0b"], baseRoadmap: "# Roadmap\n" });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("the site is published only from a milestone tag on a commit of main", () => {
+  // .github/scripts/commit-on-main.sh (the review of 7ba7a5c): a milestone tag on a pull request's
+  // head, which main never took, is refused, and so is one on a commit inside a pull request main
+  // merged, which never stood as main itself (the re-review of 40bb29a); a tag on main's head, on an
+  // older commit of main or on the merge, lightweight or annotated, passes. And .github/scripts/publish-tag.sh, which pages-publish.yml
+  // runs before anything of the tag (Norman, 2026-11-17): it checks out a tag on main, and refuses a
+  // tag outside main, a name of another shape and none, leaving the checkout where it was.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-on-main-"));
+  try {
+    const sh = testGit(dir);
+    sh("init", "-q", "-b", "main");
+    const commit = (text) => {
+      fs.writeFileSync(path.join(dir, "a"), text);
+      sh("add", "-A");
+      sh("commit", "-q", "-m", text.trim());
+      return sh("rev-parse", "HEAD");
+    };
+    const older = commit("one\n");
+    const head = commit("two\n");
+    sh("checkout", "-q", "-b", "pull-request");
+    const unmerged = commit("three\n");
+    sh("checkout", "-q", "main");
+    // A pull request main merged, as the merge queue merges one: a merge commit whose first parent is
+    // main's head, and whose second is the pull request's own commit.
+    sh("checkout", "-q", "-b", "merged", head);
+    const inner = commit("inner\n");
+    sh("checkout", "-q", "main");
+    sh("merge", "-q", "--no-ff", "-m", "Merge pull request #1 from merged", "merged");
+    const merge = sh("rev-parse", "HEAD");
+    sh("tag", "m2", inner);
+    sh("tag", "m3", merge);
+    sh("tag", "m1", head);
+    sh("tag", "-a", "-m", "m0", "m0", older);
+    sh("tag", "m9", unmerged);
+    const script = posixPath(path.join(HERE, "commit-on-main.sh"));
+    const run = (...args) => spawnSync(bashPath(), [script, ...args], { cwd: dir, encoding: "utf8", env: GIT_TEST_ENV, timeout: 30000 });
+    // Without origin/main there is nothing to check against: refused, never passed.
+    const none = run("m1");
+    assert.equal(none.status, 1, `${none.stdout}${none.stderr}`);
+    assert.match(none.stdout, /no origin\/main/);
+    sh("update-ref", "refs/remotes/origin/main", merge);
+    for (const tag of ["m1", "m0", "m3", head, older, merge]) {
+      const r = run(tag);
+      assert.equal(r.status, 0, `${tag}: ${r.stdout}${r.stderr}`);
+    }
+    for (const tag of ["m2", inner, "m9", unmerged]) {
+      const r = run(tag);
+      assert.equal(r.status, 1, `${tag}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /^::error::.* is no commit of main's own history/m, tag);
+    }
+    // A name of no commit, and no argument at all.
+    assert.equal(run("m404").status, 1);
+    assert.equal(run().status, 2);
+    assert.equal(run("").status, 2);
+    // publish-tag.sh, run as the workflow runs it: from the repository's root, with the scripts at
+    // their paths there, and the tag in TAG alone.
+    fs.mkdirSync(path.join(dir, ".github", "scripts"), { recursive: true });
+    for (const s of ["commit-on-main.sh", "publish-tag.sh"]) fs.copyFileSync(path.join(HERE, s), path.join(dir, ".github", "scripts", s));
+    const publish = (tag) => {
+      const env = { ...GIT_TEST_ENV };
+      if (tag !== undefined) env.TAG = tag;
+      return spawnSync(bashPath(), [".github/scripts/publish-tag.sh"], { cwd: dir, encoding: "utf8", env, timeout: 30000 });
+    };
+    for (const [tag, at] of [
+      ["m1", head],
+      ["m0", older],
+    ]) {
+      const r = publish(tag);
+      assert.equal(r.status, 0, `${tag}: ${r.stdout}${r.stderr}`);
+      assert.equal(sh("rev-parse", "HEAD"), at, `${tag} is not what is checked out`);
+    }
+    const before = sh("rev-parse", "HEAD");
+    for (const [tag, refusal] of [
+      ["m9", /is no commit of main's own history/],
+      ["m2", /is no commit of main's own history/],
+      ["m404", /names no commit/],
+      ["m1; touch pwned", /no milestone's name/],
+      ["$(touch pwned)", /no milestone's name/],
+      ["main", /no milestone's name/],
+      ["refs/tags/m1", /no milestone's name/],
+      ["m1\n", /no milestone's name/],
+      ["", /no milestone's name/],
+      [undefined, /no milestone's name/],
+    ]) {
+      const r = publish(tag);
+      assert.equal(r.status, 1, `${JSON.stringify(tag)}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, refusal, JSON.stringify(tag));
+      assert.equal(sh("rev-parse", "HEAD"), before, `${JSON.stringify(tag)} moved the checkout`);
+    }
+    assert.ok(!fs.existsSync(path.join(dir, "pwned")), "a tag's name ran as a command");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
