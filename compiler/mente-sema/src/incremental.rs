@@ -544,6 +544,37 @@ mod tests {
         assert!(fix.is_some());
     }
 
+    /// A clause whose kind changes while its text stays proves its callers again, as a whole
+    /// check does: an `ensures` made a `decreases` no longer gives the caller its fact, and a
+    /// `requires` made an `ensures` no longer asks the call for it. The fuzzer met the first on
+    /// 2026-11-17 (`incremental-disagrees-1751379c`): the header named each clause's text and not
+    /// its kind, so the session left the caller as it was and lacked the error at the call.
+    #[test]
+    fn test_a_clause_whose_kind_changes_proves_its_callers_again() {
+        let src = "module m\n\npub fn small(x: u8) -> u8\n  ensures result <= 9\n= x % 10\n\npub fn caller(n: u8) -> u8[0..10] = small(n)\n";
+        let mut s = Session::new(src);
+        assert!(s.diagnostics().is_empty(), "{:?}", s.diagnostics());
+        let w = edited(&mut s, "ensures result <= 9", "decreases result <= 9");
+        assert_eq!(w.checked, 2);
+        assert!(
+            s.diagnostics().iter().any(|d| d.primary.line == 7),
+            "{:?}",
+            s.diagnostics()
+        );
+        edited(&mut s, "decreases result <= 9", "ensures result <= 9");
+        assert!(s.diagnostics().is_empty(), "{:?}", s.diagnostics());
+        let src = "module m\n\npub fn pick(lo: u8, hi: u8) -> u8\n  requires lo < hi\n= lo\n\npub fn caller(n: u8) -> u8 = pick(n, n)\n";
+        let mut s = Session::new(src);
+        assert_eq!(s.diagnostics()[0].code, "E0504");
+        let w = edited(&mut s, "requires lo < hi", "ensures lo < hi");
+        assert_eq!(w.checked, 2);
+        assert!(
+            s.diagnostics().iter().all(|d| d.primary.line != 7),
+            "{:?}",
+            s.diagnostics()
+        );
+    }
+
     /// Tier 1 reads a callee's refinements and contracts, which its signature does not hold: an
     /// edit to them proves every caller again.
     #[test]
