@@ -1409,11 +1409,20 @@ mod tests {
     #[test]
     fn test_mutant_keys_are_total_and_distinct() {
         let corpus = corpus(&root()).unwrap();
+        // Every operator a mutant of the corpus has, its mutants listed and none run, on one
+        // thread: a test that runs work on several stays in nextest's group that runs alone.
         let mut operators: BTreeSet<String> = BTreeSet::new();
-        for run in run_programs(&corpus) {
-            for o in &run.outcomes {
-                operators.insert(o.id.rsplit('/').next().unwrap().to_string());
+        for p in &corpus {
+            let module = if p.proofs {
+                mente_sema::check_program(&p.source)
+            } else {
+                mente_sema::check_program_without_proofs(&p.source)
             }
+            .unwrap();
+            let lowered = lower::lower(&module).unwrap();
+            let (kept, skipped) = cfg_mutate::split(&lowered.module);
+            operators.extend(kept.iter().map(|m| m.operator.to_string()));
+            operators.extend(skipped.iter().map(|(m, _)| m.operator.to_string()));
         }
         let mut functions: BTreeSet<String> = (0..50)
             .flat_map(|seed| mir_run::generate::program(seed).functions)
