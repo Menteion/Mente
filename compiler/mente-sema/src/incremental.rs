@@ -203,7 +203,7 @@ impl Session {
             .collect();
         let callees: Vec<Option<tier1::Callee>> = functions
             .iter()
-            .map(|f| f.syntax.as_ref().map(|syntax| tier1::Callee { syntax }))
+            .map(|f| f.syntax.as_ref().map(tier1::Callee::of))
             .collect();
         if context != self.context {
             self.context = context;
@@ -542,6 +542,37 @@ mod tests {
             .find(|d| d.code == "E0201")
             .map(|d| d.fixes.clone());
         assert!(fix.is_some());
+    }
+
+    /// A call is recursive when it calls the function of its caller's name, which a session and
+    /// a whole check see alike, two functions of one name (`E0228`) included: Tier 1 once told
+    /// recursion by the identity of the callee's syntax tree, which differs between the two, so
+    /// a whole check proved one measure where the session reported `E0507`, or the reverse.
+    #[test]
+    fn test_recursion_is_told_by_name_in_a_session_as_in_a_whole_check() {
+        let one = "fn f(n: u8) -> u8\n  decreases n\n= if n > 0 { f(n - 1) } else { 0 }\n";
+        let other = "fn f(n: u8) -> u8\n  decreases n\n= if n > 0 { f(n) } else { 0 }\n";
+        for src in [
+            format!("module m\n\n{}\n{}", one, one),
+            format!("module m\n\n{}\n{}", one, other),
+            format!("module m\n\n{}\n{}", other, one),
+            // Two of one text, which the session parses and checks once.
+            format!("module m\n\n{}\n{}", other, other),
+        ] {
+            let mut s = Session::new(&src);
+            assert_eq!(s.diagnostics(), whole(&src).as_slice(), "{}", src);
+            // An edit to either function keeps the two alike.
+            edited(&mut s, "f(n - 1)", "f(n - 2)");
+        }
+        // Each `f` that calls `f` without the measure getting smaller is reported, the first
+        // included: a call resolves to the last function of its name, so by the identity of
+        // syntax trees the first one's own recursion went unchecked.
+        let both = format!("module m\n\n{}\n{}", other, other);
+        let found: Vec<(&str, u32)> = whole(&both)
+            .iter()
+            .map(|d| (d.code, d.primary.line))
+            .collect();
+        assert_eq!(found, [("E0507", 5), ("E0228", 7), ("E0507", 9)]);
     }
 
     /// A clause whose kind changes while its text stays proves its callers again, as a whole
