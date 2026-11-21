@@ -9,6 +9,10 @@
 # does not: that those facts were derived soundly from the program, which soundness by execution
 # checks. An obligation discharged where no path reaches it is listed, not queried.
 #
+# The independent cross-check closes that gap: `mn smt --independent` encodes each check Tier 1
+# erases from the program itself (compiler/mente-smt, which depends on the syntax tree alone), and
+# `mn smt --confirm` runs each model Z3 finds on the reference interpreter.
+#
 # Z3 is installed here from its release, pinned and checksummed; it is never a build dependency.
 # Solving runs on GitHub Actions only, never on a laptop.
 #
@@ -160,6 +164,76 @@ jobs:
             done
             exit 1
           fi
+      - name: Export the independent queries, each check Tier 1 erases encoded from the program
+        if: steps.watch.outputs.run != 'false'
+        # compiler/mente-smt encodes each check from the syntax tree and the checker's types alone,
+        # never from Tier 1's facts, unrolling each loop and each recursion up to 3 times
+        # (docs/design-review.md, smt-independent-encoding). The known soundness bugs of
+        # compiler/mente-cli/tests/smt-known are exported with the rest, and must be confirmed.
+        run: |
+          set -euo pipefail
+          mapfile -t pass < <(for f in conformance/*/*.mn; do
+            if [ "$(head -n 1 "$f")" = "// expect: pass" ]; then echo "$f"; fi
+          done)
+          mapfile -t agents < <(find benchmark/probe benchmark/prelim -name '*.mn' | sort)
+          start=$(date +%s%N)
+          ./target/release/mn smt --independent examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels \
+            compiler/mente-cli/tests/smt-known --out "$RUNNER_TEMP/independent" | tee "$RUNNER_TEMP/independent-export.txt"
+          ms=$(( ($(date +%s%N) - start) / 1000000 ))
+          printf 'INDEPENDENT_EXPORT_SECONDS=%d.%03d\n' $((ms / 1000)) $((ms % 1000)) >> "$GITHUB_ENV"
+      - name: Ask Z3 for each independent query, and run each model on the reference interpreter
+        if: steps.watch.outputs.run != 'false'
+        # `unsat`: no input fails the check within the bounds. `sat`: Z3's model is the inputs of a
+        # run that fails a check Tier 1 proved; `mn smt --confirm` runs it on the reference
+        # interpreter, and a trap there confirms a soundness bug of Tier 1, while any other outcome
+        # is a defect of the encoding. Both fail the job, unless the bug is a known one. A timeout
+        # or `unknown`, which nonlinear arithmetic can give, decides nothing and is counted.
+        run: |
+          set -euo pipefail
+          find "$RUNNER_TEMP/independent" -name '*.smt2' | sort > "$RUNNER_TEMP/independent-queries.txt"
+          total=$(wc -l < "$RUNNER_TEMP/independent-queries.txt")
+          # A floor, so that an export that silently lost its programs fails.
+          if [ "$total" -lt 2000 ]; then
+            echo "::error::only $total independent queries were written; the export lost programs"
+            exit 1
+          fi
+          check() {
+            answer=$(z3 -T:10 "$1" 2>&1 | tr '\n' ' ' | sed 's/ *$//')
+            printf '%s\t%s\n' "$answer" "$1"
+          }
+          export -f check
+          start=$(date +%s%N)
+          # shellcheck disable=SC2016
+          xargs -a "$RUNNER_TEMP/independent-queries.txt" -d '\n' -P "$(nproc)" -n 1 bash -c 'check "$1"' _ \
+            > "$RUNNER_TEMP/independent-answers.txt"
+          ms=$(( ($(date +%s%N) - start) / 1000000 ))
+          seconds=$(printf '%d.%03d' $((ms / 1000)) $((ms % 1000)))
+          status=0
+          ./target/release/mn smt --confirm "$RUNNER_TEMP/independent-answers.txt" \
+            --expect compiler/mente-cli/tests/smt-known/loop-candidate-facts.mn \
+            > "$RUNNER_TEMP/confirm.txt" || status=$?
+          cat "$RUNNER_TEMP/confirm.txt"
+          count() { grep -c "^$1: " "$RUNNER_TEMP/confirm.txt" || true; }
+          {
+            echo "### Independent SMT cross-check"
+            echo
+            echo "| | |"
+            echo "| :--- | ---: |"
+            echo "| Queries written | $total |"
+            echo "| Answered \`unsat\` | $(cut -f1 "$RUNNER_TEMP/independent-answers.txt" | grep -c '^unsat' || true) |"
+            echo "| Undecided: a timeout or \`unknown\` | $(count undecided) |"
+            echo "| Soundness bugs of Tier 1, confirmed on the interpreter | $(count confirmed) |"
+            echo "| Known soundness bugs, confirmed | $(count known) |"
+            echo "| Models the interpreter does not confirm: defects of the encoding | $(count unconfirmed) |"
+            echo "| Known bugs not confirmed | $(count missing) |"
+            echo "| Places of a construct the encoding lacks | $(grep -c '^unencoded: ' "$RUNNER_TEMP/independent-export.txt" || true) |"
+            echo "| Export, seconds | $INDEPENDENT_EXPORT_SECONDS |"
+            echo "| Z3 ${Z3_VERSION} on every query, seconds, $(nproc) at once | $seconds |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the independent cross-check found a soundness bug of Tier 1, a defect of the encoding, or a known bug no longer confirmed; the lines above name each"
+          fi
+          exit "$status"
       - name: Keep the queries of a failed run
         if: failure() && steps.watch.outputs.run != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -169,5 +243,9 @@ jobs:
             ${{ runner.temp }}/smt
             ${{ runner.temp }}/answers.txt
             ${{ runner.temp }}/export.txt
+            ${{ runner.temp }}/independent
+            ${{ runner.temp }}/independent-answers.txt
+            ${{ runner.temp }}/independent-export.txt
+            ${{ runner.temp }}/confirm.txt
           if-no-files-found: ignore
           retention-days: 14
