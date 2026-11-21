@@ -1274,6 +1274,63 @@ mod tests {
     use super::*;
     use mente_sema::verify_module;
 
+    fn mn_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                mn_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "mn") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every loop of the repository's programs that Tier 1 replays from its memo gives the
+    /// outcome a fresh analysis gives (`mente_sema::tier1_loop_replays`): an output of a loop's
+    /// analysis that its outcome does not carry fails here. It runs on `mn`'s own stack, which a
+    /// program of the fuzzer's corpus needs. The generated programs are held to it where every
+    /// run of them checks them (`mir_run/generate.rs`, `checked`).
+    #[test]
+    fn test_every_loop_replayed_from_the_memo_gives_what_its_analysis_gives() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        for dir in [
+            "examples",
+            "conformance",
+            "benchmark",
+            "perf",
+            "compiler/mente-cli/tests",
+        ] {
+            mn_files(&root.join(dir), &mut files);
+        }
+        assert!(files.len() > 500, "{}", files.len());
+        // Only a loop inside another loop is met again outside the pass that records: a program
+        // that writes `while` once has nothing to replay.
+        let sources: Vec<(&PathBuf, String)> = files
+            .iter()
+            .map(|f| (f, fs::read_to_string(f).unwrap_or_default()))
+            .filter(|(_, src)| src.matches("while").count() > 1)
+            .collect();
+        assert!(sources.len() > 50, "{}", sources.len());
+        let (compared, differing) = mente_threads::alone(None, Some(STACK), || {
+            let (mut compared, mut differing) = (0, Vec::new());
+            for (file, src) in &sources {
+                for (name, again, spans) in mente_sema::tier1_loop_replays(src) {
+                    compared += again;
+                    for s in spans {
+                        differing.push(format!("{} `{}` at {}", file.display(), name, s.start));
+                    }
+                }
+            }
+            (compared, differing)
+        })
+        .unwrap()
+        .unwrap();
+        assert!(differing.is_empty(), "{}", differing.join("\n"));
+        // The loops met again are many, so that the test compares something.
+        assert!(compared > 100, "{}", compared);
+    }
+
     /// Every `mente` block of the language card passes `mn check`, so the card cannot drift
     /// from the compiler (`docs/design-review.md`, `language-card`).
     #[test]

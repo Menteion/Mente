@@ -274,9 +274,19 @@ const TRAPS: &[&str] = &[
 /// loop head"): a remainder whose divisor's static range holds 0, in a loop's condition or in a
 /// guard of its body. Tier 1 keeps it only where the divisor is proven not 0 without the facts of
 /// its own evaluation, which once proved it (the nightly's wrong proofs, 2026-11-16 to 11-21).
+/// And a conjunct or a guard that is no candidate by its syntax (`loop-candidates-by-syntax`),
+/// of each form the reviews of pull request 182 found Tier 1 holding at a loop's head: one that
+/// may leave, by `break`, `continue`, `return`, `todo` or `unreachable`, one that assigns,
+/// a call whose `ensures` bounds its argument, and a `break` in the condition of a loop inside
+/// a loop, which leaves the loop around it.
 const CANDIDATES: &[&str] = &[
     "remainder that can trap in a loop's condition",
     "remainder that can trap in a guard of a loop's body",
+    "conjunct of a loop's condition that may leave",
+    "guard of a loop's body whose condition may leave",
+    "conjunct of a loop's condition that assigns",
+    "conjunct of a loop's condition that calls a function whose ensures bounds its argument",
+    "break in the condition of a loop inside a loop",
 ];
 
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
@@ -905,8 +915,8 @@ fn reached_traps(f: &CheckedFn, seen: &mut BTreeSet<String>) {
 
 /// The rows of [`CANDIDATES`] a checked function reaches: a remainder whose divisor's static
 /// range holds 0, or has none, written inside a loop's condition or inside the condition of a
-/// `guard` inside a loop's body, by their spans.
-fn reached_candidates(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+/// `guard` inside a loop's body, by their spans; and what leaves, assigns or calls there.
+fn reached_candidates(module: &CheckedModule, f: &CheckedFn, seen: &mut BTreeSet<String>) {
     let tree = &f.syntax.tree;
     let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
     let holds_zero = |e: ExprId| match ranges[e.0 as usize] {
@@ -948,6 +958,99 @@ fn reached_candidates(f: &CheckedFn, seen: &mut BTreeSet<String>) {
             }
         }
     }
+    reached_no_candidates(module, f, &bodies, seen);
+}
+
+/// The rows of [`CANDIDATES`] for what is no candidate by its syntax, a checked function reaches
+/// inside a loop's condition or a guard's condition inside `bodies`, its loops' bodies.
+fn reached_no_candidates(
+    module: &CheckedModule,
+    f: &CheckedFn,
+    bodies: &[mente_syntax::Span],
+    seen: &mut BTreeSet<String>,
+) {
+    let tree = &f.syntax.tree;
+    let within =
+        |s: mente_syntax::Span, c: mente_syntax::Span| c.start <= s.start && s.end <= c.end;
+    // What leaves, by a statement or at `todo` or `unreachable`, and what breaks or assigns.
+    let mut leaving: Vec<mente_syntax::Span> = Vec::new();
+    let mut breaking: Vec<mente_syntax::Span> = Vec::new();
+    let mut assigning: Vec<mente_syntax::Span> = Vec::new();
+    for s in &tree.stmts {
+        match &s.kind {
+            StmtKind::Break => {
+                leaving.push(s.span);
+                breaking.push(s.span);
+            }
+            StmtKind::Continue | StmtKind::Return(_) => leaving.push(s.span),
+            StmtKind::Assign { .. } => assigning.push(s.span),
+            _ => {}
+        }
+    }
+    // A call of a function whose `ensures` names one of its parameters.
+    let mut bounding: Vec<mente_syntax::Span> = Vec::new();
+    for (i, e) in tree.exprs.iter().enumerate() {
+        match &e.kind {
+            ExprKind::Todo(_) | ExprKind::Unreachable(_) => leaving.push(e.span),
+            ExprKind::Call { .. } => {
+                let callee = f.resolution.calls[i].and_then(|c| module.functions[c].as_ref());
+                if callee.is_some_and(|c| ensures_names_a_parameter(&c.syntax)) {
+                    bounding.push(e.span);
+                }
+            }
+            _ => {}
+        }
+    }
+    let any_in =
+        |found: &[mente_syntax::Span], c: mente_syntax::Span| found.iter().any(|&s| within(s, c));
+    for s in &tree.stmts {
+        match &s.kind {
+            StmtKind::While { cond, .. } => {
+                let c = tree.expr(*cond).span;
+                if any_in(&leaving, c) {
+                    seen.insert("conjunct of a loop's condition that may leave".to_string());
+                }
+                if any_in(&assigning, c) {
+                    seen.insert("conjunct of a loop's condition that assigns".to_string());
+                }
+                if any_in(&bounding, c) {
+                    seen.insert(
+                        "conjunct of a loop's condition that calls a function whose ensures bounds its argument"
+                            .to_string(),
+                    );
+                }
+                // Inside another loop's body, which its own body is not.
+                let nested = bodies.iter().any(|&b| within(s.span, b));
+                if nested && any_in(&breaking, c) {
+                    seen.insert("break in the condition of a loop inside a loop".to_string());
+                }
+            }
+            StmtKind::Guard { cond, .. } => {
+                let c = tree.expr(*cond).span;
+                if bodies.iter().any(|&b| within(c, b)) && any_in(&leaving, c) {
+                    seen.insert("guard of a loop's body whose condition may leave".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a function's `ensures` names one of its parameters, which then bounds the argument a
+/// call passes it, where the call returns.
+fn ensures_names_a_parameter(f: &mente_syntax::tree::FnSyntax) -> bool {
+    let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+    f.contracts
+        .iter()
+        .filter(|c| c.kind == mente_syntax::tree::ContractKind::Ensures)
+        .any(|c| {
+            let at = f.tree.expr(c.expr).span;
+            f.tree.exprs.iter().any(|e| {
+                matches!(&e.kind, ExprKind::Name(n) if params.contains(&n.as_str()))
+                    && at.start <= e.span.start
+                    && e.span.end <= at.end
+            })
+        })
 }
 
 /// The rows of [`EDGES`] a checked function reaches. A value lies past the domain when its
@@ -1362,7 +1465,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             for f in module.functions.iter().flatten() {
                 reached_edges(f, &mut seen);
                 reached_traps(f, &mut seen);
-                reached_candidates(f, &mut seen);
+                reached_candidates(module, f, &mut seen);
                 reached_literals(f, &mut seen);
                 reached_comparisons(f, &mut seen);
                 reached_expressions(f, &mut seen);

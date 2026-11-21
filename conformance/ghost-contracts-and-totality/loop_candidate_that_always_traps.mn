@@ -1,7 +1,8 @@
 // expect: E0508
 module conformance
-// A narrowing that always traps in a loop's condition is E0508, as it is outside a loop; as a
-// candidate it is true nowhere, so it leaves the loop's head its state.
+// A narrowing that always traps in a loop's condition is E0508, as it is outside a loop. It stands
+// in a call, so its conjunct is no candidate (spec item 2, "Facts at a loop head"), and the loop's
+// head keeps its state.
 fn take(x: u8) -> u8 = x
 
 pub fn always() -> u8 {

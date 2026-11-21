@@ -1,9 +1,10 @@
 // expect: pass
 module conformance
 // A loop's candidate holds only where evaluating it cannot trap (spec item 2, "Facts at a loop
-// head"): `7 % d` as a conjunct of the condition or a guard of the body, and the narrowing of
-// `d + 250` into `take`'s parameter, stay run-time checks, which trap where `d` is 0 or above 5.
-// The nightly's generated programs found each proven from the facts of its own evaluation.
+// head"): `7 % d` as a conjunct of the condition or a guard of the body stays a run-time check,
+// which traps where `d` is 0, and so does the narrowing of `d + 250` into `take`'s parameter,
+// where `d` is above 5, in a conjunct that calls and is no candidate. The nightly's generated
+// programs found each proven from the facts of its own evaluation.
 fn take(x: u8) -> u8 = x
 
 pub fn rem(d: u8) -> u8 {

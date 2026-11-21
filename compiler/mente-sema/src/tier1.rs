@@ -11,8 +11,9 @@
 //! valuation Tier 1 cannot rule out, never an input that fails ([`tier1-counterexample`]), with a
 //! `guard` as its suggested fix; one that may stay a run-time check is only recorded.
 //!
-//! [`check_with_queries`] also writes each obligation Tier 1 discharges as an SMT-LIB 2 query, for
-//! the SMT cross-check in CI ([`smt`]).
+//! [`check_with`] also writes, as [`Ask`] asks, each obligation Tier 1 discharges as an SMT-LIB 2
+//! query, for the SMT cross-check in CI ([`smt`]), and each loop whose outcome its memo replays
+//! differently from a fresh analysis, for the replay test ([`LoopOutcome`]).
 //!
 //! [`tier1-counterexample`]: ../../docs/design-review.md#tier1-counterexample
 
@@ -1803,10 +1804,61 @@ enum Site {
     Value(usize),
 }
 
-#[derive(Default)]
+/// The states a loop's body sends to its next round by `continue` and to its exit by `break`.
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Frame {
     breaks: Vec<Octagon>,
     continues: Vec<Octagon>,
+}
+
+/// What analysing a loop from its entry state changes of [`Fx`] outside the recording pass,
+/// all of it: the state at its exit, the obligations its analysis left unproven, which a
+/// candidate around it reads, and the states it sent to each enclosing loop's frame, by `break`
+/// or `continue` in its condition, which runs outside its own frame as the reference interpreter
+/// runs it. [`Fx::loop_outcome`] computes it against stand-in frames, so that every state sent
+/// lands in it, and [`Fx::apply_outcome`] applies it, whether it was just computed or replayed
+/// from the memo.
+///
+/// The rest of `Fx`, field by field, is none of it:
+/// - fixed for the whole function, read only: `syntax`, `tree`, `resolution`, `typing`,
+///   `routing`, `structs`, `callees`, `src`, `vars`, `paths`, `sites`, `result`, `result_shape`,
+///   `temps`, `scratch`, `probe`, `count`, `measures`, `entry_measures`, `pattern_shapes`;
+/// - written only while recording, which never replays from the memo: `report`, `retries`,
+///   `queries`;
+/// - restored by the statement or expression that changes it before it ends: `recording`,
+///   `scope`, `stmt`, `heads`, `head_of`, `arm`, `unfollowed`, and `tracks`, which a loop's pass
+///   pushes and truncates;
+/// - scratch, written and read in the evaluation of one struct literal: `built`;
+/// - read by the analysis and the same at every meeting of a loop: `tracks`, the measures of
+///   the loops around it, which an assignment in it moves. Each loop around pushes its own at
+///   each pass, from its text, and the state holds what they have moved by, so the memo's key
+///   is the loop and its entry state;
+/// - the memo itself and its instruments: `loop_memo`, `passes`, `replays`.
+///
+/// A field added to `Fx` is placed in one of these, or in the outcome. The replay test
+/// ([`check_with`] asking for [`Ask::replays`]) analyses each loop met again beside its memo's
+/// outcome over the corpus and the generated programs, and fails where they differ.
+#[derive(Clone, Debug, PartialEq)]
+struct LoopOutcome {
+    exit: Octagon,
+    unproven: usize,
+    escapes: Vec<Frame>,
+}
+
+/// A loop analysed outside the recording pass, from an entry state, and its outcome.
+struct Memo {
+    stmt: StmtId,
+    entry: Octagon,
+    outcome: LoopOutcome,
+}
+
+/// The replay test's state: whether a loop is being analysed again for it, how many loops met
+/// again it compared, and the span of each whose replay differed from its analysis.
+#[derive(Default)]
+struct Replays {
+    again: bool,
+    compared: usize,
+    differing: Vec<Span>,
 }
 
 /// The facts at the head of an enclosing loop, for an obligation inside it.
@@ -1814,6 +1866,9 @@ struct Head {
     span: Span,
     kept: Vec<String>,
     dropped: Vec<String>,
+    /// Each conjunct of the loop's condition and each `guard` condition that is no candidate
+    /// by its syntax, with why.
+    refused: Vec<(String, &'static str)>,
 }
 
 /// Where an obligation's `guard` goes.
@@ -1889,14 +1944,15 @@ struct Fx<'a> {
     retries: Vec<Retry>,
     /// When the SMT cross-check asks for them, the query of each obligation discharged so far.
     queries: Option<Vec<smt::Query>>,
-    /// Each loop analysed outside the recording pass, with its entry state and its exit state,
-    /// which depends on nothing else there: without it a loop would be analysed again for every
-    /// round of every loop around it, in time exponential in their nesting.
     /// The loop whose header, its condition and measures at the head of a round, is being
     /// read.
     head_of: Option<StmtId>,
-    /// With each, the obligations its analysis left unproven.
-    loop_memo: Vec<(StmtId, Octagon, Octagon, usize)>,
+    /// Each loop analysed outside the recording pass, with what its outcome depends on and the
+    /// outcome ([`LoopOutcome`]): without it a loop would be analysed again for every round of
+    /// every loop around it, in time exponential in their nesting.
+    loop_memo: Vec<Memo>,
+    /// When the replay test asks for it, its state ([`Ask::replays`]).
+    replays: Option<Replays>,
     /// The passes over a loop's body, for the test that keeps them linear in nesting.
     passes: usize,
     /// The `match` arm written as an expression being checked, before which a `guard` goes
@@ -1929,53 +1985,83 @@ struct Track {
 /// Checks one function, whose callees are `callees` in module order (`None` for a function
 /// without a body). `src` is the text its spans point into, for the fixes.
 pub fn check(f: &Function, callees: &[Option<Callee>], src: &str) -> Report {
-    checked(f, callees, src, false).0
+    checked(f, callees, src, Ask::default()).0
 }
 
-/// [`check`], with each obligation Tier 1 discharges written as an SMT-LIB 2 query for the SMT
-/// cross-check ([`smt`]). Only `mn smt` asks for them, and [`check`] spends nothing on them.
-pub fn check_with_queries(
+/// What a run of Tier 1 writes besides its report, which only the instruments ask for, and
+/// [`check`] spends nothing on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ask {
+    /// Each obligation Tier 1 discharges, as an SMT-LIB 2 query for the SMT cross-check
+    /// ([`smt`]), which `mn smt` writes.
+    pub queries: bool,
+    /// Each loop met again outside the recording pass, analysed again beside the outcome its
+    /// memo replays ([`LoopOutcome`]), for the test that the two agree.
+    pub replays: bool,
+}
+
+/// What a run of Tier 1 wrote besides its report, as [`Ask`] asked.
+#[derive(Clone, Debug, Default)]
+pub struct Extras {
+    pub queries: Vec<smt::Query>,
+    /// How many loops met again the replay test analysed again beside their replays.
+    pub replays_compared: usize,
+    /// The span of each loop whose outcome, analysed again, differed from the one its memo
+    /// replayed.
+    pub replays_differing: Vec<Span>,
+}
+
+/// [`check`], with what `ask` asks for besides the report.
+pub fn check_with(
     f: &Function,
     callees: &[Option<Callee>],
     src: &str,
-) -> (Report, Vec<smt::Query>) {
-    checked(f, callees, src, true)
+    ask: Ask,
+) -> (Report, Extras) {
+    checked(f, callees, src, ask)
 }
 
-fn checked(
-    f: &Function,
-    callees: &[Option<Callee>],
-    src: &str,
-    queries: bool,
-) -> (Report, Vec<smt::Query>) {
-    let (mut report, retries, queries) = run(f, callees, src, queries);
+fn checked(f: &Function, callees: &[Option<Callee>], src: &str, ask: Ask) -> (Report, Extras) {
+    let (mut report, retries, extras) = run(f, callees, src, ask);
     for r in &retries {
         if let Some(fix) = refined_var_fix(f, callees, src, &report.diagnostics, r) {
             report.diagnostics[r.diagnostic].fixes.insert(0, fix);
         }
     }
     report.diagnostics.sort_by_key(|d| d.primary.start);
-    (report, queries)
+    (report, extras)
 }
 
-/// One pass of Tier 1 over a function, its diagnostics in the order it found them, and the
-/// query of each obligation it discharged when `queries`.
+/// One pass of Tier 1 over a function, its diagnostics in the order it found them, and what
+/// `ask` asks for besides.
 fn run(
     f: &Function,
     callees: &[Option<Callee>],
     src: &str,
-    queries: bool,
-) -> (Report, Vec<Retry>, Vec<smt::Query>) {
+    ask: Ask,
+) -> (Report, Vec<Retry>, Extras) {
     let mut fx = Fx::new(f, callees, src);
-    if queries {
+    if ask.queries {
         fx.queries = Some(Vec::new());
+    }
+    if ask.replays {
+        fx.replays = Some(Replays::default());
     }
     fx.route();
     let mut st = Octagon::new(fx.count);
     fx.entry(&mut st);
     fx.body(&mut st);
     fx.report.variables = fx.count;
-    (fx.report, fx.retries, fx.queries.unwrap_or_default())
+    let (replays_compared, replays_differing) = fx
+        .replays
+        .map(|r| (r.compared, r.differing))
+        .unwrap_or_default();
+    let extras = Extras {
+        queries: fx.queries.unwrap_or_default(),
+        replays_compared,
+        replays_differing,
+    };
+    (fx.report, fx.retries, extras)
 }
 
 /// The fix that declares a `var` refined, offered before the `guard` for the `E0502` of `r`, when
@@ -2024,7 +2110,7 @@ fn refined_var_fix(
             syntax: &syntax,
             ..*f
         };
-        let after = run(&g, callees, src, false).0.diagnostics;
+        let after = run(&g, callees, src, Ask::default()).0.diagnostics;
         let fixed = after.iter().all(|d| key(d) != failed);
         let nothing_new = after
             .iter()
@@ -2238,6 +2324,7 @@ impl<'a> Fx<'a> {
             queries: None,
             head_of: None,
             loop_memo: Vec::new(),
+            replays: None,
             passes: 0,
             arm: None,
             unfollowed: false,
@@ -3197,9 +3284,17 @@ impl<'a> Fx<'a> {
                     list(&h.dropped)
                 )
             };
+            let refused: String = h
+                .refused
+                .iter()
+                .map(|(c, why)| format!("; `{}` is no candidate, since {}", c, why))
+                .collect();
             d = d.with_related(
                 h.span,
-                format!("at the head of this loop Tier 1 holds {}{}", kept, dropped),
+                format!(
+                    "at the head of this loop Tier 1 holds {}{}{}",
+                    kept, dropped, refused
+                ),
             );
         }
         if let Some(cond) = guard {
@@ -5507,6 +5602,93 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// Why `e` is no candidate fact at a loop head, by its syntax alone, or `None` when it is
+    /// one ([`loop-candidates-by-syntax`]): a candidate calls nothing, assigns nothing, passes
+    /// nothing as `mut` and leaves nowhere, by `break`, `continue`, `return`, `todo` or
+    /// `unreachable`, and each branch of an `if` or a `match` in it is a single expression that
+    /// is one. Its evaluation then changes no binding and either traps or gives a value, so
+    /// whether it gives `true` is a fact of the state alone, which Houdini judges on entry and
+    /// after a round and assumes at the head; [`Fx::refute_cand`] adds that it cannot trap
+    /// there. A call is none even when it returns: its `ensures` holds only where it runs and
+    /// returns, and a conjunct after a false one does not run.
+    ///
+    /// [`loop-candidates-by-syntax`]: ../../spec/ghost-contracts-and-totality.md
+    fn not_a_candidate(&self, e: ExprId) -> Option<&'static str> {
+        match &self.tree.expr(e).kind {
+            ExprKind::Int { .. } | ExprKind::Bool(_) | ExprKind::Name(_) => None,
+            ExprKind::Unary { operand, .. } => self.not_a_candidate(*operand),
+            ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::Index {
+                base: lhs,
+                index: rhs,
+            } => self
+                .not_a_candidate(*lhs)
+                .or_else(|| self.not_a_candidate(*rhs)),
+            ExprKind::Field { base, .. } | ExprKind::Repeat { value: base, .. } => {
+                self.not_a_candidate(*base)
+            }
+            ExprKind::Array(items) => items.iter().find_map(|&i| self.not_a_candidate(i)),
+            ExprKind::Construct { fields, .. } => {
+                fields.iter().find_map(|f| self.not_a_candidate(f.value))
+            }
+            ExprKind::Variant { payload, .. } => match payload {
+                Payload::None => None,
+                Payload::Named(fields) => fields.iter().find_map(|f| self.not_a_candidate(f.value)),
+                Payload::Positional(args) => args.iter().find_map(|a| match a.is_mut {
+                    true => Some("it passes a value as `mut`"),
+                    false => self.not_a_candidate(a.value),
+                }),
+            },
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => self
+                .not_a_candidate(*cond)
+                .or_else(|| self.not_a_candidate_branch(*then))
+                .or_else(|| match otherwise {
+                    Some(Else::Block(b)) => self.not_a_candidate_branch(*b),
+                    Some(Else::If(i)) => self.not_a_candidate(*i),
+                    None => Some("an `if` in it has no `else`"),
+                }),
+            ExprKind::Match { scrutinee, arms } => self.not_a_candidate(*scrutinee).or_else(|| {
+                arms.iter().find_map(|a| match a.body {
+                    ArmBody::Expr(x) => self.not_a_candidate(x),
+                    ArmBody::Block(b) => self.not_a_candidate_branch(b),
+                })
+            }),
+            ExprKind::Call { .. } => Some("it calls a function"),
+            ExprKind::Todo(_) | ExprKind::Unreachable(_) => {
+                Some("it may stop at `todo` or `unreachable`")
+            }
+            ExprKind::Error => Some("it does not parse"),
+        }
+    }
+
+    /// Why a block of an `if` or a `match` makes the expression it stands in no candidate: it
+    /// must hold a single expression that is one.
+    fn not_a_candidate_branch(&self, b: BlockId) -> Option<&'static str> {
+        let tree = self.tree;
+        let why = |s: StmtId| match &tree.stmt(s).kind {
+            StmtKind::Expr(x) => self.not_a_candidate(*x),
+            StmtKind::Assign { .. } => Some("a branch of it assigns"),
+            StmtKind::Break | StmtKind::Continue | StmtKind::Return(_) => {
+                Some("a branch of it may leave")
+            }
+            StmtKind::Binding { .. }
+            | StmtKind::Guard { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Discard(_) => Some("a branch of it runs a statement"),
+        };
+        match tree.block(b).stmts.as_slice() {
+            [s] => why(*s),
+            stmts => stmts
+                .iter()
+                .find_map(|&s| why(s))
+                .or(Some("a branch of it is not one expression")),
+        }
+    }
+
     /// The conditions of the `guard`s in a loop's body, outside its inner loops.
     fn guards(&self, b: BlockId, out: &mut Vec<Cand>) {
         let tree = self.tree;
@@ -5772,24 +5954,27 @@ impl<'a> Fx<'a> {
     }
 
     /// A state in which candidate `c` does not hold, or `None` where it holds wherever `st`
-    /// does. A candidate holds only where evaluating it cannot trap and gives `true`
-    /// (`ghost-contracts-and-totality.md`, item 2, "Facts at a loop head"): every check it makes
-    /// is proven in `st` itself, before the facts its evaluation leaves, that a divisor was not
-    /// 0 or that a narrowed value fit, are added; and an evaluation that ends with no state of
-    /// one that had some, one that always traps or leaves by `break` or `return`, is no proof.
-    /// Otherwise those facts would prove the candidate's own checks once it is assumed at the
-    /// head, and an empty head every check in the loop and after it. `st` itself is the state in
-    /// which it fails then.
+    /// does. `c` is one by its syntax ([`Fx::not_a_candidate`]), so its evaluation changes no
+    /// binding and leaves nowhere; it holds only where that evaluation also cannot trap and
+    /// gives `true` (`ghost-contracts-and-totality.md`, item 2, "Facts at a loop head"): every
+    /// check it makes is proven in `st` itself, before the facts its evaluation leaves, that a
+    /// divisor was not 0 or that a narrowed value fit, are added. Otherwise those facts would
+    /// prove the candidate's own checks once it is assumed at the head. `st` itself is the
+    /// state in which it fails then. An evaluation that may trap is the only one that can end
+    /// with no state of one that had some, so no head is left empty by a candidate.
     fn refute_cand(&mut self, st: &Octagon, c: Cand) -> Option<Octagon> {
         let mut s = st.clone();
-        // The candidates of a loop inside `c` are judged by their own count, not this one.
         let outer = std::mem::replace(&mut self.unproven, 0);
         let k = self.cand(&mut s, c);
         let may_trap = self.unproven > 0;
         self.unproven = outer;
-        if may_trap || (s.is_empty() && !st.is_empty()) {
+        if may_trap {
             return Some(st.clone());
         }
+        debug_assert!(
+            !s.is_empty() || st.is_empty(),
+            "a candidate that cannot trap left no state of one that had some"
+        );
         self.refute(&s, &k)
     }
 
@@ -6276,6 +6461,9 @@ impl<'a> Fx<'a> {
         self.emit("E0507", span, message, None, Anchor::Nowhere);
     }
 
+    /// A loop, from the state `st` it is entered with. Outside the recording pass nothing is
+    /// recorded, so a loop met again with what its outcome depends on unchanged gives the
+    /// outcome it gave before, which the memo replays ([`LoopOutcome`]); both are applied alike.
     fn while_loop(
         &mut self,
         st: &mut Octagon,
@@ -6284,22 +6472,100 @@ impl<'a> Fx<'a> {
         invariants: &[ExprId],
         body: BlockId,
     ) {
-        // Outside the recording pass nothing is recorded, so a loop met again with the same
-        // entry state leaves the state it left before, and counts again the obligations it
-        // left unproven, which a candidate around it reads.
-        if !self.recording {
-            if let Some((_, _, exit, unproven)) = self
-                .loop_memo
-                .iter()
-                .find(|(k, e, _, _)| *k == s && e == st)
-            {
-                *st = exit.clone();
-                self.unproven += unproven;
-                return;
-            }
-        }
         let entry = (!self.recording).then(|| st.clone());
-        let unproven = self.unproven;
+        let replayed = entry.as_ref().and_then(|entry| {
+            self.loop_memo
+                .iter()
+                .find(|m| m.stmt == s && m.entry == *entry)
+                .map(|m| m.outcome.clone())
+        });
+        let outcome = match replayed {
+            Some(outcome) => {
+                // The replay test analyses the loop again, once: a loop inside it replays.
+                if self.replays.as_ref().is_some_and(|r| !r.again) {
+                    self.set_replaying(true);
+                    let again = self.loop_outcome(st, s, cond, invariants, body);
+                    self.set_replaying(false);
+                    let span = self.tree.stmt(s).span;
+                    if let Some(r) = &mut self.replays {
+                        r.compared += 1;
+                        if again != outcome {
+                            r.differing.push(span);
+                        }
+                    }
+                }
+                outcome
+            }
+            None => {
+                let outcome = self.loop_outcome(st, s, cond, invariants, body);
+                if let Some(entry) = entry {
+                    self.loop_memo.push(Memo {
+                        stmt: s,
+                        entry,
+                        outcome: outcome.clone(),
+                    });
+                }
+                outcome
+            }
+        };
+        self.apply_outcome(st, outcome);
+    }
+
+    fn set_replaying(&mut self, again: bool) {
+        if let Some(r) = &mut self.replays {
+            r.again = again;
+        }
+    }
+
+    /// Analyses a loop entered with `st` against a stand-in frame for each enclosing loop and
+    /// a count of unproven obligations of its own, so that all it changes outside the recording
+    /// pass lands in what it returns.
+    fn loop_outcome(
+        &mut self,
+        st: &Octagon,
+        s: StmtId,
+        cond: ExprId,
+        invariants: &[ExprId],
+        body: BlockId,
+    ) -> LoopOutcome {
+        let stand_ins = self.loops.iter().map(|_| Frame::default()).collect();
+        let frames = std::mem::replace(&mut self.loops, stand_ins);
+        let outer = std::mem::replace(&mut self.unproven, 0);
+        let mut exit = st.clone();
+        self.analyse_loop(&mut exit, s, cond, invariants, body);
+        LoopOutcome {
+            exit,
+            unproven: std::mem::replace(&mut self.unproven, outer),
+            escapes: std::mem::replace(&mut self.loops, frames),
+        }
+    }
+
+    /// Applies a loop's outcome, just computed or replayed: the state at its exit, the
+    /// obligations it left unproven, and the states it sent to each enclosing loop.
+    fn apply_outcome(&mut self, st: &mut Octagon, outcome: LoopOutcome) {
+        let LoopOutcome {
+            exit,
+            unproven,
+            escapes,
+        } = outcome;
+        *st = exit;
+        self.unproven += unproven;
+        for (frame, sent) in self.loops.iter_mut().zip(escapes) {
+            frame.breaks.extend(sent.breaks);
+            frame.continues.extend(sent.continues);
+        }
+    }
+
+    /// Houdini over a loop's candidates from the state `st` it is entered with, then the pass
+    /// that records, from the head it settles on; `st` becomes the state at the loop's exit.
+    fn analyse_loop(
+        &mut self,
+        st: &mut Octagon,
+        s: StmtId,
+        cond: ExprId,
+        invariants: &[ExprId],
+        body: BlockId,
+    ) {
         let mut changed = Vec::new();
         self.changed_stmt(s, &mut changed);
         // Candidates come only from the loop's text: the written invariants first, then the
@@ -6317,8 +6583,32 @@ impl<'a> Fx<'a> {
             }
         }
         let written = cands.len();
+        // A written invariant lies in the Tier-1 fragment, which holds no call, `if` or
+        // `match`, so each of its conjuncts is a candidate by its syntax.
+        debug_assert!(cands.iter().all(|c| match c {
+            Cand::Expr(e) | Cand::Weak(e) => self.not_a_candidate(*e).is_none(),
+        }));
         let mut from_cond = Vec::new();
         self.conjuncts(cond, &mut from_cond);
+        let mut from_guards = Vec::new();
+        self.guards(body, &mut from_guards);
+        // A conjunct or a guard's condition that is no candidate by its syntax is still
+        // evaluated where the program evaluates it, and gives the head no fact.
+        let mut refused = Vec::new();
+        for found in [&mut from_cond, &mut from_guards] {
+            found.retain(|c| {
+                let e = match c {
+                    Cand::Expr(e) | Cand::Weak(e) => *e,
+                };
+                match self.not_a_candidate(e) {
+                    None => true,
+                    Some(why) => {
+                        refused.push((self.own_text(e).0, why));
+                        false
+                    }
+                }
+            });
+        }
         let tree = self.tree;
         let weak: Vec<Cand> = from_cond
             .iter()
@@ -6351,7 +6641,7 @@ impl<'a> Fx<'a> {
             .collect();
         cands.extend(from_cond);
         cands.extend(weak);
-        self.guards(body, &mut cands);
+        cands.extend(from_guards);
 
         let was = self.recording;
         self.recording = false;
@@ -6431,6 +6721,7 @@ impl<'a> Fx<'a> {
             span: tree.stmt(s).span,
             kept: Vec::new(),
             dropped: Vec::new(),
+            refused,
         };
         for (c, ok) in cands.iter().zip(&alive) {
             let text = self.cand_text(*c);
@@ -6444,10 +6735,6 @@ impl<'a> Fx<'a> {
         let (_, exit) = self.pass(&head, (s, cond, body), st);
         self.heads.pop();
         *st = exit;
-        if let Some(entry) = entry {
-            let left = self.unproven - unproven;
-            self.loop_memo.push((s, entry, st.clone(), left));
-        }
     }
 
     /// The states a proven written invariant was decided on, for its query: on entry, and
@@ -6543,6 +6830,17 @@ mod tests {
         })
     }
 
+    /// [`passes`] while the replay test analyses again each loop met again, and how many it
+    /// compared.
+    fn passes_replaying(src: &str) -> (usize, usize) {
+        with_fx(src, |fx, st| {
+            fx.replays = Some(Replays::default());
+            let mut st = st.clone();
+            fx.body(&mut st);
+            (fx.passes, fx.replays.as_ref().map_or(0, |r| r.compared))
+        })
+    }
+
     /// `f` on Tier 1's analysis of the module's last function, routed, and its entry state.
     fn with_fx<T>(src: &str, run: impl FnOnce(&mut Fx<'_>, &Octagon) -> T) -> T {
         let text = module(src);
@@ -6596,6 +6894,11 @@ mod tests {
         assert!(forty <= 8 * 40, "{}", forty);
         assert!(ten >= 10, "{}", ten);
         assert!(codes(&nested(40)).is_empty());
+        // The replay test analyses each loop met again once more, and the loops inside it
+        // replay, so it stays linear too.
+        let (replaying, compared) = passes_replaying(&nested(40));
+        assert!(compared >= 39, "{}", compared);
+        assert!(replaying <= 3 * forty, "{} then {}", forty, replaying);
     }
 
     /// A function past [`RELATIONAL_LIMIT`](crate::octagon::RELATIONAL_LIMIT) variables is
@@ -7514,9 +7817,10 @@ mod tests {
 
     /// A loop's candidate holds only where evaluating it cannot trap (`ghost-contracts-and-
     /// totality.md`, item 2): the facts its evaluation leaves, a divisor that is not 0 or a
-    /// narrowed value that fits, never prove its own checks, and one that always traps leaves
-    /// the head its state. The nightly's generated programs found both as wrong proofs
-    /// (2026-11-16 to 11-21).
+    /// narrowed value that fits, never prove its own checks. The nightly's generated programs
+    /// found such wrong proofs (2026-11-16 to 11-21). The conjuncts below that call or leave are
+    /// no candidates by their syntax ([`test_a_candidate_is_one_by_its_syntax`]), and leave
+    /// the head its state.
     #[test]
     fn test_a_candidate_holds_only_where_it_cannot_trap() {
         let take = "fn take(x: u8) -> u8 = x\n";
@@ -7581,15 +7885,15 @@ mod tests {
             "{:?}",
             narrowed
         );
-        // A narrowing that always traps is `E0508`, as it is outside a loop, not a head with no
-        // state in which every check counts as proven.
+        // A narrowing that always traps is `E0508`, as it is outside a loop, and in a call it is
+        // no candidate, so it leaves no head without a state.
         let always = format!(
             "{}pub fn f() -> u8 {{\n  var i: u8 = 0\n  while take(300) == 0 and i < 1 {{\n    i += 1\n  }}\n  i\n}}",
             take
         );
         assert_eq!(codes(&always), ["E0508"]);
-        // A call that never returns leaves no state either; the exit, where `n > 9` is false
-        // and the call is never made, keeps the state of the entry, so `m + 1` stays a check.
+        // A call that never returns is no candidate; the exit, where `n > 9` is false and the
+        // call is never made, keeps the state of the entry, so `m + 1` stays a check.
         let never = "fn never(x: u8) -> u8\n  ensures result > 200 and result < 100\n= todo(\"never\")\npub fn f(d: u8, n: u8, m: u8) -> u8 {\n  var i: u8 = 0\n  while n > 9 and never(d) == i {\n    i += 1\n  }\n  val y: u8 = m + 1\n  y\n}";
         let found: Vec<(ObligationKind, bool)> = obligations(never)
             .into_iter()
@@ -7600,7 +7904,7 @@ mod tests {
             "{:?}",
             found
         );
-        // So does a guard whose condition always leaves by `break`: the loop's exit, from the
+        // Nor is a guard whose condition always leaves by `break`: the loop's exit, from the
         // `break` of its first round, has `i` at 1, which `u8[0..1]` does not hold.
         let leaves = "pub fn f(x: u8) -> u8 {\n  var i: u8 = 0\n  while i < 3 {\n    i = i + 1\n    guard (if x > 1 { break } else { break }) else {\n      return 7\n    }\n  }\n  val y: u8[0..1] = i\n  y\n}";
         assert_eq!(codes(leaves), ["E0502"]);
@@ -7626,6 +7930,150 @@ mod tests {
             assert_eq!(fx.passes, passes, "the loop is met again from its memo");
             assert_eq!(fx.unproven, 2 * once);
             assert!(first == again);
+        });
+    }
+
+    /// A candidate is one by its syntax alone (`ghost-contracts-and-totality.md`, item 2,
+    /// `loop-candidates-by-syntax`): it calls nothing, assigns nothing and leaves nowhere, and
+    /// each branch of an `if` or a `match` in it is one expression that is one. The reviews of
+    /// pull request 182 found each form below held as a candidate and proving what the reference
+    /// interpreter traps on.
+    #[test]
+    fn test_a_candidate_is_one_by_its_syntax() {
+        let loop_then_y = |head: &str, body: &str, y: &str| {
+            format!(
+                "pub fn f(x: u8, n: u8) -> u8 {{\n  var i: u8 = 0\n  while {} {{\n{}  }}\n  val y: {} = x\n  y\n}}",
+                head, body, y
+            )
+        };
+        // A guard whose condition leaves on one branch, by `return`, `break` or `continue`, and
+        // a conjunct that may stop at `todo` or `unreachable`, in an `if` or a `match`: none
+        // gives the head `x <= 5`, which after the loop `x` need not keep.
+        let guarded = |leave: &str, step_first: bool| {
+            let guard = format!(
+                "    guard (if x > 5 {{ {} }} else {{ 0 }}) == 0 else {{\n      return 7\n    }}\n",
+                leave
+            );
+            match step_first {
+                true => format!("    i += 1\n{}", guard),
+                false => format!("{}    i += 1\n", guard),
+            }
+        };
+        for src in [
+            loop_then_y("i < n", &guarded("return 9", false), "u8[0..=5]"),
+            loop_then_y("i < n", &guarded("break", false), "u8[0..=5]"),
+            loop_then_y("i < n", &guarded("continue", true), "u8[0..=5]"),
+            loop_then_y(
+                "i < n and (if x > 5 { todo(\"t\") } else { 0 }) == 0",
+                "    i += 1\n",
+                "u8[0..=5]",
+            ),
+            loop_then_y(
+                "i < n and (if x > 5 { unreachable(\"u\") } else { 0 }) == 0",
+                "    i += 1\n",
+                "u8[0..=5]",
+            ),
+            loop_then_y(
+                "i < n and (match x {\n    0 => 0\n    1 => 0\n    _ => unreachable(\"x\")\n  }) == 0",
+                "    i += 1\n",
+                "u8[0..=1]",
+            ),
+        ] {
+            assert_eq!(codes(&src), ["E0502"], "{}", src);
+        }
+        // A call whose `ensures` constrains its argument: it holds only where the call runs and
+        // returns, and at the exit, where `i < n` fails first, `pin` is never called.
+        let pin = "fn pin(v: u8) -> u8\n  ensures v <= 9 and result == 0\n{\n  guard v <= 9 else {\n    todo(\"past 9\")\n  }\n  0\n}\n";
+        let called = format!(
+            "{}{}",
+            pin,
+            loop_then_y("i < n and pin(x) == 0", "    i += 1\n", "u8[0..=9]")
+        );
+        assert_eq!(codes(&called), ["E0502"]);
+        // A branch that assigns: assumed at the head, it set `j` to 0 there, and the round, where
+        // the body has made `j` 9, proved that `j + 250` fits in `take`'s parameter.
+        let assigns = "fn take(x: u8) -> u8 = x\npub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  var j: u8 = 0\n  while take(j + 250) > 0 and (if n < 255 {\n    j = 0\n    0\n  } else {\n    j = 0\n    0\n  }) == 0 and i < 3 {\n    j = 9\n    i += 1\n  }\n  i\n}";
+        let found: Vec<(ObligationKind, bool)> = obligations(assigns)
+            .into_iter()
+            .map(|(k, _, proven)| (k, proven))
+            .collect();
+        assert!(
+            found.contains(&(ObligationKind::Range, false)),
+            "{:?}",
+            found
+        );
+        // The note at the loop says which conjuncts are no candidates, and why.
+        let noted = format!(
+            "{}pub fn f(x: u8, n: u8) -> u8 {{\n  var i: u8 = 0\n  while i < n and pin(x) == 0 {{\n    val z: u8[0..=5] = i\n    i = z + 1\n  }}\n  i\n}}",
+            pin
+        );
+        let d = diagnostics(&noted);
+        assert_eq!(d.len(), 1, "{:?}", d);
+        assert!(
+            d[0].related.iter().any(|r| r
+                .message
+                .contains("; `pin(x) == 0` is no candidate, since it calls a function")),
+            "{:?}",
+            d[0].related
+        );
+        // An `if` whose branches are single expressions that are candidates is one, held where
+        // it holds on entry and after every round.
+        let branches = "pub fn f(x: u8, n: u8) -> u8 {\n  var i: u8 = 0\n  val j: u8 = x % 6\n  while i < n and (if j > 5 { 1 } else { 0 }) == 0 {\n    val z: u8[0..=5] = i\n    i = z + 1\n  }\n  j\n}";
+        let d = diagnostics(branches);
+        assert_eq!(d.len(), 1, "{:?}", d);
+        assert!(
+            d[0].related.iter().any(|r| r
+                .message
+                .contains("holds `(if j > 5 { 1 } else { 0 }) == 0`, `i <= n`")
+                && !r.message.contains("no candidate")),
+            "{:?}",
+            d[0].related
+        );
+    }
+
+    /// The outcome of a loop met again outside the recording pass is replayed whole: the state
+    /// a `break` in its condition sends to the loop around it is part of it, as are its exit
+    /// state and the obligations it left unproven ([`LoopOutcome`]). The review of pull request
+    /// 182 found the innermost loop below replayed without its `break`: the middle loop's exit
+    /// then had `a` at 0 only, the outer loop kept `a == 0` at its head, and `a + 255` was proven
+    /// to fit in `take`'s parameter, where the reference interpreter traps.
+    #[test]
+    fn test_a_loop_met_again_sends_the_states_of_its_condition_again() {
+        let src = "fn take(x: u8) -> u8 = x\npub fn f(n: u8) -> u8 {\n  var a: u8 = 0\n  var k: u8 = 0\n  while take(a + 255) > 0 and k < 2 and a == 0 {\n    var m: u8 = 0\n    while m < 1 {\n      a = 7\n      var c: u8 = 0\n      while (if a == 7 { break } else { c }) < 1 {\n        c += 1\n      }\n      a = 0\n      guard a == 0 else {\n        return 2\n      }\n      m += 1\n    }\n    k += 1\n  }\n  k\n}";
+        let found: Vec<(ObligationKind, bool)> = obligations(src)
+            .into_iter()
+            .map(|(k, _, proven)| (k, proven))
+            .collect();
+        assert!(
+            found.contains(&(ObligationKind::Range, false)),
+            "{:?}",
+            found
+        );
+        // The replay test sees a memo that loses what a loop sends to the loops around it.
+        with_fx(src, |fx, st| {
+            fx.recording = false;
+            let mut first = st.clone();
+            fx.body(&mut first);
+            assert!(fx.loop_memo.iter().any(|m| m
+                .outcome
+                .escapes
+                .iter()
+                .any(|f| !f.breaks.is_empty())));
+            fx.replays = Some(Replays::default());
+            let mut again = st.clone();
+            fx.body(&mut again);
+            assert_eq!(fx.replays.as_ref().map(|r| r.differing.len()), Some(0));
+            // Only the innermost loop's outcomes stay, without the state its `break` sends: the
+            // loops around it are analysed afresh, and replay it.
+            fx.loop_memo
+                .retain(|m| m.outcome.escapes.iter().any(|f| !f.breaks.is_empty()));
+            assert!(!fx.loop_memo.is_empty());
+            for m in &mut fx.loop_memo {
+                m.outcome.escapes.iter_mut().for_each(|f| f.breaks.clear());
+            }
+            let mut lossy = st.clone();
+            fx.body(&mut lossy);
+            assert!(fx.replays.as_ref().is_some_and(|r| !r.differing.is_empty()));
         });
     }
 

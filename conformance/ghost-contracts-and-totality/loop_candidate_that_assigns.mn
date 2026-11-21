@@ -1,0 +1,23 @@
+// expect: pass
+module conformance
+// A conjunct of a loop's condition that assigns, in a branch of an `if`, is no candidate (spec
+// item 2, "Facts at a loop head"): assumed at the head, its evaluation once set `j` to 0 there,
+// which proved `j + 250` fits in `u8` in the round, where the body has set `j` to 9. It is a
+// run-time check, which traps in the second round.
+fn take(x: u8) -> u8 = x
+
+pub fn f(n: u8) -> u8 {
+  var i: u8 = 0
+  var j: u8 = 0
+  while take(j + 250) > 0 and (if n < 255 {
+    j = 0
+    0
+  } else {
+    j = 0
+    0
+  }) == 0 and i < 3 {
+    j = 9
+    i += 1
+  }
+  i
+}
