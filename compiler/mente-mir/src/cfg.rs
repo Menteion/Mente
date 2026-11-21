@@ -3180,6 +3180,20 @@ mod tests {
             "an element of memory of {0: u8, 8: [2]i64}",
         );
         refused(vec![field(8, bytes2)], "taken as [2]u8");
+        // A field is taken at a stride of 1 alone, though its offset is the constant index.
+        let mut b = Builder::new("stride", &[a(record)], None);
+        let base = b.params(BlockId(0))[0];
+        let eight = b.int(U64, Num::from_i128(8));
+        b.inst(Op::Elem { stride: 8 }, a(longs2), &[base, eight]);
+        b.ret(None);
+        refused(
+            vec![b.finish()],
+            "an element of memory of {0: u8, 8: [2]i64} taken as [2]i64 at a stride of 8",
+        );
+        // An address of a shape the module does not hold.
+        let mut b = Builder::new("unknown", &[a(MemId(99))], None);
+        b.ret(None);
+        refused(vec![b.finish()], "a shape the module does not hold");
         // A store takes the type its memory holds.
         let mut b = Builder::new("store", &[a(u8m)], None);
         let at = b.params(BlockId(0))[0];
@@ -3215,7 +3229,13 @@ mod tests {
             elem: MemId(1),
         });
         ahead.of(Mem::Int(U8));
-        for mems in [past, ahead] {
+        // A shape that holds itself, whose size has no end.
+        let mut itself = Mems::default();
+        itself.of(Mem::Array {
+            len: 1,
+            elem: MemId(0),
+        });
+        for mems in [past, ahead, itself] {
             assert!(verify(&Module {
                 functions: vec![],
                 budget: BUDGET,
