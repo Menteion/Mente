@@ -1284,7 +1284,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-sandbox.sh", "b1ad92f9b398c20d707024cc43c6342c8152cc5caeb9353fb621411d0f789767"],
   // The sandbox's one program, cargo's runner and the namespace's first process, which
   // test-sandbox.sh builds at setup and every command runs through.
-  [".github/scripts/test-sandbox.rs", "71f1216eff13c419145b6f0fc0703d2c0ec336214074d8b74e256d38376b7f9a"],
+  [".github/scripts/test-sandbox.rs", "70c6da240e653cd85abab486a4eb69c5056206fdf91b81374d4ee7e86c72950c"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash

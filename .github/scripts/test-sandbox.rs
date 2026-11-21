@@ -28,6 +28,14 @@
 //
 // Every system call that fails ends it with a message and status 1, before the command runs: the
 // sandbox fails closed.
+//
+// It leaves every signal as its caller left it, as the shell route does: no Rust start runs before
+// `main` (`no_main`), which would ignore SIGPIPE for this program and so for the command, and the
+// program itself changes no disposition its children inherit. The wrapper ignores SIGPIPE only
+// after it has started its child, as the shell's wrapper did with `trap '' PIPE`. (The canary of
+// 3743b55: a caller that ignored SIGPIPE, the canary's own shell, gave the shell route's command it
+// ignored and the program's at its default.)
+#![no_main]
 
 use std::ffi::{CString, OsString};
 use std::io::Write;
@@ -63,7 +71,8 @@ const SIGINT: c_int = 2;
 const SIGKILL: c_int = 9;
 const SIGPIPE: c_int = 13;
 const SIGTERM: c_int = 15;
-const SIG_DFL: usize = 0;
+const SIG_IGN: usize = 1;
+const F_SETFD: c_int = 2;
 const O_RDWR: c_int = 2;
 const O_CLOEXEC: c_int = 0o2000000;
 const WNOHANG: c_int = 1;
@@ -110,6 +119,7 @@ extern "C" {
     fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
     fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
     fn dup2(old: c_int, new: c_int) -> c_int;
+    fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn getrlimit(resource: c_int, limit: *mut Rlimit) -> c_int;
@@ -122,9 +132,14 @@ extern "C" {
     fn _exit(status: c_int) -> !;
 }
 
+/// A line on standard error, as the shell's `echo >&2`: one that cannot be written is let go.
+fn say(line: &str) {
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 /// Ends the program as the shell's `set -e` would have: a message on standard error, status `code`.
 fn fail(code: i32, message: &str) -> ! {
-    eprintln!("test-sandbox: {message}");
+    say(&format!("test-sandbox: {message}"));
     std::process::exit(code)
 }
 
@@ -273,12 +288,16 @@ fn wrapper(args: &[OsString]) -> ! {
         // SAFETY: plain system calls, and pointers to strings and arrays alive at the call; the child
         // never returns.
         unsafe {
-            dup2(fds[0], 0);
-            // The signals as the shell's process substitution left them: Rust's start ignores SIGPIPE.
-            signal(SIGPIPE, SIG_DFL);
+            // The lifeline's end the namespace reads, on standard input, open across the exec (dup2
+            // onto itself would leave it closing there).
+            if fds[0] == 0 {
+                fcntl(0, F_SETFD, 0);
+            } else {
+                dup2(fds[0], 0);
+            }
             execve(sudo.as_ptr(), argp.as_ptr(), environ);
             let e = errno();
-            eprintln!("test-sandbox: /usr/bin/sudo: {e}");
+            say(&format!("test-sandbox: /usr/bin/sudo: {e}"));
             _exit(if e.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 })
         }
     }
@@ -286,8 +305,13 @@ fn wrapper(args: &[OsString]) -> ! {
     unsafe {
         close(fds[0]);
         LIFELINE.store(fds[1], Ordering::SeqCst);
+        // A lifeline the namespace has closed fails a write, and does not end the wrapper.
+        signal(SIGPIPE, SIG_IGN);
+        // A signal the caller ignored stays ignored, as the shell traps none it was given ignored.
         for signal_number in [SIGTERM, SIGINT, SIGHUP] {
-            signal(signal_number, stop as extern "C" fn(c_int) as usize);
+            if signal(signal_number, stop as extern "C" fn(c_int) as usize) == SIG_IGN {
+                signal(signal_number, SIG_IGN);
+            }
         }
     }
     let status = status_of(wait_for(child));
@@ -383,12 +407,11 @@ fn program(name: &[u8]) -> Vec<u8> {
 /// The command's own process, never returning: the privileges dropped, as setpriv dropped them, and
 /// the command run with only the environment named, as `env -i` ran it.
 fn command(envs: &[Vec<u8>], argv: &[Vec<u8>]) -> ! {
-    // The lifeline is the wrapper's and the watcher's alone; signals as the shell left them, none
-    // ignored (Rust's start ignores SIGPIPE, which a command would inherit).
-    // SAFETY: plain system calls on numbers.
+    // The lifeline is the wrapper's and the watcher's alone. The signals stay as the caller left
+    // them, as through the shell route.
+    // SAFETY: a plain system call on a number.
     unsafe {
         close(8);
-        signal(SIGPIPE, SIG_DFL);
     }
     let last_cap: c_ulong = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
         .ok()
@@ -433,7 +456,7 @@ fn command(envs: &[Vec<u8>], argv: &[Vec<u8>]) -> ! {
     // SAFETY: NUL-terminated strings in NULL-terminated arrays, all alive at the call.
     unsafe { execve(path.as_ptr(), argp.as_ptr(), envp.as_ptr()) };
     let e = errno();
-    eprintln!("env: '{}': {e}", String::from_utf8_lossy(&argv[0]));
+    say(&format!("env: '{}': {e}", String::from_utf8_lossy(&argv[0])));
     // SAFETY: ends this child at once, as a failed exec does.
     unsafe { _exit(if e.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 }) }
 }
@@ -549,7 +572,7 @@ fn inner(args: &[OsString]) -> ! {
         left = remaining(watcher);
     }
     if !left.is_empty() {
-        eprintln!("test-sandbox: the command left processes behind, which end with it: {}", left.join(" "));
+        say(&format!("test-sandbox: the command left processes behind, which end with it: {}", left.join(" ")));
         if status == 0 {
             status = 1;
         }
@@ -557,7 +580,10 @@ fn inner(args: &[OsString]) -> ! {
     std::process::exit(status)
 }
 
-fn main() {
+/// The program's entry, with no Rust start before it (`no_main`): the arguments come from what the
+/// standard library takes at load, as for any Rust program on Linux.
+#[no_mangle]
+pub extern "C" fn main(_argc: c_int, _argv: *const *const c_char) -> c_int {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args.first().map(|a| a.as_bytes()) {
         Some(b"run") => wrapper(&args[1..]),
