@@ -4227,6 +4227,13 @@ pub fn element(k: usize[0..=1]) -> i128 {
   val r: [2]i128 = [[-1_i64, 18446744073709551615_u128][k], 1_i8]
   r[0]
 }
+pub fn named(c: bool) -> u8 {
+  val r: [2]u8 = if c { [7; 2] } else {
+    val t: [2]u8 = [9; 2]
+    t
+  }
+  r[1]
+}
 ";
         let lowered = lower(&mente_sema::check_program(src).unwrap()).unwrap();
         let run = |name: &str, args: &[cfg::Val]| {
@@ -4260,6 +4267,8 @@ pub fn element(k: usize[0..=1]) -> i128 {
             ("row", vec![int(1)], wide),
             ("element", vec![int(1)], wide),
             ("element", vec![int(0)], int(-1)),
+            ("named", vec![flag(true)], int(7)),
+            ("named", vec![flag(false)], int(9)),
         ] {
             assert_eq!(run(name, &args), Ok(value), "{}({:?})", name, args);
         }

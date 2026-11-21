@@ -5678,17 +5678,23 @@ fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
             )
         }
     } else if roll == 1 {
-        // An `if` of a `[n]u8` to the checker whose literal holds more, until it lands.
+        // An `if` of a `[n]u8` to the checker whose literal holds more, until it lands; its
+        // `[x; n]` half the time a binding its block gives by name (the review of PR 183).
         let n = 1 + rng.below(4);
         let wide = *rng.pick(&["u16", "u32", "i32", "i64"]);
         let held = 256 + rng.below(745);
+        let bytes = if rng.chance(50) {
+            format!("{{\n    val t: [{}]u8 = [x; {}]\n    t\n  }}", n, n)
+        } else {
+            format!("{{ [x; {}] }}", n)
+        };
         format!(
-            "pub fn {}(c: bool, x: u8) -> {} {{\n  val a: [{}]{} = if c {{ [x; {}] }} else {{ [{}; {}] }}\n  a[{}]\n}}\n",
+            "pub fn {}(c: bool, x: u8) -> {} {{\n  val a: [{}]{} = if c {} else {{ [{}; {}] }}\n  a[{}]\n}}\n",
             name,
             wide,
             n,
             wide,
-            n,
+            bytes,
             held,
             n,
             n - 1
@@ -7616,6 +7622,7 @@ mod tests {
             " = if c { [x, ",
             " = match k {",
             "{ [x; ",
+            "    t\n  } else { [",
             "]][if k { 1 } else { 0 }]",
             "_u128][if k { 1 } else { 0 }], ",
         ] {
@@ -7661,7 +7668,7 @@ mod tests {
         "pub fn f3(c: bool, x: i8, y: u32) -> [2]i64 = if c { [x, 14_i8] } else { [y, 73_u32] }\n",
         "pub fn f3(k: bool) -> [2]i128 = [[-62_i32, 967083533817693959653399905997_u128][if k { 1 } else { 0 }], 16_i8]\n",
         "pub fn f3(k: bool) -> [2]i128 = [[-50_i64, 33], [439395929139861948437874669498_u128, 936904490330284766988950014917]][if k { 1 } else { 0 }]\n",
-        "pub fn f3(c: bool, x: u8) -> i64 {\n  val a: [2]i64 = if c { [x; 2] } else { [562; 2] }\n  a[1]\n}\n",
+        "pub fn f3(c: bool, x: u8) -> i64 {\n  val a: [2]i64 = if c {\n    val t: [2]u8 = [x; 2]\n    t\n  } else { [562; 2] }\n  a[1]\n}\n",
         "pub fn f3(k: u8, x: i16, y: u8) -> [2]i64 = match k {\n  0 => [x, 3_i16]\n  1 => [y, 47_u8]\n  _ => [98; 2]\n}\n",
         "pub fn f3(k: u8, x: i32, y: i64) -> [2]i64 = match k {\n  0 => [x, -15_i32]\n  1 => [y, -36_i64]\n  _ => [615; 2]\n}\n",
         "pub fn f3(c: bool, x: u8) -> u16 {\n  val a: [3]u16 = if c { [x; 3] } else { [353; 3] }\n  a[2]\n}\n",

@@ -752,6 +752,16 @@ impl Translate {
         for (p, v) in kept.iter().zip(entry_params) {
             vals[p.0 as usize] = Some(v);
         }
+        // A function whose frame passes the budget never runs: every call of it is counted
+        // first and traps, however little of the stack is in use (`core-calculus.md`, item 25),
+        // as below. So its body is never built, and its slots, which may pass what a machine
+        // frame can hold, are never made.
+        if f.frame > m.budget {
+            b.ins().trap(TrapCode::STACK_OVERFLOW);
+            b.seal_all_blocks();
+            b.finalize(frontend);
+            return Ok(());
+        }
         for (bi, block) in f.blocks.iter().enumerate() {
             if bi > 0 {
                 b.switch_to_block(blocks[bi]);
@@ -1069,6 +1079,21 @@ impl Translate {
             }
             // Native code counts no frame yet: its stack ends at the system's guard page
             // (`core-calculus.md`, item 25, what the paths do not do yet).
+            // Native code runs no count yet (`core-calculus.md`, item 25), but the count of a
+            // callee whose frame alone passes the budget, which traps however little is in use,
+            // as on MIR.
+            Op::Enter {
+                callee,
+                trap: Some(site),
+            } if m.runs_out(0, *callee) => {
+                let fail = e.b.create_block();
+                let after = e.b.create_block();
+                e.b.ins().jump(fail, &[]);
+                e.b.switch_to_block(fail);
+                trap_report(writer, rt, e, f, *site, &[], prefix)?;
+                e.b.switch_to_block(after);
+                return Ok(None);
+            }
             Op::Enter { .. } => return Ok(None),
             Op::Call(c) => {
                 let callee = &ids[c.0 as usize];
@@ -2130,6 +2155,36 @@ pub fn huge(x: u8) -> u8 {
                 x
             );
         }
+    }
+
+    /// A function whose frame passes the budget is built on every target, though its slots pass
+    /// what a machine frame can hold: nothing reaches its body, since every call of it traps at
+    /// its count, as on MIR, one from outside at the function's name. A frame of the budget
+    /// itself is built whole. The fuzzer found Cranelift refusing a 4 GiB slot (2026-11-22).
+    #[test]
+    fn test_a_function_past_the_budget_is_built_and_traps_at_its_call() {
+        let source =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "../../conformance/core-calculus/a_frame_past_the_budget_traps_at_its_call.mn",
+            ))
+            .unwrap();
+        let module = mente_sema::check_program_without_proofs(&source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        for target in [
+            Target::X86_64Linux,
+            Target::Aarch64Linux,
+            Target::X86_64Windows,
+        ] {
+            let mut w = writer(target);
+            program(&lowered, &[], "", &mut w).unwrap_or_else(|e| panic!("{:?}: {}", target, e));
+        }
+        let entry = |name: &str| lowered.entries.iter().find(|e| e.name == name).unwrap();
+        let int = |n: i128| vec![Arg::Int(Num::from_i128(n))];
+        assert_eq!(refusal(&lowered, entry("exact"), &int(3)), None);
+        assert_eq!(
+            refusal(&lowered, entry("past"), &int(3)).as_deref(),
+            Some("trap[stack-overflow] at 17:8: the call stack ran out")
+        );
     }
 
     /// The symbols of an object that are not the program's own functions: what it imports, and

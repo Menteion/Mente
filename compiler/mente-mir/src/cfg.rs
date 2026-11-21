@@ -201,14 +201,6 @@ impl Mems {
         }
     }
 
-    /// The shapes in the table, in the order they were added.
-    pub fn iter(&self) -> impl Iterator<Item = (MemId, &Mem)> {
-        self.all
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (MemId(i as u32), m))
-    }
-
     /// The shape `id`, as a diagnostic names it: `[4]u8`, `{0: u8, 8: [2]i64}`.
     pub fn name(&self, id: MemId) -> String {
         match self.get(id) {
@@ -1128,7 +1120,8 @@ pub fn verify(m: &Module) -> Result<(), String> {
 /// Every shape of memory holds only shapes added before it, so the table has no cycle; an
 /// array's bytes fit 32 bits; and a record's fields lie within its bytes.
 fn verify_mems(mems: &Mems) -> Result<(), String> {
-    for (id, m) in mems.iter() {
+    for (i, m) in mems.all.iter().enumerate() {
+        let id = MemId(i as u32);
         let before = |c: &MemId| c.0 < id.0;
         let fits = match m {
             Mem::Int(_) | Mem::Bool | Mem::Empty => true,
