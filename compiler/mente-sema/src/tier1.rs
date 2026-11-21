@@ -20,9 +20,9 @@ use std::collections::BTreeSet;
 
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
-    Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId,
-    ExprKind, FnSyntax, PatternKind, Payload, Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind,
-    UnaryOp,
+    Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, Contract, ContractKind, Else,
+    ExprId, ExprKind, FnSyntax, Param, PatternKind, Payload, Refinement, StmtId, StmtKind, Tree,
+    TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::{Attr, Span};
 
@@ -54,10 +54,60 @@ impl Routing {
     }
 }
 
-/// What Tier 1 reads of a function it calls: its header, never its body.
-#[derive(Clone, Copy, Debug)]
-pub struct Callee<'a> {
-    pub syntax: &'a FnSyntax,
+pub use callee::Callee;
+
+/// What Tier 1 reads of a function it calls, in a module of its own, so that its syntax stays
+/// private and its accessors are the only reads, even from the rest of this file.
+mod callee {
+    use mente_syntax::tree::{Contract, FnSyntax, Param, Tree, TypeId};
+
+    /// What Tier 1 reads of a function it calls: its header, never its body. It keeps one
+    /// reference, as small as the syntax it reads, since each call of a nested expression holds
+    /// one on the stack. [`Callee::of`] names each part of the syntax, so that a part added to it
+    /// gets an accessor here or is left out on purpose, and a read of the body does not compile.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Callee<'a> {
+        syntax: &'a FnSyntax,
+    }
+
+    impl<'a> Callee<'a> {
+        /// The header of `f`: everything but where its name is written and its body, which no
+        /// caller reads.
+        pub fn of(f: &'a FnSyntax) -> Callee<'a> {
+            let FnSyntax {
+                name: _,
+                name_span: _,
+                params: _,
+                result: _,
+                contracts: _,
+                body: _,
+                tree: _,
+            } = f;
+            Callee { syntax: f }
+        }
+
+        /// Its name, which a call resolves to it by, and which a session's context holds.
+        pub fn name(&self) -> &'a str {
+            &self.syntax.name
+        }
+
+        pub fn params(&self) -> &'a [Param] {
+            &self.syntax.params
+        }
+
+        pub fn result(&self) -> Option<TypeId> {
+            self.syntax.result
+        }
+
+        pub fn contracts(&self) -> &'a [Contract] {
+            &self.syntax.contracts
+        }
+
+        /// The tree its types and clauses are written in.
+        pub fn tree(&self) -> &'a Tree {
+            &self.syntax.tree
+        }
+    }
 }
 
 /// The function Tier 1 checks, with its names and types.
@@ -155,16 +205,43 @@ pub struct Report {
     pub variables: usize,
 }
 
-/// What a caller's check reads of a function: its parameters' and result's types with their
-/// refinements, and its contract clauses. A session checks a caller again when it changes.
+/// What a caller's check reads of a function, but its name, which a session's context holds
+/// beside it: each parameter's mode, name and type with its refinement, the result's type with
+/// its refinement, and each contract clause with its kind, which decides whether the call
+/// proves it, assumes it or counts it as a measure. A session checks a caller again when it
+/// changes. It is rendered from the [`Callee`] Tier 1 reads, each part of which is named.
 pub fn header(f: &FnSyntax) -> String {
-    let t = &f.tree;
-    let params: Vec<String> = f.params.iter().map(|p| t.render_type(p.ty)).collect();
-    let clauses: Vec<String> = f.contracts.iter().map(|c| t.render_expr(c.expr)).collect();
+    let c = Callee::of(f);
+    let (params, result, contracts, t) = (c.params(), c.result(), c.contracts(), c.tree());
+    let params: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let Param {
+                is_mut,
+                name,
+                name_span: _,
+                ty,
+            } = p;
+            let mode = if *is_mut { "mut " } else { "" };
+            format!("{}{}: {}", mode, name, t.render_type(*ty))
+        })
+        .collect();
+    let clauses: Vec<String> = contracts
+        .iter()
+        .map(|c| {
+            let Contract { kind, expr } = c;
+            let kind = match kind {
+                ContractKind::Requires => "requires",
+                ContractKind::Ensures => "ensures",
+                ContractKind::Decreases => "decreases",
+            };
+            format!("({} {})", kind, t.render_expr(*expr))
+        })
+        .collect();
     format!(
         "({}) {} ({})",
-        params.join(" "),
-        f.result.map_or(String::new(), |r| t.render_type(r)),
+        params.join(", "),
+        result.map_or(String::new(), |r| t.render_type(r)),
         clauses.join(" ")
     )
 }
@@ -2342,8 +2419,8 @@ impl<'a> Fx<'a> {
                         let callee = f.resolution.calls[i];
                         match callee.and_then(|c| callees.get(c).copied().flatten()) {
                             Some(c) => {
-                                let ct = &c.syntax.tree;
-                                let params = &c.syntax.params;
+                                let ct = c.tree();
+                                let params = &c.params();
                                 Site::Call(CallSite {
                                     callee: callee.unwrap_or(0),
                                     ins: params
@@ -2354,8 +2431,7 @@ impl<'a> Fx<'a> {
                                         .iter()
                                         .map(|p| n.alloc(p.is_mut && is_int_type(ct, p.ty)))
                                         .collect(),
-                                    result: n
-                                        .alloc(c.syntax.result.is_some_and(|t| is_int_type(ct, t))),
+                                    result: n.alloc(c.result().is_some_and(|t| is_int_type(ct, t))),
                                     paths: params
                                         .iter()
                                         .map(|p| {
@@ -2363,7 +2439,7 @@ impl<'a> Fx<'a> {
                                                 return Vec::new();
                                             };
                                             let mut read = Vec::new();
-                                            for clause in &c.syntax.contracts {
+                                            for clause in c.contracts() {
                                                 clause_paths(ct, clause.expr, &p.name, &mut read);
                                             }
                                             read.sort();
@@ -2516,9 +2592,9 @@ impl<'a> Fx<'a> {
     /// The shape of a callee's type at a call: its refinements' bounds name the call's
     /// arguments.
     fn callee_shape(&self, c: &Callee, site: &CallSite, args: &[Arg], t: TypeId) -> Shape {
-        let tree = &c.syntax.tree;
-        let param = |n: &str| c.syntax.params.iter().position(|p| p.name == n);
-        let len = |k: usize| match &tree.ty(c.syntax.params[k].ty).kind {
+        let tree = c.tree();
+        let param = |n: &str| c.params().iter().position(|p| p.name == n);
+        let len = |k: usize| match &tree.ty(c.params()[k].ty).kind {
             TypeKind::Array { len, .. } => Some(*len),
             TypeKind::Int { .. }
             | TypeKind::Bool
@@ -2677,18 +2753,18 @@ impl<'a> Fx<'a> {
     /// The caller's text, at a call with `args`, for `e`, a parameter of `callee` or a field
     /// path of one in its clause: the argument's text, or, for a field path, the field's value
     /// in a struct literal or the path of the argument.
-    fn arg_text(&self, callee: &FnSyntax, args: &[Arg], e: ExprId) -> Option<(String, u8)> {
+    fn arg_text(&self, callee: Callee<'_>, args: &[Arg], e: ExprId) -> Option<(String, u8)> {
         self.arg_reading(callee, args, e).map(|(text, _)| text)
     }
 
     /// Whether Tier 1 follows every value `e`, a clause of `callee` in the Tier-1 fragment,
     /// reads at a call with `args`, so that a `guard` written in the caller's terms narrows
     /// what the clause reads.
-    fn clause_followed(&self, callee: &FnSyntax, args: &[Arg], e: ExprId) -> bool {
-        let tree = &callee.tree;
+    fn clause_followed(&self, callee: Callee<'_>, args: &[Arg], e: ExprId) -> bool {
+        let tree = callee.tree();
         let read = |e: ExprId| {
             let (root, names) = chain_of(tree, e)?;
-            let k = callee.params.iter().position(|p| p.name == *root)?;
+            let k = callee.params().iter().position(|p| p.name == *root)?;
             Some(self.reading(args.get(k)?.value, &names).1)
         };
         fragment_followed(tree, e, &read)
@@ -2697,12 +2773,12 @@ impl<'a> Fx<'a> {
     /// [`Self::arg_text`], and whether Tier 1 follows the value that text reads.
     fn arg_reading(
         &self,
-        callee: &FnSyntax,
+        callee: Callee<'_>,
         args: &[Arg],
         e: ExprId,
     ) -> Option<((String, u8), bool)> {
-        let (root, names) = chain_of(&callee.tree, e)?;
-        let k = callee.params.iter().position(|p| p.name == *root)?;
+        let (root, names) = chain_of(callee.tree(), e)?;
+        let k = callee.params().iter().position(|p| p.name == *root)?;
         Some(self.reading(args.get(k)?.value, &names))
     }
 
@@ -2875,7 +2951,7 @@ impl<'a> Fx<'a> {
         e: ExprId,
         after: bool,
     ) -> Option<usize> {
-        let tree = &c.syntax.tree;
+        let tree = c.tree();
         let mut names = Vec::new();
         let mut at = e;
         while let ExprKind::Field { base, name } = &tree.expr(at).kind {
@@ -2885,8 +2961,8 @@ impl<'a> Fx<'a> {
         let ExprKind::Name(n) = &tree.expr(at).kind else {
             return None;
         };
-        let k = c.syntax.params.iter().position(|p| p.name == *n)?;
-        if after && c.syntax.params[k].is_mut {
+        let k = c.params().iter().position(|p| p.name == *n)?;
+        if after && c.params()[k].is_mut {
             return None;
         }
         let p = site.paths.get(k)?.iter().find(|p| p.names == names)?;
@@ -2971,22 +3047,22 @@ impl<'a> Fx<'a> {
     }
 
     fn callee_outside(&self, c: &Callee, e: ExprId) -> Option<String> {
-        let s = c.syntax;
+        let s = c;
         // Only `requires` clauses are classified at a call, where `result` is not visible.
         let is_int = |n: &str| {
-            s.params
+            s.params()
                 .iter()
-                .any(|p| p.name == n && is_int_type(&s.tree, p.ty))
+                .any(|p| p.name == n && is_int_type(s.tree(), p.ty))
         };
         let path = |n: &str, names: &[String]| {
-            let p = s.params.iter().find(|p| p.name == n)?;
-            path_ty(self.structs, &Ty::of(&s.tree, p.ty), names)
+            let p = s.params().iter().find(|p| p.name == n)?;
+            path_ty(self.structs, &Ty::of(s.tree(), p.ty), names)
         };
         let names = Names {
             is_int: &is_int,
             path_ty: &path,
         };
-        outside_fragment(&s.tree, e, &names)
+        outside_fragment(s.tree(), e, &names)
     }
 
     fn span(&self, e: ExprId) -> Span {
@@ -5115,16 +5191,16 @@ impl<'a> Fx<'a> {
     /// A value in a callee's clause: its parameters are the call's variables, a `mut` one
     /// the value it leaves when `after`.
     fn callee_val(&self, st: &Octagon, c: &Callee, site: &CallSite, e: ExprId, after: bool) -> Val {
-        let tree = &c.syntax.tree;
+        let tree = c.tree();
         let sub = |e: ExprId| self.callee_val(st, c, site, e, after);
         match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => int_literal(*value),
             ExprKind::Name(n) if n == "result" => site.result.map_or(TOP, var_val),
             ExprKind::Name(n) => {
-                let Some(k) = c.syntax.params.iter().position(|p| p.name == *n) else {
+                let Some(k) = c.params().iter().position(|p| p.name == *n) else {
                     return TOP;
                 };
-                let var = if after && c.syntax.params[k].is_mut {
+                let var = if after && c.params()[k].is_mut {
                     site.outs[k]
                 } else {
                     site.ins[k]
@@ -5166,8 +5242,7 @@ impl<'a> Fx<'a> {
             }
             ExprKind::Field { base, .. } => match &tree.expr(*base).kind {
                 ExprKind::Name(n) => c
-                    .syntax
-                    .params
+                    .params()
                     .iter()
                     .find(|p| p.name == *n)
                     .and_then(|p| match &tree.ty(p.ty).kind {
@@ -5220,7 +5295,7 @@ impl<'a> Fx<'a> {
         e: ExprId,
         after: bool,
     ) -> Cond {
-        let tree = &c.syntax.tree;
+        let tree = c.tree();
         let sub = |e: ExprId| Box::new(self.callee_cond(st, c, site, e, after));
         match &tree.expr(e).kind {
             ExprKind::Bool(b) => Cond::Const(*b),
@@ -5346,7 +5421,7 @@ impl<'a> Fx<'a> {
         (k, t): (usize, TypeId),
         v: &Val,
     ) -> Shape {
-        let plain = Shape::plain(&Ty::of(&c.syntax.tree, t));
+        let plain = Shape::plain(&Ty::of(c.tree(), t));
         let at = self.span(args[k].value);
         match &plain {
             // The text and the refinement a report needs are found only for a narrowing that
@@ -5390,7 +5465,6 @@ impl<'a> Fx<'a> {
             let typing = self.typing;
             return self.summary(st, &Shape::plain(&typing.exprs[e.0 as usize]));
         };
-        let callee = c.syntax;
         let span = self.span(e);
         forget_site(st, &site);
         // Every argument is evaluated, left to right, its value kept as it is then, before any
@@ -5409,17 +5483,41 @@ impl<'a> Fx<'a> {
             }
             self.arg_paths(st, &site, k, a.value);
         }
+        self.enter_call(st, (c, &site), args, &vals, span)
+    }
+
+    /// A call once its arguments are evaluated, to `vals`: each enters its parameter, the
+    /// callee's `requires` are proven and its `ensures` assumed, and its result is the value.
+    /// [`Fx::call`] evaluates the arguments, a nested call among them included, so its frame stays
+    /// on the stack at each level of nesting, two hundred in a test; this work, and the frame it
+    /// takes in a build without optimisation, is kept out of it.
+    fn enter_call(
+        &mut self,
+        st: &mut Octagon,
+        (c, site): (Callee<'a>, &CallSite),
+        args: &[Arg],
+        vals: &[Val],
+        span: Span,
+    ) -> Val {
+        let site = site.clone();
+        let callee = c;
+        let (params, contracts, ctree, cname) = (
+            callee.params(),
+            callee.contracts(),
+            callee.tree(),
+            callee.name(),
+        );
         // ... then each enters its parameter's plain type, left to right ...
-        for (k, p) in callee.params.iter().enumerate().take(args.len()) {
+        for (k, p) in params.iter().enumerate().take(args.len()) {
             let plain = self.argument_plain(st, (&c, &site, args), (k, p.ty), &vals[k]);
             if let Some(var) = site.ins[k] {
                 self.facts(st, var, &plain);
             }
         }
         // ... then its refinement, once every argument is in.
-        for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
+        for (k, (a, p)) in args.iter().zip(params).enumerate() {
             let shape = self.callee_shape(&c, &site, args, p.ty).refinements();
-            let place = format!("parameter `{}` of `{}`", p.name, callee.name);
+            let place = format!("parameter `{}` of `{}`", p.name, cname);
             let what = self.guarded(a.value);
             let v = site.ins[k].map_or_else(|| vals[k].clone(), var_val);
             self.narrow(
@@ -5434,7 +5532,7 @@ impl<'a> Fx<'a> {
                 self.facts(st, var, &shape);
             }
         }
-        for clause in &callee.contracts {
+        for clause in contracts {
             if clause.kind != ContractKind::Requires
                 || self.callee_outside(&c, clause.expr).is_some()
             {
@@ -5442,7 +5540,7 @@ impl<'a> Fx<'a> {
             }
             let k = self.callee_cond(st, &c, &site, clause.expr, false);
             let failing = self.refute(st, &k);
-            let tag = Tag::Clause(callee.tree.expr(clause.expr).span);
+            let tag = Tag::Clause(ctree.expr(clause.expr).span);
             self.record(
                 ObligationKind::Requires,
                 span,
@@ -5456,18 +5554,18 @@ impl<'a> Fx<'a> {
             };
             let extra = self.call_named(callee, &site);
             let (valuation, _) = self.valuation(&failing, &extra, &[]);
-            let text = print(&callee.tree, clause.expr, &no_subst).0;
+            let text = print(ctree, clause.expr, &no_subst).0;
             // A literal an argument's type would not hold states its own.
             let leaf = |id: ExprId| {
-                let (root, names) = chain_of(&callee.tree, id)?;
-                let k = callee.params.iter().position(|p| p.name == *root)?;
+                let (root, names) = chain_of(ctree, id)?;
+                let k = params.iter().position(|p| p.name == *root)?;
                 self.reading_type(args.get(k)?.value, &names)
             };
             // An expression of literals alone passed comes in as its parameter, in its type.
             let literal = |id: ExprId| {
-                let (root, names) = chain_of(&callee.tree, id)?;
+                let (root, names) = chain_of(ctree, id)?;
                 let k = callee
-                    .params
+                    .params()
                     .iter()
                     .position(|p| p.name == *root)
                     .filter(|_| names.is_empty())?;
@@ -5476,14 +5574,14 @@ impl<'a> Fx<'a> {
                     return None;
                 }
                 let x = literals::value(self.tree, &self.typing.literals, arg)?;
-                Some((x, int_of(&Ty::of(&callee.tree, callee.params[k].ty))))
+                Some((x, int_of(&Ty::of(ctree, params[k].ty))))
             };
-            let retyped = retyped(&callee.tree, clause.expr, &leaf, &literal);
+            let retyped = retyped(ctree, clause.expr, &leaf, &literal);
             let subst = |id: ExprId, _: &str| {
                 retyped_text(&retyped, id).or_else(|| self.arg_text(callee, args, id))
             };
-            let at_call = print(&callee.tree, clause.expr, &subst).0;
-            let what = format!("`requires {}` of `{}`", text, callee.name);
+            let at_call = print(ctree, clause.expr, &subst).0;
+            let what = format!("`requires {}` of `{}`", text, cname);
             let message = Fx::cannot_rule_out(
                 &valuation,
                 &format!("which violates {} at this call", what),
@@ -5496,24 +5594,24 @@ impl<'a> Fx<'a> {
         }
         self.call_measures(st, &c, &site, args, span);
         // After the call: the result and the `mut` parameters' final values, then `ensures`.
-        if let (Some(r), Some(t)) = (site.result, callee.result) {
+        if let (Some(r), Some(t)) = (site.result, callee.result()) {
             let shape = self.callee_shape(&c, &site, args, t);
             self.facts(st, r, &shape);
         }
-        for (k, p) in callee.params.iter().enumerate() {
+        for (k, p) in params.iter().enumerate() {
             if let Some(o) = site.outs[k] {
                 let shape = self.callee_shape(&c, &site, args, p.ty);
                 self.facts(st, o, &shape);
             }
         }
-        for clause in &callee.contracts {
+        for clause in contracts {
             if clause.kind == ContractKind::Ensures {
                 let k = self.callee_cond(st, &c, &site, clause.expr, true);
                 self.assume(st, &k, true);
             }
         }
         // A `mut` argument's place takes the parameter's final value back.
-        for (k, (a, p)) in args.iter().zip(&callee.params).enumerate() {
+        for (k, (a, p)) in args.iter().zip(params).enumerate() {
             if !a.is_mut {
                 continue;
             }
@@ -5538,7 +5636,7 @@ impl<'a> Fx<'a> {
             );
             self.give_back(st, (root, &steps), a.value, &back, &shape);
         }
-        let value = match (site.result, callee.result) {
+        let value = match (site.result, callee.result()) {
             (Some(r), _) => var_val(r),
             (None, Some(t)) => {
                 let shape = self.callee_shape(&c, &site, args, t);
@@ -6208,12 +6306,12 @@ impl<'a> Fx<'a> {
 
     /// The bindings a call's valuation names: those in scope, or the callee's parameters when
     /// none is.
-    fn call_named(&self, callee: &FnSyntax, site: &CallSite) -> Vec<(String, usize)> {
+    fn call_named(&self, callee: Callee<'_>, site: &CallSite) -> Vec<(String, usize)> {
         if self.scope.iter().any(|b| self.vars[*b].is_some()) {
             return Vec::new();
         }
         callee
-            .params
+            .params()
             .iter()
             .zip(&site.ins)
             .filter_map(|(p, v)| v.map(|v| (p.name.clone(), v)))
@@ -6230,20 +6328,20 @@ impl<'a> Fx<'a> {
         args: &[Arg],
         span: Span,
     ) {
-        let callee = c.syntax;
+        let callee = *c;
         let named = self.call_named(callee, site);
         let mut values = Vec::new();
         let mut texts = Vec::new();
-        for clause in &callee.contracts {
+        for clause in callee.contracts() {
             if clause.kind != ContractKind::Decreases {
                 continue;
             }
             let v = self.callee_val(st, c, site, clause.expr, false);
-            let text = print(&callee.tree, clause.expr, &no_subst).0;
-            let what = format!("the measure `{}` of `{}`", text, callee.name);
+            let text = print(callee.tree(), clause.expr, &no_subst).0;
+            let what = format!("the measure `{}` of `{}`", text, callee.name());
             let never_negative = cmp(Rel::Ge, v.clone(), lin(Vec::new(), 0));
             let failing = self.refute(st, &never_negative);
-            let tag = Tag::Clause(callee.tree.expr(clause.expr).span);
+            let tag = Tag::Clause(callee.tree().expr(clause.expr).span);
             self.record(
                 ObligationKind::Decreases,
                 span,
@@ -6266,7 +6364,7 @@ impl<'a> Fx<'a> {
                     ),
                 );
                 let subst = |id: ExprId, _: &str| self.arg_text(callee, args, id);
-                let at_call = print(&callee.tree, clause.expr, &subst);
+                let at_call = print(callee.tree(), clause.expr, &subst);
                 let (guard, message) = if self.clause_followed(callee, args, clause.expr) {
                     (Some(format!("{} >= 0", paren(at_call, OPERAND))), message)
                 } else {
@@ -6285,8 +6383,10 @@ impl<'a> Fx<'a> {
             texts.push(text);
         }
         // At a direct recursive call, the clauses together, in lexicographic order, are smaller
-        // than on the caller's entry.
-        if !std::ptr::eq(callee, self.syntax) || values.is_empty() {
+        // than on the caller's entry. A call is recursive when it calls the function of this
+        // one's name, which a session's context and a whole check see alike, two functions of
+        // one name (`E0228`) included; the identity of a syntax tree differs between the two.
+        if callee.name() != self.syntax.name || values.is_empty() {
             return;
         }
         let entry: Vec<Val> = self.entry_measures.iter().map(|m| var_val(m.0)).collect();
@@ -6317,7 +6417,7 @@ impl<'a> Fx<'a> {
         let what = format!(
             "the measure `{}` of `{}` is {} at this recursive call and {} on entry",
             texts.join(", "),
-            callee.name,
+            callee.name(),
             tuple(to),
             tuple(from)
         );
@@ -6560,7 +6660,7 @@ mod tests {
             .collect();
         let callees: Vec<Option<Callee>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(|syntax| Callee { syntax }))
+            .map(|p| p.syntax.as_ref().map(Callee::of))
             .collect();
         let mut out = Vec::new();
         for (p, routing) in parsed.iter().zip(&routings) {
@@ -6597,7 +6697,7 @@ mod tests {
             .collect();
         let callees: Vec<Option<Callee>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(|syntax| Callee { syntax }))
+            .map(|p| p.syntax.as_ref().map(Callee::of))
             .collect();
         let syntax = parsed.last().and_then(|p| p.syntax.as_ref()).unwrap();
         let structs = crate::structs::Structs::default();
@@ -9504,7 +9604,33 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
             .remove(0)
             .syntax
             .unwrap();
-        assert_eq!(header(&f), "(u8[0..3] [2]bool) u8 ((> x 0) (< result 9))");
+        assert_eq!(
+            header(&f),
+            "(mut x: u8[0..3], ys: [2]bool) u8 ((requires (> x 0)) (ensures (< result 9)))"
+        );
+        // Each part a caller reads changes it, a clause's kind with its text unchanged among them.
+        let of = |src: &str| {
+            let text = module(src);
+            let m = mente_syntax::parse_module(&text).unwrap();
+            header(
+                &mente_syntax::parse_bodies(&text, &m)
+                    .remove(0)
+                    .syntax
+                    .unwrap(),
+            )
+        };
+        let base = "pub fn f(x: u8, y: u8) -> u8\n  requires x > 0\n= x";
+        for edit in [
+            base.replace("requires", "ensures"),
+            base.replace("requires", "decreases"),
+            base.replace("(x: u8", "(mut x: u8"),
+            base.replace("y: u8)", "z: u8)"),
+            base.replace("y: u8)", "y: u8[0..9])"),
+            base.replace("-> u8", "-> u16"),
+        ] {
+            assert_ne!(of(&edit), of(base), "{}", edit);
+        }
+        assert_eq!(of(&base.replace("= x", "= y")), of(base));
         let text = module("pub fn g() {\n}");
         let m = mente_syntax::parse_module(&text).unwrap();
         let g = mente_syntax::parse_bodies(&text, &m)
@@ -10238,7 +10364,7 @@ mod timing {
             .collect();
         let callees: Vec<Option<Callee>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(|syntax| Callee { syntax }))
+            .map(|p| p.syntax.as_ref().map(Callee::of))
             .collect();
         let syntax = parsed[1].syntax.as_ref().unwrap();
         let structs = crate::structs::Structs::default();

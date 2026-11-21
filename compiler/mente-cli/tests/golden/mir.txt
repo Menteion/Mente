@@ -29153,6 +29153,68 @@ mente-dump 3 mir
 == conformance/morphic-layouts/unsupported_backing_type.mn == (exit 2)
 == conformance/morphic-layouts/whole_byte_integer.mn ==
 mente-dump 3 mir
+== conformance/refinement-and-fixed-point/bound_at_the_ends_of_128_bits.mn ==
+mente-dump 3 mir
+f0: fn widest(i128, effect) -> i128 frame 96 {
+block0(v0: i128, v1: effect):
+  return v0 after v1
+block1(v2: effect):
+  trap t0 after v2
+t0: unreachable @5:118 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn lowest(i128, effect) -> i128 frame 96 {
+block0(v0: i128, v1: effect):
+  return v0 after v1
+block1(v2: effect):
+  trap t0 after v2
+t0: unreachable @7:80 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn enter widest(i128, effect) -> i128 {
+block0(v0: i128, v1: effect):
+  v2: unit = enter f0 t0 v0, v1 @5:8
+  v3: i128 = int -170141183460469231731687303715884105728 @5:8
+  v4: u128 = int 340282366920938463463374607431768211455 @5:8
+  v5: bool = ge v0, v3 @5:8
+  v6: i128 = int 0 @5:8
+  v7: bool = lt v0, v6 @5:8
+  branch v7, block1(v2), block2(v2)
+block1(v8: effect):
+  v12: bool = bool true @5:8
+  jump block3(v12, v8)
+block2(v9: effect):
+  v13: i128 = assume within 0..=340282366920938463463374607431768211455 v0, v9 @5:8
+  v14: u128 = cast v13 @5:8
+  v15: bool = le v14, v4 @5:8
+  jump block3(v15, v13)
+block3(v10: bool, v11: effect):
+  v16: bool = and v5, v10 @5:8
+  v17: unit = check t1 v16, v0, v3, v4, v11 @5:8
+  v18: i128 = call f0 v0, v17 @5:8
+  return v18 after v18
+t0: stack-overflow @5:8 ["the call stack ran out"]
+t1: refinement @5:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @5:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn enter lowest(i128, effect) -> i128 {
+block0(v0: i128, v1: effect):
+  v2: unit = enter f1 t0 v0, v1 @7:8
+  v3: i128 = int -170141183460469231731687303715884105728 @7:8
+  v4: i64 = int 0 @7:8
+  v5: bool = ge v0, v3 @7:8
+  v6: i128 = cast v4 @7:8
+  v7: bool = le v0, v6 @7:8
+  v8: bool = and v5, v7 @7:8
+  v9: unit = check t1 v8, v0, v3, v4, v2 @7:8
+  v10: i128 = call f1 v0, v9 @7:8
+  return v10 after v10
+t0: stack-overflow @7:8 ["the call stack ran out"]
+t1: refinement @7:8 ["", " lies outside the refinement `[", "..=", "]`"]
+t2: unreachable @7:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/refinement-and-fixed-point/bound_below_i128.mn == (exit 2)
 == conformance/regions-and-pools/from_names_a_kept_parameter.mn ==
 mente-dump 3 mir
 == conformance/regions-and-pools/from_names_an_own_parameter.mn == (exit 2)

@@ -337,7 +337,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .collect();
     let callees: Vec<Option<tier1::Callee>> = parsed
         .iter()
-        .map(|p| p.syntax.as_ref().map(|syntax| tier1::Callee { syntax }))
+        .map(|p| p.syntax.as_ref().map(tier1::Callee::of))
         .collect();
     let mut checked = Vec::new();
     let mut reports = Vec::new();
