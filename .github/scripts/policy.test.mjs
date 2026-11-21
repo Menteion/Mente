@@ -3582,6 +3582,7 @@ const GATE_FILES = [
   "/tools/mn.mjs",
   "/tools/raw-build.mjs",
   "/tools/raw-build-guard.mjs",
+  "/.claude/settings.json",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
@@ -3900,6 +3901,30 @@ check("the quick checks run every command in one of the machine's build slots, u
   assert.ok(localLimitsProblems({ ...texts, map: noProofs }).length > 0, "a map that runs no proof of the local limits passed");
 });
 
+/// The project's settings, and the command they run the guard by.
+const GUARD_SETTINGS = ".claude/settings.json";
+const GUARD_COMMAND = 'node "$CLAUDE_PROJECT_DIR/tools/raw-build-guard.mjs"';
+
+/// What keeps `settings`, the project's Claude Code settings as parsed, from running the guard
+/// before every Bash and PowerShell command: a PreToolUse hook whose matcher takes both tools'
+/// names, with the guard's command among its hooks.
+export function guardSettingsProblems(settings) {
+  const takes = (matcher, name) => {
+    try {
+      return new RegExp(`^(?:${matcher})$`).test(name);
+    } catch {
+      return false;
+    }
+  };
+  const before = Array.isArray(settings?.hooks?.PreToolUse) ? settings.hooks.PreToolUse : [];
+  const problems = [];
+  for (const tool of ["Bash", "PowerShell"]) {
+    const runs = before.some((h) => typeof h?.matcher === "string" && takes(h.matcher, tool) && Array.isArray(h.hooks) && h.hooks.some((x) => x?.type === "command" && x.command === GUARD_COMMAND));
+    if (!runs) problems.push(`${GUARD_SETTINGS} does not run \`${GUARD_COMMAND}\` before each ${tool} command`);
+  }
+  return problems;
+}
+
 check("the raw-build guard refuses a build outside the local limits and names the capped command to run instead", () => {
   // The hook a session runs before each shell command (tools/raw-build-guard.mjs, which
   // tools/raw-build.mjs decides for): a raw `cargo test`, or a binary run from target/, would run
@@ -3937,6 +3962,20 @@ check("the raw-build guard refuses a build outside the local limits and names th
   const planted = rawBuildRefusal("cargo test");
   assert.match(rawBuildMessage(planted), /^"cargo test" would run outside the local limits\. Run this instead: node tools\/cargo\.mjs test\n/);
   for (const name of ["build", "test", "run", "clippy", "nextest", "check"]) assert.ok(CARGO_BUILDS.includes(name), `the guard lets cargo ${name} through`);
+  // The project's settings, which every checkout and every session of it reads, run the guard
+  // before each Bash and PowerShell command (Norman, 2026-11-22).
+  const settings = JSON.parse(read(GUARD_SETTINGS));
+  assert.deepEqual(guardSettingsProblems(settings), []);
+  const hook = (matcher, command) => ({ hooks: { PreToolUse: [{ matcher, hooks: [{ type: "command", command }] }] } });
+  const ours = settings.hooks.PreToolUse.find((h) => h.hooks?.some((x) => x.command === GUARD_COMMAND));
+  for (const [plant, what] of [
+    [hook("Bash", GUARD_COMMAND), "the guard for Bash alone"],
+    [hook(ours.matcher, 'node "$CLAUDE_PROJECT_DIR/tools/other.mjs"'), "another script"],
+    [{ hooks: { PostToolUse: settings.hooks.PreToolUse } }, "the guard after the command, not before"],
+    [{}, "no hook"],
+  ]) {
+    assert.ok(guardSettingsProblems(plant).length > 0, `settings with ${what} passed`);
+  }
 });
 
 check("the required checks are listed once each", () => {
