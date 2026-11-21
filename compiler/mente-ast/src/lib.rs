@@ -103,7 +103,14 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
                 for f in &bs.fields {
                     spec_h.update(
                         "bitfield",
-                        &format!("{}:{}:{:?}", f.name, f.ty, f.bit_range),
+                        // As a tuple was written, so that a range read before keeps its hash.
+                        &format!(
+                            "{}:{}:{}",
+                            f.name,
+                            f.ty,
+                            f.bit_range
+                                .map_or(String::from("?"), |(a, b)| format!("({}, {})", a, b))
+                        ),
                     );
                 }
             }
@@ -217,10 +224,10 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                 ));
                 for f in &bs.fields {
                     let vis = if f.is_pub { "pub " } else { "" };
-                    out.push_str(&format!(
-                        "  @bits({}..{}) {}{}: {}\n",
-                        f.bit_range.0, f.bit_range.1, vis, f.name, f.ty
-                    ));
+                    let bits = f
+                        .bit_range
+                        .map_or(String::from("?..?"), |(a, b)| format!("{}..{}", a, b));
+                    out.push_str(&format!("  @bits({}) {}{}: {}\n", bits, vis, f.name, f.ty));
                 }
                 out.push_str("}\n\n");
             }

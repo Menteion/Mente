@@ -29121,6 +29121,7 @@ t1: unreachable @4:8 ["unreachable reached: control left the code the checker al
 == conformance/morphic-layouts/bit_fields_short_of_the_backing.mn == (exit 2)
 == conformance/morphic-layouts/bitstruct_partition.mn ==
 mente-dump 3 mir
+== conformance/morphic-layouts/bytes_that_is_no_range.mn == (exit 2)
 == conformance/morphic-layouts/cache_line_layout.mn ==
 mente-dump 3 mir
 == conformance/morphic-layouts/empty_bit_range.mn == (exit 2)
@@ -29133,7 +29134,10 @@ mente-dump 3 mir
 == conformance/morphic-layouts/float_in_a_bitstruct.mn == (exit 2)
 == conformance/morphic-layouts/gap_between_bit_fields.mn == (exit 2)
 == conformance/morphic-layouts/gap_between_fields.mn == (exit 2)
-== conformance/morphic-layouts/layout_numbers_near_usize.mn == (exit 2)
+== conformance/morphic-layouts/layout_attribute_without_a_number.mn == (exit 2)
+== conformance/morphic-layouts/layout_numbers_past_their_limits.mn == (exit 2)
+== conformance/morphic-layouts/layout_numbers_read_as_literals.mn ==
+mente-dump 3 mir
 == conformance/morphic-layouts/layout_sized_by_a_bitstruct.mn ==
 mente-dump 3 mir
 == conformance/morphic-layouts/misaligned_field.mn == (exit 2)

@@ -1,45 +1,145 @@
-//! The numbers of `@layout`, `@bytes` and `@bits` (`spec/morphic-layouts.md`): a struct's byte
-//! ranges, sizes and alignments, and a bitstruct's bit ranges. Each number comes from the
-//! programmer and may be as large as `usize` holds, so no arithmetic here may overflow: every
-//! sum, product and difference is checked, and a fix whose numbers would pass `usize` is not
-//! offered. Clippy's `arithmetic_side_effects` holds that for every function of this module,
-//! one added later included, under the required check `cargo clippy -D warnings`: the fuzzer
-//! found three of these overflows one by one (2026-11-14 to 11-17), each fixed where it was.
-#![deny(clippy::arithmetic_side_effects)]
+//! The numbers of `@layout`, `@bytes` and `@bits` (`spec/morphic-layouts.md`, item 2): a struct's
+//! byte ranges, sizes and alignments, and a bitstruct's bit ranges. Each number comes from the
+//! programmer, read as every integer literal is ([`mente_syntax::int_literal_value`]), and is a
+//! [`LayoutNum`] here: at most the bytes a value may hold ([`VALUE_BYTES`], `E0223`), held alike
+//! on every host, with no arithmetic but its checked methods, which give none past that. A number
+//! past it is an error that says so, and a fix whose numbers would pass it is not offered.
+//! Clippy's `arithmetic_side_effects` is forbidden in this module, a function added later
+//! included, under the required check `cargo clippy -D warnings`: the fuzzer found three
+//! overflows here one by one (2026-11-14 to 11-17), and the review of pull request 187 numbers
+//! past `usize` that were never read.
+#![forbid(clippy::arithmetic_side_effects)]
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt;
 
 use mente_syntax::diagnostics::{insertion_point, Applicability, Diagnostic};
-use mente_syntax::{Attr, BitStructDecl, ItemDecl, ModuleFile, Span, StructDecl, StructFieldDecl};
+use mente_syntax::{
+    int_literal_value, Attr, BitStructDecl, ItemDecl, ModuleFile, Span, StructDecl, StructFieldDecl,
+};
 
-use crate::structs::Structs;
+use crate::structs::{Structs, ARRAY_ELEMENTS, VALUE_BYTES};
 use crate::{BitStructProof, LayoutProof};
+
+/// The widest backing a bitstruct may have, `u128`, in bits: the most a bit number may be.
+const BACKING_BITS: u32 = 128;
+
+/// A number of `@layout`, `@bytes` or `@bits`, an array's length in a field's type, or a size,
+/// an offset or an alignment computed from them: at most [`VALUE_BYTES`], held the same on every
+/// host. It has no arithmetic operators and gives no raw value: each sum, difference, product and
+/// power is a checked method, whose `None` is a result past [`VALUE_BYTES`], so that no number
+/// a programmer writes wraps, on any host, and a new operation can only be one more checked
+/// method here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LayoutNum(u128);
+
+impl LayoutNum {
+    pub(crate) const ZERO: LayoutNum = LayoutNum(0);
+
+    /// A number no larger than `u32` holds, which every layout number may be.
+    pub(crate) const fn small(n: u32) -> LayoutNum {
+        LayoutNum(n as u128)
+    }
+
+    /// `n`, where it is no more than [`VALUE_BYTES`].
+    pub(crate) fn within(n: u128) -> Option<LayoutNum> {
+        (n <= VALUE_BYTES).then_some(LayoutNum(n))
+    }
+
+    pub(crate) fn checked_add(self, o: LayoutNum) -> Option<LayoutNum> {
+        LayoutNum::within(self.0.checked_add(o.0)?)
+    }
+
+    pub(crate) fn checked_sub(self, o: LayoutNum) -> Option<LayoutNum> {
+        self.0.checked_sub(o.0).map(LayoutNum)
+    }
+
+    pub(crate) fn checked_mul(self, o: LayoutNum) -> Option<LayoutNum> {
+        LayoutNum::within(self.0.checked_mul(o.0)?)
+    }
+
+    pub(crate) fn is_power_of_two(self) -> bool {
+        self.0.is_power_of_two()
+    }
+
+    /// The least power of two at least this, and at least 1.
+    pub(crate) fn next_power_of_two(self) -> Option<LayoutNum> {
+        LayoutNum::within(self.0.max(1).checked_next_power_of_two()?)
+    }
+
+    /// Whether this is a multiple of `o`, which 0 is of every number and only 0 of 0.
+    pub(crate) fn is_multiple_of(self, o: LayoutNum) -> bool {
+        self.0.is_multiple_of(o.0)
+    }
+
+    /// The least multiple of `o` at least this, for an `o` above 0.
+    pub(crate) fn round_up_to(self, o: LayoutNum) -> Option<LayoutNum> {
+        LayoutNum(self.0.checked_div(o.0)?)
+            .checked_add(LayoutNum::small(u32::from(!self.is_multiple_of(o))))?
+            .checked_mul(o)
+    }
+
+    /// The largest power of two that divides this, at most 16; 16 for 0, which every power
+    /// divides.
+    pub(crate) fn natural_alignment(self) -> LayoutNum {
+        let most = LayoutNum::small(16);
+        1u128
+            .checked_shl(self.0.trailing_zeros())
+            .map_or(most, |a| LayoutNum(a).min(most))
+    }
+
+    /// The bytes of a whole-byte width in bits, `None` for any other.
+    fn bytes_of_bits(self) -> Option<LayoutNum> {
+        self.0
+            .is_multiple_of(8)
+            .then(|| LayoutNum(self.0.checked_div(8).unwrap_or(0)))
+    }
+}
+
+impl fmt::Display for LayoutNum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// `E0223` for a layout number past [`VALUE_BYTES`], which `what` names with where it stands.
+fn past_value_bytes(span: Span, what: String) -> Diagnostic {
+    Diagnostic::error(
+        "E0223",
+        span,
+        format!(
+            "{}, more than the {} bytes a value, kept in one piece, may hold; a `@layout` struct is a value",
+            what, VALUE_BYTES
+        ),
+    )
+}
 
 /// The byte sizes and alignments of a module's own fixed-size types, so that a `@layout` field
 /// may name them, and the bit widths of its bitstructs, so that a bitstruct field may nest one.
 pub(crate) struct Tables {
-    pub(crate) named_sizes: HashMap<String, usize>,
-    pub(crate) named_aligns: HashMap<String, usize>,
-    pub(crate) bitstruct_bits: HashMap<String, usize>,
+    pub(crate) named_sizes: HashMap<String, LayoutNum>,
+    pub(crate) named_aligns: HashMap<String, LayoutNum>,
+    pub(crate) bitstruct_bits: HashMap<String, LayoutNum>,
 }
 
 /// The [`Tables`] of `module`, whose declared types are `structs`.
 pub(crate) fn tables(module: &ModuleFile, structs: &Structs) -> Tables {
-    let mut named_sizes: HashMap<String, usize> = HashMap::new();
-    let mut named_aligns: HashMap<String, usize> = HashMap::new();
-    let mut bitstruct_bits: HashMap<String, usize> = HashMap::new();
+    let mut named_sizes: HashMap<String, LayoutNum> = HashMap::new();
+    let mut named_aligns: HashMap<String, LayoutNum> = HashMap::new();
+    let mut bitstruct_bits: HashMap<String, LayoutNum> = HashMap::new();
     for item in &module.items {
         match item {
             ItemDecl::BitStruct(bs) => {
                 if let Some(bits) = backing_bits(&bs.backing_type) {
-                    named_sizes.insert(bs.name.clone(), bits / 8);
-                    named_aligns.insert(bs.name.clone(), bits / 8);
+                    let bytes = bits.bytes_of_bits().unwrap_or(LayoutNum::ZERO);
+                    named_sizes.insert(bs.name.clone(), bytes);
+                    named_aligns.insert(bs.name.clone(), bytes);
                     bitstruct_bits.insert(bs.name.clone(), bits);
                 }
             }
             ItemDecl::Struct(s) => {
-                if let Some((size, align, _)) = extract_layout_attr(s) {
+                if let Some(Ok((size, align, _))) = layout_attr(s) {
                     named_sizes.insert(s.name.clone(), size);
                     named_aligns.insert(s.name.clone(), align);
                 }
@@ -53,7 +153,9 @@ pub(crate) fn tables(module: &ModuleFile, structs: &Structs) -> Tables {
     }
     for d in &structs.defs {
         if let Some(l) = &d.layout {
-            if let (Ok(size), Ok(align)) = (usize::try_from(l.size), usize::try_from(l.align)) {
+            if let (Some(size), Some(align)) =
+                (LayoutNum::within(l.size), LayoutNum::within(l.align))
+            {
                 named_sizes.entry(d.name.clone()).or_insert(size);
                 named_aligns.entry(d.name.clone()).or_insert(align);
             }
@@ -66,28 +168,52 @@ pub(crate) fn tables(module: &ModuleFile, structs: &Structs) -> Tables {
     }
 }
 
-/// The first `@layout(size: S, align: A)` of a struct that names both, with its span.
-pub(crate) fn extract_layout_attr(s: &StructDecl) -> Option<(usize, usize, Span)> {
-    for a in s.attrs.iter().filter(|a| a.name == "layout") {
-        let mut size = None;
-        let mut align = None;
-        for part in a.args.split(',') {
-            let kv: Vec<&str> = part.split(':').collect();
-            if kv.len() == 2 {
-                let k = kv[0].trim();
-                let v = kv[1].trim().parse::<usize>().ok();
-                if k == "size" {
-                    size = v;
-                } else if k == "align" {
-                    align = v;
-                }
+/// What a struct's first `@layout` says: nothing without one; its size, its alignment and its
+/// span; or the error of one whose `size` or `align` is missing or no integer literal (`E0426`),
+/// or past the bytes a value may hold (`E0223`).
+pub(crate) fn layout_attr(
+    s: &StructDecl,
+) -> Option<Result<(LayoutNum, LayoutNum, Span), Diagnostic>> {
+    let a = s.attrs.iter().find(|a| a.name == "layout")?;
+    let malformed = |what: String| {
+        Diagnostic::error(
+            "E0426",
+            a.span,
+            format!(
+                "the `@layout` of struct `{}` {}; it is written `@layout(size: S, align: A)`, each an integer literal",
+                s.name, what
+            ),
+        )
+    };
+    let (mut size, mut align) = (None, None);
+    for part in a.args.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once(':').map(|(k, v)| (k.trim(), v.trim())) {
+            Some(("size", v)) => size = Some(v),
+            Some(("align", v)) => align = Some(v),
+            Some(_) | None => {
+                return Some(Err(malformed(format!(
+                    "has `{}`, which is neither `size` nor `align`",
+                    part
+                ))))
             }
         }
-        if let (Some(sz), Some(al)) = (size, align) {
-            return Some((sz, al, a.span));
-        }
     }
-    None
+    let read = |name: &str, v: Option<&str>| -> Result<LayoutNum, Diagnostic> {
+        let v = v.ok_or_else(|| malformed(format!("gives no `{}`", name)))?;
+        let n = int_literal_value(v).ok_or_else(|| {
+            malformed(format!(
+                "gives `{}: {}`, which is no integer literal",
+                name, v
+            ))
+        })?;
+        LayoutNum::within(n).ok_or_else(|| {
+            past_value_bytes(
+                a.span,
+                format!("struct `{}` declares `{}: {}`", s.name, name, n),
+            )
+        })
+    };
+    Some(read("size", size).and_then(|sz| Ok((sz, read("align", align)?, a.span))))
 }
 
 /// A field's attribute by name.
@@ -99,16 +225,20 @@ fn field_attr<'f>(f: &'f StructFieldDecl, name: &str) -> Option<&'f Attr> {
 /// each at an offset its type's alignment allows unless the struct is `@packed`.
 pub fn verify_explicit_struct_layout(
     s: &StructDecl,
-    expected_size: usize,
-    align: usize,
-    named_sizes: &HashMap<String, usize>,
-    named_aligns: &HashMap<String, usize>,
+    expected_size: LayoutNum,
+    align: LayoutNum,
+    named_sizes: &HashMap<String, LayoutNum>,
+    named_aligns: &HashMap<String, LayoutNum>,
 ) -> Result<LayoutProof, Diagnostic> {
-    let layout = extract_layout_attr(s).map_or(s.name_span, |(_, _, span)| span);
+    let layout = s
+        .attrs
+        .iter()
+        .find(|a| a.name == "layout")
+        .map_or(s.name_span, |a| a.span);
     let layout_text =
-        |size: usize, align: usize| format!("@layout(size: {}, align: {})", size, align);
+        |size: LayoutNum, align: LayoutNum| format!("@layout(size: {}, align: {})", size, align);
     // A fix is offered only where its numbers exist: the next power of two above an alignment,
-    // and the next multiple of it above a size, may lie past `usize`.
+    // and the next multiple of it above a size, may lie past what a value may hold.
     if !align.is_power_of_two() {
         let d = Diagnostic::error(
             "E0410",
@@ -118,12 +248,12 @@ pub fn verify_explicit_struct_layout(
                 s.name, align
             ),
         );
-        return Err(match align.checked_next_power_of_two() {
+        return Err(match align.next_power_of_two() {
             Some(next) => d.with_fix(
                 Applicability::Suggestion,
-                format!("align it to {} bytes", next.max(1)),
+                format!("align it to {} bytes", next),
                 layout,
-                layout_text(expected_size, next.max(1)),
+                layout_text(expected_size, next),
             ),
             None => d,
         });
@@ -137,7 +267,7 @@ pub fn verify_explicit_struct_layout(
                 s.name, expected_size, align
             ),
         );
-        return Err(match expected_size.div_ceil(align).checked_mul(align) {
+        return Err(match expected_size.round_up_to(align) {
             Some(rounded) => d.with_fix(
                 Applicability::Suggestion,
                 format!("round the size up to {} bytes", rounded),
@@ -149,34 +279,65 @@ pub fn verify_explicit_struct_layout(
     }
 
     let packed = s.attrs.iter().any(|a| a.name == "packed");
-    let mut cursor = 0usize;
+    let mut cursor = LayoutNum::ZERO;
     let mut table =
         String::from("| Byte Offset | Width | Field | Type |\n| :--- | :--- | :--- | :--- |\n");
 
     for f in &s.fields {
         let size = type_byte_size(&f.ty, named_sizes);
+        let known = size.ok();
+        let written = field_attr(f, "bytes");
         let Some((start, end)) = f.byte_range else {
             let d = Diagnostic::error(
                 "E0412",
                 f.name_span,
-                format!(
-                    "field `{}.{}` has no `@bytes(start..end)`; every field of a `@layout` struct needs one",
-                    s.name, f.name
-                ),
+                match written {
+                    Some(a) => format!(
+                        "field `{}.{}` has `{}`, which is no range `start..end` of integer literals; every field of a `@layout` struct needs one",
+                        s.name, f.name, a
+                    ),
+                    None => format!(
+                        "field `{}.{}` has no `@bytes(start..end)`; every field of a `@layout` struct needs one",
+                        s.name, f.name
+                    ),
+                },
             );
             // The field must start where the last one ended and be as wide as its type, so
-            // when the type's size is known exactly one range is possible.
-            return Err(match size.and_then(|n| cursor.checked_add(n)) {
-                Some(next) => d.with_fix(
-                    Applicability::MachineApplicable,
-                    format!("give `{}` the bytes {}..{}", f.name, cursor, next),
-                    insertion_point(f.span),
-                    format!("@bytes({}..{}) ", cursor, next),
-                ),
+            // when the type's size is known exactly one range is possible. It replaces a
+            // `@bytes` that is written but cannot be read.
+            return Err(match known.and_then(|n| cursor.checked_add(n)) {
+                Some(next) => {
+                    let range = format!("@bytes({}..{})", cursor, next);
+                    let message = format!("give `{}` the bytes {}..{}", f.name, cursor, next);
+                    match written {
+                        Some(a) => {
+                            d.with_fix(Applicability::MachineApplicable, message, a.span, range)
+                        }
+                        None => d.with_fix(
+                            Applicability::MachineApplicable,
+                            message,
+                            insertion_point(f.span),
+                            format!("{} ", range),
+                        ),
+                    }
+                }
                 None => d,
             });
         };
-        let bytes = field_attr(f, "bytes").map_or(f.name_span, |a| a.span);
+        let bytes = written.map_or(f.name_span, |a| a.span);
+        let (Some(start), Some(end)) = (LayoutNum::within(start), LayoutNum::within(end)) else {
+            return Err(past_value_bytes(
+                bytes,
+                format!(
+                    "field `{}.{}` has `@bytes({}..{})`, which reaches byte {}",
+                    s.name,
+                    f.name,
+                    start,
+                    end,
+                    start.max(end)
+                ),
+            ));
+        };
         let what = match start.cmp(&cursor) {
             Ordering::Equal => None,
             Ordering::Greater => Some(format!(
@@ -190,7 +351,8 @@ pub fn verify_explicit_struct_layout(
         };
         if let Some(what) = what {
             let d = Diagnostic::error("E0413", bytes, format!("struct `{}` has {}", s.name, what));
-            return Err(match cursor.checked_add(end.saturating_sub(start)) {
+            let width = end.checked_sub(start).unwrap_or(LayoutNum::ZERO);
+            return Err(match cursor.checked_add(width) {
                 Some(moved) => d.with_fix(
                     Applicability::Suggestion,
                     format!("start `{}` at byte {}", f.name, cursor),
@@ -200,7 +362,7 @@ pub fn verify_explicit_struct_layout(
                 None => d,
             });
         }
-        let Some(width) = end.checked_sub(start).filter(|&w| w > 0) else {
+        let Some(width) = end.checked_sub(start).filter(|&w| w > LayoutNum::ZERO) else {
             let d = Diagnostic::error(
                 "E0414",
                 bytes,
@@ -209,7 +371,7 @@ pub fn verify_explicit_struct_layout(
                     s.name, f.name, start, end
                 ),
             );
-            return Err(match size.and_then(|n| Some((n, start.checked_add(n)?))) {
+            return Err(match known.and_then(|n| Some((n, start.checked_add(n)?))) {
                 Some((n, wide)) => d.with_fix(
                     Applicability::Suggestion,
                     format!("give `{}` its {} bytes", f.name, n),
@@ -219,15 +381,28 @@ pub fn verify_explicit_struct_layout(
                 None => d,
             });
         };
-        let Some(expected_field_bytes) = size else {
-            return Err(Diagnostic::error(
-                "E0417",
-                f.ty_span,
-                format!(
-                    "field `{}.{}` has type `{}`, whose byte size is not known, so `@bytes({}..{})` cannot be checked",
-                    s.name, f.name, f.ty, start, end
-                ),
-            ));
+        let expected_field_bytes = match size {
+            Ok(n) => n,
+            Err(NoSize::Unknown) => {
+                return Err(Diagnostic::error(
+                    "E0417",
+                    f.ty_span,
+                    format!(
+                        "field `{}.{}` has type `{}`, whose byte size is not known, so `@bytes({}..{})` cannot be checked",
+                        s.name, f.name, f.ty, start, end
+                    ),
+                ))
+            }
+            Err(NoSize::PastLimit) => {
+                return Err(Diagnostic::error(
+                    "E0417",
+                    f.ty_span,
+                    format!(
+                        "field `{}.{}` has type `{}`, which holds more than the {} bytes, or the {} elements, a value may hold on every target, so it has no size to check; keep fewer elements, or split the field",
+                        s.name, f.name, f.ty, VALUE_BYTES, ARRAY_ELEMENTS
+                    ),
+                ))
+            }
         };
         if width != expected_field_bytes {
             let d = Diagnostic::error(
@@ -249,7 +424,8 @@ pub fn verify_explicit_struct_layout(
             });
         }
         if !packed {
-            let field_align = type_alignment(&f.ty, named_sizes, named_aligns).unwrap_or(1);
+            let field_align =
+                type_alignment(&f.ty, named_sizes, named_aligns).unwrap_or(LayoutNum::small(1));
             if !start.is_multiple_of(field_align) {
                 return Err(Diagnostic::error(
                     "E0418",
@@ -306,16 +482,18 @@ pub fn verify_explicit_struct_layout(
                 s.name, expected_size, cursor
             ),
         );
-        return Err(if cursor > 0 && cursor.is_multiple_of(align) {
-            d.with_fix(
-                Applicability::Suggestion,
-                format!("declare the size its fields take, {} bytes", cursor),
-                layout,
-                layout_text(cursor, align),
-            )
-        } else {
-            d
-        });
+        return Err(
+            if cursor > LayoutNum::ZERO && cursor.is_multiple_of(align) {
+                d.with_fix(
+                    Applicability::Suggestion,
+                    format!("declare the size its fields take, {} bytes", cursor),
+                    layout,
+                    layout_text(cursor, align),
+                )
+            } else {
+                d
+            },
+        );
     }
 
     Ok(LayoutProof {
@@ -326,10 +504,6 @@ pub fn verify_explicit_struct_layout(
     })
 }
 
-/// Byte size of a fixed-size field type, or `None` when it is not known.
-///
-/// Target-dependent types (`usize`, `isize`) have no size here: a `@layout` struct must
-/// mean the same bytes on every target.
 /// The type a field's type `ty` holds through its arrays: `E` for `[2][3]E`.
 pub(crate) fn element_type(ty: &str) -> &str {
     let mut t = ty.trim();
@@ -342,31 +516,49 @@ pub(crate) fn element_type(ty: &str) -> &str {
     t
 }
 
-fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usize> {
+/// Why a field's type has no byte size here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoSize {
+    /// It is no fixed-size type of the module or the language.
+    Unknown,
+    /// It is an array of more elements, or more bytes, than a value may hold.
+    PastLimit,
+}
+
+/// Byte size of a fixed-size field type.
+///
+/// Target-dependent types (`usize`, `isize`) have no size here: a `@layout` struct must mean the
+/// same bytes on every target. An array's length is read as any integer literal is.
+fn type_byte_size(ty: &str, named_sizes: &HashMap<String, LayoutNum>) -> Result<LayoutNum, NoSize> {
     let t = ty.trim();
-    if let Some(inner) = t.strip_prefix("sat<").and_then(|s| s.strip_suffix('>')) {
+    if let Some(inner) = t
+        .strip_prefix("sat<")
+        .or_else(|| t.strip_prefix("wrap<"))
+        .and_then(|s| s.strip_suffix('>'))
+    {
         return type_byte_size(inner, named_sizes);
     }
-    if let Some(inner) = t.strip_prefix("wrap<").and_then(|s| s.strip_suffix('>')) {
-        return type_byte_size(inner, named_sizes);
-    }
-    // A fixed array `[N]Elem`: N elements of its element's size, none where that passes `usize`.
+    // A fixed array `[N]Elem`: N elements of its element's size.
     if let Some((count, elem_ty)) = t.strip_prefix('[').and_then(|r| r.split_once(']')) {
-        if let Ok(count) = count.trim().parse::<usize>() {
-            return count.checked_mul(type_byte_size(elem_ty, named_sizes)?);
+        let n = int_literal_value(count.trim()).ok_or(NoSize::Unknown)?;
+        let elem = type_byte_size(elem_ty, named_sizes)?;
+        if n > ARRAY_ELEMENTS {
+            return Err(NoSize::PastLimit);
         }
+        let n = LayoutNum::within(n).ok_or(NoSize::PastLimit)?;
+        return n.checked_mul(elem).ok_or(NoSize::PastLimit);
     }
+    let small = |n: u32| Ok(LayoutNum::small(n));
     match t {
-        "bool" | "q0.8" => Some(1),
-        "f16" | "bf16" | "q1.15" => Some(2),
-        "f32" | "q16.16" => Some(4),
-        "f64" => Some(8),
+        "bool" | "q0.8" => small(1),
+        "f16" | "bf16" | "q1.15" => small(2),
+        "f32" | "q16.16" => small(4),
+        "f64" => small(8),
         // A `uN` / `iN` whose width is whole bytes occupies exactly those bytes (`u8` is 1,
         // `u24` is 3); any other width only fits a bitstruct.
         _ => match int_bits(t) {
-            Some(bits) if bits % 8 == 0 => Some(bits / 8),
-            Some(_) => None,
-            None => named_sizes.get(t).copied(),
+            Some(bits) => bits.bytes_of_bits().ok_or(NoSize::Unknown),
+            None => named_sizes.get(t).copied().ok_or(NoSize::Unknown),
         },
     }
 }
@@ -376,9 +568,9 @@ fn type_byte_size(ty: &str, named_sizes: &HashMap<String, usize>) -> Option<usiz
 /// the largest power of two dividing the type's size (`u64` is 8, `u24` is 1), at most 16.
 fn type_alignment(
     ty: &str,
-    named_sizes: &HashMap<String, usize>,
-    named_aligns: &HashMap<String, usize>,
-) -> Option<usize> {
+    named_sizes: &HashMap<String, LayoutNum>,
+    named_aligns: &HashMap<String, LayoutNum>,
+) -> Option<LayoutNum> {
     let t = ty.trim();
     if let Some(inner) = t
         .strip_prefix("sat<")
@@ -394,48 +586,48 @@ fn type_alignment(
     if let Some(align) = named_aligns.get(t) {
         return Some(*align);
     }
-    let size = type_byte_size(t, named_sizes)?;
-    // A size of 0 has no power of two dividing it but every one, of which 16 is the most.
-    Some(
-        1usize
-            .checked_shl(size.trailing_zeros())
-            .map_or(16, |a| a.min(16)),
-    )
+    type_byte_size(t, named_sizes)
+        .ok()
+        .map(LayoutNum::natural_alignment)
 }
 
 /// Width of an arbitrary-width integer type `uN` / `iN`, `1 <= N <= 128`.
-fn int_bits(ty: &str) -> Option<usize> {
+fn int_bits(ty: &str) -> Option<LayoutNum> {
     let digits = ty.strip_prefix('u').or_else(|| ty.strip_prefix('i'))?;
     if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     digits
-        .parse::<usize>()
+        .parse::<u32>()
         .ok()
-        .filter(|n| (1..=128).contains(n))
+        .filter(|n| (1..=BACKING_BITS).contains(n))
+        .map(LayoutNum::small)
 }
 
-fn backing_bits(backing_type: &str) -> Option<usize> {
+fn backing_bits(backing_type: &str) -> Option<LayoutNum> {
     match backing_type {
-        "u8" => Some(8),
-        "u16" => Some(16),
-        "u32" => Some(32),
-        "u64" => Some(64),
-        "u128" => Some(128),
+        "u8" => Some(LayoutNum::small(8)),
+        "u16" => Some(LayoutNum::small(16)),
+        "u32" => Some(LayoutNum::small(32)),
+        "u64" => Some(LayoutNum::small(64)),
+        "u128" => Some(LayoutNum::small(BACKING_BITS)),
         _ => None,
     }
 }
 
 /// The smallest backing integer that holds `bits` bits.
-fn backing_for(bits: usize) -> Option<usize> {
-    [8, 16, 32, 64, 128].into_iter().find(|&w| bits <= w)
+fn backing_for(bits: LayoutNum) -> Option<LayoutNum> {
+    [8, 16, 32, 64, BACKING_BITS]
+        .into_iter()
+        .map(LayoutNum::small)
+        .find(|&w| bits <= w)
 }
 
 /// Proves that `bitstruct Name : uN` has contiguous, hole-free `@bits(start..end)` covering `[0..N)`,
 /// and that each field's type is exactly as wide as its range.
 pub fn verify_bitstruct_layout(
     bs: &BitStructDecl,
-    bitstruct_bits: &HashMap<String, usize>,
+    bitstruct_bits: &HashMap<String, LayoutNum>,
 ) -> Result<BitStructProof, Diagnostic> {
     let Some(total_bits) = backing_bits(&bs.backing_type) else {
         let d = Diagnostic::error(
@@ -457,10 +649,42 @@ pub fn verify_bitstruct_layout(
         });
     };
 
-    let mut cursor = 0usize;
+    let widest = LayoutNum::small(BACKING_BITS);
+    let mut cursor = LayoutNum::ZERO;
     for f in &bs.fields {
-        let (start, end) = f.bit_range;
         let bits = f.bits_span.unwrap_or(f.name_span);
+        let Some((start, end)) = f.bit_range else {
+            return Err(Diagnostic::error(
+                "E0426",
+                bits,
+                match f.bits_span {
+                    Some(_) => format!(
+                        "field `{}.{}` has a `@bits` that is no range `start..end` of integer literals",
+                        bs.name, f.name
+                    ),
+                    None => format!(
+                        "field `{}.{}` has no `@bits(start..end)`; every field of a bitstruct needs one",
+                        bs.name, f.name
+                    ),
+                },
+            ));
+        };
+        let (Some(start), Some(end)) = (
+            LayoutNum::within(start).filter(|&n| n <= widest),
+            LayoutNum::within(end).filter(|&n| n <= widest),
+        ) else {
+            return Err(Diagnostic::error(
+                "E0423",
+                bits,
+                format!(
+                    "field `{}.{}` reaches bit {}, past bit {}, where the widest backing, `u128`, ends",
+                    bs.name,
+                    f.name,
+                    start.max(end),
+                    BACKING_BITS
+                ),
+            ));
+        };
         let what = match start.cmp(&cursor) {
             Ordering::Equal => None,
             Ordering::Greater => Some("a gap"),
@@ -475,7 +699,8 @@ pub fn verify_bitstruct_layout(
                     bs.name, what, f.name, start, cursor
                 ),
             );
-            return Err(match cursor.checked_add(end.saturating_sub(start)) {
+            let width = end.checked_sub(start).unwrap_or(LayoutNum::ZERO);
+            return Err(match cursor.checked_add(width).filter(|&m| m <= widest) {
                 Some(moved) => d.with_fix(
                     Applicability::Suggestion,
                     format!("start `{}` at bit {}", f.name, cursor),
@@ -485,7 +710,7 @@ pub fn verify_bitstruct_layout(
                 None => d,
             });
         }
-        let Some(width) = end.checked_sub(start).filter(|&w| w > 0) else {
+        let Some(width) = end.checked_sub(start).filter(|&w| w > LayoutNum::ZERO) else {
             return Err(Diagnostic::error(
                 "E0422",
                 bits,
@@ -497,7 +722,7 @@ pub fn verify_bitstruct_layout(
         };
         let ty = f.ty.trim();
         let type_bits = if ty == "bool" {
-            Some(1)
+            Some(LayoutNum::small(1))
         } else {
             int_bits(ty).or_else(|| bitstruct_bits.get(ty).copied())
         };
@@ -525,7 +750,7 @@ pub fn verify_bitstruct_layout(
             let fitted = if ty.starts_with('i') && int_bits(ty).is_some() {
                 Some(format!("i{}", width))
             } else if ty == "bool" || int_bits(ty).is_some() {
-                Some(if width == 1 {
+                Some(if width == LayoutNum::small(1) {
                     String::from("bool")
                 } else {
                     format!("u{}", width)

@@ -28,21 +28,21 @@ pub mod wide;
 use mente_syntax::diagnostics::{in_source_order, Applicability, Diagnostic};
 use mente_syntax::{parse_module, FnDecl, ItemDecl, ModuleFile, ParamMode, Span, TokenKind};
 
-use layout::{element_type, extract_layout_attr};
-pub use layout::{verify_bitstruct_layout, verify_explicit_struct_layout};
+use layout::{element_type, layout_attr};
+pub use layout::{verify_bitstruct_layout, verify_explicit_struct_layout, LayoutNum};
 
 #[derive(Clone, Debug)]
 pub struct LayoutProof {
     pub struct_name: String,
-    pub total_bytes: usize,
-    pub align_bytes: usize,
+    pub total_bytes: LayoutNum,
+    pub align_bytes: LayoutNum,
     pub markdown_table: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct BitStructProof {
     pub name: String,
-    pub total_bits: usize,
+    pub total_bits: LayoutNum,
 }
 
 #[derive(Clone, Debug)]
@@ -438,7 +438,15 @@ pub fn verify_module_with(
     for item in &module.items {
         match item {
             ItemDecl::Struct(s) => {
-                if let Some((size, align, _)) = extract_layout_attr(s) {
+                let checked = match layout_attr(s) {
+                    Some(Ok(checked)) => Some(checked),
+                    Some(Err(e)) => {
+                        errors.push(e);
+                        None
+                    }
+                    None => None,
+                };
+                if let Some((size, align, _)) = checked {
                     // An enum has a layout (`core-calculus.md`, item 21), but a field of a
                     // `@layout` struct that holds one is a construct no milestone brings yet.
                     if let Some(f) = s
@@ -877,7 +885,7 @@ pub struct Sample {
 }
 "#;
         let rep = verify_module(&parse_module(code).unwrap()).unwrap();
-        assert_eq!(rep.layout_proofs[0].total_bytes, 8);
+        assert_eq!(rep.layout_proofs[0].total_bytes, LayoutNum::small(8));
 
         let wrong = code
             .replace(
@@ -908,7 +916,7 @@ pub struct Sample {
                 rep.layout_proofs[0].total_bytes,
                 rep.layout_proofs[0].align_bytes
             ),
-            (8, 4)
+            (LayoutNum::small(8), LayoutNum::small(4))
         );
         assert!(rep.layout_proofs[0]
             .markdown_table
@@ -927,15 +935,10 @@ pub struct Sample {
                 "E0414",
             ),
             (good.replace("size: 8", "size: 12"), "E0416"),
-            // Whose fix would lie past `usize` (the fuzzer's findings 16 and 17).
-            (
-                good.replace("align: 4", "align: 18446744073709551615"),
-                "E0410",
-            ),
-            (
-                good.replace("size: 8", "size: 18446744073709551615"),
-                "E0411",
-            ),
+            // Whose fix would lie past the bytes a value may hold, as the fuzzer's findings 16
+            // and 17 lay past `usize`.
+            (good.replace("align: 4", "align: 4294967295"), "E0410"),
+            (good.replace("size: 8", "size: 4294967295"), "E0411"),
         ];
         for (code, expected) in cases {
             let err = first_error(&code);
@@ -1135,7 +1138,7 @@ pub struct Rec {
                 backing, bits, bits
             );
             let rep = verify_module(&parse_module(&code).unwrap()).unwrap();
-            assert_eq!(rep.bitstruct_proofs[0].total_bits, bits);
+            assert_eq!(rep.bitstruct_proofs[0].total_bits, LayoutNum::small(bits));
         }
     }
 
@@ -1148,7 +1151,7 @@ pub struct Rec {
                 rep.bitstruct_proofs[0].name.as_str(),
                 rep.bitstruct_proofs[0].total_bits
             ),
-            ("Flags", 8)
+            ("Flags", LayoutNum::small(8))
         );
 
         let cases = [
@@ -1334,17 +1337,19 @@ pub struct Rec {
         }
     }
 
-    /// A number of `@layout`, `@bytes` or `@bits` may be as large as `usize` holds, and no sum,
-    /// product or difference of them overflows (`layout.rs`): each such module is an error, and
-    /// a fix whose numbers would pass `usize` is not offered. The fuzzer found the first two as
-    /// panics of `mn check` (2026-11-15 and 11-17), beside two siblings fixed one by one before.
+    /// Every number of `@layout`, `@bytes` and `@bits` is a `LayoutNum`, at most the bytes a
+    /// value may hold, and a bit number at most the 128 bits of the widest backing: one past
+    /// them is an error that says so, the same on every host, and a fix whose numbers would pass
+    /// them is not offered. The fuzzer found the first two as panics of `mn check` (2026-11-15
+    /// and 11-17), near `usize::MAX`; the review of pull request 187 found numbers past `usize`
+    /// that were never read, so a struct with one went unchecked or drew the wrong error.
     #[test]
-    fn test_layout_numbers_past_usize_are_errors_with_no_fix_past_it() {
-        const MAX: usize = usize::MAX;
-        // A field 2^64 - 2 bytes wide ends two bytes short of `usize::MAX`.
-        let huge = format!("  @bytes(0..{}) pub a: [9223372036854775807]u16\n", MAX - 1);
+    fn test_layout_numbers_past_their_limits_are_errors_with_no_fix_past_them() {
+        const MAX: u128 = crate::structs::VALUE_BYTES;
+        // A field 2^32 - 2 bytes wide ends a byte short of the most a value may hold.
+        let huge = format!("  @bytes(0..{}) pub a: [2147483647]u16\n", MAX - 1);
         for (src, code) in [
-            // An overlap whose fix would end past `usize::MAX` (E0413).
+            // An overlap whose fix would end past the limit (E0413).
             (
                 layout(
                     "@layout(size: 8, align: 8)",
@@ -1352,7 +1357,8 @@ pub struct Rec {
                 ),
                 "E0413",
             ),
-            // An array whose size passes `usize::MAX` has no size to check against (E0417).
+            // An array of more elements, or more bytes, than a value may hold has no size to
+            // check against (E0417).
             (
                 layout(
                     "@layout(size: 4, align: 4)",
@@ -1360,8 +1366,15 @@ pub struct Rec {
                 ),
                 "E0417",
             ),
+            (
+                layout(
+                    "@layout(size: 4, align: 4)",
+                    "  @bytes(0..4) pub e: [2147483648]u16\n",
+                ),
+                "E0417",
+            ),
             // Past the huge field: a field with no range (E0412), an empty range (E0414) and one
-            // of the wrong width (E0415), each of whose fixes would end past `usize::MAX`.
+            // of the wrong width (E0415), each of whose fixes would end past the limit.
             (
                 layout(
                     "@layout(size: 8, align: 8)",
@@ -1383,18 +1396,61 @@ pub struct Rec {
                 ),
                 "E0415",
             ),
-            // A bitstruct's overlap whose fix would end past `usize::MAX` (E0421).
+            // A bitstruct's overlap whose fix would end past bit 128 (E0421).
             (
-                format!(
-                    "module t\npub bitstruct B : u16 {{\n  @bits(0..8) pub a: u8\n  @bits(0..{}) pub b: u8\n}}\n",
-                    MAX
-                ),
+                String::from("module t\npub bitstruct B : u16 {\n  @bits(0..8) pub a: u8\n  @bits(0..128) pub b: u8\n}\n"),
                 "E0421",
+            ),
+            // Numbers past the limits, on every host (E0223, E0423): the review's `size` past
+            // `usize`, which was never read and left the struct unchecked, one a byte past the
+            // limit, which a host of 64 bits held, a `@bytes` past `usize`, which drew E0412
+            // with a fix that wrote a second `@bytes`, and a `@bits` past it, which read as the
+            // empty range 0..0.
+            (
+                layout(
+                    "@layout(size: 18446744073709551616, align: 8)",
+                    "  @bytes(0..8) pub a: u64\n",
+                ),
+                "E0223",
+            ),
+            (
+                layout(
+                    "@layout(size: 4294967296, align: 8)",
+                    "  @bytes(0..8) pub a: u64\n",
+                ),
+                "E0223",
+            ),
+            (
+                layout(
+                    "@layout(size: 8, align: 8)",
+                    "  @bytes(0..18446744073709551616) pub a: u64\n",
+                ),
+                "E0223",
+            ),
+            (
+                String::from("module t\npub bitstruct B : u8 {\n  @bits(0..18446744073709551616) pub a: u8\n}\n"),
+                "E0423",
+            ),
+            (
+                String::from("module t\npub bitstruct B : u8 {\n  @bits(0..129) pub a: u8\n}\n"),
+                "E0423",
             ),
         ] {
             let (d, _) = diagnosed(&src);
             assert_eq!((d.code, d.fixes.len()), (code, 0), "{}\n{}", d, src);
         }
+        // The array's error says what holds it back, and what to do.
+        let (d, _) = diagnosed(&layout(
+            "@layout(size: 4, align: 4)",
+            "  @bytes(0..4) pub e: [2147483648]u16\n",
+        ));
+        assert!(
+            d.message.contains("more than the 4294967295 bytes")
+                && d.message
+                    .contains("keep fewer elements, or split the field"),
+            "{}",
+            d.message
+        );
         // Where the numbers fit, the fix is offered as before.
         let (d, _) = diagnosed(&layout(
             "@layout(size: 8, align: 8)",
@@ -1404,6 +1460,59 @@ pub struct Rec {
             (d.code, d.fixes[0].edits[0].replacement.as_str()),
             ("E0413", "@bytes(8..16)")
         );
+    }
+
+    /// Layout numbers are read as every integer literal is: in hexadecimal or binary, with digits
+    /// grouped by `_`, where the review of pull request 187 found `[0x10]u8` and `[4_0]u8` of
+    /// no known size (E0417). A `@layout` without its `size` or `align`, or with a number that
+    /// is no literal, is an error (E0426), where the review found `@layout(size: 8)` passing
+    /// unchecked; so is a `@bits` that is no range, and a `@bytes` that is none draws E0412
+    /// with a fix that replaces it, not one that writes a second.
+    #[test]
+    fn test_layout_numbers_are_read_as_literals_and_malformed_ones_are_errors() {
+        for fields in [
+            "  @bytes(0..16) pub a: [0x10]u8\n",
+            "  @bytes(0..16) pub a: [1_6]u8\n",
+            "  @bytes(0x0..0b10000) pub a: [16]u8\n",
+        ] {
+            let src = layout("@layout(size: 0x10, align: 0b1)", fields);
+            assert!(
+                check_source(&src).is_ok(),
+                "{}: {:?}",
+                src,
+                check_source(&src).err()
+            );
+        }
+        for attr in [
+            "@layout(size: 8)",
+            "@layout(align: 8)",
+            "@layout(size: eight, align: 8)",
+            "@layout(size: 8, align: 8, pad: 1)",
+            "@layout",
+        ] {
+            let (d, text) = diagnosed(&layout(attr, "  @bytes(0..8) pub a: u64\n"));
+            assert_eq!((d.code, text.as_str()), ("E0426", attr), "{}", d);
+        }
+        for field in ["  @bits(3) pub a: u8\n", "  pub a: u8\n"] {
+            let src = format!("module t\npub bitstruct B : u8 {{\n{}}}\n", field);
+            assert_eq!(diagnosed(&src).0.code, "E0426", "{}", src);
+        }
+        let src = layout(
+            "@layout(size: 8, align: 4)",
+            "  @bytes(0..4) pub a: u32\n  @bytes(4) pub b: u32\n",
+        );
+        let (d, _) = diagnosed(&src);
+        assert_eq!(d.code, "E0412");
+        let edit = &d.fixes[0].edits[0];
+        assert_eq!(
+            (
+                &src[edit.span.start..edit.span.end],
+                edit.replacement.as_str()
+            ),
+            ("@bytes(4)", "@bytes(4..8)")
+        );
+        let fixed = mente_syntax::diagnostics::apply_fix(&src, &d.fixes[0]).unwrap();
+        assert!(check_source(&fixed).is_ok(), "{}", fixed);
     }
 }
 
