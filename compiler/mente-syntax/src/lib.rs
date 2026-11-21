@@ -151,6 +151,29 @@ pub fn tokenize(src: &str) -> Vec<Token> {
     lex(src).0
 }
 
+/// The value of `text` when it is one integer literal and nothing else, as the lexer reads
+/// literals: in decimal, `0x` hexadecimal or `0b` binary, with digits grouped by `_` and an
+/// optional suffix (`morphic-layouts.md`, item 2). `None` for anything else, a literal past
+/// `u128` included. The numbers of `@layout`, `@bytes` and `@bits` and the length of an
+/// array in a field's type are read with it, so they are read as every literal is, on every
+/// host alike.
+pub fn int_literal_value(text: &str) -> Option<u128> {
+    let (tokens, errors) = lex(text);
+    match (tokens.as_slice(), errors.is_empty()) {
+        (
+            [Token {
+                kind: TokenKind::IntLit(value, _),
+                ..
+            }, Token {
+                kind: TokenKind::Eof,
+                ..
+            }],
+            true,
+        ) => Some(*value),
+        _ => None,
+    }
+}
+
 /// Lexes `src` into tokens, and reports every lexical error on the way (`spec/grammar.md`,
 /// item 1): a character Mente does not use (`E0105`), a string literal a newline or the end of
 /// the file interrupts (`E0106`), an unknown escape (`E0107`) and a malformed integer literal
@@ -888,7 +911,8 @@ pub struct ParamDecl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructFieldDecl {
     pub attrs: Vec<Attr>,
-    pub byte_range: Option<(usize, usize)>,
+    /// The numbers of its `@bytes(start..end)`, none when it has none or they are no literals.
+    pub byte_range: Option<(u128, u128)>,
     pub is_pub: bool,
     pub name: String,
     pub ty: String,
@@ -916,7 +940,8 @@ pub struct StructDecl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BitFieldDecl {
-    pub bit_range: (usize, usize),
+    /// The numbers of its `@bits(start..end)`, none when it has none or they are no literals.
+    pub bit_range: Option<(u128, u128)>,
     pub is_pub: bool,
     pub name: String,
     pub ty: String,
@@ -1781,14 +1806,12 @@ impl<'a> Parser<'a> {
         while *self.peek() != TokenKind::RBrace && *self.peek() != TokenKind::Eof {
             let f_start = self.span();
             let f_attrs = self.parse_attrs()?;
-            let mut bit_range = (0, 0);
+            let mut bit_range = None;
             let mut bits_span = None;
             for a in &f_attrs {
                 if a.name == "bits" {
                     bits_span = Some(a.span);
-                    if let Some(r) = parse_range_arg(&a.args) {
-                        bit_range = r;
-                    }
+                    bit_range = parse_range_arg(&a.args);
                 }
             }
             let f_pub = if *self.peek() == TokenKind::Pub {
@@ -2334,15 +2357,10 @@ fn canonical_field(joined: &dyn Fn(&[Token]) -> String, field: &[Token]) -> Stri
     }
 }
 
-fn parse_range_arg(s: &str) -> Option<(usize, usize)> {
-    let parts: Vec<&str> = s.split("..").collect();
-    if parts.len() == 2 {
-        let start = parts[0].trim().parse::<usize>().ok()?;
-        let end = parts[1].trim().parse::<usize>().ok()?;
-        Some((start, end))
-    } else {
-        None
-    }
+/// The two numbers of an attribute's `start..end`, each a literal ([`int_literal_value`]).
+fn parse_range_arg(s: &str) -> Option<(u128, u128)> {
+    let (start, end) = s.split_once("..")?;
+    Some((int_literal_value(start)?, int_literal_value(end)?))
 }
 
 fn parse_param_list(raw: &str) -> Vec<ParamDecl> {

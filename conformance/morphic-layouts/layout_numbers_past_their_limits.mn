@@ -1,0 +1,21 @@
+// expect: E0223 E0417 E0423
+module conformance
+// A number of @layout or @bytes is at most the 4294967295 bytes a value may hold, and one of
+// @bits at most the 128 bits of the widest backing (morphic-layouts.md, item 2): past them each
+// is an error that says so, the same on every host. A @bytes past usize once drew E0412, an
+// array past it E0417 with no word of why, and a @bits past it read as the empty range 0..0.
+@layout(size: 8, align: 8)
+pub struct Overlap {
+  @bytes(0..8) pub a: u64
+  @bytes(0..18446744073709551616) pub b: u64
+}
+
+@layout(size: 4, align: 4)
+pub struct Huge {
+  @bytes(0..4) pub e: [9223372036854775808]u16
+}
+
+pub bitstruct Bits : u16 {
+  @bits(0..8) pub a: u8
+  @bits(8..18446744073709551616) pub b: u8
+}
