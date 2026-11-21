@@ -33,6 +33,7 @@ rust-toolchain.toml
 .github/scripts/tools.sh
 # The sandbox its tests run in.
 .github/scripts/test-sandbox.sh
+.github/scripts/test-sandbox-inner.rs
 .github/scripts/test-sandbox-env.sh
 # The floor of work the job checks.
 .github/scripts/mutants-floor.mjs
@@ -53,6 +54,7 @@ Cargo.lock
 rust-toolchain.toml
 # The sandbox its tests run in.
 .github/scripts/test-sandbox.sh
+.github/scripts/test-sandbox-inner.rs
 .github/scripts/test-sandbox-env.sh
 .github/workflows/generated.yml
 # The check that nothing of the change can run where cargo builds, which runs first.

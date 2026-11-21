@@ -196,8 +196,23 @@ inner() {
 }
 
 # The wrapper, as the runner's user: cargo's runner. It records the command, starts the namespace
-# through sudo, and waits; its end ends the namespace.
+# through sudo, and waits; its end ends the namespace. The namespace's first process is the one
+# program setup built (.github/scripts/test-sandbox-inner.rs).
 run() {
+  local first=("$home/inner")
+  wrap "$@"
+}
+
+# The same wrapper with the shell's `inner` above as the namespace's first process: the route the
+# one program replaced, which the canary runs beside it to show that a command sees the same through
+# both.
+reference() {
+  local first=(/usr/bin/bash "$self" inner)
+  wrap "$@"
+}
+
+# The wrapper's body, its namespace's first process the caller's `first`.
+wrap() {
   local name envs=() child status=0 signal=
   if [ "$#" -lt 1 ]; then
     echo "test-sandbox: no command" >&2
@@ -220,7 +235,7 @@ run() {
   # The lifeline: a pipe this shell alone writes, which the namespace reads as its standard
   # input. It ends when this shell does, by any signal, SIGKILL too.
   exec 9> >(exec /usr/bin/sudo -n -- /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- \
-    /usr/bin/bash "$self" inner "$PWD" "$(ulimit -v)" "$(ulimit -f)" "${envs[@]}" -- "$@")
+    "${first[@]}" "$PWD" "$(ulimit -v)" "$(ulimit -f)" "${envs[@]}" -- "$@")
   child=$!
   trap '' PIPE
   trap 'signal=15; printf "\n" >&9 2> /dev/null' TERM
@@ -240,7 +255,7 @@ run() {
 # process, end here: bash reads no further, so the length of the rest of this file, setup and the
 # canary, adds nothing to the cost of a test.
 case "${1:-}" in
-  run | inner)
+  run | inner | reference)
     subcommand=$1
     shift
     "$subcommand" "$@"
@@ -388,7 +403,7 @@ read_only() {
 }
 
 setup_as_root() {
-  local here=$1 workspace=$2 dir node link helper
+  local here=$1 workspace=$2 built=$3 dir node link helper
   if [ "$(/usr/bin/id -u)" != 0 ]; then fail "the sandbox is set up as root"; fi
   if [ -e "$home" ]; then fail "$home exists: the sandbox is set up once a job, before any code of the change runs"; fi
   if /usr/bin/getent passwd "$uid" > /dev/null || /usr/bin/getent group "$gid" > /dev/null; then
@@ -404,30 +419,11 @@ setup_as_root() {
   fi
   /usr/bin/install -d -m 0755 -o 0 -g 0 "$home" "$root"
   /usr/bin/install -m 0644 -o 0 -g 0 "$here/test-sandbox.sh" "$self"
+  # The one program the wrapper starts as the namespace's first process, built by setup from the
+  # workspace's own .github/scripts/test-sandbox-inner.rs before any code of the change ran.
+  if [ -z "$built" ] || [ ! -f "$built" ] || [ -L "$built" ]; then fail "no built program of .github/scripts/test-sandbox-inner.rs at $built"; fi
+  /usr/bin/install -m 0755 -o 0 -g 0 "$built" "$home/inner"
   printf '%s\n' "$workspace" > "$home/workspace"
-  # MEASUREMENT ONLY (the sandbox-cost pull request's first round, removed before review): sudo's
-  # cost without its PAM session, its log and its account checks, each on a command of its own that
-  # nothing else runs through sudo, so that the canary can time sudo with each part off. Each line
-  # is checked by visudo alone first, and left out if this sudo does not know it.
-  local line file
-  for line in 'Defaults!/usr/bin/echo !pam_session' 'Defaults!/usr/bin/printf !pam_session, !syslog' 'Defaults!/usr/bin/sleep !pam_session, !pam_setcred, !pam_acct_mgmt, !syslog'; do
-    file=$(/usr/bin/mktemp)
-    printf '%s\n' "$line" > "$file"
-    if /usr/sbin/visudo -c -q -f "$file" > /dev/null 2>&1; then
-      printf '%s\n' "$line" >> /etc/sudoers.d/90-mente-measure
-      echo "measurement: sudoers takes $line"
-    else
-      echo "measurement: sudoers refuses $line"
-    fi
-    /usr/bin/rm -f "$file"
-  done
-  if [ -f /etc/sudoers.d/90-mente-measure ]; then
-    /usr/bin/chmod 0440 /etc/sudoers.d/90-mente-measure
-    if ! /usr/sbin/visudo -c -q > /dev/null 2>&1; then
-      /usr/bin/rm -f /etc/sudoers.d/90-mente-measure
-      echo "measurement: sudoers as a whole refused the lines, removed"
-    fi
-  fi
   # No crash starts a core handler: the runner's is a pipe to a program that runs as root outside
   # every namespace, on the core the crashed process shaped, and the kernel starts a piped handler
   # whatever core limit the process set itself, but for a limit of exactly one byte. A pattern
@@ -555,7 +551,13 @@ setup() {
       echo "module-autoload $state-not-unloaded ${entry%%:*}" >> "$controls"
     fi
   fi
-  /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace"
+  # The namespace's first process, one program where a shell started seven for each command
+  # (.github/scripts/test-sandbox-inner.rs): built here, before any code of the change runs, by the
+  # toolchain rust-toolchain.toml pins, with rustc alone, from that one file and no crate, outside
+  # the workspace's build; root installs it.
+  /usr/bin/mkdir -p "$RUNNER_TEMP/test-sandbox-build"
+  rustc --edition 2021 -C opt-level=2 -C panic=abort -o "$RUNNER_TEMP/test-sandbox-build/inner" "$here/test-sandbox-inner.rs"
+  /usr/bin/sudo -n -- /usr/bin/bash "$here/test-sandbox.sh" setup-as-root "$here" "$workspace" "$RUNNER_TEMP/test-sandbox-build/inner"
   : > "$log"
   echo "The sandbox of $workspace is at $root, for the user $uid."
 }
@@ -941,7 +943,7 @@ check() {
     echo "A process started and ended in the sandbox costs $((serial / 1000)).$(printf '%03d' $((serial % 1000))) ms more than as the runner's user when it is started alone, the median of 20, and $((parallel / 1000)).$(printf '%03d' $((parallel % 1000))) ms when $cores are started at once, the median of seven rounds."
   } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
 
-  # MEASUREMENT ONLY (the sandbox-cost pull request's first round, removed before review): what each
+  # MEASUREMENT ONLY (the sandbox-cost pull request's measuring rounds, removed before review): what each
   # part of that cost is, each part a command of its own, measured as the whole is, alone (the
   # median of 20) and as many at once as the runner has cores (the median of seven rounds of 4 on
   # every core), less a process run directly.
@@ -999,15 +1001,32 @@ check() {
     echo "|---|---|---|"
     part_line "bash, started" /usr/bin/bash -c :
     part_line "bash, reading test-sandbox.sh to its dispatch" /usr/bin/bash "$self" noop
-    part_line "sudo, as today" /usr/bin/sudo -n /usr/bin/true
-    part_line "sudo, without its PAM session" /usr/bin/sudo -n /usr/bin/echo -n
-    part_line "sudo, without its PAM session and syslog" /usr/bin/sudo -n /usr/bin/printf ''
-    part_line "sudo, without its PAM session, credentials, account check and syslog" /usr/bin/sudo -n /usr/bin/sleep 0
-    part_line "sudo and unshare's namespaces, as today" /usr/bin/sudo -n /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- /usr/bin/true
-    part_line "the whole wrapper, as today" /usr/bin/bash "$self" run /usr/bin/true
+    part_line "sudo" /usr/bin/sudo -n /usr/bin/true
+    part_line "sudo and unshare's namespaces" /usr/bin/sudo -n /usr/bin/unshare --mount --pid --net --ipc --uts --fork --kill-child=SIGKILL -- /usr/bin/true
+    part_line "the whole wrapper, through the one program" /usr/bin/bash "$self" run /usr/bin/true
+    part_line "the whole wrapper, through the shell's inner, as before" /usr/bin/bash "$self" reference /usr/bin/true
     echo
-    echo "measurement: sudo's version: $(/usr/bin/sudo -V 2> /dev/null | /usr/bin/head -1); its defaults for this user: $(/usr/bin/sudo -n -l 2> /dev/null | /usr/bin/awk '/^Matching Defaults entries/ { getline; sub(/^[ \t]+/, ""); print; exit }')"
+    : "measurement: sudo's version: $(/usr/bin/sudo -V 2> /dev/null | /usr/bin/head -1); its defaults for this user: $(/usr/bin/sudo -n -l 2> /dev/null | /usr/bin/awk '/^Matching Defaults entries/ { getline; sub(/^[ \t]+/, ""); print; exit }')"
   } | /usr/bin/tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The namespace's first process is one program (.github/scripts/test-sandbox-inner.rs), where the
+  # shell's `inner` started seven: for the same command, what it sees through each route is the same,
+  # its mounts (less the numbers each mount is given anew), its user, groups and capabilities,
+  # no_new_privs, its limits, its umask and its environment.
+  view='/usr/bin/cut -d " " -f 4- /proc/self/mountinfo
+/usr/bin/grep -E "^(Uid|Gid|Groups|NoNewPrivs|Seccomp|CapInh|CapPrm|CapEff|CapBnd|CapAmb):" /proc/self/status
+/usr/bin/cat /proc/self/limits
+umask
+/usr/bin/env | /usr/bin/sort'
+  if ! through_one=$(/usr/bin/bash "$self" run /usr/bin/bash -c "$view" 2>&1); then
+    problem "the one program could not run the view of the sandbox: $through_one"
+  elif ! through_shell=$(/usr/bin/bash "$self" reference /usr/bin/bash -c "$view" 2>&1); then
+    problem "the shell's inner could not run the view of the sandbox: $through_shell"
+  elif [ "$through_one" != "$through_shell" ]; then
+    problem "a command sees another sandbox through the one program than through the shell's inner: $(/usr/bin/diff <(printf '%s\n' "$through_shell") <(printf '%s\n' "$through_one") | /usr/bin/head -n 20 | /usr/bin/tr '\n' ' ')"
+  else
+    echo "Through the one program and through the shell's inner, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, limits and environment."
+  fi
 
   # The probe crashed two processes in the sandbox, one at a core limit it had lowered to 0. The
   # pattern is a file name, so the kernel started no handler, and the runner's journal holds none.
@@ -1043,7 +1062,7 @@ check() {
 
 case "${1:-}" in
   setup) setup ;;
-  setup-as-root) setup_as_root "$2" "$3" ;;
+  setup-as-root) setup_as_root "$2" "$3" "$4" ;;
   env) env_lines ;;
   uid) echo "$uid" ;;
   ran) ran "${2:-}" ;;
