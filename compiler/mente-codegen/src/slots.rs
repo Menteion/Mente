@@ -188,15 +188,14 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
     // element. Every address of one base points into one slot, whichever it is in a run, so the
     // slots a base may point into need no bytes apart for its sake: a parameter that may take any
     // of a thousand slots, one on each path, holds one of them.
+    // A slot has no operand, so it stays its own base; a value that is no address takes the base
+    // of the one address it reads, which nothing asks for, since only addresses have roots.
     let mut base: Vec<NodeId> = (0..values).map(|v| NodeId(v as u32)).collect();
     let mut changed = true;
     while changed {
         changed = false;
         for block in &f.blocks {
             for &v in &block.insts {
-                if !address(v) || slot_of[v.0 as usize].is_some() {
-                    continue;
-                }
                 let mut from = f
                     .args(v)
                     .iter()
@@ -268,14 +267,12 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
         }
     }
     let mut reached: Vec<Option<Vec<bool>>> = vec![None; f.blocks.len()];
-    let mut reaches = |from: (usize, usize), to: (usize, usize)| -> bool {
-        if from.0 == to.0 && from.1 < to.1 {
-            return true;
-        }
-        let blocks = reached[from.0].get_or_insert_with(|| {
+    // The blocks one jump or more from block `from`.
+    let mut reaches = |from: usize, to: usize| -> bool {
+        let blocks = reached[from].get_or_insert_with(|| {
             // The blocks one jump or more from `from`'s block.
             let mut seen = vec![false; f.blocks.len()];
-            let mut stack: Vec<usize> = targets(&f.blocks[from.0].term)
+            let mut stack: Vec<usize> = targets(&f.blocks[from].term)
                 .iter()
                 .map(|(t, _)| t.0 as usize)
                 .collect();
@@ -287,14 +284,16 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
             }
             seen
         });
-        blocks[to.0]
+        blocks[to]
     };
-    // Which pairs of slots one run may both make: two that are alive together in one run lie
-    // apart, and two of which no run makes both may share every byte.
+    // Which pairs of slots one run may both make: two of one block, or two of blocks one of
+    // which reaches the other. Two that are alive together in one run lie apart, and two of
+    // which no run makes both may share every byte.
     let mut related: Vec<Vec<usize>> = vec![Vec::new(); sizes.len()];
     for k in 0..sizes.len() {
         for o in 0..k {
-            if reaches(where_made[o], where_made[k]) || reaches(where_made[k], where_made[o]) {
+            let (a, b) = (where_made[o].0, where_made[k].0);
+            if a == b || reaches(a, b) || reaches(b, a) {
                 related[k].push(o);
             }
         }
@@ -311,7 +310,7 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
         for k in 0..sizes.len() {
             let taken: Vec<(u32, u32)> = together[k]
                 .iter()
-                .filter(|o| **o < k && related[k].binary_search(o).is_ok())
+                .filter(|o| related[k].binary_search(o).is_ok())
                 .map(|&o| (placed[o], placed[o] + sizes[o]))
                 .collect();
             let starts: BTreeSet<u32> = if apart {
@@ -381,7 +380,7 @@ mod tests {
     /// frame of 363, which CI's build of it refused (seed 93 of the generator, 2026-11-21).
     #[test]
     fn test_the_slots_one_parameter_may_take_share_bytes() {
-        use mente_mir::cfg::{BlockId, Builder, IntTy, Ty};
+        use mente_mir::cfg::{BlockId, Builder, IntTy, Num, Ty};
         let u8t = Ty::Int(IntTy::new(8, false));
         let mut b = Builder::new("f", &[Ty::Bool], Some(u8t));
         let c = b.params(BlockId(0))[0];
@@ -394,11 +393,57 @@ mod tests {
         b.jump(join, vec![second]);
         b.switch(join);
         let p = b.params(join)[0];
-        let v = b.inst(Op::Load, u8t, &[p]);
+        // An element of the parameter, alive beside it, has its base: it points into the one
+        // slot the parameter holds, not into a second.
+        let one = b.int(IntTy::new(64, false), Num::new(false, 1));
+        let at = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[p, one]);
+        let x = b.inst(Op::Load, u8t, &[at]);
+        let y = b.inst(Op::Load, u8t, &[p]);
+        let v = b.inst(Op::Bits(mente_mir::cfg::BitOp::Or), u8t, &[x, y]);
         b.ret(Some(v));
         let l = layout(&b.finish());
         assert_eq!(l.offsets[first.0 as usize], l.offsets[second.0 as usize]);
         assert_eq!(l.bytes, 16);
+    }
+
+    /// Slots one run may make both, two of one block or two of blocks one reaches, start at
+    /// offsets of their own while the frame holds them, and share bytes from 16 on, so that
+    /// Cranelift never takes two for one address; slots of which no run makes both, those of two
+    /// branches, start at one. With no room in the frame, they share their bytes from the start.
+    #[test]
+    fn test_slots_one_run_makes_start_apart_within_the_frame() {
+        use mente_mir::cfg::{BlockId, Builder, IntTy, Ty};
+        let u8t = Ty::Int(IntTy::new(8, false));
+        let build = |frame: u128| {
+            let mut b = Builder::new("f", &[Ty::Bool, u8t], None);
+            let [c, x] = b.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            // Two slots of the entry block, the first dead before the second is made.
+            let s1 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            b.inst(Op::Store, Ty::Unit, &[s1, x]);
+            let s2 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            b.inst(Op::Store, Ty::Unit, &[s2, x]);
+            // A slot in each branch, one made after an instruction more than the other.
+            let (yes, no) = (b.block(&[]), b.block(&[]));
+            b.branch(c, (yes, vec![]), (no, vec![]));
+            b.switch(yes);
+            let s3 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            b.inst(Op::Store, Ty::Unit, &[s3, x]);
+            b.ret(None);
+            b.switch(no);
+            let y = b.inst(Op::Not, u8t, &[x]);
+            let s4 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            b.inst(Op::Store, Ty::Unit, &[s4, y]);
+            b.ret(None);
+            let mut f = b.finish();
+            f.frame = frame;
+            let l = layout(&f);
+            let at = |s: NodeId| l.offsets[s.0 as usize].unwrap_or(u32::MAX);
+            ([at(s1), at(s2), at(s3), at(s4)], l.bytes)
+        };
+        assert_eq!(build(1000), ([0, 16, 32, 32], 48));
+        assert_eq!(build(0), ([0, 0, 0, 0], 16));
     }
 
     /// Whether two slots, each an offset and its bytes, hold no byte in common.

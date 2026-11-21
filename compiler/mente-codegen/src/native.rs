@@ -820,10 +820,10 @@ impl Translate {
         let mut scratch = None;
         let layout = crate::slots::layout(f);
         let area = Area {
-            slot: (layout.bytes > 0).then(|| {
+            slot: std::num::NonZeroU32::new(layout.bytes).map(|bytes| {
                 b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    layout.bytes,
+                    bytes.get(),
                     4,
                 ))
             }),
@@ -2124,6 +2124,46 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
             })
             .collect();
         assert!(over.is_empty(), "{}:\n{}", over.len(), over.join("\n"));
+    }
+
+    /// A build gives a function's stack slots the bytes of its layout, which `frames_and_slots`
+    /// reports beside the frame the checker counts, by the function's name; and it refuses a
+    /// function whose slots take more than its frame, as a fault of this compiler, but builds one
+    /// whose slots take exactly its frame, and one that counts no frame, as an entry.
+    #[test]
+    fn test_a_build_refuses_slots_past_the_frame() {
+        let source = "module m\npub fn f(x: u8, i: usize[0..=63]) -> u8 {\n  var a: [64]u8 = [x; 64]\n  a[i] = 1\n  a[i]\n}\n";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let mut lowered = crate::lower::lower(&module).unwrap();
+        let k = lowered
+            .module
+            .functions
+            .iter()
+            .position(|f| f.name == "f")
+            .unwrap();
+        let laid = crate::slots::layout(&lowered.module.functions[k]).bytes;
+        assert!(laid >= 64, "{laid}");
+        let frame = lowered.module.functions[k].frame;
+        let target = Target::X86_64Linux;
+        assert_eq!(
+            frames_and_slots(&lowered, target).unwrap(),
+            [("f".to_string(), frame, laid)],
+            "the function's name, its frame, and its slots' bytes, its entry left out"
+        );
+        let built = |lowered: &mut Lowered, frame: u128| {
+            lowered.module.functions[k].frame = frame;
+            frames_and_slots(lowered, target)
+        };
+        assert_eq!(
+            built(&mut lowered, u128::from(laid)).unwrap(),
+            [("f".to_string(), u128::from(laid), laid)]
+        );
+        let refused = built(&mut lowered, u128::from(laid) - 1).unwrap_err();
+        assert!(
+            refused.to_string().contains("a fault of the compiler"),
+            "{refused}"
+        );
+        assert!(built(&mut lowered, 0).unwrap().is_empty());
     }
 
     /// A result is printed in a loop over each array, so that `main`'s code does not grow with
