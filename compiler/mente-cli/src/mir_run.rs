@@ -962,11 +962,12 @@ mod tests {
     }
 
     /// Native code's slots take at most each function's frame as the checker counts it, in the
-    /// agent programs of the benchmark, one in three, each built for one target in turn. The conformance suite is
-    /// held to the same by mente-codegen's test, and the generated programs by the generator's,
-    /// on top of every build, which refuses a function whose slots take more: native code once
-    /// gave every slot bytes of its own, two hundred branches of a 4 KiB array 1.6 MB for a frame
-    /// of 8,265 (`spec/mir-and-codegen.md`, item 5).
+    /// agent programs of the benchmark, one in three, each built for one target in turn. The
+    /// conformance suite is held to the same by mente-codegen's test, and the generated programs by
+    /// the comparison of the paths, which builds them natively, on top of every build, which
+    /// refuses a function whose slots take more: native code once gave every slot bytes of its own,
+    /// two hundred branches of a 4 KiB array 1.6 MB for a frame of 8,265
+    /// (`spec/mir-and-codegen.md`, item 5).
     #[test]
     fn test_native_slots_take_at_most_the_frame_in_the_agent_programs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

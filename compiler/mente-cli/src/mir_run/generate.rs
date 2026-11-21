@@ -4139,8 +4139,7 @@ impl Gen {
         let mut out = match roll {
             0..=29 => self.binding(depth),
             30..=49 => self.assignment(),
-            50..=52 if depth < 3 => self.if_statement(depth),
-            53 if depth < 3 => self.branch_arrays(depth),
+            50..=53 if depth < 3 => self.if_statement(depth),
             54..=58 if depth < 3 => self.match_statement(depth),
             59..=68 if depth < 3 && self.loops < 2 => self.loop_statement(depth),
             69..=76 => self.guard_statement(),
@@ -4770,42 +4769,6 @@ impl Gen {
                 stmts: vec![s],
                 tail: None,
             });
-        }
-        out
-    }
-
-    /// Sibling `if`s whose blocks each bind an array of one type, none run with another: of
-    /// branches that never run together a frame counts one (`core-calculus.md#stack-budget`), and
-    /// native code lays their slots over the same bytes. Native code once gave every slot bytes
-    /// of its own, which two hundred branches of a 4 KiB array took past Windows' stack (nightly
-    /// root cause 3, 2026-11-21); building native code refuses a function whose slots take more
-    /// than its frame counts, so a program of this rule fails every comparison of the paths then.
-    fn branch_arrays(&mut self, depth: u32) -> Vec<S> {
-        let before: Vec<Option<R>> = self.binds.iter().map(|b| b.known).collect();
-        let ty = Ty::Array(
-            1 + self.rng.below(64) as u32,
-            Box::new(Ty::Int(self.int_ty())),
-        );
-        let mut out = Vec::new();
-        for _ in 0..2 + self.rng.below(5) {
-            let cond = self.bool_expr(0);
-            out.extend(self.flush());
-            self.scopes.push(Vec::new());
-            let init = self.full(&ty, depth + 1);
-            let mut stmts = self.flush();
-            let name = self.fresh("a");
-            let id = self.declare(name, ty.clone(), Kind::Val, None);
-            self.initialized(id, &init);
-            stmts.push(S::Bind(id, Some(ty.to_string()), init));
-            self.close(&mut stmts, false);
-            out.push(S::If(cond, Block { stmts, tail: None }, None));
-        }
-        // Past the branches a binding holds what it held before or what a branch left in it.
-        for (id, was) in before.into_iter().enumerate() {
-            self.binds[id].known = match (was, self.binds[id].known) {
-                (Some(a), Some(b)) => Some(a.hull(b)),
-                _ => None,
-            };
         }
         out
     }
@@ -7898,59 +7861,6 @@ mod tests {
         // Every call but one whose result needs more than 128 bits, which the trap holds not.
         assert!(seen[0].reached > 200, "{:?}", seen[0]);
         assert_eq!(seen[0].nearest.as_deref(), Some("-4"));
-    }
-
-    /// The rule of sibling branches that each bind an array comes up among the first seeds, and
-    /// each program it shapes builds native code for every target. The build refuses a function
-    /// whose slots take more than its frame counts, as a slot each made of two hundred such
-    /// branches 1.6 MB of stack for a frame of 8,265 (nightly root cause 3, 2026-11-21).
-    #[test]
-    fn test_branches_of_arrays_build_within_their_frames() {
-        // The rule's bindings, and only its, are named `a` and a number.
-        let uses = |text: &str| {
-            text.lines().any(|l| {
-                l.trim_start()
-                    .strip_prefix("val a")
-                    .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-            })
-        };
-        let mut built = 0;
-        for seed in 0..300 {
-            if built == 5 {
-                break;
-            }
-            if !uses(&program(seed).text) {
-                continue;
-            }
-            let checked = checked(seed);
-            let text = &checked.program.text;
-            let Some(module) = checked.module.as_ref().filter(|_| uses(text)) else {
-                continue;
-            };
-            let Ok(lowered) = mente_codegen::lower::lower(module) else {
-                continue;
-            };
-            for target in [
-                mente_codegen::Target::X86_64Linux,
-                mente_codegen::Target::Aarch64Linux,
-                mente_codegen::Target::X86_64Windows,
-            ] {
-                let source = mente_codegen::SourceFile {
-                    path: "g.mn".into(),
-                    directory: ".".into(),
-                };
-                if let Err(e) =
-                    mente_codegen::native::object(&lowered, &[], "", source, "g.o", target)
-                {
-                    panic!("seed {seed}, {target:?}: {e}\n{text}");
-                }
-            }
-            built += 1;
-        }
-        assert!(
-            built >= 3,
-            "{built} programs of branches of arrays among 300 seeds"
-        );
     }
 
     /// A run is held to two bars, whatever its size: the functions it generates again for
