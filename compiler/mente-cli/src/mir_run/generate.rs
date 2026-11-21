@@ -1557,8 +1557,9 @@ impl Gen {
     /// refinement bounds the literals.
     fn scrutinee(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
         // Now and then what a call that changes a place gives, which the arms then read as the
-        // call left it. A call's result has its type's range, refined or not.
-        if self.rng.chance(60) {
+        // call left it. A call's result has its type's range, refined or not. Not for a `bool`,
+        // whose `match` decides as an `if` does and whose scrutinee changes nothing.
+        if self.rng.chance(60) && *ty != Ty::Bool {
             if let Some((e, _)) = self.call_of(depth + 1, |t| t == ty, true) {
                 let range = match ty {
                     Ty::Int(t) => Some(t.range()),
