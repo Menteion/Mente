@@ -8,7 +8,8 @@
     "site": "^site/|^README\\.md$|^spec/|^docs/",
     "benchmark": "^benchmark/",
     "harness": "^benchmark/harness/",
-    "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/"
+    "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/",
+    "generator": "^compiler/mente-cli/src/mir_run/"
   },
   "checks": [
     { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
@@ -31,6 +32,12 @@
       "when": "mir",
       "run": ["cargo", "test", "-p", "mente-cli", "--test", "cli", "test_mn_test_mutate_runs_the_demo_gate"],
       "why": "`mn test --mutate` runs the same gate on the corpus, through the command."
+    },
+    {
+      "name": "program generator",
+      "when": "generator",
+      "run": ["cargo", "test", "-p", "mente-cli", "--bin", "mn", "--", "mir_run::coverage::", "mir_run::differential::", "mir_run::generate::", "mir_run::host_shapes::"],
+      "why": "The program generator's own tests, one filter for each module of its directory: every construct of the grammar reached, every generated program well typed and replayable, the three paths agreeing on them, and the host's shapes. No other check runs them, so a change to the generator passed these checks and failed only on CI (compiler-fixes, 2026-11-22). The policy's check \"tools/quick.mjs runs the program generator's own tests for a change to it\" holds a filter here for each module of the directory."
     },
     { "name": "spec directives", "when": "documents", "run": ["cargo", "run", "--quiet", "--bin", "mn", "--", "spec"] },
     { "name": "documentation tools", "when": "documents", "run": ["npm", "run", "verify:docs"] },
