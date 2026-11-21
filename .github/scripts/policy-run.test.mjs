@@ -831,13 +831,14 @@ check("the nightly alarm's CLI keeps one issue through GitHub's API, whatever th
   // running; a job's log, behind a redirect to its storage; and the nightlies' latest scheduled
   // runs. `mode` makes the jobs' listing answer 502, or a log stall, as the review of 4ae3c27 had
   // them, and `faults` the next listings of the issues stall or answer 502, one each; `latest` gives
-  // each nightly's last scheduled run.
+  // each nightly's scheduled runs, newest first, each with its conclusion and its count of jobs.
   const FUZZ = ".github/workflows/fuzz-nightly.yml";
   const MUTANTS = ".github/workflows/mutants-full.yml";
   const fresh = () => ({ issues: Array.from({ length: 100 }, (_, k) => ({ number: k + 1, title: `Another issue ${k + 1}`, body: "", state: "open", user: { login: "github-actions[bot]" } })), comments: [], calls: [], blobAuth: [], next: 101 });
   let state = fresh();
   const mode = { jobs: "ok", logs: "ok", faults: [] };
   const latest = new Map();
+  const jobsOf = new Map();
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
     const send = (status, body, headers = {}) => {
@@ -876,13 +877,15 @@ check("the nightly alarm's CLI keeps one issue through GitHub's API, whatever th
       } else if (url.pathname === "/repos/o/r/actions/runs/77/jobs") {
         if (mode.jobs === "502") send(502, { message: "Bad Gateway" });
         else send(200, { jobs: [{ id: 1, name: "Fuzz, nightly", status: "completed", conclusion: "failure" }, { id: 2, name: "Nightly alarm (Fuzz)", status: "in_progress", conclusion: null }] });
+      } else if (/^\/repos\/o\/r\/actions\/runs\/\d+\/jobs$/.test(url.pathname)) {
+        send(200, { total_count: jobsOf.get(Number(url.pathname.split("/")[6])) ?? 1, jobs: [] });
       } else if (url.pathname === "/repos/o/r/actions/jobs/1/logs") {
         if (mode.logs === "stall") return; // no answer, ever
         send(302, undefined, { location: `http://127.0.0.1:${server.address().port}/blob/1` });
       } else if (runs) {
         const file = `.github/workflows/${runs[1]}`;
-        const at = latest.has(file) ? latest.get(file) : new Date().toISOString();
-        send(200, { workflow_runs: at === null ? [] : [{ created_at: at }] });
+        const listed = latest.get(file) ?? [{ id: 500, created_at: new Date().toISOString(), conclusion: null }];
+        send(200, { workflow_runs: listed.slice(0, Number(url.searchParams.get("per_page"))) });
       } else send(404, { message: "Not Found" });
     });
   });
@@ -968,13 +971,25 @@ check("the nightly alarm's CLI keeps one issue through GitHub's API, whatever th
     assert.equal(shaky.status, 0, shaky.out);
     assert.equal(alarms().length, 1, "a call that stalled or answered 502 once left the night without an issue");
     assert.deepEqual(mode.faults, []);
-    // A nightly that has not run: the weekly with no scheduled run at all opens its own issue.
+    // A nightly that has not run: the weekly's latest scheduled run is an hour-old startup_failure,
+    // and the one before it started no job, behind which it last ran 200 hours ago; it opens its own
+    // issue (the review of d15fe30). The jobs of the startup_failure are not asked for.
     state = fresh();
-    latest.set(MUTANTS, null);
+    const hoursAgo = (h) => new Date(Date.now() - h * 3_600_000).toISOString();
+    const lastRan = hoursAgo(200);
+    latest.set(MUTANTS, [
+      { id: 901, created_at: hoursAgo(1), conclusion: "startup_failure" },
+      { id: 902, created_at: hoursAgo(25), conclusion: "failure" },
+      { id: 903, created_at: lastRan, conclusion: "success" },
+    ]);
+    jobsOf.set(902, 0);
     const ran = await alarm({ fuzz: { result: "success", outputs: {} } });
     assert.equal(ran.status, 0, ran.out);
     assert.deepEqual(alarms().map((i) => [i.title, i.body.split("\n")[0]]), [["Nightly: mutants-full.yml has not run", `<!-- nightly-alarm: ${MUTANTS} -->`]]);
+    assert.ok(alarms()[0].body.includes(`its last scheduled run that started a job was at ${lastRan}`), alarms()[0].body);
+    assert.ok(!state.calls.some((c) => c.path === "/repos/o/r/actions/runs/901/jobs"), "the jobs of a startup_failure were asked for");
     latest.clear();
+    jobsOf.clear();
     // Without its variables, or for a workflow it does not know, it fails rather than say nothing.
     const bare = await new Promise((done) => {
       const child = spawn(process.execPath, [path.join(HERE, "nightly-alarm.mjs")], { env });

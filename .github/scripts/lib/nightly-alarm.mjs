@@ -131,10 +131,25 @@ export async function keepAlarm({ verdict: v, file, name, sha, runUrl, body, api
   throw new Error(`no verdict the alarm knows: ${v}`);
 }
 
-/// What a nightly that runs nowhere looks like to the others: for each nightly, its latest
-/// scheduled run (the alarm's own is the run it stands in, so never late), `api.latestRun(file)` -> an ISO time or null, older than its hours allow,
-/// or none, opens that workflow's issue, unless one is open already, which alarms enough. A
-/// schedule GitHub disabled, or jobs that never started, raise no alarm of their own.
+/// The time of a workflow's last scheduled run that ran, from `runs`, its scheduled runs newest
+/// first as GitHub lists them: the newest that did not end in `startup_failure` and has a job,
+/// which `countJobs(run)` tells; null when none of them did. A run that never started its jobs, as
+/// one of a workflow GitHub cannot start, runs no alarm of its own either, so it is no run (the
+/// review of d15fe30: an hour-old `startup_failure` hid a nightly that had not run).
+export async function lastRealRun(runs, countJobs) {
+  for (const run of runs) {
+    if (run.conclusion === "startup_failure") continue;
+    if ((await countJobs(run)) === 0) continue;
+    return run.created_at;
+  }
+  return null;
+}
+
+/// What a nightly that runs nowhere looks like to the others: for each nightly, its last scheduled
+/// run that ran (the alarm's own is the run it stands in, so never late), `api.latestRun(file)` ->
+/// an ISO time or null, older than its hours allow, or none, opens that workflow's issue, unless
+/// one is open already, which alarms enough. A schedule GitHub disabled, or runs that never started
+/// their jobs, raise no alarm of their own.
 export async function keepRunning({ now, api }) {
   const opened = [];
   for (const [file, hours] of NIGHTLIES) {
@@ -142,7 +157,7 @@ export async function keepRunning({ now, api }) {
     const age = last === null ? Infinity : (now - Date.parse(last)) / 3_600_000;
     if (age <= hours) continue;
     if (alarmsOf(await api.openIssues(), file).length > 0) continue;
-    const since = last === null ? "it has no scheduled run" : `its last scheduled run was at ${last}`;
+    const since = last === null ? "none of its latest scheduled runs started a job" : `its last scheduled run that started a job was at ${last}`;
     opened.push(await openAlarm(api, file, `Nightly: ${file.split("/").pop()} has not run`, `${file} has not run within ${hours} hours: ${since}.`));
   }
   return opened;

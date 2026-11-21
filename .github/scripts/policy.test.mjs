@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
-import { ALARM_AUTHOR, ALARM_LABEL, ALARM_OWNER, NIGHTLIES, alarmMarker, detailsBody, errorLines, failingJobs, failureBody, keepAlarm, keepRunning, verdict as alarmVerdict } from "./lib/nightly-alarm.mjs";
+import { ALARM_AUTHOR, ALARM_LABEL, ALARM_OWNER, NIGHTLIES, alarmMarker, detailsBody, errorLines, failingJobs, failureBody, keepAlarm, keepRunning, lastRealRun, verdict as alarmVerdict } from "./lib/nightly-alarm.mjs";
 import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
@@ -1284,8 +1284,8 @@ const PINNED_FILES = new Map([
   [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
   [".github/scripts/fuzz-summary.mjs", "e3265e708b8b8d29918fcf4badd5a37d8c7c921dd55e6e5865849e472f268a92"],
-  [".github/scripts/nightly-alarm.mjs", "e6453d61e6ae0c22b121f666cc350611a30f9037f64bc5014b09786e36ba4c96"],
-  [".github/scripts/lib/nightly-alarm.mjs", "16efcd649c535cb54f6c8b5eea6413c4174a41be73f227bf931de417dd1354da"],
+  [".github/scripts/nightly-alarm.mjs", "4d6a389e64a183ea0935fee1060d02a02a68e3dd40f2b7b6bd5c0daa47e1da59"],
+  [".github/scripts/lib/nightly-alarm.mjs", "6ec77c6bcf004da4da9896d70839f1b843e7c0ba44f324c18231dc697741a5df"],
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
@@ -1296,7 +1296,7 @@ const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "4d7b21a64d228297db154d0dff4ea39142e1ac27f9ce39a97a61919237ee85a3"],
+  [".github/scripts/policy-run.test.mjs", "fd45c1f6931dfd9116be0784dfd215a3f93abe0f410e581c2f57ecfed8d9b6dd"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -4072,19 +4072,36 @@ check("the nightly alarm keeps one issue per workflow: it opens it, comments on 
   assert.equal(own.action, "opened");
   assert.deepEqual(others.comments, []);
   await assert.rejects(() => keepAlarm({ verdict: "maybe", file: FUZZ, name: "x", sha: "s", runUrl: "u", body: "", api: g.api }), /no verdict the alarm knows/);
-  // A nightly that has not run within its period, or never, opens its own issue, unless one is open;
-  // one that ran in time does not.
+  // A workflow's last run that ran: a run that ended in startup_failure, or that has no job, never
+  // started its jobs, its alarm among them, and is passed over; the jobs of a startup_failure are
+  // not even asked for (the review of d15fe30).
+  const jobsOf = new Map([[11, 0], [12, 3], [13, 1]]);
+  const asked = [];
+  const countJobs = async (run) => (asked.push(run.id), jobsOf.get(run.id) ?? 1);
+  const listed = [
+    { id: 10, created_at: "2026-11-21T11:00:00Z", conclusion: "startup_failure" },
+    { id: 11, created_at: "2026-11-21T10:00:00Z", conclusion: "failure" },
+    { id: 12, created_at: "2026-11-20T09:00:00Z", conclusion: "success" },
+    { id: 13, created_at: "2026-11-19T09:00:00Z", conclusion: "success" },
+  ];
+  assert.equal(await lastRealRun(listed, countJobs), "2026-11-20T09:00:00Z");
+  assert.deepEqual(asked, [11, 12], "the jobs of a startup_failure were asked for, or of runs past the one found");
+  assert.equal(await lastRealRun([], countJobs), null);
+  assert.equal(await lastRealRun([listed[0], listed[1]], countJobs), null, "runs that never started a job count as runs");
+  // A nightly that has not run within its period, or whose latest runs never started a job, opens
+  // its own issue, unless one is open; one that ran in time does not. Generated programs' latest run
+  // is an hour-old startup_failure, behind which it last ran 27 hours ago.
   const now = Date.parse("2026-11-21T12:00:00Z");
   const runs = new Map([
-    [".github/workflows/generated-nightly.yml", "2026-11-20T09:00:00Z"],
-    [".github/workflows/mutants-full.yml", null],
+    [".github/workflows/generated-nightly.yml", listed],
+    [".github/workflows/mutants-full.yml", [listed[0], listed[1]]],
   ]);
   const stale = github();
-  const latestRun = async (file) => (runs.has(file) ? runs.get(file) : "2026-11-21T11:00:00Z");
+  const latestRun = async (file) => lastRealRun(runs.get(file) ?? [{ id: 20, created_at: "2026-11-21T11:00:00Z", conclusion: "failure" }], countJobs);
   const opened = await keepRunning({ now, api: { ...stale.api, latestRun } });
   assert.deepEqual(stale.issues.map((i) => [i.title, i.body]), [
-    ["Nightly: generated-nightly.yml has not run", `${alarmMarker(".github/workflows/generated-nightly.yml")}\n.github/workflows/generated-nightly.yml has not run within 26 hours: its last scheduled run was at 2026-11-20T09:00:00Z.`],
-    ["Nightly: mutants-full.yml has not run", `${alarmMarker(".github/workflows/mutants-full.yml")}\n.github/workflows/mutants-full.yml has not run within 192 hours: it has no scheduled run.`],
+    ["Nightly: generated-nightly.yml has not run", `${alarmMarker(".github/workflows/generated-nightly.yml")}\n.github/workflows/generated-nightly.yml has not run within 26 hours: its last scheduled run that started a job was at 2026-11-20T09:00:00Z.`],
+    ["Nightly: mutants-full.yml has not run", `${alarmMarker(".github/workflows/mutants-full.yml")}\n.github/workflows/mutants-full.yml has not run within 192 hours: none of its latest scheduled runs started a job.`],
   ]);
   assert.deepEqual(opened, [1, 2]);
   assert.deepEqual(await keepRunning({ now, api: { ...stale.api, latestRun } }), [], "a nightly already alarmed opened a second issue");

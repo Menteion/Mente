@@ -12,7 +12,7 @@
 // nightlies have run, is best effort, and its failure leaves the alarm as it is (the review of
 // 4ae3c27: a 502 on the jobs' listing, or a log that stalled, left a failing night with no issue).
 // Every call has a time limit and is tried again on an answer that may pass on a second try.
-import { NIGHTLIES, detailsBody, errorLines, failingJobs, failureBody, keepAlarm, keepRunning, verdict } from "./lib/nightly-alarm.mjs";
+import { NIGHTLIES, detailsBody, errorLines, failingJobs, failureBody, keepAlarm, keepRunning, lastRealRun, verdict } from "./lib/nightly-alarm.mjs";
 
 const env = process.env;
 for (const name of ["GITHUB_TOKEN", "RESULTS", "GITHUB_API_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_SERVER_URL", "GITHUB_SHA", "GITHUB_WORKFLOW", "GITHUB_WORKFLOW_REF"]) {
@@ -29,6 +29,8 @@ const BACKOFF_MS = Number(env.ALARM_BACKOFF_MS ?? 2_000);
 const TRIES = 3;
 // The time the best-effort details may take in all.
 const DETAILS_MS = 10 * TIMEOUT_MS;
+// The scheduled runs of a nightly read to find its last that ran: a month of a daily's.
+const RUNS_READ = 30;
 
 const api = env.GITHUB_API_URL;
 const repo = env.GITHUB_REPOSITORY;
@@ -81,10 +83,11 @@ const issues = {
   },
   comment: (number, text) => call("POST", `repos/${repo}/issues/${number}/comments`, { body: text }),
   close: (number) => call("PATCH", `repos/${repo}/issues/${number}`, { state: "closed", state_reason: "completed" }),
-  // The latest scheduled run of a workflow, by its file's name: its time, or null when it has none.
+  // The last scheduled run of a workflow, by its file's name, that started a job, among its latest
+  // RUNS_READ: its time, or null when none did (lastRealRun).
   latestRun: async (file) => {
-    const runs = await call("GET", `repos/${repo}/actions/workflows/${file.split("/").pop()}/runs?event=schedule&per_page=1`);
-    return runs.workflow_runs?.[0]?.created_at ?? null;
+    const runs = await call("GET", `repos/${repo}/actions/workflows/${file.split("/").pop()}/runs?event=schedule&per_page=${RUNS_READ}`);
+    return lastRealRun(runs.workflow_runs ?? [], async (run) => (await call("GET", `repos/${repo}/actions/runs/${run.id}/jobs?per_page=1`)).total_count ?? 0);
   },
 };
 
