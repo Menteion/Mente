@@ -1110,6 +1110,13 @@ export function rustAttributes(text) {
 /// function put there escapes every rule that reads the sources by their names.
 const PATH_ATTRIBUTE = /(?<![\w#])(?:r#)?path\s*=/;
 const readsModuleFromPath = (text) => rustAttributes(text).some((a) => PATH_ATTRIBUTE.test(a));
+/// `include!`, in the source's tokens, by any path (`std::include!`, `::core::include!`), with any
+/// space or comment before its `!`, and as a raw identifier: it compiles another file's text into
+/// this one, so a test or a function written there stands in a module whose file is not its own,
+/// where `mn evidence` maps a test to the file it reads and cargo-mutants reads no module.
+/// `include_str!` and `include_bytes!` read data, not code, and stay.
+const INCLUDE_MACRO = new RegExp(`(?<![\\w#])(?:r#)?include[${RUST_SPACE}]*!`);
+const includesSource = (text) => INCLUDE_MACRO.test(rustTokensText(text));
 /// An attribute whose path ends in `test` with segments before it (`rust_analyzer::test`,
 /// `miri::test`, `::test`): cargo-mutants 27.1.0 skips any item whose attribute path ends in `test`
 /// (`attr_is_test`), as it skips `mutants::skip`, and clippy and rustfmt let some of them through (the
@@ -1118,7 +1125,7 @@ const readsModuleFromPath = (text) => rustAttributes(text).some((a) => PATH_ATTR
 const TEST_SUFFIX = /::\s*(?:r#)?test(?!\w)(?!\s*::)/;
 const skipsAsTest = (text) => rustAttributes(text).some((a) => TEST_SUFFIX.test(a));
 
-check("git reads every change as text, and no source names mutants::skip, an attribute that ends in ::test, or a module path of its own", () => {
+check("git reads every change as text, and no source names mutants::skip, an attribute that ends in ::test, a module path of its own, or include!", () => {
   assert.deepEqual(gitattributesProblems(read(".gitattributes")), []);
   const nested = [...tracked()].filter((f) => f !== ".gitattributes" && path.posix.basename(f) === ".gitattributes");
   assert.deepEqual(nested, [], "a .gitattributes below the root, which the policy does not read");
@@ -1131,6 +1138,7 @@ check("git reads every change as text, and no source names mutants::skip, an att
     if (RUST_SPACE_BEYOND_ASCII.test(text)) problems.push(`${f}: a space of Rust's beyond ASCII (U+0085, U+200E, U+200F, U+2028 or U+2029)`);
     if (f.endsWith(".rs") ? namesMutantsSkip(text) : MUTANTS_SKIP.test(text)) problems.push(`${f}: mutants::skip, which takes a function out of every mutation run, the Mutants floor's included`);
     if (f.endsWith(".rs") && readsModuleFromPath(text)) problems.push(`${f}: a #[path] attribute, whose module could be a file of any name the rules here do not read`);
+    if (f.endsWith(".rs") && includesSource(text)) problems.push(`${f}: include!, which compiles another file's text into this one, out of reach of the rules that read a module by its file`);
     if (f.endsWith(".rs") && skipsAsTest(text)) problems.push(`${f}: an attribute whose path ends in ::test, which cargo-mutants reads as a test and skips`);
   }
   assert.deepEqual(problems, []);
@@ -1141,6 +1149,13 @@ check("git reads every change as text, and no source names mutants::skip, an att
   }
   for (const fine of ["let path = 1;", "fn f(path: &str) {}", '#[doc = "path = x"]\nfn f() {}', '#[serde(rename = "path")]\nstruct S;', "// #[path = \"x.inc\"]\nmod m;", "#[derive(Debug)]\nstruct Path { path: u8 }"]) {
     assert.ok(!readsModuleFromPath(fine), `the #[path] rule refuses: ${fine}`);
+  }
+  // The plants of the round-5 review of PR 172: a test file that includes another file's tests.
+  for (const plant of ['include!("helper.rs");', 'include ! ("x.rs")', 'std::include!("x.rs");', '::core::include!("x.rs")', 'r#include!("x.rs")', 'include/* c */!("x.rs")', `include${String.fromCharCode(0x85)}!("x.rs")`]) {
+    assert.ok(includesSource(`mod tests {\n    ${plant}\n}\n`), `the include! rule lets through: ${plant}`);
+  }
+  for (const fine of ['include_str!("x.txt")', 'include_bytes!("x.bin")', '// include!("x.rs")', 'let s = "include!(x)";', "fn include() {}", "let include = 1;", "fn reinclude() {}"]) {
+    assert.ok(!includesSource(fine), `the include! rule refuses: ${fine}`);
   }
   // The fourth review's plants: attributes cargo-mutants reads as a test, and so skips.
   for (const plant of ["#[rust_analyzer::test]", "#[miri::test]", "#[rustfmt::test]", "#[::test]", "#[a::b::test]", "#[tokio :: test]", "#[cfg_attr(miri, rust_analyzer::test)]", "#[rust_analyzer /* c */ :: test]"]) {
@@ -3489,7 +3504,8 @@ check("the Documentation job lints every workflow with actionlint and shellcheck
 });
 
 /// The owner of the gate files, and the gate files, as the patterns of .github/CODEOWNERS: what
-/// decides whether a change may merge, which a pull request could otherwise weaken unseen.
+/// decides whether a change may merge, and the rules and philosophy it enforces, which a pull
+/// request could otherwise weaken unseen.
 const OWNER = "@Dancraft3746";
 const GATE_FILES = [
   "/.github/",
@@ -3500,6 +3516,8 @@ const GATE_FILES = [
   "/rust-toolchain",
   "/.config/",
   "/clippy.toml",
+  "/CLAUDE.md",
+  "/spec/philosophy.md",
   "/package.json",
   "/package-lock.json",
   "/.spec-guard.json",
@@ -3515,6 +3533,17 @@ const GATE_FILES = [
   "/compiler/mente-cli/tests/gates.rs",
   "/compiler/mente-cli/tests/lints.rs",
   "/compiler/mente-cli/tests/register.rs",
+  "/compiler/mente-cli/tests/records.rs",
+  "/compiler/mente-cli/tests/escapes.rs",
+  "/compiler/mente-cli/src/records.rs",
+  "/compiler/mente-cli/src/escapes.rs",
+  "/compiler/mente-cli/src/evidence.rs",
+  "/compiler/mente-cli/src/json.rs",
+  "/compiler/mente-cli/tests/evidence.rs",
+  "/tools/evidence-reporter.mjs",
+  "/tools/evidence-reporter.test.mjs",
+  "/tools/evidence-reporter.jsonl",
+  "/compiler/mente-cli/src/front-matter/",
   "/compiler/*/src/overflow_traps.rs",
   "/compiler/mente-threads/",
   "/compiler/*/Cargo.toml",
