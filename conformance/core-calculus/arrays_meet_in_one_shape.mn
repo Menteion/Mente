@@ -15,6 +15,16 @@ pub fn literal_branch(x: u8, c: bool) -> u8 {
   a[1] + b[2]
 }
 
+// A branch block that binds an array and gives its name, beside a literal of literals alone,
+// whose 7 MIR read as the low bytes of a [2]i64 (found by the review of PR 183, 2026-11-22).
+pub fn named_branch(c: bool) -> u8 {
+  val r: [2]u8 = if c { [7; 2] } else {
+    val t: [2]u8 = [9; 2]
+    t
+  }
+  r[1]
+}
+
 // Branches of a [2]i64 and a [2]i8, and arms of three element types.
 pub fn branches(c: bool) -> [2]i64 = if c { [1_i64, 2] } else { [-1_i8, 3] }
 
