@@ -1274,6 +1274,88 @@ mod tests {
     use super::*;
     use mente_sema::verify_module;
 
+    /// Whether a function of the module has a loop inside another loop, in its body or its
+    /// condition, by their spans.
+    fn has_a_loop_inside_a_loop(src: &str) -> bool {
+        let Ok(module) = parse_module(src) else {
+            return false;
+        };
+        mente_syntax::parse_bodies(src, &module)
+            .iter()
+            .filter_map(|p| p.syntax.as_ref())
+            .any(|f| {
+                let loops: Vec<mente_syntax::Span> = f
+                    .tree
+                    .stmts
+                    .iter()
+                    .filter(|s| matches!(s.kind, mente_syntax::tree::StmtKind::While { .. }))
+                    .map(|s| s.span)
+                    .collect();
+                loops.iter().any(|a| {
+                    loops
+                        .iter()
+                        .any(|b| a != b && b.start <= a.start && a.end <= b.end)
+                })
+            })
+    }
+
+    fn mn_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                mn_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "mn") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every loop of the repository's programs that Tier 1 replays from its memo gives the
+    /// outcome a fresh analysis gives (`mente_sema::tier1_loop_replays`): an output of a loop's
+    /// analysis that its outcome does not carry fails here. It runs on `mn`'s own stack, which a
+    /// program of the fuzzer's corpus needs. The generated programs are held to it where every
+    /// run of them checks them (`mir_run/generate.rs`, `checked`).
+    #[test]
+    fn test_every_loop_replayed_from_the_memo_gives_what_its_analysis_gives() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        for dir in [
+            "examples",
+            "conformance",
+            "benchmark",
+            "perf",
+            "compiler/mente-cli/tests",
+        ] {
+            mn_files(&root.join(dir), &mut files);
+        }
+        assert!(files.len() > 500, "{}", files.len());
+        let (nested, compared, differing) = mente_threads::alone(None, Some(STACK), || {
+            let (mut nested, mut compared, mut differing) = (0, 0, Vec::new());
+            for file in &files {
+                let src = fs::read_to_string(file).unwrap_or_default();
+                // Only a loop inside another loop is met again outside the pass that records:
+                // a program without one has nothing to replay.
+                if !has_a_loop_inside_a_loop(&src) {
+                    continue;
+                }
+                nested += 1;
+                for (name, again, spans) in mente_sema::tier1_loop_replays(&src) {
+                    compared += again;
+                    for s in spans {
+                        differing.push(format!("{} `{}` at {}", file.display(), name, s.start));
+                    }
+                }
+            }
+            (nested, compared, differing)
+        })
+        .unwrap()
+        .unwrap();
+        assert!(nested > 30, "{}", nested);
+        assert!(differing.is_empty(), "{}", differing.join("\n"));
+        // The loops met again are many, so that the test compares something.
+        assert!(compared > 100, "{}", compared);
+    }
+
     /// Every `mente` block of the language card passes `mn check`, so the card cannot drift
     /// from the compiler (`docs/design-review.md`, `language-card`).
     #[test]

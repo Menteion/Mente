@@ -107,11 +107,40 @@ pub fn tier1_reports(src: &str) -> Vec<(String, tier1::Report)> {
 pub fn tier1_queries(src: &str) -> Vec<(String, tier1::Report, Vec<tier1::smt::Query>)> {
     match parse_module(src) {
         Ok(module) => {
-            let b = bodies_with(src, &module, true, true);
+            let ask = tier1::Ask {
+                queries: true,
+                replays: false,
+            };
+            let b = bodies_with(src, &module, true, ask);
             b.reports
                 .into_iter()
-                .zip(b.queries)
-                .map(|((name, report), queries)| (name, report, queries))
+                .zip(b.extras)
+                .map(|((name, report), extras)| (name, report, extras.queries))
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// For each function whose names and types check, in source order, its name, how many loops
+/// Tier 1 met again and replayed from its memo, each analysed again beside its replay, and the
+/// span of each whose replay that analysis found different (`tier1::LoopOutcome`): none, unless
+/// the outcome misses something the analysis of a loop changes. The replay test runs it over the
+/// corpus and the generated programs.
+pub fn tier1_loop_replays(src: &str) -> Vec<(String, usize, Vec<Span>)> {
+    match parse_module(src) {
+        Ok(module) => {
+            let ask = tier1::Ask {
+                queries: false,
+                replays: true,
+            };
+            let b = bodies_with(src, &module, true, ask);
+            b.reports
+                .into_iter()
+                .zip(b.extras)
+                .map(|((name, _), extras)| {
+                    (name, extras.replays_compared, extras.replays_differing)
+                })
                 .collect()
         }
         Err(_) => Vec::new(),
@@ -261,18 +290,18 @@ struct Bodies {
     functions: Vec<Option<CheckedFn>>,
     errors: Vec<Diagnostic>,
     reports: Vec<(String, tier1::Report)>,
-    /// For each report, the queries of the obligations Tier 1 discharged, when asked for.
-    queries: Vec<Vec<tier1::smt::Query>>,
+    /// For each report, what Tier 1 wrote besides it, as asked.
+    extras: Vec<tier1::Extras>,
     todos: Vec<(Span, String)>,
     structs: structs::Structs,
 }
 
 fn bodies(src: &str, module: &ModuleFile, prove: bool) -> Bodies {
-    bodies_with(src, module, prove, false)
+    bodies_with(src, module, prove, tier1::Ask::default())
 }
 
-/// [`bodies`], with Tier 1 writing the query of each obligation it discharges when `queries`.
-fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bodies {
+/// [`bodies`], with Tier 1 writing what `ask` asks for besides each report.
+fn bodies_with(src: &str, module: &ModuleFile, prove: bool, ask: tier1::Ask) -> Bodies {
     // The structs first: every function reads their fields and layouts. The module's
     // diagnostics are put in the order of the source where they are combined.
     let parsed_structs = mente_syntax::parse_structs(src, module);
@@ -364,11 +393,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                         routing: *routing,
                         structs: &structs,
                     };
-                    let (report, written) = if queries {
-                        tier1::check_with_queries(&f, &callees, src)
-                    } else {
-                        (tier1::check(&f, &callees, src), Vec::new())
-                    };
+                    let (report, written) = tier1::check_with(&f, &callees, src, ask);
                     found.extend(report.diagnostics.iter().cloned());
                     obligations = report.obligations.clone();
                     variables = report.variables;
@@ -401,7 +426,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         functions,
         errors,
         reports,
-        queries: discharged,
+        extras: discharged,
         todos,
         structs,
     }

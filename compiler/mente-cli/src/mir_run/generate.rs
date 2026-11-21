@@ -477,6 +477,9 @@ fn passes_mut(e: &E, name: &str) -> bool {
         E::Array(items) => items.iter().any(sub),
         E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
         E::Return(x) => sub(x),
+        E::Leave(_) => false,
+        // An assignment assigns its binding, as a `mut` argument does.
+        E::Assigned(n, v, then) => n == name || sub(v) || sub(then),
     }
 }
 
@@ -496,6 +499,9 @@ fn names(e: &E, is: &dyn Fn(&str) -> bool) -> bool {
         E::Array(items) => items.iter().any(sub),
         E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
         E::Return(x) => sub(x),
+        E::Leave(_) => false,
+        // The binding an assignment names counts, as a place it changes.
+        E::Assigned(n, v, then) => is(n) || sub(v) || sub(then),
     }
 }
 
@@ -672,6 +678,11 @@ enum E {
     /// `return` with a value, as a branch of an `if` or an arm of a `match` in a function's
     /// expression body: the branch leaves the function.
     Return(Box<E>),
+    /// `break` or `continue`, as a branch of an `if` inside a loop: the branch leaves the round.
+    Leave(&'static str),
+    /// An assignment of a binding, by name, and then a value, as a branch of an `if`: a block of
+    /// two lines.
+    Assigned(String, Box<E>, Box<E>),
 }
 
 impl E {
@@ -694,7 +705,7 @@ impl E {
 
     fn level(&self) -> u8 {
         match self {
-            E::If(..) | E::Match(..) | E::Return(_) => 0,
+            E::If(..) | E::Match(..) | E::Return(_) | E::Assigned(..) => 0,
             E::Bin(op, ..) => op.level(),
             E::Not(_) => NOT,
             E::Neg(_) | E::BitNot(_) => UNARY,
@@ -845,6 +856,14 @@ impl E {
             E::Return(v) => {
                 out.push_str("return ");
                 v.print(0, out);
+            }
+            E::Leave(keyword) => out.push_str(keyword),
+            E::Assigned(name, v, then) => {
+                out.push_str(name);
+                out.push_str(" = ");
+                v.print(0, out);
+                out.push('\n');
+                then.print(0, out);
             }
         }
     }
@@ -1142,6 +1161,10 @@ enum Body {
 /// The most work, in statements run, one call of a generated function may do.
 const COST_BUDGET: u64 = 4_000;
 
+/// How often, in percent, a loop gets a conjunct or a guard that is no candidate
+/// ([`Gen::no_candidate`]).
+const NO_CANDIDATE_CHANCE: u64 = 20;
+
 /// What `Gen::mark` saves.
 struct Mark {
     seen: Vec<(bool, bool)>,
@@ -1198,6 +1221,16 @@ struct Gen {
     cost: u64,
     no_calls: bool,
     names: usize,
+    /// The stream of the rules added to a function's body since the first, so that one leaves
+    /// what every other rule writes as it was: each attempt at a body has its own.
+    rules: Rng,
+    /// The stream of the loop conjuncts and guards that are no candidates ([`Gen::no_candidate`]),
+    /// apart from `rules`, so that the rules on it write what they wrote before.
+    no_candidates: Rng,
+    /// The functions those conjuncts call, written after the module's own.
+    helpers: Vec<String>,
+    /// The bindings those conjuncts declare so far, which name each.
+    helper_bindings: usize,
 }
 
 impl Gen {
@@ -1228,6 +1261,10 @@ impl Gen {
             cost: 0,
             no_calls: false,
             names: 0,
+            rules: Rng::new(seed),
+            no_candidates: Rng::new(seed),
+            helpers: Vec::new(),
+            helper_bindings: 0,
         }
     }
 
@@ -1271,6 +1308,13 @@ impl Gen {
                 out.push_str(&text);
                 functions.push((name, start..out.len()));
             }
+        }
+        // The functions the loops' conjuncts call, which no other function is generated with.
+        for (k, text) in std::mem::take(&mut self.helpers).into_iter().enumerate() {
+            out.push('\n');
+            let start = out.len();
+            out.push_str(&text);
+            functions.push((format!("pin{}", k), start..out.len()));
         }
         (out, functions)
     }
@@ -1748,6 +1792,8 @@ impl Gen {
             E::Array(items) => items.iter().any(sub),
             E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
             E::Return(x) => sub(x),
+            E::Leave(_) => false,
+            E::Assigned(n, v, then) => names.contains(n) || sub(v) || sub(then),
         }
     }
 
@@ -1820,7 +1866,12 @@ impl Gen {
                     self.returns_in(x, t);
                 }
             }
-            E::Lit(_) | E::Name(_) | E::Builtin(..) | E::Return(_) => {}
+            E::Lit(_)
+            | E::Name(_)
+            | E::Builtin(..)
+            | E::Return(_)
+            | E::Leave(_)
+            | E::Assigned(..) => {}
         }
     }
 
@@ -4747,6 +4798,27 @@ impl Gen {
         if let Some(more) = more {
             cond = E::bin(Op::And, cond, more);
         }
+        // Now and then a candidate that can trap, in the condition or as a guard of the body.
+        let mut first = Vec::new();
+        if let Some(trapping) = self.trapping_candidate() {
+            if self.rules.chance(50) {
+                cond = E::bin(Op::And, cond, trapping);
+            } else {
+                let leave = if self.rules.chance(50) {
+                    S::Continue
+                } else {
+                    S::Break
+                };
+                first.push(S::Guard(
+                    trapping,
+                    Block {
+                        stmts: vec![leave],
+                        tail: None,
+                    },
+                ));
+            }
+        }
+        let before = self.no_candidate(&mut cond, &mut first);
         let mut clauses = Vec::new();
         let invariant = self.mode == Mode::Refined && self.rng.chance(50);
         if self.mode == Mode::Refined {
@@ -4767,6 +4839,7 @@ impl Gen {
             }
         }
         let mut out = self.flush();
+        out.extend(before);
         out.push(S::Bind(
             id,
             Some(t.name.to_string()),
@@ -4799,7 +4872,8 @@ impl Gen {
             most.sub(one).map(|hi| R { lo: Num::ZERO, hi })
         }
         .filter(|r| r.lo <= r.hi);
-        let body = self.block(depth + 1, None, vec![step], None);
+        first.insert(0, step);
+        let body = self.block(depth + 1, None, first, None);
         self.binds[id].known = Some(R {
             lo: Num::ZERO,
             hi: most,
@@ -4809,6 +4883,206 @@ impl Gen {
         self.safe.truncate(saved);
         out.push(S::While(cond, clauses, body));
         out
+    }
+
+    /// Now and then `k % x < k + 1` over an integer binding `x` in scope that nothing guards,
+    /// no loop's counter: true wherever it does not trap, and trapping where `x` is 0. As a
+    /// loop's candidate it holds only where its divisor is proven not 0 without it
+    /// (`ghost-contracts-and-totality.md`, item 2, "Facts at a loop head"); the nightly runs
+    /// found Tier 1 proving such a divisor from the candidate itself. None for a binding known
+    /// to be 0, whose remainder would always trap.
+    fn trapping_candidate(&mut self) -> Option<E> {
+        if !self.rules.chance(15) {
+            return None;
+        }
+        let ids: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| {
+                let b = &self.binds[id];
+                match b.ty {
+                    Ty::Int(t) => {
+                        b.kind != Kind::Counter && self.known_range(id, t) != R::point(Num::ZERO)
+                    }
+                    _ => false,
+                }
+            })
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let id = ids[self.rules.below(ids.len() as u64) as usize];
+        let k = 1 + self.rules.below(9);
+        let x = self.read(id);
+        Some(E::bin(
+            Op::Lt,
+            E::bin(Op::Rem, E::Lit(k.to_string()), x),
+            E::Lit((k + 1).to_string()),
+        ))
+    }
+
+    /// Now and then, from a stream of its own, a conjunct of a loop's condition or a guard of its
+    /// body that is no candidate by its syntax (`ghost-contracts-and-totality.md`, item 2,
+    /// `loop-candidates-by-syntax`), of each form the reviews of pull request 182 found Tier 1
+    /// holding as a fact at a loop's head:
+    /// - an `if` that leaves on one branch, in the condition or in a guard: by `break` or
+    ///   `continue`, which in a condition leave the loop around it, so only a loop inside a loop
+    ///   has them there, and then mostly `break` (the review's d1); by `return`; or at `todo` or
+    ///   `unreachable`;
+    /// - an `if` whose branch assigns a binding of its own, which a conjunct before it reads in a
+    ///   sum that the body makes overflow in a later round where the input is large, both before
+    ///   the condition's other conjuncts;
+    /// - a call whose `ensures` bounds its argument, of a function written for it that returns
+    ///   only where that holds, and which the loop's exit never calls; in a refined program only,
+    ///   since a plain one has no contracts.
+    ///
+    /// Each reads a binding in scope, so that a fact Tier 1 wrongly held there would prove a
+    /// check some run fails. The statements to write before the loop come back; `cond` takes the
+    /// conjunct, and `first` the guard and the body's first statements, after the step.
+    fn no_candidate(&mut self, cond: &mut E, first: &mut Vec<S>) -> Vec<S> {
+        let mut before = Vec::new();
+        if !self.no_candidates.chance(NO_CANDIDATE_CHANCE) {
+            return before;
+        }
+        let ints: Vec<(usize, IntT)> = self
+            .visible()
+            .into_iter()
+            .filter_map(|id| match self.binds[id].ty {
+                Ty::Int(t) if self.binds[id].kind != Kind::Counter => Some((id, t)),
+                _ => None,
+            })
+            .collect();
+        if ints.is_empty() {
+            return before;
+        }
+        let (x, t) = ints[self.no_candidates.below(ints.len() as u64) as usize];
+        let zero = || E::Lit("0".to_string());
+        // A contract is the refined mode's alone, so a plain program's call is a leaving one.
+        let pick = match self.no_candidates.below(4) {
+            3 if self.mode != Mode::Refined => 0,
+            pick => pick,
+        };
+        let test = {
+            let k = self.no_candidates.below(10);
+            E::bin(Op::Gt, self.read(x), E::Lit(k.to_string()))
+        };
+        match pick {
+            0 | 1 => {
+                let in_guard = pick == 1;
+                let nested = !in_guard && self.loops > 0;
+                let leave = if nested && self.no_candidates.chance(50) {
+                    E::Leave("break")
+                } else {
+                    let mut leaves = vec![
+                        E::Builtin("todo", "not handled".into()),
+                        E::Builtin("unreachable", "ruled out".into()),
+                    ];
+                    if in_guard || nested {
+                        leaves.push(E::Leave("break"));
+                        leaves.push(E::Leave("continue"));
+                    }
+                    let ret = self
+                        .current
+                        .as_ref()
+                        .and_then(|s| s.ret.clone().map(|t| (t, s.ret_range)));
+                    if let Some((t, r)) = ret {
+                        leaves.push(E::Return(Box::new(self.default_of(&t, r))));
+                    }
+                    let k = self.no_candidates.below(leaves.len() as u64) as usize;
+                    leaves.swap_remove(k)
+                };
+                let conj = E::bin(
+                    Op::Eq,
+                    E::If(Box::new(test), Box::new(leave), Box::new(zero())),
+                    zero(),
+                );
+                if in_guard {
+                    let leave = if self.no_candidates.chance(50) {
+                        S::Continue
+                    } else {
+                        S::Break
+                    };
+                    first.push(S::Guard(
+                        conj,
+                        Block {
+                            stmts: vec![leave],
+                            tail: None,
+                        },
+                    ));
+                } else {
+                    *cond = E::bin(Op::And, cond.clone(), conj);
+                }
+            }
+            2 => {
+                let byte = INTS[0];
+                self.helper_bindings += 1;
+                let name = format!("lc{}", self.helper_bindings);
+                // Its own binding, which no other rule sees and so none plans with.
+                self.binds.push(Binding {
+                    name: name.clone(),
+                    ty: Ty::Int(byte),
+                    kind: Kind::Var,
+                    range: None,
+                    known: None,
+                    elements: None,
+                    read: true,
+                    assigned: true,
+                });
+                before.push(S::Bind(
+                    self.binds.len() - 1,
+                    Some(byte.name.to_string()),
+                    zero(),
+                ));
+                let sum = 1 + self.no_candidates.below(255);
+                let reads = E::bin(
+                    Op::Gt,
+                    E::bin(Op::Add, E::name(&name), E::Lit(sum.to_string())),
+                    zero(),
+                );
+                let assigns = || E::Assigned(name.clone(), Box::new(zero()), Box::new(zero()));
+                let other = if self.no_candidates.chance(50) {
+                    assigns()
+                } else {
+                    zero()
+                };
+                let conj = E::bin(
+                    Op::Eq,
+                    E::If(Box::new(test), Box::new(assigns()), Box::new(other)),
+                    zero(),
+                );
+                // First, as in the review's b2: Tier 1 forgets every conjunct to the left of one
+                // that assigns, if any of them reads what it assigns, the counter's included.
+                *cond = E::bin(Op::And, E::bin(Op::And, reads, conj), cond.clone());
+                let bytes: Vec<usize> = ints
+                    .iter()
+                    .filter(|(_, t)| *t == byte)
+                    .map(|(id, _)| *id)
+                    .collect();
+                let value = if bytes.is_empty() {
+                    E::Lit(self.no_candidates.below(256).to_string())
+                } else {
+                    let id = bytes[self.no_candidates.below(bytes.len() as u64) as usize];
+                    self.read(id)
+                };
+                first.push(S::Assign(E::name(&name), "=", value));
+            }
+            _ => {
+                let name = format!("pin{}", self.helpers.len());
+                // Every integer type holds 0 to 99.
+                let bound = self.no_candidates.below(100);
+                self.helpers.push(format!(
+                    "fn {0}(v: {1}) -> {1}\n  ensures v <= {2} and result == v\n{{\n  guard v <= {2} else {{\n    todo(\"past {2}\")\n  }}\n  v\n}}\n",
+                    name, t.name, bound
+                ));
+                let call = E::Call(name, vec![(false, self.read(x))]);
+                *cond = E::bin(
+                    Op::And,
+                    cond.clone(),
+                    E::bin(Op::Le, call, E::Lit(bound.to_string())),
+                );
+            }
+        }
+        before
     }
 
     fn guard_statement(&mut self) -> Vec<S> {
@@ -5014,6 +5288,8 @@ impl Gen {
         // The body, of this attempt: another attempt has another body under the same signature.
         let attempt = self.attempts.get(index).copied().unwrap_or(0);
         self.rng = stream(self.seed, index, 1 + u64::from(attempt));
+        self.rules = stream(self.seed, index, (1 << 32) + u64::from(attempt));
+        self.no_candidates = stream(self.seed, index, (2 << 32) + u64::from(attempt));
         let mut first = Vec::new();
         if self.recursion.is_some() {
             let leave = S::Return(ret.as_ref().map(|t| self.default_of(t, ret_range)));
@@ -5471,7 +5747,8 @@ pub struct Checked {
     pub attempts: Vec<u32>,
     /// What no generated program may show: a diagnostic other than `E0508`, which is a bug of
     /// the generator; an `E0508` the reference interpreter contradicts, which is a bug of
-    /// Tier 1; and a program that still has one after [`MAX_ROUNDS`].
+    /// Tier 1; a program that still has one after [`MAX_ROUNDS`]; and a loop Tier 1 replays
+    /// from its memo other than analysing it again gives (`mente_sema::tier1_loop_replays`).
     pub problems: Vec<String>,
 }
 
@@ -5613,6 +5890,22 @@ pub fn checked(seed: u64) -> Checked {
             Ok(Ok(module)) => {
                 let deep = too_deep(&program, &module);
                 if deep.is_empty() {
+                    match panic::catch_unwind(|| mente_sema::tier1_loop_replays(&program.text)) {
+                        Ok(replays) => {
+                            for (name, _, spans) in replays {
+                                problems.extend(spans.iter().map(|s| {
+                                    format!(
+                                        "seed {}: `{}` replays the loop at {}:{} other than its analysis gives",
+                                        seed, name, s.line, s.col
+                                    )
+                                }));
+                            }
+                        }
+                        Err(_) => problems.push(format!(
+                            "seed {}: Tier 1 panicked replaying its loops",
+                            seed
+                        )),
+                    }
                     return Checked {
                         program,
                         module: Some(module),
@@ -6585,6 +6878,8 @@ mod tests {
             E::If(c, a, b) => sub(c) || sub(a) || sub(b),
             E::Array(items) => items.iter().any(sub),
             E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
+            E::Leave(_) => false,
+            E::Assigned(_, v, then) => sub(v) || sub(then),
         }
     }
 

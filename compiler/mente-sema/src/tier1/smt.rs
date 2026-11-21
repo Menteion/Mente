@@ -2,7 +2,7 @@
 //! SMT solver installed on the runner, never in the build (`docs/design-brief.md`, "The quality
 //! system").
 //!
-//! Asked through [`super::check_with_queries`], which `mn smt` calls, Tier 1 writes each
+//! Asked through [`super::check_with`], which `mn smt` calls, Tier 1 writes each
 //! obligation it discharges as an SMT-LIB 2 query in QF_LIA, built from the very states it
 //! decided the obligation on, so that the query and the decision cannot drift apart:
 //!
