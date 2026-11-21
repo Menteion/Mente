@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 14;
+const FLOOR = 16;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -820,6 +820,145 @@ check("the site is published only from a milestone tag on a commit of main", () 
       assert.equal(sh("rev-parse", "HEAD"), before, `${JSON.stringify(tag)} moved the checkout`);
     }
     assert.ok(!fs.existsSync(path.join(dir, "pwned")), "a tag's name ran as a command");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("the nightly alarm's CLI keeps one issue through GitHub's API, and hands the log's storage no token", async () => {
+  // A stand-in for GitHub's API at GITHUB_API_URL: the repository's issues, the run's jobs, and a job's
+  // log, which GitHub answers with a redirect to its storage. Every call it was made is kept. A
+  // hundred other open issues of the bot's stand first, so that the alarm's own lies on the second
+  // page of the listing, which GitHub gives a hundred at a time.
+  const state = { issues: Array.from({ length: 100 }, (_, k) => ({ number: k + 1, title: `Another issue ${k + 1}`, state: "open", user: { login: "github-actions[bot]" } })), comments: [], calls: [], blobAuth: [] };
+  let next = 101;
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const send = (status, body, headers = {}) => {
+      res.writeHead(status, { "content-type": "application/json", ...headers });
+      res.end(body === undefined ? "" : JSON.stringify(body));
+    };
+    let chunks = "";
+    req.on("data", (c) => (chunks += c));
+    req.on("end", () => {
+      state.calls.push({ method: req.method, path: url.pathname, auth: req.headers.authorization ?? null });
+      const body = chunks ? JSON.parse(chunks) : null;
+      const issue = /^\/repos\/o\/r\/issues\/(\d+)(\/comments)?$/.exec(url.pathname);
+      if (url.pathname === "/blob/1") {
+        state.blobAuth.push(req.headers.authorization ?? null);
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("2026-11-21T00:00:00.0Z Fuzzing...\n2026-11-21T00:01:00.0Z ##[error]the interpreter and native code disagree\n");
+      } else if (req.method === "GET" && url.pathname === "/repos/o/r/issues") {
+        const page = Number(url.searchParams.get("page"));
+        const per = Number(url.searchParams.get("per_page"));
+        const open = url.searchParams.get("state") === "open" ? state.issues.filter((i) => i.state === "open" && i.user.login === url.searchParams.get("creator")) : [];
+        send(200, open.slice((page - 1) * per, page * per));
+      } else if (req.method === "POST" && url.pathname === "/repos/o/r/issues") {
+        const i = { number: next++, title: body.title, body: body.body, labels: body.labels, assignees: body.assignees, state: "open", user: { login: "github-actions[bot]" } };
+        state.issues.push(i);
+        send(201, i);
+      } else if (issue && issue[2] && req.method === "POST") {
+        state.comments.push({ n: Number(issue[1]), body: body.body });
+        send(201, { id: state.comments.length });
+      } else if (issue && !issue[2] && req.method === "PATCH") {
+        state.issues.find((i) => i.number === Number(issue[1])).state = body.state;
+        send(200, {});
+      } else if (url.pathname === "/repos/o/r/actions/runs/77/jobs") {
+        send(200, { jobs: [{ id: 1, name: "Fuzz, nightly", status: "completed", conclusion: "failure" }, { id: 2, name: "Nightly alarm (Fuzz)", status: "in_progress", conclusion: null }] });
+      } else if (url.pathname === "/repos/o/r/actions/jobs/1/logs") {
+        send(302, undefined, { location: `http://127.0.0.1:${server.address().port}/blob/1` });
+      } else send(404, { message: "Not Found" });
+    });
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  try {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
+    const alarm = (results) =>
+      new Promise((done) => {
+        const child = spawn(process.execPath, [path.join(HERE, "nightly-alarm.mjs")], {
+          env: {
+            ...env,
+            GITHUB_TOKEN: "the-token",
+            RESULTS: JSON.stringify(results),
+            GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
+            GITHUB_REPOSITORY: "o/r",
+            GITHUB_RUN_ID: "77",
+            GITHUB_SERVER_URL: "https://github.example",
+            GITHUB_SHA: "c".repeat(40),
+            GITHUB_WORKFLOW: "Fuzz, nightly",
+          },
+        });
+        let out = "";
+        child.stdout.on("data", (d) => (out += d));
+        child.stderr.on("data", (d) => (out += d));
+        child.on("close", (status) => done({ status, out }));
+      });
+    const failed = { fuzz: { result: "failure", outputs: {} } };
+    const first = await alarm(failed);
+    assert.equal(first.status, 0, first.out);
+    const alarms = () => state.issues.filter((i) => i.title.startsWith("Nightly: "));
+    assert.deepEqual(alarms().map((i) => [i.number, i.title, i.labels, i.assignees, i.state]), [[101, "Nightly: Fuzz, nightly failing", ["nightly"], ["Dancraft3746"], "open"]]);
+    assert.match(alarms()[0].body, /https:\/\/github\.example\/o\/r\/actions\/runs\/77/);
+    assert.match(alarms()[0].body, /\*\*Fuzz, nightly\*\*: failure/);
+    assert.match(alarms()[0].body, /the interpreter and native code disagree/);
+    const second = await alarm(failed);
+    assert.equal(second.status, 0, second.out);
+    assert.equal(alarms().length, 1, "a later failure opened a second issue");
+    assert.deepEqual(state.comments.map((c) => c.n), [101]);
+    const green = await alarm({ fuzz: { result: "success", outputs: {} } });
+    assert.equal(green.status, 0, green.out);
+    assert.equal(alarms()[0].state, "closed");
+    assert.equal(state.issues.filter((i) => i.state === "open").length, 100, "the alarm closed another issue");
+    assert.equal(state.comments.at(-1).body, `Green again at ${"c".repeat(40)}: https://github.example/o/r/actions/runs/77`);
+    // Every call to the API carries the token; the log's storage, another host in GitHub, gets none.
+    assert.ok(state.calls.filter((c) => c.path !== "/blob/1").every((c) => c.auth === "Bearer the-token"), JSON.stringify(state.calls));
+    assert.deepEqual(state.blobAuth, [null, null], "the log's storage was handed the token");
+    // Without the token, or the jobs' results, it fails rather than say nothing.
+    const bare = await new Promise((done) => {
+      const child = spawn(process.execPath, [path.join(HERE, "nightly-alarm.mjs")], { env });
+      child.on("close", (status) => done(status));
+    });
+    assert.equal(bare, 1);
+  } finally {
+    server.close();
+  }
+});
+
+check("the fuzz summary stays under GitHub's limit for a step's summary, and says what it cut", () => {
+  // .github/scripts/fuzz-summary.sh, as both fuzz workflows run it: a small failure shown whole, the
+  // nightly's minimized input of 2026-11-21, 3 MB on one line, which a cap of 40 lines let through
+  // and which aborted the summary, and so many failures that the whole must stop early.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-fuzz-summary-"));
+  try {
+    const out = path.join(dir, "fuzz-out");
+    fs.mkdirSync(out);
+    fs.writeFileSync(path.join(out, "summary.txt"), "runs: 1234\nfailures: 302\n");
+    fs.writeFileSync(path.join(out, "0small.txt"), "a crash of mn check\n");
+    fs.writeFileSync(path.join(out, "0small.mn"), "fn main() -> i32 {\n  0\n}\n");
+    const big = 3 * 1024 * 1024;
+    fs.writeFileSync(path.join(out, "1big.txt"), "the interpreter and native code disagree\n");
+    fs.writeFileSync(path.join(out, "1big.mn"), "x".repeat(big));
+    for (let k = 0; k < 300; k++) {
+      const name = `f${String(k).padStart(3, "0")}`;
+      fs.writeFileSync(path.join(out, `${name}.txt`), `failure ${k}\n`);
+      fs.writeFileSync(path.join(out, `${name}.mn`), `${"y".repeat(100)}\n`.repeat(60));
+    }
+    const r = spawnSync(bashPath(), [posixPath(path.join(HERE, "fuzz-summary.sh")), posixPath(out), "mn fuzz --seed 1", "0"], { encoding: "utf8", timeout: 120000, maxBuffer: 16 * 1024 * 1024 });
+    assert.equal(r.status, 0, r.stderr);
+    const bytes = Buffer.byteLength(r.stdout);
+    assert.ok(bytes < 1024 * 1024, `the summary is ${bytes} bytes, past GitHub's 1024k`);
+    assert.ok(bytes < 600 * 1024, `the summary is ${bytes} bytes, past its own cap and one part`);
+    assert.match(r.stdout, /^## mn fuzz --seed 1\n~~~~~~~~text\nruns: 1234\nfailures: 302\n~~~~~~~~\n/);
+    assert.ok(r.stdout.includes("### 0small.txt\n~~~~~~~~text\na crash of mn check\n--- minimized input:\nfn main() -> i32 {\n  0\n}\n~~~~~~~~\n"), "the small failure is not shown whole, or is said to be cut");
+    assert.ok(r.stdout.includes(`--- cut here: ${big - 4096} of its ${big} bytes are past 40 lines or 4096 bytes, and in the run's artifact`), "the 3 MB input's cut is not said");
+    assert.ok(r.stdout.includes("--- cut here: 2020 of its 6060 bytes are past 40 lines or 4096 bytes"), "a cut by lines is not said");
+    const more = /--- (\d+) more failures are not shown here/.exec(r.stdout);
+    assert.ok(more && Number(more[1]) > 0 && Number(more[1]) < 300, `the failures left out are not counted: ${more?.[0]}`);
+    // Without its three arguments it fails, and without a summary it says so.
+    assert.equal(spawnSync(bashPath(), [posixPath(path.join(HERE, "fuzz-summary.sh"))], { encoding: "utf8" }).status, 2);
+    fs.rmSync(path.join(out, "summary.txt"));
+    const none = spawnSync(bashPath(), [posixPath(path.join(HERE, "fuzz-summary.sh")), posixPath(out), "t", "101"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    assert.match(none.stdout, /no summary: mn fuzz exited with 101/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

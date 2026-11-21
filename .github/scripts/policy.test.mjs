@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
+import { ALARM_AUTHOR, ALARM_LABEL, ALARM_OWNER, errorLines, failureBody, keepAlarm, verdict as alarmVerdict } from "./lib/nightly-alarm.mjs";
 import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
@@ -44,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 68;
+const FLOOR = 70;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -263,6 +264,9 @@ check("every workflow sets its permissions at the top, read-only wherever a requ
 /// The one job that publishes the site: the only one whose token may write Pages or an OIDC token,
 /// and whose environment is github-pages.
 const PAGES_DEPLOY_JOB = "pages-publish.yml#deploy";
+/// The nightly alarms: the last job of each workflow that runs on a schedule, the only jobs whose
+/// token may write issues (Norman, 2026-11-21).
+const NIGHTLY_ALARM_JOBS = ["fuzz-nightly.yml#alarm", "generated-nightly.yml#alarm", "mutants-full.yml#alarm"];
 
 /// GitHub's permission scopes, each with the values it admits, from the workflow syntax's
 /// `permissions` (read on 2026-11-16): `id-token` and `copilot-requests` take write or none,
@@ -299,7 +303,8 @@ const PERMISSION_SCOPES = new Map([
  * judge-probe's pull request 3) saw a change's own workflow raise its token so and post a success
  * status and a success check run under the judge's name. The judge posts through its own App, so
  * no workflow needs either permission. And only PAGES_DEPLOY_JOB's token may write Pages or an
- * OIDC token, which publish the site (the review of 7ba7a5c).
+ * OIDC token, which publish the site (the review of 7ba7a5c). And only a nightly alarm's token may
+ * write issues: the job named alarm of a workflow that runs on a schedule.
  */
 export function permissionProblems(file, doc) {
   const found = [];
@@ -319,6 +324,7 @@ export function permissionProblems(file, doc) {
       else if (!admits.includes(value)) found.push(`${where}: ${scope}: ${JSON.stringify(value)}, none of ${admits.join(", ")}`);
       else if ((scope === "checks" || scope === "statuses") && value === "write") found.push(`${where}: ${scope}: write, by which its token may post check runs or commit statuses`);
       else if ((scope === "pages" || scope === "id-token") && value === "write" && key !== PAGES_DEPLOY_JOB) found.push(`${where}: ${scope}: write, which only ${PAGES_DEPLOY_JOB} may hold, to publish the site`);
+      else if (scope === "issues" && value === "write" && !(key === `${file}#alarm` && "schedule" in triggers(doc))) found.push(`${where}: issues: write, which only a nightly alarm may hold, the job alarm of a workflow that runs on a schedule`);
     }
   };
   // A workflow's own permissions are required by the check above; a job's may be left out, and
@@ -1277,6 +1283,9 @@ const PINNED_FILES = new Map([
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
+  [".github/scripts/fuzz-summary.sh", "860c9bdb55166d9cd78910caf93a641e18a6da620e0eb88fbd5bd00d1a93a260"],
+  [".github/scripts/nightly-alarm.mjs", "16e7861235fa6dae782dc10db207a539225e218e7876737eefb95e5c218cf226"],
+  [".github/scripts/lib/nightly-alarm.mjs", "6c72d0e40d6952fd18f5863802051ed4c76c65f15341da366ea6cffdacaebde3"],
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
@@ -1287,7 +1296,7 @@ const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "af42eaa6364019379803318dbbb19fd1217c512bb184bbef82c4b2a6ccd881be"],
+  [".github/scripts/policy-run.test.mjs", "7cb541bfd1d6fe737a7c10cae37d416837761bee073670018df6449493521609"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -1356,6 +1365,10 @@ const PINNED_JOBS = new Map([
   // on main first (the review of 7ba7a5c).
   ["pages-publish.yml#build", "576f730be30b3daf87b6eb04b0675d7defc124d744250f0578f5ec7a66445593"],
   ["pages-publish.yml#deploy", "b0a09fe1825e5389c6fe19cd0cdeda6da5b086b8937b345588c037fa19b3ce2b"],
+  // The nightly alarms, each with its workflow's triggers (Norman, 2026-11-21).
+  ["fuzz-nightly.yml#alarm", "3873cebb627ff350058b72ed6a16297ebd92eff8155306ccc271157ce359d652"],
+  ["generated-nightly.yml#alarm", "362bd08920cd3c3830502a91997feda6e45cb81604fcdf9bbe596e16e8ceb946"],
+  ["mutants-full.yml#alarm", "8a51983d7460cf13ca3777d62b7b3237ec381a8b8d1d8b83bcb91373bd166052"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1755,6 +1768,7 @@ const LEFT_OUTSIDE = new Map([
 const GATE_ONLY = new Map([
   ["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"],
   [PAGES_DEPLOY_JOB, "it deploys the site its build job made from a tag the build proved in main's history, and runs nothing else"],
+  ...NIGHTLY_ALARM_JOBS.map((key) => [key, "it runs .github/scripts/nightly-alarm.mjs alone, with the results of the jobs it needs"]),
 ]);
 /// The labels a job may run on: each a literal, or a matrix value that is one.
 const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);
@@ -1840,12 +1854,13 @@ const TOOL_ENV =
   /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|RUSTFMT|CLIPPY_|BASH_ENV$|BASH_FUNC_|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_|NPM_CONFIG_|LD_|DYLD_|GLIBC_TUNABLES$|GCONV_|LOCPATH$|MALLOC_|GIT_|HOME$|XDG_|TMPDIR$|OPENSSL_|SSL_CERT_|CURL_CA_BUNDLE$|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$)/i;
 const TOOL_ENV_ALLOWED = new Map([
   ["CARGO_TERM_COLOR", { value: "always", jobs: null }],
-  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
+  // The full run's alarm inherits the workflow's two, and runs no cargo and no nextest.
+  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // The fuzzer's release build also asserts what a debug build asserts.
   ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", { value: "true", jobs: ["fuzz.yml#fuzz"] }],
   // The base branch's build beside this change's.
   ["CARGO_TARGET_DIR", { value: "${{ github.workspace }}/../target", jobs: ["perf.yml#kernels"] }],
-  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
+  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#in-diff", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // A warning fails the build.
   ["RUSTFLAGS", { value: "-D warnings", jobs: ["ci.yml#rust"] }],
 ]);
@@ -3917,6 +3932,134 @@ export function publishProblems(doc) {
   }
   return found;
 }
+
+/// A nightly alarm's last step, exactly, and its job's permissions: the issues it writes, the run's
+/// jobs it reads, the repository it checks out, and nothing more.
+const ALARM_STEP = { name: "Open, comment on or close the workflow's one issue", env: { GITHUB_TOKEN: "${{ github.token }}", RESULTS: "${{ toJSON(needs) }}" }, run: "node .github/scripts/nightly-alarm.mjs" };
+const ALARM_PERMISSIONS = { contents: "read", actions: "read", issues: "write" };
+/// A value with its keys in order, so that two equal maps compare equal however they were written.
+const canonical = (v) => (Array.isArray(v) ? v.map(canonical) : isPlain(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v);
+const sameValue = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+
+/// What is wrong with a workflow's nightly alarm (Norman, 2026-11-21): a workflow that runs on a
+/// schedule ends in a job alarm that needs every other job of it, runs on every scheduled run
+/// whatever they ended in, holds ALARM_PERMISSIONS, ends with ALARM_STEP, and is pinned whole and
+/// gate-only. The nightlies were red nearly every night from 11-10, and nobody saw.
+export function alarmProblems(file, doc) {
+  if (!("schedule" in triggers(doc))) return [];
+  const jobs = isPlain(doc.jobs) ? doc.jobs : {};
+  const alarm = jobs.alarm;
+  if (!isPlain(alarm)) return [`${file} runs on a schedule and has no job alarm: a scheduled run that fails would go unseen`];
+  const found = [];
+  const others = Object.keys(jobs).filter((id) => id !== "alarm").sort();
+  const needs = (Array.isArray(alarm.needs) ? alarm.needs : [alarm.needs]).filter((n) => n !== undefined).map(String).sort();
+  if (!sameValue(needs, others)) found.push(`${file}, job alarm, needs ${needs.join(", ") || "nothing"}, not every other job: ${others.join(", ")}`);
+  if (normalize(String(alarm.if ?? "")) !== "always() && github.event_name == 'schedule'") found.push(`${file}, job alarm, runs if: ${alarm.if ?? "(none)"}, not always() on a scheduled run: a run that timed out, was cancelled or passed would say nothing`);
+  if (!sameValue(alarm.permissions, ALARM_PERMISSIONS)) found.push(`${file}, job alarm, holds the permissions ${JSON.stringify(alarm.permissions ?? null)}, not ALARM_PERMISSIONS`);
+  const all = steps(alarm);
+  if (all.length === 0 || !sameValue(all[all.length - 1], ALARM_STEP)) found.push(`${file}, job alarm, does not end with ALARM_STEP: ${JSON.stringify(all[all.length - 1] ?? null)}`);
+  if (!PINNED_JOBS.has(`${file}#alarm`)) found.push(`${file}, job alarm, is not pinned whole in PINNED_JOBS`);
+  if (!GATE_ONLY.has(`${file}#alarm`)) found.push(`${file}, job alarm, is not in GATE_ONLY`);
+  return found;
+}
+
+check("every workflow that runs on a schedule raises its one alarm, and no other job writes issues", () => {
+  const scheduled = workflows().filter((w) => "schedule" in triggers(w.doc));
+  assert.deepEqual(scheduled.map((w) => `${w.file}#alarm`).sort(), [...NIGHTLY_ALARM_JOBS].sort(), "NIGHTLY_ALARM_JOBS names other jobs than the alarms of the workflows that run on a schedule");
+  for (const { file, doc } of workflows()) assert.deepEqual(alarmProblems(file, doc), []);
+  // Planted on a nightly: each way its failure could go unseen, or its token reach further.
+  const fuzz = workflows().find((w) => w.file === "fuzz-nightly.yml").doc;
+  const planted = (change) => {
+    const d = JSON.parse(JSON.stringify(fuzz));
+    change(d);
+    return alarmProblems("fuzz-nightly.yml", d);
+  };
+  for (const [what, change] of [
+    ["no alarm", (d) => delete d.jobs.alarm],
+    ["an alarm that needs no job", (d) => (d.jobs.alarm.needs = [])],
+    ["a job the alarm does not need", (d) => (d.jobs.extra = { "runs-on": "ubuntu-24.04", steps: [] })],
+    ["an alarm on failure alone", (d) => (d.jobs.alarm.if = "failure()")],
+    ["an alarm on every run, by hand too", (d) => (d.jobs.alarm.if = "always()")],
+    ["an alarm that writes the repository", (d) => (d.jobs.alarm.permissions = { ...d.jobs.alarm.permissions, contents: "write" })],
+    ["an alarm that runs another script", (d) => (d.jobs.alarm.steps[d.jobs.alarm.steps.length - 1].run = "node x.mjs")],
+    ["an alarm handed a secret", (d) => (d.jobs.alarm.steps[d.jobs.alarm.steps.length - 1].env.X = "${{ secrets.X }}")],
+    ["a step after the alarm's", (d) => d.jobs.alarm.steps.push({ run: "echo done" })],
+  ]) {
+    assert.ok(planted(change).length > 0, `${what} passes`);
+  }
+  // issues: write anywhere but a nightly alarm: a job of that name in a workflow on no schedule,
+  // another job of a nightly, and a nightly's top.
+  const writes = (file, doc) => permissionProblems(file, doc).some((p) => p.includes("issues: write, which only a nightly alarm may hold"));
+  assert.ok(writes("ci.yml", { on: { pull_request: null }, permissions: { contents: "read" }, jobs: { alarm: { permissions: { issues: "write" } } } }), "an alarm of a workflow on no schedule writes issues");
+  assert.ok(writes("fuzz-nightly.yml", { ...fuzz, jobs: { fuzz: { permissions: { issues: "write" } } } }), "another job of a nightly writes issues");
+  assert.ok(writes("fuzz-nightly.yml", { ...fuzz, permissions: { contents: "read", issues: "write" } }), "a nightly's top writes issues");
+  assert.ok(!writes("fuzz-nightly.yml", fuzz), "the nightly's own alarm may not write issues");
+});
+
+check("the nightly alarm keeps one issue per workflow: it opens it, comments on it and closes it", async () => {
+  // A stand-in for GitHub's issues, as .github/scripts/nightly-alarm.mjs reaches them.
+  const github = () => {
+    const issues = [];
+    const comments = [];
+    let next = 1;
+    const api = {
+      openIssues: async () => issues.filter((i) => i.state === "open").map((i) => ({ number: i.number, title: i.title, user: { login: i.user } })),
+      create: async ({ title, body, labels, assignees }) => {
+        const i = { number: next++, title, body, labels, assignees, state: "open", user: ALARM_AUTHOR };
+        issues.push(i);
+        return { number: i.number };
+      },
+      comment: async (n, body) => void comments.push({ n, body }),
+      close: async (n) => void (issues.find((i) => i.number === n).state = "closed"),
+    };
+    return { issues, comments, api };
+  };
+  const g = github();
+  const run = (v, body = "it failed") => keepAlarm({ verdict: v, workflow: "Fuzz, nightly", sha: "a".repeat(40), runUrl: "https://example.invalid/run", body, api: g.api });
+  assert.deepEqual(await run("success"), { action: "nothing", closed: [] }, "a green run with no issue open");
+  const first = await run("failure", "first");
+  assert.equal(first.action, "opened");
+  assert.deepEqual(g.issues.map((i) => [i.title, i.labels, i.assignees, i.state, i.body]), [["Nightly: Fuzz, nightly failing", [ALARM_LABEL], [ALARM_OWNER], "open", "first"]]);
+  const second = await run("failure", "second");
+  assert.equal(second.action, "commented");
+  assert.equal(g.issues.length, 1, "a later failure opened a second issue");
+  assert.deepEqual(g.comments.at(-1), { n: first.issue, body: "second" });
+  const green = await run("success");
+  assert.deepEqual(green, { action: "closed", closed: [first.issue] });
+  assert.equal(g.comments.at(-1).body, `Green again at ${"a".repeat(40)}: https://example.invalid/run`);
+  assert.equal(g.issues[0].state, "closed");
+  const again = await run("failure", "again");
+  assert.equal(again.action, "opened", "a failure after the issue closed opens a new one");
+  assert.equal(g.issues.filter((i) => i.state === "open").length, 1);
+  // Never two open: of two open issues of the title, the oldest is kept and the other closed.
+  const two = github();
+  for (const body of ["x", "y"]) await two.api.create({ title: "Nightly: Fuzz, nightly failing", body, labels: [], assignees: [] });
+  const kept = await keepAlarm({ verdict: "failure", workflow: "Fuzz, nightly", sha: "b".repeat(40), runUrl: "u", body: "z", api: two.api });
+  assert.deepEqual([kept.issue, kept.closedDuplicates], [1, [2]]);
+  assert.deepEqual(two.issues.map((i) => i.state), ["open", "closed"]);
+  // An issue of the title opened by someone else, and the alarm of another workflow, are no
+  // alarm's of this one: left alone.
+  const others = github();
+  others.issues.push({ number: 7, title: "Nightly: Fuzz, nightly failing", state: "open", user: "someone" });
+  others.issues.push({ number: 8, title: "Nightly: Mutants, full run failing", state: "open", user: ALARM_AUTHOR });
+  const own = await keepAlarm({ verdict: "failure", workflow: "Fuzz, nightly", sha: "c".repeat(40), runUrl: "u", body: "w", api: others.api });
+  assert.equal(own.action, "opened");
+  assert.deepEqual(others.comments, []);
+  assert.deepEqual(await keepAlarm({ verdict: "success", workflow: "Generated programs, nightly", sha: "c".repeat(40), runUrl: "u", body: "", api: others.api }), { action: "nothing", closed: [] });
+  // A run's verdict, from its jobs' results: green only when every job succeeded; no job, a job of
+  // no result, a cancellation, a skip and a failure are each a failure.
+  assert.equal(alarmVerdict({ fuzz: { result: "success" } }).verdict, "success");
+  for (const needs of [{ fuzz: { result: "failure" } }, { full: { result: "cancelled" } }, { paths: { result: "skipped" } }, { fuzz: { result: "success" }, full: { result: "failure" } }, {}, null, { fuzz: {} }]) {
+    assert.equal(alarmVerdict(needs).verdict, "failure", JSON.stringify(needs));
+  }
+  await assert.rejects(() => keepAlarm({ verdict: "maybe", workflow: "x", sha: "s", runUrl: "u", body: "", api: g.api }), /no verdict the alarm knows/);
+  // The error lines of a log, and a comment no line of a log can leave its fence in.
+  assert.deepEqual(errorLines("2026-11-21T00:00:00.0Z ##[error]boom\nok\n##[error]  second  \n"), ["boom", "second"]);
+  assert.equal(errorLines(Array.from({ length: 9 }, (_, k) => `##[error]e${k}`).join("\n")).length, 5);
+  const body = failureBody({ runUrl: "u", sha: "s", jobs: [{ name: "fuzz", result: "failure", errors: ["````", "@someone ping"] }] });
+  const opening = /\n(`{5,})text\n/.exec(body);
+  assert.ok(opening && body.endsWith(opening[1]), `a log's own fence closed the comment's: ${body}`);
+});
 
 check("the site is published only by hand, from main's own definition, of a tag on main", () => {
   const doc = workflows().find((w) => w.file === "pages-publish.yml").doc;

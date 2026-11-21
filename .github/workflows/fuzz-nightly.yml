@@ -28,7 +28,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
 
 jobs:
   fuzz:
@@ -36,6 +35,10 @@ jobs:
     runs-on: ubuntu-24.04
     # The fuzzing budget, then up to 90 s of minimizing for each new failure.
     timeout-minutes: 120
+    env:
+      # The fuzzer's release build also asserts what a debug build asserts: this job's alone, so that
+      # the alarm, which builds nothing, carries no variable of cargo's.
+      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,22 +59,9 @@ jobs:
           esac
           status=0
           target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out || status=$?
-          {
-            echo "## mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)"
-            echo '```text'
-            cat fuzz-out/summary.txt 2>/dev/null || echo "no summary: mn fuzz exited with $status"
-            echo '```'
-            for about in fuzz-out/*.txt; do
-              case "$about" in */summary.txt) continue ;; esac
-              [ -f "$about" ] || continue
-              echo "### ${about#fuzz-out/}"
-              echo '```text'
-              cat "$about"
-              echo '--- minimized input (first 40 lines):'
-              head -n 40 "${about%.txt}.mn"
-              echo '```'
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Every part capped by lines and by bytes, the whole by bytes, each cut said: GitHub refuses a
+          # step summary past 1024k (.github/scripts/fuzz-summary.sh).
+          bash .github/scripts/fuzz-summary.sh fuzz-out "mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)" "$status" >> "$GITHUB_STEP_SUMMARY"
           # The floor of work done: a campaign that ran no case found nothing because it looked
           # at nothing.
           runs=$(sed -n -E 's/^runs: ([0-9]+)$/\1/p' fuzz-out/summary.txt 2>/dev/null || true)
@@ -86,3 +76,33 @@ jobs:
           name: fuzz-nightly-failures
           path: fuzz-out
           if-no-files-found: ignore
+
+  alarm:
+    # The workflow's one issue, which the code owner is assigned to: a scheduled run that fails opens
+    # it or comments on it, and one that passes closes it (.github/scripts/nightly-alarm.mjs). A run
+    # by hand, with inputs that can narrow it, reports nothing. It runs whatever the jobs it needs
+    # ended in, a timeout or a cancellation included, and its token may write issues and read the
+    # run's jobs, nothing else; the workflow policy (.github/scripts/policy.test.mjs) pins this job
+    # and the script.
+    name: Nightly alarm (Fuzz)
+    needs: [fuzz]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: Open, comment on or close the workflow's one issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: node .github/scripts/nightly-alarm.mjs
