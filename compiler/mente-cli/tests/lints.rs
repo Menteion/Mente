@@ -1722,27 +1722,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-sema/src/wide.rs",
-        "array",
-        "let-else",
-        "let Ty::Array(_, elem) = &self.typing.exprs[e.0 as usize]",
-        "only an array literal has elements to bound",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "array",
-        "matches!",
-        "matches!(leaf, Ty::Int(Int::Mixed(None)))",
-        "only elements of no one type need a bound on their mix",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "array",
-        "while let",
-        "while let Ty::Array(_, inner) = leaf",
-        "an array's leaves are what lies below every array level",
-    ),
-    (
-        "mente-sema/src/wide.rs",
         "check",
         "if let",
         "if let StmtKind::Assign { place, op: AssignOp::Compound(op), value, } = &s.kind",
@@ -1768,20 +1747,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "matches!",
         "matches!(s.kind, StmtKind::While { .. })",
         "a binding cannot go before a loop's condition, which runs every round; any other statement takes it",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "leaves",
-        "matches!",
-        "matches!(self.typing.exprs[i.0 as usize], Ty::Array(..))",
-        "an element that is itself an array is bounded by its leaves' type; any other element by its own range",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "leaves",
-        "while let",
-        "while let Ty::Array(_, inner) = t",
-        "an array's leaves are what lies below every array level",
     ),
     (
         "mente-sema/src/wide.rs",

@@ -686,15 +686,6 @@ fn reaches_never(steps: &[Step]) -> bool {
         .is_some_and(|s| matches!(s, Step::Index(V::Never, _, _)))
 }
 
-/// What an array of `shape` holds at the end of the arrays nested in it; `shape` itself when it
-/// is no array.
-fn leaf_shape(shape: Shape) -> Shape {
-    match shape {
-        Shape::Array(_, inner) => leaf_shape(*inner),
-        Shape::Int(_) | Shape::Bool | Shape::Struct(_) | Shape::Enum(_) | Shape::Unit => shape,
-    }
-}
-
 /// Whether no value of type `t` exists (`Ty::has_no_value`). An expression of an array type
 /// of no element, which has the value `[]`, may still leave, as a repeat of no copies of a
 /// value that leaves does when it evaluates that value, which `V::Never` tells where it
@@ -2153,13 +2144,13 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// `t`, an array type, with the machine type that holds every integer of `e` at its leaves
-    /// (`leaf_hull`), `i64` where it holds none.
+    /// `t`, an array type, with the machine type that holds every integer of the branches of
+    /// the `if` or the `match` `e` at its leaves, `i64` where they hold none. The hull is the
+    /// checker's (`mente_sema::wide`, `held`), which `E0222` holds to 128 bits, so a module
+    /// that checks always meets in one.
     fn holding(&self, e: ExprId, t: &SemaTy) -> Result<Shape, String> {
-        let mut hull: Option<(Num, Num)> = None;
-        self.leaf_hull(e, &mut hull)?;
-        let m = match hull {
-            Some((lo, hi)) => machine(lo, hi),
+        let m = match self.interval(e) {
+            Some(iv) => machine(Num::new(iv.lo.0, iv.lo.1), Num::new(iv.hi.0, iv.hi.1)),
             None => Some(IntTy::new(64, true)),
         }
         .ok_or("integers that meet beyond 128 bits")?;
@@ -2230,68 +2221,6 @@ impl<'a> Lower<'a> {
             }
             V::Int(..) | V::Bool(_) | V::Unit | V::Never => Ok(v),
         }
-    }
-
-    /// Widens `hull` to hold every integer the array literal `e` holds, through the array
-    /// literals nested in it: each element's static range.
-    fn leaf_hull(&self, e: ExprId, hull: &mut Option<(Num, Num)>) -> Result<(), String> {
-        // An element of no type leaves before the literal holds a value (`core-calculus.md`,
-        // item 6), so it widens nothing.
-        if no_value(&self.s.f.typing.exprs[e.0 as usize]) {
-            return Ok(());
-        }
-        let tree = self.tree();
-        let (lo, hi) = match &tree.expr(e).kind {
-            ExprKind::Array(items) => {
-                for &i in items {
-                    self.leaf_hull(i, hull)?;
-                }
-                return Ok(());
-            }
-            ExprKind::Repeat { value, .. } => return self.leaf_hull(*value, hull),
-            // An element holds one of the integers of its array; a branch's value, those of its
-            // branches (`core-calculus.md`, item 4: an indexed element's range, and an `if`'s).
-            ExprKind::Index { base, .. } => return self.leaf_hull(*base, hull),
-            ExprKind::If { .. } | ExprKind::Match { .. } => {
-                for v in self.branch_values(e) {
-                    self.leaf_hull(v, hull)?;
-                }
-                return Ok(());
-            }
-            ExprKind::Int { .. }
-            | ExprKind::Bool(_)
-            | ExprKind::Name(_)
-            | ExprKind::Todo(_)
-            | ExprKind::Unreachable(_)
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Field { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Construct { .. }
-            | ExprKind::Variant { .. }
-            | ExprKind::Error => {
-                // An array among them that is no literal counts with its element type's range,
-                // for each integer it holds (`core-calculus.md`, item 4; `wide.rs`, `leaves`).
-                let r = match &self.s.f.typing.exprs[e.0 as usize] {
-                    ty @ SemaTy::Array(..) => {
-                        Self::place_interval(&leaf_shape(Shape::of(ty, self.shapes)?))
-                    }
-                    SemaTy::Int(_)
-                    | SemaTy::Bool
-                    | SemaTy::Struct(_)
-                    | SemaTy::Enum(_)
-                    | SemaTy::Unit
-                    | SemaTy::Any => self.interval(e),
-                }
-                .ok_or("an element without a static range")?;
-                (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1))
-            }
-        };
-        *hull = Some(match *hull {
-            Some((l, h)) => (l.min(lo), h.max(hi)),
-            None => (lo, hi),
-        });
-        Ok(())
     }
 
     /// Whether `t` is an integer of no one type, the element of an array literal whose elements
@@ -2415,7 +2344,7 @@ impl<'a> Lower<'a> {
 
     /// A value of shape `from` kept in `to`, a machine shape that holds it, elementwise for an
     /// array: cast with no check, since `to` holds the static range of every integer of the
-    /// value ([`Lower::leaf_hull`]): `to` is the machine type of an array literal that keeps its
+    /// value (`mente_sema::wide`, `held`): `to` is the machine type of an array literal that keeps its
     /// integers exact, or of an `if` or a `match` whose branches give arrays of different
     /// shapes; an array among them that is no literal counts with its element type's range, and
     /// every value that reaches here lies within its own, a nested literal's after its own

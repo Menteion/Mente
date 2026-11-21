@@ -58,3 +58,10 @@ pub fn element_in_a_literal(k: usize[0..=1]) -> [2]i128 = [[-1_i64, 184467440737
 
 // An `else if`, its branches of three shapes.
 pub fn nested(a: u8, b: i8, c: bool, d: bool) -> [2]i16 = if c { [a, 1] } else if d { [b, -1] } else { [300_i16, a] }
+
+// At the edge of 128 bits the branches still meet in one machine type: an `i8`'s integers
+// beside a `u64`'s in an `i128`, a `u8`'s beside a `u128`'s in a `u128`. One more bit of either,
+// an `i8`'s beside a `u128`'s, is E0222 (arrays_that_meet_beyond_128_bits.mn).
+pub fn edge_signed(c: bool, x: i8, y: u64) -> [2]i128 = if c { [x; 2] } else { [y; 2] }
+
+pub fn edge_unsigned(c: bool, x: u8, y: u128) -> [2]u128 = if c { [x; 2] } else { [y; 2] }

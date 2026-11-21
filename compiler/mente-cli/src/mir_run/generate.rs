@@ -5658,10 +5658,16 @@ fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
     };
     let roll = rng.below(4);
     let text = if roll == 0 {
-        // Branches, or arms, of arrays of two element types, landing in a wider one.
+        // Branches, or arms, of arrays of two element types, landing in a wider one. Half the
+        // time the second stands at the edge of 128 bits beside the first: a `u64` beside a
+        // signed type, their integers meeting in an `i128`, or a `u128` beside an unsigned one,
+        // meeting in a `u128`. One bit past it, an `i8` beside a `u128`, is E0222, which the
+        // review of PR 189 found lowering refusing where the checker let it through.
         let a = *rng.pick(&small);
         let mut b = *rng.pick(&small);
-        if b == a {
+        if rng.chance(50) {
+            b = if a.starts_with('i') { "u64" } else { "u128" };
+        } else if b == a {
             b = "i64";
         }
         let (la, lb) = (literal(a, rng), literal(b, rng));
@@ -7587,7 +7593,8 @@ mod tests {
     }
 
     /// `meeting_arrays` writes each of its forms, every one of which checks: branches of arrays of
-    /// two element types, as an `if` and as a `match`, an `if` of a `[n]u8` holding a literal past
+    /// two element types, as an `if` and as a `match`, at the edge of 128 bits too, a `u64`
+    /// beside a signed type and a `u128` beside an unsigned one, an `if` of a `[n]u8` holding a literal past
     /// `u8`, a row of an exact literal read by index, and an element of one inside another. The
     /// first functions are pinned, so that a change to a choice shows. In a program the function
     /// lies before the recursion, which ends a program, named past the recursion's two.
@@ -7625,6 +7632,8 @@ mod tests {
             "    t\n  } else { [",
             "]][if k { 1 } else { 0 }]",
             "_u128][if k { 1 } else { 0 }], ",
+            ", y: u64) -> [2]i64 = ",
+            ", y: u128) -> [2]i64 = ",
         ] {
             assert!(texts.iter().any(|t| t.contains(form)), "no `{}`", form);
         }
@@ -7667,14 +7676,14 @@ mod tests {
 
     /// The first functions of `meeting_arrays`, from random sources 0 and on.
     const PINNED: [&str; 8] = [
-        "pub fn f3(c: bool, x: i8, y: u32) -> [2]i64 = if c { [x, 14_i8] } else { [y, 73_u32] }\n",
+        "pub fn f3(k: u8, x: i8, y: u64) -> [2]i64 = match k {\n  0 => [x, -87_i8]\n  1 => [y, 81_u64]\n  _ => [117; 2]\n}\n",
         "pub fn f3(k: bool) -> [2]i128 = [[-62_i32, 967083533817693959653399905997_u128][if k { 1 } else { 0 }], 16_i8]\n",
         "pub fn f3(k: bool) -> [2]i128 = [[-50_i64, 33], [439395929139861948437874669498_u128, 936904490330284766988950014917]][if k { 1 } else { 0 }]\n",
         "pub fn f3(c: bool, x: u8) -> i64 {\n  val a: [2]i64 = if c {\n    val t: [2]u8 = [x; 2]\n    t\n  } else { [562; 2] }\n  a[1]\n}\n",
-        "pub fn f3(k: u8, x: i16, y: u8) -> [2]i64 = match k {\n  0 => [x, 3_i16]\n  1 => [y, 47_u8]\n  _ => [98; 2]\n}\n",
-        "pub fn f3(k: u8, x: i32, y: i64) -> [2]i64 = match k {\n  0 => [x, -15_i32]\n  1 => [y, -36_i64]\n  _ => [615; 2]\n}\n",
+        "pub fn f3(k: u8, x: i16, y: u64) -> [2]i64 = match k {\n  0 => [x, -52_i16]\n  1 => [y, 72_u64]\n  _ => [381; 2]\n}\n",
+        "pub fn f3(k: u8, x: i32, y: i64) -> [2]i64 = match k {\n  0 => [x, -50_i32]\n  1 => [y, 35_i64]\n  _ => [81; 2]\n}\n",
         "pub fn f3(c: bool, x: u8) -> u16 {\n  val a: [3]u16 = if c { [x; 3] } else { [353; 3] }\n  a[2]\n}\n",
-        "pub fn f3(k: u8, x: u8, y: i16) -> [2]i64 = match k {\n  0 => [x, 25_u8]\n  1 => [y, 64_i16]\n  _ => [475; 2]\n}\n",
+        "pub fn f3(k: u8, x: u8, y: i16) -> [2]i64 = match k {\n  0 => [x, 64_u8]\n  1 => [y, 30_i16]\n  _ => [217; 2]\n}\n",
     ];
 
     /// Beside integers no standard type holds, a literal compared is a plain value, compared

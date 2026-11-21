@@ -299,7 +299,13 @@ const CONDITIONS: &[&str] = &["condition that assigns or passes mut"];
 /// Norman's decision of 2026-11-21): a row whose elements have one integer type, inside a literal
 /// whose rows have no one type together, which keeps the others exact. The nightly runs found MIR
 /// building such a row in the outer literal's type, where the reference interpreter narrowed it.
-const ROWS: &[&str] = &["row of one integer type beside rows of others"];
+/// And branches, or arms, that give arrays whose integers meet past 64 bits, in an `i128` or a
+/// `u128`, the edge E0222 holds them to (the review of PR 189 found lowering refusing arrays one
+/// bit past it, which the checker let through).
+const ROWS: &[&str] = &[
+    "row of one integer type beside rows of others",
+    "branches of arrays meeting in a 128-bit machine type",
+];
 
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
 /// (`core-calculus.md`, item 5), by what the checker's table says of it: beside an operand
@@ -1120,11 +1126,27 @@ fn a_condition_changes_state(f: &FnSyntax) -> bool {
     })
 }
 
-/// The row of [`ROWS`], when a checked function reaches it: an array literal whose elements are
-/// arrays of integers of no one type, one of them a literal of one integer type.
+/// The rows of [`ROWS`] a checked function reaches: an array literal whose elements are arrays
+/// of integers of no one type, one of them a literal of one integer type; and an `if` or a
+/// `match` that gives arrays whose integers, by the checker's hull of them, need more than 64
+/// bits together.
 fn reached_rows(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     let tree = &f.syntax.tree;
     let ty = |e: ExprId| &f.typing.exprs[e.0 as usize];
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    for (k, e) in tree.exprs.iter().enumerate() {
+        let join = matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. });
+        if !join || !matches!(ty(ExprId(k as u32)), Ty::Array(..)) {
+            continue;
+        }
+        let Some(Interval { lo, hi }) = ranges[k] else {
+            continue;
+        };
+        let above = |limit: u128| !hi.0 && hi.1 > limit;
+        if (lo.0 && above(i64::MAX as u128)) || above(u64::MAX as u128) {
+            seen.insert("branches of arrays meeting in a 128-bit machine type".to_string());
+        }
+    }
     // The integer type an array of integers holds, at its innermost depth.
     fn leaf(t: &Ty) -> Option<&Int> {
         match t {

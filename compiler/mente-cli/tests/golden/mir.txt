@@ -4198,7 +4198,151 @@ t2: narrowing @60:104 ["", " does not fit in `i16`"]
 t3: unreachable @60:59 ["unreachable reached: control left the code the checker allows"]
 }
 
-f11: fn enter literal_branch(u8, bool, effect) -> u8 {
+f11: fn edge_signed(addr, bool, i8, u64, effect) frame 154 {
+block0(v0: addr, v1: bool, v2: i8, v3: u64, v4: effect):
+  branch v1, block1(v4), block2(v4)
+block1(v5: effect):
+  v9: addr = slot 2 @65:65
+  v14: u64 = int 0 @65:65
+  jump block4(v14, v5)
+block2(v6: effect):
+  v38: addr = slot 16 @65:81
+  v43: u64 = int 0 @65:81
+  jump block10(v43, v6)
+block3(v7: addr, v8: effect):
+  v67: unit = copy 32 v0, v7, v8 @65:57
+  return after v67
+block4(v10: u64, v11: effect):
+  v15: u64 = int 2 @65:65
+  v16: bool = lt v10, v15 @65:65
+  branch v16, block5(v11), block6(v11)
+block5(v12: effect):
+  v17: u64 = assume within 0..=1 v10, v12 @65:65
+  v18: addr = elem 1 v9, v17 @65:65
+  v19: unit = store v18, v2, v17 @65:65
+  v20: u64 = int 1 @65:65
+  v21: u64 = add v10, v20, v19 @65:65
+  jump block4(v21, v19)
+block6(v13: effect):
+  v22: addr = slot 32 @65:65
+  v27: u64 = int 0 @65:65
+  jump block7(v27, v13)
+block7(v23: u64, v24: effect):
+  v28: u64 = int 2 @65:65
+  v29: bool = lt v23, v28 @65:65
+  branch v29, block8(v24), block9(v24)
+block8(v25: effect):
+  v30: u64 = assume within 0..=1 v23, v25 @65:65
+  v31: addr = elem 1 v9, v30 @65:65
+  v32: addr = elem 16 v22, v30 @65:65
+  v33: i8 = load v31, v30 @65:65
+  v34: i128 = cast v33 @65:65
+  v35: unit = store v32, v34, v33 @65:65
+  v36: u64 = int 1 @65:65
+  v37: u64 = add v23, v36, v35 @65:65
+  jump block7(v37, v35)
+block9(v26: effect):
+  jump block3(v22, v26)
+block10(v39: u64, v40: effect):
+  v44: u64 = int 2 @65:81
+  v45: bool = lt v39, v44 @65:81
+  branch v45, block11(v40), block12(v40)
+block11(v41: effect):
+  v46: u64 = assume within 0..=1 v39, v41 @65:81
+  v47: addr = elem 8 v38, v46 @65:81
+  v48: unit = store v47, v3, v46 @65:81
+  v49: u64 = int 1 @65:81
+  v50: u64 = add v39, v49, v48 @65:81
+  jump block10(v50, v48)
+block12(v42: effect):
+  v51: addr = slot 32 @65:81
+  v56: u64 = int 0 @65:81
+  jump block13(v56, v42)
+block13(v52: u64, v53: effect):
+  v57: u64 = int 2 @65:81
+  v58: bool = lt v52, v57 @65:81
+  branch v58, block14(v53), block15(v53)
+block14(v54: effect):
+  v59: u64 = assume within 0..=1 v52, v54 @65:81
+  v60: addr = elem 8 v38, v59 @65:81
+  v61: addr = elem 16 v51, v59 @65:81
+  v62: u64 = load v60, v59 @65:81
+  v63: i128 = cast v62 @65:81
+  v64: unit = store v61, v63, v62 @65:81
+  v65: u64 = int 1 @65:81
+  v66: u64 = add v52, v65, v64 @65:81
+  jump block13(v66, v64)
+block15(v55: effect):
+  jump block3(v51, v55)
+block16(v68: effect):
+  trap t0 after v68
+t0: unreachable @65:57 ["unreachable reached: control left the code the checker allows"]
+}
+
+f12: fn edge_unsigned(addr, bool, u8, u128, effect) frame 178 {
+block0(v0: addr, v1: bool, v2: u8, v3: u128, v4: effect):
+  branch v1, block1(v4), block2(v4)
+block1(v5: effect):
+  v9: addr = slot 2 @67:68
+  v14: u64 = int 0 @67:68
+  jump block4(v14, v5)
+block2(v6: effect):
+  v38: addr = slot 32 @67:84
+  v43: u64 = int 0 @67:84
+  jump block10(v43, v6)
+block3(v7: addr, v8: effect):
+  v51: unit = copy 32 v0, v7, v8 @67:60
+  return after v51
+block4(v10: u64, v11: effect):
+  v15: u64 = int 2 @67:68
+  v16: bool = lt v10, v15 @67:68
+  branch v16, block5(v11), block6(v11)
+block5(v12: effect):
+  v17: u64 = assume within 0..=1 v10, v12 @67:68
+  v18: addr = elem 1 v9, v17 @67:68
+  v19: unit = store v18, v2, v17 @67:68
+  v20: u64 = int 1 @67:68
+  v21: u64 = add v10, v20, v19 @67:68
+  jump block4(v21, v19)
+block6(v13: effect):
+  v22: addr = slot 32 @67:68
+  v27: u64 = int 0 @67:68
+  jump block7(v27, v13)
+block7(v23: u64, v24: effect):
+  v28: u64 = int 2 @67:68
+  v29: bool = lt v23, v28 @67:68
+  branch v29, block8(v24), block9(v24)
+block8(v25: effect):
+  v30: u64 = assume within 0..=1 v23, v25 @67:68
+  v31: addr = elem 1 v9, v30 @67:68
+  v32: addr = elem 16 v22, v30 @67:68
+  v33: u8 = load v31, v30 @67:68
+  v34: u128 = cast v33 @67:68
+  v35: unit = store v32, v34, v33 @67:68
+  v36: u64 = int 1 @67:68
+  v37: u64 = add v23, v36, v35 @67:68
+  jump block7(v37, v35)
+block9(v26: effect):
+  jump block3(v22, v26)
+block10(v39: u64, v40: effect):
+  v44: u64 = int 2 @67:84
+  v45: bool = lt v39, v44 @67:84
+  branch v45, block11(v40), block12(v40)
+block11(v41: effect):
+  v46: u64 = assume within 0..=1 v39, v41 @67:84
+  v47: addr = elem 16 v38, v46 @67:84
+  v48: unit = store v47, v3, v46 @67:84
+  v49: u64 = int 1 @67:84
+  v50: u64 = add v39, v49, v48 @67:84
+  jump block10(v50, v48)
+block12(v42: effect):
+  jump block3(v38, v42)
+block13(v52: effect):
+  trap t0 after v52
+t0: unreachable @67:60 ["unreachable reached: control left the code the checker allows"]
+}
+
+f13: fn enter literal_branch(u8, bool, effect) -> u8 {
 block0(v0: u8, v1: bool, v2: effect):
   v3: unit = enter f0 t0 v0, v1, v2 @12:8
   v4: u8 = call f0 v0, v1, v3 @12:8
@@ -4207,7 +4351,7 @@ t0: stack-overflow @12:8 ["the call stack ran out"]
 t1: unreachable @12:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f12: fn enter named_branch(bool, effect) -> u8 {
+f14: fn enter named_branch(bool, effect) -> u8 {
 block0(v0: bool, v1: effect):
   v2: unit = enter f1 t0 v0, v1 @20:8
   v3: u8 = call f1 v0, v2 @20:8
@@ -4216,7 +4360,7 @@ t0: stack-overflow @20:8 ["the call stack ran out"]
 t1: unreachable @20:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f13: fn enter branches(addr, bool, effect) {
+f15: fn enter branches(addr, bool, effect) {
 block0(v0: addr, v1: bool, v2: effect):
   v3: unit = enter f2 t0 v0, v1, v2 @29:8
   v4: unit = call f2 v0, v1, v3 @29:8
@@ -4225,7 +4369,7 @@ t0: stack-overflow @29:8 ["the call stack ran out"]
 t1: unreachable @29:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f14: fn enter arms(addr, u8, effect) {
+f16: fn enter arms(addr, u8, effect) {
 block0(v0: addr, v1: u8, v2: effect):
   v3: unit = enter f3 t0 v0, v1, v2 @31:8
   v4: unit = call f3 v0, v1, v3 @31:8
@@ -4234,7 +4378,7 @@ t0: stack-overflow @31:8 ["the call stack ran out"]
 t1: unreachable @31:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f15: fn enter wider_than_its_type(u8, bool, effect) -> u16 {
+f17: fn enter wider_than_its_type(u8, bool, effect) -> u16 {
 block0(v0: u8, v1: bool, v2: effect):
   v3: unit = enter f4 t0 v0, v1, v2 @38:8
   v4: u16 = call f4 v0, v1, v3 @38:8
@@ -4243,7 +4387,7 @@ t0: stack-overflow @38:8 ["the call stack ran out"]
 t1: unreachable @38:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f16: fn enter pair_wider_than_its_type(u8, bool, effect) -> u16 {
+f18: fn enter pair_wider_than_its_type(u8, bool, effect) -> u16 {
 block0(v0: u8, v1: bool, v2: effect):
   v3: unit = enter f5 t0 v0, v1, v2 @43:8
   v4: u16 = call f5 v0, v1, v3 @43:8
@@ -4252,7 +4396,7 @@ t0: stack-overflow @43:8 ["the call stack ran out"]
 t1: unreachable @43:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f17: fn enter bytes_beside_words(addr, bool, u16, effect) {
+f19: fn enter bytes_beside_words(addr, bool, u16, effect) {
 block0(v0: addr, v1: bool, v2: u16, v3: effect):
   v4: unit = enter f6 t0 v0, v1, v2, v3 @48:8
   v5: unit = call f6 v0, v1, v2, v4 @48:8
@@ -4261,7 +4405,7 @@ t0: stack-overflow @48:8 ["the call stack ran out"]
 t1: unreachable @48:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f18: fn enter signed_beside_unsigned(addr, bool, effect) {
+f20: fn enter signed_beside_unsigned(addr, bool, effect) {
 block0(v0: addr, v1: bool, v2: effect):
   v3: unit = enter f7 t0 v0, v1, v2 @51:8
   v4: unit = call f7 v0, v1, v3 @51:8
@@ -4270,7 +4414,7 @@ t0: stack-overflow @51:8 ["the call stack ran out"]
 t1: unreachable @51:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f19: fn enter row(addr, u64, effect) {
+f21: fn enter row(addr, u64, effect) {
 block0(v0: addr, v1: u64, v2: effect):
   v3: unit = enter f8 t0 v0, v1, v2 @54:8
   v4: i64 = int 0 @54:8
@@ -4290,7 +4434,7 @@ t1: refinement @54:8 ["", " lies outside the refinement `[", "..=", "]`"]
 t2: unreachable @54:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f20: fn enter element_in_a_literal(addr, u64, effect) {
+f22: fn enter element_in_a_literal(addr, u64, effect) {
 block0(v0: addr, v1: u64, v2: effect):
   v3: unit = enter f9 t0 v0, v1, v2 @57:8
   v4: i64 = int 0 @57:8
@@ -4310,7 +4454,7 @@ t1: refinement @57:8 ["", " lies outside the refinement `[", "..=", "]`"]
 t2: unreachable @57:8 ["unreachable reached: control left the code the checker allows"]
 }
 
-f21: fn enter nested(addr, u8, i8, bool, bool, effect) {
+f23: fn enter nested(addr, u8, i8, bool, bool, effect) {
 block0(v0: addr, v1: u8, v2: i8, v3: bool, v4: bool, v5: effect):
   v6: unit = enter f10 t0 v0, v1, v2, v3, v4, v5 @60:8
   v7: unit = call f10 v0, v1, v2, v3, v4, v6 @60:8
@@ -4318,6 +4462,25 @@ block0(v0: addr, v1: u8, v2: i8, v3: bool, v4: bool, v5: effect):
 t0: stack-overflow @60:8 ["the call stack ran out"]
 t1: unreachable @60:8 ["unreachable reached: control left the code the checker allows"]
 }
+
+f24: fn enter edge_signed(addr, bool, i8, u64, effect) {
+block0(v0: addr, v1: bool, v2: i8, v3: u64, v4: effect):
+  v5: unit = enter f11 t0 v0, v1, v2, v3, v4 @65:8
+  v6: unit = call f11 v0, v1, v2, v3, v5 @65:8
+  return after v6
+t0: stack-overflow @65:8 ["the call stack ran out"]
+t1: unreachable @65:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f25: fn enter edge_unsigned(addr, bool, u8, u128, effect) {
+block0(v0: addr, v1: bool, v2: u8, v3: u128, v4: effect):
+  v5: unit = enter f12 t0 v0, v1, v2, v3, v4 @67:8
+  v6: unit = call f12 v0, v1, v2, v3, v5 @67:8
+  return after v6
+t0: stack-overflow @67:8 ["the call stack ran out"]
+t1: unreachable @67:8 ["unreachable reached: control left the code the checker allows"]
+}
+== conformance/core-calculus/arrays_that_meet_beyond_128_bits.mn == (exit 2)
 == conformance/core-calculus/assign_to_a_field_of_a_val.mn == (exit 2)
 == conformance/core-calculus/assign_to_val.mn == (exit 2)
 == conformance/core-calculus/assigned_place_that_leaves.mn ==

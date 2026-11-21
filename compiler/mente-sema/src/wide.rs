@@ -377,10 +377,9 @@ impl Wide<'_> {
                 // its operands' one type, or in the one their literals take.
                 None => typed.or(taken),
             },
-            ExprKind::Array(items) => {
-                self.array(span, e, items);
-                typed
-            }
+            ExprKind::Array(items) => self.array(span, e, items).or(typed),
+            // A repeat of an exact array holds its value's integers, as the lowering keeps it.
+            ExprKind::Repeat { value, .. } if self.exact(e).is_some() => self.held(*value),
             ExprKind::If {
                 then, otherwise, ..
             } => {
@@ -393,18 +392,19 @@ impl Wide<'_> {
                 let mut hull: Option<Range> = None;
                 let mut ranges = Vec::new();
                 for t in tails.into_iter().flatten() {
-                    let r = self.range(t)?;
+                    let r = self.held(t)?;
                     hull = Some(hull.map_or(r, |h| h.hull(r)));
                     ranges.push((t, r));
                 }
-                // The branches' values meet in one machine type, so their hull must fit one. A
-                // hull that fits neither holds a negative value and one above `i128`, which a
-                // branch reaching above `i128` gives: bound to an `i128` in its branch, it fits.
+                // The branches' values meet in one machine type, an array's every integer
+                // included (`core-calculus.md`, item 4), so their hull must fit one. A hull that
+                // fits neither holds a negative value and one above `i128`, which a branch reaching
+                // above `i128` gives: bound to an `i128` in its branch, it fits.
                 let top = Num::new(false, i128::MAX.unsigned_abs());
                 let above = ranges.iter().find(|(_, r)| r.hi > top).map(|(t, _)| *t);
                 match (hull, above) {
                     (Some(h), Some(tail)) if !h.fits() => {
-                        self.report_if(span, tail);
+                        self.report_if(span, e, tail);
                         None
                     }
                     _ => hull.or(typed),
@@ -425,7 +425,7 @@ impl Wide<'_> {
                     let Some(t) = t else {
                         continue;
                     };
-                    let r = self.range(t)?;
+                    let r = self.held(t)?;
                     hull = Some(hull.map_or(r, |h| h.hull(r)));
                     ranges.push((t, body, r));
                 }
@@ -433,7 +433,7 @@ impl Wide<'_> {
                 let above = ranges.iter().find(|(_, _, r)| r.hi > top);
                 match (hull, above) {
                     (Some(h), Some(&(tail, body, _))) if !h.fits() => {
-                        self.report_match(span, tail, body);
+                        self.report_match(span, e, tail, body);
                         None
                     }
                     _ => hull.or(typed),
@@ -456,13 +456,19 @@ impl Wide<'_> {
     /// the fix binds `tail`, the value of the arm that reaches highest, to an `i128` inside that
     /// arm, a block made of it when it is an expression, so that it is computed only when the
     /// arm runs.
-    fn report_match(&mut self, at: Span, tail: ExprId, body: ArmBody) {
-        let message = "the arms of this `match` give values that no one of `i128` and `u128` \
-                       holds together, and they meet in one of them"
-            .to_string();
+    fn report_match(&mut self, at: Span, e: ExprId, tail: ExprId, body: ArmBody) {
+        let message = format!(
+            "the arms of this `match` give {} no one of `i128` and `u128` holds \
+             together, and they meet in one of them",
+            self.what_meets(e)
+        );
         let place = self.tree.expr(tail).span;
+        let Some(machine) = self.binding_for(e, tail) else {
+            self.errors.push(Diagnostic::error("E0222", at, message));
+            return;
+        };
         if let ArmBody::Block(_) = body {
-            self.report_with(at, place, tail, "i128", message);
+            self.report_with(at, place, tail, &machine, message);
             return;
         }
         let mut d = Diagnostic::error("E0222", at, message);
@@ -474,14 +480,15 @@ impl Wide<'_> {
                 .take_while(|c| *c == ' ' || *c == '\t')
                 .collect();
             d.fixes.push(Fix {
-                message: format!("bind `{}` to `{}: i128` in its arm", value, name),
+                message: format!("bind `{}` to `{}: {}` in its arm", value, name, machine),
                 applicability: Applicability::Suggestion,
                 edits: vec![Edit {
                     span: place,
                     replacement: format!(
-                        "{{\n{ind}  val {n}: i128 = {v}\n{ind}  {n}\n{ind}}}",
+                        "{{\n{ind}  val {n}: {m} = {v}\n{ind}  {n}\n{ind}}}",
                         ind = indent,
                         n = name,
+                        m = machine,
                         v = value
                     ),
                 }],
@@ -492,35 +499,115 @@ impl Wide<'_> {
 
     /// `E0222` for an array literal at `at` whose elements, integers of no one type, kept exact
     /// until the array lands, fit no one 128-bit type together. Its fix binds the element that
-    /// reaches above `i128` to an `i128` first.
-    fn array(&mut self, at: Span, e: ExprId, items: &[ExprId]) {
-        let Ty::Array(_, elem) = &self.typing.exprs[e.0 as usize] else {
-            return;
-        };
+    /// reaches above `i128` to an `i128` first. The hull of its integers is its range, which the
+    /// lowering keeps them in (`mir-and-codegen`'s lowering reads it), none for a literal of one
+    /// integer type, whose elements are narrowed into it, or one reported.
+    fn array(&mut self, at: Span, e: ExprId, items: &[ExprId]) -> Option<Range> {
         // Elements of one type are narrowed into it; only those of no standard type together
         // are kept exact, and the literals alone are points that fit. So are the integers of
         // the array literals nested in it, which are kept in the same machine type.
-        let mut leaf = &**elem;
-        while let Ty::Array(_, inner) = leaf {
-            leaf = inner;
-        }
-        if !matches!(leaf, Ty::Int(Int::Mixed(None))) {
-            return;
-        }
+        let mixed = self.exact(e)?;
         let mut ranges = Vec::new();
         if !self.leaves(items, &mut ranges) {
-            return;
+            return None;
         }
         let hull = ranges.iter().map(|(_, r)| *r).reduce(|h, r| h.hull(r));
         let top = Num::new(false, i128::MAX.unsigned_abs());
         let above = ranges.iter().find(|(_, r)| r.hi > top).map(|(i, _)| *i);
-        if let (Some(h), Some(item)) = (hull, above) {
+        if let (true, Some(h), Some(item)) = (mixed, hull, above) {
             if !h.fits() {
                 let message = "the elements of this array literal give values that no one of \
                                `i128` and `u128` holds together, and they are kept in one of them"
                     .to_string();
                 self.report_with(at, at, item, "i128", message);
                 self.unfit[e.0 as usize] = true;
+                return None;
+            }
+        }
+        hull
+    }
+
+    /// Whether `e` is an array whose integers are literals alone or of no one type, which an
+    /// array literal of them keeps exact until it lands, and so does a repeat of one, as the
+    /// lowering decides it (`Lower::exact`): `Some(true)` for integers of no one type, whose hull
+    /// `E0222` holds to 128 bits, `Some(false)` for literals alone; none for any other.
+    fn exact(&self, e: ExprId) -> Option<bool> {
+        let mut t = &self.typing.exprs[e.0 as usize];
+        let mut depth = 0;
+        loop {
+            match t {
+                Ty::Array(_, inner) => {
+                    t = inner;
+                    depth += 1;
+                }
+                Ty::Int(Int::Mixed(None)) => return (depth > 0).then_some(true),
+                Ty::Int(Int::Literal) => return (depth > 0).then_some(false),
+                Ty::Int(Int::One(_) | Int::Mixed(Some(_)))
+                | Ty::Bool
+                | Ty::Struct(_)
+                | Ty::Enum(_)
+                | Ty::Unit
+                | Ty::Any => return None,
+            }
+        }
+    }
+
+    /// The hull of the integers a value of `e` holds (`core-calculus.md`, item 4): an integer's
+    /// range; and an array's every integer, an array literal's elements and those of the literals
+    /// nested in it, a repeat's value, an element of an array of arrays its array's, a branch's
+    /// value its `if`'s or `match`'s hull, and any other array its element type's range for
+    /// each integer it holds. The branches of an `if` or the arms of a `match` that give arrays
+    /// meet in the machine type that holds this hull (`mir-and-codegen`'s lowering reads it), so
+    /// it is checked as a scalar branch's range is. None where one has no range, or where a value
+    /// nested in it was reported `E0222` itself.
+    fn held(&mut self, e: ExprId) -> Option<Range> {
+        // The value's own range first, which checks a nested literal or a join on its own.
+        let own = self.range(e);
+        if self.unfit[e.0 as usize] {
+            return None;
+        }
+        match &self.tree.expr(e).kind {
+            ExprKind::Array(items) => {
+                let mut ranges = Vec::new();
+                if !self.leaves(&items.clone(), &mut ranges) {
+                    return None;
+                }
+                ranges.into_iter().map(|(_, r)| r).reduce(Range::hull)
+            }
+            ExprKind::Repeat { value, .. } => self.held(*value),
+            ExprKind::Index { base, .. } => self.held(*base),
+            ExprKind::If { .. } | ExprKind::Match { .. } => own,
+            ExprKind::Int { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Name(_)
+            | ExprKind::Todo(_)
+            | ExprKind::Unreachable(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Variant { .. }
+            | ExprKind::Error => {
+                // A value of its type: an integer its range, and an array its element type's.
+                let mut t = &self.typing.exprs[e.0 as usize];
+                let mut array = false;
+                loop {
+                    match t {
+                        Ty::Array(_, inner) => {
+                            t = inner;
+                            array = true;
+                        }
+                        Ty::Int(_)
+                        | Ty::Bool
+                        | Ty::Struct(_)
+                        | Ty::Enum(_)
+                        | Ty::Unit
+                        | Ty::Any => {
+                            return if array { int_ty(t).map(Range::of) } else { own };
+                        }
+                    }
+                }
             }
         }
     }
@@ -532,7 +619,7 @@ impl Wide<'_> {
     fn leaves(&mut self, items: &[ExprId], ranges: &mut Vec<(ExprId, Range)>) -> bool {
         for &i in items {
             // The element's own range first, which checks a nested literal on its own.
-            let r = self.range(i);
+            let _ = self.range(i);
             if self.unfit[i.0 as usize] {
                 return false;
             }
@@ -567,16 +654,10 @@ impl Wide<'_> {
                 | ExprKind::Match { .. }
                 | ExprKind::If { .. }
                 | ExprKind::Error => {
-                    let mut t = &self.typing.exprs[i.0 as usize];
-                    while let Ty::Array(_, inner) = t {
-                        t = inner;
-                    }
-                    let r = if matches!(self.typing.exprs[i.0 as usize], Ty::Array(..)) {
-                        int_ty(t).map(Range::of)
-                    } else {
-                        r
-                    };
-                    let Some(r) = r else {
+                    // Every other element by the one definition (`held`): an integer its range,
+                    // an indexed element its array's integers, a branch's value its hull, and
+                    // another array its element type's range.
+                    let Some(r) = self.held(i) else {
                         return false;
                     };
                     ranges.push((i, r));
@@ -731,12 +812,64 @@ impl Wide<'_> {
     /// `E0222` for the `if` at `at`, whose branches' values fit no one 128-bit type together;
     /// the fix binds `tail`, the value of the branch that reaches highest, to an `i128` inside
     /// that branch, so that it is computed only when the branch is taken.
-    fn report_if(&mut self, at: Span, tail: ExprId) {
-        let message = "the branches of this `if` give values that no one of `i128` and `u128` \
-                       holds together, and they meet in one of them"
-            .to_string();
+    fn report_if(&mut self, at: Span, e: ExprId, tail: ExprId) {
+        let message = format!(
+            "the branches of this `if` give {} no one of `i128` and `u128` holds \
+             together, and they meet in one of them",
+            self.what_meets(e)
+        );
         let place = self.tree.expr(tail).span;
-        self.report_with(at, place, tail, "i128", message);
+        match self.binding_for(e, tail) {
+            Some(machine) => self.report_with(at, place, tail, &machine, message),
+            None => self.errors.push(Diagnostic::error("E0222", at, message)),
+        }
+    }
+
+    /// What the branches of the `if` or the arms of the `match` `e` give, as a report names it.
+    fn what_meets(&self, e: ExprId) -> &'static str {
+        match &self.typing.exprs[e.0 as usize] {
+            Ty::Array(..) => "arrays whose integers",
+            Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                "values that"
+            }
+        }
+    }
+
+    /// The type a branch's value `tail` of the `if` or the `match` `e` is bound to, to fit the
+    /// others: an `i128`, or an array of them for an array literal or a repeat, whose elements
+    /// narrow into it; none for any other array, which no binding narrows.
+    fn binding_for(&self, e: ExprId, tail: ExprId) -> Option<String> {
+        /// `t` with `i128` at the bottom of its arrays.
+        fn of_i128(t: &Ty) -> Option<String> {
+            match t {
+                Ty::Array(n, elem) => Some(format!("[{}]{}", n, of_i128(elem)?)),
+                Ty::Int(_) => Some("i128".to_string()),
+                Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
+            }
+        }
+        let ty = &self.typing.exprs[e.0 as usize];
+        match ty {
+            Ty::Int(_) => Some("i128".to_string()),
+            Ty::Array(..) => match &self.tree.expr(tail).kind {
+                ExprKind::Array(_) | ExprKind::Repeat { .. } => of_i128(ty),
+                ExprKind::Int { .. }
+                | ExprKind::Bool(_)
+                | ExprKind::Name(_)
+                | ExprKind::Todo(_)
+                | ExprKind::Unreachable(_)
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Construct { .. }
+                | ExprKind::Variant { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::If { .. }
+                | ExprKind::Error => None,
+            },
+            Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => None,
+        }
     }
 
     /// `E0222` at `at`, whose fix binds `bind` to `machine` before the statement that holds
@@ -1133,6 +1266,51 @@ mod tests {
         for src in [
             "pub fn f(c: bool, a: i64, b: u64) -> i64 = match c {\n  true => a\n  false => b\n}",
             "pub fn f(c: bool, a: u8, b: u128) -> u8 = match c {\n  true => a\n  false => b\n}",
+        ] {
+            assert!(codes(src).is_empty(), "{}", src);
+        }
+    }
+
+    /// The branches of an `if` or the arms of a `match` that give arrays meet in the machine
+    /// type that holds every integer of each (`held`), so their hull fits one of `i128` and
+    /// `u128` or is `E0222`, as scalar branches' does: the review of pull request 189 found MIR
+    /// and native code refusing `[-1; 2]` beside `[y; 2]` for a `u128` `y`, which the checker let
+    /// through. A repeat or a literal is bound to an array of `i128`s, whose elements narrow
+    /// there, and the fixed module checks; a name has no fix, since no binding narrows an array
+    /// it is given. Arrays at the edge of 128 bits are none.
+    #[test]
+    fn test_arrays_that_meet_beyond_128_bits_are_e0222() {
+        let w4 = "pub fn f(y: u128, k: u8) -> [2]i64 = match k {\n  0 => [-1; 2]\n  _ => [y; 2]\n}";
+        let text = fixed(w4, "bind `[y; 2]` to `wide: [2]i128` in its arm");
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        let repeat =
+            "pub fn f(c: bool, x: i8, y: u128) -> [2]i64 = if c { [x; 2] } else { [y, 1] }";
+        let text = fixed(repeat, "bind `[y, 1]` to `wide: [2]i128` first");
+        assert_eq!(check_source(&text).err(), None, "{}", text);
+        let named = "pub fn f(c: bool, a: [2]i8, b: [2]u128) -> [2]i64 = if c { a } else { b }";
+        let d = check_source(&module(named)).unwrap_err();
+        assert_eq!(
+            (d.len(), d[0].code, d[0].fixes.len()),
+            (1, "E0222", 0),
+            "{:?}",
+            d
+        );
+        assert_eq!(
+            d[0].message,
+            "the branches of this `if` give arrays whose integers no one of `i128` and `u128` \
+             holds together, and they meet in one of them"
+        );
+        // An array nested in a branch's literal, or read from an array of arrays, counts too.
+        for src in [
+            "pub fn f(c: bool, x: i8, y: u128) -> [1][2]i64 = if c { [[x; 2]] } else { [[y; 2]] }",
+            "pub fn f(c: bool, x: i8, ys: [2][2]u128) -> [2]i64 = if c { [x; 2] } else { ys[1] }",
+        ] {
+            assert_eq!(codes(src), ["E0222"], "{}", src);
+        }
+        for src in [
+            "pub fn f(c: bool, x: i8, y: u64) -> [2]i128 = if c { [x; 2] } else { [y; 2] }",
+            "pub fn f(c: bool, x: u8, y: u128) -> [2]u128 = if c { [x; 2] } else { [y; 2] }",
+            "pub fn f(c: bool, a: [2]u128, b: [2]u128) -> [2]u128 = if c { a } else { b }",
         ] {
             assert!(codes(src).is_empty(), "{}", src);
         }
