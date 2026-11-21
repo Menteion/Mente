@@ -7612,13 +7612,15 @@ mod tests {
     /// it reads: otherwise a candidate that meets it twice would hold the second time.
     #[test]
     fn test_a_loop_met_again_counts_its_unproven_obligations_again() {
-        let src = "pub fn f(d: u8) -> u8 {\n  var i: u8 = 0\n  while i < 3 {\n    i += 7 % d\n  }\n  i\n}";
+        // The narrowing of `d + 1` is left unproven before the loop is met, so the count is not
+        // 0 there: the memo keeps what the loop added, not what the count held when it ended.
+        let src = "pub fn f(d: u8) -> u8 {\n  var i: u8 = d + 1\n  while i < 3 {\n    i += 7 % d\n  }\n  i\n}";
         with_fx(src, |fx, st| {
             fx.recording = false;
             let mut first = st.clone();
             fx.body(&mut first);
             let (once, passes) = (fx.unproven, fx.passes);
-            assert!(once > 0);
+            assert!(once > 1);
             let mut again = st.clone();
             fx.body(&mut again);
             assert_eq!(fx.passes, passes, "the loop is met again from its memo");
