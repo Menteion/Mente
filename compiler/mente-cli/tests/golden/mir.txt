@@ -26063,6 +26063,7 @@ t1: unreachable @79:8 ["unreachable reached: control left the code the checker a
 == conformance/core-calculus/struct_built_without_a_field.mn == (exit 2)
 == conformance/core-calculus/struct_compared_with_eq.mn == (exit 2)
 == conformance/core-calculus/struct_containing_itself.mn == (exit 2)
+== conformance/core-calculus/struct_containing_itself_as_a_parameter.mn == (exit 2)
 == conformance/core-calculus/struct_containing_itself_through_others.mn == (exit 2)
 == conformance/core-calculus/struct_field_default.mn == (exit 2)
 == conformance/core-calculus/struct_field_of_a_later_type.mn == (exit 2)

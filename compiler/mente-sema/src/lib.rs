@@ -285,6 +285,10 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
     let (structs, declared) = structs::declare(module, &parsed_structs, &parsed_enums);
     errors.extend(declared);
     errors.sort_by_key(|d| d.primary.start);
+    // Tier 1 reads the types the declarations give, so it proves no function of a module whose
+    // declarations have an error, such as a struct that contains itself (`E0225`), whose field
+    // paths go on without end; each body is checked all the same.
+    let declarations_hold = errors.is_empty();
     let parsed = parse_qualified(src, module);
     let mut todos: Vec<(Span, String)> = parsed
         .iter()
@@ -346,7 +350,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
                 let mut variables = 0;
-                if prove && found.is_empty() {
+                if prove && declarations_hold && found.is_empty() {
                     let f = tier1::Function {
                         syntax,
                         resolution: &resolution,
@@ -1361,6 +1365,32 @@ pub fn pick(x: i32) -> i32 ! RangeError {
         // The same body is accepted without the contract: raise is ordinary control flow.
         let plain = code.replace("@branchless\n", "");
         assert!(verify_module(&parse_module(&plain).unwrap()).is_ok());
+    }
+
+    /// Tier 1 proves no function of a module whose declarations have an error: a struct that
+    /// contains itself, used as a parameter, once sent Tier 1 down its field paths without end
+    /// (the nightly fuzzer, 2026-11-14 to 11-20), and a function beside it whose refinement
+    /// Tier 1 cannot prove reports nothing of it until the declarations check. Its body is still
+    /// checked.
+    #[test]
+    fn test_tier1_proves_no_function_of_a_module_whose_declarations_fail() {
+        let codes = |src: &str| -> Vec<&'static str> {
+            check_source(src)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        let cycle = "module m\nstruct P {\n  a: P\n}\nfn e(p: P) -> u8 = 0\n";
+        assert_eq!(codes(cycle), ["E0225"]);
+        let beside = "module m\nstruct P {\n  a: P\n}\npub fn f(x: u8) -> u8[0..10] = x\n";
+        assert_eq!(codes(beside), ["E0225"]);
+        let held = beside.replace("  a: P\n", "  a: u8\n");
+        assert_eq!(codes(&held), ["E0502"]);
+        // A body's own error is reported beside the declarations'.
+        let body = beside.replace("= x\n", "= y\n");
+        assert_eq!(codes(&body), ["E0225", "E0201"]);
     }
 
     #[test]

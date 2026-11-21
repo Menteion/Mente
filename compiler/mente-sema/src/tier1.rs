@@ -1415,13 +1415,29 @@ type PathVal = (Vec<String>, Val);
 /// declared shape: an integer field, and each scalar path of a struct field, in the order of
 /// the declaration. `None` when there are more than `room`, which each one listed takes one of:
 /// structs nested level by level can have a number of them that doubles with each level, and
-/// none is listed past the room.
+/// none is listed past the room. `None` too for a struct that contains itself, which no value
+/// has (`E0225`): its paths would go on without end, with no integer field on the way to use
+/// the room up.
 fn scalar_paths(
     structs: &crate::structs::Structs,
     name: &str,
     room: &mut usize,
 ) -> Option<Vec<(Vec<String>, Shape)>> {
+    paths_within(structs, name, room, &mut Vec::new())
+}
+
+/// [`scalar_paths`] of struct `name`, inside the structs `open` whose paths lead to it.
+fn paths_within(
+    structs: &crate::structs::Structs,
+    name: &str,
+    room: &mut usize,
+    open: &mut Vec<String>,
+) -> Option<Vec<(Vec<String>, Shape)>> {
+    if open.iter().any(|o| o == name) {
+        return None;
+    }
     let def = structs.get(name)?;
+    open.push(name.to_string());
     let mut out = Vec::new();
     for f in &def.fields {
         match Fx::declared_shape(def.tree(), f.decl) {
@@ -1430,7 +1446,7 @@ fn scalar_paths(
                 out.push((vec![f.name.clone()], shape));
             }
             Shape::Struct(inner) => {
-                for (mut names, shape) in scalar_paths(structs, &inner, room)? {
+                for (mut names, shape) in paths_within(structs, &inner, room, open)? {
                     names.insert(0, f.name.clone());
                     out.push((names, shape));
                 }
@@ -1438,6 +1454,7 @@ fn scalar_paths(
             Shape::Array(..) | Shape::Other => {}
         }
     }
+    open.pop();
     Some(out)
 }
 
@@ -9674,6 +9691,49 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
     /// The field paths of a struct are listed no further than the room they may take: structs
     /// nested level by level, whose paths double with each level, are given up on once the room
     /// is used, so a struct of 2^41 paths costs as much as one of 128.
+    #[test]
+    fn test_a_struct_that_contains_itself_has_no_paths_to_follow() {
+        // A cycle with no integer field on it, directly or through another struct: its paths
+        // would go on without end, using none of the room.
+        for (decls, name) in [
+            ("struct P {\n  a: P\n}\n", "P"),
+            (
+                "struct A {\n  b: B\n}\nstruct B {\n  a: A\n  n: u8\n}\n",
+                "A",
+            ),
+            (
+                "struct Q {\n  n: u8\n  p: P\n}\nstruct P {\n  a: P\n}\n",
+                "Q",
+            ),
+        ] {
+            let src = module(decls);
+            let m = mente_syntax::parse_module(&src).unwrap();
+            let parsed = mente_syntax::parse_structs(&src, &m);
+            let (structs, declared) = crate::structs::declare(&m, &parsed, &[]);
+            assert!(declared.iter().any(|d| d.code == "E0225"), "{}", decls);
+            let mut room = RELATIONAL_LIMIT;
+            assert!(
+                scalar_paths(&structs, name, &mut room).is_none(),
+                "{}",
+                decls
+            );
+            // A binding of it is not followed, and Tier 1 ends.
+            let r = report(&format!("{}pub fn e(p: {}) -> u8 = 0", decls, name));
+            assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        }
+        // Two fields of one struct that is no cycle are each followed.
+        let src = module("struct L {\n  n: u8\n}\nstruct T {\n  a: L\n  b: L\n}\n");
+        let m = mente_syntax::parse_module(&src).unwrap();
+        let parsed = mente_syntax::parse_structs(&src, &m);
+        let (structs, _) = crate::structs::declare(&m, &parsed, &[]);
+        let mut room = RELATIONAL_LIMIT;
+        let paths = scalar_paths(&structs, "T", &mut room).unwrap();
+        assert_eq!(
+            paths.iter().map(|p| p.0.join(".")).collect::<Vec<_>>(),
+            ["a.n", "b.n"]
+        );
+    }
+
     #[test]
     fn test_field_paths_are_listed_no_further_than_the_cap() {
         let mut src = String::from("module t\npub struct S0 {\n  a: u8\n  b: u8\n}\n");
