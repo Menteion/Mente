@@ -3568,6 +3568,34 @@ mod tests {
         .contains("does not exist"));
     }
 
+    /// MIR keeps an address only in a value, never in memory: the verifier refuses a store of an
+    /// address and a load that gives one, beside the store and the load of an integer it admits.
+    /// Native code lays the slots never alive together over the same bytes by what this holds,
+    /// that a slot is reached only through the values derived from its own
+    /// (`spec/mir-and-codegen.md`, "Slots never alive together share bytes").
+    #[test]
+    fn test_no_address_is_stored_in_memory_or_loaded_from_it() {
+        let u8t = Ty::Int(U8);
+        let function = |stored: Ty, loaded: Ty| {
+            let mut b = Builder::new("f", &[u8t], Some(u8t));
+            let x = b.params(BlockId(0))[0];
+            let s = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            let value = if stored == Ty::Addr { s } else { x };
+            b.inst(Op::Store, Ty::Unit, &[s, value]);
+            b.inst(Op::Load, loaded, &[s]);
+            b.ret(Some(x));
+            Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+            }
+        };
+        verify(&function(u8t, u8t)).unwrap();
+        let stored = verify(&function(Ty::Addr, u8t)).unwrap_err();
+        assert!(stored.contains("Store"), "{stored}");
+        let loaded = verify(&function(u8t, Ty::Addr)).unwrap_err();
+        assert!(loaded.contains("Load"), "{loaded}");
+    }
+
     /// A slot read before it is written holds the memory's fill, 0 unless another is asked
     /// for, and a copy of memory starts runs of its own; a run counts what it executed.
     #[test]
