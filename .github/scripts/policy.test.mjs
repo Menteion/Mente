@@ -45,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 71;
+const FLOOR = 72;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1279,7 +1279,8 @@ export function jobDigest(doc, job) {
 const PINNED_FILES = new Map([
   [".github/scripts/limits.sh", "ff5fb294d3365b4c5240a4b9f86042d3c9d2767e0c6e5e1fa0adceea359fdee9"],
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
-  [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
+  [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
+  [".github/scripts/lib/job-object.cs", "cf59a22d9ca836f8897539eeebf08c2e543069902ef809acb022afb0f5a0eb3a"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
@@ -3537,6 +3538,11 @@ const GATE_FILES = [
   "/.gitattributes",
   "/tools/quick.mjs",
   "/tools/quick-checks.json",
+  "/tools/local-limits.mjs",
+  "/tools/local-limits.test.mjs",
+  "/tools/capped.ps1",
+  "/tools/cargo.mjs",
+  "/tools/mn.mjs",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
@@ -3709,6 +3715,150 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
   const when = new RegExp(source);
   const missed = [...tracked(), "a-new-directory/a-new-file.txt", "a-new-file"].filter((f) => !when.test(f));
   assert.deepEqual(missed.slice(0, 20), [], `${missed.length} files whose change tools/quick.mjs would not check against this policy`);
+});
+
+/// The local limits' files: the module that defines them, the job object's script and the type it
+/// shares with CI, the entry points, and their proofs (tools/local-limits.mjs).
+const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/cargo.mjs", "tools/mn.mjs", "tools/local-limits.test.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
+/// The most the local limits may give: builds at once, and GB committed by a process and by a tree.
+const LOCAL_CEILING = { slots: 2, processGB: 8, jobGB: 16, minutes: 60 };
+
+/// The arguments of each call of `name` in `toks`, each argument its tokens, split at the commas of
+/// the call's own depth.
+function callArguments(toks, name) {
+  const calls = [];
+  for (let i = 0; i < toks.length; i++) {
+    if (toks[i].t !== "id" || toks[i].v !== name || toks[i + 1]?.v !== "(" || toks[i - 1]?.v === ".") continue;
+    const args = [[]];
+    let depth = 0;
+    for (let j = i + 2; j < toks.length; j++) {
+      const v = toks[j].v;
+      if (depth === 0 && v === ")") break;
+      if (depth === 0 && v === ",") {
+        args.push([]);
+        continue;
+      }
+      if (["(", "[", "{"].includes(v)) depth++;
+      if ([")", "]", "}"].includes(v)) depth--;
+      args.at(-1).push(toks[j]);
+    }
+    calls.push(args);
+  }
+  return calls;
+}
+
+/// What keeps the quick checks from running every command in a build slot and under the local
+/// limits, from the texts of tools/quick.mjs (`quick`), tools/local-limits.mjs (`limits`) and
+/// tools/capped.ps1 (`capped`), and the quick map (`map`):
+/// - quick.mjs starts no process but git's and runCapped's: it imports nothing else that could, it
+///   calls execFileSync only on "git", it takes a slot, and runs each check by runCapped with BUILD;
+/// - local-limits.mjs gives no more than LOCAL_CEILING, and runs a command only through
+///   capped(), which names capped.ps1 with the three limits;
+/// - capped.ps1 starts a command on Windows only through the job object's Run, after Confine, and
+///   runs one untouched only off Windows or, with -MenteOnly, outside a checkout of this repository;
+/// - the quick map runs the proofs for a change to any file of LOCAL_LIMITS.
+export function localLimitsProblems({ quick, limits, capped, map }) {
+  const problems = [];
+  const q = jsTokens(quick);
+  const allowed = new Set(["node:child_process", "node:fs", "./local-limits.mjs"]);
+  for (const s of jsImports(q).specifiers) if (!allowed.has(s.v)) problems.push(`tools/quick.mjs imports ${s.v}, which could start a process past the limits`);
+  const starters = ["spawn", "spawnSync", "exec", "execSync", "execFile", "fork"];
+  for (const t of q) if (t.t === "id" && starters.includes(t.v)) problems.push(`tools/quick.mjs:${t.line}: ${t.v} starts a process past the limits`);
+  for (const args of callArguments(q, "execFileSync")) {
+    if (!(args[0]?.length === 1 && args[0][0].t === "str" && args[0][0].v === "git")) problems.push("tools/quick.mjs calls execFileSync on something other than git");
+  }
+  if (q.some((t, i) => t.t === "id" && t.v === "execFileSync" && !["(", "}", ","].includes(q[i + 1]?.v))) problems.push("tools/quick.mjs passes execFileSync around, where no reading follows it");
+  if (callArguments(q, "acquireSlot").length !== 1) problems.push("tools/quick.mjs takes no build slot, or more than one");
+  const runs = callArguments(q, "runCapped");
+  if (runs.length === 0) problems.push("tools/quick.mjs runs no check through runCapped");
+  for (const args of runs) {
+    if (!(args[1]?.length === 1 && args[1][0].v === "BUILD")) problems.push("tools/quick.mjs runs a check under other limits than BUILD");
+  }
+
+  const l = jsTokens(limits);
+  const number = (name, key) => {
+    const at = l.findIndex((t, i) => t.t === "id" && t.v === name && l[i + 1]?.v === "=");
+    if (at < 0) return NaN;
+    if (key === null) return l[at + 2]?.t === "num" ? Number(l[at + 2].v) : NaN;
+    for (let j = at; j < Math.min(l.length, at + 30); j++) if (l[j].t === "id" && l[j].v === key && l[j + 1]?.v === ":" && l[j + 2]?.t === "num") return Number(l[j + 2].v);
+    return NaN;
+  };
+  const slots = number("SLOTS", null);
+  if (!(slots >= 1 && slots <= LOCAL_CEILING.slots)) problems.push(`tools/local-limits.mjs lets ${slots} builds run at once, past ${LOCAL_CEILING.slots}`);
+  for (const set of ["BUILD", "PROBE"]) {
+    for (const key of ["processGB", "jobGB", "minutes"]) {
+      const v = number(set, key);
+      if (!(v > 0 && v <= LOCAL_CEILING[key])) problems.push(`tools/local-limits.mjs gives ${set}.${key} ${v}, past ${LOCAL_CEILING[key]}`);
+    }
+  }
+  const spawns = callArguments(l, "spawnSync");
+  if (spawns.length !== 1 || spawns[0][0]?.map((t) => t.v).join(" ") !== "cmd" || spawns[0][1]?.map((t) => t.v).join(" ") !== "args") problems.push("tools/local-limits.mjs starts a process other than the one runCapped starts");
+  const destructured = ["[", "cmd", ",", ".", ".", ".", "args", "]", "=", "capped", "("];
+  if (!l.some((t, i) => destructured.every((v, k) => l[i + k]?.v === v))) {
+    problems.push("tools/local-limits.mjs runs a command other than capped() gives");
+  }
+  const strings = new Set(l.filter((t) => t.t === "str").map((t) => t.v));
+  for (const s of ["capped.ps1", "-ProcessGB", "-JobGB", "-Minutes", "--"]) if (!strings.has(s)) problems.push(`tools/local-limits.mjs does not name ${s} in the command capped() gives`);
+
+  const code = capped.split(/\r?\n/).filter((line) => !/^\s*#/.test(line)).join("\n");
+  const confine = code.indexOf("[JobLimits]::Confine(");
+  const run = code.indexOf("[JobLimits]::Run(");
+  if (!/Add-Type -Path \(Join-Path \$PSScriptRoot '\.\.\/\.github\/scripts\/lib\/job-object\.cs'\)/.test(code)) problems.push("tools/capped.ps1 does not load the job object CI's Windows jobs use");
+  if (confine < 0 || run < 0 || run < confine) problems.push("tools/capped.ps1 does not start the command in the job, after setting the job up");
+  if (/Start-Process|Diagnostics\.Process\]::Start|Invoke-Expression|\biex\b/.test(code)) problems.push("tools/capped.ps1 starts a process outside the job object's Run");
+  // The one untouched run lies in the block of that one condition: from its brace to the brace
+  // that closes it.
+  const untouched = [...code.matchAll(/^\s*& \$program @rest$/gm)];
+  const gate = "if (-not $IsWindows -or ($menteOnly -and -not (Test-InMente))) {";
+  const open = code.indexOf(gate);
+  let close = -1;
+  for (let i = open + gate.length, depth = 1; open >= 0 && i < code.length; i++) {
+    if (code[i] === "{") depth++;
+    if (code[i] === "}" && --depth === 0) {
+      close = i;
+      break;
+    }
+  }
+  if (untouched.length !== 1 || close < 0 || untouched[0].index < open || untouched[0].index > close) {
+    problems.push("tools/capped.ps1 runs a command untouched where it should bound it");
+  }
+
+  const proofs = (map.checks ?? []).filter((c) => Array.isArray(c.run) && c.run.join(" ") === "node --test tools/local-limits.test.mjs");
+  const when = proofs.map((c) => (Object.hasOwn(map.patterns ?? {}, c.when) && typeof map.patterns[c.when] === "string" ? new RegExp(map.patterns[c.when]) : null)).filter(Boolean);
+  for (const f of LOCAL_LIMITS) if (!when.some((w) => w.test(f))) problems.push(`no quick check runs the local limits' proofs for a change to ${f}`);
+  return problems;
+}
+
+check("the quick checks run every command in one of the machine's build slots, under the local limits", () => {
+  // On 2026-11-22 a test binary committed 107 GB on the laptop, where several sessions build and
+  // test at once, and the machine reset: nothing bounded a local process. tools/quick.mjs runs each
+  // check in a Windows job object that bounds each process's memory, the tree's and the time, in one
+  // of two build slots for the machine (tools/local-limits.mjs). Read as text, never run.
+  const texts = { quick: read("tools/quick.mjs"), limits: read("tools/local-limits.mjs"), capped: read("tools/capped.ps1"), map: JSON.parse(read(QUICK_MAP)) };
+  for (const f of LOCAL_LIMITS) assert.ok(tracked().has(f), `${f} is not in the repository`);
+  assert.deepEqual(localLimitsProblems(texts), []);
+  // Planted, one at a time: each must be refused.
+  const plants = [
+    ["quick", 'import { execFileSync } from "node:child_process";', 'import { execFileSync, spawnSync } from "node:child_process";', "a direct spawnSync"],
+    ["quick", '  results.push([check.name, runCapped(check.run, BUILD) === 0]);', "  results.push([check.name, runCapped(check.run, { processGB: 64, jobGB: 64, minutes: 600 }) === 0]);", "other limits"],
+    ["quick", 'const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);', "const slot = { release() {} };", "no slot"],
+    ["quick", 'execFileSync("git", args', 'execFileSync("cargo", args', "execFileSync on cargo"],
+    ["quick", 'import { BUILD, acquireSlot, runCapped } from "./local-limits.mjs";', 'import { BUILD, acquireSlot, runCapped } from "./local-limits.mjs";\nimport { run } from "./other.mjs";', "another module"],
+    ["limits", "export const SLOTS = 2;", "export const SLOTS = 4;", "four slots"],
+    ["limits", "export const BUILD = Object.freeze({ processGB: 8,", "export const BUILD = Object.freeze({ processGB: 64,", "64 GB a process"],
+    ["limits", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 80, minutes: 5 });", "80 GB a probe's tree"],
+    ["limits", "  const [cmd, ...args] = capped(run, limits);", "  const [cmd, ...args] = run;", "no capped()"],
+    ["limits", '"-ProcessGB", String(limits.processGB), ', "", "no process limit named"],
+    ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds)", "$status = (Start-Process $application -PassThru -Wait).ExitCode", "Start-Process"],
+    ["capped", "Add-Type -Path (Join-Path $PSScriptRoot '../.github/scripts/lib/job-object.cs')", "Add-Type -Path (Join-Path $PSScriptRoot 'other.cs')", "another job object"],
+    ["capped", "if (-not $IsWindows -or ($menteOnly -and -not (Test-InMente))) {", "if ($true) {", "always untouched"],
+  ];
+  for (const [part, from, to, what] of plants) {
+    assert.equal(texts[part].split(from).length, 2, `the plant "${what}" finds no place in ${part}`);
+    assert.ok(localLimitsProblems({ ...texts, [part]: texts[part].replace(from, () => to) }).length > 0, `the plant "${what}" passed`);
+  }
+  const noProofs = { ...texts.map, checks: texts.map.checks.filter((c) => c.run.join(" ") !== "node --test tools/local-limits.test.mjs") };
+  assert.ok(localLimitsProblems({ ...texts, map: noProofs }).length > 0, "a map that runs no proof of the local limits passed");
 });
 
 check("the required checks are listed once each", () => {

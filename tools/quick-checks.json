@@ -8,7 +8,8 @@
     "site": "^site/|^README\\.md$|^spec/|^docs/",
     "benchmark": "^benchmark/",
     "harness": "^benchmark/harness/",
-    "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/"
+    "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/",
+    "local limits": "^tools/(local-limits(\\.test)?\\.mjs|capped\\.ps1|cargo\\.mjs|mn\\.mjs)$|^\\.github/scripts/(job-limits\\.ps1|lib/job-object\\.cs)$"
   },
   "checks": [
     { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
@@ -43,6 +44,12 @@
     { "name": "benchmark corpus", "when": "benchmark", "run": ["npm", "run", "check:benchmark"] },
     { "name": "benchmark checker", "when": "benchmark", "run": ["npm", "run", "test:benchmark"] },
     { "name": "benchmark harness", "when": "harness", "run": ["npm", "run", "test:harness"] },
-    { "name": "site", "when": "site", "run": ["npm", "run", "test:site"] }
+    { "name": "site", "when": "site", "run": ["npm", "run", "test:site"] },
+    {
+      "name": "local limits",
+      "when": "local limits",
+      "run": ["node", "--test", "tools/local-limits.test.mjs"],
+      "why": "The local limits proved on this machine: a process past its memory dies alone, a command past its time ends with its children, a third build waits for a slot, a killed holder frees its slot, and -MenteOnly leaves other projects untouched. They run on Windows alone, so CI does not run them. The policy's check \"the quick checks run every command in one of the machine's build slots, under the local limits\" holds this."
+    }
   ]
 }
