@@ -317,6 +317,7 @@ dependencies = [
  "mente-interp",
  "mente-mir",
  "mente-sema",
+ "mente-smt",
  "mente-syntax",
  "mente-threads",
 ]
@@ -354,6 +355,13 @@ version = "0.1.0"
 dependencies = [
  "mente-ast",
  "mente-mir",
+ "mente-syntax",
+]
+
+[[package]]
+name = "mente-smt"
+version = "0.1.0"
+dependencies = [
  "mente-syntax",
 ]
 

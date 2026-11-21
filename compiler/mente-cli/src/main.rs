@@ -45,6 +45,7 @@ const CARD_WORD_BUDGET: usize = 2_000;
 mod latency;
 mod mir_mutants;
 mod mir_run;
+mod smt_independent;
 
 /// The stack `mn`'s work runs on: every phase recurses over a function's tree, as deep as the
 /// nesting limit allows (`E0127`), and a debug build's frames need more than a main thread's
@@ -598,8 +599,17 @@ fn run_time_checks(src: &str) -> String {
 /// SMT-LIB 2 query, for an SMT solver to answer `unsat` (`mente_sema::tier1::smt`). Each goes in
 /// a file of its own, `<dir>/<the file's path without .mn>/<function>-<line>-<kind>.smt2`, whose
 /// first line is `; source: <file>:<line>:<col>`. An obligation no path reaches, which no query
-/// can check, is listed instead. Exits 2 when a file cannot be read or written.
+/// can check, is listed instead. Exits 2 when a file cannot be read or written. `mn smt
+/// --independent`, `--confirm`, `--compare` and `--encodes` are the independent cross-check
+/// (`smt_independent`).
 fn cmd_smt(args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("--independent") => return smt_independent::cmd_independent(&args[1..]),
+        Some("--confirm") => return smt_independent::cmd_confirm(&args[1..]),
+        Some("--compare") => return smt_independent::cmd_compare(&args[1..]),
+        Some("--encodes") => return smt_independent::cmd_encodes(&args[1..]),
+        _ => {}
+    }
     let mut out = None;
     let mut inputs = Vec::new();
     let mut words = args.iter();
