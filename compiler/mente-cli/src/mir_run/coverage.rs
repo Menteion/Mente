@@ -289,6 +289,12 @@ const CANDIDATES: &[&str] = &[
     "break in the condition of a loop inside a loop",
 ];
 
+/// A nested array literal that narrows its integers by itself (`core-calculus.md`, item 4,
+/// Norman's decision of 2026-11-21): a row whose elements have one integer type, inside a literal
+/// whose rows have no one type together, which keeps the others exact. The nightly runs found MIR
+/// building such a row in the outer literal's type, where the reference interpreter narrowed it.
+const ROWS: &[&str] = &["row of one integer type beside rows of others"];
+
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
 /// (`core-calculus.md`, item 5), by what the checker's table says of it: beside an operand
 /// of a type, which gives it; and alone, an `i64`, either narrowed into a place, which gives
@@ -1037,6 +1043,35 @@ fn reached_no_candidates(
     }
 }
 
+/// The row of [`ROWS`], when a checked function reaches it: an array literal whose elements are
+/// arrays of integers of no one type, one of them a literal of one integer type.
+fn reached_rows(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let ty = |e: ExprId| &f.typing.exprs[e.0 as usize];
+    // The integer type an array of integers holds, at its innermost depth.
+    fn leaf(t: &Ty) -> Option<&Int> {
+        match t {
+            Ty::Array(_, e) => leaf(e),
+            Ty::Int(i) => Some(i),
+            _ => None,
+        }
+    }
+    for (k, e) in tree.exprs.iter().enumerate() {
+        let ExprKind::Array(items) = &e.kind else {
+            continue;
+        };
+        let outer = ty(ExprId(k as u32));
+        let mixed = matches!(outer, Ty::Array(_, inner) if matches!(**inner, Ty::Array(..)))
+            && matches!(leaf(outer), Some(Int::Mixed(_)));
+        let one = items.iter().any(|&i| {
+            tree.expr(i).kind.is_array_literal() && matches!(leaf(ty(i)), Some(Int::One(_)))
+        });
+        if mixed && one {
+            seen.insert("row of one integer type beside rows of others".to_string());
+        }
+    }
+}
+
 /// Whether a function's `ensures` names one of its parameters, which then bounds the argument a
 /// call passes it, where the call returns.
 fn ensures_names_a_parameter(f: &mente_syntax::tree::FnSyntax) -> bool {
@@ -1413,6 +1448,7 @@ fn grammar() -> BTreeSet<String> {
         RELATIONS,
         TRAPS,
         CANDIDATES,
+        ROWS,
         LITERALS,
         COMPARISONS,
         EXPRESSIONS,
@@ -1467,6 +1503,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 reached_edges(f, &mut seen);
                 reached_traps(f, &mut seen);
                 reached_candidates(module, f, &mut seen);
+                reached_rows(f, &mut seen);
                 reached_literals(f, &mut seen);
                 reached_comparisons(f, &mut seen);
                 reached_expressions(f, &mut seen);
