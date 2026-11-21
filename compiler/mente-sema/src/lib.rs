@@ -335,9 +335,13 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
         .iter()
         .map(|p| p.syntax.as_ref().map(check::Signature::of))
         .collect();
-    let callees: Vec<Option<tier1::Callee>> = parsed
+    let headers: Vec<Option<tier1::Header>> = parsed
         .iter()
-        .map(|p| p.syntax.as_ref().map(tier1::Callee::of))
+        .map(|p| p.syntax.as_ref().map(tier1::Header::of))
+        .collect();
+    let callees: Vec<Option<tier1::Callee>> = headers
+        .iter()
+        .map(|h| h.as_ref().map(tier1::Callee::of))
         .collect();
     let mut checked = Vec::new();
     let mut reports = Vec::new();
@@ -352,7 +356,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, queries: bool) -> Bo
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
                 let mut variables = 0;
-                if prove && types_hold && found.is_empty() {
+                if prove && types_hold && found.is_empty() && tier1::proves(&names, &p.name) {
                     let f = tier1::Function {
                         syntax,
                         resolution: &resolution,
@@ -1397,11 +1401,13 @@ pub fn pick(x: i32) -> i32 ! RangeError {
         assert_eq!(codes(&body), ["E0225", "E0201"]);
         let enums = "module m\nenum E {\n  V(e: E)\n}\npub fn f(x: u8) -> u8[0..10] = x\n";
         assert_eq!(codes(enums), ["E0225"]);
+        // Two functions of one name: neither is proven (`tier1::proves`), in a session as in a
+        // whole check, so the narrowing Tier 1 would prove always traps draws no `E0508`.
         for twice in [
             "module m\nfn f()\nfn f() -> u8 = 0xFFF\n",
             "module m\npub fn f() -> u8 = 2\npub fn f() -> u8 = -0xFFFFFFFFFFFFFFFF_u128\n",
         ] {
-            assert_eq!(codes(twice), ["E0228", "E0508"], "{}", twice);
+            assert_eq!(codes(twice), ["E0228"], "{}", twice);
             let session = incremental::Session::new(twice);
             assert_eq!(
                 session.diagnostics(),

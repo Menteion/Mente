@@ -201,9 +201,13 @@ impl Session {
                 header: f.syntax.as_ref().map(tier1::header),
             })
             .collect();
-        let callees: Vec<Option<tier1::Callee>> = functions
+        let headers: Vec<Option<tier1::Header>> = functions
             .iter()
-            .map(|f| f.syntax.as_ref().map(tier1::Callee::of))
+            .map(|f| f.syntax.as_ref().map(tier1::Header::of))
+            .collect();
+        let callees: Vec<Option<tier1::Callee>> = headers
+            .iter()
+            .map(|h| h.as_ref().map(tier1::Callee::of))
             .collect();
         if context != self.context {
             self.context = context;
@@ -238,7 +242,7 @@ impl Session {
             let (typing, typed) = check::check(syntax, &resolution, &signatures, &structs, text);
             found.extend(typed);
             found.extend(wide::check(syntax, &resolution, &typing, text));
-            if found.is_empty() {
+            if found.is_empty() && tier1::proves(&names, &syntax.name) {
                 let function = tier1::Function {
                     syntax,
                     resolution: &resolution,
@@ -544,35 +548,62 @@ mod tests {
         assert!(fix.is_some());
     }
 
-    /// A call is recursive when it calls the function of its caller's name, which a session and
-    /// a whole check see alike, two functions of one name (`E0228`) included: Tier 1 once told
-    /// recursion by the identity of the callee's syntax tree, which differs between the two, so
-    /// a whole check proved one measure where the session reported `E0507`, or the reverse.
+    /// A call is recursive when it calls the function of its caller's name, and no function
+    /// that shares its name with another (`E0228`) is proven, in a session as in a whole check
+    /// (`tier1::proves`): a call by the name could mean either. Tier 1 once told recursion by
+    /// the identity of the callee's syntax tree, which differs between the two checks, so one
+    /// proved a measure where the other reported `E0507`; and, told by name, it compared one
+    /// `f`'s measure with another's of other parameters, in an `E0507` that named neither (the
+    /// review of pull request 190).
     #[test]
-    fn test_recursion_is_told_by_name_in_a_session_as_in_a_whole_check() {
+    fn test_no_function_of_a_name_declared_twice_is_proven() {
         let one = "fn f(n: u8) -> u8\n  decreases n\n= if n > 0 { f(n - 1) } else { 0 }\n";
         let other = "fn f(n: u8) -> u8\n  decreases n\n= if n > 0 { f(n) } else { 0 }\n";
-        for src in [
+        let wider = "fn f(a: u8, b: u8) -> u8\n  decreases a\n  decreases b\n= if a > 0 { f(a, b) } else { 0 }\n";
+        let unmeasured = "fn f(a: u8, b: u8) -> u8 = a\n";
+        let layouts = [
             format!("module m\n\n{}\n{}", one, one),
             format!("module m\n\n{}\n{}", one, other),
             format!("module m\n\n{}\n{}", other, one),
             // Two of one text, which the session parses and checks once.
             format!("module m\n\n{}\n{}", other, other),
-        ] {
-            let mut s = Session::new(&src);
-            assert_eq!(s.diagnostics(), whole(&src).as_slice(), "{}", src);
+            format!("module m\n\n{}\n{}", other, wider),
+            format!("module m\n\n{}\n{}", wider, other),
+            format!("module m\n\n{}\n{}", other, unmeasured),
+        ];
+        for src in &layouts {
+            let mut s = Session::new(src);
+            assert_eq!(s.diagnostics(), whole(src).as_slice(), "{}", src);
+            // Neither `f` is proven: no diagnostic of Tier 1's, only the second name's `E0228`,
+            // and the type errors of a call the other `f` takes.
+            let codes: Vec<&str> = s.diagnostics().iter().map(|d| d.code).collect();
+            assert!(codes.contains(&"E0228"), "{}: {:?}", src, codes);
+            assert!(
+                codes.iter().all(|c| !c.starts_with("E05")),
+                "{}: {:?}",
+                src,
+                codes
+            );
             // An edit to either function keeps the two alike.
             edited(&mut s, "f(n - 1)", "f(n - 2)");
         }
-        // Each `f` that calls `f` without the measure getting smaller is reported, the first
-        // included: a call resolves to the last function of its name, so by the identity of
-        // syntax trees the first one's own recursion went unchecked.
-        let both = format!("module m\n\n{}\n{}", other, other);
-        let found: Vec<(&str, u32)> = whole(&both)
+        // A function of a name of its own is proven beside them, and named in its `E0507`.
+        let src = format!(
+            "{}\nfn g(n: u8) -> u8\n  decreases n\n= if n > 0 {{ g(n) }} else {{ 0 }}\n",
+            layouts[4]
+        );
+        let mut s = Session::new(&src);
+        assert_eq!(s.diagnostics(), whole(&src).as_slice());
+        let measured: Vec<&Diagnostic> = s
+            .diagnostics()
             .iter()
-            .map(|d| (d.code, d.primary.line))
+            .filter(|d| d.code == "E0507")
             .collect();
-        assert_eq!(found, [("E0507", 5), ("E0228", 7), ("E0507", 9)]);
+        assert_eq!(measured.len(), 1, "{:?}", s.diagnostics());
+        assert!(measured[0].message.contains("`g`"), "{}", measured[0]);
+        // Renaming the second `f` proves both again.
+        edited(&mut s, "fn f(a: u8, b: u8)", "fn h(a: u8, b: u8)");
+        assert!(s.diagnostics().iter().all(|d| d.code != "E0228"));
     }
 
     /// A clause whose kind changes while its text stays proves its callers again, as a whole

@@ -54,58 +54,92 @@ impl Routing {
     }
 }
 
-pub use callee::Callee;
+pub use callee::{Callee, Header};
+
+/// Whether Tier 1 proves a function named `name` of a module whose functions are named
+/// `names`: not when another function shares the name (`E0228`), since a call by it could
+/// mean either, and comparing one's measure or clauses with the other's says nothing true. A
+/// session and a whole check read the same names, so they prove the same functions.
+pub fn proves(names: &[String], name: &str) -> bool {
+    names.iter().filter(|n| *n == name).count() <= 1
+}
 
 /// What Tier 1 reads of a function it calls, in a module of its own, so that its syntax stays
 /// private and its accessors are the only reads, even from the rest of this file.
 mod callee {
     use mente_syntax::tree::{Contract, FnSyntax, Param, Tree, TypeId};
 
-    /// What Tier 1 reads of a function it calls: its header, never its body. It keeps one
-    /// reference, as small as the syntax it reads, since each call of a nested expression holds
-    /// one on the stack. [`Callee::of`] names each part of the syntax, so that a part added to it
-    /// gets an accessor here or is left out on purpose, and a read of the body does not compile.
+    /// What a caller reads of a function: its header, never its body. It holds the header's own
+    /// nodes alone, the first ones of the function's tree, which the parser builds before the
+    /// body's ([`FnSyntax::header`]), so that no read of the body is possible through it, not
+    /// even of how many nodes the body takes.
+    #[derive(Clone, Debug)]
+    pub struct Header {
+        name: String,
+        params: Vec<Param>,
+        result: Option<TypeId>,
+        contracts: Vec<Contract>,
+        tree: Tree,
+    }
+
+    impl Header {
+        /// The header of `f`: everything but where its name is written and its body. Each part
+        /// of the syntax is named, so that a part added to it is placed here or left out on
+        /// purpose.
+        pub fn of(f: &FnSyntax) -> Header {
+            let FnSyntax {
+                name,
+                name_span: _,
+                params,
+                result,
+                contracts,
+                body: _,
+                tree,
+                header,
+            } = f;
+            Header {
+                name: name.clone(),
+                params: params.clone(),
+                result: *result,
+                contracts: contracts.clone(),
+                tree: tree.prefix(*header),
+            }
+        }
+    }
+
+    /// What Tier 1 reads of a function it calls, a [`Header`]: one reference, as small as the
+    /// syntax it reads, since each call of a nested expression holds one on the stack. Its
+    /// accessors are the only reads, even from the rest of this file.
     #[derive(Clone, Copy, Debug)]
     pub struct Callee<'a> {
-        syntax: &'a FnSyntax,
+        header: &'a Header,
     }
 
     impl<'a> Callee<'a> {
-        /// The header of `f`: everything but where its name is written and its body, which no
-        /// caller reads.
-        pub fn of(f: &'a FnSyntax) -> Callee<'a> {
-            let FnSyntax {
-                name: _,
-                name_span: _,
-                params: _,
-                result: _,
-                contracts: _,
-                body: _,
-                tree: _,
-            } = f;
-            Callee { syntax: f }
+        pub fn of(header: &'a Header) -> Callee<'a> {
+            Callee { header }
         }
 
         /// Its name, which a call resolves to it by, and which a session's context holds.
         pub fn name(&self) -> &'a str {
-            &self.syntax.name
+            &self.header.name
         }
 
         pub fn params(&self) -> &'a [Param] {
-            &self.syntax.params
+            &self.header.params
         }
 
         pub fn result(&self) -> Option<TypeId> {
-            self.syntax.result
+            self.header.result
         }
 
         pub fn contracts(&self) -> &'a [Contract] {
-            &self.syntax.contracts
+            &self.header.contracts
         }
 
-        /// The tree its types and clauses are written in.
+        /// The header's nodes, its types and clauses: none of the body's.
         pub fn tree(&self) -> &'a Tree {
-            &self.syntax.tree
+            &self.header.tree
         }
     }
 }
@@ -211,7 +245,8 @@ pub struct Report {
 /// proves it, assumes it or counts it as a measure. A session checks a caller again when it
 /// changes. It is rendered from the [`Callee`] Tier 1 reads, each part of which is named.
 pub fn header(f: &FnSyntax) -> String {
-    let c = Callee::of(f);
+    let h = Header::of(f);
+    let c = Callee::of(&h);
     let (params, result, contracts, t) = (c.params(), c.result(), c.contracts(), c.tree());
     let params: Vec<String> = params
         .iter()
@@ -6658,10 +6693,12 @@ mod tests {
             .iter()
             .map(|p| p.syntax.as_ref().map(Signature::of))
             .collect();
-        let callees: Vec<Option<Callee>> = parsed
+        let headers: Vec<Option<Header>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(Callee::of))
+            .map(|p| p.syntax.as_ref().map(Header::of))
             .collect();
+        let callees: Vec<Option<Callee>> =
+            headers.iter().map(|h| h.as_ref().map(Callee::of)).collect();
         let mut out = Vec::new();
         for (p, routing) in parsed.iter().zip(&routings) {
             let Some(syntax) = &p.syntax else {
@@ -6695,10 +6732,12 @@ mod tests {
             .iter()
             .map(|p| p.syntax.as_ref().map(Signature::of))
             .collect();
-        let callees: Vec<Option<Callee>> = parsed
+        let headers: Vec<Option<Header>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(Callee::of))
+            .map(|p| p.syntax.as_ref().map(Header::of))
             .collect();
+        let callees: Vec<Option<Callee>> =
+            headers.iter().map(|h| h.as_ref().map(Callee::of)).collect();
         let syntax = parsed.last().and_then(|p| p.syntax.as_ref()).unwrap();
         let structs = crate::structs::Structs::default();
         let (resolution, _) = crate::names::resolve(syntax, &names, &structs);
@@ -9641,6 +9680,44 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         assert_eq!(Routing::of(&[]), Routing::default());
     }
 
+    /// What Tier 1 reads of a callee holds its header's nodes alone, the first ones the parser
+    /// builds, and none of its body's: the review of pull request 190 found its tree the whole
+    /// function's, so that a read of the body compiled. The header renders from them as from
+    /// the whole tree, refinements and clauses included.
+    #[test]
+    fn test_a_callee_holds_its_headers_nodes_alone() {
+        let text = module("pub fn f(x: u8[0..10], ys: [2]u8) -> u8[0..=9]\n  requires x < 9\n  ensures result <= x\n{\n  var s: u8 = x\n  while s < 9 {\n    s += ys[0] % 2 + 1\n  }\n  s % 10\n}");
+        let m = mente_syntax::parse_module(&text).unwrap();
+        let f = mente_syntax::parse_bodies(&text, &m)
+            .remove(0)
+            .syntax
+            .unwrap();
+        let h = Header::of(&f);
+        let c = Callee::of(&h);
+        let t = c.tree();
+        assert_eq!(t.counts(), f.header);
+        assert!(t.stmts.is_empty() && t.blocks.is_empty(), "{:?}", t);
+        assert!(t.exprs.len() < f.tree.exprs.len() && t.types.len() < f.tree.types.len());
+        let rendered = |tree: &Tree| {
+            let mut parts: Vec<String> =
+                c.params().iter().map(|p| tree.render_type(p.ty)).collect();
+            parts.extend(c.result().map(|r| tree.render_type(r)));
+            parts.extend(c.contracts().iter().map(|k| tree.render_expr(k.expr)));
+            parts
+        };
+        assert_eq!(rendered(t), rendered(&f.tree));
+        assert_eq!(
+            rendered(t),
+            [
+                "u8[0..10]",
+                "[2]u8",
+                "u8[0..=9]",
+                "(< x 9)",
+                "(<= result x)"
+            ]
+        );
+    }
+
     /// The messages of the fixes of the only diagnostic of `src`, which must be an `E0502`.
     fn fix_messages(src: &str) -> Vec<String> {
         let d = diagnostics(src);
@@ -10362,10 +10439,12 @@ mod timing {
             .iter()
             .map(|p| p.syntax.as_ref().map(Signature::of))
             .collect();
-        let callees: Vec<Option<Callee>> = parsed
+        let headers: Vec<Option<Header>> = parsed
             .iter()
-            .map(|p| p.syntax.as_ref().map(Callee::of))
+            .map(|p| p.syntax.as_ref().map(Header::of))
             .collect();
+        let callees: Vec<Option<Callee>> =
+            headers.iter().map(|h| h.as_ref().map(Callee::of)).collect();
         let syntax = parsed[1].syntax.as_ref().unwrap();
         let structs = crate::structs::Structs::default();
         let (resolution, _) = crate::names::resolve(syntax, &names, &structs);

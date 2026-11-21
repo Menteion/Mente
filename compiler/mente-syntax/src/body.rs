@@ -399,6 +399,8 @@ impl Parser {
             self.skip_to_clauses();
         }
 
+        // Every node of the header is built by now, and none of the body's.
+        let header = self.tree.counts();
         let body = match self.peek() {
             TokenKind::LBrace => Some(Body::Block(self.block())),
             TokenKind::Eq => {
@@ -423,6 +425,7 @@ impl Parser {
             contracts,
             body,
             tree: std::mem::take(&mut self.tree),
+            header,
         }
     }
 

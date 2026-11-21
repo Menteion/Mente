@@ -30,6 +30,39 @@ pub struct Tree {
     pub types: Vec<TypeExpr>,
 }
 
+/// How many nodes of each table a tree holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub exprs: usize,
+    pub stmts: usize,
+    pub blocks: usize,
+    pub types: usize,
+}
+
+impl Tree {
+    /// How many nodes of each table it holds.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            exprs: self.exprs.len(),
+            stmts: self.stmts.len(),
+            blocks: self.blocks.len(),
+            types: self.types.len(),
+        }
+    }
+
+    /// The first nodes of each table, as many as `c` counts: a function's header, whose nodes
+    /// the parser builds before its body's ([`FnSyntax::header`]).
+    pub fn prefix(&self, c: Counts) -> Tree {
+        let first = |n: usize, len: usize| n.min(len);
+        Tree {
+            exprs: self.exprs[..first(c.exprs, self.exprs.len())].to_vec(),
+            stmts: self.stmts[..first(c.stmts, self.stmts.len())].to_vec(),
+            blocks: self.blocks[..first(c.blocks, self.blocks.len())].to_vec(),
+            types: self.types[..first(c.types, self.types.len())].to_vec(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnaryOp {
     /// `-x`
@@ -431,6 +464,10 @@ pub struct FnSyntax {
     pub contracts: Vec<Contract>,
     pub body: Option<Body>,
     pub tree: Tree,
+    /// How many nodes of each table of `tree` its parameters, result and clauses take: the
+    /// parser builds them before the body, so they are the first ones, and a caller can be given
+    /// them alone ([`Tree::prefix`]).
+    pub header: Counts,
 }
 
 /// One field of a struct declaration.
