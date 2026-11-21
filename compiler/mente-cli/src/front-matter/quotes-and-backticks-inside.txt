@@ -1,0 +1,11 @@
+fields date area note
+expect accepted
+value date 2026-11-14
+value area checker
+value note The `_` arm's "wildcard" hid it.
+input
+---
+date: 2026-11-14
+area: checker
+note: The `_` arm's "wildcard" hid it.
+---

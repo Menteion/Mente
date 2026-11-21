@@ -1,7 +1,7 @@
 // ============================================================================
 // Example 05: zero-cost physical units, floating-point refinements, and a generic struct with an
 // invariant. These were example 01's until M2's design closure split them off, so that example
-// 01's binary search runs as M2 builds it (docs/design-review.md, example-01-m2).
+// 01's binary search runs as M2 builds it (docs/design-review.md, example-binary-search-m2).
 // Specs: spec/dimensional-units.md, spec/refinement-and-fixed-point.md, spec/algebraic-types-and-null.md
 // ============================================================================
 module examples.units_and_generics
