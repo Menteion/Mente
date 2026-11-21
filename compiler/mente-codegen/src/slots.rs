@@ -471,6 +471,52 @@ mod tests {
         assert_eq!(build(0), ([0, 0, 0, 0], 16));
     }
 
+    /// With no room in the frame, slots share bytes wherever they are not alive together, so
+    /// what keeps a slot alive decides: an address computed from it, alive past the next slot's
+    /// making, and an address a jump passes to the block it joins, read there, each keep it
+    /// apart from that slot; two slots of which the first is dead share bytes. While the frame
+    /// had room, each slot of a run started at an offset of its own anyway, so that a liveness
+    /// that dropped the addresses computed from slots, or the values a jump passes, went unseen
+    /// (the mutants of pull request 183 that made `address` true of every other value and
+    /// `term_uses` give nothing, 2026-11-22).
+    #[test]
+    fn test_with_no_room_only_slots_dead_before_the_next_share_bytes() {
+        use mente_mir::cfg::{BlockId, Builder, IntTy, Num, Ty};
+        let u8t = Ty::Int(IntTy::new(8, false));
+        let mut b = Builder::new("f", &[u8t], Some(u8t));
+        let x = b.params(BlockId(0))[0];
+        // A slot alive past the next one's making through an element of it.
+        let s1 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let zero = b.int(IntTy::new(64, false), Num::new(false, 0));
+        let e1 = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[s1, zero]);
+        let s2 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        b.inst(Op::Store, Ty::Unit, &[s2, x]);
+        b.inst(Op::Store, Ty::Unit, &[e1, x]);
+        // A slot alive past the next one's making through the jump that passes it on.
+        let s3 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        b.inst(Op::Store, Ty::Unit, &[s3, x]);
+        let s4 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        b.inst(Op::Store, Ty::Unit, &[s4, x]);
+        let join = b.block(&[Ty::Addr]);
+        b.jump(join, vec![s3]);
+        b.switch(join);
+        let p = b.params(join)[0];
+        let y = b.inst(Op::Load, u8t, &[p]);
+        // Two slots, the first dead before the second is made.
+        let s5 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        b.inst(Op::Store, Ty::Unit, &[s5, y]);
+        let s6 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        b.inst(Op::Store, Ty::Unit, &[s6, y]);
+        b.ret(Some(y));
+        let mut f = b.finish();
+        f.frame = 0;
+        let l = layout(&f).unwrap();
+        let at = |s: NodeId| l.offsets[s.0 as usize].unwrap();
+        assert!(apart((at(s1), 16), (at(s2), 16)), "{:?}", l.offsets);
+        assert!(apart((at(s3), 16), (at(s4), 16)), "{:?}", l.offsets);
+        assert_eq!(at(s5), at(s6), "{:?}", l.offsets);
+    }
+
     /// Whether two slots, each an offset and its bytes, hold no byte in common.
     fn apart(a: (u32, u32), b: (u32, u32)) -> bool {
         a.0 + a.1 <= b.0 || b.0 + b.1 <= a.0
