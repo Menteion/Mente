@@ -283,8 +283,8 @@ fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
         stdout
     );
     assert!(
-        stdout.contains("Of the checks Tier 1 erased that no input reaches, 0 are unreachable, 0 lie past the bounds and 0 past a construct the encoding lacks.")
-            && stdout.ends_with("0 files do not check, 0 obligations have no site.\n"),
+        stdout.contains("Of the checks Tier 1 erased that no input reaches, 0 are unreachable, 0 lie past the bounds and 0 past a construct the encoding lacks; 0 have no site, lying within such a construct.")
+            && stdout.ends_with("0 files do not check, 0 obligations have no site where they should.\n"),
         "{}",
         stdout
     );
@@ -410,9 +410,10 @@ fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// `mn smt --independent --keys` writes what it made of each check Tier 1 erased, and `mn smt
-/// --compare` holds a run to its base's: a check checked less, or a program both hold unchanged
-/// left unread, fails it.
+/// `mn smt --independent --keys` writes each check Tier 1 erased with what the encoding made of
+/// it, and `mn smt --compare` holds a run to its base's: a check verified less, unless a waiver
+/// names it, a waiver nothing needs, a program both hold unchanged left unread or no longer
+/// checked, each fails it. `mn smt --encodes` tells whether a tree's workspace holds the encoding.
 #[test]
 fn test_mn_smt_compare_holds_a_run_to_its_base() {
     let dir = scratch("compare");
@@ -442,65 +443,123 @@ fn test_mn_smt_compare_holds_a_run_to_its_base() {
     };
     let (base_keys, base_answers, base_text) = export("base");
     let (head_keys, head_answers, head_text) = export("head");
+    let shown = file.display().to_string();
+    let file_line = head_text.lines().next().unwrap().to_string();
     assert!(
-        head_text.starts_with(&format!("file\t{}\t", file.display())),
+        file_line.starts_with(&format!("file\t{}\t", shown)) && file_line.ends_with("\tchecked"),
         "{}",
         head_text
     );
     assert!(
-        head_text.contains(&format!("check\t{}\t", file.display()))
-            && head_text.contains("\tsafe\tdivisor at 2:39\tdivision-by-zero at 2:35\tquery "),
+        head_text.contains(&format!("check\t{}\t", shown))
+            && head_text.contains("\tsafe\tdivisor at 2:39\tquery "),
         "{}",
         head_text
     );
+    // A base tree whose workspace does not hold the encoding, and the waivers of no commit.
+    let tree = dir.join("base-tree");
+    let package = |at: &str, name: &str| {
+        fs::create_dir_all(tree.join(at)).unwrap();
+        fs::write(
+            tree.join(at).join("Cargo.toml"),
+            format!("[package]\nname = \"{}\"\n", name),
+        )
+        .unwrap();
+    };
+    let workspace = |members: &[&str]| {
+        let listed: String = members
+            .iter()
+            .map(|m| format!("    \"{}\",\n", m))
+            .collect();
+        fs::write(
+            tree.join("Cargo.toml"),
+            format!("[workspace]\nmembers = [\n{}]\n", listed),
+        )
+        .unwrap();
+    };
+    package("compiler/mente-syntax", "mente-syntax");
+    package("tools/smt", "mente-smt");
+    workspace(&["compiler/mente-syntax"]);
+    let waivers = dir.join("waivers.txt");
+    fs::write(&waivers, "").unwrap();
     let compare = || {
         mn(&[
             "smt",
             "--compare",
             "--base-tree",
-            dir.join("base-tree").to_str().unwrap(),
+            tree.to_str().unwrap(),
             "--base",
             base_keys.to_str().unwrap(),
             base_answers.to_str().unwrap(),
             "--head",
             head_keys.to_str().unwrap(),
             head_answers.to_str().unwrap(),
+            "--waivers",
+            waivers.to_str().unwrap(),
         ])
     };
     let run = compare();
     let stdout = text(&run.stdout);
     assert!(run.status.success(), "{}{}", stdout, text(&run.stderr));
     assert!(
-        stdout.ends_with("0 checks are checked less than on the base, 0 programs were not read, and 0 checks moved otherwise; 0 programs were added, changed or deleted; undecided over the checks both query: 0 on the base, 0 here.\n"),
+        stdout.ends_with("0 checks are verified less than on the base and 0 more waived, 0 programs were not read and 0 no longer check, and 0 checks moved otherwise; 0 waivers are unused or malformed; 0 programs were added, changed, renamed or deleted. Undecided: 0 on the base and 0 here over the checks both query, 0 of this run's 2 queries.\n"),
         "{}",
         stdout
     );
-    // The divisor's query cut off by the bound here: checked less than on the base.
+    // The divisor's query cut off by the bound here: verified less than on the base, unless a
+    // commit's trailer names it.
     let cut: String = head_text
         .lines()
-        .map(
-            |l| match l.split_once("\tdivisor at 2:39\tdivision-by-zero at 2:35\tquery ") {
-                Some((front, _)) => format!(
-                    "{}\tdivisor at 2:39\tdivision-by-zero at 2:35\tbeyond-bound\n",
-                    front
-                ),
-                None => format!("{}\n", l),
-            },
-        )
+        .map(|l| match l.split_once("\tsafe\tdivisor at 2:39\tquery ") {
+            Some((front, _)) => format!("{}\tsafe\tdivisor at 2:39\tbeyond-bound\n", front),
+            None => format!("{}\n", l),
+        })
         .collect();
-    fs::write(&head_keys, cut).unwrap();
+    fs::write(&head_keys, &cut).unwrap();
+    let run = compare();
+    let stdout = text(&run.stdout);
+    assert_eq!(run.status.code(), Some(1), "{}", stdout);
+    let dropped = format!(
+        "{}: `safe`'s obligation `divisor at 2:39` is a query on the base and cut off by the bound here",
+        shown
+    );
+    assert!(
+        stdout.contains(&format!("dropped: {}\n", dropped)),
+        "{}",
+        stdout
+    );
+    fs::write(
+        &waivers,
+        format!("\n{} safe divisor at 2:39: a test of the waiver\n\n", shown),
+    )
+    .unwrap();
+    let run = compare();
+    let stdout = text(&run.stdout);
+    assert!(run.status.success(), "{}", stdout);
+    assert!(
+        stdout.contains(&format!("waived: {}; a test of the waiver\n", dropped)),
+        "{}",
+        stdout
+    );
+    // The waiver, with nothing verified less, is unused; and a trailer that is no waiver fails.
+    fs::write(&head_keys, &head_text).unwrap();
     let run = compare();
     let stdout = text(&run.stdout);
     assert_eq!(run.status.code(), Some(1), "{}", stdout);
     assert!(
-        stdout.contains("dropped: ")
-            && stdout.contains(
-                "`safe`'s obligation `divisor at 2:39` is a query on the base and cut off by the bound here"
-            ),
+        stdout.contains(&format!(
+            "unused: Smt-Drop: {} safe divisor at 2:39: a test of the waiver: no check",
+            shown
+        )),
         "{}",
         stdout
     );
-    // The program, unchanged in this tree, not read here.
+    fs::write(&waivers, "m.mn safe\n").unwrap();
+    let run = compare();
+    assert_eq!(run.status.code(), Some(1));
+    assert!(text(&run.stdout).contains("unused: `Smt-Drop: m.mn safe` is no waiver"));
+    fs::write(&waivers, "").unwrap();
+    // The program, unchanged in this tree, not read here; read, but no longer checked.
     fs::write(&head_keys, "").unwrap();
     let run = compare();
     let stdout = text(&run.stdout);
@@ -508,35 +567,45 @@ fn test_mn_smt_compare_holds_a_run_to_its_base() {
     assert!(
         stdout.contains(&format!(
             "lost: {}: both trees hold it unchanged, but this export did not read it",
-            file.display()
+            shown
+        )),
+        "{}",
+        stdout
+    );
+    fs::write(
+        &head_keys,
+        format!("{}unchecked\n", file_line.strip_suffix("checked").unwrap()),
+    )
+    .unwrap();
+    let run = compare();
+    let stdout = text(&run.stdout);
+    assert_eq!(run.status.code(), Some(1), "{}", stdout);
+    assert!(
+        stdout.contains(&format!(
+            "unchecked: {}: the base's checker accepts its module and this run's does not",
+            shown
         )),
         "{}",
         stdout
     );
     // Changed in this tree, it is listed and not held.
     fs::write(&head_keys, &head_text).unwrap();
-    let hash = base_text
-        .lines()
-        .next()
-        .unwrap()
-        .rsplit('\t')
-        .next()
-        .unwrap();
+    let hash = file_line.split('\t').nth(2).unwrap();
     fs::write(&base_keys, base_text.replace(hash, "0000000000000000")).unwrap();
     let run = compare();
     let stdout = text(&run.stdout);
     assert!(run.status.success(), "{}", stdout);
     assert!(
         stdout.contains(&format!(
-            "program: changed: {}: 2 queries, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks on the base; 2 queries",
-            file.display()
+            "program: changed: {}: 2 checks: 2 with a query, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks, 0 without a site on the base; 2 checks: 2 with a query",
+            shown
         )),
         "{}",
         stdout
     );
-    // With no export of the base, every program is new while the base's tree lacks the encoding;
-    // once it has it, a program both trees hold unchanged that the base's export did not read
-    // fails the run.
+    // With no export of the base, every program is new while the base's workspace lacks the
+    // encoding; once it holds it, wherever it lies, a program both trees hold unchanged that the
+    // base's export did not read fails the run.
     fs::write(&base_keys, "").unwrap();
     let run = compare();
     let stdout = text(&run.stdout);
@@ -544,31 +613,44 @@ fn test_mn_smt_compare_holds_a_run_to_its_base() {
     assert!(
         stdout.starts_with("The base at `")
             && stdout.contains(
-                "` has no independent encoding, so every program is new to the comparison.\n"
+                "` does not hold mente-smt, so every program is new to the comparison.\n"
             )
-            && stdout.contains(&format!("program: added: {}: 2 queries", file.display())),
-        "{}",
-        stdout
-    );
-    let tree = dir.join("base-tree");
-    fs::create_dir_all(tree.join("compiler/mente-smt/src")).unwrap();
-    fs::write(tree.join("compiler/mente-smt/src/lib.rs"), "").unwrap();
-    let run = compare();
-    let stdout = text(&run.stdout);
-    assert_eq!(run.status.code(), Some(1), "{}", stdout);
-    assert!(
-        !stdout.contains("has no independent encoding")
             && stdout.contains(&format!(
-                "lost: {}: both trees hold it unchanged, but the base's export did not read it",
-                file.display()
+                "program: added: {}: 2 checks: 2 with a query",
+                shown
             )),
         "{}",
         stdout
     );
+    let encodes = || {
+        mn(&["smt", "--encodes", tree.to_str().unwrap()])
+            .status
+            .code()
+    };
+    assert_eq!(encodes(), Some(1));
+    workspace(&["compiler/mente-syntax", "tools/smt"]);
+    assert_eq!(encodes(), Some(0));
+    let run = compare();
+    let stdout = text(&run.stdout);
+    assert_eq!(run.status.code(), Some(1), "{}", stdout);
+    assert!(
+        !stdout.contains("does not hold mente-smt")
+            && stdout.contains(&format!(
+                "lost: {}: both trees hold it unchanged, but the base's export did not read it",
+                shown
+            )),
+        "{}",
+        stdout
+    );
+    fs::remove_file(tree.join("Cargo.toml")).unwrap();
+    assert_eq!(encodes(), Some(2));
+    assert_eq!(compare().status.code(), Some(2));
+    workspace(&["compiler/mente-syntax"]);
     fs::write(&head_keys, "check\tm.mn\n").unwrap();
     for usage in [
         compare(),
         mn(&["smt", "--compare", "--base", base_keys.to_str().unwrap()]),
+        mn(&["smt", "--encodes"]),
     ] {
         assert_eq!(usage.status.code(), Some(2), "{}", text(&usage.stderr));
     }

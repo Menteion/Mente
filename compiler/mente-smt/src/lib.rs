@@ -281,17 +281,22 @@ impl Site {
         (self.kind, self.span, self.tag)
     }
 
-    /// The obligation as a query names it: its kind, its place and its tag, such as
-    /// `range at 4:19 into `i32``.
+    /// The obligation as a query names it ([`obligation_text`]).
     pub fn obligation(&self) -> String {
-        format!(
-            "{} at {}:{}{}",
-            self.kind.name(),
-            self.span.line,
-            self.span.col,
-            tag_text(self.tag)
-        )
+        obligation_text(self.key())
     }
+}
+
+/// An obligation as a query names it, from its key: its kind, its place and its tag, such as
+/// `range at 4:19 into `i32``. A check with no site is named by the same text.
+pub fn obligation_text((kind, span, tag): (Kind, Span, Tag)) -> String {
+    format!(
+        "{} at {}:{}{}",
+        kind.name(),
+        span.line,
+        span.col,
+        tag_text(tag)
+    )
 }
 
 /// A parameter of the encoded function and the inputs that give its value: one for an integer

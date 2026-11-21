@@ -248,14 +248,19 @@ jobs:
         # commit; the commit before a push to main. Its compiler, built apart in a target directory
         # of its own, exports the same corpus from its own tree, with the construct programs this
         # change wrote, and Z3 answers each of its queries whose text is not this change's; the rest
-        # take this change's answers. `mn smt --compare` then holds this change to the base check by
-        # check, over the programs both trees hold unchanged, where only the encoder or the checker
-        # can have changed anything: a check checked less (a query now unreachable or cut off, an
-        # unreachable check now cut off, a check Tier 1 erases here alone and the encoding cuts off)
-        # fails the job, and so do such a program either export did not read, and undecided answers
-        # past the base's by more than 5. Checks checked more, checks erased by Tier 1 in one run
-        # alone, and programs added, changed or deleted are listed. A base without the encoding has
-        # no export, and every program is new to the comparison.
+        # take this change's answers. Each export names every check Tier 1 erases, with a site or
+        # without one. `mn smt --compare` then holds this change to the base check by check, over
+        # the programs both trees hold unchanged (one text, whatever its path), where only the
+        # encoder or the checker can have changed anything: a check verified less (a query now
+        # unreachable, cut off or without a site; an unreachable check now cut off or without one;
+        # a check Tier 1 erases here alone that the encoding cuts off or has no site for) fails the
+        # job, unless an `Smt-Drop:` trailer of a commit between the base and this change names it
+        # and says why. So do such a program either export did not read or this change no longer
+        # checks, a trailer no check needs, undecided answers past the base's by more than 5, and
+        # more than one undecided answer in 200 of this change's queries. Checks verified more,
+        # checks erased by Tier 1 in one run alone that are still verified, and programs added,
+        # changed, renamed or deleted are listed. A base whose workspace lacks the encoding has no
+        # export, and every program is new to the comparison.
         env:
           GROUP_BASE: ${{ github.event.merge_group.base_sha }}
           PUSH_BEFORE: ${{ github.event.before }}
@@ -269,9 +274,11 @@ jobs:
           esac
           if [ -z "$base" ]; then echo "::error::the $GITHUB_EVENT_NAME event names no base"; exit 1; fi
           git worktree add ../base "$base"
+          # The waivers of the commits between the base and this change, which expire with them.
+          git log --format='%(trailers:key=Smt-Drop,valueonly,unfold)' "$base..HEAD" > "$RUNNER_TEMP/waivers.txt"
           for f in base-keys base-answers base-queries base-ask base-export; do : > "$RUNNER_TEMP/$f.txt"; done
           start=$(date +%s%N)
-          if [ -f ../base/compiler/mente-smt/src/lib.rs ]; then
+          if ./target/release/mn smt --encodes ../base; then
             (cd ../base && rustup toolchain install && CARGO_TARGET_DIR="$RUNNER_TEMP/target-base" cargo build --release --locked --bin mn)
             built=$(date +%s%N)
             mapfile -t pass < <(cd ../base && for f in conformance/*/*.mn; do
@@ -318,7 +325,7 @@ jobs:
           seconds() { printf '%d.%03d' $(($1 / 1000000000)) $(($1 / 1000000 % 1000)); }
           status=0
           ./target/release/mn smt --compare --base-tree ../base --base "$RUNNER_TEMP/base-keys.txt" "$RUNNER_TEMP/base-answers.txt" \
-            --head "$RUNNER_TEMP/independent-keys.txt" "$RUNNER_TEMP/independent-answers.txt" > "$RUNNER_TEMP/compare.txt" || status=$?
+            --head "$RUNNER_TEMP/independent-keys.txt" "$RUNNER_TEMP/independent-answers.txt" --waivers "$RUNNER_TEMP/waivers.txt" > "$RUNNER_TEMP/compare.txt" || status=$?
           cat "$RUNNER_TEMP/compare.txt"
           count() { grep -c "^$1: " "$RUNNER_TEMP/compare.txt" || true; }
           {
@@ -326,18 +333,21 @@ jobs:
             echo
             echo "| | |"
             echo "| :--- | ---: |"
-            echo "| Checks of unchanged programs checked less than on the base | $(count dropped) |"
+            echo "| Checks of unchanged programs verified less than on the base | $(count dropped) |"
+            echo "| Of them, let through by an \`Smt-Drop:\` trailer | $(count waived) |"
+            echo "| Trailers no check needs, or that are no waiver | $(count unused) |"
             echo "| Unchanged programs an export did not read | $(count lost) |"
-            echo "| Checks of unchanged programs checked more, or erased by Tier 1 in one run alone | $(count moved) |"
-            echo "| Programs added, changed or deleted | $(count program) |"
+            echo "| Unchanged programs this change no longer checks | $(count unchecked) |"
+            echo "| Checks of unchanged programs verified more, or erased by Tier 1 in one run alone | $(count moved) |"
+            echo "| Programs added, changed, renamed or deleted | $(count program) |"
             echo "| Base queries Z3 was asked, of those written | $(wc -l < "$RUNNER_TEMP/base-ask.txt") of $(wc -l < "$RUNNER_TEMP/base-queries.txt") |"
             echo "| The base's build, seconds | $(seconds $((built - start))) |"
             echo "| The base's export and Z3 on its queries, seconds | $(seconds $((now - built))) |"
             echo
-            grep -E '^(dropped: |lost: |Of the programs |The base at )' "$RUNNER_TEMP/compare.txt" | head -n 40 | sed 's/^/- /' || true
+            grep -E '^(dropped: |waived: |unused: |lost: |unchecked: |Of the programs |The base at )' "$RUNNER_TEMP/compare.txt" | head -n 60 | sed 's/^/- /' || true
           } | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$status" -ne 0 ]; then
-            echo "::error::this change checks less than its base on programs both trees hold unchanged, an export did not read such a program, or the undecided answers rose past the base's; the lines above name each"
+            echo "::error::this change verifies less than its base on programs both trees hold unchanged with no waiver naming it, a waiver is unused, an export did not read such a program or this change no longer checks one, or the undecided answers rose past their caps; the lines above name each"
           fi
           exit "$status"
       - name: Keep the queries of a failed run
@@ -358,5 +368,6 @@ jobs:
             ${{ runner.temp }}/base-answers.txt
             ${{ runner.temp }}/base-export.txt
             ${{ runner.temp }}/compare.txt
+            ${{ runner.temp }}/waivers.txt
           if-no-files-found: ignore
           retention-days: 14
