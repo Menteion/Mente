@@ -533,7 +533,10 @@ struct Scratch {
                 "bitstruct Hidden : u8 {\n  @bits(0..8) pub raw: u8",
                 "bitstruct Hidden : u8 {\n  @bits(0..8) pub bits: u8",
             ),
-            ("enum Inner {\n  A\n  B\n}", "enum Inner {\n  A\n  B\n  C\n}"),
+            (
+                "enum Inner {\n  A\n  B\n}",
+                "enum Inner {\n  A\n  B\n  C\n}",
+            ),
             ("  fn peek(self) -> bool", "  fn peek(self) -> u8"),
             ("struct Scratch {\n  n: u32", "struct Scratch {\n  n: u64"),
         ] {
