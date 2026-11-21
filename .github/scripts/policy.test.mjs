@@ -45,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 71;
+const FLOOR = 72;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -3709,6 +3709,61 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
   const when = new RegExp(source);
   const missed = [...tracked(), "a-new-directory/a-new-file.txt", "a-new-file"].filter((f) => !when.test(f));
   assert.deepEqual(missed.slice(0, 20), [], `${missed.length} files whose change tools/quick.mjs would not check against this policy`);
+});
+
+/// The program generator, its differential runs and their coverage: modules of mn's own binary.
+const GENERATOR_DIR = "compiler/mente-cli/src/mir_run/";
+const GENERATOR_RUN = ["cargo", "test", "-p", "mente-cli", "--bin", "mn", "--"];
+
+/// What keeps the quick map (`map`, as parsed) from running the program generator's own tests for a
+/// change to any of `files`, the tracked files of GENERATOR_DIR, with `main`, the text of mn's
+/// main.rs: one check whose pattern takes every one of them runs `cargo test` on mn's binary with,
+/// for each module a file of the directory is, a filter every test of that module's path contains,
+/// and no option among them (`--exact` or `--skip` would turn the filters into something else); and
+/// main.rs declares mir_run, so that the binary holds those tests at all. A filter that matched no
+/// test would pass with none run.
+export function generatorQuickProblems(map, files, main) {
+  const problems = [];
+  if (!/^mod mir_run;$/m.test(main)) problems.push("compiler/mente-cli/src/main.rs declares no `mod mir_run;`, so mn's binary holds none of the generator's tests");
+  const modules = files.filter((f) => f.endsWith(".rs")).map((f) => `mir_run::${f.slice(GENERATOR_DIR.length, -".rs".length).replace(/\/mod$/, "").replace(/\//g, "::")}::`);
+  const runs = (map.checks ?? []).filter((c) => Array.isArray(c.run) && GENERATOR_RUN.every((a, k) => c.run[k] === a));
+  const covering = runs.filter((c) => {
+    const source = Object.hasOwn(map.patterns ?? {}, c.when) ? map.patterns[c.when] : null;
+    if (typeof source !== "string") return false;
+    const when = new RegExp(source);
+    const filters = c.run.slice(GENERATOR_RUN.length);
+    return files.every((f) => when.test(f)) && !filters.some((a) => a.startsWith("-")) && modules.every((m) => filters.some((a) => m.includes(a)));
+  });
+  if (covering.length === 0) {
+    problems.push(`no check of ${QUICK_MAP} runs \`${GENERATOR_RUN.join(" ")}\` with a filter for each of ${modules.join(", ")}, for a change to any file of ${GENERATOR_DIR}`);
+  }
+  return problems;
+}
+
+check("tools/quick.mjs runs the program generator's own tests for a change to it", () => {
+  // A change to the program generator can break what only its own tests hold: every construct of
+  // the grammar reached, every generated program well typed and replayable, the three paths
+  // agreeing on them. No other quick check runs them, so such a change passed the quick checks and
+  // failed only on CI (compiler-fixes, 2026-11-22). A module added to the directory needs its
+  // filter in the map too.
+  const files = [...tracked()].filter((f) => f.startsWith(GENERATOR_DIR));
+  assert.ok(files.some((f) => f.endsWith("/generate.rs")), `${GENERATOR_DIR} holds no generate.rs: the generator moved, and this check with it`);
+  const main = read("compiler/mente-cli/src/main.rs");
+  const map = JSON.parse(read(QUICK_MAP));
+  assert.deepEqual(generatorQuickProblems(map, files, main), []);
+  // Planted: a module added to the directory, a pattern that misses a file, a filter turned exact,
+  // one module's filter alone, the filters run on another test target, the check gone, and mir_run
+  // no longer a module of the binary.
+  const generator = map.checks.find((c) => generatorQuickProblems({ ...map, checks: [c] }, files, main).length === 0);
+  const withRun = (run) => ({ ...map, checks: map.checks.map((c) => (c === generator ? { ...c, run } : c)) });
+  assert.equal(generatorQuickProblems(map, [...files, `${GENERATOR_DIR}shrink.rs`], main).length, 1, "a module added to the generator's directory passed without its filter");
+  assert.equal(generatorQuickProblems({ ...map, patterns: { ...map.patterns, [generator.when]: `^${GENERATOR_DIR}generate\\.rs$` } }, files, main).length, 1, "a pattern that misses a file of the directory passed");
+  assert.equal(generatorQuickProblems(withRun([...generator.run, "--exact"]), files, main).length, 1, "filters turned exact passed");
+  assert.equal(generatorQuickProblems(withRun([...GENERATOR_RUN, "mir_run::generate::"]), files, main).length, 1, "a run of one module's tests passed");
+  assert.equal(generatorQuickProblems(withRun(["cargo", "test", "-p", "mente-cli", "--test", "cli", "--", ...generator.run.slice(GENERATOR_RUN.length)]), files, main).length, 1, "the filters run against a test target that holds none of the generator's tests passed");
+  assert.equal(generatorQuickProblems({ ...map, checks: map.checks.filter((c) => c !== generator) }, files, main).length, 1, "a map without the generator's check passed");
+  assert.equal(generatorQuickProblems(map, files, main.replace(/^mod mir_run;$/m, "")).length, 1, "mir_run outside mn's binary passed");
+  assert.deepEqual(generatorQuickProblems(withRun([...GENERATOR_RUN, "mir_run::"]), files, main), [], "one filter that every module's tests contain was refused");
 });
 
 check("the required checks are listed once each", () => {
