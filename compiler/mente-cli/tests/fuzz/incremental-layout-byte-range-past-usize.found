@@ -1,0 +1,10 @@
+mn fuzz found
+phase: incremental
+kind: panic
+edit seed: 17181853095418334516
+found by: mn fuzz --seed 3 --jobs 4 --phase-seconds 10 --stack-kib 262144, job 1, run 275
+compiler: 965cfb5c951ee2a55c1968c6d7ca2ce9883df6d6
+input: 30807 bytes, minimized to 135 bytes
+replay: mn fuzz --replay incremental-layout-byte-range-past-usize.mn
+key: panic [at compiler/mente-sema/src/lib.rs:653:51]
+message: attempt to add with overflow [at compiler/mente-sema/src/lib.rs:653:51]

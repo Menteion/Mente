@@ -1283,7 +1283,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
-  [".github/scripts/fuzz-summary.mjs", "e3265e708b8b8d29918fcf4badd5a37d8c7c921dd55e6e5865849e472f268a92"],
+  [".github/scripts/fuzz-summary.mjs", "5f434a6b1c82003c27e5b531609d2877e0e8c61628bd49261f0f045df4616fea"],
   [".github/scripts/nightly-alarm.mjs", "4d6a389e64a183ea0935fee1060d02a02a68e3dd40f2b7b6bd5c0daa47e1da59"],
   [".github/scripts/lib/nightly-alarm.mjs", "6ec77c6bcf004da4da9896d70839f1b843e7c0ba44f324c18231dc697741a5df"],
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
