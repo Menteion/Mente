@@ -3711,12 +3711,14 @@ mod tests {
         );
     }
 
-    /// The shape of a struct two hundred thousand deep, each level a struct or an enum holding
-    /// the one below it through an array, is let go of on the test's thread: a drop that took a
-    /// level of the host's stack for each struct overflowed a thread's 2 MiB at eight thousand
-    /// (2026-11-22), and at twenty thousand still fit the 8 MiB a Linux main thread has, so that
-    /// the mutation run on CI saw no difference without `take_apart`.
-    /// A level another shape still holds is left whole.
+    /// The shape of a value two hundred thousand levels deep, each level holding the one below it
+    /// through an array, is let go of on the test's thread, whether every level is a struct,
+    /// every level an enum, or they take turns: a drop that took a level of the host's stack for
+    /// each struct overflowed a thread's 2 MiB at eight thousand (2026-11-22), and at twenty
+    /// thousand still fit the 8 MiB a Linux main thread has, so that the mutation run on CI saw no
+    /// difference without `take_apart`. Each kind is held on its own, since in a chain of both
+    /// either one's drop takes the other's levels apart. A level another shape still holds is
+    /// left whole.
     #[test]
     fn test_a_deep_shape_is_let_go_of_one_level_at_a_time() {
         let field = |shape: Shape| FieldShape {
@@ -3724,33 +3726,40 @@ mod tests {
             offset: 0,
             shape,
         };
-        let mut shape = Shape::Int(U16);
-        let mut kept = None;
-        for k in 0..200_000 {
-            let held = Shape::Array(1, Box::new(shape));
-            shape = if k % 2 == 0 {
-                Shape::Struct(Arc::new(StructShape {
-                    name: format!("S{k}"),
-                    fields: vec![field(held)],
-                    size: 2,
-                    align: 2,
-                }))
-            } else {
-                Shape::Enum(Arc::new(EnumShape {
-                    name: format!("E{k}"),
-                    tag: U16,
-                    variants: vec![VariantShape {
-                        name: "V".to_string(),
+        // Levels of structs where `structs` says so for the level's number, of enums elsewhere.
+        let build = |structs: &dyn Fn(usize) -> bool| {
+            let mut shape = Shape::Int(U16);
+            let mut kept = None;
+            for k in 0..200_000 {
+                let held = Shape::Array(1, Box::new(shape));
+                shape = if structs(k) {
+                    Shape::Struct(Arc::new(StructShape {
+                        name: format!("S{k}"),
                         fields: vec![field(held)],
-                    }],
-                    size: 4,
-                    align: 2,
-                }))
-            };
-            if k == 101 {
-                kept = Some(shape.clone());
+                        size: 2,
+                        align: 2,
+                    }))
+                } else {
+                    Shape::Enum(Arc::new(EnumShape {
+                        name: format!("E{k}"),
+                        tag: U16,
+                        variants: vec![VariantShape {
+                            name: "V".to_string(),
+                            fields: vec![field(held)],
+                        }],
+                        size: 4,
+                        align: 2,
+                    }))
+                };
+                if k == 101 {
+                    kept = Some(shape.clone());
+                }
             }
-        }
+            (shape, kept)
+        };
+        drop(build(&|_| true));
+        drop(build(&|_| false));
+        let (shape, kept) = build(&|k| k % 2 == 0);
         drop(shape);
         let Some(Shape::Enum(e)) = kept else {
             panic!("level 101 is an enum");
