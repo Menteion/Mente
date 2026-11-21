@@ -1,7 +1,8 @@
 //! The forms the project's records are written in, defined once and read by every reader of a
 //! record (Norman, 2026-11-17): the design register's tests (`tests/register.rs`), the record of
 //! escaped bugs (`escapes.rs`, `tests/escapes.rs`, `mn escapes`), and the forms' own tests
-//! (`tests/records.rs`), which also hold that no document names a record by a number.
+//! (`tests/records.rs`). A record is named by a key, never by a number, and the key rule,
+//! [`is_key`], is that structure; a number written in prose is held by review only.
 
 /// Whether `day` is a day of the calendar written `YYYY-MM-DD`.
 pub fn is_day(day: &str) -> bool {
